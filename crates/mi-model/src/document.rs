@@ -218,6 +218,7 @@ impl LocalDocumentV2 {
         for id in g.actions.keys() {
             add(id)?;
         }
+        crate::multi::validate_references(g)?;
         if self
             .editable
             .source_refs
@@ -463,7 +464,7 @@ impl LocalDocumentV2 {
         Ok(())
     }
     fn remove_orphan_actions(&mut self) {
-        let used: BTreeSet<_> = self
+        let mut used: BTreeSet<_> = self
             .editable
             .graph
             .layers
@@ -471,10 +472,20 @@ impl LocalDocumentV2 {
             .flat_map(|l| l.controls.values())
             .filter_map(|b| b.action_id.clone())
             .collect();
-        self.editable
-            .graph
-            .actions
-            .retain(|id, a| used.contains(id) || crate::macro_library::is_local_macro(a));
+        for a in self.editable.graph.actions.values() {
+            if let Some(m) = crate::multi::local_multi(a) {
+                for (_, r) in m.branches() {
+                    if let Some(r) = r {
+                        used.insert(r.id().to_owned());
+                    }
+                }
+            }
+        }
+        self.editable.graph.actions.retain(|id, a| {
+            used.contains(id)
+                || crate::macro_library::is_local_macro(a)
+                || crate::multi::is_local_multi(a)
+        });
         let valid: BTreeSet<_> = self
             .editable
             .graph
