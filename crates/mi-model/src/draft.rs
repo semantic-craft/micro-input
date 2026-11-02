@@ -21,6 +21,9 @@ pub enum ActionKind {
     OpenUrl {
         url: String,
     },
+    OpenApp {
+        bundle_id: String,
+    },
     AgentCommand {
         adapter: String,
         command: String,
@@ -72,6 +75,14 @@ impl Action {
                         matches!(u.scheme(), "http" | "https") && u.host_str().is_some()
                     })
             }
+            ActionKind::OpenApp { bundle_id } => {
+                bundle_id.len() <= 256
+                    && bundle_id.split('.').count() >= 2
+                    && bundle_id.split('.').all(|part| {
+                        !part.is_empty()
+                            && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    })
+            }
             ActionKind::AgentCommand { adapter, command } => bounded(&adapter) && bounded(&command),
             ActionKind::FocusSession { adapter, session } => bounded(&adapter) && bounded(&session),
             ActionKind::SkillReference { adapter, skill } => bounded(&adapter) && bounded(&skill),
@@ -93,6 +104,7 @@ pub fn actions() -> Vec<Action> {
         ("pane", "下一个 pane", "Herdr", "适配器未验证 · 不执行", json!({"type":"agent_command","adapter":"herdr","command":"next-pane"})),
         ("session", "切换会话", "DSH", "适配器未验证 · 不执行", json!({"type":"focus_session","adapter":"dsh","session":"unselected"})),
         ("skill", "Skill 引用", "Skill", "适配器未验证 · 不执行", json!({"type":"skill_reference","adapter":"unverified","skill":"unselected"})),
+        ("app", "打开应用", "应用", "本地应用意图 · 宿主执行未接入", json!({"type":"open_app","bundle_id":"com.apple.TextEdit"})),
         ("local-macro", "普通宏", "普通宏", "自有本地格式 · 仅草稿 · 不执行", json!({"type":"local_macro","macro_sequence":{"format_version":1,"events":[{"type":"press","key":"a"},{"type":"release","key":"a"}]}})),
     ].into_iter().map(|(id,name,category,detail,payload)| Action {id:id.into(),name:name.into(),category:category.into(),detail:detail.into(),payload}).collect()
 }

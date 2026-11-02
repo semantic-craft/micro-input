@@ -315,6 +315,7 @@ mod device_tests;
 mod device;
 pub use device::parse_device_files;
 
+pub mod action_library;
 pub mod document;
 
 pub mod macro_sequence;

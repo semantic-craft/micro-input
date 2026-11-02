@@ -26,8 +26,13 @@ fn document_response(
     selection: Option<(String, Option<String>)>,
 ) -> Result<String, BridgeError> {
     let hint = selection.map(|(p, l)| serde_json::json!({"profile_id":p,"layer_id":l}));
+    let capabilities: std::collections::BTreeMap<_, _> = draft
+        .edits
+        .iter()
+        .map(|(key, action)| (key, mi_model::action_library::capability(action)))
+        .collect();
     serde_json::to_string(
-        &serde_json::json!({"draft":draft,"config":draft.config,"selection_hint":hint,"macro_library":draft.macros()}),
+        &serde_json::json!({"draft":draft,"config":draft.config,"selection_hint":hint,"macro_library":draft.macros(),"action_capabilities":capabilities}),
     )
     .map_err(failure)
 }
@@ -162,6 +167,37 @@ impl MicroInput {
     }
     pub async fn action_catalog(&self) -> Result<String, BridgeError> {
         serde_json::to_string(&mi_model::draft::actions()).map_err(failure)
+    }
+    pub async fn action_library(
+        &self,
+        query: String,
+        category: String,
+        favorites_only: bool,
+    ) -> Result<String, BridgeError> {
+        let store = self.draft.lock().unwrap();
+        let (favorites, preferences_error) = match store.favorite_actions() {
+            Ok(values) => (values.clone(), None),
+            Err(error) => (Default::default(), Some(error)),
+        };
+        let categories: std::collections::BTreeSet<_> = mi_model::draft::actions()
+            .into_iter()
+            .map(|a| a.category)
+            .collect();
+        serde_json::to_string(&serde_json::json!({
+            "entries":mi_model::action_library::search(&query, &category, favorites_only, &favorites),
+            "categories":categories,"preferences_error":preferences_error
+        })).map_err(failure)
+    }
+    pub async fn set_action_favorite(
+        &self,
+        action_id: String,
+        favorite: bool,
+    ) -> Result<(), BridgeError> {
+        self.draft
+            .lock()
+            .unwrap()
+            .set_action_favorite(&action_id, favorite)
+            .map_err(failure)
     }
     pub async fn open_document(&self, path: String) -> Result<String, BridgeError> {
         let mut store = self.draft.lock().unwrap();

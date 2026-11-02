@@ -15,6 +15,8 @@ protocol Backend {
     func subscribeInput() async throws -> InputSubscription
     func openDocument(path: String) async throws -> String
     func actionCatalog() async throws -> String
+    func actionLibrary(query: String, category: String, favoritesOnly: Bool) async throws -> String
+    func setActionFavorite(actionId: String, favorite: Bool) async throws
     func assignAction(profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String
     func saveMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String
     func bindMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32) async throws -> String
@@ -40,6 +42,8 @@ extension Backend {
     func readIdentity() async throws -> IdentityInfo { throw BridgeError.Failed(message: "身份读取不可用") }
     func openDocument(path: String) async throws -> String { throw BridgeError.Failed(message: "本地文档不可用") }
     func actionCatalog() async throws -> String { throw BridgeError.Failed(message: "动作目录不可用") }
+    func actionLibrary(query: String, category: String, favoritesOnly: Bool) async throws -> String { throw BridgeError.Failed(message: "动作库不可用") }
+    func setActionFavorite(actionId: String, favorite: Bool) async throws { throw BridgeError.Failed(message: "收藏不可用") }
     func assignAction(profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String { throw BridgeError.Failed(message: "草稿编辑不可用") }
     func saveMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String { throw BridgeError.Failed(message: "本地宏不可用") }
     func bindMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32) async throws -> String { throw BridgeError.Failed(message: "本地宏不可用") }
@@ -67,6 +71,27 @@ extension MicroInput: Backend {}
     @Published var draft = DraftState()
     @Published var macros: [MacroSummary] = []
     @Published var catalog: [CatalogAction] = []
+    @Published var library = ActionLibraryState()
+    @Published var actionCapabilities: [String:ActionCapability] = [:]
+    private var libraryGeneration = 0
+    private var libraryQuery = "", libraryCategory = "全部"
+    private var libraryFavoritesOnly = false
+    func searchActions(query: String, category: String, favoritesOnly: Bool) async {
+        libraryGeneration += 1; let generation = libraryGeneration
+        libraryQuery = query; libraryCategory = category; libraryFavoritesOnly = favoritesOnly
+        do {
+            let result = try await backend.actionLibrary(query: query, category: category, favoritesOnly: favoritesOnly)
+            guard generation == libraryGeneration else { return }
+            library = try JSONDecoder().decode(ActionLibraryState.self, from: Data(result.utf8))
+        } catch { if generation == libraryGeneration { status = readableError(error) } }
+    }
+    func setFavorite(_ id: String, favorite: Bool) async {
+        do {
+            try await backend.setActionFavorite(actionId: id, favorite: favorite)
+            await searchActions(query: libraryQuery, category: libraryCategory, favoritesOnly: libraryFavoritesOnly)
+            status = "收藏已保存为本机偏好 · 草稿修订不变"
+        } catch { status = readableError(error) }
+    }
     @Published var slot = 0
     @Published var documentReady = false
     @Published private(set) var browsingDeviceSnapshot = false
@@ -91,6 +116,7 @@ extension MicroInput: Backend {}
         do {
             try applyDocument(try await backend.openDocument(path: documentURL.path))
             catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await backend.actionCatalog().utf8))
+            await searchActions(query: "", category: "全部", favoritesOnly: false)
         } catch { status = readableError(error); documentReady = false }
     }
     private func restoreSelection(profile id: String?, layer lid: String?, fallbackProfile: Int, fallbackLayer: Int) {
@@ -104,6 +130,7 @@ extension MicroInput: Backend {}
         let pi = fresh ? 0 : profileIndex, li = fresh ? 0 : layerIndex
         macros = result.macro_library ?? []
         draft = result.draft; snapshot = result.config; localSnapshot = result.config
+        actionCapabilities = result.action_capabilities ?? [:]
         browsingDeviceSnapshot = false; stale = false; documentReady = !draft.read_only
         restoreSelection(profile: result.selection_hint?.profile_id ?? oldProfile, layer: result.selection_hint?.layer_id ?? oldLayer, fallbackProfile: pi, fallbackLayer: li)
         localSelection = (profile?.id.text, layer?.id.text, slot)

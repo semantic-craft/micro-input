@@ -1,5 +1,6 @@
 // R-P03/R-E01/R-E02/R-K01: selected workbench; all edits flow through UniFFI.
 import SwiftUI
+import UniformTypeIdentifiers
 struct Workbench: View {
     @ObservedObject var store: Store
     @FocusState private var searchFocused: Bool
@@ -8,6 +9,8 @@ struct Workbench: View {
     @State private var choosingMacro = false
     @State private var search = ""
     @State private var category = "全部"
+    @State private var favoritesOnly = false
+    @State private var candidate: CatalogAction?
     @State private var naming = false
     @State private var nameOperation = ""
     @State private var objectName = ""
@@ -21,7 +24,11 @@ struct Workbench: View {
         if operation.hasPrefix("复制") {objectName += " 副本"}
         naming = true
     }
-    var filteredActions: [CatalogAction] { store.catalog.filter { (category == "全部" || $0.category == category) && (search.isEmpty || ($0.name+$0.category+$0.detail).localizedCaseInsensitiveContains(search)) } }
+    func choose(_ action: CatalogAction) {
+        if action.payload["type"]?.text == "shortcut" {
+            Task { if await store.saveAction(action) { choosing = false } }
+        } else { candidate = action }
+    }
     var bindings: [JSONValue] { guard let l = store.layer else { return [] }; return l.keys + l.encoders + l.joystick.sectors }
     func title(_ slot: Int) -> String { slot < 13 ? String(format: "按键 %02d", slot + 1) : slot < 16 ? "旋钮槽 \(slot-12) · 方向未核实" : "摇杆 · 扇区 \(slot-15)" }
     func action(_ slot: Int) -> CatalogAction? { return store.browsingDeviceSnapshot ? nil : store.draft.edits[store.key(slot)] }
@@ -214,7 +221,12 @@ struct Workbench: View {
                 Text("共享宏 · \(macro.references.count) 个控件引用").font(.caption).foregroundStyle(.secondary)
                 Button("移除此控件的宏引用") { Task { await store.bindMacro(nil) } }.disabled(store.busy || !store.canEditDraft)
             }
-            if let a = action(store.slot) { Text(a.category).font(.caption).foregroundStyle(.secondary); Text(a.detail).textSelection(.enabled); ActionParameters(action: a, store: store, macroID: store.selectedMacro?.id).id(store.slotKey + String(store.draft.revision)) }
+            if let a = action(store.slot) {
+                Text(a.category).font(.caption).foregroundStyle(.secondary)
+                if let capability = store.actionCapabilities[store.slotKey] { ActionCapabilityView(capability: capability) }
+                ActionParameters(action: a, store: store, macroID: store.selectedMacro?.id).id(store.slotKey + String(store.draft.revision))
+                DisclosureGroup("高级参数原值") { Text(JSONValue.object(a.payload).text).font(.caption.monospaced()).textSelection(.enabled) }
+            }
             else if bindings.indices.contains(store.slot) {
                 Text("原始绑定保留；未知值不会当成空绑定。").font(.caption).foregroundStyle(.secondary)
                 DisclosureGroup("原始值与引用") { ScrollView { Text(store.snapshot?.referenceDetail(bindings[store.slot]) ?? bindings[store.slot].text).font(.caption.monospaced()).textSelection(.enabled) }.frame(maxHeight: 160) }
@@ -234,15 +246,48 @@ struct Workbench: View {
     var actionSheet: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack { Text("选择一个动作").font(.title2.bold()); Spacer(); Button("关闭") {choosing = false}.keyboardShortcut(.cancelAction) }
-            TextField("搜索动作、工具或快捷键", text: $search).focused($searchFocused)
-                .onSubmit { if let first = filteredActions.first { Task { await store.assign(first.id); choosing = false } } }
-            Picker("分类", selection: $category) { ForEach(["全部","快捷键","文本","URL","Herdr","DSH","Skill"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
-            ForEach(filteredActions) { a in
-                Button { Task { await store.assign(a.id); choosing = false } } label: { VStack(alignment: .leading, spacing: 5) {Text(a.name).bold(); Text(a.detail).font(.caption).foregroundStyle(.secondary)}.frame(maxWidth: .infinity, alignment: .leading).padding(10) }.buttonStyle(.plain).disabled(store.busy || !store.canEditDraft)
+            if let candidate {
+                Button("返回动作库") { self.candidate = nil }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("设置 \(candidate.name)").font(.headline)
+                        if let info = store.library.entries.first(where: {$0.id == candidate.id})?.capability { ActionCapabilityView(capability: info) }
+                        ActionParameters(action: candidate, store: store, saved: { choosing = false }).id(candidate.id)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                TextField("搜索动作、工具、目标或快捷键", text: $search).focused($searchFocused)
+                    .onSubmit { if let first = store.library.entries.first { choose(first.action) } }
+                HStack {
+                    Picker("分类", selection: $category) { Text("全部").tag("全部"); ForEach(store.library.categories, id: \.self) { Text($0).tag($0) } }
+                    Toggle("只看收藏", isOn: $favoritesOnly)
+                }
+                if let error = store.library.preferences_error { Text(error).font(.caption).foregroundStyle(.orange) }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        if store.library.entries.isEmpty { Text("没有匹配动作").foregroundStyle(.secondary).padding() }
+                        ForEach(store.library.entries) { entry in
+                            HStack(alignment: .top) {
+                                Button { choose(entry.action) } label: {
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text(entry.action.name).bold()
+                                        Text(entry.capability.unavailable_reason).font(.caption).foregroundStyle(.secondary)
+                                        Text("目标：\(entry.capability.target)").font(.caption).foregroundStyle(.secondary)
+                                    }.frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                                }.buttonStyle(.plain).disabled(store.busy || !store.canEditDraft)
+                                Button { Task { await store.setFavorite(entry.id, favorite: !entry.favorite) } } label: { Image(systemName: entry.favorite ? "star.fill" : "star") }
+                                    .buttonStyle(.borderless).padding(10).accessibilityLabel("\(entry.favorite ? "取消收藏" : "收藏") \(entry.action.name)")
+                                    .disabled(store.library.preferences_error != nil)
+                            }
+                        }
+                    }
+                }
             }
-            Text("自有演示动作 · 不执行 · 设备格式未验证").font(.caption).foregroundStyle(.secondary)
-        }.padding(24).frame(width: 530)
-        .onAppear { search = ""; category = "全部"; searchFocused = true }
+            Text(store.status).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+            Text("可保存本地意图；所有条目当前均不可执行。收藏是本机偏好。").font(.caption).foregroundStyle(.secondary)
+        }.padding(24).frame(width: 600, height: 560)
+        .onAppear { search = ""; category = "全部"; favoritesOnly = false; candidate = nil; searchFocused = true }
+        .task(id: "\(search)\u{0}\(category)\u{0}\(favoritesOnly)") { await store.searchActions(query: search, category: category, favoritesOnly: favoritesOnly) }
     }
     var nameSheet: some View {
         VStack(alignment:.leading,spacing:16) {
@@ -304,6 +349,7 @@ struct ActionParameters: View {
     @State private var editingMacro = false
     @ObservedObject var store: Store
     var macroID: String? = nil
+    var saved: (() -> Void)? = nil
     var type: String { action.payload["type"]?.text ?? "unknown" }
     var fields: [(String,String)] {
         switch type {
@@ -329,6 +375,20 @@ struct ActionParameters: View {
                 Text(label).font(.caption).foregroundStyle(.secondary)
                 TextField(label, text: Binding(get: {action.payload[key]?.text ?? ""}, set: {action.payload[key] = .string($0)}), axis: .vertical).lineLimit(1...4)
             }
+            if type == "open_app" {
+                Text("目标应用：\(action.payload["bundle_id"]?.text ?? "未选择")").font(.caption).textSelection(.enabled)
+                Button("选择应用…") {
+                    let panel = NSOpenPanel(); panel.allowedContentTypes = [.applicationBundle]
+                    panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+                    panel.directoryURL = URL(fileURLWithPath: "/Applications")
+                    panel.begin { result in
+                        if result == .OK, let url = panel.url, let bundleID = Bundle(url: url)?.bundleIdentifier {
+                            action.payload["bundle_id"] = .string(bundleID)
+                            action.name = "打开 \(url.deletingPathExtension().lastPathComponent)"
+                        }
+                    }
+                }
+            }
             if type == "shortcut" {
                 ForEach(["command","shift","option","control"], id: \.self) { modifier in
                     Toggle(modifier, isOn: Binding(get: { modifiers.contains(modifier) }, set: { enabled in
@@ -338,9 +398,26 @@ struct ActionParameters: View {
                 }
             }
             Text("参数修改后点击保存").font(.caption).foregroundStyle(.secondary)
-            Button("保存参数到草稿") { Task { await store.saveAction(action) } }.disabled(!store.canEditDraft || store.busy)
+            Button("保存参数到草稿") { Task { if await store.saveAction(action) { saved?() } } }.disabled(!store.canEditDraft || store.busy)
             }
-        }.sheet(isPresented: $editingMacro) { MacroEditor(action: action, macroID: macroID, store: store) }
+        }.sheet(isPresented: $editingMacro) { MacroEditor(action: action, macroID: macroID, store: store, saved: saved) }
     }
     var modifiers: [String] { if case .array(let values) = action.payload["modifiers"] { return values.map(\.text) }; return [] }
+}
+
+struct ActionCapabilityView: View {
+    let capability: ActionCapability
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("当前不可执行", systemImage: "pause.circle").font(.caption.bold())
+            Text(capability.unavailable_reason).font(.caption)
+            Text("目标：\(capability.target)").font(.caption).textSelection(.enabled)
+            Text(capability.host_required ? "需要 Mac 宿主常驻" : "宿主常驻要求及设备独立执行能力待验证").font(.caption).foregroundStyle(.secondary)
+            ForEach(capability.prerequisites, id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary) }
+            DisclosureGroup("来源与结果语义") {
+                Text(capability.source).font(.caption)
+                Text(capability.result_semantics).font(.caption)
+            }
+        }
+    }
 }

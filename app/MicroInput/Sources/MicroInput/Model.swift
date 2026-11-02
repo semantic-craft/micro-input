@@ -77,7 +77,7 @@ func bindingKey(profile: JSONValue, layer: JSONValue, slot: Int) -> String {
 extension CatalogAction {
     var parameterSummary: String {
         payload.keys.filter {$0 != "type"}.sorted().map { key in
-            let label = ["text":"文本", "url":"网址", "key":"按键", "target":"目标", "modifiers":"修饰键", "adapter":"适配器（未验证）", "command":"命令引用", "session":"会话引用", "skill":"Skill 引用"][key] ?? key
+            let label = ["text":"文本", "url":"网址", "bundle_id":"应用标识", "key":"按键", "target":"目标", "modifiers":"修饰键", "adapter":"适配器（未验证）", "command":"命令引用", "session":"会话引用", "skill":"Skill 引用"][key] ?? key
             return "\(label)：\(payload[key]?.text ?? "")"
         }.joined(separator: "\n")
     }
@@ -119,4 +119,16 @@ extension Snapshot {
 struct DocumentSelection: Decodable { let profile_id: String, layer_id: String? }
 struct MacroReference: Decodable { let profile_id: String, profile_name: String, layer_id: String, layer_name: String, logical_control: String }
 struct MacroSummary: Decodable, Identifiable { let id: String, action: CatalogAction, references: [MacroReference] }
-struct DocumentView: Decodable { let macro_library: [MacroSummary]?; let draft: DraftState, config: Snapshot, selection_hint: DocumentSelection? }
+struct DocumentView: Decodable { let macro_library: [MacroSummary]?; let draft: DraftState, config: Snapshot, selection_hint: DocumentSelection?; let action_capabilities: [String:ActionCapability]? }
+struct ActionCapability: Decodable {
+    let target: String, prerequisites: [String], host_required: Bool, execution_available: Bool
+    let unavailable_reason: String, source: String, result_semantics: String
+}
+struct LibraryEntry: Decodable, Identifiable {
+    let action: CatalogAction, capability: ActionCapability, favorite: Bool
+    var id: String { action.id }
+}
+struct ActionLibraryState: Decodable {
+    var entries: [LibraryEntry] = [], categories: [String] = []
+    var preferences_error: String?
+}
