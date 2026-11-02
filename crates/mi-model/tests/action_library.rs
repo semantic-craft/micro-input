@@ -29,6 +29,48 @@ fn favorite_is_a_host_preference_and_survives_restart_without_editing_the_draft(
 }
 
 #[test]
+fn corrupt_or_incomplete_preferences_never_overwrite_files_or_disable_draft_editing() {
+    let directory = std::env::temp_dir().join(format!("mi-library-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("workbench.json");
+    let preferences = directory.join("workbench.preferences.json");
+    for original in [
+        b"{broken".to_vec(),
+        br#"{"schema_version":2,"favorites":["app"]}"#.to_vec(),
+        br#"{"schema_version":1,"favorites":[],"future":true}"#.to_vec(),
+    ] {
+        std::fs::write(&preferences, &original).unwrap();
+        let mut store = DocumentStore::default();
+        store.open(path.clone()).unwrap();
+        assert!(store.favorite_actions().is_err());
+        assert!(store.set_action_favorite("app", true).is_err());
+        assert_eq!(std::fs::read(&preferences).unwrap(), original);
+        store
+            .update(|d| {
+                let id = d.config.profiles[0].id.as_str().unwrap().to_owned();
+                d.rename_profile(&id, "Local editing still works")
+            })
+            .unwrap();
+    }
+    std::fs::remove_file(&preferences).unwrap();
+    std::fs::write(
+        directory.join("workbench.preferences.pending"),
+        b"retain incomplete save",
+    )
+    .unwrap();
+    let mut store = DocumentStore::default();
+    store.open(path).unwrap();
+    assert!(store.set_action_favorite("app", true).is_err());
+    assert!(store.favorite_actions().unwrap().is_empty());
+    assert!(!preferences.exists());
+    assert_eq!(
+        std::fs::read(directory.join("workbench.preferences.pending")).unwrap(),
+        b"retain incomplete save"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn library_explains_local_app_intent_and_rust_validates_assignment() {
     let entries = action_library::search("应用", "全部", false, &BTreeSet::new());
     let app = entries.iter().find(|e| e.action.id == "app").unwrap();
