@@ -15,6 +15,16 @@ fn failure(e: impl std::fmt::Display) -> BridgeError {
         message: e.to_string(),
     }
 }
+fn document_response(
+    draft: &mi_model::draft::Draft,
+    selection: Option<(String, Option<String>)>,
+) -> Result<String, BridgeError> {
+    let hint = selection.map(|(p, l)| serde_json::json!({"profile_id":p,"layer_id":l}));
+    serde_json::to_string(
+        &serde_json::json!({"draft":draft,"config":draft.config,"selection_hint":hint}),
+    )
+    .map_err(failure)
+}
 #[derive(Clone, uniffi::Record)]
 pub struct DeviceUsage {
     pub page: u16,
@@ -109,12 +119,12 @@ impl MicroInput {
         serde_json::to_string(&mi_model::draft::actions()).map_err(failure)
     }
     pub async fn open_document(&self, path: String) -> Result<String, BridgeError> {
-        self.draft
-            .lock()
-            .unwrap()
-            .open(path.into())
-            .map_err(failure)?;
-        self.draft_state().await
+        let mut store = self.draft.lock().unwrap();
+        store.open(path.into()).map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn document_view(&self) -> Result<String, BridgeError> {
+        document_response(&self.draft.lock().unwrap().draft, None)
     }
     pub async fn assign_action(
         &self,
@@ -126,20 +136,163 @@ impl MicroInput {
         let profile = serde_json::from_str(&profile_id).map_err(failure)?;
         let layer = serde_json::from_str(&layer_id).map_err(failure)?;
         let action = serde_json::from_str(&action_json).map_err(failure)?;
-        self.draft
-            .lock()
-            .unwrap()
+        let mut store = self.draft.lock().unwrap();
+        store
             .update(|d| d.assign(&profile, &layer, slot, action))
             .map_err(failure)?;
-        self.draft_state().await
+        document_response(&store.draft, None)
     }
     pub async fn undo_draft(&self, redo: bool) -> Result<String, BridgeError> {
-        self.draft
-            .lock()
-            .unwrap()
-            .update(|d| d.undo(redo))
+        let mut store = self.draft.lock().unwrap();
+        store.update(|d| d.undo(redo)).map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn create_profile(&self, name: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        let mut id = String::new();
+        store
+            .update(|d| {
+                id = d.create_profile(&name)?;
+                Ok(())
+            })
             .map_err(failure)?;
-        self.draft_state().await
+        let lid = store.draft.document.editable.graph.profiles[&id]
+            .layer_order
+            .first()
+            .cloned();
+        document_response(&store.draft, Some((id, lid)))
+    }
+    pub async fn rename_profile(
+        &self,
+        profile_id: String,
+        name: String,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.rename_profile(&profile_id, &name))
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn duplicate_profile(
+        &self,
+        profile_id: String,
+        name: String,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        let mut id = String::new();
+        store
+            .update(|d| {
+                id = d.duplicate_profile(&profile_id, &name)?;
+                Ok(())
+            })
+            .map_err(failure)?;
+        let lid = store.draft.document.editable.graph.profiles[&id]
+            .layer_order
+            .first()
+            .cloned();
+        document_response(&store.draft, Some((id, lid)))
+    }
+    pub async fn delete_profile(&self, profile_id: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.delete_profile(&profile_id))
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn move_profile(
+        &self,
+        profile_id: String,
+        to_index: u32,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.move_profile(&profile_id, to_index as usize))
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn create_layer(
+        &self,
+        profile_id: String,
+        name: String,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        let mut id = String::new();
+        store
+            .update(|d| {
+                id = d.create_layer(&profile_id, &name)?;
+                Ok(())
+            })
+            .map_err(failure)?;
+        document_response(&store.draft, Some((profile_id, Some(id))))
+    }
+    pub async fn rename_layer(
+        &self,
+        layer_id: String,
+        name: String,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.rename_layer(&layer_id, &name))
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn duplicate_layer(
+        &self,
+        profile_id: String,
+        layer_id: String,
+        name: String,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        let mut id = String::new();
+        store
+            .update(|d| {
+                id = d.duplicate_layer(&profile_id, &layer_id, &name)?;
+                Ok(())
+            })
+            .map_err(failure)?;
+        document_response(&store.draft, Some((profile_id, Some(id))))
+    }
+    pub async fn delete_layer(
+        &self,
+        profile_id: String,
+        layer_id: String,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.delete_layer(&profile_id, &layer_id))
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn move_layer(
+        &self,
+        profile_id: String,
+        layer_id: String,
+        to_index: u32,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.move_layer(&profile_id, &layer_id, to_index as usize))
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    /// Copy only the current session's completed, checksum-verified snapshot; never caller supplied JSON.
+    pub async fn create_draft_from_snapshot(&self) -> Result<String, BridgeError> {
+        let state = self.state.lock().unwrap();
+        let (id, session) = state
+            .session
+            .as_ref()
+            .ok_or_else(|| failure("设备会话已断开"))?;
+        let snapshot = session
+            .snapshot()
+            .filter(|s| !s.stale)
+            .ok_or_else(|| failure("请先读取完整且未过期的设备快照"))?;
+        let file = |f: &mi_session::VerifiedFile| serde_json::json!({"state":"present","name":f.meta.file.name(),"size":f.meta.size,"sha1":f.meta.checksum_hex(),"bytes":f.bytes.as_ref()});
+        let baseline = serde_json::json!({"device_identity":{"interface":id,"session_id":session.id,"confidence":"observed-interface","backend":session.backend_name()},"firmware":snapshot.config.firmware,"read_at":snapshot.config.read_at,"keymap":file(&snapshot.files.keymap),"smart_actions":snapshot.files.smart_actions.as_ref().map(&file).unwrap_or(serde_json::json!({"state":"missing"}))});
+        let mut store = self.draft.lock().unwrap();
+        store
+            .create_independent(snapshot.config, baseline)
+            .map_err(failure)?;
+        document_response(&store.draft, None)
     }
     pub async fn list_devices(&self) -> Result<Vec<DeviceInfo>, BridgeError> {
         let t = self.transport.clone();

@@ -492,6 +492,9 @@ impl LocalDocumentV2 {
         let mut config: DeviceConfig = serde_json::from_value(self.origin["config"].clone())
             .map_err(|_| "来源配置不能显示")?;
         let source = config.clone();
+        if self.baseline.is_some() {
+            config.source = Source::LocalDraft;
+        }
         config.profiles.clear();
         let mut edits = BTreeMap::new();
         for (pi, pid) in self.editable.graph.profile_order.iter().enumerate() {
@@ -562,6 +565,78 @@ impl LocalDocumentV2 {
             config.profiles.push(profile);
         }
         Ok((config, edits))
+    }
+    pub fn structure_changes(&self) -> Vec<String> {
+        let Ok(source) = serde_json::from_value::<DeviceConfig>(self.origin["config"].clone())
+        else {
+            return vec![];
+        };
+        let mut changes = vec![];
+        let g = &self.editable.graph;
+        let refs = &self.editable.source_refs;
+        for old in &source.profiles {
+            if !g.profile_order.iter().any(|id| {
+                refs.get(id)
+                    .is_some_and(|r| r["source_id"] == old.id && r["kind"] != "derived")
+            }) {
+                changes.push(format!("删除配置：{}", old.name));
+            }
+        }
+        for (pi, pid) in g.profile_order.iter().enumerate() {
+            let p = &g.profiles[pid];
+            let sr = refs.get(pid);
+            let original = sr
+                .filter(|r| r["kind"] != "derived")
+                .and_then(|r| source.profiles.iter().find(|old| old.id == r["source_id"]));
+            if let Some(old) = original {
+                if p.name != old.name {
+                    changes.push(format!("配置改名：{} → {}", old.name, p.name));
+                }
+                if pi != old.index {
+                    changes.push(format!("配置排序：{} → 第 {} 项", p.name, pi + 1));
+                }
+                for l in &old.layers {
+                    if !p.layer_order.iter().any(|id| {
+                        refs.get(id)
+                            .is_some_and(|r| r["source_id"] == l.id && r["kind"] != "derived")
+                    }) {
+                        changes.push(format!("删除层：{} / {}", p.name, l.name));
+                    }
+                }
+            } else {
+                changes.push(format!("新增配置：{}", p.name));
+            }
+            for (li, lid) in p.layer_order.iter().enumerate() {
+                let l = &g.layers[lid];
+                let original_layer =
+                    refs.get(lid)
+                        .filter(|r| r["kind"] != "derived")
+                        .and_then(|r| {
+                            original.and_then(|p| {
+                                p.layers
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(_, l)| l.id == r["source_id"])
+                            })
+                        });
+                if let Some((index, old)) = original_layer {
+                    if old.name != l.name {
+                        changes.push(format!("层改名：{} / {} → {}", p.name, old.name, l.name));
+                    }
+                    if index != li {
+                        changes.push(format!(
+                            "层排序：{} / {} → 第 {} 项",
+                            p.name,
+                            l.name,
+                            li + 1
+                        ));
+                    }
+                } else {
+                    changes.push(format!("新增层：{} / {}", p.name, l.name));
+                }
+            }
+        }
+        changes
     }
 }
 fn move_item(order: &mut Vec<String>, id: &str, index: usize) -> Result<(), String> {

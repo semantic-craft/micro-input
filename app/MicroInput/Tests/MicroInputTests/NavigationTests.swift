@@ -23,7 +23,8 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(store.layer?.keys.count, 13)
         XCTAssertEqual(store.layer?.encoders.count, 3)
         store.selectProfile(1)
-        XCTAssertEqual(store.profile?.id.text, "42")
+        XCTAssertNotNil(UUID(uuidString: store.profile?.id.text ?? ""))
+        XCTAssertTrue(store.snapshot?.raw.text.contains("42") == true)
         XCTAssertEqual(store.profile?.index, 1)
         store.selectProfile(0); store.selectLayer(1)
         XCTAssertEqual(store.layer?.name, "辅助层")
@@ -87,6 +88,50 @@ extension NavigationTests {
 }
 
 extension NavigationTests {
+    @MainActor func testLegacySavedActionMigratesThroughRealBridgeWithOriginalBytesBackup() async throws {
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:dir)}
+        try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
+        let url=dir.appendingPathComponent("workbench.json"), core=MicroInputCore.MicroInput()
+        let config=try JSONSerialization.jsonObject(with:Data(try await core.loadDemo().utf8)) as! [String:Any]
+        let first=(config["profiles"] as! [[String:Any]])[0], layer=(first["layers"] as! [[String:Any]])[0]
+        let keyData=try JSONSerialization.data(withJSONObject:[first["id"]!,layer["id"]!,"logical-1"],options:[.fragmentsAllowed,.sortedKeys,.withoutEscapingSlashes])
+        let key=String(decoding:keyData,as:UTF8.self)
+        let action:[String:Any] = ["id":"review","name":"Saved text","category":"文本","detail":"local","payload":["type":"text","text":"保留参数\n第二行"]]
+        let bytes=try JSONSerialization.data(withJSONObject:["schema_version":1,"config":config,"edits":[key:action],"revision":7],options:[.sortedKeys])
+        try bytes.write(to:url)
+        let store=Store(backend:core,documentURL:url);await store.loadWorkbench()
+        XCTAssertEqual(try Data(contentsOf:url),bytes);XCTAssertEqual(store.draft.loaded_format,1)
+        store.slot=1;XCTAssertEqual(store.draft.edits[store.slotKey]?.payload["text"]?.text,"保留参数\n第二行")
+        await store.renameProfile(name:"Migrated")
+        XCTAssertEqual(store.draft.revision,8);XCTAssertEqual(store.draft.loaded_format,2)
+        let backup=try FileManager.default.contentsOfDirectory(at:dir,includingPropertiesForKeys:nil).first {$0.pathExtension=="backup"}
+        XCTAssertNotNil(backup);XCTAssertEqual(try Data(contentsOf:backup!),bytes)
+        let reopened=Store(backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench();reopened.slot=1
+        XCTAssertEqual(reopened.profile?.name,"Migrated")
+        XCTAssertEqual(reopened.draft.edits[reopened.slotKey]?.payload["text"]?.text,"保留参数\n第二行")
+    }
+    @MainActor func testProfileGraphEditingThroughRealBridgeSurvivesRestart() async throws {
+        let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:directory)}
+        let url=directory.appendingPathComponent("workbench.json")
+        let store=Store(backend:MicroInputCore.MicroInput(),documentURL:url)
+        await store.loadWorkbench();let oldID=store.profile?.id.text
+        await store.createProfile(name:"Local profile")
+        let created=store.profile?.id.text
+        XCTAssertNotEqual(created,oldID);XCTAssertEqual(store.profile?.name,"Local profile")
+        await store.createLayer(name:"Work layer");let layer=store.layer?.id.text
+        await store.assign("save");await store.renameProfile(name:"Renamed")
+        await store.moveProfile(by:-1)
+        XCTAssertEqual(store.profile?.id.text,created);XCTAssertEqual(store.layer?.id.text,layer)
+        await store.duplicateProfile(name:"Independent copy");let copy=store.profile?.id.text
+        XCTAssertNotEqual(copy,created);await store.undoDraft();XCTAssertEqual(store.snapshot?.profiles.count,3)
+        await store.undoDraft(redo:true);XCTAssertEqual(store.snapshot?.profiles.last?.id.text,copy)
+        let reopened=Store(backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench()
+        XCTAssertEqual(reopened.snapshot?.profiles.count,4)
+        XCTAssertTrue(reopened.snapshot?.profiles.contains {$0.id.text==created && $0.name=="Renamed"} == true)
+        XCTAssertFalse(reopened.draft.can_undo)
+    }
     @MainActor func testWorkbenchDraftThroughRealBridge() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -149,6 +194,34 @@ extension NavigationTests {
 
 #if MI_SYNTHETIC_BACKEND
 extension NavigationTests {
+    @MainActor func testExplicitSnapshotDraftPreservesPreviousDocumentAndRestoresSelection() async throws {
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:dir)}
+        let url=dir.appendingPathComponent("workbench.json")
+        let core=MicroInputCore.MicroInput.syntheticDiscovery()
+        try await core.setSyntheticDiscovery(state:.twoDevices);try await core.setSyntheticConfig(scenario:1)
+        let store=Store(backend:core,documentURL:url);await store.loadWorkbench();await store.assign("save")
+        let original=try Data(contentsOf:url)
+        await store.refresh();store.selectDevice("synthetic-interface-0");await store.connect("synthetic-interface-0")
+        await store.readIdentity();await store.readDeviceConfig()
+        XCTAssertFalse(store.canEditDraft)
+        let requestCount=await core.syntheticRequests().count
+        await store.createDraftFromSnapshot()
+        XCTAssertTrue(store.canEditDraft);XCTAssertFalse(store.browsingDeviceSnapshot)
+        XCTAssertEqual(store.snapshot?.source,"LocalDraft")
+        let chosen=store.draft.document_id
+        store.slot=1 // Unknown original remains visible while a separate local intent is assigned.
+        await store.assign("save");await store.renameProfile(name:"Device working copy")
+        XCTAssertEqual(store.draft.edits[store.slotKey]?.id,"save")
+        XCTAssertEqual(try Data(contentsOf:url),original)
+        let finalRequests=await core.syntheticRequests().count;XCTAssertEqual(finalRequests,requestCount)
+        await store.suspend()
+        let reopened=Store(backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench()
+        XCTAssertEqual(reopened.draft.document_id,chosen)
+        XCTAssertEqual(reopened.profile?.name,"Device working copy")
+        XCTAssertEqual(reopened.draft.edits.count,1);XCTAssertFalse(reopened.draft.can_undo)
+        XCTAssertTrue(reopened.snapshot?.raw.text.contains("18446744073709551615") == true)
+    }
     @MainActor func testIdentityThroughRealBridgeIsSeparateFromConnectionAndConfig() async throws {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)

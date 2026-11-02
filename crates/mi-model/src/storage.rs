@@ -126,8 +126,7 @@ impl DocumentStore {
             result
         })();
         if let Err(e) = result {
-            let _ = fs::remove_file(path);
-            return Err(e);
+            return Err(format!("未切换草稿；原草稿保持，新文档文件保留供检查：{e}"));
         }
         self.draft = next;
         self.path = Some(path);

@@ -257,6 +257,7 @@ pub struct Draft {
     pub read_only: bool,
     pub loaded_format: u32,
     pub document_id: String,
+    pub structure_changes: Vec<String>,
     #[serde(skip)]
     pub document: crate::document::LocalDocumentV2,
     #[serde(skip)]
@@ -281,6 +282,7 @@ impl Draft {
     ) -> Result<Self, String> {
         let (config, edits) = document.view()?;
         Ok(Self {
+            structure_changes: document.structure_changes(),
             revision: document.revision,
             document_id: document.document_id.clone(),
             config,
@@ -347,6 +349,7 @@ impl Draft {
         Ok(result)
     }
     fn refresh(&mut self) {
+        self.structure_changes = self.document.structure_changes();
         self.revision = self.document.revision;
         self.can_undo = !self.undo.is_empty();
         self.can_redo = !self.redo.is_empty();

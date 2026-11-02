@@ -55,6 +55,9 @@ extension Snapshot {
 
 // R-P03/R-E02: projection of Rust-owned offline intents, not firmware bindings.
 struct DraftState: Decodable {
+    var structure_changes: [String] = []
+    var document_id: String?
+    var loaded_format: Int?
     var edits: [String:CatalogAction] = [:]
     var read_only = false
     var revision: UInt64 = 0
@@ -112,3 +115,6 @@ extension Snapshot {
         }.map { ($0.key, $0.value) }
     }
 }
+
+struct DocumentSelection: Decodable { let profile_id: String, layer_id: String? }
+struct DocumentView: Decodable { let draft: DraftState, config: Snapshot, selection_hint: DocumentSelection? }

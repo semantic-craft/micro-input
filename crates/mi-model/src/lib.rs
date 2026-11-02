@@ -7,6 +7,7 @@ pub enum Source {
     Demo,
     DeviceSnapshot,
     Imported,
+    LocalDraft,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceConfig {
