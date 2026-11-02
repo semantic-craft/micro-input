@@ -462,3 +462,17 @@ fn stale_instance_cannot_replace_another_instances_document_selection() {
     reopened.open(t.file()).unwrap();
     assert_eq!(reopened.draft.document_id, first.draft.document_id);
 }
+
+#[test]
+fn legacy_device_source_is_historical_and_never_claims_a_current_snapshot() {
+    let mut legacy = LegacyDocumentV1::default();
+    legacy.config.source = crate::Source::DeviceSnapshot;
+    let bytes = serde_json::to_vec(&legacy).unwrap();
+    let mut d = Draft::from_bytes(&bytes).unwrap();
+    assert_eq!(d.config.source, crate::Source::LocalDraft);
+    assert!(d.document.baseline.is_none());
+    assert_eq!(d.document.origin["config"]["source"], "DeviceSnapshot");
+    let pid = d.config.profiles[0].id.as_str().unwrap().to_owned();
+    d.rename_profile(&pid, "Local name").unwrap();
+    assert_eq!(d.config.source, crate::Source::LocalDraft);
+}

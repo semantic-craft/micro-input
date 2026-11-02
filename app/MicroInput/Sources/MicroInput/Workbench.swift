@@ -22,7 +22,7 @@ struct Workbench: View {
     }
     var filteredActions: [CatalogAction] { store.catalog.filter { (category == "全部" || $0.category == category) && (search.isEmpty || ($0.name+$0.category+$0.detail).localizedCaseInsensitiveContains(search)) } }
     var bindings: [JSONValue] { guard let l = store.layer else { return [] }; return l.keys + l.encoders + l.joystick.sectors }
-    func title(_ slot: Int) -> String { slot < 13 ? String(format: "按键 %02d", slot + 1) : slot < 16 ? (store.browsingDeviceSnapshot ? "旋钮逻辑槽 \(slot-12)（方向未核实）" : ["旋钮 · 逆时针", "旋钮 · 顺时针", "旋钮 · 按下"][slot-13]) : "摇杆 · 扇区 \(slot-15)" }
+    func title(_ slot: Int) -> String { slot < 13 ? String(format: "按键 %02d", slot + 1) : slot < 16 ? "旋钮槽 \(slot-12) · 方向未核实" : "摇杆 · 扇区 \(slot-15)" }
     func action(_ slot: Int) -> CatalogAction? { return store.browsingDeviceSnapshot ? nil : store.draft.edits[store.key(slot)] }
     func label(_ slot: Int) -> String { if let a = action(slot) {return a.name}; guard bindings.indices.contains(slot) else {return "未知"}; return bindings[slot].bindingLabel }
     var body: some View {
@@ -194,7 +194,7 @@ struct Workbench: View {
     }
     func control(_ slot: Int, round: Bool = false) -> some View {
         Button { store.slot = slot } label: {
-            VStack(spacing: 5) { Text(slot < 13 ? String(format: "%02d",slot+1) : slot < 16 ? ["↶","↷","↓"][slot-13] : "✣").font(.headline); Text(label(slot)).font(.caption2).lineLimit(2) }
+            VStack(spacing: 5) { Text(slot < 13 ? String(format: "%02d",slot+1) : slot < 16 ? "E\(slot-12)" : "✣").font(.headline); Text(label(slot)).font(.caption2).lineLimit(2) }
                 .frame(width: 73, height: 62).padding(3)
                 .background(store.slot == slot ? Color.accentColor.opacity(0.14) : Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: round ? 25 : 9))
                 .overlay(RoundedRectangle(cornerRadius: round ? 25 : 9).stroke(store.slot == slot ? Color.accentColor : Color.gray.opacity(0.2)))

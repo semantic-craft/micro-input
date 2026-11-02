@@ -492,7 +492,7 @@ impl LocalDocumentV2 {
         let mut config: DeviceConfig = serde_json::from_value(self.origin["config"].clone())
             .map_err(|_| "来源配置不能显示")?;
         let source = config.clone();
-        if self.baseline.is_some() {
+        if self.baseline.is_some() || self.origin["kind"] == "legacy-local" {
             config.source = Source::LocalDraft;
         }
         config.profiles.clear();
