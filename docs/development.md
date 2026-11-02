@@ -1,10 +1,12 @@
 # 当前实施入口
 
+接手未完成工单或产品改动时，先执行[研究成果接入规则](agents/research-context.md)。其中包含 Input 1.1.0 的证据索引、按功能阅读路径和可直接使用的接续提示词；实际工单状态以 GitHub 当前记录为准。
+
 PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与 Rust 本地持久化。设备发现、身份查询及 #5 有界配置读取已实现；当前0.6.3的核心读回和原生只读浏览见E-079。#6完整生命周期、其他固件和物理映射仍待验收，未知后端继续禁止发送。
 
 本地v2文档、v1原字节备份迁移、Profile/Layer管理和真实快照显式创建独立草稿已实现，证据见E-083；设备应用和三方比较仍未开放。
 
-先读 [实施设计](implementation-plan.md) D01–D07 与 [BUILD_PROMPT](spec/BUILD_PROMPT.md) 的 S1，再按对应工单推进。完整产品与依赖入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)。本次批准仅更新规划，不启动设备操作、宿主执行或自动化。
+先读 [实施设计](implementation-plan.md) D01–D07 与 [BUILD_PROMPT](spec/BUILD_PROMPT.md) 的 S1，再按对应工单推进。完整产品与依赖入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)。当前继续开发本地功能与适用验证；设备操作遵守证据和恢复门槛，不因规划批准而解锁宿主执行或自动化。
 
 # 开发起点
 
