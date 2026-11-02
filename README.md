@@ -24,6 +24,6 @@
 
 ## 下一步
 
-先确定最小可运行范围并初始化 Rust / SwiftUI 工程。建议第一条端到端路径为：发现设备 → 读取身份/配置 → 在 UI 展示，暂不写设备。随后建立可回读、可恢复的配置写入流程。
+首版范围已确定为 USB 只读配置查看器：发现一台 Creator Micro 2 → 读取身份与配置 → 浏览 Profile、Layer、按键及旋钮映射。范围、验收和依赖以 [MVP 总工单 #1](https://github.com/semantic-craft/micro-input/issues/1) 为准。下一步执行 [#2 合成数据查看器](https://github.com/semantic-craft/micro-input/issues/2)，先交付真实 Rust / SwiftUI 桥接的可启动应用，再逐步接入设备。
 
 目前没有构建或启动命令；初始化实现时增加项目验证入口 `scripts/check`。本次只验证文档导航和调研迁移完整性，未做应用构建或真实设备协议验收。
