@@ -69,3 +69,44 @@ fn logical_sector_mode_preserves_independent_slots_history_and_source() {
     assert_eq!(draft.document.origin, origin);
     assert_ne!(origin["config"]["raw"], json!(null));
 }
+
+#[test]
+fn unknown_mode_stays_visible_and_invalid_field_edits_leave_document_unchanged() {
+    let draft = Draft::default();
+    let pid = draft.config.profiles[0].id.as_str().unwrap().to_owned();
+    let lid = draft.config.profiles[0].layers[0]
+        .id
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut raw = serde_json::to_value(&draft.document).unwrap();
+    raw["graph"]["layers"][&lid]["control_settings"] =
+        json!({"joystick_mode":"future-mode", "active_sectors":17});
+    let mut reopened = Draft::from_bytes(&serde_json::to_vec(&raw).unwrap()).unwrap();
+    assert!(!reopened.read_only);
+    let before = serde_json::to_value(&reopened.document).unwrap();
+    let error = reopened
+        .set_control_settings(
+            &pid,
+            &lid,
+            ControlSettings {
+                joystick_mode: "source".into(),
+                active_sectors: 2,
+            },
+        )
+        .unwrap_err();
+    assert!(error.contains("摇杆模式"));
+    assert_eq!(serde_json::to_value(&reopened.document).unwrap(), before);
+    let error = reopened
+        .set_control_settings(
+            &pid,
+            &lid,
+            ControlSettings {
+                joystick_mode: "source".into(),
+                active_sectors: 33,
+            },
+        )
+        .unwrap_err();
+    assert!(error.contains("活动扇区数"));
+    assert_eq!(serde_json::to_value(&reopened.document).unwrap(), before);
+}

@@ -18,6 +18,7 @@ protocol Backend {
     func actionLibrary(query: String, category: String, favoritesOnly: Bool) async throws -> String
     func setActionFavorite(actionId: String, favorite: Bool) async throws
     func assignAction(profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String
+    func setControlSettings(profileId: String, layerId: String, settingsJson: String) async throws -> String
     func undoDraft(redo: Bool) async throws -> String
     func documentView() async throws -> String
     func createProfile(name: String) async throws -> String
@@ -42,6 +43,7 @@ extension Backend {
     func actionLibrary(query: String, category: String, favoritesOnly: Bool) async throws -> String { throw BridgeError.Failed(message: "动作库不可用") }
     func setActionFavorite(actionId: String, favorite: Bool) async throws { throw BridgeError.Failed(message: "收藏不可用") }
     func assignAction(profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String { throw BridgeError.Failed(message: "草稿编辑不可用") }
+    func setControlSettings(profileId: String, layerId: String, settingsJson: String) async throws -> String { throw BridgeError.Failed(message: "控件设置不可用") }
     func undoDraft(redo: Bool) async throws -> String { throw BridgeError.Failed(message: "草稿撤销不可用") }
 
     func documentView() async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
@@ -85,6 +87,9 @@ extension MicroInput: Backend {}
             status = "收藏已保存为本机偏好 · 草稿修订不变"
         } catch { status = readableError(error) }
     }
+    @Published var controlSettings: [String:LocalControlSettings] = [:]
+    @Published var controlSettingsError: String?
+    var currentControlSettings: LocalControlSettings? { layer.flatMap { controlSettings[$0.id.text] } }
     @Published var slot = 0
     @Published var documentReady = false
     @Published private(set) var browsingDeviceSnapshot = false
@@ -123,6 +128,7 @@ extension MicroInput: Backend {}
         let pi = fresh ? 0 : profileIndex, li = fresh ? 0 : layerIndex
         draft = result.draft; snapshot = result.config; localSnapshot = result.config
         actionCapabilities = result.action_capabilities ?? [:]
+        controlSettings = result.control_settings ?? [:]; controlSettingsError = nil
         browsingDeviceSnapshot = false; stale = false; documentReady = !draft.read_only
         restoreSelection(profile: result.selection_hint?.profile_id ?? oldProfile, layer: result.selection_hint?.layer_id ?? oldLayer, fallbackProfile: pi, fallbackLayer: li)
         localSelection = (profile?.id.text, layer?.id.text, slot)
@@ -168,6 +174,20 @@ extension MicroInput: Backend {}
             status = "草稿已保存到本机 · 不执行动作 · 不写设备"
             return true
         } catch { status = readableError(error); return false }
+    }
+    @discardableResult func saveControlSettings(mode: String, sectors: String) async -> Bool {
+        guard canEditDraft, !busy, let profile, let layer else { return false }
+        guard let count = UInt32(sectors), count <= 32 else {
+            controlSettingsError = "活动扇区数：请输入 0–32 的整数（本机编辑器限制，非设备容量）"
+            return false
+        }
+        busy = true; defer { busy = false }
+        do {
+            let data = try JSONEncoder().encode(LocalControlSettings(joystick_mode: mode, active_sectors: count))
+            try applyDocument(try await backend.setControlSettings(profileId: profile.id.text, layerId: layer.id.text, settingsJson: String(decoding: data, as: UTF8.self)))
+            status = "控件意图已保存到本机 · 旧槽位及绑定保留 · 不写设备"
+            return true
+        } catch { controlSettingsError = readableError(error); return false }
     }
     func undoDraft(redo: Bool = false) async {
         guard canEditDraft, !busy else { return }; busy = true; defer { busy = false }
