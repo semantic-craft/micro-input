@@ -25,17 +25,30 @@ pub enum TransportHint {
     Unknown,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UsagePair {
+    pub page: u16,
+    pub usage: u16,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HidCandidate {
     pub vid: u16,
     pub pid: u16,
     pub usage_page: u16,
     pub usage: u16,
+    pub usage_pairs: Vec<UsagePair>,
     pub transport_hint: TransportHint,
     pub product: String,
     pub path: String,
 }
 pub fn is_candidate(d: &HidCandidate) -> bool {
-    d.vid == 0x303a && matches!(d.pid, 0x8297 | 0x8298) && d.usage_page == 0xff00
+    d.vid == 0x303a
+        && matches!(d.pid, 0x8297 | 0x8298)
+        && d.transport_hint == TransportHint::Usb
+        && (d
+            .usage_pairs
+            .iter()
+            .any(|p| p.page == 0xff00 && p.usage == 1)
+            || (d.usage_pairs.is_empty() && d.usage_page == 0xff00 && d.usage == 1))
 }
 #[async_trait::async_trait]
 pub trait HidLink: Send + Sync {
@@ -45,11 +58,30 @@ pub trait HidLink: Send + Sync {
 }
 pub trait HidTransport: Send + Sync {
     fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError>;
+    #[cfg(feature = "synthetic-backend")]
+    fn set_synthetic_discovery(&self, _state: u8) -> Result<(), TransportError> {
+        Err(TransportError::Unsupported)
+    }
     fn subscribe(&self) -> broadcast::Receiver<()>;
     fn open(&self, id: &str) -> Result<Arc<dyn HidLink>, TransportError>;
 }
 #[cfg(target_os = "macos")]
 extern "C" {
+    fn mi_enumerate(
+        callback: extern "C" fn(
+            *mut std::ffi::c_void,
+            u16,
+            u16,
+            u16,
+            u16,
+            *const u16,
+            usize,
+            *const std::ffi::c_char,
+            *const std::ffi::c_char,
+            *const std::ffi::c_char,
+        ),
+        context: *mut std::ffi::c_void,
+    ) -> i32;
     fn mi_changes() -> u64;
     fn mi_permission() -> i32;
     fn mi_watch(stop: *const AtomicBool);
@@ -118,28 +150,68 @@ impl Drop for MacTransport {
         self.stop.store(true, Ordering::Relaxed);
     }
 }
+#[cfg(target_os = "macos")]
+extern "C" fn discovered(
+    context: *mut std::ffi::c_void,
+    vid: u16,
+    pid: u16,
+    usage_page: u16,
+    usage: u16,
+    pairs: *const u16,
+    count: usize,
+    transport: *const std::ffi::c_char,
+    product: *const std::ffi::c_char,
+    path: *const std::ffi::c_char,
+) {
+    // The native adapter owns these values for the duration of this synchronous callback.
+    unsafe {
+        let string = |p| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
+        let candidate = HidCandidate {
+            vid,
+            pid,
+            usage_page,
+            usage,
+            usage_pairs: std::slice::from_raw_parts(pairs, count * 2)
+                .chunks_exact(2)
+                .map(|p| UsagePair {
+                    page: p[0],
+                    usage: p[1],
+                })
+                .collect(),
+            transport_hint: match string(transport).as_str() {
+                "USB" => TransportHint::Usb,
+                "Bluetooth" | "Bluetooth Low Energy" => TransportHint::Bluetooth,
+                _ => TransportHint::Unknown,
+            },
+            product: string(product),
+            path: string(path),
+        };
+        if is_candidate(&candidate) {
+            (*(context as *mut Vec<HidCandidate>)).push(candidate);
+        }
+    }
+}
+// TODO(UNKNOWN-05): USB source is OS-derived; BLE and cross-interface physical identity remain unverified.
 impl HidTransport for MacTransport {
     fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
-        let api = hidapi::HidApi::new().map_err(|e| TransportError::Unavailable(e.to_string()))?;
-        Ok(api
-            .device_list()
-            .map(|d| HidCandidate {
-                vid: d.vendor_id(),
-                pid: d.product_id(),
-                usage_page: d.usage_page(),
-                usage: d.usage(),
-                // TODO(UNKNOWN-05): only OS Transport (via hidapi bus_type); no release-bit guess or dual-channel dedupe.
-                transport_hint: match d.bus_type() {
-                    hidapi::BusType::Usb => TransportHint::Usb,
-                    hidapi::BusType::Bluetooth => TransportHint::Bluetooth,
-                    _ => TransportHint::Unknown,
-                },
-                product: d.product_string().unwrap_or("未命名 HID").into(),
-                path: d.path().to_string_lossy().into_owned(),
-            })
-            .filter(is_candidate)
-            .collect())
+        #[cfg(target_os = "macos")]
+        {
+            let mut devices: Vec<HidCandidate> = Vec::new();
+            let result = unsafe {
+                mi_enumerate(discovered, &mut devices as *mut _ as *mut std::ffi::c_void)
+            };
+            if result != 0 {
+                return Err(TransportError::Unavailable("系统 HID 枚举失败".into()));
+            }
+            devices.sort_by(|a, b| a.path.cmp(&b.path));
+            Ok(devices)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(TransportError::Unsupported)
+        }
     }
+
     fn subscribe(&self) -> broadcast::Receiver<()> {
         let receiver = self.events.subscribe();
         self.start_watching();
@@ -151,7 +223,7 @@ impl HidTransport for MacTransport {
             .into_iter()
             .find(|d| d.path == id)
             .ok_or(TransportError::Disconnected)?;
-        if d.transport_hint != TransportHint::Usb {
+        if d.transport_hint != TransportHint::Usb || d.pid != 0x8298 {
             return Err(TransportError::Unsupported);
         }
         let api = hidapi::HidApi::new().map_err(|e| TransportError::Unavailable(e.to_string()))?;
@@ -304,21 +376,104 @@ impl HidTransport for MockTransport {
 mod tests {
     use super::*;
     #[test]
+    fn vendor_collection_is_found_when_primary_usage_is_keyboard() {
+        let d = HidCandidate {
+            vid: 0x303a,
+            pid: 0x8298,
+            usage_page: 1,
+            usage: 6,
+            usage_pairs: vec![
+                UsagePair { page: 1, usage: 6 },
+                UsagePair {
+                    page: 0xff00,
+                    usage: 1,
+                },
+            ],
+            transport_hint: TransportHint::Usb,
+            product: "Synthetic".into(),
+            path: "interface-a".into(),
+        };
+        assert!(is_candidate(&d));
+    }
+    #[test]
     fn filtering() {
         let mut d = HidCandidate {
             vid: 0x303a,
             pid: 0x8297,
             usage_page: 0xff00,
             usage: 1,
-            transport_hint: TransportHint::Unknown,
+            usage_pairs: vec![],
+            transport_hint: TransportHint::Usb,
             product: "synthetic".into(),
             path: "mock".into(),
         };
         assert!(is_candidate(&d));
+        // R-D01: a vendor page alone cannot identify the RPC interface.
+        d.usage = 2;
+        assert!(!is_candidate(&d));
+        d.usage = 1;
+        d.transport_hint = TransportHint::Bluetooth;
+        assert!(!is_candidate(&d));
+        d.transport_hint = TransportHint::Usb;
         d.pid = 0x8360;
         assert!(!is_candidate(&d));
         d.pid = 0x8298;
         d.usage_page = 1;
         assert!(!is_candidate(&d));
+    }
+}
+
+// R-D13/D05: explicit test-only OS discovery boundary; no physical open is possible.
+#[cfg(feature = "synthetic-backend")]
+pub struct SyntheticDiscovery {
+    state: Mutex<u8>,
+    events: broadcast::Sender<()>,
+}
+#[cfg(feature = "synthetic-backend")]
+impl Default for SyntheticDiscovery {
+    fn default() -> Self {
+        let (events, _) = broadcast::channel(16);
+        Self {
+            state: Mutex::new(0),
+            events,
+        }
+    }
+}
+#[cfg(feature = "synthetic-backend")]
+impl HidTransport for SyntheticDiscovery {
+    fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
+        match *self.state.lock().unwrap() {
+            0 => Ok(vec![]),
+            1 => Ok((0..2)
+                .map(|i| HidCandidate {
+                    vid: 0x303a,
+                    pid: if i == 0 { 0x8298 } else { 0x8297 },
+                    usage_page: 1,
+                    usage: 6,
+                    usage_pairs: vec![
+                        UsagePair { page: 1, usage: 6 },
+                        UsagePair {
+                            page: 0xff00,
+                            usage: 1,
+                        },
+                    ],
+                    transport_hint: TransportHint::Usb,
+                    product: "合成 Creator Micro".into(),
+                    path: format!("synthetic-interface-{i}"),
+                })
+                .collect()),
+            _ => Err(TransportError::Unavailable("合成枚举失败".into())),
+        }
+    }
+    fn subscribe(&self) -> broadcast::Receiver<()> {
+        self.events.subscribe()
+    }
+    fn open(&self, _: &str) -> Result<Arc<dyn HidLink>, TransportError> {
+        Err(TransportError::Unsupported)
+    }
+    fn set_synthetic_discovery(&self, state: u8) -> Result<(), TransportError> {
+        *self.state.lock().unwrap() = state;
+        let _ = self.events.send(());
+        Ok(())
     }
 }

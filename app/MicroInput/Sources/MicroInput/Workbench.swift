@@ -14,6 +14,8 @@ struct Workbench: View {
     func label(_ slot: Int) -> String { if let a = action(slot) {return a.name}; guard bindings.indices.contains(slot) else {return "未知"}; return bindings[slot].bindingLabel }
     var body: some View {
         VStack(spacing: 0) {
+            discoveryPanel
+            Divider()
             HStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 24) {
                     Label("Micro Input", systemImage: "keyboard").font(.headline)
@@ -80,6 +82,32 @@ struct Workbench: View {
         .sheet(isPresented: $choosing) { actionSheet }
         .sheet(isPresented: $reviewing) { diffSheet }
         .task { if store.snapshot == nil { await store.loadWorkbench() } }
+    }
+    var discoveryPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(store.discoveryStatus, systemImage: "cable.connector")
+                Spacer()
+                if !store.devices.isEmpty {
+                    Picker("USB 候选", selection: Binding(get: { store.selectedDeviceID ?? "" }, set: { store.selectDevice($0) })) {
+                        Text("请选择设备").tag("")
+                        ForEach(Array(store.devices.enumerated()), id: \.element.id) { index, device in
+                            Text("\(device.product) · \(String(format: "%04X", device.pid)) · 接口 \(index + 1)\(device.verifiedModel ? "" : " · 未验型号")").tag(device.id)
+                        }
+                    }.frame(maxWidth: 410)
+                }
+                Button("查找 / 刷新 USB") { Task { await store.startDiscovery(); await store.refresh() } }
+                Button("离线演示") { Task { await store.loadDemo() } }
+            }
+            if let device = store.selectedDevice {
+                Text("OS 名称：\(device.product) · USB · VID \(String(format: "%04X", device.vid)) / PID \(String(format: "%04X", device.pid)) · 固件：未知")
+                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                Text("主 usage \(String(format: "%04X/%d", device.usagePage, device.usage)) · 完整 usage pairs：\(device.usagePairs.map { String(format: "%04X/%d", $0.page, $0.usage) }.joined(separator: ", "))")
+                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            Text("候选选择仅用于浏览身份；下方仍是离线工作台。设备配置尚未读取。")
+                .font(.caption).foregroundStyle(.secondary)
+        }.padding(.horizontal, 20).padding(.vertical, 12)
     }
     func control(_ slot: Int, round: Bool = false) -> some View {
         Button { store.slot = slot } label: {

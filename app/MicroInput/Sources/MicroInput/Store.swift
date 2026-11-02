@@ -8,6 +8,10 @@ protocol Backend {
     func readConfig() async throws -> String
     func disconnect() async
     func inputMonitoringStatus() async -> Bool
+    func subscribeDeviceEvents(cb: DeviceEvents) async
+}
+extension Backend {
+    func subscribeDeviceEvents(cb: DeviceEvents) async {}
 }
 extension MicroInput: Backend {}
 @MainActor final class Store: ObservableObject {
@@ -65,6 +69,26 @@ extension MicroInput: Backend {}
     private var pendingID: String?
     @Published var snapshot: Snapshot?
     @Published var devices: [DeviceInfo] = []
+    @Published var selectedDeviceID: String?
+    @Published var discoveryStatus = "USB 发现尚未开始"
+    private var events: Events?
+    var selectedDevice: DeviceInfo? { devices.first { $0.id == selectedDeviceID } }
+    func startDiscovery() async {
+        guard events == nil else { return }
+        let receiver = Events(self)
+        events = receiver
+        await backend.subscribeDeviceEvents(cb: receiver)
+        await refresh()
+    }
+    func selectDevice(_ id: String) {
+        guard let device = devices.first(where: { $0.id == id }) else { return }
+        selectedDeviceID = id
+        discoveryStatus = device.verifiedModel ? "已连接 USB · 固件未知 · 尚未打开设备" : "未知型号 · 尚未验证 · 固件未知"
+    }
+    func discoveryFailed(_ message: String) {
+        devices = []; selectedDeviceID = nil
+        discoveryStatus = "发现失败 · \(message)"
+    }
     @Published var profileIndex = 0
     @Published var layerIndex = 0
     @Published var selectedBinding: JSONValue?
@@ -79,11 +103,18 @@ extension MicroInput: Backend {}
     func selectProfile(_ index: Int) { profileIndex = index; layerIndex = 0; slot = 0; selectedBinding = nil }
     func selectLayer(_ index: Int) { layerIndex = index; slot = 0; selectedBinding = nil }
     func refresh() async {
-        allowed = await backend.inputMonitoringStatus()
-        do { received(try await backend.listDevices()) } catch { status = readableError(error) }
+        // R-D02: descriptors only, no permission preflight/request or device open.
+        do { received(try await backend.listDevices()) } catch { discoveryFailed(readableError(error)) }
     }
     func received(_ values: [DeviceInfo]) {
+        let removed = selectedDeviceID.map { id in !values.contains { $0.id == id } } ?? false
         devices = values
+        if removed {
+            selectedDeviceID = nil
+            discoveryStatus = "设备已断开 · 可继续使用离线工作台"
+        } else if selectedDeviceID == nil {
+            discoveryStatus = values.isEmpty ? "无 USB 候选设备" : "发现 \(values.count) 个 USB 候选 · 请选择设备"
+        }
         if let id = pendingID ?? connectedID, !values.contains(where: { $0.id == id }) { generation += 1; pendingID = nil; connectedID = nil; stale = snapshot != nil; status = "设备已断开" }
     }
     func loadDemo() async {
@@ -112,7 +143,7 @@ extension MicroInput: Backend {}
     private weak var store: Store?
     init(_ store: Store) { self.store = store }
     nonisolated func changed(devices: [DeviceInfo]) { Task { @MainActor [weak self] in self?.store?.received(devices) } }
-    nonisolated func failed(message: String) { Task { @MainActor [weak self] in self?.store?.status = message } }
+    nonisolated func failed(message: String) { Task { @MainActor [weak self] in self?.store?.discoveryFailed(message) } }
 }
 
 // R-A02: keep bridge type names and protocol internals out of normal status text.

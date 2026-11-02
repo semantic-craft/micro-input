@@ -119,3 +119,30 @@ extension NavigationTests {
         XCTAssertFalse(AppLifetime().applicationShouldTerminateAfterLastWindowClosed(NSApplication.shared))
     }
 }
+
+#if MI_SYNTHETIC_BACKEND
+// R-D01/R-D13: OS events cross real Rust → UniFFI → Store, with no physical device.
+extension NavigationTests {
+    @MainActor func testDiscoveryKeepsCandidatesSeparateAndRemovalClearsSelection() async throws {
+        let core = MicroInputCore.MicroInput.syntheticDiscovery()
+        let store = Store(backend: core)
+        await store.startDiscovery()
+        XCTAssertEqual(store.discoveryStatus, "无 USB 候选设备")
+        try await core.setSyntheticDiscovery(state: .twoDevices)
+        for _ in 0..<100 where store.devices.count != 2 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(store.devices.count, 2)
+        XCTAssertNil(store.selectedDeviceID)
+        XCTAssertFalse(store.devices[1].verifiedModel)
+        store.selectDevice(store.devices[0].id)
+        XCTAssertEqual(store.selectedDeviceID, "synthetic-interface-0")
+        XCTAssertTrue(store.discoveryStatus.contains("固件未知"))
+        try await core.setSyntheticDiscovery(state: .noDevices)
+        for _ in 0..<100 where store.selectedDeviceID != nil { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertNil(store.selectedDeviceID)
+        XCTAssertEqual(store.discoveryStatus, "设备已断开 · 可继续使用离线工作台")
+        try await core.setSyntheticDiscovery(state: .failure)
+        for _ in 0..<100 where !store.discoveryStatus.contains("失败") { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(store.discoveryStatus.contains("发现失败"))
+    }
+}
+#endif
