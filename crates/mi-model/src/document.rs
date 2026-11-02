@@ -613,6 +613,17 @@ impl LocalDocumentV2 {
             }
             for (li, lid) in p.layer_order.iter().enumerate() {
                 let l = &g.layers[lid];
+                if let Some(settings) = &l.control_settings {
+                    let mode = match settings.joystick_mode.as_str() {
+                        "source" => "保留来源模式",
+                        "logical_sectors" => "逻辑扇区意图",
+                        other => other,
+                    };
+                    changes.push(format!(
+                        "控件意图：{} / {} · {} · 活动扇区 {}（旧槽位保留）",
+                        p.name, l.name, mode, settings.active_sectors
+                    ));
+                }
                 let original_layer =
                     refs.get(lid)
                         .filter(|r| r["kind"] != "derived")

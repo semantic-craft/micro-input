@@ -17,6 +17,10 @@ fn logical_sector_mode_preserves_independent_slots_history_and_source() {
             },
         )
         .unwrap();
+    assert!(draft
+        .structure_changes
+        .iter()
+        .any(|s| s.contains("控件意图")));
     let a = mi_model::draft::actions()[0].clone();
     let b = mi_model::draft::actions()[1].clone();
     draft.assign(&p, &l, 13, a.clone()).unwrap();
