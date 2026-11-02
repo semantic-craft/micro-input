@@ -117,4 +117,6 @@ extension Snapshot {
 }
 
 struct DocumentSelection: Decodable { let profile_id: String, layer_id: String? }
-struct DocumentView: Decodable { let draft: DraftState, config: Snapshot, selection_hint: DocumentSelection? }
+struct MacroReference: Decodable { let profile_id: String, profile_name: String, layer_id: String, layer_name: String, logical_control: String }
+struct MacroSummary: Decodable, Identifiable { let id: String, action: CatalogAction, references: [MacroReference] }
+struct DocumentView: Decodable { let macro_library: [MacroSummary]?; let draft: DraftState, config: Snapshot, selection_hint: DocumentSelection? }

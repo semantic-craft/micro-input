@@ -99,6 +99,30 @@ impl Draft {
             Ok(id)
         })
     }
+    pub fn save_macro_for_binding(
+        &mut self,
+        id: Option<&str>,
+        action: Action,
+        profile: &Value,
+        layer: &Value,
+        slot: u32,
+    ) -> Result<String, String> {
+        if !is_local_macro(&action) {
+            return Err("只能保存自有本地宏".into());
+        }
+        action.validate()?;
+        self.mutate(|d| {
+            if let Some(id) = id {
+                if !d.editable.graph.actions.get(id).is_some_and(is_local_macro) {
+                    return Err("本地宏不存在".into());
+                }
+            }
+            let id = id.map(str::to_owned).unwrap_or_else(new_id);
+            binding(d, profile, layer, slot)?.action_id = Some(id.clone());
+            d.editable.graph.actions.insert(id.clone(), action);
+            Ok(id)
+        })
+    }
     pub fn bind_macro(
         &mut self,
         profile: &Value,

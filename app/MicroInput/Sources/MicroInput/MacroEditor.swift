@@ -60,10 +60,12 @@ struct MacroEditor: View {
     @State private var draft: MacroEditorDraft
     @State private var name: String
     @State private var error: String?
+    var macroID: String?
+    var saved: (() -> Void)?
     @ObservedObject var store: Store
     @Environment(\.dismiss) private var dismiss
-    init(action: CatalogAction, store: Store) {
-        self.store = store
+    init(action: CatalogAction, macroID: String? = nil, store: Store, saved: (() -> Void)? = nil) {
+        self.store = store; self.macroID = macroID; self.saved = saved
         _draft = State(initialValue: MacroEditorDraft(action: action)!)
         _name = State(initialValue: action.name)
     }
@@ -71,6 +73,10 @@ struct MacroEditor: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("编辑普通宏").font(.title2.bold())
             Text("自有本地格式 · 按键名称仅为本地标签 · 不执行输入、不写设备").font(.caption).foregroundStyle(.secondary)
+            if let id = macroID, let macro = store.macros.first(where: { $0.id == id }) {
+                Text("保存将更新以下 \(macro.references.count) 个共享引用：").font(.caption).bold()
+                Text(macro.references.map { "\($0.profile_name) / \($0.layer_name) / \($0.logical_control)" }.joined(separator: "、")).font(.caption).textSelection(.enabled)
+            }
             TextField("宏名称", text: $name).accessibilityLabel("宏名称")
             ScrollView {
                 VStack(spacing: 10) {
@@ -109,11 +115,40 @@ struct MacroEditor: View {
                     Task {
                         do {
                             let action = try draft.action(named: name)
-                            if await store.saveAction(action) { dismiss() } else { error = store.status }
+                            if await store.saveMacro(action, id: macroID) { saved?(); dismiss() } else { error = store.status }
                         } catch { self.error = error.localizedDescription }
                     }
                 }.keyboardShortcut(.defaultAction).disabled(store.busy || !store.canEditDraft)
             }
         }.padding(24).frame(width: 760, height: 510)
+    }
+}
+
+
+struct MacroLibraryView: View {
+    @ObservedObject var store: Store
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack { Text("已保存的普通宏").font(.title2.bold()); Spacer(); Button("关闭") { dismiss() } }
+            Text("引用同一宏的控件共享后续编辑；移除绑定保留宏。仅本地草稿，不执行。").font(.caption).foregroundStyle(.secondary)
+            if store.macros.isEmpty { Text("尚无本地宏。请在动作库选择“普通宏”并保存步骤。").foregroundStyle(.secondary) }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(store.macros) { macro in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack { Text(macro.action.name).bold(); Spacer(); Text("\(macro.references.count) 个引用").foregroundStyle(.secondary) }
+                            Text(macro.references.isEmpty ? "未绑定，仍保留在本地草稿" : macro.references.map { "\($0.profile_name) / \($0.layer_name) / \($0.logical_control)" }.joined(separator: "、")).font(.caption)
+                            HStack {
+                                Button("引用到当前控件") { Task { await store.bindMacro(macro.id); dismiss() } }.disabled(store.busy || !store.canEditDraft || store.layer == nil)
+                                Button("删除宏", role: .destructive) { Task { await store.deleteMacro(macro.id) } }.disabled(store.busy || !store.canEditDraft || !macro.references.isEmpty)
+                                if !macro.references.isEmpty { Text("先移除以上绑定再删除").font(.caption).foregroundStyle(.secondary) }
+                            }
+                        }.padding(12).background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+            Text(store.status).font(.caption).foregroundStyle(.secondary)
+        }.padding(24).frame(width: 640, height: 450)
     }
 }

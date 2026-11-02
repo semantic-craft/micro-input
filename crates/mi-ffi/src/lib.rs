@@ -27,7 +27,7 @@ fn document_response(
 ) -> Result<String, BridgeError> {
     let hint = selection.map(|(p, l)| serde_json::json!({"profile_id":p,"layer_id":l}));
     serde_json::to_string(
-        &serde_json::json!({"draft":draft,"config":draft.config,"selection_hint":hint}),
+        &serde_json::json!({"draft":draft,"config":draft.config,"selection_hint":hint,"macro_library":draft.macros()}),
     )
     .map_err(failure)
 }
@@ -184,6 +184,48 @@ impl MicroInput {
         let mut store = self.draft.lock().unwrap();
         store
             .update(|d| d.assign(&profile, &layer, slot, action))
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn save_macro_action(
+        &self,
+        macro_id: Option<String>,
+        profile_id: String,
+        layer_id: String,
+        slot: u32,
+        action_json: String,
+    ) -> Result<String, BridgeError> {
+        let profile = serde_json::from_str(&profile_id).map_err(failure)?;
+        let layer = serde_json::from_str(&layer_id).map_err(failure)?;
+        let action = serde_json::from_str(&action_json).map_err(failure)?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| {
+                d.save_macro_for_binding(macro_id.as_deref(), action, &profile, &layer, slot)
+                    .map(|_| ())
+            })
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn bind_macro_action(
+        &self,
+        macro_id: Option<String>,
+        profile_id: String,
+        layer_id: String,
+        slot: u32,
+    ) -> Result<String, BridgeError> {
+        let profile = serde_json::from_str(&profile_id).map_err(failure)?;
+        let layer = serde_json::from_str(&layer_id).map_err(failure)?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.bind_macro(&profile, &layer, slot, macro_id.as_deref()))
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn delete_macro_action(&self, macro_id: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.delete_macro(&macro_id))
             .map_err(failure)?;
         document_response(&store.draft, None)
     }
