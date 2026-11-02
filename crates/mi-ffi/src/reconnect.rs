@@ -12,6 +12,8 @@ impl MicroInput {
             .ok_or_else(|| failure("请先读取完整且未过期的设备快照"))?;
         let file = |f: &mi_session::VerifiedFile| serde_json::json!({"state":"present","name":f.meta.file.name(),"size":f.meta.size,"sha1":f.meta.checksum_hex(),"bytes":f.bytes.as_ref()});
         let baseline = serde_json::json!({"device_identity":{"interface":id,"session_id":session.id,"confidence":"observed-interface","backend":session.backend_name()},"firmware":snapshot.config.firmware,"read_at":snapshot.config.read_at,"keymap":file(&snapshot.files.keymap),"smart_actions":snapshot.files.smart_actions.as_ref().map(file).unwrap_or(serde_json::json!({"state":"missing"}))});
+        let mut baseline = baseline;
+        baseline["active_indices"] = state.identity.as_ref().filter(|i| i.session_id == session.id).map(|i| serde_json::json!({"profile":i.profile_index,"layer":i.layer_index,"source_method":i.source_method,"observed_at":"identity-query; not active source mapping"})).unwrap_or(serde_json::Value::Null);
         Ok((snapshot.config, baseline))
     }
 }

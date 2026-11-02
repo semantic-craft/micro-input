@@ -130,6 +130,16 @@ T30 本地恢复在 `mi-model/src/recovery.rs` 复用 `Draft::from_bytes` 的 v1
 
 #22 写前再次核验设备身份和文件摘要，变化即拒绝应用并要求重做比较；不能认为一次比较永久有效。
 
+### T13 单基础绑定准备契约（软件准备；设备应用仍未开放）
+
+`DeviceKey { token }` 是独立于宿主 Shortcut 的本地设备意图，只接受既有读取投影认识的 KC_A/KC_B/KC_ENTER/KC_ESC/KC_SPACE/KC_TAB。准备从当前会话完整、未过期的校验快照取得两文件原字节与有无、摘要、身份、固件及可确认的活动索引；不从活动索引选择目标，物理位置与活动源语义仍未知。仅允许一个来源唯一的普通键本地意图，任何结构、模式、高级绑定或其他字段变化均拒绝。
+
+`DocumentStore::preview_apply` 生成内存 token，绑定文档 ID/revision/磁盘 SHA-256、session/设备身份/固件与两文件摘要；取消只清预览。`prepare_apply_backup` 再次核对当前文档与当前会话快照，才在同目录私有 device-backups 下 create-new 0700 操作目录、0600 原字节文件与 manifest，fsync 并读回验证；planned-keymap.json 仅保存本机编译候选，原 keymap.json 保持原字节。备份记录两文件有无和元数据以及计划身份，不能称作已验证的设备恢复。失败不提交草稿或 prepared 状态。
+
+编译由 serde_json 借用 RawValue 定位唯一源 Profile/Layer/逻辑槽中的 token，以边界校验后的字节拼接替换该 token；不正规化整份文件，smart_actions 原样。重复 JSON 字段、重复源 ID、未知版本、只读本地文档或陈旧基线均拒绝。预览只使用缓存的核验快照，无 USB 请求；未来真实发送前仍必须重新读取身份与文件摘要，不能拿缓存预览授权写入。
+
+UniFFI 和 Swift Store 只暴露预览、取消和本机备份；Apply/Restore 显示 UNKNOWN-08/09 的具体不可用原因，不提供发送或伪成功实现。E-097 仅覆盖软件准备；#22 的真实应用、读回、控件操作、恢复及恢复后实测仍待独立授权与证据，A/B 临时文件及 C 的局部结果不证明这些能力。C 的局部结果不视为完整实验通过。
+
 ## D08 · 依赖与适配最低范围（F08/F09/F10）
 
 规则 R-K06/R-X04。

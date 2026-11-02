@@ -18,6 +18,11 @@ pub fn capability(action: &Action) -> ActionCapability {
     let mut prerequisites = vec!["仅可分配到本地逻辑槽位；物理映射待验证".into()];
     let (target, host_required, reason) =
         match serde_json::from_value::<ActionKind>(action.payload.clone()) {
+            Ok(ActionKind::DeviceKey { token }) => (
+                token,
+                false,
+                "设备按键仅保存本地意图；配置写入与恢复尚未验证",
+            ),
             Ok(ActionKind::Shortcut { target, .. }) => {
                 prerequisites.push("目标应用须在前台并支持此快捷键；当前不检测焦点".into());
                 (target, false, "快捷键发送未接入；设备独立执行能力未验证")

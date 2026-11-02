@@ -1,4 +1,5 @@
 //! R-A02/R-A05: only high-level asynchronous operations cross the in-process UniFFI bridge.
+mod apply_preparation;
 mod input_monitor;
 mod reconnect;
 pub use input_monitor::*;
@@ -125,6 +126,7 @@ pub trait DeviceEvents: Send + Sync {
 #[derive(Default)]
 struct ConnectionState {
     generation: u64,
+    identity: Option<IdentityInfo>,
     pending: Option<String>,
     session: Option<(String, Arc<DeviceSession>)>,
 }
@@ -702,7 +704,7 @@ impl MicroInput {
             .await
             .map_err(|e| session_failure(s.terminal_failure().unwrap_or(e)))?;
         // A reply verifies this identity query only, not configuration or broad compatibility.
-        Ok(IdentityInfo {
+        let result = IdentityInfo {
             session_id: info.session_id,
             version: info.version,
             profile_index: info.profile_index,
@@ -711,7 +713,16 @@ impl MicroInput {
             verification: "identity-query-observed".into(),
             backend: s.backend_name().into(),
             raw_json: info.raw.to_string(),
-        })
+        };
+        let mut state = self.state.lock().unwrap();
+        if state
+            .session
+            .as_ref()
+            .is_some_and(|(_, active)| active.id == result.session_id)
+        {
+            state.identity = Some(result.clone());
+        }
+        Ok(result)
     }
     pub async fn read_config(&self) -> Result<String, BridgeError> {
         let s = self.current()?;

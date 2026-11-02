@@ -26,6 +26,8 @@ scripts/run --verify   # 独立QA标识/文档，10分钟自动退出并回收�
 
 Agent 可通过 `target/debug/mi draft read/validate/patch` 读取已保存的本地文档、校验受限操作并生成独立提案。工作台“审阅 Agent 提案…”显示来源修订、摘要和逐项差异，拒绝保持当前草稿，接受才创建独立草稿。过期身份/修订/原字节、非法字段、悬空引用与保存冲突均拒绝。示例：`scripts/draft-client.py /absolute/workbench.json /absolute/proposal.json '新配置名称'`；CLI 只支持配置/层改名及已有本地动作绑定，不创建新动作、不控制设备或执行宿主动作。协议、错误码与来源保全见[T29 契约](docs/implementation-plan.md#t29-agent-本地提案契约)。
 
+“准备基础绑定应用”提供单个普通设备按键的本地预览：将已知的六项 DeviceKey 意图与宿主快捷键分开，只接受来源明确且无其他结构变化的草稿。预览绑定当前会话核验快照、文档身份/修订/原字节摘要，显示来源 Profile/Layer/逻辑槽和前后值；活动索引不用于猜测目标。明确保存后，在私有目录保存两文件原字节/有无、元数据、计划身份与单 token 编译候选，fsync 并读回核对；不覆盖旧包。设备应用与恢复按钮保持禁用，副本不代表设备恢复已验收。见[T13 准备契约](docs/implementation-plan.md#t13-单基础绑定准备契约软件准备设备应用仍未开放)与 E-097。
+
 规格见 [SPEC](docs/spec/SPEC.md)、分阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)、[证据](docs/spec/EVIDENCE.md)和[未知项](docs/spec/UNKNOWNS.md)。
 
 ## 调研入口

@@ -18,6 +18,7 @@ pub struct DocumentStore {
     preferences: HostPreferencesStore,
     recovery_preview: Option<recovery::InspectedRecovery>,
     agent_preview: Option<agent::Pending>,
+    apply_preview: Option<crate::apply::Pending>,
 }
 fn read(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
     let f = match fs::File::open(path) {
@@ -35,6 +36,60 @@ fn read(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(b))
 }
 impl DocumentStore {
+    fn ensure_apply_document(&self) -> Result<Vec<u8>, String> {
+        if self.blocked || self.draft.read_only || self.draft.loaded_format != 2 {
+            return Err("文档只读、未来格式或未载入；不能准备应用".into());
+        }
+        let path = self.path.as_ref().ok_or("请先打开已保存的本地草稿")?;
+        let bytes = read(path)?.ok_or("本地草稿未保存")?;
+        if Some(&bytes) != self.expected.as_ref() {
+            return Err("本地文档原字节已变化；请重新打开并预览".into());
+        }
+        if serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| "文档原字节无效")?
+            != serde_json::to_value(&self.draft.document).map_err(|e| e.to_string())?
+        {
+            return Err("内存与磁盘文档不一致；请重新打开并预览".into());
+        }
+        if let Some((path, expected)) = &self.selection {
+            if &read(path)? != expected {
+                return Err("所选文档已变化；请重新预览".into());
+            }
+        }
+        Ok(bytes)
+    }
+    pub fn preview_apply(
+        &mut self,
+        current: &serde_json::Value,
+    ) -> Result<crate::apply::Preview, String> {
+        let bytes = self.ensure_apply_document()?;
+        let pending = crate::apply::Pending::new(&self.draft.document, &bytes, current)?;
+        let preview = pending.preview.clone();
+        self.apply_preview = Some(pending);
+        Ok(preview)
+    }
+    pub fn cancel_apply_preview(&mut self) {
+        self.apply_preview = None;
+    }
+    pub fn prepare_apply_backup(
+        &mut self,
+        token: &str,
+        current: &serde_json::Value,
+    ) -> Result<crate::apply::Prepared, String> {
+        let bytes = self.ensure_apply_document()?;
+        let pending = self
+            .apply_preview
+            .as_ref()
+            .filter(|p| p.preview.token == token)
+            .ok_or("预览已过期；请重新预览")?;
+        pending.ensure_current(&self.draft.document, &bytes, current)?;
+        let path = self.path.as_ref().ok_or("没有文档路径")?;
+        let _guard = Lock::acquire(path.with_extension("lock"))?;
+        self.ensure_apply_document()?;
+        let result = pending.backup(path.parent().ok_or("无效文档目录")?)?;
+        self.ensure_apply_document()?;
+        self.apply_preview = None;
+        Ok(result)
+    }
     pub fn compare(
         &mut self,
         config: &crate::DeviceConfig,

@@ -50,6 +50,9 @@ protocol Backend {
     func deleteLayer(profileId: String, layerId: String) async throws -> String
     func moveLayer(profileId: String, layerId: String, toIndex: UInt32) async throws -> String
     func createDraftFromSnapshot() async throws -> String
+    func previewApply() async throws -> String
+    func cancelApplyPreview() async
+    func prepareApplyBackup(token: String) async throws -> String
     func compareSnapshot() async throws -> String
     func confirmComparisonIdentity(token: String) async throws -> String
     func resolveComparison(token: String, choice: String) async throws -> String
@@ -98,6 +101,9 @@ extension Backend {
     func deleteLayer(profileId: String, layerId: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func moveLayer(profileId: String, layerId: String, toIndex: UInt32) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func createDraftFromSnapshot() async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func previewApply() async throws -> String { throw BridgeError.Failed(message:"设备应用准备不可用") }
+    func cancelApplyPreview() async {}
+    func prepareApplyBackup(token: String) async throws -> String { throw BridgeError.Failed(message:"设备备份不可用") }
     func confirmComparisonIdentity(token:String) async throws -> String {throw BridgeError.Failed(message:"设备核对不可用")}
     func compareSnapshot() async throws -> String { throw BridgeError.Failed(message:"重连比较不可用") }
     func resolveComparison(token: String, choice: String) async throws -> String { throw BridgeError.Failed(message:"重连比较不可用") }
@@ -161,7 +167,7 @@ extension MicroInput: Backend {}
             try applyDocument(try await backend.openDocument(path: documentURL.path))
             catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await backend.actionCatalog().utf8))
             #if MI_SYNTHETIC_BACKEND
-            if ["reconnect", "reconnect-transient"].contains(ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""), !preparedReconnectScenario {await prepareReconnectScenario()}
+            if ["reconnect", "reconnect-transient", "apply-preparation"].contains(ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""), !preparedReconnectScenario {await prepareReconnectScenario()}
             #endif
             await searchActions(query: "", category: "全部", favoritesOnly: false)
         } catch { status = readableError(error); documentReady = false }
@@ -173,6 +179,7 @@ extension MicroInput: Backend {}
     }
     private func applyDocument(_ json: String, fresh: Bool = false) throws {
         let result = try JSONDecoder().decode(DocumentView.self, from: Data(json.utf8))
+        if draft.document_id != result.draft.document_id || draft.revision != result.draft.revision {applyPreview=nil;preparedApplyBackup=nil}
         let oldProfile = fresh ? nil : profile?.id.text, oldLayer = fresh ? nil : layer?.id.text
         let pi = fresh ? 0 : profileIndex, li = fresh ? 0 : layerIndex
         macros = result.macro_library ?? []
@@ -271,6 +278,9 @@ extension MicroInput: Backend {}
         do {try await core.setSyntheticDiscovery(state:.twoDevices);try await core.setSyntheticConfig(scenario:1)} catch {status=readableError(error);return}
         await refresh();selectDevice("synthetic-interface-0")
         await connect("synthetic-interface-0");await readIdentity();await readDeviceConfig();await createDraftFromSnapshot()
+        if ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == "apply-preparation" {
+            await assign("device-key");await previewApply();return
+        }
         await renameProfile(name:"Local comparison draft")
         if ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == "reconnect-transient" {
             await suspend()
@@ -282,6 +292,26 @@ extension MicroInput: Backend {}
         await readDeviceConfig();await compareSnapshot()
     }
     #endif
+    @Published var applyPreview: ApplyPreview?
+    @Published var preparedApplyBackup: PreparedApplyBackup?
+    func previewApply() async {
+        guard !busy, canEditDraft else { return }; busy=true; defer {busy=false}
+        do {
+            let response=try await backend.previewApply()
+            applyPreview=try JSONDecoder().decode(ApplyPreview.self,from:Data(response.utf8));preparedApplyBackup=nil
+            status="单绑定预览 · 未发送 · 下一步仅保存本机原字节副本"
+        } catch {applyPreview=nil;preparedApplyBackup=nil;status=readableError(error)}
+    }
+    func prepareApplyBackup() async {
+        guard !busy, let preview=applyPreview else {return};busy=true;defer {busy=false}
+        do {
+            preparedApplyBackup=try JSONDecoder().decode(PreparedApplyBackup.self,from:Data(try await backend.prepareApplyBackup(token:preview.token).utf8))
+            status="原配置副本已核验 · 尚未发送 · 设备恢复仍待验收"
+        } catch {preparedApplyBackup=nil;status=readableError(error)}
+    }
+    func cancelApplyPreview() async {
+        await backend.cancelApplyPreview();applyPreview=nil;preparedApplyBackup=nil
+    }
     @Published var comparison: ReconnectComparison?
     func compareSnapshot() async {
         guard !busy else {return};busy=true;defer {busy=false}

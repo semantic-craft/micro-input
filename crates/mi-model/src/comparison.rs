@@ -73,7 +73,7 @@ fn source_key(value: &Value) -> Option<String> {
         .to_string(),
     )
 }
-fn align(doc: &mut LocalDocumentV2, reference: &EditableState) -> Result<(), String> {
+pub(crate) fn align(doc: &mut LocalDocumentV2, reference: &EditableState) -> Result<(), String> {
     let mut keys = BTreeMap::new();
     for (id, source) in &reference.source_refs {
         if let Some(key) = source_key(source) {

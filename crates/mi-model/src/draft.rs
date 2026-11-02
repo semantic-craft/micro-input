@@ -4,9 +4,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub const DEVICE_KEY_TOKENS: [&str; 6] =
+    ["KC_A", "KC_B", "KC_ENTER", "KC_ESC", "KC_SPACE", "KC_TAB"];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActionKind {
+    DeviceKey {
+        token: String,
+    },
     LocalMulti {
         multi: crate::multi::LocalMulti,
     },
@@ -58,6 +64,7 @@ impl Action {
             serde_json::from_value(self.payload.clone()).map_err(|_| "动作参数未知或格式不正确")?;
         let bounded = |s: &str| !s.trim().is_empty() && s.len() <= 16384;
         let valid = match kind {
+            ActionKind::DeviceKey { token } => DEVICE_KEY_TOKENS.contains(&token.as_str()),
             ActionKind::LocalMacro { macro_sequence } => return macro_sequence.validate(),
             ActionKind::LocalMulti { multi } => return multi.validate(),
             ActionKind::Shortcut {
@@ -111,6 +118,7 @@ pub fn actions() -> Vec<Action> {
         ("app", "打开应用", "应用", "本地应用意图 · 宿主执行未接入", json!({"type":"open_app","bundle_id":"com.apple.TextEdit"})),
         ("local-multi", "Multi 动作", "Multi", "本地四分支 · 不执行 · 固件范围未知", json!({"type":"local_multi","multi":{"format_version":1,"term_ms":250,"tap":null,"double_tap":null,"hold":null,"tap_hold":null}})),
         ("local-macro", "普通宏", "普通宏", "自有本地格式 · 仅草稿 · 不执行", json!({"type":"local_macro","macro_sequence":{"format_version":1,"events":[{"type":"press","key":"a"},{"type":"release","key":"a"}]}})),
+        ("device-key", "设备普通按键", "设备按键", "来源明确的普通键意图 · 尚未应用", json!({"type":"device_key","token":"KC_B"})),
     ].into_iter().map(|(id,name,category,detail,payload)| Action {id:id.into(),name:name.into(),category:category.into(),detail:detail.into(),payload}).collect()
 }
 
