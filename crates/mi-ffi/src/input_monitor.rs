@@ -9,6 +9,8 @@ use tokio::sync::{Mutex, Notify};
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum InputKind {
     UnknownNotification,
+    CandidatePressed,
+    CandidateReleased,
     Pressed,
     Released,
     InputStreamGap,
@@ -20,6 +22,8 @@ pub struct InputEventInfo {
     pub timestamp_ms: u64,
     pub kind: InputKind,
     pub logical_switch: Option<String>,
+    /// Semantic vendor binding only; no physical identity follows from this string.
+    pub binding_id: Option<String>,
     // Distinct axes; UNKNOWN-10 does not authorize guessed IDs or key counts.
     pub physical_control: Option<String>,
     pub keycap_group: Option<String>,
@@ -37,7 +41,7 @@ pub struct InputSubscription {
 #[uniffi::export(async_runtime = "tokio")]
 impl MicroInput {
     /// Fresh, bounded subscription. Rebuilding discards old backlog and pressed state;
-    /// production still cannot provide action events while the input schema is UNKNOWN.
+    /// community candidates remain non-executable until current-device mapping is verified.
     pub async fn subscribe_input(&self) -> Result<Arc<InputSubscription>, BridgeError> {
         let session = self.current().map_err(failure)?;
         Ok(Arc::new(InputSubscription {
@@ -70,6 +74,8 @@ impl InputSubscription {
         }
         let kind = match event.kind {
             mi_session::InputEventKind::UnknownNotification => InputKind::UnknownNotification,
+            mi_session::InputEventKind::CandidatePressed => InputKind::CandidatePressed,
+            mi_session::InputEventKind::CandidateReleased => InputKind::CandidateReleased,
             mi_session::InputEventKind::Pressed => InputKind::Pressed,
             mi_session::InputEventKind::Released => InputKind::Released,
             mi_session::InputEventKind::InputStreamGap => InputKind::InputStreamGap,
@@ -78,13 +84,20 @@ impl InputSubscription {
             session_id: event.session_id,
             sequence: event.sequence,
             timestamp_ms: event.timestamp_ms,
-            kind,
+            kind: kind.clone(),
             logical_switch: event.logical_switch,
+            binding_id: event.binding_id,
             physical_control: None,
             keycap_group: None,
             action_role: None,
             lost_count: event.lost_count,
-            verification: "input-schema-unverified".into(),
+            verification: match kind {
+                InputKind::CandidatePressed | InputKind::CandidateReleased => {
+                    "candidate-dispatch-0.6.2-current-firmware-unverified"
+                }
+                _ => "input-schema-unverified",
+            }
+            .into(),
             action_eligible: false,
         })
     }
@@ -108,5 +121,29 @@ impl MicroInput {
     pub async fn emit_synthetic_input(&self, count: u16) -> Result<(), BridgeError> {
         self.current()?;
         self.transport.emit_synthetic_input(count).map_err(failure)
+    }
+}
+
+#[cfg(feature = "synthetic-backend")]
+#[derive(Clone, Debug, uniffi::Enum)]
+pub enum SyntheticInputCase {
+    CandidateBindings,
+    UnsupportedVariants,
+}
+#[cfg(feature = "synthetic-backend")]
+#[uniffi::export(async_runtime = "tokio")]
+impl MicroInput {
+    /// Fixed original fixtures only. Production has no input injection or RPC passthrough.
+    pub async fn emit_synthetic_input_case(
+        &self,
+        input_case: SyntheticInputCase,
+    ) -> Result<(), BridgeError> {
+        self.current()?;
+        self.transport
+            .emit_synthetic_input_case(match input_case {
+                SyntheticInputCase::CandidateBindings => 0,
+                SyntheticInputCase::UnsupportedVariants => 1,
+            })
+            .map_err(failure)
     }
 }

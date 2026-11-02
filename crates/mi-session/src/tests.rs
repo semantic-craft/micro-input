@@ -382,6 +382,136 @@ async fn input_monitor_observes_idle_notifications_without_requests_or_payloads(
     assert!(monitor.next().await.is_none());
 }
 
+#[tokio::test]
+async fn vendor_binding_candidate_is_readable_without_claiming_physical_input() {
+    let (s, link, mut requests) = setup(500);
+    let mut monitor = s.subscribe_input();
+    for (act, expected) in [
+        (1, crate::InputEventKind::CandidatePressed),
+        (0, crate::InputEventKind::CandidateReleased),
+    ] {
+        link.inject
+            .send(
+                json!({"m":"v.oai.hid","p":{"k":"AG00","act":act}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .unwrap();
+        let event = monitor.next().await.unwrap();
+        assert_eq!(event.kind, expected);
+        assert_eq!(event.binding_id.as_deref(), Some("AG00"));
+        assert_eq!(event.logical_switch, None);
+        assert!(!event.action_eligible);
+        assert!(monitor.pressed_switches().is_empty());
+    }
+    assert!(requests.try_recv().is_err());
+    s.shutdown().await;
+}
+
+#[tokio::test]
+async fn candidate_variants_preserve_binding_identity_and_do_not_merge_or_count_actions() {
+    let (s, link, mut requests) = setup(500);
+    let mut monitor = s.subscribe_input();
+    // The public source's wide-key sequence remains four separate binding events.
+    // Release-before-press, duplicate presses, and AG13/14's release remain diagnostics.
+    let inputs = [
+        ("AG11", 1),
+        ("AG10", 1),
+        ("AG10", 0),
+        ("AG11", 0),
+        ("AG13", 0),
+        ("AG13", 1),
+        ("AG13", 1),
+        ("AG13", 0),
+        ("AG14", 1),
+        ("AG15", 1),
+        ("AG16", 1),
+        ("AG17", 1),
+        ("AG18", 1),
+        ("AG12", 1),
+    ];
+    for (index, (binding, act)) in inputs.into_iter().enumerate() {
+        link.inject
+            .send(
+                json!({"method":"v.oai.hid","params":{"k":binding,"act":act,"future":"private"}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .unwrap();
+        let event = monitor.next().await.unwrap();
+        assert_eq!(event.sequence, index as u64 + 1);
+        assert_eq!(event.binding_id.as_deref(), Some(binding));
+        assert_eq!(
+            event.kind,
+            if act == 1 {
+                crate::InputEventKind::CandidatePressed
+            } else {
+                crate::InputEventKind::CandidateReleased
+            }
+        );
+        assert_eq!(event.logical_switch, None);
+        assert!(!event.action_eligible);
+    }
+    assert!(monitor.pressed_switches().is_empty());
+    assert!(requests.try_recv().is_err());
+    s.shutdown().await;
+}
+
+#[tokio::test]
+async fn malformed_and_other_generation_inputs_remain_unknown_without_false_release() {
+    let (s, link, mut requests) = setup(500);
+    let mut monitor = s.subscribe_input();
+    let mut inputs = vec![];
+    for binding in [
+        "AG19",
+        "AG0",
+        "AG000",
+        "AG-1",
+        "AG００",
+        "ACT06",
+        "ENC_CW",
+        "ENC_CC",
+        "ENC_CLK",
+        "KV_OAI_AG00",
+    ] {
+        inputs.push(json!({"m":"v.oai.hid","p":{"k":binding,"act":1}}));
+    }
+    for act in [
+        json!(2),
+        json!(-1),
+        json!(1.0),
+        json!(0.0),
+        json!("1"),
+        json!(true),
+        json!(null),
+        json!([]),
+    ] {
+        inputs.push(json!({"m":"v.oai.hid","p":{"k":"AG00","act":act}}));
+    }
+    inputs.extend([
+        json!({"m":"v.oai.hid","p":{"act":1}}),
+        json!({"m":"v.oai.hid","p":{"k":0,"act":1}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG00"}}),
+        json!({"m":"v.oai.hid","p":[]}),
+        json!({"m":"v.oai.hid","p":{"k":"AG00","act":1},"params":{"k":"AG00","act":0}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG00","act":1},"id":7}),
+        json!({"m":"v.oai.hid","p":{"k":"AG00","act":1},"i":null}),
+        json!({"m":"v.oai.rad","p":{"a":0.75,"d":1}}),
+        json!({"m":"kb.radial","p":{"k":"AG00","act":1}}),
+        json!({"m":"kb.sa.exec","p":{"k":"AG00","act":1}}),
+    ]);
+    for raw in inputs {
+        link.inject.send(raw.to_string().into_bytes()).unwrap();
+        let event = monitor.next().await.unwrap();
+        assert_eq!(event.kind, crate::InputEventKind::UnknownNotification);
+        assert_eq!(event.binding_id, None);
+        assert_eq!(event.logical_switch, None);
+        assert!(!event.action_eligible);
+    }
+    assert!(requests.try_recv().is_err());
+    s.shutdown().await;
+}
+
 // Test-only logical decoding; this is not a Creator Micro wire schema.
 struct SyntheticInputDecoder;
 impl crate::InputDecoder for SyntheticInputDecoder {
