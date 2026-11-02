@@ -32,11 +32,11 @@ final class DocumentRecoveryTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at:dir) }
         try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
         let url=dir.appendingPathComponent("workbench.json")
-        let bytes=Data("{\"schema_version\":999,\"future\":true}".utf8)
+        let bytes=Data("{\"schema_version\":18446744073709551615,\"future\":true}".utf8)
         try bytes.write(to:url)
         let store=Store(backend:MicroInputCore.MicroInput(),documentURL:url); await store.loadWorkbench()
         let preview=try await store.inspectRecovery(path:url.path)
-        XCTAssertFalse(preview.can_restore); XCTAssertEqual(preview.schema_version,999)
+        XCTAssertFalse(preview.can_restore); XCTAssertEqual(preview.schema_version.map(String.init),"18446744073709551615")
         let restored=await store.recoverDocument(token:preview.token); XCTAssertFalse(restored)
         let copy=dir.appendingPathComponent("original.copy")
         try await store.copyRecoveryOriginal(token:preview.token,destination:copy.path)

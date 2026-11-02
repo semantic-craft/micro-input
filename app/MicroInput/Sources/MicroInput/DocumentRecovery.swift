@@ -5,7 +5,7 @@ struct RecoveryPreview: Decodable, Identifiable {
     let token: String
     let path: String
     let sha256: String
-    let schema_version: Int?
+    let schema_version: UInt64?
     let source_kind: String
     let profiles: Int
     let revision: UInt64?
