@@ -38,22 +38,34 @@ fn assign(d: &mut Draft) -> Result<(), String> {
 }
 #[test]
 fn stable_ids_survive_reorder_and_rename() {
-    let mut d = Draft::default();
-    assign(&mut d).unwrap();
-    let original = d.edits.clone();
-    d.config.profiles.reverse();
-    for p in &mut d.config.profiles {
-        p.layers.reverse();
-        p.name = "Renamed".into();
-    }
-    d.validate().unwrap();
-    assert_eq!(d.edits, original);
-    let mut config = d.config.clone();
-    config.profiles[1].id = config.profiles[0].id.clone();
-    assert!(Draft::new(config).is_err());
-    let p = d.config.profiles[0].id.clone();
-    assert!(d
-        .assign(&p, &json!(99999), 0, actions()[0].clone())
+    let t = Temp::new();
+    let mut s = DocumentStore::default();
+    s.open(t.file()).unwrap();
+    s.update(assign).unwrap();
+    let pid = s.draft.config.profiles[0].id.as_str().unwrap().to_owned();
+    let lid = s.draft.config.profiles[0].layers[0]
+        .id
+        .as_str()
+        .unwrap()
+        .to_owned();
+    s.update(|d| d.rename_profile(&pid, "Renamed")).unwrap();
+    s.update(|d| d.rename_layer(&lid, "Renamed layer")).unwrap();
+    s.update(|d| d.move_profile(&pid, 1)).unwrap();
+    s.update(|d| d.move_layer(&pid, &lid, 1)).unwrap();
+    let mut reopened = DocumentStore::default();
+    reopened.open(t.file()).unwrap();
+    let p = &reopened.draft.config.profiles[1];
+    let l = &p.layers[1];
+    assert_eq!(p.name, "Renamed");
+    assert_eq!(p.id, pid);
+    assert_eq!(l.name, "Renamed layer");
+    assert_eq!(l.id, lid);
+    assert_eq!(
+        reopened.draft.edits[&binding_key(&p.id, &l.id, 1)].id,
+        "save"
+    );
+    assert!(reopened
+        .update(|d| d.move_layer(&pid, "missing", 0))
         .is_err());
 }
 #[test]
@@ -194,4 +206,160 @@ fn legacy_edits_survive_first_structure_save_with_exact_backup() {
         .any(|a| a.payload["text"] == "retained\nsecond line"));
     assert_eq!(reopened.draft.config.profiles.len(), 3);
     assert!(!reopened.draft.can_undo);
+}
+
+#[test]
+fn copied_profile_is_independent_and_one_undo_restores_its_exact_ids() {
+    let mut d = Draft::default();
+    assign(&mut d).unwrap();
+    let original = d.config.profiles[0].id.as_str().unwrap().to_owned();
+    let copied = d.duplicate_profile(&original, "Copy").unwrap();
+    let copied_layer = d.config.profiles[2].layers[0].id.clone();
+    assert_eq!(d.config.profiles.len(), 3);
+    d.undo(false).unwrap();
+    assert_eq!(d.config.profiles.len(), 2);
+    d.undo(true).unwrap();
+    assert_eq!(d.config.profiles[2].id, copied);
+    assert_eq!(d.config.profiles[2].layers[0].id, copied_layer);
+    let mut a = actions()[2].clone();
+    a.payload = json!({"type":"text","text":"copy only"});
+    d.assign(&json!(copied), &copied_layer, 1, a).unwrap();
+    assert_eq!(
+        d.edits[&binding_key(&json!(original), &d.config.profiles[0].layers[0].id, 1)].id,
+        "save"
+    );
+    assert_eq!(
+        d.edits[&binding_key(&json!(copied), &copied_layer, 1)].payload["text"],
+        "copy only"
+    );
+}
+
+#[test]
+fn deleting_owned_nodes_keeps_shared_actions_and_can_reach_empty_document() {
+    let mut d = Draft::default();
+    assign(&mut d).unwrap();
+    let pid = d.config.profiles[0].id.as_str().unwrap().to_owned();
+    let first = d.config.profiles[0].layers[0]
+        .id
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second = d.config.profiles[0].layers[1]
+        .id
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let source = d.document.origin.clone();
+    let aid = d.document.editable.graph.layers[&first]
+        .controls
+        .values()
+        .find_map(|b| b.action_id.clone())
+        .unwrap();
+    let target = d.document.editable.graph.layers.get_mut(&second).unwrap();
+    target
+        .controls
+        .get_mut(&target.control_order[0])
+        .unwrap()
+        .action_id = Some(aid.clone());
+    d.validate().unwrap();
+    d.delete_layer(&pid, &first).unwrap();
+    assert!(d.document.editable.graph.actions.contains_key(&aid));
+    assert!(d.edits.values().any(|a| a.id == "save"));
+    assert_eq!(d.document.origin, source);
+    let ids = d
+        .config
+        .profiles
+        .iter()
+        .map(|p| p.id.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    for id in ids {
+        d.delete_profile(&id).unwrap();
+    }
+    assert!(d.config.profiles.is_empty());
+    assert!(d.document.editable.graph.actions.is_empty());
+    d.undo(false).unwrap();
+    assert_eq!(d.config.profiles.len(), 1);
+    let mut bad = d.document.clone();
+    let layer = bad.editable.graph.layers.values_mut().next().unwrap();
+    layer.controls.values_mut().next().unwrap().action_id = Some(crate::document::new_id());
+    assert!(bad.validate().is_err());
+}
+
+#[test]
+fn independent_document_selection_survives_restart_without_replacing_previous_file() {
+    let t = Temp::new();
+    let mut store = DocumentStore::default();
+    store.open(t.file()).unwrap();
+    store.update(assign).unwrap();
+    let old = fs::read(t.file()).unwrap();
+    let mut config = crate::demo().unwrap();
+    config.source = crate::Source::Imported;
+    let baseline = json!({"device_identity":{"confidence":"synthetic"},"files":[{"bytes":[1,2,3],"sha1":"synthetic"}]});
+    store.create_independent(config, baseline).unwrap();
+    let new_id = store.draft.document_id.clone();
+    store
+        .update(|d| {
+            d.rename_profile(
+                &d.config.profiles[0].id.as_str().unwrap().to_owned(),
+                "Selected draft",
+            )
+        })
+        .unwrap();
+    let mut re = DocumentStore::default();
+    re.open(t.file()).unwrap();
+    assert_eq!(re.draft.document_id, new_id);
+    assert_eq!(re.draft.config.profiles[0].name, "Selected draft");
+    assert_eq!(fs::read(t.file()).unwrap(), old);
+    assert!(!re.draft.can_undo);
+    assert_eq!(
+        re.draft.document.baseline.as_ref().unwrap()["files"][0]["bytes"],
+        json!([1, 2, 3])
+    );
+}
+
+#[test]
+fn failed_selection_and_migration_backup_preserve_files_and_memory() {
+    let t = Temp::new();
+    let mut store = DocumentStore::default();
+    store.open(t.file()).unwrap();
+    store.update(assign).unwrap();
+    let old = fs::read(t.file()).unwrap();
+    let id = store.draft.document_id.clone();
+    let revision = store.draft.revision;
+    fs::write(t.file().with_extension("active.pending"), b"interrupted").unwrap();
+    assert!(store
+        .create_independent(crate::demo().unwrap(), json!({"source":"synthetic"}))
+        .is_err());
+    assert_eq!(store.draft.document_id, id);
+    assert_eq!(store.draft.revision, revision);
+    assert_eq!(fs::read(t.file()).unwrap(), old);
+    assert_eq!(
+        fs::read_dir(&t.0)
+            .unwrap()
+            .filter(|e| e
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("draft-"))
+            .count(),
+        0
+    );
+    let bytes = serde_json::to_vec(&LegacyDocumentV1::default()).unwrap();
+    fs::write(t.file(), &bytes).unwrap();
+    store.open(t.file()).unwrap();
+    use sha2::{Digest, Sha256};
+    let hash = format!("{:x}", Sha256::digest(&bytes));
+    fs::write(
+        t.0.join(format!("workbench.json.v1.{hash}.backup")),
+        b"different",
+    )
+    .unwrap();
+    let id = store.draft.document_id.clone();
+    assert!(store
+        .update(|d| d.create_profile("Failed").map(|_| ()))
+        .is_err());
+    assert_eq!(store.draft.document_id, id);
+    assert_eq!(store.draft.revision, 0);
+    assert_eq!(fs::read(t.file()).unwrap(), bytes);
 }

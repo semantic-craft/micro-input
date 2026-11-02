@@ -13,6 +13,7 @@ pub struct DocumentStore {
     path: Option<PathBuf>,
     expected: Option<Vec<u8>>,
     blocked: bool,
+    selection: Option<(PathBuf, Option<Vec<u8>>)>,
 }
 fn read(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
     let f = match fs::File::open(path) {
@@ -32,6 +33,26 @@ fn read(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
 impl DocumentStore {
     pub fn open(&mut self, path: PathBuf) -> Result<(), String> {
         self.blocked = true;
+        let selection_path = path.with_extension("active.json");
+        let selection_bytes = read(&selection_path)?;
+        let path = if let Some(bytes) = &selection_bytes {
+            let name: String =
+                serde_json::from_slice(bytes).map_err(|_| "所选文档记录损坏；原文件保留")?;
+            let id = name
+                .strip_prefix("draft-")
+                .and_then(|s| s.strip_suffix(".json"))
+                .ok_or("所选文档路径无效")?;
+            if uuid::Uuid::parse_str(id).is_err() || name.contains('/') || name.contains('\\') {
+                return Err("所选文档路径无效".into());
+            }
+            let chosen = path.parent().ok_or("无效文档目录")?.join(name);
+            if !chosen.is_file() {
+                return Err("所选本地文档不存在；没有切换到其他草稿".into());
+            }
+            chosen
+        } else {
+            path
+        };
         let bytes = read(&path)?;
         let draft = match &bytes {
             Some(b) => Draft::from_bytes(b)?,
@@ -40,7 +61,78 @@ impl DocumentStore {
         self.draft = draft;
         self.path = Some(path);
         self.expected = bytes;
+        self.selection = Some((selection_path, selection_bytes));
         self.blocked = false;
+        Ok(())
+    }
+    /// Explicitly save a separate document, then select it. The previously open file is untouched.
+    pub fn create_independent(
+        &mut self,
+        config: crate::DeviceConfig,
+        baseline: serde_json::Value,
+    ) -> Result<(), String> {
+        if self.blocked {
+            return Err("当前文档未载入，不能切换草稿".into());
+        }
+        let (selection_path, expected) = self.selection.as_ref().ok_or("请先打开工作台")?;
+        let doc = crate::document::LocalDocumentV2::from_config(
+            &config,
+            Some(baseline),
+            "device-snapshot",
+        )?;
+        let next = Draft::from_document(doc, 2, false)?;
+        let bytes = serde_json::to_vec_pretty(&next.document).map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > LIMIT {
+            return Err("本地文档超过 4 MiB；未创建草稿".into());
+        }
+        let parent = selection_path.parent().ok_or("无效文档目录")?;
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let _guard = Lock::acquire(selection_path.with_extension("lock"))?;
+        if &read(selection_path)? != expected {
+            return Err("所选文档已被其他实例修改；请重开应用".into());
+        }
+        let name = format!("draft-{}.json", next.document_id);
+        let path = parent.join(&name);
+        let mut f = OpenOptions::new()
+            .write(true)
+            .mode(0o600)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        let selected = serde_json::to_vec(&name).map_err(|e| e.to_string())?;
+        let pending = selection_path.with_extension("pending");
+        let result = (|| -> Result<(), String> {
+            f.write_all(&bytes)
+                .and_then(|_| f.sync_all())
+                .map_err(|e| e.to_string())?;
+            let mut p = OpenOptions::new()
+                .write(true)
+                .mode(0o600)
+                .create_new(true)
+                .open(&pending)
+                .map_err(|_| "所选文档存在未完成保存记录")?;
+            let result = (|| -> Result<(), String> {
+                p.write_all(&selected)
+                    .and_then(|_| p.sync_all())
+                    .map_err(|e| e.to_string())?;
+                if &read(selection_path)? != expected {
+                    return Err("所选文档已变化；未切换草稿".into());
+                }
+                fs::rename(&pending, selection_path).map_err(|e| e.to_string())
+            })();
+            if result.is_err() {
+                let _ = fs::remove_file(&pending);
+            }
+            result
+        })();
+        if let Err(e) = result {
+            let _ = fs::remove_file(path);
+            return Err(e);
+        }
+        self.draft = next;
+        self.path = Some(path);
+        self.expected = Some(bytes);
+        self.selection = Some((selection_path.clone(), Some(selected)));
         Ok(())
     }
     pub fn update(

@@ -357,6 +357,30 @@ impl Draft {
     pub fn create_layer(&mut self, pid: &str, name: &str) -> Result<String, String> {
         self.mutate(|d| d.create_layer(pid, name))
     }
+    pub fn duplicate_profile(&mut self, pid: &str, name: &str) -> Result<String, String> {
+        self.mutate(|d| d.duplicate_profile(pid, name))
+    }
+    pub fn duplicate_layer(&mut self, pid: &str, lid: &str, name: &str) -> Result<String, String> {
+        self.mutate(|d| d.duplicate_layer(pid, lid, name))
+    }
+    pub fn rename_profile(&mut self, id: &str, name: &str) -> Result<(), String> {
+        self.mutate(|d| d.rename_profile(id, name))
+    }
+    pub fn rename_layer(&mut self, id: &str, name: &str) -> Result<(), String> {
+        self.mutate(|d| d.rename_layer(id, name))
+    }
+    pub fn move_profile(&mut self, id: &str, index: usize) -> Result<(), String> {
+        self.mutate(|d| d.move_profile(id, index))
+    }
+    pub fn move_layer(&mut self, pid: &str, id: &str, index: usize) -> Result<(), String> {
+        self.mutate(|d| d.move_layer(pid, id, index))
+    }
+    pub fn delete_profile(&mut self, id: &str) -> Result<(), String> {
+        self.mutate(|d| d.delete_profile(id))
+    }
+    pub fn delete_layer(&mut self, pid: &str, id: &str) -> Result<(), String> {
+        self.mutate(|d| d.delete_layer(pid, id))
+    }
     pub fn assign(
         &mut self,
         profile: &Value,

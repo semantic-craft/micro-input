@@ -276,6 +276,218 @@ impl LocalDocumentV2 {
         self.editable.graph.layers.insert(id.clone(), layer);
         Ok(id)
     }
+    fn copy_layer(
+        &mut self,
+        lid: &str,
+        name: &str,
+        action_map: &mut BTreeMap<String, String>,
+    ) -> Result<String, String> {
+        name_valid(name)?;
+        let old = self
+            .editable
+            .graph
+            .layers
+            .get(lid)
+            .ok_or("层不存在")?
+            .clone();
+        let id = new_id();
+        let mut layer = LayerNode {
+            name: name.into(),
+            control_order: vec![],
+            controls: BTreeMap::new(),
+        };
+        self.copy_source(lid, &id);
+        for bid in old.control_order {
+            let mut b = old.controls[&bid].clone();
+            let new_bid = new_id();
+            if let Some(aid) = &b.action_id {
+                let mapped = if let Some(id) = action_map.get(aid) {
+                    id.clone()
+                } else {
+                    let id = new_id();
+                    self.editable
+                        .graph
+                        .actions
+                        .insert(id.clone(), self.editable.graph.actions[aid].clone());
+                    self.copy_source(aid, &id);
+                    action_map.insert(aid.clone(), id.clone());
+                    id
+                };
+                b.action_id = Some(mapped);
+            }
+            self.copy_source(&bid, &new_bid);
+            layer.control_order.push(new_bid.clone());
+            layer.controls.insert(new_bid, b);
+        }
+        self.editable.graph.layers.insert(id.clone(), layer);
+        Ok(id)
+    }
+    fn copy_source(&mut self, old: &str, new: &str) {
+        if let Some(mut source) = self.editable.source_refs.get(old).cloned() {
+            if let Some(fields) = source.as_object_mut() {
+                fields.insert("kind".into(), json!("derived"));
+                fields.insert("copied_from".into(), json!(old));
+            }
+            self.editable.source_refs.insert(new.into(), source);
+        }
+    }
+    pub fn duplicate_profile(&mut self, pid: &str, name: &str) -> Result<String, String> {
+        name_valid(name)?;
+        let old = self
+            .editable
+            .graph
+            .profiles
+            .get(pid)
+            .ok_or("配置不存在")?
+            .clone();
+        let id = new_id();
+        let mut layers = vec![];
+        let mut actions = BTreeMap::new();
+        self.copy_source(pid, &id);
+        for lid in old.layer_order {
+            let name = self.editable.graph.layers[&lid].name.clone();
+            layers.push(self.copy_layer(&lid, &name, &mut actions)?);
+        }
+        self.editable.graph.profiles.insert(
+            id.clone(),
+            ProfileNode {
+                name: name.into(),
+                layer_order: layers,
+            },
+        );
+        self.editable.graph.profile_order.push(id.clone());
+        Ok(id)
+    }
+    pub fn duplicate_layer(&mut self, pid: &str, lid: &str, name: &str) -> Result<String, String> {
+        if !self
+            .editable
+            .graph
+            .profiles
+            .get(pid)
+            .ok_or("配置不存在")?
+            .layer_order
+            .iter()
+            .any(|id| id == lid)
+        {
+            return Err("层不属于所选配置".into());
+        }
+        let id = self.copy_layer(lid, name, &mut BTreeMap::new())?;
+        self.editable
+            .graph
+            .profiles
+            .get_mut(pid)
+            .unwrap()
+            .layer_order
+            .push(id.clone());
+        Ok(id)
+    }
+    pub fn rename_profile(&mut self, id: &str, name: &str) -> Result<(), String> {
+        name_valid(name)?;
+        self.editable
+            .graph
+            .profiles
+            .get_mut(id)
+            .ok_or("配置不存在")?
+            .name = name.into();
+        Ok(())
+    }
+    pub fn rename_layer(&mut self, id: &str, name: &str) -> Result<(), String> {
+        name_valid(name)?;
+        self.editable
+            .graph
+            .layers
+            .get_mut(id)
+            .ok_or("层不存在")?
+            .name = name.into();
+        Ok(())
+    }
+    pub fn move_profile(&mut self, id: &str, index: usize) -> Result<(), String> {
+        move_item(&mut self.editable.graph.profile_order, id, index)
+    }
+    pub fn move_layer(&mut self, pid: &str, id: &str, index: usize) -> Result<(), String> {
+        move_item(
+            &mut self
+                .editable
+                .graph
+                .profiles
+                .get_mut(pid)
+                .ok_or("配置不存在")?
+                .layer_order,
+            id,
+            index,
+        )
+    }
+    pub fn delete_layer(&mut self, pid: &str, lid: &str) -> Result<(), String> {
+        let p = self
+            .editable
+            .graph
+            .profiles
+            .get_mut(pid)
+            .ok_or("配置不存在")?;
+        let index = p
+            .layer_order
+            .iter()
+            .position(|v| v == lid)
+            .ok_or("层不属于所选配置")?;
+        p.layer_order.remove(index);
+        self.remove_layer(lid)?;
+        self.remove_orphan_actions();
+        Ok(())
+    }
+    pub fn delete_profile(&mut self, pid: &str) -> Result<(), String> {
+        let p = self
+            .editable
+            .graph
+            .profiles
+            .remove(pid)
+            .ok_or("配置不存在")?;
+        self.editable.graph.profile_order.retain(|v| v != pid);
+        self.editable.source_refs.remove(pid);
+        for lid in p.layer_order {
+            self.remove_layer(&lid)?;
+        }
+        self.remove_orphan_actions();
+        Ok(())
+    }
+    fn remove_layer(&mut self, lid: &str) -> Result<(), String> {
+        let l = self.editable.graph.layers.remove(lid).ok_or("层不存在")?;
+        self.editable.source_refs.remove(lid);
+        for bid in l.controls.keys() {
+            self.editable.source_refs.remove(bid);
+        }
+        Ok(())
+    }
+    fn remove_orphan_actions(&mut self) {
+        let used: BTreeSet<_> = self
+            .editable
+            .graph
+            .layers
+            .values()
+            .flat_map(|l| l.controls.values())
+            .filter_map(|b| b.action_id.clone())
+            .collect();
+        self.editable
+            .graph
+            .actions
+            .retain(|id, _| used.contains(id));
+        let valid: BTreeSet<_> = self
+            .editable
+            .graph
+            .profiles
+            .keys()
+            .chain(self.editable.graph.layers.keys())
+            .chain(self.editable.graph.actions.keys())
+            .cloned()
+            .chain(
+                self.editable
+                    .graph
+                    .layers
+                    .values()
+                    .flat_map(|l| l.controls.keys().cloned()),
+            )
+            .collect();
+        self.editable.source_refs.retain(|id, _| valid.contains(id));
+    }
     pub fn view(&self) -> Result<(DeviceConfig, BTreeMap<String, Action>), String> {
         let mut config: DeviceConfig = serde_json::from_value(self.origin["config"].clone())
             .map_err(|_| "来源配置不能显示")?;
@@ -351,4 +563,16 @@ impl LocalDocumentV2 {
         }
         Ok((config, edits))
     }
+}
+fn move_item(order: &mut Vec<String>, id: &str, index: usize) -> Result<(), String> {
+    if index >= order.len() {
+        return Err("目标排序位置不存在".into());
+    }
+    let from = order
+        .iter()
+        .position(|v| v == id)
+        .ok_or("对象不属于此列表")?;
+    let value = order.remove(from);
+    order.insert(index, value);
+    Ok(())
 }
