@@ -22,6 +22,9 @@ pub struct ComparisonRow {
     pub local: Option<Value>,
     pub device: Option<Value>,
     pub result: String,
+    pub base_summary: String,
+    pub local_summary: String,
+    pub device_summary: String,
 }
 #[derive(Clone, Serialize)]
 pub struct Comparison {
@@ -174,6 +177,9 @@ fn merge(
         local: l.cloned(),
         device: r.cloned(),
         result: result.into(),
+        base_summary: String::new(),
+        local_summary: String::new(),
+        device_summary: String::new(),
     });
     value.cloned()
 }
@@ -274,6 +280,55 @@ fn opaque(config: &DeviceConfig, other: &DeviceConfig) -> Value {
 fn has_unknown(v: Option<&Value>) -> bool {
     v.is_some_and(|v| v.get("Unknown").is_some())
 }
+fn summary(
+    value: Option<&Value>,
+    state: &EditableState,
+    labels: &BTreeMap<String, String>,
+) -> String {
+    let Some(value) = value else {
+        return "已删除 / 不存在".into();
+    };
+    match value {
+        Value::String(text) => labels.get(text).cloned().unwrap_or_else(|| text.clone()),
+        Value::Object(object) => {
+            if object.contains_key("logical_control") {
+                if let Some(action) = value["action_id"]
+                    .as_str()
+                    .and_then(|id| state.graph.actions.get(id))
+                {
+                    return format!("本地动作：{}", action.name);
+                }
+                let original = &value["original"];
+                if original == "Empty" {
+                    return "空绑定".into();
+                }
+                if let Some(token) = original["Basic"].as_str() {
+                    return format!("按键 {token}");
+                }
+                return "原始绑定（只读，展开查看）".into();
+            }
+            if let Some(name) = value["name"].as_str() {
+                return name.into();
+            }
+            "结构化内容（展开查看）".into()
+        }
+        Value::Array(items) => {
+            if items.is_empty() {
+                return "空列表".into();
+            }
+            let named: Option<Vec<_>> = items
+                .iter()
+                .map(|v| v.as_str().and_then(|id| labels.get(id)))
+                .collect();
+            if let Some(named) = named {
+                named.into_iter().cloned().collect::<Vec<_>>().join(" → ")
+            } else {
+                format!("{} 项（展开查看）", items.len())
+            }
+        }
+        _ => value.to_string(),
+    }
+}
 impl Comparison {
     pub fn new(
         local: &LocalDocumentV2,
@@ -357,6 +412,9 @@ impl Comparison {
                 local: Some(old_raw),
                 device: Some(new_raw),
                 result: "冲突".into(),
+                base_summary: String::new(),
+                local_summary: String::new(),
+                device_summary: String::new(),
             });
         }
         let b = json!(base.editable);
@@ -385,6 +443,9 @@ impl Comparison {
             }
         }
         for row in &mut rows {
+            row.base_summary = summary(row.base.as_ref(), &base.editable, &labels);
+            row.local_summary = summary(row.local.as_ref(), &local.editable, &labels);
+            row.device_summary = summary(row.device.as_ref(), &remote.editable, &labels);
             if !row.label.is_empty() {
                 continue;
             }

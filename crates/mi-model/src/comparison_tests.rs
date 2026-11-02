@@ -330,3 +330,28 @@ fn changed_transient_interface_requires_snapshot_bound_manual_identity_confirmat
     let mut wrong = Comparison::new(&local, &remote, baseline.clone()).unwrap();
     assert!(wrong.confirm_identity(&local, &baseline).is_err());
 }
+
+#[test]
+fn comparison_binding_summary_names_the_action_while_raw_reference_remains_available() {
+    let (local, remote, baseline) = fixture();
+    let mut draft = crate::draft::Draft::from_document(local, 2, false).unwrap();
+    let p = draft.config.profiles[0].id.clone();
+    let l = draft.config.profiles[0].layers[0].id.clone();
+    draft
+        .assign(&p, &l, 0, crate::draft::actions()[1].clone())
+        .unwrap();
+    let compared = Comparison::new(&draft.document, &remote, baseline).unwrap();
+    let row = compared
+        .rows
+        .iter()
+        .find(|r| {
+            r.local
+                .as_ref()
+                .is_some_and(|v| v.get("logical_control").is_some())
+        })
+        .unwrap();
+    assert!(row.local_summary.contains("保存文件"));
+    assert!(!row
+        .local_summary
+        .contains(row.local.as_ref().unwrap()["action_id"].as_str().unwrap()));
+}

@@ -7,6 +7,7 @@ struct ReconnectComparison: Decodable, Identifiable {
     let identity_confirmation_required: Bool, identity_user_confirmed: Bool
     let revision: UInt64
     struct Row: Decodable {
+        let base_summary: String, local_summary: String, device_summary: String
         let path: String, label: String, base: JSONValue?, local: JSONValue?, device: JSONValue?, result: String
     }
 }
@@ -32,7 +33,7 @@ struct ReconnectComparisonView: View {
                         VStack(alignment:.leading,spacing:6){
                             Text("\(row.result) · \(row.label)").font(.headline)
                             HStack(alignment:.top,spacing:12){
-                                value("基线",row.base);value("本地草稿",row.local);value("当前设备",row.device)
+                                value("基线",row.base,summary:row.base_summary);value("本地草稿",row.local,summary:row.local_summary);value("当前设备",row.device,summary:row.device_summary)
                             }
                         }.padding(10).background(.quaternary,in:RoundedRectangle(cornerRadius:8))
                     }
@@ -61,12 +62,17 @@ struct ReconnectComparisonView: View {
         if comparison.identity_conflict {return "已知设备身份不同，不能接受此版本。"}
         return "设备身份只有当前接口记录，跨重连尚未确认。请核对所选设备，再明确选择整份版本。"
     }
-    private func value(_ title:String,_ value:JSONValue?)->some View {
+    private func value(_ title:String,_ value:JSONValue?,summary:String)->some View {
         VStack(alignment:.leading){
             Text(title).font(.caption).foregroundStyle(.secondary)
-            if let text=value?.text,text.count>180 {
-                DisclosureGroup("查看完整原值") {ScrollView {Text(text).font(.caption.monospaced()).textSelection(.enabled)}.frame(maxHeight:140)}
-            } else {Text(value?.text ?? "已删除 / 不存在").font(.caption.monospaced()).textSelection(.enabled)}
+            Text(summary).font(.caption).textSelection(.enabled)
+            if let value {
+                switch value {
+                case .object,.array:
+                    DisclosureGroup("查看完整原值") {ScrollView {Text(value.text).font(.caption.monospaced()).textSelection(.enabled)}.frame(maxHeight:140)}
+                default: EmptyView()
+                }
+            }
         }.frame(maxWidth:.infinity,alignment:.leading)
     }
 }
