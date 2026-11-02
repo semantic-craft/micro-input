@@ -12,7 +12,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{broadcast, Mutex as AsyncMutex, Notify};
+use tokio::sync::{broadcast, oneshot, Mutex as AsyncMutex, Notify};
 static SESSION_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SessionError {
@@ -71,8 +71,24 @@ impl DeviceSchema for UnverifiedSchema {
         Err(ProtoError::Unverified("UNKNOWN-06 device config schema").into())
     }
 }
+struct Pending {
+    id: u16,
+    sender: oneshot::Sender<Result<Value, SessionError>>,
+}
+struct PendingLease {
+    id: u16,
+    pending: Arc<Mutex<Option<Pending>>>,
+}
+impl Drop for PendingLease {
+    fn drop(&mut self) {
+        let mut p = self.pending.lock().unwrap();
+        if p.as_ref().is_some_and(|p| p.id == self.id) {
+            p.take();
+        }
+    }
+}
 struct Queue {
-    framer: Box<dyn Framer>,
+    framer: Arc<Mutex<Box<dyn Framer>>>,
     next_id: u16,
     last: Option<tokio::time::Instant>,
 }
@@ -85,11 +101,14 @@ pub struct DeviceSession {
     pub id: u64,
     link: Arc<dyn HidLink>,
     queue: AsyncMutex<Queue>,
-    invalid: AtomicBool,
-    changed: Notify,
+    invalid: Arc<AtomicBool>,
+    changed: Arc<Notify>,
+    pending: Arc<Mutex<Option<Pending>>>,
+    terminal: Arc<Mutex<Option<SessionError>>>,
+    reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
     config: SessionConfig,
     schema: Arc<dyn DeviceSchema>,
-    snapshot: Mutex<Option<Snapshot>>,
+    snapshot: Arc<Mutex<Option<Snapshot>>>,
     notifications: broadcast::Sender<HostNotification>,
 }
 impl DeviceSession {
@@ -99,7 +118,68 @@ impl DeviceSession {
         schema: Arc<dyn DeviceSchema>,
         config: SessionConfig,
     ) -> Arc<Self> {
-        let (notifications, _) = broadcast::channel(32);
+        let (notifications, _) = broadcast::channel(256);
+        let framer = Arc::new(Mutex::new(framer));
+        let invalid = Arc::new(AtomicBool::new(false));
+        let changed = Arc::new(Notify::new());
+        let pending = Arc::new(Mutex::new(None::<Pending>));
+        let terminal = Arc::new(Mutex::new(None));
+        let snapshot = Arc::new(Mutex::new(None::<Snapshot>));
+        let reader = {
+            let terminal = terminal.clone();
+            let (link, framer, invalid, changed, pending, notifications, snapshot) = (
+                link.clone(),
+                framer.clone(),
+                invalid.clone(),
+                changed.clone(),
+                pending.clone(),
+                notifications.clone(),
+                snapshot.clone(),
+            );
+            tokio::spawn(async move {
+                let outcome: Result<(), SessionError> = async {
+                    loop {
+                        if invalid.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let report = link.read().await?;
+                        let lines = framer.lock().unwrap().feed(&report)?;
+                        for line in lines {
+                            match JsonCodec.decode(&line)? {
+                                Incoming::Response(r) => {
+                                    let mut held = pending.lock().unwrap();
+                                    if held.as_ref().is_some_and(|p| p.id == r.id) {
+                                        if let Some(p) = held.take() {
+                                            let _ = p.sender.send(Ok(r.raw));
+                                        }
+                                    }
+                                }
+                                Incoming::Notification(n) => {
+                                    let _ = notifications.send(n.into());
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                }
+                .await;
+                if !invalid.load(Ordering::SeqCst) {
+                    *terminal.lock().unwrap() = outcome.as_ref().err().cloned();
+                }
+                invalid.store(true, Ordering::SeqCst);
+                if let Some(p) = pending.lock().unwrap().take() {
+                    let _ = p
+                        .sender
+                        .send(Err(outcome.err().unwrap_or(SessionError::Disconnected)));
+                }
+                framer.lock().unwrap().clear();
+                if let Some(s) = snapshot.lock().unwrap().as_mut() {
+                    s.stale = true;
+                }
+                link.close();
+                changed.notify_waiters();
+            })
+        };
         Arc::new(Self {
             id: SESSION_ID.fetch_add(1, Ordering::SeqCst),
             link,
@@ -108,14 +188,26 @@ impl DeviceSession {
                 next_id: 0,
                 last: None,
             }),
-            invalid: AtomicBool::new(false),
-            changed: Notify::new(),
+            invalid,
+            changed,
+            pending,
+            terminal,
+            reader: Mutex::new(Some(reader)),
             config,
             schema,
-            snapshot: Mutex::new(None),
+            snapshot,
             notifications,
         })
     }
+    /// R-D07/R-D13: close wakes read; await receiver termination before releasing the session.
+    pub async fn shutdown(&self) {
+        self.disconnect();
+        let reader = self.reader.lock().unwrap().take();
+        if let Some(reader) = reader {
+            let _ = reader.await;
+        }
+    }
+
     pub fn notifications(&self) -> broadcast::Receiver<HostNotification> {
         self.notifications.subscribe()
     }
@@ -129,8 +221,8 @@ impl DeviceSession {
             s.stale = true;
         }
         self.changed.notify_waiters();
-        if let Ok(mut q) = self.queue.try_lock() {
-            q.framer.clear();
+        if let Ok(q) = self.queue.try_lock() {
+            q.framer.lock().unwrap().clear();
         }
     }
     async fn exchange(
@@ -140,7 +232,7 @@ impl DeviceSession {
         params: Value,
     ) -> Result<Value, SessionError> {
         if self.invalid.load(Ordering::SeqCst) {
-            q.framer.clear();
+            q.framer.lock().unwrap().clear();
             return Err(SessionError::Disconnected);
         }
         // Do not wrap IDs in a connection: a late timed-out response must never satisfy a later request.
@@ -150,36 +242,34 @@ impl DeviceSession {
         let id = q.next_id;
         q.next_id += 1;
         let request = RpcRequest::new(method, params, id)?;
-        let reports = q.framer.encode(&JsonCodec.encode(&request)?)?;
+        mi_proto::validate_read_only(&request)?;
+        let reports = q
+            .framer
+            .lock()
+            .unwrap()
+            .encode(&JsonCodec.encode(&request)?)?;
         if let Some(last) = q.last {
             tokio::time::sleep_until(last + self.config.interval).await;
         }
+        if self.invalid.load(Ordering::SeqCst) {
+            return Err(SessionError::Disconnected);
+        }
+        let (sender, receiver) = oneshot::channel();
+        *self.pending.lock().unwrap() = Some(Pending { id, sender });
+        let _lease = PendingLease {
+            pending: self.pending.clone(),
+            id,
+        };
         for report in reports {
             self.link.write(&report).await?;
         }
         q.last = Some(tokio::time::Instant::now());
-        let receive = async {
-            loop {
-                let report = self.link.read().await?;
-                let mut response = None;
-                for line in q.framer.feed(&report)? {
-                    match JsonCodec.decode(&line)? {
-                        Incoming::Response(r) if r.id == id => response = Some(r.raw),
-                        Incoming::Response(_) => {}
-                        Incoming::Notification(n) => {
-                            let _ = self.notifications.send(n.into());
-                        }
-                    }
-                }
-                if let Some(value) = response {
-                    return Ok(value);
-                }
-            }
-        };
-        tokio::time::timeout(self.config.timeout, receive)
+        tokio::time::timeout(self.config.timeout, receiver)
             .await
             .map_err(|_| SessionError::Timeout)?
+            .map_err(|_| SessionError::Disconnected)?
     }
+
     async fn guarded<T>(
         &self,
         f: impl std::future::Future<Output = Result<T, SessionError>>,
@@ -190,7 +280,7 @@ impl DeviceSession {
         if self.invalid.load(Ordering::SeqCst) {
             return Err(SessionError::Disconnected);
         }
-        tokio::select! {biased;_=n=>{self.queue.lock().await.framer.clear();Err(SessionError::Disconnected)},r=f=>{if matches!(r,Err(SessionError::Transport(TransportError::Disconnected))){self.disconnect();}r}}
+        tokio::select! {biased;_=n=>{self.queue.lock().await.framer.lock().unwrap().clear();Err(self.terminal.lock().unwrap().clone().unwrap_or(SessionError::Disconnected))},r=f=>{if matches!(r,Err(SessionError::Transport(TransportError::Disconnected))){self.disconnect();}r}}
     }
     pub async fn request(&self, method: Method, params: Value) -> Result<Value, SessionError> {
         self.guarded(async {
