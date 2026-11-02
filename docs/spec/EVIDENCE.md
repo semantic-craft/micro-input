@@ -117,3 +117,14 @@
 | E-067 | DECIDED，用户在本对话确认“就按这个工作台方案”，2026-11-02 | 采用工作台布局并同步UI交互验收，开始Rust+SwiftUI首轮实现；不接自动化、不做设备写入、未知协议继续占位。HTML原型证明设计选择和浏览器交互，不证明原生应用已交付。S1a为离线纵向切片，完整S1/S2门槛不变。 | R-P03, R-X03, R-N01 |
 
 - E-068（IMPLEMENTATION，本轮S1a原生验收）：macOS/arm64开发构建，键盘、深浅色、标准/紧凑窗口、主窗关闭/菜单栏重开/共享草稿/退出均实测。键盘采用明确快捷键避免依赖系统全键盘访问设置；菜单栏面板可由状态按钮或⇧⌘M打开，实测使用键盘入口。证明范围限S1a，设备/性能预算/正式签名仍未验收。对应R-P03/R-H11/AC-W04/AC-W05。
+
+
+## Cindy 与本地文档补充证据
+
+- **E-069 / COMMUNITY**：只读检查 Cindy 提交 `5368875f4bc5d14f1a94387acf53aca3403e4e1b` 的独立宿主代码。macOS先尝试可选SDK包，再寻找ChatGPT/Codex安装内的device-kit-oai；底层发现/连接交给WLDeviceDiscovery/WLDeviceCommImpl/RPCApiOAI。USB候选优先，事件在宿主归一化。Creator Micro 2监听路径可能读取、备份并重写当前层keymap/encoders/joystick后接收Agent事件，因此不能作为无写入按键识别能力证明。权限熔断、占用分类、子进程重启上限、结构化动作和布局归一化可作设计参考；本项目进程内架构不具有同等子进程隔离。没有复制原厂/社区实现或资产，没有启动Cindy设备功能。来源：[sdkResolver](https://github.com/makecindy/cindy/blob/5368875f4bc5d14f1a94387acf53aca3403e4e1b/apps/desktop/src/main/worklouder-codex/sdkResolver.ts)、[宿主](https://github.com/makecindy/cindy/blob/5368875f4bc5d14f1a94387acf53aca3403e4e1b/apps/desktop/src/main/worklouder-codex/workLouderCodexHostProcess.ts)、[生命周期](https://github.com/makecindy/cindy/blob/5368875f4bc5d14f1a94387acf53aca3403e4e1b/apps/desktop/src/main/worklouder-codex/WorkLouderCodexHostClient.ts)、[设置](https://github.com/makecindy/cindy/blob/5368875f4bc5d14f1a94387acf53aca3403e4e1b/apps/desktop/src/main/worklouder-codex/settingsStore.ts)。对应R-N05/R-D12/R-E07/R-K05。
+- **E-070 / DECIDED**：用户确认先整理设备识别与只读证据，再实现稳定ID、结构化动作和本地持久化；仍不接自动化、不写设备、不猜未知协议。对应R-E07/R-E08/R-K05。
+- **E-071 / SEEN-O记录复核**：本轮重读本机`.scratch/firmware-check/result.txt`，与E-057相符：2026-11-02独立USB探针一次sys.version，匹配响应，固件0.6.3；无配置读取/写入。本轮未重放探针，未打开真实设备；不能升级为Rust应用验收。E-052–E-060仍为真实读取的证据边界。
+
+当前Git基线已由PR #12合并至1c8e4f5；E-064是当时历史状态，不再代表当前main。S1a离线工作台已合并，真实读回仍未完成。S2a实现验收入口见BUILD_PROMPT，硬件UNKNOWN-01/03/04/06保持原状态。
+
+- **E-072 / IMPLEMENTATION**：S2a本地文档实现及验收，见BUILD_PROMPT AC-L01–L05。新建Rust核心实例与原生应用退出重开均恢复保存值；不代表硬件或工具适配验收。持久格式首版为v1，没有旧持久格式迁移事实。

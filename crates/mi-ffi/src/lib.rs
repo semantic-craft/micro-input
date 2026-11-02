@@ -47,7 +47,7 @@ struct ConnectionState {
 }
 #[derive(uniffi::Object)]
 pub struct MicroInput {
-    draft: Mutex<mi_model::draft::Draft>,
+    draft: Mutex<mi_model::storage::DocumentStore>,
     transport: Arc<dyn HidTransport>,
     state: Mutex<ConnectionState>,
     connect_gate: tokio::sync::Mutex<()>,
@@ -57,7 +57,7 @@ impl MicroInput {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            draft: Mutex::new(mi_model::draft::Draft::default()),
+            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
             transport: Arc::new(MacTransport::new()),
             state: Mutex::new(ConnectionState::default()),
             connect_gate: tokio::sync::Mutex::new(()),
@@ -65,34 +65,42 @@ impl MicroInput {
     }
     // R-P03/R-E02: local intents only, no session or transport access.
     pub async fn draft_state(&self) -> Result<String, BridgeError> {
-        serde_json::to_string(&*self.draft.lock().unwrap()).map_err(failure)
+        serde_json::to_string(&self.draft.lock().unwrap().draft).map_err(failure)
     }
     pub async fn action_catalog(&self) -> Result<String, BridgeError> {
         serde_json::to_string(&mi_model::draft::actions()).map_err(failure)
     }
-    pub async fn assign_action(
-        &self,
-        profile: u32,
-        layer: u32,
-        slot: u32,
-        action: String,
-    ) -> Result<String, BridgeError> {
+    pub async fn open_document(&self, path: String) -> Result<String, BridgeError> {
         self.draft
             .lock()
             .unwrap()
-            .assign(profile, layer, slot, &action)
+            .open(path.into())
+            .map_err(failure)?;
+        self.draft_state().await
+    }
+    pub async fn assign_action(
+        &self,
+        profile_id: String,
+        layer_id: String,
+        slot: u32,
+        action_json: String,
+    ) -> Result<String, BridgeError> {
+        let profile = serde_json::from_str(&profile_id).map_err(failure)?;
+        let layer = serde_json::from_str(&layer_id).map_err(failure)?;
+        let action = serde_json::from_str(&action_json).map_err(failure)?;
+        self.draft
+            .lock()
+            .unwrap()
+            .update(|d| d.assign(&profile, &layer, slot, action))
             .map_err(failure)?;
         self.draft_state().await
     }
     pub async fn undo_draft(&self, redo: bool) -> Result<String, BridgeError> {
-        {
-            let mut d = self.draft.lock().unwrap();
-            if redo {
-                d.redo()
-            } else {
-                d.undo()
-            }
-        }
+        self.draft
+            .lock()
+            .unwrap()
+            .update(|d| d.undo(redo))
+            .map_err(failure)?;
         self.draft_state().await
     }
     pub async fn list_devices(&self) -> Result<Vec<DeviceInfo>, BridgeError> {
@@ -188,7 +196,7 @@ impl MicroInput {
         serde_json::to_string(&c).map_err(failure)
     }
     pub async fn load_demo(&self) -> Result<String, BridgeError> {
-        let c = mi_model::demo().map_err(failure)?;
+        let c = self.draft.lock().unwrap().draft.config.clone();
         serde_json::to_string(&c).map_err(failure)
     }
     pub async fn input_monitoring_status(&self) -> bool {
@@ -279,7 +287,7 @@ mod tests {
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let core = Arc::new(MicroInput {
-            draft: Mutex::new(mi_model::draft::Draft::default()),
+            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
             transport: Arc::new(DelayedTransport {
                 entered: entered.clone(),
                 release: release.clone(),
