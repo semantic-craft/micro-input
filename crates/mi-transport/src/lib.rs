@@ -552,16 +552,22 @@ impl HidTransport for SyntheticDiscovery {
                 let config = configuration.load(Ordering::SeqCst);
                 let response = if method == "fs.list" || method == "fs.readbin" {
                     use base64::Engine;
-                    let keymap = include_bytes!(
-                        "../../mi-model/fixtures/device/synthetic-keymap-multichunk.json"
-                    );
+                    let keymap: &[u8] = if config == 4 {
+                        include_bytes!(
+                            "../../mi-model/fixtures/device/synthetic-keymap-reconnected.json"
+                        )
+                    } else {
+                        include_bytes!(
+                            "../../mi-model/fixtures/device/synthetic-keymap-multichunk.json"
+                        )
+                    };
                     let smart = include_bytes!(
                         "../../mi-model/fixtures/device/synthetic-smart-actions-object.json"
                     );
                     let result = if method == "fs.list" {
                         lists += 1;
                         serde_json::json!([
-                            {"name":"keymap.json","size":if config==2 && lists%2==0 {1} else {12466},"checksum":"29982c129d7250b624d483d1bf2a29544271507e"},
+                            {"name":"keymap.json","size":if config==2 && lists%2==0 {1} else {12466},"checksum":if config==4 {"8629249fa26f62ab5cbe37dbbacf8b6813e6560a"}else{"29982c129d7250b624d483d1bf2a29544271507e"}},
                             {"name":"smart_actions.json","size":738,"checksum":"e60e82aba8a5f71ba7726febac9310e4007ed2ab"}
                         ])
                     } else {

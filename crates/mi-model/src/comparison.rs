@@ -17,6 +17,7 @@ pub enum Choice {
 #[derive(Clone, Serialize)]
 pub struct ComparisonRow {
     pub path: String,
+    pub label: String,
     pub base: Option<Value>,
     pub local: Option<Value>,
     pub device: Option<Value>,
@@ -72,31 +73,31 @@ fn align(doc: &mut LocalDocumentV2, reference: &EditableState) -> Result<(), Str
                 .and_then(|key| keys.get(&key).map(|target| (id.clone(), target.clone())))
         })
         .collect();
-    fn rewrite(v: &mut Value, mapping: &BTreeMap<String, String>) {
-        match v {
-            Value::String(s) => {
-                if let Some(target) = mapping.get(s) {
-                    *s = target.clone()
-                }
-            }
-            Value::Array(a) => {
-                for v in a {
-                    rewrite(v, mapping)
-                }
-            }
-            Value::Object(o) => {
-                let old = std::mem::take(o);
-                for (key, mut value) in old {
-                    rewrite(&mut value, mapping);
-                    o.insert(mapping.get(&key).cloned().unwrap_or(key), value);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut v = serde_json::to_value(&doc.editable).map_err(|e| e.to_string())?;
-    rewrite(&mut v, &mapping);
-    doc.editable = serde_json::from_value(v).map_err(|e| e.to_string())?;
+    let map = |id: String| mapping.get(&id).cloned().unwrap_or(id);
+    let g = &mut doc.editable.graph;
+    g.profile_order = std::mem::take(&mut g.profile_order)
+        .into_iter()
+        .map(&map)
+        .collect();
+    g.profiles = std::mem::take(&mut g.profiles)
+        .into_iter()
+        .map(|(id, mut p)| {
+            p.layer_order = p.layer_order.into_iter().map(&map).collect();
+            (map(id), p)
+        })
+        .collect();
+    g.layers = std::mem::take(&mut g.layers)
+        .into_iter()
+        .map(|(id, mut l)| {
+            l.control_order = l.control_order.into_iter().map(&map).collect();
+            l.controls = l.controls.into_iter().map(|(id, b)| (map(id), b)).collect();
+            (map(id), l)
+        })
+        .collect();
+    doc.editable.source_refs = std::mem::take(&mut doc.editable.source_refs)
+        .into_iter()
+        .map(|(id, r)| (map(id), r))
+        .collect();
     Ok(())
 }
 fn merge(
@@ -153,6 +154,7 @@ fn merge(
     };
     rows.push(ComparisonRow {
         path: path.into(),
+        label: String::new(),
         base: b.cloned(),
         local: l.cloned(),
         device: r.cloned(),
@@ -173,17 +175,27 @@ fn opaque(config: &DeviceConfig) -> Value {
             let key = p["id"].to_string();
             let Some(o) = p.as_object_mut() else { continue };
             o.remove("id");
-            o.remove("name");
+            if o.get("name").is_some_and(Value::is_string) {
+                o.remove("name");
+            }
             let mut layers = serde_json::Map::new();
             if let Some(ls) = o.remove("layers").and_then(|v| v.as_array().cloned()) {
                 for mut l in ls {
                     let lid = l["id"].to_string();
                     if let Some(lo) = l.as_object_mut() {
                         lo.remove("id");
-                        lo.remove("name");
+                        if lo.get("name").is_some_and(Value::is_string) {
+                            lo.remove("name");
+                        }
                         if let Some(layout) = lo.get_mut("layout").and_then(Value::as_object_mut) {
                             layout.remove("keymap");
-                            layout.remove("encoders");
+                            if layout
+                                .get("encoders")
+                                .and_then(Value::as_array)
+                                .is_some_and(|a| a.len() == 3)
+                            {
+                                layout.remove("encoders");
+                            }
                             // Joystick metadata remains opaque; bindings are separately compared.
                             if let Some(sectors) = layout
                                 .get_mut("joystick")
@@ -214,7 +226,23 @@ fn opaque(config: &DeviceConfig) -> Value {
             }
         }
     }
-    json!({"root":root,"profiles":extras,"smart_actions":config.smart_actions})
+    let mut unknown = BTreeMap::new();
+    for p in &config.profiles {
+        for l in &p.layers {
+            for (slot, b) in l
+                .keys
+                .iter()
+                .chain(l.encoders.iter())
+                .chain(l.joystick.sectors.iter())
+                .enumerate()
+            {
+                if matches!(b, crate::Binding::Unknown(_)) {
+                    unknown.insert(format!("{} / {} / logical-{slot}", p.id, l.id), json!(b));
+                }
+            }
+        }
+    }
+    json!({"root":root,"profiles":extras,"smart_actions":config.smart_actions,"unknown_bindings":unknown})
 }
 fn has_unknown(v: Option<&Value>) -> bool {
     v.is_some_and(|v| v.get("Unknown").is_some())
@@ -225,6 +253,9 @@ impl Comparison {
         config: &DeviceConfig,
         mut baseline: Value,
     ) -> Result<Self, String> {
+        if !baseline.is_object() || !local.baseline.as_ref().is_some_and(Value::is_object) {
+            return Err("缺少有效的设备基线；不能比较".into());
+        }
         let base_config = base_config(local)?;
         let mut base = LocalDocumentV2::from_config(&base_config, None, "comparison")?;
         align(&mut base, &local.editable)?;
@@ -259,12 +290,30 @@ impl Comparison {
                 .into(),
             );
         }
+        for kind in ["source-profile", "source-layer", "source-binding"] {
+            let sources = |state: &EditableState| {
+                state
+                    .source_refs
+                    .values()
+                    .filter(|r| r["kind"] == kind)
+                    .map(Value::to_string)
+                    .collect::<BTreeSet<_>>()
+            };
+            let b = sources(&base.editable);
+            let r = sources(&remote.editable);
+            if b.difference(&r).next().is_some() && r.difference(&b).next().is_some() {
+                conflicts.push(format!(
+                    "源 ID 无法对照：{kind}；新增与删除不能猜作同一对象"
+                ));
+            }
+        }
         let old_raw = opaque(&base_config);
         let new_raw = opaque(config);
         if old_raw != new_raw {
             conflicts.push("未知 raw 改变；双方原值保留，禁止自动合并".into());
             rows.push(ComparisonRow {
                 path: "未知 raw".into(),
+                label: "未知原值".into(),
                 base: Some(old_raw.clone()),
                 local: Some(old_raw),
                 device: Some(new_raw),
@@ -280,6 +329,41 @@ impl Comparison {
         candidate.editable = merged.clone();
         if let Err(e) = candidate.validate() {
             conflicts.push(format!("引用校验：{e}"));
+        }
+        let mut labels = BTreeMap::new();
+        for state in [&base.editable, &remote.editable, &local.editable] {
+            for (id, p) in &state.graph.profiles {
+                labels.insert(id.clone(), format!("配置 {}", p.name));
+            }
+            for (id, l) in &state.graph.layers {
+                labels.insert(id.clone(), format!("层 {}", l.name));
+                for (bid, b) in &l.controls {
+                    labels.insert(bid.clone(), format!("{} / {}", l.name, b.logical_control));
+                }
+            }
+            for (id, a) in &state.graph.actions {
+                labels.insert(id.clone(), format!("动作 {}", a.name));
+            }
+        }
+        for row in &mut rows {
+            if !row.label.is_empty() {
+                continue;
+            }
+            let context = row
+                .path
+                .split('/')
+                .filter_map(|id| labels.get(id))
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "文档".into());
+            let field = match row.path.rsplit('/').next().unwrap_or("") {
+                "name" => "名称",
+                "profile_order" => "配置顺序",
+                "layer_order" => "层顺序",
+                "control_order" => "控件顺序",
+                _ => "对象或绑定",
+            };
+            row.label = format!("{context} · {field}");
         }
         Ok(Self {
             token: crate::document::new_id(),
@@ -360,7 +444,30 @@ impl Comparison {
 /// #22 must invoke this after a fresh identity/file-list query, before any future write.
 /// A cached comparison cannot authorize a write by itself.
 pub fn ensure_apply_baseline(document: &LocalDocumentV2, fresh: &Value) -> Result<(), String> {
-    let baseline = document.baseline.as_ref().ok_or("没有设备基线，拒绝应用")?;
+    let baseline = document
+        .baseline
+        .as_ref()
+        .filter(|b| b.is_object())
+        .ok_or("没有设备基线，拒绝应用")?;
+    if !baseline["device_identity"].is_object() || !fresh["device_identity"].is_object() {
+        return Err("设备身份未经核验，拒绝应用".into());
+    }
+    if !["observed-interface", "verified-serial"]
+        .iter()
+        .any(|c| baseline["device_identity"]["confidence"] == *c)
+    {
+        return Err("设备身份状态未知，拒绝应用".into());
+    }
+    for key in ["keymap", "smart_actions"] {
+        let file = &fresh[key];
+        if !(file["state"] == "missing" && key == "smart_actions")
+            && !(file["state"] == "present"
+                && file["sha1"].as_str().is_some_and(|s| !s.is_empty())
+                && file["size"].as_u64().is_some())
+        {
+            return Err("缺少新读取的文件摘要，拒绝应用".into());
+        }
+    }
     for key in ["device_identity", "firmware"] {
         if baseline[key] != fresh[key] {
             return Err("设备身份或固件已变化；请重新比较".into());

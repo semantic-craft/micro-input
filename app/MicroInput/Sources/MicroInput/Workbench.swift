@@ -126,6 +126,7 @@ struct Workbench: View {
             Button("取消",role:.cancel) {}
             Button("删除",role:.destructive) {Task {if deleteLayer {await store.deleteLayer()} else {await store.deleteProfile()}}}
         } message: {Text("仅删除本地草稿中的对象及其所属内容。原始来源保留，可撤销；设备不会改变。") }
+        .sheet(item: $store.comparison) { comparison in ReconnectComparisonView(store: store, comparison: comparison) }
         .task { if store.snapshot == nil { await store.loadWorkbench() } }
     }
     var discoveryPanel: some View {
@@ -157,6 +158,7 @@ struct Workbench: View {
                         .disabled(store.busy || store.stale || store.connectedID == nil)
                 }
 
+                Button("比较设备与草稿") { Task {await store.compareSnapshot()} }.disabled(store.busy || store.connectedID == nil || store.stale)
                 Text(store.identityStatus).font(.caption).foregroundStyle(.secondary)
             }
             if let device = store.selectedDevice {

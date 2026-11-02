@@ -217,3 +217,41 @@ fn freshly_changed_identity_or_file_digest_rejects_future_application() {
     current["device_identity"]["serial"] = json!("other");
     assert!(ensure_apply_baseline(&local, &current).is_err());
 }
+
+#[test]
+fn keeping_local_binding_recomputes_diff_against_remote_and_preserves_remote_opaque_binding() {
+    let (local, mut remote, baseline) = fixture();
+    remote.profiles[0].layers[0].keys[0] = crate::Binding::Basic(crate::Token("KC_B".into()));
+    let compared = Comparison::new(&local, &remote, baseline.clone()).unwrap();
+    assert!(compared.can_merge());
+    let kept = compared
+        .resolve(&local, Choice::KeepLocal)
+        .unwrap()
+        .unwrap();
+    assert!(kept
+        .structure_changes()
+        .iter()
+        .any(|c| c.contains("绑定变化")));
+    remote.profiles[0].layers[0].keys[0] = crate::Binding::Unknown(json!({"future":"remote"}));
+    let compared = Comparison::new(&local, &remote, baseline).unwrap();
+    assert!(!compared.can_merge());
+    let kept = compared
+        .resolve(&local, Choice::KeepLocal)
+        .unwrap()
+        .unwrap();
+    let (view, _) = kept.view().unwrap();
+    assert_eq!(
+        view.profiles[0].layers[0].keys[0],
+        crate::Binding::Unknown(json!({"future":"remote"}))
+    );
+}
+
+#[test]
+fn replacement_source_id_is_manual_and_malformed_baseline_never_panics() {
+    let (local, mut remote, baseline) = fixture();
+    remote.profiles[0].id = json!(900);
+    let compared = Comparison::new(&local, &remote, baseline).unwrap();
+    assert!(!compared.can_merge());
+    assert!(compared.conflicts.iter().any(|c| c.contains("源 ID")));
+    assert!(Comparison::new(&local, &remote, json!("invalid baseline")).is_err());
+}

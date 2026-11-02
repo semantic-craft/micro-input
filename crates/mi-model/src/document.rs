@@ -619,6 +619,33 @@ impl LocalDocumentV2 {
                             })
                         });
                 if let Some((index, old)) = original_layer {
+                    let base_bindings: Vec<_> = old
+                        .keys
+                        .iter()
+                        .chain(old.encoders.iter())
+                        .chain(old.joystick.sectors.iter())
+                        .collect();
+                    for bid in &l.control_order {
+                        let binding = &l.controls[bid];
+                        let slot = binding
+                            .logical_control
+                            .strip_prefix("logical-")
+                            .and_then(|v| v.parse::<usize>().ok());
+                        if let Some((slot, original)) =
+                            slot.and_then(|slot| base_bindings.get(slot).map(|b| (slot, b)))
+                        {
+                            if serde_json::to_value(original).ok().as_ref()
+                                != Some(&binding.original)
+                            {
+                                changes.push(format!(
+                                    "绑定变化：{} / {} / 逻辑控件 {}",
+                                    p.name,
+                                    l.name,
+                                    slot + 1
+                                ));
+                            }
+                        }
+                    }
                     if old.name != l.name {
                         changes.push(format!("层改名：{} / {} → {}", p.name, old.name, l.name));
                     }
