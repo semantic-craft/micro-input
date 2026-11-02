@@ -34,4 +34,6 @@ scripts/run --verify   # 验收实例10分钟自动退出
 
 ## 下一步
 
-S2a补齐文档稳定ID、动作参数和持久化；后续S2继续完整Profile/Layer管理、宏/Multi编辑、收藏和导入导出。S1真实设备读取必须先满足后端/schema证据门槛，硬件验收未完成。自动化和设备写入未授权。
+PR #12/#13 已交付原生离线工作台、结构化动作和本地持久化。下一实施前沿为 [#3 设备发现](https://github.com/semantic-craft/micro-input/issues/3) / [#4 身份读取](https://github.com/semantic-craft/micro-input/issues/4)，限只读范围并受协议证据门槛约束；真实读取尚未通过应用验收。
+
+完整目标与 35 张工单入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)，技术契约见 [实施设计](docs/implementation-plan.md)，阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)。规划已批准不等于未来阶段获准执行；当前不接自动化、不写设备、不执行宿主动作。未完成技术细化的工单使用 needs-info，并在工单内列明缺项。
