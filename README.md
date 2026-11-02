@@ -4,9 +4,11 @@
 
 ## 当前状态
 
-2026-11-02：已建立正式项目和本地 Git 仓库，迁入前期调研原件；尚未初始化 Cargo/Swift 工程、实现设备通信或构建可运行应用。既有 input.app 和设备配置保持原状。
+2026-11-02：已建立正式项目及公开 GitHub 仓库，前期调研原件仅保存在本机；尚未初始化 Cargo/Swift 工程、实现设备通信或构建可运行应用。既有 input.app 和设备配置保持原状。
 
 从 [开发起点](docs/development.md) 开始；操作设备或处理兼容行为前阅读 [项目教训](lessons.md)。Agent 入口见 [AGENTS.md](AGENTS.md)。
+
+工单与规格统一放在 [GitHub Issues](https://github.com/semantic-craft/micro-input/issues)。
 
 ## 调研入口
 
