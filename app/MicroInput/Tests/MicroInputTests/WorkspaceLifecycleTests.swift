@@ -164,6 +164,28 @@ final class WorkspaceLifecycleTests: XCTestCase {
         await store.shutdown()
     }
 
+    @MainActor func testReopeningWindowWithSameStoreDoesNotCancelPendingWake() async throws {
+        let backend = DelayedSleepBackend()
+        let store = Store(backend: backend)
+        await store.connect("first")
+        let lifetime = AppLifetime(store: store, reply: { _ in })
+        defer { lifetime.store = nil }
+        // Posting on this process-local center exercises the AppLifetime wiring;
+        // it does not request or cause system sleep.
+        let center = NSWorkspace.shared.notificationCenter
+        center.post(name: NSWorkspace.willSleepNotification, object: nil)
+        for _ in 0..<100 where backend.disconnectRelease == nil { await Task.yield() }
+        let release = try XCTUnwrap(backend.disconnectRelease)
+        center.post(name: NSWorkspace.didWakeNotification, object: nil)
+        await Task.yield()
+        lifetime.store = store // WorkbenchHost.onAppear when the same window reopens.
+        release.resume()
+        for _ in 0..<100 { await Task.yield() }
+        await store.connect("explicit")
+        XCTAssertEqual(store.connectedID, "explicit", "Reopening must preserve the in-progress wake task")
+        await store.shutdown()
+    }
+
     @MainActor func testObserverStopAndDeinitRemoveNotificationEffects() async throws {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)

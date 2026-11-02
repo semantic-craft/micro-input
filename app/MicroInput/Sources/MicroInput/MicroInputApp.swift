@@ -80,6 +80,9 @@ struct WorkbenchHost: View {
 @MainActor final class AppLifetime: NSObject, NSApplicationDelegate {
     weak var store: Store? {
         didSet {
+            // The main window may appear again while wake is waiting for close/join.
+            // Keep that lifecycle task when onAppear reassigns the same Store.
+            guard oldValue !== store else { return }
             sleepObserver?.stop()
             sleepObserver = store.map { WorkspaceSleepObserver(store: $0) }
         }
