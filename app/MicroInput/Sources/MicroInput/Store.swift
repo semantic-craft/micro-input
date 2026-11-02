@@ -31,7 +31,7 @@ extension MicroInput: Backend {}
     func selectLayer(_ index: Int) { layerIndex = index; selectedBinding = nil }
     func refresh() async {
         allowed = await backend.inputMonitoringStatus()
-        do { received(try await backend.listDevices()) } catch { status = error.localizedDescription }
+        do { received(try await backend.listDevices()) } catch { status = readableError(error) }
     }
     func received(_ values: [DeviceInfo]) {
         devices = values
@@ -41,7 +41,7 @@ extension MicroInput: Backend {}
         guard !busy else { return }; busy = true; defer { busy = false }
         generation += 1; let token = generation
         await backend.disconnect(); guard token == generation else { return }; connectedID = nil
-        do { let json = try await backend.loadDemo(); guard token == generation else { return }; try replace(json); status = "演示数据 · 未与设备同步" } catch { if token == generation { status = error.localizedDescription } }
+        do { let json = try await backend.loadDemo(); guard token == generation else { return }; try replace(json); status = "演示数据 · 未与设备同步" } catch { if token == generation { status = readableError(error) } }
     }
     func connect(_ id: String) async {
         guard !busy else { return }; busy = true; defer { busy = false }
@@ -54,7 +54,7 @@ extension MicroInput: Backend {}
             pendingID = nil; connectedID = id; status = "已连接 · 协议未验证"
             let json = try await backend.readConfig()
             guard token == generation else { return }; try replace(json)
-        } catch { if token == generation { pendingID = nil; stale = snapshot != nil; status = "读取失败 · \(error.localizedDescription)" } }
+        } catch { if token == generation { pendingID = nil; stale = snapshot != nil; status = "读取失败 · \(readableError(error))" } }
     }
     func suspend() async { generation += 1; pendingID = nil; await backend.disconnect(); connectedID = nil; stale = snapshot != nil; status = "会话已断开" }
     private func replace(_ json: String) throws { let result = try JSONDecoder().decode(Snapshot.self, from: Data(json.utf8)); snapshot = result; stale = false; selectProfile(0) }
@@ -64,4 +64,13 @@ extension MicroInput: Backend {}
     init(_ store: Store) { self.store = store }
     nonisolated func changed(devices: [DeviceInfo]) { Task { @MainActor [weak self] in self?.store?.received(devices) } }
     nonisolated func failed(message: String) { Task { @MainActor [weak self] in self?.store?.status = message } }
+}
+
+// R-A02: keep bridge type names and protocol internals out of normal status text.
+func readableError(_ error: Error) -> String {
+    if case BridgeError.Failed(let message) = error {
+        if message.contains("协议未验证") { return "协议未验证，设备读取待确认" }
+        return message
+    }
+    return error.localizedDescription
 }

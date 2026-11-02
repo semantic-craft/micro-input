@@ -79,3 +79,8 @@ extension NavigationTests {
         XCTAssertEqual(store.status, "设备已断开")
     }
 }
+extension NavigationTests {
+    func testProtocolFailureHasReadableStatus() {
+        XCTAssertEqual(readableError(BridgeError.Failed(message: "协议未验证：UNKNOWN-04 fs schema")), "协议未验证，设备读取待确认")
+    }
+}
