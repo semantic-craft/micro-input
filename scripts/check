@@ -2,7 +2,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo fmt --all -- --check
-cargo test --locked --workspace
+cargo test --locked --workspace --all-features
+scripts/build --synthetic
+swift test --package-path app/MicroInput -Xswiftc -DMI_SYNTHETIC_BACKEND
+# Restore production bindings/static library/app as one matching ABI.
 scripts/build
 swift test --package-path app/MicroInput
 python3 scripts/check-boundaries.py

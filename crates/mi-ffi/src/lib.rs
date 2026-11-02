@@ -14,12 +14,27 @@ fn failure(e: impl std::fmt::Display) -> BridgeError {
     }
 }
 #[derive(Clone, uniffi::Record)]
+pub struct DeviceUsage {
+    pub page: u16,
+    pub usage: u16,
+}
+#[cfg(feature = "synthetic-backend")]
+#[derive(uniffi::Enum)]
+pub enum SyntheticDiscoveryState {
+    NoDevices,
+    TwoDevices,
+    Failure,
+}
+#[derive(Clone, uniffi::Record)]
 pub struct DeviceInfo {
     pub id: String,
     pub product: String,
     pub vid: u16,
     pub pid: u16,
     pub usage_page: u16,
+    pub usage: u16,
+    pub usage_pairs: Vec<DeviceUsage>,
+    pub verified_model: bool,
     pub transport: String,
 }
 impl From<HidCandidate> for DeviceInfo {
@@ -30,6 +45,16 @@ impl From<HidCandidate> for DeviceInfo {
             vid: c.vid,
             pid: c.pid,
             usage_page: c.usage_page,
+            usage: c.usage,
+            usage_pairs: c
+                .usage_pairs
+                .into_iter()
+                .map(|p| DeviceUsage {
+                    page: p.page,
+                    usage: p.usage,
+                })
+                .collect(),
+            verified_model: c.pid == 0x8298,
             transport: format!("{:?}", c.transport_hint),
         }
     }
@@ -115,6 +140,10 @@ impl MicroInput {
     }
     pub async fn subscribe_device_events(self: Arc<Self>, cb: Box<dyn DeviceEvents>) {
         let mut rx = self.transport.subscribe();
+        match self.list_devices().await {
+            Ok(devices) => cb.changed(devices),
+            Err(e) => cb.failed(e.to_string()),
+        }
         let weak = Arc::downgrade(&self);
         tokio::spawn(async move {
             loop {
@@ -307,5 +336,31 @@ mod tests {
         release.1.notify_one();
         assert!(task.await.unwrap().is_err());
         assert!(core.current().is_err());
+    }
+}
+
+#[cfg(feature = "synthetic-backend")]
+#[uniffi::export(async_runtime = "tokio")]
+impl MicroInput {
+    #[uniffi::constructor]
+    pub fn synthetic_discovery() -> Arc<Self> {
+        Arc::new(Self {
+            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            transport: Arc::new(mi_transport::SyntheticDiscovery::default()),
+            state: Mutex::new(ConnectionState::default()),
+            connect_gate: tokio::sync::Mutex::new(()),
+        })
+    }
+    pub async fn set_synthetic_discovery(
+        &self,
+        state: SyntheticDiscoveryState,
+    ) -> Result<(), BridgeError> {
+        self.transport
+            .set_synthetic_discovery(match state {
+                SyntheticDiscoveryState::NoDevices => 0,
+                SyntheticDiscoveryState::TwoDevices => 1,
+                SyntheticDiscoveryState::Failure => 2,
+            })
+            .map_err(failure)
     }
 }

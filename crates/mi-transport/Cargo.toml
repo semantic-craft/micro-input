@@ -2,6 +2,8 @@
 name = "mi-transport"
 version.workspace = true
 edition.workspace = true
+[features]
+synthetic-backend = []
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
