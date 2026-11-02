@@ -146,6 +146,10 @@ fn accepting_comparison_saves_recovery_copy_and_reopens_new_base_without_history
     assert_eq!(std::fs::read(&path).unwrap(), before);
     assert_eq!(store.draft.revision, rev);
     assert!(store.draft.can_undo);
+    assert!(store
+        .resolve_comparison(&comparison.token, Choice::UseDevice, &baseline)
+        .is_err());
+    let comparison = store.compare(&remote, baseline.clone()).unwrap();
     store
         .resolve_comparison(&comparison.token, Choice::UseDevice, &baseline)
         .unwrap();

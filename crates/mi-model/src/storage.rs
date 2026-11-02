@@ -71,6 +71,7 @@ impl DocumentStore {
             .filter(|c| c.token == token)
             .ok_or("比较结果已过期；请重新比较")?;
         if choice == crate::comparison::Choice::Cancel {
+            self.comparison = None;
             return Ok(());
         }
         comparison.ensure_snapshot(current)?;

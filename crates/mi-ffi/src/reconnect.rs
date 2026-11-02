@@ -60,7 +60,11 @@ impl MicroInput {
         };
         // Cancel requires no live session; it is always a no-op on the document.
         if choice == Choice::Cancel {
-            return document_response(&self.draft.lock().unwrap().draft, None);
+            let mut store = self.draft.lock().unwrap();
+            store
+                .resolve_comparison(&token, choice, &serde_json::Value::Null)
+                .map_err(failure)?;
+            return document_response(&store.draft, None);
         }
         let state = self.state.lock().unwrap();
         let (_, baseline) = Self::comparison_snapshot(&state)?;
