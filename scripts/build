@@ -14,7 +14,9 @@ swift_flags=(--configuration debug)
 if [[ "${1:-}" == "--synthetic" ]]; then swift_flags=(-Xswiftc -DMI_SYNTHETIC_BACKEND); fi
 swift build --package-path app/MicroInput "${swift_flags[@]}"
 bundle=target/MicroInput.app
-mkdir -p "$bundle/Contents/MacOS"
+mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
+swift scripts/generate-app-icon.swift
+iconutil -c icns target/AppIcon.iconset -o "$bundle/Contents/Resources/AppIcon.icns"
 cp app/MicroInput/.build/debug/MicroInput "$bundle/Contents/MacOS/"
 cp app/MicroInput/Info.plist "$bundle/Contents/Info.plist"
 codesign --force --sign - "$bundle"
