@@ -71,8 +71,34 @@ impl DeviceSchema for UnverifiedSchema {
         Err(ProtoError::Unverified("UNKNOWN-06 device config schema").into())
     }
 }
+#[derive(Debug, Clone)]
+pub struct IdentityInfo {
+    pub session_id: u64,
+    pub version: Option<String>,
+    pub profile_index: Option<u32>,
+    pub layer_index: Option<u32>,
+    pub source_method: String,
+    pub raw: Value,
+}
+fn identity_result(v: &Value) -> Result<&Value, SessionError> {
+    if let Some(error) = v.get("error") {
+        return Err(
+            ProtoError::Invalid(format!("identity RPC error code {}", error["code"])).into(),
+        );
+    }
+    v.get("result")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| ProtoError::Invalid("identity result must be an object".into()).into())
+}
+fn firmware(v: &Value) -> Option<String> {
+    v.get("version")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_owned)
+}
 struct Pending {
     id: u16,
+    method: Method,
     sender: oneshot::Sender<Result<Value, SessionError>>,
 }
 struct PendingLease {
@@ -148,7 +174,14 @@ impl DeviceSession {
                             match JsonCodec.decode(&line)? {
                                 Incoming::Response(r) => {
                                     let mut held = pending.lock().unwrap();
-                                    if held.as_ref().is_some_and(|p| p.id == r.id) {
+                                    if held.as_ref().is_some_and(|p| {
+                                        p.id == r.id
+                                            && r.raw
+                                                .get("method")
+                                                .or_else(|| r.raw.get("m"))
+                                                .and_then(Value::as_str)
+                                                .is_none_or(|m| m == p.method.name())
+                                    }) {
                                         if let Some(p) = held.take() {
                                             let _ = p.sender.send(Ok(r.raw));
                                         }
@@ -208,6 +241,17 @@ impl DeviceSession {
         }
     }
 
+    pub fn terminal_failure(&self) -> Option<SessionError> {
+        self.terminal.lock().unwrap().clone()
+    }
+    pub fn backend_name(&self) -> &'static str {
+        match self.link.backend() {
+            mi_transport::LinkBackend::MacHidapi267Numbered => "hidapi-2.6.7/macOS/numbered-0x06",
+            #[cfg(feature = "synthetic-backend")]
+            mi_transport::LinkBackend::SyntheticNumbered => "synthetic/numbered-0x06",
+            _ => "unverified",
+        }
+    }
     pub fn notifications(&self) -> broadcast::Receiver<HostNotification> {
         self.notifications.subscribe()
     }
@@ -237,7 +281,11 @@ impl DeviceSession {
         }
         // Do not wrap IDs in a connection: a late timed-out response must never satisfy a later request.
         if q.next_id >= 999 {
-            return Err(ProtoError::Invalid("request id space exhausted; reconnect".into()).into());
+            let error: SessionError =
+                ProtoError::Invalid("request id space exhausted; reconnect".into()).into();
+            *self.terminal.lock().unwrap() = Some(error.clone());
+            self.shutdown().await;
+            return Err(error);
         }
         let id = q.next_id;
         q.next_id += 1;
@@ -255,7 +303,7 @@ impl DeviceSession {
             return Err(SessionError::Disconnected);
         }
         let (sender, receiver) = oneshot::channel();
-        *self.pending.lock().unwrap() = Some(Pending { id, sender });
+        *self.pending.lock().unwrap() = Some(Pending { id, method, sender });
         let _lease = PendingLease {
             pending: self.pending.clone(),
             id,
@@ -286,6 +334,53 @@ impl DeviceSession {
         self.guarded(async {
             let mut q = self.queue.lock().await;
             self.exchange(&mut q, method, params).await
+        })
+        .await
+    }
+    /// E-053/R-D09: identity reads never invoke the configuration schema or file service.
+    pub async fn read_identity_info(&self) -> Result<IdentityInfo, SessionError> {
+        self.guarded(async {
+            let mut q = self.queue.lock().await;
+            let status = self
+                .exchange(&mut q, Method::DeviceStatus, Value::Null)
+                .await;
+            let status_value = status
+                .as_ref()
+                .ok()
+                .and_then(|v| identity_result(v).ok())
+                .cloned();
+            let mut version = status_value.as_ref().and_then(firmware);
+            let mut raw = serde_json::json!({"status":status_value});
+            let mut source_method = "device.status";
+            if version.is_none() {
+                let reply = self
+                    .exchange(&mut q, Method::SysVersion, Value::Null)
+                    .await?;
+                let result = identity_result(&reply)?;
+                version = firmware(result);
+                if version.is_none() {
+                    return Err(
+                        ProtoError::Invalid("sys.version has no valid version".into()).into(),
+                    );
+                }
+                raw["version"] = result.clone();
+                source_method = "sys.version";
+            }
+            let index = |key: &str| {
+                status_value
+                    .as_ref()
+                    .and_then(|v| v.get(key))
+                    .and_then(Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok())
+            };
+            Ok(IdentityInfo {
+                session_id: self.id,
+                version,
+                profile_index: index("profile_index"),
+                layer_index: index("layer_index"),
+                source_method: source_method.into(),
+                raw,
+            })
         })
         .await
     }

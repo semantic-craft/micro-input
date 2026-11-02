@@ -13,7 +13,7 @@ use tokio::sync::{broadcast, mpsc};
 pub enum TransportError {
     #[error("设备已断开")]
     Disconnected,
-    #[error("设备不可用或被占用：{0}")]
+    #[error("设备 I/O 失败（原因未确认）：{0}")]
     Unavailable(String),
     #[error("仅支持 USB；连接类型待确认")]
     Unsupported,
@@ -50,8 +50,19 @@ pub fn is_candidate(d: &HidCandidate) -> bool {
             .any(|p| p.page == 0xff00 && p.usage == 1)
             || (d.usage_pairs.is_empty() && d.usage_page == 0xff00 && d.usage == 1))
 }
+/// R-D13/E-075: selected by compiled adapters, never by environment variables or RPC input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkBackend {
+    Unverified,
+    MacHidapi267Numbered,
+    #[cfg(feature = "synthetic-backend")]
+    SyntheticNumbered,
+}
 #[async_trait::async_trait]
 pub trait HidLink: Send + Sync {
+    fn backend(&self) -> LinkBackend {
+        LinkBackend::Unverified
+    }
     async fn write(&self, report: &[u8]) -> Result<(), TransportError>;
     async fn read(&self) -> Result<Vec<u8>, TransportError>;
     fn close(&self);
@@ -61,6 +72,14 @@ pub trait HidTransport: Send + Sync {
     #[cfg(feature = "synthetic-backend")]
     fn set_synthetic_discovery(&self, _state: u8) -> Result<(), TransportError> {
         Err(TransportError::Unsupported)
+    }
+    #[cfg(feature = "synthetic-backend")]
+    fn set_synthetic_identity(&self, _scenario: u8) -> Result<(), TransportError> {
+        Err(TransportError::Unsupported)
+    }
+    #[cfg(feature = "synthetic-backend")]
+    fn synthetic_requests(&self) -> Vec<String> {
+        vec![]
     }
     fn subscribe(&self) -> broadcast::Receiver<()>;
     fn open(&self, id: &str) -> Result<Arc<dyn HidLink>, TransportError>;
@@ -243,15 +262,28 @@ struct MacLink {
 }
 #[async_trait::async_trait]
 impl HidLink for MacLink {
+    fn backend(&self) -> LinkBackend {
+        if cfg!(target_os = "macos") {
+            LinkBackend::MacHidapi267Numbered
+        } else {
+            LinkBackend::Unverified
+        }
+    }
     async fn write(&self, report: &[u8]) -> Result<(), TransportError> {
         let d = self.device.clone();
         let bytes = report.to_vec();
         tokio::task::spawn_blocking(move || {
             let guard = d.lock().unwrap();
             let dev = guard.as_ref().ok_or(TransportError::Disconnected)?;
-            dev.write(&bytes)
-                .map(|_| ())
-                .map_err(|e| TransportError::Unavailable(e.to_string()))
+            let sent = dev
+                .write(&bytes)
+                .map_err(|e| TransportError::Unavailable(e.to_string()))?;
+            if sent != bytes.len() {
+                return Err(TransportError::Unavailable(
+                    "short numbered report send".into(),
+                ));
+            }
+            Ok(())
         })
         .await
         .map_err(|e| TransportError::Unavailable(e.to_string()))?
@@ -427,6 +459,8 @@ mod tests {
 #[cfg(feature = "synthetic-backend")]
 pub struct SyntheticDiscovery {
     state: Mutex<u8>,
+    identity: std::sync::atomic::AtomicU8,
+    requests: Arc<Mutex<Vec<String>>>,
     events: broadcast::Sender<()>,
 }
 #[cfg(feature = "synthetic-backend")]
@@ -435,6 +469,8 @@ impl Default for SyntheticDiscovery {
         let (events, _) = broadcast::channel(16);
         Self {
             state: Mutex::new(0),
+            identity: std::sync::atomic::AtomicU8::new(0),
+            requests: Arc::new(Mutex::new(vec![])),
             events,
         }
     }
@@ -468,12 +504,77 @@ impl HidTransport for SyntheticDiscovery {
     fn subscribe(&self) -> broadcast::Receiver<()> {
         self.events.subscribe()
     }
-    fn open(&self, _: &str) -> Result<Arc<dyn HidLink>, TransportError> {
-        Err(TransportError::Unsupported)
+    fn open(&self, id: &str) -> Result<Arc<dyn HidLink>, TransportError> {
+        if *self.state.lock().unwrap() != 1 || id != "synthetic-interface-0" {
+            return Err(TransportError::Unsupported);
+        }
+        let (link, mut incoming) = MockLink::new();
+        let scenario = self.identity.load(Ordering::SeqCst);
+        let requests = self.requests.clone();
+        let inject = link.inject.clone();
+        tokio::spawn(async move {
+            let mut bytes = vec![];
+            while let Some(report) = incoming.recv().await {
+                if report.len() != 64 || report[0] != 6 || report[1] != 2 || report[2] > 61 {
+                    break;
+                }
+                bytes.extend_from_slice(&report[3..3 + report[2] as usize]);
+                let Ok(request) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                    continue;
+                };
+                bytes.clear();
+                let method = request["method"].as_str().unwrap_or("");
+                requests.lock().unwrap().push(method.to_owned());
+                let response = if scenario == 2 {
+                    serde_json::json!({"id":request["id"],"error":{"code":500,"message":"synthetic identity failure"}})
+                } else if method == "device.status" && scenario == 1 {
+                    serde_json::json!({"id":request["id"],"result":{"profile_index":-1,"layer_index":1.5}})
+                } else {
+                    serde_json::json!({"id":request["id"],"result":{"version":"synthetic-0.6.3","profile_index":2,"layer_index":1}})
+                };
+                for part in response.to_string().as_bytes().chunks(61) {
+                    let mut r = vec![0; 64];
+                    r[0] = 6;
+                    r[1] = 2;
+                    r[2] = part.len() as u8;
+                    r[3..3 + part.len()].copy_from_slice(part);
+                    if inject.send(r).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(Arc::new(SyntheticLink(link)))
+    }
+    fn set_synthetic_identity(&self, scenario: u8) -> Result<(), TransportError> {
+        self.identity.store(scenario, Ordering::SeqCst);
+        Ok(())
+    }
+    fn synthetic_requests(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
     }
     fn set_synthetic_discovery(&self, state: u8) -> Result<(), TransportError> {
         *self.state.lock().unwrap() = state;
         let _ = self.events.send(());
         Ok(())
+    }
+}
+
+#[cfg(feature = "synthetic-backend")]
+struct SyntheticLink(Arc<MockLink>);
+#[cfg(feature = "synthetic-backend")]
+#[async_trait::async_trait]
+impl HidLink for SyntheticLink {
+    fn backend(&self) -> LinkBackend {
+        LinkBackend::SyntheticNumbered
+    }
+    async fn write(&self, r: &[u8]) -> Result<(), TransportError> {
+        self.0.write(r).await
+    }
+    async fn read(&self) -> Result<Vec<u8>, TransportError> {
+        self.0.read().await
+    }
+    fn close(&self) {
+        self.0.close();
     }
 }

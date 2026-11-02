@@ -59,6 +59,17 @@ impl From<HidCandidate> for DeviceInfo {
         }
     }
 }
+#[derive(Clone, uniffi::Record)]
+pub struct IdentityInfo {
+    pub session_id: u64,
+    pub version: Option<String>,
+    pub profile_index: Option<u32>,
+    pub layer_index: Option<u32>,
+    pub source_method: String,
+    pub verification: String,
+    pub backend: String,
+    pub raw_json: String,
+}
 #[uniffi::export(callback_interface)]
 pub trait DeviceEvents: Send + Sync {
     fn changed(&self, devices: Vec<DeviceInfo>);
@@ -175,9 +186,7 @@ impl MicroInput {
             (state.generation, state.session.take())
         };
         if let Some((_, s)) = old {
-            tokio::task::spawn_blocking(move || s.disconnect())
-                .await
-                .ok();
+            s.shutdown().await;
         }
         let _gate = self.connect_gate.lock().await;
         if self.state.lock().unwrap().generation != generation {
@@ -194,9 +203,22 @@ impl MicroInput {
             link.close();
             return Err(failure("连接已取消"));
         }
+        // E-075: only the compiled, inspected native adapter can select numbered reports.
+        let supported = matches!(
+            link.backend(),
+            mi_transport::LinkBackend::MacHidapi267Numbered
+        );
+        #[cfg(feature = "synthetic-backend")]
+        let supported =
+            supported || matches!(link.backend(), mi_transport::LinkBackend::SyntheticNumbered);
+        let framer: Box<dyn mi_proto::Framer> = if supported {
+            Box::new(mi_proto::NativeFramer::default())
+        } else {
+            Box::new(mi_proto::UnimplementedFramer)
+        };
         let s = DeviceSession::new(
             link,
-            Box::new(mi_proto::UnimplementedFramer),
+            framer,
             Arc::new(UnverifiedSchema),
             SessionConfig::default(),
         );
@@ -207,17 +229,26 @@ impl MicroInput {
     pub async fn disconnect(&self) {
         let (_, old) = self.invalidate();
         if let Some((_, s)) = old {
-            tokio::task::spawn_blocking(move || s.disconnect())
-                .await
-                .ok();
+            s.shutdown().await;
         }
     }
-    pub async fn read_identity(&self) -> Result<String, BridgeError> {
+    pub async fn read_identity(&self) -> Result<IdentityInfo, BridgeError> {
         let s = self.current()?;
-        s.read_identity()
+        let info = s
+            .read_identity_info()
             .await
-            .map(|v| v.to_string())
-            .map_err(failure)
+            .map_err(|e| failure(s.terminal_failure().unwrap_or(e)))?;
+        // A reply verifies this identity query only, not configuration or broad compatibility.
+        Ok(IdentityInfo {
+            session_id: info.session_id,
+            version: info.version,
+            profile_index: info.profile_index,
+            layer_index: info.layer_index,
+            source_method: info.source_method,
+            verification: "identity-query-observed".into(),
+            backend: s.backend_name().into(),
+            raw_json: info.raw.to_string(),
+        })
     }
     pub async fn read_config(&self) -> Result<String, BridgeError> {
         let s = self.current()?;
@@ -351,6 +382,14 @@ impl MicroInput {
             connect_gate: tokio::sync::Mutex::new(()),
         })
     }
+    pub async fn set_synthetic_identity(&self, scenario: u8) -> Result<(), BridgeError> {
+        self.transport
+            .set_synthetic_identity(scenario)
+            .map_err(failure)
+    }
+    pub async fn synthetic_requests(&self) -> Vec<String> {
+        self.transport.synthetic_requests()
+    }
     pub async fn set_synthetic_discovery(
         &self,
         state: SyntheticDiscoveryState,
@@ -362,5 +401,39 @@ impl MicroInput {
                 SyntheticDiscoveryState::Failure => 2,
             })
             .map_err(failure)
+    }
+}
+
+#[cfg(test)]
+mod hardware_tests {
+    use super::*;
+    /// Opt-in only. R-D09: same core as UniFFI, exactly one supported USB candidate,
+    /// status/version only, bounded lifetime, no file reads or device mutations.
+    #[tokio::test]
+    #[ignore = "requires an explicitly authorized physical read-only device session"]
+    async fn native_identity_query_only() {
+        let core = MicroInput::new();
+        let devices = core.list_devices().await.unwrap();
+        let supported: Vec<_> = devices
+            .into_iter()
+            .filter(|d| d.pid == 0x8298 && d.transport == "Usb")
+            .collect();
+        assert_eq!(
+            supported.len(),
+            1,
+            "explicit selection required for zero/multiple candidates"
+        );
+        core.connect(supported[0].id.clone()).await.unwrap();
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(25), core.read_identity()).await;
+        core.disconnect().await;
+        let identity = result
+            .expect("bounded identity query")
+            .expect("native identity response");
+        eprintln!(
+            "identity version={:?} backend={} source={}",
+            identity.version, identity.backend, identity.source_method
+        );
+        assert!(identity.version.is_some());
     }
 }

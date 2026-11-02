@@ -92,15 +92,22 @@ impl RpcCodec for JsonCodec {
         if !v.is_object() {
             return Err(ProtoError::Invalid("expected object".into()));
         }
-        if v.get("method").is_some() || v.get("m").is_some() {
-            if v.get("result").is_some() || v.get("error").is_some() {
-                return Err(ProtoError::Invalid("mixed request/response".into()));
-            }
-            let method = alias(&v, "method", "m")?
-                .and_then(Value::as_str)
+        let method = alias(&v, "method", "m")?;
+        let is_response = v.get("result").is_some() || v.get("error").is_some();
+        if let Some(method) = method {
+            let method = method
+                .as_str()
                 .ok_or_else(|| ProtoError::Invalid("invalid method".into()))?
                 .to_owned();
-            return Ok(Incoming::Notification(Notification { method, raw: v }));
+            if !is_response {
+                return Ok(Incoming::Notification(Notification { method, raw: v }));
+            }
+            if !["device.status", "sys.version", "fs.list", "fs.readbin"].contains(&method.as_str())
+                || v.get("params").is_some()
+                || v.get("p").is_some()
+            {
+                return Err(ProtoError::Invalid("invalid response method echo".into()));
+            }
         }
         let id = alias(&v, "id", "i")?
             .and_then(Value::as_u64)
@@ -190,6 +197,22 @@ pub enum HostAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // E-077: native 0.6.3 replies echo the requested read-only method.
+    #[test]
+    fn response_can_echo_method_without_becoming_a_device_request() {
+        assert!(
+            matches!(JsonCodec.decode(br#"{"id":7,"method":"device.status","result":{"version":"synthetic"}}"#).unwrap(),Incoming::Response(r) if r.id==7)
+        );
+        assert!(matches!(
+            JsonCodec
+                .decode(br#"{"id":7,"method":"host.focused_app","params":{}}"#)
+                .unwrap(),
+            Incoming::Notification(_)
+        ));
+        assert!(JsonCodec
+            .decode(br#"{"id":7,"method":"host.focused_app","result":{}}"#)
+            .is_err());
+    }
     #[test]
     fn native_frames_and_object_boundaries() {
         for (length, sizes) in [

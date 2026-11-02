@@ -208,6 +208,10 @@ async fn real_framer_never_writes() {
         s.read_identity().await,
         Err(SessionError::Protocol(ProtoError::Unverified(_)))
     ));
+    assert!(matches!(
+        s.read_identity_info().await,
+        Err(SessionError::Protocol(ProtoError::Unverified(_)))
+    ));
     assert!(l.writes.lock().unwrap().is_empty());
 }
 #[tokio::test]
@@ -286,4 +290,87 @@ async fn production_exit_rejects_forbidden_parameters_without_sending() {
     }
     assert!(l.writes.lock().unwrap().is_empty());
     s.shutdown().await;
+}
+
+// R-D09/D01: status success is sufficient; absent version triggers explicit fallback.
+#[tokio::test]
+async fn identity_preserves_unknown_indices_and_falls_back_only_when_needed() {
+    let (l, mut requests) = MockLink::new();
+    let s = DeviceSession::new(
+        l.clone(),
+        Box::new(mi_proto::NativeFramer::default()),
+        Arc::new(UnverifiedSchema),
+        SessionConfig::default(),
+    );
+    let a = s.clone();
+    let read = tokio::spawn(async move { a.read_identity_info().await });
+    let report = requests.recv().await.unwrap();
+    let r: Value = serde_json::from_slice(&report[3..3 + report[2] as usize]).unwrap();
+    assert_eq!(r["method"], "device.status");
+    let response =
+        json!({"id":r["id"],"result":{"profile_index":-1,"layer_index":1.5,"future":"retained"}});
+    for r in mi_proto::NativeFramer::default()
+        .encode(response.to_string().as_bytes())
+        .unwrap()
+    {
+        l.inject.send(r).unwrap();
+    }
+    let report = requests.recv().await.unwrap();
+    let r: Value = serde_json::from_slice(&report[3..3 + report[2] as usize]).unwrap();
+    assert_eq!(r["method"], "sys.version");
+    for r in mi_proto::NativeFramer::default()
+        .encode(
+            json!({"id":r["id"],"result":{"version":"0.6.3"}})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap()
+    {
+        l.inject.send(r).unwrap();
+    }
+    let identity = read.await.unwrap().unwrap();
+    assert_eq!(identity.version.as_deref(), Some("0.6.3"));
+    assert_eq!(identity.profile_index, None);
+    assert_eq!(identity.layer_index, None);
+    assert_eq!(identity.raw["status"]["future"], "retained");
+    assert_eq!(identity.source_method, "sys.version");
+    assert!(requests.try_recv().is_err());
+    s.shutdown().await;
+}
+
+#[tokio::test]
+async fn exhausted_request_ids_end_the_session_and_require_reconnect() {
+    let (link, mut requests) = MockLink::new();
+    let s = DeviceSession::new(
+        link.clone(),
+        Box::new(TestFramer),
+        Arc::new(TestSchema),
+        SessionConfig {
+            timeout: Duration::from_secs(1),
+            interval: Duration::ZERO,
+        },
+    );
+    let inject = link.inject.clone();
+    let server = tokio::spawn(async move {
+        while let Some(r) = requests.recv().await {
+            let v: Value = serde_json::from_slice(&r).unwrap();
+            inject
+                .send(json!({"id":v["id"],"result":null}).to_string().into_bytes())
+                .unwrap();
+        }
+    });
+    for _ in 0..999 {
+        s.request(Method::SysVersion, Value::Null).await.unwrap();
+    }
+    let exhausted = s
+        .request(Method::SysVersion, Value::Null)
+        .await
+        .unwrap_err();
+    assert!(exhausted.to_string().contains("exhausted"));
+    assert!(matches!(
+        s.request(Method::SysVersion, Value::Null).await,
+        Err(SessionError::Disconnected)
+    ));
+    s.shutdown().await;
+    server.abort();
 }
