@@ -469,7 +469,7 @@ impl LocalDocumentV2 {
         self.editable
             .graph
             .actions
-            .retain(|id, _| used.contains(id));
+            .retain(|id, a| used.contains(id) || crate::macro_library::is_local_macro(a));
         let valid: BTreeSet<_> = self
             .editable
             .graph
@@ -572,6 +572,19 @@ impl LocalDocumentV2 {
             return vec![];
         };
         let mut changes = vec![];
+        for (id, action) in &self.editable.graph.actions {
+            if crate::macro_library::is_local_macro(action) {
+                let count = self
+                    .editable
+                    .graph
+                    .layers
+                    .values()
+                    .flat_map(|l| l.controls.values())
+                    .filter(|b| b.action_id.as_ref() == Some(id))
+                    .count();
+                changes.push(format!("本地宏：{}（{} 个引用）", action.name, count));
+            }
+        }
         let g = &self.editable.graph;
         let refs = &self.editable.source_refs;
         for old in &source.profiles {

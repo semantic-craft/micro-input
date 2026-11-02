@@ -6,6 +6,7 @@ struct Workbench: View {
     @FocusState private var searchFocused: Bool
     @State private var choosing = false
     @State private var reviewing = false
+    @State private var choosingMacro = false
     @State private var search = ""
     @State private var category = "全部"
     @State private var favoritesOnly = false
@@ -127,6 +128,7 @@ struct Workbench: View {
             Button("重做草稿") { Task { await store.undoDraft(redo: true) } }.keyboardShortcut("z", modifiers: [.command, .shift]).hidden()
         }
         .sheet(isPresented: $choosing) { actionSheet }
+        .sheet(isPresented: $choosingMacro) { MacroLibraryView(store: store) }
         .sheet(isPresented: $reviewing) { diffSheet }
         .sheet(isPresented: $naming) { nameSheet }
         .alert(deleteLayer ? "删除所选层？" : "删除所选配置？", isPresented:$deleting) {
@@ -214,10 +216,15 @@ struct Workbench: View {
             if store.browsingDeviceSnapshot { Text("层颜色：\(store.layer?.displayColor ?? "未知（原值保留）")").font(.caption).foregroundStyle(.secondary) }
             Text("动作").foregroundStyle(.secondary)
             Button { choosing = true } label: { HStack { Text(label(store.slot)).lineLimit(3); Spacer(); Text(store.browsingDeviceSnapshot ? "只读" : "更换").foregroundStyle(.blue) }.padding(14).frame(maxWidth: .infinity).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 9)) }.buttonStyle(.plain).disabled(!store.canEditDraft || store.layer == nil)
+            Button("已保存的普通宏（\(store.macros.count)）") { choosingMacro = true }.disabled(!store.canEditDraft)
+            if let macro = store.selectedMacro {
+                Text("共享宏 · \(macro.references.count) 个控件引用").font(.caption).foregroundStyle(.secondary)
+                Button("移除此控件的宏引用") { Task { await store.bindMacro(nil) } }.disabled(store.busy || !store.canEditDraft)
+            }
             if let a = action(store.slot) {
                 Text(a.category).font(.caption).foregroundStyle(.secondary)
                 if let capability = store.actionCapabilities[store.slotKey] { ActionCapabilityView(capability: capability) }
-                ActionParameters(action: a, store: store).id(store.slotKey + String(store.draft.revision))
+                ActionParameters(action: a, store: store, macroID: store.selectedMacro?.id).id(store.slotKey + String(store.draft.revision))
                 DisclosureGroup("高级参数原值") { Text(JSONValue.object(a.payload).text).font(.caption.monospaced()).textSelection(.enabled) }
             }
             else if bindings.indices.contains(store.slot) {
@@ -259,6 +266,16 @@ struct Workbench: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         if store.library.entries.isEmpty { Text("没有匹配动作").foregroundStyle(.secondary).padding() }
+                        if !favoritesOnly && (category == "全部" || category == "普通宏") {
+                            ForEach(store.macros.filter { search.isEmpty || $0.action.name.localizedCaseInsensitiveContains(search) }) { macro in
+                                Button { Task { await store.bindMacro(macro.id); choosing = false } } label: {
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text(macro.action.name).bold()
+                                        Text("已保存本地宏 · 共享引用 · \(macro.references.count) 个控件").font(.caption).foregroundStyle(.secondary)
+                                    }.frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                                }.buttonStyle(.plain).disabled(store.busy || !store.canEditDraft)
+                            }
+                        }
                         ForEach(store.library.entries) { entry in
                             HStack(alignment: .top) {
                                 Button { choose(entry.action) } label: {
@@ -339,7 +356,9 @@ struct Workbench: View {
 // R-K05: typed parameters edited locally; adapters remain unavailable.
 struct ActionParameters: View {
     @State var action: CatalogAction
+    @State private var editingMacro = false
     @ObservedObject var store: Store
+    var macroID: String? = nil
     var saved: (() -> Void)? = nil
     var type: String { action.payload["type"]?.text ?? "unknown" }
     var fields: [(String,String)] {
@@ -355,6 +374,11 @@ struct ActionParameters: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if type == "local_macro", MacroEditorDraft(action: action) != nil {
+                Button("编辑宏步骤") { editingMacro = true }.disabled(!store.canEditDraft || store.busy)
+                Text("自有本地序列 · 按下 / 释放 / 延时 · 不执行").font(.caption).foregroundStyle(.secondary)
+            }
+            if type != "local_macro" {
             Text("动作名称").font(.caption).foregroundStyle(.secondary)
             TextField("动作名称", text: $action.name)
             ForEach(fields, id: \.0) { key,label in
@@ -385,7 +409,8 @@ struct ActionParameters: View {
             }
             Text("参数修改后点击保存").font(.caption).foregroundStyle(.secondary)
             Button("保存参数到草稿") { Task { if await store.saveAction(action) { saved?() } } }.disabled(!store.canEditDraft || store.busy)
-        }
+            }
+        }.sheet(isPresented: $editingMacro) { MacroEditor(action: action, macroID: macroID, store: store, saved: saved) }
     }
     var modifiers: [String] { if case .array(let values) = action.payload["modifiers"] { return values.map(\.text) }; return [] }
 }

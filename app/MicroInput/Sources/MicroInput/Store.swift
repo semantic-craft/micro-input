@@ -18,6 +18,9 @@ protocol Backend {
     func actionLibrary(query: String, category: String, favoritesOnly: Bool) async throws -> String
     func setActionFavorite(actionId: String, favorite: Bool) async throws
     func assignAction(profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String
+    func saveMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String
+    func bindMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32) async throws -> String
+    func deleteMacroAction(macroId: String) async throws -> String
     func undoDraft(redo: Bool) async throws -> String
     func documentView() async throws -> String
     func createProfile(name: String) async throws -> String
@@ -42,6 +45,9 @@ extension Backend {
     func actionLibrary(query: String, category: String, favoritesOnly: Bool) async throws -> String { throw BridgeError.Failed(message: "动作库不可用") }
     func setActionFavorite(actionId: String, favorite: Bool) async throws { throw BridgeError.Failed(message: "收藏不可用") }
     func assignAction(profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String { throw BridgeError.Failed(message: "草稿编辑不可用") }
+    func saveMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String { throw BridgeError.Failed(message: "本地宏不可用") }
+    func bindMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32) async throws -> String { throw BridgeError.Failed(message: "本地宏不可用") }
+    func deleteMacroAction(macroId: String) async throws -> String { throw BridgeError.Failed(message: "本地宏不可用") }
     func undoDraft(redo: Bool) async throws -> String { throw BridgeError.Failed(message: "草稿撤销不可用") }
 
     func documentView() async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
@@ -63,6 +69,7 @@ extension MicroInput: Backend {}
     func subscribeInput() async throws -> InputSubscription { try await backend.subscribeInput() }
     private let backend: Backend
     @Published var draft = DraftState()
+    @Published var macros: [MacroSummary] = []
     @Published var catalog: [CatalogAction] = []
     @Published var library = ActionLibraryState()
     @Published var actionCapabilities: [String:ActionCapability] = [:]
@@ -121,6 +128,7 @@ extension MicroInput: Backend {}
         let result = try JSONDecoder().decode(DocumentView.self, from: Data(json.utf8))
         let oldProfile = fresh ? nil : profile?.id.text, oldLayer = fresh ? nil : layer?.id.text
         let pi = fresh ? 0 : profileIndex, li = fresh ? 0 : layerIndex
+        macros = result.macro_library ?? []
         draft = result.draft; snapshot = result.config; localSnapshot = result.config
         actionCapabilities = result.action_capabilities ?? [:]
         browsingDeviceSnapshot = false; stale = false; documentReady = !draft.read_only
@@ -157,6 +165,7 @@ extension MicroInput: Backend {}
         await saveAction(action)
     }
     @discardableResult func saveAction(_ action: CatalogAction) async -> Bool {
+        if action.payload["type"]?.text == "local_macro" { return await saveMacro(action) }
         guard canEditDraft, !busy, let profile, let layer else { return false }
         busy = true; defer { busy = false }
         do {
@@ -169,6 +178,31 @@ extension MicroInput: Backend {}
             return true
         } catch { status = readableError(error); return false }
     }
+    var selectedMacro: MacroSummary? {
+        macros.first { $0.references.contains { $0.profile_id == profile?.id.text && $0.layer_id == layer?.id.text && $0.logical_control == "logical-\(slot)" } }
+    }
+    @discardableResult func saveMacro(_ action: CatalogAction, id: String? = nil) async -> Bool {
+        guard canEditDraft, !busy, let profile, let layer else { return false }
+        busy = true; defer { busy = false }
+        do {
+            let encoder = JSONEncoder()
+            let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
+            let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
+            let a = String(decoding: try encoder.encode(action), as: UTF8.self)
+            try applyDocument(try await backend.saveMacroAction(macroId: id, profileId: p, layerId: l, slot: UInt32(slot), actionJson: a))
+            return true
+        } catch { status = readableError(error); return false }
+    }
+    func bindMacro(_ id: String?) async {
+        guard let profile, let layer else { return }
+        let encoder = JSONEncoder()
+        do {
+            let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
+            let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
+            await editDocument { try await backend.bindMacroAction(macroId: id, profileId: p, layerId: l, slot: UInt32(slot)) }
+        } catch { status = readableError(error) }
+    }
+    func deleteMacro(_ id: String) async { await editDocument { try await backend.deleteMacroAction(macroId: id) } }
     func undoDraft(redo: Bool = false) async {
         guard canEditDraft, !busy else { return }; busy = true; defer { busy = false }
         do { try applyDocument(try await backend.undoDraft(redo: redo)) }
