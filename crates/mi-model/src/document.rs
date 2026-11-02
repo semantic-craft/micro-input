@@ -18,6 +18,8 @@ pub struct ProfileNode {
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct LayerNode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_settings: Option<crate::control_settings::ControlSettings>,
     pub name: String,
     pub control_order: Vec<String>,
     pub controls: BTreeMap<String, BindingNode>,
@@ -123,6 +125,7 @@ impl LocalDocumentV2 {
             for l in &p.layers {
                 let lid = new_id();
                 let mut layer = LayerNode {
+                    control_settings: None,
                     name: l.name.clone(),
                     control_order: vec![],
                     controls: BTreeMap::new(),
@@ -256,6 +259,7 @@ impl LocalDocumentV2 {
             .ok_or("配置不存在")?;
         let id = new_id();
         let mut layer = LayerNode {
+            control_settings: None,
             name: name.into(),
             control_order: vec![],
             controls: BTreeMap::new(),
@@ -292,6 +296,7 @@ impl LocalDocumentV2 {
             .clone();
         let id = new_id();
         let mut layer = LayerNode {
+            control_settings: old.control_settings.clone(),
             name: name.into(),
             control_order: vec![],
             controls: BTreeMap::new(),
