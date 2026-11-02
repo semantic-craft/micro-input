@@ -328,9 +328,12 @@ impl Comparison {
             let b = sources(&base.editable);
             let r = sources(&remote.editable);
             if b.difference(&r).next().is_some() && r.difference(&b).next().is_some() {
-                conflicts.push(format!(
-                    "源 ID 无法对照：{kind}；新增与删除不能猜作同一对象"
-                ));
+                let label = match kind {
+                    "source-profile" => "配置",
+                    "source-layer" => "层",
+                    _ => "控件",
+                };
+                conflicts.push(format!("{label}源 ID 无法对照；新增与删除不能猜作同一对象"));
             }
         }
         let old_raw = opaque(&base_config, config);

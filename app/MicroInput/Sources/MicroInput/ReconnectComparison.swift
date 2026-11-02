@@ -47,7 +47,7 @@ struct ReconnectComparisonView: View {
             Button("取消",role:.cancel){confirming=nil}
             Button("确认保存"){if let choice=confirming {Task {await store.resolveComparison(choice)}};confirming=nil}
         } message:{
-            Text(confirming=="local" ? "忽略设备侧的可编辑变化，保留本地草稿。设备的未知原值会保留为只读；保存后仍有本地差异，旧撤销历史将清空。" : "舍弃全部本地编辑，采用当前设备快照。保存后差异与旧撤销历史将清空。前态会先保存为恢复副本。")
+            Text(confirming=="local" ? "忽略设备侧的可编辑变化，保留本地草稿。设备的未知原值会保留为只读；保存后仍有本地差异，旧撤销历史将清空。前态会先保存为恢复副本。" : "舍弃全部本地编辑，采用当前设备快照。保存后差异与旧撤销历史将清空。前态会先保存为恢复副本。")
         }
     }
     private func value(_ title:String,_ value:JSONValue?)->some View {
