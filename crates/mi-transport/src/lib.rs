@@ -6,7 +6,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
 };
 use tokio::sync::{broadcast, mpsc};
 #[derive(Debug, Clone, thiserror::Error)]
@@ -90,6 +89,7 @@ pub trait HidTransport: Send + Sync {
         Err(TransportError::Unsupported)
     }
     fn subscribe(&self) -> broadcast::Receiver<()>;
+    fn stop_discovery(&self) {}
     fn open(&self, id: &str) -> Result<Arc<dyn HidLink>, TransportError>;
 }
 #[cfg(target_os = "macos")]
@@ -109,9 +109,12 @@ extern "C" {
         ),
         context: *mut std::ffi::c_void,
     ) -> i32;
-    fn mi_changes() -> u64;
     fn mi_permission() -> i32;
-    fn mi_watch(stop: *const AtomicBool);
+    fn mi_watch(
+        stop: *const AtomicBool,
+        changed: extern "C" fn(*mut std::ffi::c_void),
+        context: *mut std::ffi::c_void,
+    );
 }
 pub fn input_monitoring_allowed() -> bool {
     #[cfg(target_os = "macos")]
@@ -125,8 +128,7 @@ pub fn input_monitoring_allowed() -> bool {
 }
 pub struct MacTransport {
     events: broadcast::Sender<()>,
-    stop: Arc<AtomicBool>,
-    started: AtomicBool,
+    watcher: Mutex<Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>>,
 }
 impl Default for MacTransport {
     fn default() -> Self {
@@ -136,47 +138,51 @@ impl Default for MacTransport {
 impl MacTransport {
     pub fn new() -> Self {
         let (events, _) = broadcast::channel(16);
-        let stop = Arc::new(AtomicBool::new(false));
         Self {
             events,
-            stop,
-            started: AtomicBool::new(false),
+            watcher: Mutex::new(None),
         }
     }
     fn start_watching(&self) {
-        if self.started.swap(true, Ordering::SeqCst) {
+        let mut watcher = self.watcher.lock().unwrap();
+        if watcher.is_some() {
             return;
         }
         #[cfg(target_os = "macos")]
         {
-            let stop = self.stop.clone();
-            std::thread::spawn(move || unsafe { mi_watch(Arc::as_ptr(&stop)) });
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_stop = stop.clone();
+            let events = self.events.clone();
+            let thread = std::thread::spawn(move || unsafe {
+                // The callback only borrows this sender while mi_watch owns the run loop.
+                mi_watch(
+                    Arc::as_ptr(&thread_stop),
+                    discovery_changed,
+                    &events as *const _ as *mut std::ffi::c_void,
+                );
+            });
+            *watcher = Some((stop, thread));
         }
-        let s = self.stop.clone();
-        let e = self.events.clone();
-        std::thread::spawn(move || {
-            #[cfg(target_os = "macos")]
-            let mut seen = unsafe { mi_changes() };
-            while !s.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(25));
-                #[cfg(target_os = "macos")]
-                {
-                    let now = unsafe { mi_changes() };
-                    if now != seen {
-                        std::thread::sleep(Duration::from_millis(175));
-                        seen = unsafe { mi_changes() };
-                        let _ = e.send(());
-                    }
-                }
-            }
-        });
+    }
+    fn stop_watching(&self) {
+        let watcher = self.watcher.lock().unwrap().take();
+        if let Some((stop, thread)) = watcher {
+            stop.store(true, Ordering::SeqCst);
+            let _ = thread.join();
+        }
     }
 }
 impl Drop for MacTransport {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.stop_watching();
     }
 }
+#[cfg(target_os = "macos")]
+extern "C" fn discovery_changed(context: *mut std::ffi::c_void) {
+    let sender = unsafe { &*(context as *const broadcast::Sender<()>) };
+    let _ = sender.send(());
+}
+
 #[cfg(target_os = "macos")]
 extern "C" fn discovered(
     context: *mut std::ffi::c_void,
@@ -243,6 +249,9 @@ impl HidTransport for MacTransport {
         let receiver = self.events.subscribe();
         self.start_watching();
         receiver
+    }
+    fn stop_discovery(&self) {
+        self.stop_watching();
     }
     fn open(&self, id: &str) -> Result<Arc<dyn HidLink>, TransportError> {
         let d = self

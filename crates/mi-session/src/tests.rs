@@ -532,3 +532,117 @@ async fn owned_malformed_response_remains_an_error_after_routing() {
     assert!(s.terminal_failure().is_some());
     s.shutdown().await;
 }
+
+#[tokio::test]
+async fn waiting_for_session_end_observes_disconnect_without_polling() {
+    let (session, _, _) = setup(100);
+    let waiter = session.clone();
+    let ended = tokio::spawn(async move { waiter.wait_disconnected().await });
+    tokio::task::yield_now().await;
+    assert!(!ended.is_finished());
+    session.shutdown().await;
+    tokio::time::timeout(Duration::from_millis(100), ended)
+        .await
+        .unwrap()
+        .unwrap();
+    // Calling after shutdown must not miss the earlier notification.
+    tokio::time::timeout(Duration::from_millis(100), session.wait_disconnected())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_read_retries_with_fresh_request_and_rejects_late_response() {
+    let (session, link, mut requests) = setup(500);
+    let first = session.clone();
+    let cancelled = tokio::spawn(async move { first.read_identity_info().await });
+    let old: Value = serde_json::from_slice(&requests.recv().await.unwrap()).unwrap();
+    cancelled.abort();
+    assert!(cancelled.await.unwrap_err().is_cancelled());
+    let next = session.clone();
+    let retry = tokio::spawn(async move { next.read_identity_info().await });
+    let current: Value = serde_json::from_slice(&requests.recv().await.unwrap()).unwrap();
+    assert_ne!(old["id"], current["id"]);
+    link.inject
+        .send(
+            json!({"id": old["id"], "result": {"version": "old"}})
+                .to_string()
+                .into_bytes(),
+        )
+        .unwrap();
+    tokio::task::yield_now().await;
+    assert!(!retry.is_finished());
+    link.inject
+        .send(
+            json!({"id": current["id"], "result": {"version": "new"}})
+                .to_string()
+                .into_bytes(),
+        )
+        .unwrap();
+    assert_eq!(
+        retry.await.unwrap().unwrap().version.as_deref(),
+        Some("new")
+    );
+    session.shutdown().await;
+}
+
+struct StalledWriteLink(Arc<MockLink>, Arc<Notify>);
+#[async_trait::async_trait]
+impl HidLink for StalledWriteLink {
+    async fn write(&self, _: &[u8]) -> Result<(), TransportError> {
+        self.1.notify_one();
+        std::future::pending().await
+    }
+    async fn read(&self) -> Result<Vec<u8>, TransportError> {
+        self.0.read().await
+    }
+    fn close(&self) {
+        self.0.close();
+    }
+}
+#[tokio::test]
+async fn stalled_report_write_is_bounded_and_requires_a_new_session() {
+    let (link, _) = MockLink::new();
+    let session = DeviceSession::new(
+        Arc::new(StalledWriteLink(link, Arc::new(Notify::new()))),
+        Box::new(TestFramer),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_millis(20),
+            interval: Duration::ZERO,
+        },
+    );
+    let result = tokio::time::timeout(
+        Duration::from_millis(200),
+        session.request(Method::SysVersion, Value::Null),
+    )
+    .await;
+    assert!(matches!(result, Ok(Err(SessionError::Timeout))));
+    assert!(matches!(
+        session.request(Method::SysVersion, Value::Null).await,
+        Err(SessionError::Disconnected)
+    ));
+    session.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelling_incomplete_send_invalidates_session() {
+    let (link, _) = MockLink::new();
+    let started = Arc::new(Notify::new());
+    let session = DeviceSession::new(
+        Arc::new(StalledWriteLink(link, started.clone())),
+        Box::new(TestFramer),
+        Arc::new(ReadOnlySchema),
+        SessionConfig::default(),
+    );
+    let held = session.clone();
+    let request = tokio::spawn(async move { held.request(Method::SysVersion, Value::Null).await });
+    started.notified().await;
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    assert!(matches!(
+        session.request(Method::SysVersion, Value::Null).await,
+        Err(SessionError::Disconnected)
+    ));
+    session.shutdown().await;
+}

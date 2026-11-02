@@ -151,11 +151,12 @@ struct Workbench: View {
                     .disabled(store.busy || store.connectedID == nil || store.connectedID != store.selectedDeviceID)
                 Button("读取设备配置") { Task { await store.readDeviceConfig() } }
                     .disabled(store.busy || store.connectedID == nil || store.connectedID != store.selectedDeviceID || !["0.6.3", "synthetic-0.6.3"].contains(store.identity?.version ?? ""))
-                Button("断开") { Task { await store.suspend() } }.disabled(store.connectedID == nil)
+                Button("断开") { Task { await store.suspend() } }.disabled(!store.canDisconnect)
                 if store.browsingDeviceSnapshot {
                     Button("从快照新建草稿") {Task {await store.createDraftFromSnapshot()}}
                         .disabled(store.busy || store.stale || store.connectedID == nil)
                 }
+
                 Text(store.identityStatus).font(.caption).foregroundStyle(.secondary)
             }
             if let device = store.selectedDevice {
