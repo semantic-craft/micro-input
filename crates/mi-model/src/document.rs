@@ -509,6 +509,8 @@ impl LocalDocumentV2 {
             crate::comparison::base_config(self).map_err(|_| "来源配置不能显示")?;
         let source = config.clone();
         if self.baseline.is_some()
+            || self.origin["local_recovery"].is_object()
+            || self.origin["local_copy"].is_object()
             || matches!(
                 self.origin["kind"].as_str(),
                 Some("legacy-local" | "imported-local")

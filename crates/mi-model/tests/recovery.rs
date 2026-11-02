@@ -115,6 +115,10 @@ fn save_as_preserves_concurrent_changes_and_reopens_in_memory_draft_copy() {
         .update(|d| d.create_profile("Lost".into()).map(|_| ()))
         .is_err());
     store.save_document_as().unwrap();
+    assert!(matches!(
+        store.draft.config.source,
+        mi_model::Source::LocalDraft
+    ));
     assert_ne!(store.draft.document_id, before);
     assert!(!store.draft.can_undo);
     assert_eq!(fs::read(&path).unwrap(), b"external version");
@@ -165,4 +169,32 @@ fn stale_preview_pending_and_pointer_conflicts_never_change_memory_or_selection(
         assert_eq!(fs::read(path).unwrap(), original);
         assert_eq!(fs::read(marker).unwrap(), b"external");
     }
+}
+#[test]
+fn recovered_v2_is_a_local_draft_even_when_historical_config_claimed_device_snapshot() {
+    let t = Directory::new();
+    let path = t.0.join("workbench.json");
+    let mut config = mi_model::demo().unwrap();
+    config.source = mi_model::Source::DeviceSnapshot;
+    let document =
+        mi_model::document::LocalDocumentV2::from_config(&config, None, "device-snapshot").unwrap();
+    fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+    let mut store = DocumentStore::default();
+    store.open(path.clone()).unwrap();
+    let preview = store.inspect_recovery(path.clone()).unwrap();
+    store.recover_document(&preview.token).unwrap();
+    assert!(matches!(
+        store.draft.config.source,
+        mi_model::Source::LocalDraft
+    ));
+    assert_eq!(
+        store.draft.document.origin["config"]["source"],
+        "DeviceSnapshot"
+    );
+    let mut reopened = DocumentStore::default();
+    reopened.open(path).unwrap();
+    assert!(matches!(
+        reopened.draft.config.source,
+        mi_model::Source::LocalDraft
+    ));
 }

@@ -116,6 +116,8 @@ impl DocumentStore {
             return Err("当前文档未载入或含未知数据；请检查原件并保留原始字节副本".into());
         }
         let mut document = self.draft.document.clone();
+        document.origin["local_copy"] =
+            serde_json::json!({"kind":"save-as","source_document_id":document.document_id});
         document.document_id = crate::document::new_id();
         self.select_copy(Draft::from_document(document, 2, false)?, false)
     }

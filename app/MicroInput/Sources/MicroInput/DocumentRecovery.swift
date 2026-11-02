@@ -66,7 +66,7 @@ private struct DocumentRecoveryPanel: View {
             if let item = preview {
                 Divider()
                 Text(URL(fileURLWithPath:item.path).lastPathComponent).font(.headline)
-                Text("版本：\(item.schema_version.map(String.init) ?? "未知") · 来源：\(item.source_kind) · 修订：\(item.revision.map(String.init) ?? "未知") · \(item.profiles) 个配置")
+                Text("版本：\(item.schema_version.map(String.init) ?? "未知") · 历史来源：\(item.source_kind) · 修订：\(item.revision.map(String.init) ?? "未知") · \(item.profiles) 个配置")
                 Text("SHA-256：\(item.sha256)").font(.caption2).textSelection(.enabled)
                 Text(item.message).foregroundStyle(item.can_restore ? Color.primary : Color.orange)
                 if item.schema_version == 1 && item.can_restore { Text("复用 v1 → v2 转换；旧文件保留原字节，历史来源不作为当前设备快照。").font(.caption) }
