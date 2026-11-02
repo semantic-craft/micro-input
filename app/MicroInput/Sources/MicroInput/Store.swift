@@ -8,6 +8,8 @@ protocol Backend {
     func readIdentity() async throws -> IdentityInfo
     func readConfig() async throws -> String
     func disconnect() async
+    func waitForDisconnect() async -> String
+    func shutdown() async
     func inputMonitoringStatus() async -> Bool
     func subscribeDeviceEvents(cb: DeviceEvents) async
     func subscribeInput() async throws -> InputSubscription
@@ -17,6 +19,8 @@ protocol Backend {
     func undoDraft(redo: Bool) async throws -> String
 }
 extension Backend {
+    func waitForDisconnect() async -> String { "" }
+    func shutdown() async { await disconnect() }
     func subscribeInput() async throws -> InputSubscription { throw BridgeError.Failed(message: "输入监听不可用") }
     func readIdentity() async throws -> IdentityInfo { throw BridgeError.Failed(message: "身份读取不可用") }
     func openDocument(path: String) async throws -> String { throw BridgeError.Failed(message: "本地文档不可用") }
@@ -89,6 +93,8 @@ extension MicroInput: Backend {}
     }
     private var generation = 0
     private var pendingID: String?
+    private var connectionWatcher: Task<Void, Never>?
+    var canDisconnect: Bool { pendingID != nil || connectedID != nil }
     @Published var identity: IdentityInfo?
     @Published var identityStatus = "身份尚未读取"
     @Published var snapshot: Snapshot?
@@ -145,7 +151,7 @@ extension MicroInput: Backend {}
         } else if selectedDeviceID == nil {
             discoveryStatus = values.isEmpty ? "无 USB 候选设备" : "发现 \(values.count) 个 USB 候选 · 请选择设备"
         }
-        if let id = pendingID ?? connectedID, !values.contains(where: { $0.id == id }) { generation += 1; pendingID = nil; connectedID = nil; identity = nil; identityStatus = "身份尚未读取"; stale = snapshot != nil; status = "设备已断开" }
+        if let id = pendingID ?? connectedID, !values.contains(where: { $0.id == id }) { retireConnection("设备已断开") }
     }
     func loadDemo() async {
         guard !busy else { return }; busy = true; defer { busy = false }
@@ -154,19 +160,28 @@ extension MicroInput: Backend {}
         do { let json = try await backend.loadDemo(); guard token == generation else { return }; try replace(json); localSnapshot = snapshot; browsingDeviceSnapshot = false; status = "本地草稿 · 演示基线 · 未与设备同步" } catch { if token == generation { status = readableError(error) } }
     }
     func connect(_ id: String) async {
-        guard !busy else { return }; busy = true; defer { busy = false }
+        guard !busy else { return }
         generation += 1; let token = generation
+        busy = true; defer { if token == generation { busy = false } }
+        connectionWatcher?.cancel()
         connectedID = nil; identity = nil; identityStatus = "身份尚未读取"; pendingID = id
         // Preserve provenance: a failed device read cannot turn demo data into a device snapshot.
         do {
             try await backend.connect(id: id)
             guard token == generation else { return }
             pendingID = nil; connectedID = id; status = "设备已打开 · 身份尚未读取 · 配置尚未读取"
+            connectionWatcher = Task { [weak self, backend] in
+                let reason = await backend.waitForDisconnect()
+                guard !Task.isCancelled, !reason.isEmpty, let self, token == self.generation else { return }
+                self.retireConnection(reason)
+            }
         } catch { if token == generation { pendingID = nil; stale = snapshot != nil; status = "连接失败 · \(readableError(error))" } }
     }
     func readIdentity() async {
-        guard !busy, connectedID != nil else { return }; busy = true; defer { busy = false }
-        let token = generation; identity = nil; identityStatus = "正在读取身份"
+        guard !busy, connectedID != nil else { return }
+        let token = generation
+        busy = true; defer { if token == generation { busy = false } }
+        identity = nil; identityStatus = "正在读取身份"
         do {
             let result = try await backend.readIdentity()
             guard token == generation else { return }
@@ -176,8 +191,9 @@ extension MicroInput: Backend {}
         } catch { if token == generation { identityStatus = "身份读取失败 · \(readableError(error))" } }
     }
     func readDeviceConfig() async {
-        guard !busy, connectedID != nil else { return }; busy = true; defer { busy = false }
+        guard !busy, connectedID != nil else { return }
         let token = generation
+        busy = true; defer { if token == generation { busy = false } }
         stale = snapshot != nil
         status = "正在读取设备配置 · 旧数据尚未更新"
         do {
@@ -193,7 +209,14 @@ extension MicroInput: Backend {}
         } catch { if token == generation { stale = snapshot != nil; status = "配置读取失败 · \(readableError(error))" } }
     }
 
-    func suspend() async { generation += 1; pendingID = nil; await backend.disconnect(); connectedID = nil; identity = nil; identityStatus = "身份尚未读取"; stale = snapshot != nil; status = "会话已断开" }
+    private func retireConnection(_ reason: String) {
+        generation += 1; pendingID = nil; busy = false
+        connectionWatcher?.cancel(); connectionWatcher = nil
+        connectedID = nil; identity = nil; identityStatus = "身份尚未读取"
+        stale = snapshot != nil; status = reason
+    }
+    func suspend() async { retireConnection("会话已断开"); await backend.disconnect() }
+    func shutdown() async { retireConnection("应用正在退出"); await backend.shutdown() }
     private func replace(_ json: String) throws { let result = try JSONDecoder().decode(Snapshot.self, from: Data(json.utf8)); snapshot = result; stale = false; selectProfile(0) }
 }
 @MainActor final class Events: DeviceEvents {
@@ -205,6 +228,9 @@ extension MicroInput: Backend {}
 
 // R-A02: keep bridge type names and protocol internals out of normal status text.
 func readableError(_ error: Error) -> String {
+    if case BridgeError.Disconnected = error { return "设备已断开；请重新连接" }
+    if case BridgeError.Timeout = error { return "请求超时；可以手动重试" }
+    if case BridgeError.Unavailable = error { return "设备 I/O 失败，原因未确认；请检查连接后重试" }
     if case BridgeError.Failed(let message) = error {
         if message.contains("协议未验证") { return "协议未验证，设备读取待确认" }
         return message

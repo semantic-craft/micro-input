@@ -532,3 +532,56 @@ async fn owned_malformed_response_remains_an_error_after_routing() {
     assert!(s.terminal_failure().is_some());
     s.shutdown().await;
 }
+
+#[tokio::test]
+async fn waiting_for_session_end_observes_disconnect_without_polling() {
+    let (session, _, _) = setup(100);
+    let waiter = session.clone();
+    let ended = tokio::spawn(async move { waiter.wait_disconnected().await });
+    tokio::task::yield_now().await;
+    assert!(!ended.is_finished());
+    session.shutdown().await;
+    tokio::time::timeout(Duration::from_millis(100), ended)
+        .await
+        .unwrap()
+        .unwrap();
+    // Calling after shutdown must not miss the earlier notification.
+    tokio::time::timeout(Duration::from_millis(100), session.wait_disconnected())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_read_retries_with_fresh_request_and_rejects_late_response() {
+    let (session, link, mut requests) = setup(500);
+    let first = session.clone();
+    let cancelled = tokio::spawn(async move { first.read_identity_info().await });
+    let old: Value = serde_json::from_slice(&requests.recv().await.unwrap()).unwrap();
+    cancelled.abort();
+    assert!(cancelled.await.unwrap_err().is_cancelled());
+    let next = session.clone();
+    let retry = tokio::spawn(async move { next.read_identity_info().await });
+    let current: Value = serde_json::from_slice(&requests.recv().await.unwrap()).unwrap();
+    assert_ne!(old["id"], current["id"]);
+    link.inject
+        .send(
+            json!({"id": old["id"], "result": {"version": "old"}})
+                .to_string()
+                .into_bytes(),
+        )
+        .unwrap();
+    tokio::task::yield_now().await;
+    assert!(!retry.is_finished());
+    link.inject
+        .send(
+            json!({"id": current["id"], "result": {"version": "new"}})
+                .to_string()
+                .into_bytes(),
+        )
+        .unwrap();
+    assert_eq!(
+        retry.await.unwrap().unwrap().version.as_deref(),
+        Some("new")
+    );
+    session.shutdown().await;
+}

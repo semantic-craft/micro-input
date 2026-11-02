@@ -265,6 +265,16 @@ impl DeviceSession {
         }
     }
 
+    /// Event-driven lifecycle observation, independent of RPC and input subscriptions.
+    pub async fn wait_disconnected(&self) {
+        let changed = self.changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        if !self.invalid.load(Ordering::SeqCst) {
+            changed.await;
+        }
+    }
+
     pub fn terminal_failure(&self) -> Option<SessionError> {
         self.terminal.lock().unwrap().clone()
     }

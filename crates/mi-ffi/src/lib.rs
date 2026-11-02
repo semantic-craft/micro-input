@@ -7,12 +7,32 @@ use std::sync::{Arc, Mutex};
 uniffi::setup_scaffolding!();
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum BridgeError {
+    #[error("设备已断开；请明确重新连接")]
+    Disconnected,
+    #[error("请求超时；可以手动重试")]
+    Timeout,
+    #[error("设备 I/O 失败，原因未确认；请检查连接后重试")]
+    Unavailable,
     #[error("{message}")]
     Failed { message: String },
 }
 fn failure(e: impl std::fmt::Display) -> BridgeError {
     BridgeError::Failed {
         message: e.to_string(),
+    }
+}
+fn session_failure(error: mi_session::SessionError) -> BridgeError {
+    match error {
+        mi_session::SessionError::Disconnected
+        | mi_session::SessionError::Transport(mi_transport::TransportError::Disconnected) => {
+            BridgeError::Disconnected
+        }
+        mi_session::SessionError::Timeout => BridgeError::Timeout,
+        mi_session::SessionError::Transport(mi_transport::TransportError::Unavailable(_)) => {
+            BridgeError::Unavailable
+        }
+        mi_session::SessionError::Config(_) => failure("设备配置读取失败；旧快照已过期，请重试"),
+        error => failure(error),
     }
 }
 #[derive(Clone, uniffi::Record)]
@@ -227,7 +247,7 @@ impl MicroInput {
             tokio::task::spawn_blocking(move || t.open(&path).map(|link| OpenedLink(Some(link))))
                 .await
                 .map_err(failure)?
-                .map_err(failure)?;
+                .map_err(|e| session_failure(e.into()))?;
         let mut state = self.state.lock().unwrap();
         if state.generation != generation {
             return Err(failure("连接已取消"));
@@ -262,12 +282,23 @@ impl MicroInput {
             s.shutdown().await;
         }
     }
+    /// Wait on the current generation without opening hardware or sending any request.
+    pub async fn wait_for_disconnect(&self) -> String {
+        let Ok(session) = self.current() else {
+            return "设备已断开".into();
+        };
+        session.wait_disconnected().await;
+        session
+            .terminal_failure()
+            .map(|e| session_failure(e).to_string())
+            .unwrap_or_else(|| "设备已断开".into())
+    }
     pub async fn read_identity(&self) -> Result<IdentityInfo, BridgeError> {
         let s = self.current()?;
         let info = s
             .read_identity_info()
             .await
-            .map_err(|e| failure(s.terminal_failure().unwrap_or(e)))?;
+            .map_err(|e| session_failure(s.terminal_failure().unwrap_or(e)))?;
         // A reply verifies this identity query only, not configuration or broad compatibility.
         Ok(IdentityInfo {
             session_id: info.session_id,
@@ -282,7 +313,7 @@ impl MicroInput {
     }
     pub async fn read_config(&self) -> Result<String, BridgeError> {
         let s = self.current()?;
-        let c = s.read_config_snapshot().await.map_err(failure)?;
+        let c = s.read_config_snapshot().await.map_err(session_failure)?;
         serde_json::to_string(&c).map_err(failure)
     }
     pub async fn load_demo(&self) -> Result<String, BridgeError> {
@@ -328,7 +359,7 @@ impl MicroInput {
             .session
             .as_ref()
             .map(|(_, s)| s.clone())
-            .ok_or_else(|| failure("未连接设备"))
+            .ok_or(BridgeError::Disconnected)
     }
 }
 impl Drop for MicroInput {
@@ -363,6 +394,38 @@ mod tests {
                 released = cv.wait(released).unwrap();
             }
             Ok(self.link.clone())
+        }
+    }
+    struct UnavailableTransport;
+    impl HidTransport for UnavailableTransport {
+        fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
+            Ok(vec![])
+        }
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {
+            tokio::sync::broadcast::channel(1).1
+        }
+        fn open(&self, _: &str) -> Result<Arc<dyn HidLink>, TransportError> {
+            Err(TransportError::Unavailable(
+                "native detail must stay local".into(),
+            ))
+        }
+    }
+    #[tokio::test]
+    async fn nonexclusive_open_failure_is_unconfirmed_and_manual_retry_is_available() {
+        let core = MicroInput {
+            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            transport: Arc::new(UnavailableTransport),
+            state: Mutex::new(ConnectionState::default()),
+            connect_gate: tokio::sync::Mutex::new(()),
+        };
+        for _ in 0..2 {
+            let error = core.connect("mock".into()).await.unwrap_err();
+            assert!(matches!(error, BridgeError::Unavailable));
+            assert!(!error.to_string().contains("native detail"));
+            assert!(matches!(
+                core.read_identity().await,
+                Err(BridgeError::Disconnected)
+            ));
         }
     }
     #[tokio::test]
