@@ -1,5 +1,5 @@
 //! R-A02/R-A05: only high-level asynchronous operations cross the in-process UniFFI bridge.
-use mi_session::{DeviceSession, SessionConfig, UnverifiedSchema};
+use mi_session::{DeviceSession, ReadOnlySchema, SessionConfig, UnverifiedSchema};
 use mi_transport::{HidCandidate, HidTransport, MacTransport};
 use std::sync::{Arc, Mutex};
 uniffi::setup_scaffolding!();
@@ -216,12 +216,12 @@ impl MicroInput {
         } else {
             Box::new(mi_proto::UnimplementedFramer)
         };
-        let s = DeviceSession::new(
-            link,
-            framer,
-            Arc::new(UnverifiedSchema),
-            SessionConfig::default(),
-        );
+        let schema: Arc<dyn mi_session::DeviceSchema> = if supported {
+            Arc::new(ReadOnlySchema)
+        } else {
+            Arc::new(UnverifiedSchema)
+        };
+        let s = DeviceSession::new(link, framer, schema, SessionConfig::default());
         state.pending = None;
         state.session = Some((id, s));
         Ok(())
@@ -387,6 +387,11 @@ impl MicroInput {
             .set_synthetic_identity(scenario)
             .map_err(failure)
     }
+    pub async fn set_synthetic_config(&self, scenario: u8) -> Result<(), BridgeError> {
+        self.transport
+            .set_synthetic_config(scenario)
+            .map_err(failure)
+    }
     pub async fn synthetic_requests(&self) -> Vec<String> {
         self.transport.synthetic_requests()
     }
@@ -407,6 +412,47 @@ impl MicroInput {
 #[cfg(test)]
 mod hardware_tests {
     use super::*;
+    #[tokio::test]
+    #[ignore = "requires explicitly authorized physical read-only configuration session"]
+    async fn native_configuration_snapshot_read_only() {
+        let core = MicroInput::new();
+        let devices: Vec<_> = core
+            .list_devices()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.pid == 0x8298 && d.transport == "Usb")
+            .collect();
+        assert_eq!(devices.len(), 1, "explicit selection required");
+        core.connect(devices[0].id.clone()).await.unwrap();
+        let identity = core.read_identity().await.unwrap();
+        assert_eq!(identity.version.as_deref(), Some("0.6.3"));
+        let response =
+            tokio::time::timeout(std::time::Duration::from_secs(65), core.read_config()).await;
+        core.disconnect().await;
+        let text = response
+            .expect("bounded read")
+            .expect("verified configuration read");
+        let snapshot: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let profiles = snapshot["profiles"].as_array().unwrap();
+        assert!(!profiles.is_empty());
+        assert!(profiles
+            .iter()
+            .any(|p| p["layers"].as_array().is_some_and(|a| !a.is_empty())));
+        assert_eq!(snapshot["source"], "DeviceSnapshot");
+        assert_eq!(snapshot["firmware"], "0.6.3");
+        let files = snapshot["device_files"].as_array().unwrap();
+        assert!(!files.is_empty());
+        eprintln!(
+            "configuration read PASS: firmware=0.6.3 profiles={} files={} total_bytes={}",
+            profiles.len(),
+            files.len(),
+            files
+                .iter()
+                .map(|f| f["size"].as_u64().unwrap())
+                .sum::<u64>()
+        );
+    }
     /// Opt-in only. R-D09: same core as UniFFI, exactly one supported USB candidate,
     /// status/version only, bounded lifetime, no file reads or device mutations.
     #[tokio::test]

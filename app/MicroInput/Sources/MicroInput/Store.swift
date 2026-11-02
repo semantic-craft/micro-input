@@ -31,6 +31,16 @@ extension MicroInput: Backend {}
     @Published var catalog: [CatalogAction] = []
     @Published var slot = 0
     @Published var documentReady = false
+    @Published private(set) var browsingDeviceSnapshot = false
+    private var localSnapshot: Snapshot?
+    private var localSelection = (profile: 0, layer: 0, slot: 0)
+    var canEditDraft: Bool { documentReady && !browsingDeviceSnapshot }
+    func showLocalDraft() {
+        guard !busy, let localSnapshot else { return }
+        snapshot = localSnapshot; browsingDeviceSnapshot = false; stale = false
+        profileIndex = localSelection.profile; layerIndex = localSelection.layer; slot = localSelection.slot
+        status = "本地草稿 · 修改自动保存 · 不写设备"
+    }
     private var documentOverride: URL?
     var documentURL: URL {
         if let documentOverride { return documentOverride }
@@ -58,7 +68,7 @@ extension MicroInput: Backend {}
         await saveAction(action)
     }
     func saveAction(_ action: CatalogAction) async {
-        guard documentReady, !busy, let profile, let layer else { return }
+        guard canEditDraft, !busy, let profile, let layer else { return }
         busy = true; defer { busy = false }
         do {
             let encoder = JSONEncoder()
@@ -70,7 +80,7 @@ extension MicroInput: Backend {}
         } catch { status = readableError(error) }
     }
     func undoDraft(redo: Bool = false) async {
-        guard documentReady, !busy else { return }; busy = true; defer { busy = false }
+        guard canEditDraft, !busy else { return }; busy = true; defer { busy = false }
         do { draft = try JSONDecoder().decode(DraftState.self, from: Data(try await backend.undoDraft(redo: redo).utf8)) }
         catch { status = readableError(error) }
     }
@@ -138,7 +148,7 @@ extension MicroInput: Backend {}
         guard !busy else { return }; busy = true; defer { busy = false }
         generation += 1; let token = generation
         await backend.disconnect(); guard token == generation else { return }; connectedID = nil; identity = nil; identityStatus = "身份尚未读取"
-        do { let json = try await backend.loadDemo(); guard token == generation else { return }; try replace(json); status = "演示数据 · 未与设备同步" } catch { if token == generation { status = readableError(error) } }
+        do { let json = try await backend.loadDemo(); guard token == generation else { return }; try replace(json); localSnapshot = snapshot; browsingDeviceSnapshot = false; status = "本地草稿 · 演示基线 · 未与设备同步" } catch { if token == generation { status = readableError(error) } }
     }
     func connect(_ id: String) async {
         guard !busy else { return }; busy = true; defer { busy = false }
@@ -158,17 +168,25 @@ extension MicroInput: Backend {}
             let result = try await backend.readIdentity()
             guard token == generation else { return }
             identity = result
-            identityStatus = "身份已读回 · \(result.sourceMethod) · 配置尚未读取"
+            identityStatus = "身份已读回 · \(result.sourceMethod)"
             status = "设备身份已读回 · 固件 \(result.version ?? "未知") · 配置尚未读取"
         } catch { if token == generation { identityStatus = "身份读取失败 · \(readableError(error))" } }
     }
     func readDeviceConfig() async {
         guard !busy, connectedID != nil else { return }; busy = true; defer { busy = false }
         let token = generation
+        stale = snapshot != nil
+        status = "正在读取设备配置 · 旧数据尚未更新"
         do {
             let json = try await backend.readConfig()
-            guard token == generation else { return }; try replace(json)
-            status = "设备配置已读取"
+            guard token == generation else { return }
+            let result = try JSONDecoder().decode(Snapshot.self, from: Data(json.utf8))
+            if !browsingDeviceSnapshot {
+                localSnapshot = snapshot
+                localSelection = (profileIndex, layerIndex, slot)
+            }
+            snapshot = result; browsingDeviceSnapshot = true; stale = false; selectProfile(0)
+            status = result.source == "DeviceSnapshot" ? "设备快照 · 只读 · 已核对文件大小及摘要" : "合成设备夹具 · 只读 · 不是实际设备快照"
         } catch { if token == generation { stale = snapshot != nil; status = "配置读取失败 · \(readableError(error))" } }
     }
 

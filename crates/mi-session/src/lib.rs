@@ -351,6 +351,7 @@ impl DeviceSession {
     }
     /// E-053/R-D09: identity reads never invoke the configuration schema or file service.
     pub async fn read_identity_info(&self) -> Result<IdentityInfo, SessionError> {
+        *self.firmware.lock().unwrap() = None;
         self.guarded(async {
             let mut q = self.queue.lock().await;
             let status = self
@@ -437,21 +438,22 @@ impl DeviceSession {
     }
     /// Bounded read transaction. A failed/cancelled attempt never publishes a partial snapshot.
     pub async fn read_config_snapshot(&self) -> Result<DeviceConfig, SessionError> {
-        if !matches!(
-            self.firmware.lock().unwrap().as_deref(),
-            Some("0.6.3" | "synthetic-0.6.3")
-        ) {
-            return Err(ProtoError::Unverified(
-                "UNKNOWN-04 configuration requires explicit supported identity read",
-            )
-            .into());
-        }
         let _lease = self
             .read_gate
             .try_lock()
             .map_err(|_| SessionError::Config("配置正在读取".into()))?;
         if let Some(old) = self.snapshot.lock().unwrap().as_mut() {
             old.stale = true;
+        }
+        let read_firmware = self.firmware.lock().unwrap().clone();
+        let supported = read_firmware.as_deref() == Some("0.6.3")
+            || (self.backend_name().starts_with("synthetic/")
+                && read_firmware.as_deref() == Some("synthetic-0.6.3"));
+        if !supported {
+            return Err(ProtoError::Unverified(
+                "UNKNOWN-04 configuration requires explicit supported identity read",
+            )
+            .into());
         }
         tokio::time::timeout(
             Duration::from_secs(60),
@@ -490,12 +492,25 @@ impl DeviceSession {
                     &keymap.bytes,
                     smart_actions.as_ref().map(|f| f.bytes.as_ref()),
                 )?;
-                parsed.source = if self.backend_name().starts_with("synthetic/") {
-                    Source::Imported
-                } else {
+                parsed.source = if matches!(
+                    self.link.backend(),
+                    mi_transport::LinkBackend::MacHidapi267Numbered
+                ) {
                     Source::DeviceSnapshot
+                } else {
+                    Source::Imported
                 };
-                parsed.firmware = self.firmware.lock().unwrap().clone();
+                parsed.firmware = read_firmware;
+                parsed.device_files = Some(
+                    std::iter::once(&keymap)
+                        .chain(smart_actions.iter())
+                        .map(|f| mi_model::FileVerification {
+                            name: f.meta.file.name().into(),
+                            size: f.meta.size,
+                            sha1: f.meta.checksum_hex(),
+                        })
+                        .collect(),
+                );
                 let mut held = self.snapshot.lock().unwrap();
                 if self.invalid.load(Ordering::SeqCst) {
                     return Err(SessionError::Disconnected);
@@ -522,3 +537,6 @@ impl Drop for DeviceSession {
 }
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod file_tests;

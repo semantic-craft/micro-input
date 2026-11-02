@@ -13,7 +13,7 @@ fn device_binding(v: &Value) -> Binding {
 }
 /// Device files are not the demo/import interchange format. Missing optional values remain unknown.
 pub fn parse_device_files(keymap: &[u8], smart: Option<&[u8]>) -> Result<DeviceConfig, ParseError> {
-    let raw: Value = serde_json::from_slice(keymap).map_err(|_| error("keymap JSON 无效"))?;
+    let raw = strict_json(keymap)?;
     if !raw.is_object() {
         return Err(error("keymap 根必须为对象"));
     }
@@ -21,8 +21,7 @@ pub fn parse_device_files(keymap: &[u8], smart: Option<&[u8]>) -> Result<DeviceC
         None => Value::Null,
         Some([]) => return Err(error("smart_actions.json 存在但为空文件")),
         Some(bytes) => {
-            let v: Value =
-                serde_json::from_slice(bytes).map_err(|_| error("smart_actions JSON 无效"))?;
+            let v = strict_json(bytes)?;
             if !v.is_object() || !v.get("smartActions").is_some_and(Value::is_object) {
                 return Err(error("smartActions 必须为对象"));
             }
@@ -139,6 +138,7 @@ pub fn parse_device_files(keymap: &[u8], smart: Option<&[u8]>) -> Result<DeviceC
         });
     }
     Ok(DeviceConfig {
+        device_files: None,
         source: Source::Imported,
         read_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -153,4 +153,61 @@ pub fn parse_device_files(keymap: &[u8], smart: Option<&[u8]>) -> Result<DeviceC
         multi_actions: vec![],
         smart_actions,
     })
+}
+
+// Check duplicate keys before Value deserialization can silently choose the last member.
+fn strict_json(bytes: &[u8]) -> Result<Value, ParseError> {
+    struct Unique;
+    impl<'de> serde::Deserialize<'de> for Unique {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = Unique;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("unambiguous JSON")
+                }
+                fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Unique, E> {
+                    Ok(Unique)
+                }
+                fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Unique, E> {
+                    Ok(Unique)
+                }
+                fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Unique, E> {
+                    Ok(Unique)
+                }
+                fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Unique, E> {
+                    Ok(Unique)
+                }
+                fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Unique, E> {
+                    Ok(Unique)
+                }
+                fn visit_unit<E: serde::de::Error>(self) -> Result<Unique, E> {
+                    Ok(Unique)
+                }
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                    self,
+                    mut a: A,
+                ) -> Result<Unique, A::Error> {
+                    while a.next_element::<Unique>()?.is_some() {}
+                    Ok(Unique)
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut a: A,
+                ) -> Result<Unique, A::Error> {
+                    let mut keys = std::collections::HashSet::new();
+                    while let Some(key) = a.next_key::<String>()? {
+                        if !keys.insert(key) {
+                            return Err(serde::de::Error::custom("duplicate JSON key"));
+                        }
+                        a.next_value::<Unique>()?;
+                    }
+                    Ok(Unique)
+                }
+            }
+            d.deserialize_any(Visitor)
+        }
+    }
+    serde_json::from_slice::<Unique>(bytes).map_err(|_| error("JSON 无效或包含重复字段"))?;
+    serde_json::from_slice(bytes).map_err(|_| error("JSON 无效"))
 }
