@@ -14,6 +14,9 @@ pub enum Fault {
     WrongEcho,
     WriteTimeout,
     WriteError,
+    SecondChunkTimeout,
+    SecondChunkError,
+    SecondChunkWrongEcho,
     ReadMismatch,
     DeleteTimeout,
     ConfigChanged,
@@ -122,7 +125,7 @@ impl HidLink for FakeLink {
         for line in lines {
             let req: Value = serde_json::from_slice(&line).unwrap();
             let method = req["method"].as_str().unwrap();
-            let diagnostic = ["fs.write", "fs.delete"].contains(&method)
+            let diagnostic = ["fs.write", "fs.writebin", "fs.delete"].contains(&method)
                 || (method == "fs.readbin"
                     && req["params"]["file"]
                         .as_str()
@@ -133,7 +136,7 @@ impl HidLink for FakeLink {
                 assert!(req["id"].as_u64().unwrap() < 900);
             }
             let file = req["params"]["file"].as_str().unwrap_or("");
-            if ["fs.write", "fs.delete"].contains(&method) {
+            if ["fs.write", "fs.writebin", "fs.delete"].contains(&method) {
                 self.mutations.lock().unwrap().push(method.into());
             }
             let result = match method {
@@ -183,6 +186,53 @@ impl HidLink for FakeLink {
                         continue;
                     }
                     if self.fault == Fault::WriteError {
+                        self.reply(json!({"id":req["id"],"error":{"code":500,"message":"synthetic failure"}}));
+                        continue;
+                    }
+                    Value::Null
+                }
+                "fs.writebin" => {
+                    assert!(temp_name(file).is_ok());
+                    let first = req["params"]["offset"] == 0;
+                    assert_eq!(
+                        req["params"],
+                        if first {
+                            json!({"file":file,"data":"bWljcm8t","append":true,"completed":false,"offset":0})
+                        } else {
+                            json!({"file":file,"data":"aW5wdXQK","append":true,"completed":true,"offset":6})
+                        }
+                    );
+                    let mut files = self.files.lock().unwrap();
+                    if first {
+                        assert!(!files.contains_key(file));
+                        files.insert(file.into(), b"micro-".to_vec());
+                    } else {
+                        let data = files.get_mut(file).expect("second chunk requires first");
+                        assert_eq!(data, b"micro-");
+                        data.extend_from_slice(b"input\n");
+                    }
+                    if first && self.fault == Fault::ConfigChanged {
+                        files.get_mut("keymap.json").unwrap().push(b' ');
+                    }
+                    drop(files);
+                    if (first && self.fault == Fault::WriteTimeout)
+                        || (!first && self.fault == Fault::SecondChunkTimeout)
+                    {
+                        continue;
+                    }
+                    if first && self.fault == Fault::Disconnect {
+                        self.close();
+                        return Err(TransportError::Disconnected);
+                    }
+                    if (first && self.fault == Fault::WrongEcho)
+                        || (!first && self.fault == Fault::SecondChunkWrongEcho)
+                    {
+                        self.reply(json!({"id":req["id"],"method":"fs.delete","result":null}));
+                        continue;
+                    }
+                    if (first && self.fault == Fault::WriteError)
+                        || (!first && self.fault == Fault::SecondChunkError)
+                    {
                         self.reply(json!({"id":req["id"],"error":{"code":500,"message":"synthetic failure"}}));
                         continue;
                     }
