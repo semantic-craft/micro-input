@@ -284,3 +284,48 @@ fn unavailable_capabilities_versions_missing_files_and_locks_are_structured() {
         fs::remove_file(marker).unwrap();
     }
 }
+#[test]
+fn selected_draft_and_active_pointer_are_preserved_and_pointer_conflict_blocks_acceptance() {
+    let t = Directory::new();
+    let path = t.0.join("workbench.json");
+    let mut store = DocumentStore::default();
+    store.open(path.clone()).unwrap();
+    store
+        .update(|d| d.create_profile("Original").map(|_| ()))
+        .unwrap();
+    store.save_document_as().unwrap();
+    let active = path.with_extension("active.json");
+    let selected = fs::read(&active).unwrap();
+    let name: String = serde_json::from_slice(&selected).unwrap();
+    let current = fs::read(t.0.join(&name)).unwrap();
+    let original = fs::read(&path).unwrap();
+    let (_, read) = cli("read", json!({"api_version":1,"workbench":path}));
+    assert_eq!(
+        read["result"]["stamp"]["document_id"],
+        store.draft.document_id
+    );
+    let output = t.0.join("proposal.json");
+    let p = store.draft.document.editable.graph.profile_order[0].clone();
+    let (ok, result) = cli(
+        "patch",
+        json!({"api_version":1,"workbench":path,"expected":read["result"]["stamp"],"operations":[{"op":"rename_profile","profile_id":p,"name":"Proposal"}],"output":output}),
+    );
+    assert!(ok, "{result}");
+    assert_eq!(fs::read(&active).unwrap(), selected);
+    assert_eq!(fs::read(t.0.join(name)).unwrap(), current);
+    assert_eq!(fs::read(&path).unwrap(), original);
+    let preview = store
+        .inspect_agent_proposal(&fs::read_to_string(output).unwrap())
+        .unwrap();
+    let id = store.draft.document_id.clone();
+    fs::write(&active, b"concurrent selection").unwrap();
+    assert_eq!(
+        store
+            .accept_agent_proposal(&preview.token)
+            .unwrap_err()
+            .code,
+        "stale_revision"
+    );
+    assert_eq!(store.draft.document_id, id);
+    assert_eq!(fs::read(&active).unwrap(), b"concurrent selection");
+}
