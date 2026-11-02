@@ -266,6 +266,16 @@ struct Workbench: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         if store.library.entries.isEmpty { Text("没有匹配动作").foregroundStyle(.secondary).padding() }
+                        if !favoritesOnly && (category == "全部" || category == "普通宏") {
+                            ForEach(store.macros.filter { search.isEmpty || $0.action.name.localizedCaseInsensitiveContains(search) }) { macro in
+                                Button { Task { await store.bindMacro(macro.id); choosing = false } } label: {
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text(macro.action.name).bold()
+                                        Text("已保存本地宏 · 共享引用 · \(macro.references.count) 个控件").font(.caption).foregroundStyle(.secondary)
+                                    }.frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                                }.buttonStyle(.plain).disabled(store.busy || !store.canEditDraft)
+                            }
+                        }
                         ForEach(store.library.entries) { entry in
                             HStack(alignment: .top) {
                                 Button { choose(entry.action) } label: {
