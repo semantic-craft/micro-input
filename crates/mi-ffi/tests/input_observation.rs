@@ -79,8 +79,9 @@ async fn overflow_stops_capture_and_does_not_replay_backlog() {
     let core = connected().await;
     let sub = core.subscribe_input().await.unwrap();
     core.emit_synthetic_input(1024).await.unwrap();
-    // Let the unique production reader drain into the bounded broadcast queue.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The synthetic reply is queued behind the injected reports. Receiving it is a
+    // deterministic reader barrier; no scheduling sleep is needed.
+    core.read_identity().await.unwrap();
     let report = capture(&sub, Duration::from_secs(1)).await;
     assert_eq!(report["terminal"], "input_stream_gap");
     assert_eq!(report["events"][0]["class"], "input_stream_gap");
@@ -156,8 +157,10 @@ async fn native_input_observation() {
     }).await;
     match setup {
         Ok(Ok((sub, identity))) => {
-            println!("READY_FOR_PHYSICAL_INPUT experiment={} start_ms={} window_seconds={} active_source_verified=false", experiment, now_ms(), seconds);
-            if std::io::stdout().flush().is_ok() {
+            let mut stdout = std::io::stdout();
+            let ready = writeln!(stdout, "READY_FOR_PHYSICAL_INPUT experiment={} start_ms={} window_seconds={} active_source_verified=false", experiment, now_ms(), seconds)
+                .and_then(|_| stdout.flush());
+            if ready.is_ok() {
                 report["capture"] = capture(&sub, Duration::from_secs(seconds)).await;
                 // A bounded read-only recheck detects status changes, without claiming source semantics.
                 report["status_indices_stable"] =
