@@ -557,6 +557,7 @@ dependencies = [
 name = "mi-session"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64",
  "mi-model",
  "mi-proto",

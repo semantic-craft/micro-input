@@ -132,6 +132,7 @@ pub struct MicroInput {
     transport: Arc<dyn HidTransport>,
     state: Mutex<ConnectionState>,
     connect_gate: tokio::sync::Mutex<()>,
+    stopped: tokio::sync::watch::Sender<bool>,
 }
 #[uniffi::export(async_runtime = "tokio")]
 impl MicroInput {
@@ -142,6 +143,7 @@ impl MicroInput {
             transport: Arc::new(MacTransport::new()),
             state: Mutex::new(ConnectionState::default()),
             connect_gate: tokio::sync::Mutex::new(()),
+            stopped: tokio::sync::watch::channel(false).0,
         })
     }
     // R-P03/R-E02: local intents only, no session or transport access.
@@ -195,6 +197,10 @@ impl MicroInput {
         .map_err(failure)
     }
     pub async fn subscribe_device_events(self: Arc<Self>, cb: Box<dyn DeviceEvents>) {
+        let mut stopped = self.stopped.subscribe();
+        if *stopped.borrow() {
+            return;
+        }
         let mut rx = self.transport.subscribe();
         match self.list_devices().await {
             Ok(devices) => cb.changed(devices),
@@ -203,11 +209,17 @@ impl MicroInput {
         let weak = Arc::downgrade(&self);
         tokio::spawn(async move {
             loop {
-                let result =
-                    tokio::time::timeout(std::time::Duration::from_millis(250), rx.recv()).await;
+                let result = tokio::select! {
+                    biased;
+                    _ = stopped.changed() => break,
+                    result = rx.recv() => result,
+                };
                 let Some(this) = weak.upgrade() else { break };
+                if *stopped.borrow() {
+                    break;
+                }
                 match result {
-                    Ok(Ok(())) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         match this.list_devices().await {
                             Ok(devices) => {
                                 this.devices_changed(&devices);
@@ -216,13 +228,15 @@ impl MicroInput {
                             Err(e) => cb.failed(e.to_string()),
                         }
                     }
-                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
-                    Err(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
     }
     pub async fn connect(&self, id: String) -> Result<(), BridgeError> {
+        if *self.stopped.borrow() {
+            return Err(BridgeError::Disconnected);
+        }
         // Invalidate before awaiting the gate, so disconnect also cancels queued connects.
         let (generation, old) = {
             let mut state = self.state.lock().unwrap();
@@ -275,6 +289,14 @@ impl MicroInput {
         state.pending = None;
         state.session = Some((id, s));
         Ok(())
+    }
+    pub async fn shutdown(&self) {
+        self.stopped.send_replace(true);
+        self.disconnect().await;
+        let _connecting = self.connect_gate.lock().await;
+        let transport = self.transport.clone();
+        // Native discovery joins off the UI executor after callbacks are unscheduled.
+        let _ = tokio::task::spawn_blocking(move || transport.stop_discovery()).await;
     }
     pub async fn disconnect(&self) {
         let (_, old) = self.invalidate();
@@ -396,6 +418,67 @@ mod tests {
             Ok(self.link.clone())
         }
     }
+    struct LifecycleTransport {
+        events: tokio::sync::broadcast::Sender<()>,
+        stopped: std::sync::atomic::AtomicBool,
+    }
+    impl HidTransport for LifecycleTransport {
+        fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
+            Ok(vec![])
+        }
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {
+            self.events.subscribe()
+        }
+        fn stop_discovery(&self) {
+            self.stopped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn open(&self, _: &str) -> Result<Arc<dyn HidLink>, TransportError> {
+            Ok(MockLink::new().0)
+        }
+    }
+    struct EventsLifetime(Arc<tokio::sync::Notify>);
+    impl DeviceEvents for EventsLifetime {
+        fn changed(&self, _: Vec<DeviceInfo>) {}
+        fn failed(&self, _: String) {}
+    }
+    impl Drop for EventsLifetime {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+    #[tokio::test]
+    async fn shutdown_releases_discovery_subscription_and_rejects_new_opens() {
+        let transport = Arc::new(LifecycleTransport {
+            events: tokio::sync::broadcast::channel(1).0,
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        });
+        let core = Arc::new(MicroInput {
+            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            transport: transport.clone(),
+            state: Mutex::new(ConnectionState::default()),
+            connect_gate: tokio::sync::Mutex::new(()),
+            stopped: tokio::sync::watch::channel(false).0,
+        });
+        let released = Arc::new(tokio::sync::Notify::new());
+        core.clone()
+            .subscribe_device_events(Box::new(EventsLifetime(released.clone())))
+            .await;
+        core.connect("mock".into()).await.unwrap();
+        core.shutdown().await;
+        tokio::time::timeout(std::time::Duration::from_millis(200), released.notified())
+            .await
+            .unwrap();
+        assert!(transport.stopped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(matches!(
+            core.connect("mock".into()).await,
+            Err(BridgeError::Disconnected)
+        ));
+        assert!(matches!(
+            core.read_identity().await,
+            Err(BridgeError::Disconnected)
+        ));
+    }
     struct UnavailableTransport;
     impl HidTransport for UnavailableTransport {
         fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
@@ -417,6 +500,7 @@ mod tests {
             transport: Arc::new(UnavailableTransport),
             state: Mutex::new(ConnectionState::default()),
             connect_gate: tokio::sync::Mutex::new(()),
+            stopped: tokio::sync::watch::channel(false).0,
         };
         for _ in 0..2 {
             let error = core.connect("mock".into()).await.unwrap_err();
@@ -450,6 +534,7 @@ mod tests {
             }),
             state: Mutex::new(ConnectionState::default()),
             connect_gate: tokio::sync::Mutex::new(()),
+            stopped: tokio::sync::watch::channel(false).0,
         });
         let c = core.clone();
         let task = tokio::spawn(async move { c.connect("mock".into()).await });
@@ -475,6 +560,7 @@ mod tests {
             }),
             state: Mutex::new(ConnectionState::default()),
             connect_gate: tokio::sync::Mutex::new(()),
+            stopped: tokio::sync::watch::channel(false).0,
         });
         let c = core.clone();
         let task = tokio::spawn(async move { c.connect("mock".into()).await });
@@ -501,6 +587,7 @@ impl MicroInput {
             transport: Arc::new(mi_transport::SyntheticDiscovery::default()),
             state: Mutex::new(ConnectionState::default()),
             connect_gate: tokio::sync::Mutex::new(()),
+            stopped: tokio::sync::watch::channel(false).0,
         })
     }
     pub async fn set_synthetic_identity(&self, scenario: u8) -> Result<(), BridgeError> {
@@ -533,6 +620,46 @@ impl MicroInput {
 #[cfg(test)]
 mod hardware_tests {
     use super::*;
+    #[tokio::test]
+    #[ignore = "requires an explicitly authorized native read-only lifecycle session"]
+    async fn native_identity_shutdown_and_reopen() {
+        let mut previous = None;
+        for _ in 0..2 {
+            let core = MicroInput::new();
+            let candidates: Vec<_> = core
+                .list_devices()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|d| d.pid == 0x8298 && d.transport == "Usb")
+                .collect();
+            assert_eq!(candidates.len(), 1, "explicit selection required");
+            // Retain a real descriptor-only event subscription until shutdown.
+            struct Events;
+            impl DeviceEvents for Events {
+                fn changed(&self, _: Vec<DeviceInfo>) {}
+                fn failed(&self, _: String) {}
+            }
+            core.clone().subscribe_device_events(Box::new(Events)).await;
+            core.connect(candidates[0].id.clone()).await.unwrap();
+            let identity =
+                tokio::time::timeout(std::time::Duration::from_secs(25), core.read_identity())
+                    .await
+                    .expect("bounded query")
+                    .expect("identity query");
+            assert_eq!(identity.version.as_deref(), Some("0.6.3"));
+            assert_ne!(previous, Some(identity.session_id));
+            previous = Some(identity.session_id);
+            tokio::time::timeout(std::time::Duration::from_secs(3), core.shutdown())
+                .await
+                .expect("bounded reader and discovery shutdown");
+            assert!(matches!(
+                core.read_identity().await,
+                Err(BridgeError::Disconnected)
+            ));
+        }
+        eprintln!("native read-only lifecycle PASS: two fresh sessions, identity 0.6.3, reader/discovery shutdown, no configuration requests");
+    }
     #[tokio::test]
     #[ignore = "requires explicitly authorized physical read-only configuration session"]
     async fn native_configuration_snapshot_read_only() {

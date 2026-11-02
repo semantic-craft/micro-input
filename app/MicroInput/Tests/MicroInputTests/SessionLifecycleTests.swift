@@ -1,9 +1,12 @@
 import XCTest
+import AppKit
 import MicroInputCore
 @testable import MicroInput
 
 private final class SuspendedSessionBackend: Backend {
     var reads: [CheckedContinuation<String, Error>] = []
+    var shutdownRelease: CheckedContinuation<Void, Never>?
+    func shutdown() async { await withCheckedContinuation { shutdownRelease = $0 } }
     var connections = 0
     var disconnects = 0
     func loadDemo() async throws -> String { try await MicroInputCore.MicroInput().loadDemo() }
@@ -43,6 +46,20 @@ final class SessionLifecycleTests: XCTestCase {
 
 #if MI_SYNTHETIC_BACKEND
 extension SessionLifecycleTests {
+    @MainActor func testReplacementConnectionMarksPreviousDeviceSnapshotStale() async throws {
+        let core = MicroInputCore.MicroInput.syntheticDiscovery()
+        try await core.setSyntheticDiscovery(state: .twoDevices)
+        try await core.setSyntheticConfig(scenario: 1)
+        let store = Store(backend: core)
+        await store.connect("synthetic-interface-0"); await store.readIdentity(); await store.readDeviceConfig()
+        XCTAssertFalse(store.stale)
+        let previous = store.snapshot?.raw.text
+        await store.connect("synthetic-interface-0")
+        XCTAssertTrue(store.stale)
+        XCTAssertNil(store.identity)
+        XCTAssertEqual(store.snapshot?.raw.text, previous)
+        await store.suspend()
+    }
     @MainActor func testEndedBridgeSessionClearsStoreAndReconnectRequiresNewIdentity() async throws {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
@@ -66,3 +83,18 @@ extension SessionLifecycleTests {
     }
 }
 #endif
+
+extension SessionLifecycleTests {
+    @MainActor func testQuitWaitsForBackendShutdownBeforeReplyingToAppKit() async {
+        let backend = SuspendedSessionBackend()
+        let store = Store(backend: backend)
+        var replies: [Bool] = []
+        let lifetime = AppLifetime(store: store, reply: { replies.append($0) })
+        XCTAssertEqual(lifetime.applicationShouldTerminate(NSApplication.shared), .terminateLater)
+        while backend.shutdownRelease == nil { await Task.yield() }
+        XCTAssertTrue(replies.isEmpty)
+        backend.shutdownRelease?.resume()
+        for _ in 0..<100 where replies.isEmpty { await Task.yield() }
+        XCTAssertEqual(replies, [true])
+    }
+}

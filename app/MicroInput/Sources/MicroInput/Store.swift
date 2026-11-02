@@ -164,6 +164,7 @@ extension MicroInput: Backend {}
         generation += 1; let token = generation
         busy = true; defer { if token == generation { busy = false } }
         connectionWatcher?.cancel()
+        stale = snapshot != nil
         connectedID = nil; identity = nil; identityStatus = "身份尚未读取"; pendingID = id
         // Preserve provenance: a failed device read cannot turn demo data into a device snapshot.
         do {

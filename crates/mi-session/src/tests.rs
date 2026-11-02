@@ -585,3 +585,64 @@ async fn cancelled_read_retries_with_fresh_request_and_rejects_late_response() {
     );
     session.shutdown().await;
 }
+
+struct StalledWriteLink(Arc<MockLink>, Arc<Notify>);
+#[async_trait::async_trait]
+impl HidLink for StalledWriteLink {
+    async fn write(&self, _: &[u8]) -> Result<(), TransportError> {
+        self.1.notify_one();
+        std::future::pending().await
+    }
+    async fn read(&self) -> Result<Vec<u8>, TransportError> {
+        self.0.read().await
+    }
+    fn close(&self) {
+        self.0.close();
+    }
+}
+#[tokio::test]
+async fn stalled_report_write_is_bounded_and_requires_a_new_session() {
+    let (link, _) = MockLink::new();
+    let session = DeviceSession::new(
+        Arc::new(StalledWriteLink(link, Arc::new(Notify::new()))),
+        Box::new(TestFramer),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_millis(20),
+            interval: Duration::ZERO,
+        },
+    );
+    let result = tokio::time::timeout(
+        Duration::from_millis(200),
+        session.request(Method::SysVersion, Value::Null),
+    )
+    .await;
+    assert!(matches!(result, Ok(Err(SessionError::Timeout))));
+    assert!(matches!(
+        session.request(Method::SysVersion, Value::Null).await,
+        Err(SessionError::Disconnected)
+    ));
+    session.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelling_incomplete_send_invalidates_session() {
+    let (link, _) = MockLink::new();
+    let started = Arc::new(Notify::new());
+    let session = DeviceSession::new(
+        Arc::new(StalledWriteLink(link, started.clone())),
+        Box::new(TestFramer),
+        Arc::new(ReadOnlySchema),
+        SessionConfig::default(),
+    );
+    let held = session.clone();
+    let request = tokio::spawn(async move { held.request(Method::SysVersion, Value::Null).await });
+    started.notified().await;
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    assert!(matches!(
+        session.request(Method::SysVersion, Value::Null).await,
+        Err(SessionError::Disconnected)
+    ));
+    session.shutdown().await;
+}
