@@ -100,6 +100,8 @@ v1→v2：先完整解析 v1 与 edits，保留其有效草稿语义和原始源
 
 显式“从快照新建草稿”只复制当前会话完整、未过期的核验快照，保存独立draft-UUID.json和含文件精确字节的baseline，不覆盖原工作台。workbench.active.json仅保存同目录文档文件名，以独立锁、预期字节检查和原子替换切换；失败不改当前选择或内存，已生成新文件保留供检查。重开解析此选择记录；损坏或丢失不静默退回其他草稿。未知原绑定保留在original/origin，显式动作覆盖仅记录本地意图，不编译为设备载荷。
 
+T08 本地宏使用现有 graph.actions 的共享 UUID，不新增持久化文件：`ActionKind::LocalMacro` 的 payload 包含 `macro_sequence`（`format_version=1`、有序 `events`）。事件仅为本地 `press { key }`、`release { key }` 和 `delay { ms: UInt32 }`；key 是用户本地标签，毫秒类型不是固件范围。`mi-model/src/macro_sequence.rs` 校验顺序与配对，`macro_library.rs` 提供共享引用、原子保存并绑定、解绑和引用保护删除；`save_macro_action` / `bind_macro_action` / `delete_macro_action` 通过现有 DocumentStore 保存。未知原宏继续只读保留 raw；显式本地意图不转换设备格式。编辑共享宏前显示全部受影响控件，未绑定宏保留在图中，结构删除不会暗中删除宏。
+
 测试：v1 fixture 迁移语义等价、原件备份存在、失败保全、高版本拒写、结构删除引用拒绝、整次撤销/重做、导入重映射、损坏/锁/冲突失败不变内存。
 
 ## D07 · 比较结果和按钮（F07；#21/#22）
