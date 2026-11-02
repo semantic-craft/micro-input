@@ -7,6 +7,7 @@ struct Workbench: View {
     @State private var choosing = false
     @State private var reviewing = false
     @State private var choosingMacro = false
+    @State private var choosingMulti = false
     @State private var search = ""
     @State private var category = "全部"
     @State private var favoritesOnly = false
@@ -58,6 +59,7 @@ struct Workbench: View {
                         Button("下移配置") { Task { await store.moveProfile(by: 1) } }.disabled(store.profileIndex + 1 >= (store.snapshot?.profiles.count ?? 0))
                         Button("删除配置…", role: .destructive) {deleteLayer=false;deleting=true}.disabled(store.profile == nil)
                     }.disabled(!store.canEditDraft || store.busy)
+                    PresetMenu(store: store)
                     Text("切换配置不会应用到设备。").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Label(store.browsingDeviceSnapshot ? (store.snapshot?.source == "DeviceSnapshot" ? "设备快照 · 只读" : "合成夹具 · 只读") : "本地草稿", systemImage: store.browsingDeviceSnapshot ? "eye" : "doc")
@@ -128,6 +130,7 @@ struct Workbench: View {
             Button("重做草稿") { Task { await store.undoDraft(redo: true) } }.keyboardShortcut("z", modifiers: [.command, .shift]).hidden()
         }
         .sheet(isPresented: $choosing) { actionSheet }
+        .sheet(isPresented: $choosingMulti) { MultiLibraryView(store: store) }
         .sheet(isPresented: $choosingMacro) { MacroLibraryView(store: store) }
         .sheet(isPresented: $reviewing) { diffSheet }
         .sheet(isPresented: $naming) { nameSheet }
@@ -135,6 +138,7 @@ struct Workbench: View {
             Button("取消",role:.cancel) {}
             Button("删除",role:.destructive) {Task {if deleteLayer {await store.deleteLayer()} else {await store.deleteProfile()}}}
         } message: {Text("仅删除本地草稿中的对象及其所属内容。原始来源保留，可撤销；设备不会改变。") }
+        .sheet(item: $store.comparison) { comparison in ReconnectComparisonView(store: store, initialComparison: comparison) }
         .task { if store.snapshot == nil { await store.loadWorkbench() } }
     }
     var discoveryPanel: some View {
@@ -166,6 +170,7 @@ struct Workbench: View {
                         .disabled(store.busy || store.stale || store.connectedID == nil)
                 }
 
+                Button("比较设备与草稿") { Task {await store.compareSnapshot()} }.disabled(store.busy || store.connectedID == nil || store.stale)
                 Text(store.identityStatus).font(.caption).foregroundStyle(.secondary)
             }
             if let device = store.selectedDevice {
@@ -224,6 +229,11 @@ struct Workbench: View {
             Text("动作").foregroundStyle(.secondary)
             Button { choosing = true } label: { HStack { Text(label(store.slot)).lineLimit(3); Spacer(); Text(store.browsingDeviceSnapshot ? "只读" : "更换").foregroundStyle(.blue) }.padding(14).frame(maxWidth: .infinity).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 9)) }.buttonStyle(.plain).disabled(!store.canEditDraft || store.layer == nil)
             Button("已保存的普通宏（\(store.macros.count)）") { choosingMacro = true }.disabled(!store.canEditDraft)
+            Button("已保存的 Multi（\(store.multis.count)）") { choosingMulti = true }.disabled(!store.canEditDraft)
+            if let multi = store.selectedMulti {
+                Text("共享 Multi · \(multi.references.count) 个引用").font(.caption).foregroundStyle(.secondary)
+                Button("移除此控件的 Multi 引用") { Task { await store.bindMulti(nil) } }.disabled(store.busy || !store.canEditDraft)
+            }
             if let macro = store.selectedMacro {
                 Text("共享宏 · \(macro.references.count) 个控件引用").font(.caption).foregroundStyle(.secondary)
                 Button("移除此控件的宏引用") { Task { await store.bindMacro(nil) } }.disabled(store.busy || !store.canEditDraft)
@@ -231,7 +241,7 @@ struct Workbench: View {
             if let a = action(store.slot) {
                 Text(a.category).font(.caption).foregroundStyle(.secondary)
                 if let capability = store.actionCapabilities[store.slotKey] { ActionCapabilityView(capability: capability) }
-                ActionParameters(action: a, store: store, macroID: store.selectedMacro?.id).id(store.slotKey + String(store.draft.revision))
+                ActionParameters(action: a, store: store, macroID: store.selectedMacro?.id, multiID: store.selectedMulti?.id).id(store.slotKey + String(store.draft.revision))
                 DisclosureGroup("高级参数原值") { Text(JSONValue.object(a.payload).text).font(.caption.monospaced()).textSelection(.enabled) }
             }
             else if bindings.indices.contains(store.slot) {
@@ -345,7 +355,7 @@ struct Workbench: View {
                                 let values = l.keys + l.encoders + l.joystick.sectors
                                 ForEach(values.indices, id: \.self) { si in
                                     if bindingKey(profile: p.id, layer: l.id, slot: si) == key, let action = store.draft.edits[key] {
-                                        VStack(alignment: .leading, spacing: 5) { Text("\(p.name) / \(l.name) / \(title(si))").bold(); Text("\(values[si].bindingLabel) → \(action.name)").font(.caption); Text(action.parameterSummary).font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical,8)
+                                        VStack(alignment: .leading, spacing: 5) { Text("\(p.name) / \(l.name) / \(title(si))").bold(); Text("\(values[si].bindingLabel) → \(action.name)").font(.caption); Text(store.parameterSummary(action)).font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical,8)
                                     }
                                 }
                             }
@@ -364,8 +374,10 @@ struct Workbench: View {
 struct ActionParameters: View {
     @State var action: CatalogAction
     @State private var editingMacro = false
+    @State private var editingMulti = false
     @ObservedObject var store: Store
     var macroID: String? = nil
+    var multiID: String? = nil
     var saved: (() -> Void)? = nil
     var type: String { action.payload["type"]?.text ?? "unknown" }
     var fields: [(String,String)] {
@@ -381,11 +393,15 @@ struct ActionParameters: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if type == "local_multi", MultiEditorDraft(action: action) != nil {
+                Button("编辑四分支 Multi") { editingMulti = true }.disabled(!store.canEditDraft || store.busy)
+                Text(store.parameterSummary(action)).font(.caption).foregroundStyle(.secondary)
+            }
             if type == "local_macro", MacroEditorDraft(action: action) != nil {
                 Button("编辑宏步骤") { editingMacro = true }.disabled(!store.canEditDraft || store.busy)
                 Text("自有本地序列 · 按下 / 释放 / 延时 · 不执行").font(.caption).foregroundStyle(.secondary)
             }
-            if type != "local_macro" {
+            if !["local_macro", "local_multi"].contains(type) {
             Text("动作名称").font(.caption).foregroundStyle(.secondary)
             TextField("动作名称", text: $action.name)
             ForEach(fields, id: \.0) { key,label in
@@ -417,7 +433,8 @@ struct ActionParameters: View {
             Text("参数修改后点击保存").font(.caption).foregroundStyle(.secondary)
             Button("保存参数到草稿") { Task { if await store.saveAction(action) { saved?() } } }.disabled(!store.canEditDraft || store.busy)
             }
-        }.sheet(isPresented: $editingMacro) { MacroEditor(action: action, macroID: macroID, store: store, saved: saved) }
+        }.sheet(isPresented: $editingMulti) { MultiEditor(action: action, multiID: multiID, store: store, saved: saved) }
+        .sheet(isPresented: $editingMacro) { MacroEditor(action: action, macroID: macroID, store: store, saved: saved) }
     }
     var modifiers: [String] { if case .array(let values) = action.payload["modifiers"] { return values.map(\.text) }; return [] }
 }

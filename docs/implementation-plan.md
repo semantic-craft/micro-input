@@ -102,6 +102,8 @@ v1→v2：先完整解析 v1 与 edits，保留其有效草稿语义和原始源
 
 T08 本地宏使用现有 graph.actions 的共享 UUID，不新增持久化文件：`ActionKind::LocalMacro` 的 payload 包含 `macro_sequence`（`format_version=1`、有序 `events`）。事件仅为本地 `press { key }`、`release { key }` 和 `delay { ms: UInt32 }`；key 是用户本地标签，毫秒类型不是固件范围。`mi-model/src/macro_sequence.rs` 校验顺序与配对，`macro_library.rs` 提供共享引用、原子保存并绑定、解绑和引用保护删除；`save_macro_action` / `bind_macro_action` / `delete_macro_action` 通过现有 DocumentStore 保存。未知原宏继续只读保留 raw；显式本地意图不转换设备格式。编辑共享宏前显示全部受影响控件，未绑定宏保留在图中，结构删除不会暗中删除宏。
 
+T09 的 Multi 继续使用 graph.actions 与同一 DocumentStore：`ActionKind::LocalMulti` 包含版本为 1 的本地 `multi`，`term_ms` 为正 UInt32 毫秒，`tap/double_tap/hold/tap_hold` 各为 null 或显式 `macro/action` 类型及 `action_id` UUID。该本地时序校验、初始值、可空分支均不是当前固件范围、容量或载荷 schema 的承诺。`mi-model/src/multi.rs` 拒绝悬空、类型不符和递归引用；原宏库统计并保护 Multi 父动作/分支引用，结构删除保留共享 Multi 及其分支动作。新建普通分支动作与四分支在一次事务中保存，已有宏复用同一宏库；编辑已有 Multi 仅更新共享对象，分配/解绑另有显式入口。专用 SwiftUI MultiEditor 显示动作名称、分支关系及影响范围；未知/未来格式只读保留原值，不接设备或宿主执行。
+
 测试：v1 fixture 迁移语义等价、原件备份存在、失败保全、高版本拒写、结构删除引用拒绝、整次撤销/重做、导入重映射、损坏/锁/冲突失败不变内存。
 
 ## D07 · 比较结果和按钮（F07；#21/#22）
@@ -119,6 +121,8 @@ T08 本地宏使用现有 graph.actions 的共享 UUID，不新增持久化文�
 | 未知 raw 改变 | 冲突，保留双方 raw |
 
 “合并无冲突变化”：仅全体无冲突且引用有效时启用；base=R，draft=合并结果。“保留整份本地草稿”：显式确认忽略设备侧可编辑变化；base=R，draft=L，未知 raw 仍以 R 保存且只读，不用 L 覆盖。“采用整份设备版本”：显式确认舍弃本地编辑；base=R，draft=R。“取消”：B/L/revision 全不变。
+
+接受后的 baseline.comparison_config 保存本次核验投影，origin.config 继续保留初始来源；显示与 diff 使用当前基线，不改写不可变来源。当前 USB 来源只有 observed-interface，不等于可靠物理身份；跨重连需核对当前候选后明确选择整份版本，临时接口变化时先阻断版本接受；用户明确核对同一设备后，仅为当前比较 token、当前会话和快照解锁整份版本选择。baseline.identity_resolution 保存 user-confirmed 记录，device_identity.confidence 仍为 observed-interface，自动合并仍禁用；可靠序列号不同不能绕过。
 
 前三种操作先保存前态恢复副本，再原子保存新文档；成功 revision+1、清空旧撤销栈、diff 由新 base 与 draft 重算。保留本地仍有 diff；采用设备 diff 为空。保存失败不改变内存。
 
@@ -149,6 +153,16 @@ T08 本地宏使用现有 graph.actions 的共享 UUID，不新增持久化文�
 `mi-model/src/control_settings.rs` 在 v2 LayerNode 中保存可选的 `control_settings`，使用现有文档服务和撤销栈；`mi-ffi::set_control_settings` 只提供本地高层操作，SwiftUI `ControlSettingsEditor` 不访问设备。旋钮沿用独立逻辑槽位，不声称它们已对应顺转、逆转或按压。摇杆保存 `source`（保留来源）或 `logical_sectors`（本地扇区意图）；只有后者增加逻辑槽位，减少数量或切回来源模式保留所有旧槽位、原值及绑定。0–32 是本机编辑器预算，不是固件容量；未知模式拒绝覆盖，未来字段沿用整份文档只读保护。
 
 证据使用 `docs/agents/research-context.md`、IA-12/13/14 及模块契约：来源 raw 不改写，本地保存不激活设备、不发送 RPC，不推定物理方向。验收覆盖独立绑定、模式切换、参数错误、来源保全、未知字段拒写、保存重开及整次撤销/重做。物理输入属于 #14，设备模式和扇区容量仍须独立实机证据。
+
+### T11 自有预设交换契约
+
+`mi-model/src/preset.rs` 拥有 `micro-input-preset` / version 1 格式、结构/引用校验、范围裁剪及本地 ID 重映射；`mi-ffi` 仅暴露 export/inspect/import/starter 四个高层操作。SwiftUI `PresetMenu` 使用系统 JSON 打开/保存面板和导入预览，读取与核心处理上限均为 4 MiB。文件格式不是厂商配置格式；未知格式、未来字段或不支持的动作结构拒绝导入，原文件不变。
+
+整文档导出保留所有本地动作；Profile/Layer 导出仅保留选中的可编辑图及可达动作（含 Multi 分支递归引用）。为了无损保留未知来源值，三种范围都携带完整不可变 origin 与历史 baseline，导出前明确告知可能包含其他配置及文本参数。导入重新分配文档/Profile/Layer/Binding/Action UUID 并重写顺序、绑定和 Multi 引用，来源 source ID 保持原义。命名不覆盖或合并：同名内容位于不同文档，导入确认页说明这一策略。
+
+导入是独立文件与选中指针的事务，复用 DocumentStore 的锁、冲突检测、create_new 和原子切换；原工作台及已有草稿不覆盖。导入后的 baseline=null，原 baseline 仅在 origin.imported_baseline 中作历史保存；展示来源固定为 LocalDraft，修订和撤销历史从 0 开始。确认前的预览只检查内存里的同一份文本，确认后不会重新读取可能已变更的外部文件。内置“Coding 起步”是本项目原创的搜索/保存两个本地快捷键意图，不调用设备或宿主执行器。
+
+证据：研究入口、IA-05/08/12/15、候选协议配置格式及模块契约。验证覆盖共享宏/Multi/工具引用、范围裁剪、未知原值、非法版本/字段/引用、同名独立导入、旧实例选择冲突、原文件保全和真实 UniFFI 重开。T09 的已提交模型为 Multi 引用依赖；T09 界面和完整硬件能力不由 T11 签收。
 
 ## D09 · 远期交互的确定语义（F12/F13/F14）
 

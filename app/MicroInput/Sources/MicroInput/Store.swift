@@ -18,10 +18,17 @@ protocol Backend {
     func actionLibrary(query: String, category: String, favoritesOnly: Bool) async throws -> String
     func setActionFavorite(actionId: String, favorite: Bool) async throws
     func assignAction(profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String
+    func exportPreset(profileId: String?, layerId: String?) async throws -> String
+    func inspectPreset(text: String) throws -> String
+    func starterPreset() throws -> String
+    func importPreset(text: String) async throws -> String
     func setControlSettings(profileId: String, layerId: String, settingsJson: String) async throws -> String
     func saveMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String
     func bindMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32) async throws -> String
     func deleteMacroAction(macroId: String) async throws -> String
+    func saveMultiAction(multiId: String?, profileId: String, layerId: String, slot: UInt32, actionJson: String, additionsJson: String) async throws -> String
+    func bindMultiAction(multiId: String?, profileId: String, layerId: String, slot: UInt32) async throws -> String
+    func deleteMultiAction(multiId: String) async throws -> String
     func undoDraft(redo: Bool) async throws -> String
     func documentView() async throws -> String
     func createProfile(name: String) async throws -> String
@@ -35,8 +42,16 @@ protocol Backend {
     func deleteLayer(profileId: String, layerId: String) async throws -> String
     func moveLayer(profileId: String, layerId: String, toIndex: UInt32) async throws -> String
     func createDraftFromSnapshot() async throws -> String
+    func compareSnapshot() async throws -> String
+    func confirmComparisonIdentity(token: String) async throws -> String
+    func resolveComparison(token: String, choice: String) async throws -> String
 }
 extension Backend {
+    func exportPreset(profileId: String?, layerId: String?) async throws -> String { throw BridgeError.Failed(message: "预设导出不可用") }
+    func inspectPreset(text: String) throws -> String { throw BridgeError.Failed(message: "预设检查不可用") }
+    func starterPreset() throws -> String { throw BridgeError.Failed(message: "原创预设不可用") }
+    func importPreset(text: String) async throws -> String { throw BridgeError.Failed(message: "预设导入不可用") }
+
     func waitForDisconnect() async -> String { "" }
     func shutdown() async { await disconnect() }
     func subscribeInput() async throws -> InputSubscription { throw BridgeError.Failed(message: "输入监听不可用") }
@@ -50,6 +65,9 @@ extension Backend {
     func saveMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String { throw BridgeError.Failed(message: "本地宏不可用") }
     func bindMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32) async throws -> String { throw BridgeError.Failed(message: "本地宏不可用") }
     func deleteMacroAction(macroId: String) async throws -> String { throw BridgeError.Failed(message: "本地宏不可用") }
+    func saveMultiAction(multiId: String?, profileId: String, layerId: String, slot: UInt32, actionJson: String, additionsJson: String) async throws -> String { throw BridgeError.Failed(message: "本地 Multi 不可用") }
+    func bindMultiAction(multiId: String?, profileId: String, layerId: String, slot: UInt32) async throws -> String { throw BridgeError.Failed(message: "本地 Multi 不可用") }
+    func deleteMultiAction(multiId: String) async throws -> String { throw BridgeError.Failed(message: "本地 Multi 不可用") }
     func undoDraft(redo: Bool) async throws -> String { throw BridgeError.Failed(message: "草稿撤销不可用") }
 
     func documentView() async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
@@ -64,6 +82,9 @@ extension Backend {
     func deleteLayer(profileId: String, layerId: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func moveLayer(profileId: String, layerId: String, toIndex: UInt32) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func createDraftFromSnapshot() async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func confirmComparisonIdentity(token:String) async throws -> String {throw BridgeError.Failed(message:"设备核对不可用")}
+    func compareSnapshot() async throws -> String { throw BridgeError.Failed(message:"重连比较不可用") }
+    func resolveComparison(token: String, choice: String) async throws -> String { throw BridgeError.Failed(message:"重连比较不可用") }
     func subscribeDeviceEvents(cb: DeviceEvents) async {}
 }
 extension MicroInput: Backend {}
@@ -72,6 +93,8 @@ extension MicroInput: Backend {}
     private let backend: Backend
     @Published var draft = DraftState()
     @Published var macros: [MacroSummary] = []
+    @Published var multis: [MacroSummary] = []
+    @Published var graphActions: [String:CatalogAction] = [:]
     @Published var catalog: [CatalogAction] = []
     @Published var library = ActionLibraryState()
     @Published var actionCapabilities: [String:ActionCapability] = [:]
@@ -121,6 +144,9 @@ extension MicroInput: Backend {}
         do {
             try applyDocument(try await backend.openDocument(path: documentURL.path))
             catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await backend.actionCatalog().utf8))
+            #if MI_SYNTHETIC_BACKEND
+            if ["reconnect", "reconnect-transient"].contains(ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""), !preparedReconnectScenario {await prepareReconnectScenario()}
+            #endif
             await searchActions(query: "", category: "全部", favoritesOnly: false)
         } catch { status = readableError(error); documentReady = false }
     }
@@ -134,6 +160,7 @@ extension MicroInput: Backend {}
         let oldProfile = fresh ? nil : profile?.id.text, oldLayer = fresh ? nil : layer?.id.text
         let pi = fresh ? 0 : profileIndex, li = fresh ? 0 : layerIndex
         macros = result.macro_library ?? []
+        multis = result.multi_library ?? []; graphActions = result.graph_actions ?? [:]
         draft = result.draft; snapshot = result.config; localSnapshot = result.config
         actionCapabilities = result.action_capabilities ?? [:]
         controlSettings = result.control_settings ?? [:]; controlSettingsError = nil
@@ -157,9 +184,64 @@ extension MicroInput: Backend {}
     func duplicateLayer(name: String) async {guard let pid=profile?.id.text, let id=layer?.id.text else {return}; await editDocument {try await backend.duplicateLayer(profileId:pid,layerId:id,name:name)} }
     func deleteLayer() async {guard let pid=profile?.id.text, let id=layer?.id.text else {return}; await editDocument {try await backend.deleteLayer(profileId:pid,layerId:id)} }
     func moveLayer(by offset: Int) async {guard let pid=profile?.id.text, let id=layer?.id.text, let count=profile?.layers.count, (0..<count).contains(layerIndex+offset) else {return}; await editDocument {try await backend.moveLayer(profileId:pid,layerId:id,toIndex:UInt32(layerIndex+offset))} }
+    func presetText(scope: String) async throws -> String {
+        guard canEditDraft, !busy else { throw BridgeError.Failed(message: "请先返回可编辑本地草稿") }
+        return try await backend.exportPreset(profileId: scope == "document" ? nil : profile?.id.text, layerId: scope == "layer" ? layer?.id.text : nil)
+    }
+    func inspectPreset(_ text: String) throws -> PresetSummary {
+        try JSONDecoder().decode(PresetSummary.self, from: Data(backend.inspectPreset(text: text).utf8))
+    }
+    func starterPreset() throws -> String { try backend.starterPreset() }
+    @discardableResult func importPreset(_ text: String) async -> Bool {
+        guard !busy, documentReady, !browsingDeviceSnapshot else { return false }
+        busy = true; defer { busy = false }
+        do {
+            try applyDocument(try await backend.importPreset(text: text), fresh: true)
+            status = "已创建独立本地草稿 · 原文档保留 · 未激活设备或执行动作"
+            return true
+        } catch { status = readableError(error); return false }
+    }
     func createDraftFromSnapshot() async {
         guard browsingDeviceSnapshot, !stale, !busy else {return};busy=true;defer {busy=false}
         do {try applyDocument(try await backend.createDraftFromSnapshot(), fresh:true);status="已创建独立本地草稿 · 原工作台保留 · 重开继续此草稿"} catch {status=readableError(error)}
+    }
+    #if MI_SYNTHETIC_BACKEND
+    private var preparedReconnectScenario=false
+    private func prepareReconnectScenario() async {
+        preparedReconnectScenario=true
+        guard let core=backend as? MicroInputCore.MicroInput else {return}
+        do {try await core.setSyntheticDiscovery(state:.twoDevices);try await core.setSyntheticConfig(scenario:1)} catch {status=readableError(error);return}
+        await refresh();selectDevice("synthetic-interface-0")
+        await connect("synthetic-interface-0");await readIdentity();await readDeviceConfig();await createDraftFromSnapshot()
+        await renameProfile(name:"Local comparison draft")
+        if ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == "reconnect-transient" {
+            await suspend()
+            do {try await core.setSyntheticDiscovery(state:.reconnectedDevice)} catch {status=readableError(error);return}
+            await refresh();selectDevice("synthetic-reconnected-interface-0")
+            await connect("synthetic-reconnected-interface-0");await readIdentity()
+        }
+        do {try await core.setSyntheticConfig(scenario:4)} catch {status=readableError(error);return}
+        await readDeviceConfig();await compareSnapshot()
+    }
+    #endif
+    @Published var comparison: ReconnectComparison?
+    func compareSnapshot() async {
+        guard !busy else {return};busy=true;defer {busy=false}
+        do {comparison=try JSONDecoder().decode(ReconnectComparison.self,from:Data(try await backend.compareSnapshot().utf8))}
+        catch {comparison=nil;status=readableError(error)}
+    }
+    func confirmComparisonIdentity() async {
+        guard !busy,let comparison else {return};busy=true;defer {busy=false}
+        do {self.comparison=try JSONDecoder().decode(ReconnectComparison.self,from:Data(try await backend.confirmComparisonIdentity(token:comparison.token).utf8))}
+        catch {status=readableError(error)}
+    }
+    func resolveComparison(_ choice:String) async {
+        guard !busy,let comparison else {return};busy=true;defer {busy=false}
+        do {
+            let response=try await backend.resolveComparison(token:comparison.token,choice:choice)
+            if choice != "cancel" {try applyDocument(response);status="比较结果已保存 · 旧版本已备份 · 不写设备"}
+            self.comparison=nil
+        } catch {status=readableError(error)}
     }
     var slotKey: String { key(slot) }
     func key(_ slot: Int) -> String {
@@ -171,6 +253,7 @@ extension MicroInput: Backend {}
         await saveAction(action)
     }
     @discardableResult func saveAction(_ action: CatalogAction) async -> Bool {
+        if action.payload["type"]?.text == "local_multi" { return await saveMulti(action) }
         if action.payload["type"]?.text == "local_macro" { return await saveMacro(action) }
         guard canEditDraft, !busy, let profile, let layer else { return false }
         busy = true; defer { busy = false }
@@ -223,6 +306,36 @@ extension MicroInput: Backend {}
         } catch { status = readableError(error) }
     }
     func deleteMacro(_ id: String) async { await editDocument { try await backend.deleteMacroAction(macroId: id) } }
+    var selectedMulti: MacroSummary? {
+        multis.first { $0.references.contains { $0.parent_action_name == nil && $0.profile_id == profile?.id.text && $0.layer_id == layer?.id.text && $0.logical_control == "logical-\(slot)" } }
+    }
+    @discardableResult func saveMulti(_ action: CatalogAction, id: String? = nil, additions: [String:CatalogAction] = [:]) async -> Bool {
+        guard canEditDraft, !busy, let profile, let layer else { return false }
+        busy = true; defer { busy = false }
+        do {
+            let encoder = JSONEncoder()
+            func json<T: Encodable>(_ value: T) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
+            try applyDocument(try await backend.saveMultiAction(multiId: id, profileId: json(profile.id), layerId: json(layer.id), slot: UInt32(slot), actionJson: json(action), additionsJson: json(additions)))
+            return true
+        } catch { status = readableError(error); return false }
+    }
+    func bindMulti(_ id: String?) async {
+        guard let profile, let layer else { return }
+        do {
+            let encoder = JSONEncoder()
+            let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
+            let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
+            await editDocument { try await backend.bindMultiAction(multiId: id, profileId: p, layerId: l, slot: UInt32(slot)) }
+        } catch { status = readableError(error) }
+    }
+    func deleteMulti(_ id: String) async { await editDocument { try await backend.deleteMultiAction(multiId: id) } }
+    func parameterSummary(_ action: CatalogAction) -> String {
+        guard let multi = MultiEditorDraft(action: action) else { return action.parameterSummary }
+        return MultiBranch.allCases.map { branch in
+            let id = multi.branches[branch]?.actionID
+            return "\(branch.label)：\(id.flatMap { graphActions[$0]?.name } ?? (id == nil ? "未分配" : "引用不可用"))"
+        }.joined(separator: "\n") + "\n本地判定时长：\(multi.term) ms（固件范围未知）"
+    }
     func undoDraft(redo: Bool = false) async {
         guard canEditDraft, !busy else { return }; busy = true; defer { busy = false }
         do { try applyDocument(try await backend.undoDraft(redo: redo)) }

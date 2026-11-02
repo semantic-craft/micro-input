@@ -1,5 +1,6 @@
 //! R-A02/R-A05: only high-level asynchronous operations cross the in-process UniFFI bridge.
 mod input_monitor;
+mod reconnect;
 pub use input_monitor::*;
 use mi_session::{DeviceSession, ReadOnlySchema, SessionConfig, UnverifiedSchema};
 use mi_transport::{HidCandidate, HidTransport, MacTransport};
@@ -40,7 +41,7 @@ fn document_response(
         .filter_map(|(id, layer)| layer.control_settings.as_ref().map(|value| (id, value)))
         .collect();
     serde_json::to_string(
-        &serde_json::json!({"draft":draft,"config":draft.config,"selection_hint":hint,"macro_library":draft.macros(),"control_settings":settings,"action_capabilities":capabilities}),
+        &serde_json::json!({"draft":draft,"config":draft.config,"selection_hint":hint,"macro_library":draft.macros(),"multi_library":draft.multis(),"graph_actions":draft.document.editable.graph.actions,"control_settings":settings,"action_capabilities":capabilities}),
     )
     .map_err(failure)
 }
@@ -66,6 +67,7 @@ pub struct DeviceUsage {
 #[cfg(feature = "synthetic-backend")]
 #[derive(uniffi::Enum)]
 pub enum SyntheticDiscoveryState {
+    ReconnectedDevice,
     NoDevices,
     TwoDevices,
     Failure,
@@ -231,6 +233,26 @@ impl MicroInput {
             .map_err(failure)?;
         document_response(&store.draft, None)
     }
+    pub async fn export_preset(
+        &self,
+        profile_id: Option<String>,
+        layer_id: Option<String>,
+    ) -> Result<String, BridgeError> {
+        let store = self.draft.lock().unwrap();
+        mi_model::preset::export(&store.draft, profile_id.as_deref(), layer_id.as_deref())
+            .map_err(failure)
+    }
+    pub fn inspect_preset(&self, text: String) -> Result<String, BridgeError> {
+        mi_model::preset::inspect(&text).map_err(failure)
+    }
+    pub fn starter_preset(&self) -> Result<String, BridgeError> {
+        mi_model::preset::starter().map_err(failure)
+    }
+    pub async fn import_preset(&self, text: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store.import_preset(&text).map_err(failure)?;
+        document_response(&store.draft, None)
+    }
     pub async fn set_control_settings(
         &self,
         profile_id: String,
@@ -283,6 +305,54 @@ impl MicroInput {
         let mut store = self.draft.lock().unwrap();
         store
             .update(|d| d.delete_macro(&macro_id))
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn save_multi_action(
+        &self,
+        multi_id: Option<String>,
+        profile_id: String,
+        layer_id: String,
+        slot: u32,
+        action_json: String,
+        additions_json: String,
+    ) -> Result<String, BridgeError> {
+        let profile = serde_json::from_str(&profile_id).map_err(failure)?;
+        let layer = serde_json::from_str(&layer_id).map_err(failure)?;
+        let action = serde_json::from_str(&action_json).map_err(failure)?;
+        let additions = serde_json::from_str(&additions_json).map_err(failure)?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| {
+                if let Some(id) = multi_id {
+                    d.save_multi(&id, action, additions).map(|_| ())
+                } else {
+                    d.save_multi_for_binding(None, action, additions, &profile, &layer, slot)
+                        .map(|_| ())
+                }
+            })
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn bind_multi_action(
+        &self,
+        multi_id: Option<String>,
+        profile_id: String,
+        layer_id: String,
+        slot: u32,
+    ) -> Result<String, BridgeError> {
+        let profile = serde_json::from_str(&profile_id).map_err(failure)?;
+        let layer = serde_json::from_str(&layer_id).map_err(failure)?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.bind_multi(&profile, &layer, slot, multi_id.as_deref()))
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn delete_multi_action(&self, multi_id: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.delete_multi(&multi_id))
             .map_err(failure)?;
         document_response(&store.draft, None)
     }
@@ -422,19 +492,10 @@ impl MicroInput {
     /// Copy only the current session's completed, checksum-verified snapshot; never caller supplied JSON.
     pub async fn create_draft_from_snapshot(&self) -> Result<String, BridgeError> {
         let state = self.state.lock().unwrap();
-        let (id, session) = state
-            .session
-            .as_ref()
-            .ok_or_else(|| failure("设备会话已断开"))?;
-        let snapshot = session
-            .snapshot()
-            .filter(|s| !s.stale)
-            .ok_or_else(|| failure("请先读取完整且未过期的设备快照"))?;
-        let file = |f: &mi_session::VerifiedFile| serde_json::json!({"state":"present","name":f.meta.file.name(),"size":f.meta.size,"sha1":f.meta.checksum_hex(),"bytes":f.bytes.as_ref()});
-        let baseline = serde_json::json!({"device_identity":{"interface":id,"session_id":session.id,"confidence":"observed-interface","backend":session.backend_name()},"firmware":snapshot.config.firmware,"read_at":snapshot.config.read_at,"keymap":file(&snapshot.files.keymap),"smart_actions":snapshot.files.smart_actions.as_ref().map(&file).unwrap_or(serde_json::json!({"state":"missing"}))});
+        let (config, baseline) = Self::comparison_snapshot(&state)?;
         let mut store = self.draft.lock().unwrap();
         store
-            .create_independent(snapshot.config, baseline)
+            .create_independent(config, baseline)
             .map_err(failure)?;
         document_response(&store.draft, None)
     }
@@ -935,6 +996,7 @@ impl MicroInput {
     ) -> Result<(), BridgeError> {
         self.transport
             .set_synthetic_discovery(match state {
+                SyntheticDiscoveryState::ReconnectedDevice => 3,
                 SyntheticDiscoveryState::NoDevices => 0,
                 SyntheticDiscoveryState::TwoDevices => 1,
                 SyntheticDiscoveryState::Failure => 2,

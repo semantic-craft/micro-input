@@ -6,7 +6,12 @@ import MicroInputCore
     @StateObject private var store: Store
     private let statusMenu: StatusMenu
     init() {
-        let store = Store(backend: MicroInput())
+        #if MI_SYNTHETIC_BACKEND
+        let core = ["reconnect", "reconnect-transient"].contains(ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? "") ? MicroInput.syntheticDiscovery() : MicroInput()
+        #else
+        let core = MicroInput()
+        #endif
+        let store = Store(backend: core)
         _store = StateObject(wrappedValue: store)
         statusMenu = StatusMenu(store: store)
     }

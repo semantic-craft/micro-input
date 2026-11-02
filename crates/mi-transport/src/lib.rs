@@ -503,9 +503,10 @@ impl Default for SyntheticDiscovery {
 #[cfg(feature = "synthetic-backend")]
 impl HidTransport for SyntheticDiscovery {
     fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
-        match *self.state.lock().unwrap() {
+        let state = *self.state.lock().unwrap();
+        match state {
             0 => Ok(vec![]),
-            1 => Ok((0..2)
+            1 | 3 => Ok((0..if state == 3 { 1 } else { 2 })
                 .map(|i| HidCandidate {
                     vid: 0x303a,
                     pid: if i == 0 { 0x8298 } else { 0x8297 },
@@ -520,7 +521,11 @@ impl HidTransport for SyntheticDiscovery {
                     ],
                     transport_hint: TransportHint::Usb,
                     product: "合成 Creator Micro".into(),
-                    path: format!("synthetic-interface-{i}"),
+                    path: if state == 3 {
+                        "synthetic-reconnected-interface-0".into()
+                    } else {
+                        format!("synthetic-interface-{i}")
+                    },
                 })
                 .collect()),
             _ => Err(TransportError::Unavailable("合成枚举失败".into())),
@@ -530,7 +535,10 @@ impl HidTransport for SyntheticDiscovery {
         self.events.subscribe()
     }
     fn open(&self, id: &str) -> Result<Arc<dyn HidLink>, TransportError> {
-        if *self.state.lock().unwrap() != 1 || id != "synthetic-interface-0" {
+        let state = *self.state.lock().unwrap();
+        if !((state == 1 && id == "synthetic-interface-0")
+            || (state == 3 && id == "synthetic-reconnected-interface-0"))
+        {
             return Err(TransportError::Unsupported);
         }
         let (link, mut incoming) = MockLink::new();
@@ -556,16 +564,22 @@ impl HidTransport for SyntheticDiscovery {
                 let config = configuration.load(Ordering::SeqCst);
                 let response = if method == "fs.list" || method == "fs.readbin" {
                     use base64::Engine;
-                    let keymap = include_bytes!(
-                        "../../mi-model/fixtures/device/synthetic-keymap-multichunk.json"
-                    );
+                    let keymap: &[u8] = if config == 4 {
+                        include_bytes!(
+                            "../../mi-model/fixtures/device/synthetic-keymap-reconnected.json"
+                        )
+                    } else {
+                        include_bytes!(
+                            "../../mi-model/fixtures/device/synthetic-keymap-multichunk.json"
+                        )
+                    };
                     let smart = include_bytes!(
                         "../../mi-model/fixtures/device/synthetic-smart-actions-object.json"
                     );
                     let result = if method == "fs.list" {
                         lists += 1;
                         serde_json::json!([
-                            {"name":"keymap.json","size":if config==2 && lists%2==0 {1} else {12466},"checksum":"29982c129d7250b624d483d1bf2a29544271507e"},
+                            {"name":"keymap.json","size":if config==2 && lists%2==0 {1} else {12466},"checksum":if config==4 {"8629249fa26f62ab5cbe37dbbacf8b6813e6560a"}else{"29982c129d7250b624d483d1bf2a29544271507e"}},
                             {"name":"smart_actions.json","size":738,"checksum":"e60e82aba8a5f71ba7726febac9310e4007ed2ab"}
                         ])
                     } else {

@@ -318,9 +318,14 @@ pub use device::parse_device_files;
 pub mod action_library;
 pub mod document;
 
+pub mod comparison;
+#[cfg(test)]
+mod comparison_tests;
 pub mod control_settings;
 pub mod macro_sequence;
 
 pub mod macro_library;
 
 pub mod multi;
+
+pub mod preset;
