@@ -12,7 +12,7 @@ import MicroInputCore
     }
     @State private var appearance = "system"
     var body: some Scene {
-        Window("Micro Input", id: "main") { WorkbenchHost(store: store, statusMenu: statusMenu).preferredColorScheme(appearance == "system" ? nil : appearance == "dark" ? .dark : .light) }.defaultSize(width: 1180, height: 730)
+        Window("Micro Input", id: "main") { WorkbenchHost(store: store, statusMenu: statusMenu).onAppear { lifetime.store = store }.preferredColorScheme(appearance == "system" ? nil : appearance == "dark" ? .dark : .light) }.defaultSize(width: 1180, height: 730)
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(after: .appInfo) {
@@ -72,8 +72,27 @@ struct WorkbenchHost: View {
     @objc func quitApp() { NSApp.terminate(nil) }
 }
 
-final class AppLifetime: NSObject, NSApplicationDelegate {
+@MainActor final class AppLifetime: NSObject, NSApplicationDelegate {
+    weak var store: Store?
+    private var terminating = false
+    private let reply: (Bool) -> Void
+    override init() {
+        reply = { NSApplication.shared.reply(toApplicationShouldTerminate: $0) }
+        super.init()
+    }
+    init(store: Store, reply: @escaping (Bool) -> Void) {
+        self.store = store; self.reply = reply
+        super.init()
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let store else { return .terminateNow }
+        if !terminating {
+            terminating = true
+            Task { await store.shutdown(); reply(true) }
+        }
+        return .terminateLater
+    }
 }
 
 struct StatusPanel: View {

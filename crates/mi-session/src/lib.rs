@@ -122,6 +122,19 @@ impl Drop for PendingLease {
         }
     }
 }
+// Abandoning a multi-report send can leave an incomplete frame at the device.
+// Only cancellation after all reports were sent may keep the session reusable.
+struct Sending<'a> {
+    session: &'a DeviceSession,
+    complete: bool,
+}
+impl Drop for Sending<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.session.disconnect();
+        }
+    }
+}
 struct Queue {
     framer: Arc<Mutex<Box<dyn Framer>>>,
     next_id: u16,
@@ -181,6 +194,9 @@ impl DeviceSession {
                             break;
                         }
                         let report = link.read().await?;
+                        if invalid.load(Ordering::SeqCst) {
+                            break;
+                        }
                         let lines = framer.lock().unwrap().feed(&report)?;
                         for line in lines {
                             if let Some(id) = mi_proto::response_id(&line)? {
@@ -219,7 +235,10 @@ impl DeviceSession {
                 }
                 .await;
                 if !invalid.load(Ordering::SeqCst) {
-                    *terminal.lock().unwrap() = outcome.as_ref().err().cloned();
+                    let mut terminal = terminal.lock().unwrap();
+                    if terminal.is_none() {
+                        *terminal = outcome.as_ref().err().cloned();
+                    }
                 }
                 invalid.store(true, Ordering::SeqCst);
                 if let Some(p) = pending.lock().unwrap().take() {
@@ -265,6 +284,16 @@ impl DeviceSession {
         }
     }
 
+    /// Event-driven lifecycle observation, independent of RPC and input subscriptions.
+    pub async fn wait_disconnected(&self) {
+        let changed = self.changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        if !self.invalid.load(Ordering::SeqCst) {
+            changed.await;
+        }
+    }
+
     pub fn terminal_failure(&self) -> Option<SessionError> {
         self.terminal.lock().unwrap().clone()
     }
@@ -284,6 +313,9 @@ impl DeviceSession {
     }
     pub fn disconnect(&self) {
         self.invalid.store(true, Ordering::SeqCst);
+        if let Some(pending) = self.pending.lock().unwrap().take() {
+            let _ = pending.sender.send(Err(SessionError::Disconnected));
+        }
         self.link.close();
         if let Some(s) = self.snapshot.lock().unwrap().as_mut() {
             s.stale = true;
@@ -332,11 +364,32 @@ impl DeviceSession {
             pending: self.pending.clone(),
             id,
         };
-        for report in reports {
-            self.link.write(&report).await?;
+        let deadline = tokio::time::Instant::now() + self.config.timeout;
+        let mut sending = Sending {
+            session: self,
+            complete: false,
+        };
+        let result = tokio::time::timeout_at(deadline, async {
+            for report in reports {
+                self.link.write(&report).await?;
+            }
+            Ok::<_, TransportError>(())
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => sending.complete = true,
+            error => {
+                let error = match error {
+                    Ok(Err(error)) => SessionError::Transport(error),
+                    Err(_) => SessionError::Timeout,
+                    Ok(Ok(())) => unreachable!(),
+                };
+                *self.terminal.lock().unwrap() = Some(error.clone());
+                return Err(error);
+            }
         }
         q.last = Some(tokio::time::Instant::now());
-        tokio::time::timeout(self.config.timeout, receiver)
+        tokio::time::timeout_at(deadline, receiver)
             .await
             .map_err(|_| SessionError::Timeout)?
             .map_err(|_| SessionError::Disconnected)?

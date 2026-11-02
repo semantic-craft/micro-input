@@ -32,6 +32,8 @@ scripts/run --verify   # 验收实例10分钟自动退出
 
 旧入口 `~/agent-tasks/worklouder-input-study` 仅保留晋升记录和兼容链接。后续项目事实、代码和进度只在本项目维护。
 
+T05已补取消、会话终止通知及退出时等待资源释放；当前设备两次独立身份查询→关闭→重开已通过。配置读取中物理拔插、睡眠和原有映射行为仍待实际验收，不能据此签收完整生命周期。见[E-082](docs/spec/EVIDENCE.md)。
+
 ## 下一步
 
 PR #12/#13 已交付原生离线工作台、结构化动作和本地持久化。当前已有设备发现、身份查询与[#5 配置读取](https://github.com/semantic-craft/micro-input/issues/5)实现；配置原生浏览验收见[E-079](docs/spec/EVIDENCE.md)，[#6 生命周期](https://github.com/semantic-craft/micro-input/issues/6)及未核实物理映射仍待验证。范围继续限定只读，不从核心读回推定全部S1完成。

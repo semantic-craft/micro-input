@@ -3,14 +3,16 @@
 #include <CoreGraphics/CoreGraphics.h>
 #include <stdatomic.h>
 #include <stdint.h>
-static atomic_uint_fast64_t changes = 0;
+typedef void (*change_callback)(void *);
+typedef struct { change_callback notify; void *context; } watch_context;
 static void changed(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef device) {
-    (void)ctx; (void)result; (void)sender; (void)device;
-    atomic_fetch_add(&changes, 1);
+    (void)result; (void)sender; (void)device;
+    watch_context *watch = ctx;
+    watch->notify(watch->context);
 }
-uint64_t mi_changes(void) { return atomic_load(&changes); }
 int mi_permission(void) { return CGPreflightListenEventAccess(); }
-void mi_watch(const atomic_bool *stop) {
+void mi_watch(const atomic_bool *stop, change_callback notify, void *context) {
+    watch_context watch = {notify, context};
     IOHIDManagerRef manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
     if (!manager) return;
     int vendor = 0x303A;
@@ -20,8 +22,8 @@ void mi_watch(const atomic_bool *stop) {
     CFDictionaryRef filter = CFDictionaryCreate(NULL, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     IOHIDManagerSetDeviceMatching(manager, filter);
     CFRelease(filter); CFRelease(number);
-    IOHIDManagerRegisterDeviceMatchingCallback(manager, changed, NULL);
-    IOHIDManagerRegisterDeviceRemovalCallback(manager, changed, NULL);
+    IOHIDManagerRegisterDeviceMatchingCallback(manager, changed, &watch);
+    IOHIDManagerRegisterDeviceRemovalCallback(manager, changed, &watch);
     IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
     while (!atomic_load(stop)) CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, true);
     IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
