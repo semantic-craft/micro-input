@@ -2,6 +2,8 @@
 
 状态：2026-11-02，Input 1.1.0 随包静态分析 + 本机只读 IOKit 枚举。可据此实现只读客户端；**尚未完成独立客户端与固件 0.6.3 的 RPC 收发验收**。本轮未打开 HID 句柄、未发送设备请求、未启动或操作 Input，也未读取用户宏载荷。
 
+后续核验（2026-11-02）：独立 Swift / IOKit 临时探针已通过 USB 的 `sys.version` 读回 **0.6.3**，与官方 latest 稳定版一致，无需刷机。此次只证明单个版本查询成功；配置读取、多帧、异常恢复及应用端到端验收仍未完成。上段及 E01–E09 的“本轮”指此前静态调查。新增社区证据、差异和实机待验项见第 7 节。
+
 ## 适用范围与证据
 
 - 目标：本机 `/Applications/input.app`，Info.plist 版本 1.1.0；随包 `@worklouder/wl-device-kit` 0.2.13。
@@ -142,5 +144,30 @@ HID 筛选顺序：
 | 文件读取 | 多块、空块、非法 Base64、大小漂移、checksum 不匹配、缺少文件 | 实现后离线及实机验证 |
 | 连接生命周期 | 非独占、断连取消、重新连接、Input/Codex 共存 | 待实机；本轮未改变宿主运行状态 |
 | 不改变配置 | 所有出口仅白名单读命令；读取前后校验和可比 | 待客户端验收；本轮未发送任何 RPC |
+
+## 7. Dispatch 补充证据与当前固件核验
+
+**C（社区观察/实现）**：Dispatch 主版本固定在提交 `6c6770a67f640f0eefbad03aff3c43e254b52239`。它的[互操作文档](https://github.com/thefotes/Dispatch/blob/6c6770a67f640f0eefbad03aff3c43e254b52239/docs/protocol/creator-micro-2.md)主要基于作者的固件 0.6.2 实机，BLE 观察日期为 2026-10-20。以下不是官方保证，也不是本机验收。代码复用受其 [MIT 许可证](https://github.com/thefotes/Dispatch/blob/6c6770a67f640f0eefbad03aff3c43e254b52239/LICENSE)约束，保留版权与许可；本次只整理自然语言结论，没有移植代码。
+
+| 补充证据 | 对本项目的设计含义 | 本机仍需验证 |
+| --- | --- | --- |
+| C：vendor collection 位于 device usage pairs，primary usage 却是键盘；使用 DeviceUsagePage/DeviceUsage 匹配 | 枚举检查完整 usage pairs，不能只依赖 PrimaryUsage；仍保留 VID/PID/USB 约束 | 与 E09 的三接口观察核对，区分 OS 枚举方式和固件差异，不把一个接口形态写死 |
+| C：非独占打开；IOHIDManager 须存活到连接结束 | 会话持有 manager、回调缓冲区及监听生命周期 | 断连、退出及重新打开后的回调和资源释放 |
+| C：缺 Input Monitoring 或 Secure Input 均可能返回 0xE00002E2；权限与签名关联 | 区分权限、被保护输入阻塞和其他 I/O 错误；不自动退出应用或改变系统权限 | 我们交付签名下的真实错误路径；枚举阶段仍不请求权限 |
+| C：64 字节含 report ID 0x06、channel、length、最多 61 字节；channel 2 为 RPC | 与当前静态帧定义相互印证 | 各后端回调是否含 report ID；多帧及跨帧 UTF-8；本次仅验了短版本请求 |
+| C：按完整顶层 JSON 对象重组；源码发送 m/p 紧凑字段 | 与 Input 的 LF/CRLF 行解析、method/params 长字段分别验证，不能直接互相替换 | 连续 JSON、行结束、通知插入、畸形对象的实际返回边界 |
+| C：fs.read 的参数是 file；作者在 0.6.2 读到编码 JSON 字符串 | 这是另一条社区已观察路径，不取代本项目 fs.readbin 分块与校验方案 | 0.6.3 的 readbin、文件大小/校验和、分块一致性；fs.read 不自动加入 MVP 白名单 |
+| C：忽略未持有 ID 的响应，ID 小于 1000 是 Dispatch 自定约定 | 自研应处理外来和迟到响应；小 ID 范围不是固件规格，也不能保证跨进程不碰撞 | 与 Input/Codex 共存、同 ID 外来响应、超时后迟到响应和新会话隔离 |
+| C：13 个开关的行宽为 [2,4,4,3]，宽键跨开关 10/11，物理键为 12 个 | 查看器区分物理控件与开关；后续事件层合并宽键状态 | 本机物理位置、事件先后、去重及释放行为 |
+| C：AG13/14 为旋钮方向，AG15–18 为摇杆下/左/上/右；动作含按下与释放 | 后续宿主动作不能把释放误当第二次动作 | 当前固件与配置下的方向、按压及事件；本次不发送绑定写入 |
+| C：只有对应 KV_OAI_AGnn 活动绑定才能收到 v.oai.hid 并驱动逐键灯；Codex 也接收同类事件 | 专用绑定与普通按键分开显示；多宿主执行可能重复 | 不同活动层与 Codex 共存下的通知和灯光所有权 |
+| C：逐键灯与 ambient/keys 区域参数、效果表现不完全相同；RPC 返回 ok 不代表灯实际变化 | 普通层灯效与 v.oai.* 灯光 API 分开建模，不借用 UI 序号 | 效果、速度、亮度、Magic 和键 12 灯的实际表现；留到授权灯光阶段 |
+| C：BLE 与 USB 共用 channel 2 RPC，三槽分别配对；插拔 USB 后可切换传输 | 后续 BLE 可复用编解码，但传输身份与重连单独验收 | USB/BLE 切换、双候选去重和重连耗时；不扩入 USB MVP |
+
+源码定位：[Transport.swift](https://github.com/thefotes/Dispatch/blob/6c6770a67f640f0eefbad03aff3c43e254b52239/Sources/DispatchCreatorMicro/Transport.swift)、[HIDFraming.swift](https://github.com/thefotes/Dispatch/blob/6c6770a67f640f0eefbad03aff3c43e254b52239/Sources/DispatchCreatorMicro/HIDFraming.swift)、[RPC.swift](https://github.com/thefotes/Dispatch/blob/6c6770a67f640f0eefbad03aff3c43e254b52239/Sources/DispatchCreatorMicro/RPC.swift)。`fs.write`、逐键灯光、配置 provisioning 与恢复仅作为后续设计参考，不属于当前读命令白名单。
+
+**O（本机新增核验）**：2026-11-02，macOS IOKit，VID `0x303A`、PID `0x8298`、Transport `USB`，按 device usage pair `0xFF00/1` 匹配到一台设备，非独占打开。仅发送一次 `sys.version`（长字段 method/params、独立 request ID），收到匹配 ID 的 `version: 0.6.3`。原始输出及一次性探针留在 `.scratch/firmware-check/`；没有读取配置、刷机、切 Profile 或发送灯光命令。不能将此扩写为全部 RPC 或不变配置读回已验收。
+
+**F（官方发布事实）**：同日查询[官方 latest](https://github.com/worklouder/cm-v2-fw-releases/releases/latest)为 [v0.6.3](https://github.com/worklouder/cm-v2-fw-releases/releases/tag/v0.6.3)，`prerelease=false`；[v0.7.0-rc.16](https://github.com/worklouder/cm-v2-fw-releases/releases/tag/v0.7.0-rc.16)为预发布，不是升级目标。遵循用户选择：保持最新稳定版，未来操作前重新查询发布状态并保留既有映射。发布说明可提示功能差异，但不能代替协议规格。
 
 实现交接仅提供本文及合成向量说明；不得导入原应用模块充当自研核心。下一步可据本文实现编解码器与只读 transport，再在明确可控的设备会话中验证。尚未核实 native HID 适配细节、完整键码/容量、固件实际错误码以及跨文件一致性，不把这些缺口补成假定规格。
