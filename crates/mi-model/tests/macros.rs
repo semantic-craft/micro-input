@@ -32,3 +32,9 @@ fn local_press_delay_release_round_trips_with_whole_graph_undo() {
     draft.undo(true).unwrap();
     assert!(draft.document.editable == after);
 }
+
+#[test]
+fn invalid_macro_reports_the_held_press_step() {
+    let invalid = action(json!([{"type":"press","key":"a"},{"type":"delay","ms":1}]));
+    assert!(invalid.validate().unwrap_err().contains("第 1 步"));
+}

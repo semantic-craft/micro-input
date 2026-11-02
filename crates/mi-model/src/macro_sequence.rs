@@ -1,6 +1,6 @@
 //! Versioned local editing intent. Key labels and delays are not firmware tokens or limits.
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -20,13 +20,13 @@ impl LocalMacro {
         if self.format_version != 1 || self.events.is_empty() {
             return Err("本地宏格式不支持或步骤为空".into());
         }
-        let mut held = BTreeSet::new();
+        let mut held = BTreeMap::new();
         for (index, event) in self.events.iter().enumerate() {
             let valid = match event {
                 MacroEvent::Press { key } => {
-                    !key.trim().is_empty() && key.len() <= 256 && held.insert(key)
+                    !key.trim().is_empty() && key.len() <= 256 && held.insert(key, index).is_none()
                 }
-                MacroEvent::Release { key } => held.remove(key),
+                MacroEvent::Release { key } => held.remove(key).is_some(),
                 MacroEvent::Delay { ms } => *ms > 0,
             };
             if !valid {
@@ -36,8 +36,8 @@ impl LocalMacro {
                 ));
             }
         }
-        if !held.is_empty() {
-            return Err("本地宏仍有未释放的按键".into());
+        if let Some(index) = held.values().min() {
+            return Err(format!("本地宏第 {} 步按下的按键尚未释放", index + 1));
         }
         Ok(())
     }
