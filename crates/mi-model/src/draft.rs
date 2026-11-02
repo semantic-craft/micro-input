@@ -98,7 +98,7 @@ pub fn binding_key(profile: &Value, layer: &Value, slot: u32) -> String {
     serde_json::to_string(&(profile, layer, format!("logical-{slot}"))).unwrap()
 }
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Draft {
+pub struct LegacyDocumentV1 {
     pub schema_version: u32,
     pub config: DeviceConfig,
     pub edits: BTreeMap<String, Action>,
@@ -114,12 +114,12 @@ pub struct Draft {
     #[serde(skip_deserializing)]
     pub read_only: bool,
 }
-impl Default for Draft {
+impl Default for LegacyDocumentV1 {
     fn default() -> Self {
         Self::new(crate::demo().expect("valid bundled fixture")).unwrap()
     }
 }
-impl Draft {
+impl LegacyDocumentV1 {
     pub fn new(config: DeviceConfig) -> Result<Self, String> {
         let d = Self {
             schema_version: 1,
@@ -243,5 +243,191 @@ impl Draft {
         self.revision += 1;
         self.can_undo = !self.undo.is_empty();
         self.can_redo = !self.redo.is_empty();
+    }
+}
+
+/// Runtime projection plus one authoritative v2 document. History is session-local.
+#[derive(Clone, Serialize)]
+pub struct Draft {
+    pub config: DeviceConfig,
+    pub edits: BTreeMap<String, Action>,
+    pub revision: u64,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub read_only: bool,
+    pub loaded_format: u32,
+    pub document_id: String,
+    #[serde(skip)]
+    pub document: crate::document::LocalDocumentV2,
+    #[serde(skip)]
+    undo: Vec<crate::document::EditableState>,
+    #[serde(skip)]
+    redo: Vec<crate::document::EditableState>,
+}
+impl Default for Draft {
+    fn default() -> Self {
+        Self::new(crate::demo().expect("valid fixture")).unwrap()
+    }
+}
+impl Draft {
+    pub fn new(config: DeviceConfig) -> Result<Self, String> {
+        let doc = crate::document::LocalDocumentV2::from_config(&config, None, "synthetic-local")?;
+        Self::from_document(doc, 2, false)
+    }
+    pub fn from_document(
+        document: crate::document::LocalDocumentV2,
+        loaded_format: u32,
+        read_only: bool,
+    ) -> Result<Self, String> {
+        let (config, edits) = document.view()?;
+        Ok(Self {
+            revision: document.revision,
+            document_id: document.document_id.clone(),
+            config,
+            edits,
+            can_undo: false,
+            can_redo: false,
+            read_only,
+            loaded_format,
+            document,
+            undo: vec![],
+            redo: vec![],
+        })
+    }
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        use sha2::{Digest, Sha256};
+        let raw: Value = serde_json::from_slice(bytes).map_err(|_| "本地文档损坏；原文件保留")?;
+        match raw["schema_version"].as_u64() {
+            Some(1) => {
+                let legacy = LegacyDocumentV1::from_bytes(bytes)?;
+                let doc = crate::document::LocalDocumentV2::from_legacy(
+                    &legacy,
+                    Some(format!("{:x}", Sha256::digest(bytes))),
+                )?;
+                Self::from_document(doc, 1, legacy.read_only)
+            }
+            Some(2) => {
+                let doc: crate::document::LocalDocumentV2 = serde_json::from_value(raw.clone())
+                    .map_err(|_| "本地文档结构不合法；原文件保留")?;
+                doc.validate()?;
+                let read_only = serde_json::to_value(&doc).map_err(|e| e.to_string())? != raw
+                    || !doc.actions_known();
+                Self::from_document(doc, 2, read_only)
+            }
+            _ => Err("本地文档版本不支持；原文件保留".into()),
+        }
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        self.document.validate()
+    }
+    pub fn mutate<T>(
+        &mut self,
+        edit: impl FnOnce(&mut crate::document::LocalDocumentV2) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if self.read_only {
+            return Err("文档含未知动作或字段，仅可浏览；原文件保留".into());
+        }
+        let mut next = self.document.clone();
+        let result = edit(&mut next)?;
+        next.validate()?;
+        if next.editable == self.document.editable {
+            return Ok(result);
+        }
+        next.revision = self.revision.checked_add(1).ok_or("文档修订号已达上限")?;
+        let (config, edits) = next.view()?;
+        self.undo.push(self.document.editable.clone());
+        if self.undo.len() > 100 {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        self.document = next;
+        self.config = config;
+        self.edits = edits;
+        self.refresh();
+        Ok(result)
+    }
+    fn refresh(&mut self) {
+        self.revision = self.document.revision;
+        self.can_undo = !self.undo.is_empty();
+        self.can_redo = !self.redo.is_empty();
+    }
+    pub fn create_profile(&mut self, name: &str) -> Result<String, String> {
+        self.mutate(|d| d.create_profile(name))
+    }
+    pub fn create_layer(&mut self, pid: &str, name: &str) -> Result<String, String> {
+        self.mutate(|d| d.create_layer(pid, name))
+    }
+    pub fn assign(
+        &mut self,
+        profile: &Value,
+        layer: &Value,
+        slot: u32,
+        action: Action,
+    ) -> Result<(), String> {
+        action.validate()?;
+        let pid = profile.as_str().ok_or("配置必须是本地 UUID")?;
+        let lid = layer.as_str().ok_or("层必须是本地 UUID")?;
+        self.mutate(|d| {
+            let p = d.editable.graph.profiles.get(pid).ok_or("配置不存在")?;
+            if !p.layer_order.iter().any(|id| id == lid) {
+                return Err("层不属于所选配置".into());
+            }
+            let l = d.editable.graph.layers.get_mut(lid).ok_or("层不存在")?;
+            let binding = l
+                .controls
+                .values_mut()
+                .find(|b| b.logical_control == format!("logical-{slot}"))
+                .ok_or("控件不存在")?;
+            if binding
+                .action_id
+                .as_ref()
+                .and_then(|id| d.editable.graph.actions.get(id))
+                == Some(&action)
+            {
+                return Ok(());
+            }
+            let old = binding.action_id.replace(crate::document::new_id());
+            d.editable
+                .graph
+                .actions
+                .insert(binding.action_id.clone().unwrap(), action);
+            if let Some(old) = old {
+                if !d.editable.graph.layers.values().any(|l| {
+                    l.controls
+                        .values()
+                        .any(|b| b.action_id.as_ref() == Some(&old))
+                }) {
+                    d.editable.graph.actions.remove(&old);
+                    d.editable.source_refs.remove(&old);
+                }
+            }
+            Ok(())
+        })
+    }
+    pub fn undo(&mut self, redo: bool) -> Result<(), String> {
+        if self.read_only {
+            return Err("文档仅可浏览".into());
+        }
+        let stack = if redo { &self.redo } else { &self.undo };
+        let Some(state) = stack.last().cloned() else {
+            return Ok(());
+        };
+        let mut next = self.document.clone();
+        next.editable = state;
+        next.revision = self.revision.checked_add(1).ok_or("文档修订号已达上限")?;
+        next.validate()?;
+        let (config, edits) = next.view()?;
+        if redo {
+            self.redo.pop();
+            self.undo.push(self.document.editable.clone());
+        } else {
+            self.undo.pop();
+            self.redo.push(self.document.editable.clone());
+        }
+        self.document = next;
+        self.config = config;
+        self.edits = edits;
+        self.refresh();
+        Ok(())
     }
 }

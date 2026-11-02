@@ -95,8 +95,10 @@ fn corrupt_future_and_unknown_files_are_never_overwritten() {
         assert!(s.update(assign).is_err());
         assert_eq!(fs::read(t.file()).unwrap(), bytes);
     }
-    let mut d = Draft::default();
-    assign(&mut d).unwrap();
+    let mut d = LegacyDocumentV1::default();
+    let p = d.config.profiles[0].id.clone();
+    let l = d.config.profiles[0].layers[0].id.clone();
+    d.assign(&p, &l, 1, actions()[1].clone()).unwrap();
     let mut raw = serde_json::to_value(&d).unwrap();
     raw["config"]["future"] = json!({"keep":true});
     let bytes = serde_json::to_vec(&raw).unwrap();
@@ -149,4 +151,47 @@ fn typed_actions_reject_invalid_parameters() {
     assert!(a.validate().is_err());
     a.payload = json!({"type":"shortcut","key":"p","modifiers":["guess"],"target":"editor"});
     assert!(a.validate().is_err());
+}
+
+#[test]
+fn legacy_edits_survive_first_structure_save_with_exact_backup() {
+    let t = Temp::new();
+    let config = crate::demo().unwrap();
+    let key = binding_key(&config.profiles[0].id, &config.profiles[0].layers[0].id, 1);
+    let mut action = actions()[2].clone();
+    action.payload = json!({"type":"text","text":"retained\nsecond line"});
+    let bytes = serde_json::to_vec_pretty(&json!({
+        "schema_version":1,"config":config,"edits":{key:action},"revision":7
+    }))
+    .unwrap();
+    fs::write(t.file(), &bytes).unwrap();
+    let mut store = DocumentStore::default();
+    store.open(t.file()).unwrap();
+    assert_eq!(
+        fs::read(t.file()).unwrap(),
+        bytes,
+        "browsing does not migrate"
+    );
+    store
+        .update(|d| d.create_profile("New profile").map(|_| ()))
+        .unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(t.file()).unwrap()).unwrap();
+    assert_eq!(saved["schema_version"], 2);
+    assert_eq!(saved["baseline"], serde_json::Value::Null);
+    assert_eq!(saved["revision"], 8);
+    let backup = fs::read_dir(&t.0)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|e| e == "backup"))
+        .unwrap();
+    assert_eq!(fs::read(backup).unwrap(), bytes);
+    let mut reopened = DocumentStore::default();
+    reopened.open(t.file()).unwrap();
+    assert!(reopened
+        .draft
+        .edits
+        .values()
+        .any(|a| a.payload["text"] == "retained\nsecond line"));
+    assert_eq!(reopened.draft.config.profiles.len(), 3);
+    assert!(!reopened.draft.can_undo);
 }

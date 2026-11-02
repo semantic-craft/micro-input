@@ -52,6 +52,9 @@ impl DocumentStore {
         }
         let mut next = self.draft.clone();
         edit(&mut next)?;
+        if next.revision == self.draft.revision {
+            return Ok(());
+        }
         if let Some(path) = &self.path {
             let parent = path.parent().ok_or("无效保存目录")?;
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -60,9 +63,35 @@ impl DocumentStore {
             if read(path)? != self.expected {
                 return Err("本地文档已被其他实例修改；请重开应用后编辑".into());
             }
-            let bytes = serde_json::to_vec_pretty(&next).map_err(|e| e.to_string())?;
+            let bytes = serde_json::to_vec_pretty(&next.document).map_err(|e| e.to_string())?;
             if bytes.len() as u64 > LIMIT {
                 return Err("本地文档超过 4 MiB".into());
+            }
+            if self.draft.loaded_format == 1 {
+                use sha2::{Digest, Sha256};
+                let original = self.expected.as_ref().ok_or("缺少迁移原件")?;
+                let hash = format!("{:x}", Sha256::digest(original));
+                let backup = path.with_file_name(format!(
+                    "{}.v1.{hash}.backup",
+                    path.file_name().ok_or("无效文件名")?.to_string_lossy()
+                ));
+                match OpenOptions::new()
+                    .write(true)
+                    .mode(0o600)
+                    .create_new(true)
+                    .open(&backup)
+                {
+                    Ok(mut f) => {
+                        f.write_all(original)
+                            .and_then(|_| f.sync_all())
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(e.to_string()),
+                }
+                if read(&backup)?.as_ref() != Some(original) {
+                    return Err("迁移备份不一致；原件保留".into());
+                }
             }
             let tmp = path.with_extension("pending");
             let mut f = OpenOptions::new()
@@ -74,6 +103,9 @@ impl DocumentStore {
             let result = (|| {
                 f.write_all(&bytes)?;
                 f.sync_all()?;
+                if read(path).map_err(std::io::Error::other)? != self.expected {
+                    return Err(std::io::Error::other("保存前原件已变化"));
+                }
                 fs::rename(&tmp, path)
             })()
             .map_err(|e: std::io::Error| e.to_string());
@@ -83,6 +115,7 @@ impl DocumentStore {
             result?;
             self.expected = Some(bytes);
         }
+        next.loaded_format = 2;
         self.draft = next;
         Ok(())
     }

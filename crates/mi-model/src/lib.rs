@@ -313,3 +313,5 @@ mod device_tests;
 
 mod device;
 pub use device::parse_device_files;
+
+pub mod document;
