@@ -44,6 +44,6 @@ T05已补取消、会话终止通知及退出时等待资源释放；当前设�
 
 PR #12/#13 已交付原生离线工作台、结构化动作和本地持久化。当前已有设备发现、身份查询与[#5 配置读取](https://github.com/semantic-craft/micro-input/issues/5)实现；配置原生浏览验收见[E-079](docs/spec/EVIDENCE.md)，[#6 生命周期](https://github.com/semantic-craft/micro-input/issues/6)及未核实物理映射仍待验证。范围继续限定只读，不从核心读回推定全部S1完成。
 
-完整目标与 35 张工单入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)，技术契约见 [实施设计](docs/implementation-plan.md)，阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)。当前按继续开发授权补齐本地功能与验证；设备能力仍遵守各票证据与恢复门槛，不接自动化、不写设备、不执行宿主动作。未完成技术细化的工单使用 needs-info，并在工单内列明缺项。T10 本地控件编辑已接入集成分支并通过离线与原生 QA；T11 自有预设已实现，下一步核对 T09 / T12 在途分支的交付和剩余验收。工单关闭与产品总验收仍以 GitHub 当前状态为准。
+完整目标与 35 张工单入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)，技术契约见 [实施设计](docs/implementation-plan.md)，阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)。当前按继续开发授权补齐本地功能与验证；设备能力仍遵守各票证据与恢复门槛，不接自动化、不写设备、不执行宿主动作。未完成技术细化的工单使用 needs-info，并在工单内列明缺项。T10 本地控件编辑已接入集成分支并通过离线与原生 QA；T11 自有预设已实现；T09 四分支本地编辑器与 T12 显式三方比较已接入集成分支。T12 只消费完整核验的会话快照，选择结果仅保存本地，身份不确定时禁止自动合并。既有原生合成验收见 E-088/E-086；真实重连、外部改配与高级绑定执行仍待验收。工单关闭与产品总验收仍以 GitHub 当前状态为准。
 
 原生验收使用 `scripts/run --verify` 输出的 `QA_APP_PATH` 精确选择应用；QA 副本有唯一 bundle ID，避免多个 worktree 的同名应用互相抢占。退出后通过进程状态确认，不再调用可能自动重启应用的 UI 入口。QA 身份不能替代生产签名与权限验收。
