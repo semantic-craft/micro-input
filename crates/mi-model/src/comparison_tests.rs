@@ -25,3 +25,24 @@ fn local_and_remote_disjoint_names_merge_against_new_base() {
         vec!["配置改名：通用 Coding · 演示 → Local profile"]
     );
 }
+
+#[test]
+fn unknown_raw_and_uncertain_identity_block_only_automatic_merge() {
+    let (local, mut remote, mut baseline) = fixture();
+    remote.raw["future_mode"] = json!({"mode":"new"});
+    baseline["device_identity"] =
+        json!({"confidence":"observed-interface","interface":"ephemeral"});
+    let comparison = Comparison::new(&local, &remote, baseline).unwrap();
+    assert!(!comparison.can_merge());
+    assert!(comparison.conflicts.iter().any(|c| c.contains("未知 raw")));
+    assert!(!comparison.identity_matches);
+    let kept = comparison
+        .resolve(&local, Choice::KeepLocal)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        kept.baseline.unwrap()["comparison_config"]["raw"]["future_mode"]["mode"],
+        "new"
+    );
+    assert_eq!(local.origin["config"]["raw"].get("future_mode"), None);
+}
