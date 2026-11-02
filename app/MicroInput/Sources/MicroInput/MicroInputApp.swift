@@ -78,7 +78,16 @@ struct WorkbenchHost: View {
 }
 
 @MainActor final class AppLifetime: NSObject, NSApplicationDelegate {
-    weak var store: Store?
+    weak var store: Store? {
+        didSet {
+            // The main window may appear again while wake is waiting for close/join.
+            // Keep that lifecycle task when onAppear reassigns the same Store.
+            guard oldValue !== store else { return }
+            sleepObserver?.stop()
+            sleepObserver = store.map { WorkspaceSleepObserver(store: $0) }
+        }
+    }
+    private var sleepObserver: WorkspaceSleepObserver?
     private var terminating = false
     private let reply: (Bool) -> Void
     override init() {
@@ -88,12 +97,14 @@ struct WorkbenchHost: View {
     init(store: Store, reply: @escaping (Bool) -> Void) {
         self.store = store; self.reply = reply
         super.init()
+        sleepObserver = WorkspaceSleepObserver(store: store)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let store else { return .terminateNow }
         if !terminating {
             terminating = true
+            sleepObserver?.stop(); sleepObserver = nil
             Task { await store.shutdown(); reply(true) }
         }
         return .terminateLater

@@ -91,3 +91,12 @@
 - 正确做法：语法通过不等于启动入口可运行；先对实际入口运行隔离的系统边界回归，再进行真实设备验收。
 - 验证点：`python3 -B -m unittest discover -s scripts/tests -p 'test_probe_a_launcher.py'`；已加入 `scripts/check`，原生设备测试继续保持 ignored。
 - 复发记录：Seen 1x（2026-11-03）。
+
+
+## 窗口重开不能替换应用级生命周期观察者
+
+- 标签：#macOS #生命周期
+- 起因与后果：T05 集成评审复现主窗 onAppear 重设同一个 Store，触发观察者替换并取消正在等待 disconnect close/join 的唯一 wake 任务；关闭完成后 Store 仍处于睡眠状态，显式重连被拒绝。
+- 修复：AppLifetime 只在 Store 对象身份实际变化时替换观察者，同一对象重设保留观察者及唤醒任务。
+- 验证点：`WorkspaceLifecycleTests.testReopeningWindowWithSameStoreDoesNotCancelPendingWake` 在进程内发布合成通知，持住 disconnect，重设相同 Store 后释放，明确重连应成功；本测试不能替代真实 OS 睡眠验收。修复前确定失败，修复后通过。
+- 复发记录：Seen 1x（2026-11-03）。
