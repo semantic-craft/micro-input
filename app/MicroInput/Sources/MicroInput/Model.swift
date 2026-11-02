@@ -77,7 +77,7 @@ func bindingKey(profile: JSONValue, layer: JSONValue, slot: Int) -> String {
 extension CatalogAction {
     var parameterSummary: String {
         payload.keys.filter {$0 != "type"}.sorted().map { key in
-            let label = ["text":"文本", "url":"网址", "bundle_id":"应用标识", "key":"按键", "target":"目标", "modifiers":"修饰键", "adapter":"适配器（未验证）", "command":"命令引用", "session":"会话引用", "skill":"Skill 引用"][key] ?? key
+            let label = ["token":"设备按键意图", "text":"文本", "url":"网址", "bundle_id":"应用标识", "key":"按键", "target":"目标", "modifiers":"修饰键", "adapter":"适配器（未验证）", "command":"命令引用", "session":"会话引用", "skill":"Skill 引用"][key] ?? key
             return "\(label)：\(payload[key]?.text ?? "")"
         }.joined(separator: "\n")
     }

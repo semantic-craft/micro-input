@@ -7,7 +7,7 @@ sources = list((root / 'crates').rglob('*.rs'))
 found = set()
 for path in sources:
     found.update(re.findall(r'TODO\((UNKNOWN-\d+)\)', path.read_text()))
-expected = {f'UNKNOWN-{n:02}' for n in range(1, 8)}
+expected = {f'UNKNOWN-{n:02}' for n in range(1, 10)}
 assert found == expected, (found, expected)
 doc = (root / 'docs/spec/UNKNOWNS.md').read_text()
 assert expected <= set(re.findall(r'UNKNOWN-\d+', doc))

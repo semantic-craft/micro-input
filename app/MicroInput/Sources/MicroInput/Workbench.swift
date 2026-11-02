@@ -62,6 +62,7 @@ struct Workbench: View {
                     PresetMenu(store: store)
                     DocumentRecoveryMenu(store: store)
                     AgentProposalButton(store: store)
+                    Button("准备基础绑定应用…") { Task {await store.previewApply()} }.disabled(!store.canEditDraft || store.busy)
                     Text("切换配置不会应用到设备。").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Label(store.browsingDeviceSnapshot ? (store.snapshot?.source == "DeviceSnapshot" ? "设备快照 · 只读" : "合成夹具 · 只读") : "本地草稿", systemImage: store.browsingDeviceSnapshot ? "eye" : "doc")
@@ -140,6 +141,7 @@ struct Workbench: View {
             Button("取消",role:.cancel) {}
             Button("删除",role:.destructive) {Task {if deleteLayer {await store.deleteLayer()} else {await store.deleteProfile()}}}
         } message: {Text("仅删除本地草稿中的对象及其所属内容。原始来源保留，可撤销；设备不会改变。") }
+        .sheet(item: $store.applyPreview, onDismiss: { Task { await store.cancelApplyPreview() } }) { preview in ApplyPreparationView(store:store,preview:preview) }
         .sheet(item: $store.comparison) { comparison in ReconnectComparisonView(store: store, initialComparison: comparison) }
         .task { if store.snapshot == nil { await store.loadWorkbench() } }
     }
@@ -409,6 +411,12 @@ struct ActionParameters: View {
             ForEach(fields, id: \.0) { key,label in
                 Text(label).font(.caption).foregroundStyle(.secondary)
                 TextField(label, text: Binding(get: {action.payload[key]?.text ?? ""}, set: {action.payload[key] = .string($0)}), axis: .vertical).lineLimit(1...4)
+            }
+            if type == "device_key" {
+                Picker("普通设备按键", selection: Binding(get: {action.payload["token"]?.text ?? "KC_B"}, set: {action.payload["token"] = .string($0)})) {
+                    ForEach(["KC_A","KC_B","KC_ENTER","KC_ESC","KC_SPACE","KC_TAB"],id:\.self) { Text($0).tag($0) }
+                }
+                Text("本地设备按键意图 · 保存后仍未应用 · 实体位置未核实").font(.caption).foregroundStyle(.secondary)
             }
             if type == "open_app" {
                 Text("目标应用：\(action.payload["bundle_id"]?.text ?? "未选择")").font(.caption).textSelection(.enabled)
