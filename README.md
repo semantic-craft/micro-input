@@ -12,6 +12,8 @@
 
 ## 调研入口
 
+可直接用于只读客户端实现的结论见 [USB 发现、身份与配置读取协议](docs/protocol-readonly.md)。依据 Input 1.1.0 静态分析及本机 IOKit 枚举；尚未完成独立 RPC 收发验收。
+
 以下为本机原始调查材料，保存在 Git 忽略的 `.scratch/input-study/`，不随源码提交：
 
 - [官方来源、能力矩阵与公开协议线索](.scratch/input-study/out/research.md)

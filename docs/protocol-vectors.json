@@ -1,0 +1,104 @@
+{
+  "status": "synthetic-not-device-capture",
+  "requests": [
+    {
+      "method": "device.status",
+      "json": "{\"method\":\"device.status\",\"params\":null,\"id\":1}",
+      "byte_length": 47,
+      "node_hid_write_buffers_hex": [
+        "06022f7b226d6574686f64223a226465766963652e737461747573222c22706172616d73223a6e756c6c2c226964223a317d0000000000000000000000000000"
+      ]
+    },
+    {
+      "method": "sys.version",
+      "json": "{\"method\":\"sys.version\",\"params\":null,\"id\":2}",
+      "byte_length": 45,
+      "node_hid_write_buffers_hex": [
+        "06022d7b226d6574686f64223a227379732e76657273696f6e222c22706172616d73223a6e756c6c2c226964223a327d00000000000000000000000000000000"
+      ]
+    },
+    {
+      "method": "fs.list",
+      "json": "{\"method\":\"fs.list\",\"params\":{\"checksum\":true},\"id\":3}",
+      "byte_length": 54,
+      "node_hid_write_buffers_hex": [
+        "0602367b226d6574686f64223a2266732e6c697374222c22706172616d73223a7b22636865636b73756d223a747275657d2c226964223a337d00000000000000"
+      ]
+    },
+    {
+      "method": "fs.readbin",
+      "json": "{\"method\":\"fs.readbin\",\"params\":{\"file\":\"keymap.json\",\"offset\":0,\"len\":3072},\"id\":4}",
+      "byte_length": 84,
+      "node_hid_write_buffers_hex": [
+        "06023d7b226d6574686f64223a2266732e7265616462696e222c22706172616d73223a7b2266696c65223a226b65796d61702e6a736f6e222c226f6666736574",
+        "060217223a302c226c656e223a333037327d2c226964223a347d0000000000000000000000000000000000000000000000000000000000000000000000000000"
+      ]
+    }
+  ],
+  "transport_boundaries": [
+    {
+      "payload_bytes": 0,
+      "frame_payload_lengths": [],
+      "note": "Transport boundary only; x payload is not an executable JSON request."
+    },
+    {
+      "payload_bytes": 1,
+      "frame_payload_lengths": [
+        1
+      ],
+      "note": "Transport boundary only; x payload is not an executable JSON request."
+    },
+    {
+      "payload_bytes": 60,
+      "frame_payload_lengths": [
+        60
+      ],
+      "note": "Transport boundary only; x payload is not an executable JSON request."
+    },
+    {
+      "payload_bytes": 61,
+      "frame_payload_lengths": [
+        61
+      ],
+      "note": "Transport boundary only; x payload is not an executable JSON request."
+    },
+    {
+      "payload_bytes": 62,
+      "frame_payload_lengths": [
+        61,
+        1
+      ],
+      "note": "Transport boundary only; x payload is not an executable JSON request."
+    },
+    {
+      "payload_bytes": 122,
+      "frame_payload_lengths": [
+        61,
+        61
+      ],
+      "note": "Transport boundary only; x payload is not an executable JSON request."
+    },
+    {
+      "payload_bytes": 123,
+      "frame_payload_lengths": [
+        61,
+        61,
+        1
+      ],
+      "note": "Transport boundary only; x payload is not an executable JSON request."
+    }
+  ],
+  "readbin_response": {
+    "id": 4,
+    "result": {
+      "total_size": 27,
+      "data": "eyJ2ZXJzaW9uIjoxLCJwcm9maWxlcyI6W119"
+    }
+  },
+  "decoded_file_utf8": "{\"version\":1,\"profiles\":[]}",
+  "decoded_file_sha1": "7d49f42b29b046e4a3898c88e949422c4afa4008",
+  "unicode_example": {
+    "input": "中文😀",
+    "json": "\"\\u4e2d\\u6587\\ud83d\\ude00\""
+  }
+}
