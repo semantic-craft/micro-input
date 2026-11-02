@@ -105,7 +105,10 @@ extension Backend {
 }
 extension MicroInput: Backend {}
 @MainActor final class Store: ObservableObject {
-    func subscribeInput() async throws -> InputSubscription { try await backend.subscribeInput() }
+    func subscribeInput() async throws -> InputSubscription {
+        guard !systemSleeping, !stopped, connectedID != nil else { throw BridgeError.Disconnected }
+        return try await backend.subscribeInput()
+    }
     private let backend: Backend
     @Published var draft = DraftState()
     @Published var macros: [MacroSummary] = []
@@ -400,6 +403,11 @@ extension MicroInput: Backend {}
         catch { status = readableError(error) }
     }
     private var generation = 0
+    private var systemSleeping = false
+    private var stopped = false
+    private var lifecycleGeneration = 0
+    private var discoveryGeneration = 0
+    private var sleepDisconnect: Task<Void, Never>?
     private var pendingID: String?
     private var connectionWatcher: Task<Void, Never>?
     var canDisconnect: Bool { pendingID != nil || connectedID != nil }
@@ -418,18 +426,19 @@ extension MicroInput: Backend {}
         return discoveryStatus
     }
     func startDiscovery() async {
-        guard events == nil else { return }
+        guard events == nil, !systemSleeping, !stopped else { return }
         let receiver = Events(self)
         events = receiver
         await backend.subscribeDeviceEvents(cb: receiver)
         await refresh()
     }
     func selectDevice(_ id: String) {
-        guard let device = devices.first(where: { $0.id == id }) else { return }
+        guard !systemSleeping, !stopped, let device = devices.first(where: { $0.id == id }) else { return }
         selectedDeviceID = id
         discoveryStatus = device.verifiedModel ? "已连接 USB · 固件未知 · 尚未打开设备" : "未知型号 · 尚未验证 · 固件未知"
     }
     func discoveryFailed(_ message: String) {
+        guard !systemSleeping, !stopped else { return }
         devices = []; selectedDeviceID = nil
         discoveryStatus = "发现失败 · \(message)"
     }
@@ -448,9 +457,16 @@ extension MicroInput: Backend {}
     func selectLayer(_ index: Int) { controlSettingsError = nil; layerIndex = index; slot = 0; selectedBinding = nil }
     func refresh() async {
         // R-D02: descriptors only, no permission preflight/request or device open.
-        do { received(try await backend.listDevices()) } catch { discoveryFailed(readableError(error)) }
+        guard !systemSleeping, !stopped else { return }
+        discoveryGeneration += 1; let token = discoveryGeneration
+        do {
+            let values = try await backend.listDevices()
+            guard token == discoveryGeneration else { return }
+            received(values)
+        } catch { if token == discoveryGeneration { discoveryFailed(readableError(error)) } }
     }
     func received(_ values: [DeviceInfo]) {
+        guard !systemSleeping, !stopped else { return }
         let removed = selectedDeviceID.map { id in !values.contains { $0.id == id } } ?? false
         devices = values
         if removed {
@@ -468,7 +484,7 @@ extension MicroInput: Backend {}
         do { let json = try await backend.loadDemo(); guard token == generation else { return }; try replace(json); localSnapshot = snapshot; browsingDeviceSnapshot = false; status = "本地草稿 · 演示基线 · 未与设备同步" } catch { if token == generation { status = readableError(error) } }
     }
     func connect(_ id: String) async {
-        guard !busy else { return }
+        guard !busy, !systemSleeping, !stopped else { return }
         generation += 1; let token = generation
         busy = true; defer { if token == generation { busy = false } }
         connectionWatcher?.cancel()
@@ -525,14 +541,67 @@ extension MicroInput: Backend {}
         stale = snapshot != nil; status = reason
     }
     func suspend() async { retireConnection("会话已断开"); await backend.disconnect() }
-    func shutdown() async { retireConnection("应用正在退出"); await backend.shutdown() }
+    // Retire synchronously in the notification callback, before asynchronous close/join.
+    func systemWillSleep() {
+        guard !stopped else { return }
+        lifecycleGeneration += 1
+        guard !systemSleeping else { return }
+        systemSleeping = true
+        discoveryGeneration += 1
+        events?.invalidatePending()
+        retireConnection("系统睡眠 · 设备快照已过期，唤醒后请明确选择并重新连接")
+        devices = []; selectedDeviceID = nil
+        discoveryStatus = "系统睡眠 · 等待唤醒"
+        sleepDisconnect = Task { [backend] in await backend.disconnect() }
+    }
+    func systemDidWake() async {
+        guard systemSleeping, !stopped else { return }
+        let token = lifecycleGeneration
+        await sleepDisconnect?.value
+        guard !Task.isCancelled, token == lifecycleGeneration, systemSleeping, !stopped else { return }
+        sleepDisconnect = nil
+        events?.invalidatePending()
+        systemSleeping = false
+        discoveryStatus = events == nil ? "USB 发现尚未开始" : "系统已唤醒 · 请明确选择设备并重新连接"
+        if events != nil { await refresh() }
+    }
+    func shutdown() async {
+        stopped = true; lifecycleGeneration += 1; discoveryGeneration += 1
+        events?.invalidatePending()
+        retireConnection("应用正在退出")
+        await sleepDisconnect?.value
+        sleepDisconnect = nil
+        await backend.shutdown()
+    }
     private func replace(_ json: String) throws { let result = try JSONDecoder().decode(Snapshot.self, from: Data(json.utf8)); snapshot = result; stale = false; selectProfile(0) }
+}
+// Rust callbacks can already be queued on MainActor when sleep/wake retires a session.
+// A locked epoch captures ownership at enqueue time, before crossing that executor.
+private final class DiscoveryDeliveryEpoch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func current() -> Int { lock.withLock { value } }
+    func invalidate() { lock.withLock { value += 1 } }
 }
 @MainActor final class Events: DeviceEvents {
     private weak var store: Store?
+    private nonisolated let delivery = DiscoveryDeliveryEpoch()
     init(_ store: Store) { self.store = store }
-    nonisolated func changed(devices: [DeviceInfo]) { Task { @MainActor [weak self] in self?.store?.received(devices) } }
-    nonisolated func failed(message: String) { Task { @MainActor [weak self] in self?.store?.discoveryFailed(message) } }
+    func invalidatePending() { delivery.invalidate() }
+    nonisolated func changed(devices: [DeviceInfo]) {
+        let token = delivery.current()
+        Task { @MainActor [weak self] in
+            guard let self, token == self.delivery.current() else { return }
+            self.store?.received(devices)
+        }
+    }
+    nonisolated func failed(message: String) {
+        let token = delivery.current()
+        Task { @MainActor [weak self] in
+            guard let self, token == self.delivery.current() else { return }
+            self.store?.discoveryFailed(message)
+        }
+    }
 }
 
 // R-A02: keep bridge type names and protocol internals out of normal status text.
