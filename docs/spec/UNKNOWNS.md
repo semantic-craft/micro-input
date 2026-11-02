@@ -7,7 +7,7 @@
 | UNKNOWN-01 | E-052已有node-hid帧描述，E-057有单次IOKit短查询；E-075已核对锁定hidapi 2.6.7编号报告API；长帧、UTF-8和接收结束规则仍需当前设备应用验收 | Framer按E-052/075启用USB8298/macOS候选，E-078短身份路径已验；未知组合仍no-send；完整S1仍受阻 | 先可靠行为规格+后端契约核对，合成边界通过，再获准只读短/长查询；AC-1.4/1.5。禁止无framing盲探测 |
 | UNKNOWN-02 | E-056已有原客户端10s/20s等策略；固件时限、重试和取消语义不明 | SessionConfig策略显式可配置；不得称固件默认 | 超时/迟到/断连离线测试及当前设备恢复；AC-1.8/1.9 |
 | UNKNOWN-03 | E-053有静态error/status/version字段；E-078已通过当前0.6.3应用device.status身份查询；实际错误、可选字段与其他版本仍未穷尽 | 原始响应/可选字段、Unverified解析分支；不猜成功默认 | 当前应用查询与错误夹具，AC-1.5 |
-| UNKNOWN-04 | E-054有协议摘要；E-079已在当前0.6.3核心读回两文件，原始SHA-1与前后list一致；原生UI与外部变化仍分别验收；fs.read仅社区候选 | DeviceSchema/文件读取边界；只读四方法、两文件 | AC-1.6实机及故障矩阵；前后list不是原子快照证明 |
+| UNKNOWN-04 | E-054有协议摘要；E-079已在当前0.6.3核心读回两文件，原始SHA-1与前后list一致；原生只读UI已验，未覆盖任意外部变化；fs.read仅社区候选 | DeviceSchema/文件读取边界；只读四方法、两文件 | AC-1.6实机及故障矩阵；前后list不是原子快照证明 |
 | UNKNOWN-05 | OS Transport支持USB观察；BLE/双通道身份与切换未验 | TransportHint::Unknown，禁止自动合并候选；BLE非MVP | 后续明确BLE任务下验证同设备身份、去重与切换；不得由release位推定 |
 | UNKNOWN-06 | E-055确定设备schema与UI/合成不同；E-079独立只读投影已接受当前配置并保留raw，完整token、活动索引、物理方向及所有可选格式仍未知 | 设备投影trait、Unknown raw；草稿不得伪装可应用设备格式 | AC-1.7/2.2/2.5；只用脱敏结论/合成回归，不提交载荷 |
 | UNKNOWN-07 | kb.sa.*、kb.radial、kb.cs.*、host.focused_app名称已知；完整参数/触发/重复事件与宿主缺席行为不明 | HostNotification/HostAction未知分支，无执行或上报 | 获准宿主阶段按动作补参数与副作用证据；AC-4.3/4.4/5.1/5.2 |

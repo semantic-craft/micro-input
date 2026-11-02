@@ -69,6 +69,23 @@ pub trait RpcCodec: Send + Sync {
     fn encode(&self, r: &RpcRequest) -> Result<Vec<u8>, ProtoError>;
     fn decode(&self, line: &[u8]) -> Result<Incoming, ProtoError>;
 }
+/// Extract only a response's validated routing ID. Operation-specific validation happens
+/// after the session confirms ownership; unrelated responses cannot terminate its reader.
+pub fn response_id(line: &[u8]) -> Result<Option<u16>, ProtoError> {
+    let v: Value = serde_json::from_slice(line)
+        .map_err(|_| ProtoError::Invalid("invalid JSON object".into()))?;
+    if !v.is_object() {
+        return Err(ProtoError::Invalid("expected object".into()));
+    }
+    if v.get("result").is_none() && v.get("error").is_none() {
+        return Ok(None);
+    }
+    let id = alias(&v, "id", "i")?
+        .and_then(Value::as_u64)
+        .filter(|n| *n < 999)
+        .ok_or_else(|| ProtoError::Invalid("invalid response id".into()))?;
+    Ok(Some(id as u16))
+}
 pub struct JsonCodec;
 impl RpcCodec for JsonCodec {
     fn encode(&self, r: &RpcRequest) -> Result<Vec<u8>, ProtoError> {

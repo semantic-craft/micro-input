@@ -456,3 +456,79 @@ async fn disconnected_monitor_drops_buffered_old_session_events() {
     assert_ne!(s.id, new_session.id);
     new_session.shutdown().await;
 }
+
+#[tokio::test]
+async fn foreign_response_echo_does_not_kill_reader_or_satisfy_current_request() {
+    let (link, mut requests) = MockLink::new();
+    let s = DeviceSession::new(
+        link.clone(),
+        Box::new(mi_proto::NativeFramer::default()),
+        Arc::new(ReadOnlySchema),
+        SessionConfig::default(),
+    );
+    let mut notices = s.notifications();
+    for value in [
+        json!({"id":998,"method":"synthetic.foreign","params":{},"result":{}}),
+        json!({"method":"kb.radial"}),
+    ] {
+        for report in mi_proto::NativeFramer::default()
+            .encode(value.to_string().as_bytes())
+            .unwrap()
+        {
+            link.inject.send(report).unwrap();
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(1), notices.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let session = s.clone();
+    let task =
+        tokio::spawn(async move { session.request(Method::DeviceStatus, Value::Null).await });
+    let report = requests.recv().await.unwrap();
+    let request: Value = serde_json::from_slice(&report[3..3 + report[2] as usize]).unwrap();
+    for value in [
+        json!({"id":998,"method":"synthetic.foreign","params":{},"result":{}}),
+        json!({"id":request["id"],"method":"sys.version","result":{"version":"wrong-method"}}),
+        json!({"id":request["id"],"method":"device.status","result":{"version":"owned"}}),
+    ] {
+        for report in mi_proto::NativeFramer::default()
+            .encode(value.to_string().as_bytes())
+            .unwrap()
+        {
+            link.inject.send(report).unwrap();
+        }
+    }
+    assert_eq!(task.await.unwrap().unwrap()["result"]["version"], "owned");
+    assert!(s.terminal_failure().is_none());
+    s.shutdown().await;
+}
+
+#[tokio::test]
+async fn owned_malformed_response_remains_an_error_after_routing() {
+    let (link, mut requests) = MockLink::new();
+    let s = DeviceSession::new(
+        link.clone(),
+        Box::new(mi_proto::NativeFramer::default()),
+        Arc::new(ReadOnlySchema),
+        SessionConfig::default(),
+    );
+    let session = s.clone();
+    let task =
+        tokio::spawn(async move { session.request(Method::DeviceStatus, Value::Null).await });
+    let report = requests.recv().await.unwrap();
+    let request: Value = serde_json::from_slice(&report[3..3 + report[2] as usize]).unwrap();
+    let value = json!({"id":request["id"],"method":"device.status","params":{},"result":{}});
+    for report in mi_proto::NativeFramer::default()
+        .encode(value.to_string().as_bytes())
+        .unwrap()
+    {
+        link.inject.send(report).unwrap();
+    }
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(SessionError::Protocol(_))
+    ));
+    assert!(s.terminal_failure().is_some());
+    s.shutdown().await;
+}

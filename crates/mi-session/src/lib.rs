@@ -183,6 +183,11 @@ impl DeviceSession {
                         let report = link.read().await?;
                         let lines = framer.lock().unwrap().feed(&report)?;
                         for line in lines {
+                            if let Some(id) = mi_proto::response_id(&line)? {
+                                if !pending.lock().unwrap().as_ref().is_some_and(|p| p.id == id) {
+                                    continue;
+                                }
+                            }
                             match JsonCodec.decode(&line)? {
                                 Incoming::Response(r) => {
                                     let mut held = pending.lock().unwrap();
