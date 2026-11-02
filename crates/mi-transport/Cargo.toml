@@ -1,0 +1,12 @@
+[package]
+name = "mi-transport"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+async-trait = "0.1"
+hidapi = { version = "2.6.7", features = ["macos-shared-device"] }
+[build-dependencies]
+cc = "1"

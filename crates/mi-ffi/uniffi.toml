@@ -1,0 +1,4 @@
+[bindings.swift]
+module_name = "MicroInputCore"
+ffi_module_name = "MicroInputCoreFFI"
+generate_module_map = true
