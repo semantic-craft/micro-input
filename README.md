@@ -20,6 +20,8 @@ scripts/run --verify   # 独立QA标识/文档，10分钟自动退出并回收�
 
 ## 调研入口
 
+Input 1.1.0 的[业务架构与证据定位](docs/input-architecture.md)、[写入和宿主通知候选协议](docs/protocol-candidates.md)、[独立实现模块契约](docs/module-contracts.md)已基于当前安装包整理。该轮为静态分析，未新增设备操作或运行时插桩验收；原始材料仍保留在 `.scratch/input-study/`。
+
 可直接用于只读客户端实现的结论见 [USB 发现、身份与配置读取协议](docs/protocol-readonly.md)。依据 Input 1.1.0 静态分析及本机 IOKit 枚举；独立IOKit探针曾读回0.6.3；应用身份路径已读回0.6.3；当前0.6.3的配置读取及原生只读浏览已有E-079验收；完整生命周期和物理映射仍待验收。
 
 以下为本机原始调查材料，保存在 Git 忽略的 `.scratch/input-study/`，不随源码提交：
