@@ -489,8 +489,8 @@ impl LocalDocumentV2 {
         self.editable.source_refs.retain(|id, _| valid.contains(id));
     }
     pub fn view(&self) -> Result<(DeviceConfig, BTreeMap<String, Action>), String> {
-        let mut config: DeviceConfig = serde_json::from_value(self.origin["config"].clone())
-            .map_err(|_| "来源配置不能显示")?;
+        let mut config: DeviceConfig =
+            crate::comparison::base_config(self).map_err(|_| "来源配置不能显示")?;
         let source = config.clone();
         if self.baseline.is_some() || self.origin["kind"] == "legacy-local" {
             config.source = Source::LocalDraft;
@@ -567,8 +567,7 @@ impl LocalDocumentV2 {
         Ok((config, edits))
     }
     pub fn structure_changes(&self) -> Vec<String> {
-        let Ok(source) = serde_json::from_value::<DeviceConfig>(self.origin["config"].clone())
-        else {
+        let Ok(source) = crate::comparison::base_config(self) else {
             return vec![];
         };
         let mut changes = vec![];

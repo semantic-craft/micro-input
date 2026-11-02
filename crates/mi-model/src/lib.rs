@@ -316,3 +316,7 @@ mod device;
 pub use device::parse_device_files;
 
 pub mod document;
+
+pub mod comparison;
+#[cfg(test)]
+mod comparison_tests;
