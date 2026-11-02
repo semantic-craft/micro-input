@@ -1,6 +1,32 @@
+use mi_model::storage::DocumentStore;
 use mi_model::{action_library, draft::Draft};
 use serde_json::json;
 use std::collections::BTreeSet;
+
+#[test]
+fn favorite_is_a_host_preference_and_survives_restart_without_editing_the_draft() {
+    let directory = std::env::temp_dir().join(format!("mi-library-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("workbench.json");
+    let mut store = DocumentStore::default();
+    store.open(path.clone()).unwrap();
+    let before = serde_json::to_value(&store.draft).unwrap();
+    store.set_action_favorite("app", true).unwrap();
+    assert_eq!(serde_json::to_value(&store.draft).unwrap(), before);
+    assert!(!path.exists());
+    let mut reopened = DocumentStore::default();
+    reopened.open(path.clone()).unwrap();
+    let favorites = reopened.favorite_actions().unwrap();
+    let found = action_library::search("TEXTEDIT", "应用", true, favorites);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].action.id, "app");
+    assert!(action_library::search("", "文本", true, favorites).is_empty());
+    reopened.set_action_favorite("app", false).unwrap();
+    assert!(store.set_action_favorite("url", true).is_err());
+    assert!(store.favorite_actions().unwrap().contains("app"));
+    assert!(reopened.favorite_actions().unwrap().is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
 
 #[test]
 fn library_explains_local_app_intent_and_rust_validates_assignment() {
