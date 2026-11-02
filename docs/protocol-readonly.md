@@ -179,3 +179,13 @@ E-075核对Cargo.lock锁定hidapi crate 2.6.7的macOS后端：编号报告0x06�
 E-077受控本机观察补充：固件0.6.3回应包含`id/method/result`，method echo本次只读查询。自研RPC响应必须有合法id/i、result/error恰一项；可选method/m只允许四项只读查询名并与pending method匹配，不能带params/p。仅含method+id而无result/error的设备请求不满足pending，只读阶段不执行、不回复。RPC错误不伪装为成功。
 
 E-078已在原生应用路径查询到0.6.3（device.status），可选活动索引与本地浏览选中分开显示。连接、身份和配置读取独立；当前配置schema仍Unverified，不会导入演示解析器。任意长响应/UTF-8、完整配置、拔插/睡眠、权限错误、同ID外来回包与共享channel共存尚待对应实机验收。
+
+## 8. 输入监视的当前边界
+
+`DeviceSession` 的唯一 reader 把无 ID 通知分流到 256 项有界队列。`subscribe_input()` 及 UniFFI `InputSubscription.next_event()` 复用它，不发送轮询请求。SwiftUI 输入监视只显示本地会话、订阅序号、时间、通知数量和缺口数量，不返回、显示或记录通知载荷。
+
+当前生产 `UnverifiedInputDecoder` 不识别实体按下/释放、旋钮方向或摇杆。所有通知都返回 `UnknownNotification`、空逻辑引用和 `input-schema-unverified`，禁止动作执行；宿主动作名称也不能充当物理输入证据。物理控件、键帽覆盖和动作角色保留三个独立的空引用，不从 13 个逻辑位置推导实体键数或宽键去重。`InputDecoder` 仅提供未来有证据解码的 Rust 边界；合成测试里的逻辑开关不属于设备协议。
+
+订阅队列溢出返回 `InputStreamGap` 和丢失数，清除其按住状态，停止该订阅全部后续输入。用户必须明确重建监听；新订阅丢弃旧积压并从空状态开始，生产解码仍保持未验证，不能借重建开放动作。关闭订阅会唤醒等待，断连终止等待并拒绝旧会话缓冲事件；窗口停止 UI 订阅不关闭应用设备会话。
+
+这只交付监视基础。#14 的真实按下/释放、旋转方向、按压、摇杆回中、全部实体映射与宽键去重仍待当前配置和固件的独立证据及实机核对；本实现没有改变 keymap、准备最小绑定或写入设备。

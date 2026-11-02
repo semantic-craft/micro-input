@@ -1,4 +1,6 @@
 //! R-A02/R-A05: only high-level asynchronous operations cross the in-process UniFFI bridge.
+mod input_monitor;
+pub use input_monitor::*;
 use mi_session::{DeviceSession, SessionConfig, UnverifiedSchema};
 use mi_transport::{HidCandidate, HidTransport, MacTransport};
 use std::sync::{Arc, Mutex};
