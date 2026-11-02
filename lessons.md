@@ -58,3 +58,9 @@
 - 起因与后果：从真实快照显式创建本地草稿后，浏览状态已不是设备视图，但原旋钮方向仍未知；按浏览布尔值显示方向会把未知映射标成已验。旧v1的历史DeviceSnapshot来源也不能继续作为当前快照来源。
 - 修复：所有视图统一使用旋钮逻辑槽和方向未核实标签；legacy-local投影为LocalDraft，历史来源仅留在不可变origin.config，baseline不伪造。
 - 验证点：`legacy_device_source_is_historical_and_never_claims_a_current_snapshot`核对迁移前后投影；真实快照→独立草稿验收时核对来源提示与逻辑槽标签，不能把编辑可用当成物理映射已验。Seen 1x（2026-11-02）。
+
+## 多 worktree 原生验收身份
+
+- 起因：CUA getApp 会按应用身份自动启动；相同 bundle ID 的旧 worktree 实例可能被绑定，退出后再取 UI 状态也可能重启实例。
+- 修复：scripts/run --verify 创建独立 bundle ID/显示名和临时文档，打印精确 QA_APP_PATH；限时退出并清理副本。退出后查进程状态，不用 UI 获取已退出应用。
+- 验证：独立 QA 路径/标识与实际进程对应；生产 app 未改；QA 验收不冒充生产权限验收。Seen 1x。
