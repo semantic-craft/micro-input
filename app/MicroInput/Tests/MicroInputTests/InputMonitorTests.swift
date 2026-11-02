@@ -25,6 +25,41 @@ final class InputMonitorTests: XCTestCase {
         XCTAssertNil(closed)
         await core.disconnect()
     }
+    @MainActor func testCandidateBindingsCrossRealBridgeWithoutPhysicalOrActionClaims() async throws {
+        let core = MicroInputCore.MicroInput.syntheticDiscovery()
+        try await core.setSyntheticDiscovery(state: .twoDevices)
+        try await core.connect(id: "synthetic-interface-0")
+        let subscription = try await core.subscribeInput()
+        try await core.emitSyntheticInputCase(inputCase: .candidateBindings)
+        let expectedBindings = ["AG00", "AG00", "AG13", "AG13", "AG11", "AG10", "AG10", "AG11"]
+        let expectedKinds: [InputKind] = [.candidatePressed, .candidateReleased, .candidatePressed, .candidateReleased, .candidatePressed, .candidatePressed, .candidateReleased, .candidateReleased]
+        for index in expectedBindings.indices {
+            let event = await subscription.nextEvent()
+            XCTAssertEqual(event?.bindingId, expectedBindings[index])
+            XCTAssertEqual(event?.kind, expectedKinds[index])
+            XCTAssertEqual(event?.sequence, UInt64(index + 1))
+            XCTAssertNil(event?.logicalSwitch)
+            XCTAssertNil(event?.physicalControl)
+            XCTAssertNil(event?.keycapGroup)
+            XCTAssertNil(event?.actionRole)
+            XCTAssertEqual(event?.verification, "candidate-dispatch-0.6.2-current-firmware-unverified")
+            XCTAssertEqual(event?.actionEligible, false)
+        }
+        try await core.emitSyntheticInputCase(inputCase: .unsupportedVariants)
+        for _ in 0..<5 {
+            let unknown = await subscription.nextEvent()
+            XCTAssertEqual(unknown?.kind, .unknownNotification)
+            XCTAssertNil(unknown?.bindingId)
+            XCTAssertEqual(unknown?.verification, "input-schema-unverified")
+            XCTAssertEqual(unknown?.actionEligible, false)
+        }
+        let requests = await core.syntheticRequests()
+        XCTAssertEqual(requests, [])
+        subscription.close()
+        let closed = await subscription.nextEvent()
+        XCTAssertNil(closed)
+        await core.disconnect()
+    }
     @MainActor func testGapStopsDeliveryAndExplicitRebuildDiscardsOldBacklog() async throws {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
@@ -63,6 +98,28 @@ final class InputMonitorTests: XCTestCase {
 
 #if MI_SYNTHETIC_BACKEND
 extension InputMonitorTests {
+    @MainActor func testCandidatePresentationNamesBindingAndSourceWithoutPhysicalIdentity() async throws {
+        let core = MicroInputCore.MicroInput.syntheticDiscovery()
+        try await core.setSyntheticDiscovery(state: .twoDevices)
+        let store = Store(backend: core)
+        await store.connect("synthetic-interface-0")
+        let monitor = InputMonitorState()
+        let task = Task { await monitor.listen(store: store) }
+        for _ in 0..<100 where !monitor.status.contains("正在监听") { try await Task.sleep(nanoseconds: 1_000_000) }
+        try await core.emitSyntheticInputCase(inputCase: .candidateBindings)
+        for _ in 0..<100 where monitor.count < 8 { try await Task.sleep(nanoseconds: 1_000_000) }
+        XCTAssertEqual(monitor.count, 8)
+        XCTAssertEqual(monitor.eventSummary, "候选绑定 AG11 · 释放（未核实）")
+        XCTAssertEqual(monitor.candidateSourceSummary, "Dispatch 0.6.2 候选 · 当前固件输入与物理映射未核实")
+        XCTAssertEqual(monitor.lastEvent?.actionEligible, false)
+        monitor.stop()
+        await task.value
+        await store.suspend()
+        await monitor.listen(store: store)
+        XCTAssertNil(monitor.lastEvent)
+        XCTAssertNil(monitor.eventSummary)
+        XCTAssertNil(monitor.candidateSourceSummary)
+    }
     @MainActor func testMonitorPresentationUsesRealBridgeAndClearsOldSessionOnRestart() async throws {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
@@ -75,7 +132,7 @@ extension InputMonitorTests {
         for _ in 0..<100 where monitor.count == 0 { try await Task.sleep(nanoseconds: 1_000_000) }
         XCTAssertEqual(monitor.count, 1)
         XCTAssertEqual(monitor.lastEvent?.kind, .unknownNotification)
-        XCTAssertTrue(monitor.status.contains("格式待核实"))
+        XCTAssertTrue(monitor.status.contains("物理映射待核实"))
         await store.suspend()
         await task.value
         XCTAssertTrue(monitor.status.contains("已停止"))

@@ -88,6 +88,10 @@ pub trait HidTransport: Send + Sync {
     fn emit_synthetic_input(&self, _count: u16) -> Result<(), TransportError> {
         Err(TransportError::Unsupported)
     }
+    #[cfg(feature = "synthetic-backend")]
+    fn emit_synthetic_input_case(&self, _input_case: u8) -> Result<(), TransportError> {
+        Err(TransportError::Unsupported)
+    }
     fn subscribe(&self) -> broadcast::Receiver<()>;
     fn stop_discovery(&self) {}
     fn open(&self, id: &str) -> Result<Arc<dyn HidLink>, TransportError>;
@@ -627,6 +631,44 @@ impl HidTransport for SyntheticDiscovery {
         let bytes = br#"{"m":"test.synthetic","p":"private payload must not cross FFI"}"#;
         for _ in 0..count {
             for part in bytes.chunks(61) {
+                let mut report = vec![0; 64];
+                report[0] = 6;
+                report[1] = 2;
+                report[2] = part.len() as u8;
+                report[3..3 + part.len()].copy_from_slice(part);
+                inject
+                    .send(report)
+                    .map_err(|_| TransportError::Disconnected)?;
+            }
+        }
+        Ok(())
+    }
+    fn emit_synthetic_input_case(&self, input_case: u8) -> Result<(), TransportError> {
+        // Original synthetic protocol facts, not captured device or manufacturer payloads.
+        let messages = match input_case {
+            0 => vec![
+                serde_json::json!({"m":"v.oai.hid","p":{"k":"AG00","act":1}}),
+                serde_json::json!({"m":"v.oai.hid","p":{"k":"AG00","act":0}}),
+                serde_json::json!({"m":"v.oai.hid","p":{"k":"AG13","act":1}}),
+                serde_json::json!({"m":"v.oai.hid","p":{"k":"AG13","act":0}}),
+                serde_json::json!({"m":"v.oai.hid","p":{"k":"AG11","act":1}}),
+                serde_json::json!({"m":"v.oai.hid","p":{"k":"AG10","act":1}}),
+                serde_json::json!({"m":"v.oai.hid","p":{"k":"AG10","act":0}}),
+                serde_json::json!({"m":"v.oai.hid","p":{"k":"AG11","act":0}}),
+            ],
+            1 => vec![
+                serde_json::json!({"m":"v.oai.hid","p":{"k":"AG00","act":2}}),
+                serde_json::json!({"m":"v.oai.hid","p":{"k":"AG19","act":1}}),
+                serde_json::json!({"m":"v.oai.hid","p":{"k":"ENC_CW","act":2}}),
+                serde_json::json!({"m":"v.oai.hid","p":{"k":"AG00","act":true}}),
+                serde_json::json!({"m":"test.synthetic","p":"private payload must not cross FFI"}),
+            ],
+            _ => return Err(TransportError::Unsupported),
+        };
+        let inject = self.input_inject.lock().unwrap();
+        let inject = inject.as_ref().ok_or(TransportError::Disconnected)?;
+        for message in messages {
+            for part in message.to_string().as_bytes().chunks(61) {
                 let mut report = vec![0; 64];
                 report[0] = 6;
                 report[1] = 2;
