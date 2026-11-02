@@ -18,6 +18,8 @@ scripts/run --verify   # 独立QA标识/文档，10分钟自动退出并回收�
 
 旋钮三个逻辑槽位可独立分配本地动作；摇杆可选择保留来源模式或编辑本地逻辑扇区。减少活动扇区或切换模式不会删除旧槽位及绑定，未知物理方向继续标识；0–32 是本机编辑器限制，不是设备容量。保存、撤销/重做和重开沿用本地文档服务。见[控件编辑契约](docs/implementation-plan.md#t10-本地控件编辑契约)。
 
+“导入与导出”支持整文档、当前配置或当前层的自有 JSON 预设，以及原创 Coding 起步预设。导入先预览，再创建独立草稿；原文档保留，本地对象 ID 重映射，历史设备基线不作为当前设备事实。为保留未知原值，导出仍包含完整来源档案，保存前会提示；不宣称兼容厂商格式。见[预设交换契约](docs/implementation-plan.md#t11-自有预设交换契约)。
+
 规格见 [SPEC](docs/spec/SPEC.md)、分阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)、[证据](docs/spec/EVIDENCE.md)和[未知项](docs/spec/UNKNOWNS.md)。
 
 ## 调研入口
@@ -42,6 +44,6 @@ T05已补取消、会话终止通知及退出时等待资源释放；当前设�
 
 PR #12/#13 已交付原生离线工作台、结构化动作和本地持久化。当前已有设备发现、身份查询与[#5 配置读取](https://github.com/semantic-craft/micro-input/issues/5)实现；配置原生浏览验收见[E-079](docs/spec/EVIDENCE.md)，[#6 生命周期](https://github.com/semantic-craft/micro-input/issues/6)及未核实物理映射仍待验证。范围继续限定只读，不从核心读回推定全部S1完成。
 
-完整目标与 35 张工单入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)，技术契约见 [实施设计](docs/implementation-plan.md)，阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)。当前按继续开发授权补齐本地功能与验证；设备能力仍遵守各票证据与恢复门槛，不接自动化、不写设备、不执行宿主动作。未完成技术细化的工单使用 needs-info，并在工单内列明缺项。T10 本地控件编辑已接入集成分支并通过离线与原生 QA；下一步核对 T09 / T12 在途分支的交付状态，再按依赖补 T11 自有预设。工单关闭与产品总验收仍以 GitHub 当前状态为准。
+完整目标与 35 张工单入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)，技术契约见 [实施设计](docs/implementation-plan.md)，阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)。当前按继续开发授权补齐本地功能与验证；设备能力仍遵守各票证据与恢复门槛，不接自动化、不写设备、不执行宿主动作。未完成技术细化的工单使用 needs-info，并在工单内列明缺项。T10 本地控件编辑已接入集成分支并通过离线与原生 QA；T11 自有预设已实现，下一步核对 T09 / T12 在途分支的交付和剩余验收。工单关闭与产品总验收仍以 GitHub 当前状态为准。
 
 原生验收使用 `scripts/run --verify` 输出的 `QA_APP_PATH` 精确选择应用；QA 副本有唯一 bundle ID，避免多个 worktree 的同名应用互相抢占。退出后通过进程状态确认，不再调用可能自动重启应用的 UI 入口。QA 身份不能替代生产签名与权限验收。

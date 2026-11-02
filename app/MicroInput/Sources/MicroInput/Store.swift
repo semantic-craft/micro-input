@@ -18,6 +18,10 @@ protocol Backend {
     func actionLibrary(query: String, category: String, favoritesOnly: Bool) async throws -> String
     func setActionFavorite(actionId: String, favorite: Bool) async throws
     func assignAction(profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String
+    func exportPreset(profileId: String?, layerId: String?) async throws -> String
+    func inspectPreset(text: String) throws -> String
+    func starterPreset() throws -> String
+    func importPreset(text: String) async throws -> String
     func setControlSettings(profileId: String, layerId: String, settingsJson: String) async throws -> String
     func saveMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String
     func bindMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32) async throws -> String
@@ -37,6 +41,11 @@ protocol Backend {
     func createDraftFromSnapshot() async throws -> String
 }
 extension Backend {
+    func exportPreset(profileId: String?, layerId: String?) async throws -> String { throw BridgeError.Failed(message: "预设导出不可用") }
+    func inspectPreset(text: String) throws -> String { throw BridgeError.Failed(message: "预设检查不可用") }
+    func starterPreset() throws -> String { throw BridgeError.Failed(message: "原创预设不可用") }
+    func importPreset(text: String) async throws -> String { throw BridgeError.Failed(message: "预设导入不可用") }
+
     func waitForDisconnect() async -> String { "" }
     func shutdown() async { await disconnect() }
     func subscribeInput() async throws -> InputSubscription { throw BridgeError.Failed(message: "输入监听不可用") }
@@ -157,6 +166,23 @@ extension MicroInput: Backend {}
     func duplicateLayer(name: String) async {guard let pid=profile?.id.text, let id=layer?.id.text else {return}; await editDocument {try await backend.duplicateLayer(profileId:pid,layerId:id,name:name)} }
     func deleteLayer() async {guard let pid=profile?.id.text, let id=layer?.id.text else {return}; await editDocument {try await backend.deleteLayer(profileId:pid,layerId:id)} }
     func moveLayer(by offset: Int) async {guard let pid=profile?.id.text, let id=layer?.id.text, let count=profile?.layers.count, (0..<count).contains(layerIndex+offset) else {return}; await editDocument {try await backend.moveLayer(profileId:pid,layerId:id,toIndex:UInt32(layerIndex+offset))} }
+    func presetText(scope: String) async throws -> String {
+        guard canEditDraft, !busy else { throw BridgeError.Failed(message: "请先返回可编辑本地草稿") }
+        return try await backend.exportPreset(profileId: scope == "document" ? nil : profile?.id.text, layerId: scope == "layer" ? layer?.id.text : nil)
+    }
+    func inspectPreset(_ text: String) throws -> PresetSummary {
+        try JSONDecoder().decode(PresetSummary.self, from: Data(backend.inspectPreset(text: text).utf8))
+    }
+    func starterPreset() throws -> String { try backend.starterPreset() }
+    @discardableResult func importPreset(_ text: String) async -> Bool {
+        guard !busy, documentReady, !browsingDeviceSnapshot else { return false }
+        busy = true; defer { busy = false }
+        do {
+            try applyDocument(try await backend.importPreset(text: text), fresh: true)
+            status = "已创建独立本地草稿 · 原文档保留 · 未激活设备或执行动作"
+            return true
+        } catch { status = readableError(error); return false }
+    }
     func createDraftFromSnapshot() async {
         guard browsingDeviceSnapshot, !stale, !busy else {return};busy=true;defer {busy=false}
         do {try applyDocument(try await backend.createDraftFromSnapshot(), fresh:true);status="已创建独立本地草稿 · 原工作台保留 · 重开继续此草稿"} catch {status=readableError(error)}

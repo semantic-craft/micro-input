@@ -231,6 +231,26 @@ impl MicroInput {
             .map_err(failure)?;
         document_response(&store.draft, None)
     }
+    pub async fn export_preset(
+        &self,
+        profile_id: Option<String>,
+        layer_id: Option<String>,
+    ) -> Result<String, BridgeError> {
+        let store = self.draft.lock().unwrap();
+        mi_model::preset::export(&store.draft, profile_id.as_deref(), layer_id.as_deref())
+            .map_err(failure)
+    }
+    pub fn inspect_preset(&self, text: String) -> Result<String, BridgeError> {
+        mi_model::preset::inspect(&text).map_err(failure)
+    }
+    pub fn starter_preset(&self) -> Result<String, BridgeError> {
+        mi_model::preset::starter().map_err(failure)
+    }
+    pub async fn import_preset(&self, text: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store.import_preset(&text).map_err(failure)?;
+        document_response(&store.draft, None)
+    }
     pub async fn set_control_settings(
         &self,
         profile_id: String,

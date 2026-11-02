@@ -92,13 +92,23 @@ impl DocumentStore {
         if self.blocked {
             return Err("当前文档未载入，不能切换草稿".into());
         }
-        let (selection_path, expected) = self.selection.as_ref().ok_or("请先打开工作台")?;
         let doc = crate::document::LocalDocumentV2::from_config(
             &config,
             Some(baseline),
             "device-snapshot",
         )?;
         let next = Draft::from_document(doc, 2, false)?;
+        self.select_independent(next)
+    }
+    pub fn import_preset(&mut self, text: &str) -> Result<(), String> {
+        let next = crate::preset::import(text)?;
+        self.select_independent(next)
+    }
+    fn select_independent(&mut self, next: Draft) -> Result<(), String> {
+        if self.blocked {
+            return Err("当前文档未载入，不能切换草稿".into());
+        }
+        let (selection_path, expected) = self.selection.as_ref().ok_or("请先打开工作台")?;
         let bytes = serde_json::to_vec_pretty(&next.document).map_err(|e| e.to_string())?;
         if bytes.len() as u64 > LIMIT {
             return Err("本地文档超过 4 MiB；未创建草稿".into());

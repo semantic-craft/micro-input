@@ -58,6 +58,7 @@ struct Workbench: View {
                         Button("下移配置") { Task { await store.moveProfile(by: 1) } }.disabled(store.profileIndex + 1 >= (store.snapshot?.profiles.count ?? 0))
                         Button("删除配置…", role: .destructive) {deleteLayer=false;deleting=true}.disabled(store.profile == nil)
                     }.disabled(!store.canEditDraft || store.busy)
+                    PresetMenu(store: store)
                     Text("切换配置不会应用到设备。").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Label(store.browsingDeviceSnapshot ? (store.snapshot?.source == "DeviceSnapshot" ? "设备快照 · 只读" : "合成夹具 · 只读") : "本地草稿", systemImage: store.browsingDeviceSnapshot ? "eye" : "doc")

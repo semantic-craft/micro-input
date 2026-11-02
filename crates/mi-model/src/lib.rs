@@ -324,3 +324,5 @@ pub mod macro_sequence;
 pub mod macro_library;
 
 pub mod multi;
+
+pub mod preset;

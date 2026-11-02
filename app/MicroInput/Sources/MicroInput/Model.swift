@@ -134,3 +134,5 @@ struct ActionLibraryState: Decodable {
 }
 
 struct LocalControlSettings: Codable { let joystick_mode: String; let active_sectors: UInt32 }
+
+struct PresetSummary: Decodable { let name: String, scope: String; let profiles: Int, layers: Int, actions: Int }
