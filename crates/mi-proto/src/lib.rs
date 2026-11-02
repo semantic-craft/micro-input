@@ -71,7 +71,7 @@ pub trait RpcCodec: Send + Sync {
 }
 /// Extract only a response's validated routing ID. Operation-specific validation happens
 /// after the session confirms ownership; unrelated responses cannot terminate its reader.
-pub fn response_id(line: &[u8]) -> Result<Option<u16>, ProtoError> {
+pub fn response_id(line: &[u8]) -> Result<Option<u64>, ProtoError> {
     let v: Value = serde_json::from_slice(line)
         .map_err(|_| ProtoError::Invalid("invalid JSON object".into()))?;
     if !v.is_object() {
@@ -82,9 +82,8 @@ pub fn response_id(line: &[u8]) -> Result<Option<u16>, ProtoError> {
     }
     let id = alias(&v, "id", "i")?
         .and_then(Value::as_u64)
-        .filter(|n| *n < 999)
         .ok_or_else(|| ProtoError::Invalid("invalid response id".into()))?;
-    Ok(Some(id as u16))
+    Ok(Some(id))
 }
 pub struct JsonCodec;
 impl RpcCodec for JsonCodec {

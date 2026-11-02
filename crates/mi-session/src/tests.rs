@@ -468,7 +468,7 @@ async fn foreign_response_echo_does_not_kill_reader_or_satisfy_current_request()
     );
     let mut notices = s.notifications();
     for value in [
-        json!({"id":998,"method":"synthetic.foreign","params":{},"result":{}}),
+        json!({"id":1000,"method":"synthetic.foreign","params":{},"result":{}}),
         json!({"method":"kb.radial"}),
     ] {
         for report in mi_proto::NativeFramer::default()
@@ -488,7 +488,7 @@ async fn foreign_response_echo_does_not_kill_reader_or_satisfy_current_request()
     let report = requests.recv().await.unwrap();
     let request: Value = serde_json::from_slice(&report[3..3 + report[2] as usize]).unwrap();
     for value in [
-        json!({"id":998,"method":"synthetic.foreign","params":{},"result":{}}),
+        json!({"id":1000,"method":"synthetic.foreign","params":{},"result":{}}),
         json!({"id":request["id"],"method":"sys.version","result":{"version":"wrong-method"}}),
         json!({"id":request["id"],"method":"device.status","result":{"version":"owned"}}),
     ] {

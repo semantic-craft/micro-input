@@ -184,7 +184,12 @@ impl DeviceSession {
                         let lines = framer.lock().unwrap().feed(&report)?;
                         for line in lines {
                             if let Some(id) = mi_proto::response_id(&line)? {
-                                if !pending.lock().unwrap().as_ref().is_some_and(|p| p.id == id) {
+                                if !pending
+                                    .lock()
+                                    .unwrap()
+                                    .as_ref()
+                                    .is_some_and(|p| u64::from(p.id) == id)
+                                {
                                     continue;
                                 }
                             }
