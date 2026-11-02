@@ -114,3 +114,81 @@ fn unknown_mode_stays_visible_and_invalid_field_edits_leave_document_unchanged()
     assert!(error.contains("活动扇区数"));
     assert_eq!(serde_json::to_value(&reopened.document).unwrap(), before);
 }
+
+#[test]
+fn source_mode_does_not_materialize_inactive_sector_intent() {
+    let mut draft = Draft::default();
+    let pid = draft.config.profiles[0].id.as_str().unwrap().to_owned();
+    let lid = draft.config.profiles[0].layers[0]
+        .id
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let original_controls = draft.document.editable.graph.layers[&lid].controls.clone();
+    let original_order = draft.document.editable.graph.layers[&lid]
+        .control_order
+        .clone();
+    draft
+        .set_control_settings(
+            &pid,
+            &lid,
+            ControlSettings {
+                joystick_mode: "source".into(),
+                active_sectors: 32,
+            },
+        )
+        .unwrap();
+    let layer = &draft.document.editable.graph.layers[&lid];
+    assert!(layer.controls == original_controls);
+    assert_eq!(layer.control_order, original_order);
+    draft
+        .set_control_settings(
+            &pid,
+            &lid,
+            ControlSettings {
+                joystick_mode: "logical_sectors".into(),
+                active_sectors: 32,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        draft.document.editable.graph.layers[&lid]
+            .control_order
+            .len(),
+        48
+    );
+    assert!(original_controls
+        .iter()
+        .all(
+            |(id, binding)| draft.document.editable.graph.layers[&lid].controls.get(id)
+                == Some(binding)
+        ));
+}
+
+#[test]
+fn unknown_control_fields_make_document_read_only() {
+    let draft = Draft::default();
+    let pid = draft.config.profiles[0].id.as_str().unwrap().to_owned();
+    let lid = draft.config.profiles[0].layers[0]
+        .id
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut raw = serde_json::to_value(&draft.document).unwrap();
+    raw["graph"]["layers"][&lid]["control_settings"] = json!({
+        "joystick_mode":"logical_sectors", "active_sectors":2,
+        "future_direction_map":{"a":17}
+    });
+    let mut reopened = Draft::from_bytes(&serde_json::to_vec(&raw).unwrap()).unwrap();
+    assert!(reopened.read_only);
+    assert!(reopened
+        .set_control_settings(
+            &pid,
+            &lid,
+            ControlSettings {
+                joystick_mode: "source".into(),
+                active_sectors: 0,
+            }
+        )
+        .is_err());
+}

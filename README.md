@@ -16,6 +16,8 @@ scripts/run --verify   # 独立QA标识/文档，10分钟自动退出并回收�
 
 启动载入所选本地草稿，无文件时载入合成配置；点击“查找 / 刷新 USB”后只读枚举 USB HID 描述符并持续监听插拔，不会打开硬件或申请权限。候选经完整 usage pairs 与 OS USB 来源筛选，多候选必须明确选择；0x8297 标为未验型号，固件始终显示未知。插拔事件更新候选，选择不读取或应用设备配置。本地文档默认在用户Application Support/MicroInput/workbench.json；v1浏览不改文件，首次修改先备份原字节再保存v2。设备快照保持只读，点击“从快照新建草稿”才保存独立draft-UUID.json；原工作台保留，所选文档记录带锁/冲突检查，退出重开继续新草稿。参数表单需点击保存，撤销历史仅在当前会话。无法执行动作或写入设备。支持显式USB身份查询，当前303A:8298/固件0.6.3已在应用路径读回；显式身份为受支持的0.6.3后可读取两份限定配置文件，按块校验原始SHA-1并再次list，再一次发布只读快照。查看设备不会改变本地草稿，返回后保留编辑与撤销。其他固件仍拒绝读取，不把演示或导入数据作为设备快照。
 
+旋钮三个逻辑槽位可独立分配本地动作；摇杆可选择保留来源模式或编辑本地逻辑扇区。减少活动扇区或切换模式不会删除旧槽位及绑定，未知物理方向继续标识；0–32 是本机编辑器限制，不是设备容量。保存、撤销/重做和重开沿用本地文档服务。见[控件编辑契约](docs/implementation-plan.md#t10-本地控件编辑契约)。
+
 规格见 [SPEC](docs/spec/SPEC.md)、分阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)、[证据](docs/spec/EVIDENCE.md)和[未知项](docs/spec/UNKNOWNS.md)。
 
 ## 调研入口
@@ -40,6 +42,6 @@ T05已补取消、会话终止通知及退出时等待资源释放；当前设�
 
 PR #12/#13 已交付原生离线工作台、结构化动作和本地持久化。当前已有设备发现、身份查询与[#5 配置读取](https://github.com/semantic-craft/micro-input/issues/5)实现；配置原生浏览验收见[E-079](docs/spec/EVIDENCE.md)，[#6 生命周期](https://github.com/semantic-craft/micro-input/issues/6)及未核实物理映射仍待验证。范围继续限定只读，不从核心读回推定全部S1完成。
 
-完整目标与 35 张工单入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)，技术契约见 [实施设计](docs/implementation-plan.md)，阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)。规划已批准不等于未来阶段获准执行；当前不接自动化、不写设备、不执行宿主动作。未完成技术细化的工单使用 needs-info，并在工单内列明缺项。
+完整目标与 35 张工单入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)，技术契约见 [实施设计](docs/implementation-plan.md)，阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)。当前按继续开发授权补齐本地功能与验证；设备能力仍遵守各票证据与恢复门槛，不接自动化、不写设备、不执行宿主动作。未完成技术细化的工单使用 needs-info，并在工单内列明缺项。T10 本地控件编辑已接入集成分支并通过离线与原生 QA；下一步核对 T09 / T12 在途分支的交付状态，再按依赖补 T11 自有预设。工单关闭与产品总验收仍以 GitHub 当前状态为准。
 
 原生验收使用 `scripts/run --verify` 输出的 `QA_APP_PATH` 精确选择应用；QA 副本有唯一 bundle ID，避免多个 worktree 的同名应用互相抢占。退出后通过进程状态确认，不再调用可能自动重启应用的 UI 入口。QA 身份不能替代生产签名与权限验收。

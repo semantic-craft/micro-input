@@ -26,6 +26,7 @@ struct ControlSettingsEditor: View {
                 }
                 Text("活动扇区数").font(.caption)
                 TextField("活动扇区数", text: $sectors).accessibilityLabel("活动扇区数")
+                    .disabled(mode != "logical_sectors")
                 Text("0–32 是本机编辑器限制，不代表设备容量。减少数量或切换模式会保留所有旧槽位及绑定，可继续查看和编辑。").font(.caption).foregroundStyle(.secondary)
                 if let error = store.controlSettingsError { Text(error).font(.caption).foregroundStyle(.red).accessibilityLabel(error) }
                 Button("保存控件意图") { Task { await store.saveControlSettings(mode: mode, sectors: sectors) } }

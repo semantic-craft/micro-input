@@ -273,8 +273,8 @@ extension MicroInput: Backend {}
     init(backend: Backend, documentURL: URL? = nil) { self.backend = backend; self.documentOverride = documentURL }
     var profile: Profile? { guard let ps = snapshot?.profiles, ps.indices.contains(profileIndex) else { return nil }; return ps[profileIndex] }
     var layer: Layer? { guard let ls = profile?.layers, ls.indices.contains(layerIndex) else { return nil }; return ls[layerIndex] }
-    func selectProfile(_ index: Int) { profileIndex = index; layerIndex = 0; slot = 0; selectedBinding = nil }
-    func selectLayer(_ index: Int) { layerIndex = index; slot = 0; selectedBinding = nil }
+    func selectProfile(_ index: Int) { controlSettingsError = nil; profileIndex = index; layerIndex = 0; slot = 0; selectedBinding = nil }
+    func selectLayer(_ index: Int) { controlSettingsError = nil; layerIndex = index; slot = 0; selectedBinding = nil }
     func refresh() async {
         // R-D02: descriptors only, no permission preflight/request or device open.
         do { received(try await backend.listDevices()) } catch { discoveryFailed(readableError(error)) }

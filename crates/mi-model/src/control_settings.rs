@@ -51,7 +51,12 @@ impl Draft {
             }
             // Never remove a slot when reducing the active count or switching modes.
             // Dormant originals and independent assignments remain addressable.
-            for slot in layer.control_order.len()..16 + settings.active_sectors as usize {
+            let required_slots = if settings.joystick_mode == "logical_sectors" {
+                16 + settings.active_sectors as usize
+            } else {
+                layer.control_order.len()
+            };
+            for slot in layer.control_order.len()..required_slots {
                 let id = new_id();
                 layer.control_order.push(id.clone());
                 layer.controls.insert(
