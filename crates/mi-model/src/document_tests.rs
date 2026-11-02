@@ -1,13 +1,19 @@
 //! R-E07/R-E08/R-K05 regression checks against data loss and wrong-target edits.
 use crate::{draft::*, storage::DocumentStore};
 use serde_json::json;
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
+static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {
         let p = std::env::temp_dir().join(format!(
-            "mi-document-{}-{}",
+            "mi-document-{}-{}-{}",
             std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

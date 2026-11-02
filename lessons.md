@@ -32,3 +32,9 @@
 - 修复：绑定使用文档内Profile/Layer ID和逻辑控件ID；保存成功才提交内存修订；未知/损坏文件不覆盖，QA目录隔离。
 - 验证点：mi-model document_tests覆盖重排、参数往返、未来字段、损坏和冲突；NavigationTests真实桥接重开；原生文本参数退出重开已验。
 - 复发记录：Seen 1x（2026-11-02）。
+
+## 并行测试临时目录
+
+- 起因：全量检查中两个持久化测试获得相同系统时钟值，create_dir 报 AlreadyExists。
+- 修复：临时目录增加进程内原子序号，不再仅依赖时钟分辨率隔离并行测试。
+- 验证：mi-model 并行测试与 scripts/check；不改变用户文档保存策略。Seen 1x。
