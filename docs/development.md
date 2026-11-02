@@ -54,3 +54,9 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 已有材料包含官方文档、本机黑箱观察及带来源的社区公开研究，部分社区材料源自作者分析旧版应用；2026-11-02 按用户授权新增 Input 1.1.0 随包 JavaScript 静态分析，未执行原模块或反编译原生二进制。当前没有严格 clean-room 隔离证明。原始材料留在 .scratch，独立实现只接收整理后的协议说明和合成向量；不复制标注 UNLICENSED 的 device-kit 实现。新界面使用原创设计与素材，社区代码或模型按其许可和版本核查后再使用。
 
 当前应用实施与验收状态以 MVP 工单为准；本页的独立版本查询不代表应用已经完成。原有映射仍需保留；之前的临时 Profile 切换授权不等于任意设备写入、刷固件或安装替代驱动的授权。
+
+## 应用与菜单栏图标
+
+应用使用已选定的薄荷绿短发角色原画 `app/MicroInput/Resources/AppIcon-artwork.png`。`scripts/build` 调用 `scripts/generate-app-icon.swift` 生成 16–1024 px 的图标表示并打包为 AppIcon.icns；圆角和 5% 透明外边距与 Koe 的 macOS 图标一致。原画不带截图外框。
+
+菜单栏由 `StatusItemIcon.swift` 绘制 20 × 18 pt 的键盘与旋钮符号，设置 `isTemplate`，由系统处理深浅色及选中着色。尺寸是本项目选择，不是 Apple 强制尺寸。遵循 [Apple 菜单栏规范](https://developer.apple.com/design/human-interface-guidelines/the-menu-bar) 的黑色/透明符号建议及 [NSImage.isTemplate](https://developer.apple.com/documentation/appkit/nsimage/istemplate) 的模板语义。

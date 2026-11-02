@@ -59,7 +59,7 @@ struct WorkbenchHost: View {
     init(store: Store) {
         self.store = store
         super.init()
-        item.button?.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "Micro Input")
+        item.button?.image = StatusItemIcon.make()
         item.button?.toolTip = "Micro Input"
         item.button?.target = self; item.button?.action = #selector(show)
     }
