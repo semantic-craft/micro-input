@@ -90,13 +90,15 @@ Swift Backend 加入所使用的草稿高层方法；Store 不再通过 `as? Mic
 
 规则 R-P03/R-E02/R-E09/R-E10；改动 `mi-model/src/draft.rs`、`storage.rs`、`document_tests.rs`，桥接文档状态及 Swift 投影。
 
-拟定 LocalDocumentV2：schema_version=2、document_id、revision、baseline、graph、source_refs。baseline 可为空；非空时含设备身份置信状态、固件、读取时间、两文件存在性/摘要/raw。graph 是可编辑对象与绑定。source_refs 映射本地稳定 ID 到设备源 ID 或 legacy logical-N；不把源 index 转成实体 ID。
+LocalDocumentV2（#15实现）：schema_version=2、document_id、revision、baseline、origin、graph、source_refs。origin.config是不可变来源投影及raw，graph是唯一可编辑图。baseline 可为空；非空时含设备身份置信状态、固件、读取时间、两文件存在性/摘要/raw。graph 是可编辑对象与绑定。source_refs 映射本地稳定 ID 到设备源 ID 或 legacy logical-N；不把源 index 转成实体 ID。
 
 新建 Profile/Layer/Action/Binding 使用文档内独立 UUID；导入冲突先建立映射再重写引用，校验无悬空引用。原始文件不随草稿正规化，不因编辑覆盖未知字段。未知结构采用只读/受限投影，不自行补全设备格式。
 
 v1→v2：先完整解析 v1 与 edits，保留其有效草稿语义和原始源值；baseline=null、来源=legacy-local，绝不伪装来自当前设备；持久化旧 logical 引用供后续显式核对。转换失败、高版本或未知字段仍保留原文件并只读。成功写新格式之前，把 v1 原字节写入独立不可覆盖备份并核验摘要；沿用锁、预期内容检查、pending+rename，任一步失败不提交内存状态。
 
 撤销单元为可编辑 graph 与 source_refs 的完整变更，包含重命名、结构和绑定；一次用户确认产生一次 revision。快照事实、设备状态和磁盘迁移不在撤销栈。重连接受新基线后清空旧撤销栈，以免撤销偷偷跨越外部版本；重启不恢复撤销历史。
+
+显式“从快照新建草稿”只复制当前会话完整、未过期的核验快照，保存独立draft-UUID.json和含文件精确字节的baseline，不覆盖原工作台。workbench.active.json仅保存同目录文档文件名，以独立锁、预期字节检查和原子替换切换；失败不改当前选择或内存，已生成新文件保留供检查。重开解析此选择记录；损坏或丢失不静默退回其他草稿。未知原绑定保留在original/origin，显式动作覆盖仅记录本地意图，不编译为设备载荷。
 
 测试：v1 fixture 迁移语义等价、原件备份存在、失败保全、高版本拒写、结构删除引用拒绝、整次撤销/重做、导入重映射、损坏/锁/冲突失败不变内存。
 

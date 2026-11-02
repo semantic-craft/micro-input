@@ -848,6 +848,107 @@ impl MicroInput {
 mod hardware_tests {
     use super::*;
     #[tokio::test]
+    #[ignore = "requires explicitly authorized physical read-only snapshot and isolated local draft"]
+    async fn native_snapshot_to_independent_local_draft() {
+        struct Isolated(std::path::PathBuf);
+        impl Drop for Isolated {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory =
+            Isolated(std::env::temp_dir().join(format!("mi-t06-{}", mi_model::document::new_id())));
+        std::fs::create_dir(&directory.0).unwrap();
+        let path = directory.0.join("workbench.json");
+        let core = MicroInput::new();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+            let ensure = |ok: bool, message: &str| if ok { Ok(()) } else { Err(failure(message)) };
+            core.open_document(path.to_string_lossy().into_owned())
+                .await?;
+            core.create_profile("Existing local work".into()).await?;
+            let old = std::fs::read(&path).map_err(failure)?;
+            let devices: Vec<_> = core
+                .list_devices()
+                .await?
+                .into_iter()
+                .filter(|d| d.pid == 0x8298 && d.transport == "Usb")
+                .collect();
+            ensure(
+                devices.len() == 1,
+                "expected exactly one supported USB candidate",
+            )?;
+            core.connect(devices[0].id.clone()).await?;
+            let identity = core.read_identity().await?;
+            ensure(
+                identity.version.as_deref() == Some("0.6.3"),
+                "unexpected firmware",
+            )?;
+            let read: serde_json::Value =
+                serde_json::from_str(&core.read_config().await?).map_err(failure)?;
+            ensure(
+                read["source"] == "DeviceSnapshot",
+                "not a physical snapshot",
+            )?;
+            let created: serde_json::Value =
+                serde_json::from_str(&core.create_draft_from_snapshot().await?).map_err(failure)?;
+            let doc_id = created["draft"]["document_id"]
+                .as_str()
+                .ok_or_else(|| failure("new document identity missing"))?;
+            let pid = created["config"]["profiles"][0]["id"]
+                .as_str()
+                .ok_or_else(|| failure("source has no profile"))?;
+            core.rename_profile(pid.into(), "Acceptance local copy".into())
+                .await?;
+            ensure(
+                std::fs::read(&path).map_err(failure)? == old,
+                "previous local file changed",
+            )?;
+            let selected: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(directory.0.join(format!("draft-{doc_id}.json")))
+                    .map_err(failure)?,
+            )
+            .map_err(failure)?;
+            ensure(
+                selected["baseline"]["keymap"]["state"] == "present",
+                "baseline file missing",
+            )?;
+            let bytes = selected["baseline"]["keymap"]["bytes"]
+                .as_array()
+                .ok_or_else(|| failure("exact baseline bytes missing"))?;
+            ensure(!bytes.is_empty(), "empty baseline bytes")?;
+            let re = MicroInput::new();
+            let reopened: serde_json::Value = serde_json::from_str(
+                &re.open_document(path.to_string_lossy().into_owned())
+                    .await?,
+            )
+            .map_err(failure)?;
+            ensure(
+                reopened["draft"]["document_id"] == doc_id,
+                "selection not restored",
+            )?;
+            ensure(
+                reopened["config"]["source"] == "LocalDraft",
+                "new local source not restored",
+            )?;
+            ensure(
+                reopened["config"]["profiles"][0]["name"] == "Acceptance local copy",
+                "saved name not restored",
+            )?;
+            ensure(
+                reopened["draft"]["can_undo"] == false,
+                "history restored across restart",
+            )?;
+            re.shutdown().await;
+            Ok::<(), BridgeError>(())
+        })
+        .await;
+        core.shutdown().await;
+        outcome
+            .expect("bounded acceptance timed out")
+            .expect("read-only local-draft acceptance failed");
+        eprintln!("T06 physical read-only snapshot -> independent local document -> reopen PASS; firmware=0.6.3; no device mutation");
+    }
+    #[tokio::test]
     #[ignore = "requires an explicitly authorized native read-only lifecycle session"]
     async fn native_identity_shutdown_and_reopen() {
         let mut previous = None;
