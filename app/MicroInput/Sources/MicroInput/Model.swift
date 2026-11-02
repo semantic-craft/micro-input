@@ -117,9 +117,16 @@ extension Snapshot {
 }
 
 struct DocumentSelection: Decodable { let profile_id: String, layer_id: String? }
-struct MacroReference: Decodable { let profile_id: String, profile_name: String, layer_id: String, layer_name: String, logical_control: String }
+struct MacroReference: Decodable {
+    let profile_id: String, profile_name: String, layer_id: String, layer_name: String, logical_control: String
+    let parent_action_name: String?, branch: String?
+    var displayName: String {
+        if let parent = parent_action_name, let branch { return "\(parent) / \(branch)" }
+        return "\(profile_name) / \(layer_name) / \(logical_control)"
+    }
+}
 struct MacroSummary: Decodable, Identifiable { let id: String, action: CatalogAction, references: [MacroReference] }
-struct DocumentView: Decodable { let macro_library: [MacroSummary]?; let draft: DraftState, config: Snapshot, selection_hint: DocumentSelection?; let action_capabilities: [String:ActionCapability]? }
+struct DocumentView: Decodable { let macro_library: [MacroSummary]?; let multi_library: [MacroSummary]?; let graph_actions: [String:CatalogAction]?; let draft: DraftState, config: Snapshot, selection_hint: DocumentSelection?; let action_capabilities: [String:ActionCapability]? }
 struct ActionCapability: Decodable {
     let target: String, prerequisites: [String], host_required: Bool, execution_available: Bool
     let unavailable_reason: String, source: String, result_semantics: String
