@@ -1,6 +1,7 @@
 """Deterministic guard for UNKNOWN inventory and the physical framing barrier."""
 from pathlib import Path
 import re
+import subprocess
 root = Path(__file__).resolve().parent.parent
 sources = list((root / 'crates').rglob('*.rs'))
 found = set()
@@ -10,10 +11,14 @@ expected = {f'UNKNOWN-{n:02}' for n in range(1, 8)}
 assert found == expected, (found, expected)
 doc = (root / 'docs/spec/UNKNOWNS.md').read_text()
 assert expected <= set(re.findall(r'UNKNOWN-\d+', doc))
-production_framers = []
-for path in sources:
-    if path.name == 'tests.rs':
-        continue
-    production_framers += re.findall(r'impl Framer for (\w+)', path.read_text())
-assert production_framers == ['UnimplementedFramer'], production_framers
-print('UNKNOWN inventory and production framing boundary: PASS')
+# R-D13: guard behavior rather than requiring one placeholder implementation.
+# The tests capture the actual session出口 and assert zero reports for rejected requests.
+for package, behavior in [
+    ('mi-proto', 'production_exit_is_strictly_read_only'),
+    ('mi-session', 'production_exit_rejects_forbidden_parameters_without_sending'),
+    ('mi-session', 'real_framer_never_writes'),
+]:
+    subprocess.run(['cargo', 'test', '--locked', '-p', package, behavior], cwd=root, check=True)
+ffi = (root / 'crates/mi-ffi/src/lib.rs').read_text()
+assert not re.search(r'pub async fn (?:request|rpc|send_report)\b', ffi), 'raw RPC exposed through UniFFI'
+print('UNKNOWN inventory and read-only/no-send boundaries: PASS')

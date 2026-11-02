@@ -19,14 +19,14 @@ impl DeviceSchema for TestSchema {
         Ok((Method::SysVersion, Value::Null))
     }
     fn list_request(&self) -> Result<(Method, Value), ProtoError> {
-        Ok((Method::FsList, Value::Null))
+        Ok((Method::FsList, json!({"checksum":true})))
     }
     fn files(&self, v: &Value) -> Result<Vec<String>, ProtoError> {
         serde_json::from_value(v["test_files"].clone())
             .map_err(|e| ProtoError::Invalid(e.to_string()))
     }
     fn read_request(&self, n: &str) -> Result<(Method, Value), ProtoError> {
-        Ok((Method::FsRead, json!({"test_name":n})))
+        Ok((Method::FsReadbin, json!({"file":n,"offset":0,"len":3072})))
     }
     fn bytes(&self, v: &Value) -> Result<Vec<u8>, ProtoError> {
         v["test_content"]
@@ -78,14 +78,14 @@ async fn queue_interval_notifications_and_id_matching() {
         .await
         .is_err());
     l.inject
-        .send(json!({"id":998}).to_string().into_bytes())
+        .send(json!({"result":null,"id":998}).to_string().into_bytes())
         .unwrap();
     l.inject
         .send(br#"{"m":"kb.sa.exec","params":"never execute"}"#.to_vec())
         .unwrap();
     l.inject
         .send(
-            json!({"id":req["id"],"test_ok":true})
+            json!({"result":null,"id":req["id"],"test_ok":true})
                 .to_string()
                 .into_bytes(),
         )
@@ -97,7 +97,11 @@ async fn queue_interval_notifications_and_id_matching() {
     ));
     let req: Value = serde_json::from_slice(&rx.recv().await.unwrap()).unwrap();
     l.inject
-        .send(json!({"id":req["id"]}).to_string().into_bytes())
+        .send(
+            json!({"result":null,"id":req["id"]})
+                .to_string()
+                .into_bytes(),
+        )
         .unwrap();
     assert!(second.await.unwrap().is_ok());
     let w = l.writes.lock().unwrap();
@@ -107,12 +111,17 @@ async fn queue_interval_notifications_and_id_matching() {
 async fn malformed_timeout_disconnect_and_new_connection() {
     let (s, l, mut rx) = setup(25);
     let a = s.clone();
-    let f = tokio::spawn(async move { a.request(Method::FsList, Value::Null).await });
+    let f = tokio::spawn(async move { a.request(Method::FsList, json!({"checksum":true})).await });
     rx.recv().await;
     l.inject.send(b"invalid".to_vec()).unwrap();
     assert!(matches!(f.await.unwrap(), Err(SessionError::Protocol(_))));
     assert!(matches!(
-        s.request(Method::FsList, Value::Null).await,
+        s.request(Method::FsList, json!({"checksum":true})).await,
+        Err(SessionError::Disconnected)
+    ));
+    let (s, l, _rx) = setup(25);
+    assert!(matches!(
+        s.request(Method::FsList, json!({"checksum":true})).await,
         Err(SessionError::Timeout)
     ));
     let a = s.clone();
@@ -131,14 +140,20 @@ async fn malformed_timeout_disconnect_and_new_connection() {
     let a = new.clone();
     let f = tokio::spawn(async move { a.read_identity().await });
     let req: Value = serde_json::from_slice(&new_rx.recv().await.unwrap()).unwrap();
-    let _ = l
-        .inject
-        .send(json!({"id":req["id"],"old":true}).to_string().into_bytes());
+    let _ = l.inject.send(
+        json!({"result":null,"id":req["id"],"old":true})
+            .to_string()
+            .into_bytes(),
+    );
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert!(!f.is_finished());
     new_link
         .inject
-        .send(json!({"id":req["id"],"new":true}).to_string().into_bytes())
+        .send(
+            json!({"result":null,"id":req["id"],"new":true})
+                .to_string()
+                .into_bytes(),
+        )
         .unwrap();
     assert_eq!(f.await.unwrap().unwrap()["new"], true);
 }
@@ -160,9 +175,9 @@ async fn snapshot_commit_and_stale_preservation() {
             let r: Value = serde_json::from_slice(&bytes).unwrap();
             let files = m.files.lock().unwrap();
             let result = if r["method"] == "fs.list" {
-                json!({"id":r["id"],"test_files":files.keys().collect::<Vec<_>>()})
+                json!({"result":null,"id":r["id"],"test_files":files.keys().collect::<Vec<_>>()})
             } else {
-                json!({"id":r["id"],"test_content":String::from_utf8_lossy(&files[r["params"]["test_name"].as_str().unwrap()])})
+                json!({"result":null,"id":r["id"],"test_content":String::from_utf8_lossy(&files[r["params"]["file"].as_str().unwrap()])})
             };
             m.link.inject.send(result.to_string().into_bytes()).unwrap();
         }
@@ -191,6 +206,10 @@ async fn real_framer_never_writes() {
     );
     assert!(matches!(
         s.read_identity().await,
+        Err(SessionError::Protocol(ProtoError::Unverified(_)))
+    ));
+    assert!(matches!(
+        s.read_identity_info().await,
         Err(SessionError::Protocol(ProtoError::Unverified(_)))
     ));
     assert!(l.writes.lock().unwrap().is_empty());
@@ -222,7 +241,7 @@ async fn notification_after_response_in_same_report_is_not_lost() {
         .send(
             format!(
                 "{}\n{}",
-                json!({"id":r["id"]}),
+                json!({"result":null,"id":r["id"]}),
                 json!({"method":"kb.radial"})
             )
             .into_bytes(),
@@ -233,4 +252,125 @@ async fn notification_after_response_in_same_report_is_not_lost() {
         notices.try_recv().unwrap(),
         HostNotification::Radial(_)
     ));
+}
+
+// R-D13: notifications belong to the session, including between requests.
+#[tokio::test]
+async fn idle_notifications_are_received_without_a_request() {
+    let (s, l, _) = setup(100);
+    let mut notices = s.notifications();
+    l.inject
+        .send(br#"{"method":"kb.radial"}"#.to_vec())
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_millis(100), notices.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        HostNotification::Radial(_)
+    ));
+    s.shutdown().await;
+    assert!(matches!(
+        s.request(Method::SysVersion, Value::Null).await,
+        Err(SessionError::Disconnected)
+    ));
+}
+
+#[tokio::test]
+async fn production_exit_rejects_forbidden_parameters_without_sending() {
+    let (s, l, _rx) = setup(100);
+    for (method, params) in [
+        (Method::FsRead, json!({"file":"keymap.json"})),
+        (
+            Method::FsReadbin,
+            json!({"file":"unrelated.json","offset":0,"len":10}),
+        ),
+    ] {
+        assert!(s.request(method, params).await.is_err());
+    }
+    assert!(l.writes.lock().unwrap().is_empty());
+    s.shutdown().await;
+}
+
+// R-D09/D01: status success is sufficient; absent version triggers explicit fallback.
+#[tokio::test]
+async fn identity_preserves_unknown_indices_and_falls_back_only_when_needed() {
+    let (l, mut requests) = MockLink::new();
+    let s = DeviceSession::new(
+        l.clone(),
+        Box::new(mi_proto::NativeFramer::default()),
+        Arc::new(UnverifiedSchema),
+        SessionConfig::default(),
+    );
+    let a = s.clone();
+    let read = tokio::spawn(async move { a.read_identity_info().await });
+    let report = requests.recv().await.unwrap();
+    let r: Value = serde_json::from_slice(&report[3..3 + report[2] as usize]).unwrap();
+    assert_eq!(r["method"], "device.status");
+    let response =
+        json!({"id":r["id"],"result":{"profile_index":-1,"layer_index":1.5,"future":"retained"}});
+    for r in mi_proto::NativeFramer::default()
+        .encode(response.to_string().as_bytes())
+        .unwrap()
+    {
+        l.inject.send(r).unwrap();
+    }
+    let report = requests.recv().await.unwrap();
+    let r: Value = serde_json::from_slice(&report[3..3 + report[2] as usize]).unwrap();
+    assert_eq!(r["method"], "sys.version");
+    for r in mi_proto::NativeFramer::default()
+        .encode(
+            json!({"id":r["id"],"result":{"version":"0.6.3"}})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap()
+    {
+        l.inject.send(r).unwrap();
+    }
+    let identity = read.await.unwrap().unwrap();
+    assert_eq!(identity.version.as_deref(), Some("0.6.3"));
+    assert_eq!(identity.profile_index, None);
+    assert_eq!(identity.layer_index, None);
+    assert_eq!(identity.raw["status"]["future"], "retained");
+    assert_eq!(identity.source_method, "sys.version");
+    assert!(requests.try_recv().is_err());
+    s.shutdown().await;
+}
+
+#[tokio::test]
+async fn exhausted_request_ids_end_the_session_and_require_reconnect() {
+    let (link, mut requests) = MockLink::new();
+    let s = DeviceSession::new(
+        link.clone(),
+        Box::new(TestFramer),
+        Arc::new(TestSchema),
+        SessionConfig {
+            timeout: Duration::from_secs(1),
+            interval: Duration::ZERO,
+        },
+    );
+    let inject = link.inject.clone();
+    let server = tokio::spawn(async move {
+        while let Some(r) = requests.recv().await {
+            let v: Value = serde_json::from_slice(&r).unwrap();
+            inject
+                .send(json!({"id":v["id"],"result":null}).to_string().into_bytes())
+                .unwrap();
+        }
+    });
+    for _ in 0..999 {
+        s.request(Method::SysVersion, Value::Null).await.unwrap();
+    }
+    let exhausted = s
+        .request(Method::SysVersion, Value::Null)
+        .await
+        .unwrap_err();
+    assert!(exhausted.to_string().contains("exhausted"));
+    assert!(matches!(
+        s.request(Method::SysVersion, Value::Null).await,
+        Err(SessionError::Disconnected)
+    ));
+    s.shutdown().await;
+    server.abort();
 }

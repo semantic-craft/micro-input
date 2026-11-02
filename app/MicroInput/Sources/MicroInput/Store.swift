@@ -5,12 +5,23 @@ protocol Backend {
     func loadDemo() async throws -> String
     func listDevices() async throws -> [DeviceInfo]
     func connect(id: String) async throws
+    func readIdentity() async throws -> IdentityInfo
     func readConfig() async throws -> String
     func disconnect() async
     func inputMonitoringStatus() async -> Bool
     func subscribeDeviceEvents(cb: DeviceEvents) async
+    func openDocument(path: String) async throws -> String
+    func actionCatalog() async throws -> String
+    func assignAction(profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String
+    func undoDraft(redo: Bool) async throws -> String
 }
 extension Backend {
+    func readIdentity() async throws -> IdentityInfo { throw BridgeError.Failed(message: "身份读取不可用") }
+    func openDocument(path: String) async throws -> String { throw BridgeError.Failed(message: "本地文档不可用") }
+    func actionCatalog() async throws -> String { throw BridgeError.Failed(message: "动作目录不可用") }
+    func assignAction(profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String { throw BridgeError.Failed(message: "草稿编辑不可用") }
+    func undoDraft(redo: Bool) async throws -> String { throw BridgeError.Failed(message: "草稿撤销不可用") }
+
     func subscribeDeviceEvents(cb: DeviceEvents) async {}
 }
 extension MicroInput: Backend {}
@@ -19,7 +30,6 @@ extension MicroInput: Backend {}
     @Published var draft = DraftState()
     @Published var catalog: [CatalogAction] = []
     @Published var slot = 0
-    private var draftCore: MicroInput? { backend as? MicroInput }
     @Published var documentReady = false
     private var documentOverride: URL?
     var documentURL: URL {
@@ -30,11 +40,10 @@ extension MicroInput: Backend {}
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("MicroInput/workbench.json")
     }
     func loadWorkbench() async {
-        guard let core = draftCore else { await loadDemo(); return }
         do {
-            draft = try JSONDecoder().decode(DraftState.self, from: Data(try await core.openDocument(path: documentURL.path).utf8))
+            draft = try JSONDecoder().decode(DraftState.self, from: Data(try await backend.openDocument(path: documentURL.path).utf8))
             await loadDemo()
-            catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await core.actionCatalog().utf8))
+            catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await backend.actionCatalog().utf8))
             documentReady = !draft.read_only
             status = draft.read_only ? "文档含未知数据 · 只读 · 原文件保留" : "本地草稿 · 修改自动保存 · 不写设备"
         } catch { status = readableError(error); documentReady = false }
@@ -49,30 +58,38 @@ extension MicroInput: Backend {}
         await saveAction(action)
     }
     func saveAction(_ action: CatalogAction) async {
-        guard documentReady, !busy, let core = draftCore, let profile, let layer else { return }
+        guard documentReady, !busy, let profile, let layer else { return }
         busy = true; defer { busy = false }
         do {
             let encoder = JSONEncoder()
             let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
             let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
             let a = String(decoding: try encoder.encode(action), as: UTF8.self)
-            draft = try JSONDecoder().decode(DraftState.self, from: Data(try await core.assignAction(profileId: p, layerId: l, slot: UInt32(slot), actionJson: a).utf8))
+            draft = try JSONDecoder().decode(DraftState.self, from: Data(try await backend.assignAction(profileId: p, layerId: l, slot: UInt32(slot), actionJson: a).utf8))
             status = "草稿已保存到本机 · 不执行动作 · 不写设备"
         } catch { status = readableError(error) }
     }
     func undoDraft(redo: Bool = false) async {
-        guard documentReady, !busy, let core = draftCore else { return }; busy = true; defer { busy = false }
-        do { draft = try JSONDecoder().decode(DraftState.self, from: Data(try await core.undoDraft(redo: redo).utf8)) }
+        guard documentReady, !busy else { return }; busy = true; defer { busy = false }
+        do { draft = try JSONDecoder().decode(DraftState.self, from: Data(try await backend.undoDraft(redo: redo).utf8)) }
         catch { status = readableError(error) }
     }
     private var generation = 0
     private var pendingID: String?
+    @Published var identity: IdentityInfo?
+    @Published var identityStatus = "身份尚未读取"
     @Published var snapshot: Snapshot?
     @Published var devices: [DeviceInfo] = []
     @Published var selectedDeviceID: String?
     @Published var discoveryStatus = "USB 发现尚未开始"
     private var events: Events?
     var selectedDevice: DeviceInfo? { devices.first { $0.id == selectedDeviceID } }
+    var connectionSummary: String {
+        if connectedID != nil, connectedID == selectedDeviceID {
+            return identity.map { "USB 会话已连接 · 固件 \($0.version ?? "未知")" } ?? "USB 会话已连接 · 身份尚未读取"
+        }
+        return discoveryStatus
+    }
     func startDiscovery() async {
         guard events == nil else { return }
         let receiver = Events(self)
@@ -115,28 +132,47 @@ extension MicroInput: Backend {}
         } else if selectedDeviceID == nil {
             discoveryStatus = values.isEmpty ? "无 USB 候选设备" : "发现 \(values.count) 个 USB 候选 · 请选择设备"
         }
-        if let id = pendingID ?? connectedID, !values.contains(where: { $0.id == id }) { generation += 1; pendingID = nil; connectedID = nil; stale = snapshot != nil; status = "设备已断开" }
+        if let id = pendingID ?? connectedID, !values.contains(where: { $0.id == id }) { generation += 1; pendingID = nil; connectedID = nil; identity = nil; identityStatus = "身份尚未读取"; stale = snapshot != nil; status = "设备已断开" }
     }
     func loadDemo() async {
         guard !busy else { return }; busy = true; defer { busy = false }
         generation += 1; let token = generation
-        await backend.disconnect(); guard token == generation else { return }; connectedID = nil
+        await backend.disconnect(); guard token == generation else { return }; connectedID = nil; identity = nil; identityStatus = "身份尚未读取"
         do { let json = try await backend.loadDemo(); guard token == generation else { return }; try replace(json); status = "演示数据 · 未与设备同步" } catch { if token == generation { status = readableError(error) } }
     }
     func connect(_ id: String) async {
         guard !busy else { return }; busy = true; defer { busy = false }
         generation += 1; let token = generation
-        connectedID = nil; pendingID = id
+        connectedID = nil; identity = nil; identityStatus = "身份尚未读取"; pendingID = id
         // Preserve provenance: a failed device read cannot turn demo data into a device snapshot.
         do {
             try await backend.connect(id: id)
             guard token == generation else { return }
-            pendingID = nil; connectedID = id; status = "已连接 · 协议未验证"
+            pendingID = nil; connectedID = id; status = "设备已打开 · 身份尚未读取 · 配置尚未读取"
+        } catch { if token == generation { pendingID = nil; stale = snapshot != nil; status = "连接失败 · \(readableError(error))" } }
+    }
+    func readIdentity() async {
+        guard !busy, connectedID != nil else { return }; busy = true; defer { busy = false }
+        let token = generation; identity = nil; identityStatus = "正在读取身份"
+        do {
+            let result = try await backend.readIdentity()
+            guard token == generation else { return }
+            identity = result
+            identityStatus = "身份已读回 · \(result.sourceMethod) · 配置尚未读取"
+            status = "设备身份已读回 · 固件 \(result.version ?? "未知") · 配置尚未读取"
+        } catch { if token == generation { identityStatus = "身份读取失败 · \(readableError(error))" } }
+    }
+    func readDeviceConfig() async {
+        guard !busy, connectedID != nil else { return }; busy = true; defer { busy = false }
+        let token = generation
+        do {
             let json = try await backend.readConfig()
             guard token == generation else { return }; try replace(json)
-        } catch { if token == generation { pendingID = nil; stale = snapshot != nil; status = "读取失败 · \(readableError(error))" } }
+            status = "设备配置已读取"
+        } catch { if token == generation { stale = snapshot != nil; status = "配置读取失败 · \(readableError(error))" } }
     }
-    func suspend() async { generation += 1; pendingID = nil; await backend.disconnect(); connectedID = nil; stale = snapshot != nil; status = "会话已断开" }
+
+    func suspend() async { generation += 1; pendingID = nil; await backend.disconnect(); connectedID = nil; identity = nil; identityStatus = "身份尚未读取"; stale = snapshot != nil; status = "会话已断开" }
     private func replace(_ json: String) throws { let result = try JSONDecoder().decode(Snapshot.self, from: Data(json.utf8)); snapshot = result; stale = false; selectProfile(0) }
 }
 @MainActor final class Events: DeviceEvents {

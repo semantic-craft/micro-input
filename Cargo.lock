@@ -519,6 +519,7 @@ dependencies = [
  "cc",
  "hidapi",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

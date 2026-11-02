@@ -32,7 +32,7 @@ final class NavigationTests: XCTestCase {
     }
     @MainActor func testFailedDeviceReadRetainsDemoProvenance() async {
         let backend = SpyBackend(); let store = Store(backend: backend)
-        await store.loadDemo(); await store.connect("synthetic")
+        await store.loadDemo(); await store.connect("synthetic"); await store.readDeviceConfig()
         XCTAssertEqual(store.snapshot?.source, "Demo")
         XCTAssertTrue(store.stale)
         XCTAssertTrue(store.status.contains("读取失败"))
@@ -143,6 +143,56 @@ extension NavigationTests {
         try await core.setSyntheticDiscovery(state: .failure)
         for _ in 0..<100 where !store.discoveryStatus.contains("失败") { try await Task.sleep(nanoseconds: 10_000_000) }
         XCTAssertTrue(store.discoveryStatus.contains("发现失败"))
+    }
+}
+#endif
+
+#if MI_SYNTHETIC_BACKEND
+extension NavigationTests {
+    @MainActor func testIdentityThroughRealBridgeIsSeparateFromConnectionAndConfig() async throws {
+        let core = MicroInputCore.MicroInput.syntheticDiscovery()
+        try await core.setSyntheticDiscovery(state: .twoDevices)
+        let store = Store(backend: core)
+        await store.loadDemo(); await store.refresh()
+        store.selectDevice("synthetic-interface-0")
+        await store.connect("synthetic-interface-0")
+        XCTAssertNotNil(store.connectedID)
+        XCTAssertNil(store.identity)
+        var requests = await core.syntheticRequests()
+        XCTAssertEqual(requests, [])
+        await store.readIdentity()
+        XCTAssertEqual(store.identity?.version, "synthetic-0.6.3")
+        XCTAssertEqual(store.identity?.profileIndex, 2)
+        XCTAssertTrue(store.connectionSummary.contains("synthetic-0.6.3"))
+        XCTAssertTrue(store.status.contains("身份已读回"))
+        XCTAssertEqual(store.snapshot?.source, "Demo")
+        requests = await core.syntheticRequests()
+        XCTAssertEqual(requests, ["device.status"])
+        store.selectProfile(1); store.selectLayer(0)
+        await store.readDeviceConfig()
+        requests = await core.syntheticRequests()
+        XCTAssertEqual(requests, ["device.status"])
+        XCTAssertEqual(store.snapshot?.source, "Demo")
+        XCTAssertNotNil(store.connectedID)
+        await store.suspend()
+        XCTAssertNil(store.identity)
+    }
+    @MainActor func testIdentityFallbackAndFailureThroughRealBridge() async throws {
+        let core = MicroInputCore.MicroInput.syntheticDiscovery()
+        try await core.setSyntheticDiscovery(state: .twoDevices)
+        try await core.setSyntheticIdentity(scenario: 1)
+        let store = Store(backend: core)
+        await store.connect("synthetic-interface-0"); await store.readIdentity()
+        XCTAssertEqual(store.identity?.sourceMethod, "sys.version")
+        XCTAssertNil(store.identity?.profileIndex)
+        XCTAssertNil(store.identity?.layerIndex)
+        await store.suspend()
+        try await core.setSyntheticIdentity(scenario: 2)
+        await store.connect("synthetic-interface-0"); await store.readIdentity()
+        XCTAssertNil(store.identity)
+        XCTAssertNotNil(store.connectedID)
+        XCTAssertTrue(store.identityStatus.contains("失败"))
+        await store.suspend()
     }
 }
 #endif

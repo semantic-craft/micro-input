@@ -86,7 +86,7 @@ struct Workbench: View {
     var discoveryPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label(store.discoveryStatus, systemImage: "cable.connector")
+                Label(store.connectionSummary, systemImage: "cable.connector")
                 Spacer()
                 if !store.devices.isEmpty {
                     Picker("USB 候选", selection: Binding(get: { store.selectedDeviceID ?? "" }, set: { store.selectDevice($0) })) {
@@ -99,13 +99,29 @@ struct Workbench: View {
                 Button("查找 / 刷新 USB") { Task { await store.startDiscovery(); await store.refresh() } }
                 Button("离线演示") { Task { await store.loadDemo() } }
             }
+            HStack {
+                Button("连接选中设备") { if let id = store.selectedDeviceID { Task { await store.connect(id) } } }
+                    .disabled(store.busy || store.selectedDevice?.verifiedModel != true)
+                Button("读取身份") { Task { await store.readIdentity() } }
+                    .disabled(store.busy || store.connectedID == nil || store.connectedID != store.selectedDeviceID)
+                Button("读取设备配置") { Task { await store.readDeviceConfig() } }
+                    .disabled(store.busy || store.connectedID == nil || store.connectedID != store.selectedDeviceID)
+                Button("断开") { Task { await store.suspend() } }.disabled(store.connectedID == nil)
+                Text(store.identityStatus).font(.caption).foregroundStyle(.secondary)
+            }
             if let device = store.selectedDevice {
-                Text("OS 名称：\(device.product) · USB · VID \(String(format: "%04X", device.vid)) / PID \(String(format: "%04X", device.pid)) · 固件：未知")
+                Text("OS 名称：\(device.product) · USB · VID \(String(format: "%04X", device.vid)) / PID \(String(format: "%04X", device.pid)) · 固件：\(store.connectedID == device.id ? (store.identity?.version ?? "未知") : "未知")")
                     .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 Text("主 usage \(String(format: "%04X/%d", device.usagePage, device.usage)) · 完整 usage pairs：\(device.usagePairs.map { String(format: "%04X/%d", $0.page, $0.usage) }.joined(separator: ", "))")
                     .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             }
-            Text("候选选择仅用于浏览身份；下方仍是离线工作台。设备配置尚未读取。")
+            if let identity = store.identity, store.connectedID == store.selectedDeviceID {
+                Text("设备活动 Profile 索引：\(identity.profileIndex.map(String.init) ?? "未知") · Layer 索引：\(identity.layerIndex.map(String.init) ?? "未知") · 来源：\(identity.sourceMethod)")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("身份查询已回包 · 配置兼容与生命周期仍待验收")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("连接、身份与配置分别读取；下方演示来源保留到真实配置完整读回。")
                 .font(.caption).foregroundStyle(.secondary)
         }.padding(.horizontal, 20).padding(.vertical, 12)
     }

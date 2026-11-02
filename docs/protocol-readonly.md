@@ -171,3 +171,11 @@ HID 筛选顺序：
 **F（官方发布事实）**：同日查询[官方 latest](https://github.com/worklouder/cm-v2-fw-releases/releases/latest)为 [v0.6.3](https://github.com/worklouder/cm-v2-fw-releases/releases/tag/v0.6.3)，`prerelease=false`；[v0.7.0-rc.16](https://github.com/worklouder/cm-v2-fw-releases/releases/tag/v0.7.0-rc.16)为预发布，不是升级目标。遵循用户选择：保持最新稳定版，未来操作前重新查询发布状态并保留既有映射。发布说明可提示功能差异，但不能代替协议规格。
 
 实现交接仅提供本文及合成向量说明；不得导入原应用模块充当自研核心。下一步可据本文实现编解码器与只读 transport，再在明确可控的设备会话中验证。尚未核实 native HID 适配细节、完整键码/容量、固件实际错误码以及跨文件一致性，不把这些缺口补成假定规格。
+
+## 8. 当前独立后端与身份应用验收
+
+E-075核对Cargo.lock锁定hidapi crate 2.6.7的macOS后端：编号报告0x06保留在64字节buffer首部，IOKit另传相同report ID；入站callback buffer原样保留，不再拼ID。`macos-shared-device`开启非独占；该版使用run loop并在close中join原生read thread，不适用dispatch cancel-handler实现。生产adapter只为303A:8298/USB/macOS启用，其他组合仍Unverified/no-send。
+
+E-077受控本机观察补充：固件0.6.3回应包含`id/method/result`，method echo本次只读查询。自研RPC响应必须有合法id/i、result/error恰一项；可选method/m只允许四项只读查询名并与pending method匹配，不能带params/p。仅含method+id而无result/error的设备请求不满足pending，只读阶段不执行、不回复。RPC错误不伪装为成功。
+
+E-078已在原生应用路径查询到0.6.3（device.status），可选活动索引与本地浏览选中分开显示。连接、身份和配置读取独立；当前配置schema仍Unverified，不会导入演示解析器。任意长响应/UTF-8、完整配置、拔插/睡眠、权限错误、同ID外来回包与共享channel共存尚待对应实机验收。
