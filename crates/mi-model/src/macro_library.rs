@@ -22,10 +22,12 @@ pub struct MacroReference {
     pub layer_id: String,
     pub layer_name: String,
     pub logical_control: String,
+    pub parent_action_name: Option<String>,
+    pub branch: Option<String>,
 }
-fn references(doc: &LocalDocumentV2, action_id: &str) -> Vec<MacroReference> {
+pub(crate) fn references(doc: &LocalDocumentV2, action_id: &str) -> Vec<MacroReference> {
     let graph = &doc.editable.graph;
-    graph
+    let mut result: Vec<_> = graph
         .profile_order
         .iter()
         .flat_map(|pid| {
@@ -35,6 +37,8 @@ fn references(doc: &LocalDocumentV2, action_id: &str) -> Vec<MacroReference> {
                 layer.control_order.iter().filter_map(move |bid| {
                     let binding = &layer.controls[bid];
                     (binding.action_id.as_deref() == Some(action_id)).then(|| MacroReference {
+                        parent_action_name: None,
+                        branch: None,
                         profile_id: pid.clone(),
                         profile_name: profile.name.clone(),
                         layer_id: lid.clone(),
@@ -44,9 +48,11 @@ fn references(doc: &LocalDocumentV2, action_id: &str) -> Vec<MacroReference> {
                 })
             })
         })
-        .collect()
+        .collect();
+    result.extend(crate::multi::parent_references(doc, action_id));
+    result
 }
-fn binding<'a>(
+pub(crate) fn binding<'a>(
     doc: &'a mut LocalDocumentV2,
     profile: &Value,
     layer: &Value,
@@ -159,10 +165,7 @@ impl Draft {
                 return Err(format!(
                     "宏仍被引用，请先移除绑定：{}",
                     refs.iter()
-                        .map(|r| format!(
-                            "{} / {} / {}",
-                            r.profile_name, r.layer_name, r.logical_control
-                        ))
+                        .map(|r| r.display_name())
                         .collect::<Vec<_>>()
                         .join("、")
                 ));
@@ -171,5 +174,18 @@ impl Draft {
             d.editable.source_refs.remove(id);
             Ok(())
         })
+    }
+}
+
+impl MacroReference {
+    pub fn display_name(&self) -> String {
+        if let (Some(parent), Some(branch)) = (&self.parent_action_name, &self.branch) {
+            format!("{parent} / {branch}")
+        } else {
+            format!(
+                "{} / {} / {}",
+                self.profile_name, self.layer_name, self.logical_control
+            )
+        }
     }
 }

@@ -7,6 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActionKind {
+    LocalMulti {
+        multi: crate::multi::LocalMulti,
+    },
     LocalMacro {
         macro_sequence: crate::macro_sequence::LocalMacro,
     },
@@ -56,6 +59,7 @@ impl Action {
         let bounded = |s: &str| !s.trim().is_empty() && s.len() <= 16384;
         let valid = match kind {
             ActionKind::LocalMacro { macro_sequence } => return macro_sequence.validate(),
+            ActionKind::LocalMulti { multi } => return multi.validate(),
             ActionKind::Shortcut {
                 key,
                 modifiers,
@@ -105,6 +109,7 @@ pub fn actions() -> Vec<Action> {
         ("session", "切换会话", "DSH", "适配器未验证 · 不执行", json!({"type":"focus_session","adapter":"dsh","session":"unselected"})),
         ("skill", "Skill 引用", "Skill", "适配器未验证 · 不执行", json!({"type":"skill_reference","adapter":"unverified","skill":"unselected"})),
         ("app", "打开应用", "应用", "本地应用意图 · 宿主执行未接入", json!({"type":"open_app","bundle_id":"com.apple.TextEdit"})),
+        ("local-multi", "Multi 动作", "Multi", "本地四分支 · 不执行 · 固件范围未知", json!({"type":"local_multi","multi":{"format_version":1,"term_ms":250,"tap":null,"double_tap":null,"hold":null,"tap_hold":null}})),
         ("local-macro", "普通宏", "普通宏", "自有本地格式 · 仅草稿 · 不执行", json!({"type":"local_macro","macro_sequence":{"format_version":1,"events":[{"type":"press","key":"a"},{"type":"release","key":"a"}]}})),
     ].into_iter().map(|(id,name,category,detail,payload)| Action {id:id.into(),name:name.into(),category:category.into(),detail:detail.into(),payload}).collect()
 }
@@ -436,12 +441,9 @@ impl Draft {
                 .actions
                 .insert(binding.action_id.clone().unwrap(), action);
             if let Some(old) = old {
-                if !d
-                    .editable
-                    .graph
-                    .actions
-                    .get(&old)
-                    .is_some_and(crate::macro_library::is_local_macro)
+                if !d.editable.graph.actions.get(&old).is_some_and(|a| {
+                    crate::macro_library::is_local_macro(a) || crate::multi::is_local_multi(a)
+                }) && crate::multi::parent_references(d, &old).is_empty()
                     && !d.editable.graph.layers.values().any(|l| {
                         l.controls
                             .values()

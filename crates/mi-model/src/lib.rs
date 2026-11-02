@@ -321,3 +321,5 @@ pub mod document;
 pub mod macro_sequence;
 
 pub mod macro_library;
+
+pub mod multi;
