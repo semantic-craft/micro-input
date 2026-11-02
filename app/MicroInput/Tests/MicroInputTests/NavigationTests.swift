@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 @testable import MicroInput
 import MicroInputCore
 private final class SpyBackend: Backend {
@@ -101,5 +102,12 @@ extension NavigationTests {
         XCTAssertEqual(store.draft.edits.count, 1)
         XCTAssertEqual(store.snapshot?.raw.text, before)
         XCTAssertNil(store.connectedID)
+    }
+}
+
+// R-H11: closing the editor must not terminate the offline menu-bar host.
+extension NavigationTests {
+    @MainActor func testClosingLastWindowKeepsHostAlive() {
+        XCTAssertFalse(AppLifetime().applicationShouldTerminateAfterLastWindowClosed(NSApplication.shared))
     }
 }

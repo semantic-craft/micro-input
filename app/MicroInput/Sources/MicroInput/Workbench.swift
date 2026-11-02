@@ -2,10 +2,12 @@
 import SwiftUI
 struct Workbench: View {
     @ObservedObject var store: Store
+    @FocusState private var searchFocused: Bool
     @State private var choosing = false
     @State private var reviewing = false
     @State private var search = ""
     @State private var category = "全部"
+    var filteredActions: [CatalogAction] { store.catalog.filter { (category == "全部" || $0.category == category) && (search.isEmpty || ($0.name+$0.category+$0.detail).localizedCaseInsensitiveContains(search)) } }
     var bindings: [JSONValue] { guard let l = store.layer else { return [] }; return l.keys + l.encoders + l.joystick.sectors }
     func title(_ slot: Int) -> String { slot < 13 ? String(format: "按键 %02d", slot + 1) : slot < 16 ? ["旋钮 · 逆时针", "旋钮 · 顺时针", "旋钮 · 按下"][slot-13] : "摇杆 · 扇区 \(slot-15)" }
     func action(_ slot: Int) -> CatalogAction? { let key = "\(store.profileIndex):\(store.layerIndex):\(slot)"; return store.catalog.first { $0.id == store.draft.edits[key] } }
@@ -66,7 +68,15 @@ struct Workbench: View {
             }
             Divider()
             HStack { Text(store.status); Spacer(); Text("草稿修订 \(store.draft.revision) · 不写设备") }.font(.caption).foregroundStyle(.secondary).padding(10)
-        }.frame(minWidth: 1080, minHeight: 650)
+        }.frame(minWidth: 1020, minHeight: 620)
+        .background {
+            Button("前一个控件") { store.slot = max(0, store.slot - 1) }.keyboardShortcut("[", modifiers: [.command]).hidden()
+            Button("后一个控件") { store.slot = min(max(0,bindings.count - 1), store.slot + 1) }.keyboardShortcut("]", modifiers: [.command]).hidden()
+            Button("更换所选动作") { choosing = true }.keyboardShortcut("e", modifiers: [.command]).hidden()
+            Button("查看差异") { reviewing = true }.keyboardShortcut("d", modifiers: [.command]).hidden()
+            Button("撤销草稿") { Task { await store.undoDraft() } }.keyboardShortcut("z", modifiers: [.command]).hidden()
+            Button("重做草稿") { Task { await store.undoDraft(redo: true) } }.keyboardShortcut("z", modifiers: [.command, .shift]).hidden()
+        }
         .sheet(isPresented: $choosing) { actionSheet }
         .sheet(isPresented: $reviewing) { diffSheet }
         .task { if store.snapshot == nil { await store.loadWorkbench() } }
@@ -97,14 +107,16 @@ struct Workbench: View {
     }
     var actionSheet: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack { Text("选择一个动作").font(.title2.bold()); Spacer(); Button("关闭") {choosing = false} }
-            TextField("搜索动作、工具或快捷键", text: $search)
+            HStack { Text("选择一个动作").font(.title2.bold()); Spacer(); Button("关闭") {choosing = false}.keyboardShortcut(.cancelAction) }
+            TextField("搜索动作、工具或快捷键", text: $search).focused($searchFocused)
+                .onSubmit { if let first = filteredActions.first { Task { await store.assign(first.id); choosing = false } } }
             Picker("分类", selection: $category) { ForEach(["全部","快捷键","文本","Herdr","DSH"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
-            ForEach(store.catalog.filter { (category == "全部" || $0.category == category) && (search.isEmpty || ($0.name+$0.category+$0.detail).localizedCaseInsensitiveContains(search)) }) { a in
+            ForEach(filteredActions) { a in
                 Button { Task { await store.assign(a.id); choosing = false } } label: { VStack(alignment: .leading, spacing: 5) {Text(a.name).bold(); Text(a.detail).font(.caption).foregroundStyle(.secondary)}.frame(maxWidth: .infinity, alignment: .leading).padding(10) }.buttonStyle(.plain).disabled(store.busy)
             }
             Text("自有演示动作 · 不执行 · 设备格式未验证").font(.caption).foregroundStyle(.secondary)
         }.padding(24).frame(width: 530)
+        .onAppear { search = ""; category = "全部"; searchFocused = true }
     }
     var diffSheet: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -121,6 +133,7 @@ struct Workbench: View {
             }
             Text("仅当前运行内保留，退出后重置。原始数据未修改。").font(.caption).foregroundStyle(.secondary)
             Button("继续编辑") { reviewing = false }.keyboardShortcut(.defaultAction)
+            Button("关闭变更") { reviewing = false }.keyboardShortcut(.cancelAction)
         }.padding(24).frame(width: 550, height: 380)
     }
 }
