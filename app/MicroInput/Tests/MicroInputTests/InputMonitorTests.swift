@@ -98,6 +98,28 @@ final class InputMonitorTests: XCTestCase {
 
 #if MI_SYNTHETIC_BACKEND
 extension InputMonitorTests {
+    @MainActor func testCandidatePresentationNamesBindingAndSourceWithoutPhysicalIdentity() async throws {
+        let core = MicroInputCore.MicroInput.syntheticDiscovery()
+        try await core.setSyntheticDiscovery(state: .twoDevices)
+        let store = Store(backend: core)
+        await store.connect("synthetic-interface-0")
+        let monitor = InputMonitorState()
+        let task = Task { await monitor.listen(store: store) }
+        for _ in 0..<100 where !monitor.status.contains("正在监听") { try await Task.sleep(nanoseconds: 1_000_000) }
+        try await core.emitSyntheticInputCase(inputCase: .candidateBindings)
+        for _ in 0..<100 where monitor.count < 8 { try await Task.sleep(nanoseconds: 1_000_000) }
+        XCTAssertEqual(monitor.count, 8)
+        XCTAssertEqual(monitor.eventSummary, "候选绑定 AG11 · 释放（未核实）")
+        XCTAssertEqual(monitor.candidateSourceSummary, "Dispatch 0.6.2 候选 · 当前固件输入与物理映射未核实")
+        XCTAssertEqual(monitor.lastEvent?.actionEligible, false)
+        monitor.stop()
+        await task.value
+        await store.suspend()
+        await monitor.listen(store: store)
+        XCTAssertNil(monitor.lastEvent)
+        XCTAssertNil(monitor.eventSummary)
+        XCTAssertNil(monitor.candidateSourceSummary)
+    }
     @MainActor func testMonitorPresentationUsesRealBridgeAndClearsOldSessionOnRestart() async throws {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
@@ -110,7 +132,7 @@ extension InputMonitorTests {
         for _ in 0..<100 where monitor.count == 0 { try await Task.sleep(nanoseconds: 1_000_000) }
         XCTAssertEqual(monitor.count, 1)
         XCTAssertEqual(monitor.lastEvent?.kind, .unknownNotification)
-        XCTAssertTrue(monitor.status.contains("格式待核实"))
+        XCTAssertTrue(monitor.status.contains("物理映射待核实"))
         await store.suspend()
         await task.value
         XCTAssertTrue(monitor.status.contains("已停止"))
