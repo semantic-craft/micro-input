@@ -1,5 +1,7 @@
 # 开发接续
 
+规格工单：[产品基线 #10](https://github.com/semantic-craft/micro-input/issues/10)。仓库文档拥有现行规则，工单保留发布快照和阶段任务关联。
+
 ## 当前基线
 
 产品、工程范围和分阶段验收统一由 [SPEC](spec/SPEC.md) 与 [BUILD_PROMPT](spec/BUILD_PROMPT.md) 维护；术语见 [GLOSSARY](../GLOSSARY.md)。本轮只交付规格，禁止自动化接线和设备写入，不运行新的实机查询。

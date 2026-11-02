@@ -10,6 +10,8 @@
 
 下一步按阶段1补齐真实只读查看器；可在协议补证期间独立推进阶段2离线草稿，但不提前解锁写入。既有 [MVP #1](https://github.com/semantic-craft/micro-input/issues/1) 及 #2–#6 仍属只读阶段，完成状态以GitHub为准。
 
+完整规格已发布为 [Issue #10](https://github.com/semantic-craft/micro-input/issues/10)，标记 `ready-for-agent`；该标签不扩张当前文档任务的执行范围。
+
 ## 规格入口
 
 1. [SPEC：完整产品范围、用户故事与规则](docs/spec/SPEC.md)
