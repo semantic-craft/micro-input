@@ -1,4 +1,6 @@
 //! R-D07/R-C01/R-N01: one serialized queue per connection, cancellation and atomic snapshots.
+mod input;
+pub use input::*;
 use mi_model::{DeviceConfig, Source};
 use mi_proto::{
     Framer, HostNotification, Incoming, JsonCodec, Method, ProtoError, RpcCodec, RpcRequest,

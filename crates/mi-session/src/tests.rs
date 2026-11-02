@@ -374,3 +374,99 @@ async fn exhausted_request_ids_end_the_session_and_require_reconnect() {
     s.shutdown().await;
     server.abort();
 }
+
+#[tokio::test]
+async fn input_monitor_observes_idle_notifications_without_requests_or_payloads() {
+    let (s, l, mut requests) = setup(500);
+    let mut monitor = s.subscribe_input();
+    l.inject
+        .send(br#"{"m":"kb.sa.inserttext","params":"private text"}"#.to_vec())
+        .unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(1), monitor.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.session_id, s.id);
+    assert_eq!(event.sequence, 1);
+    assert_eq!(event.kind, crate::InputEventKind::UnknownNotification);
+    assert_eq!(event.logical_switch, None);
+    assert!(!event.action_eligible);
+    assert!(requests.try_recv().is_err());
+    s.shutdown().await;
+    assert!(monitor.next().await.is_none());
+}
+
+// Test-only logical decoding; this is not a Creator Micro wire schema.
+struct SyntheticInputDecoder;
+impl crate::InputDecoder for SyntheticInputDecoder {
+    fn decode(&self, _: &HostNotification) -> Option<(crate::InputEventKind, String)> {
+        Some((crate::InputEventKind::Pressed, "synthetic-switch-a".into()))
+    }
+}
+#[tokio::test]
+async fn input_gap_clears_pressed_state_and_requires_new_subscription() {
+    let (s, l, mut requests) = setup(1000);
+    let mut monitor = s.subscribe_input_with_decoder(Box::new(SyntheticInputDecoder));
+    l.inject
+        .send(br#"{"m":"test.synthetic"}"#.to_vec())
+        .unwrap();
+    assert_eq!(
+        monitor.next().await.unwrap().kind,
+        crate::InputEventKind::Pressed
+    );
+    assert_eq!(monitor.pressed_switches(), ["synthetic-switch-a"]);
+    for _ in 0..300 {
+        l.inject
+            .send(br#"{"m":"test.synthetic"}"#.to_vec())
+            .unwrap();
+    }
+    // A response behind the flood is a public barrier that the single reader consumed it.
+    let session = s.clone();
+    let barrier =
+        tokio::spawn(async move { session.request(Method::SysVersion, Value::Null).await });
+    let request: Value = serde_json::from_slice(&requests.recv().await.unwrap()).unwrap();
+    l.inject
+        .send(
+            json!({"id":request["id"],"result":{}})
+                .to_string()
+                .into_bytes(),
+        )
+        .unwrap();
+    barrier.await.unwrap().unwrap();
+    let gap = monitor.next().await.unwrap();
+    assert_eq!(gap.kind, crate::InputEventKind::InputStreamGap);
+    assert_eq!(gap.lost_count, 44);
+    assert!(!gap.action_eligible);
+    assert!(monitor.pressed_switches().is_empty());
+    assert!(monitor.stopped());
+    assert!(monitor.next().await.is_none());
+    let mut rebuilt = s.subscribe_input();
+    assert!(rebuilt.pressed_switches().is_empty());
+    l.inject
+        .send(br#"{"m":"unknown.current.firmware"}"#.to_vec())
+        .unwrap();
+    assert_eq!(
+        rebuilt.next().await.unwrap().kind,
+        crate::InputEventKind::UnknownNotification
+    );
+    s.shutdown().await;
+}
+
+#[tokio::test]
+async fn disconnected_monitor_drops_buffered_old_session_events() {
+    let (s, l, _) = setup(500);
+    let mut monitor = s.subscribe_input();
+    l.inject
+        .send(br#"{"m":"test.synthetic"}"#.to_vec())
+        .unwrap();
+    s.shutdown().await;
+    assert!(monitor.next().await.is_none());
+    let (new_session, link, _) = setup(500);
+    let mut fresh = new_session.subscribe_input();
+    link.inject
+        .send(br#"{"m":"test.synthetic"}"#.to_vec())
+        .unwrap();
+    assert_eq!(fresh.next().await.unwrap().session_id, new_session.id);
+    assert_ne!(s.id, new_session.id);
+    new_session.shutdown().await;
+}
