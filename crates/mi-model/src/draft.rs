@@ -424,11 +424,18 @@ impl Draft {
                 .actions
                 .insert(binding.action_id.clone().unwrap(), action);
             if let Some(old) = old {
-                if !d.editable.graph.layers.values().any(|l| {
-                    l.controls
-                        .values()
-                        .any(|b| b.action_id.as_ref() == Some(&old))
-                }) {
+                if !d
+                    .editable
+                    .graph
+                    .actions
+                    .get(&old)
+                    .is_some_and(crate::macro_library::is_local_macro)
+                    && !d.editable.graph.layers.values().any(|l| {
+                        l.controls
+                            .values()
+                            .any(|b| b.action_id.as_ref() == Some(&old))
+                    })
+                {
                     d.editable.graph.actions.remove(&old);
                     d.editable.source_refs.remove(&old);
                 }

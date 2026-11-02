@@ -318,3 +318,5 @@ pub use device::parse_device_files;
 pub mod document;
 
 pub mod macro_sequence;
+
+pub mod macro_library;

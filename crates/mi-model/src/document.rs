@@ -469,7 +469,7 @@ impl LocalDocumentV2 {
         self.editable
             .graph
             .actions
-            .retain(|id, _| used.contains(id));
+            .retain(|id, a| used.contains(id) || crate::macro_library::is_local_macro(a));
         let valid: BTreeSet<_> = self
             .editable
             .graph

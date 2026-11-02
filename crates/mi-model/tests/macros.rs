@@ -86,3 +86,37 @@ fn invalid_or_future_macro_never_replaces_the_saved_sequence_or_source() {
     assert_eq!(std::fs::read(&path).unwrap(), future_bytes);
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn shared_macro_references_survive_restart_and_guard_deletion() {
+    let mut draft = Draft::default();
+    let p = draft.config.profiles[0].id.clone();
+    let l = draft.config.profiles[0].layers[0].id.clone();
+    let id = draft
+        .save_macro(
+            None,
+            action(json!([{"type":"press","key":"a"},{"type":"release","key":"a"}])),
+        )
+        .unwrap();
+    draft.bind_macro(&p, &l, 0, Some(&id)).unwrap();
+    draft.bind_macro(&p, &l, 1, Some(&id)).unwrap();
+    assert_eq!(draft.macros()[0].references.len(), 2);
+    assert!(draft.delete_macro(&id).unwrap_err().contains("logical-0"));
+    let revision = draft.revision;
+    let edited = action(json!([{"type":"press","key":"b"},{"type":"release","key":"b"}]));
+    draft.save_macro(Some(&id), edited.clone()).unwrap();
+    assert_eq!(draft.revision, revision + 1);
+    assert_eq!(draft.edits[&binding_key(&p, &l, 0)], edited);
+    assert_eq!(draft.edits[&binding_key(&p, &l, 1)], edited);
+    let mut re = Draft::from_bytes(&serde_json::to_vec(&draft.document).unwrap()).unwrap();
+    assert_eq!(re.macros()[0].id, id);
+    assert_eq!(re.macros()[0].references.len(), 2);
+    re.bind_macro(&p, &l, 0, None).unwrap();
+    re.bind_macro(&p, &l, 1, None).unwrap();
+    re.delete_macro(&id).unwrap();
+    assert!(re.macros().is_empty());
+    re.undo(false).unwrap();
+    assert_eq!(re.macros()[0].id, id);
+    re.undo(false).unwrap();
+    assert_eq!(re.macros()[0].references.len(), 1);
+}
