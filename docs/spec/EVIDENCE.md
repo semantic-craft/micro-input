@@ -139,3 +139,5 @@
 - **E-077 / SEEN-O（受控身份验收）**：2026-11-02 当前303A:8298/USB、锁定hidapi2.6.7应用核心只读查询，观察到回复包络键为 `id/method/result`，method为此次只读查询名，result为非null。未记录params/result内容或原始载荷。固件可echo method；它与仅含method+id的设备请求必须区分。接收端以result/error恰一项、合法ID及可选echo method匹配pending method判为响应；带method但无result/error仍仅作未执行的设备请求/通知。此条只解锁包络合成回归，不代表查询/版本或完整S1已通过。
 
 - **E-078 / IMPLEMENTATION + SEEN-O**：2026-11-02 T02只读应用验收：原生开发构建（ad-hoc、macOS/arm64）经SwiftUI“查找→明确选择8298 USB→连接→读取身份”，Rust/UniFFI/hidapi2.6.7实际读回version **0.6.3**、profile_index **0**、layer_index **1**，来源device.status。连接阶段未隐式读取配置；下方仍明确为Demo。另同一高层核心的opt-in native_identity_query_only通过并输出同版本/backend/source；不是独立探针。结束点击断开并退出，未读取配置/激活/灯光/写入/宿主执行、未修改权限或终止Input/Codex。原有映射物理行为、任意长响应/UTF-8、错误/拔插/睡眠和共存仍未验收。对应AC-1.5；不签收完整S1/AC-1.10。
+
+- **E-080 / SEEN-O，原生物理拔插**：2026-11-02，集成55f49f6的生产开发构建，隔离文档和限时验收实例。用户按提示拔出/插回Creator Micro USB；CUA观察界面在不点击刷新时自动从“发现1个USB候选”→“无USB候选设备”→“发现1个USB候选”，重新出现后仍要求明确选择。实例通过菜单退出，进程结束。本次未点击连接/身份/配置，无RPC或设备写入；仅证明AC-1.3发现插拔，不证明已连接会话恢复或原有映射行为。
