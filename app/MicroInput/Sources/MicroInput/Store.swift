@@ -129,8 +129,8 @@ extension MicroInput: Backend {}
         guard let action = catalog.first(where: {$0.id == id}) else { return }
         await saveAction(action)
     }
-    func saveAction(_ action: CatalogAction) async {
-        guard canEditDraft, !busy, let profile, let layer else { return }
+    @discardableResult func saveAction(_ action: CatalogAction) async -> Bool {
+        guard canEditDraft, !busy, let profile, let layer else { return false }
         busy = true; defer { busy = false }
         do {
             let encoder = JSONEncoder()
@@ -139,7 +139,8 @@ extension MicroInput: Backend {}
             let a = String(decoding: try encoder.encode(action), as: UTF8.self)
             try applyDocument(try await backend.assignAction(profileId: p, layerId: l, slot: UInt32(slot), actionJson: a))
             status = "草稿已保存到本机 · 不执行动作 · 不写设备"
-        } catch { status = readableError(error) }
+            return true
+        } catch { status = readableError(error); return false }
     }
     func undoDraft(redo: Bool = false) async {
         guard canEditDraft, !busy else { return }; busy = true; defer { busy = false }

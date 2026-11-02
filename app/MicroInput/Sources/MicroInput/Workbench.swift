@@ -294,6 +294,7 @@ struct Workbench: View {
 // R-K05: typed parameters edited locally; adapters remain unavailable.
 struct ActionParameters: View {
     @State var action: CatalogAction
+    @State private var editingMacro = false
     @ObservedObject var store: Store
     var type: String { action.payload["type"]?.text ?? "unknown" }
     var fields: [(String,String)] {
@@ -309,6 +310,10 @@ struct ActionParameters: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if type == "local_macro", MacroEditorDraft(action: action) != nil {
+                Button("编辑宏步骤") { editingMacro = true }.disabled(!store.canEditDraft || store.busy)
+                Text("自有本地序列 · 按下 / 释放 / 延时 · 不执行").font(.caption).foregroundStyle(.secondary)
+            }
             Text("动作名称").font(.caption).foregroundStyle(.secondary)
             TextField("动作名称", text: $action.name)
             ForEach(fields, id: \.0) { key,label in
@@ -325,7 +330,7 @@ struct ActionParameters: View {
             }
             Text("参数修改后点击保存").font(.caption).foregroundStyle(.secondary)
             Button("保存参数到草稿") { Task { await store.saveAction(action) } }.disabled(!store.canEditDraft || store.busy)
-        }
+        }.sheet(isPresented: $editingMacro) { MacroEditor(action: action, store: store) }
     }
     var modifiers: [String] { if case .array(let values) = action.payload["modifiers"] { return values.map(\.text) }; return [] }
 }

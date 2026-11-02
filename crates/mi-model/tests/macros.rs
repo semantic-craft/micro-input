@@ -38,3 +38,51 @@ fn invalid_macro_reports_the_held_press_step() {
     let invalid = action(json!([{"type":"press","key":"a"},{"type":"delay","ms":1}]));
     assert!(invalid.validate().unwrap_err().contains("第 1 步"));
 }
+
+#[test]
+fn invalid_or_future_macro_never_replaces_the_saved_sequence_or_source() {
+    use mi_model::storage::DocumentStore;
+    let directory = std::env::temp_dir().join(format!("mi-macro-{}", mi_model::document::new_id()));
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("workbench.json");
+    let mut store = DocumentStore::default();
+    store.open(path.clone()).unwrap();
+    let p = store.draft.config.profiles[0].id.clone();
+    let l = store.draft.config.profiles[0].layers[0].id.clone();
+    let valid = action(json!([{"type":"press","key":"a"},{"type":"release","key":"a"}]));
+    store
+        .update(|d| d.assign(&p, &l, 0, valid.clone()))
+        .unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    for events in [
+        json!([]),
+        json!([{"type":"release","key":"a"}]),
+        json!([{"type":"press","key":"a"},{"type":"press","key":"a"}]),
+        json!([{"type":"delay","ms":0}]),
+        json!([{"type":"delay","ms":-1}]),
+        json!([{"type":"delay","ms":4294967296u64}]),
+        json!([{"type":"delay","ms":1,"future":true}]),
+    ] {
+        assert!(store
+            .update(|d| d.assign(&p, &l, 0, action(events)))
+            .is_err());
+        assert_eq!(store.draft.revision, 1);
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+    }
+    let mut future: Value = serde_json::from_slice(&saved).unwrap();
+    let aid = future["graph"]["actions"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    future["graph"]["actions"][&aid]["payload"]["macro_sequence"]["format_version"] = json!(2);
+    let future_bytes = serde_json::to_vec(&future).unwrap();
+    std::fs::write(&path, &future_bytes).unwrap();
+    store.open(path.clone()).unwrap();
+    assert!(store.draft.read_only);
+    assert!(store.update(|d| d.assign(&p, &l, 0, valid)).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), future_bytes);
+    std::fs::remove_dir_all(directory).unwrap();
+}
