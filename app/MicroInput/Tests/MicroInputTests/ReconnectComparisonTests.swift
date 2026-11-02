@@ -29,5 +29,27 @@ final class ReconnectComparisonTests: XCTestCase {
         XCTAssertEqual(reopened.profile?.name,"Synthetic external edit");XCTAssertEqual(reopened.draft.revision,beforeRevision+1)
         await core.shutdown()
     }
+    @MainActor func testChangedCachedSnapshotRejectsOldDecisionAndWholeLocalChoiceReopensWithDiff() async throws {
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:dir)}
+        let url=dir.appendingPathComponent("workbench.json"),core=MicroInputCore.MicroInput.syntheticDiscovery()
+        let store=Store(backend:core,documentURL:url);await store.loadWorkbench()
+        try await core.setSyntheticDiscovery(state:.twoDevices);try await core.setSyntheticConfig(scenario:1)
+        await store.refresh();store.selectDevice("synthetic-interface-0");await store.connect("synthetic-interface-0")
+        await store.readIdentity();await store.readDeviceConfig();await store.createDraftFromSnapshot()
+        await store.renameProfile(name:"Whole local choice")
+        await store.compareSnapshot();let old=try XCTUnwrap(store.comparison),revision=store.draft.revision
+        try await core.setSyntheticConfig(scenario:4);_ = try await core.readConfig()
+        do {_ = try await core.resolveComparison(token:old.token,choice:"device");XCTFail("Stale comparison was accepted")}catch {}
+        XCTAssertEqual(store.draft.revision,revision)
+        await store.compareSnapshot();await store.resolveComparison("local")
+        XCTAssertEqual(store.profile?.name,"Whole local choice");XCTAssertFalse(store.draft.can_undo)
+        XCTAssertEqual(store.draft.revision,revision+1)
+        XCTAssertEqual(store.draft.structure_changes,["配置改名：Synthetic external edit → Whole local choice"])
+        let reopened=Store(backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench()
+        XCTAssertEqual(reopened.profile?.name,"Whole local choice");XCTAssertEqual(reopened.draft.structure_changes,store.draft.structure_changes)
+        await core.shutdown()
+    }
+
 }
 #endif

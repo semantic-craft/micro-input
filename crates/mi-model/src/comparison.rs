@@ -50,10 +50,23 @@ pub fn base_config(doc: &LocalDocumentV2) -> Result<DeviceConfig, String> {
     .map_err(|_| "基线配置不能显示".into())
 }
 fn source_key(value: &Value) -> Option<String> {
-    match value["kind"].as_str()? {
-        "source-profile" | "source-layer" | "source-binding" => Some(value.to_string()),
-        _ => None,
-    }
+    let kind = value["kind"].as_str()?;
+    let fields: &[&str] = match kind {
+        "source-profile" => &["source_id"],
+        "source-layer" => &["profile_source_id", "source_id"],
+        "source-binding" => &["profile_source_id", "layer_source_id", "logical_control"],
+        _ => return None,
+    };
+    Some(
+        json!([
+            kind,
+            fields
+                .iter()
+                .map(|field| value[*field].clone())
+                .collect::<Vec<_>>()
+        ])
+        .to_string(),
+    )
 }
 fn align(doc: &mut LocalDocumentV2, reference: &EditableState) -> Result<(), String> {
     let mut keys = BTreeMap::new();
@@ -163,7 +176,7 @@ fn merge(
     value.cloned()
 }
 // Only fields represented by the editable graph are removed. Everything else is opaque.
-fn opaque(config: &DeviceConfig) -> Value {
+fn opaque(config: &DeviceConfig, other: &DeviceConfig) -> Value {
     let mut root = config.raw.clone();
     let mut extras = serde_json::Map::new();
     if let Some(profiles) = root
@@ -172,6 +185,9 @@ fn opaque(config: &DeviceConfig) -> Value {
         .and_then(|v| v.as_array().cloned())
     {
         for mut p in profiles {
+            let Some(peer) = other.profiles.iter().find(|peer| peer.id == p["id"]) else {
+                continue;
+            };
             let key = p["id"].to_string();
             let Some(o) = p.as_object_mut() else { continue };
             o.remove("id");
@@ -181,6 +197,9 @@ fn opaque(config: &DeviceConfig) -> Value {
             let mut layers = serde_json::Map::new();
             if let Some(ls) = o.remove("layers").and_then(|v| v.as_array().cloned()) {
                 for mut l in ls {
+                    if !peer.layers.iter().any(|peer| peer.id == l["id"]) {
+                        continue;
+                    }
                     let lid = l["id"].to_string();
                     if let Some(lo) = l.as_object_mut() {
                         lo.remove("id");
@@ -228,7 +247,13 @@ fn opaque(config: &DeviceConfig) -> Value {
     }
     let mut unknown = BTreeMap::new();
     for p in &config.profiles {
+        let Some(peer) = other.profiles.iter().find(|peer| peer.id == p.id) else {
+            continue;
+        };
         for l in &p.layers {
+            if !peer.layers.iter().any(|peer| peer.id == l.id) {
+                continue;
+            }
             for (slot, b) in l
                 .keys
                 .iter()
@@ -274,12 +299,13 @@ impl Comparison {
             && new_identity["confidence"] == "verified-serial"
             && old_identity["serial"].as_str().is_some()
             && old_identity["serial"] == new_identity["serial"];
-        let identity_conflict = (old_identity["serial"].as_str().is_some()
-            && new_identity["serial"].as_str().is_some()
-            && old_identity["serial"] != new_identity["serial"])
-            || (old_identity["interface"].as_str().is_some()
-                && new_identity["interface"].as_str().is_some()
-                && old_identity["interface"] != new_identity["interface"]);
+        let identity_conflict = !identity_matches
+            && ((old_identity["serial"].as_str().is_some()
+                && new_identity["serial"].as_str().is_some()
+                && old_identity["serial"] != new_identity["serial"])
+                || (old_identity["interface"].as_str().is_some()
+                    && new_identity["interface"].as_str().is_some()
+                    && old_identity["interface"] != new_identity["interface"]));
         if !identity_matches {
             conflicts.push(
                 if identity_conflict {
@@ -296,7 +322,7 @@ impl Comparison {
                     .source_refs
                     .values()
                     .filter(|r| r["kind"] == kind)
-                    .map(Value::to_string)
+                    .filter_map(source_key)
                     .collect::<BTreeSet<_>>()
             };
             let b = sources(&base.editable);
@@ -307,8 +333,8 @@ impl Comparison {
                 ));
             }
         }
-        let old_raw = opaque(&base_config);
-        let new_raw = opaque(config);
+        let old_raw = opaque(&base_config, config);
+        let new_raw = opaque(config, &base_config);
         if old_raw != new_raw {
             conflicts.push("未知 raw 改变；双方原值保留，禁止自动合并".into());
             rows.push(ComparisonRow {

@@ -255,3 +255,27 @@ fn replacement_source_id_is_manual_and_malformed_baseline_never_panics() {
     assert!(compared.conflicts.iter().any(|c| c.contains("源 ID")));
     assert!(Comparison::new(&local, &remote, json!("invalid baseline")).is_err());
 }
+
+#[test]
+fn device_deleted_unchanged_profile_is_a_deletion_not_opaque_conflict() {
+    let (local, mut remote, baseline) = fixture();
+    remote.profiles.remove(0);
+    remote.profiles[0].index = 0;
+    remote.raw["profiles"].as_array_mut().unwrap().remove(0);
+    let compared = Comparison::new(&local, &remote, baseline).unwrap();
+    assert!(compared.can_merge(), "{:?}", compared.conflicts);
+    let next = compared.resolve(&local, Choice::Merge).unwrap().unwrap();
+    assert_eq!(next.editable.graph.profile_order.len(), 1);
+    assert!(next.structure_changes().is_empty());
+}
+
+#[test]
+fn source_id_ambiguity_is_not_hidden_by_extra_reference_metadata() {
+    let (mut local, remote, baseline) = fixture();
+    let first = local.editable.graph.profile_order[0].clone();
+    let second = local.editable.graph.profile_order[1].clone();
+    let mut duplicate = local.editable.source_refs[&first].clone();
+    duplicate["future_note"] = json!("retained");
+    local.editable.source_refs.insert(second, duplicate);
+    assert!(Comparison::new(&local, &remote, baseline).is_err());
+}
