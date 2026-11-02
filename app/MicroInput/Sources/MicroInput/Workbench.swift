@@ -30,7 +30,7 @@ struct Workbench: View {
         } else { candidate = action }
     }
     var bindings: [JSONValue] { guard let l = store.layer else { return [] }; return l.keys + l.encoders + l.joystick.sectors }
-    func title(_ slot: Int) -> String { slot < 13 ? String(format: "按键 %02d", slot + 1) : slot < 16 ? "旋钮槽 \(slot-12) · 方向未核实" : "摇杆 · 扇区 \(slot-15)" }
+    func title(_ slot: Int) -> String { slot < 13 ? String(format: "按键 %02d", slot + 1) : slot < 16 ? "旋钮槽 \(slot-12) · 方向未核实" : "摇杆 · 逻辑扇区 \(slot-15)" }
     func action(_ slot: Int) -> CatalogAction? { return store.browsingDeviceSnapshot ? nil : store.draft.edits[store.key(slot)] }
     func label(_ slot: Int) -> String { if let a = action(slot) {return a.name}; guard bindings.indices.contains(slot) else {return "未知"}; return bindings[slot].bindingLabel }
     var body: some View {
@@ -104,7 +104,7 @@ struct Workbench: View {
                                             ForEach([0,2,6,10][row]..<([0,2,6,10][row]+[2,4,4,3][row]), id: \.self) { i in control(i) }
                                         }
                                     }
-                                    HStack { ForEach(16..<max(16,bindings.count), id: \.self) { i in control(i) } }
+                                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 100))], spacing: 10) { ForEach(16..<max(16,bindings.count), id: \.self) { i in control(i) } }
                                     Text("CREATOR MICRO").font(.caption2).tracking(3).foregroundStyle(.secondary)
                                 }.padding(20).background(.background, in: RoundedRectangle(cornerRadius: 22)).overlay(RoundedRectangle(cornerRadius: 22).stroke(.quaternary)).shadow(color: .black.opacity(0.08), radius: 12, y: 8)
                                 Text("13 开关逻辑位置示意 · 实体宽键和方向待核对").font(.caption).foregroundStyle(.secondary)
@@ -203,7 +203,7 @@ struct Workbench: View {
     }
     func control(_ slot: Int, round: Bool = false) -> some View {
         Button { store.slot = slot } label: {
-            VStack(spacing: 5) { Text(slot < 13 ? String(format: "%02d",slot+1) : slot < 16 ? "E\(slot-12)" : "✣").font(.headline); Text(label(slot)).font(.caption2).lineLimit(2) }
+            VStack(spacing: 5) { Text(slot < 13 ? String(format: "%02d",slot+1) : slot < 16 ? "E\(slot-12)" : "J\(slot-15)").font(.headline); Text(label(slot)).font(.caption2).lineLimit(2) }
                 .frame(width: 73, height: 62).padding(3)
                 .background(store.slot == slot ? Color.accentColor.opacity(0.14) : Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: round ? 25 : 9))
                 .overlay(RoundedRectangle(cornerRadius: round ? 25 : 9).stroke(store.slot == slot ? Color.accentColor : Color.gray.opacity(0.2)))
@@ -213,7 +213,14 @@ struct Workbench: View {
         VStack(alignment: .leading, spacing: 22) {
             Text(title(store.slot)).font(.title3.bold())
             Text(store.layer?.name ?? "").font(.caption).foregroundStyle(.secondary)
+            if store.slot >= 16, let settings = store.currentControlSettings, !store.browsingDeviceSnapshot {
+                Text(settings.joystick_mode == "logical_sectors" && store.slot - 16 < Int(settings.active_sectors) ? "活动逻辑扇区 · 物理方向未核实" : "保留槽位 · 绑定未删除").font(.caption).foregroundStyle(.secondary)
+            }
             if store.browsingDeviceSnapshot { Text("层颜色：\(store.layer?.displayColor ?? "未知（原值保留）")").font(.caption).foregroundStyle(.secondary) }
+            if store.slot >= 13, !store.browsingDeviceSnapshot {
+                ControlSettingsEditor(store: store).id((store.layer?.id.text ?? "") + String(store.draft.revision))
+                Divider()
+            }
             Text("动作").foregroundStyle(.secondary)
             Button { choosing = true } label: { HStack { Text(label(store.slot)).lineLimit(3); Spacer(); Text(store.browsingDeviceSnapshot ? "只读" : "更换").foregroundStyle(.blue) }.padding(14).frame(maxWidth: .infinity).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 9)) }.buttonStyle(.plain).disabled(!store.canEditDraft || store.layer == nil)
             Button("已保存的普通宏（\(store.macros.count)）") { choosingMacro = true }.disabled(!store.canEditDraft)

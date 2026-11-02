@@ -31,8 +31,16 @@ fn document_response(
         .iter()
         .map(|(key, action)| (key, mi_model::action_library::capability(action)))
         .collect();
+    let settings: std::collections::BTreeMap<_, _> = draft
+        .document
+        .editable
+        .graph
+        .layers
+        .iter()
+        .filter_map(|(id, layer)| layer.control_settings.as_ref().map(|value| (id, value)))
+        .collect();
     serde_json::to_string(
-        &serde_json::json!({"draft":draft,"config":draft.config,"selection_hint":hint,"macro_library":draft.macros(),"action_capabilities":capabilities}),
+        &serde_json::json!({"draft":draft,"config":draft.config,"selection_hint":hint,"macro_library":draft.macros(),"control_settings":settings,"action_capabilities":capabilities}),
     )
     .map_err(failure)
 }
@@ -220,6 +228,19 @@ impl MicroInput {
         let mut store = self.draft.lock().unwrap();
         store
             .update(|d| d.assign(&profile, &layer, slot, action))
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn set_control_settings(
+        &self,
+        profile_id: String,
+        layer_id: String,
+        settings_json: String,
+    ) -> Result<String, BridgeError> {
+        let settings = serde_json::from_str(&settings_json).map_err(failure)?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.set_control_settings(&profile_id, &layer_id, settings))
             .map_err(failure)?;
         document_response(&store.draft, None)
     }

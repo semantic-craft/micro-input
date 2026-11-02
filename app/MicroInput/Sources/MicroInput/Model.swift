@@ -119,7 +119,7 @@ extension Snapshot {
 struct DocumentSelection: Decodable { let profile_id: String, layer_id: String? }
 struct MacroReference: Decodable { let profile_id: String, profile_name: String, layer_id: String, layer_name: String, logical_control: String }
 struct MacroSummary: Decodable, Identifiable { let id: String, action: CatalogAction, references: [MacroReference] }
-struct DocumentView: Decodable { let macro_library: [MacroSummary]?; let draft: DraftState, config: Snapshot, selection_hint: DocumentSelection?; let action_capabilities: [String:ActionCapability]? }
+struct DocumentView: Decodable { let control_settings: [String:LocalControlSettings]?; let macro_library: [MacroSummary]?; let draft: DraftState, config: Snapshot, selection_hint: DocumentSelection?; let action_capabilities: [String:ActionCapability]? }
 struct ActionCapability: Decodable {
     let target: String, prerequisites: [String], host_required: Bool, execution_available: Bool
     let unavailable_reason: String, source: String, result_semantics: String
@@ -132,3 +132,5 @@ struct ActionLibraryState: Decodable {
     var entries: [LibraryEntry] = [], categories: [String] = []
     var preferences_error: String?
 }
+
+struct LocalControlSettings: Codable { let joystick_mode: String; let active_sectors: UInt32 }
