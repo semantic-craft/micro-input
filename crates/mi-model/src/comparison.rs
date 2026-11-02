@@ -391,6 +391,17 @@ impl Comparison {
             };
             row.label = format!("{context} · {field}");
         }
+        for conflict in &mut conflicts {
+            for row in &rows {
+                if row.path.starts_with('/') && conflict.contains(&row.path) {
+                    *conflict = if *conflict == row.path {
+                        format!("{}：本地与设备变化不同", row.label)
+                    } else {
+                        conflict.replace(&row.path, &row.label)
+                    };
+                }
+            }
+        }
         Ok(Self {
             token: crate::document::new_id(),
             rows,
