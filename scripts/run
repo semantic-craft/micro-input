@@ -1,31 +1,57 @@
 #!/usr/bin/env python3
-"""Run this checkout's build. --verify bounds the QA instance lifetime to ten minutes."""
+"""Launch this checkout; --verify uses an isolated, uniquely identified ten-minute QA app."""
 import os
-import tempfile
 import pathlib
+import plistlib
+import shutil
 import subprocess
 import sys
+import tempfile
+import uuid
+
 root = pathlib.Path(__file__).resolve().parent.parent
-app = root / 'target/MicroInput.app/Contents/MacOS/MicroInput'
-if not app.exists():
+source_app = root / 'target/MicroInput.app'
+if not (source_app / 'Contents/MacOS/MicroInput').exists():
     raise SystemExit('Run scripts/build first')
 qa = tempfile.TemporaryDirectory(prefix='micro-input-qa-') if '--verify' in sys.argv else None
 run_env = os.environ.copy()
+app = source_app
 if qa:
-    run_env['MI_DOCUMENT_DIR'] = qa.name
-p = subprocess.Popen([str(app)], env=run_env)
+    directory = pathlib.Path(qa.name)
+    app = directory / 'Micro Input QA.app'
+    shutil.copytree(source_app, app)
+    info_path = app / 'Contents/Info.plist'
+    with info_path.open('rb') as handle:
+        info = plistlib.load(handle)
+    suffix = uuid.uuid4().hex
+    info['CFBundleIdentifier'] = f'com.semanticcraft.microinput.qa.{suffix}'
+    info['CFBundleName'] = f'Micro Input QA {suffix[:8]}'
+    info['CFBundleDisplayName'] = info['CFBundleName']
+    with info_path.open('wb') as handle:
+        plistlib.dump(info, handle)
+    subprocess.run(['codesign', '--force', '--sign', '-', '--timestamp=none', str(app)], check=True)
+    run_env['MI_DOCUMENT_DIR'] = str(directory / 'documents')
+    print(f'QA_APP_PATH={app}', flush=True)
+    print('QA identity is isolated; it does not validate production signing or permissions.', flush=True)
+p = None
 try:
-    p.wait(timeout=600 if '--verify' in sys.argv else None)
+    p = subprocess.Popen([str(app / 'Contents/MacOS/MicroInput')], env=run_env)
+    p.wait(timeout=600 if qa else None)
 except (subprocess.TimeoutExpired, KeyboardInterrupt):
-    p.terminate()
-    try:
-        p.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        p.kill()
-        p.wait()
-finally:
-    if p.poll() is None:
+    if p is not None:
         p.terminate()
-
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+finally:
+    if p is not None and p.poll() is None:
+        p.terminate()
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
     if qa:
         qa.cleanup()
