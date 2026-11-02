@@ -279,3 +279,50 @@ fn source_id_ambiguity_is_not_hidden_by_extra_reference_metadata() {
     local.editable.source_refs.insert(second, duplicate);
     assert!(Comparison::new(&local, &remote, baseline).is_err());
 }
+
+#[test]
+fn changed_transient_interface_requires_snapshot_bound_manual_identity_confirmation() {
+    let (mut local, mut remote, mut baseline) = fixture();
+    local.baseline.as_mut().unwrap()["device_identity"] =
+        json!({"confidence":"observed-interface","interface":"transient-old","session_id":1});
+    baseline["device_identity"] =
+        json!({"confidence":"observed-interface","interface":"transient-new","session_id":2});
+    remote.profiles[0].name = "After physical reconnect".into();
+    let mut compared = Comparison::new(&local, &remote, baseline.clone()).unwrap();
+    assert!(compared.identity_confirmation_required);
+    assert!(compared.resolve(&local, Choice::UseDevice).is_err());
+    let mut newer = baseline.clone();
+    newer["device_identity"]["session_id"] = json!(3);
+    assert!(compared.confirm_identity(&local, &newer).is_err());
+    compared.confirm_identity(&local, &baseline).unwrap();
+    assert!(!compared.can_merge());
+    assert!(compared.identity_user_confirmed);
+    let kept = compared
+        .resolve(&local, Choice::KeepLocal)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        kept.baseline.as_ref().unwrap()["device_identity"]["confidence"],
+        "observed-interface"
+    );
+    assert_eq!(
+        kept.baseline.as_ref().unwrap()["identity_resolution"]["comparison_token"],
+        compared.token
+    );
+    assert_eq!(
+        compared
+            .resolve(&local, Choice::UseDevice)
+            .unwrap()
+            .unwrap()
+            .view()
+            .unwrap()
+            .0
+            .profiles[0]
+            .name,
+        "After physical reconnect"
+    );
+    let (local, remote, mut baseline) = fixture();
+    baseline["device_identity"]["serial"] = json!("known-other");
+    let mut wrong = Comparison::new(&local, &remote, baseline.clone()).unwrap();
+    assert!(wrong.confirm_identity(&local, &baseline).is_err());
+}

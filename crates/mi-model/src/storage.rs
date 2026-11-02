@@ -46,6 +46,19 @@ impl DocumentStore {
         self.comparison = Some(comparison.clone());
         Ok(comparison)
     }
+    pub fn confirm_comparison_identity(
+        &mut self,
+        token: &str,
+        current: &serde_json::Value,
+    ) -> Result<crate::comparison::Comparison, String> {
+        let comparison = self
+            .comparison
+            .as_mut()
+            .filter(|c| c.token == token)
+            .ok_or("比较结果已过期；请重新比较")?;
+        comparison.confirm_identity(&self.draft.document, current)?;
+        Ok(comparison.clone())
+    }
     pub fn resolve_comparison(
         &mut self,
         token: &str,

@@ -15,6 +15,13 @@ impl MicroInput {
         Ok((snapshot.config, baseline))
     }
 }
+fn comparison_response(
+    comparison: &mi_model::comparison::Comparison,
+) -> Result<String, BridgeError> {
+    let mut value = serde_json::to_value(comparison).map_err(failure)?;
+    value["can_merge"] = serde_json::json!(comparison.can_merge());
+    serde_json::to_string(&value).map_err(failure)
+}
 #[uniffi::export(async_runtime = "tokio")]
 impl MicroInput {
     pub async fn compare_snapshot(&self) -> Result<String, BridgeError> {
@@ -26,9 +33,18 @@ impl MicroInput {
             .unwrap()
             .compare(&config, baseline)
             .map_err(failure)?;
-        let mut value = serde_json::to_value(&comparison).map_err(failure)?;
-        value["can_merge"] = serde_json::json!(comparison.can_merge());
-        serde_json::to_string(&value).map_err(failure)
+        comparison_response(&comparison)
+    }
+    pub async fn confirm_comparison_identity(&self, token: String) -> Result<String, BridgeError> {
+        let state = self.state.lock().unwrap();
+        let (_, baseline) = Self::comparison_snapshot(&state)?;
+        let comparison = self
+            .draft
+            .lock()
+            .unwrap()
+            .confirm_comparison_identity(&token, &baseline)
+            .map_err(failure)?;
+        comparison_response(&comparison)
     }
     pub async fn resolve_comparison(
         &self,

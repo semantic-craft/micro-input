@@ -35,6 +35,7 @@ protocol Backend {
     func moveLayer(profileId: String, layerId: String, toIndex: UInt32) async throws -> String
     func createDraftFromSnapshot() async throws -> String
     func compareSnapshot() async throws -> String
+    func confirmComparisonIdentity(token: String) async throws -> String
     func resolveComparison(token: String, choice: String) async throws -> String
 }
 extension Backend {
@@ -64,6 +65,7 @@ extension Backend {
     func deleteLayer(profileId: String, layerId: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func moveLayer(profileId: String, layerId: String, toIndex: UInt32) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func createDraftFromSnapshot() async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func confirmComparisonIdentity(token:String) async throws -> String {throw BridgeError.Failed(message:"设备核对不可用")}
     func compareSnapshot() async throws -> String { throw BridgeError.Failed(message:"重连比较不可用") }
     func resolveComparison(token: String, choice: String) async throws -> String { throw BridgeError.Failed(message:"重连比较不可用") }
     func subscribeDeviceEvents(cb: DeviceEvents) async {}
@@ -121,7 +123,7 @@ extension MicroInput: Backend {}
             try applyDocument(try await backend.openDocument(path: documentURL.path))
             catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await backend.actionCatalog().utf8))
             #if MI_SYNTHETIC_BACKEND
-            if ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == "reconnect", !preparedReconnectScenario {await prepareReconnectScenario()}
+            if ["reconnect", "reconnect-transient"].contains(ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""), !preparedReconnectScenario {await prepareReconnectScenario()}
             #endif
             await searchActions(query: "", category: "全部", favoritesOnly: false)
         } catch { status = readableError(error); documentReady = false }
@@ -171,6 +173,12 @@ extension MicroInput: Backend {}
         await refresh();selectDevice("synthetic-interface-0")
         await connect("synthetic-interface-0");await readIdentity();await readDeviceConfig();await createDraftFromSnapshot()
         await renameProfile(name:"Local comparison draft")
+        if ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == "reconnect-transient" {
+            await suspend()
+            do {try await core.setSyntheticDiscovery(state:.reconnectedDevice)} catch {status=readableError(error);return}
+            await refresh();selectDevice("synthetic-reconnected-interface-0")
+            await connect("synthetic-reconnected-interface-0");await readIdentity()
+        }
         do {try await core.setSyntheticConfig(scenario:4)} catch {status=readableError(error);return}
         await readDeviceConfig();await compareSnapshot()
     }
@@ -180,6 +188,11 @@ extension MicroInput: Backend {}
         guard !busy else {return};busy=true;defer {busy=false}
         do {comparison=try JSONDecoder().decode(ReconnectComparison.self,from:Data(try await backend.compareSnapshot().utf8))}
         catch {comparison=nil;status=readableError(error)}
+    }
+    func confirmComparisonIdentity() async {
+        guard !busy,let comparison else {return};busy=true;defer {busy=false}
+        do {self.comparison=try JSONDecoder().decode(ReconnectComparison.self,from:Data(try await backend.confirmComparisonIdentity(token:comparison.token).utf8))}
+        catch {status=readableError(error)}
     }
     func resolveComparison(_ choice:String) async {
         guard !busy,let comparison else {return};busy=true;defer {busy=false}

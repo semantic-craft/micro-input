@@ -31,6 +31,8 @@ pub struct Comparison {
     pub identity_matches: bool,
     pub revision: u64,
     pub identity_conflict: bool,
+    pub identity_confirmation_required: bool,
+    pub identity_user_confirmed: bool,
     #[serde(skip)]
     original: Value,
     #[serde(skip)]
@@ -306,10 +308,18 @@ impl Comparison {
                 || (old_identity["interface"].as_str().is_some()
                     && new_identity["interface"].as_str().is_some()
                     && old_identity["interface"] != new_identity["interface"]));
+        let serial_conflict = old_identity["serial"].as_str().is_some()
+            && new_identity["serial"].as_str().is_some()
+            && old_identity["serial"] != new_identity["serial"];
+        let identity_confirmation_required = identity_conflict && !serial_conflict;
         if !identity_matches {
             conflicts.push(
                 if identity_conflict {
-                    "设备身份不同；不能接受错误基线"
+                    if identity_confirmation_required {
+                        "设备接口已变化；请先核对并确认是同一设备"
+                    } else {
+                        "设备身份不同；不能接受错误基线"
+                    }
                 } else {
                     "跨重连设备身份未确认；只允许明确选择整份版本"
                 }
@@ -411,11 +421,38 @@ impl Comparison {
             conflicts,
             identity_matches,
             identity_conflict,
+            identity_confirmation_required,
+            identity_user_confirmed: false,
             revision: local.revision,
             original: json!(local),
             remote,
             merged,
         })
+    }
+    /// Explicit user resolution for a transient interface change, scoped to this exact snapshot.
+    /// This does not upgrade observed identity or make automatic merge eligible.
+    pub fn confirm_identity(
+        &mut self,
+        local: &LocalDocumentV2,
+        current: &Value,
+    ) -> Result<(), String> {
+        if !self.identity_confirmation_required {
+            return Err("此比较不能由人工确认绕过设备身份差异".into());
+        }
+        if json!(local) != self.original {
+            return Err("草稿已变化；请重新比较".into());
+        }
+        self.ensure_snapshot(current)?;
+        if self.identity_user_confirmed {
+            return Ok(());
+        }
+        self.identity_user_confirmed = true;
+        self.identity_conflict = false;
+        self.conflicts
+            .retain(|c| c != "设备接口已变化；请先核对并确认是同一设备");
+        self.conflicts
+            .push("设备身份已由用户核对；技术身份仍未确认，不自动合并".into());
+        Ok(())
     }
     pub fn ensure_snapshot(&self, current: &Value) -> Result<(), String> {
         let mut expected = self.remote.baseline.clone().ok_or("缺少设备基线")?;
@@ -454,6 +491,9 @@ impl Comparison {
         }
         let mut next = local.clone();
         next.baseline = self.remote.baseline.clone();
+        if self.identity_user_confirmed {
+            next.baseline.as_mut().unwrap()["identity_resolution"] = json!({"kind":"user-confirmed","comparison_token":self.token,"device_identity":self.remote.baseline.as_ref().unwrap()["device_identity"]});
+        }
         next.editable = match choice {
             Choice::Merge => self.merged.clone(),
             Choice::KeepLocal => local.editable.clone(),

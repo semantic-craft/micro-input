@@ -59,6 +59,7 @@ pub struct DeviceUsage {
 #[cfg(feature = "synthetic-backend")]
 #[derive(uniffi::Enum)]
 pub enum SyntheticDiscoveryState {
+    ReconnectedDevice,
     NoDevices,
     TwoDevices,
     Failure,
@@ -906,6 +907,7 @@ impl MicroInput {
     ) -> Result<(), BridgeError> {
         self.transport
             .set_synthetic_discovery(match state {
+                SyntheticDiscoveryState::ReconnectedDevice => 3,
                 SyntheticDiscoveryState::NoDevices => 0,
                 SyntheticDiscoveryState::TwoDevices => 1,
                 SyntheticDiscoveryState::Failure => 2,

@@ -7,7 +7,7 @@ import MicroInputCore
     private let statusMenu: StatusMenu
     init() {
         #if MI_SYNTHETIC_BACKEND
-        let core = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == "reconnect" ? MicroInput.syntheticDiscovery() : MicroInput()
+        let core = ["reconnect", "reconnect-transient"].contains(ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? "") ? MicroInput.syntheticDiscovery() : MicroInput()
         #else
         let core = MicroInput()
         #endif

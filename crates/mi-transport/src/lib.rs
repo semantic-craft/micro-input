@@ -499,9 +499,10 @@ impl Default for SyntheticDiscovery {
 #[cfg(feature = "synthetic-backend")]
 impl HidTransport for SyntheticDiscovery {
     fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
-        match *self.state.lock().unwrap() {
+        let state = *self.state.lock().unwrap();
+        match state {
             0 => Ok(vec![]),
-            1 => Ok((0..2)
+            1 | 3 => Ok((0..if state == 3 { 1 } else { 2 })
                 .map(|i| HidCandidate {
                     vid: 0x303a,
                     pid: if i == 0 { 0x8298 } else { 0x8297 },
@@ -516,7 +517,11 @@ impl HidTransport for SyntheticDiscovery {
                     ],
                     transport_hint: TransportHint::Usb,
                     product: "合成 Creator Micro".into(),
-                    path: format!("synthetic-interface-{i}"),
+                    path: if state == 3 {
+                        "synthetic-reconnected-interface-0".into()
+                    } else {
+                        format!("synthetic-interface-{i}")
+                    },
                 })
                 .collect()),
             _ => Err(TransportError::Unavailable("合成枚举失败".into())),
@@ -526,7 +531,10 @@ impl HidTransport for SyntheticDiscovery {
         self.events.subscribe()
     }
     fn open(&self, id: &str) -> Result<Arc<dyn HidLink>, TransportError> {
-        if *self.state.lock().unwrap() != 1 || id != "synthetic-interface-0" {
+        let state = *self.state.lock().unwrap();
+        if !((state == 1 && id == "synthetic-interface-0")
+            || (state == 3 && id == "synthetic-reconnected-interface-0"))
+        {
             return Err(TransportError::Unsupported);
         }
         let (link, mut incoming) = MockLink::new();
