@@ -1,8 +1,8 @@
 # Micro Input
 
-- 开工读 README.md、docs/development.md 和 lessons.md；当前是开发前项目，尚无可运行实现。
+- 开工读 README.md、docs/development.md 和 lessons.md；主分支尚无应用实现，旧PR候选不算合并交付。
 - 技术方向固定为 Rust 核心 + SwiftUI。初始化工程时补真实构建/运行说明和 scripts/check；不把文档校验当成应用验收。
-- 兼容功能或协议工作查 README 中对应调研原件，分别标明观察、官方说明、社区线索和未知；社区旧版参数不能充当当前固件规格。
+- 实现或验收依次读 docs/spec/SPEC.md、BUILD_PROMPT.md、EVIDENCE.md；未知项归 UNKNOWNS.md。只依据自撰行为规格与合成夹具，不读取厂商代码/资源或用户缓存补协议；社区事实与本机验收分开。
 - 真实设备操作保留已有映射。默认先做只读或脱敏夹具验证；涉及写入时依据当轮用户授权并验证恢复。Profile 选择在原 Input 中可能自动同步设备。
 - 当前原始材料唯一位置是 .scratch/input-study，受 Git 忽略；正式实现结论进入源码或 docs，不提交用户宏载荷、应用数据库或原始日志。
 - 后续在本项目维护事实；原 agent-tasks 入口只作跳转，不双写项目状态。

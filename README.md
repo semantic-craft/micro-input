@@ -1,31 +1,26 @@
 # Micro Input
 
-面向 Work Louder Creator Micro 2 的独立 macOS 配置器与宿主服务。技术方向：**Rust 核心 + SwiftUI 界面**。项目名为工作名。
+轻量、原生的 macOS Creator Micro 管理软件，采用 **Rust核心 + SwiftUI**，以 coding 工作为优先场景。产品中心是实体设备的配置与操作；Herdr、DeepSeek Harness、ZCode、QwenWork等是动作适配对象。
 
-## 当前状态
+## 当前状态与下一步
 
-2026-11-02：已建立正式项目及公开 GitHub 仓库，前期调研原件仅保存在本机；尚未初始化 Cargo/Swift 工程、实现设备通信或构建可运行应用。既有 input.app 和设备配置保持原状。
+2026-11-02：完整产品基线已经用户确认。本轮只统一规格、证据和分阶段验收，不接自动化、不操作或写入设备。
 
-从 [开发起点](docs/development.md) 开始；操作设备或处理兼容行为前阅读 [项目教训](lessons.md)。Agent 入口见 [AGENTS.md](AGENTS.md)。
+当前主分支为文档与调查结论。旧规格 [PR #7](https://github.com/semantic-craft/micro-input/pull/7) 和演示实现 [PR #8](https://github.com/semantic-craft/micro-input/pull/8) 均已关闭且未合并；后者可作选择性接续的候选，不是主分支已交付应用。当前主分支没有可运行构建命令；未来阶段1建立 `scripts/check` 与真实启动入口。
 
-工单与规格统一放在 [GitHub Issues](https://github.com/semantic-craft/micro-input/issues)。
+下一步按阶段1补齐真实只读查看器；可在协议补证期间独立推进阶段2离线草稿，但不提前解锁写入。既有 [MVP #1](https://github.com/semantic-craft/micro-input/issues/1) 及 #2–#6 仍属只读阶段，完成状态以GitHub为准。
 
-## 调研入口
+## 规格入口
 
-可直接用于只读客户端实现的结论见 [USB 发现、身份与配置读取协议](docs/protocol-readonly.md)。依据 Input 1.1.0 静态分析及本机 IOKit 枚举；尚未完成独立 RPC 收发验收。
+1. [SPEC：完整产品范围、用户故事与规则](docs/spec/SPEC.md)
+2. [BUILD_PROMPT：阶段0–6构建与验收](docs/spec/BUILD_PROMPT.md)
+3. [EVIDENCE：统一证据索引与冲突裁决](docs/spec/EVIDENCE.md)
+4. [UNKNOWNS：未知项、占位与解锁条件](docs/spec/UNKNOWNS.md)
 
-以下为本机原始调查材料，保存在 Git 忽略的 `.scratch/input-study/`，不随源码提交：
+术语见 [GLOSSARY](GLOSSARY.md)，工程接续见 [development](docs/development.md)，约束见 [AGENTS](AGENTS.md)，经验见 [lessons](lessons.md)。
 
-- [官方来源、能力矩阵与公开协议线索](.scratch/input-study/out/research.md)
-- [已连接 UI 清单](.scratch/input-study/out/connected-ui-inventory.md)
-- [灯光、摇杆、层、AppSense 与参数实验](.scratch/input-study/out/layer-lighting-joystick-followup.md)
-- [观察规格](.scratch/input-study/out/spec.json)和[证据记录](.scratch/input-study/out/evidence.jsonl)
-- [原任务历史](.scratch/input-study/task-history.md)
+## 已有发现
 
-旧入口 `~/agent-tasks/worklouder-input-study` 仅保留晋升记录和兼容链接。后续项目事实、代码和进度只在本项目维护。
+[只读协议说明](docs/protocol-readonly.md) 保留已整理的静态接口行为、独立查询记录和社区版本差异；[合成向量](docs/protocol-vectors.json)用于离线验证；[参考仓库](docs/reference-repositories.md)保存来源与许可边界。它们经EVIDENCE关联进入产品规格，不直接等于当前应用或固件已验收。
 
-## 下一步
-
-首版范围已确定为 USB 只读配置查看器：发现一台 Creator Micro 2 → 读取身份与配置 → 浏览 Profile、Layer、按键及旋钮映射。范围、验收和依赖以 [MVP 总工单 #1](https://github.com/semantic-craft/micro-input/issues/1) 为准。下一步执行 [#2 合成数据查看器](https://github.com/semantic-craft/micro-input/issues/2)，先交付真实 Rust / SwiftUI 桥接的可启动应用，再逐步接入设备。
-
-目前没有构建或启动命令；初始化实现时增加项目验证入口 `scripts/check`。本次只验证文档导航和调研迁移完整性，未做应用构建或真实设备协议验收。
+独立探针曾读回固件0.6.3；这不证明真实配置读取、写入或恢复完成。历史原始材料留在本地忽略目录，不交给实现者作为厂商代码输入，不提交用户配置或回包。实现仅依据自撰行为规格与合成夹具。

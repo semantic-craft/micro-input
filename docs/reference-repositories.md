@@ -1,6 +1,6 @@
 # Creator Micro 参考仓库
 
-本页用于设计时选择原始来源；协议事实归 [protocol-readonly.md](protocol-readonly.md)，实施顺序归 [development.md](development.md)。公开仓库的说明、源码和测试不等于本机验收。Creator Micro 2、Codex Micro、旧款 Figma/VIA/QMK 设备与兼容仿真硬件分别核对 VID/PID、固件、传输及许可，不共用未经验证的规格。
+本页保留来源索引；汇总进入实现前按 [EVIDENCE](spec/EVIDENCE.md) 和 [UNKNOWNS](spec/UNKNOWNS.md) 判断级别与门槛。本轮不读取第三方源码，不移植实现。协议事实归 [protocol-readonly.md](protocol-readonly.md)，实施顺序归 [development.md](development.md)。公开仓库的说明、源码和测试不等于本机验收。Creator Micro 2、Codex Micro、旧款 Figma/VIA/QMK 设备与兼容仿真硬件分别核对 VID/PID、固件、传输及许可，不共用未经验证的规格。
 
 ## 优先参考
 
