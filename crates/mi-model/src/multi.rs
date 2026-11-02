@@ -56,7 +56,7 @@ pub fn is_local_multi(a: &Action) -> bool {
 }
 pub fn local_multi(a: &Action) -> Option<LocalMulti> {
     match serde_json::from_value(a.payload.clone()).ok()? {
-        ActionKind::LocalMulti { multi } => Some(multi),
+        ActionKind::LocalMulti { multi } if multi.format_version == 1 => Some(multi),
         _ => None,
     }
 }
@@ -149,6 +149,23 @@ impl Draft {
         layer: &Value,
         slot: u32,
     ) -> Result<String, String> {
+        self.save_multi_target(id, action, additions, Some((profile, layer, slot)))
+    }
+    pub fn save_multi(
+        &mut self,
+        id: &str,
+        action: Action,
+        additions: BTreeMap<String, Action>,
+    ) -> Result<String, String> {
+        self.save_multi_target(Some(id), action, additions, None)
+    }
+    fn save_multi_target(
+        &mut self,
+        id: Option<&str>,
+        action: Action,
+        additions: BTreeMap<String, Action>,
+        target: Option<(&Value, &Value, u32)>,
+    ) -> Result<String, String> {
         if !is_local_multi(&action) {
             return Err("只能保存本地 Multi".into());
         }
@@ -178,7 +195,9 @@ impl Draft {
                 d.editable.graph.actions.insert(aid, a);
             }
             let id = id.map(str::to_owned).unwrap_or_else(new_id);
-            binding(d, profile, layer, slot)?.action_id = Some(id.clone());
+            if let Some((profile, layer, slot)) = target {
+                binding(d, profile, layer, slot)?.action_id = Some(id.clone());
+            }
             d.editable.graph.actions.insert(id.clone(), action);
             Ok(id)
         })

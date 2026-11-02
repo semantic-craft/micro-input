@@ -158,3 +158,54 @@ fn deleting_a_layer_keeps_shared_multi_and_its_other_action_children() {
     assert!(d.document.editable.graph.actions.contains_key(&id));
     assert!(d.document.editable.graph.actions.contains_key(&aid));
 }
+
+#[test]
+fn editing_a_shared_multi_from_library_does_not_rebind_the_selected_control() {
+    let mut d = Draft::default();
+    let p = d.config.profiles[0].id.clone();
+    let l = d.config.profiles[0].layers[0].id.clone();
+    let mid = d
+        .save_macro(
+            None,
+            mi_model::draft::actions()
+                .into_iter()
+                .find(|a| a.id == "local-macro")
+                .unwrap(),
+        )
+        .unwrap();
+    let id = d
+        .save_multi_for_binding(None, multi(&mid), BTreeMap::new(), &p, &l, 0)
+        .unwrap();
+    let mut changed = multi(&mid);
+    changed.name = "Shared edit".into();
+    d.save_multi(&id, changed, BTreeMap::new()).unwrap();
+    assert_eq!(d.multis()[0].references.len(), 1);
+    assert_eq!(d.multis()[0].action.name, "Shared edit");
+}
+
+#[test]
+fn future_multi_format_and_unknown_original_bindings_stay_read_only_and_preserved() {
+    let mut d = Draft::default();
+    let p = d.config.profiles[0].id.clone();
+    let l = d.config.profiles[0].layers[0].id.clone();
+    let mid = d
+        .save_macro(
+            None,
+            mi_model::draft::actions()
+                .into_iter()
+                .find(|a| a.id == "local-macro")
+                .unwrap(),
+        )
+        .unwrap();
+    let id = d
+        .save_multi_for_binding(None, multi(&mid), BTreeMap::new(), &p, &l, 0)
+        .unwrap();
+    let original = d.document.origin.clone();
+    let mut raw = serde_json::to_value(&d.document).unwrap();
+    raw["graph"]["actions"][&id]["payload"]["multi"]["format_version"] = json!(2);
+    let mut re = Draft::from_bytes(&serde_json::to_vec(&raw).unwrap()).unwrap();
+    assert!(re.read_only);
+    assert_eq!(re.document.origin, original);
+    assert!(re.bind_multi(&p, &l, 1, Some(&id)).is_err());
+    assert_eq!(serde_json::to_value(&re.document).unwrap(), raw);
+}

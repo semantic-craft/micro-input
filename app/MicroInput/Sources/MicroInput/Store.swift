@@ -26,6 +26,9 @@ protocol Backend {
     func saveMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String
     func bindMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32) async throws -> String
     func deleteMacroAction(macroId: String) async throws -> String
+    func saveMultiAction(multiId: String?, profileId: String, layerId: String, slot: UInt32, actionJson: String, additionsJson: String) async throws -> String
+    func bindMultiAction(multiId: String?, profileId: String, layerId: String, slot: UInt32) async throws -> String
+    func deleteMultiAction(multiId: String) async throws -> String
     func undoDraft(redo: Bool) async throws -> String
     func documentView() async throws -> String
     func createProfile(name: String) async throws -> String
@@ -59,6 +62,9 @@ extension Backend {
     func saveMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String { throw BridgeError.Failed(message: "本地宏不可用") }
     func bindMacroAction(macroId: String?, profileId: String, layerId: String, slot: UInt32) async throws -> String { throw BridgeError.Failed(message: "本地宏不可用") }
     func deleteMacroAction(macroId: String) async throws -> String { throw BridgeError.Failed(message: "本地宏不可用") }
+    func saveMultiAction(multiId: String?, profileId: String, layerId: String, slot: UInt32, actionJson: String, additionsJson: String) async throws -> String { throw BridgeError.Failed(message: "本地 Multi 不可用") }
+    func bindMultiAction(multiId: String?, profileId: String, layerId: String, slot: UInt32) async throws -> String { throw BridgeError.Failed(message: "本地 Multi 不可用") }
+    func deleteMultiAction(multiId: String) async throws -> String { throw BridgeError.Failed(message: "本地 Multi 不可用") }
     func undoDraft(redo: Bool) async throws -> String { throw BridgeError.Failed(message: "草稿撤销不可用") }
 
     func documentView() async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
@@ -81,6 +87,8 @@ extension MicroInput: Backend {}
     private let backend: Backend
     @Published var draft = DraftState()
     @Published var macros: [MacroSummary] = []
+    @Published var multis: [MacroSummary] = []
+    @Published var graphActions: [String:CatalogAction] = [:]
     @Published var catalog: [CatalogAction] = []
     @Published var library = ActionLibraryState()
     @Published var actionCapabilities: [String:ActionCapability] = [:]
@@ -143,6 +151,7 @@ extension MicroInput: Backend {}
         let oldProfile = fresh ? nil : profile?.id.text, oldLayer = fresh ? nil : layer?.id.text
         let pi = fresh ? 0 : profileIndex, li = fresh ? 0 : layerIndex
         macros = result.macro_library ?? []
+        multis = result.multi_library ?? []; graphActions = result.graph_actions ?? [:]
         draft = result.draft; snapshot = result.config; localSnapshot = result.config
         actionCapabilities = result.action_capabilities ?? [:]
         controlSettings = result.control_settings ?? [:]; controlSettingsError = nil
@@ -197,6 +206,7 @@ extension MicroInput: Backend {}
         await saveAction(action)
     }
     @discardableResult func saveAction(_ action: CatalogAction) async -> Bool {
+        if action.payload["type"]?.text == "local_multi" { return await saveMulti(action) }
         if action.payload["type"]?.text == "local_macro" { return await saveMacro(action) }
         guard canEditDraft, !busy, let profile, let layer else { return false }
         busy = true; defer { busy = false }
@@ -249,6 +259,36 @@ extension MicroInput: Backend {}
         } catch { status = readableError(error) }
     }
     func deleteMacro(_ id: String) async { await editDocument { try await backend.deleteMacroAction(macroId: id) } }
+    var selectedMulti: MacroSummary? {
+        multis.first { $0.references.contains { $0.parent_action_name == nil && $0.profile_id == profile?.id.text && $0.layer_id == layer?.id.text && $0.logical_control == "logical-\(slot)" } }
+    }
+    @discardableResult func saveMulti(_ action: CatalogAction, id: String? = nil, additions: [String:CatalogAction] = [:]) async -> Bool {
+        guard canEditDraft, !busy, let profile, let layer else { return false }
+        busy = true; defer { busy = false }
+        do {
+            let encoder = JSONEncoder()
+            func json<T: Encodable>(_ value: T) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
+            try applyDocument(try await backend.saveMultiAction(multiId: id, profileId: json(profile.id), layerId: json(layer.id), slot: UInt32(slot), actionJson: json(action), additionsJson: json(additions)))
+            return true
+        } catch { status = readableError(error); return false }
+    }
+    func bindMulti(_ id: String?) async {
+        guard let profile, let layer else { return }
+        do {
+            let encoder = JSONEncoder()
+            let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
+            let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
+            await editDocument { try await backend.bindMultiAction(multiId: id, profileId: p, layerId: l, slot: UInt32(slot)) }
+        } catch { status = readableError(error) }
+    }
+    func deleteMulti(_ id: String) async { await editDocument { try await backend.deleteMultiAction(multiId: id) } }
+    func parameterSummary(_ action: CatalogAction) -> String {
+        guard let multi = MultiEditorDraft(action: action) else { return action.parameterSummary }
+        return MultiBranch.allCases.map { branch in
+            let id = multi.branches[branch]?.actionID
+            return "\(branch.label)：\(id.flatMap { graphActions[$0]?.name } ?? (id == nil ? "未分配" : "引用不可用"))"
+        }.joined(separator: "\n") + "\n本地判定时长：\(multi.term) ms（固件范围未知）"
+    }
     func undoDraft(redo: Bool = false) async {
         guard canEditDraft, !busy else { return }; busy = true; defer { busy = false }
         do { try applyDocument(try await backend.undoDraft(redo: redo)) }

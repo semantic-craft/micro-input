@@ -40,7 +40,7 @@ fn document_response(
         .filter_map(|(id, layer)| layer.control_settings.as_ref().map(|value| (id, value)))
         .collect();
     serde_json::to_string(
-        &serde_json::json!({"draft":draft,"config":draft.config,"selection_hint":hint,"macro_library":draft.macros(),"control_settings":settings,"action_capabilities":capabilities}),
+        &serde_json::json!({"draft":draft,"config":draft.config,"selection_hint":hint,"macro_library":draft.macros(),"multi_library":draft.multis(),"graph_actions":draft.document.editable.graph.actions,"control_settings":settings,"action_capabilities":capabilities}),
     )
     .map_err(failure)
 }
@@ -303,6 +303,54 @@ impl MicroInput {
         let mut store = self.draft.lock().unwrap();
         store
             .update(|d| d.delete_macro(&macro_id))
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn save_multi_action(
+        &self,
+        multi_id: Option<String>,
+        profile_id: String,
+        layer_id: String,
+        slot: u32,
+        action_json: String,
+        additions_json: String,
+    ) -> Result<String, BridgeError> {
+        let profile = serde_json::from_str(&profile_id).map_err(failure)?;
+        let layer = serde_json::from_str(&layer_id).map_err(failure)?;
+        let action = serde_json::from_str(&action_json).map_err(failure)?;
+        let additions = serde_json::from_str(&additions_json).map_err(failure)?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| {
+                if let Some(id) = multi_id {
+                    d.save_multi(&id, action, additions).map(|_| ())
+                } else {
+                    d.save_multi_for_binding(None, action, additions, &profile, &layer, slot)
+                        .map(|_| ())
+                }
+            })
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn bind_multi_action(
+        &self,
+        multi_id: Option<String>,
+        profile_id: String,
+        layer_id: String,
+        slot: u32,
+    ) -> Result<String, BridgeError> {
+        let profile = serde_json::from_str(&profile_id).map_err(failure)?;
+        let layer = serde_json::from_str(&layer_id).map_err(failure)?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.bind_multi(&profile, &layer, slot, multi_id.as_deref()))
+            .map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn delete_multi_action(&self, multi_id: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.delete_multi(&multi_id))
             .map_err(failure)?;
         document_response(&store.draft, None)
     }

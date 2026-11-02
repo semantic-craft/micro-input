@@ -102,6 +102,8 @@ v1→v2：先完整解析 v1 与 edits，保留其有效草稿语义和原始源
 
 T08 本地宏使用现有 graph.actions 的共享 UUID，不新增持久化文件：`ActionKind::LocalMacro` 的 payload 包含 `macro_sequence`（`format_version=1`、有序 `events`）。事件仅为本地 `press { key }`、`release { key }` 和 `delay { ms: UInt32 }`；key 是用户本地标签，毫秒类型不是固件范围。`mi-model/src/macro_sequence.rs` 校验顺序与配对，`macro_library.rs` 提供共享引用、原子保存并绑定、解绑和引用保护删除；`save_macro_action` / `bind_macro_action` / `delete_macro_action` 通过现有 DocumentStore 保存。未知原宏继续只读保留 raw；显式本地意图不转换设备格式。编辑共享宏前显示全部受影响控件，未绑定宏保留在图中，结构删除不会暗中删除宏。
 
+T09 的 Multi 继续使用 graph.actions 与同一 DocumentStore：`ActionKind::LocalMulti` 包含版本为 1 的本地 `multi`，`term_ms` 为正 UInt32 毫秒，`tap/double_tap/hold/tap_hold` 各为 null 或显式 `macro/action` 类型及 `action_id` UUID。该本地时序校验、初始值、可空分支均不是当前固件范围、容量或载荷 schema 的承诺。`mi-model/src/multi.rs` 拒绝悬空、类型不符和递归引用；原宏库统计并保护 Multi 父动作/分支引用，结构删除保留共享 Multi 及其分支动作。新建普通分支动作与四分支在一次事务中保存，已有宏复用同一宏库；编辑已有 Multi 仅更新共享对象，分配/解绑另有显式入口。专用 SwiftUI MultiEditor 显示动作名称、分支关系及影响范围；未知/未来格式只读保留原值，不接设备或宿主执行。
+
 测试：v1 fixture 迁移语义等价、原件备份存在、失败保全、高版本拒写、结构删除引用拒绝、整次撤销/重做、导入重映射、损坏/锁/冲突失败不变内存。
 
 ## D07 · 比较结果和按钮（F07；#21/#22）

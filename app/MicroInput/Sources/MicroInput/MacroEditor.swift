@@ -75,7 +75,7 @@ struct MacroEditor: View {
             Text("自有本地格式 · 按键名称仅为本地标签 · 不执行输入、不写设备").font(.caption).foregroundStyle(.secondary)
             if let id = macroID, let macro = store.macros.first(where: { $0.id == id }) {
                 Text("保存将更新以下 \(macro.references.count) 个共享引用：").font(.caption).bold()
-                Text(macro.references.map { "\($0.profile_name) / \($0.layer_name) / \($0.logical_control)" }.joined(separator: "、")).font(.caption).textSelection(.enabled)
+                Text(macro.references.map { $0.displayName }.joined(separator: "、")).font(.caption).textSelection(.enabled)
             }
             TextField("宏名称", text: $name).accessibilityLabel("宏名称")
             ScrollView {
@@ -138,7 +138,7 @@ struct MacroLibraryView: View {
                     ForEach(store.macros) { macro in
                         VStack(alignment: .leading, spacing: 6) {
                             HStack { Text(macro.action.name).bold(); Spacer(); Text("\(macro.references.count) 个引用").foregroundStyle(.secondary) }
-                            Text(macro.references.isEmpty ? "未绑定，仍保留在本地草稿" : macro.references.map { "\($0.profile_name) / \($0.layer_name) / \($0.logical_control)" }.joined(separator: "、")).font(.caption)
+                            Text(macro.references.isEmpty ? "未绑定，仍保留在本地草稿" : macro.references.map { $0.displayName }.joined(separator: "、")).font(.caption)
                             HStack {
                                 Button("引用到当前控件") { Task { await store.bindMacro(macro.id); dismiss() } }.disabled(store.busy || !store.canEditDraft || store.layer == nil)
                                 Button("删除宏", role: .destructive) { Task { await store.deleteMacro(macro.id) } }.disabled(store.busy || !store.canEditDraft || !macro.references.isEmpty)
