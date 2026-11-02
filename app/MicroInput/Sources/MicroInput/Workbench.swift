@@ -15,6 +15,7 @@ struct Workbench: View {
     var body: some View {
         VStack(spacing: 0) {
             discoveryPanel
+            InputMonitorPanel(store: store)
             Divider()
             HStack(spacing: 0) {
                 VStack(alignment: .leading, spacing: 24) {
