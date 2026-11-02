@@ -33,6 +33,8 @@ impl DocumentStore {
             let name = entry.file_name().to_string_lossy().into_owned();
             if entry.file_type().map_err(|e| e.to_string())?.is_file()
                 && (name == "workbench.json"
+                    || name == "workbench.active.json"
+                    || name == "workbench.active.pending"
                     || name == "workbench.pending"
                     || name.ends_with(".backup")
                     || (name.starts_with("draft-")

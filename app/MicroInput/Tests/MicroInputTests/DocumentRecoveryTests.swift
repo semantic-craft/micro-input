@@ -27,4 +27,24 @@ final class DocumentRecoveryTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf:url),Data("{broken".utf8)); XCTAssertEqual(try Data(contentsOf:source),legacy)
         XCTAssertNil(store.connectedID); XCTAssertTrue(store.devices.isEmpty)
     }
+    @MainActor func testFutureVersionCopyAndChangedPreviewAreProtectedThroughRealBridge() async throws {
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:dir) }
+        try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
+        let url=dir.appendingPathComponent("workbench.json")
+        let bytes=Data("{\"schema_version\":999,\"future\":true}".utf8)
+        try bytes.write(to:url)
+        let store=Store(backend:MicroInputCore.MicroInput(),documentURL:url); await store.loadWorkbench()
+        let preview=try await store.inspectRecovery(path:url.path)
+        XCTAssertFalse(preview.can_restore); XCTAssertEqual(preview.schema_version,999)
+        let restored=await store.recoverDocument(token:preview.token); XCTAssertFalse(restored)
+        let copy=dir.appendingPathComponent("original.copy")
+        try await store.copyRecoveryOriginal(token:preview.token,destination:copy.path)
+        XCTAssertEqual(try Data(contentsOf:copy),bytes)
+        try Data("changed".utf8).write(to:url)
+        do { try await store.copyRecoveryOriginal(token:preview.token,destination:dir.appendingPathComponent("stale.copy").path); XCTFail("Changed preview must be rejected") } catch {}
+        XCTAssertFalse(store.documentReady)
+        XCTAssertFalse(FileManager.default.fileExists(atPath:dir.appendingPathComponent("workbench.active.json").path))
+    }
+
 }
