@@ -298,3 +298,9 @@ pub mod storage;
 
 #[cfg(test)]
 mod document_tests;
+
+#[cfg(test)]
+mod device_tests;
+
+mod device;
+pub use device::parse_device_files;
