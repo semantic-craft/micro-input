@@ -9,7 +9,7 @@
 ```sh
 scripts/check          # Rust/Swift测试（含真实UniFFI合成发现）、桥接生成、开发构建和协议边界检查
 scripts/run            # 启动当前checkout的target/MicroInput.app
-scripts/run --verify   # 验收实例10分钟自动退出
+scripts/run --verify   # 独立QA标识/文档，10分钟自动退出并回收副本
 ```
 
 需要macOS14+、Rust stable、Swift工具链。构建不加载凭据。仅本地ad-hoc开发签名，未正式发布。
@@ -39,3 +39,5 @@ T05已补取消、会话终止通知及退出时等待资源释放；当前设�
 PR #12/#13 已交付原生离线工作台、结构化动作和本地持久化。当前已有设备发现、身份查询与[#5 配置读取](https://github.com/semantic-craft/micro-input/issues/5)实现；配置原生浏览验收见[E-079](docs/spec/EVIDENCE.md)，[#6 生命周期](https://github.com/semantic-craft/micro-input/issues/6)及未核实物理映射仍待验证。范围继续限定只读，不从核心读回推定全部S1完成。
 
 完整目标与 35 张工单入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)，技术契约见 [实施设计](docs/implementation-plan.md)，阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)。规划已批准不等于未来阶段获准执行；当前不接自动化、不写设备、不执行宿主动作。未完成技术细化的工单使用 needs-info，并在工单内列明缺项。
+
+原生验收使用 `scripts/run --verify` 输出的 `QA_APP_PATH` 精确选择应用；QA 副本有唯一 bundle ID，避免多个 worktree 的同名应用互相抢占。退出后通过进程状态确认，不再调用可能自动重启应用的 UI 入口。QA 身份不能替代生产签名与权限验收。
