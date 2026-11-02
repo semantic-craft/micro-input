@@ -16,6 +16,7 @@ pub struct DocumentStore {
     blocked: bool,
     selection: Option<(PathBuf, Option<Vec<u8>>)>,
     preferences: HostPreferencesStore,
+    recovery_preview: Option<recovery::InspectedRecovery>,
 }
 fn read(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
     let f = match fs::File::open(path) {
@@ -95,6 +96,10 @@ impl DocumentStore {
         let preferences_path = path.with_extension("preferences.json");
         let selection_path = path.with_extension("active.json");
         let selection_bytes = read(&selection_path)?;
+        self.path = Some(path.clone());
+        self.selection = Some((selection_path.clone(), selection_bytes.clone()));
+        self.recovery_preview = None;
+        self.preferences.open(preferences_path.clone());
         let path = if let Some(bytes) = &selection_bytes {
             let name: String =
                 serde_json::from_slice(bytes).map_err(|_| "所选文档记录损坏；原文件保留")?;
@@ -113,6 +118,7 @@ impl DocumentStore {
         } else {
             path
         };
+        self.path = Some(path.clone());
         let bytes = read(&path)?;
         let draft = match &bytes {
             Some(b) => Draft::from_bytes(b)?,
@@ -163,7 +169,10 @@ impl DocumentStore {
         self.select_independent(next)
     }
     fn select_independent(&mut self, next: Draft) -> Result<(), String> {
-        if self.blocked {
+        self.select_copy(next, false)
+    }
+    fn select_copy(&mut self, next: Draft, recovery: bool) -> Result<(), String> {
+        if self.blocked && !recovery {
             return Err("当前文档未载入，不能切换草稿".into());
         }
         let (selection_path, expected) = self.selection.as_ref().ok_or("请先打开工作台")?;
@@ -176,6 +185,35 @@ impl DocumentStore {
         let _guard = Lock::acquire(selection_path.with_extension("lock"))?;
         if &read(selection_path)? != expected {
             return Err("所选文档已被其他实例修改；请重开应用".into());
+        }
+        if recovery {
+            if let Some(original) = expected {
+                use sha2::{Digest, Sha256};
+                let hash = format!("{:x}", Sha256::digest(original));
+                let backup = selection_path.with_file_name(format!(
+                    "{}.recovery.{hash}.backup",
+                    selection_path
+                        .file_name()
+                        .ok_or("无效文件名")?
+                        .to_string_lossy()
+                ));
+                match OpenOptions::new()
+                    .write(true)
+                    .mode(0o600)
+                    .create_new(true)
+                    .open(&backup)
+                {
+                    Ok(mut file) => file
+                        .write_all(original)
+                        .and_then(|_| file.sync_all())
+                        .map_err(|e| e.to_string())?,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(e.to_string()),
+                }
+                if read(&backup)?.as_ref() != Some(original) {
+                    return Err("所选文档恢复副本不一致；未切换草稿".into());
+                }
+            }
         }
         let name = format!("draft-{}.json", next.document_id);
         let path = parent.join(&name);
@@ -214,6 +252,8 @@ impl DocumentStore {
         if let Err(e) = result {
             return Err(format!("未切换草稿；原草稿保持，新文档文件保留供检查：{e}"));
         }
+        self.blocked = false;
+        self.comparison = None;
         self.draft = next;
         self.path = Some(path);
         self.expected = Some(bytes);
@@ -441,3 +481,7 @@ impl Drop for Lock {
         let _ = fs::remove_file(&self.0);
     }
 }
+
+#[path = "recovery.rs"]
+mod recovery;
+pub use recovery::RecoveryPreview;

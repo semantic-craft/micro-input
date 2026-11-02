@@ -14,6 +14,11 @@ protocol Backend {
     func subscribeDeviceEvents(cb: DeviceEvents) async
     func subscribeInput() async throws -> InputSubscription
     func openDocument(path: String) async throws -> String
+    func recoveryFiles() async throws -> [String]
+    func inspectRecovery(path: String) async throws -> String
+    func recoverDocument(token: String) async throws -> String
+    func saveDocumentAs() async throws -> String
+    func copyRecoveryOriginal(token: String, destination: String) async throws
     func actionCatalog() async throws -> String
     func actionLibrary(query: String, category: String, favoritesOnly: Bool) async throws -> String
     func setActionFavorite(actionId: String, favorite: Bool) async throws
@@ -47,6 +52,11 @@ protocol Backend {
     func resolveComparison(token: String, choice: String) async throws -> String
 }
 extension Backend {
+    func recoveryFiles() async throws -> [String] { throw BridgeError.Failed(message: "文档恢复不可用") }
+    func inspectRecovery(path: String) async throws -> String { throw BridgeError.Failed(message: "文档恢复不可用") }
+    func recoverDocument(token: String) async throws -> String { throw BridgeError.Failed(message: "文档恢复不可用") }
+    func saveDocumentAs() async throws -> String { throw BridgeError.Failed(message: "文档另存不可用") }
+    func copyRecoveryOriginal(token: String, destination: String) async throws { throw BridgeError.Failed(message: "原件副本保存不可用") }
     func exportPreset(profileId: String?, layerId: String?) async throws -> String { throw BridgeError.Failed(message: "预设导出不可用") }
     func inspectPreset(text: String) throws -> String { throw BridgeError.Failed(message: "预设检查不可用") }
     func starterPreset() throws -> String { throw BridgeError.Failed(message: "原创预设不可用") }
@@ -200,6 +210,34 @@ extension MicroInput: Backend {}
             status = "已创建独立本地草稿 · 原文档保留 · 未激活设备或执行动作"
             return true
         } catch { status = readableError(error); return false }
+    }
+    func recoveryFiles() async throws -> [String] { try await backend.recoveryFiles() }
+    func inspectRecovery(path: String) async throws -> RecoveryPreview {
+        try JSONDecoder().decode(RecoveryPreview.self, from: Data(try await backend.inspectRecovery(path: path).utf8))
+    }
+    @discardableResult func recoverDocument(token: String) async -> Bool {
+        guard !busy, !browsingDeviceSnapshot else { return false }
+        busy = true; defer { busy = false }
+        do {
+            try applyDocument(try await backend.recoverDocument(token: token), fresh: true)
+            catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await backend.actionCatalog().utf8))
+            await searchActions(query: "", category: "全部", favoritesOnly: false)
+            status = "已恢复为独立本地草稿 · 原件保留 · 不代表设备恢复"
+            return true
+        } catch { status = readableError(error); return false }
+    }
+    @discardableResult func saveDocumentAs() async -> Bool {
+        guard canEditDraft, !busy else { return false }
+        busy = true; defer { busy = false }
+        do {
+            try applyDocument(try await backend.saveDocumentAs(), fresh: true)
+            status = "已另存为独立本地文档 · 原件保留 · 重开继续此草稿"
+            return true
+        } catch { status = readableError(error); return false }
+    }
+    func copyRecoveryOriginal(token: String, destination: String) async throws {
+        try await backend.copyRecoveryOriginal(token: token, destination: destination)
+        status = "已保存原始字节副本 · 未切换文档 · 不转换未知格式"
     }
     func createDraftFromSnapshot() async {
         guard browsingDeviceSnapshot, !stale, !busy else {return};busy=true;defer {busy=false}

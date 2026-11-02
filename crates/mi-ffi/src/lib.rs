@@ -214,6 +214,39 @@ impl MicroInput {
         store.open(path.into()).map_err(failure)?;
         document_response(&store.draft, None)
     }
+    pub async fn recovery_files(&self) -> Result<Vec<String>, BridgeError> {
+        self.draft.lock().unwrap().recovery_files().map_err(failure)
+    }
+    pub async fn inspect_recovery(&self, path: String) -> Result<String, BridgeError> {
+        let preview = self
+            .draft
+            .lock()
+            .unwrap()
+            .inspect_recovery(path.into())
+            .map_err(failure)?;
+        serde_json::to_string(&preview).map_err(failure)
+    }
+    pub async fn recover_document(&self, token: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store.recover_document(&token).map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn save_document_as(&self) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store.save_document_as().map_err(failure)?;
+        document_response(&store.draft, None)
+    }
+    pub async fn copy_recovery_original(
+        &self,
+        token: String,
+        destination: String,
+    ) -> Result<(), BridgeError> {
+        self.draft
+            .lock()
+            .unwrap()
+            .copy_recovery_original(&token, destination.into())
+            .map_err(failure)
+    }
     pub async fn document_view(&self) -> Result<String, BridgeError> {
         document_response(&self.draft.lock().unwrap().draft, None)
     }
