@@ -1,4 +1,4 @@
-//! R-C03/R-C05/R-N03: owned display model; raw JSON is retained losslessly.
+//! R-C03/R-C05/R-N03: owned display projection retaining raw values; exact device bytes remain in the session.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

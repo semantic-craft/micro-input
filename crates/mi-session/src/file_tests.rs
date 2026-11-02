@@ -125,7 +125,7 @@ async fn failed_file_transactions_retain_one_complete_stale_snapshot() {
                         _ => panic!("forbidden method"),
                     };
                     let response = if enabled && fault == "rpc-error" {
-                        json!({"id":request["id"],"error":{"code":500}})
+                        json!({"id":request["id"],"error":{"code":500,"message":"synthetic file RPC failure"}})
                     } else {
                         json!({"id":request["id"],"result":result})
                     };

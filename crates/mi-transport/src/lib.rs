@@ -562,7 +562,7 @@ impl HidTransport for SyntheticDiscovery {
                         serde_json::json!({"total_size":file.len(),"data":if config==3 {"!invalid".into()} else {base64::engine::general_purpose::STANDARD.encode(chunk)}})
                     };
                     if config == 0 {
-                        serde_json::json!({"id":request["id"],"error":{"code":503}})
+                        serde_json::json!({"id":request["id"],"error":{"code":503,"message":"synthetic configuration unavailable"}})
                     } else {
                         serde_json::json!({"id":request["id"],"result":result})
                     }

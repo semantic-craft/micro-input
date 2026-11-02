@@ -218,6 +218,9 @@ extension NavigationTests {
         XCTAssertEqual(store.snapshot?.source,"Imported")
         XCTAssertEqual(store.snapshot?.firmware,"synthetic-0.6.3")
         XCTAssertEqual(store.snapshot?.device_files?.count,2)
+        XCTAssertEqual(store.layer?.displayColor,"#123456")
+        XCTAssertEqual(store.snapshot?.smartRecords.prefix(3).map { $0.0 }, ["SA_2", "SA_19", "SA_9007199254740993"])
+        XCTAssertTrue(store.snapshot?.raw.text.contains("18446744073709551615") == true)
         XCTAssertEqual(store.profile?.id.text,"7")
         let count=await core.syntheticRequests().count
         store.selectProfile(1);store.selectLayer(0);await store.assign("copy");await store.undoDraft()
