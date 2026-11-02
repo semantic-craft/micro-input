@@ -1,6 +1,6 @@
 use super::*;
 use mi_proto::{Line, Report};
-use mi_transport::{MockLink, MockTransport};
+use mi_transport::MockLink;
 use serde_json::json;
 // TEST ONLY: one raw JSON object per report is a made-up format, NOT a device protocol.
 struct TestFramer;
@@ -13,36 +13,7 @@ impl Framer for TestFramer {
     }
     fn clear(&mut self) {}
 }
-struct TestSchema;
-impl DeviceSchema for TestSchema {
-    fn identity_request(&self) -> Result<(Method, Value), ProtoError> {
-        Ok((Method::SysVersion, Value::Null))
-    }
-    fn list_request(&self) -> Result<(Method, Value), ProtoError> {
-        Ok((Method::FsList, json!({"checksum":true})))
-    }
-    fn files(&self, v: &Value) -> Result<Vec<String>, ProtoError> {
-        serde_json::from_value(v["test_files"].clone())
-            .map_err(|e| ProtoError::Invalid(e.to_string()))
-    }
-    fn read_request(&self, n: &str) -> Result<(Method, Value), ProtoError> {
-        Ok((Method::FsReadbin, json!({"file":n,"offset":0,"len":3072})))
-    }
-    fn bytes(&self, v: &Value) -> Result<Vec<u8>, ProtoError> {
-        v["test_content"]
-            .as_str()
-            .map(|s| s.as_bytes().to_vec())
-            .ok_or_else(|| ProtoError::Invalid("synthetic content missing".into()))
-    }
-    fn parse(&self, k: &[u8], s: Option<&[u8]>) -> Result<DeviceConfig, SessionError> {
-        let mut c = mi_model::parse_config(k).map_err(|e| SessionError::Config(e.to_string()))?;
-        if let Some(s) = s {
-            c.smart_actions =
-                serde_json::from_slice(s).map_err(|e| SessionError::Config(e.to_string()))?;
-        }
-        Ok(c)
-    }
-}
+
 fn setup(
     timeout: u64,
 ) -> (
@@ -55,7 +26,7 @@ fn setup(
         DeviceSession::new(
             l.clone(),
             Box::new(TestFramer),
-            Arc::new(TestSchema),
+            Arc::new(ReadOnlySchema),
             SessionConfig {
                 timeout: Duration::from_millis(timeout),
                 ..SessionConfig::default()
@@ -125,7 +96,7 @@ async fn malformed_timeout_disconnect_and_new_connection() {
         Err(SessionError::Timeout)
     ));
     let a = s.clone();
-    let f = tokio::spawn(async move { a.read_config_snapshot().await });
+    let f = tokio::spawn(async move { a.request(Method::FsList, json!({"checksum":true})).await });
     tokio::time::sleep(Duration::from_millis(5)).await;
     let a = s.clone();
     let queued = tokio::spawn(async move { a.read_identity().await });
@@ -158,50 +129,12 @@ async fn malformed_timeout_disconnect_and_new_connection() {
     assert_eq!(f.await.unwrap().unwrap()["new"], true);
 }
 #[tokio::test]
-async fn snapshot_commit_and_stale_preservation() {
-    let (s, l, mut rx) = setup(100);
-    let mock = Arc::new(MockTransport::new(l.clone()));
-    mock.files.lock().unwrap().insert(
-        "keymap.json".into(),
-        serde_json::to_vec(&mi_model::demo().unwrap().raw).unwrap(),
-    );
-    mock.files
-        .lock()
-        .unwrap()
-        .insert("smart_actions.json".into(), b"[]".to_vec());
-    let m = mock.clone();
-    let server = tokio::spawn(async move {
-        while let Some(bytes) = rx.recv().await {
-            let r: Value = serde_json::from_slice(&bytes).unwrap();
-            let files = m.files.lock().unwrap();
-            let result = if r["method"] == "fs.list" {
-                json!({"result":null,"id":r["id"],"test_files":files.keys().collect::<Vec<_>>()})
-            } else {
-                json!({"result":null,"id":r["id"],"test_content":String::from_utf8_lossy(&files[r["params"]["file"].as_str().unwrap()])})
-            };
-            m.link.inject.send(result.to_string().into_bytes()).unwrap();
-        }
-    });
-    assert_eq!(
-        s.read_config_snapshot().await.unwrap().source,
-        Source::DeviceSnapshot
-    );
-    mock.files
-        .lock()
-        .unwrap()
-        .insert("smart_actions.json".into(), b"{".to_vec());
-    assert!(s.read_config_snapshot().await.is_err());
-    assert!(s.snapshot().unwrap().stale);
-    assert_eq!(s.snapshot().unwrap().config.profiles.len(), 2);
-    server.abort();
-}
-#[tokio::test]
 async fn real_framer_never_writes() {
     let (l, _) = MockLink::new();
     let s = DeviceSession::new(
         l.clone(),
         Box::new(mi_proto::UnimplementedFramer),
-        Arc::new(TestSchema),
+        Arc::new(ReadOnlySchema),
         SessionConfig::default(),
     );
     assert!(matches!(
@@ -230,7 +163,7 @@ async fn notification_after_response_in_same_report_is_not_lost() {
     let s = DeviceSession::new(
         l.clone(),
         Box::new(BatchFramer),
-        Arc::new(TestSchema),
+        Arc::new(ReadOnlySchema),
         SessionConfig::default(),
     );
     let mut notices = s.notifications();
@@ -344,7 +277,7 @@ async fn exhausted_request_ids_end_the_session_and_require_reconnect() {
     let s = DeviceSession::new(
         link.clone(),
         Box::new(TestFramer),
-        Arc::new(TestSchema),
+        Arc::new(ReadOnlySchema),
         SessionConfig {
             timeout: Duration::from_secs(1),
             interval: Duration::ZERO,
@@ -373,4 +306,57 @@ async fn exhausted_request_ids_end_the_session_and_require_reconnect() {
     ));
     s.shutdown().await;
     server.abort();
+}
+
+#[tokio::test]
+async fn bounded_device_files_are_verified_before_snapshot_publication() {
+    let (link, mut requests) = MockLink::new();
+    let s = DeviceSession::new(
+        link.clone(),
+        Box::new(TestFramer),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            interval: Duration::ZERO,
+            ..SessionConfig::default()
+        },
+    );
+    let bytes = include_bytes!("../../mi-model/fixtures/device/synthetic-keymap-multichunk.json");
+    let inject = link.inject.clone();
+    let server = tokio::spawn(async move {
+        let mut offsets = vec![];
+        while let Some(r) = requests.recv().await {
+            let r: Value = serde_json::from_slice(&r).unwrap();
+            let result = if r["method"] == "device.status" {
+                json!({"version":"0.6.3"})
+            } else if r["method"] == "fs.list" {
+                json!([{"name":"keymap.json","size":12466,"checksum":"29982c129d7250b624d483d1bf2a29544271507e"}])
+            } else {
+                use base64::Engine;
+                assert_eq!(r["method"], "fs.readbin");
+                assert_eq!(r["params"]["file"], "keymap.json");
+                let offset = r["params"]["offset"].as_u64().unwrap() as usize;
+                let len = r["params"]["len"].as_u64().unwrap() as usize;
+                assert!(len <= 3072);
+                offsets.push(offset);
+                json!({"total_size":12466,"data":base64::engine::general_purpose::STANDARD.encode(&bytes[offset..offset+len])})
+            };
+            inject
+                .send(
+                    json!({"id":r["id"],"result":result})
+                        .to_string()
+                        .into_bytes(),
+                )
+                .unwrap();
+            if r["method"] == "fs.list" && !offsets.is_empty() {
+                return offsets;
+            }
+        }
+        offsets
+    });
+    s.read_identity_info().await.unwrap();
+    let c = s.read_config_snapshot().await.unwrap();
+    assert_eq!(c.profiles[1].id, 42);
+    assert_eq!(server.await.unwrap(), [0, 3072, 6144, 9216, 12288]);
+    assert_eq!(s.snapshot().unwrap().files.keymap.bytes.as_ref(), bytes);
+    s.shutdown().await;
 }

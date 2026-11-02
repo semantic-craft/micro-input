@@ -11,3 +11,5 @@ mi-transport = { path = "../mi-transport" }
 serde_json.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
+base64 = "0.22.1"
+sha1 = "0.10.6"
