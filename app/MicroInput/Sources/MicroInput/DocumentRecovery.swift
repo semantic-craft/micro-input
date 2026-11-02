@@ -44,16 +44,20 @@ private struct DocumentRecoveryPanel: View {
             Text("恢复为独立草稿，保留当前文件与来源副本；本地恢复不等同设备恢复。").font(.callout)
             Text("保存保护提示：\(store.status)").font(.caption).foregroundStyle(.secondary)
             Text("本机文档与恢复副本").font(.headline)
-            List(files, id: \.self) { path in
-                HStack {
-                    VStack(alignment: .leading) {
-                        Text(URL(fileURLWithPath:path).lastPathComponent).lineLimit(1)
-                        Text(path).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(files, id: \.self) { path in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(URL(fileURLWithPath:path).lastPathComponent).lineLimit(1)
+                                Text(path).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Spacer()
+                            Button("检查") { Task { await inspect(path) } }
+                                .buttonStyle(.bordered).accessibilityLabel("检查 \(URL(fileURLWithPath:path).lastPathComponent)")
+                        }
                     }
-                    Spacer()
-                    Button("检查") { Task { await inspect(path) } }
-                        .buttonStyle(.bordered).accessibilityLabel("检查 \(URL(fileURLWithPath:path).lastPathComponent)")
-                }
+                }.padding(8)
             }.frame(height: 130)
             HStack {
                 Button("选择其他来源文件…") { chooseSource() }
