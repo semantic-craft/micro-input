@@ -34,6 +34,6 @@ scripts/run --verify   # 验收实例10分钟自动退出
 
 ## 下一步
 
-PR #12/#13 已交付原生离线工作台、结构化动作和本地持久化。下一实施前沿为 [#3 设备发现](https://github.com/semantic-craft/micro-input/issues/3) / [#4 身份读取](https://github.com/semantic-craft/micro-input/issues/4)，限只读范围并受协议证据门槛约束；真实读取尚未通过应用验收。
+PR #12/#13 已交付原生离线工作台、结构化动作和本地持久化。当前已有设备发现、身份查询与[#5 配置读取](https://github.com/semantic-craft/micro-input/issues/5)实现；配置原生浏览验收见[E-079](docs/spec/EVIDENCE.md)，[#6 生命周期](https://github.com/semantic-craft/micro-input/issues/6)及未核实物理映射仍待验证。范围继续限定只读，不从核心读回推定全部S1完成。
 
 完整目标与 35 张工单入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)，技术契约见 [实施设计](docs/implementation-plan.md)，阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)。规划已批准不等于未来阶段获准执行；当前不接自动化、不写设备、不执行宿主动作。未完成技术细化的工单使用 needs-info，并在工单内列明缺项。
