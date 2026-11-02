@@ -60,3 +60,16 @@ SDK 区分有 ID 的回应与无 ID 的 method 通知，并兼容部分紧凑字
 3. 为宿主命令、文本和路径定义自有许可与目标约束；不把收到通知等同于可执行权限。
 4. 分开存储稳定对象 ID、源索引和当前活动索引；径向菜单字段与 keymap 字段名字相似不证明可互换。
 5. 为真实输入建立物理事件证据；不要把 `kb.sa.exec` 等已编译语义通知伪装为通用键盘扫描码。
+
+## 公开社区输入候选：Dispatch 0.6.2
+
+本项目的输入监视器可识别以下**不可执行候选**，来源为 MIT 许可的 Dispatch 固定提交 `6c6770a67f640f0eefbad03aff3c43e254b52239` 的[协议记录](https://github.com/thefotes/Dispatch/blob/6c6770a67f640f0eefbad03aff3c43e254b52239/docs/protocol/creator-micro-2.md#vendor-methods)、[绑定说明](https://github.com/thefotes/Dispatch/blob/6c6770a67f640f0eefbad03aff3c43e254b52239/Sources/DispatchCreatorMicro/Keymap.swift#L24)及[解码边界](https://github.com/thefotes/Dispatch/blob/6c6770a67f640f0eefbad03aff3c43e254b52239/Sources/DispatchCreatorMicro/VendorDecoder.swift#L20)。它是作者对固件 **0.6.2** 的观察；本机身份曾读回 **0.6.3**（E-078），本轮没有验证当前固件输入或物理映射。下面是协议事实的自撰契约，不移植第三方实现或厂商材料。
+
+- 只分类无 `id/i` 的 `v.oai.hid` 通知。对象参数中的 `k` 必须精确为 `AG00`–`AG18`，`act` 必须为整数 `1`（候选按下）或 `0`（候选释放）。兼容现有包络的 `method/m`、`params/p` 别名；冲突别名、非对象、缺字段、字符串/布尔/小数或其他 act 一律 unknown，不将 `2` 转为释放。未来附加字段保留在内部原通知，不解释、不跨桥接或写日志。
+- `k` 是活动层绑定的 vendor keycode 名称。相应通知依赖该控件已绑定 `KV_OAI_AGnn`；连接或订阅不修改绑定。重复绑定可使多个实体发送相同 k，不能按数字推定扫描位置。
+- 该来源布局将 AG00–12 分配给 13 个矩阵开关，将 AG10/11 作为同一宽键帽的两个开关，将 AG13/14 分配给旋钮两方向、AG15–18 分配给摇杆四个 cardinal sectors。这些只是该布局的候选对应，本项目保留每条绑定按/放，不合并 AG10/11、不计算 detent、不生成方向或动作角色；旋钮按压没有已证明的 AG ID，AG19 继续 unknown。
+- [cm2-probe 的历史基线](https://github.com/panghy/cm2-probe/blob/1cb03f970bc86061be903fdd49f534e3fdaf0862/README.md#vendor-key-events-codex-layer)是固件 0.6.0 / Input 0.18.0-rc.8，包含 ACT/ENC 名称与旋转 `act=2`；不与本候选合并。`kb.radial`、`v.oai.rad` 连续摇杆和 `kb.sa.*` 执行语义通知均不投影为本候选按键事件。
+
+Rust→UniFFI→Swift 仅公开 candidate kind、`binding_id`、本地会话/序号/时间和候选来源状态；`logical_switch`、物理控件、键帽组和动作角色为空，`action_eligible=false`。本地序号不是固件序号，接收时间不是设备时间。unknown 不公开原始字段。流溢出终止订阅，断连与旧会话回调保护继续生效；重建订阅不补猜旧释放。
+
+进一步解锁仍须独立核实当前活动配置与绑定是否唯一、逐实体按住/释放、宽键两开关、旋钮方向与 detent、摇杆回中，以及丢包/重连和其他消费者副作用；不能为取得事件自动 provision、切 Profile/Layer 或写设备。E-089 仅记录候选实现与合成验证，#14 / UNKNOWN-06/07/10/12/17 的实机缺口保持开放。
