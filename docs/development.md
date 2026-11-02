@@ -1,6 +1,8 @@
 # 当前实施入口
 
-当前实施范围为 [BUILD_PROMPT S2a](spec/BUILD_PROMPT.md)：离线原生工作台、文档稳定ID、结构化动作和Rust本地持久化。运行与检查见 [README](../README.md)。以下只读调研与后续验收仍保留，不代表当前工作台已完成设备通信。
+PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与 Rust 本地持久化。下一实施前沿为 #3 设备发现 / #4 身份读取，限只读范围，未知后端继续禁止发送；并未完成真实配置读取。
+
+先读 [实施设计](implementation-plan.md) D01–D05 与 [BUILD_PROMPT](spec/BUILD_PROMPT.md) 的 S1，再按对应工单推进。完整产品与依赖入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)。本次批准仅更新规划，不启动设备操作、宿主执行或自动化。
 
 # 开发起点
 
@@ -16,7 +18,7 @@
 
 ## 首轮开发范围
 
-首版为 USB 只读配置查看器，范围与可勾选验收项统一维护在 [MVP 总工单 #1](https://github.com/semantic-craft/micro-input/issues/1) 及其子工单，不在本地重复维护工单状态。先执行无前置依赖的 [#2](https://github.com/semantic-craft/micro-input/issues/2)。
+首版为 USB 只读配置查看器，范围与可勾选验收项统一维护在 [MVP 总工单 #1](https://github.com/semantic-craft/micro-input/issues/1) 及其子工单，不在本地重复维护工单状态。初始化基础已由 PR #12/#13 提供；下一步是 [#3](https://github.com/semantic-craft/micro-input/issues/3)，不重复初始化工程。
 
 模拟数据用于建立可运行技术链路，不等于设备验收。身份和配置读回须在当前实机验证；原 Input 缓存不能充当设备快照。首版不含设备配置写入或宿主动作执行，后续写入仍需独立的备份、提交、读回及恢复设计。
 
