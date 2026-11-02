@@ -198,11 +198,19 @@ impl MicroInput {
     }
     pub async fn subscribe_device_events(self: Arc<Self>, cb: Box<dyn DeviceEvents>) {
         let mut stopped = self.stopped.subscribe();
+        let mut rx = {
+            // Serialize watcher creation with shutdown's state invalidation.
+            let _state = self.state.lock().unwrap();
+            if *stopped.borrow() {
+                return;
+            }
+            self.transport.subscribe()
+        };
+        let devices = self.list_devices().await;
         if *stopped.borrow() {
             return;
         }
-        let mut rx = self.transport.subscribe();
-        match self.list_devices().await {
+        match devices {
             Ok(devices) => cb.changed(devices),
             Err(e) => cb.failed(e.to_string()),
         }
@@ -220,7 +228,11 @@ impl MicroInput {
                 }
                 match result {
                     Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        match this.list_devices().await {
+                        let devices = this.list_devices().await;
+                        if *stopped.borrow() {
+                            break;
+                        }
+                        match devices {
                             Ok(devices) => {
                                 this.devices_changed(&devices);
                                 cb.changed(devices);
@@ -420,6 +432,65 @@ mod tests {
             }
             Ok(self.link.clone())
         }
+    }
+    struct SlowDiscoveryTransport {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        events: tokio::sync::broadcast::Sender<()>,
+    }
+    impl HidTransport for SlowDiscoveryTransport {
+        fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
+            self.entered.notify_one();
+            let mut released = self.release.0.lock().unwrap();
+            while !*released {
+                released = self.release.1.wait(released).unwrap();
+            }
+            Ok(vec![])
+        }
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {
+            self.events.subscribe()
+        }
+        fn open(&self, _: &str) -> Result<Arc<dyn HidLink>, TransportError> {
+            Err(TransportError::Unsupported)
+        }
+    }
+    struct CountEvents(Arc<std::sync::atomic::AtomicUsize>);
+    impl DeviceEvents for CountEvents {
+        fn changed(&self, _: Vec<DeviceInfo>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn failed(&self, _: String) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    #[tokio::test]
+    async fn shutdown_discards_discovery_result_that_was_already_in_flight() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let core = Arc::new(MicroInput {
+            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            transport: Arc::new(SlowDiscoveryTransport {
+                entered: entered.clone(),
+                release: release.clone(),
+                events: tokio::sync::broadcast::channel(1).0,
+            }),
+            state: Mutex::new(ConnectionState::default()),
+            connect_gate: tokio::sync::Mutex::new(()),
+            stopped: tokio::sync::watch::channel(false).0,
+        });
+        let callbacks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = core.clone();
+        let count = callbacks.clone();
+        let subscribed = tokio::spawn(async move {
+            c.subscribe_device_events(Box::new(CountEvents(count)))
+                .await
+        });
+        entered.notified().await;
+        core.shutdown().await;
+        *release.0.lock().unwrap() = true;
+        release.1.notify_one();
+        subscribed.await.unwrap();
+        assert_eq!(callbacks.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
     struct LifecycleTransport {
         events: tokio::sync::broadcast::Sender<()>,
