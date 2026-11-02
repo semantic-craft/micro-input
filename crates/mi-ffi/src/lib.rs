@@ -240,6 +240,9 @@ impl MicroInput {
         // Invalidate before awaiting the gate, so disconnect also cancels queued connects.
         let (generation, old) = {
             let mut state = self.state.lock().unwrap();
+            if *self.stopped.borrow() {
+                return Err(BridgeError::Disconnected);
+            }
             state.generation += 1;
             state.pending = Some(id.clone());
             (state.generation, state.session.take())
@@ -252,7 +255,7 @@ impl MicroInput {
             s.shutdown().await;
         }
         let _gate = self.connect_gate.lock().await;
-        if self.state.lock().unwrap().generation != generation {
+        if *self.stopped.borrow() || self.state.lock().unwrap().generation != generation {
             return Err(failure("连接已取消"));
         }
         let t = self.transport.clone();
@@ -263,7 +266,7 @@ impl MicroInput {
                 .map_err(failure)?
                 .map_err(|e| session_failure(e.into()))?;
         let mut state = self.state.lock().unwrap();
-        if state.generation != generation {
+        if *self.stopped.borrow() || state.generation != generation {
             return Err(failure("连接已取消"));
         }
         let link = opened.0.take().expect("native open returned a link");
