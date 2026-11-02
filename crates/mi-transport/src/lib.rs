@@ -191,6 +191,7 @@ extern "C" fn discovered(
         }
     }
 }
+// TODO(UNKNOWN-05): USB source is OS-derived; BLE and cross-interface physical identity remain unverified.
 impl HidTransport for MacTransport {
     fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
         #[cfg(target_os = "macos")]
