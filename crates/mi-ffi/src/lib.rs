@@ -1,5 +1,6 @@
 //! R-A02/R-A05: only high-level asynchronous operations cross the in-process UniFFI bridge.
 mod input_monitor;
+mod reconnect;
 pub use input_monitor::*;
 use mi_session::{DeviceSession, ReadOnlySchema, SessionConfig, UnverifiedSchema};
 use mi_transport::{HidCandidate, HidTransport, MacTransport};
@@ -323,19 +324,10 @@ impl MicroInput {
     /// Copy only the current session's completed, checksum-verified snapshot; never caller supplied JSON.
     pub async fn create_draft_from_snapshot(&self) -> Result<String, BridgeError> {
         let state = self.state.lock().unwrap();
-        let (id, session) = state
-            .session
-            .as_ref()
-            .ok_or_else(|| failure("设备会话已断开"))?;
-        let snapshot = session
-            .snapshot()
-            .filter(|s| !s.stale)
-            .ok_or_else(|| failure("请先读取完整且未过期的设备快照"))?;
-        let file = |f: &mi_session::VerifiedFile| serde_json::json!({"state":"present","name":f.meta.file.name(),"size":f.meta.size,"sha1":f.meta.checksum_hex(),"bytes":f.bytes.as_ref()});
-        let baseline = serde_json::json!({"device_identity":{"interface":id,"session_id":session.id,"confidence":"observed-interface","backend":session.backend_name()},"firmware":snapshot.config.firmware,"read_at":snapshot.config.read_at,"keymap":file(&snapshot.files.keymap),"smart_actions":snapshot.files.smart_actions.as_ref().map(&file).unwrap_or(serde_json::json!({"state":"missing"}))});
+        let (config, baseline) = Self::comparison_snapshot(&state)?;
         let mut store = self.draft.lock().unwrap();
         store
-            .create_independent(snapshot.config, baseline)
+            .create_independent(config, baseline)
             .map_err(failure)?;
         document_response(&store.draft, None)
     }

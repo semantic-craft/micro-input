@@ -293,6 +293,21 @@ impl Comparison {
             merged,
         })
     }
+    pub fn ensure_snapshot(&self, current: &Value) -> Result<(), String> {
+        let mut expected = self.remote.baseline.clone().ok_or("缺少设备基线")?;
+        expected
+            .as_object_mut()
+            .ok_or("设备基线无效")?
+            .remove("comparison_config");
+        let mut current = current.clone();
+        if let Some(o) = current.as_object_mut() {
+            o.remove("comparison_config");
+        }
+        if expected != current {
+            return Err("设备快照或身份已变化；请重新读取并比较".into());
+        }
+        Ok(())
+    }
     pub fn can_merge(&self) -> bool {
         self.conflicts.is_empty() && self.identity_matches
     }
@@ -340,4 +355,23 @@ impl Comparison {
         next.validate()?;
         Ok(Some(next))
     }
+}
+
+/// #22 must invoke this after a fresh identity/file-list query, before any future write.
+/// A cached comparison cannot authorize a write by itself.
+pub fn ensure_apply_baseline(document: &LocalDocumentV2, fresh: &Value) -> Result<(), String> {
+    let baseline = document.baseline.as_ref().ok_or("没有设备基线，拒绝应用")?;
+    for key in ["device_identity", "firmware"] {
+        if baseline[key] != fresh[key] {
+            return Err("设备身份或固件已变化；请重新比较".into());
+        }
+    }
+    for key in ["keymap", "smart_actions"] {
+        for field in ["state", "sha1", "size"] {
+            if baseline[key][field] != fresh[key][field] {
+                return Err("设备摘要已变化；请重新比较".into());
+            }
+        }
+    }
+    Ok(())
 }

@@ -46,3 +46,174 @@ fn unknown_raw_and_uncertain_identity_block_only_automatic_merge() {
     );
     assert_eq!(local.origin["config"]["raw"].get("future_mode"), None);
 }
+
+#[test]
+fn comparison_table_and_whole_choices_preserve_exact_semantics() {
+    for (left, right, conflict, expected) in [
+        ("Local", "通用 Coding · 演示", false, "Local"),
+        ("通用 Coding · 演示", "Device", false, "Device"),
+        ("Common", "Common", false, "Common"),
+        ("Local", "Device", true, "Local"),
+    ] {
+        let (mut local, mut remote, baseline) = fixture();
+        let pid = local.editable.graph.profile_order[0].clone();
+        local.rename_profile(&pid, left).unwrap();
+        remote.profiles[0].name = right.into();
+        let before = json!(local);
+        let comparison = Comparison::new(&local, &remote, baseline).unwrap();
+        assert_eq!(!comparison.can_merge(), conflict);
+        assert!(comparison
+            .resolve(&local, Choice::Cancel)
+            .unwrap()
+            .is_none());
+        assert_eq!(json!(local), before);
+        let kept = comparison
+            .resolve(&local, Choice::KeepLocal)
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.editable.graph.profiles[&pid].name, left);
+        let device = comparison
+            .resolve(&local, Choice::UseDevice)
+            .unwrap()
+            .unwrap();
+        assert_eq!(device.editable.graph.profiles[&pid].name, right);
+        assert!(device.structure_changes().is_empty());
+        if !conflict {
+            let merged = comparison.resolve(&local, Choice::Merge).unwrap().unwrap();
+            assert_eq!(merged.editable.graph.profiles[&pid].name, expected);
+        } else {
+            assert!(comparison.resolve(&local, Choice::Merge).is_err());
+        }
+    }
+    let (mut local, mut remote, baseline) = fixture();
+    let pid = local.editable.graph.profile_order[0].clone();
+    local.delete_profile(&pid).unwrap();
+    let compared = Comparison::new(&local, &remote, baseline.clone()).unwrap();
+    assert!(compared.can_merge());
+    assert_eq!(
+        compared
+            .resolve(&local, Choice::Merge)
+            .unwrap()
+            .unwrap()
+            .editable
+            .graph
+            .profile_order
+            .len(),
+        1
+    );
+    remote.profiles[0].name = "Modified deleted".into();
+    assert!(!Comparison::new(&local, &remote, baseline)
+        .unwrap()
+        .can_merge());
+}
+#[test]
+fn different_device_ambiguous_sources_and_stale_local_cannot_be_accepted() {
+    let (mut local, remote, mut baseline) = fixture();
+    baseline["device_identity"]["serial"] = json!("other-device");
+    let compared = Comparison::new(&local, &remote, baseline).unwrap();
+    assert!(compared.resolve(&local, Choice::UseDevice).is_err());
+    let (_, remote, baseline) = fixture();
+    let compared = Comparison::new(&local, &remote, baseline.clone()).unwrap();
+    let pid = local.editable.graph.profile_order[0].clone();
+    local.rename_profile(&pid, "Later edit").unwrap();
+    assert!(compared.resolve(&local, Choice::KeepLocal).is_err());
+    let mut ambiguous = remote;
+    ambiguous.profiles[1].id = ambiguous.profiles[0].id.clone();
+    assert!(Comparison::new(&local, &ambiguous, baseline).is_err());
+}
+
+#[test]
+fn accepting_comparison_saves_recovery_copy_and_reopens_new_base_without_history() {
+    let dir = std::env::temp_dir().join(format!("mi-compare-{}", crate::document::new_id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("workbench.json");
+    let (local, mut remote, baseline) = fixture();
+    let original = serde_json::to_vec_pretty(&local).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let mut store = crate::storage::DocumentStore::default();
+    store.open(path.clone()).unwrap();
+    let pid = store.draft.document.editable.graph.profile_order[0].clone();
+    store
+        .update(|d| d.rename_profile(&pid, "Saved local"))
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let rev = store.draft.revision;
+    remote.profiles[0].name = "Device version".into();
+    let comparison = store.compare(&remote, baseline.clone()).unwrap();
+    store
+        .resolve_comparison(&comparison.token, Choice::Cancel, &baseline)
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(store.draft.revision, rev);
+    assert!(store.draft.can_undo);
+    store
+        .resolve_comparison(&comparison.token, Choice::UseDevice, &baseline)
+        .unwrap();
+    assert_eq!(store.draft.config.profiles[0].name, "Device version");
+    assert_eq!(store.draft.revision, rev + 1);
+    assert!(!store.draft.can_undo);
+    assert!(store.draft.structure_changes.is_empty());
+    assert!(store.draft.edits.is_empty());
+    let backups: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "backup"))
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(std::fs::read(&backups[0]).unwrap(), before);
+    let mut reopen = crate::storage::DocumentStore::default();
+    reopen.open(path).unwrap();
+    assert_eq!(reopen.draft.config.profiles[0].name, "Device version");
+    assert_eq!(reopen.draft.document.origin, local.origin);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn snapshot_change_backup_failure_and_atomic_save_failure_leave_document_unchanged() {
+    for failure in ["snapshot", "backup", "pending"] {
+        let dir =
+            std::env::temp_dir().join(format!("mi-compare-fail-{}", crate::document::new_id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("workbench.json");
+        let (local, mut remote, baseline) = fixture();
+        let bytes = serde_json::to_vec_pretty(&local).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let mut store = crate::storage::DocumentStore::default();
+        store.open(path.clone()).unwrap();
+        remote.profiles[0].name = "Device name".into();
+        let c = store.compare(&remote, baseline.clone()).unwrap();
+        let mut current = baseline;
+        match failure {
+            "snapshot" => current["keymap"]["sha1"] = json!("changed"),
+            "backup" => {
+                use sha2::{Digest, Sha256};
+                let hash = format!("{:x}", Sha256::digest(&bytes));
+                std::fs::write(
+                    dir.join(format!("workbench.json.reconnect.{hash}.backup")),
+                    b"wrong existing backup",
+                )
+                .unwrap();
+            }
+            _ => std::fs::write(path.with_extension("pending"), b"interrupted").unwrap(),
+        }
+        assert!(store
+            .resolve_comparison(&c.token, Choice::UseDevice, &current)
+            .is_err());
+        assert_eq!(json!(store.draft.document), json!(local));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+#[test]
+fn freshly_changed_identity_or_file_digest_rejects_future_application() {
+    let (mut local, _, mut current) = fixture();
+    current["keymap"] = json!({"state":"present","sha1":"base","size":128});
+    current["smart_actions"] = json!({"state":"missing"});
+    local.baseline = Some(current.clone());
+    assert!(ensure_apply_baseline(&local, &current).is_ok());
+    current["keymap"]["sha1"] = json!("changed");
+    assert!(ensure_apply_baseline(&local, &current).is_err());
+    current["keymap"]["sha1"] = json!("base");
+    current["device_identity"]["serial"] = json!("other");
+    assert!(ensure_apply_baseline(&local, &current).is_err());
+}
