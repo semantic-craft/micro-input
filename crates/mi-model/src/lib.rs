@@ -293,3 +293,8 @@ mod tests {
 }
 
 pub mod draft;
+
+pub mod storage;
+
+#[cfg(test)]
+mod document_tests;

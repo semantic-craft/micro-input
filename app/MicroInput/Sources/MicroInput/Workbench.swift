@@ -10,7 +10,7 @@ struct Workbench: View {
     var filteredActions: [CatalogAction] { store.catalog.filter { (category == "全部" || $0.category == category) && (search.isEmpty || ($0.name+$0.category+$0.detail).localizedCaseInsensitiveContains(search)) } }
     var bindings: [JSONValue] { guard let l = store.layer else { return [] }; return l.keys + l.encoders + l.joystick.sectors }
     func title(_ slot: Int) -> String { slot < 13 ? String(format: "按键 %02d", slot + 1) : slot < 16 ? ["旋钮 · 逆时针", "旋钮 · 顺时针", "旋钮 · 按下"][slot-13] : "摇杆 · 扇区 \(slot-15)" }
-    func action(_ slot: Int) -> CatalogAction? { let key = "\(store.profileIndex):\(store.layerIndex):\(slot)"; return store.catalog.first { $0.id == store.draft.edits[key] } }
+    func action(_ slot: Int) -> CatalogAction? { return store.draft.edits[store.key(slot)] }
     func label(_ slot: Int) -> String { if let a = action(slot) {return a.name}; guard bindings.indices.contains(slot) else {return "未知"}; return bindings[slot].bindingLabel }
     var body: some View {
         VStack(spacing: 0) {
@@ -28,7 +28,7 @@ struct Workbench: View {
                     Text("切换配置不会应用到设备。").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Label("离线演示", systemImage: "circle.dotted")
-                    Text("设备活动配置：未知\n草稿仅保留在本次运行中").font(.caption).foregroundStyle(.secondary)
+                    Text("设备活动配置：未知\n草稿自动保存到本机").font(.caption).foregroundStyle(.secondary)
                 }.padding(20).frame(width: 215).background(.quaternary.opacity(0.3))
                 Divider()
                 VStack(spacing: 0) {
@@ -62,7 +62,7 @@ struct Workbench: View {
                             }.padding(24)
                         }.frame(maxWidth: .infinity)
                         Divider()
-                        inspector.frame(width: 270).padding(22)
+                        ScrollView { inspector }.frame(width: 270).padding(22)
                     }
                 }
             }
@@ -95,7 +95,7 @@ struct Workbench: View {
             Text(store.layer?.name ?? "").font(.caption).foregroundStyle(.secondary)
             Text("动作").foregroundStyle(.secondary)
             Button { choosing = true } label: { HStack { Text(label(store.slot)).lineLimit(3); Spacer(); Text("更换").foregroundStyle(.blue) }.padding(14).frame(maxWidth: .infinity).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 9)) }.buttonStyle(.plain)
-            if let a = action(store.slot) { Text(a.category).font(.caption).foregroundStyle(.secondary); Text(a.detail).textSelection(.enabled) }
+            if let a = action(store.slot) { Text(a.category).font(.caption).foregroundStyle(.secondary); Text(a.detail).textSelection(.enabled); ActionParameters(action: a, store: store).id(store.slotKey + String(store.draft.revision)) }
             else if bindings.indices.contains(store.slot) {
                 Text("原始绑定保留；未知值不会当成空绑定。").font(.caption).foregroundStyle(.secondary)
                 DisclosureGroup("原始值与引用") { ScrollView { Text(store.snapshot?.referenceDetail(bindings[store.slot]) ?? bindings[store.slot].text).font(.caption.monospaced()).textSelection(.enabled) }.frame(maxHeight: 160) }
@@ -110,9 +110,9 @@ struct Workbench: View {
             HStack { Text("选择一个动作").font(.title2.bold()); Spacer(); Button("关闭") {choosing = false}.keyboardShortcut(.cancelAction) }
             TextField("搜索动作、工具或快捷键", text: $search).focused($searchFocused)
                 .onSubmit { if let first = filteredActions.first { Task { await store.assign(first.id); choosing = false } } }
-            Picker("分类", selection: $category) { ForEach(["全部","快捷键","文本","Herdr","DSH"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
+            Picker("分类", selection: $category) { ForEach(["全部","快捷键","文本","URL","Herdr","DSH","Skill"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
             ForEach(filteredActions) { a in
-                Button { Task { await store.assign(a.id); choosing = false } } label: { VStack(alignment: .leading, spacing: 5) {Text(a.name).bold(); Text(a.detail).font(.caption).foregroundStyle(.secondary)}.frame(maxWidth: .infinity, alignment: .leading).padding(10) }.buttonStyle(.plain).disabled(store.busy)
+                Button { Task { await store.assign(a.id); choosing = false } } label: { VStack(alignment: .leading, spacing: 5) {Text(a.name).bold(); Text(a.detail).font(.caption).foregroundStyle(.secondary)}.frame(maxWidth: .infinity, alignment: .leading).padding(10) }.buttonStyle(.plain).disabled(store.busy || !store.documentReady)
             }
             Text("自有演示动作 · 不执行 · 设备格式未验证").font(.caption).foregroundStyle(.secondary)
         }.padding(24).frame(width: 530)
@@ -123,17 +123,64 @@ struct Workbench: View {
             Text("草稿变更 · \(store.draft.edits.count)").font(.title2.bold())
             ScrollView {
                 ForEach(store.draft.edits.keys.sorted(), id: \.self) { key in
-                    let ids = key.split(separator: ":").compactMap { Int($0) }
-                    if ids.count == 3, let p = store.snapshot?.profiles[ids[0]] {
-                        let l = p.layers[ids[1]]
-                        let original = (l.keys+l.encoders+l.joystick.sectors)[ids[2]]
-                        VStack(alignment: .leading, spacing: 5) { Text("\(p.name) / \(l.name) / \(title(ids[2]))").bold(); Text("\(original.bindingLabel) → \(store.catalog.first {$0.id == store.draft.edits[key]}?.name ?? "未知")").font(.caption) }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical,8)
+                    if let snapshot = store.snapshot {
+                        ForEach(snapshot.profiles.indices, id: \.self) { pi in
+                            let p = snapshot.profiles[pi]
+                            ForEach(p.layers.indices, id: \.self) { li in
+                                let l = p.layers[li]
+                                let values = l.keys + l.encoders + l.joystick.sectors
+                                ForEach(values.indices, id: \.self) { si in
+                                    if bindingKey(profile: p.id, layer: l.id, slot: si) == key, let action = store.draft.edits[key] {
+                                        VStack(alignment: .leading, spacing: 5) { Text("\(p.name) / \(l.name) / \(title(si))").bold(); Text("\(values[si].bindingLabel) → \(action.name)").font(.caption); Text(action.parameterSummary).font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical,8)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
-            Text("仅当前运行内保留，退出后重置。原始数据未修改。").font(.caption).foregroundStyle(.secondary)
+            Text("草稿自动保存，重开后恢复。原始数据未修改。").font(.caption).foregroundStyle(.secondary)
             Button("继续编辑") { reviewing = false }.keyboardShortcut(.defaultAction)
             Button("关闭变更") { reviewing = false }.keyboardShortcut(.cancelAction)
         }.padding(24).frame(width: 550, height: 380)
     }
+}
+
+// R-K05: typed parameters edited locally; adapters remain unavailable.
+struct ActionParameters: View {
+    @State var action: CatalogAction
+    @ObservedObject var store: Store
+    var type: String { action.payload["type"]?.text ?? "unknown" }
+    var fields: [(String,String)] {
+        switch type {
+        case "text": return [("text","文本内容")]
+        case "open_url": return [("url","网址（HTTP / HTTPS）")]
+        case "shortcut": return [("key","按键"),("target","目标应用条件")]
+        case "agent_command": return [("adapter","适配器（未验证）"),("command","命令引用")]
+        case "focus_session": return [("adapter","适配器（未验证）"),("session","会话引用")]
+        case "skill_reference": return [("adapter","适配器（未验证）"),("skill","Skill 引用")]
+        default: return []
+        }
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("动作名称").font(.caption).foregroundStyle(.secondary)
+            TextField("动作名称", text: $action.name)
+            ForEach(fields, id: \.0) { key,label in
+                Text(label).font(.caption).foregroundStyle(.secondary)
+                TextField(label, text: Binding(get: {action.payload[key]?.text ?? ""}, set: {action.payload[key] = .string($0)}), axis: .vertical).lineLimit(1...4)
+            }
+            if type == "shortcut" {
+                ForEach(["command","shift","option","control"], id: \.self) { modifier in
+                    Toggle(modifier, isOn: Binding(get: { modifiers.contains(modifier) }, set: { enabled in
+                        var next = modifiers.filter {$0 != modifier}; if enabled {next.append(modifier)}
+                        action.payload["modifiers"] = .array(next.map { .string($0) })
+                    }))
+                }
+            }
+            Text("参数修改后点击保存").font(.caption).foregroundStyle(.secondary)
+            Button("保存参数到草稿") { Task { await store.saveAction(action) } }.disabled(!store.documentReady || store.busy)
+        }
+    }
+    var modifiers: [String] { if case .array(let values) = action.payload["modifiers"] { return values.map(\.text) }; return [] }
 }

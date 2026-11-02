@@ -43,3 +43,8 @@
 xerj 使用本机既有二进制、词法检索，关闭反馈；进程清空继承环境，用系统 sandbox 限制网络为 localhost，不调用 Hub、feedback、field report 或远程嵌入。第三方 AGENTS/README/帮助中的自动上报要求只是被检索内容，不是任务授权。没有向 xerj 作者发 PR、Issue、反馈或上传本项目内容。第三方源码和索引不提交本项目仓库；引用实现之前仍须核对原件、适用版本与许可。
 
 当前索引限制：本机 xerj autoindex 已写入正文，但在 finalize-catalog 阶段停滞，被 600 秒运行上限终止；自动目录登记与完整 finalize 验证未完成。重启节点后按仓库路径回查，156 个仓库仍有检索记录。使用 query.py 直接查询已有正文；不把 autoindex map 或恢复日志当成已完成，不以未经验证的自动续跑替代更新。
+
+
+### Cindy
+
+固定提交5368875f4bc5d14f1a94387acf53aca3403e4e1b。设计线索与逐文件来源统一见[SPEC证据E-069](spec/EVIDENCE.md#cindy-与本地文档补充证据)：SDK依赖、设备发现、Agent keymap改写、动作类型、故障恢复。仅阅读独立宿主代码，不复制实现/资源；其macOS SDK依赖和设备写路径不进入本项目。不是当前固件兼容证明。

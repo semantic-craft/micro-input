@@ -1,6 +1,6 @@
 # 当前实施入口
 
-当前分支实现范围为 [BUILD_PROMPT S1a](spec/BUILD_PROMPT.md)：离线原生工作台和Rust内存草稿。运行与检查见 [README](../README.md)。以下只读调研与后续验收仍保留，不代表当前工作台已完成设备通信。
+当前实施范围为 [BUILD_PROMPT S2a](spec/BUILD_PROMPT.md)：离线原生工作台、文档稳定ID、结构化动作和Rust本地持久化。运行与检查见 [README](../README.md)。以下只读调研与后续验收仍保留，不代表当前工作台已完成设备通信。
 
 # 开发起点
 

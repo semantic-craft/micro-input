@@ -16,22 +16,48 @@ extension MicroInput: Backend {}
     @Published var catalog: [CatalogAction] = []
     @Published var slot = 0
     private var draftCore: MicroInput? { backend as? MicroInput }
+    @Published var documentReady = false
+    private var documentOverride: URL?
+    var documentURL: URL {
+        if let documentOverride { return documentOverride }
+        if let directory = ProcessInfo.processInfo.environment["MI_DOCUMENT_DIR"] {
+            return URL(fileURLWithPath: directory).appendingPathComponent("workbench.json")
+        }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("MicroInput/workbench.json")
+    }
     func loadWorkbench() async {
-        await loadDemo()
-        guard let core = draftCore else { return }
+        guard let core = draftCore else { await loadDemo(); return }
         do {
+            draft = try JSONDecoder().decode(DraftState.self, from: Data(try await core.openDocument(path: documentURL.path).utf8))
+            await loadDemo()
             catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await core.actionCatalog().utf8))
-            draft = try JSONDecoder().decode(DraftState.self, from: Data(try await core.draftState().utf8))
+            documentReady = !draft.read_only
+            status = draft.read_only ? "文档含未知数据 · 只读 · 原文件保留" : "本地草稿 · 修改自动保存 · 不写设备"
+        } catch { status = readableError(error); documentReady = false }
+    }
+    var slotKey: String { key(slot) }
+    func key(_ slot: Int) -> String {
+        guard let profile, let layer else { return "" }
+        return bindingKey(profile: profile.id, layer: layer.id, slot: slot)
+    }
+    func assign(_ id: String) async {
+        guard let action = catalog.first(where: {$0.id == id}) else { return }
+        await saveAction(action)
+    }
+    func saveAction(_ action: CatalogAction) async {
+        guard documentReady, !busy, let core = draftCore, let profile, let layer else { return }
+        busy = true; defer { busy = false }
+        do {
+            let encoder = JSONEncoder()
+            let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
+            let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
+            let a = String(decoding: try encoder.encode(action), as: UTF8.self)
+            draft = try JSONDecoder().decode(DraftState.self, from: Data(try await core.assignAction(profileId: p, layerId: l, slot: UInt32(slot), actionJson: a).utf8))
+            status = "草稿已保存到本机 · 不执行动作 · 不写设备"
         } catch { status = readableError(error) }
     }
-    var slotKey: String { "\(profileIndex):\(layerIndex):\(slot)" }
-    func assign(_ action: String) async {
-        guard !busy, let core = draftCore else { return }; busy = true; defer { busy = false }
-        do { draft = try JSONDecoder().decode(DraftState.self, from: Data(try await core.assignAction(profile: UInt32(profileIndex), layer: UInt32(layerIndex), slot: UInt32(slot), action: action).utf8)) }
-        catch { status = readableError(error) }
-    }
     func undoDraft(redo: Bool = false) async {
-        guard !busy, let core = draftCore else { return }; busy = true; defer { busy = false }
+        guard documentReady, !busy, let core = draftCore else { return }; busy = true; defer { busy = false }
         do { draft = try JSONDecoder().decode(DraftState.self, from: Data(try await core.undoDraft(redo: redo).utf8)) }
         catch { status = readableError(error) }
     }
@@ -47,7 +73,7 @@ extension MicroInput: Backend {}
     @Published var connectedID: String?
     @Published var stale = false
     @Published var busy = false
-    init(backend: Backend) { self.backend = backend }
+    init(backend: Backend, documentURL: URL? = nil) { self.backend = backend; self.documentOverride = documentURL }
     var profile: Profile? { guard let ps = snapshot?.profiles, ps.indices.contains(profileIndex) else { return nil }; return ps[profileIndex] }
     var layer: Layer? { guard let ls = profile?.layers, ls.indices.contains(layerIndex) else { return nil }; return ls[layerIndex] }
     func selectProfile(_ index: Int) { profileIndex = index; layerIndex = 0; slot = 0; selectedBinding = nil }

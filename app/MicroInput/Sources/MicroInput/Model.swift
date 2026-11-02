@@ -52,11 +52,27 @@ extension Snapshot {
 
 // R-P03/R-E02: projection of Rust-owned offline intents, not firmware bindings.
 struct DraftState: Decodable {
-    var edits: [String:String] = [:]
+    var edits: [String:CatalogAction] = [:]
+    var read_only = false
     var revision: UInt64 = 0
     var can_undo = false
     var can_redo = false
 }
-struct CatalogAction: Decodable, Identifiable {
-    let id: String, name: String, category: String, detail: String
+struct CatalogAction: Codable, Identifiable {
+    var id: String, name: String, category: String, detail: String
+    var payload: [String: JSONValue]
+}
+
+func bindingKey(profile: JSONValue, layer: JSONValue, slot: Int) -> String {
+    let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    return String(decoding: (try? encoder.encode([profile, layer, .string("logical-\(slot)")])) ?? Data(), as: UTF8.self)
+}
+
+extension CatalogAction {
+    var parameterSummary: String {
+        payload.keys.filter {$0 != "type"}.sorted().map { key in
+            let label = ["text":"文本", "url":"网址", "key":"按键", "target":"目标", "modifiers":"修饰键", "adapter":"适配器（未验证）", "command":"命令引用", "session":"会话引用", "skill":"Skill 引用"][key] ?? key
+            return "\(label)：\(payload[key]?.text ?? "")"
+        }.joined(separator: "\n")
+    }
 }

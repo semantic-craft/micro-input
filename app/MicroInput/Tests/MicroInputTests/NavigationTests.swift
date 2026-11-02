@@ -88,12 +88,15 @@ extension NavigationTests {
 
 extension NavigationTests {
     @MainActor func testWorkbenchDraftThroughRealBridge() async throws {
-        let store = Store(backend: MicroInputCore.MicroInput())
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("workbench.json")
+        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
         await store.loadWorkbench()
         let before = store.snapshot?.raw.text
         store.slot = 1
         await store.assign("save")
-        XCTAssertEqual(store.draft.edits["0:0:1"], "save")
+        XCTAssertEqual(store.draft.edits[store.slotKey]?.id, "save")
         store.selectProfile(1)
         XCTAssertEqual(store.draft.edits.count, 1)
         await store.undoDraft()
@@ -102,6 +105,11 @@ extension NavigationTests {
         XCTAssertEqual(store.draft.edits.count, 1)
         XCTAssertEqual(store.snapshot?.raw.text, before)
         XCTAssertNil(store.connectedID)
+        let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        await reopened.loadWorkbench()
+        reopened.slot = 1
+        XCTAssertEqual(reopened.draft.edits[reopened.slotKey]?.id, "save")
+        XCTAssertEqual(reopened.snapshot?.raw.text, before)
     }
 }
 
