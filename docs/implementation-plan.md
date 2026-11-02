@@ -146,6 +146,12 @@ T08 本地宏使用现有 graph.actions 的共享 UUID，不新增持久化文�
 
 #29 即未来 Agent 草稿接口，首选一次性本地 CLI `mi draft read/validate/patch` + 版本化 JSON stdin/stdout，复用 Rust 文档服务的 revision 检查和锁；不开放网络服务、通用设备 RPC 或任务执行。本轮只固定接口形态；JSON 字段、错误码及客户端样例在其开工前单独补齐，未补齐前不标 ready。
 
+### T10 本地控件编辑契约
+
+`mi-model/src/control_settings.rs` 在 v2 LayerNode 中保存可选的 `control_settings`，使用现有文档服务和撤销栈；`mi-ffi::set_control_settings` 只提供本地高层操作，SwiftUI `ControlSettingsEditor` 不访问设备。旋钮沿用独立逻辑槽位，不声称它们已对应顺转、逆转或按压。摇杆保存 `source`（保留来源）或 `logical_sectors`（本地扇区意图）；只有后者增加逻辑槽位，减少数量或切回来源模式保留所有旧槽位、原值及绑定。0–32 是本机编辑器预算，不是固件容量；未知模式拒绝覆盖，未来字段沿用整份文档只读保护。
+
+证据使用 `docs/agents/research-context.md`、IA-12/13/14 及模块契约：来源 raw 不改写，本地保存不激活设备、不发送 RPC，不推定物理方向。验收覆盖独立绑定、模式切换、参数错误、来源保全、未知字段拒写、保存重开及整次撤销/重做。物理输入属于 #14，设备模式和扇区容量仍须独立实机证据。
+
 ## D09 · 远期交互的确定语义（F12/F13/F14）
 
 规则 R-E11/R-K07/R-K08。
