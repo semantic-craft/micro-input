@@ -83,6 +83,29 @@ struct ConnectionState {
     pending: Option<String>,
     session: Option<(String, Arc<DeviceSession>)>,
 }
+// An OS open cannot be cancelled once spawn_blocking starts. Keep its result
+// under RAII until the current generation has adopted it as a session.
+struct OpenedLink(Option<Arc<dyn mi_transport::HidLink>>);
+impl Drop for OpenedLink {
+    fn drop(&mut self) {
+        if let Some(link) = self.0.take() {
+            link.close();
+        }
+    }
+}
+struct ConnectAttempt<'a> {
+    state: &'a Mutex<ConnectionState>,
+    generation: u64,
+}
+impl Drop for ConnectAttempt<'_> {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap();
+        if state.generation == self.generation && state.pending.is_some() {
+            state.generation += 1;
+            state.pending = None;
+        }
+    }
+}
 #[derive(uniffi::Object)]
 pub struct MicroInput {
     draft: Mutex<mi_model::storage::DocumentStore>,
@@ -187,6 +210,10 @@ impl MicroInput {
             state.pending = Some(id.clone());
             (state.generation, state.session.take())
         };
+        let _attempt = ConnectAttempt {
+            state: &self.state,
+            generation,
+        };
         if let Some((_, s)) = old {
             s.shutdown().await;
         }
@@ -196,15 +223,16 @@ impl MicroInput {
         }
         let t = self.transport.clone();
         let path = id.clone();
-        let link = tokio::task::spawn_blocking(move || t.open(&path))
-            .await
-            .map_err(failure)?
-            .map_err(failure)?;
+        let mut opened =
+            tokio::task::spawn_blocking(move || t.open(&path).map(|link| OpenedLink(Some(link))))
+                .await
+                .map_err(failure)?
+                .map_err(failure)?;
         let mut state = self.state.lock().unwrap();
         if state.generation != generation {
-            link.close();
             return Err(failure("连接已取消"));
         }
+        let link = opened.0.take().expect("native open returned a link");
         // E-075: only the compiled, inspected native adapter can select numbered reports.
         let supported = matches!(
             link.backend(),
@@ -317,6 +345,7 @@ mod tests {
     struct DelayedTransport {
         entered: Arc<tokio::sync::Notify>,
         release: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        link: Arc<MockLink>,
     }
     impl HidTransport for DelayedTransport {
         fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
@@ -333,8 +362,7 @@ mod tests {
             while !*released {
                 released = cv.wait(released).unwrap();
             }
-            let (l, _) = MockLink::new();
-            Ok(l)
+            Ok(self.link.clone())
         }
     }
     #[tokio::test]
@@ -345,6 +373,33 @@ mod tests {
     async fn removal_cancels_in_flight_open() {
         cancellation_during_open(true).await;
     }
+    #[tokio::test]
+    async fn dropped_open_future_closes_late_native_handle() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (link, _) = MockLink::new();
+        let core = Arc::new(MicroInput {
+            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            transport: Arc::new(DelayedTransport {
+                entered: entered.clone(),
+                release: release.clone(),
+                link: link.clone(),
+            }),
+            state: Mutex::new(ConnectionState::default()),
+            connect_gate: tokio::sync::Mutex::new(()),
+        });
+        let c = core.clone();
+        let task = tokio::spawn(async move { c.connect("mock".into()).await });
+        entered.notified().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        *release.0.lock().unwrap() = true;
+        release.1.notify_one();
+        // The native open is not abortable; its late result must still close.
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), link.read()).await;
+        assert!(matches!(result, Ok(Err(TransportError::Disconnected))));
+        assert!(core.read_identity().await.is_err());
+    }
     async fn cancellation_during_open(removal: bool) {
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
@@ -353,6 +408,7 @@ mod tests {
             transport: Arc::new(DelayedTransport {
                 entered: entered.clone(),
                 release: release.clone(),
+                link: MockLink::new().0,
             }),
             state: Mutex::new(ConnectionState::default()),
             connect_gate: tokio::sync::Mutex::new(()),
