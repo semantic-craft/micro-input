@@ -62,3 +62,11 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 应用使用已选定的薄荷绿短发角色原画 `app/MicroInput/Resources/AppIcon-artwork.png`。`scripts/build` 调用 `scripts/generate-app-icon.swift` 生成 16–1024 px 的图标表示并打包为 AppIcon.icns；圆角和 5% 透明外边距与 Koe 的 macOS 图标一致。原画不带截图外框。
 
 菜单栏由 `StatusItemIcon.swift` 绘制 20 × 18 pt 的键盘与旋钮符号，设置 `isTemplate`，由系统处理深浅色及选中着色。尺寸是本项目选择，不是 Apple 强制尺寸。遵循 [Apple 菜单栏规范](https://developer.apple.com/design/human-interface-guidelines/the-menu-bar) 的黑色/透明符号建议及 [NSImage.isTemplate](https://developer.apple.com/documentation/appkit/nsimage/istemplate) 的模板语义。
+
+## 有界只读输入观测
+
+`scripts/observe-input`（或 `--dry-run`）默认只跑合成测试，原生测试保持 ignored。需要一次由操作者配合的物理观测时，显式运行 `scripts/observe-input --observe-once`。只复用生产 `MicroInput` / `DeviceSession` 的描述符、身份、完整性校验配置读取及唯一 reader 输入订阅；不激活 Profile/Layer、不写配置、不执行宿主动作、不申请权限或终止其他应用。
+
+看到并刷新输出的 `READY_FOR_PHYSICAL_INPUT` 后，操作者才进行本轮约定的控件操作；被动窗口固定为 45 秒，事件上限 2048，gap/关闭/断连均停止订阅。准备阶段上限 100 秒，结束后状态复查上限 15 秒、shutdown join 上限 5 秒；外层启动器总预算 180 秒（包含构建），超时只停止并等待自己创建的进程组，不重试。可先运行默认入口完成构建。
+
+每次生成独立 experiment ID 与开始时间；0700 的 `.scratch/input-study/input-observation-<ID>/` 下仅保存 0600 的脱敏事件和启动器状态。记录事件分类、语义 binding ID、时间、计数、session、gap；不保存通知、配置、宏、设备路径或 serial。报告的 `active_source_verified=false`、`active_ag_binding_count=null` 是当前证据边界：设备返回活动索引不证明它与源配置对象的对应语义。静默为 `silence_unconfirmed`，不能据此证明未按键、映射正确或硬件支持完成；有候选消息也只支持其通知形态，实体位置与其他消费者共存仍须另行核对。E-094 保留给实际观测后的证据登记，本入口的合成通过不占用实机证据。
