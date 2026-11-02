@@ -1,4 +1,7 @@
+// Shared fixed A/B harness: each integration test uses only its own entry.
+#![allow(dead_code)]
 use std::io::Read;
+pub const OPT_IN_B: &str = "I_AUTHORIZE_EXACT_TEMPFILE_B";
 pub const OPT_IN: &str = "I_AUTHORIZE_EXACT_TEMPFILE_A";
 pub type Result<T> = std::result::Result<T, &'static str>;
 pub fn authorize(value: Option<&str>) -> Result<()> {
@@ -49,7 +52,37 @@ use std::{
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex, Notify};
 
 const PAYLOAD: &[u8] = b"{\"ok\":true}";
-const SHA1: &str = "022d91f218046ab2e61cac1eb13d6a718f75df2b";
+#[derive(Clone, Copy, PartialEq)]
+enum Probe {
+    A,
+    B,
+}
+impl Probe {
+    fn label(self) -> &'static str {
+        match self {
+            Self::A => "a",
+            Self::B => "b",
+        }
+    }
+    fn opt_in(self) -> &'static str {
+        match self {
+            Self::A => OPT_IN,
+            Self::B => OPT_IN_B,
+        }
+    }
+    fn payload(self) -> &'static [u8] {
+        match self {
+            Self::A => PAYLOAD,
+            Self::B => b"micro-input\n",
+        }
+    }
+    fn sha1(self) -> &'static str {
+        match self {
+            Self::A => "022d91f218046ab2e61cac1eb13d6a718f75df2b",
+            Self::B => "8c6bf41b8e5eccf2860f597878b8878b560442fc",
+        }
+    }
+}
 const RPC_BUDGET: Duration = Duration::from_secs(4);
 type Listing = BTreeMap<String, Value>;
 struct Pending {
@@ -58,7 +91,7 @@ struct Pending {
     response: oneshot::Sender<Result<Value>>,
 }
 
-/// Test-only broker: one native reader/handle for both the existing core and exact A RPCs.
+/// Test-only broker: one native reader/handle for both the existing core and exact tempfile RPCs.
 /// It observes foreign traffic but cannot establish exclusive ownership.
 struct Broker {
     raw: Arc<dyn HidLink>,
@@ -72,9 +105,10 @@ struct Broker {
     changed: Notify,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     target: String,
+    probe: Probe,
 }
 impl Broker {
-    fn start(raw: Arc<dyn HidLink>, target: String) -> Arc<Self> {
+    fn start(raw: Arc<dyn HidLink>, target: String, probe: Probe) -> Arc<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         let broker = Arc::new(Self {
             raw,
@@ -88,6 +122,7 @@ impl Broker {
             changed: Notify::new(),
             worker: Mutex::new(None),
             target,
+            probe,
         });
         let held = broker.clone();
         let task = tokio::spawn(async move {
@@ -176,13 +211,22 @@ impl Broker {
         self.uncontested()?;
         temp_name(&self.target)?;
         let (method, params) = match operation {
-            Exact::Create => (
+            Exact::Create if self.probe == Probe::A => (
                 "fs.write",
                 json!({"file":self.target,"data":"{\"ok\":true}"}),
             ),
+            Exact::Chunk1 if self.probe == Probe::B => (
+                "fs.writebin",
+                json!({"file":self.target,"data":"bWljcm8t","append":true,"completed":false,"offset":0}),
+            ),
+            Exact::Chunk2 if self.probe == Probe::B => (
+                "fs.writebin",
+                json!({"file":self.target,"data":"aW5wdXQK","append":true,"completed":true,"offset":6}),
+            ),
+            Exact::Create | Exact::Chunk1 | Exact::Chunk2 => return Err("wrong_probe_operation"),
             Exact::Read => (
                 "fs.readbin",
-                json!({"file":self.target,"offset":0,"len":11}),
+                json!({"file":self.target,"offset":0,"len":self.probe.payload().len()}),
             ),
             Exact::Delete => ("fs.delete", json!({"file":self.target})),
         };
@@ -199,7 +243,7 @@ impl Broker {
             response: tx,
         });
         let wire = json!({"method":method,"params":params,"id":id}).to_string();
-        // No arbitrary method/path entry point: only the three exact operations above.
+        // No arbitrary method/path entry point: only the fixed operations above.
         let outcome = tokio::time::timeout(RPC_BUDGET, async {
             for report in NativeFramer::default()
                 .encode(wire.as_bytes())
@@ -227,6 +271,8 @@ impl Broker {
 #[derive(Clone, Copy)]
 enum Exact {
     Create,
+    Chunk1,
+    Chunk2,
     Read,
     Delete,
 }
@@ -317,14 +363,15 @@ struct Record {
     mutation_attempted: bool,
 }
 impl Record {
-    fn new() -> Result<Self> {
+    fn new(probe: Probe) -> Result<Self> {
         let token: String = random::<16>()?.iter().map(|b| format!("{b:02x}")).collect();
         let target = format!("mi_{}.txt", &token[..12]);
         temp_name(&target)?;
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.scratch/input-study");
         fs::create_dir_all(&root).map_err(|_| "private_parent_failed")?;
         let directory = root.join(format!(
-            "probe-a-{}-{}-{}-{}-{}",
+            "probe-{}-{}-{}-{}-{}-{}",
+            probe.label(),
             &token[..8],
             &token[8..12],
             &token[12..16],
@@ -423,13 +470,16 @@ fn same_files(a: &DeviceFiles, b: &DeviceFiles) -> bool {
             _ => false,
         }
 }
-fn exact_added(before: &Listing, after: &Listing, target: &str) -> Result<()> {
+fn exact_added(before: &Listing, after: &Listing, target: &str, probe: Probe) -> Result<()> {
     let mut rest = after.clone();
     let new = rest.remove(target).ok_or("temp_absent_after_write")?;
     let size = new["size"]
         .as_u64()
         .or_else(|| new["size"].as_str().and_then(|s| s.parse().ok()));
-    if size != Some(11) || new["checksum"].as_str() != Some(SHA1) || &rest != before {
+    if size != Some(probe.payload().len() as u64)
+        || new["checksum"].as_str() != Some(probe.sha1())
+        || &rest != before
+    {
         return Err("list_changed_or_wrong_temp");
     }
     Ok(())
@@ -473,6 +523,7 @@ async fn experiment(
     record: &mut Record,
     quiet: Duration,
 ) -> Result<()> {
+    let probe = broker.probe;
     broker.quiet(quiet).await?;
     let active = identity(session).await?;
     let before = snapshot(session).await?;
@@ -504,25 +555,68 @@ async fn experiment(
         return Err("core_request_budget_exceeded");
     }
     record.mutation_attempted = true;
-    record.stage("create_attempt", json!({}))?;
     let operation = async {
-        let reply = broker.exact(Exact::Create).await?;
-        record.stage("create_ack", json!({"result_kind":kind(&reply)}))?;
-        exact_added(&before_list, &listing(session).await?, &record.target)?;
+        match probe {
+            Probe::A => {
+                record.stage("create_attempt", json!({}))?;
+                let reply = broker.exact(Exact::Create).await?;
+                record.stage("create_ack", json!({"result_kind":kind(&reply)}))?;
+            }
+            Probe::B => {
+                record.stage(
+                    "chunk_1_attempt",
+                    json!({"offset":0,"size":6,"completed":false}),
+                )?;
+                let reply = broker.exact(Exact::Chunk1).await?;
+                record.stage("chunk_1_ack", json!({"result_kind":kind(&reply)}))?;
+                // A successful envelope is required before a second mutation. A
+                // quiet/identity gate also catches observed external changes.
+                broker.quiet(quiet).await?;
+                if candidate(transport)? != *selected || identity(session).await? != active {
+                    return Err("identity_or_activity_changed");
+                }
+                let mut interim = listing(session).await?;
+                interim.remove(&record.target);
+                if interim != before_list {
+                    return Err("original_entries_changed_between_chunks");
+                }
+                broker.uncontested()?;
+                record.stage(
+                    "chunk_2_attempt",
+                    json!({"offset":6,"size":6,"completed":true}),
+                )?;
+                let reply = broker.exact(Exact::Chunk2).await?;
+                record.stage("chunk_2_ack", json!({"result_kind":kind(&reply)}))?;
+            }
+        }
+        exact_added(
+            &before_list,
+            &listing(session).await?,
+            &record.target,
+            probe,
+        )?;
         let reply = broker.exact(Exact::Read).await?;
         use mi_session::DeviceSchema;
         let chunk = ReadOnlySchema
             .chunk(&reply)
             .map_err(|_| "invalid_temp_read")?;
-        if chunk.total_size != 11 || chunk.data != PAYLOAD {
+        if chunk.total_size != probe.payload().len() as u64 || chunk.data != probe.payload() {
             return Err("temp_byte_mismatch");
         }
-        record.stage("temp_bytes_verified", json!({"size":11,"sha1":SHA1}))?;
+        record.stage(
+            "temp_bytes_verified",
+            json!({"size":probe.payload().len(),"sha1":probe.sha1()}),
+        )?;
         // Immediately re-check every original entry and activity before the exact cleanup.
         if candidate(transport)? != *selected || identity(session).await? != active {
             return Err("identity_or_activity_changed");
         }
-        exact_added(&before_list, &listing(session).await?, &record.target)?;
+        exact_added(
+            &before_list,
+            &listing(session).await?,
+            &record.target,
+            probe,
+        )?;
         broker.uncontested()?;
         record.stage("delete_attempt", json!({}))?;
         let reply = broker.exact(Exact::Delete).await?;
@@ -566,20 +660,23 @@ async fn experiment(
     post
 }
 /// System boundary injection is test-only; authorization precedes all transport calls.
-pub async fn run(
+async fn run_exact(
     transport: &dyn HidTransport,
     opt_in: Option<&str>,
     quiet: Duration,
+    probe: Probe,
 ) -> Result<Outcome> {
-    authorize(opt_in)?;
+    if opt_in != Some(probe.opt_in()) {
+        return Err("operator_opt_in_absent");
+    }
     let selected = candidate(transport)?;
-    let mut record = Record::new()?;
+    let mut record = Record::new(probe)?;
     record.stage(
         "before_open",
         json!({"vid":"303A","pid":"8298","quiet_window_ms":quiet.as_millis()}),
     )?;
     let raw = transport.open(&selected.path).map_err(|_| "open_failed")?;
-    let broker = Broker::start(raw, record.target.clone());
+    let broker = Broker::start(raw, record.target.clone(), probe);
     let session = DeviceSession::new(
         broker.clone(),
         Box::<NativeFramer>::default(),
@@ -610,13 +707,40 @@ pub async fn run(
         target: record.target,
     })
 }
+pub async fn run(
+    transport: &dyn HidTransport,
+    opt_in: Option<&str>,
+    quiet: Duration,
+) -> Result<Outcome> {
+    run_exact(transport, opt_in, quiet, Probe::A).await
+}
+pub async fn run_b(
+    transport: &dyn HidTransport,
+    opt_in: Option<&str>,
+    quiet: Duration,
+) -> Result<Outcome> {
+    run_exact(transport, opt_in, quiet, Probe::B).await
+}
+pub async fn native_b() -> Result<()> {
+    native_exact(Probe::B).await
+}
 pub async fn native() -> Result<()> {
-    let value = std::env::var("MI_PROBE_A_OPERATOR").ok();
-    authorize(value.as_deref())?; // Even constructing native discovery requires opt-in.
+    native_exact(Probe::A).await
+}
+async fn native_exact(probe: Probe) -> Result<()> {
+    let value = std::env::var(match probe {
+        Probe::A => "MI_PROBE_A_OPERATOR",
+        Probe::B => "MI_PROBE_B_OPERATOR",
+    })
+    .ok();
+    if value.as_deref() != Some(probe.opt_in()) {
+        return Err("operator_opt_in_absent");
+    } // Even constructing native discovery requires opt-in.
     let transport = mi_transport::MacTransport::new();
-    let outcome = run(&transport, value.as_deref(), Duration::from_secs(2)).await?;
+    let outcome = run_exact(&transport, value.as_deref(), Duration::from_secs(2), probe).await?;
     println!(
-        "A metadata: passed={} cleanup_confirmed={} reason={} target={} private_evidence={}",
+        "{} metadata: passed={} cleanup_confirmed={} reason={} target={} private_evidence={}",
+        probe.label(),
         outcome.passed,
         outcome.cleanup_confirmed,
         outcome.reason,
