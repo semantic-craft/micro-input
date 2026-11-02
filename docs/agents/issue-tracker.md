@@ -4,6 +4,7 @@
 
 ## 操作约定
 
+- 接手、实现或评审未完成工单前，执行[研究成果接入规则](research-context.md)；在交付说明中列出相关证据、实现影响与未验证边界。工单无需复制整份研究，引用该入口及实际使用的结论即可。
 - 创建：`gh issue create --title "..." --body-file <path>`；多行正文先写文件。
 - 读取：`gh issue view <number> --json number,title,body,labels,comments`。
 - 列表：`gh issue list --state open --json number,title,body,labels`，按需加 `--label`。
