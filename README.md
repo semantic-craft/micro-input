@@ -1,29 +1,29 @@
 # Micro Input
 
-面向 Work Louder Creator Micro 2 的独立 macOS 配置器与宿主服务。技术方向：**Rust 核心 + SwiftUI 界面**。项目名为工作名。
+面向 Work Louder Creator Micro 2 的独立 macOS 配置查看器，采用 Rust 核心与 SwiftUI 界面。当前首版是 **clean-room 只读 MVP**，支持合成配置浏览与 USB 候选设备发现。
 
-## 当前状态
+## 构建与运行
 
-2026-11-02：已建立正式项目及公开 GitHub 仓库，前期调研原件仅保存在本机；尚未初始化 Cargo/Swift 工程、实现设备通信或构建可运行应用。既有 input.app 和设备配置保持原状。
+要求 Apple Silicon Mac、macOS 14+、Xcode Command Line Tools / Swift 5.9+、Rust stable（含 rustfmt）。依赖由 Cargo.lock 固定；首次构建需要从 crates.io 下载依赖，不加载开发凭据。
 
-从 [开发起点](docs/development.md) 开始；操作设备或处理兼容行为前阅读 [项目教训](lessons.md)。Agent 入口见 [AGENTS.md](AGENTS.md)。
+```sh
+scripts/check       # Rust 格式、构建与全部测试，UniFFI 生成，Swift 构建与测试，边界检查
+scripts/run         # 启动当前 checkout 的 target/MicroInput.app，Ctrl-C 退出
+scripts/run --verify # 同一应用，验收实例最多存活十分钟
+```
 
-工单与规格统一放在 [GitHub Issues](https://github.com/semantic-craft/micro-input/issues)。
+已实测工具链与验收限制见 [开发说明](docs/development.md)。`scripts/build` 单独构建应用，生成桥接代码不入库。
 
-## 调研入口
+## 当前可用范围
 
-以下为本机原始调查材料，保存在 Git 忽略的 `.scratch/input-study/`，不随源码提交：
+- “载入演示数据”走 Rust 解析 → UniFFI → SwiftUI，可浏览 Profile、Layer、13 键、旋钮 3 槽、摇杆扇区、灯光原始值和绑定详情；明确标注演示来源与读取时间。
+- Profile id 与 index 分开显示，未知 token/字段保留，缺失引用提示；选择 Profile/Layer 只改变页面状态。
+- 通过 OS 身份发现 VID 303A、PID 8297/8298、usage page FF00 的候选；检查输入监控权限并提供系统设置入口。
+- 真实 HID 非独占打开的代码已接入；真实身份/文件读取由未知协议占位阻断，不发送 RPC、不回退演示结果。输入监控未授权时禁用连接。
+- 无配置写入、Profile 激活、灯光预览、宿主动作执行、固件更新或自动化接线。
 
-- [官方来源、能力矩阵与公开协议线索](.scratch/input-study/out/research.md)
-- [已连接 UI 清单](.scratch/input-study/out/connected-ui-inventory.md)
-- [灯光、摇杆、层、AppSense 与参数实验](.scratch/input-study/out/layer-lighting-joystick-followup.md)
-- [观察规格](.scratch/input-study/out/spec.json)和[证据记录](.scratch/input-study/out/evidence.jsonl)
-- [原任务历史](.scratch/input-study/task-history.md)
+## 接续入口
 
-旧入口 `~/agent-tasks/worklouder-input-study` 仅保留晋升记录和兼容链接。后续项目事实、代码和进度只在本项目维护。
+实现前按顺序读 [SPEC](docs/spec/SPEC.md) → [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md) → [EVIDENCE](docs/spec/EVIDENCE.md)。能力和宿主/设备边界以 SPEC 为准；验收以 BUILD_PROMPT 为准；未知项见 [UNKNOWNS](docs/spec/UNKNOWNS.md)。旧调研不作为本轮实现输入。
 
-## 下一步
-
-首版范围已确定为 USB 只读配置查看器：发现一台 Creator Micro 2 → 读取身份与配置 → 浏览 Profile、Layer、按键及旋钮映射。范围、验收和依赖以 [MVP 总工单 #1](https://github.com/semantic-craft/micro-input/issues/1) 为准。下一步执行 [#2 合成数据查看器](https://github.com/semantic-craft/micro-input/issues/2)，先交付真实 Rust / SwiftUI 桥接的可启动应用，再逐步接入设备。
-
-目前没有构建或启动命令；初始化实现时增加项目验证入口 `scripts/check`。本次只验证文档导航和调研迁移完整性，未做应用构建或真实设备协议验收。
+下一步先审查本轮实现 PR，再为 UNKNOWN 边界补可靠证据及硬件验收；当前不启用自动触发。工程说明见 [development](docs/development.md)，约束见 [AGENTS](AGENTS.md)，经验见 [lessons](lessons.md)。任务跟踪在 [GitHub Issues](https://github.com/semantic-craft/micro-input/issues)，首版父工单为 [#1](https://github.com/semantic-craft/micro-input/issues/1)。

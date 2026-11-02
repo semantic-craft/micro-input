@@ -1,0 +1,16 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export MACOSX_DEPLOYMENT_TARGET=14.0
+cargo build --locked -p mi-ffi
+mkdir -p target/swift-bindings app/MicroInput/Sources/MicroInputCore app/MicroInput/Sources/MicroInputCoreFFI
+cargo run --locked -p mi-ffi --bin uniffi-bindgen -- generate --library target/debug/libmi_ffi.dylib --language swift --config crates/mi-ffi/uniffi.toml --out-dir target/swift-bindings
+cp target/swift-bindings/MicroInputCore.swift app/MicroInput/Sources/MicroInputCore/
+cp target/swift-bindings/MicroInputCoreFFI.h app/MicroInput/Sources/MicroInputCoreFFI/
+cp target/swift-bindings/MicroInputCoreFFI.modulemap app/MicroInput/Sources/MicroInputCoreFFI/module.modulemap
+swift build --package-path app/MicroInput
+bundle=target/MicroInput.app
+mkdir -p "$bundle/Contents/MacOS"
+cp app/MicroInput/.build/debug/MicroInput "$bundle/Contents/MacOS/"
+cp app/MicroInput/Info.plist "$bundle/Contents/Info.plist"
+codesign --force --sign - "$bundle"
