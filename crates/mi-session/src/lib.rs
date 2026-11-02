@@ -38,18 +38,25 @@ pub struct SessionConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
-            timeout: Duration::from_secs(2),
+            timeout: Duration::from_secs(10),
             interval: Duration::from_millis(50),
         }
     }
 }
-// TODO(UNKNOWN-04): fs parameter names, chunks, checksums and response schemas must be supplied by evidence.
+mod files;
+pub use files::*;
+// TODO(UNKNOWN-04): current-firmware configuration semantics still require device acceptance.
 pub trait DeviceSchema: Send + Sync {
     fn identity_request(&self) -> Result<(Method, Value), ProtoError>;
     fn list_request(&self) -> Result<(Method, Value), ProtoError>;
-    fn files(&self, response: &Value) -> Result<Vec<String>, ProtoError>;
-    fn read_request(&self, name: &str) -> Result<(Method, Value), ProtoError>;
-    fn bytes(&self, response: &Value) -> Result<Vec<u8>, ProtoError>;
+    fn files(&self, response: &Value) -> Result<Vec<FileMeta>, ProtoError>;
+    fn read_request(
+        &self,
+        file: ConfigFile,
+        offset: u64,
+        len: u32,
+    ) -> Result<(Method, Value), ProtoError>;
+    fn chunk(&self, response: &Value) -> Result<ReadChunk, ProtoError>;
     fn parse(&self, keymap: &[u8], smart: Option<&[u8]>) -> Result<DeviceConfig, SessionError>;
 }
 pub struct UnverifiedSchema;
@@ -60,13 +67,13 @@ impl DeviceSchema for UnverifiedSchema {
     fn list_request(&self) -> Result<(Method, Value), ProtoError> {
         Err(ProtoError::Unverified("UNKNOWN-04 fs schema"))
     }
-    fn files(&self, _: &Value) -> Result<Vec<String>, ProtoError> {
+    fn files(&self, _: &Value) -> Result<Vec<FileMeta>, ProtoError> {
         Err(ProtoError::Unverified("UNKNOWN-04 fs schema"))
     }
-    fn read_request(&self, _: &str) -> Result<(Method, Value), ProtoError> {
+    fn read_request(&self, _: ConfigFile, _: u64, _: u32) -> Result<(Method, Value), ProtoError> {
         Err(ProtoError::Unverified("UNKNOWN-04 fs schema"))
     }
-    fn bytes(&self, _: &Value) -> Result<Vec<u8>, ProtoError> {
+    fn chunk(&self, _: &Value) -> Result<ReadChunk, ProtoError> {
         Err(ProtoError::Unverified("UNKNOWN-04 fs schema"))
     }
     fn parse(&self, _: &[u8], _: Option<&[u8]>) -> Result<DeviceConfig, SessionError> {
@@ -124,6 +131,7 @@ struct Queue {
 pub struct Snapshot {
     pub config: DeviceConfig,
     pub stale: bool,
+    pub files: DeviceFiles,
 }
 pub struct DeviceSession {
     pub id: u64,
@@ -135,6 +143,8 @@ pub struct DeviceSession {
     terminal: Arc<Mutex<Option<SessionError>>>,
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
     config: SessionConfig,
+    read_gate: AsyncMutex<()>,
+    firmware: Mutex<Option<String>>,
     schema: Arc<dyn DeviceSchema>,
     snapshot: Arc<Mutex<Option<Snapshot>>>,
     notifications: broadcast::Sender<HostNotification>,
@@ -173,6 +183,16 @@ impl DeviceSession {
                         let report = link.read().await?;
                         let lines = framer.lock().unwrap().feed(&report)?;
                         for line in lines {
+                            if let Some(id) = mi_proto::response_id(&line)? {
+                                if !pending
+                                    .lock()
+                                    .unwrap()
+                                    .as_ref()
+                                    .is_some_and(|p| u64::from(p.id) == id)
+                                {
+                                    continue;
+                                }
+                            }
                             match JsonCodec.decode(&line)? {
                                 Incoming::Response(r) => {
                                     let mut held = pending.lock().unwrap();
@@ -229,6 +249,8 @@ impl DeviceSession {
             terminal,
             reader: Mutex::new(Some(reader)),
             config,
+            read_gate: AsyncMutex::new(()),
+            firmware: Mutex::new(None),
             schema,
             snapshot,
             notifications,
@@ -341,6 +363,7 @@ impl DeviceSession {
     }
     /// E-053/R-D09: identity reads never invoke the configuration schema or file service.
     pub async fn read_identity_info(&self) -> Result<IdentityInfo, SessionError> {
+        *self.firmware.lock().unwrap() = None;
         self.guarded(async {
             let mut q = self.queue.lock().await;
             let status = self
@@ -375,6 +398,7 @@ impl DeviceSession {
                     .and_then(Value::as_u64)
                     .and_then(|n| u32::try_from(n).ok())
             };
+            *self.firmware.lock().unwrap() = version.clone();
             Ok(IdentityInfo {
                 session_id: self.id,
                 version,
@@ -390,42 +414,132 @@ impl DeviceSession {
         let (m, p) = self.schema.identity_request()?;
         self.request(m, p).await
     }
+    async fn read_file(
+        &self,
+        q: &mut Queue,
+        meta: &FileMeta,
+    ) -> Result<VerifiedFile, SessionError> {
+        use sha1::{Digest, Sha1};
+        let mut bytes = Vec::with_capacity(meta.size as usize);
+        while (bytes.len() as u64) < meta.size {
+            let offset = bytes.len() as u64;
+            let len = (meta.size - offset).min(3072) as u32;
+            let (m, p) = self.schema.read_request(meta.file, offset, len)?;
+            let chunk = self.schema.chunk(&self.exchange(q, m, p).await?)?;
+            if chunk.total_size != meta.size
+                || chunk.data.is_empty()
+                || chunk.data.len() > len as usize
+                || offset
+                    .checked_add(chunk.data.len() as u64)
+                    .is_none_or(|end| end > meta.size)
+            {
+                return Err(SessionError::Config(
+                    "分块大小无效或读取期间发生变化".into(),
+                ));
+            }
+            bytes.extend_from_slice(&chunk.data);
+        }
+        let actual: [u8; 20] = Sha1::digest(&bytes).into();
+        if actual != meta.checksum {
+            return Err(SessionError::Config("原始文件 SHA-1 校验失败".into()));
+        }
+        Ok(VerifiedFile {
+            meta: meta.clone(),
+            bytes: bytes.into(),
+        })
+    }
+    /// Bounded read transaction. A failed/cancelled attempt never publishes a partial snapshot.
     pub async fn read_config_snapshot(&self) -> Result<DeviceConfig, SessionError> {
-        let result = self
-            .guarded(async {
+        let _lease = self
+            .read_gate
+            .try_lock()
+            .map_err(|_| SessionError::Config("配置正在读取".into()))?;
+        if let Some(old) = self.snapshot.lock().unwrap().as_mut() {
+            old.stale = true;
+        }
+        let read_firmware = self.firmware.lock().unwrap().clone();
+        let supported = read_firmware.as_deref() == Some("0.6.3")
+            || (self.backend_name().starts_with("synthetic/")
+                && read_firmware.as_deref() == Some("synthetic-0.6.3"));
+        if !supported {
+            return Err(ProtoError::Unverified(
+                "UNKNOWN-04 configuration requires explicit supported identity read",
+            )
+            .into());
+        }
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            self.guarded(async {
                 let mut q = self.queue.lock().await;
                 let (m, p) = self.schema.list_request()?;
-                let files = self.schema.files(&self.exchange(&mut q, m, p).await?)?;
-                if !files.iter().any(|n| n == "keymap.json") {
-                    return Err(SessionError::Config("缺少 keymap.json".into()));
+                let first = self.schema.files(&self.exchange(&mut q, m, p).await?)?;
+                let key = first
+                    .iter()
+                    .find(|m| m.file == ConfigFile::Keymap)
+                    .ok_or_else(|| SessionError::Config("缺少 keymap.json".into()))?;
+                let smart = first.iter().find(|m| m.file == ConfigFile::SmartActions);
+                let total = first.iter().try_fold(0u64, |sum, m| {
+                    if m.size > 4 * 1024 * 1024 {
+                        None
+                    } else {
+                        sum.checked_add(m.size)
+                    }
+                });
+                if total.is_none_or(|n| n > 8 * 1024 * 1024) {
+                    return Err(SessionError::Config("配置超过本地读取预算".into()));
                 }
-                let (m, p) = self.schema.read_request("keymap.json")?;
-                let keymap = self.schema.bytes(&self.exchange(&mut q, m, p).await?)?;
-                let smart = if files.iter().any(|n| n == "smart_actions.json") {
-                    let (m, p) = self.schema.read_request("smart_actions.json")?;
-                    Some(self.schema.bytes(&self.exchange(&mut q, m, p).await?)?)
-                } else {
-                    None
+                let smart_actions = match smart {
+                    Some(m) => Some(self.read_file(&mut q, m).await?),
+                    None => None,
                 };
-                let mut parsed = self.schema.parse(&keymap, smart.as_deref())?;
-                parsed.source = Source::DeviceSnapshot;
-                let mut snapshot = self.snapshot.lock().unwrap();
+                let keymap = self.read_file(&mut q, key).await?;
+                let (m, p) = self.schema.list_request()?;
+                let second = self.schema.files(&self.exchange(&mut q, m, p).await?)?;
+                if first != second {
+                    return Err(SessionError::Config(
+                        "前后文件元数据不同；本次快照未更新".into(),
+                    ));
+                }
+                let mut parsed = self.schema.parse(
+                    &keymap.bytes,
+                    smart_actions.as_ref().map(|f| f.bytes.as_ref()),
+                )?;
+                parsed.source = if matches!(
+                    self.link.backend(),
+                    mi_transport::LinkBackend::MacHidapi267Numbered
+                ) {
+                    Source::DeviceSnapshot
+                } else {
+                    Source::Imported
+                };
+                parsed.firmware = read_firmware;
+                parsed.device_files = Some(
+                    std::iter::once(&keymap)
+                        .chain(smart_actions.iter())
+                        .map(|f| mi_model::FileVerification {
+                            name: f.meta.file.name().into(),
+                            size: f.meta.size,
+                            sha1: f.meta.checksum_hex(),
+                        })
+                        .collect(),
+                );
+                let mut held = self.snapshot.lock().unwrap();
                 if self.invalid.load(Ordering::SeqCst) {
                     return Err(SessionError::Disconnected);
                 }
-                *snapshot = Some(Snapshot {
+                *held = Some(Snapshot {
                     config: parsed.clone(),
                     stale: false,
+                    files: DeviceFiles {
+                        keymap,
+                        smart_actions,
+                    },
                 });
                 Ok(parsed)
-            })
-            .await;
-        if result.is_err() {
-            if let Some(s) = self.snapshot.lock().unwrap().as_mut() {
-                s.stale = true;
-            }
-        }
-        result
+            }),
+        )
+        .await
+        .map_err(|_| SessionError::Timeout)?
     }
 }
 impl Drop for DeviceSession {
@@ -435,3 +549,6 @@ impl Drop for DeviceSession {
 }
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod file_tests;

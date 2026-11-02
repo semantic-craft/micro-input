@@ -171,7 +171,7 @@ extension NavigationTests {
         store.selectProfile(1); store.selectLayer(0)
         await store.readDeviceConfig()
         requests = await core.syntheticRequests()
-        XCTAssertEqual(requests, ["device.status"])
+        XCTAssertEqual(requests, ["device.status", "fs.list"])
         XCTAssertEqual(store.snapshot?.source, "Demo")
         XCTAssertNotNil(store.connectedID)
         await store.suspend()
@@ -192,6 +192,54 @@ extension NavigationTests {
         XCTAssertNil(store.identity)
         XCTAssertNotNil(store.connectedID)
         XCTAssertTrue(store.identityStatus.contains("失败"))
+        await store.suspend()
+    }
+}
+#endif
+
+#if MI_SYNTHETIC_BACKEND
+extension NavigationTests {
+    @MainActor func testDeviceSnapshotThroughRealBridgeNeverEditsLocalDraft() async throws {
+        let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:directory)}
+        let url=directory.appendingPathComponent("workbench.json")
+        let core=MicroInputCore.MicroInput.syntheticDiscovery()
+        try await core.setSyntheticDiscovery(state:.twoDevices)
+        try await core.setSyntheticConfig(scenario:1)
+        let store=Store(backend:core,documentURL:url)
+        await store.loadWorkbench()
+        await store.assign("save")
+        let localFile=try Data(contentsOf:url)
+        let revision=store.draft.revision
+        await store.refresh(); store.selectDevice("synthetic-interface-0")
+        await store.connect("synthetic-interface-0"); await store.readIdentity(); await store.readDeviceConfig()
+        XCTAssertTrue(store.browsingDeviceSnapshot)
+        XCTAssertFalse(store.canEditDraft)
+        XCTAssertEqual(store.snapshot?.source,"Imported")
+        XCTAssertEqual(store.snapshot?.firmware,"synthetic-0.6.3")
+        XCTAssertEqual(store.snapshot?.device_files?.count,2)
+        XCTAssertEqual(store.layer?.displayColor,"#123456")
+        XCTAssertEqual(store.snapshot?.smartRecords.prefix(3).map { $0.0 }, ["SA_2", "SA_19", "SA_9007199254740993"])
+        XCTAssertTrue(store.snapshot?.raw.text.contains("18446744073709551615") == true)
+        XCTAssertEqual(store.profile?.id.text,"7")
+        let count=await core.syntheticRequests().count
+        store.selectProfile(1);store.selectLayer(0);await store.assign("copy");await store.undoDraft()
+        let afterNavigation=await core.syntheticRequests().count
+        XCTAssertEqual(afterNavigation,count)
+        XCTAssertEqual(store.draft.revision,revision)
+        XCTAssertEqual(try Data(contentsOf:url),localFile)
+        try await core.setSyntheticConfig(scenario:3)
+        await store.readDeviceConfig()
+        XCTAssertTrue(store.stale)
+        XCTAssertEqual(store.snapshot?.profiles.count,2)
+        XCTAssertTrue(store.browsingDeviceSnapshot)
+        store.showLocalDraft()
+        XCTAssertTrue(store.canEditDraft)
+        XCTAssertFalse(store.browsingDeviceSnapshot)
+        XCTAssertEqual(store.snapshot?.source,"Demo")
+        XCTAssertEqual(store.draft.edits.count,1)
+        await store.undoDraft()
+        XCTAssertTrue(store.draft.edits.isEmpty)
         await store.suspend()
     }
 }

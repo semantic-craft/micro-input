@@ -1,0 +1,92 @@
+{
+  "synthetic_only": true,
+  "not_firmware_validation": true,
+  "input_keymap": "synthetic-keymap-numeric.json",
+  "input_smart": "synthetic-smart-actions-object.json",
+  "projection_policy": "Candidate T03 read-only display expectations; original bytes always preserved",
+  "profile_expectations": [
+    {
+      "index": 0,
+      "source_id": 7,
+      "layer_source_ids": [
+        3,
+        99
+      ]
+    },
+    {
+      "index": 1,
+      "source_id": 42,
+      "layer_source_ids": [
+        501
+      ]
+    }
+  ],
+  "active_profile": {
+    "raw": 1,
+    "resolved": false
+  },
+  "color_vectors": [
+    {
+      "pointer": "/profiles/0/layers/0/color",
+      "raw": 1193046,
+      "display": "#123456"
+    },
+    {
+      "pointer": "/profiles/0/layers/1/color",
+      "raw": 0,
+      "display": "#000000"
+    },
+    {
+      "pointer": "/profiles/1/layers/0/color",
+      "raw": 16777215,
+      "display": "#FFFFFF"
+    }
+  ],
+  "token_alias_vectors": [
+    {
+      "raw": "KA_A12",
+      "display_alias_candidate": "KA_12",
+      "reference_semantics": "unverified"
+    },
+    {
+      "raw": "KA_M37",
+      "display_alias_candidate": "KM_37",
+      "reference_semantics": "unverified"
+    },
+    {
+      "raw": "KC_FUNC11",
+      "display_alias_candidate": "KI_FP11",
+      "reference_semantics": "unverified"
+    },
+    {
+      "raw": "SYNTH_UNKNOWN_TOKEN",
+      "classification": "Unknown",
+      "never_empty": true
+    }
+  ],
+  "smart_source_keys_sorted": [
+    "SA_2",
+    "SA_19",
+    "SA_9007199254740993"
+  ],
+  "smart_unknown_source_keys": [
+    "SYNTH_FUTURE_KEY"
+  ],
+  "smart_existing_id_preserved": "existing-id-must-not-be-overwritten",
+  "preserved_keymap_pointers": [
+    "/future_root/u64_max",
+    "/future_root/unicode",
+    "/profiles/0/layers/0/future_layer",
+    "/multiActionGroups",
+    "/multiActionsGroups",
+    "/macros/0/syntheticEvents"
+  ],
+  "u64_max": 18446744073709551615,
+  "invalid_color_vectors": [
+    -1,
+    16777216,
+    "1193046"
+  ],
+  "invalid_color_policy": "retain raw, derived color absent; never clamp/coerce",
+  "readonly_identity_policy": "path indices may browse duplicate/missing IDs within this snapshot; never synthesize source IDs"
+}

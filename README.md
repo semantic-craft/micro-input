@@ -14,13 +14,13 @@ scripts/run --verify   # 验收实例10分钟自动退出
 
 需要macOS14+、Rust stable、Swift工具链。构建不加载凭据。仅本地ad-hoc开发签名，未正式发布。
 
-启动仅载入合成配置；点击“查找 / 刷新 USB”后只读枚举 USB HID 描述符并持续监听插拔，不会打开硬件或申请权限。候选经完整 usage pairs 与 OS USB 来源筛选，多候选必须明确选择；0x8297 标为未验型号，固件始终显示未知。插拔事件更新候选，选择不读取或应用设备配置。草稿保存在用户Application Support/MicroInput/workbench.json；退出重开恢复。参数表单需点击保存，撤销历史仅在当前会话。无法执行动作或写入设备。支持显式USB身份查询，当前303A:8298/固件0.6.3已在应用路径读回；配置读取仍受UNKNOWN接口阻断，不把演示数据作为设备快照。
+启动仅载入合成配置；点击“查找 / 刷新 USB”后只读枚举 USB HID 描述符并持续监听插拔，不会打开硬件或申请权限。候选经完整 usage pairs 与 OS USB 来源筛选，多候选必须明确选择；0x8297 标为未验型号，固件始终显示未知。插拔事件更新候选，选择不读取或应用设备配置。草稿保存在用户Application Support/MicroInput/workbench.json；退出重开恢复。参数表单需点击保存，撤销历史仅在当前会话。无法执行动作或写入设备。支持显式USB身份查询，当前303A:8298/固件0.6.3已在应用路径读回；显式身份为受支持的0.6.3后可读取两份限定配置文件，按块校验原始SHA-1并再次list，再一次发布只读快照。查看设备不会改变本地草稿，返回后保留编辑与撤销。其他固件仍拒绝读取，不把演示或导入数据作为设备快照。
 
 规格见 [SPEC](docs/spec/SPEC.md)、分阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)、[证据](docs/spec/EVIDENCE.md)和[未知项](docs/spec/UNKNOWNS.md)。
 
 ## 调研入口
 
-可直接用于只读客户端实现的结论见 [USB 发现、身份与配置读取协议](docs/protocol-readonly.md)。依据 Input 1.1.0 静态分析及本机 IOKit 枚举；独立IOKit探针曾读回0.6.3；应用身份路径已读回0.6.3；配置读取与完整生命周期尚未验收。
+可直接用于只读客户端实现的结论见 [USB 发现、身份与配置读取协议](docs/protocol-readonly.md)。依据 Input 1.1.0 静态分析及本机 IOKit 枚举；独立IOKit探针曾读回0.6.3；应用身份路径已读回0.6.3；当前0.6.3的配置读取及原生只读浏览已有E-079验收；完整生命周期和物理映射仍待验收。
 
 以下为本机原始调查材料，保存在 Git 忽略的 `.scratch/input-study/`，不随源码提交：
 
@@ -34,6 +34,6 @@ scripts/run --verify   # 验收实例10分钟自动退出
 
 ## 下一步
 
-PR #12/#13 已交付原生离线工作台、结构化动作和本地持久化。下一实施前沿为 [#3 设备发现](https://github.com/semantic-craft/micro-input/issues/3) / [#4 身份读取](https://github.com/semantic-craft/micro-input/issues/4)，限只读范围并受协议证据门槛约束；真实读取尚未通过应用验收。
+PR #12/#13 已交付原生离线工作台、结构化动作和本地持久化。当前已有设备发现、身份查询与[#5 配置读取](https://github.com/semantic-craft/micro-input/issues/5)实现；配置原生浏览验收见[E-079](docs/spec/EVIDENCE.md)，[#6 生命周期](https://github.com/semantic-craft/micro-input/issues/6)及未核实物理映射仍待验证。范围继续限定只读，不从核心读回推定全部S1完成。
 
 完整目标与 35 张工单入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)，技术契约见 [实施设计](docs/implementation-plan.md)，阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)。规划已批准不等于未来阶段获准执行；当前不接自动化、不写设备、不执行宿主动作。未完成技术细化的工单使用 needs-info，并在工单内列明缺项。

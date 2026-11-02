@@ -38,3 +38,11 @@
 - 起因：全量检查中两个持久化测试获得相同系统时钟值，create_dir 报 AlreadyExists。
 - 修复：临时目录增加进程内原子序号，不再仅依赖时钟分辨率隔离并行测试。
 - 验证：mi-model 并行测试与 scripts/check；不改变用户文档保存策略。Seen 1x。
+
+## 响应分派先判断请求归属
+
+- 起因与后果：T03原生只读验收中未知method echo可终结reader；旧路径在核对pending ID前校验所有回应，外来响应被当作当前请求错误。
+- 修复与证据：先校验响应ID并丢弃非pending响应，再严格验证当前回应。NativeFramer回归覆盖空闲/在途外来ID、同ID不同method与当前ID畸形回应；见mi-session/tests.rs的foreign_response_echo_does_not_kill_reader_or_satisfy_current_request和owned_malformed_response_remains_an_error_after_routing。实际原生流只记录分类元数据，未取得原失败对应来包，原因关联仍有限。
+- 正确做法：出站方法白名单约束本应用发送，不用它假定整个共享接收流只包含本应用回应；同ID冲突仍不能靠此消除。
+- 验证点：cargo test -p mi-session response；测试必须既确认外来回应不杀会话，也确认当前无效回应仍失败，不能靠放宽echo接受条件通过。
+- 复发记录：Seen 1x（2026-11-02）。

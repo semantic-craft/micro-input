@@ -81,7 +81,7 @@ struct StatusPanel: View {
     let owner: StatusMenu
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("离线演示 · 不激活设备配置").font(.caption).foregroundStyle(.secondary)
+            Text(store.browsingDeviceSnapshot ? (store.stale ? "设备快照已过期 · 浏览不激活配置" : "设备快照只读 · 浏览不激活配置") : "本地草稿 · 不激活设备配置").font(.caption).foregroundStyle(.secondary)
             ForEach(Array((store.snapshot?.profiles ?? []).enumerated()), id: \.offset) { i,p in
                 Button(p.name) { store.selectProfile(i); owner.showWindow() }
             }

@@ -78,6 +78,10 @@ pub trait HidTransport: Send + Sync {
         Err(TransportError::Unsupported)
     }
     #[cfg(feature = "synthetic-backend")]
+    fn set_synthetic_config(&self, _scenario: u8) -> Result<(), TransportError> {
+        Err(TransportError::Unsupported)
+    }
+    #[cfg(feature = "synthetic-backend")]
     fn synthetic_requests(&self) -> Vec<String> {
         vec![]
     }
@@ -464,6 +468,7 @@ mod tests {
 pub struct SyntheticDiscovery {
     state: Mutex<u8>,
     identity: std::sync::atomic::AtomicU8,
+    configuration: Arc<std::sync::atomic::AtomicU8>,
     input_inject: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
     requests: Arc<Mutex<Vec<String>>>,
     events: broadcast::Sender<()>,
@@ -475,6 +480,7 @@ impl Default for SyntheticDiscovery {
         Self {
             state: Mutex::new(0),
             identity: std::sync::atomic::AtomicU8::new(0),
+            configuration: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             input_inject: Mutex::new(None),
             requests: Arc::new(Mutex::new(vec![])),
             events,
@@ -516,11 +522,13 @@ impl HidTransport for SyntheticDiscovery {
         }
         let (link, mut incoming) = MockLink::new();
         let scenario = self.identity.load(Ordering::SeqCst);
+        let configuration = self.configuration.clone();
         let requests = self.requests.clone();
         let inject = link.inject.clone();
         *self.input_inject.lock().unwrap() = Some(inject.clone());
         tokio::spawn(async move {
             let mut bytes = vec![];
+            let mut lists = 0;
             while let Some(report) = incoming.recv().await {
                 if report.len() != 64 || report[0] != 6 || report[1] != 2 || report[2] > 61 {
                     break;
@@ -532,7 +540,40 @@ impl HidTransport for SyntheticDiscovery {
                 bytes.clear();
                 let method = request["method"].as_str().unwrap_or("");
                 requests.lock().unwrap().push(method.to_owned());
-                let response = if scenario == 2 {
+                let config = configuration.load(Ordering::SeqCst);
+                let response = if method == "fs.list" || method == "fs.readbin" {
+                    use base64::Engine;
+                    let keymap = include_bytes!(
+                        "../../mi-model/fixtures/device/synthetic-keymap-multichunk.json"
+                    );
+                    let smart = include_bytes!(
+                        "../../mi-model/fixtures/device/synthetic-smart-actions-object.json"
+                    );
+                    let result = if method == "fs.list" {
+                        lists += 1;
+                        serde_json::json!([
+                            {"name":"keymap.json","size":if config==2 && lists%2==0 {1} else {12466},"checksum":"29982c129d7250b624d483d1bf2a29544271507e"},
+                            {"name":"smart_actions.json","size":738,"checksum":"e60e82aba8a5f71ba7726febac9310e4007ed2ab"}
+                        ])
+                    } else {
+                        let file: &[u8] = if request["params"]["file"] == "keymap.json" {
+                            keymap
+                        } else {
+                            smart
+                        };
+                        let offset = request["params"]["offset"].as_u64().unwrap_or(0) as usize;
+                        let len = request["params"]["len"].as_u64().unwrap_or(0) as usize;
+                        let chunk = file
+                            .get(offset..offset.saturating_add(len))
+                            .unwrap_or_default();
+                        serde_json::json!({"total_size":file.len(),"data":if config==3 {"!invalid".into()} else {base64::engine::general_purpose::STANDARD.encode(chunk)}})
+                    };
+                    if config == 0 {
+                        serde_json::json!({"id":request["id"],"error":{"code":503,"message":"synthetic configuration unavailable"}})
+                    } else {
+                        serde_json::json!({"id":request["id"],"result":result})
+                    }
+                } else if scenario == 2 {
                     serde_json::json!({"id":request["id"],"error":{"code":500,"message":"synthetic identity failure"}})
                 } else if method == "device.status" && scenario == 1 {
                     serde_json::json!({"id":request["id"],"result":{"profile_index":-1,"layer_index":1.5}})
@@ -577,6 +618,10 @@ impl HidTransport for SyntheticDiscovery {
     }
     fn set_synthetic_identity(&self, scenario: u8) -> Result<(), TransportError> {
         self.identity.store(scenario, Ordering::SeqCst);
+        Ok(())
+    }
+    fn set_synthetic_config(&self, scenario: u8) -> Result<(), TransportError> {
+        self.configuration.store(scenario, Ordering::SeqCst);
         Ok(())
     }
     fn synthetic_requests(&self) -> Vec<String> {

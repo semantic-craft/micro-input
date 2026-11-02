@@ -24,7 +24,10 @@ indirect enum JSONValue: Codable {
         return "\(kind == "Unknown" ? "Unknown" : kind) · \(payload.text)"
     }
 }
+struct DeviceFileVerification: Decodable { let name: String, size: UInt64, sha1: String }
 struct Snapshot: Decodable {
+    let firmware: String?
+    let device_files: [DeviceFileVerification]?
     let source: String, read_at: UInt64, profiles: [Profile], warnings: [String]
     let active_profile: JSONValue, raw: JSONValue
     let macros: JSONValue, multi_actions: JSONValue, smart_actions: JSONValue
@@ -74,5 +77,38 @@ extension CatalogAction {
             let label = ["text":"文本", "url":"网址", "key":"按键", "target":"目标", "modifiers":"修饰键", "adapter":"适配器（未验证）", "command":"命令引用", "session":"会话引用", "skill":"Skill 引用"][key] ?? key
             return "\(label)：\(payload[key]?.text ?? "")"
         }.joined(separator: "\n")
+    }
+}
+
+extension Layer {
+    var displayColor: String? {
+        let value: UInt64
+        switch color {
+        case .unsigned(let n): value = n
+        case .integer(let n) where n >= 0: value = UInt64(n)
+        default: return nil
+        }
+        guard value <= 0xFFFFFF else { return nil }
+        return String(format: "#%06llX", value)
+    }
+}
+extension Snapshot {
+    var smartRecords: [(String, JSONValue)] {
+        guard case .object(let root) = smart_actions, case .object(let records) = root["smartActions"] else { return [] }
+        func digits(_ key: String) -> String? {
+            guard key.hasPrefix("SA_") else { return nil }
+            let suffix = String(key.dropFirst(3))
+            guard !suffix.isEmpty, suffix.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }) else { return nil }
+            let trimmed = String(suffix.drop(while: { $0 == "0" }))
+            return trimmed.isEmpty ? "0" : trimmed
+        }
+        return records.sorted { a, b in
+            if let left = digits(a.key), let right = digits(b.key) {
+                if left.count != right.count { return left.count < right.count }
+                if left != right { return left < right }
+            } else if digits(a.key) != nil { return true }
+            else if digits(b.key) != nil { return false }
+            return a.key < b.key
+        }.map { ($0.key, $0.value) }
     }
 }
