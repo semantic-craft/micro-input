@@ -14,6 +14,9 @@ protocol Backend {
     func subscribeDeviceEvents(cb: DeviceEvents) async
     func subscribeInput() async throws -> InputSubscription
     func openDocument(path: String) async throws -> String
+    func inspectAgentProposal(text: String) async throws -> String
+    func rejectAgentProposal() async
+    func acceptAgentProposal(token: String) async throws -> String
     func recoveryFiles() async throws -> [String]
     func inspectRecovery(path: String) async throws -> String
     func recoverDocument(token: String) async throws -> String
@@ -52,6 +55,9 @@ protocol Backend {
     func resolveComparison(token: String, choice: String) async throws -> String
 }
 extension Backend {
+    func inspectAgentProposal(text: String) async throws -> String { throw BridgeError.Failed(message: "Agent 提案不可用") }
+    func rejectAgentProposal() async {}
+    func acceptAgentProposal(token: String) async throws -> String { throw BridgeError.Failed(message: "Agent 提案不可用") }
     func recoveryFiles() async throws -> [String] { throw BridgeError.Failed(message: "文档恢复不可用") }
     func inspectRecovery(path: String) async throws -> String { throw BridgeError.Failed(message: "文档恢复不可用") }
     func recoverDocument(token: String) async throws -> String { throw BridgeError.Failed(message: "文档恢复不可用") }
@@ -208,6 +214,20 @@ extension MicroInput: Backend {}
         do {
             try applyDocument(try await backend.importPreset(text: text), fresh: true)
             status = "已创建独立本地草稿 · 原文档保留 · 未激活设备或执行动作"
+            return true
+        } catch { status = readableError(error); return false }
+    }
+    func inspectAgentProposal(_ text: String) async throws -> AgentProposalPreview {
+        guard canEditDraft, !busy else { throw BridgeError.Failed(message: "请先返回可编辑本地草稿") }
+        return try JSONDecoder().decode(AgentProposalPreview.self, from: Data(try await backend.inspectAgentProposal(text: text).utf8))
+    }
+    func rejectAgentProposal() async { await backend.rejectAgentProposal() }
+    @discardableResult func acceptAgentProposal(token: String) async -> Bool {
+        guard canEditDraft, !busy else { return false }
+        busy = true; defer { busy = false }
+        do {
+            try applyDocument(try await backend.acceptAgentProposal(token: token), fresh: true)
+            status = "已接受 Agent 提案为独立草稿 · 原文档保留 · 不写设备"
             return true
         } catch { status = readableError(error); return false }
     }

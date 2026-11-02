@@ -214,6 +214,25 @@ impl MicroInput {
         store.open(path.into()).map_err(failure)?;
         document_response(&store.draft, None)
     }
+    pub async fn inspect_agent_proposal(&self, text: String) -> Result<String, BridgeError> {
+        let preview = self
+            .draft
+            .lock()
+            .unwrap()
+            .inspect_agent_proposal(&text)
+            .map_err(|e| failure(e.to_string()))?;
+        serde_json::to_string(&preview).map_err(|e| failure(e.to_string()))
+    }
+    pub async fn reject_agent_proposal(&self) {
+        self.draft.lock().unwrap().reject_agent_proposal();
+    }
+    pub async fn accept_agent_proposal(&self, token: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .accept_agent_proposal(&token)
+            .map_err(|e| failure(e.to_string()))?;
+        document_response(&store.draft, None)
+    }
     pub async fn recovery_files(&self) -> Result<Vec<String>, BridgeError> {
         self.draft.lock().unwrap().recovery_files().map_err(failure)
     }

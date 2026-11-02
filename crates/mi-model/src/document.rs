@@ -511,6 +511,7 @@ impl LocalDocumentV2 {
         if self.baseline.is_some()
             || self.origin["local_recovery"].is_object()
             || self.origin["local_copy"].is_object()
+            || self.origin["agent_proposal"].is_object()
             || matches!(
                 self.origin["kind"].as_str(),
                 Some("legacy-local" | "imported-local")

@@ -4,6 +4,7 @@ cd "$(dirname "$0")/.."
 export MACOSX_DEPLOYMENT_TARGET=14.0
 features=(--no-default-features)
 if [[ "${1:-}" == "--synthetic" ]]; then features=(--features synthetic-backend); fi
+cargo build --locked -p mi-model --bin mi
 cargo build --locked -p mi-ffi "${features[@]}"
 mkdir -p target/swift-bindings app/MicroInput/Sources/MicroInputCore app/MicroInput/Sources/MicroInputCoreFFI
 cargo run --locked -p mi-ffi "${features[@]}" --bin uniffi-bindgen -- generate --library target/debug/libmi_ffi.dylib --language swift --config crates/mi-ffi/uniffi.toml --out-dir target/swift-bindings
