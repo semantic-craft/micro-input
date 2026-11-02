@@ -148,7 +148,22 @@ T30 本地恢复在 `mi-model/src/recovery.rs` 复用 `Draft::from_bytes` 的 v1
 
 操作机制仅采用核实的公开接口或明确的焦点操作；不臆造 CLI/RPC。无法保证指定目标的快捷键不充当专用会话控制。缺少最低能力时保持票未完成，并提交明确的范围调整；不能用“不支持”满足原目标。Task/Command/Skill 的类型保留；本轮不增加任务调度或执行。
 
-#38（T29）即未来 Agent 草稿接口，首选一次性本地 CLI `mi draft read/validate/patch` + 版本化 JSON stdin/stdout，复用 Rust 文档服务的 revision 检查和锁；不开放网络服务、通用设备 RPC 或任务执行。本轮只固定接口形态；JSON 字段、错误码及客户端样例在其开工前单独补齐，未补齐前不标 ready。
+#38（T29）采用一次性本地 CLI `mi draft read/validate/patch`，JSON stdin/stdout 协议版本 1；只处理已保存的本地文档，不开放网络服务、通用设备 RPC 或任务执行。具体契约如下。
+
+### T29 Agent 本地提案契约
+
+`cargo build -p mi-model --bin mi` 生成 `target/debug/mi`。每进程读取一个至多 4 MiB 的 JSON 对象并退出；标准输出恰一份 JSON，成功 exit 0，结构化失败 exit 2。请求公共字段为 `api_version:1`、`workbench`（绝对工作台路径）；read 仅允许这两项。validate/patch 另带 `expected:{document_id,revision,sha256}` 和非空 `operations`（最多 100 项）；patch 还需 `output`（绝对新文件路径）。所有请求、expected、操作、提案 envelope 拒绝未知字段。SHA-256 覆盖 read 时实际选中文档原字节，revision 是 v2 文档修订；v1、未知字段/动作的文档可读但不可修改。缺失工作台不生成演示文档。
+
+操作白名单：`{op:"rename_profile",profile_id,name}`、`{op:"rename_layer",layer_id,name}`、`{op:"bind_action",profile_id,layer_id,binding_id,action_id}`。ID 均为 read 返回的本地 UUID；action_id 为已存在且已知的动作 UUID 或 null（解绑）。绑定归属与所有引用按 UI 同一 Rust Draft/LocalDocumentV2 校验。不提供任意 JSON Pointer、raw/origin/baseline 编辑、新动作执行或设备接口。read 的 capabilities 列出可用操作、local_proposal=true、device_apply=false、host_execute=false。
+
+成功包络 `{api_version:1,ok:true,result:{...}}`；read result 含 `stamp`、`document`、`source_kind`、`read_only`、`capabilities`。validate result 含 `base`、`document`、`changes`，仅计算，不落盘。patch result 另含 `proposal_path`；提案为 `{format:"micro-input-proposal",format_version:1,base,operations,document}`，document 使用新文档 UUID 和 origin.agent_proposal 来源身份/修订/摘要记录，其余内容来自同一核心模型的操作结果，未知来源 raw 保留；此标记使 UI 投影为 LocalDraft，origin.config 保持历史值。patch 在文档与选择记录的现有锁下复核原字节/修订和 active 指针，以 create_new/0600 输出；不改当前文档、选择记录或偏好。
+
+失败包络 `{api_version:1,ok:false,error:{code,message}}`，稳定 code：`invalid_request`（命令、JSON、字段、大小或路径），`unsupported_version`，`capability_unavailable`（设备应用、宿主执行或其他未提供的操作），`not_found`，`read_only`，`stale_revision`（身份/修订/原字节/选择变化），`invalid_operation`（参数或悬空/归属错误引用），`conflict`（锁、已存在输出/中断保存），`io_error`。message 是可读说明，不作为程序判别条件。
+
+工作台的“审阅 Agent 提案”通过同一 Rust 文档服务读取/锁定当前来源，验证 envelope、base 和受限操作重放结果与文档完全一致，再显示变化；接受前再次复核来源并新建独立草稿，原文档保留。拒绝只清除内存预览。预览后来源或工作台修订变化会拒绝接受，不能把旧提案套到新文档；提案文件在预览时固定为同一份有界内容，修改外部文件不会替换已预览内容。
+
+真实客户端样例 `scripts/draft-client.py WORKBENCH OUTPUT [NAME]` 通过 subprocess 调用 read→validate→patch，把第一个 Profile 改名为 NAME（默认 Agent 草稿示例），输出提案路径；没有任何 UI 接受或设备应用接口。随后在工作台选择该提案，核对差异，可拒绝或接受为独立草稿。read 会返回完整本地内容（可能含文本参数和历史来源），客户端应仅在本机受授权目录使用。
+
 
 ### T10 本地控件编辑契约
 

@@ -61,6 +61,7 @@ struct Workbench: View {
                     }.disabled(!store.canEditDraft || store.busy)
                     PresetMenu(store: store)
                     DocumentRecoveryMenu(store: store)
+                    AgentProposalButton(store: store)
                     Text("切换配置不会应用到设备。").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Label(store.browsingDeviceSnapshot ? (store.snapshot?.source == "DeviceSnapshot" ? "设备快照 · 只读" : "合成夹具 · 只读") : "本地草稿", systemImage: store.browsingDeviceSnapshot ? "eye" : "doc")

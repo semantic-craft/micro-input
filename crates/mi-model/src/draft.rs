@@ -457,6 +457,37 @@ impl Draft {
             Ok(())
         })
     }
+    /// Bind an existing local action using stable ownership IDs; no action is executed.
+    pub fn bind_existing_action(
+        &mut self,
+        profile_id: &str,
+        layer_id: &str,
+        binding_id: &str,
+        action_id: Option<&str>,
+    ) -> Result<(), String> {
+        self.mutate(|d| {
+            let graph = &mut d.editable.graph;
+            if !graph
+                .profiles
+                .get(profile_id)
+                .is_some_and(|p| p.layer_order.iter().any(|id| id == layer_id))
+            {
+                return Err("层不属于配置".into());
+            }
+            if let Some(id) = action_id {
+                graph.actions.get(id).ok_or("动作引用不存在")?.validate()?;
+            }
+            let binding = graph
+                .layers
+                .get_mut(layer_id)
+                .ok_or("层不存在")?
+                .controls
+                .get_mut(binding_id)
+                .ok_or("控件不属于层")?;
+            binding.action_id = action_id.map(str::to_owned);
+            Ok(())
+        })
+    }
     pub fn undo(&mut self, redo: bool) -> Result<(), String> {
         if self.read_only {
             return Err("文档仅可浏览".into());

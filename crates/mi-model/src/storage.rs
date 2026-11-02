@@ -17,6 +17,7 @@ pub struct DocumentStore {
     selection: Option<(PathBuf, Option<Vec<u8>>)>,
     preferences: HostPreferencesStore,
     recovery_preview: Option<recovery::InspectedRecovery>,
+    agent_preview: Option<agent::Pending>,
 }
 fn read(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
     let f = match fs::File::open(path) {
@@ -485,3 +486,6 @@ impl Drop for Lock {
 #[path = "recovery.rs"]
 mod recovery;
 pub use recovery::RecoveryPreview;
+
+#[path = "agent.rs"]
+pub mod agent;

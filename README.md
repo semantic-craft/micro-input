@@ -24,6 +24,8 @@ scripts/run --verify   # 独立QA标识/文档，10分钟自动退出并回收�
 
 “导入与导出”支持整文档、当前配置或当前层的自有 JSON 预设，以及原创 Coding 起步预设。导入先预览，再创建独立草稿；原文档保留，本地对象 ID 重映射，历史设备基线不作为当前设备事实。为保留未知原值，导出仍包含完整来源档案，保存前会提示；不宣称兼容厂商格式。见[预设交换契约](docs/implementation-plan.md#t11-自有预设交换契约)。
 
+Agent 可通过 `target/debug/mi draft read/validate/patch` 读取已保存的本地文档、校验受限操作并生成独立提案。工作台“审阅 Agent 提案…”显示来源修订、摘要和逐项差异，拒绝保持当前草稿，接受才创建独立草稿。过期身份/修订/原字节、非法字段、悬空引用与保存冲突均拒绝。示例：`scripts/draft-client.py /absolute/workbench.json /absolute/proposal.json '新配置名称'`；CLI 只支持配置/层改名及已有本地动作绑定，不创建新动作、不控制设备或执行宿主动作。协议、错误码与来源保全见[T29 契约](docs/implementation-plan.md#t29-agent-本地提案契约)。
+
 规格见 [SPEC](docs/spec/SPEC.md)、分阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)、[证据](docs/spec/EVIDENCE.md)和[未知项](docs/spec/UNKNOWNS.md)。
 
 ## 调研入口
