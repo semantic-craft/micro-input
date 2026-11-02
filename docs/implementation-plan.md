@@ -122,6 +122,8 @@ T09 的 Multi 继续使用 graph.actions 与同一 DocumentStore：`ActionKind::
 
 “合并无冲突变化”：仅全体无冲突且引用有效时启用；base=R，draft=合并结果。“保留整份本地草稿”：显式确认忽略设备侧可编辑变化；base=R，draft=L，未知 raw 仍以 R 保存且只读，不用 L 覆盖。“采用整份设备版本”：显式确认舍弃本地编辑；base=R，draft=R。“取消”：B/L/revision 全不变。
 
+接受后的 baseline.comparison_config 保存本次核验投影，origin.config 继续保留初始来源；显示与 diff 使用当前基线，不改写不可变来源。当前 USB 来源只有 observed-interface，不等于可靠物理身份；跨重连需核对当前候选后明确选择整份版本，临时接口变化时先阻断版本接受；用户明确核对同一设备后，仅为当前比较 token、当前会话和快照解锁整份版本选择。baseline.identity_resolution 保存 user-confirmed 记录，device_identity.confidence 仍为 observed-interface，自动合并仍禁用；可靠序列号不同不能绕过。
+
 前三种操作先保存前态恢复副本，再原子保存新文档；成功 revision+1、清空旧撤销栈、diff 由新 base 与 draft 重算。保留本地仍有 diff；采用设备 diff 为空。保存失败不改变内存。
 
 #22 写前再次核验设备身份和文件摘要，变化即拒绝应用并要求重做比较；不能认为一次比较永久有效。

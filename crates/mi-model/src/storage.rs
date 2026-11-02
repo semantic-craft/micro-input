@@ -10,6 +10,7 @@ const LIMIT: u64 = 4 * 1024 * 1024;
 #[derive(Default)]
 pub struct DocumentStore {
     pub draft: Draft,
+    comparison: Option<crate::comparison::Comparison>,
     path: Option<PathBuf>,
     expected: Option<Vec<u8>>,
     blocked: bool,
@@ -32,6 +33,63 @@ fn read(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(b))
 }
 impl DocumentStore {
+    pub fn compare(
+        &mut self,
+        config: &crate::DeviceConfig,
+        baseline: serde_json::Value,
+    ) -> Result<crate::comparison::Comparison, String> {
+        if self.blocked || self.draft.read_only {
+            return Err("本地文档只读或未载入；不能比较".into());
+        }
+        let comparison =
+            crate::comparison::Comparison::new(&self.draft.document, config, baseline)?;
+        self.comparison = Some(comparison.clone());
+        Ok(comparison)
+    }
+    pub fn confirm_comparison_identity(
+        &mut self,
+        token: &str,
+        current: &serde_json::Value,
+    ) -> Result<crate::comparison::Comparison, String> {
+        let comparison = self
+            .comparison
+            .as_mut()
+            .filter(|c| c.token == token)
+            .ok_or("比较结果已过期；请重新比较")?;
+        comparison.confirm_identity(&self.draft.document, current)?;
+        Ok(comparison.clone())
+    }
+    pub fn resolve_comparison(
+        &mut self,
+        token: &str,
+        choice: crate::comparison::Choice,
+        current: &serde_json::Value,
+    ) -> Result<(), String> {
+        let comparison = self
+            .comparison
+            .as_ref()
+            .filter(|c| c.token == token)
+            .ok_or("比较结果已过期；请重新比较")?;
+        if choice == crate::comparison::Choice::Cancel {
+            self.comparison = None;
+            return Ok(());
+        }
+        comparison.ensure_snapshot(current)?;
+        let next = comparison
+            .resolve(&self.draft.document, choice)?
+            .ok_or("没有比较结果")?;
+        let draft = Draft::from_document(next, 2, false)?;
+        self.update_with_recovery(
+            |d| {
+                *d = draft;
+                Ok(())
+            },
+            true,
+        )?;
+        self.comparison = None;
+        Ok(())
+    }
+
     pub fn open(&mut self, path: PathBuf) -> Result<(), String> {
         self.blocked = true;
         let preferences_path = path.with_extension("preferences.json");
@@ -166,6 +224,13 @@ impl DocumentStore {
         &mut self,
         edit: impl FnOnce(&mut Draft) -> Result<(), String>,
     ) -> Result<(), String> {
+        self.update_with_recovery(edit, false)
+    }
+    fn update_with_recovery(
+        &mut self,
+        edit: impl FnOnce(&mut Draft) -> Result<(), String>,
+        recovery: bool,
+    ) -> Result<(), String> {
         if self.blocked {
             return Err("本地文档未成功载入，已停止保存；原文件保留".into());
         }
@@ -210,6 +275,33 @@ impl DocumentStore {
                 }
                 if read(&backup)?.as_ref() != Some(original) {
                     return Err("迁移备份不一致；原件保留".into());
+                }
+            }
+            if recovery {
+                use sha2::{Digest, Sha256};
+                let old = self.expected.clone().unwrap_or(
+                    serde_json::to_vec_pretty(&self.draft.document).map_err(|e| e.to_string())?,
+                );
+                let hash = format!("{:x}", Sha256::digest(&old));
+                let backup = path.with_file_name(format!(
+                    "{}.reconnect.{hash}.backup",
+                    path.file_name().ok_or("无效文件名")?.to_string_lossy()
+                ));
+                match OpenOptions::new()
+                    .write(true)
+                    .mode(0o600)
+                    .create_new(true)
+                    .open(&backup)
+                {
+                    Ok(mut f) => f
+                        .write_all(&old)
+                        .and_then(|_| f.sync_all())
+                        .map_err(|e| e.to_string())?,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(e.to_string()),
+                }
+                if read(&backup)?.as_ref() != Some(&old) {
+                    return Err("重连恢复副本不一致；没有保存".into());
                 }
             }
             let tmp = path.with_extension("pending");

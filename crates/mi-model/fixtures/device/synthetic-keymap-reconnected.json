@@ -1,0 +1,310 @@
+{
+  "syntheticFixture": {
+    "synthetic_only": true,
+    "purpose": "Independent read-only projection fixture; never send to a device; no manufacturer/user payload."
+  },
+  "version": 1,
+  "activeProfileId": 1,
+  "profiles": [
+    {
+      "id": 7,
+      "name": "Synthetic external edit",
+      "layers": [
+        {
+          "id": 3,
+          "name": "Synthetic numeric color",
+          "color": 1193046,
+          "layout": {
+            "keymap": [
+              [
+                "KC_A",
+                "KA_A12"
+              ],
+              [
+                "KA_M37",
+                "KC_FUNC11",
+                "KV_OAI_AG00",
+                "SYNTH_UNKNOWN_TOKEN"
+              ],
+              [
+                null,
+                {
+                  "synthetic_unknown_binding": {
+                    "id": 18446744073709551615
+                  }
+                },
+                "SA_19",
+                "SA_404"
+              ],
+              [
+                "KC_B",
+                "KC_NO",
+                "SYNTH_WIDE_SWITCH_11"
+              ]
+            ],
+            "encoders": [
+              "SYNTH_ROTATION_A",
+              "SYNTH_ROTATION_B",
+              {
+                "future_encoder": true
+              }
+            ],
+            "buttons": {
+              "synthetic_button_schema_unknown": true
+            },
+            "joystick": {
+              "mode": "SYNTH_MODE_UNKNOWN",
+              "sectors": [
+                {
+                  "k": "KC_A",
+                  "future_sector": {
+                    "angle": 0.125
+                  }
+                },
+                {
+                  "k": "SYNTH_UNKNOWN_SECTOR",
+                  "future_flag": true
+                }
+              ],
+              "future_joystick": 17
+            }
+          },
+          "lights": {
+            "backlight": {
+              "effect": "SYNTH_UNKNOWN_EFFECT",
+              "brightness": 0.25,
+              "future": {
+                "x": 1
+              }
+            },
+            "underglow": {
+              "effect": "off",
+              "future": false
+            }
+          },
+          "linkedAppId": 9001,
+          "future_layer": {
+            "preserved": true
+          }
+        },
+        {
+          "id": 99,
+          "name": "Synthetic black",
+          "color": 0,
+          "layout": {
+            "keymap": [
+              [
+                "KC_A",
+                "KA_A12"
+              ],
+              [
+                "KA_M37",
+                "KC_FUNC11",
+                "KV_OAI_AG00",
+                "SYNTH_UNKNOWN_TOKEN"
+              ],
+              [
+                null,
+                {
+                  "synthetic_unknown_binding": {
+                    "id": 18446744073709551615
+                  }
+                },
+                "SA_19",
+                "SA_404"
+              ],
+              [
+                "KC_B",
+                "KC_NO",
+                "SYNTH_WIDE_SWITCH_11"
+              ]
+            ],
+            "encoders": [
+              "SYNTH_ROTATION_A",
+              "SYNTH_ROTATION_B",
+              {
+                "future_encoder": true
+              }
+            ],
+            "buttons": {
+              "synthetic_button_schema_unknown": true
+            },
+            "joystick": {
+              "mode": "SYNTH_MODE_UNKNOWN",
+              "sectors": [
+                {
+                  "k": "KC_A",
+                  "future_sector": {
+                    "angle": 0.125
+                  }
+                },
+                {
+                  "k": "SYNTH_UNKNOWN_SECTOR",
+                  "future_flag": true
+                }
+              ],
+              "future_joystick": 17
+            }
+          },
+          "lights": {
+            "backlight": {
+              "effect": "SYNTH_UNKNOWN_EFFECT",
+              "brightness": 0.25,
+              "future": {
+                "x": 1
+              }
+            },
+            "underglow": {
+              "effect": "off",
+              "future": false
+            }
+          },
+          "linkedAppId": 9001,
+          "future_layer": {
+            "preserved": true
+          }
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "name": "Synthetic profile forty-two",
+      "layers": [
+        {
+          "id": 501,
+          "name": "Synthetic white",
+          "color": 16777215,
+          "layout": {
+            "keymap": [
+              [
+                "KC_A",
+                "KA_A12"
+              ],
+              [
+                "KA_M37",
+                "KC_FUNC11",
+                "KV_OAI_AG00",
+                "SYNTH_UNKNOWN_TOKEN"
+              ],
+              [
+                null,
+                {
+                  "synthetic_unknown_binding": {
+                    "id": 18446744073709551615
+                  }
+                },
+                "SA_19",
+                "SA_404"
+              ],
+              [
+                "KC_B",
+                "KC_NO",
+                "SYNTH_WIDE_SWITCH_11"
+              ]
+            ],
+            "encoders": [
+              "SYNTH_ROTATION_A",
+              "SYNTH_ROTATION_B",
+              {
+                "future_encoder": true
+              }
+            ],
+            "buttons": {
+              "synthetic_button_schema_unknown": true
+            },
+            "joystick": {
+              "mode": "SYNTH_MODE_UNKNOWN",
+              "sectors": [
+                {
+                  "k": "KC_A",
+                  "future_sector": {
+                    "angle": 0.125
+                  }
+                },
+                {
+                  "k": "SYNTH_UNKNOWN_SECTOR",
+                  "future_flag": true
+                }
+              ],
+              "future_joystick": 17
+            }
+          },
+          "lights": {
+            "backlight": {
+              "effect": "SYNTH_UNKNOWN_EFFECT",
+              "brightness": 0.25,
+              "future": {
+                "x": 1
+              }
+            },
+            "underglow": {
+              "effect": "off",
+              "future": false
+            }
+          },
+          "linkedAppId": 9001,
+          "future_layer": {
+            "preserved": true
+          }
+        }
+      ]
+    }
+  ],
+  "macros": [
+    {
+      "id": 37,
+      "name": "Synthetic opaque macro",
+      "syntheticEvents": [
+        {
+          "token": "KC_A",
+          "act": 91,
+          "timeUnit": "unknown"
+        }
+      ],
+      "future_macro": true
+    }
+  ],
+  "multiActions": [
+    {
+      "id": 11,
+      "name": "Synthetic opaque multi",
+      "syntheticBranches": {
+        "tap": "KC_A"
+      },
+      "future_multi": {
+        "unknown": true
+      }
+    }
+  ],
+  "multiActionGroups": [
+    {
+      "id": 90,
+      "synthetic_members": [
+        11
+      ]
+    }
+  ],
+  "multiActionsGroups": [
+    {
+      "id": 91,
+      "synthetic_members": [
+        11
+      ]
+    }
+  ],
+  "linkedApps": [
+    {
+      "id": 9001,
+      "synthetic_bundle": "invalid.synthetic.example"
+    }
+  ],
+  "future_root": {
+    "u64_max": 18446744073709551615,
+    "unicode": "独立合成😀",
+    "meaningful": {
+      "empty": {},
+      "null": null
+    },
+    "padding": "SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_SYNTHETIC_MULTICHUNK_"
+  }
+}

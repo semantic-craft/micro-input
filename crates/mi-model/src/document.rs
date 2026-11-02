@@ -505,8 +505,8 @@ impl LocalDocumentV2 {
         self.editable.source_refs.retain(|id, _| valid.contains(id));
     }
     pub fn view(&self) -> Result<(DeviceConfig, BTreeMap<String, Action>), String> {
-        let mut config: DeviceConfig = serde_json::from_value(self.origin["config"].clone())
-            .map_err(|_| "来源配置不能显示")?;
+        let mut config: DeviceConfig =
+            crate::comparison::base_config(self).map_err(|_| "来源配置不能显示")?;
         let source = config.clone();
         if self.baseline.is_some()
             || matches!(
@@ -588,8 +588,7 @@ impl LocalDocumentV2 {
         Ok((config, edits))
     }
     pub fn structure_changes(&self) -> Vec<String> {
-        let Ok(source) = serde_json::from_value::<DeviceConfig>(self.origin["config"].clone())
-        else {
+        let Ok(source) = crate::comparison::base_config(self) else {
             return vec![];
         };
         let mut changes = vec![];
@@ -665,6 +664,33 @@ impl LocalDocumentV2 {
                             })
                         });
                 if let Some((index, old)) = original_layer {
+                    let base_bindings: Vec<_> = old
+                        .keys
+                        .iter()
+                        .chain(old.encoders.iter())
+                        .chain(old.joystick.sectors.iter())
+                        .collect();
+                    for bid in &l.control_order {
+                        let binding = &l.controls[bid];
+                        let slot = binding
+                            .logical_control
+                            .strip_prefix("logical-")
+                            .and_then(|v| v.parse::<usize>().ok());
+                        if let Some((slot, original)) =
+                            slot.and_then(|slot| base_bindings.get(slot).map(|b| (slot, b)))
+                        {
+                            if serde_json::to_value(original).ok().as_ref()
+                                != Some(&binding.original)
+                            {
+                                changes.push(format!(
+                                    "绑定变化：{} / {} / 逻辑控件 {}",
+                                    p.name,
+                                    l.name,
+                                    slot + 1
+                                ));
+                            }
+                        }
+                    }
                     if old.name != l.name {
                         changes.push(format!("层改名：{} / {} → {}", p.name, old.name, l.name));
                     }

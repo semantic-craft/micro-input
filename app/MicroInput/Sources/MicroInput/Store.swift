@@ -42,6 +42,9 @@ protocol Backend {
     func deleteLayer(profileId: String, layerId: String) async throws -> String
     func moveLayer(profileId: String, layerId: String, toIndex: UInt32) async throws -> String
     func createDraftFromSnapshot() async throws -> String
+    func compareSnapshot() async throws -> String
+    func confirmComparisonIdentity(token: String) async throws -> String
+    func resolveComparison(token: String, choice: String) async throws -> String
 }
 extension Backend {
     func exportPreset(profileId: String?, layerId: String?) async throws -> String { throw BridgeError.Failed(message: "预设导出不可用") }
@@ -79,6 +82,9 @@ extension Backend {
     func deleteLayer(profileId: String, layerId: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func moveLayer(profileId: String, layerId: String, toIndex: UInt32) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func createDraftFromSnapshot() async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func confirmComparisonIdentity(token:String) async throws -> String {throw BridgeError.Failed(message:"设备核对不可用")}
+    func compareSnapshot() async throws -> String { throw BridgeError.Failed(message:"重连比较不可用") }
+    func resolveComparison(token: String, choice: String) async throws -> String { throw BridgeError.Failed(message:"重连比较不可用") }
     func subscribeDeviceEvents(cb: DeviceEvents) async {}
 }
 extension MicroInput: Backend {}
@@ -138,6 +144,9 @@ extension MicroInput: Backend {}
         do {
             try applyDocument(try await backend.openDocument(path: documentURL.path))
             catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await backend.actionCatalog().utf8))
+            #if MI_SYNTHETIC_BACKEND
+            if ["reconnect", "reconnect-transient"].contains(ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""), !preparedReconnectScenario {await prepareReconnectScenario()}
+            #endif
             await searchActions(query: "", category: "全部", favoritesOnly: false)
         } catch { status = readableError(error); documentReady = false }
     }
@@ -195,6 +204,44 @@ extension MicroInput: Backend {}
     func createDraftFromSnapshot() async {
         guard browsingDeviceSnapshot, !stale, !busy else {return};busy=true;defer {busy=false}
         do {try applyDocument(try await backend.createDraftFromSnapshot(), fresh:true);status="已创建独立本地草稿 · 原工作台保留 · 重开继续此草稿"} catch {status=readableError(error)}
+    }
+    #if MI_SYNTHETIC_BACKEND
+    private var preparedReconnectScenario=false
+    private func prepareReconnectScenario() async {
+        preparedReconnectScenario=true
+        guard let core=backend as? MicroInputCore.MicroInput else {return}
+        do {try await core.setSyntheticDiscovery(state:.twoDevices);try await core.setSyntheticConfig(scenario:1)} catch {status=readableError(error);return}
+        await refresh();selectDevice("synthetic-interface-0")
+        await connect("synthetic-interface-0");await readIdentity();await readDeviceConfig();await createDraftFromSnapshot()
+        await renameProfile(name:"Local comparison draft")
+        if ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == "reconnect-transient" {
+            await suspend()
+            do {try await core.setSyntheticDiscovery(state:.reconnectedDevice)} catch {status=readableError(error);return}
+            await refresh();selectDevice("synthetic-reconnected-interface-0")
+            await connect("synthetic-reconnected-interface-0");await readIdentity()
+        }
+        do {try await core.setSyntheticConfig(scenario:4)} catch {status=readableError(error);return}
+        await readDeviceConfig();await compareSnapshot()
+    }
+    #endif
+    @Published var comparison: ReconnectComparison?
+    func compareSnapshot() async {
+        guard !busy else {return};busy=true;defer {busy=false}
+        do {comparison=try JSONDecoder().decode(ReconnectComparison.self,from:Data(try await backend.compareSnapshot().utf8))}
+        catch {comparison=nil;status=readableError(error)}
+    }
+    func confirmComparisonIdentity() async {
+        guard !busy,let comparison else {return};busy=true;defer {busy=false}
+        do {self.comparison=try JSONDecoder().decode(ReconnectComparison.self,from:Data(try await backend.confirmComparisonIdentity(token:comparison.token).utf8))}
+        catch {status=readableError(error)}
+    }
+    func resolveComparison(_ choice:String) async {
+        guard !busy,let comparison else {return};busy=true;defer {busy=false}
+        do {
+            let response=try await backend.resolveComparison(token:comparison.token,choice:choice)
+            if choice != "cancel" {try applyDocument(response);status="比较结果已保存 · 旧版本已备份 · 不写设备"}
+            self.comparison=nil
+        } catch {status=readableError(error)}
     }
     var slotKey: String { key(slot) }
     func key(_ slot: Int) -> String {
