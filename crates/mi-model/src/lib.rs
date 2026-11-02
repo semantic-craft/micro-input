@@ -7,6 +7,7 @@ pub enum Source {
     Demo,
     DeviceSnapshot,
     Imported,
+    LocalDraft,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceConfig {
@@ -313,3 +314,5 @@ mod device_tests;
 
 mod device;
 pub use device::parse_device_files;
+
+pub mod document;

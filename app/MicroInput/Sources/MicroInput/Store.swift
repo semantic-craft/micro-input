@@ -17,6 +17,18 @@ protocol Backend {
     func actionCatalog() async throws -> String
     func assignAction(profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String
     func undoDraft(redo: Bool) async throws -> String
+    func documentView() async throws -> String
+    func createProfile(name: String) async throws -> String
+    func renameProfile(profileId: String, name: String) async throws -> String
+    func duplicateProfile(profileId: String, name: String) async throws -> String
+    func deleteProfile(profileId: String) async throws -> String
+    func moveProfile(profileId: String, toIndex: UInt32) async throws -> String
+    func createLayer(profileId: String, name: String) async throws -> String
+    func renameLayer(layerId: String, name: String) async throws -> String
+    func duplicateLayer(profileId: String, layerId: String, name: String) async throws -> String
+    func deleteLayer(profileId: String, layerId: String) async throws -> String
+    func moveLayer(profileId: String, layerId: String, toIndex: UInt32) async throws -> String
+    func createDraftFromSnapshot() async throws -> String
 }
 extension Backend {
     func waitForDisconnect() async -> String { "" }
@@ -28,6 +40,18 @@ extension Backend {
     func assignAction(profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String { throw BridgeError.Failed(message: "草稿编辑不可用") }
     func undoDraft(redo: Bool) async throws -> String { throw BridgeError.Failed(message: "草稿撤销不可用") }
 
+    func documentView() async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func createProfile(name: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func renameProfile(profileId: String, name: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func duplicateProfile(profileId: String, name: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func deleteProfile(profileId: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func moveProfile(profileId: String, toIndex: UInt32) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func createLayer(profileId: String, name: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func renameLayer(layerId: String, name: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func duplicateLayer(profileId: String, layerId: String, name: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func deleteLayer(profileId: String, layerId: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func moveLayer(profileId: String, layerId: String, toIndex: UInt32) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func createDraftFromSnapshot() async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func subscribeDeviceEvents(cb: DeviceEvents) async {}
 }
 extension MicroInput: Backend {}
@@ -40,12 +64,12 @@ extension MicroInput: Backend {}
     @Published var documentReady = false
     @Published private(set) var browsingDeviceSnapshot = false
     private var localSnapshot: Snapshot?
-    private var localSelection = (profile: 0, layer: 0, slot: 0)
+    private var localSelection: (profile: String?, layer: String?, slot: Int) = (nil, nil, 0)
     var canEditDraft: Bool { documentReady && !browsingDeviceSnapshot }
     func showLocalDraft() {
         guard !busy, let localSnapshot else { return }
         snapshot = localSnapshot; browsingDeviceSnapshot = false; stale = false
-        profileIndex = localSelection.profile; layerIndex = localSelection.layer; slot = localSelection.slot
+        restoreSelection(profile: localSelection.profile, layer: localSelection.layer, fallbackProfile: 0, fallbackLayer: 0); slot = localSelection.slot
         status = "本地草稿 · 修改自动保存 · 不写设备"
     }
     private var documentOverride: URL?
@@ -58,12 +82,43 @@ extension MicroInput: Backend {}
     }
     func loadWorkbench() async {
         do {
-            draft = try JSONDecoder().decode(DraftState.self, from: Data(try await backend.openDocument(path: documentURL.path).utf8))
-            await loadDemo()
+            try applyDocument(try await backend.openDocument(path: documentURL.path))
             catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await backend.actionCatalog().utf8))
-            documentReady = !draft.read_only
-            status = draft.read_only ? "文档含未知数据 · 只读 · 原文件保留" : "本地草稿 · 修改自动保存 · 不写设备"
         } catch { status = readableError(error); documentReady = false }
+    }
+    private func restoreSelection(profile id: String?, layer lid: String?, fallbackProfile: Int, fallbackLayer: Int) {
+        profileIndex = snapshot?.profiles.firstIndex(where: {$0.id.text == id}) ?? min(fallbackProfile, max(0, (snapshot?.profiles.count ?? 0)-1))
+        layerIndex = profile?.layers.firstIndex(where: {$0.id.text == lid}) ?? min(fallbackLayer, max(0, (profile?.layers.count ?? 0)-1))
+        slot = min(slot, max(0, (layer.map {$0.keys.count+$0.encoders.count+$0.joystick.sectors.count} ?? 0)-1))
+    }
+    private func applyDocument(_ json: String, fresh: Bool = false) throws {
+        let result = try JSONDecoder().decode(DocumentView.self, from: Data(json.utf8))
+        let oldProfile = fresh ? nil : profile?.id.text, oldLayer = fresh ? nil : layer?.id.text
+        let pi = fresh ? 0 : profileIndex, li = fresh ? 0 : layerIndex
+        draft = result.draft; snapshot = result.config; localSnapshot = result.config
+        browsingDeviceSnapshot = false; stale = false; documentReady = !draft.read_only
+        restoreSelection(profile: result.selection_hint?.profile_id ?? oldProfile, layer: result.selection_hint?.layer_id ?? oldLayer, fallbackProfile: pi, fallbackLayer: li)
+        localSelection = (profile?.id.text, layer?.id.text, slot)
+        status = draft.read_only ? "文档含未知数据 · 只读 · 原文件保留" : "本地草稿 · 修改自动保存 · 不写设备"
+        if draft.loaded_format == 1 { status += " · 旧格式将在首次修改时转换并备份" }
+    }
+    private func editDocument(_ action: () async throws -> String) async {
+        guard canEditDraft, !busy else { return }; busy = true; defer { busy = false }
+        do { try applyDocument(try await action()) } catch { status = readableError(error) }
+    }
+    func createProfile(name: String) async { await editDocument { try await backend.createProfile(name: name) } }
+    func renameProfile(name: String) async { guard let id=profile?.id.text else {return}; await editDocument { try await backend.renameProfile(profileId:id,name:name) } }
+    func duplicateProfile(name: String) async { guard let id=profile?.id.text else {return}; await editDocument {try await backend.duplicateProfile(profileId:id,name:name)} }
+    func deleteProfile() async {guard let id=profile?.id.text else {return}; await editDocument {try await backend.deleteProfile(profileId:id)} }
+    func moveProfile(by offset: Int) async {guard let id=profile?.id.text, let count=snapshot?.profiles.count, (0..<count).contains(profileIndex+offset) else {return}; await editDocument {try await backend.moveProfile(profileId:id,toIndex:UInt32(profileIndex+offset))} }
+    func createLayer(name: String) async {guard let id=profile?.id.text else {return}; await editDocument {try await backend.createLayer(profileId:id,name:name)} }
+    func renameLayer(name: String) async {guard let id=layer?.id.text else {return}; await editDocument {try await backend.renameLayer(layerId:id,name:name)} }
+    func duplicateLayer(name: String) async {guard let pid=profile?.id.text, let id=layer?.id.text else {return}; await editDocument {try await backend.duplicateLayer(profileId:pid,layerId:id,name:name)} }
+    func deleteLayer() async {guard let pid=profile?.id.text, let id=layer?.id.text else {return}; await editDocument {try await backend.deleteLayer(profileId:pid,layerId:id)} }
+    func moveLayer(by offset: Int) async {guard let pid=profile?.id.text, let id=layer?.id.text, let count=profile?.layers.count, (0..<count).contains(layerIndex+offset) else {return}; await editDocument {try await backend.moveLayer(profileId:pid,layerId:id,toIndex:UInt32(layerIndex+offset))} }
+    func createDraftFromSnapshot() async {
+        guard browsingDeviceSnapshot, !stale, !busy else {return};busy=true;defer {busy=false}
+        do {try applyDocument(try await backend.createDraftFromSnapshot(), fresh:true);status="已创建独立本地草稿 · 原工作台保留 · 重开继续此草稿"} catch {status=readableError(error)}
     }
     var slotKey: String { key(slot) }
     func key(_ slot: Int) -> String {
@@ -82,13 +137,13 @@ extension MicroInput: Backend {}
             let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
             let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
             let a = String(decoding: try encoder.encode(action), as: UTF8.self)
-            draft = try JSONDecoder().decode(DraftState.self, from: Data(try await backend.assignAction(profileId: p, layerId: l, slot: UInt32(slot), actionJson: a).utf8))
+            try applyDocument(try await backend.assignAction(profileId: p, layerId: l, slot: UInt32(slot), actionJson: a))
             status = "草稿已保存到本机 · 不执行动作 · 不写设备"
         } catch { status = readableError(error) }
     }
     func undoDraft(redo: Bool = false) async {
         guard canEditDraft, !busy else { return }; busy = true; defer { busy = false }
-        do { draft = try JSONDecoder().decode(DraftState.self, from: Data(try await backend.undoDraft(redo: redo).utf8)) }
+        do { try applyDocument(try await backend.undoDraft(redo: redo)) }
         catch { status = readableError(error) }
     }
     private var generation = 0
@@ -203,7 +258,7 @@ extension MicroInput: Backend {}
             let result = try JSONDecoder().decode(Snapshot.self, from: Data(json.utf8))
             if !browsingDeviceSnapshot {
                 localSnapshot = snapshot
-                localSelection = (profileIndex, layerIndex, slot)
+                localSelection = (profile?.id.text, layer?.id.text, slot)
             }
             snapshot = result; browsingDeviceSnapshot = true; stale = false; selectProfile(0)
             status = result.source == "DeviceSnapshot" ? "设备快照 · 只读 · 已核对文件大小及摘要" : "合成设备夹具 · 只读 · 不是实际设备快照"
