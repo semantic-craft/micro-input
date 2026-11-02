@@ -146,7 +146,7 @@ T09 的 Multi 继续使用 graph.actions 与同一 DocumentStore：`ActionKind::
 
 操作机制仅采用核实的公开接口或明确的焦点操作；不臆造 CLI/RPC。无法保证指定目标的快捷键不充当专用会话控制。缺少最低能力时保持票未完成，并提交明确的范围调整；不能用“不支持”满足原目标。Task/Command/Skill 的类型保留；本轮不增加任务调度或执行。
 
-#29 即未来 Agent 草稿接口，首选一次性本地 CLI `mi draft read/validate/patch` + 版本化 JSON stdin/stdout，复用 Rust 文档服务的 revision 检查和锁；不开放网络服务、通用设备 RPC 或任务执行。本轮只固定接口形态；JSON 字段、错误码及客户端样例在其开工前单独补齐，未补齐前不标 ready。
+#38（T29）即未来 Agent 草稿接口，首选一次性本地 CLI `mi draft read/validate/patch` + 版本化 JSON stdin/stdout，复用 Rust 文档服务的 revision 检查和锁；不开放网络服务、通用设备 RPC 或任务执行。本轮只固定接口形态；JSON 字段、错误码及客户端样例在其开工前单独补齐，未补齐前不标 ready。
 
 ### T10 本地控件编辑契约
 
