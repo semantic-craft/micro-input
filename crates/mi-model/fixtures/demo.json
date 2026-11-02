@@ -1,0 +1,224 @@
+{
+  "profiles": [
+    {
+      "id": 7,
+      "name": "通用 Coding · 演示",
+      "layers": [
+        {
+          "id": "a",
+          "name": "基础层",
+          "color": "#477DAD",
+          "layout": {
+            "keymap": [
+              [
+                "KC_A",
+                "FUTURE_SYNTHETIC_TOKEN"
+              ],
+              [
+                null,
+                {
+                  "kind": "macro",
+                  "ref": "m1"
+                },
+                {
+                  "kind": "multi",
+                  "ref": "t1"
+                },
+                {
+                  "kind": "smart",
+                  "ref": "missing"
+                }
+              ],
+              [
+                null,
+                null,
+                null,
+                null
+              ],
+              [
+                null,
+                null,
+                null
+              ]
+            ],
+            "encoders": [
+              "KC_B",
+              null,
+              "UNKNOWN_ENCODER"
+            ],
+            "joystick": {
+              "kind": "synthetic-sectors",
+              "sectors": [
+                "KC_A",
+                null,
+                "FUTURE_SECTOR"
+              ]
+            }
+          },
+          "lights": {
+            "backlight": {
+              "effect": "unknown-demo"
+            },
+            "underglow": null
+          }
+        },
+        {
+          "id": "b",
+          "name": "辅助层",
+          "color": "#477DAD",
+          "layout": {
+            "keymap": [
+              [
+                "KC_A",
+                "FUTURE_SYNTHETIC_TOKEN"
+              ],
+              [
+                null,
+                {
+                  "kind": "macro",
+                  "ref": "m1"
+                },
+                {
+                  "kind": "multi",
+                  "ref": "t1"
+                },
+                {
+                  "kind": "smart",
+                  "ref": "missing"
+                }
+              ],
+              [
+                null,
+                null,
+                null,
+                null
+              ],
+              [
+                null,
+                null,
+                null
+              ]
+            ],
+            "encoders": [
+              "KC_B",
+              null,
+              "UNKNOWN_ENCODER"
+            ],
+            "joystick": {
+              "kind": "synthetic-sectors",
+              "sectors": [
+                "KC_A",
+                null,
+                "FUTURE_SECTOR"
+              ]
+            }
+          },
+          "lights": {
+            "backlight": {
+              "effect": "unknown-demo"
+            },
+            "underglow": null
+          }
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "name": "Herdr · 示例",
+      "layers": [
+        {
+          "id": "c",
+          "name": "画布层",
+          "color": "#477DAD",
+          "layout": {
+            "keymap": [
+              [
+                "KC_A",
+                "FUTURE_SYNTHETIC_TOKEN"
+              ],
+              [
+                null,
+                {
+                  "kind": "macro",
+                  "ref": "m1"
+                },
+                {
+                  "kind": "multi",
+                  "ref": "t1"
+                },
+                {
+                  "kind": "smart",
+                  "ref": "missing"
+                }
+              ],
+              [
+                null,
+                null,
+                null,
+                null
+              ],
+              [
+                null,
+                null,
+                null
+              ]
+            ],
+            "encoders": [
+              "KC_B",
+              null,
+              "UNKNOWN_ENCODER"
+            ],
+            "joystick": {
+              "kind": "synthetic-sectors",
+              "sectors": [
+                "KC_A",
+                null,
+                "FUTURE_SECTOR"
+              ]
+            }
+          },
+          "lights": {
+            "backlight": {
+              "effect": "unknown-demo"
+            },
+            "underglow": null
+          }
+        }
+      ]
+    }
+  ],
+  "activeProfileId": 1,
+  "macros": [
+    {
+      "id": "m1",
+      "name": "合成动作",
+      "color": null,
+      "events": [
+        {
+          "token": "KC_A",
+          "delay_ms": 10,
+          "act": 1
+        },
+        {
+          "token": "KC_A",
+          "delay_ms": 0,
+          "act": 0
+        }
+      ]
+    }
+  ],
+  "multiActions": [
+    {
+      "id": "t1",
+      "tap": "KC_A",
+      "double_tap": null,
+      "hold": null,
+      "tap_hold": null,
+      "tapping_term_ms": 250
+    }
+  ],
+  "smartActions": [],
+  "futureField": {
+    "preserved": true
+  }
+}

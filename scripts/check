@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+cargo fmt --all -- --check
+cargo test --locked --workspace
+scripts/build
+swift test --package-path app/MicroInput
+python3 scripts/check-boundaries.py

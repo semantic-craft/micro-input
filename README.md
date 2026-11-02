@@ -2,13 +2,21 @@
 
 面向 Work Louder Creator Micro 2 的独立 macOS 配置器与宿主服务。技术方向：**Rust 核心 + SwiftUI 界面**。项目名为工作名。
 
-## 当前状态
+## 当前开发状态
 
-2026-11-02：已建立正式项目及公开 GitHub 仓库，前期调研原件仅保存在本机；尚未初始化 Cargo/Swift 工程、实现设备通信或构建可运行应用。既有 input.app 和设备配置保持原状。
+首轮原生离线工作台：Rust五核心模块 + UniFFI + SwiftUI。支持合成配置浏览、动作搜索/分类、内存草稿、差异及撤销/重做。主窗和菜单栏共享状态；关闭主窗保留菜单栏，退出结束会话。View菜单可选择深浅色和紧凑窗口；⇧⌘M打开菜单栏面板，⌘E搜索动作，⌘[/⌘]选择控件，⌘D查看差异。
 
-从 [开发起点](docs/development.md) 开始；操作设备或处理兼容行为前阅读 [项目教训](lessons.md)。Agent 入口见 [AGENTS.md](AGENTS.md)。
+```sh
+scripts/check          # Rust/Swift测试、桥接生成、开发构建和协议边界检查
+scripts/run            # 启动当前checkout的target/MicroInput.app
+scripts/run --verify   # 验收实例10分钟自动退出
+```
 
-工单与规格统一放在 [GitHub Issues](https://github.com/semantic-craft/micro-input/issues)。
+需要macOS14+、Rust stable、Swift工具链。构建不加载凭据。仅本地ad-hoc开发签名，未正式发布。
+
+启动只载入合成数据，不枚举/打开硬件或申请权限。草稿退出重置，无法执行动作或写入设备。真实读取仍受UNKNOWN接口阻断，不把演示数据作为设备快照。
+
+规格见 [SPEC](docs/spec/SPEC.md)、分阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)、[证据](docs/spec/EVIDENCE.md)和[未知项](docs/spec/UNKNOWNS.md)。
 
 ## 调研入口
 
@@ -26,6 +34,4 @@
 
 ## 下一步
 
-首版范围已确定为 USB 只读配置查看器：发现一台 Creator Micro 2 → 读取身份与配置 → 浏览 Profile、Layer、按键及旋钮映射。范围、验收和依赖以 [MVP 总工单 #1](https://github.com/semantic-craft/micro-input/issues/1) 为准。下一步执行 [#2 合成数据查看器](https://github.com/semantic-craft/micro-input/issues/2)，先交付真实 Rust / SwiftUI 桥接的可启动应用，再逐步接入设备。
-
-目前没有构建或启动命令；初始化实现时增加项目验证入口 `scripts/check`。本次只验证文档导航和调研迁移完整性，未做应用构建或真实设备协议验收。
+按S1a验收当前原生工作台；后续S2补持久化、参数编辑和完整Profile管理。S1真实设备读取必须先满足后端/schema证据门槛，硬件验收未完成。自动化和设备写入未授权。

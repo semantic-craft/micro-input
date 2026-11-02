@@ -1,0 +1,93 @@
+// R-P03/R-H11: offline first-round workbench; no discovery, permission request or device open on launch.
+import SwiftUI
+import MicroInputCore
+@main struct MicroInputApp: App {
+    @NSApplicationDelegateAdaptor(AppLifetime.self) private var lifetime
+    @StateObject private var store: Store
+    private let statusMenu: StatusMenu
+    init() {
+        let store = Store(backend: MicroInput())
+        _store = StateObject(wrappedValue: store)
+        statusMenu = StatusMenu(store: store)
+    }
+    @State private var appearance = "system"
+    var body: some Scene {
+        Window("Micro Input", id: "main") { WorkbenchHost(store: store, statusMenu: statusMenu).preferredColorScheme(appearance == "system" ? nil : appearance == "dark" ? .dark : .light) }.defaultSize(width: 1180, height: 730)
+        .windowResizability(.contentMinSize)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("显示菜单栏菜单") { statusMenu.show() }.keyboardShortcut("m", modifiers: [.command, .shift])
+            }
+            CommandGroup(after: .toolbar) {
+                Picker("外观", selection: $appearance) {
+                    Text("跟随系统").tag("system")
+                    Text("浅色").tag("light")
+                    Text("深色").tag("dark")
+                }
+                Button("紧凑窗口") { NSApp.keyWindow?.setContentSize(NSSize(width: 1020, height: 620)) }
+                Button("标准窗口") { NSApp.keyWindow?.setContentSize(NSSize(width: 1180, height: 730)) }
+                Divider()
+                Text("⌘[ / ⌘] 选择前后控件")
+                Text("⌘E 搜索动作 · ⌘D 差异 · ⌘Z 撤销")
+            }
+        }
+
+    }
+}
+
+// R-H11/R-P03: native status menu with a keyboard route, including when the editor is closed.
+struct WorkbenchHost: View {
+    @ObservedObject var store: Store
+    let statusMenu: StatusMenu
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        Workbench(store: store).onAppear {
+            statusMenu.open = { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
+        }
+    }
+}
+@MainActor final class StatusMenu: NSObject {
+    let store: Store
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    var open: (() -> Void)?
+    private var panel: NSPanel?
+    init(store: Store) {
+        self.store = store
+        super.init()
+        item.button?.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "Micro Input")
+        item.button?.toolTip = "Micro Input"
+        item.button?.target = self; item.button?.action = #selector(show)
+    }
+    @objc func show() {
+        if panel == nil {
+            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 280, height: 240), styleMask: [.titled, .utilityWindow], backing: .buffered, defer: false)
+            panel.title = "Micro Input 菜单栏"
+            panel.isReleasedWhenClosed = false
+            panel.contentView = NSHostingView(rootView: StatusPanel(store: store, owner: self))
+            panel.center(); self.panel = panel
+        }
+        panel?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+    @objc func showWindow() { open?() }
+    @objc func quitApp() { NSApp.terminate(nil) }
+}
+
+final class AppLifetime: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+}
+
+struct StatusPanel: View {
+    @ObservedObject var store: Store
+    let owner: StatusMenu
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("离线演示 · 不激活设备配置").font(.caption).foregroundStyle(.secondary)
+            ForEach(Array((store.snapshot?.profiles ?? []).enumerated()), id: \.offset) { i,p in
+                Button(p.name) { store.selectProfile(i); owner.showWindow() }
+            }
+            Divider()
+            Button("打开工作台") { owner.showWindow() }
+            Button("退出 Micro Input") { owner.quitApp() }
+        }.padding(20).frame(width: 280, height: 240, alignment: .topLeading)
+    }
+}
