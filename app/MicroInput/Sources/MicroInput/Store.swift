@@ -10,12 +10,14 @@ protocol Backend {
     func disconnect() async
     func inputMonitoringStatus() async -> Bool
     func subscribeDeviceEvents(cb: DeviceEvents) async
+    func subscribeInput() async throws -> InputSubscription
     func openDocument(path: String) async throws -> String
     func actionCatalog() async throws -> String
     func assignAction(profileId: String, layerId: String, slot: UInt32, actionJson: String) async throws -> String
     func undoDraft(redo: Bool) async throws -> String
 }
 extension Backend {
+    func subscribeInput() async throws -> InputSubscription { throw BridgeError.Failed(message: "输入监听不可用") }
     func readIdentity() async throws -> IdentityInfo { throw BridgeError.Failed(message: "身份读取不可用") }
     func openDocument(path: String) async throws -> String { throw BridgeError.Failed(message: "本地文档不可用") }
     func actionCatalog() async throws -> String { throw BridgeError.Failed(message: "动作目录不可用") }
@@ -26,6 +28,7 @@ extension Backend {
 }
 extension MicroInput: Backend {}
 @MainActor final class Store: ObservableObject {
+    func subscribeInput() async throws -> InputSubscription { try await backend.subscribeInput() }
     private let backend: Backend
     @Published var draft = DraftState()
     @Published var catalog: [CatalogAction] = []

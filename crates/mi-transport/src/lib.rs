@@ -85,6 +85,10 @@ pub trait HidTransport: Send + Sync {
     fn synthetic_requests(&self) -> Vec<String> {
         vec![]
     }
+    #[cfg(feature = "synthetic-backend")]
+    fn emit_synthetic_input(&self, _count: u16) -> Result<(), TransportError> {
+        Err(TransportError::Unsupported)
+    }
     fn subscribe(&self) -> broadcast::Receiver<()>;
     fn open(&self, id: &str) -> Result<Arc<dyn HidLink>, TransportError>;
 }
@@ -465,6 +469,7 @@ pub struct SyntheticDiscovery {
     state: Mutex<u8>,
     identity: std::sync::atomic::AtomicU8,
     configuration: Arc<std::sync::atomic::AtomicU8>,
+    input_inject: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
     requests: Arc<Mutex<Vec<String>>>,
     events: broadcast::Sender<()>,
 }
@@ -476,6 +481,7 @@ impl Default for SyntheticDiscovery {
             state: Mutex::new(0),
             identity: std::sync::atomic::AtomicU8::new(0),
             configuration: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            input_inject: Mutex::new(None),
             requests: Arc::new(Mutex::new(vec![])),
             events,
         }
@@ -519,6 +525,7 @@ impl HidTransport for SyntheticDiscovery {
         let configuration = self.configuration.clone();
         let requests = self.requests.clone();
         let inject = link.inject.clone();
+        *self.input_inject.lock().unwrap() = Some(inject.clone());
         tokio::spawn(async move {
             let mut bytes = vec![];
             let mut lists = 0;
@@ -586,6 +593,28 @@ impl HidTransport for SyntheticDiscovery {
             }
         });
         Ok(Arc::new(SyntheticLink(link)))
+    }
+    fn emit_synthetic_input(&self, count: u16) -> Result<(), TransportError> {
+        if count > 1024 {
+            return Err(TransportError::Unsupported);
+        }
+        let inject = self.input_inject.lock().unwrap();
+        let inject = inject.as_ref().ok_or(TransportError::Disconnected)?;
+        // Test-only unknown notification. This does not specify a physical control schema.
+        let bytes = br#"{"m":"test.synthetic","p":"private payload must not cross FFI"}"#;
+        for _ in 0..count {
+            for part in bytes.chunks(61) {
+                let mut report = vec![0; 64];
+                report[0] = 6;
+                report[1] = 2;
+                report[2] = part.len() as u8;
+                report[3..3 + part.len()].copy_from_slice(part);
+                inject
+                    .send(report)
+                    .map_err(|_| TransportError::Disconnected)?;
+            }
+        }
+        Ok(())
     }
     fn set_synthetic_identity(&self, scenario: u8) -> Result<(), TransportError> {
         self.identity.store(scenario, Ordering::SeqCst);
