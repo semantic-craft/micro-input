@@ -321,3 +321,6 @@ pub mod document;
 pub mod comparison;
 #[cfg(test)]
 mod comparison_tests;
+pub mod macro_sequence;
+
+pub mod macro_library;
