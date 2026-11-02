@@ -76,3 +76,12 @@
 - 起因：T11 首次原生验收时，分别更新 summary/pending 与 isPresented，首个弹窗缺少名称、数量，并可能捕获旧的待导入内容。模型与桥接测试无法验证弹窗首次渲染。
 - 修复：用包含内容和摘要的 Identifiable 对象驱动 sheet(item:)，确认操作使用弹窗参数，不从旁路状态取内容。
 - 验证：首次打开原创预设必须显示名称与数量；取消后不改草稿，再次打开并确认应创建独立文档。保存范围使用 alert 的 presenting 参数。Seen 1x（2026-11-03）。
+
+## 原生验收入口必须走到进程边界
+
+- 标签：#验收 #自动化
+- 起因与后果：A 启动器仅做 Python 语法检查和离线 Rust 测试；`Path.open` 不支持 `opener` 参数，真实入口在准备日志时抛出 TypeError，尚未创建子进程或接触设备。
+- 修复与证据：改用支持自定义 opener 的内置 `open` 创建 0600 日志；`scripts/tests/test_probe_a_launcher.py` 将实际入口复制到临时根目录，替换子进程和信号边界，验证正常启动、超时停止和退出未确认三条路径，以及 0700/0600 权限。
+- 正确做法：语法通过不等于启动入口可运行；先对实际入口运行隔离的系统边界回归，再进行真实设备验收。
+- 验证点：`python3 -B -m unittest discover -s scripts/tests -p 'test_probe_a_launcher.py'`；已加入 `scripts/check`，原生设备测试继续保持 ignored。
+- 复发记录：Seen 1x（2026-11-03）。

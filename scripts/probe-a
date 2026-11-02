@@ -37,7 +37,7 @@ child = None
 
 def journal(stage):
     path = private / (stage + '.json')
-    with path.open('x', opener=lambda path, flags: os.open(path, flags, 0o600)) as f:
+    with open(path, 'x', opener=lambda path, flags: os.open(path, flags, 0o600)) as f:
         json.dump({'stage': stage, 'pid': child.pid if child else None, 'returncode': child.poll() if child else None, 'time': time.time(),
                    'state_if_interrupted': 'UNKNOWN; do not retry or auto-clean',
                    'private_harness_journals': '.scratch/input-study/probe-a-*/stage-*.json'}, f)
