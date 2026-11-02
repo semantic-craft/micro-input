@@ -319,3 +319,6 @@ pub mod action_library;
 pub mod document;
 
 pub mod control_settings;
+pub mod macro_sequence;
+
+pub mod macro_library;

@@ -22,6 +22,16 @@ pub fn capability(action: &Action) -> ActionCapability {
                 prerequisites.push("目标应用须在前台并支持此快捷键；当前不检测焦点".into());
                 (target, false, "快捷键发送未接入；设备独立执行能力未验证")
             }
+            Ok(ActionKind::LocalMacro { .. }) => {
+                prerequisites.push(
+                    "自有本地序列；按键名称不是固件 token，设备与宿主执行能力均未核实".into(),
+                );
+                (
+                    "本地普通宏序列".into(),
+                    false,
+                    "宏执行未接入；设备驻留与宿主要求未核实",
+                )
+            }
             Ok(ActionKind::Text { .. }) => {
                 prerequisites.push("需要 Mac 宿主常驻与明确的文本输入目标".into());
                 ("当前文本输入目标（未检测）".into(), true, "文本执行未接入")
