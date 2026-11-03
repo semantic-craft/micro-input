@@ -51,4 +51,13 @@
 
 `mi-model::lighting` 保存Layer目标并复用mutate/undo；`apply`在精确基线下生成单键或灯光候选，副本成功后才允许取得一次PreparedCandidate。此对象不携带生产发送权限。`mi-proto::mutation`仅编码限定keymap块；原Method/公开request的只读守卫不变。
 
-`mi-session::config_write::SyntheticWriter`只在synthetic-backend编译，构造时拒绝原生/未知backend，复用私有会话队列和唯一reader。显式合成文件按实际字节生成摘要，合成ACK不冒充固件事实；写后逐字节比较并保全smart_actions，失败/取消后不自动重试。它是离线验证工具，不是具有持久操作日志、宿主排空或产品恢复UI的生产协调器。只读快照复用抽出的原始文件校验；解析失败仍不发布快照。
+`mi-session::config_write::SyntheticWriter`只在synthetic-backend编译，构造时拒绝原生/未知backend，复用私有会话队列和唯一reader。显式合成文件按实际字节生成摘要，合成ACK不冒充固件事实；写后逐字节比较并保全smart_actions，失败/取消后不自动重试。它是离线验证工具，已接入持久操作记录和失败恢复；尚无宿主排空、FFI 或产品恢复 UI，不能作为生产协调器。只读快照复用抽出的原始文件校验；解析失败仍不发布快照。
+
+
+## S3 离线持久记录与恢复
+
+`mi-model::operation_record` 复用原副本和候选文件，仅新增冻结的前后本地文档、材料关联及校验状态文件；目录 0700、文件 0600，状态通过临时文件、fsync、rename、目录同步更新。创建操作目录即持久占用计划 ID，重开只读记录，不重发。状态文件不含配置载荷；含原文档的私有恢复材料不进入诊断日志。
+
+`SyntheticWriter` 首次可能发送前保存 Writing，逐块确认和完整读回分别落盘。读回后本地失败返回 VerifiedLocalSaveFailed；只有持久核验结果完整时，重开后才可离线修复。若核验结果未落盘，保留未知状态，必须显式独立读回；当前进程仍保留已核验事实，可在材料完好时重试落盘。恢复新计划绑定当前完整原字节、明确合成身份和固件，旧计划过期后零变更；现状不可解析不阻断原始读取，缺失/摘要错误/读取失败则拒绝恢复。
+
+恢复只写 keymap，保全现状 smart_actions，并保存恢复链关联。显式读回可区分 original/candidate/other；OriginalVerified 表示本次检查等于原配置，不声称从未发送。未决记录冻结对应文档的编辑和新普通应用；成功恢复或本地修复后重开文档清空旧撤销历史。retry_local_save 不依赖会话，仅核对冻结文档身份、修订和原字节；磁盘已经等于目标时只补记录，其他内容一律拒绝覆盖。记录损坏时保持关闭，不自动清理材料。合成身份为模拟器固定标识，不冒充硬件序列号验证。

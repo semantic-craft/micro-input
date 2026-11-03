@@ -215,8 +215,26 @@ async fn cancelling_after_send_closes_session_and_never_replays() {
     let (device, session) = setup(files).await;
     let (_dir, plan) = plan(RAW, session.id, 7);
     let writer = SyntheticWriter::new(session.clone()).unwrap();
-    let result = tokio::time::timeout(Duration::from_millis(10), writer.apply(&plan)).await;
-    assert!(result.is_err());
+    let mut pending = Box::pin(writer.apply(&plan));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            tokio::select! {
+                result = &mut pending => panic!("completed before cancellation: {result:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(1)) => {
+                    if device.synthetic_requests().iter().any(|m| m == "fs.writebin") { break; }
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(pending);
+    assert_eq!(
+        OperationRecord::open(plan.record_path())
+            .unwrap()
+            .restart_phase(),
+        Phase::DeviceStateUnknown
+    );
     assert!(device
         .synthetic_requests()
         .iter()
@@ -273,5 +291,446 @@ async fn ordinary_ag_key_candidate_preserves_smart_file_through_real_readback() 
         Some(smart.as_slice())
     );
     assert_eq!(device.files().unwrap().keymap, plan.candidate());
+    let mut reopened = DocumentStore::default();
+    reopened.open(dir.path().join("draft.json")).unwrap();
+    let current = writer.inspect().await.unwrap();
+    assert!(
+        reopened.preview_apply(&current).is_err(),
+        "applied key must not compile twice"
+    );
     session.shutdown().await;
+}
+
+use mi_model::operation_record::{OperationRecord, Phase};
+use mi_session::config_write::Checkpoint;
+fn mutations(d: &SyntheticDiscovery) -> usize {
+    d.synthetic_requests()
+        .iter()
+        .filter(|m| *m == "fs.writebin")
+        .count()
+}
+async fn reconnect(d: &SyntheticDiscovery) -> Arc<DeviceSession> {
+    let s = DeviceSession::new(
+        d.open("synthetic-interface-0").unwrap(),
+        Box::<mi_proto::NativeFramer>::default(),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_millis(100),
+            interval: Duration::ZERO,
+        },
+    );
+    s.read_identity_info().await.unwrap();
+    s
+}
+fn block_status(path: &std::path::Path) {
+    std::fs::rename(path.join("status.json"), path.join("status.saved")).unwrap();
+    std::fs::create_dir(path.join("status.json")).unwrap();
+}
+fn unblock_status(path: &std::path::Path) {
+    std::fs::remove_dir(path.join("status.json")).unwrap();
+    std::fs::rename(path.join("status.saved"), path.join("status.json")).unwrap();
+}
+#[tokio::test]
+async fn durable_phase_faults_distinguish_no_send_unknown_and_verified_local_failure() {
+    for checkpoint in [
+        Checkpoint::BeforeRevalidate,
+        Checkpoint::BeforeWrite(0),
+        Checkpoint::AfterAck(1),
+        Checkpoint::BeforeVerifiedSave,
+        Checkpoint::BeforeLocalSave,
+    ] {
+        let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
+        let (dir, p) = plan(RAW, session.id, 55);
+        let writer = SyntheticWriter::new(session.clone()).unwrap();
+        let result = writer
+            .apply_observed(&p, |at, path| {
+                if at == checkpoint {
+                    if at == Checkpoint::BeforeLocalSave {
+                        std::fs::write(dir.path().join("draft.lock"), b"fault").unwrap();
+                    } else {
+                        block_status(path);
+                    }
+                }
+            })
+            .await;
+        if checkpoint == Checkpoint::BeforeLocalSave {
+            std::fs::remove_file(dir.path().join("draft.lock")).unwrap();
+        } else {
+            unblock_status(&p.record_path());
+        }
+        let record = OperationRecord::open(p.record_path()).unwrap();
+        match checkpoint {
+            Checkpoint::BeforeRevalidate | Checkpoint::BeforeWrite(0) => {
+                assert_eq!(result, Outcome::NotSent);
+                assert_eq!(mutations(&device), 0);
+                assert_eq!(record.restart_phase(), Phase::NotSent);
+            }
+            Checkpoint::AfterAck(1) => {
+                assert_eq!(result, Outcome::DeviceStateUnknown);
+                assert!(!record.status().device_verified);
+                assert_eq!(record.restart_phase(), Phase::DeviceStateUnknown);
+            }
+            Checkpoint::BeforeVerifiedSave => {
+                assert_eq!(result, Outcome::VerifiedLocalSaveFailed);
+                assert!(!record.status().device_verified);
+                assert!(OperationRecord::open(p.record_path())
+                    .unwrap()
+                    .retry_local_save()
+                    .is_err());
+            }
+            Checkpoint::BeforeLocalSave => {
+                assert_eq!(result, Outcome::VerifiedLocalSaveFailed);
+                assert!(record.status().device_verified);
+                assert_eq!(
+                    record.status().error_category,
+                    Some(mi_model::operation_record::Failure::LocalSave)
+                );
+            }
+            _ => unreachable!(),
+        }
+        let count = mutations(&device);
+        if matches!(
+            checkpoint,
+            Checkpoint::BeforeVerifiedSave | Checkpoint::BeforeLocalSave
+        ) {
+            writer.retry_local_save(p.operation_id()).unwrap();
+            writer.retry_local_save(p.operation_id()).unwrap();
+            let final_record = OperationRecord::open(p.record_path()).unwrap();
+            assert!(final_record.status().local_saved);
+            let mut reopened = DocumentStore::default();
+            reopened.open(dir.path().join("draft.json")).unwrap();
+            assert!(!reopened.draft.read_only);
+            assert!(reopened.draft.document.structure_changes().is_empty());
+        }
+        assert_eq!(mutations(&device), count);
+        // Persisted consumption survives constructing another writer.
+        assert_eq!(
+            SyntheticWriter::new(session.clone())
+                .unwrap()
+                .apply(&p)
+                .await,
+            Outcome::NotSent
+        );
+        assert_eq!(mutations(&device), count);
+        session.shutdown().await;
+    }
+}
+#[tokio::test]
+async fn restart_local_repair_requires_persisted_proof_and_refuses_changed_document() {
+    let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
+    let (dir, p) = plan(RAW, session.id, 44);
+    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    assert_eq!(
+        writer
+            .apply_observed(&p, |at, _| {
+                if at == Checkpoint::BeforeLocalSave {
+                    std::fs::write(dir.path().join("draft.lock"), b"fault").unwrap();
+                }
+            })
+            .await,
+        Outcome::VerifiedLocalSaveFailed
+    );
+    std::fs::remove_file(dir.path().join("draft.lock")).unwrap();
+    let mut store = DocumentStore::default();
+    store.open(dir.path().join("draft.json")).unwrap();
+    assert!(store.draft.read_only);
+    let original = std::fs::read(dir.path().join("draft.json")).unwrap();
+    let mut changed = original.clone();
+    changed.push(b' ');
+    std::fs::write(dir.path().join("draft.json"), &changed).unwrap();
+    let count = mutations(&device);
+    let mut record = OperationRecord::open(p.record_path()).unwrap();
+    assert!(record.retry_local_save().is_err());
+    assert_eq!(
+        std::fs::read(dir.path().join("draft.json")).unwrap(),
+        changed
+    );
+    std::fs::write(dir.path().join("draft.json"), original).unwrap();
+    record.retry_local_save().unwrap();
+    let saved = std::fs::read(dir.path().join("draft.json")).unwrap();
+    OperationRecord::open(p.record_path())
+        .unwrap()
+        .retry_local_save()
+        .unwrap();
+    assert_eq!(std::fs::read(dir.path().join("draft.json")).unwrap(), saved);
+    assert_eq!(mutations(&device), count);
+    session.shutdown().await;
+}
+#[tokio::test]
+async fn lost_verification_record_needs_explicit_readback_after_restart() {
+    let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
+    let (_dir, p) = plan(RAW, session.id, 22);
+    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    assert_eq!(
+        writer
+            .apply_observed(&p, |at, path| {
+                if at == Checkpoint::BeforeVerifiedSave {
+                    block_status(path);
+                }
+            })
+            .await,
+        Outcome::VerifiedLocalSaveFailed
+    );
+    unblock_status(&p.record_path());
+    drop(writer);
+    session.shutdown().await;
+    let mut record = OperationRecord::open(p.record_path()).unwrap();
+    assert!(record.retry_local_save().is_err());
+    let s = reconnect(&device).await;
+    let w = SyntheticWriter::new(s.clone()).unwrap();
+    let count = mutations(&device);
+    w.confirm_readback(&mut record).await.unwrap();
+    record.retry_local_save().unwrap();
+    assert_eq!(mutations(&device), count);
+    s.shutdown().await;
+}
+#[tokio::test]
+async fn corrupt_partial_file_restores_from_linked_backup_preserving_current_smart() {
+    let mut v: Value = serde_json::from_slice(RAW).unwrap();
+    v["padding"] = json!("x".repeat(7000));
+    let raw = serde_json::to_vec(&v).unwrap();
+    let mut files = SyntheticFiles::new(raw.clone(), None);
+    files.reject_offset = Some(3072);
+    let (device, session) = setup(files).await;
+    let (dir, p) = plan(&raw, session.id, 23);
+    assert_eq!(
+        SyntheticWriter::new(session.clone())
+            .unwrap()
+            .apply(&p)
+            .await,
+        Outcome::DeviceStateUnknown
+    );
+    assert!(mi_model::parse_device_files(&device.files().unwrap().keymap, None).is_err());
+    let mut state = device.files().unwrap();
+    state.reject_offset = None;
+    state.smart_actions = Some(br#"{"smartActions":{}}"#.to_vec());
+    device.set_files(state);
+    session.shutdown().await;
+    let s = reconnect(&device).await;
+    let writer = SyntheticWriter::new(s.clone()).unwrap();
+    let record = OperationRecord::open(p.record_path()).unwrap();
+    let before = mutations(&device);
+    assert_eq!(
+        record.classify(&writer.inspect().await.unwrap()).unwrap(),
+        "other"
+    );
+    let restore = writer.prepare_restore(&record).await.unwrap();
+    assert_eq!(mutations(&device), before);
+    assert_eq!(restore.candidate(), raw);
+    assert_eq!(
+        restore.smart_actions(),
+        Some(br#"{"smartActions":{}}"#.as_slice())
+    );
+    assert_eq!(writer.apply(&restore).await, Outcome::Verified);
+    assert_eq!(device.files().unwrap().keymap, raw);
+    assert_eq!(
+        device.files().unwrap().smart_actions,
+        Some(br#"{"smartActions":{}}"#.to_vec())
+    );
+    let recovered = OperationRecord::open(restore.record_path()).unwrap();
+    assert_eq!(
+        recovered.status().restores.as_deref(),
+        Some(p.operation_id())
+    );
+    let original = OperationRecord::open(p.record_path()).unwrap();
+    assert_eq!(
+        original.status().resolved_by.as_deref(),
+        Some(restore.operation_id())
+    );
+    let mut reopened = DocumentStore::default();
+    reopened.open(dir.path().join("draft.json")).unwrap();
+    assert!(!reopened.draft.read_only);
+    s.shutdown().await;
+}
+#[tokio::test]
+async fn stale_restore_refuses_changes_and_new_review_can_bind_new_bytes() {
+    let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
+    let (_dir, p) = plan(RAW, session.id, 12);
+    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    assert_eq!(writer.apply(&p).await, Outcome::Verified);
+    let record = OperationRecord::open(p.record_path()).unwrap();
+    let stale = writer.prepare_restore(&record).await.unwrap();
+    let mut state = device.files().unwrap();
+    state.keymap.push(b' ');
+    device.set_files(state);
+    let before = mutations(&device);
+    assert_eq!(writer.apply(&stale).await, Outcome::NotSent);
+    assert_eq!(mutations(&device), before);
+    let fresh = writer.prepare_restore(&record).await.unwrap();
+    assert_eq!(writer.apply(&fresh).await, Outcome::Verified);
+    assert_eq!(device.files().unwrap().keymap, RAW);
+    session.shutdown().await;
+}
+#[tokio::test]
+async fn recovery_rejects_missing_bad_digest_failed_read_and_unverified_identity() {
+    for fault in 0..4 {
+        let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
+        let (_dir, p) = plan(RAW, session.id, 14);
+        let writer = SyntheticWriter::new(session.clone()).unwrap();
+        assert_eq!(writer.apply(&p).await, Outcome::Verified);
+        let record = OperationRecord::open(p.record_path()).unwrap();
+        let mut files = device.files().unwrap();
+        match fault {
+            0 => files.missing_keymap = true,
+            1 => files.bad_checksum = true,
+            2 => files.fail_read = true,
+            _ => {}
+        }
+        device.set_files(files);
+        let before = mutations(&device);
+        if fault == 3 {
+            let mut current = writer.inspect().await.unwrap();
+            current["device_identity"]["confidence"] = json!("unknown");
+            assert!(record.prepare_restore(current).is_err());
+        } else {
+            assert!(writer.prepare_restore(&record).await.is_err());
+        }
+        assert_eq!(mutations(&device), before);
+        session.shutdown().await;
+    }
+}
+#[tokio::test]
+async fn records_are_private_checksummed_and_corruption_never_authorizes_repair() {
+    use std::os::unix::fs::PermissionsExt;
+    let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
+    let (_dir, p) = plan(RAW, session.id, 18);
+    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    assert_eq!(writer.apply(&p).await, Outcome::Verified);
+    assert_eq!(
+        std::fs::metadata(p.record_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    for name in [
+        "status.json",
+        "material.json",
+        "document-before.json",
+        "document-target.json",
+    ] {
+        assert_eq!(
+            std::fs::metadata(p.record_path().join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    let count = mutations(&device);
+    for name in [
+        "status.json",
+        "material.json",
+        "document-before.json",
+        "document-target.json",
+    ] {
+        let path = p.record_path().join(name);
+        let original = std::fs::read(&path).unwrap();
+        let mut corrupted = original.clone();
+        corrupted.push(b'x');
+        std::fs::write(&path, &corrupted).unwrap();
+        assert!(OperationRecord::open(p.record_path()).is_err());
+        std::fs::write(path, original).unwrap();
+    }
+    assert_eq!(mutations(&device), count);
+    session.shutdown().await;
+}
+
+#[tokio::test]
+async fn explicit_original_readback_unlocks_without_claiming_not_sent_or_rewriting() {
+    let mut files = SyntheticFiles::new(RAW.to_vec(), None);
+    files.reject_offset = Some(0);
+    let (device, session) = setup(files).await;
+    let (dir, p) = plan(RAW, session.id, 21);
+    assert_eq!(
+        SyntheticWriter::new(session.clone())
+            .unwrap()
+            .apply(&p)
+            .await,
+        Outcome::DeviceStateUnknown
+    );
+    session.shutdown().await;
+    let s = reconnect(&device).await;
+    let writer = SyntheticWriter::new(s.clone()).unwrap();
+    let count = mutations(&device);
+    let mut record = OperationRecord::open(p.record_path()).unwrap();
+    writer.confirm_readback(&mut record).await.unwrap();
+    assert_eq!(record.status().phase, Phase::OriginalVerified);
+    assert!(!record.status().device_verified);
+    assert!(record.retry_local_save().is_err());
+    let mut store = DocumentStore::default();
+    store.open(dir.path().join("draft.json")).unwrap();
+    assert!(!store.draft.read_only);
+    assert_eq!(mutations(&device), count);
+    s.shutdown().await;
+}
+#[tokio::test]
+async fn failed_restore_can_be_replaced_by_new_review_of_same_original_backup() {
+    let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
+    let (dir, p) = plan(RAW, session.id, 33);
+    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    assert_eq!(writer.apply(&p).await, Outcome::Verified);
+    let record = OperationRecord::open(p.record_path()).unwrap();
+    let first = writer.prepare_restore(&record).await.unwrap();
+    let mut files = device.files().unwrap();
+    files.reject_offset = Some(0);
+    device.set_files(files);
+    assert_eq!(writer.apply(&first).await, Outcome::DeviceStateUnknown);
+    session.shutdown().await;
+    let mut files = device.files().unwrap();
+    files.reject_offset = None;
+    device.set_files(files);
+    let s = reconnect(&device).await;
+    let writer = SyntheticWriter::new(s.clone()).unwrap();
+    let fresh = writer.prepare_restore(&record).await.unwrap();
+    assert_eq!(writer.apply(&fresh).await, Outcome::Verified);
+    assert_eq!(device.files().unwrap().keymap, RAW);
+    assert!(OperationRecord::open(first.record_path())
+        .unwrap()
+        .status()
+        .resolved_by
+        .is_some());
+    let mut store = DocumentStore::default();
+    store.open(dir.path().join("draft.json")).unwrap();
+    assert!(!store.draft.read_only);
+    s.shutdown().await;
+}
+
+#[tokio::test]
+async fn readback_failure_keeps_unknown_until_independent_fresh_check() {
+    let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
+    let (_dir, p) = plan(RAW, session.id, 29);
+    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    assert_eq!(
+        writer
+            .apply_observed(&p, |at, _| {
+                if at == Checkpoint::AfterAck(1) {
+                    let mut f = device.files().unwrap();
+                    f.fail_read = true;
+                    device.set_files(f);
+                }
+            })
+            .await,
+        Outcome::DeviceStateUnknown
+    );
+    assert_eq!(device.files().unwrap().keymap, p.candidate());
+    let mut r = OperationRecord::open(p.record_path()).unwrap();
+    assert!(!r.status().device_verified);
+    assert!(r.retry_local_save().is_err());
+    session.shutdown().await;
+    let mut f = device.files().unwrap();
+    f.fail_read = false;
+    device.set_files(f);
+    let s = reconnect(&device).await;
+    let count = mutations(&device);
+    SyntheticWriter::new(s.clone())
+        .unwrap()
+        .confirm_readback(&mut r)
+        .await
+        .unwrap();
+    r.retry_local_save().unwrap();
+    assert_eq!(mutations(&device), count);
+    s.shutdown().await;
 }

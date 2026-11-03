@@ -38,7 +38,9 @@ Rust 模型已支持 Layer 可选灯光目标、单区/当前Profile多层编辑
 
 `cargo test -p mi-model --test lighting` 验证文档与候选；`cargo test -p mi-session --features synthetic-backend --test config_write` 用实际codec/framer/唯一reader和可变合成文件验证写回、恢复及失败路径。合成写入器仅在synthetic-backend构建中存在，并拒绝原生后端；没有FFI或UI设备写入口。生产读接口仍只读。
 
-这不是完整S3交付：持久操作日志与崩溃后产品恢复、逐绑定宿主重验/动作排空、RGB界面、预览生命周期及真实设备验收仍待后续阶段。当前验证不连接真实设备。方案见[设备改键与RGB设计](docs/designs/device-write-and-rgb.md)。
+下一段离线恢复已实现：备份目录内持久操作记录绑定原副本、候选和冻结文档；首次可能发送前落盘，重开不续写。合成环境支持损坏 keymap 的显式新计划恢复、独立读回核对，以及只修本地保存的幂等重试。
+
+这不是完整 S3 交付：上述能力尚未接入 FFI 和产品恢复界面；逐绑定宿主重验/动作排空、RGB 界面、预览生命周期及真实设备验收仍待后续阶段。当前验证不连接真实设备。方案见[设备改键与RGB设计](docs/designs/device-write-and-rgb.md)。
 
 ## 常用 Agent 与日常界面
 
@@ -70,7 +72,7 @@ T05已补取消、会话终止通知及退出时等待资源释放；当前设�
 
 ## 下一步
 
-S3 首段离线模型、候选与合成链路已完成（E-100）；下一段可继续离线实现持久操作记录及失败恢复，再接入 FFI 与 RGB 编辑界面。真实设备连接与写入不属于本轮授权。
+S3 离线模型与候选（E-100）、持久操作记录与失败恢复（E-101）已完成核心和合成验证；下一段可接入高层 FFI、宿主动作排空及产品恢复界面，再完成 RGB 编辑与预览。真实设备连接与写入不属于本轮授权。
 
 PR #12/#13 已交付原生离线工作台、结构化动作和本地持久化。当前已有设备发现、身份查询与[#5 配置读取](https://github.com/semantic-craft/micro-input/issues/5)实现；配置原生浏览验收见[E-079](docs/spec/EVIDENCE.md)，[#6 生命周期](https://github.com/semantic-craft/micro-input/issues/6)及完整硬件写入恢复仍待验证。范围继续保持设备 Flash 只读，不从核心读回推定全部 S3 完成。
 

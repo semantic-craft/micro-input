@@ -782,6 +782,9 @@ pub struct SyntheticFiles {
     /// Store the chunk but lose its response, modeling uncertain completion.
     pub lose_ack_offset: Option<usize>,
     pub corrupt_completed: bool,
+    pub missing_keymap: bool,
+    pub bad_checksum: bool,
+    pub fail_read: bool,
     next_offset: usize,
 }
 #[cfg(feature = "synthetic-backend")]
@@ -793,6 +796,9 @@ impl SyntheticFiles {
             reject_offset: None,
             lose_ack_offset: None,
             corrupt_completed: false,
+            missing_keymap: false,
+            bad_checksum: false,
+            fail_read: false,
             next_offset: 0,
         }
     }
@@ -807,12 +813,20 @@ impl SyntheticFiles {
                     let mut files = vec![
                         json!({"name":"keymap.json","size":self.keymap.len(),"checksum":format!("{:x}",Sha1::digest(&self.keymap))}),
                     ];
+                    if self.missing_keymap {
+                        files.clear();
+                    } else if self.bad_checksum {
+                        files[0]["checksum"] = json!("0000000000000000000000000000000000000000");
+                    }
                     if let Some(smart) = &self.smart_actions {
                         files.push(json!({"name":"smart_actions.json","size":smart.len(),"checksum":format!("{:x}",Sha1::digest(smart))}));
                     }
                     Ok(json!(files))
                 }
                 Some("fs.readbin") => {
+                    if self.fail_read {
+                        return Err(());
+                    }
                     let bytes = match params["file"].as_str() {
                         Some("keymap.json") => &self.keymap,
                         Some("smart_actions.json") => self.smart_actions.as_ref().ok_or(())?,

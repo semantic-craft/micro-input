@@ -1,6 +1,6 @@
 //! T13 software preparation only. No transport, writer, activation or recovery execution.
 use crate::{comparison, document::LocalDocumentV2, draft::ActionKind};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, value::RawValue, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -8,7 +8,7 @@ use std::{
     fs::{self, DirBuilder, OpenOptions},
     io::Write,
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 pub const UNAVAILABLE: &str =
@@ -16,7 +16,7 @@ pub const UNAVAILABLE: &str =
 // TODO(UNKNOWN-08): implement a writer only after configuration commit/readback evidence.
 // TODO(UNKNOWN-09): implement device restore only after recovery evidence.
 // Both require explicit authorization. Temporary-file probes do not establish these capabilities.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Preview {
     pub kind: String,
     pub token: String,
@@ -39,7 +39,7 @@ pub struct Preview {
     pub restore_available: bool,
     pub unavailable_reason: String,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Prepared {
     pub token: String,
     pub backup_path: String,
@@ -48,7 +48,7 @@ pub struct Prepared {
     pub unavailable_reason: String,
 }
 pub(crate) struct Pending {
-    pub prepared: bool,
+    pub prepared: Option<Prepared>,
     pub preview: Preview,
     baseline: Value,
     keymap: Vec<u8>,
@@ -288,7 +288,7 @@ impl Pending {
             unavailable_reason: UNAVAILABLE.into(),
         };
         Ok(Self {
-            prepared: false,
+            prepared: None,
             preview,
             baseline: current.clone(),
             keymap,
@@ -363,7 +363,10 @@ impl Pending {
         }
         Ok(Prepared {
             token: self.preview.token.clone(),
-            backup_path: path.to_string_lossy().into(),
+            backup_path: fs::canonicalize(&path)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .into(),
             manifest_sha256: digest(&manifest),
             status: "prepared-not-sent".into(),
             unavailable_reason: UNAVAILABLE.into(),
@@ -375,13 +378,21 @@ impl Pending {
 /// It carries no transport authority. Production execution is not implemented.
 #[derive(Clone)]
 pub struct PreparedCandidate {
-    operation_id: String,
-    session_id: u64,
-    original: Vec<u8>,
-    candidate: Vec<u8>,
-    smart: Option<Vec<u8>>,
+    pub(crate) operation_id: String,
+    pub(crate) session_id: u64,
+    pub(crate) original: Vec<u8>,
+    pub(crate) candidate: Vec<u8>,
+    pub(crate) smart: Option<Vec<u8>>,
+    pub(crate) backup: Prepared,
+    pub(crate) document_path: PathBuf,
+    pub(crate) document_bytes: Vec<u8>,
+    pub(crate) baseline: Value,
+    pub(crate) restores: Option<String>,
 }
 impl PreparedCandidate {
+    pub fn record_path(&self) -> PathBuf {
+        PathBuf::from(&self.backup.backup_path).join("operation")
+    }
     pub fn operation_id(&self) -> &str {
         &self.operation_id
     }
@@ -399,11 +410,18 @@ impl PreparedCandidate {
     }
 }
 impl Pending {
-    pub(crate) fn candidate(&self) -> Result<PreparedCandidate, String> {
-        if !self.prepared {
-            return Err("先保存并核验原始副本".into());
-        }
+    pub(crate) fn candidate(
+        &self,
+        document_path: PathBuf,
+        document_bytes: Vec<u8>,
+    ) -> Result<PreparedCandidate, String> {
+        let backup = self.prepared.clone().ok_or("先保存并核验原始副本")?;
         Ok(PreparedCandidate {
+            backup,
+            document_path: fs::canonicalize(document_path).map_err(|e| e.to_string())?,
+            document_bytes,
+            baseline: self.baseline.clone(),
+            restores: None,
             operation_id: self.preview.token.clone(),
             session_id: self.preview.device_identity["session_id"]
                 .as_u64()
@@ -543,7 +561,7 @@ impl Pending {
             unavailable_reason: UNAVAILABLE.into(),
         };
         Ok(Self {
-            prepared: false,
+            prepared: None,
             preview,
             baseline: current.clone(),
             keymap,
@@ -580,4 +598,65 @@ fn known_passthrough(layer: &crate::Layer, slot: usize, token: &str) -> bool {
         })
         .count()
         == 1
+}
+
+impl PreparedCandidate {
+    pub(crate) fn restore(
+        record: &crate::operation_record::OperationRecord,
+        current: Value,
+    ) -> Result<Self, String> {
+        let prior = record.plan()?;
+        crate::operation_record::same_device(&prior.baseline, &current)?;
+        let keymap = bytes(&current, "keymap")?.ok_or("缺少现状文件")?;
+        let smart = bytes(&current, "smart_actions")?;
+        let target = prior.original.clone();
+        crate::parse_device_files(&target, smart.as_deref()).map_err(|e| e.to_string())?;
+        let document_bytes = crate::storage::read(&prior.document_path)?.ok_or("文档缺失")?;
+        let draft = crate::draft::Draft::from_bytes(&document_bytes)?;
+        if draft.read_only || draft.loaded_format != 2 {
+            return Err("恢复不能覆盖未知本地格式".into());
+        }
+        let doc = draft.document;
+        let prior_doc: LocalDocumentV2 =
+            serde_json::from_slice(&prior.document_bytes).map_err(|e| e.to_string())?;
+        if doc.document_id != prior_doc.document_id {
+            return Err("恢复关联文档身份已变化".into());
+        }
+        doc.validate()?;
+        if keymap.len() > 4 * 1024 * 1024
+            || smart.as_ref().is_some_and(|b| b.len() > 4 * 1024 * 1024)
+        {
+            return Err("恢复现状超过读取预算".into());
+        }
+        let mut preview: Preview = serde_json::from_slice::<Value>(
+            &fs::read(PathBuf::from(&prior.backup.backup_path).join("manifest.json"))
+                .map_err(|e| e.to_string())?,
+        )
+        .and_then(|v| serde_json::from_value(v["plan"].clone()))
+        .map_err(|e| e.to_string())?;
+        preview.kind = "restore-keymap".into();
+        preview.token = crate::document::new_id();
+        preview.document_id = doc.document_id.clone();
+        preview.revision = doc.revision;
+        preview.document_sha256 = digest(&document_bytes);
+        preview.device_identity = current["device_identity"].clone();
+        preview.firmware = current["firmware"].clone();
+        preview.files = metadata(&current);
+        preview.before = "完整现状 keymap；可能不可解析".into();
+        preview.after = "关联原副本；保留现状 smart_actions".into();
+        preview.planned_keymap_sha256 = digest(&target);
+        let mut pending = Pending {
+            prepared: None,
+            preview,
+            baseline: current,
+            keymap,
+            planned_keymap: target,
+            smart,
+        };
+        let backup = pending.backup(prior.document_path.parent().ok_or("无效文档路径")?)?;
+        pending.prepared = Some(backup);
+        let mut result = pending.candidate(prior.document_path, document_bytes)?;
+        result.restores = Some(prior.operation_id);
+        Ok(result)
+    }
 }
