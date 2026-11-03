@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""Measure isolated QA startup and idle CPU/RSS; record a baseline, not an acceptance verdict."""
+
+import argparse
+import json
+import os
+import platform
+import signal
+import subprocess
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def parse_ps_cpu_time(value):
+    days = 0.0
+    remaining = value
+    if "-" in remaining:
+        days_text, remaining = remaining.split("-", 1)
+        days = float(days_text)
+    fields = remaining.split(":")
+    seconds = float(fields[-1])
+    multiplier = 1
+    for field in reversed(fields[:-1]):
+        multiplier *= 60
+        seconds += int(field) * multiplier
+    return days * 86400 + seconds
+
+
+def read_process(pid):
+    raw = subprocess.run(
+        ["ps", "-o", "cputime=", "-o", "rss=", "-p", str(pid)],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    cpu_time, rss_kb = raw.split(None, 1)
+    return parse_ps_cpu_time(cpu_time), int(rss_kb)
+
+
+def machine_metadata():
+    chip = subprocess.run(
+        ["sysctl", "-n", "machdep.cpu.brand_string"], check=True, text=True, capture_output=True
+    ).stdout.strip()
+    os_build = subprocess.run(
+        ["sw_vers", "-buildVersion"], check=True, text=True, capture_output=True
+    ).stdout.strip()
+    memory = int(subprocess.run(["sysctl", "-n", "hw.memsize"], check=True, text=True, capture_output=True).stdout)
+    release, _, _ = platform.mac_ver()
+    return {
+        "os_version": release,
+        "os_build": os_build,
+        "arch": platform.machine(),
+        "chip": chip,
+        "physical_memory_bytes": memory,
+    }
+
+
+def write_json(path, payload):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+def stop_launcher(process):
+    if process.poll() is None:
+        process.send_signal(signal.SIGTERM)
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    try:
+        process.communicate(timeout=1)
+    except (subprocess.TimeoutExpired, ValueError):
+        pass
+
+
+def summary(samples):
+    rss = [sample["rss_kb"] for sample in samples]
+    cpu_percent = [sample["cpu_percent"] for sample in samples]
+    return {
+        "sample_count": len(samples),
+        "rss_kb_min": min(rss),
+        "rss_kb_max": max(rss),
+        "rss_kb_avg": sum(rss) / len(rss),
+        "cpu_percent_min": min(cpu_percent),
+        "cpu_percent_max": max(cpu_percent),
+        "cpu_percent_avg": sum(cpu_percent) / len(cpu_percent),
+    }
+
+
+def baseline(process, run_dir, seconds, interval):
+    evidence = run_dir / "evidence"
+    launcher_path = evidence / "launcher.json"
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        try:
+            launcher = json.loads(launcher_path.read_text(encoding="utf-8"))
+            ready = json.loads((evidence / "app-ready.json").read_text(encoding="utf-8"))
+            break
+        except (FileNotFoundError, json.JSONDecodeError):
+            if process.poll() is not None:
+                raise RuntimeError(f"QA launcher exited before app-ready: {process.returncode}")
+            time.sleep(0.05)
+    else:
+        stop_launcher(process)
+        raise RuntimeError("app-ready.json was not produced within 20 seconds")
+
+    if launcher.get("pid") != ready.get("pid"):
+        stop_launcher(process)
+        raise RuntimeError("launcher and app-ready pid disagree")
+    if launcher.get("bundle_id") != "com.semanticcraft.microinput.qa":
+        stop_launcher(process)
+        raise RuntimeError("unexpected QA bundle identity")
+
+    samples = []
+    previous_cpu_time, _ = read_process(launcher["pid"])
+    for _ in range(round(seconds / interval)):
+        time.sleep(interval)
+        cpu_time, rss_kb = read_process(launcher["pid"])
+        samples.append({
+            "at_unix_ms": int(time.time() * 1000),
+            "rss_kb": rss_kb,
+            "cpu_percent": (cpu_time - previous_cpu_time) / interval * 100,
+        })
+        previous_cpu_time = cpu_time
+
+    stop_launcher(process)
+    if process.returncode not in (0, -signal.SIGTERM, 128 + signal.SIGTERM):
+        raise RuntimeError(f"QA launcher exited with {process.returncode}")
+    launcher = json.loads(launcher_path.read_text(encoding="utf-8"))
+    cleanup = all(launcher.get(key) for key in ("app_bundle_removed", "documents_removed", "preferences_removed"))
+    if not cleanup:
+        raise RuntimeError("QA cleanup incomplete")
+
+    started = launcher["started_ms"]
+    return {
+        "status": "MEASURED",
+        "scenario": "performance-baseline",
+        "build": "synthetic",
+        "bundle_id": launcher["bundle_id"],
+        "launcher_pid": process.pid,
+        "app_pid": launcher["pid"],
+        "startup": {
+            "launch_to_workbench_ready_ms": ready["ready_at_unix_ms"] - started,
+            "in_process_workbench_ready_ms": ready["monotonic_ready_ms"],
+            "trigger": ready["trigger"],
+        },
+        "idle": {
+            "duration_seconds": seconds,
+            "interval_seconds": interval,
+            "cpu_metric": "macOS ps cputime delta / interval",
+            "rss_metric": "macOS ps resident set size in KiB",
+            "samples": samples,
+            "summary": summary(samples),
+        },
+        "boundaries": {
+            "device_connection": "NOT_RUN",
+            "physical_key": "NOT_RUN",
+            "lighting_visual": "NOT_RUN",
+            "installed_release": "NOT_RUN",
+            "acceptance_budget": "NOT_SET",
+        },
+        "cleanup_confirmed": True,
+        "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "working_tree_changes": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True)),
+        "timestamp_ms": int(time.time() * 1000),
+        "environment": machine_metadata(),
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--seconds", type=float, default=10, help="idle observation duration")
+    parser.add_argument("--interval", type=float, default=1, help="sampling interval")
+    args = parser.parse_args()
+    if args.seconds <= 0 or args.interval <= 0 or args.seconds < args.interval:
+        parser.error("--seconds and --interval must be positive, with seconds >= interval")
+
+    subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, check=True)
+    env = dict(os.environ, MI_AUTO_HOST_READY="0")
+    env.pop("MI_SYNTHETIC_SCENARIO", None)
+    started_ms = int(time.time() * 1000)
+    process = subprocess.Popen(
+        ["scripts/run", "--verify", "--timeout=45"],
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output = []
+    run_dir = None
+    try:
+        while run_dir is None and process.poll() is None:
+            line = process.stdout.readline()
+            if line:
+                output.append(line)
+                if line.startswith("QA_RUN_DIR="):
+                    run_dir = Path(line.split("=", 1)[1].strip()).resolve()
+        if run_dir is None:
+            raise RuntimeError("launcher did not identify exactly one QA run")
+        result = baseline(process, run_dir, args.seconds, args.interval)
+        result["run_started_ms"] = started_ms
+        write_json(run_dir / "evidence/result.json", result)
+        print("".join(output), end="", flush=True)
+        print(f"performance baseline: MEASURED ({run_dir / 'evidence/result.json'})", flush=True)
+    except BaseException:
+        if process.poll() is None:
+            stop_launcher(process)
+        print("".join(output), end="", flush=True)
+        raise
+    finally:
+        subprocess.run(["scripts/build"], cwd=ROOT, env=env, check=True)
+
+
+if __name__ == "__main__":
+    main()

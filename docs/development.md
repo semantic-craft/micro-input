@@ -86,6 +86,8 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 
 RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和三个 QA 场景的总入口；`--qa-only` 用于已完成单元门禁后的应用复验。每个应用场景 TTL 45 秒，启动器负责退出/清理，验证器另核对进程消失、回执数量及隔离目录移除。失败写入 FAIL 结果并非零退出；finally 恢复匹配的生产绑定/库/应用但不启动它。环境强制 `MI_AUTO_HOST_READY=0`，不运行任何物理探针。
 
+性能基线准备：`scripts/perf-baseline` 构建合成应用后启动隔离 QA，记录从启动到 Workbench 首次 `onAppear` 的耗时，再采样默认 10 秒空闲 CPU time 增量与 RSS。结果写入该轮 `evidence/result.json`，状态为 `MEASURED`；设备连接、实体键、灯光视觉、安装版和验收预算固定 `NOT_RUN` 或 `NOT_SET`。该命令只建立可复测基线，不签收 #42 的长时运行、插拔、睡眠唤醒或轻量预算。
+
 `cargo test -p mi-session --features synthetic-backend lighting_preview` 覆盖合成运行态与文件分离、最新值合并、切层/断连、失败未知状态、编号保留、30 秒上限及所有者丢弃恢复。`LightingTests` 经实际 UniFFI 覆盖两区六效果、参数可用性、非法值、单次全层撤销、重开、RGB 应用/恢复及预览不修改本地文档。恢复设备保留本地目标意图；测试分别检查当前设备快照和本地草稿，不把两者相等当成要求。
 
 ## 实机验收材料的离线准备
