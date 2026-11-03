@@ -2,6 +2,11 @@
 import Foundation
 import MicroInputCore
 protocol Backend {
+    func hostRoutingState() -> String
+    func hostInputWatermark() -> String
+    func updateHostRouting(requestJson: String) async throws -> String
+    func resolveHostInput(bindingId: String, expectedDocumentId: String, expectedDocumentRevision: UInt64, expectedHostStateRevision: UInt64) -> String?
+
     func loadDemo() async throws -> String
     func listDevices() async throws -> [DeviceInfo]
     func connect(id: String) async throws
@@ -64,6 +69,11 @@ protocol Backend {
     func installCodingAgentPresets() async throws -> String
 }
 extension Backend {
+    func hostRoutingState() -> String { "{}" }
+    func hostInputWatermark() -> String { #"{"session_id":null,"ingress_sequence":0}"# }
+    func updateHostRouting(requestJson: String) async throws -> String { throw BridgeError.Unavailable }
+    func resolveHostInput(bindingId: String, expectedDocumentId: String, expectedDocumentRevision: UInt64, expectedHostStateRevision: UInt64) -> String? { nil }
+
     func inspectAgentProposal(text: String) async throws -> String { throw BridgeError.Failed(message: "Agent 提案不可用") }
     func rejectAgentProposal() async {}
     func acceptAgentProposal(token: String) async throws -> String { throw BridgeError.Failed(message: "Agent 提案不可用") }
@@ -131,8 +141,21 @@ extension MicroInput: Backend {}
         guard !systemSleeping, !stopped, connectedID != nil else { throw BridgeError.Disconnected }
         return try await backend.subscribeVerifiedInput()
     }
-    private let backend: Backend
-    private let actionExecutor: HostActionExecuting
+    let backend: Backend
+    let actionExecutor: HostActionExecuting
+    @Published var routing: HostRoutingState?
+    @Published var inputNeedsResume = false
+    var routingValid = false
+    var hostMutations: [HostMutation] = []
+    var mutationDraining = false
+    var inputBoundary = HostInputBoundary()
+    var pendingHostActions: [PendingHostAction] = []
+    var hostExecutionTask: Task<Void, Never>?
+    var overflowDraining = false
+    var observationSequence: UInt64 = 0
+    var externalBundleID: String?
+    var foregroundTask: Task<Void, Never>?
+    lazy var overlay = HostOverlay(store: self)
     @Published var hostActiveProfileId: String?
     @Published var hostExecutionEnabled = false
     @Published var passThroughHealth: PassThroughHealthView = .disconnected
@@ -191,7 +214,7 @@ extension MicroInput: Backend {}
     private var autoSetupInFlight = false
     func loadWorkbench() async {
         do {
-            try applyDocument(try await backend.openDocument(path: documentURL.path))
+            try await changeDocument(fresh: false) { [self] in try await backend.openDocument(path: documentURL.path) }
             if let index = snapshot?.profiles.firstIndex(where: {
                 $0.id.text == hostActiveProfileId && DesktopAgent.named($0.name) != nil
             }) {
@@ -228,21 +251,10 @@ extension MicroInput: Backend {}
         draft = result.draft; snapshot = result.config; localSnapshot = result.config
         actionCapabilities = result.action_capabilities ?? [:]
         controlSettings = result.control_settings ?? [:]; controlSettingsError = nil
-        if let activePid = result.host_active_profile_id,
-           result.config.profiles.contains(where: { $0.id.text == activePid }) {
-            hostActiveProfileId = activePid
-        } else {
-            hostActiveProfileId = result.config.profiles.first(where: { $0.name == "Antigravity" })?.id.text
-                ?? result.config.profiles.first?.id.text
-        }
-        if let enabled = result.host_execution_enabled {
-            hostExecutionEnabled = enabled
-            if enabled, connectedID != nil, hostInputTask == nil {
-                startHostInputLoop(token: generation)
-            } else if !enabled {
-                hostInputTask?.cancel(); hostInputTask = nil
-            }
-        }
+        hostActiveProfileId = result.host_active_profile_id
+        if let enabled = result.host_execution_enabled { hostExecutionEnabled = enabled }
+        try? refreshRouting()
+        if connectedID != nil, hostInputTask == nil, !inputNeedsResume { startHostInputLoop(token: generation) }
         browsingDeviceSnapshot = false; stale = false; documentReady = !draft.read_only
         restoreSelection(profile: result.selection_hint?.profile_id ?? oldProfile, layer: result.selection_hint?.layer_id ?? oldLayer, fallbackProfile: pi, fallbackLayer: li)
         localSelection = (profile?.id.text, layer?.id.text, slot)
@@ -250,50 +262,18 @@ extension MicroInput: Backend {}
         if draft.loaded_format == 1 { status += " · 旧格式将在首次修改时转换并备份" }
     }
     func setHostActiveProfile(_ profileId: String?) async {
-        let previous = hostActiveProfileId
-        hostActiveProfileId = profileId
-        do {
-            let json = try await backend.setHostActiveProfile(profileId: profileId)
-            if let result = try? JSONDecoder().decode(DocumentView.self, from: Data(json.utf8)) {
-                if let activePid = result.host_active_profile_id,
-                   result.config.profiles.contains(where: { $0.id.text == activePid }) {
-                    hostActiveProfileId = activePid
-                } else {
-                    hostActiveProfileId = result.config.profiles.first(where: { $0.name == "Antigravity" })?.id.text
-                        ?? result.config.profiles.first?.id.text
-                }
-            }
-            status = "已切换宿主激活 Profile · 不写设备 Flash"
-        } catch {
-            hostActiveProfileId = previous
-            status = readableError(error)
-        }
+        guard let id = profileId ?? hostProfiles.first(where: { $0.name == "Antigravity" })?.id.text else { return }
+        await routingChange(["kind":"select", "profile_id":id])
     }
     func setHostExecutionEnabled(_ enabled: Bool) async {
-        let previous = hostExecutionEnabled
-        hostExecutionEnabled = enabled
-        do {
-            let json = try await backend.setHostExecutionEnabled(enabled: enabled)
-            if let result = try? JSONDecoder().decode(DocumentView.self, from: Data(json.utf8)),
-               let persisted = result.host_execution_enabled {
-                hostExecutionEnabled = persisted
-            }
-            if hostExecutionEnabled, connectedID != nil {
-                startHostInputLoop(token: generation)
-            } else if !hostExecutionEnabled {
-                hostInputTask?.cancel(); hostInputTask = nil
-            }
-            status = hostExecutionEnabled ? "宿主动作执行已开启 · 仅响应已验证输入" : "宿主动作执行已暂停"
-        } catch {
-            hostExecutionEnabled = previous
-            status = readableError(error)
-        }
+        await routingChange(["kind":"execution", "enabled":enabled])
+        if connectedID != nil, hostInputTask == nil, !inputNeedsResume { startHostInputLoop(token: generation) }
     }
     func installCodingAgentPresets() async {
         guard canEditDraft, !busy else { return }
         busy = true; defer { busy = false }
         do {
-            try applyDocument(try await backend.installCodingAgentPresets())
+            try await changeDocument(fresh: false) { [self] in try await backend.installCodingAgentPresets() }
             status = "已安装常用 Agent 配置 · 可在菜单栏选择当前控制目标"
         } catch { status = readableError(error) }
     }
@@ -311,7 +291,6 @@ extension MicroInput: Backend {}
         await installCodingAgentPresets()
         if untouched, let index = snapshot?.profiles.firstIndex(where: { $0.name == "Cindy" }) {
             selectProfile(index)
-            await setHostActiveProfile(profile?.id.text)
         }
     }
     var canTryDesktopAction: Bool {
@@ -322,6 +301,7 @@ extension MicroInput: Backend {}
     }
     private static let desktopBindings = ["AG01", "AG00", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10", "AG11", "AG12", "AG13", "AG14", "ENC_CLK", "AG15", "AG16", "AG17", "AG18"]
     func tryDesktopAction() async {
+        guard dispatchOpen else { status = "正在切换或路由尚未就绪，请稍后重试"; return }
         guard canTryDesktopAction else { return }
         let binding = Self.desktopBindings[slot]
         guard let json = backend.resolveInputAction(bindingId: binding, isPressed: true),
@@ -329,14 +309,17 @@ extension MicroInput: Backend {}
               ["open_app", "shortcut", "agent_command"].contains(payload.action_type) else {
             status = "此按键未配置可试运行动作"; return
         }
-        busy = true; defer { busy = false }
-        lastHostActionReceipt = await actionExecutor.execute(actionJSON: json, bindingId: "ui-" + binding, profileId: hostActiveProfileId ?? "")
+        guard let (resolved, profile, state) = resolveHostAction(binding) else { return }
+        await withCheckedContinuation { continuation in
+            enqueueHostAction(json: resolved, binding: "ui-" + binding, profile: profile, state: state, done: { continuation.resume() })
+        }
         status = lastHostActionReceipt?.detail ?? "没有执行回执"
     }
     func openDesktopAgent(_ agent: DesktopAgent) async {
-        guard let data = try? JSONSerialization.data(withJSONObject: ["action_type": "open_app", "bundle_id": agent.bundleID]),
-              let json = String(data: data, encoding: .utf8) else { return }
-        lastHostActionReceipt = await actionExecutor.execute(actionJSON: json, bindingId: "ui-open", profileId: profile?.id.text ?? "")
+        guard let state = routing, let data = try? JSONSerialization.data(withJSONObject: ["action_type": "open_app", "bundle_id": agent.bundleID]) else { return }
+        await withCheckedContinuation { continuation in
+            enqueueHostAction(json: String(decoding: data, as: UTF8.self), binding: "ui-open", profile: state.profile_id ?? "", state: state, requiresEnabled: false, done: { continuation.resume() })
+        }
     }
     func autoSetupHostExecutionIfNeeded() async {
         guard !autoSetupInFlight, !systemSleeping, !stopped else { return }
@@ -347,13 +330,6 @@ extension MicroInput: Backend {}
         let existingNames = Set(hostProfiles.map(\.name))
         if !presetNames.isSubset(of: existingNames), canEditDraft, !busy {
             await prepareDesktopProfiles()
-        }
-        if let agProfile = hostProfiles.first(where: { $0.name == "Cindy" }),
-           !presetNames.contains(hostProfiles.first(where: { $0.id.text == hostActiveProfileId })?.name ?? "") {
-            await setHostActiveProfile(agProfile.id.text)
-        }
-        if !hostExecutionEnabled {
-            await setHostExecutionEnabled(true)
         }
         await startDiscovery()
         if devices.isEmpty { await refresh() }
@@ -402,48 +378,48 @@ extension MicroInput: Backend {}
     func resolveInputActionForTesting(bindingId: String, isPressed: Bool = true) -> String? {
         backend.resolveInputAction(bindingId: bindingId, isPressed: isPressed)
     }
-    private func startHostInputLoop(token: Int) {
-        hostInputTask?.cancel()
+    func startHostInputLoop(token: Int) {
+        guard hostInputTask == nil else { return }
         hostInputTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            while !Task.isCancelled, token == self.generation, self.connectedID != nil, !self.systemSleeping, !self.stopped {
-                guard let stream = try? await self.subscribeVerifiedInput() else { break }
-                var sawGap = false
-                await withTaskCancellationHandler(operation: {
-                    while !Task.isCancelled, let event = await stream.nextEvent() {
-                        guard token == self.generation else { break }
-                        if event.kind == .inputStreamGap {
-                            sawGap = true
-                            break
-                        }
-                        if event.kind == .pressed, event.actionEligible, let bindingId = event.bindingId {
-                            if let actionJSON = self.backend.resolveInputAction(bindingId: bindingId, isPressed: true) {
-                                let pid = self.hostActiveProfileId ?? ""
-                                let receipt = await self.actionExecutor.execute(actionJSON: actionJSON, bindingId: bindingId, profileId: pid)
-                                self.lastHostActionReceipt = receipt
-                            }
-                        }
+            guard let stream = try? await self.subscribeVerifiedInput() else { self.hostInputTask = nil; return }
+            self.readInputBoundary()
+            await withTaskCancellationHandler(operation: {
+                while !Task.isCancelled, let event = await stream.nextEvent() {
+                    guard token == self.generation, !self.systemSleeping, !self.stopped else { break }
+                    if event.kind == .inputStreamGap {
+                        self.clearPendingActions(); self.inputNeedsResume = true
+                        self.status = "输入流丢失，已暂停派发；请恢复输入并松开按键 / 摇杆回中"
+                        break
                     }
-                }, onCancel: { stream.close() })
-                stream.close()
-                if !sawGap { break }
-            }
+                    if self.inputBoundary.consume(event, gateOpen: self.dispatchOpen && !self.inputNeedsResume),
+                       let binding = event.bindingId, let (json, profile, state) = self.resolveHostAction(binding) {
+                        self.enqueueHostAction(json: json, binding: binding, profile: profile, state: state, deviceSession: event.sessionId, deviceIngress: event.ingressSequence)
+                    }
+                }
+            }, onCancel: { stream.close() })
+            stream.close()
+            if token == self.generation { self.hostInputTask = nil }
         }
     }
-    private func editDocument(_ action: () async throws -> String) async {
-        guard canEditDraft, !busy else { return }; busy = true; defer { busy = false }
-        do { try applyDocument(try await action()) } catch { status = readableError(error) }
+    private func changeDocument(fresh: Bool = false, _ operation: @escaping () async throws -> String) async throws {
+        try await hostMutation { [self] in try applyDocument(try await operation(), fresh: fresh) }
+        reevaluateForeground()
     }
-    func createProfile(name: String) async { await editDocument { try await backend.createProfile(name: name) } }
-    func renameProfile(name: String) async { guard let id=profile?.id.text else {return}; await editDocument { try await backend.renameProfile(profileId:id,name:name) } }
-    func duplicateProfile(name: String) async { guard let id=profile?.id.text else {return}; await editDocument {try await backend.duplicateProfile(profileId:id,name:name)} }
-    func deleteProfile() async {guard let id=profile?.id.text else {return}; await editDocument {try await backend.deleteProfile(profileId:id)} }
-    func moveProfile(by offset: Int) async {guard let id=profile?.id.text, let count=snapshot?.profiles.count, (0..<count).contains(profileIndex+offset) else {return}; await editDocument {try await backend.moveProfile(profileId:id,toIndex:UInt32(profileIndex+offset))} }
-    func createLayer(name: String) async {guard let id=profile?.id.text else {return}; await editDocument {try await backend.createLayer(profileId:id,name:name)} }
-    func renameLayer(name: String) async {guard let id=layer?.id.text else {return}; await editDocument {try await backend.renameLayer(layerId:id,name:name)} }
-    func duplicateLayer(name: String) async {guard let pid=profile?.id.text, let id=layer?.id.text else {return}; await editDocument {try await backend.duplicateLayer(profileId:pid,layerId:id,name:name)} }
-    func deleteLayer() async {guard let pid=profile?.id.text, let id=layer?.id.text else {return}; await editDocument {try await backend.deleteLayer(profileId:pid,layerId:id)} }
-    func moveLayer(by offset: Int) async {guard let pid=profile?.id.text, let id=layer?.id.text, let count=profile?.layers.count, (0..<count).contains(layerIndex+offset) else {return}; await editDocument {try await backend.moveLayer(profileId:pid,layerId:id,toIndex:UInt32(layerIndex+offset))} }
+    private func editDocument(_ action: @escaping () async throws -> String) async {
+        guard canEditDraft, !busy else { return }; busy = true; defer { busy = false }
+        do { try await changeDocument(fresh: false) { try await action() } } catch { status = readableError(error) }
+    }
+    func createProfile(name: String) async { await editDocument { [self] in try await backend.createProfile(name: name) } }
+    func renameProfile(name: String) async { guard let id=profile?.id.text else {return}; await editDocument { [self] in try await backend.renameProfile(profileId:id,name:name) } }
+    func duplicateProfile(name: String) async { guard let id=profile?.id.text else {return}; await editDocument { [self] in try await backend.duplicateProfile(profileId:id,name:name)} }
+    func deleteProfile() async {guard let id=profile?.id.text else {return}; await editDocument { [self] in try await backend.deleteProfile(profileId:id)} }
+    func moveProfile(by offset: Int) async {guard let id=profile?.id.text, let count=snapshot?.profiles.count, (0..<count).contains(profileIndex+offset) else {return}; await editDocument { [self] in try await backend.moveProfile(profileId:id,toIndex:UInt32(profileIndex+offset))} }
+    func createLayer(name: String) async {guard let id=profile?.id.text else {return}; await editDocument { [self] in try await backend.createLayer(profileId:id,name:name)} }
+    func renameLayer(name: String) async {guard let id=layer?.id.text else {return}; await editDocument { [self] in try await backend.renameLayer(layerId:id,name:name)} }
+    func duplicateLayer(name: String) async {guard let pid=profile?.id.text, let id=layer?.id.text else {return}; await editDocument { [self] in try await backend.duplicateLayer(profileId:pid,layerId:id,name:name)} }
+    func deleteLayer() async {guard let pid=profile?.id.text, let id=layer?.id.text else {return}; await editDocument { [self] in try await backend.deleteLayer(profileId:pid,layerId:id)} }
+    func moveLayer(by offset: Int) async {guard let pid=profile?.id.text, let id=layer?.id.text, let count=profile?.layers.count, (0..<count).contains(layerIndex+offset) else {return}; await editDocument { [self] in try await backend.moveLayer(profileId:pid,layerId:id,toIndex:UInt32(layerIndex+offset))} }
     func presetText(scope: String) async throws -> String {
         guard canEditDraft, !busy else { throw BridgeError.Failed(message: "请先返回可编辑本地草稿") }
         return try await backend.exportPreset(profileId: scope == "document" ? nil : profile?.id.text, layerId: scope == "layer" ? layer?.id.text : nil)
@@ -456,7 +432,7 @@ extension MicroInput: Backend {}
         guard !busy, documentReady, !browsingDeviceSnapshot else { return false }
         busy = true; defer { busy = false }
         do {
-            try applyDocument(try await backend.importPreset(text: text), fresh: true)
+            try await changeDocument(fresh: true) { [self] in try await backend.importPreset(text: text) }
             status = "已创建独立本地草稿 · 原文档保留 · 未激活设备或执行动作"
             return true
         } catch { status = readableError(error); return false }
@@ -470,7 +446,7 @@ extension MicroInput: Backend {}
         guard canEditDraft, !busy else { return false }
         busy = true; defer { busy = false }
         do {
-            try applyDocument(try await backend.acceptAgentProposal(token: token), fresh: true)
+            try await changeDocument(fresh: true) { [self] in try await backend.acceptAgentProposal(token: token) }
             status = "已接受 Agent 提案为独立草稿 · 原文档保留 · 不写设备"
             return true
         } catch { status = readableError(error); return false }
@@ -483,7 +459,7 @@ extension MicroInput: Backend {}
         guard !busy, !browsingDeviceSnapshot else { return false }
         busy = true; defer { busy = false }
         do {
-            try applyDocument(try await backend.recoverDocument(token: token), fresh: true)
+            try await changeDocument(fresh: true) { [self] in try await backend.recoverDocument(token: token) }
             catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await backend.actionCatalog().utf8))
             await searchActions(query: "", category: "全部", favoritesOnly: false)
             status = "已恢复为独立本地草稿 · 原件保留 · 不代表设备恢复"
@@ -494,7 +470,7 @@ extension MicroInput: Backend {}
         guard canEditDraft, !busy else { return false }
         busy = true; defer { busy = false }
         do {
-            try applyDocument(try await backend.saveDocumentAs(), fresh: true)
+            try await changeDocument(fresh: true) { [self] in try await backend.saveDocumentAs() }
             status = "已另存为独立本地文档 · 原件保留 · 重开继续此草稿"
             return true
         } catch { status = readableError(error); return false }
@@ -505,7 +481,7 @@ extension MicroInput: Backend {}
     }
     func createDraftFromSnapshot() async {
         guard browsingDeviceSnapshot, !stale, !busy else {return};busy=true;defer {busy=false}
-        do {try applyDocument(try await backend.createDraftFromSnapshot(), fresh:true);status="已创建独立本地草稿 · 原工作台保留 · 重开继续此草稿"} catch {status=readableError(error)}
+        do {try await changeDocument(fresh: true) { [self] in try await backend.createDraftFromSnapshot() };status="已创建独立本地草稿 · 原工作台保留 · 重开继续此草稿"} catch {status=readableError(error)}
     }
     #if MI_SYNTHETIC_BACKEND
     private var preparedReconnectScenario=false
@@ -600,8 +576,8 @@ extension MicroInput: Backend {}
     func resolveComparison(_ choice:String) async {
         guard !busy,let comparison else {return};busy=true;defer {busy=false}
         do {
-            let response=try await backend.resolveComparison(token:comparison.token,choice:choice)
-            if choice != "cancel" {try applyDocument(response);status="比较结果已保存 · 旧版本已备份 · 不写设备"}
+            try await changeDocument { [self] in try await backend.resolveComparison(token:comparison.token,choice:choice) }
+            if choice != "cancel" {status="比较结果已保存 · 旧版本已备份 · 不写设备"}
             self.comparison=nil
         } catch {status=readableError(error)}
     }
@@ -624,7 +600,7 @@ extension MicroInput: Backend {}
             let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
             let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
             let a = String(decoding: try encoder.encode(action), as: UTF8.self)
-            try applyDocument(try await backend.assignAction(profileId: p, layerId: l, slot: UInt32(slot), actionJson: a))
+            try await changeDocument(fresh: false) { [self] in try await backend.assignAction(profileId: p, layerId: l, slot: UInt32(slot), actionJson: a) }
             status = "草稿已保存到本机 · 不执行动作 · 不写设备"
             return true
         } catch { status = readableError(error); return false }
@@ -638,7 +614,7 @@ extension MicroInput: Backend {}
         busy = true; defer { busy = false }
         do {
             let data = try JSONEncoder().encode(LocalControlSettings(joystick_mode: mode, active_sectors: count))
-            try applyDocument(try await backend.setControlSettings(profileId: profile.id.text, layerId: layer.id.text, settingsJson: String(decoding: data, as: UTF8.self)))
+            try await changeDocument(fresh: false) { [self] in try await backend.setControlSettings(profileId: profile.id.text, layerId: layer.id.text, settingsJson: String(decoding: data, as: UTF8.self)) }
             status = "控件意图已保存到本机 · 旧槽位及绑定保留 · 不写设备"
             return true
         } catch { controlSettingsError = readableError(error); return false }
@@ -654,7 +630,7 @@ extension MicroInput: Backend {}
             let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
             let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
             let a = String(decoding: try encoder.encode(action), as: UTF8.self)
-            try applyDocument(try await backend.saveMacroAction(macroId: id, profileId: p, layerId: l, slot: UInt32(slot), actionJson: a))
+            try await changeDocument(fresh: false) { [self] in try await backend.saveMacroAction(macroId: id, profileId: p, layerId: l, slot: UInt32(slot), actionJson: a) }
             return true
         } catch { status = readableError(error); return false }
     }
@@ -664,10 +640,10 @@ extension MicroInput: Backend {}
         do {
             let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
             let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
-            await editDocument { try await backend.bindMacroAction(macroId: id, profileId: p, layerId: l, slot: UInt32(slot)) }
+            await editDocument { [self] in try await backend.bindMacroAction(macroId: id, profileId: p, layerId: l, slot: UInt32(slot)) }
         } catch { status = readableError(error) }
     }
-    func deleteMacro(_ id: String) async { await editDocument { try await backend.deleteMacroAction(macroId: id) } }
+    func deleteMacro(_ id: String) async { await editDocument { [self] in try await backend.deleteMacroAction(macroId: id) } }
     var selectedMulti: MacroSummary? {
         multis.first { $0.references.contains { $0.parent_action_name == nil && $0.profile_id == profile?.id.text && $0.layer_id == layer?.id.text && $0.logical_control == "logical-\(slot)" } }
     }
@@ -677,7 +653,7 @@ extension MicroInput: Backend {}
         do {
             let encoder = JSONEncoder()
             func json<T: Encodable>(_ value: T) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
-            try applyDocument(try await backend.saveMultiAction(multiId: id, profileId: json(profile.id), layerId: json(layer.id), slot: UInt32(slot), actionJson: json(action), additionsJson: json(additions)))
+            try await changeDocument(fresh: false) { [self] in try await backend.saveMultiAction(multiId: id, profileId: json(profile.id), layerId: json(layer.id), slot: UInt32(slot), actionJson: json(action), additionsJson: json(additions)) }
             return true
         } catch { status = readableError(error); return false }
     }
@@ -687,10 +663,10 @@ extension MicroInput: Backend {}
             let encoder = JSONEncoder()
             let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
             let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
-            await editDocument { try await backend.bindMultiAction(multiId: id, profileId: p, layerId: l, slot: UInt32(slot)) }
+            await editDocument { [self] in try await backend.bindMultiAction(multiId: id, profileId: p, layerId: l, slot: UInt32(slot)) }
         } catch { status = readableError(error) }
     }
-    func deleteMulti(_ id: String) async { await editDocument { try await backend.deleteMultiAction(multiId: id) } }
+    func deleteMulti(_ id: String) async { await editDocument { [self] in try await backend.deleteMultiAction(multiId: id) } }
     func parameterSummary(_ action: CatalogAction) -> String {
         guard let multi = MultiEditorDraft(action: action) else { return action.parameterSummary }
         return MultiBranch.allCases.map { branch in
@@ -700,12 +676,12 @@ extension MicroInput: Backend {}
     }
     func undoDraft(redo: Bool = false) async {
         guard canEditDraft, !busy else { return }; busy = true; defer { busy = false }
-        do { try applyDocument(try await backend.undoDraft(redo: redo)) }
+        do { try await changeDocument(fresh: false) { [self] in try await backend.undoDraft(redo: redo) } }
         catch { status = readableError(error) }
     }
-    private var generation = 0
-    private var systemSleeping = false
-    private var stopped = false
+    var generation = 0
+    var systemSleeping = false
+    var stopped = false
     private var lifecycleGeneration = 0
     private var discoveryGeneration = 0
     private var sleepDisconnect: Task<Void, Never>?
@@ -787,7 +763,7 @@ extension MicroInput: Backend {}
         generation += 1; let token = generation
         hostInputTask?.cancel(); hostInputTask = nil
         await backend.disconnect(); guard token == generation else { return }; connectedID = nil; identity = nil; identityStatus = "身份尚未读取"; refreshPassthroughHealth()
-        do { let json = try await backend.loadDemo(); guard token == generation else { return }; try replace(json); localSnapshot = snapshot; browsingDeviceSnapshot = false; status = "本地草稿 · 演示基线 · 未与设备同步" } catch { if token == generation { status = readableError(error) } }
+        do { let json = try await hostMutation { [self] in try await backend.loadDemo() }; guard token == generation else { return }; try replace(json); localSnapshot = snapshot; browsingDeviceSnapshot = false; status = "本地草稿 · 演示基线 · 未与设备同步" } catch { if token == generation { status = readableError(error) } }
     }
     func connect(_ id: String) async {
         guard !busy, !systemSleeping, !stopped else { return }
@@ -804,7 +780,7 @@ extension MicroInput: Backend {}
             guard token == generation else { return }
             pendingID = nil; connectedID = id; status = "设备已打开 · 身份尚未读取 · 配置尚未读取"
             refreshPassthroughHealth()
-            if hostExecutionEnabled { startHostInputLoop(token: token) }
+            inputNeedsResume = false; inputBoundary = HostInputBoundary(); startHostInputLoop(token: token)
             connectionWatcher = Task { [weak self, backend] in
                 let reason = await backend.waitForDisconnect()
                 guard !Task.isCancelled, !reason.isEmpty, let self, token == self.generation else { return }
@@ -847,6 +823,7 @@ extension MicroInput: Backend {}
     }
 
     private func retireConnection(_ reason: String) {
+        clearPendingActions(); inputBoundary.session = nil
         generation += 1; pendingID = nil; busy = false
         connectionWatcher?.cancel(); connectionWatcher = nil
         hostInputTask?.cancel(); hostInputTask = nil
@@ -860,6 +837,7 @@ extension MicroInput: Backend {}
         guard !stopped else { return }
         lifecycleGeneration += 1
         guard !systemSleeping else { return }
+        invalidateHostWork()
         systemSleeping = true
         discoveryGeneration += 1
         events?.invalidatePending()
@@ -880,11 +858,13 @@ extension MicroInput: Backend {}
         if events != nil { await refresh() }
     }
     func shutdown() async {
+        invalidateHostWork()
         stopped = true; lifecycleGeneration += 1; discoveryGeneration += 1
         events?.invalidatePending()
         retireConnection("应用正在退出")
         await sleepDisconnect?.value
         sleepDisconnect = nil
+        await hostExecutionTask?.value
         await backend.shutdown()
     }
     private func replace(_ json: String) throws { let result = try JSONDecoder().decode(Snapshot.self, from: Data(json.utf8)); snapshot = result; stale = false; selectProfile(0) }

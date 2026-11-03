@@ -1,5 +1,6 @@
 //! R-A02/R-A05: only high-level asynchronous operations cross the in-process UniFFI bridge.
 mod apply_preparation;
+mod host_routing;
 mod input_monitor;
 mod reconnect;
 pub use input_monitor::*;
@@ -53,6 +54,7 @@ fn document_response(
         "action_capabilities": capabilities,
         "host_active_profile_id": store.host_active_profile_id(),
         "host_execution_enabled": store.host_execution_enabled(),
+        "host_routing": store.routing_state(),
     }))
     .map_err(failure)
 }
@@ -787,23 +789,7 @@ impl MicroInput {
         if !store.host_execution_enabled() {
             return None;
         }
-        let graph = &store.draft.document.editable.graph;
-        let active_pid = store
-            .host_active_profile_id()
-            .filter(|id| graph.profiles.contains_key(id))
-            .or_else(|| {
-                graph
-                    .profile_order
-                    .iter()
-                    .find(|id| {
-                        graph
-                            .profiles
-                            .get(*id)
-                            .is_some_and(|p| p.name == "Antigravity")
-                    })
-                    .cloned()
-            })
-            .or_else(|| graph.profile_order.first().cloned());
+        let active_pid = store.host_active_profile_id();
         let resolved = mi_model::host_router::resolve_host_action(
             &store.draft.document,
             active_pid.as_deref(),
@@ -821,18 +807,18 @@ impl MicroInput {
                 Ok(())
             })
             .map_err(failure)?;
-        let current_valid = store.host_active_profile_id().is_some_and(|id| {
-            store
-                .draft
-                .document
-                .editable
-                .graph
-                .profiles
-                .contains_key(&id)
-        });
-        if !current_valid {
-            if let Some(first) = created.first() {
-                let _ = store.set_host_active_profile(Some(first.clone()));
+        if store.host_active_profile_id().is_none() {
+            let graph = &store.draft.document.editable.graph;
+            let initial = graph
+                .profile_order
+                .iter()
+                .find(|id| graph.profiles.get(*id).is_some_and(|p| p.name == "Cindy"))
+                .cloned()
+                .or_else(|| created.first().cloned());
+            if let Some(initial) = initial {
+                store
+                    .set_host_active_profile(Some(initial))
+                    .map_err(failure)?;
             }
         }
         let selection = created.first().and_then(|pid| {

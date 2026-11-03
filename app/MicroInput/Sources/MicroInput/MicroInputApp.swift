@@ -61,6 +61,8 @@ struct WorkbenchHost: View {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var open: (() -> Void)?
     private let popover = NSPopover()
+    private var previousApp: NSRunningApplication?
+    private var linksWindow: NSWindow?
     init(store: Store) {
         self.store = store
         super.init()
@@ -74,9 +76,27 @@ struct WorkbenchHost: View {
     @objc func show() {
         guard let button = item.button else { return }
         if popover.isShown { popover.performClose(nil); return }
+        let front = NSWorkspace.shared.frontmostApplication
+        if front?.bundleIdentifier != Bundle.main.bundleIdentifier { previousApp = front }
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
+    }
+    func toggleCheatSheet() {
+        popover.performClose(nil)
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier,
+           let previousApp, !previousApp.isTerminated { previousApp.activate(options: []) }
+        store.overlay.toggleSheet()
+    }
+    func editAppLinks() {
+        popover.performClose(nil)
+        if linksWindow == nil {
+            let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.title = "应用与 Profile"; window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: AppProfileLinksView(store: store, close: { [weak window] in window?.close() })); window.center()
+            linksWindow = window
+        }
+        NSApp.activate(ignoringOtherApps: true); linksWindow?.makeKeyAndOrderFront(nil)
     }
     @objc func showWindow() { popover.performClose(nil); open?() }
     @objc func quitApp() { NSApp.terminate(nil) }
@@ -194,6 +214,19 @@ struct StatusPanel: View {
                 Spacer()
                 Button("编辑按键…") { owner.showWindow() }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
             }
+            Divider()
+            Toggle("自动跟随前台应用", isOn: Binding(get: { store.routing?.auto_follow_enabled ?? false }, set: { value in Task { await store.setAutoFollow(value) } })).toggleStyle(.switch).controlSize(.small)
+            HStack {
+                Text(store.routingMode).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if store.routing?.manual_override == true { Button("恢复跟随") { Task { await store.resumeFollowing() } }.font(.caption) }
+            }
+            HStack {
+                Button("应用关联…") { owner.editAppLinks() }
+                Spacer()
+                Button("按键速查") { owner.toggleCheatSheet() }
+            }.font(.caption)
+            if store.inputNeedsResume { Button("恢复输入") { store.resumeInput() } }
             Divider()
             HStack(spacing: 8) {
                 Circle().fill(store.connectedID == nil ? Color.secondary : Color.green).frame(width: 5, height: 5)

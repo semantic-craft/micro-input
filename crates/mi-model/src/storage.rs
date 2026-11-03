@@ -1,4 +1,5 @@
 //! R-E08: bounded local storage, conflict detection, atomic replacement. No device access.
+pub mod routing;
 use crate::draft::Draft;
 use std::os::unix::fs::OpenOptionsExt;
 use std::{
@@ -16,6 +17,7 @@ pub struct DocumentStore {
     blocked: bool,
     selection: Option<(PathBuf, Option<Vec<u8>>)>,
     preferences: HostPreferencesStore,
+    host_state_revision: u64,
     recovery_preview: Option<recovery::InspectedRecovery>,
     agent_preview: Option<agent::Pending>,
     apply_preview: Option<crate::apply::Pending>,
@@ -225,13 +227,23 @@ impl DocumentStore {
                 return Err("所选宿主激活 Profile 不存在".into());
             }
         }
-        self.preferences.set_host_active_profile(profile_id)
+        let changed = self.preferences.value.host_active_profile_id != profile_id;
+        self.preferences.set_host_active_profile(profile_id)?;
+        if changed {
+            self.host_state_revision += 1;
+        }
+        Ok(())
     }
     pub fn set_host_execution_enabled(&mut self, enabled: bool) -> Result<(), String> {
         if self.blocked {
             return Err("本地文档未载入，宿主执行开关未保存".into());
         }
-        self.preferences.set_host_execution_enabled(enabled)
+        let changed = self.preferences.value.host_execution_enabled != enabled;
+        self.preferences.set_host_execution_enabled(enabled)?;
+        if changed {
+            self.host_state_revision += 1;
+        }
+        Ok(())
     }
     /// Explicitly save a separate document, then select it. The previously open file is untouched.
     pub fn create_independent(
@@ -467,6 +479,12 @@ struct HostPreferences {
     host_active_profile_id: Option<String>,
     #[serde(default)]
     host_execution_enabled: bool,
+    #[serde(default)]
+    auto_follow_enabled: bool,
+    #[serde(default)]
+    manual_override: bool,
+    #[serde(default)]
+    app_profile_links: std::collections::BTreeMap<String, String>,
 }
 impl Default for HostPreferences {
     fn default() -> Self {
@@ -475,6 +493,9 @@ impl Default for HostPreferences {
             favorites: Default::default(),
             host_active_profile_id: None,
             host_execution_enabled: false,
+            auto_follow_enabled: false,
+            manual_override: false,
+            app_profile_links: Default::default(),
         }
     }
 }
