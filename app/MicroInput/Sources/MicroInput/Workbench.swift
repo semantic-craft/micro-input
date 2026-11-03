@@ -3,18 +3,13 @@ import SwiftUI
 import UniformTypeIdentifiers
 struct Workbench: View {
     @ObservedObject var store: Store
-    @FocusState private var searchFocused: Bool
     @State private var choosing = false
     @State private var reviewing = false
     @State private var choosingMacro = false
     @State private var choosingMulti = false
     @State private var showingDiagnosticExport = false
-    @State private var search = ""
     @State private var showDiagnostics = false
     @State private var showOtherProfiles = false
-    @State private var category = "全部"
-    @State private var favoritesOnly = false
-    @State private var candidate: CatalogAction?
     @State private var naming = false
     @State private var nameOperation = ""
     @State private var objectName = ""
@@ -27,11 +22,6 @@ struct Workbench: View {
         if operation.hasPrefix("新建") {objectName = operation.contains("配置") ? "新配置" : "新层"}
         if operation.hasPrefix("复制") {objectName += " 副本"}
         naming = true
-    }
-    func choose(_ action: CatalogAction) {
-        if action.payload["type"]?.text == "shortcut" {
-            Task { if await store.saveAction(action) { choosing = false } }
-        } else { candidate = action }
     }
     var bindings: [JSONValue] { guard let l = store.layer else { return [] }; return l.keys + l.encoders + l.joystick.sectors }
     func title(_ slot: Int) -> String {
@@ -359,60 +349,7 @@ struct Workbench: View {
         }.frame(maxHeight: .infinity, alignment: .topLeading)
     }
     var actionSheet: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack { Text("选择一个动作").font(.title2.bold()); Spacer(); Button("关闭") {choosing = false}.keyboardShortcut(.cancelAction) }
-            if let candidate {
-                Button("返回动作库") { self.candidate = nil }
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text("设置 \(candidate.name)").font(.headline)
-                        if let info = store.library.entries.first(where: {$0.id == candidate.id})?.capability { ActionCapabilityView(capability: info) }
-                        ActionParameters(action: candidate, store: store, saved: { choosing = false }).id(candidate.id)
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                }
-            } else {
-                TextField("搜索动作、工具、目标或快捷键", text: $search).focused($searchFocused)
-                    .onSubmit { if let first = store.library.entries.first { choose(first.action) } }
-                HStack {
-                    Picker("分类", selection: $category) { Text("全部").tag("全部"); ForEach(store.library.categories, id: \.self) { Text($0).tag($0) } }
-                    Toggle("只看收藏", isOn: $favoritesOnly)
-                }
-                if let error = store.library.preferences_error { Text(error).font(.caption).foregroundStyle(.orange) }
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        if store.library.entries.isEmpty { Text("没有匹配动作").foregroundStyle(.secondary).padding() }
-                        if !favoritesOnly && (category == "全部" || category == "普通宏") {
-                            ForEach(store.macros.filter { search.isEmpty || $0.action.name.localizedCaseInsensitiveContains(search) }) { macro in
-                                Button { Task { await store.bindMacro(macro.id); choosing = false } } label: {
-                                    VStack(alignment: .leading, spacing: 5) {
-                                        Text(macro.action.name).bold()
-                                        Text("已保存本地宏 · 共享引用 · \(macro.references.count) 个控件").font(.caption).foregroundStyle(.secondary)
-                                    }.frame(maxWidth: .infinity, alignment: .leading).padding(10)
-                                }.buttonStyle(.plain).disabled(store.busy || !store.canEditDraft)
-                            }
-                        }
-                        ForEach(store.library.entries.filter { !store.editingDevice || $0.action.payload["type"]?.text == "device_key" }) { entry in
-                            HStack(alignment: .top) {
-                                Button { choose(entry.action) } label: {
-                                    VStack(alignment: .leading, spacing: 5) {
-                                        Text(entry.action.name).bold()
-                                        Text(entry.capability.execution_available ? "宿主可执行" : entry.capability.unavailable_reason).font(.caption).foregroundStyle(entry.capability.execution_available ? .green : .secondary)
-                                        Text("目标：\(entry.capability.target)").font(.caption).foregroundStyle(.secondary)
-                                    }.frame(maxWidth: .infinity, alignment: .leading).padding(10)
-                                }.buttonStyle(.plain).disabled(store.busy || !store.canEditDraft)
-                                Button { Task { await store.setFavorite(entry.id, favorite: !entry.favorite) } } label: { Image(systemName: entry.favorite ? "star.fill" : "star") }
-                                    .buttonStyle(.borderless).padding(10).accessibilityLabel("\(entry.favorite ? "取消收藏" : "收藏") \(entry.action.name)")
-                                    .disabled(store.library.preferences_error != nil)
-                            }
-                        }
-                    }
-                }
-            }
-            Text(store.status).font(.caption).foregroundStyle(.secondary).lineLimit(3)
-            Text("可保存本地意图；「宿主可执行」动作由 Mac 宿主路由触发，不写设备 Flash。收藏是本机偏好。").font(.caption).foregroundStyle(.secondary)
-        }.padding(24).frame(width: 600, height: 560)
-        .onAppear { search = ""; category = "全部"; favoritesOnly = false; candidate = nil; searchFocused = true }
-        .task(id: "\(search)\u{0}\(category)\u{0}\(favoritesOnly)") { await store.searchActions(query: search, category: category, favoritesOnly: favoritesOnly) }
+        ActionLibrarySheet(store: store) { choosing = false }
     }
     var nameSheet: some View {
         VStack(alignment:.leading,spacing:16) {
@@ -465,6 +402,80 @@ struct Workbench: View {
             Button("继续编辑") { reviewing = false }.keyboardShortcut(.defaultAction)
             Button("关闭变更") { reviewing = false }.keyboardShortcut(.cancelAction)
         }.padding(24).frame(width: 550, height: 380)
+    }
+}
+
+struct ActionLibrarySheet: View {
+    @ObservedObject var store: Store
+    var close: () -> Void
+    @State private var search = ""
+    @State private var category = "全部"
+    @State private var favoritesOnly = false
+    @State private var candidate: CatalogAction?
+    @FocusState private var searchFocused: Bool
+
+    func choose(_ action: CatalogAction) {
+        if action.payload["type"]?.text == "shortcut" {
+            Task { if await store.saveAction(action) { close() } }
+        } else { candidate = action }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack { Text("选择一个动作").font(.title2.bold()); Spacer(); Button("关闭") {close()}.keyboardShortcut(.cancelAction) }
+            if let candidate {
+                Button("返回动作库") { self.candidate = nil }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("设置 \(candidate.name)").font(.headline)
+                        if let info = store.library.entries.first(where: {$0.id == candidate.id})?.capability { ActionCapabilityView(capability: info) }
+                        ActionParameters(action: candidate, store: store, saved: close).id(candidate.id)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                TextField("搜索动作、工具、目标或快捷键", text: $search).focused($searchFocused)
+                    .defaultFocus($searchFocused, true)
+                    .onSubmit { if let first = store.library.entries.first { choose(first.action) } }
+                HStack {
+                    Picker("分类", selection: $category) { Text("全部").tag("全部"); ForEach(store.library.categories, id: \.self) { Text($0).tag($0) } }
+                    Toggle("只看收藏", isOn: $favoritesOnly)
+                }
+                if let error = store.library.preferences_error { Text(error).font(.caption).foregroundStyle(.orange) }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        if store.library.entries.isEmpty { Text("没有匹配动作").foregroundStyle(.secondary).padding() }
+                        if !favoritesOnly && (category == "全部" || category == "普通宏") {
+                            ForEach(store.macros.filter { search.isEmpty || $0.action.name.localizedCaseInsensitiveContains(search) }) { macro in
+                                Button { Task { await store.bindMacro(macro.id); close() } } label: {
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text(macro.action.name).bold()
+                                        Text("已保存本地宏 · 共享引用 · \(macro.references.count) 个控件").font(.caption).foregroundStyle(.secondary)
+                                    }.frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                                }.buttonStyle(.plain).disabled(store.busy || !store.canEditDraft)
+                            }
+                        }
+                        ForEach(store.library.entries.filter { !store.editingDevice || $0.action.payload["type"]?.text == "device_key" }) { entry in
+                            HStack(alignment: .top) {
+                                Button { choose(entry.action) } label: {
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text(entry.action.name).bold()
+                                        Text(entry.capability.execution_available ? "宿主可执行" : entry.capability.unavailable_reason).font(.caption).foregroundStyle(entry.capability.execution_available ? .green : .secondary)
+                                        Text("目标：\(entry.capability.target)").font(.caption).foregroundStyle(.secondary)
+                                    }.frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                                }.buttonStyle(.plain).disabled(store.busy || !store.canEditDraft)
+                                Button { Task { await store.setFavorite(entry.id, favorite: !entry.favorite) } } label: { Image(systemName: entry.favorite ? "star.fill" : "star") }
+                                    .buttonStyle(.borderless).padding(10).accessibilityLabel("\(entry.favorite ? "取消收藏" : "收藏") \(entry.action.name)")
+                                    .disabled(store.library.preferences_error != nil)
+                            }
+                        }
+                    }
+                }
+            }
+            Text(store.status).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+            Text("可保存本地意图；「宿主可执行」动作由 Mac 宿主路由触发，不写设备 Flash。收藏是本机偏好。").font(.caption).foregroundStyle(.secondary)
+        }.padding(24).frame(width: 600, height: 560)
+        .onAppear { search = ""; category = "全部"; favoritesOnly = false; candidate = nil; searchFocused = true }
+        .task(id: "\(search)\u{0}\(category)\u{0}\(favoritesOnly)") { await store.searchActions(query: search, category: category, favoritesOnly: favoritesOnly) }
     }
 }
 
