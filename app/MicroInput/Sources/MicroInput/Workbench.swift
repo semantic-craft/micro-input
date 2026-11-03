@@ -43,14 +43,15 @@ struct Workbench: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 16) {
-                    Label("Micro Input", systemImage: "keyboard").font(.headline)
-                    Text(store.browsingDeviceSnapshot ? "设备配置 · 只读" : "常用 AGENT").font(.caption).foregroundStyle(.secondary)
+                ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Micro Input", systemImage: "keyboard").font(.system(size: 14, weight: .semibold)).padding(.bottom, 14)
+                    Text(store.browsingDeviceSnapshot ? "设备配置 · 只读" : "AGENTS").font(.caption).foregroundStyle(.secondary)
                     if let snapshot = store.snapshot {
                         ForEach(visibleProfileIndices, id: \.self) { i in
                             Button { store.selectProfile(i) } label: {
-                                HStack(spacing: 10) { AgentBadge(name: snapshot.profiles[i].name); Text(snapshot.profiles[i].name).fontWeight(.medium); Spacer(); if i == store.profileIndex { Image(systemName: "checkmark").font(.caption) } }.padding(10).background(i == store.profileIndex ? Color.accentColor.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
-                            }.buttonStyle(.plain)
+                                HStack(spacing: 10) { AgentBadge(name: snapshot.profiles[i].name); Text(snapshot.profiles[i].name == "DeepSeek Coder (DSH)" ? "DSH" : snapshot.profiles[i].name).font(.system(size: 13, weight: .medium)).lineLimit(1); Spacer(); if i == store.profileIndex { Image(systemName: "checkmark").font(.caption) } }.padding(.horizontal, 10).padding(.vertical, 7).background(i == store.profileIndex ? Color.accentColor.opacity(0.09) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                            }.buttonStyle(.plain).accessibilityLabel(snapshot.profiles[i].name)
                         }
                     }
                     Toggle("显示其他配置", isOn: $showOtherProfiles).toggleStyle(.checkbox).font(.caption)
@@ -63,7 +64,7 @@ struct Workbench: View {
                         Button("上移配置") { Task { await store.moveProfile(by: -1) } }.disabled(store.profileIndex == 0 || store.profile == nil)
                         Button("下移配置") { Task { await store.moveProfile(by: 1) } }.disabled(store.profileIndex + 1 >= (store.snapshot?.profiles.count ?? 0))
                         Button("删除配置…", role: .destructive) {deleteLayer=false;deleting=true}.disabled(store.profile == nil)
-                    }.disabled(!store.canEditDraft || store.busy)
+                    }.menuStyle(.borderlessButton).fixedSize().disabled(!store.canEditDraft || store.busy)
                     DisclosureGroup("配置工具") {
                         VStack(alignment: .leading, spacing: 12) {
                             PresetMenu(store: store)
@@ -77,11 +78,12 @@ struct Workbench: View {
                     Spacer()
                     Label(store.browsingDeviceSnapshot ? (store.snapshot?.source == "DeviceSnapshot" ? "设备快照 · 只读" : "合成夹具 · 只读") : "本地草稿", systemImage: store.browsingDeviceSnapshot ? "eye" : "doc")
                     Text(store.browsingDeviceSnapshot ? "浏览不会激活设备配置\n原本地草稿已保留" : "设备活动配置：未知\n草稿自动保存到本机").font(.caption).foregroundStyle(.secondary)
-                }.padding(20).frame(width: 230).background(Color.accentColor.opacity(0.045))
+                }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(width: 218).background(Color(nsColor: .windowBackgroundColor))
                 Divider()
                 VStack(spacing: 0) {
                     HStack {
-                        VStack(alignment: .leading, spacing: 7) { Text(store.profile?.name ?? (store.snapshot == nil ? "载入中" : "暂无配置")).font(.title.bold()); Text(store.browsingDeviceSnapshot ? "设备快照只读；点选控件查看绑定。" : "点选控件，设置它要做的事。").foregroundStyle(.secondary) }
+                        VStack(alignment: .leading, spacing: 7) { Text(store.profile?.name ?? (store.snapshot == nil ? "载入中" : "暂无配置")).font(.system(size: 24, weight: .semibold)); Text(store.browsingDeviceSnapshot ? "设备快照只读；点选控件查看绑定。" : "点选控件，设置它要做的事。").foregroundStyle(.secondary) }
                         Spacer()
                         Toggle("按键控制", isOn: Binding(get: { store.hostExecutionEnabled }, set: { value in Task { await store.setHostExecutionEnabled(value) } }))
                             .toggleStyle(.switch).controlSize(.small).fixedSize()
@@ -101,16 +103,17 @@ struct Workbench: View {
                             Button(store.hostActiveProfileId == store.profile?.id.text ? "当前控制配置" : "启用此配置") {
                                 Task { await store.setHostActiveProfile(store.profile?.id.text) }
                             }.disabled(store.hostActiveProfileId == store.profile?.id.text || store.busy)
-                        }.padding(14).background(Color.accentColor.opacity(0.055), in: RoundedRectangle(cornerRadius: 10)).padding(.horizontal, 24).padding(.bottom, 16)
+                        }.padding(14).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10)).padding(.horizontal, 24).padding(.bottom, 16)
                     }
                     Divider()
                     HStack(alignment: .top, spacing: 0) {
                         ScrollView {
                             VStack(spacing: 18) {
                                 if let profile = store.profile {
+                                    HStack {
                                     Picker("层", selection: Binding(get: {store.layerIndex}, set: {store.selectLayer($0)})) {
                                         ForEach(profile.layers.indices, id: \.self) { i in Text(profile.layers[i].name).tag(i) }
-                                    }.pickerStyle(.segmented)
+                                    }.pickerStyle(.segmented).labelsHidden()
                                     Menu("管理层") {
                                         Button("新建层") {promptName("新建层")}
                                         Button("重命名层") {promptName("重命名层")}.disabled(store.layer == nil)
@@ -119,7 +122,8 @@ struct Workbench: View {
                                         Button("上移层") {Task {await store.moveLayer(by:-1)}}.disabled(store.layerIndex == 0 || store.layer == nil)
                                         Button("下移层") {Task {await store.moveLayer(by:1)}}.disabled(store.layerIndex+1 >= (store.profile?.layers.count ?? 0))
                                         Button("删除层…",role:.destructive) {deleteLayer=true;deleting=true}.disabled(store.layer == nil)
-                                    }.disabled(!store.canEditDraft || store.busy)
+                                    }.menuStyle(.borderlessButton).fixedSize().disabled(!store.canEditDraft || store.busy)
+                                    }
                                 }
                                 if store.layer == nil {
                                     VStack(spacing:14) {
@@ -144,7 +148,7 @@ struct Workbench: View {
                                         .disabled(!store.canEditDraft || store.busy)
                                     }
                                     Text("CREATOR MICRO").font(.caption2).tracking(3).foregroundStyle(.secondary)
-                                }.padding(16).background(.background, in: RoundedRectangle(cornerRadius: 16)).overlay(RoundedRectangle(cornerRadius: 22).stroke(.quaternary)).shadow(color: .black.opacity(0.08), radius: 12, y: 8)
+                                }.padding(16).background(.background, in: RoundedRectangle(cornerRadius: 16)).overlay(RoundedRectangle(cornerRadius: 22).stroke(.quaternary)).shadow(color: .black.opacity(0.04), radius: 10, y: 4)
                                 Text("13 开关逻辑位置示意 · 实体宽键和方向待核对").font(.caption).foregroundStyle(.secondary)
                                 }
                             }.padding(24)
@@ -181,7 +185,7 @@ struct Workbench: View {
         } message: {Text("仅删除本地草稿中的对象及其所属内容。原始来源保留，可撤销；设备不会改变。") }
         .sheet(item: $store.applyPreview, onDismiss: { Task { await store.cancelApplyPreview() } }) { preview in ApplyPreparationView(store:store,preview:preview) }
         .sheet(item: $store.comparison) { comparison in ReconnectComparisonView(store: store, initialComparison: comparison) }
-        .tint(Color(red: 0.20, green: 0.43, blue: 0.34))
+        .tint(.accentColor)
         .accentColor(Color(red: 0.20, green: 0.43, blue: 0.34))
         .task {
             if store.snapshot == nil { await store.loadWorkbench() }
@@ -264,8 +268,8 @@ struct Workbench: View {
     }
     func control(_ slot: Int, round: Bool = false) -> some View {
         Button { store.slot = slot } label: {
-            VStack(spacing: 5) { Text(slot < 13 ? String(format: "%02d",slot+1) : slot < 16 ? "E\(slot-12)" : "J\(slot-15)").font(.headline); Text(label(slot)).font(.caption2).lineLimit(2) }
-                .frame(width: 73, height: 44).padding(3)
+            VStack(spacing: 8) { Text(slot < 13 ? String(format: "%02d",slot+1) : slot < 16 ? "E\(slot-12)" : "J\(slot-15)").font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(.secondary); Text(label(slot)).font(.system(size: 10, weight: .medium)).lineLimit(2) }
+                .frame(width: 76, height: 46).padding(4)
                 .background(store.slot == slot ? Color.accentColor.opacity(0.14) : Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: round ? 25 : 9))
                 .overlay(RoundedRectangle(cornerRadius: round ? 25 : 9).stroke(store.slot == slot ? Color.accentColor : Color.gray.opacity(0.2)))
         }.buttonStyle(.plain).accessibilityLabel("\(title(slot))，\(label(slot))")

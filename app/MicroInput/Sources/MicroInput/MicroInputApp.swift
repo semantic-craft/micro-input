@@ -146,15 +146,13 @@ struct StatusPanel: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Micro Input").font(.headline)
-                    Text("Creator Micro 2").font(.caption).foregroundStyle(.secondary)
+                    Text("Micro Input").font(.system(size: 14, weight: .semibold))
+                    Text("Creator Micro 2").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Label(store.connectedID == nil ? "未连接" : "已连接", systemImage: "cable.connector")
-                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("按键控制", isOn: Binding(get: { store.hostExecutionEnabled }, set: { value in Task { await store.setHostExecutionEnabled(value) } }))
+                    .labelsHidden().toggleStyle(.switch).controlSize(.small).help("启用或暂停按键控制")
             }
-            Toggle("按键控制", isOn: Binding(get: { store.hostExecutionEnabled }, set: { value in Task { await store.setHostExecutionEnabled(value) } }))
-                .toggleStyle(.switch).controlSize(.small)
             // Intrinsic, non-scrolling rows: a maxHeight-only ScrollView can collapse
             // inside NSHostingController's initial popover size negotiation.
             VStack(spacing: 8) {
@@ -192,15 +190,17 @@ struct StatusPanel: View {
                         Divider()
                         Button("恢复默认排列") { favoriteIDsJSON = "[]" }
                     }
-                }.fixedSize()
+                }.menuStyle(.borderlessButton).fixedSize().font(.system(size: 11))
                 Spacer()
-                Button("编辑按键…") { owner.showWindow() }
+                Button("编辑按键…") { owner.showWindow() }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Divider()
             HStack(spacing: 8) {
-                Text(summary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Circle().fill(store.connectedID == nil ? Color.secondary : Color.green).frame(width: 5, height: 5)
+                Text(store.connectedID == nil ? "设备未连接" : "Creator Micro 2 已连接").font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 4)
-                Menu("连接详情") {
+                Menu {
+                    Text(summary)
                     Text(store.passThroughHealth.label)
                     if let receipt = store.lastHostActionReceipt {
                         Text("最近动作：\(receipt.succeeded ? "已执行" : "未执行") · \(receipt.detail)")
@@ -210,40 +210,38 @@ struct StatusPanel: View {
                         Task { await store.autoSetupHostExecutionIfNeeded() }
                     }.disabled(store.busy)
                     Button("设置辅助功能权限…") { LiveHostActionExecutor.openAccessibilitySettings() }
-                }.fixedSize().font(.caption)
+                    Divider()
+                    Button("退出 Micro Input") { owner.quitApp() }
+                } label: { Image(systemName: "ellipsis.circle").font(.system(size: 13)) }
+                    .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("连接详情")
             }
-            HStack {
-                Text("配置切换仅作用于本机").font(.caption2).foregroundStyle(.secondary)
-                Spacer()
-                Button("退出") { owner.quitApp() }.buttonStyle(.plain).font(.caption)
-            }
-        }.padding(16).frame(width: 336).fixedSize(horizontal: false, vertical: true)
-            .tint(Color(red: 0.20, green: 0.43, blue: 0.34))
+        }.padding(16).frame(width: 352).fixedSize(horizontal: false, vertical: true)
+            .tint(.accentColor)
     }
     private func favoriteButton(at index: Int) -> some View {
         let profile = favorites.indices.contains(index) ? favorites[index] : nil
         let name = profile?.name ?? "未设置"
         let agent = DesktopAgent.named(name)
-        let title = name == "Antigravity" ? "反重力" : name == "DeepSeek Coder (DSH)" ? "DSH" : name
-        let symbol = agent?.symbol ?? (name == "Antigravity" ? "sparkles" : "terminal")
+        let title = name == "DeepSeek Coder (DSH)" ? "DSH" : name
         let selected = profile != nil && store.hostActiveProfileId == profile?.id.text
         return Button {
             guard let profile else { return }
             Task { await store.setHostActiveProfile(profile.id.text) }
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: symbol).foregroundStyle(.tint).frame(width: 20)
+                AgentBadge(name: name, size: 28)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                    if let agent, !agent.installed { Text("未找到应用").font(.caption2).foregroundStyle(.secondary) }
+                    Text(title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                    Text(selected ? "正在控制" : (agent?.installed == false ? "未安装" : "切换配置"))
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "checkmark").font(.caption.weight(.semibold))
                     .foregroundStyle(.tint).opacity(selected ? 1 : 0)
-            }.padding(.horizontal, 10).frame(maxWidth: .infinity).frame(height: 52)
+            }.padding(.horizontal, 10).frame(maxWidth: .infinity).frame(height: 64)
                 .contentShape(RoundedRectangle(cornerRadius: 9))
-                .background(selected ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
-                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(selected ? Color.accentColor.opacity(0.4) : Color.primary.opacity(0.06)))
+                .background(selected ? Color.accentColor.opacity(0.08) : Color(nsColor: .controlBackgroundColor).opacity(0.65), in: RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(selected ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.06)))
         }.buttonStyle(.plain).disabled(store.busy || profile == nil)
             .accessibilityLabel("控制 \(name)\(selected ? "，当前配置" : "")")
     }
