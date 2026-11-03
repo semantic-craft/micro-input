@@ -1,7 +1,7 @@
 import SwiftUI
 import MicroInputCore
 
-struct DeviceOperationCapabilities: Decodable {
+struct DeviceOperationCapabilities: Codable {
     var apply = false
     var restore = false
     var preview = false
@@ -32,6 +32,7 @@ extension Store {
     func refreshOperationCapabilities() {
         operationCapabilities = (try? JSONDecoder().decode(DeviceOperationCapabilities.self, from: Data(backend.deviceOperationCapabilities().utf8))) ?? DeviceOperationCapabilities()
     }
+
     @discardableResult
     func executeHostAction(actionJSON: String, bindingId: String, profileId: String) async -> HostActionReceipt? {
         guard !hostOperationPaused, let lease = try? backend.beginHostExecution() else { return nil }

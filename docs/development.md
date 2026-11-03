@@ -84,7 +84,9 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 高层集成与恢复界面：`MI_AUTO_HOST_READY=0 swift test --package-path app/MicroInput -Xswiftc -DMI_SYNTHETIC_BACKEND --filter DeviceOperationsTests`（先构建合成绑定）。隔离应用场景 `MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=config-write scripts/run --verify --timeout=55` 完成单键应用、完整读回、新计划恢复，并打开恢复记录面板。独立 `device-operations.jsonl` 只记录操作结果，实体键和视觉灯效固定 NOT_RUN。本地保存失败通过仅专用合成实例可用的故障开关注入，重开后用无设备会话的原生核心修复；不启动生产应用。
 
 
-RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和三个 QA 场景的总入口；`--qa-only` 用于已完成单元门禁后的应用复验。每个应用场景 TTL 45 秒，启动器负责退出/清理，验证器另核对进程消失、回执数量及隔离目录移除。失败写入 FAIL 结果并非零退出；finally 恢复匹配的生产绑定/库/应用但不启动它。环境强制 `MI_AUTO_HOST_READY=0`，不运行任何物理探针。
+诊断导出：`MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=diagnostic-export MI_DIAGNOSTIC_EVIDENCE_PATH=/absolute/report.json scripts/run --verify --timeout=45`。隔离应用打开报告，生成 0600 的 JSON 和 `evidence/diagnostics.json`；后者确认失败阶段存在，并把实体键和灯光视觉固定为 `NOT_RUN`。单元测试覆盖路径、serial 和 JSON 载荷脱敏，以及失败读取后的行动报告。
+
+RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和四个 QA 场景的总入口；`--qa-only` 用于已完成单元门禁后的应用复验。每个应用场景 TTL 45 秒，启动器负责退出/清理，验证器另核对进程消失、回执数量及隔离目录移除。失败写入 FAIL 结果并非零退出；finally 恢复匹配的生产绑定/库/应用但不启动它。环境强制 `MI_AUTO_HOST_READY=0`，不运行任何物理探针。
 
 性能基线准备：`scripts/perf-baseline` 构建合成应用后启动隔离 QA，记录从启动到 Workbench 首次 `onAppear` 的耗时，再采样默认 10 秒空闲 CPU time 增量与 RSS。结果写入该轮 `evidence/result.json`，状态为 `MEASURED`；设备连接、实体键、灯光视觉、安装版和验收预算固定 `NOT_RUN` 或 `NOT_SET`。该命令只建立可复测基线，不签收 #42 的长时运行、插拔、睡眠唤醒或轻量预算。
 
