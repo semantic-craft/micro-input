@@ -48,7 +48,7 @@ disable-model-invocation: true
 
 1. **合成 HID 全链路自动驱动（`MI_SYNTHETIC_SCENARIO=host-execution`）**：
    - 应用启动后自动连接合成 `0.6.3` 设备、安装八套桌面 Agent 预设、开启 `hostExecutionEnabled`；
-   - 依次切换八个桌面 Profile；每个注入 AG01，Antigravity 和 DSH 另注入 AG00/AG02/AG03，Herdr 另注入 AG10+AG11 宽键组合与 AG15。共 16 条 simulated 回执。该场景不验证真实应用 UI，不发送文本。
+   - 依次切换八个桌面 Profile；每个注入 AG00，Antigravity 和 DSH 另注入 AG01/AG02/AG03，Herdr 另注入 AG10+AG11 宽键组合与 AG15。共 16 条 simulated 回执。该场景不验证真实应用 UI，不发送文本。
    - 生产模式下（无 `MI_SYNTHETIC_SCENARIO` 且 `MI_AUTO_HOST_READY != "0"`），若检测到唯一已验证 USB `303A:8298` 设备，自动完成连接、身份与配置读取、预设安装并向 `$QA_AUDIT_LOG` 写入 `action_type: "host_ready"` 就绪回执；
    - 宿主执行器将每次派发的脱敏回执实时追加写入 `$QA_AUDIT_LOG`。
 2. **UniFFI + Swift 注入式驱动**：

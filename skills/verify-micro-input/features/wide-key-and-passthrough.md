@@ -1,10 +1,10 @@
 # 2U 宽键合并防抖与透传层健康检查 (`wide-key-and-passthrough`)
 
-修正第 0 行硬件反序（`AG01` 在左对应 `logical-0`，`AG00` 在右对应 `logical-1`），合并底部 2U 宽键双微动（`AG10` + `AG11` 及出厂 Codex 层 `ACT10` + `ACT11`）避免单次按压触发两次动作，支持 `v.oai.rad` 摇杆相邻扇区直接滑动切换与 `< 0.35` 归中释放，并在硬件层偏离 `KV_OAI_AG*` / `KV_OAI_ACT*` 透传绑定时给出告警。
+按 0.6.3 实机逐键核验映射第 0 行（`AG00` 在左对应 `logical-0`，`AG01` 在右对应 `logical-1`），合并底部 2U 宽键双微动（`AG10` + `AG11` 及出厂 Codex 层 `ACT10` + `ACT11`）避免单次按压触发两次动作，支持 `v.oai.rad` 摇杆相邻扇区直接滑动切换与 `< 0.35` 归中释放，并在硬件层偏离 `KV_OAI_AG*` / `KV_OAI_ACT*` 透传绑定时给出告警。
 
 ## Sub-features
 
-- `WP-01`：`AG01` 映射到 `logical-0`（`row0-col0-left`），`AG00` 映射到 `logical-1`（`row0-col1-right`）。
+- `WP-01`：`AG00` 映射到 `logical-0`（`row0-col0-left`），`AG01` 映射到 `logical-1`（`row0-col1-right`）。
 - `WP-02`：`WideKeyMerger` 在 `AG10` 与 `AG11`（或 `ACT10` 与 `ACT11`）重叠按下时仅发出 1 次 `Pressed`（`binding_id: "AG10"`, `logical_switch: "logical-10"`），全部释放后才发出 1 次 `Released`；`resolve_host_action` 对 `logical-10` 与 `logical-11` 提供双向对称回退；遇到 `InputStreamGap` 时清空按住集合。
 - `WP-03`：`check_passthrough_health` 检查当前活动层（在真实 `0.6.3` 固件上按 1-based `layer_index` 映射 `layers[active_layer - 1]`）是否包含全部 13 个 `"KV_OAI_AG00"`..`"KV_OAI_AG12"` 或 `"KV_OAI_ACT00"`..`"KV_OAI_ACT12"` 透传键位绑定，不足时返回 `LayerDriftWarning`。
 

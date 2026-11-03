@@ -299,7 +299,7 @@ extension MicroInput: Backend {}
         let binding = Self.desktopBindings[slot]
         return !busy && backend.resolveInputAction(bindingId: binding, isPressed: true) != nil
     }
-    private static let desktopBindings = ["AG01", "AG00", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10", "AG11", "AG12", "AG13", "AG14", "ENC_CLK", "AG15", "AG16", "AG17", "AG18"]
+    private static let desktopBindings = ["AG00", "AG01", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10", "AG11", "AG12", "AG13", "AG14", "ENC_CLK", "AG15", "AG16", "AG17", "AG18"]
     func tryDesktopAction() async {
         guard dispatchOpen else { status = "正在切换或路由尚未就绪，请稍后重试"; return }
         guard canTryDesktopAction else { return }
@@ -527,7 +527,7 @@ extension MicroInput: Backend {}
             guard let id = hostProfiles.first(where: { $0.name == agent.name })?.id.text else { continue }
             await setHostActiveProfile(id)
             let bindings = ["Antigravity", "DeepSeek Coder (DSH)"].contains(agent.name)
-                ? ["AG01", "AG00", "AG02", "AG03"] : ["AG01"]
+                ? ["AG00", "AG01", "AG02", "AG03"] : ["AG00"]
             for binding in bindings {
                 try? await core.emitSyntheticBindingEvent(bindingId: binding, pressed: true)
                 try? await core.emitSyntheticBindingEvent(bindingId: binding, pressed: false)
