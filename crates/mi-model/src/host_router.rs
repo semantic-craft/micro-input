@@ -2,7 +2,6 @@
 use crate::{
     document::LocalDocumentV2,
     draft::{Action, ActionKind},
-    multi::ActionReference,
     Binding, DeviceConfig,
 };
 use serde::{Deserialize, Serialize};
@@ -366,7 +365,7 @@ pub fn macos_virtual_key_code(key: &str) -> Option<u16> {
     }
 }
 
-fn convert_action(doc: &LocalDocumentV2, action: &Action) -> Option<ResolvedHostAction> {
+fn convert_action(action: &Action) -> Option<ResolvedHostAction> {
     let kind: ActionKind = serde_json::from_value(action.payload.clone()).ok()?;
     match kind {
         ActionKind::Shortcut {
@@ -402,15 +401,8 @@ fn convert_action(doc: &LocalDocumentV2, action: &Action) -> Option<ResolvedHost
                 Some(ResolvedHostAction::FocusSession { adapter, session })
             }
         }
-        ActionKind::LocalMulti { multi } => {
-            if let Some(ActionReference::Action { action_id }) = multi.tap {
-                let target_action = doc.editable.graph.actions.get(&action_id)?;
-                convert_action(doc, target_action)
-            } else {
-                None
-            }
-        }
-        ActionKind::DeviceKey { .. }
+        ActionKind::LocalMulti { .. }
+        | ActionKind::DeviceKey { .. }
         | ActionKind::LocalMacro { .. }
         | ActionKind::SkillReference { .. } => None,
     }
@@ -461,7 +453,7 @@ pub fn resolve_host_action(
     })?;
 
     let action = doc.editable.graph.actions.get(action_id)?;
-    convert_action(doc, action)
+    convert_action(action)
 }
 
 /// Recheck each supported physical binding; counts alone do not establish position or uniqueness.
