@@ -2,6 +2,12 @@
 import Foundation
 import MicroInputCore
 protocol Backend {
+    func layerLighting(layerId: String) throws -> String
+    func editLighting(profileId: String, layerId: String, zone: String, field: String, value: String, allLayers: Bool) async throws -> String
+    func beginLightingPreview() async throws -> String
+    func updateLightingPreview(token: String, zone: String, field: String, value: String) throws
+    func lightingPreviewStatus() -> String
+    func endLightingPreview(token: String) async throws -> String
     func deviceOperationCapabilities() -> String
     func beginHostExecution() throws -> UInt64
     func finishHostExecution(lease: UInt64)
@@ -78,6 +84,12 @@ protocol Backend {
     func installCodingAgentPresets() async throws -> String
 }
 extension Backend {
+    func layerLighting(layerId: String) throws -> String { throw BridgeError.Failed(message: "灯光不可用") }
+    func editLighting(profileId: String, layerId: String, zone: String, field: String, value: String, allLayers: Bool) async throws -> String { throw BridgeError.Failed(message: "灯光不可用") }
+    func beginLightingPreview() async throws -> String { throw BridgeError.Failed(message: "预览未验收") }
+    func updateLightingPreview(token: String, zone: String, field: String, value: String) throws {}
+    func lightingPreviewStatus() -> String { "{}" }
+    func endLightingPreview(token: String) async throws -> String { "{}" }
     func deviceOperationCapabilities() -> String { #"{"apply":false,"restore":false,"reason":"设备变更不可用"}"# }
     func beginHostExecution() throws -> UInt64 { 0 }
     func finishHostExecution(lease: UInt64) {}
@@ -228,7 +240,8 @@ extension MicroInput: Backend {}
             catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await backend.actionCatalog().utf8))
             #if MI_SYNTHETIC_BACKEND
             let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
-            if scenario == "config-write" { await runSyntheticDeviceOperationScenario() }
+            if scenario == "lighting-control" { await runSyntheticLightingScenario() }
+            else if scenario == "config-write" { await runSyntheticDeviceOperationScenario() }
             else if ["reconnect", "reconnect-transient", "apply-preparation"].contains(scenario), !preparedReconnectScenario {
                 await prepareReconnectScenario()
             } else if scenario == "host-execution", !preparedHostExecutionScenario {
@@ -596,6 +609,11 @@ extension MicroInput: Backend {}
         }
     }
     #endif
+    @Published var showingLighting = false
+    @Published var lightingPreviewToken: String?
+    @Published var lightingPreviewResult = "未开始预览"
+    @Published var lightingPreviewPhase = "Idle"
+    var endingLightingPreview = false
     @Published var operationCapabilities = DeviceOperationCapabilities()
     @Published var operationRows: [DeviceOperationState] = []
     @Published var operationResult: DeviceOperationState?
@@ -926,6 +944,7 @@ extension MicroInput: Backend {}
         if events != nil { await refresh() }
     }
     func shutdown() async {
+        await endLightingPreview()
         cancelActiveDeviceOperation()
         stopped = true; lifecycleGeneration += 1; discoveryGeneration += 1
         events?.invalidatePending()

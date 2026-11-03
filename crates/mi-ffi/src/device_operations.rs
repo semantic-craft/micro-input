@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 use std::{collections::BTreeSet, path::PathBuf};
 #[derive(Default)]
 pub(super) struct Operations {
+    #[cfg(feature = "synthetic-backend")]
+    pub(super) preview: Option<(String, Arc<mi_session::lighting_preview::Preview>)>,
     paused: bool,
     inspecting: bool,
     revalidate_routes: bool,
@@ -23,15 +25,19 @@ pub(super) struct Operations {
     #[cfg(feature = "synthetic-backend")]
     writers: BTreeMap<String, Arc<mi_session::config_write::SyntheticWriter>>,
 }
-struct Inspection<'a>(&'a Mutex<Operations>);
+pub(super) struct Inspection<'a>(&'a Mutex<Operations>);
 impl Drop for Inspection<'_> {
     fn drop(&mut self) {
         self.0.lock().unwrap().inspecting = false;
     }
 }
 impl MicroInput {
-    fn reserve_inspection(&self) -> Result<Inspection<'_>, BridgeError> {
+    pub(super) fn reserve_inspection(&self) -> Result<Inspection<'_>, BridgeError> {
         let mut operations = self.operations.lock().unwrap();
+        #[cfg(feature = "synthetic-backend")]
+        if operations.preview.is_some() {
+            return Err(failure("请先结束灯光预览并核对恢复"));
+        }
         if operations.inspecting || operations.running.is_some() || operations.drain.is_some() {
             return Err(failure("已有设备操作"));
         }
@@ -137,7 +143,7 @@ impl MicroInput {
 #[uniffi::export(async_runtime = "tokio")]
 impl MicroInput {
     pub fn device_operation_capabilities(&self) -> String {
-        json!({"apply":self.write_capable(),"restore":self.write_capable(),"preview":false,"synthetic_only":true,"reason":"原生配置写入与恢复尚未验收"}).to_string()
+        json!({"apply":self.write_capable(),"restore":self.write_capable(),"preview":self.write_capable(),"synthetic_only":true,"reason":"原生配置写入与恢复尚未验收"}).to_string()
     }
     pub fn begin_host_execution(&self) -> Result<u64, BridgeError> {
         let mut o = self.operations.lock().unwrap();
@@ -164,6 +170,10 @@ impl MicroInput {
         }
         let session = self.current()?;
         let mut o = self.operations.lock().unwrap();
+        #[cfg(feature = "synthetic-backend")]
+        if o.preview.is_some() {
+            return Err(failure("请先结束灯光预览"));
+        }
         if o.inspecting || o.running.is_some() || o.drain.is_some() {
             return Err(failure("已有设备操作"));
         }

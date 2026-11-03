@@ -573,7 +573,15 @@ impl HidTransport for SyntheticDiscovery {
                 let method = request["method"].as_str().unwrap_or("");
                 requests.lock().unwrap().push(method.to_owned());
                 let config = configuration.load(Ordering::SeqCst);
-                let mutable_reply = if ["fs.list", "fs.readbin", "fs.writebin"].contains(&method) {
+                let mutable_reply = if [
+                    "fs.list",
+                    "fs.readbin",
+                    "fs.writebin",
+                    "synthetic.lights.read",
+                    "synthetic.lights.set",
+                ]
+                .contains(&method)
+                {
                     files.lock().unwrap().as_mut().map(|f| f.respond(&request))
                 } else {
                     None
@@ -787,6 +795,9 @@ pub struct SyntheticFiles {
     pub missing_keymap: bool,
     pub bad_checksum: bool,
     pub fail_read: bool,
+    pub preview_target: u64,
+    pub preview_lights: serde_json::Value,
+    pub fail_preview: bool,
     next_offset: usize,
 }
 #[cfg(feature = "synthetic-backend")]
@@ -801,6 +812,9 @@ impl SyntheticFiles {
             missing_keymap: false,
             bad_checksum: false,
             fail_read: false,
+            preview_target: 0,
+            preview_lights: serde_json::Value::Null,
+            fail_preview: false,
             next_offset: 0,
         }
     }
@@ -811,6 +825,24 @@ impl SyntheticFiles {
         let params = &request["params"];
         let result: Result<serde_json::Value, ()> = (|| {
             match request["method"].as_str() {
+                Some("synthetic.lights.read" | "synthetic.lights.set") => {
+                    if self.fail_preview {
+                        return Err(());
+                    }
+                    if self.preview_lights.is_null() {
+                        let source: serde_json::Value =
+                            serde_json::from_slice(&self.keymap).map_err(|_| ())?;
+                        self.preview_lights = source["profiles"][0]["layers"][0]["lights"].clone();
+                    }
+                    if request["method"] == "synthetic.lights.set" {
+                        if params["target"].as_u64() != Some(self.preview_target) {
+                            return Err(());
+                        }
+                        self.preview_lights = params["lights"].clone();
+                    }
+                    Ok(json!({"target":self.preview_target,"lights":self.preview_lights}))
+                }
+
                 Some("fs.list") => {
                     let mut files = vec![
                         json!({"name":"keymap.json","size":self.keymap.len(),"checksum":format!("{:x}",Sha1::digest(&self.keymap))}),

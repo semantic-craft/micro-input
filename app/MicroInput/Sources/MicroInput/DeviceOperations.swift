@@ -4,6 +4,7 @@ import MicroInputCore
 struct DeviceOperationCapabilities: Decodable {
     var apply = false
     var restore = false
+    var preview = false
     var reason = "原生设备变更能力关闭"
 }
 struct DeviceOperationState: Decodable, Identifiable {
@@ -49,6 +50,7 @@ extension Store {
     }
     func performDeviceOperation(token: String, restore: Bool = false) async {
         guard !deviceOperationRunning else { return }
+        guard lightingPreviewToken == nil else { status = "请先结束灯光预览并确认恢复"; return }
         refreshOperationCapabilities()
         guard restore ? operationCapabilities.restore : operationCapabilities.apply else { status = operationCapabilities.reason; return }
         deviceOperationRunning = true

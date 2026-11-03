@@ -74,6 +74,7 @@ struct Workbench: View {
                             Button("准备基础绑定应用…") { Task { await store.previewApply() } }
                         }.padding(.top, 8).disabled(!store.canEditDraft || store.busy)
                     }.font(.caption)
+                    Button("RGB 灯光…") { store.showingLighting = true }.disabled(store.layer == nil || !store.canEditDraft)
                     Button("设备操作与恢复…") { store.showingDeviceOperations = true }
                     Text("切换配置不会应用到设备。").font(.caption).foregroundStyle(.secondary)
                     Spacer()
@@ -184,6 +185,7 @@ struct Workbench: View {
             Button("取消",role:.cancel) {}
             Button("删除",role:.destructive) {Task {if deleteLayer {await store.deleteLayer()} else {await store.deleteProfile()}}}
         } message: {Text("仅删除本地草稿中的对象及其所属内容。原始来源保留，可撤销；设备不会改变。") }
+        .sheet(isPresented: $store.showingLighting, onDismiss: { Task { await store.endLightingPreview() } }) { LightingEditor(store: store) }
         .sheet(isPresented: $store.showingDeviceOperations) { DeviceOperationsView(store: store) }
         .sheet(item: $store.applyPreview, onDismiss: { Task { await store.cancelApplyPreview() } }) { preview in ApplyPreparationView(store:store,preview:preview) }
         .sheet(item: $store.comparison) { comparison in ReconnectComparisonView(store: store, initialComparison: comparison) }

@@ -2,6 +2,7 @@
 mod apply_preparation;
 mod device_operations;
 mod input_monitor;
+mod lighting;
 mod reconnect;
 pub use input_monitor::*;
 use mi_session::{DeviceSession, ReadOnlySchema, SessionConfig, UnverifiedSchema};

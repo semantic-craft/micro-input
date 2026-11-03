@@ -626,3 +626,6 @@ mod file_tests;
 
 #[cfg(feature = "synthetic-backend")]
 pub mod config_write;
+
+#[cfg(feature = "synthetic-backend")]
+pub mod lighting_preview;

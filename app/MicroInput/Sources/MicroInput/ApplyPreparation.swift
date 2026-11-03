@@ -15,7 +15,7 @@ struct ApplyPreparationView: View {
     let preview: ApplyPreview
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack { Text("基础绑定应用准备").font(.title2.bold()); Spacer(); Button("关闭准备") { Task { await store.cancelApplyPreview() } } }
+            HStack { Text("配置应用准备").font(.title2.bold()); Spacer(); Button("关闭准备") { Task { await store.cancelApplyPreview() } } }
             Text("\(preview.before) → \(preview.after)").font(.title3.monospaced())
             Text("来源 Profile \(preview.profile_source_id.text) / Layer \(preview.layer_source_id.text) / \(preview.logical_control)")
             Text("实体位置：\(preview.physical_position) · 活动来源：\(preview.active_source)").font(.caption).foregroundStyle(.secondary)
