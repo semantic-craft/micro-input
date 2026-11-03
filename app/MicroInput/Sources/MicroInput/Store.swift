@@ -301,6 +301,7 @@ extension MicroInput: Backend {}
     }
     private static let desktopBindings = ["AG01", "AG00", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10", "AG11", "AG12", "AG13", "AG14", "ENC_CLK", "AG15", "AG16", "AG17", "AG18"]
     func tryDesktopAction() async {
+        guard dispatchOpen else { status = "正在切换或路由尚未就绪，请稍后重试"; return }
         guard canTryDesktopAction else { return }
         let binding = Self.desktopBindings[slot]
         guard let json = backend.resolveInputAction(bindingId: binding, isPressed: true),
