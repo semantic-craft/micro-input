@@ -91,3 +91,5 @@ RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和
 ## 实机验收材料的离线准备
 
 使用 `scripts/prepare-hardware-acceptance prepare` 生成新的私有准备包；`verify` 检查固定范围、权限及摘要，`compare` 比较调用方提供的本地原字节。工具没有设备I/O或执行入口，材料有效不等于设备备份或执行许可。最小实验、备份采集前提和恢复规则见 [实机验收准备](designs/hardware-acceptance.md)。回归 `test_hardware_acceptance_launcher.py` 随 `scripts/check` 运行，无需连接设备。
+
+独立 H0/H1 执行器：`scripts/hardware-acceptance` 默认只跑假 USB；显式实机选项和一次性材料约束见上述设计。`cargo test --locked -p mi-session --test hardware` 覆盖完整备份、固定5块/删除、逐步保全及失败零重放；两个 native 用例保持 ignored。启动器系统边界回归随统一检查执行，不创建真实子进程或连接设备。
