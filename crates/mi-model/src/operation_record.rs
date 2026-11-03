@@ -178,6 +178,21 @@ fn atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 pub(crate) fn same_device(a: &Value, b: &Value) -> Result<(), String> {
     let x = &a["device_identity"];
     let y = &b["device_identity"];
+    // A live native connection may restore its own exact backup. Interface paths
+    // never authorize restoration after reconnect/restart or to another session.
+    if a["firmware"] == "0.6.3"
+        && b["firmware"] == "0.6.3"
+        && x["confidence"] == "observed-interface"
+        && y == x
+        && x["session_id"].as_u64().is_some()
+        && x["connection_nonce"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty())
+        && x["interface"].as_str().is_some_and(|v| !v.is_empty())
+        && x["backend"] == "hidapi-2.6.7/macOS/numbered-0x06"
+    {
+        return Ok(());
+    }
     if a["firmware"] != b["firmware"]
         || !matches!(b["firmware"].as_str(), Some("0.6.3" | "synthetic-0.6.3"))
         || x["confidence"] != "verified-serial"

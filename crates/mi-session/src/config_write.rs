@@ -1,4 +1,4 @@
-//! Offline verification harness, compiled only with synthetic-backend. Only the dedicated synthetic FFI constructor exposes this harness; no native writer.
+//! Plan-bound keymap application and exact-byte restoration; never an arbitrary RPC API.
 use super::*;
 use mi_model::{
     apply::PreparedCandidate,
@@ -12,9 +12,10 @@ pub enum Outcome {
     Verified,
     VerifiedLocalSaveFailed,
 }
-/// Owns consumed plan IDs for one synthetic session. A failure is never retried automatically.
-pub struct SyntheticWriter {
+/// Owns consumed plan IDs for one live connection. A failure is never retried automatically.
+pub struct ConfigWriter {
     session: Arc<DeviceSession>,
+    native_interface: Option<String>,
     consumed: AsyncMutex<BTreeSet<String>>,
     records: Mutex<std::collections::BTreeMap<String, OperationRecord>>,
 }
@@ -32,7 +33,8 @@ impl Drop for MutationGuard<'_> {
         }
     }
 }
-impl SyntheticWriter {
+impl ConfigWriter {
+    #[cfg(feature = "synthetic-backend")]
     pub fn new(session: Arc<DeviceSession>) -> Result<Self, SessionError> {
         if session.link.backend() != mi_transport::LinkBackend::SyntheticNumbered {
             return Err(
@@ -41,21 +43,53 @@ impl SyntheticWriter {
         }
         Ok(Self {
             session,
+            native_interface: None,
             consumed: AsyncMutex::new(BTreeSet::new()),
             records: Mutex::new(std::collections::BTreeMap::new()),
         })
     }
-    /// Fixed simulator identity, never derived from the candidate or a firmware string gate.
+    pub fn native(session: Arc<DeviceSession>, interface: String) -> Result<Self, SessionError> {
+        if interface.is_empty()
+            || session.link.backend() != mi_transport::LinkBackend::MacHidapi267Numbered
+        {
+            return Err(ProtoError::Unverified("native numbered backend required").into());
+        }
+        Ok(Self {
+            session,
+            native_interface: Some(interface),
+            consumed: AsyncMutex::new(BTreeSet::new()),
+            records: Mutex::new(std::collections::BTreeMap::new()),
+        })
+    }
+    fn firmware(&self) -> &str {
+        if self.native_interface.is_some() {
+            "0.6.3"
+        } else {
+            "synthetic-0.6.3"
+        }
+    }
+    fn baseline(&self, files: &DeviceFiles) -> Value {
+        let mut value = synthetic_baseline(self.session.id, files);
+        if let Some(interface) = &self.native_interface {
+            value["device_identity"] = serde_json::json!({"confidence":"observed-interface","connection_nonce":self.session.connection_nonce,"interface":interface,"session_id":self.session.id,"backend":self.session.backend_name()});
+            value["firmware"] = serde_json::json!("0.6.3");
+        }
+        value
+    }
+    /// Revalidate the supported backend and independently read complete files.
     pub async fn inspect(&self) -> Result<serde_json::Value, SessionError> {
         let info = self.session.read_identity_info().await?;
-        if info.version.as_deref() != Some("synthetic-0.6.3") {
-            return Err(SessionError::Config("synthetic identity unverified".into()));
+        if info.version.as_deref() != Some(self.firmware()) {
+            return Err(SessionError::Config("identity unverified".into()));
         }
         self.session
             .guarded(async {
                 let mut q = self.session.queue.lock().await;
                 let files = self.session.read_files_locked(&mut q).await?;
-                Ok(synthetic_baseline(self.session.id, &files))
+                let mut base = self.baseline(&files);
+                base["active_indices"] =
+                    serde_json::json!({"profile":info.profile_index,"layer":info.layer_index});
+                Ok(base)
             })
             .await
     }
@@ -82,7 +116,7 @@ impl SyntheticWriter {
     pub async fn apply(&self, plan: &PreparedCandidate) -> Outcome {
         self.apply_observed(plan, |_, _| {}).await
     }
-    /// Synthetic fault/observation seam. Production has no writer or such callback.
+    /// Checkpoint observation used by offline fault tests and durable state tracking.
     pub async fn apply_observed(
         &self,
         plan: &PreparedCandidate,
@@ -114,8 +148,18 @@ impl SyntheticWriter {
                     .map_err(SessionError::Config)?;
                 failure = Failure::Identity;
                 let info = self.session.read_identity_info().await?;
-                if info.version.as_deref() != Some("synthetic-0.6.3") {
+                if info.version.as_deref() != Some(self.firmware()) {
                     return Err(SessionError::Config("identity unverified".into()));
+                }
+                if self.native_interface.is_some() {
+                    let active = plan.preview().map_err(SessionError::Config)?.active_indices;
+                    if info.profile_index.is_none()
+                        || info.layer_index.is_none()
+                        || active["profile"].as_u64() != info.profile_index.map(u64::from)
+                        || active["layer"].as_u64() != info.layer_index.map(u64::from)
+                    {
+                        return Err(SessionError::Config("active indices changed".into()));
+                    }
                 }
                 let mut q = self.session.queue.lock().await;
                 failure = Failure::Transport;
@@ -125,14 +169,17 @@ impl SyntheticWriter {
                     || current.smart_actions.as_ref().map(|f| f.bytes.as_ref())
                         != plan.smart_actions()
                 {
-                    return Err(SessionError::Config("synthetic baseline changed".into()));
+                    return Err(SessionError::Config("baseline changed".into()));
                 }
                 failure = Failure::Identity;
                 record
-                    .classify(&synthetic_baseline(self.session.id, &current))
+                    .classify(&self.baseline(&current))
                     .map_err(SessionError::Config)?;
                 let chunks = plan.candidate().len().div_ceil(3072);
-                let reads = chunks + plan.smart_actions().map_or(0, |b| b.len().div_ceil(3072)) + 2;
+                let reads = chunks
+                    + plan.smart_actions().map_or(0, |b| b.len().div_ceil(3072))
+                    + 2
+                    + usize::from(self.native_interface.is_some());
                 failure = Failure::RequestBudget;
                 if chunks == 0 || usize::from(q.next_id) + chunks + reads > 999 {
                     return Err(SessionError::Config("request budget insufficient".into()));
@@ -142,8 +189,7 @@ impl SyntheticWriter {
                 }
                 for (n, offset) in (0..plan.candidate().len()).step_by(3072).enumerate() {
                     let expected_id = q.next_id;
-                    let encoded =
-                        mi_proto::mutation::keymap_chunk(plan.candidate(), offset, expected_id)?;
+
                     observe(Checkpoint::BeforeWrite(n), record.path());
                     failure = Failure::Persistence;
                     record
@@ -153,7 +199,7 @@ impl SyntheticWriter {
                     failure = Failure::Transport;
                     let reply = self
                         .session
-                        .exchange_encoded(&mut q, "fs.writebin", encoded)
+                        .exchange_keymap(&mut q, plan.candidate(), offset)
                         .await?;
                     mi_proto::mutation::validate_mutation_response_candidate(&reply, expected_id)?;
                     observe(Checkpoint::AfterAck(n + 1), record.path());
@@ -172,7 +218,22 @@ impl SyntheticWriter {
                     || actual.smart_actions.as_ref().map(|f| f.bytes.as_ref())
                         != plan.smart_actions()
                 {
-                    return Err(SessionError::Config("synthetic readback differs".into()));
+                    return Err(SessionError::Config("readback differs".into()));
+                }
+                if self.native_interface.is_some() {
+                    let status = self
+                        .session
+                        .exchange(&mut q, Method::DeviceStatus, Value::Null)
+                        .await?;
+                    if status["result"]["profile_index"].as_u64()
+                        != info.profile_index.map(u64::from)
+                        || status["result"]["layer_index"].as_u64()
+                            != info.layer_index.map(u64::from)
+                    {
+                        return Err(SessionError::Config(
+                            "activity changed during application".into(),
+                        ));
+                    }
                 }
                 guard.verified = true;
                 observe(Checkpoint::BeforeVerifiedSave, record.path());

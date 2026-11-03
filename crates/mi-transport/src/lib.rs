@@ -63,6 +63,15 @@ pub trait HidLink: Send + Sync {
         LinkBackend::Unverified
     }
     async fn write(&self, report: &[u8]) -> Result<(), TransportError>;
+    /// One RPC frame sequence. Native backends must not interleave blocking reads
+    /// between its reports; default preserves injectable link behavior.
+    async fn write_batch(&self, reports: &[Vec<u8>]) -> Result<(), TransportError> {
+        for report in reports {
+            self.write(report).await?;
+        }
+        Ok(())
+    }
+
     async fn read(&self) -> Result<Vec<u8>, TransportError>;
     fn close(&self);
 }
@@ -299,18 +308,25 @@ impl HidLink for MacLink {
         }
     }
     async fn write(&self, report: &[u8]) -> Result<(), TransportError> {
+        self.write_batch(&[report.to_vec()]).await
+    }
+    async fn write_batch(&self, reports: &[Vec<u8>]) -> Result<(), TransportError> {
         let d = self.device.clone();
-        let bytes = report.to_vec();
+        let reports = reports.to_vec();
         tokio::task::spawn_blocking(move || {
+            // A read_timeout holds this same mutex. Acquire it once for the whole
+            // RPC so the 20ms reader cannot insert gaps between 61-byte pieces.
             let guard = d.lock().unwrap();
             let dev = guard.as_ref().ok_or(TransportError::Disconnected)?;
-            let sent = dev
-                .write(&bytes)
-                .map_err(|e| TransportError::Unavailable(e.to_string()))?;
-            if sent != bytes.len() {
-                return Err(TransportError::Unavailable(
-                    "short numbered report send".into(),
-                ));
+            for bytes in reports {
+                let sent = dev
+                    .write(&bytes)
+                    .map_err(|e| TransportError::Unavailable(e.to_string()))?;
+                if sent != bytes.len() {
+                    return Err(TransportError::Unavailable(
+                        "short numbered report send".into(),
+                    ));
+                }
             }
             Ok(())
         })

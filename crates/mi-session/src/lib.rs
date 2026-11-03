@@ -153,6 +153,7 @@ pub struct ReceivedNotification {
 }
 pub struct DeviceSession {
     pub id: u64,
+    pub connection_nonce: String,
     link: Arc<dyn HidLink>,
     queue: AsyncMutex<Queue>,
     invalid: Arc<AtomicBool>,
@@ -269,6 +270,7 @@ impl DeviceSession {
         };
         Arc::new(Self {
             id: SESSION_ID.fetch_add(1, Ordering::SeqCst),
+            connection_nonce: mi_model::document::new_id(),
             link,
             queue: AsyncMutex::new(Queue {
                 framer,
@@ -360,7 +362,27 @@ impl DeviceSession {
         &self,
         q: &mut Queue,
         method: &'static str,
+        encoded: Vec<u8>,
+    ) -> Result<Value, SessionError> {
+        self.exchange_authorized(q, method, encoded, false).await
+    }
+    // Only the plan-owning writer reaches this typed, fixed-path entry.
+    async fn exchange_keymap(
+        &self,
+        q: &mut Queue,
+        candidate: &[u8],
+        offset: usize,
+    ) -> Result<Value, SessionError> {
+        let encoded = mi_proto::mutation::keymap_chunk(candidate, offset, q.next_id)?;
+        self.exchange_authorized(q, "fs.writebin", encoded, true)
+            .await
+    }
+    async fn exchange_authorized(
+        &self,
+        q: &mut Queue,
+        method: &'static str,
         mut encoded: Vec<u8>,
+        keymap: bool,
     ) -> Result<Value, SessionError> {
         if self.invalid.load(Ordering::SeqCst) {
             q.framer.lock().unwrap().clear();
@@ -374,8 +396,8 @@ impl DeviceSession {
             self.shutdown().await;
             return Err(error);
         }
-        // Candidate encoders never authorize a native mutation, even if a future
-        // caller reaches this private byte entry point or mislabels its method.
+        // General byte callers remain read-only. Only exchange_keymap constructs
+        // the fixed-path bytes for an already validated immutable plan.
         let synthetic = {
             #[cfg(feature = "synthetic-backend")]
             {
@@ -386,7 +408,10 @@ impl DeviceSession {
                 false
             }
         };
-        if !synthetic {
+        let native_keymap = keymap
+            && method == "fs.writebin"
+            && self.link.backend() == mi_transport::LinkBackend::MacHidapi267Numbered;
+        if !synthetic && !native_keymap {
             let request: Value = serde_json::from_slice(&encoded)
                 .map_err(|_| ProtoError::Invalid("invalid encoded request".into()))?;
             let readonly = match method {
@@ -431,9 +456,7 @@ impl DeviceSession {
             complete: false,
         };
         let result = tokio::time::timeout_at(deadline, async {
-            for report in reports {
-                self.link.write(&report).await?;
-            }
+            self.link.write_batch(&reports).await?;
             Ok::<_, TransportError>(())
         })
         .await;
@@ -677,7 +700,6 @@ mod tests;
 #[cfg(test)]
 mod file_tests;
 
-#[cfg(feature = "synthetic-backend")]
 pub mod config_write;
 
 #[cfg(feature = "synthetic-backend")]

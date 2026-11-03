@@ -154,3 +154,8 @@
 - 实测：2026-11-03，在固件 0.6.3、Profile 0／Layer 1 下逐颗确认：左键 AG00、右键 AG01；候选流和映射流的绑定 ID 一致，按下/释放完整，采集前后活动索引不变。
 - 修复：按实机证据修正路由、速查顺序与标签、UI 试运行和合成输入；不写设备，不迁移用户逻辑槽位。
 - 回归：`verified_input_maps_observed_row0_order_joystick_sectors_and_merges_wide_key` 修复前因 AG00 被映射到 logical-1 而失败，修复后通过。物理验收一次只提示一颗键，收到回执后再继续；不把复合口令的模糊结果判成证据。
+
+## 原生长请求连续发送与完成块核验
+
+- 2026-11-03：H1 首块 ACK 后目标尚未出现在目录，不能把中间不可见当作整文件失败。每块仍检查原配置与非目标目录，`completed:true` 后才核验目标完整内容。回归：`buffered_uncompleted_chunks_need_no_visible_file_until_completed`。
+- 唯一 reader 在同一 HID mutex 上执行 20ms read_timeout；逐报告重新拿锁会在长 RPC 中插入间隔。实际配置恢复曾收到缺少合法 ID / error 400；改为一个 RPC 一次锁定、连续发完后，原字节恢复成功。回归：`multiframe_request_uses_one_transport_batch`。保留严格响应检查，失败不自动重放，不把该修复当作多客户端竞争已解决。
