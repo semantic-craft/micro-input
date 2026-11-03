@@ -60,25 +60,24 @@ struct WorkbenchHost: View {
     let store: Store
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var open: (() -> Void)?
-    private var panel: NSPanel?
+    private let popover = NSPopover()
     init(store: Store) {
         self.store = store
         super.init()
         item.button?.image = StatusItemIcon.make()
         item.button?.toolTip = "Micro Input"
         item.button?.target = self; item.button?.action = #selector(show)
+        popover.behavior = .transient
+        popover.contentViewController = NSHostingController(rootView: StatusPanel(store: store, owner: self))
     }
     @objc func show() {
-        if panel == nil {
-            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 320, height: 380), styleMask: [.titled, .utilityWindow], backing: .buffered, defer: false)
-            panel.title = "Micro Input 菜单栏"
-            panel.isReleasedWhenClosed = false
-            panel.contentView = NSHostingView(rootView: StatusPanel(store: store, owner: self))
-            panel.center(); self.panel = panel
-        }
-        panel?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        guard let button = item.button else { return }
+        if popover.isShown { popover.performClose(nil); return }
+        NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
     }
-    @objc func showWindow() { open?() }
+    @objc func showWindow() { popover.performClose(nil); open?() }
     @objc func quitApp() { NSApp.terminate(nil) }
 }
 
@@ -119,75 +118,70 @@ struct WorkbenchHost: View {
 struct StatusPanel: View {
     @ObservedObject var store: Store
     let owner: StatusMenu
+    @State private var search = ""
+    @State private var showOther = false
+    var profiles: [Profile] {
+        store.orderedHostProfiles.filter { p in
+            (showOther || DesktopAgent.named(p.name) != nil) && (search.isEmpty || p.name.localizedCaseInsensitiveContains(search))
+        }
+    }
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(store.passThroughHealth.label)
-                .font(.caption.bold())
-                .foregroundStyle(store.passThroughHealth == .ready ? Color.green : Color.secondary)
-            if case .layerDriftWarning = store.passThroughHealth {
-                Text("键盘当前不在宿主透传层，请轻触键盘左下角 Logo 切回第 0 层")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-            }
-            if store.connectedID != nil, store.passThroughHealth != .ready {
-                Button("重新检查身份/层状态") {
-                    Task {
-                        await store.readIdentity()
-                        if store.passThroughHealth == .snapshotMissing,
-                           ["0.6.3", "synthetic-0.6.3"].contains(store.identity?.version ?? "") {
-                            await store.readDeviceConfig()
-                            if store.browsingDeviceSnapshot {
-                                store.showLocalDraft()
-                            }
-                        }
-                    }
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Micro Input").font(.headline)
+                    Text("Creator Micro 2").font(.caption).foregroundStyle(.secondary)
                 }
-                .font(.caption2)
+                Spacer()
+                Label(store.connectedID == nil ? "未连接" : "已连接", systemImage: "cable.connector")
+                    .font(.caption).foregroundStyle(.secondary)
             }
-            Toggle("启用宿主动作执行", isOn: Binding(
-                get: { store.hostExecutionEnabled },
-                set: { enabled in Task { await store.setHostExecutionEnabled(enabled) } }
-            ))
-            .font(.caption)
-            let axTrusted = LiveHostActionExecutor.isAccessibilityTrusted
-            HStack(spacing: 6) {
-                Text(axTrusted ? "辅助功能权限：已授权" : "辅助功能权限：未授权（快捷键与粘贴需要）")
-                    .font(.caption2)
-                    .foregroundStyle(axTrusted ? Color.secondary : Color.orange)
-                if !axTrusted {
-                    Button("打开系统辅助功能设置…") {
-                        LiveHostActionExecutor.openAccessibilitySettings()
+            Toggle("启用按键控制", isOn: Binding(get: { store.hostExecutionEnabled }, set: { value in Task { await store.setHostExecutionEnabled(value) } }))
+                .toggleStyle(.switch).controlSize(.small)
+            TextField("搜索 Agent 配置", text: $search).textFieldStyle(.roundedBorder)
+            ScrollView {
+                VStack(spacing: 4) {
+                    ForEach(profiles, id: \.id.text) { p in
+                        Button { Task { await store.setHostActiveProfile(p.id.text) } } label: {
+                            HStack(spacing: 10) {
+                                AgentBadge(name: p.name)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(p.name).fontWeight(.medium)
+                                    if let agent = DesktopAgent.named(p.name) {
+                                        Text(agent.installed ? "已安装" : "未找到应用").font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer()
+                                if store.hostActiveProfileId == p.id.text { Image(systemName: "checkmark").foregroundStyle(.tint) }
+                            }.padding(8).contentShape(Rectangle())
+                                .background(store.hostActiveProfileId == p.id.text ? Color.accentColor.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                        }.buttonStyle(.plain).disabled(store.busy)
+                        .accessibilityLabel("控制 \(p.name)\(store.hostActiveProfileId == p.id.text ? "，当前配置" : "")")
                     }
-                    .font(.caption2)
+                    if profiles.isEmpty { Text("没有匹配的配置").foregroundStyle(.secondary).padding() }
                 }
+            }.frame(maxHeight: 290)
+            Toggle("显示其他配置", isOn: $showOther).toggleStyle(.checkbox).font(.caption)
+            Divider()
+            Text(store.hostExecutionEnabled ? store.passThroughHealth.label : "按键控制已暂停")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if !LiveHostActionExecutor.isAccessibilityTrusted {
+                Button("设置辅助功能权限…") { LiveHostActionExecutor.openAccessibilitySettings() }.font(.caption)
             }
             if let receipt = store.lastHostActionReceipt {
-                Text("最近触发：\(receipt.bindingId) → \(receipt.actionType) (\(receipt.detail))")
-                    .font(.caption2)
-                    .foregroundStyle(receipt.succeeded ? Color.secondary : Color.red)
-                    .lineLimit(1)
+                Text("最近动作：\(receipt.succeeded ? "已执行" : "未执行") · \(receipt.detail)")
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
             }
-            Divider()
-            Text("宿主激活 Profile（切换不写设备 Flash）：")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            ForEach(Array(store.hostProfiles.enumerated()), id: \.offset) { _, p in
-                let active = store.hostActiveProfileId == p.id.text
-                Button(active ? "✓ \(p.name)" : p.name) {
-                    Task { await store.setHostActiveProfile(p.id.text) }
-                }
+            HStack {
+                Button(store.connectedID == nil ? "连接设备" : "检查连接") { Task { await store.autoSetupHostExecutionIfNeeded() } }.disabled(store.busy)
+                Spacer()
+                Button("编辑按键…") { owner.showWindow() }
             }
-            Divider()
-            Button("一键就绪（连接 USB + 预设 + 开启接管）") {
-                Task { await store.autoSetupHostExecutionIfNeeded() }
+            HStack {
+                Text("配置切换仅作用于本机").font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Button("退出") { owner.quitApp() }.buttonStyle(.plain).font(.caption)
             }
-            .disabled(store.busy)
-            Button("安装 Coding Agent 预设") {
-                Task { await store.installCodingAgentPresets() }
-            }
-            .disabled(!store.canEditDraft || store.busy)
-            Button("打开工作台") { owner.showWindow() }
-            Button("退出 Micro Input") { owner.quitApp() }
-        }.padding(16).frame(width: 320, height: 450, alignment: .topLeading)
+        }.padding(16).frame(width: 336).tint(Color(red: 0.20, green: 0.43, blue: 0.34))
     }
 }

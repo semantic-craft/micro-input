@@ -92,15 +92,21 @@ pub fn capability(action: &Action) -> ActionCapability {
                 )
             }
             Ok(ActionKind::AgentCommand { adapter, command }) => {
-                let verified = matches!(adapter.as_str(), "herdr" | "dsh");
+                let desktop = matches!(adapter.as_str(), "cindy" | "zcode" | "qwenwork" | "codex")
+                    && (command == "focus-input" || (command == "search" && adapter != "qwenwork"));
+                let verified = matches!(adapter.as_str(), "herdr" | "dsh") || desktop;
                 if verified {
-                    prerequisites.push(format!("需要本机已安装并配置 {adapter} CLI 适配器"));
+                    prerequisites.push(if desktop {
+                        "需要目标应用、辅助功能权限及唯一可访问控件".into()
+                    } else {
+                        format!("需要本机已安装并配置 {adapter} CLI 适配器")
+                    });
                     (
                         format!("{adapter} / {command}"),
                         true,
                         true,
                         "",
-                        "Mac 宿主 CLI 适配器（herdr / dsh）",
+                        "Mac 宿主适配器（CLI / 辅助功能）",
                         "宿主激活对应 Profile 时按键可实时触发此动作",
                     )
                 } else {
