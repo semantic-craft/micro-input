@@ -114,13 +114,13 @@ async fn verified_input_subscription_merges_wide_key_and_resolves_host_actions()
     core.set_host_execution_enabled(true).await.unwrap();
 
     let sub = core.subscribe_verified_input().await.unwrap();
-    // Row 0 inversion: AG01 -> logical-0
-    core.emit_synthetic_binding_event("AG01".into(), true)
+    // Observed row 0 order: AG00 -> logical-0
+    core.emit_synthetic_binding_event("AG00".into(), true)
         .await
         .unwrap();
     let ev0 = sub.next_event().await.unwrap();
     assert_eq!(ev0.kind, mi_ffi::InputKind::Pressed);
-    assert_eq!(ev0.binding_id.as_deref(), Some("AG01"));
+    assert_eq!(ev0.binding_id.as_deref(), Some("AG00"));
     assert_eq!(ev0.logical_switch.as_deref(), Some("logical-0"));
     assert_eq!(ev0.physical_control.as_deref(), Some("row0-col0-left"));
     assert_eq!(ev0.verification, "verified-host-routing-0.6.3");

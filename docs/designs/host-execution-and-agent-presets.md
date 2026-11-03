@@ -32,7 +32,7 @@
    - 现有 [`../../scripts/run`](../../scripts/run) `--verify` 使用 `tempfile.TemporaryDirectory` 在 `/tmp`（解析后为 `/private/tmp`）下创建 QA 应用包，且每次生成随机 UUID 的 `CFBundleIdentifier`。按照 `project-verification` 的 macOS 实测经验，`/tmp` 下的应用会被 LaunchServices 登记为 `Other (255)`，随机 Bundle ID 会导致每次重跑都要重新授予辅助功能（Accessibility）权限，且缺乏 `MI_HOST_AUDIT_LOG` 审计回执供自动化回读验证。
 2. **原厂 `Input.app` 切换 Profile 强制刷写硬件 Flash**：官方 Electron 应用每次点选 Profile 都会触发倒计时覆写硬件 LittleFS（参见 [`../input-architecture.md` IA-13/14](../input-architecture.md)）。
 3. **宿主执行层与菜单栏生效态尚未接通**：[`../../crates/mi-model/src/action_library.rs`](../../crates/mi-model/src/action_library.rs) 中 `execution_available` 全为 `false`；菜单栏点选 Profile 仅切换工作台草稿浏览视图，且输入监听循环绑定在工作台诊断子视图上，关闭工作台主窗口即停止监听。
-4. **物理键位反序、2U 宽键双微动与硬件层漂移缺乏保护**：第 0 行硬件反序（`AG00` 在右、`AG01` 在左）、底部宽键双开关（`AG10` + `AG11`）以及摇杆四扇区（`AG15`–`AG18` 对应 `logical-16`–`logical-19`）尚未接入可执行路由；若误触左下角电容触摸区切走硬件 Layer，宿主将停止收到 `v.oai.hid` 而缺乏状态提示（关联 [`../spec/UNKNOWNS.md` `UNKNOWN-07` / `UNKNOWN-10`](../spec/UNKNOWNS.md)）。
+4. **物理键位反序、2U 宽键双微动与硬件层漂移缺乏保护**：第 0 行绑定曾被误判为反序（2026-11-03 实机逐键核验：`AG00` 在左、`AG01` 在右）、底部宽键双开关（`AG10` + `AG11`）以及摇杆四扇区（`AG15`–`AG18` 对应 `logical-16`–`logical-19`）尚未接入可执行路由；若误触左下角电容触摸区切走硬件 Layer，宿主将停止收到 `v.oai.hid` 而缺乏状态提示（关联 [`../spec/UNKNOWNS.md` `UNKNOWN-07` / `UNKNOWN-10`](../spec/UNKNOWNS.md)）。
 
 ## Goals
 
@@ -143,8 +143,8 @@
 
    | `v.oai.hid` 绑定 (`binding_id`) | 逻辑槽位 (`logical_switch`) | 物理位置标识 (`physical_control`) | 键帽分组 (`keycap_group`) | 动作角色 (`action_role`) | 说明 |
    | :--- | :--- | :--- | :--- | :--- | :--- |
-   | `AG01` | `logical-0` | `row0-col0-left` | `key-r0c0` | `momentary_key` | 第 0 行左键（硬件反序修正） |
-   | `AG00` | `logical-1` | `row0-col1-right` | `key-r0c1` | `momentary_key` | 第 0 行右键（硬件反序修正） |
+   | `AG00` | `logical-0` | `row0-col0-left` | `key-r0c0` | `momentary_key` | 第 0 行左键（0.6.3 实机逐键核验） |
+   | `AG01` | `logical-1` | `row0-col1-right` | `key-r0c1` | `momentary_key` | 第 0 行右键（0.6.3 实机逐键核验） |
    | `AG02`–`AG05` | `logical-2`–`logical-5` | `row1-col0`..`row1-col3` | `key-r1c0`..`key-r1c3` | `momentary_key` | 第 1 行左起 4 键 |
    | `AG06`–`AG09` | `logical-6`–`logical-9` | `row2-col0`..`row2-col3` | `key-r2c0`..`key-r2c3` | `momentary_key` | 第 2 行左起 4 键 |
    | `AG10` + `AG11` | `logical-10`（回退 `logical-11`） | `row3-wide-2u` | `wide-bottom-2u` | `wide_momentary_key` | 第 3 行底部 2U 宽键双开关合并输出 `binding_id: "AG10"`, `logical_switch: "logical-10"` |
@@ -199,8 +199,8 @@
 
 | 控件位置 | `v.oai.hid` 绑定 | 逻辑槽位 | **Antigravity 预设 (`T21 / #30`)** | **Herdr 预设 (`T22 / #31`)** | **DeepSeek Coder / DSH 预设 (`T23 / #32`)** |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **第 0 行左** | `AG01` | `logical-0` | `OpenApp("com.google.antigravity")` | `FocusSession("herdr", "session-1")` | `FocusSession("dsh", "session-1")` |
-| **第 0 行右** | `AG00` | `logical-1` | `Shortcut("l", ["command"], "frontmost-editor")` | `FocusSession("herdr", "session-2")` | `FocusSession("dsh", "session-2")` |
+| **第 0 行左** | `AG00` | `logical-0` | `OpenApp("com.google.antigravity")` | `FocusSession("herdr", "session-1")` | `FocusSession("dsh", "session-1")` |
+| **第 0 行右** | `AG01` | `logical-1` | `Shortcut("l", ["command"], "frontmost-editor")` | `FocusSession("herdr", "session-2")` | `FocusSession("dsh", "session-2")` |
 | **第 1 行 4 键** | `AG02`–`AG05` | `logical-2`–`5` | `Text`：注入审查、计划、测试、重构 Prompt（不回车） | `FocusSession("herdr", "session-3".."session-6")` | `Text`：注入 DSH 调试、重构、测试、解释 Prompt（不回车） |
 | **第 2 行 4 键** | `AG06`–`AG09` | `logical-6`–`9` | `Shortcut`：切终端(`ctrl+grave`)、新对话(`cmd+n`)、搜索(`cmd+p`)、保存(`cmd+s`) | `AgentCommand("herdr", "new-workspace" / "split-right" / "toggle-stack" / "close-pane")` | `AgentCommand("dsh", "interrupt" / "clear" / "inject-context" / "history-search")` |
 | **底部 2U 宽键** | `AG10` + `AG11` | `logical-10` | `Shortcut("return", ["command"], "frontmost-editor")`（同意继续） | `AgentCommand("herdr", "approve-current")` | `AgentCommand("dsh", "approve-current")` |
@@ -343,7 +343,7 @@
         *   `pub enum PassThroughHealth { Ready, LayerDriftWarning { active_profile: u32, active_layer: u32, bound_ag_count: u32 }, SnapshotMissing, Disconnected }`
         *   `pub enum ResolvedHostAction { Shortcut { key: String, key_code: u16, modifiers: Vec<String>, target_bundle_id: Option<String> }, PasteText { text: String }, OpenApp { bundle_id: String }, OpenUrl { url: String }, AgentCommand { adapter: String, command: String }, FocusSession { adapter: String, session: String } }`
         *   `pub fn check_passthrough_health(snapshot: Option<&DeviceConfig>, identity: Option<&HostIdentityStatus>) -> PassThroughHealth`（检查活动层 `layer.keys` 中匹配的 `"KV_OAI_AG00"`..`"KV_OAI_AG12"` 字符串数量）。
-        *   `pub fn binding_to_logical_slot(binding_id: &str) -> Option<&'static str>`（含 `AG01` $\rightarrow$ `logical-0`, `AG00` $\rightarrow$ `logical-1`, `AG15`–`AG18` $\rightarrow$ `logical-16`–`logical-19`）。
+        *   `pub fn binding_to_logical_slot(binding_id: &str) -> Option<&'static str>`（含 `AG00` $\rightarrow$ `logical-0`, `AG01` $\rightarrow$ `logical-1`, `AG15`–`AG18` $\rightarrow$ `logical-16`–`logical-19`）。
         *   `pub fn macos_virtual_key_code(key: &str) -> Option<u16>`：提供完整 macOS `CGKeyCode` 映射表（`a`..`z`, `0`..`9`, `return`=`0x24`, `tab`=`0x30`, `space`=`0x31`, `delete`/`backspace`=`0x33`, `escape`=`0x35`, `grave`/`backtick`=`0x32`, `minus`=`0x1B`, `equal`=`0x18`, `leftbracket`/`[`=`0x21`, `rightbracket`/`]`=`0x1E`, `backslash`=`0x2A`, `semicolon`=`0x29`, `quote`=`0x27`, `comma`=`0x2B`, `period`=`0x2F`, `slash`=`0x2C`, `left`=`0x7B`, `right`=`0x7C`, `down`=`0x7D`, `up`=`0x7E`, `f1`..`f12`）。
         *   `pub fn resolve_host_action(doc: &LocalDocumentV2, host_active_profile_id: Option<&str>, binding_id: &str, is_pressed: bool) -> Option<ResolvedHostAction>`。
 *   **Phase 1 Checkpoint**: `cargo test --locked -p mi-session -p mi-model` 全部通过。

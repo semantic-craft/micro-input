@@ -18,7 +18,7 @@ scripts/run --verify   # 独立QA标识/文档，10分钟自动退出并回收�
 
 系统睡眠通知会立即使旧会话和待完成结果失效，取消请求并关闭输入订阅，保留本地草稿及会话内撤销历史；旧快照标为过期。唤醒等待旧会话关闭，只在用户此前已开启 USB 发现时刷新描述符；设备选择清空，连接、身份和配置仍须明确重新操作。观察者随应用退出注销。此路径已通过合成通知与真实 UniFFI 回归，真实睡眠/唤醒、锁屏/解锁、读取中物理拔插及原映射行为仍待验收，见[E-096](docs/spec/EVIDENCE.md)。
 
-输入监视支持候选绑定观察（`subscribe_input`）与已核实宿主路由流（`subscribe_verified_input`）：在固件 0.6.3 硬件透传层（`AG00–AG18`）就绪时，`VerifiedInputDecoder` 修正第 0 行按键翻转（`AG01` → `logical-0`，`AG00` → `logical-1`）与摇杆 4 扇区偏移（`AG15–AG18` → `logical-16–logical-19`），并由 `WideKeyMerger` 将底部 2U 宽键双微动（`AG10` + `AG11`）按位掩码合并为单次触发。菜单栏与工作台支持启用 Mac 宿主动作执行、安装八套桌面 Agent 预设（Cindy、Codex、千问办公、ZCode、Antigravity、DSH、Qoder CN、Herdr App）及零 Flash 写入切换 `host_active_profile_id`，详见[宿主动作执行与 Coding Agent 预设架构](docs/designs/host-execution-and-agent-presets.md)与 [E-098](docs/spec/EVIDENCE.md)。
+输入监视支持候选绑定观察（`subscribe_input`）与已核实宿主路由流（`subscribe_verified_input`）：在固件 0.6.3 硬件透传层（`AG00–AG18`）就绪时，`VerifiedInputDecoder` 按实机核验映射第 0 行按键（左键 `AG00` → `logical-0`，右键 `AG01` → `logical-1`）与摇杆 4 扇区偏移（`AG15–AG18` → `logical-16–logical-19`），并由 `WideKeyMerger` 将底部 2U 宽键双微动（`AG10` + `AG11`）按位掩码合并为单次触发。菜单栏与工作台支持启用 Mac 宿主动作执行、安装八套桌面 Agent 预设（Cindy、Codex、千问办公、ZCode、Antigravity、DSH、Qoder CN、Herdr App）及零 Flash 写入切换 `host_active_profile_id`，详见[宿主动作执行与 Coding Agent 预设架构](docs/designs/host-execution-and-agent-presets.md)与 [E-098](docs/spec/EVIDENCE.md)。
 
 旋钮三个逻辑槽位可独立分配本地动作；摇杆可选择保留来源模式或编辑本地逻辑扇区。减少活动扇区或切换模式不会删除旧槽位及绑定，未知物理方向继续标识；0–32 是本机编辑器限制，不是设备容量。保存、撤销/重做和重开沿用本地文档服务。见[控件编辑契约](docs/implementation-plan.md#t10-本地控件编辑契约)。
 
@@ -40,7 +40,7 @@ Agent 可通过 `target/debug/mi draft read/validate/patch` 读取已保存的�
 
 首次安装预设时默认优先 Cindy，并提供 Codex、千问办公（QwenWorkCN）、ZCode 的独立配置。按键 01 打开／聚焦指定应用；02 聚焦当前窗口唯一输入区；03 搜索任务；千问办公和 ZCode 的 04 为新任务。聚焦与 Cindy / Codex / ZCode 搜索使用目标应用辅助功能控件，千问办公搜索与两者新任务使用已核对快捷键；不预置发送或审批。按键 02 不是精确会话 ID 路由，多个候选、缺少输入区、权限不足或界面变化时明确失败。辅助功能权限与设备连接状态单独显示。
 
-“试运行此动作”使用同一 Rust 路由与真实 Mac 执行器，要求当前编辑配置已启用且按键控制开启；它不伪造硬件事件。原生实测与合成按键链路分别验收。Cindy / Codex 搜索与聚焦、千问办公搜索／新任务／聚焦、ZCode 搜索／聚焦／新任务已在本机 UI 核对；Cindy 的实体首行两键已取得 AG01 打开应用与 AG00 聚焦输入框的执行回执；其他 Agent 的实体按键逐项验收、完整多会话控制仍不由这些结果替代。
+“试运行此动作”使用同一 Rust 路由与真实 Mac 执行器，要求当前编辑配置已启用且按键控制开启；它不伪造硬件事件。原生实测与合成按键链路分别验收。Cindy / Codex 搜索与聚焦、千问办公搜索／新任务／聚焦、ZCode 搜索／聚焦／新任务已在本机 UI 核对；早期 Cindy 回执按旧映射记录为 AG01 打开应用、AG00 聚焦输入框；后续逐键实测确认左键 AG00、右键 AG01，已修正首行映射（见 E-100 续验），修正版已取得左键 AG00 打开 Cindy、右键 AG01 聚焦输入框的 executed 回执；其他 Agent 的实体按键逐项验收、完整多会话控制仍不由这些结果替代。
 
 启动时补齐缺少的常用配置；移除“安装 Coding 起步预设”入口，并在预设安装时仅移除与内置来源完全相同、没有动作或控件设置修改的演示／示例配置。已编辑、改名或导入的配置保留；安装与移除作为同一次可撤销修改保存，重复安装不覆盖已有同名配置。
 

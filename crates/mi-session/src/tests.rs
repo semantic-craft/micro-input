@@ -784,14 +784,16 @@ async fn cancelling_incomplete_send_invalidates_session() {
 }
 
 #[tokio::test]
-async fn verified_input_maps_row0_inversion_joystick_sectors_and_merges_wide_key() {
+// Physical 0.6.3 capture, 2026-11-03: operator pressed left once, then right once.
+// Candidate and mapped subscriptions both retain AG00 then AG01; only the old slot mapping was reversed.
+async fn verified_input_maps_observed_row0_order_joystick_sectors_and_merges_wide_key() {
     let (s, link, _) = setup(500);
     let mut monitor = s.subscribe_verified_input();
     for raw in [
-        json!({"m":"v.oai.hid","p":{"k":"AG01","act":1}}),
-        json!({"m":"v.oai.hid","p":{"k":"AG01","act":0}}),
         json!({"m":"v.oai.hid","p":{"k":"AG00","act":1}}),
         json!({"m":"v.oai.hid","p":{"k":"AG00","act":0}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG01","act":1}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG01","act":0}}),
         json!({"m":"v.oai.hid","p":{"k":"AG11","act":1}}),
         json!({"m":"v.oai.hid","p":{"k":"AG10","act":1}}),
         json!({"m":"v.oai.hid","p":{"k":"AG11","act":0}}),
@@ -802,7 +804,7 @@ async fn verified_input_maps_row0_inversion_joystick_sectors_and_merges_wide_key
     }
     let e1 = monitor.next().await.unwrap();
     assert_eq!(e1.kind, crate::InputEventKind::Pressed);
-    assert_eq!(e1.binding_id.as_deref(), Some("AG01"));
+    assert_eq!(e1.binding_id.as_deref(), Some("AG00"));
     assert_eq!(e1.logical_switch.as_deref(), Some("logical-0"));
     assert_eq!(e1.physical_control.as_deref(), Some("row0-col0-left"));
     assert!(e1.action_eligible);
@@ -813,7 +815,7 @@ async fn verified_input_maps_row0_inversion_joystick_sectors_and_merges_wide_key
 
     let e3 = monitor.next().await.unwrap();
     assert_eq!(e3.kind, crate::InputEventKind::Pressed);
-    assert_eq!(e3.binding_id.as_deref(), Some("AG00"));
+    assert_eq!(e3.binding_id.as_deref(), Some("AG01"));
     assert_eq!(e3.logical_switch.as_deref(), Some("logical-1"));
     assert_eq!(e3.physical_control.as_deref(), Some("row0-col1-right"));
 

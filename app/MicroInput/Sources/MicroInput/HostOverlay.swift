@@ -71,7 +71,7 @@ struct HostCheatSheet: View {
     }
     private func controlName(_ key: HostKey) -> String {
         let names = ["AG10":"宽键（合并）", "AG12":"底行右键", "AG13":"旋钮逆时针", "AG14":"旋钮顺时针", "ENC_CLK":"编码器按下", "AG15":"摇杆 ↑", "AG16":"摇杆 ←", "AG17":"摇杆 ↓", "AG18":"摇杆 →"]
-        let keys = ["AG01":"第 1 行 · 左", "AG00":"第 1 行 · 右", "AG02":"第 2 行 · 1", "AG03":"第 2 行 · 2", "AG04":"第 2 行 · 3", "AG05":"第 2 行 · 4", "AG06":"第 3 行 · 1", "AG07":"第 3 行 · 2", "AG08":"第 3 行 · 3", "AG09":"第 3 行 · 4"]
+        let keys = ["AG00":"第 1 行 · 左", "AG01":"第 1 行 · 右", "AG02":"第 2 行 · 1", "AG03":"第 2 行 · 2", "AG04":"第 2 行 · 3", "AG05":"第 2 行 · 4", "AG06":"第 3 行 · 1", "AG07":"第 3 行 · 2", "AG08":"第 3 行 · 3", "AG09":"第 3 行 · 4"]
         return names[key.binding_id] ?? keys[key.binding_id] ?? key.control
     }
 }
