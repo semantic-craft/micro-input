@@ -15,22 +15,35 @@ pub struct ActionCapability {
 }
 
 pub fn capability(action: &Action) -> ActionCapability {
-    let mut prerequisites = vec!["仅可分配到本地逻辑槽位；物理映射待验证".into()];
-    let (target, host_required, reason) =
+    let mut prerequisites = vec!["可分配到本地逻辑槽位；宿主执行基于 0.6.3 物理映射验证".into()];
+    let (target, host_required, execution_available, reason, source, result_semantics) =
         match serde_json::from_value::<ActionKind>(action.payload.clone()) {
             Ok(ActionKind::DeviceKey { token }) => (
                 token,
                 false,
+                false,
                 "设备按键仅保存本地意图；配置写入与恢复尚未验证",
+                "Micro Input 自有离线意图；不是已验证的设备或工具能力",
+                "保存只改变本地草稿；没有执行结果",
             ),
             Ok(ActionKind::Shortcut { target, .. }) => {
-                prerequisites.push("目标应用须在前台并支持此快捷键；当前不检测焦点".into());
-                (target, false, "快捷键发送未接入；设备独立执行能力未验证")
+                prerequisites.push("目标应用须支持此快捷键；辅助功能权限由宿主按需调用".into());
+                (
+                    target,
+                    true,
+                    true,
+                    "",
+                    "Mac 宿主动作执行器（CGEvent / NSWorkspace）",
+                    "宿主激活对应 Profile 时按键可实时触发此动作",
+                )
             }
             Ok(ActionKind::LocalMulti { .. }) => (
                 "本地 Multi 四分支".into(),
                 false,
+                false,
                 "Multi 执行未接入；时序、容量和设备格式未知",
+                "Micro Input 自有离线意图；不是已验证的设备或工具能力",
+                "保存只改变本地草稿；没有执行结果",
             ),
             Ok(ActionKind::LocalMacro { .. }) => {
                 prerequisites.push(
@@ -39,35 +52,94 @@ pub fn capability(action: &Action) -> ActionCapability {
                 (
                     "本地普通宏序列".into(),
                     false,
+                    false,
                     "宏执行未接入；设备驻留与宿主要求未核实",
+                    "Micro Input 自有离线意图；不是已验证的设备或工具能力",
+                    "保存只改变本地草稿；没有执行结果",
                 )
             }
             Ok(ActionKind::Text { .. }) => {
                 prerequisites.push("需要 Mac 宿主常驻与明确的文本输入目标".into());
-                ("当前文本输入目标（未检测）".into(), true, "文本执行未接入")
+                (
+                    "当前文本输入目标".into(),
+                    true,
+                    true,
+                    "",
+                    "Mac 宿主动作执行器（剪贴板恢复 + Cmd+V）",
+                    "宿主激活对应 Profile 时按键可实时触发此动作",
+                )
             }
             Ok(ActionKind::OpenUrl { url }) => {
                 prerequisites.push("需要 Mac 宿主常驻与可处理 HTTP / HTTPS 的应用".into());
-                (url, true, "网址执行未接入")
+                (
+                    url,
+                    true,
+                    true,
+                    "",
+                    "Mac 宿主动作执行器（NSWorkspace URL 打开）",
+                    "宿主激活对应 Profile 时按键可实时触发此动作",
+                )
             }
             Ok(ActionKind::OpenApp { bundle_id }) => {
-                prerequisites.push("需要 Mac 宿主常驻；目标应用须已安装（未检测）".into());
-                (bundle_id, true, "应用执行未接入")
+                prerequisites.push("需要 Mac 宿主常驻；目标应用须已安装".into());
+                (
+                    bundle_id,
+                    true,
+                    true,
+                    "",
+                    "Mac 宿主动作执行器（NSWorkspace 应用激活）",
+                    "宿主激活对应 Profile 时按键可实时触发此动作",
+                )
             }
-            Ok(ActionKind::AgentCommand { adapter, command }) => (
-                format!("{adapter} / {command}"),
-                true,
-                "工具适配器未验证、未接入；引用仅为本地意图",
-            ),
+            Ok(ActionKind::AgentCommand { adapter, command }) => {
+                let verified = matches!(adapter.as_str(), "herdr" | "dsh");
+                if verified {
+                    prerequisites.push(format!("需要本机已安装并配置 {adapter} CLI 适配器"));
+                    (
+                        format!("{adapter} / {command}"),
+                        true,
+                        true,
+                        "",
+                        "Mac 宿主 CLI 适配器（herdr / dsh）",
+                        "宿主激活对应 Profile 时按键可实时触发此动作",
+                    )
+                } else {
+                    (
+                        format!("{adapter} / {command}"),
+                        true,
+                        false,
+                        "工具适配器未验证、未接入；引用仅为本地意图",
+                        "Micro Input 自有离线意图；不是已验证的设备或工具能力",
+                        "保存只改变本地草稿；没有执行结果",
+                    )
+                }
+            }
             Ok(ActionKind::FocusSession { adapter, session }) => {
+                let verified =
+                    matches!(adapter.as_str(), "herdr" | "dsh") && session != "unselected";
                 if session == "unselected" {
                     prerequisites.push("缺失具体会话引用；请先填写本地意图".into());
                 }
-                (
-                    format!("{adapter} / {session}"),
-                    true,
-                    "工具适配器未验证、未接入；无法确认目标会话",
-                )
+                if verified {
+                    prerequisites.push(format!("需要本机已安装并配置 {adapter} CLI 适配器"));
+                    (
+                        format!("{adapter} / {session}"),
+                        true,
+                        true,
+                        "",
+                        "Mac 宿主 CLI 适配器（herdr / dsh）",
+                        "宿主激活对应 Profile 时按键可实时触发此动作",
+                    )
+                } else {
+                    (
+                        format!("{adapter} / {session}"),
+                        true,
+                        false,
+                        "工具适配器未验证或缺失具体会话引用；无法确认目标会话",
+                        "Micro Input 自有离线意图；不是已验证的设备或工具能力",
+                        "保存只改变本地草稿；没有执行结果",
+                    )
+                }
             }
             Ok(ActionKind::SkillReference { adapter, skill }) => {
                 if skill == "unselected" {
@@ -76,19 +148,29 @@ pub fn capability(action: &Action) -> ActionCapability {
                 (
                     format!("{adapter} / {skill}"),
                     true,
+                    false,
                     "工具适配器未验证、未接入；无法解析 Skill 引用",
+                    "Micro Input 自有离线意图；不是已验证的设备或工具能力",
+                    "保存只改变本地草稿；没有执行结果",
                 )
             }
-            Err(_) => ("未知".into(), false, "未知动作或参数；原始值保留，不可执行"),
+            Err(_) => (
+                "未知".into(),
+                false,
+                false,
+                "未知动作或参数；原始值保留，不可执行",
+                "Micro Input 自有离线意图；不是已验证的设备或工具能力",
+                "保存只改变本地草稿；没有执行结果",
+            ),
         };
     ActionCapability {
         target,
         prerequisites,
         host_required,
-        execution_available: false,
+        execution_available,
         unavailable_reason: reason.into(),
-        source: "Micro Input 自有离线意图；不是已验证的设备或工具能力".into(),
-        result_semantics: "保存只改变本地草稿；没有执行结果".into(),
+        source: source.into(),
+        result_semantics: result_semantics.into(),
     }
 }
 

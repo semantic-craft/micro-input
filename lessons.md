@@ -100,3 +100,12 @@
 - 修复：AppLifetime 只在 Store 对象身份实际变化时替换观察者，同一对象重设保留观察者及唤醒任务。
 - 验证点：`WorkspaceLifecycleTests.testReopeningWindowWithSameStoreDoesNotCancelPendingWake` 在进程内发布合成通知，持住 disconnect，重设相同 Store 后释放，明确重连应成功；本测试不能替代真实 OS 睡眠验收。修复前确定失败，修复后通过。
 - 复发记录：Seen 1x（2026-11-03）。
+
+## 真机自动连接只统计已验证候选且兼容出厂 Codex 层
+
+- 标签：#设备 #macOS #验收
+- 起因与后果：一是 `Store.autoSetupHostExecutionIfNeeded` 曾同时要求 `devices.count == 1`，在真实 macOS 上因系统自带 `/dev/cu.Bluetooth-Incoming-Port`（`verifiedModel == false`）导致只插一把 `303A:8298` 时跳过自动连接；二是固件 `0.6.3` 出厂 Codex 层（1-based `layer_index: 1`）混用 `KV_OAI_AG00`–`05`、`KV_OAI_ACT06`–`12`、`KV_OAI_ENC_CC/CW/CLK` 与 `v.oai.rad`，若只认 `AG*` 或 0-based 层索引会误报层漂移或漏解码。
+- 修复与证据：自动连接守卫改为 `devices.filter(\.verifiedModel).count == 1 && verifiedUSB.count == 1`；`check_passthrough_health` 与 `VerifiedInputDecoder` 同时兼容 `AG*`/`ACT06`–`12`/`ENC_*`/`v.oai.rad` 及 `0.6.3` 1-based 层索引。见 `E-098`、`E-099`。
+- 正确做法：多候选安全门禁按 `verifiedModel` 候选计数，不将系统无关串口算作冲突候选；出厂默认层协议须以实机读回的 `keymap.json` 为准。
+- 验证点：`HostExecutionTests`、`crates/mi-model/tests/host_router.rs` 及真机 `./scripts/run --verify --timeout=10` 产出 `action_type: "host_ready"`。
+- 复发记录：Seen 1x（2026-11-03）。

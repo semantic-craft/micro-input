@@ -254,3 +254,696 @@ pub fn starter() -> Result<String, String> {
     preset.metadata["author"] = json!("Micro Input");
     serde_json::to_string_pretty(&preset).map_err(|e| e.to_string())
 }
+
+pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, String> {
+    let mut created_ids = Vec::new();
+    let specs = [
+        (
+            "Antigravity",
+            vec![
+                (
+                    0,
+                    "ag-focus",
+                    "聚焦 Antigravity",
+                    "应用",
+                    "com.google.antigravity",
+                    ActionKind::OpenApp {
+                        bundle_id: "com.google.antigravity".into(),
+                    },
+                ),
+                (
+                    1,
+                    "ag-panel",
+                    "切换 Agent 面板",
+                    "Coding",
+                    "Cmd+L",
+                    ActionKind::Shortcut {
+                        modifiers: vec!["command".into()],
+                        key: "L".into(),
+                        target: "frontmost-editor".into(),
+                    },
+                ),
+                (
+                    2,
+                    "ag-review",
+                    "注入审查提示词",
+                    "文本",
+                    "请检查边界条件与回归测试",
+                    ActionKind::Text {
+                        text: "请检查边界条件与回归测试".into(),
+                    },
+                ),
+                (
+                    3,
+                    "ag-plan",
+                    "注入计划提示词",
+                    "文本",
+                    "请先给出分阶段实施与验证计划",
+                    ActionKind::Text {
+                        text: "请先给出分阶段实施与验证计划".into(),
+                    },
+                ),
+                (
+                    4,
+                    "ag-test",
+                    "注入验证提示词",
+                    "文本",
+                    "请运行 check 并验证当前改动",
+                    ActionKind::Text {
+                        text: "请运行 check 并验证当前改动".into(),
+                    },
+                ),
+                (
+                    5,
+                    "ag-refactor",
+                    "注入重构提示词",
+                    "文本",
+                    "请在不改变外部行为的前提下简化当前实现",
+                    ActionKind::Text {
+                        text: "请在不改变外部行为的前提下简化当前实现".into(),
+                    },
+                ),
+                (
+                    6,
+                    "ag-term",
+                    "切换终端",
+                    "Coding",
+                    "Ctrl+`",
+                    ActionKind::Shortcut {
+                        modifiers: vec!["control".into()],
+                        key: "grave".into(),
+                        target: "frontmost-editor".into(),
+                    },
+                ),
+                (
+                    7,
+                    "ag-new-chat",
+                    "新建对话",
+                    "Coding",
+                    "Cmd+N",
+                    ActionKind::Shortcut {
+                        modifiers: vec!["command".into()],
+                        key: "N".into(),
+                        target: "frontmost-editor".into(),
+                    },
+                ),
+                (
+                    8,
+                    "ag-open",
+                    "快速搜索文件",
+                    "Coding",
+                    "Cmd+P",
+                    ActionKind::Shortcut {
+                        modifiers: vec!["command".into()],
+                        key: "P".into(),
+                        target: "frontmost-editor".into(),
+                    },
+                ),
+                (
+                    9,
+                    "ag-save",
+                    "保存当前文件",
+                    "Coding",
+                    "Cmd+S",
+                    ActionKind::Shortcut {
+                        modifiers: vec!["command".into()],
+                        key: "S".into(),
+                        target: "frontmost-editor".into(),
+                    },
+                ),
+                (
+                    10,
+                    "ag-accept",
+                    "同意继续",
+                    "Coding",
+                    "Cmd+Return",
+                    ActionKind::Shortcut {
+                        modifiers: vec!["command".into()],
+                        key: "Return".into(),
+                        target: "frontmost-editor".into(),
+                    },
+                ),
+                (
+                    12,
+                    "ag-stop",
+                    "取消 / 拒绝",
+                    "Coding",
+                    "Escape",
+                    ActionKind::Shortcut {
+                        modifiers: vec![],
+                        key: "Escape".into(),
+                        target: "frontmost-editor".into(),
+                    },
+                ),
+                (
+                    13,
+                    "ag-prev-tab",
+                    "上一标签页",
+                    "Coding",
+                    "Cmd+Shift+[",
+                    ActionKind::Shortcut {
+                        modifiers: vec!["command".into(), "shift".into()],
+                        key: "[".into(),
+                        target: "frontmost-editor".into(),
+                    },
+                ),
+                (
+                    14,
+                    "ag-next-tab",
+                    "下一标签页",
+                    "Coding",
+                    "Cmd+Shift+]",
+                    ActionKind::Shortcut {
+                        modifiers: vec!["command".into(), "shift".into()],
+                        key: "]".into(),
+                        target: "frontmost-editor".into(),
+                    },
+                ),
+                (
+                    15,
+                    "ag-enc-click",
+                    "切换侧边栏",
+                    "Coding",
+                    "Cmd+B",
+                    ActionKind::Shortcut {
+                        modifiers: vec!["command".into()],
+                        key: "B".into(),
+                        target: "frontmost-editor".into(),
+                    },
+                ),
+                (
+                    16,
+                    "ag-north",
+                    "向上切分屏焦点",
+                    "Coding",
+                    "Cmd+Opt+Up",
+                    ActionKind::Shortcut {
+                        modifiers: vec!["command".into(), "option".into()],
+                        key: "Up".into(),
+                        target: "frontmost-editor".into(),
+                    },
+                ),
+                (
+                    17,
+                    "ag-west",
+                    "向左切分屏焦点",
+                    "Coding",
+                    "Cmd+Opt+Left",
+                    ActionKind::Shortcut {
+                        modifiers: vec!["command".into(), "option".into()],
+                        key: "Left".into(),
+                        target: "frontmost-editor".into(),
+                    },
+                ),
+                (
+                    18,
+                    "ag-south",
+                    "向下切分屏焦点",
+                    "Coding",
+                    "Cmd+Opt+Down",
+                    ActionKind::Shortcut {
+                        modifiers: vec!["command".into(), "option".into()],
+                        key: "Down".into(),
+                        target: "frontmost-editor".into(),
+                    },
+                ),
+                (
+                    19,
+                    "ag-east",
+                    "向右切分屏焦点",
+                    "Coding",
+                    "Cmd+Opt+Right",
+                    ActionKind::Shortcut {
+                        modifiers: vec!["command".into(), "option".into()],
+                        key: "Right".into(),
+                        target: "frontmost-editor".into(),
+                    },
+                ),
+            ],
+        ),
+        (
+            "Herdr",
+            vec![
+                (
+                    0,
+                    "hd-s1",
+                    "聚焦 Session 1",
+                    "Agent",
+                    "herdr / session-1",
+                    ActionKind::FocusSession {
+                        adapter: "herdr".into(),
+                        session: "session-1".into(),
+                    },
+                ),
+                (
+                    1,
+                    "hd-s2",
+                    "聚焦 Session 2",
+                    "Agent",
+                    "herdr / session-2",
+                    ActionKind::FocusSession {
+                        adapter: "herdr".into(),
+                        session: "session-2".into(),
+                    },
+                ),
+                (
+                    2,
+                    "hd-s3",
+                    "聚焦 Session 3",
+                    "Agent",
+                    "herdr / session-3",
+                    ActionKind::FocusSession {
+                        adapter: "herdr".into(),
+                        session: "session-3".into(),
+                    },
+                ),
+                (
+                    3,
+                    "hd-s4",
+                    "聚焦 Session 4",
+                    "Agent",
+                    "herdr / session-4",
+                    ActionKind::FocusSession {
+                        adapter: "herdr".into(),
+                        session: "session-4".into(),
+                    },
+                ),
+                (
+                    4,
+                    "hd-s5",
+                    "聚焦 Session 5",
+                    "Agent",
+                    "herdr / session-5",
+                    ActionKind::FocusSession {
+                        adapter: "herdr".into(),
+                        session: "session-5".into(),
+                    },
+                ),
+                (
+                    5,
+                    "hd-s6",
+                    "聚焦 Session 6",
+                    "Agent",
+                    "herdr / session-6",
+                    ActionKind::FocusSession {
+                        adapter: "herdr".into(),
+                        session: "session-6".into(),
+                    },
+                ),
+                (
+                    6,
+                    "hd-new-ws",
+                    "新建工作区",
+                    "Agent",
+                    "herdr / new-workspace",
+                    ActionKind::AgentCommand {
+                        adapter: "herdr".into(),
+                        command: "new-workspace".into(),
+                    },
+                ),
+                (
+                    7,
+                    "hd-split-r",
+                    "向右分屏",
+                    "Agent",
+                    "herdr / split-right",
+                    ActionKind::AgentCommand {
+                        adapter: "herdr".into(),
+                        command: "split-right".into(),
+                    },
+                ),
+                (
+                    8,
+                    "hd-stack",
+                    "切换栈视图",
+                    "Agent",
+                    "herdr / toggle-stack",
+                    ActionKind::AgentCommand {
+                        adapter: "herdr".into(),
+                        command: "toggle-stack".into(),
+                    },
+                ),
+                (
+                    9,
+                    "hd-close-pane",
+                    "关闭当前窗格",
+                    "Agent",
+                    "herdr / close-pane",
+                    ActionKind::AgentCommand {
+                        adapter: "herdr".into(),
+                        command: "close-pane".into(),
+                    },
+                ),
+                (
+                    10,
+                    "hd-approve",
+                    "同意当前会话请求",
+                    "Agent",
+                    "herdr / approve-current",
+                    ActionKind::AgentCommand {
+                        adapter: "herdr".into(),
+                        command: "approve-current".into(),
+                    },
+                ),
+                (
+                    12,
+                    "hd-deny",
+                    "拒绝当前会话请求",
+                    "Agent",
+                    "herdr / deny-current",
+                    ActionKind::AgentCommand {
+                        adapter: "herdr".into(),
+                        command: "deny-current".into(),
+                    },
+                ),
+                (
+                    13,
+                    "hd-prev-session",
+                    "上一会话",
+                    "Agent",
+                    "herdr / prev-session",
+                    ActionKind::AgentCommand {
+                        adapter: "herdr".into(),
+                        command: "prev-session".into(),
+                    },
+                ),
+                (
+                    14,
+                    "hd-next-session",
+                    "下一会话",
+                    "Agent",
+                    "herdr / next-session",
+                    ActionKind::AgentCommand {
+                        adapter: "herdr".into(),
+                        command: "next-session".into(),
+                    },
+                ),
+                (
+                    15,
+                    "hd-enc-click",
+                    "切换窗格缩放",
+                    "Agent",
+                    "herdr / toggle-zoom",
+                    ActionKind::AgentCommand {
+                        adapter: "herdr".into(),
+                        command: "toggle-zoom".into(),
+                    },
+                ),
+                (
+                    16,
+                    "hd-pane-north",
+                    "北向分屏焦点",
+                    "Agent",
+                    "herdr / pane-north",
+                    ActionKind::AgentCommand {
+                        adapter: "herdr".into(),
+                        command: "pane-north".into(),
+                    },
+                ),
+                (
+                    17,
+                    "hd-pane-west",
+                    "西向分屏焦点",
+                    "Agent",
+                    "herdr / pane-west",
+                    ActionKind::AgentCommand {
+                        adapter: "herdr".into(),
+                        command: "pane-west".into(),
+                    },
+                ),
+                (
+                    18,
+                    "hd-pane-south",
+                    "南向分屏焦点",
+                    "Agent",
+                    "herdr / pane-south",
+                    ActionKind::AgentCommand {
+                        adapter: "herdr".into(),
+                        command: "pane-south".into(),
+                    },
+                ),
+                (
+                    19,
+                    "hd-pane-east",
+                    "东向分屏焦点",
+                    "Agent",
+                    "herdr / pane-east",
+                    ActionKind::AgentCommand {
+                        adapter: "herdr".into(),
+                        command: "pane-east".into(),
+                    },
+                ),
+            ],
+        ),
+        (
+            "DeepSeek Coder (DSH)",
+            vec![
+                (
+                    0,
+                    "dsh-s1",
+                    "聚焦 DSH 会话 1",
+                    "Agent",
+                    "dsh / session-1",
+                    ActionKind::FocusSession {
+                        adapter: "dsh".into(),
+                        session: "session-1".into(),
+                    },
+                ),
+                (
+                    1,
+                    "dsh-s2",
+                    "聚焦 DSH 会话 2",
+                    "Agent",
+                    "dsh / session-2",
+                    ActionKind::FocusSession {
+                        adapter: "dsh".into(),
+                        session: "session-2".into(),
+                    },
+                ),
+                (
+                    2,
+                    "dsh-debug",
+                    "注入调试提示词",
+                    "文本",
+                    "请定位根因并给出最小修复方案",
+                    ActionKind::Text {
+                        text: "请定位根因并给出最小修复方案".into(),
+                    },
+                ),
+                (
+                    3,
+                    "dsh-refactor",
+                    "注入重构提示词",
+                    "文本",
+                    "请保持公共接口不变并重构此模块",
+                    ActionKind::Text {
+                        text: "请保持公共接口不变并重构此模块".into(),
+                    },
+                ),
+                (
+                    4,
+                    "dsh-test",
+                    "注入测试提示词",
+                    "文本",
+                    "请补充覆盖异常分支的单元测试",
+                    ActionKind::Text {
+                        text: "请补充覆盖异常分支的单元测试".into(),
+                    },
+                ),
+                (
+                    5,
+                    "dsh-explain",
+                    "注入解释提示词",
+                    "文本",
+                    "请说明这段代码的状态流转与边界条件",
+                    ActionKind::Text {
+                        text: "请说明这段代码的状态流转与边界条件".into(),
+                    },
+                ),
+                (
+                    6,
+                    "dsh-interrupt",
+                    "发送中断",
+                    "Agent",
+                    "dsh / interrupt",
+                    ActionKind::AgentCommand {
+                        adapter: "dsh".into(),
+                        command: "interrupt".into(),
+                    },
+                ),
+                (
+                    7,
+                    "dsh-clear",
+                    "清屏",
+                    "Agent",
+                    "dsh / clear",
+                    ActionKind::AgentCommand {
+                        adapter: "dsh".into(),
+                        command: "clear".into(),
+                    },
+                ),
+                (
+                    8,
+                    "dsh-context",
+                    "注入文件上下文",
+                    "Agent",
+                    "dsh / inject-context",
+                    ActionKind::AgentCommand {
+                        adapter: "dsh".into(),
+                        command: "inject-context".into(),
+                    },
+                ),
+                (
+                    9,
+                    "dsh-history",
+                    "历史搜索",
+                    "Agent",
+                    "dsh / history-search",
+                    ActionKind::AgentCommand {
+                        adapter: "dsh".into(),
+                        command: "history-search".into(),
+                    },
+                ),
+                (
+                    10,
+                    "dsh-approve",
+                    "同意执行当前工具调用",
+                    "Agent",
+                    "dsh / approve-current",
+                    ActionKind::AgentCommand {
+                        adapter: "dsh".into(),
+                        command: "approve-current".into(),
+                    },
+                ),
+                (
+                    12,
+                    "dsh-deny",
+                    "拒绝 / 取消当前操作",
+                    "Agent",
+                    "dsh / deny-current",
+                    ActionKind::AgentCommand {
+                        adapter: "dsh".into(),
+                        command: "deny-current".into(),
+                    },
+                ),
+                (
+                    13,
+                    "dsh-prev-session",
+                    "上一会话",
+                    "Agent",
+                    "dsh / prev-session",
+                    ActionKind::AgentCommand {
+                        adapter: "dsh".into(),
+                        command: "prev-session".into(),
+                    },
+                ),
+                (
+                    14,
+                    "dsh-next-session",
+                    "下一会话",
+                    "Agent",
+                    "dsh / next-session",
+                    ActionKind::AgentCommand {
+                        adapter: "dsh".into(),
+                        command: "next-session".into(),
+                    },
+                ),
+                (
+                    15,
+                    "dsh-enc-click",
+                    "查看会话状态",
+                    "Agent",
+                    "dsh / status",
+                    ActionKind::AgentCommand {
+                        adapter: "dsh".into(),
+                        command: "status".into(),
+                    },
+                ),
+                (
+                    16,
+                    "dsh-pane-north",
+                    "北向分屏焦点",
+                    "Agent",
+                    "dsh / pane-north",
+                    ActionKind::AgentCommand {
+                        adapter: "dsh".into(),
+                        command: "pane-north".into(),
+                    },
+                ),
+                (
+                    17,
+                    "dsh-pane-west",
+                    "西向分屏焦点",
+                    "Agent",
+                    "dsh / pane-west",
+                    ActionKind::AgentCommand {
+                        adapter: "dsh".into(),
+                        command: "pane-west".into(),
+                    },
+                ),
+                (
+                    18,
+                    "dsh-pane-south",
+                    "南向分屏焦点",
+                    "Agent",
+                    "dsh / pane-south",
+                    ActionKind::AgentCommand {
+                        adapter: "dsh".into(),
+                        command: "pane-south".into(),
+                    },
+                ),
+                (
+                    19,
+                    "dsh-pane-east",
+                    "东向分屏焦点",
+                    "Agent",
+                    "dsh / pane-east",
+                    ActionKind::AgentCommand {
+                        adapter: "dsh".into(),
+                        command: "pane-east".into(),
+                    },
+                ),
+            ],
+        ),
+    ];
+
+    let mut work = draft.clone();
+    for (profile_name, assignments) in specs {
+        if let Some((existing_id, _)) = work
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == profile_name)
+        {
+            created_ids.push(existing_id.clone());
+            continue;
+        }
+        let pid = work.create_profile(profile_name)?;
+        let lid = work.document.editable.graph.profiles[&pid].layer_order[0].clone();
+        work.set_control_settings(
+            &pid,
+            &lid,
+            crate::control_settings::ControlSettings {
+                joystick_mode: "logical_sectors".into(),
+                active_sectors: 4,
+            },
+        )?;
+        for (slot, id, name, category, detail, kind) in assignments {
+            let action = crate::draft::Action {
+                id: id.into(),
+                name: name.into(),
+                category: category.into(),
+                detail: detail.into(),
+                payload: serde_json::to_value(kind).map_err(|e| e.to_string())?,
+            };
+            work.assign(&json!(pid), &json!(lid), slot, action)?;
+        }
+        created_ids.push(pid);
+    }
+    draft.mutate(|doc| {
+        doc.editable = work.document.editable;
+        Ok(created_ids)
+    })
+}

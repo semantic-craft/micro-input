@@ -19,7 +19,7 @@ final class ActionLibraryTests: XCTestCase {
         await store.assign("app")
         XCTAssertEqual(store.draft.edits[store.slotKey]?.payload["bundle_id"]?.text, "com.apple.TextEdit")
         XCTAssertEqual(store.actionCapabilities[store.slotKey]?.target, "com.apple.TextEdit")
-        XCTAssertEqual(store.actionCapabilities[store.slotKey]?.execution_available, false)
+        XCTAssertEqual(store.actionCapabilities[store.slotKey]?.execution_available, true)
         await store.undoDraft()
         XCTAssertTrue(store.draft.edits.isEmpty)
         let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url)

@@ -203,6 +203,36 @@ impl DocumentStore {
         }
         self.preferences.set_favorite(id, favorite)
     }
+    pub fn host_active_profile_id(&self) -> Option<String> {
+        self.preferences.value.host_active_profile_id.clone()
+    }
+    pub fn host_execution_enabled(&self) -> bool {
+        self.preferences.value.host_execution_enabled
+    }
+    pub fn set_host_active_profile(&mut self, profile_id: Option<String>) -> Result<(), String> {
+        if self.blocked {
+            return Err("本地文档未载入，宿主激活 Profile 未保存".into());
+        }
+        if let Some(pid) = &profile_id {
+            if !self
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .contains_key(pid)
+            {
+                return Err("所选宿主激活 Profile 不存在".into());
+            }
+        }
+        self.preferences.set_host_active_profile(profile_id)
+    }
+    pub fn set_host_execution_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        if self.blocked {
+            return Err("本地文档未载入，宿主执行开关未保存".into());
+        }
+        self.preferences.set_host_execution_enabled(enabled)
+    }
     /// Explicitly save a separate document, then select it. The previously open file is untouched.
     pub fn create_independent(
         &mut self,
@@ -428,17 +458,23 @@ impl DocumentStore {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HostPreferences {
     schema_version: u32,
     favorites: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    host_active_profile_id: Option<String>,
+    #[serde(default)]
+    host_execution_enabled: bool,
 }
 impl Default for HostPreferences {
     fn default() -> Self {
         Self {
             schema_version: 1,
             favorites: Default::default(),
+            host_active_profile_id: None,
+            host_execution_enabled: false,
         }
     }
 }
@@ -469,29 +505,22 @@ impl HostPreferencesStore {
         })();
         self.error = result.err();
     }
-    fn set_favorite(&mut self, id: &str, favorite: bool) -> Result<(), String> {
+    fn save(&mut self, value: HostPreferences) -> Result<(), String> {
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
-        let path = self.path.as_ref().ok_or("请先打开工作台再收藏")?;
-        let mut next = self.value.favorites.clone();
-        if favorite {
-            next.insert(id.into());
-        } else {
-            next.remove(id);
-        }
-        if next == self.value.favorites {
+        if value == self.value {
             return Ok(());
         }
+        let Some(path) = self.path.as_ref() else {
+            self.value = value;
+            return Ok(());
+        };
         fs::create_dir_all(path.parent().ok_or("无效收藏目录")?).map_err(|e| e.to_string())?;
         let _guard = Lock::acquire(path.with_extension("lock"))?;
         if read(path)? != self.expected {
             return Err("收藏已被其他实例修改；请重开应用".into());
         }
-        let value = HostPreferences {
-            schema_version: 1,
-            favorites: next,
-        };
         let bytes = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
         if bytes.len() as u64 > LIMIT {
             return Err("收藏文件过大；没有保存".into());
@@ -519,6 +548,29 @@ impl HostPreferencesStore {
         self.value = value;
         self.expected = Some(bytes);
         Ok(())
+    }
+    fn set_favorite(&mut self, id: &str, favorite: bool) -> Result<(), String> {
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+        let _ = self.path.as_ref().ok_or("请先打开工作台再收藏")?;
+        let mut next = self.value.clone();
+        if favorite {
+            next.favorites.insert(id.into());
+        } else {
+            next.favorites.remove(id);
+        }
+        self.save(next)
+    }
+    fn set_host_active_profile(&mut self, profile_id: Option<String>) -> Result<(), String> {
+        let mut next = self.value.clone();
+        next.host_active_profile_id = profile_id;
+        self.save(next)
+    }
+    fn set_host_execution_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        let mut next = self.value.clone();
+        next.host_execution_enabled = enabled;
+        self.save(next)
     }
 }
 struct Lock(PathBuf);

@@ -24,9 +24,10 @@ fn failure(e: impl std::fmt::Display) -> BridgeError {
     }
 }
 fn document_response(
-    draft: &mi_model::draft::Draft,
+    store: &mi_model::storage::DocumentStore,
     selection: Option<(String, Option<String>)>,
 ) -> Result<String, BridgeError> {
+    let draft = &store.draft;
     let hint = selection.map(|(p, l)| serde_json::json!({"profile_id":p,"layer_id":l}));
     let capabilities: std::collections::BTreeMap<_, _> = draft
         .edits
@@ -41,9 +42,18 @@ fn document_response(
         .iter()
         .filter_map(|(id, layer)| layer.control_settings.as_ref().map(|value| (id, value)))
         .collect();
-    serde_json::to_string(
-        &serde_json::json!({"draft":draft,"config":draft.config,"selection_hint":hint,"macro_library":draft.macros(),"multi_library":draft.multis(),"graph_actions":draft.document.editable.graph.actions,"control_settings":settings,"action_capabilities":capabilities}),
-    )
+    serde_json::to_string(&serde_json::json!({
+        "draft": draft,
+        "config": draft.config,
+        "selection_hint": hint,
+        "macro_library": draft.macros(),
+        "multi_library": draft.multis(),
+        "graph_actions": draft.document.editable.graph.actions,
+        "control_settings": settings,
+        "action_capabilities": capabilities,
+        "host_active_profile_id": store.host_active_profile_id(),
+        "host_execution_enabled": store.host_execution_enabled(),
+    }))
     .map_err(failure)
 }
 fn session_failure(error: mi_session::SessionError) -> BridgeError {
@@ -214,7 +224,7 @@ impl MicroInput {
     pub async fn open_document(&self, path: String) -> Result<String, BridgeError> {
         let mut store = self.draft.lock().unwrap();
         store.open(path.into()).map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn inspect_agent_proposal(&self, text: String) -> Result<String, BridgeError> {
         let preview = self
@@ -233,7 +243,7 @@ impl MicroInput {
         store
             .accept_agent_proposal(&token)
             .map_err(|e| failure(e.to_string()))?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn recovery_files(&self) -> Result<Vec<String>, BridgeError> {
         self.draft.lock().unwrap().recovery_files().map_err(failure)
@@ -250,12 +260,12 @@ impl MicroInput {
     pub async fn recover_document(&self, token: String) -> Result<String, BridgeError> {
         let mut store = self.draft.lock().unwrap();
         store.recover_document(&token).map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn save_document_as(&self) -> Result<String, BridgeError> {
         let mut store = self.draft.lock().unwrap();
         store.save_document_as().map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn copy_recovery_original(
         &self,
@@ -269,7 +279,7 @@ impl MicroInput {
             .map_err(failure)
     }
     pub async fn document_view(&self) -> Result<String, BridgeError> {
-        document_response(&self.draft.lock().unwrap().draft, None)
+        document_response(&self.draft.lock().unwrap(), None)
     }
     pub async fn assign_action(
         &self,
@@ -285,7 +295,7 @@ impl MicroInput {
         store
             .update(|d| d.assign(&profile, &layer, slot, action))
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn export_preset(
         &self,
@@ -305,7 +315,7 @@ impl MicroInput {
     pub async fn import_preset(&self, text: String) -> Result<String, BridgeError> {
         let mut store = self.draft.lock().unwrap();
         store.import_preset(&text).map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn set_control_settings(
         &self,
@@ -318,7 +328,7 @@ impl MicroInput {
         store
             .update(|d| d.set_control_settings(&profile_id, &layer_id, settings))
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn save_macro_action(
         &self,
@@ -338,7 +348,7 @@ impl MicroInput {
                     .map(|_| ())
             })
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn bind_macro_action(
         &self,
@@ -353,14 +363,14 @@ impl MicroInput {
         store
             .update(|d| d.bind_macro(&profile, &layer, slot, macro_id.as_deref()))
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn delete_macro_action(&self, macro_id: String) -> Result<String, BridgeError> {
         let mut store = self.draft.lock().unwrap();
         store
             .update(|d| d.delete_macro(&macro_id))
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn save_multi_action(
         &self,
@@ -386,7 +396,7 @@ impl MicroInput {
                 }
             })
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn bind_multi_action(
         &self,
@@ -401,19 +411,19 @@ impl MicroInput {
         store
             .update(|d| d.bind_multi(&profile, &layer, slot, multi_id.as_deref()))
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn delete_multi_action(&self, multi_id: String) -> Result<String, BridgeError> {
         let mut store = self.draft.lock().unwrap();
         store
             .update(|d| d.delete_multi(&multi_id))
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn undo_draft(&self, redo: bool) -> Result<String, BridgeError> {
         let mut store = self.draft.lock().unwrap();
         store.update(|d| d.undo(redo)).map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn create_profile(&self, name: String) -> Result<String, BridgeError> {
         let mut store = self.draft.lock().unwrap();
@@ -428,7 +438,7 @@ impl MicroInput {
             .layer_order
             .first()
             .cloned();
-        document_response(&store.draft, Some((id, lid)))
+        document_response(&store, Some((id, lid)))
     }
     pub async fn rename_profile(
         &self,
@@ -439,7 +449,7 @@ impl MicroInput {
         store
             .update(|d| d.rename_profile(&profile_id, &name))
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn duplicate_profile(
         &self,
@@ -458,14 +468,14 @@ impl MicroInput {
             .layer_order
             .first()
             .cloned();
-        document_response(&store.draft, Some((id, lid)))
+        document_response(&store, Some((id, lid)))
     }
     pub async fn delete_profile(&self, profile_id: String) -> Result<String, BridgeError> {
         let mut store = self.draft.lock().unwrap();
         store
             .update(|d| d.delete_profile(&profile_id))
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn move_profile(
         &self,
@@ -476,7 +486,7 @@ impl MicroInput {
         store
             .update(|d| d.move_profile(&profile_id, to_index as usize))
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn create_layer(
         &self,
@@ -491,7 +501,7 @@ impl MicroInput {
                 Ok(())
             })
             .map_err(failure)?;
-        document_response(&store.draft, Some((profile_id, Some(id))))
+        document_response(&store, Some((profile_id, Some(id))))
     }
     pub async fn rename_layer(
         &self,
@@ -502,7 +512,7 @@ impl MicroInput {
         store
             .update(|d| d.rename_layer(&layer_id, &name))
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn duplicate_layer(
         &self,
@@ -518,7 +528,7 @@ impl MicroInput {
                 Ok(())
             })
             .map_err(failure)?;
-        document_response(&store.draft, Some((profile_id, Some(id))))
+        document_response(&store, Some((profile_id, Some(id))))
     }
     pub async fn delete_layer(
         &self,
@@ -529,7 +539,7 @@ impl MicroInput {
         store
             .update(|d| d.delete_layer(&profile_id, &layer_id))
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn move_layer(
         &self,
@@ -541,7 +551,7 @@ impl MicroInput {
         store
             .update(|d| d.move_layer(&profile_id, &layer_id, to_index as usize))
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     /// Copy only the current session's completed, checksum-verified snapshot; never caller supplied JSON.
     pub async fn create_draft_from_snapshot(&self) -> Result<String, BridgeError> {
@@ -551,7 +561,7 @@ impl MicroInput {
         store
             .create_independent(config, baseline)
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
     pub async fn list_devices(&self) -> Result<Vec<DeviceInfo>, BridgeError> {
         let t = self.transport.clone();
@@ -737,6 +747,108 @@ impl MicroInput {
         tokio::task::spawn_blocking(mi_transport::input_monitoring_allowed)
             .await
             .unwrap_or(false)
+    }
+    pub async fn set_host_active_profile(
+        &self,
+        profile_id: Option<String>,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store.set_host_active_profile(profile_id).map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn set_host_execution_enabled(&self, enabled: bool) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store.set_host_execution_enabled(enabled).map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub fn check_passthrough_health(&self) -> String {
+        let state = self.state.lock().unwrap();
+        let (snapshot, identity) = if let Some((_, session)) = &state.session {
+            let snap = session.snapshot().filter(|s| !s.stale).map(|s| s.config);
+            let ident = state
+                .identity
+                .as_ref()
+                .filter(|i| i.session_id == session.id)
+                .map(|i| mi_model::host_router::HostIdentityStatus {
+                    version: i.version.clone(),
+                    profile_index: i.profile_index,
+                    layer_index: i.layer_index,
+                });
+            (snap, ident)
+        } else {
+            (None, None)
+        };
+        let health =
+            mi_model::host_router::check_passthrough_health(snapshot.as_ref(), identity.as_ref());
+        serde_json::to_string(&health).unwrap_or_else(|_| r#"{"status":"disconnected"}"#.into())
+    }
+    pub fn resolve_input_action(&self, binding_id: String, is_pressed: bool) -> Option<String> {
+        let store = self.draft.lock().unwrap();
+        if !store.host_execution_enabled() {
+            return None;
+        }
+        let graph = &store.draft.document.editable.graph;
+        let active_pid = store
+            .host_active_profile_id()
+            .filter(|id| graph.profiles.contains_key(id))
+            .or_else(|| {
+                graph
+                    .profile_order
+                    .iter()
+                    .find(|id| {
+                        graph
+                            .profiles
+                            .get(*id)
+                            .is_some_and(|p| p.name == "Antigravity")
+                    })
+                    .cloned()
+            })
+            .or_else(|| graph.profile_order.first().cloned());
+        let resolved = mi_model::host_router::resolve_host_action(
+            &store.draft.document,
+            active_pid.as_deref(),
+            &binding_id,
+            is_pressed,
+        )?;
+        serde_json::to_string(&resolved).ok()
+    }
+    pub async fn install_coding_agent_presets(&self) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        let mut created = Vec::new();
+        store
+            .update(|d| {
+                created = mi_model::preset::install_agent_starter_profiles(d)?;
+                Ok(())
+            })
+            .map_err(failure)?;
+        let current_valid = store.host_active_profile_id().is_some_and(|id| {
+            store
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .contains_key(&id)
+        });
+        if !current_valid {
+            if let Some(first) = created.first() {
+                let _ = store.set_host_active_profile(Some(first.clone()));
+            }
+        }
+        let selection = created.first().and_then(|pid| {
+            let lid = store
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .get(pid)?
+                .layer_order
+                .first()
+                .cloned();
+            Some((pid.clone(), lid))
+        });
+        document_response(&store, selection)
     }
 }
 impl MicroInput {
@@ -1281,5 +1393,109 @@ mod hardware_tests {
             identity.version, identity.backend, identity.source_method
         );
         assert!(identity.version.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an explicitly authorized physical read-only device session"]
+    async fn native_passthrough_health_and_host_routing_readiness() {
+        let core = MicroInput::new();
+        let devices: Vec<_> = core
+            .list_devices()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.pid == 0x8298 && d.transport == "Usb")
+            .collect();
+        assert_eq!(devices.len(), 1, "explicit selection required");
+        core.connect(devices[0].id.clone()).await.unwrap();
+        let identity = core.read_identity().await.unwrap();
+        assert_eq!(identity.version.as_deref(), Some("0.6.3"));
+        assert_eq!(identity.profile_index, Some(0));
+        assert_eq!(identity.layer_index, Some(1));
+        let config_json =
+            tokio::time::timeout(std::time::Duration::from_secs(65), core.read_config())
+                .await
+                .expect("bounded config read")
+                .expect("verified config read");
+        let snapshot: serde_json::Value = serde_json::from_str(&config_json).unwrap();
+        assert_eq!(snapshot["profiles"].as_array().map(Vec::len), Some(3));
+
+        let health_json = core.check_passthrough_health();
+        eprintln!("live check_passthrough_health() => {health_json}");
+        let health: serde_json::Value = serde_json::from_str(&health_json).unwrap();
+        assert_eq!(
+            health["status"].as_str(),
+            Some("ready"),
+            "stock Codex layer on live hardware must pass check_passthrough_health as ready"
+        );
+
+        let doc_json = core.install_coding_agent_presets().await.unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&doc_json).unwrap();
+        let profiles = doc["config"]["profiles"].as_array().unwrap();
+        assert!(profiles.len() >= 3);
+        let ag_id = profiles
+            .iter()
+            .find(|p| p["name"].as_str() == Some("Antigravity"))
+            .and_then(|p| p["id"].as_str())
+            .expect("Antigravity profile id")
+            .to_string();
+        let herdr_id = profiles
+            .iter()
+            .find(|p| p["name"].as_str() == Some("Herdr"))
+            .and_then(|p| p["id"].as_str())
+            .expect("Herdr profile id")
+            .to_string();
+        let dsh_id = profiles
+            .iter()
+            .find(|p| p["name"].as_str() == Some("DeepSeek Coder (DSH)"))
+            .and_then(|p| p["id"].as_str())
+            .expect("DSH profile id")
+            .to_string();
+
+        core.set_host_execution_enabled(true).await.unwrap();
+        core.set_host_active_profile(Some(ag_id)).await.unwrap();
+
+        // Verify live resolution for stock Codex tokens across AG, Herdr, and DSH
+        let ag_action: serde_json::Value = serde_json::from_str(
+            &core
+                .resolve_input_action("AG01".to_string(), true)
+                .expect("AG01 should resolve for Antigravity"),
+        )
+        .unwrap();
+        assert_eq!(ag_action["action_type"].as_str(), Some("open_app"));
+        assert_eq!(
+            ag_action["bundle_id"].as_str(),
+            Some("com.google.antigravity")
+        );
+
+        core.set_host_active_profile(Some(herdr_id)).await.unwrap();
+        let herdr_act06: serde_json::Value = serde_json::from_str(
+            &core
+                .resolve_input_action("ACT06".to_string(), true)
+                .expect("ACT06 should resolve for Herdr"),
+        )
+        .unwrap();
+        assert!(herdr_act06["action_type"].is_string());
+
+        core.set_host_active_profile(Some(dsh_id)).await.unwrap();
+        let dsh_enc: serde_json::Value = serde_json::from_str(
+            &core
+                .resolve_input_action("ENC_CC".to_string(), true)
+                .expect("ENC_CC should resolve for DSH"),
+        )
+        .unwrap();
+        assert!(dsh_enc["action_type"].is_string());
+        let dsh_enc_clk: serde_json::Value = serde_json::from_str(
+            &core
+                .resolve_input_action("ENC_CLK".to_string(), true)
+                .expect("ENC_CLK should resolve for DSH"),
+        )
+        .unwrap();
+        assert_eq!(dsh_enc_clk["action_type"].as_str(), Some("agent_command"));
+        assert_eq!(dsh_enc_clk["command"].as_str(), Some("status"));
+
+        let _sub = core.subscribe_verified_input().await.unwrap();
+
+        core.shutdown().await;
     }
 }

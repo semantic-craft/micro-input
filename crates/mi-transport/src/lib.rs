@@ -92,6 +92,14 @@ pub trait HidTransport: Send + Sync {
     fn emit_synthetic_input_case(&self, _input_case: u8) -> Result<(), TransportError> {
         Err(TransportError::Unsupported)
     }
+    #[cfg(feature = "synthetic-backend")]
+    fn emit_synthetic_binding(
+        &self,
+        _binding_id: &str,
+        _pressed: bool,
+    ) -> Result<(), TransportError> {
+        Err(TransportError::Unsupported)
+    }
     fn subscribe(&self) -> broadcast::Receiver<()>;
     fn stop_discovery(&self) {}
     fn open(&self, id: &str) -> Result<Arc<dyn HidLink>, TransportError>;
@@ -678,6 +686,38 @@ impl HidTransport for SyntheticDiscovery {
                     .send(report)
                     .map_err(|_| TransportError::Disconnected)?;
             }
+        }
+        Ok(())
+    }
+    fn emit_synthetic_binding(
+        &self,
+        binding_id: &str,
+        pressed: bool,
+    ) -> Result<(), TransportError> {
+        let digits = binding_id
+            .strip_prefix("AG")
+            .ok_or(TransportError::Unsupported)?;
+        if digits.len() != 2
+            || !digits.bytes().all(|b| b.is_ascii_digit())
+            || digits
+                .parse::<u8>()
+                .map_err(|_| TransportError::Unsupported)?
+                > 18
+        {
+            return Err(TransportError::Unsupported);
+        }
+        let message = serde_json::json!({"m":"v.oai.hid","p":{"k":binding_id,"act":if pressed { 1 } else { 0 }}});
+        let inject = self.input_inject.lock().unwrap();
+        let inject = inject.as_ref().ok_or(TransportError::Disconnected)?;
+        for part in message.to_string().as_bytes().chunks(61) {
+            let mut report = vec![0; 64];
+            report[0] = 6;
+            report[1] = 2;
+            report[2] = part.len() as u8;
+            report[3..3 + part.len()].copy_from_slice(part);
+            inject
+                .send(report)
+                .map_err(|_| TransportError::Disconnected)?;
         }
         Ok(())
     }

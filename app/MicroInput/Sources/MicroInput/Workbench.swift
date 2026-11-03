@@ -31,7 +31,11 @@ struct Workbench: View {
         } else { candidate = action }
     }
     var bindings: [JSONValue] { guard let l = store.layer else { return [] }; return l.keys + l.encoders + l.joystick.sectors }
-    func title(_ slot: Int) -> String { slot < 13 ? String(format: "按键 %02d", slot + 1) : slot < 16 ? "旋钮槽 \(slot-12) · 方向未核实" : "摇杆 · 逻辑扇区 \(slot-15)" }
+    func title(_ slot: Int) -> String {
+        if slot == 10 { return "按键 11（2U 宽键主槽）" }
+        if slot == 11 { return "按键 12（2U 宽键副轴 · 与按键 11 共用键帽）" }
+        return slot < 13 ? String(format: "按键 %02d", slot + 1) : slot < 16 ? "旋钮槽 \(slot-12) · 方向未核实" : "摇杆 · 逻辑扇区 \(slot-15)"
+    }
     func action(_ slot: Int) -> CatalogAction? { return store.browsingDeviceSnapshot ? nil : store.draft.edits[store.key(slot)] }
     func label(_ slot: Int) -> String { if let a = action(slot) {return a.name}; guard bindings.indices.contains(slot) else {return "未知"}; return bindings[slot].bindingLabel }
     var body: some View {
@@ -110,6 +114,13 @@ struct Workbench: View {
                                         }
                                     }
                                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 100))], spacing: 10) { ForEach(16..<max(16,bindings.count), id: \.self) { i in control(i) } }
+                                    if (bindings.count < 20 || store.currentControlSettings?.joystick_mode != "logical_sectors" || (store.currentControlSettings?.active_sectors ?? 0) < 4), !store.browsingDeviceSnapshot {
+                                        Button("启用摇杆四向扇区（J1–J4）") {
+                                            Task { _ = await store.saveControlSettings(mode: "logical_sectors", sectors: "4") }
+                                        }
+                                        .font(.caption)
+                                        .disabled(!store.canEditDraft || store.busy)
+                                    }
                                     Text("CREATOR MICRO").font(.caption2).tracking(3).foregroundStyle(.secondary)
                                 }.padding(20).background(.background, in: RoundedRectangle(cornerRadius: 22)).overlay(RoundedRectangle(cornerRadius: 22).stroke(.quaternary)).shadow(color: .black.opacity(0.08), radius: 12, y: 8)
                                 Text("13 开关逻辑位置示意 · 实体宽键和方向待核对").font(.caption).foregroundStyle(.secondary)
@@ -158,6 +169,7 @@ struct Workbench: View {
                         }
                     }.frame(maxWidth: 410)
                 }
+                Button("一键就绪（USB + 预设 + 开启接管）") { Task { await store.autoSetupHostExecutionIfNeeded() } }.disabled(store.busy)
                 Button("查找 / 刷新 USB") { Task { await store.startDiscovery(); await store.refresh() } }
                 Button("返回本地草稿") { store.showLocalDraft() }.disabled(!store.browsingDeviceSnapshot || store.busy)
             }
@@ -222,13 +234,25 @@ struct Workbench: View {
         VStack(alignment: .leading, spacing: 22) {
             Text(title(store.slot)).font(.title3.bold())
             Text(store.layer?.name ?? "").font(.caption).foregroundStyle(.secondary)
+            if store.slot == 10 || store.slot == 11 {
+                Text("底部 2U 宽键覆盖开关 11 与 12（双轴合并触发，优先使用按键 11 绑定，未设时回退按键 12）。").font(.caption).foregroundStyle(.secondary)
+                if store.slot == 11, !store.browsingDeviceSnapshot {
+                    Button("切换到按键 11（2U 宽键主槽）") { store.slot = 10 }.font(.caption)
+                }
+            }
             if store.slot >= 16, let settings = store.currentControlSettings, !store.browsingDeviceSnapshot {
                 Text(settings.joystick_mode == "logical_sectors" && store.slot - 16 < Int(settings.active_sectors) ? "活动逻辑扇区 · 物理方向未核实" : "保留槽位 · 绑定未删除").font(.caption).foregroundStyle(.secondary)
             }
             if store.browsingDeviceSnapshot { Text("层颜色：\(store.layer?.displayColor ?? "未知（原值保留）")").font(.caption).foregroundStyle(.secondary) }
-            if store.slot >= 13, !store.browsingDeviceSnapshot {
-                ControlSettingsEditor(store: store).id((store.layer?.id.text ?? "") + String(store.draft.revision))
-                Divider()
+            if !store.browsingDeviceSnapshot {
+                if store.slot >= 13 {
+                    ControlSettingsEditor(store: store).id((store.layer?.id.text ?? "") + String(store.draft.revision))
+                    Divider()
+                } else {
+                    DisclosureGroup("旋钮与摇杆扇区设置") {
+                        ControlSettingsEditor(store: store).id((store.layer?.id.text ?? "") + String(store.draft.revision))
+                    }
+                }
             }
             Text("动作").foregroundStyle(.secondary)
             Button { choosing = true } label: { HStack { Text(label(store.slot)).lineLimit(3); Spacer(); Text(store.browsingDeviceSnapshot ? "只读" : "更换").foregroundStyle(.blue) }.padding(14).frame(maxWidth: .infinity).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 9)) }.buttonStyle(.plain).disabled(!store.canEditDraft || store.layer == nil)
@@ -260,8 +284,8 @@ struct Workbench: View {
                 }
             }
             Spacer()
-            Label(store.browsingDeviceSnapshot ? "设备快照仅供查看" : "先改草稿，再检查", systemImage: "doc.badge.clock")
-            Text("工具动作尚未接入。修改不执行动作，不生成设备载荷。").font(.caption).foregroundStyle(.secondary)
+            Label(store.browsingDeviceSnapshot ? "设备快照仅供查看" : "本地草稿 · 宿主接管不写 Flash", systemImage: "doc.badge.clock")
+            Text("标有「宿主可执行」的动作在开启宿主动作执行后由 Mac 端路由执行，不写入设备 Flash。").font(.caption).foregroundStyle(.secondary)
         }.frame(maxHeight: .infinity, alignment: .topLeading)
     }
     var actionSheet: some View {
@@ -302,7 +326,7 @@ struct Workbench: View {
                                 Button { choose(entry.action) } label: {
                                     VStack(alignment: .leading, spacing: 5) {
                                         Text(entry.action.name).bold()
-                                        Text(entry.capability.unavailable_reason).font(.caption).foregroundStyle(.secondary)
+                                        Text(entry.capability.execution_available ? "宿主可执行" : entry.capability.unavailable_reason).font(.caption).foregroundStyle(entry.capability.execution_available ? .green : .secondary)
                                         Text("目标：\(entry.capability.target)").font(.caption).foregroundStyle(.secondary)
                                     }.frame(maxWidth: .infinity, alignment: .leading).padding(10)
                                 }.buttonStyle(.plain).disabled(store.busy || !store.canEditDraft)
@@ -315,7 +339,7 @@ struct Workbench: View {
                 }
             }
             Text(store.status).font(.caption).foregroundStyle(.secondary).lineLimit(3)
-            Text("可保存本地意图；所有条目当前均不可执行。收藏是本机偏好。").font(.caption).foregroundStyle(.secondary)
+            Text("可保存本地意图；「宿主可执行」动作由 Mac 宿主路由触发，不写设备 Flash。收藏是本机偏好。").font(.caption).foregroundStyle(.secondary)
         }.padding(24).frame(width: 600, height: 560)
         .onAppear { search = ""; category = "全部"; favoritesOnly = false; candidate = nil; searchFocused = true }
         .task(id: "\(search)\u{0}\(category)\u{0}\(favoritesOnly)") { await store.searchActions(query: search, category: category, favoritesOnly: favoritesOnly) }
@@ -374,7 +398,7 @@ struct Workbench: View {
     }
 }
 
-// R-K05: typed parameters edited locally; adapters remain unavailable.
+// R-K05: typed parameters edited locally; host-executable adapters (herdr / dsh) dispatch on macOS.
 struct ActionParameters: View {
     @State var action: CatalogAction
     @State private var editingMacro = false
@@ -389,8 +413,8 @@ struct ActionParameters: View {
         case "text": return [("text","文本内容")]
         case "open_url": return [("url","网址（HTTP / HTTPS）")]
         case "shortcut": return [("key","按键"),("target","目标应用条件")]
-        case "agent_command": return [("adapter","适配器（未验证）"),("command","命令引用")]
-        case "focus_session": return [("adapter","适配器（未验证）"),("session","会话引用")]
+        case "agent_command": return [("adapter","适配器（herdr / dsh）"),("command","命令引用")]
+        case "focus_session": return [("adapter","适配器（herdr / dsh）"),("session","会话引用")]
         case "skill_reference": return [("adapter","适配器（未验证）"),("skill","Skill 引用")]
         default: return []
         }
@@ -453,8 +477,14 @@ struct ActionCapabilityView: View {
     let capability: ActionCapability
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("当前不可执行", systemImage: "pause.circle").font(.caption.bold())
-            Text(capability.unavailable_reason).font(.caption)
+            if capability.execution_available {
+                Label("宿主可执行", systemImage: "bolt.circle.fill")
+                    .font(.caption.bold())
+                    .foregroundStyle(.green)
+            } else {
+                Label("当前不可执行", systemImage: "pause.circle").font(.caption.bold())
+                Text(capability.unavailable_reason).font(.caption)
+            }
             Text("目标：\(capability.target)").font(.caption).textSelection(.enabled)
             Text(capability.host_required ? "需要 Mac 宿主常驻" : "宿主常驻要求及设备独立执行能力待验证").font(.caption).foregroundStyle(.secondary)
             ForEach(capability.prerequisites, id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary) }

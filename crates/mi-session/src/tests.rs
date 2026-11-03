@@ -776,3 +776,210 @@ async fn cancelling_incomplete_send_invalidates_session() {
     ));
     session.shutdown().await;
 }
+
+#[tokio::test]
+async fn verified_input_maps_row0_inversion_joystick_sectors_and_merges_wide_key() {
+    let (s, link, _) = setup(500);
+    let mut monitor = s.subscribe_verified_input();
+    for raw in [
+        json!({"m":"v.oai.hid","p":{"k":"AG01","act":1}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG01","act":0}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG00","act":1}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG00","act":0}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG11","act":1}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG10","act":1}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG11","act":0}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG10","act":0}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG15","act":1}}),
+    ] {
+        link.inject.send(raw.to_string().into_bytes()).unwrap();
+    }
+    let e1 = monitor.next().await.unwrap();
+    assert_eq!(e1.kind, crate::InputEventKind::Pressed);
+    assert_eq!(e1.binding_id.as_deref(), Some("AG01"));
+    assert_eq!(e1.logical_switch.as_deref(), Some("logical-0"));
+    assert_eq!(e1.physical_control.as_deref(), Some("row0-col0-left"));
+    assert!(e1.action_eligible);
+
+    let e2 = monitor.next().await.unwrap();
+    assert_eq!(e2.kind, crate::InputEventKind::Released);
+    assert_eq!(e2.logical_switch.as_deref(), Some("logical-0"));
+
+    let e3 = monitor.next().await.unwrap();
+    assert_eq!(e3.kind, crate::InputEventKind::Pressed);
+    assert_eq!(e3.binding_id.as_deref(), Some("AG00"));
+    assert_eq!(e3.logical_switch.as_deref(), Some("logical-1"));
+    assert_eq!(e3.physical_control.as_deref(), Some("row0-col1-right"));
+
+    let e4 = monitor.next().await.unwrap();
+    assert_eq!(e4.kind, crate::InputEventKind::Released);
+    assert_eq!(e4.logical_switch.as_deref(), Some("logical-1"));
+
+    // AG11 press + AG10 press + AG11 release + AG10 release -> 1 Pressed + 1 Released on logical-10
+    let wide_press = monitor.next().await.unwrap();
+    assert_eq!(wide_press.kind, crate::InputEventKind::Pressed);
+    assert_eq!(wide_press.binding_id.as_deref(), Some("AG10"));
+    assert_eq!(wide_press.logical_switch.as_deref(), Some("logical-10"));
+    assert_eq!(wide_press.keycap_group.as_deref(), Some("wide-bottom-2u"));
+    assert!(wide_press.action_eligible);
+
+    let wide_release = monitor.next().await.unwrap();
+    assert_eq!(wide_release.kind, crate::InputEventKind::Released);
+    assert_eq!(wide_release.binding_id.as_deref(), Some("AG10"));
+    assert_eq!(wide_release.logical_switch.as_deref(), Some("logical-10"));
+    assert!(monitor.active_wide_switches().is_empty());
+
+    let joy_north = monitor.next().await.unwrap();
+    assert_eq!(joy_north.kind, crate::InputEventKind::Pressed);
+    assert_eq!(joy_north.binding_id.as_deref(), Some("AG15"));
+    assert_eq!(joy_north.logical_switch.as_deref(), Some("logical-16"));
+    assert_eq!(
+        joy_north.physical_control.as_deref(),
+        Some("joystick-sector-north")
+    );
+    s.shutdown().await;
+}
+
+#[tokio::test]
+async fn verified_input_decodes_stock_codex_act_enc_and_radial_joystick() {
+    use crate::InputDecoder;
+    let decoder = crate::VerifiedInputDecoder;
+    assert_eq!(
+        decoder.decode(&crate::HostNotification::Unknown(
+            json!({"m":"v.oai.rad","p":{"a":0.75,"d":0.9}})
+        )),
+        Some((crate::InputEventKind::Pressed, "AG15".into()))
+    );
+    assert_eq!(
+        decoder.decode(&crate::HostNotification::Unknown(
+            json!({"m":"v.oai.rad","p":{"a":0.25,"d":0.9}})
+        )),
+        Some((crate::InputEventKind::Pressed, "AG17".into()))
+    );
+    assert_eq!(
+        decoder.decode(&crate::HostNotification::Unknown(
+            json!({"m":"v.oai.rad","p":{"a":5.0,"d":0.9}})
+        )),
+        None
+    );
+
+    let (s, link, _) = setup(500);
+    let mut monitor = s.subscribe_verified_input();
+    for raw in [
+        // ACT10 + ACT11 wide key on stock Codex layer coalesces into AG10 (logical-10)
+        json!({"m":"v.oai.hid","p":{"k":"ACT10","act":1}}),
+        json!({"m":"v.oai.hid","p":{"k":"ACT11","act":1}}),
+        json!({"m":"v.oai.hid","p":{"k":"ACT10","act":0}}),
+        json!({"m":"v.oai.hid","p":{"k":"ACT11","act":0}}),
+        // ENC_CC with act=2 (firmware 0.6.3 encoder step pulse) -> AG13 (logical-13)
+        json!({"m":"v.oai.hid","p":{"k":"ENC_CC","act":2}}),
+        // ENC_CLK press + release -> ENC_CLK (logical-15)
+        json!({"m":"v.oai.hid","p":{"k":"ENC_CLK","act":1}}),
+        json!({"m":"v.oai.hid","p":{"k":"ENC_CLK","act":0}}),
+        // v.oai.rad continuous radial joystick in normalized turns [0.0, 1.0):
+        // East (a=0.0, d=0.9), repeated East (a=0.05, d=0.95, ignored), center release (d=0.05)
+        json!({"m":"v.oai.rad","p":{"a":0.0,"d":0.9}}),
+        json!({"m":"v.oai.rad","p":{"a":0.05,"d":0.95}}),
+        json!({"m":"v.oai.rad","p":{"a":0.0,"d":0.05}}),
+        // South (a=0.25 -> AG17), West (a=0.5 -> AG16), North (a=0.75 -> AG15)
+        json!({"m":"v.oai.rad","p":{"a":0.25,"d":0.9}}),
+        json!({"m":"v.oai.rad","p":{"a":0.25,"d":0.05}}),
+        json!({"m":"v.oai.rad","p":{"a":0.5,"d":0.9}}),
+        json!({"m":"v.oai.rad","p":{"a":0.5,"d":0.05}}),
+        json!({"m":"v.oai.rad","p":{"a":0.75,"d":0.9}}),
+        json!({"m":"v.oai.rad","p":{"a":0.75,"d":0.05}}),
+        // Out-of-range angle (a=5.0) must be rejected as UnknownNotification
+        json!({"m":"v.oai.rad","p":{"a":5.0,"d":0.95}}),
+    ] {
+        link.inject.send(raw.to_string().into_bytes()).unwrap();
+    }
+
+    let wide_press = monitor.next().await.unwrap();
+    assert_eq!(wide_press.kind, crate::InputEventKind::Pressed);
+    assert_eq!(wide_press.binding_id.as_deref(), Some("AG10"));
+    assert_eq!(wide_press.logical_switch.as_deref(), Some("logical-10"));
+    assert_eq!(wide_press.keycap_group.as_deref(), Some("wide-bottom-2u"));
+
+    let wide_release = monitor.next().await.unwrap();
+    assert_eq!(wide_release.kind, crate::InputEventKind::Released);
+    assert_eq!(wide_release.binding_id.as_deref(), Some("AG10"));
+    assert_eq!(wide_release.logical_switch.as_deref(), Some("logical-10"));
+
+    let enc_cc = monitor.next().await.unwrap();
+    assert_eq!(enc_cc.kind, crate::InputEventKind::Pressed);
+    assert_eq!(enc_cc.binding_id.as_deref(), Some("AG13"));
+    assert_eq!(enc_cc.logical_switch.as_deref(), Some("logical-13"));
+    assert!(enc_cc.action_eligible);
+    assert!(
+        monitor.pressed_switches().is_empty(),
+        "momentary encoder step must not stay stuck in pressed_switches"
+    );
+
+    let enc_clk = monitor.next().await.unwrap();
+    assert_eq!(enc_clk.kind, crate::InputEventKind::Pressed);
+    assert_eq!(enc_clk.binding_id.as_deref(), Some("ENC_CLK"));
+    assert_eq!(enc_clk.logical_switch.as_deref(), Some("logical-15"));
+    assert!(enc_clk.action_eligible);
+    assert_eq!(monitor.pressed_switches(), vec!["logical-15".to_string()]);
+
+    let enc_clk_release = monitor.next().await.unwrap();
+    assert_eq!(enc_clk_release.kind, crate::InputEventKind::Released);
+    assert_eq!(enc_clk_release.binding_id.as_deref(), Some("ENC_CLK"));
+    assert!(monitor.pressed_switches().is_empty());
+
+    for (expected_ag, expected_switch) in [
+        ("AG18", "logical-19"),
+        ("AG17", "logical-18"),
+        ("AG16", "logical-17"),
+        ("AG15", "logical-16"),
+    ] {
+        let press = monitor.next().await.unwrap();
+        assert_eq!(press.kind, crate::InputEventKind::Pressed);
+        assert_eq!(press.binding_id.as_deref(), Some(expected_ag));
+        assert_eq!(press.logical_switch.as_deref(), Some(expected_switch));
+        assert!(press.action_eligible);
+
+        let release = monitor.next().await.unwrap();
+        assert_eq!(release.kind, crate::InputEventKind::Released);
+        assert_eq!(release.binding_id.as_deref(), Some(expected_ag));
+        assert_eq!(release.logical_switch.as_deref(), Some(expected_switch));
+        assert!(release.action_eligible);
+    }
+
+    let invalid_rad = monitor.next().await.unwrap();
+    assert_eq!(invalid_rad.kind, crate::InputEventKind::UnknownNotification);
+    assert!(!invalid_rad.action_eligible);
+
+    // Sector-to-sector roll without returning to center (North AG15 -> East AG18),
+    // followed by release at d=0.25 (< 0.35 threshold).
+    for raw in [
+        json!({"m":"v.oai.rad","p":{"a":0.75,"d":0.9}}),
+        json!({"m":"v.oai.rad","p":{"a":0.0,"d":0.9}}),
+        json!({"m":"v.oai.rad","p":{"a":0.0,"d":0.25}}),
+    ] {
+        link.inject.send(raw.to_string().into_bytes()).unwrap();
+    }
+    let roll_north = monitor.next().await.unwrap();
+    assert_eq!(roll_north.kind, crate::InputEventKind::Pressed);
+    assert_eq!(roll_north.binding_id.as_deref(), Some("AG15"));
+    assert_eq!(roll_north.logical_switch.as_deref(), Some("logical-16"));
+    assert_eq!(monitor.pressed_switches(), vec!["logical-16".to_string()]);
+
+    let roll_east = monitor.next().await.unwrap();
+    assert_eq!(roll_east.kind, crate::InputEventKind::Pressed);
+    assert_eq!(roll_east.binding_id.as_deref(), Some("AG18"));
+    assert_eq!(roll_east.logical_switch.as_deref(), Some("logical-19"));
+    assert_eq!(
+        monitor.pressed_switches(),
+        vec!["logical-19".to_string()],
+        "rolling directly to a new radial sector must clear the previous sector from pressed_switches"
+    );
+
+    let release_east = monitor.next().await.unwrap();
+    assert_eq!(release_east.kind, crate::InputEventKind::Released);
+    assert_eq!(release_east.binding_id.as_deref(), Some("AG18"));
+    assert_eq!(release_east.logical_switch.as_deref(), Some("logical-19"));
+    assert!(monitor.pressed_switches().is_empty());
+
+    s.shutdown().await;
+}

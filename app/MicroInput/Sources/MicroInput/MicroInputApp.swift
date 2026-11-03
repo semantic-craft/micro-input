@@ -6,12 +6,17 @@ import MicroInputCore
     @StateObject private var store: Store
     private let statusMenu: StatusMenu
     init() {
+        let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
         #if MI_SYNTHETIC_BACKEND
-        let core = ["reconnect", "reconnect-transient", "apply-preparation"].contains(ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? "") ? MicroInput.syntheticDiscovery() : MicroInput()
+        let core = ["reconnect", "reconnect-transient", "apply-preparation", "host-execution"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
+        let store = Store(backend: core)
         #else
         let core = MicroInput()
-        #endif
         let store = Store(backend: core)
+        #endif
+        if scenario.isEmpty, ProcessInfo.processInfo.environment["MI_AUTO_HOST_READY"] != "0" {
+            store.autoHostReady = true
+        }
         _store = StateObject(wrappedValue: store)
         statusMenu = StatusMenu(store: store)
     }
@@ -65,7 +70,7 @@ struct WorkbenchHost: View {
     }
     @objc func show() {
         if panel == nil {
-            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 280, height: 240), styleMask: [.titled, .utilityWindow], backing: .buffered, defer: false)
+            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 320, height: 380), styleMask: [.titled, .utilityWindow], backing: .buffered, defer: false)
             panel.title = "Micro Input 菜单栏"
             panel.isReleasedWhenClosed = false
             panel.contentView = NSHostingView(rootView: StatusPanel(store: store, owner: self))
@@ -115,14 +120,74 @@ struct StatusPanel: View {
     @ObservedObject var store: Store
     let owner: StatusMenu
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(store.browsingDeviceSnapshot ? (store.stale ? "设备快照已过期 · 浏览不激活配置" : "设备快照只读 · 浏览不激活配置") : "本地草稿 · 不激活设备配置").font(.caption).foregroundStyle(.secondary)
-            ForEach(Array((store.snapshot?.profiles ?? []).enumerated()), id: \.offset) { i,p in
-                Button(p.name) { store.selectProfile(i); owner.showWindow() }
+        VStack(alignment: .leading, spacing: 10) {
+            Text(store.passThroughHealth.label)
+                .font(.caption.bold())
+                .foregroundStyle(store.passThroughHealth == .ready ? Color.green : Color.secondary)
+            if case .layerDriftWarning = store.passThroughHealth {
+                Text("键盘当前不在宿主透传层，请轻触键盘左下角 Logo 切回第 0 层")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+            if store.connectedID != nil, store.passThroughHealth != .ready {
+                Button("重新检查身份/层状态") {
+                    Task {
+                        await store.readIdentity()
+                        if store.passThroughHealth == .snapshotMissing,
+                           ["0.6.3", "synthetic-0.6.3"].contains(store.identity?.version ?? "") {
+                            await store.readDeviceConfig()
+                            if store.browsingDeviceSnapshot {
+                                store.showLocalDraft()
+                            }
+                        }
+                    }
+                }
+                .font(.caption2)
+            }
+            Toggle("启用宿主动作执行", isOn: Binding(
+                get: { store.hostExecutionEnabled },
+                set: { enabled in Task { await store.setHostExecutionEnabled(enabled) } }
+            ))
+            .font(.caption)
+            let axTrusted = LiveHostActionExecutor.isAccessibilityTrusted
+            HStack(spacing: 6) {
+                Text(axTrusted ? "辅助功能权限：已授权" : "辅助功能权限：未授权（快捷键与粘贴需要）")
+                    .font(.caption2)
+                    .foregroundStyle(axTrusted ? Color.secondary : Color.orange)
+                if !axTrusted {
+                    Button("打开系统辅助功能设置…") {
+                        LiveHostActionExecutor.openAccessibilitySettings()
+                    }
+                    .font(.caption2)
+                }
+            }
+            if let receipt = store.lastHostActionReceipt {
+                Text("最近触发：\(receipt.bindingId) → \(receipt.actionType) (\(receipt.detail))")
+                    .font(.caption2)
+                    .foregroundStyle(receipt.succeeded ? Color.secondary : Color.red)
+                    .lineLimit(1)
             }
             Divider()
+            Text("宿主激活 Profile（切换不写设备 Flash）：")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            ForEach(Array(store.hostProfiles.enumerated()), id: \.offset) { _, p in
+                let active = store.hostActiveProfileId == p.id.text
+                Button(active ? "✓ \(p.name)" : p.name) {
+                    Task { await store.setHostActiveProfile(p.id.text) }
+                }
+            }
+            Divider()
+            Button("一键就绪（连接 USB + 预设 + 开启接管）") {
+                Task { await store.autoSetupHostExecutionIfNeeded() }
+            }
+            .disabled(store.busy)
+            Button("安装 Coding Agent 预设") {
+                Task { await store.installCodingAgentPresets() }
+            }
+            .disabled(!store.canEditDraft || store.busy)
             Button("打开工作台") { owner.showWindow() }
             Button("退出 Micro Input") { owner.quitApp() }
-        }.padding(20).frame(width: 280, height: 240, alignment: .topLeading)
+        }.padding(16).frame(width: 320, height: 450, alignment: .topLeading)
     }
 }

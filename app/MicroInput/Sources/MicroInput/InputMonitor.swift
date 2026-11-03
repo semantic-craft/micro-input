@@ -13,6 +13,13 @@ import MicroInputCore
     var eventSummary: String? {
         guard let event = lastEvent else { return nil }
         switch event.kind {
+        case .pressed, .released:
+            let phase = event.kind == .pressed ? "按下" : "释放"
+            let binding = event.bindingId ?? "未知绑定"
+            let slot = event.logicalSwitch ?? "未知槽位"
+            let phys = event.physicalControl ?? "未知控件"
+            let group = event.keycapGroup.map { " · 键帽组 \($0)" } ?? ""
+            return "已验证输入 \(binding) → \(slot) (\(phys)\(group)) · \(phase)"
         case .candidatePressed, .candidateReleased:
             guard let binding = event.bindingId else { return "未知通知 · 绑定身份未核实" }
             let phase = event.kind == .candidatePressed ? "按下" : "释放"
@@ -39,10 +46,11 @@ import MicroInputCore
         count = 0; lost = 0; lastEvent = nil; paused = false
         guard store.connectedID != nil else { status = "连接设备后持续监听"; return }
         do {
-            let stream = try await store.subscribeInput()
+            let useVerified = store.hostExecutionEnabled || ["0.6.3", "synthetic-0.6.3"].contains(store.identity?.version ?? "")
+            let stream = useVerified ? try await store.subscribeVerifiedInput() : try await store.subscribeInput()
             guard token == generation, !Task.isCancelled else { stream.close(); return }
             subscription = stream
-            status = "正在监听 · 仅观察已有绑定，物理映射待核实"
+            status = useVerified ? "正在监听 · 已验证物理映射与宽键合并生效" : "正在监听 · 仅观察已有绑定，物理映射待核实"
             await withTaskCancellationHandler(operation: {
                 while !Task.isCancelled, let event = await stream.nextEvent() {
                     guard token == generation else { break }
@@ -74,7 +82,7 @@ struct InputMonitorPanel: View {
             Label("输入监视", systemImage: "waveform.path").font(.caption.bold())
             VStack(alignment: .leading, spacing: 4) {
                 Text(monitor.status)
-                Text("已收 \(monitor.count) 条通知 · 丢失 \(monitor.lost) 条 · 不执行动作")
+                Text("已收 \(monitor.count) 条通知 · 丢失 \(monitor.lost) 条 · 监视器自身不触发动作")
                     .foregroundStyle(.secondary)
                 if let event = monitor.lastEvent {
                     if let summary = monitor.eventSummary { Text(summary) }
@@ -89,7 +97,7 @@ struct InputMonitorPanel: View {
             Button("重建监听") { revision += 1 }
                 .disabled(store.connectedID == nil)
         }.padding(.horizontal, 20).padding(.vertical, 8)
-        .task(id: "\(store.connectedID ?? "")/\(revision)") { await monitor.listen(store: store) }
+        .task(id: "\(store.connectedID ?? "")/\(store.hostExecutionEnabled)/\(store.identity?.version ?? "")/\(revision)") { await monitor.listen(store: store) }
         .onDisappear { monitor.stop() }
     }
 }

@@ -56,6 +56,12 @@ protocol Backend {
     func compareSnapshot() async throws -> String
     func confirmComparisonIdentity(token: String) async throws -> String
     func resolveComparison(token: String, choice: String) async throws -> String
+    func subscribeVerifiedInput() async throws -> InputSubscription
+    func setHostActiveProfile(profileId: String?) async throws -> String
+    func setHostExecutionEnabled(enabled: Bool) async throws -> String
+    func checkPassthroughHealth() -> String
+    func resolveInputAction(bindingId: String, isPressed: Bool) -> String?
+    func installCodingAgentPresets() async throws -> String
 }
 extension Backend {
     func inspectAgentProposal(text: String) async throws -> String { throw BridgeError.Failed(message: "Agent 提案不可用") }
@@ -74,6 +80,12 @@ extension Backend {
     func waitForDisconnect() async -> String { "" }
     func shutdown() async { await disconnect() }
     func subscribeInput() async throws -> InputSubscription { throw BridgeError.Failed(message: "输入监听不可用") }
+    func subscribeVerifiedInput() async throws -> InputSubscription { throw BridgeError.Failed(message: "已验证输入监听不可用") }
+    func setHostActiveProfile(profileId: String?) async throws -> String { throw BridgeError.Failed(message: "宿主激活 Profile 不可用") }
+    func setHostExecutionEnabled(enabled: Bool) async throws -> String { throw BridgeError.Failed(message: "宿主执行开关不可用") }
+    func checkPassthroughHealth() -> String { #"{"status":"disconnected"}"# }
+    func resolveInputAction(bindingId: String, isPressed: Bool) -> String? { nil }
+    func installCodingAgentPresets() async throws -> String { throw BridgeError.Failed(message: "Coding Agent 预设不可用") }
     func readIdentity() async throws -> IdentityInfo { throw BridgeError.Failed(message: "身份读取不可用") }
     func openDocument(path: String) async throws -> String { throw BridgeError.Failed(message: "本地文档不可用") }
     func actionCatalog() async throws -> String { throw BridgeError.Failed(message: "动作目录不可用") }
@@ -115,7 +127,17 @@ extension MicroInput: Backend {}
         guard !systemSleeping, !stopped, connectedID != nil else { throw BridgeError.Disconnected }
         return try await backend.subscribeInput()
     }
+    func subscribeVerifiedInput() async throws -> InputSubscription {
+        guard !systemSleeping, !stopped, connectedID != nil else { throw BridgeError.Disconnected }
+        return try await backend.subscribeVerifiedInput()
+    }
     private let backend: Backend
+    private let actionExecutor: HostActionExecuting
+    @Published var hostActiveProfileId: String?
+    @Published var hostExecutionEnabled = false
+    @Published var passThroughHealth: PassThroughHealthView = .disconnected
+    @Published var lastHostActionReceipt: HostActionReceipt?
+    private var hostInputTask: Task<Void, Never>?
     @Published var draft = DraftState()
     @Published var macros: [MacroSummary] = []
     @Published var multis: [MacroSummary] = []
@@ -165,13 +187,23 @@ extension MicroInput: Backend {}
         }
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("MicroInput/workbench.json")
     }
+    var autoHostReady = ProcessInfo.processInfo.environment["MI_AUTO_HOST_READY"] == "1"
+    private var autoSetupInFlight = false
     func loadWorkbench() async {
         do {
             try applyDocument(try await backend.openDocument(path: documentURL.path))
             catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await backend.actionCatalog().utf8))
             #if MI_SYNTHETIC_BACKEND
-            if ["reconnect", "reconnect-transient", "apply-preparation"].contains(ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""), !preparedReconnectScenario {await prepareReconnectScenario()}
+            let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
+            if ["reconnect", "reconnect-transient", "apply-preparation"].contains(scenario), !preparedReconnectScenario {
+                await prepareReconnectScenario()
+            } else if scenario == "host-execution", !preparedHostExecutionScenario {
+                await prepareHostExecutionScenario()
+            }
             #endif
+            if autoHostReady, (ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? "").isEmpty {
+                await autoSetupHostExecutionIfNeeded()
+            }
             await searchActions(query: "", category: "全部", favoritesOnly: false)
         } catch { status = readableError(error); documentReady = false }
     }
@@ -180,6 +212,7 @@ extension MicroInput: Backend {}
         layerIndex = profile?.layers.firstIndex(where: {$0.id.text == lid}) ?? min(fallbackLayer, max(0, (profile?.layers.count ?? 0)-1))
         slot = min(slot, max(0, (layer.map {$0.keys.count+$0.encoders.count+$0.joystick.sectors.count} ?? 0)-1))
     }
+    var hostProfiles: [Profile] { (localSnapshot ?? snapshot)?.profiles ?? [] }
     private func applyDocument(_ json: String, fresh: Bool = false) throws {
         let result = try JSONDecoder().decode(DocumentView.self, from: Data(json.utf8))
         if draft.document_id != result.draft.document_id || draft.revision != result.draft.revision {applyPreview=nil;preparedApplyBackup=nil}
@@ -190,11 +223,166 @@ extension MicroInput: Backend {}
         draft = result.draft; snapshot = result.config; localSnapshot = result.config
         actionCapabilities = result.action_capabilities ?? [:]
         controlSettings = result.control_settings ?? [:]; controlSettingsError = nil
+        if let activePid = result.host_active_profile_id,
+           result.config.profiles.contains(where: { $0.id.text == activePid }) {
+            hostActiveProfileId = activePid
+        } else {
+            hostActiveProfileId = result.config.profiles.first(where: { $0.name == "Antigravity" })?.id.text
+                ?? result.config.profiles.first?.id.text
+        }
+        if let enabled = result.host_execution_enabled {
+            hostExecutionEnabled = enabled
+            if enabled, connectedID != nil, hostInputTask == nil {
+                startHostInputLoop(token: generation)
+            } else if !enabled {
+                hostInputTask?.cancel(); hostInputTask = nil
+            }
+        }
         browsingDeviceSnapshot = false; stale = false; documentReady = !draft.read_only
         restoreSelection(profile: result.selection_hint?.profile_id ?? oldProfile, layer: result.selection_hint?.layer_id ?? oldLayer, fallbackProfile: pi, fallbackLayer: li)
         localSelection = (profile?.id.text, layer?.id.text, slot)
         status = draft.read_only ? "文档含未知数据 · 只读 · 原文件保留" : "本地草稿 · 修改自动保存 · 不写设备"
         if draft.loaded_format == 1 { status += " · 旧格式将在首次修改时转换并备份" }
+    }
+    func setHostActiveProfile(_ profileId: String?) async {
+        let previous = hostActiveProfileId
+        hostActiveProfileId = profileId
+        do {
+            let json = try await backend.setHostActiveProfile(profileId: profileId)
+            if let result = try? JSONDecoder().decode(DocumentView.self, from: Data(json.utf8)) {
+                if let activePid = result.host_active_profile_id,
+                   result.config.profiles.contains(where: { $0.id.text == activePid }) {
+                    hostActiveProfileId = activePid
+                } else {
+                    hostActiveProfileId = result.config.profiles.first(where: { $0.name == "Antigravity" })?.id.text
+                        ?? result.config.profiles.first?.id.text
+                }
+            }
+            status = "已切换宿主激活 Profile · 不写设备 Flash"
+        } catch {
+            hostActiveProfileId = previous
+            status = readableError(error)
+        }
+    }
+    func setHostExecutionEnabled(_ enabled: Bool) async {
+        let previous = hostExecutionEnabled
+        hostExecutionEnabled = enabled
+        do {
+            let json = try await backend.setHostExecutionEnabled(enabled: enabled)
+            if let result = try? JSONDecoder().decode(DocumentView.self, from: Data(json.utf8)),
+               let persisted = result.host_execution_enabled {
+                hostExecutionEnabled = persisted
+            }
+            if hostExecutionEnabled, connectedID != nil {
+                startHostInputLoop(token: generation)
+            } else if !hostExecutionEnabled {
+                hostInputTask?.cancel(); hostInputTask = nil
+            }
+            status = hostExecutionEnabled ? "宿主动作执行已开启 · 仅响应已验证输入" : "宿主动作执行已暂停"
+        } catch {
+            hostExecutionEnabled = previous
+            status = readableError(error)
+        }
+    }
+    func installCodingAgentPresets() async {
+        guard canEditDraft, !busy else { return }
+        busy = true; defer { busy = false }
+        do {
+            try applyDocument(try await backend.installCodingAgentPresets())
+            status = "已安装 Antigravity / Herdr / DSH 预设 · 可在菜单栏切换宿主激活 Profile"
+        } catch { status = readableError(error) }
+    }
+    func autoSetupHostExecutionIfNeeded() async {
+        guard !autoSetupInFlight, !systemSleeping, !stopped else { return }
+        autoSetupInFlight = true
+        defer { autoSetupInFlight = false }
+        if browsingDeviceSnapshot { showLocalDraft() }
+        let presetNames: Set<String> = ["Antigravity", "Herdr", "DeepSeek Coder (DSH)"]
+        let existingNames = Set(hostProfiles.map(\.name))
+        if !presetNames.isSubset(of: existingNames), canEditDraft, !busy {
+            await installCodingAgentPresets()
+        }
+        if let agProfile = hostProfiles.first(where: { $0.name == "Antigravity" }),
+           !presetNames.contains(hostProfiles.first(where: { $0.id.text == hostActiveProfileId })?.name ?? "") {
+            await setHostActiveProfile(agProfile.id.text)
+        }
+        if !hostExecutionEnabled {
+            await setHostExecutionEnabled(true)
+        }
+        await startDiscovery()
+        if devices.isEmpty { await refresh() }
+        let usbCandidates = devices.filter { $0.transport == "Usb" }
+        let verifiedUSB = usbCandidates.filter(\.verifiedModel)
+        if connectedID == nil, usbCandidates.count == 1, verifiedUSB.count == 1, let target = verifiedUSB.first {
+            selectDevice(target.id)
+            await connect(target.id)
+        }
+        if connectedID != nil {
+            if identity == nil {
+                await readIdentity()
+            }
+            if passThroughHealth == .snapshotMissing,
+               ["0.6.3", "synthetic-0.6.3"].contains(identity?.version ?? "") {
+                await readDeviceConfig()
+                if browsingDeviceSnapshot {
+                    showLocalDraft()
+                }
+            }
+        }
+        if passThroughHealth == .ready, hostExecutionEnabled {
+            let activeName = hostProfiles.first(where: { $0.id.text == hostActiveProfileId })?.name ?? "默认"
+            status = "USB 透传层已就绪 · 宿主接管已开启（\(activeName)）· 不写设备"
+            let receipt = HostActionReceipt(
+                timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                profileId: hostActiveProfileId ?? "",
+                bindingId: "USB:303A:8298",
+                actionType: "host_ready",
+                target: identity?.version ?? "unknown",
+                textByteLen: nil,
+                outcome: "executed",
+                detail: "passthrough=ready presets=\(hostProfiles.count) ax_trusted=\(LiveHostActionExecutor.isAccessibilityTrusted)"
+            )
+            AuditLogWriter.append(receipt)
+        }
+    }
+    func refreshPassthroughHealth() {
+        let raw = backend.checkPassthroughHealth()
+        if let view = try? JSONDecoder().decode(PassThroughHealthView.self, from: Data(raw.utf8)) {
+            passThroughHealth = view
+        } else {
+            passThroughHealth = .disconnected
+        }
+    }
+    func resolveInputActionForTesting(bindingId: String, isPressed: Bool = true) -> String? {
+        backend.resolveInputAction(bindingId: bindingId, isPressed: isPressed)
+    }
+    private func startHostInputLoop(token: Int) {
+        hostInputTask?.cancel()
+        hostInputTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled, token == self.generation, self.connectedID != nil, !self.systemSleeping, !self.stopped {
+                guard let stream = try? await self.subscribeVerifiedInput() else { break }
+                var sawGap = false
+                await withTaskCancellationHandler(operation: {
+                    while !Task.isCancelled, let event = await stream.nextEvent() {
+                        guard token == self.generation else { break }
+                        if event.kind == .inputStreamGap {
+                            sawGap = true
+                            break
+                        }
+                        if event.kind == .pressed, event.actionEligible, let bindingId = event.bindingId {
+                            if let actionJSON = self.backend.resolveInputAction(bindingId: bindingId, isPressed: true) {
+                                let pid = self.hostActiveProfileId ?? ""
+                                let receipt = await self.actionExecutor.execute(actionJSON: actionJSON, bindingId: bindingId, profileId: pid)
+                                self.lastHostActionReceipt = receipt
+                            }
+                        }
+                    }
+                }, onCancel: { stream.close() })
+                stream.close()
+                if !sawGap { break }
+            }
+        }
     }
     private func editDocument(_ action: () async throws -> String) async {
         guard canEditDraft, !busy else { return }; busy = true; defer { busy = false }
@@ -275,6 +463,7 @@ extension MicroInput: Backend {}
     }
     #if MI_SYNTHETIC_BACKEND
     private var preparedReconnectScenario=false
+    private var preparedHostExecutionScenario=false
     private func prepareReconnectScenario() async {
         preparedReconnectScenario=true
         guard let core=backend as? MicroInputCore.MicroInput else {return}
@@ -293,6 +482,60 @@ extension MicroInput: Backend {}
         }
         do {try await core.setSyntheticConfig(scenario:4)} catch {status=readableError(error);return}
         await readDeviceConfig();await compareSnapshot()
+    }
+    private func prepareHostExecutionScenario() async {
+        preparedHostExecutionScenario=true
+        guard let core=backend as? MicroInputCore.MicroInput else {return}
+        await installCodingAgentPresets()
+        await setHostExecutionEnabled(true)
+        do {
+            try await core.setSyntheticDiscovery(state:.reconnectedDevice)
+            try await core.setSyntheticConfig(scenario:1)
+        } catch { status=readableError(error); return }
+        await refresh()
+        selectDevice("synthetic-reconnected-interface-0")
+        await connect("synthetic-reconnected-interface-0")
+        await readIdentity()
+        await readDeviceConfig()
+        showLocalDraft()
+        // Wait briefly for hostInputLoop subscription to attach
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        // 1. Antigravity profile: AG01 (Row 0 left -> logical-0: OpenApp com.google.antigravity), AG00 (Row 0 right -> logical-1: Cmd+L), AG10+AG11 (Wide-Key -> 1 Cmd+Return), AG15 (Joystick Up -> Cmd+Opt+Up)
+        let antigravityId = hostProfiles.first(where: { $0.name == "Antigravity" })?.id.text
+        if let antigravityId {
+            await setHostActiveProfile(antigravityId)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: true)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: false)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG00", pressed: true)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG00", pressed: false)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG10", pressed: true)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG11", pressed: true)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG10", pressed: false)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG11", pressed: false)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG15", pressed: true)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG15", pressed: false)
+            try? await Task.sleep(nanoseconds: 80_000_000)
+        }
+        // 2. Herdr profile: AG01 (logical-0 -> FocusSession session-1), AG06 (logical-6 -> AgentCommand new-workspace)
+        if let herdrId = hostProfiles.first(where: { $0.name == "Herdr" })?.id.text {
+            await setHostActiveProfile(herdrId)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: true)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: false)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG06", pressed: true)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG06", pressed: false)
+            try? await Task.sleep(nanoseconds: 80_000_000)
+        }
+        // 3. DSH profile: AG01 (Row 0 left -> logical-0: FocusSession session-1), AG02 (logical-2 -> PasteText /explain), AG10 (logical-10 -> AgentCommand approve-current)
+        if let dshId = hostProfiles.first(where: { $0.name == "DeepSeek Coder (DSH)" })?.id.text {
+            await setHostActiveProfile(dshId)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: true)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: false)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG02", pressed: true)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG02", pressed: false)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG10", pressed: true)
+            try? await core.emitSyntheticBindingEvent(bindingId: "AG10", pressed: false)
+            try? await Task.sleep(nanoseconds: 80_000_000)
+        }
     }
     #endif
     @Published var applyPreview: ApplyPreview?
@@ -480,7 +723,11 @@ extension MicroInput: Backend {}
     @Published var connectedID: String?
     @Published var stale = false
     @Published var busy = false
-    init(backend: Backend, documentURL: URL? = nil) { self.backend = backend; self.documentOverride = documentURL }
+    init(backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil) {
+        self.backend = backend
+        self.documentOverride = documentURL
+        self.actionExecutor = actionExecutor ?? LiveHostActionExecutor()
+    }
     var profile: Profile? { guard let ps = snapshot?.profiles, ps.indices.contains(profileIndex) else { return nil }; return ps[profileIndex] }
     var layer: Layer? { guard let ls = profile?.layers, ls.indices.contains(layerIndex) else { return nil }; return ls[layerIndex] }
     func selectProfile(_ index: Int) { controlSettingsError = nil; profileIndex = index; layerIndex = 0; slot = 0; selectedBinding = nil }
@@ -510,7 +757,8 @@ extension MicroInput: Backend {}
     func loadDemo() async {
         guard !busy else { return }; busy = true; defer { busy = false }
         generation += 1; let token = generation
-        await backend.disconnect(); guard token == generation else { return }; connectedID = nil; identity = nil; identityStatus = "身份尚未读取"
+        hostInputTask?.cancel(); hostInputTask = nil
+        await backend.disconnect(); guard token == generation else { return }; connectedID = nil; identity = nil; identityStatus = "身份尚未读取"; refreshPassthroughHealth()
         do { let json = try await backend.loadDemo(); guard token == generation else { return }; try replace(json); localSnapshot = snapshot; browsingDeviceSnapshot = false; status = "本地草稿 · 演示基线 · 未与设备同步" } catch { if token == generation { status = readableError(error) } }
     }
     func connect(_ id: String) async {
@@ -518,13 +766,17 @@ extension MicroInput: Backend {}
         generation += 1; let token = generation
         busy = true; defer { if token == generation { busy = false } }
         connectionWatcher?.cancel()
+        hostInputTask?.cancel(); hostInputTask = nil
         stale = snapshot != nil
         connectedID = nil; identity = nil; identityStatus = "身份尚未读取"; pendingID = id
+        refreshPassthroughHealth()
         // Preserve provenance: a failed device read cannot turn demo data into a device snapshot.
         do {
             try await backend.connect(id: id)
             guard token == generation else { return }
             pendingID = nil; connectedID = id; status = "设备已打开 · 身份尚未读取 · 配置尚未读取"
+            refreshPassthroughHealth()
+            if hostExecutionEnabled { startHostInputLoop(token: token) }
             connectionWatcher = Task { [weak self, backend] in
                 let reason = await backend.waitForDisconnect()
                 guard !Task.isCancelled, !reason.isEmpty, let self, token == self.generation else { return }
@@ -543,6 +795,7 @@ extension MicroInput: Backend {}
             identity = result
             identityStatus = "身份已读回 · \(result.sourceMethod)"
             status = "设备身份已读回 · 固件 \(result.version ?? "未知") · 配置尚未读取"
+            refreshPassthroughHealth()
         } catch { if token == generation { identityStatus = "身份读取失败 · \(readableError(error))" } }
     }
     func readDeviceConfig() async {
@@ -561,13 +814,16 @@ extension MicroInput: Backend {}
             }
             snapshot = result; browsingDeviceSnapshot = true; stale = false; selectProfile(0)
             status = result.source == "DeviceSnapshot" ? "设备快照 · 只读 · 已核对文件大小及摘要" : "合成设备夹具 · 只读 · 不是实际设备快照"
+            refreshPassthroughHealth()
         } catch { if token == generation { stale = snapshot != nil; status = "配置读取失败 · \(readableError(error))" } }
     }
 
     private func retireConnection(_ reason: String) {
         generation += 1; pendingID = nil; busy = false
         connectionWatcher?.cancel(); connectionWatcher = nil
+        hostInputTask?.cancel(); hostInputTask = nil
         connectedID = nil; identity = nil; identityStatus = "身份尚未读取"
+        passThroughHealth = .disconnected
         stale = snapshot != nil; status = reason
     }
     func suspend() async { retireConnection("会话已断开"); await backend.disconnect() }

@@ -50,6 +50,15 @@ impl MicroInput {
             changed: Notify::new(),
         }))
     }
+    /// Verified host-routing subscription (0.6.3 physical mapping + WideKeyMerger).
+    pub async fn subscribe_verified_input(&self) -> Result<Arc<InputSubscription>, BridgeError> {
+        let session = self.current().map_err(failure)?;
+        Ok(Arc::new(InputSubscription {
+            monitor: Mutex::new(session.subscribe_verified_input()),
+            closed: AtomicBool::new(false),
+            changed: Notify::new(),
+        }))
+    }
 }
 #[uniffi::export(async_runtime = "tokio")]
 impl InputSubscription {
@@ -80,25 +89,29 @@ impl InputSubscription {
             mi_session::InputEventKind::Released => InputKind::Released,
             mi_session::InputEventKind::InputStreamGap => InputKind::InputStreamGap,
         };
+        let verification = match kind {
+            InputKind::Pressed | InputKind::Released if event.action_eligible => {
+                "verified-host-routing-0.6.3"
+            }
+            InputKind::CandidatePressed | InputKind::CandidateReleased => {
+                "candidate-dispatch-0.6.2-current-firmware-unverified"
+            }
+            _ => "input-schema-unverified",
+        }
+        .into();
         Some(InputEventInfo {
             session_id: event.session_id,
             sequence: event.sequence,
             timestamp_ms: event.timestamp_ms,
-            kind: kind.clone(),
+            kind,
             logical_switch: event.logical_switch,
             binding_id: event.binding_id,
-            physical_control: None,
-            keycap_group: None,
-            action_role: None,
+            physical_control: event.physical_control,
+            keycap_group: event.keycap_group,
+            action_role: event.action_role,
             lost_count: event.lost_count,
-            verification: match kind {
-                InputKind::CandidatePressed | InputKind::CandidateReleased => {
-                    "candidate-dispatch-0.6.2-current-firmware-unverified"
-                }
-                _ => "input-schema-unverified",
-            }
-            .into(),
-            action_eligible: false,
+            verification,
+            action_eligible: event.action_eligible,
         })
     }
     pub fn close(&self) {
@@ -121,6 +134,16 @@ impl MicroInput {
     pub async fn emit_synthetic_input(&self, count: u16) -> Result<(), BridgeError> {
         self.current()?;
         self.transport.emit_synthetic_input(count).map_err(failure)
+    }
+    pub async fn emit_synthetic_binding_event(
+        &self,
+        binding_id: String,
+        pressed: bool,
+    ) -> Result<(), BridgeError> {
+        self.current()?;
+        self.transport
+            .emit_synthetic_binding(&binding_id, pressed)
+            .map_err(failure)
     }
 }
 

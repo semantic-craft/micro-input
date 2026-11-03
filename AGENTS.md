@@ -21,3 +21,7 @@
 ### Domain docs
 
 采用 single-context；探索领域模型或架构前见 [domain.md](docs/agents/domain.md)。
+
+### Verification
+
+应用交互验证与宿主执行闭环验收使用项目内置技能 [verify-micro-input](skills/verify-micro-input/SKILL.md)（驱动 `scripts/run --verify`、检查 `launcher.json` 与 `audit.jsonl` 并输出 `result.json`）。

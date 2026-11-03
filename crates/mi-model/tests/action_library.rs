@@ -72,16 +72,20 @@ fn corrupt_or_incomplete_preferences_never_overwrite_files_or_disable_draft_edit
 
 #[test]
 fn library_explains_local_app_intent_and_rust_validates_assignment() {
-    let entries = action_library::search("应用", "全部", false, &BTreeSet::new());
+    let entries = action_library::search("", "全部", false, &BTreeSet::new());
     let app = entries.iter().find(|e| e.action.id == "app").unwrap();
     assert_eq!(
         app.action.payload,
         json!({"type":"open_app","bundle_id":"com.apple.TextEdit"})
     );
     assert!(app.capability.host_required);
-    assert!(!app.capability.execution_available);
+    assert!(app.capability.execution_available);
     assert_eq!(app.capability.target, "com.apple.TextEdit");
-    assert!(app.capability.unavailable_reason.contains("未接入"));
+    assert!(app.capability.unavailable_reason.is_empty());
+    let skill = entries.iter().find(|e| e.action.id == "skill").unwrap();
+    assert!(skill.capability.host_required);
+    assert!(!skill.capability.execution_available);
+    assert!(skill.capability.unavailable_reason.contains("未接入"));
     let mut draft = Draft::default();
     let p = draft.config.profiles[0].id.clone();
     let l = draft.config.profiles[0].layers[0].id.clone();

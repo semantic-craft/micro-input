@@ -90,6 +90,62 @@ async fn overflow_stops_capture_and_does_not_replay_backlog() {
     core.shutdown().await;
 }
 
+#[cfg(feature = "synthetic-backend")]
+#[tokio::test]
+async fn verified_input_subscription_merges_wide_key_and_resolves_host_actions() {
+    let core = connected().await;
+    let doc_json = core.install_coding_agent_presets().await.unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&doc_json).unwrap();
+    let active_pid = doc["host_active_profile_id"].as_str().unwrap().to_owned();
+    assert!(!active_pid.is_empty());
+    core.set_host_execution_enabled(true).await.unwrap();
+
+    let sub = core.subscribe_verified_input().await.unwrap();
+    // Row 0 inversion: AG01 -> logical-0
+    core.emit_synthetic_binding_event("AG01".into(), true)
+        .await
+        .unwrap();
+    let ev0 = sub.next_event().await.unwrap();
+    assert_eq!(ev0.kind, mi_ffi::InputKind::Pressed);
+    assert_eq!(ev0.binding_id.as_deref(), Some("AG01"));
+    assert_eq!(ev0.logical_switch.as_deref(), Some("logical-0"));
+    assert_eq!(ev0.physical_control.as_deref(), Some("row0-col0-left"));
+    assert_eq!(ev0.verification, "verified-host-routing-0.6.3");
+    assert!(ev0.action_eligible);
+
+    let resolved_json = core
+        .resolve_input_action(ev0.binding_id.unwrap(), true)
+        .unwrap();
+    let resolved: serde_json::Value = serde_json::from_str(&resolved_json).unwrap();
+    assert_eq!(resolved["action_type"], "open_app");
+    assert_eq!(resolved["bundle_id"], "com.google.antigravity");
+
+    // WideKeyMerger across FFI: AG10 press -> 1 Pressed; AG11 press -> suppressed; AG10 release -> suppressed; AG11 release -> 1 Released
+    core.emit_synthetic_binding_event("AG10".into(), true)
+        .await
+        .unwrap();
+    core.emit_synthetic_binding_event("AG11".into(), true)
+        .await
+        .unwrap();
+    core.emit_synthetic_binding_event("AG10".into(), false)
+        .await
+        .unwrap();
+    core.emit_synthetic_binding_event("AG11".into(), false)
+        .await
+        .unwrap();
+
+    let wide_press = sub.next_event().await.unwrap();
+    assert_eq!(wide_press.kind, mi_ffi::InputKind::Pressed);
+    assert_eq!(wide_press.binding_id.as_deref(), Some("AG10"));
+    assert_eq!(wide_press.keycap_group.as_deref(), Some("wide-bottom-2u"));
+
+    let wide_release = sub.next_event().await.unwrap();
+    assert_eq!(wide_release.kind, mi_ffi::InputKind::Released);
+    assert_eq!(wide_release.binding_id.as_deref(), Some("AG10"));
+
+    core.shutdown().await;
+}
+
 #[test]
 fn native_options_require_exact_opt_in_and_a_bounded_window() {
     assert!(options(None, Some("test-1"), Some("45")).is_err());

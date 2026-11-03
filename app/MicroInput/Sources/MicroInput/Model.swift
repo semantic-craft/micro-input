@@ -77,7 +77,7 @@ func bindingKey(profile: JSONValue, layer: JSONValue, slot: Int) -> String {
 extension CatalogAction {
     var parameterSummary: String {
         payload.keys.filter {$0 != "type"}.sorted().map { key in
-            let label = ["token":"设备按键意图", "text":"文本", "url":"网址", "bundle_id":"应用标识", "key":"按键", "target":"目标", "modifiers":"修饰键", "adapter":"适配器（未验证）", "command":"命令引用", "session":"会话引用", "skill":"Skill 引用"][key] ?? key
+            let label = ["token":"设备按键意图", "text":"文本", "url":"网址", "bundle_id":"应用标识", "key":"按键", "target":"目标", "modifiers":"修饰键", "adapter":"适配器", "command":"命令引用", "session":"会话引用", "skill":"Skill 引用"][key] ?? key
             return "\(label)：\(payload[key]?.text ?? "")"
         }.joined(separator: "\n")
     }
@@ -126,7 +126,18 @@ struct MacroReference: Decodable {
     }
 }
 struct MacroSummary: Decodable, Identifiable { let id: String, action: CatalogAction, references: [MacroReference] }
-struct DocumentView: Decodable { let control_settings: [String:LocalControlSettings]?; let macro_library: [MacroSummary]?; let multi_library: [MacroSummary]?; let graph_actions: [String:CatalogAction]?; let draft: DraftState, config: Snapshot, selection_hint: DocumentSelection?; let action_capabilities: [String:ActionCapability]? }
+struct DocumentView: Decodable {
+    let control_settings: [String:LocalControlSettings]?
+    let macro_library: [MacroSummary]?
+    let multi_library: [MacroSummary]?
+    let graph_actions: [String:CatalogAction]?
+    let draft: DraftState
+    let config: Snapshot
+    let selection_hint: DocumentSelection?
+    let action_capabilities: [String:ActionCapability]?
+    let host_active_profile_id: String?
+    let host_execution_enabled: Bool?
+}
 struct ActionCapability: Decodable {
     let target: String, prerequisites: [String], host_required: Bool, execution_available: Bool
     let unavailable_reason: String, source: String, result_semantics: String

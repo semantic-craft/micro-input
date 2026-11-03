@@ -141,5 +141,28 @@ extension InputMonitorTests {
         XCTAssertNil(monitor.lastEvent)
         XCTAssertEqual(monitor.status, "连接设备后持续监听")
     }
+    @MainActor func testVerifiedPresentationWhenIdentityReadEvenWithHostExecutionPaused() async throws {
+        let core = MicroInputCore.MicroInput.syntheticDiscovery()
+        try await core.setSyntheticDiscovery(state: .twoDevices)
+        let store = Store(backend: core)
+        store.selectDevice("synthetic-interface-0")
+        await store.connect("synthetic-interface-0")
+        await store.readIdentity()
+        XCTAssertFalse(store.hostExecutionEnabled)
+        XCTAssertEqual(store.identity?.version, "synthetic-0.6.3")
+
+        let monitor = InputMonitorState()
+        let task = Task { await monitor.listen(store: store) }
+        for _ in 0..<100 where !monitor.status.contains("已验证物理映射") { try await Task.sleep(nanoseconds: 1_000_000) }
+        try await core.emitSyntheticInputCase(inputCase: .candidateBindings)
+        // WideKeyMerger coalesces AG11+AG10 press/release (8 raw events -> 6 verified events)
+        for _ in 0..<100 where monitor.count < 6 { try await Task.sleep(nanoseconds: 1_000_000) }
+        XCTAssertEqual(monitor.count, 6)
+        XCTAssertEqual(monitor.eventSummary, "已验证输入 AG10 → logical-10 (row3-wide-2u · 键帽组 wide-bottom-2u) · 释放")
+        XCTAssertEqual(monitor.lastEvent?.actionEligible, true)
+        monitor.stop()
+        await task.value
+        await store.shutdown()
+    }
 }
 #endif

@@ -208,3 +208,10 @@ UniFFI 和 Swift Store 只暴露预览、取消和本机备份；Apply/Restore �
 技术准备按票评估。当前 #3/#4 补完明确契约后可进入实施候选；缺 native adapter 证据的子项仍受门槛约束。远期票没有文件/API/检查点或证据不足时保持 needs-info，说明具体缺什么。这里的报告不是 35 张工单整体通过零决策审查的证明。
 
 规划验收：35 票映射、48 故事保留；静态 DAG 无环；激活条件边 #23→#14 后也无环；每条发现有明确落点；链接与来源边界有效；GitHub 回读正文/标签/依赖一致。只修改文档时不把代码测试或原生验收标为本轮运行。复审单列结果，未复审不得宣称 EGM 已通过。
+
+### S2 / S4 宿主动作执行与 Coding Agent 预设契约（E-098）
+
+基于 IA-05/12/13/14 与 E-060/079/089 候选协议与逆向静态映射证据（并提供 `scripts/observe-input --observe-once` 供 E-094 实机 45 秒受控按键序列采集），完整技术方案与验收设计见 [docs/designs/host-execution-and-agent-presets.md](designs/host-execution-and-agent-presets.md)：
+- **硬件透传层健康检查**：`mi-model::host_router::check_passthrough_health` 检查当前活动层是否包含完整的 `KV_OAI_AG00`–`KV_OAI_AG12` 绑定，零 Flash 写入实现多套 Coding Agent Profile 切换。
+- **2U 宽键双微动状态机**：`mi-session::input::VerifiedInputDecoder` 按位掩码合并 `AG10` + `AG11`，先按触发一次 `Pressed(AG10)`、全松触发一次 `Released(AG10)`。
+- **宿主执行与菜单栏解耦**：`workbench.preferences.json` 持久化 `host_active_profile_id` 与 `host_execution_enabled`，与主窗口编辑器 `profileIndex` 独立；Swift `LiveHostActionExecutor` 支持 `Shortcut`、`PasteText`（剪贴板恢复且剥离末尾换行）、`OpenApp`、`OpenUrl` 以及 `HerdrAdapter` / `DshAdapter`。

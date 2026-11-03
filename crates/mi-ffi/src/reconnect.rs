@@ -66,7 +66,7 @@ impl MicroInput {
             store
                 .resolve_comparison(&token, choice, &serde_json::Value::Null)
                 .map_err(failure)?;
-            return document_response(&store.draft, None);
+            return document_response(&store, None);
         }
         let state = self.state.lock().unwrap();
         let (_, baseline) = Self::comparison_snapshot(&state)?;
@@ -74,6 +74,6 @@ impl MicroInput {
         store
             .resolve_comparison(&token, choice, &baseline)
             .map_err(failure)?;
-        document_response(&store.draft, None)
+        document_response(&store, None)
     }
 }
