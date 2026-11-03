@@ -8,6 +8,7 @@
 
 ```sh
 scripts/verify-offline # 全量检查 + 三个隔离合成应用场景 + 自动回执/清理核对；不连接真实设备
+scripts/perf-baseline # 隔离 QA 冷启动与空闲 CPU/RSS 基线；只测量，不设验收预算
 scripts/check          # Rust/Swift测试（含真实UniFFI合成发现）、桥接生成、开发构建和协议边界检查
 scripts/run            # 启动当前checkout的target/MicroInput.app
 scripts/run --verify   # 独立QA标识/文档，10分钟自动退出并回收副本

@@ -6,6 +6,7 @@ import MicroInputCore
     @StateObject private var store: Store
     private let statusMenu: StatusMenu
     init() {
+        PerformanceProbe.start()
         let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
         #if MI_SYNTHETIC_BACKEND
         let core = ["config-write", "lighting-control"].contains(scenario) ? MicroInput.syntheticConfigWriter() : ["reconnect", "reconnect-transient", "apply-preparation", "host-execution"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
@@ -45,6 +46,35 @@ import MicroInputCore
     }
 }
 
+enum PerformanceProbe {
+    private static var startedAt: DispatchTime?
+    private static var startUptime: Double?
+    private static var marked = false
+
+    static func start() {
+        guard startedAt == nil else { return }
+        startedAt = DispatchTime.now()
+        startUptime = ProcessInfo.processInfo.systemUptime
+    }
+
+    static func markWorkbenchReady() {
+        guard !marked, let auditLog = ProcessInfo.processInfo.environment["MI_HOST_AUDIT_LOG"] else { return }
+        marked = true
+        guard let startedAt, let startUptime else { return }
+        let evidenceDirectory = URL(fileURLWithPath: auditLog).deletingLastPathComponent()
+        let payload: [String: Any] = [
+            "pid": ProcessInfo.processInfo.processIdentifier,
+            "ready_at_unix_ms": Int(Date().timeIntervalSince1970 * 1000),
+            "monotonic_ready_ms": Double(DispatchTime.now().uptimeNanoseconds - startedAt.uptimeNanoseconds) / 1_000_000,
+            "process_ready_ms": (ProcessInfo.processInfo.systemUptime - startUptime) * 1000,
+            "trigger": "workbench-on-appear",
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
+        let path = evidenceDirectory.appendingPathComponent("app-ready.json")
+        FileManager.default.createFile(atPath: path.path, contents: data, attributes: [.posixPermissions: 0o600])
+    }
+}
+
 // R-H11/R-P03: native status menu with a keyboard route, including when the editor is closed.
 struct WorkbenchHost: View {
     @ObservedObject var store: Store
@@ -52,6 +82,7 @@ struct WorkbenchHost: View {
     @Environment(\.openWindow) private var openWindow
     var body: some View {
         Workbench(store: store).onAppear {
+            PerformanceProbe.markWorkbenchReady()
             statusMenu.open = { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
         }
     }
