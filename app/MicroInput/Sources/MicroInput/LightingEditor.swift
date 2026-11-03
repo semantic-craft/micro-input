@@ -128,7 +128,7 @@ struct LightingEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack { Text("RGB 灯光").font(.title2); Spacer(); Button("结束预览并关闭") { Task { await store.endLightingPreview(); store.showingLighting = false } } }
-            Text("本地编辑保存到当前层。即时预览显示在当前连接设备，不切换设备层、不写配置文件；结束不会自动恢复原灯光。")
+            Text("本地编辑保存到当前层。即时预览显示在当前连接设备，不切换设备层、不写配置文件；结束不会自动恢复原灯光。").fixedSize(horizontal: false, vertical: true)
             Picker("灯区", selection: $zone) { Text("Backlight · 按键背光").tag("backlight"); Text("Underglow · 底部灯光").tag("underglow") }.pickerStyle(.segmented).onChange(of: zone) { _,_ in reload() }
             if model?.can_add == true {
                 Text("当前层没有灯光设置。添加后可编辑，并与按键一同审阅应用。")
@@ -157,7 +157,7 @@ struct LightingEditor: View {
                 Button("保存预览到草稿") { Task { await store.saveLightingPreview(); reload() } }.disabled(store.lightingPreviewToken == nil || store.busy)
                 Button("结束预览") { Task { await store.endLightingPreview(); reload() } }.disabled(store.lightingPreviewToken == nil)
             }
-            Text(store.lightingPreviewResult).font(.caption).textSelection(.enabled)
+            Text(store.lightingPreviewResult).font(.caption).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             Text(store.status).font(.caption)
             DisclosureGroup("原始灯光值") { Text(model?.raw ?? "未知").font(.caption.monospaced()).textSelection(.enabled) }
         }.padding(24).frame(width: 680).onAppear { store.refreshOperationCapabilities(); reload() }.task(id: store.lightingPreviewToken) { await store.observeLightingPreview() }
