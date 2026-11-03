@@ -225,4 +225,4 @@
 
 - **E-106 / PREPARATION + OFFLINE（实机验收方案与材料工具）**：2026-11-03，新增 `docs/designs/hardware-acceptance.md`，定义H0新鲜只读身份/配置备份、H1单新临时文件实验及停止/诊断/恢复规则，H2单键配置与H3灯光预览保持独立范围。H1固定最多5个writebin块、6220字节和1次删除，只涉及自编临时内容；不向keymap/smart_actions写入，不发送灯光或重启方法，不把不确定后的恢复放进finally。已有C诊断/清理工作线需先核清未决状态，本轮未合入或执行。
   `scripts/prepare-hardware-acceptance` 只有prepare/verify/compare本地入口，无设备库、子进程、网络或execute/resume入口。生成0700/0600私有新包，保存固定计划、载荷和可选导入原字节；验证范围、库存、摘要及权限，拒绝覆盖、符号链接、非普通文件和缺失/空文件混淆。导入来源始终未核实，本地相等不报告设备/灯光已通过，ready_to_execute始终false。当前实际生成的 `.scratch/input-study/hardware-acceptance-preparation/offline-kit/` 仅含自编载荷，无设备备份。
-  参考IA-04/06/07/16/17、E-105与UNKNOWN-08/09/17；采用独立完整读回、未知状态停止不重放、备份与硬件恢复分离的约束。新增8项离线回归已通过；完整项目检查结果另记。本轮未连接、枚举或写入真实设备，未采集设备备份、执行物理探针或改变现有键位/灯光。
+  参考IA-04/06/07/16/17、E-105与UNKNOWN-08/09/17；采用独立完整读回、未知状态停止不重放、备份与硬件恢复分离的约束。新增8项离线回归已通过；实现提交 `af73e6f` 的 `MI_AUTO_HOST_READY=0 scripts/check` 退出0，29项Python、全工作区Rust、81项合成Swift、43项生产Swift、双后端构建及UNKNOWN/只读/零发送边界通过，实机探针保持跳过。日志为主工作区 `.scratch/input-study/hardware-acceptance-preparation/check.log`。本轮未连接、枚举或写入真实设备，未采集设备备份、执行物理探针或改变现有键位/灯光。
