@@ -4,7 +4,7 @@
 
 PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与 Rust 本地持久化。设备发现、身份查询及 #5 有界配置读取已实现；当前0.6.3的核心读回和原生只读浏览见E-079。#6完整生命周期、其他固件和物理映射仍待验收，未知后端继续禁止发送。
 
-本地v2文档、v1原字节备份迁移、Profile/Layer管理和真实快照显式创建独立草稿已实现，证据见E-083；三方比较已实现，身份仅有临时接口时保留明确的整份选择，自动合并保持禁用；设备应用仍未开放。
+本地v2文档、v1原字节备份迁移、Profile/Layer管理和真实快照显式创建独立草稿已实现，证据见E-083；三方比较已实现，身份仅有临时接口时保留明确的整份选择，自动合并保持禁用；设备应用当前范围见 E-108。
 
 先读 [实施设计](implementation-plan.md) D01–D07 与 [BUILD_PROMPT](spec/BUILD_PROMPT.md) 的 S1，再按对应工单推进。完整产品与依赖入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)。当前继续开发本地功能与适用验证；设备操作遵守证据和恢复门槛，不因规划批准而解锁宿主执行或自动化。
 
@@ -73,12 +73,12 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 
 ## S3 离线验证入口
 
-文档模型与候选：`cargo test -p mi-model --test lighting`；合成端到端：`cargo test -p mi-session --features synthetic-backend --test config_write`。后者仅用自编夹具、私有临时备份和编译的合成transport，不枚举/打开真实设备。合成写入器仅由显式 `synthetic_config_writer` 构造的高层 UniFFI 工作流调用；普通合成实例与原生实例都不开放写入。默认统一门禁仍为 `scripts/check`，原生探针继续ignored。
+文档模型与候选：`cargo test -p mi-model --test lighting`；合成端到端：`cargo test -p mi-session --features synthetic-backend --test config_write`。后者仅用自编夹具、私有临时备份和编译的合成transport，不枚举/打开真实设备。合成写入器仅由显式 `synthetic_config_writer` 构造的高层 UniFFI 工作流调用；普通合成实例不开放写入；原生接线已由 E-108 补齐。默认统一门禁仍为 `scripts/check`，原生探针继续ignored。
 
 既有宿主回归使用 `scripts/build --synthetic` 后的 `MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=25`；该场景验证既有预设/宿主模拟未回退，不代表新增灯光UI或真实设备功能。生产离线启动必须设置 `MI_AUTO_HOST_READY=0`，本轮不启动生产应用。
 
 
-持久记录回归：`cargo test -p mi-model --test operation_record`；合成恢复链路仍用 `cargo test -p mi-session --features synthetic-backend --test config_write`。覆盖首次发送前落盘、中断重开、损坏现状恢复、恢复链失败、新计划绑定、读回失败、核验结果未落盘、文档冲突和重复本地修复。`apply_observed` 是仅合成模块的故障注入接缝，不开放到 FFI；生产后端继续拒绝构造 writer。完整检查使用 `MI_AUTO_HOST_READY=0 scripts/check`，真实硬件测试保持 ignored。
+持久记录回归：`cargo test -p mi-model --test operation_record`；合成恢复链路仍用 `cargo test -p mi-session --features synthetic-backend --test config_write`。覆盖首次发送前落盘、中断重开、损坏现状恢复、恢复链失败、新计划绑定、读回失败、核验结果未落盘、文档冲突和重复本地修复。`apply_observed` 是检查点观测接缝，不开放到 FFI；生产后端现经 E-108 的独立入口构造计划绑定 writer。完整检查使用 `MI_AUTO_HOST_READY=0 scripts/check`，真实硬件测试保持 ignored。
 
 
 高层集成与恢复界面：`MI_AUTO_HOST_READY=0 swift test --package-path app/MicroInput -Xswiftc -DMI_SYNTHETIC_BACKEND --filter DeviceOperationsTests`（先构建合成绑定）。隔离应用场景 `MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=config-write scripts/run --verify --timeout=55` 完成单键应用、完整读回、新计划恢复，并打开恢复记录面板。独立 `device-operations.jsonl` 只记录操作结果，实体键和视觉灯效固定 NOT_RUN。本地保存失败通过仅专用合成实例可用的故障开关注入，重开后用无设备会话的原生核心修复；不启动生产应用。
@@ -93,3 +93,5 @@ RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和
 使用 `scripts/prepare-hardware-acceptance prepare` 生成新的私有准备包；`verify` 检查固定范围、权限及摘要，`compare` 比较调用方提供的本地原字节。工具没有设备I/O或执行入口，材料有效不等于设备备份或执行许可。最小实验、备份采集前提和恢复规则见 [实机验收准备](designs/hardware-acceptance.md)。回归 `test_hardware_acceptance_launcher.py` 随 `scripts/check` 运行，无需连接设备。
 
 独立 H0/H1 执行器：`scripts/hardware-acceptance` 默认只跑假 USB；显式实机选项和一次性材料约束见上述设计。`cargo test --locked -p mi-session --test hardware` 覆盖完整备份、固定5块/删除、逐步保全及失败零重放；两个 native 用例保持 ignored。启动器系统边界回归随统一检查执行，不创建真实子进程或连接设备。
+
+原生配置链（E-108）：`ConfigWriter::native` 与合成路径共用计划/记录/恢复；`native_plan_bound_writer_applies_and_restores_but_rejects_another_connection` 离线覆盖真实分支和连接nonce隔离，`multiframe_request_uses_one_transport_batch` 防止长请求回退到逐报告锁竞争。普通RPC出口继续只读。实机最小配置应用与原字节恢复的私有材料在 `.scratch/input-study/hardware-live/`；默认门禁不重跑设备变更。GUI/宿主回归仍使用 `MI_AUTO_HOST_READY=0 scripts/verify-offline`。

@@ -1101,3 +1101,73 @@ async fn encoded_readonly_requests_never_forward_ambiguous_original_bytes() {
     assert!(task.await.unwrap().is_ok());
     session.shutdown().await;
 }
+
+struct BatchOnlyLink {
+    inner: Arc<MockLink>,
+    batches: Arc<Mutex<Vec<usize>>>,
+}
+#[async_trait::async_trait]
+impl HidLink for BatchOnlyLink {
+    async fn write(&self, _: &[u8]) -> Result<(), TransportError> {
+        panic!("RPC reports must use one batch")
+    }
+    async fn write_batch(&self, reports: &[Vec<u8>]) -> Result<(), TransportError> {
+        self.batches.lock().unwrap().push(reports.len());
+        for report in reports {
+            self.inner.write(report).await?;
+        }
+        Ok(())
+    }
+    async fn read(&self) -> Result<Vec<u8>, TransportError> {
+        self.inner.read().await
+    }
+    fn close(&self) {
+        self.inner.close();
+    }
+}
+#[tokio::test]
+async fn multiframe_request_uses_one_transport_batch() {
+    let (raw, mut requests) = MockLink::new();
+    let batches = Arc::new(Mutex::new(Vec::new()));
+    let link = Arc::new(BatchOnlyLink {
+        inner: raw.clone(),
+        batches: batches.clone(),
+    });
+    let s = DeviceSession::new(
+        link,
+        Box::<mi_proto::NativeFramer>::default(),
+        Arc::new(ReadOnlySchema),
+        SessionConfig::default(),
+    );
+    let task = {
+        let s = s.clone();
+        tokio::spawn(async move {
+            s.request(
+                Method::FsReadbin,
+                json!({"file":"keymap.json","offset":0,"len":3072}),
+            )
+            .await
+        })
+    };
+    let mut framer = mi_proto::NativeFramer::default();
+    let request = loop {
+        let frame = requests.recv().await.unwrap();
+        if let Some(line) = framer.feed(&frame).unwrap().pop() {
+            break serde_json::from_slice::<Value>(&line).unwrap();
+        }
+    };
+    assert_eq!(batches.lock().unwrap().len(), 1);
+    assert!(batches.lock().unwrap()[0] > 1);
+    for report in mi_proto::NativeFramer::default()
+        .encode(
+            json!({"id":request["id"],"result":null})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap()
+    {
+        raw.inject.send(report).unwrap();
+    }
+    assert!(task.await.unwrap().is_ok());
+    s.shutdown().await;
+}

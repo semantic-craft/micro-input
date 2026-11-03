@@ -15,7 +15,7 @@ impl MicroInput {
         result.apply_available = capable;
         result.restore_available = capable;
         if capable {
-            result.unavailable_reason = "仅合成设备可执行；真实设备能力关闭".into();
+            result.unavailable_reason = "将应用已审阅配置；备份与恢复限定当前连接".into();
         }
         serde_json::to_string(&result).map_err(failure)
     }

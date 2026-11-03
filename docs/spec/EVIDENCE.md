@@ -232,3 +232,11 @@
   执行器只有一个串行reader，ID不回绕，按配置大小预留完整核验预算；4秒RPC、240秒流程及300秒进程监督。首次可能发送前记录阶段，错误立即关闭，不追加诊断、不重试、不自动清理/恢复。启动器在材料旁持久独占占用目标，正常入口重复执行同一材料拒绝；这不是防手工绕过的安全系统。原生稳定硬件ID仍未知，只支持指定候选和当前同一连接，不声称跨连接恢复；未完成块不可见时保守停止，不猜测后续写入。
   参考IA-04/06/07/16、E-105/E-106及批准验收方案。实现提交 `1e84a70` 新增7项Rust假USB回归和4项Python启动器系统边界回归；覆盖正常5块6220字节/删除、每一变更点失败即停、不截断、假成功、错ID、配置改变、删除超时、授权/路径/身份/预算拒绝、原字节备份与缺失/空文件、一次性占用及进程组超时回收。完整 `MI_AUTO_HOST_READY=0 scripts/check` 退出0：33项Python、全工作区Rust、81项合成Swift、43项生产Swift、双后端构建和只读/零发送门禁通过。最终H0/H1定向回归及实际默认脚本入口均7通过、2个实机用例ignored；日志为主工作区 `.scratch/input-study/hardware-executor/check.log`、`hardware-final.log`、`default-entry.log`。
   本轮没有设备枚举、连接、真实备份、配置写入、灯光请求、应用启动或安装。实机H0/H1和实体/视觉行为仍NOT_RUN；实际覆盖/截断、分块可见性、竞争及恢复语义仍未验收，#22/#24不关闭。
+
+
+- **E-108 / IMPLEMENTATION + OBSERVED + OFFLINE（原生配置应用与原值恢复）**：2026-11-03，用户明确授权连接、先备份、最小临时文件实验、配置最小变更及恢复。当前 USB Creator Micro 2 / 0.6.3 的 H0 两次完整配置备份通过。H1 总计五块、6220 字节、一次删除，完成长→短→长完整读回及删除核验，两原配置、非目标目录和活动索引保持一致。首次因未完成块尚未出现在目录而停止；只读确认后经审阅仅继续剩余块，未重放首块。一轮续接在任何写入前因方法回显不匹配停止；新一次续接完成。历史 C 的 11 字节自编临时残留核对后保留，未清除。
+  单普通键与已有 Layer 灯光字段共用生产 ConfigWriter / 高层 FFI 的候选、备份、宿主动作排空、持久记录和完整读回路径；普通 RPC 出口仍只读。限定唯一 USB303A:8298、固件0.6.3及当前连接，连接随机nonce参与身份比较，不能将OS临时接口当成跨连接稳定身份。原生 lights.preview 保持关闭。
+  实机通过真实高层 FFI 将一个非活动 Profile 的既有 Backlight 色值从 #FFFFFF 改为 #FFFFFE，三块写入及完整读回通过；不切换活动 Profile/Layer。初次应用及随后的恢复尝试曾在首块后因响应问题停止，分别通过新鲜只读快照确认原值或候选现状，未自动重放。诊断观察到缺少合法ID/error400；原先同句柄 reader 的20ms read_timeout可能插入逐报告写锁之间，现一个RPC一次持锁连续发送。修复后重新从当前快照编译恢复候选、逐字节核对原备份，经三块写入及完整读回恢复Verified。最终 keymap 与最初7421字节备份完全一致，smart_actions 未变。该结果支持本次恢复，不证明全部竞争原因已消除。随后额外只读H0因foreign_response停止，没有新增写入，也不计为成功检查。
+  原始材料保存在主工作区 `.scratch/input-study/hardware-live/`（不提交）：`h0.log`、`h1-remainder-after-not-sent.log`、`native-config-reviewed.log`、`original-restore-batched.log`、`original-restore-batched-transport/result.json`；各次备份/失败记录保存于 `device-records/`，一次性执行源码留在 `execution-sources/`，未加入日常自动入口。
+  `MI_AUTO_HOST_READY=0 scripts/verify-offline` 退出0：33项Python、全工作区Rust（含22项配置应用/恢复、8项H0/H1假USB）、81项合成Swift、43项生产Swift、双后端构建及只读/零发送门禁通过；host-execution、config-write、lighting-control 三项隔离应用场景PASS并确认清理，日志 `final-offline.log`，回执 `qa/`。新增回归覆盖原生分支计划/恢复与不同连接nonce拒绝、RPC单批发送、未完成块不可见；最后请求预算补入原生状态复核后，原生分支定向回归再次通过。
+  本轮只做一次 RGB 配置字段变更，未做实体按键、视觉灯效或断电持久化验收；无灯光字段的层不自动补造结构。安装版未替换，不宣称当前日常应用已更新。UNKNOWN-08/09/17 与 #22/#24 仍部分开放；不以本次配置读回替代物理效果、跨连接恢复或即时预览验收。

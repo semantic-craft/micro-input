@@ -20,6 +20,7 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 #[derive(Clone, Copy, PartialEq)]
 enum Fault {
     None,
+    BufferedVisibility,
     NoTruncate,
     AckOnly,
     WrongId,
@@ -128,7 +129,9 @@ impl HidLink for Link {
             let mut files = self.files.lock().unwrap();
             let result=match method {
                 "device.status"=>json!({"version":if self.fault==Fault::Firmware {"0.7"}else{"0.6.3"},"profile_index":0,"layer_index":if self.fault==Fault::MissingActivity {Value::Null}else{json!(1)}}),
-                "fs.list"=>Value::Array(files.iter().map(|(name,bytes)|json!({"name":name,"size":if self.fault==Fault::Huge {1000000}else{bytes.len()},"checksum":format!("{:x}",Sha1::digest(bytes))})).collect()),
+                "fs.list"=>Value::Array(files.iter().filter(|(name,_)| {
+                    !(self.fault==Fault::BufferedVisibility && name.starts_with("mi_") && self.requests.lock().unwrap().iter().rev().find(|v|v["method"]=="fs.writebin").is_some_and(|v|v["params"]["completed"]==false))
+                }).map(|(name,bytes)|json!({"name":name,"size":if self.fault==Fault::Huge {1000000}else{bytes.len()},"checksum":format!("{:x}",Sha1::digest(bytes))})).collect()),
                 "fs.readbin"=>{let offset=req["params"]["offset"].as_u64().unwrap() as usize;let len=req["params"]["len"].as_u64().unwrap() as usize;let bytes=&files[file];json!({"total_size":bytes.len(),"data":base64::engine::general_purpose::STANDARD.encode(&bytes[offset..bytes.len().min(offset+len)])})},
                 "fs.writebin"=>{
                     assert!(temp_name(file).is_ok());
@@ -260,7 +263,7 @@ async fn h1_exact_wire_sequence_and_configuration_preservation() {
 async fn h1_stops_without_any_followup_request_after_uncertain_mutation() {
     for (fault, count) in [
         (Fault::NoTruncate, 3),
-        (Fault::AckOnly, 1),
+        (Fault::AckOnly, 2),
         (Fault::WrongId, 1),
         (Fault::ChangeConfig, 1),
         (Fault::DeleteTimeout, 6),
@@ -353,4 +356,14 @@ async fn each_mutation_failure_is_terminal_without_replay_or_cleanup() {
         assert!(fake.inner.closed.load(Ordering::SeqCst));
         fs::remove_dir_all(out.directory).unwrap();
     }
+}
+
+#[tokio::test]
+async fn buffered_uncompleted_chunks_need_no_visible_file_until_completed() {
+    let fake = Fake::new(Fault::BufferedVisibility);
+    let out = run(&fake, &options(true), Duration::ZERO).await.unwrap();
+    assert!(out.passed, "{}", out.reason);
+    assert_eq!(mutations(&fake).len(), 6);
+    assert!(out.cleanup_confirmed);
+    fs::remove_dir_all(out.directory).unwrap();
 }

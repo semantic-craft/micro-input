@@ -1,8 +1,7 @@
-//! High-level offline workflow. Only the explicit synthetic constructor can mutate a simulator.
+//! Reviewed configuration application; native preview remains unavailable.
 use super::*;
 use mi_model::operation_record::OperationRecord;
 use serde_json::{json, Value};
-#[cfg(feature = "synthetic-backend")]
 use std::collections::BTreeMap;
 use std::{collections::BTreeSet, path::PathBuf};
 #[derive(Default)]
@@ -18,12 +17,9 @@ pub(super) struct Operations {
     running: Option<String>,
     cancel: Option<tokio::sync::watch::Sender<bool>>,
     last: Value,
-    #[cfg(feature = "synthetic-backend")]
     local_save_fault: bool,
-    #[cfg(feature = "synthetic-backend")]
     restores: BTreeMap<String, mi_model::apply::PreparedCandidate>,
-    #[cfg(feature = "synthetic-backend")]
-    writers: BTreeMap<String, Arc<mi_session::config_write::SyntheticWriter>>,
+    writers: BTreeMap<String, Arc<mi_session::config_write::ConfigWriter>>,
 }
 pub(super) struct Inspection<'a>(&'a Mutex<Operations>);
 impl Drop for Inspection<'_> {
@@ -44,7 +40,6 @@ impl MicroInput {
         operations.inspecting = true;
         Ok(Inspection(&self.operations))
     }
-    #[cfg(feature = "synthetic-backend")]
     async fn refresh_operation_routes(&self, session: &Arc<mi_session::DeviceSession>) -> bool {
         let Ok(info) = session.read_identity_info().await else {
             return false;
@@ -73,18 +68,48 @@ impl MicroInput {
         true
     }
     pub(super) fn write_capable(&self) -> bool {
+        let state = self.state.lock().unwrap();
         #[cfg(feature = "synthetic-backend")]
+        if state.synthetic_write_enabled
+            && state
+                .session
+                .as_ref()
+                .is_some_and(|(_, s)| s.backend_name() == "synthetic/numbered-0x06")
         {
-            let s = self.state.lock().unwrap();
-            s.synthetic_write_enabled
-                && s.session
-                    .as_ref()
-                    .is_some_and(|(_, s)| s.backend_name() == "synthetic/numbered-0x06")
+            return true;
         }
-        #[cfg(not(feature = "synthetic-backend"))]
+        let Some((path, session)) = &state.session else {
+            return false;
+        };
+        if session.backend_name() != "hidapi-2.6.7/macOS/numbered-0x06"
+            || !state.identity.as_ref().is_some_and(|i| {
+                i.session_id == session.id && i.version.as_deref() == Some("0.6.3")
+            })
         {
-            false
+            return false;
         }
+        self.transport.enumerate().is_ok_and(|all| {
+            all.iter().filter(|d| mi_transport::is_candidate(d)).count() == 1
+                && all.iter().any(|d| {
+                    d.path == *path
+                        && d.vid == 0x303a
+                        && d.pid == 0x8298
+                        && d.transport_hint == mi_transport::TransportHint::Usb
+                })
+        })
+    }
+    fn operation_writer(&self) -> Result<mi_session::config_write::ConfigWriter, BridgeError> {
+        if !self.write_capable() {
+            return Err(failure("当前设备不支持配置应用"));
+        }
+        let state = self.state.lock().unwrap();
+        let (path, session) = state.session.as_ref().ok_or(BridgeError::Disconnected)?;
+        #[cfg(feature = "synthetic-backend")]
+        if session.backend_name() == "synthetic/numbered-0x06" {
+            return mi_session::config_write::ConfigWriter::new(session.clone()).map_err(failure);
+        }
+        mi_session::config_write::ConfigWriter::native(session.clone(), path.clone())
+            .map_err(failure)
     }
     pub(super) fn operation_allows_binding(&self, binding: &str) -> bool {
         let (paused, required) = {
@@ -143,7 +168,13 @@ impl MicroInput {
 #[uniffi::export(async_runtime = "tokio")]
 impl MicroInput {
     pub fn device_operation_capabilities(&self) -> String {
-        json!({"apply":self.write_capable(),"restore":self.write_capable(),"preview":self.write_capable(),"synthetic_only":true,"reason":"原生配置写入与恢复尚未验收"}).to_string()
+        {
+            let preview = self
+                .current()
+                .is_ok_and(|s| s.backend_name() == "synthetic/numbered-0x06")
+                && self.write_capable();
+            json!({"apply":self.write_capable(),"restore":self.write_capable(),"preview":preview,"synthetic_only":false,"reason":"需要唯一 Creator Micro 2、固件 0.6.3 和已核验的当前连接；即时灯光预览未开放"}).to_string()
+        }
     }
     pub fn begin_host_execution(&self) -> Result<u64, BridgeError> {
         let mut o = self.operations.lock().unwrap();
@@ -166,7 +197,7 @@ impl MicroInput {
     }
     pub fn begin_device_drain(&self) -> Result<String, BridgeError> {
         if !self.write_capable() {
-            return Err(failure("原生设备变更能力关闭"));
+            return Err(failure("当前连接不支持配置应用"));
         }
         let session = self.current()?;
         let mut o = self.operations.lock().unwrap();
@@ -247,7 +278,6 @@ impl MicroInput {
         }
         let _inspection = self.reserve_inspection()?;
         let path = self.record_path(&operation_id)?;
-        #[cfg(feature = "synthetic-backend")]
         {
             let writer = self
                 .operations
@@ -265,11 +295,7 @@ impl MicroInput {
                     .map_err(failure)?;
             }
         }
-        #[cfg(not(feature = "synthetic-backend"))]
-        OperationRecord::open(&path)
-            .map_err(failure)?
-            .retry_local_save()
-            .map_err(failure)?;
+
         let record = OperationRecord::open(path).map_err(failure)?;
         self.operations.lock().unwrap().last = Self::record_view(&record);
         let mut store = self.draft.lock().unwrap();
@@ -277,17 +303,15 @@ impl MicroInput {
         document_response(&store, None)
     }
     pub fn discard_device_restore(&self) {
-        #[cfg(feature = "synthetic-backend")]
         self.operations.lock().unwrap().restores.clear();
     }
     pub async fn prepare_device_restore(
         &self,
         operation_id: String,
     ) -> Result<String, BridgeError> {
-        #[cfg(feature = "synthetic-backend")]
         {
             if !self.write_capable() {
-                return Err(failure("原生恢复能力关闭"));
+                return Err(failure("当前连接不支持原值恢复"));
             }
             if self.operations.lock().unwrap().running.is_some() {
                 return Err(failure("已有设备操作"));
@@ -295,8 +319,7 @@ impl MicroInput {
             let _inspection = self.reserve_inspection()?;
             let record =
                 OperationRecord::open(self.record_path(&operation_id)?).map_err(failure)?;
-            let writer =
-                mi_session::config_write::SyntheticWriter::new(self.current()?).map_err(failure)?;
+            let writer = self.operation_writer()?;
             let plan = writer.prepare_restore(&record).await.map_err(failure)?;
             let preview = plan.preview().map_err(failure)?;
             let token = plan.operation_id().to_string();
@@ -305,20 +328,14 @@ impl MicroInput {
             operations.restores.insert(token, plan);
             return serde_json::to_string(&preview).map_err(failure);
         }
-        #[cfg(not(feature = "synthetic-backend"))]
-        {
-            let _ = operation_id;
-            Err(failure("原生恢复能力关闭"))
-        }
     }
     pub async fn check_device_operation(
         &self,
         operation_id: String,
     ) -> Result<String, BridgeError> {
-        #[cfg(feature = "synthetic-backend")]
         {
             if !self.write_capable() {
-                return Err(failure("当前仅支持合成设备核对"));
+                return Err(failure("当前连接不支持配置核对"));
             }
             if self.operations.lock().unwrap().running.is_some() {
                 return Err(failure("已有设备操作"));
@@ -327,8 +344,7 @@ impl MicroInput {
             let mut record =
                 OperationRecord::open(self.record_path(&operation_id)?).map_err(failure)?;
             let session = self.current()?;
-            let writer =
-                mi_session::config_write::SyntheticWriter::new(session.clone()).map_err(failure)?;
+            let writer = self.operation_writer()?;
             writer
                 .confirm_readback(&mut record)
                 .await
@@ -345,11 +361,6 @@ impl MicroInput {
             operations.last = value.clone();
             return Ok(value.to_string());
         }
-        #[cfg(not(feature = "synthetic-backend"))]
-        {
-            let _ = operation_id;
-            Err(failure("原生核对入口尚未接入"))
-        }
     }
     pub async fn start_device_apply(
         self: Arc<Self>,
@@ -357,15 +368,9 @@ impl MicroInput {
         drain_token: String,
         restore: bool,
     ) -> Result<String, BridgeError> {
-        #[cfg(not(feature = "synthetic-backend"))]
-        {
-            let _ = (token, drain_token, restore);
-            Err(failure("原生设备变更能力关闭"))
-        }
-        #[cfg(feature = "synthetic-backend")]
         {
             if !self.write_capable() {
-                return Err(failure("原生设备变更能力关闭"));
+                return Err(failure("当前连接不支持配置应用"));
             }
             let session = self.current()?;
             let mut o = self.operations.lock().unwrap();
@@ -394,9 +399,7 @@ impl MicroInput {
             }
             let id = plan.operation_id().to_owned();
             let path = plan.record_path();
-            let writer = Arc::new(
-                mi_session::config_write::SyntheticWriter::new(session.clone()).map_err(failure)?,
-            );
+            let writer = Arc::new(self.operation_writer()?);
             let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
             o.cancel = Some(cancel);
             o.running = Some(id.clone());

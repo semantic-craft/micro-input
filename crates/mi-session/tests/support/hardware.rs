@@ -334,25 +334,7 @@ pub async fn run(
         let meta: BTreeMap<_,_>=files.iter().map(|(name,bytes)|(name,json!({"size":bytes.len(),"sha1":format!("{:x}",Sha1::digest(bytes)),"sha256":hash(bytes)}))).collect();
         journal(&mut record,"h_backup_verified",json!({"files":meta,"smart_actions_present":files.contains_key("smart_actions.json"),"directory":list,"status":status,"identity_scope":"same_open_handle_and_expected_configuration","physical_keys":"NOT_RUN","lighting_visual":"NOT_RUN"}))?;
         if !options.h1 { return Ok(()); }
-        let mut expected: Option<Vec<u8>>=None;
-        for index in 0..5 {
-            unchanged(&mut wire,transport,&selected,&status,&list,&files,expected.as_deref()).await?;
-            wire.quiet(quiet).await?;
-            record.mutation_attempted=true;
-            journal(&mut record,"h_chunk_attempt",json!({"index":index}))?;
-            wire.rpc(Request::Chunk(index)).await?;
-            journal(&mut record,"h_chunk_ack",json!({"index":index,"durability":"NOT_YET_VERIFIED"}))?;
-            expected=Some(match index {0|3=>long()[..3072].to_vec(),1|4=>long(),2=>short(),_=>unreachable!()});
-            unchanged(&mut wire,transport,&selected,&status,&list,&files,expected.as_deref()).await?;
-            journal(&mut record,"h_chunk_verified",json!({"index":index}))?;
-        }
-        unchanged(&mut wire,transport,&selected,&status,&list,&files,expected.as_deref()).await?;
-        wire.quiet(quiet).await?;
-        journal(&mut record,"h_delete_attempt",json!({}))?;
-        wire.rpc(Request::Delete).await?;
-        unchanged(&mut wire,transport,&selected,&status,&list,&files,None).await?;
-        record.cleanup_confirmed=true;
-        journal(&mut record,"h_delete_verified",json!({}))?;
+        h1_steps(&mut wire, transport, &selected, &status, &list, &files, &mut record, quiet, 0).await?;
         Ok(())
     }).await.map_err(|_|"overall_timeout_unknown").and_then(|r|r);
     wire.link.close(); // No post-error requests, retry, reconnect, restore or cleanup.
@@ -397,4 +379,99 @@ pub async fn native(h1: bool) -> Result<()> {
     } else {
         Err(outcome.reason)
     }
+}
+
+async fn original_files_unchanged(
+    wire: &mut Wire,
+    transport: &dyn HidTransport,
+    selected: &HidCandidate,
+    status: &Value,
+    list: &Listing,
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    if candidate(transport)? != *selected || wire.status().await? != *status {
+        return Err("identity_changed");
+    }
+    let current = wire.list().await?;
+    let mut rest = current.clone();
+    rest.remove(&wire.target);
+    if rest != *list || wire.configs(&current).await? != *files {
+        return Err("original_files_changed");
+    }
+    let mut rest = wire.list().await?;
+    rest.remove(&wire.target);
+    if rest != *list || wire.status().await? != *status {
+        return Err("originals_changed_during_read");
+    }
+    Ok(())
+}
+async fn h1_steps(
+    wire: &mut Wire,
+    transport: &dyn HidTransport,
+    selected: &HidCandidate,
+    status: &Value,
+    list: &Listing,
+    files: &BTreeMap<String, Vec<u8>>,
+    record: &mut Record,
+    quiet: Duration,
+    start: usize,
+) -> Result<()> {
+    let mut expected: Option<Vec<u8>> = None;
+    for index in start..5 {
+        if index == 1 || index == 4 {
+            original_files_unchanged(wire, transport, selected, status, list, files).await?;
+        } else {
+            unchanged(
+                wire,
+                transport,
+                selected,
+                status,
+                list,
+                files,
+                expected.as_deref(),
+            )
+            .await?;
+        }
+        wire.quiet(quiet).await?;
+        record.mutation_attempted = true;
+        journal(record, "h_chunk_attempt", json!({"index":index}))?;
+        let reply = wire.rpc(Request::Chunk(index)).await?;
+        journal(
+            record,
+            "h_chunk_ack",
+            json!({"index":index,"result":reply["result"],"durability":"NOT_YET_VERIFIED"}),
+        )?;
+        if index == 0 || index == 3 {
+            original_files_unchanged(wire, transport, selected, status, list, files).await?;
+        } else {
+            expected = Some(if index == 2 { short() } else { long() });
+            unchanged(
+                wire,
+                transport,
+                selected,
+                status,
+                list,
+                files,
+                expected.as_deref(),
+            )
+            .await?;
+            journal(record, "h_transfer_verified", json!({"index":index}))?;
+        }
+    }
+    unchanged(
+        wire,
+        transport,
+        selected,
+        status,
+        list,
+        files,
+        expected.as_deref(),
+    )
+    .await?;
+    wire.quiet(quiet).await?;
+    journal(record, "h_delete_attempt", json!({}))?;
+    wire.rpc(Request::Delete).await?;
+    unchanged(wire, transport, selected, status, list, files, None).await?;
+    record.cleanup_confirmed = true;
+    journal(record, "h_delete_verified", json!({}))
 }

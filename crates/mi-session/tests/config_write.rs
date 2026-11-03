@@ -5,7 +5,7 @@ use mi_model::{
     storage::DocumentStore,
 };
 use mi_session::{
-    config_write::{Outcome, SyntheticWriter},
+    config_write::{ConfigWriter, Outcome},
     DeviceSession, ReadOnlySchema, SessionConfig,
 };
 use mi_transport::{
@@ -64,7 +64,7 @@ async fn setup(files: SyntheticFiles) -> (Arc<SyntheticDiscovery>, Arc<DeviceSes
 #[tokio::test]
 async fn compiled_lighting_goes_through_real_codec_reader_and_explicit_restore() {
     let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
-    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    let writer = ConfigWriter::new(session.clone()).unwrap();
     let (_dir, plan) = plan(RAW, session.id, 0xabcdef);
     assert_eq!(writer.apply(&plan).await, Outcome::Verified);
     assert_eq!(device.files().unwrap().keymap, plan.candidate());
@@ -95,7 +95,7 @@ async fn candidate_result_payloads_still_require_independent_readback() {
         files.write_response = SyntheticWriteResponse::Result(result.clone());
         let (device, session) = setup(files).await;
         let (_dir, plan) = plan(RAW, session.id, 0xabcdef);
-        let writer = SyntheticWriter::new(session.clone()).unwrap();
+        let writer = ConfigWriter::new(session.clone()).unwrap();
         let mut requests_after_ack = 0;
         assert_eq!(
             writer
@@ -127,7 +127,7 @@ async fn successful_response_without_expected_bytes_cannot_verify_or_save_locall
         let (device, session) = setup(files).await;
         let (dir, plan) = plan(RAW, session.id, 0xabcdef);
         let local_before = std::fs::read(dir.path().join("draft.json")).unwrap();
-        let writer = SyntheticWriter::new(session.clone()).unwrap();
+        let writer = ConfigWriter::new(session.clone()).unwrap();
         let mut acknowledged = false;
         assert_eq!(
             writer
@@ -175,7 +175,7 @@ async fn malformed_error_and_wrong_id_responses_leave_completed_writes_unknown()
         let (device, session) = setup(files).await;
         let (dir, plan) = plan(RAW, session.id, 0xabcdef);
         let local_before = std::fs::read(dir.path().join("draft.json")).unwrap();
-        let writer = SyntheticWriter::new(session.clone()).unwrap();
+        let writer = ConfigWriter::new(session.clone()).unwrap();
         let mut acknowledged = false;
         assert_eq!(
             writer
@@ -226,7 +226,7 @@ async fn multichunk_partial_write_lost_ack_and_corrupt_readback_never_report_suc
             files.corrupt_completed = true
         }
         device.set_files(files);
-        let writer = SyntheticWriter::new(session.clone()).unwrap();
+        let writer = ConfigWriter::new(session.clone()).unwrap();
         assert_eq!(
             writer.apply(&plan).await,
             Outcome::DeviceStateUnknown,
@@ -240,7 +240,7 @@ async fn multichunk_partial_write_lost_ack_and_corrupt_readback_never_report_suc
 #[tokio::test]
 async fn changed_baseline_and_wrong_session_send_no_mutations() {
     let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
-    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    let writer = ConfigWriter::new(session.clone()).unwrap();
     let (_dir, wrong) = plan(RAW, session.id + 1, 5);
     assert_eq!(writer.apply(&wrong).await, Outcome::NotSent);
     let (_dir2, valid) = plan(RAW, session.id, 5);
@@ -276,7 +276,7 @@ async fn synthetic_writer_rejects_native_backend_even_when_feature_is_built() {
         Arc::new(ReadOnlySchema),
         SessionConfig::default(),
     );
-    assert!(SyntheticWriter::new(session.clone()).is_err());
+    assert!(ConfigWriter::new(session.clone()).is_err());
     session.disconnect();
 }
 #[test]
@@ -315,7 +315,7 @@ async fn exhausted_budget_is_rejected_before_the_first_mutation() {
             .unwrap();
     }
     let (_dir, plan) = plan(RAW, session.id, 7);
-    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    let writer = ConfigWriter::new(session.clone()).unwrap();
     // Revalidation uses three, then a write plus three readback calls still fits.
     // Consume one further ID so the write must be rejected rather than stranding readback.
     session
@@ -335,7 +335,7 @@ async fn cancelling_after_send_closes_session_and_never_replays() {
     files.lose_ack_offset = Some(0);
     let (device, session) = setup(files).await;
     let (_dir, plan) = plan(RAW, session.id, 7);
-    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    let writer = ConfigWriter::new(session.clone()).unwrap();
     let mut pending = Box::pin(writer.apply(&plan));
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -405,7 +405,7 @@ async fn ordinary_ag_key_candidate_preserves_smart_file_through_real_readback() 
     let plan = store
         .take_prepared_candidate(&preview.token, &base)
         .unwrap();
-    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    let writer = ConfigWriter::new(session.clone()).unwrap();
     assert_eq!(writer.apply(&plan).await, Outcome::Verified);
     assert_eq!(
         device.files().unwrap().smart_actions.as_deref(),
@@ -462,7 +462,7 @@ async fn durable_phase_faults_distinguish_no_send_unknown_and_verified_local_fai
     ] {
         let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
         let (dir, p) = plan(RAW, session.id, 55);
-        let writer = SyntheticWriter::new(session.clone()).unwrap();
+        let writer = ConfigWriter::new(session.clone()).unwrap();
         let result = writer
             .apply_observed(&p, |at, path| {
                 if at == checkpoint {
@@ -526,10 +526,7 @@ async fn durable_phase_faults_distinguish_no_send_unknown_and_verified_local_fai
         assert_eq!(mutations(&device), count);
         // Persisted consumption survives constructing another writer.
         assert_eq!(
-            SyntheticWriter::new(session.clone())
-                .unwrap()
-                .apply(&p)
-                .await,
+            ConfigWriter::new(session.clone()).unwrap().apply(&p).await,
             Outcome::NotSent
         );
         assert_eq!(mutations(&device), count);
@@ -540,7 +537,7 @@ async fn durable_phase_faults_distinguish_no_send_unknown_and_verified_local_fai
 async fn restart_local_repair_requires_persisted_proof_and_refuses_changed_document() {
     let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
     let (dir, p) = plan(RAW, session.id, 44);
-    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    let writer = ConfigWriter::new(session.clone()).unwrap();
     assert_eq!(
         writer
             .apply_observed(&p, |at, _| {
@@ -581,7 +578,7 @@ async fn restart_local_repair_requires_persisted_proof_and_refuses_changed_docum
 async fn lost_verification_record_needs_explicit_readback_after_restart() {
     let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
     let (_dir, p) = plan(RAW, session.id, 22);
-    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    let writer = ConfigWriter::new(session.clone()).unwrap();
     assert_eq!(
         writer
             .apply_observed(&p, |at, path| {
@@ -598,7 +595,7 @@ async fn lost_verification_record_needs_explicit_readback_after_restart() {
     let mut record = OperationRecord::open(p.record_path()).unwrap();
     assert!(record.retry_local_save().is_err());
     let s = reconnect(&device).await;
-    let w = SyntheticWriter::new(s.clone()).unwrap();
+    let w = ConfigWriter::new(s.clone()).unwrap();
     let count = mutations(&device);
     w.confirm_readback(&mut record).await.unwrap();
     record.retry_local_save().unwrap();
@@ -615,10 +612,7 @@ async fn corrupt_partial_file_restores_from_linked_backup_preserving_current_sma
     let (device, session) = setup(files).await;
     let (dir, p) = plan(&raw, session.id, 23);
     assert_eq!(
-        SyntheticWriter::new(session.clone())
-            .unwrap()
-            .apply(&p)
-            .await,
+        ConfigWriter::new(session.clone()).unwrap().apply(&p).await,
         Outcome::DeviceStateUnknown
     );
     assert!(mi_model::parse_device_files(&device.files().unwrap().keymap, None).is_err());
@@ -628,7 +622,7 @@ async fn corrupt_partial_file_restores_from_linked_backup_preserving_current_sma
     device.set_files(state);
     session.shutdown().await;
     let s = reconnect(&device).await;
-    let writer = SyntheticWriter::new(s.clone()).unwrap();
+    let writer = ConfigWriter::new(s.clone()).unwrap();
     let record = OperationRecord::open(p.record_path()).unwrap();
     let before = mutations(&device);
     assert_eq!(
@@ -667,7 +661,7 @@ async fn corrupt_partial_file_restores_from_linked_backup_preserving_current_sma
 async fn stale_restore_refuses_changes_and_new_review_can_bind_new_bytes() {
     let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
     let (_dir, p) = plan(RAW, session.id, 12);
-    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    let writer = ConfigWriter::new(session.clone()).unwrap();
     assert_eq!(writer.apply(&p).await, Outcome::Verified);
     let record = OperationRecord::open(p.record_path()).unwrap();
     let stale = writer.prepare_restore(&record).await.unwrap();
@@ -687,7 +681,7 @@ async fn recovery_rejects_missing_bad_digest_failed_read_and_unverified_identity
     for fault in 0..4 {
         let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
         let (_dir, p) = plan(RAW, session.id, 14);
-        let writer = SyntheticWriter::new(session.clone()).unwrap();
+        let writer = ConfigWriter::new(session.clone()).unwrap();
         assert_eq!(writer.apply(&p).await, Outcome::Verified);
         let record = OperationRecord::open(p.record_path()).unwrap();
         let mut files = device.files().unwrap();
@@ -715,7 +709,7 @@ async fn records_are_private_checksummed_and_corruption_never_authorizes_repair(
     use std::os::unix::fs::PermissionsExt;
     let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
     let (_dir, p) = plan(RAW, session.id, 18);
-    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    let writer = ConfigWriter::new(session.clone()).unwrap();
     assert_eq!(writer.apply(&p).await, Outcome::Verified);
     assert_eq!(
         std::fs::metadata(p.record_path())
@@ -766,15 +760,12 @@ async fn explicit_original_readback_unlocks_without_claiming_not_sent_or_rewriti
     let (device, session) = setup(files).await;
     let (dir, p) = plan(RAW, session.id, 21);
     assert_eq!(
-        SyntheticWriter::new(session.clone())
-            .unwrap()
-            .apply(&p)
-            .await,
+        ConfigWriter::new(session.clone()).unwrap().apply(&p).await,
         Outcome::DeviceStateUnknown
     );
     session.shutdown().await;
     let s = reconnect(&device).await;
-    let writer = SyntheticWriter::new(s.clone()).unwrap();
+    let writer = ConfigWriter::new(s.clone()).unwrap();
     let count = mutations(&device);
     let mut record = OperationRecord::open(p.record_path()).unwrap();
     writer.confirm_readback(&mut record).await.unwrap();
@@ -791,7 +782,7 @@ async fn explicit_original_readback_unlocks_without_claiming_not_sent_or_rewriti
 async fn failed_restore_can_be_replaced_by_new_review_of_same_original_backup() {
     let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
     let (dir, p) = plan(RAW, session.id, 33);
-    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    let writer = ConfigWriter::new(session.clone()).unwrap();
     assert_eq!(writer.apply(&p).await, Outcome::Verified);
     let record = OperationRecord::open(p.record_path()).unwrap();
     let first = writer.prepare_restore(&record).await.unwrap();
@@ -804,7 +795,7 @@ async fn failed_restore_can_be_replaced_by_new_review_of_same_original_backup() 
     files.reject_offset = None;
     device.set_files(files);
     let s = reconnect(&device).await;
-    let writer = SyntheticWriter::new(s.clone()).unwrap();
+    let writer = ConfigWriter::new(s.clone()).unwrap();
     let fresh = writer.prepare_restore(&record).await.unwrap();
     assert_eq!(writer.apply(&fresh).await, Outcome::Verified);
     assert_eq!(device.files().unwrap().keymap, RAW);
@@ -823,7 +814,7 @@ async fn failed_restore_can_be_replaced_by_new_review_of_same_original_backup() 
 async fn readback_failure_keeps_unknown_until_independent_fresh_check() {
     let (device, session) = setup(SyntheticFiles::new(RAW.to_vec(), None)).await;
     let (_dir, p) = plan(RAW, session.id, 29);
-    let writer = SyntheticWriter::new(session.clone()).unwrap();
+    let writer = ConfigWriter::new(session.clone()).unwrap();
     assert_eq!(
         writer
             .apply_observed(&p, |at, _| {
@@ -846,7 +837,7 @@ async fn readback_failure_keeps_unknown_until_independent_fresh_check() {
     device.set_files(f);
     let s = reconnect(&device).await;
     let count = mutations(&device);
-    SyntheticWriter::new(s.clone())
+    ConfigWriter::new(s.clone())
         .unwrap()
         .confirm_readback(&mut r)
         .await
@@ -854,4 +845,90 @@ async fn readback_failure_keeps_unknown_until_independent_fresh_check() {
     r.retry_local_save().unwrap();
     assert_eq!(mutations(&device), count);
     s.shutdown().await;
+}
+
+// Exercise the actual native writer branch and production byte barrier without HID.
+struct NativeFixtureLink {
+    inner: Arc<dyn HidLink>,
+    incoming: tokio::sync::Mutex<(mi_proto::NativeFramer, std::collections::VecDeque<Vec<u8>>)>,
+}
+#[async_trait::async_trait]
+impl HidLink for NativeFixtureLink {
+    fn backend(&self) -> LinkBackend {
+        LinkBackend::MacHidapi267Numbered
+    }
+    async fn write(&self, report: &[u8]) -> Result<(), TransportError> {
+        self.inner.write(report).await
+    }
+    async fn read(&self) -> Result<Vec<u8>, TransportError> {
+        use mi_proto::Framer;
+        let mut state = self.incoming.lock().await;
+        loop {
+            if let Some(frame) = state.1.pop_front() {
+                return Ok(frame);
+            }
+            let report = self.inner.read().await?;
+            for line in state.0.feed(&report).unwrap() {
+                let mut value: Value = serde_json::from_slice(&line).unwrap();
+                if value["result"]["version"] == "synthetic-0.6.3" {
+                    value["result"]["version"] = json!("0.6.3");
+                }
+                state.1.extend(
+                    mi_proto::NativeFramer::default()
+                        .encode(value.to_string().as_bytes())
+                        .unwrap(),
+                );
+            }
+        }
+    }
+    fn close(&self) {
+        self.inner.close();
+    }
+}
+#[tokio::test]
+async fn native_plan_bound_writer_applies_and_restores_but_rejects_another_connection() {
+    let device = Arc::new(SyntheticDiscovery::default());
+    device.set_synthetic_discovery(1).unwrap();
+    device.set_files(SyntheticFiles::new(RAW.to_vec(), None));
+    let link = Arc::new(NativeFixtureLink {
+        inner: device.open("synthetic-interface-0").unwrap(),
+        incoming: tokio::sync::Mutex::new(Default::default()),
+    });
+    let session = DeviceSession::new(
+        link,
+        Box::<mi_proto::NativeFramer>::default(),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_millis(500),
+            interval: Duration::ZERO,
+        },
+    );
+    let writer = ConfigWriter::native(session.clone(), "fake-native".into()).unwrap();
+    let base = writer.inspect().await.unwrap();
+    let config = mi_model::parse_device_files(RAW, None).unwrap();
+    let doc = LocalDocumentV2::from_config(&config, Some(base.clone()), "device-snapshot").unwrap();
+    let p = doc.editable.graph.profile_order[0].clone();
+    let l = doc.editable.graph.profiles[&p].layer_order[0].clone();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("draft.json");
+    std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+    let mut store = DocumentStore::default();
+    store.open(path).unwrap();
+    store
+        .update(|d| d.edit_lighting(&p, &l, Zone::Backlight, Edit::Color(0x123457), false))
+        .unwrap();
+    let preview = store.preview_apply(&base).unwrap();
+    store.prepare_apply_backup(&preview.token, &base).unwrap();
+    let plan = store
+        .take_prepared_candidate(&preview.token, &base)
+        .unwrap();
+    assert_eq!(writer.apply(&plan).await, Outcome::Verified);
+    let record = mi_model::operation_record::OperationRecord::open(plan.record_path()).unwrap();
+    let mut different = writer.inspect().await.unwrap();
+    different["device_identity"]["connection_nonce"] = json!("another-process");
+    assert!(record.prepare_restore(different).is_err());
+    let restore = writer.prepare_restore(&record).await.unwrap();
+    assert_eq!(writer.apply(&restore).await, Outcome::Verified);
+    assert_eq!(device.files().unwrap().keymap, RAW);
+    session.shutdown().await;
 }

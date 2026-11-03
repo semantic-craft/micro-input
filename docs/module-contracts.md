@@ -94,3 +94,8 @@ Swift 的所有宿主执行入口统一经过执行 lease；暂停新入口并�
 `mi-proto::lighting_candidate` 的两区类型仅生成固定 `lights.preview` 候选字节，保留可选字段缺省，校验客户端已知范围；它不是配置往返模型，也没有发送入口。`mutation::validate_mutation_response_candidate` 只确认匹配ID的成功包络，不提升为写入或恢复结果。原生通用回应的 `result` 不限类型，不能继续依赖自造的 `synthetic_written`。
 
 `DeviceSession::exchange_encoded` 在分帧前重新校验非合成连接的实际方法、参数与队列ID，再从受限对象重新编码，原始重复键等歧义字节不进入传输，候选字节即使被内部调用误标为只读也零发送、零消耗ID；合成后端继续承载受控写入/预览实验。原生 `Method` 和高层 capability 没有扩展。`check-boundaries.py` 同时运行候选字节绕过回归，硬件探针仍不执行。
+
+
+## 原生配置计划入口（E-108）
+
+`ConfigWriter` 共用持久记录和独立读回，原生构造要求受支持后端，FFI另核对唯一USB8298/固件0.6.3。一般RPC仍只读；只有私有 `exchange_keymap` 为审阅计划构造固定keymap写块。MacLink按整条RPC持锁发送所有报告，唯一reader不会插入阻塞读取。原生基线包含随机connection_nonce，同连接原值恢复可用，跨连接旧记录拒绝。RGB编辑随keymap提交，原生即时预览仍关闭；文件读回不代表物理/视觉验收。
