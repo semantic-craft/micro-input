@@ -19,6 +19,8 @@ pub struct ProfileNode {
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct LayerNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lighting: Option<crate::lighting::Lighting>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_settings: Option<crate::control_settings::ControlSettings>,
     pub name: String,
     pub control_order: Vec<String>,
@@ -126,6 +128,7 @@ impl LocalDocumentV2 {
                 let lid = new_id();
                 let mut layer = LayerNode {
                     control_settings: None,
+                    lighting: None,
                     name: l.name.clone(),
                     control_order: vec![],
                     controls: BTreeMap::new(),
@@ -261,6 +264,7 @@ impl LocalDocumentV2 {
         let id = new_id();
         let mut layer = LayerNode {
             control_settings: None,
+            lighting: None,
             name: name.into(),
             control_order: vec![],
             controls: BTreeMap::new(),
@@ -298,6 +302,7 @@ impl LocalDocumentV2 {
         let id = new_id();
         let mut layer = LayerNode {
             control_settings: old.control_settings.clone(),
+            lighting: old.lighting.clone(),
             name: name.into(),
             control_order: vec![],
             controls: BTreeMap::new(),
@@ -554,6 +559,12 @@ impl LocalDocumentV2 {
                         underglow: Value::Null,
                     },
                 });
+                if let Some(target) = &l.lighting {
+                    layer.lights = Lights {
+                        backlight: target.backlight.clone(),
+                        underglow: target.underglow.clone(),
+                    };
+                }
                 layer.id = json!(lid);
                 layer.name = l.name.clone();
                 let mut values = vec![];
@@ -644,6 +655,20 @@ impl LocalDocumentV2 {
             }
             for (li, lid) in p.layer_order.iter().enumerate() {
                 let l = &g.layers[lid];
+                if let Some(target) = &l.lighting {
+                    let original_lights = refs.get(lid).and_then(|r| {
+                        source
+                            .profiles
+                            .iter()
+                            .find(|p| p.id == r["profile_source_id"])
+                            .and_then(|p| p.layers.iter().find(|l| l.id == r["source_id"]))
+                    });
+                    if original_lights.is_none_or(|old| {
+                        crate::lighting::Lighting::from_lights(&old.lights) != *target
+                    }) {
+                        changes.push(format!("灯光目标：{} / {}", p.name, l.name));
+                    }
+                }
                 if let Some(settings) = &l.control_settings {
                     let mode = match settings.joystick_mode.as_str() {
                         "source" => "保留来源模式",

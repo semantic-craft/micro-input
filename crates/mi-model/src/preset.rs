@@ -1169,7 +1169,9 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             let node = &draft.document.editable.graph.profiles[&pid];
             if node.layer_order.iter().any(|lid| {
                 let l = &draft.document.editable.graph.layers[lid];
-                l.control_settings.is_some() || l.controls.values().any(|b| b.action_id.is_some())
+                l.lighting.is_some()
+                    || l.control_settings.is_some()
+                    || l.controls.values().any(|b| b.action_id.is_some())
             }) {
                 continue;
             }
@@ -1206,15 +1208,17 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                     .filter(|(name, _)| *name == profile_name)
                     .any(|(_, old)| {
                         let layer = &work.document.editable.graph.layers[&p.layer_order[0]];
-                        layer.control_settings.as_ref().is_some_and(|settings| {
-                            settings.joystick_mode == "logical_sectors"
-                                && settings.active_sectors == 4
-                        }) && layer
-                            .controls
-                            .values()
-                            .filter(|b| b.action_id.is_some())
-                            .count()
-                            == old.len()
+                        layer.lighting.is_none()
+                            && layer.control_settings.as_ref().is_some_and(|settings| {
+                                settings.joystick_mode == "logical_sectors"
+                                    && settings.active_sectors == 4
+                            })
+                            && layer
+                                .controls
+                                .values()
+                                .filter(|b| b.action_id.is_some())
+                                .count()
+                                == old.len()
                             && old.iter().all(|(slot, id, name, category, detail, kind)| {
                                 layer
                                     .controls

@@ -69,7 +69,7 @@ extension Store {
         if routing.manual_override { return "手动保持" }
         return routing.auto_follow_enabled ? "自动跟随" : "自动跟随已关闭"
     }
-    var dispatchOpen: Bool { !mutationDraining && routingValid && !systemSleeping && !stopped && !overflowDraining }
+    var dispatchOpen: Bool { !hostOperationPaused && !mutationDraining && routingValid && !systemSleeping && !stopped && !overflowDraining }
     func refreshRouting() throws {
         let value = try JSONDecoder().decode(HostRoutingState.self, from: Data(backend.hostRoutingState().utf8))
         routing = value; hostActiveProfileId = value.profile_id; hostExecutionEnabled = value.execution_enabled
@@ -186,7 +186,7 @@ extension Store {
                       !entry.requiresEnabled || current.execution_enabled,
                       entry.deviceSession == nil || (entry.deviceSession == inputBoundary.session && (entry.deviceIngress ?? 0) > inputBoundary.cutoff),
                       entry.admitted.duration(to: .now) < .seconds(1) else { continue }
-                lastHostActionReceipt = await actionExecutor.execute(actionJSON: entry.json, bindingId: entry.binding, profileId: entry.profile)
+                _ = await executeHostAction(actionJSON: entry.json, bindingId: entry.binding, profileId: entry.profile)
             }
             if overflowDraining { readInputBoundary(); overflowDraining = false }
             hostExecutionTask = nil

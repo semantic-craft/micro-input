@@ -133,6 +133,18 @@
 
 - 2026-11-03：听写的启动/停止标签可能带当前快捷键后缀。千问办公使用“停止录音（Right ⌘）”；仅匹配无后缀名称会漏掉停止入口和状态。回归：`testQwenDictationRecognizesShortcutSuffixAndBothStates`，真实执行器启动/停止闭环，不用按钮调用成功替代状态确认。
 
+## 取消测试先确认已越过发送边界
+
+- 起因与后果：S3 接入 fsync 操作记录后，旧测试以 10ms 固定超时触发取消，可能在首次发送之前结束，无法验证“发送后取消”的契约。
+- 修复：在有界等待内观察合成传输实际出现 `fs.writebin` 后再丢弃 future；核对会话失效、持久记录重开为未知及重复计划零重放。
+- 验证点：`cancelling_after_send_closes_session_and_never_replays`。发送前与发送后取消分别判断，不以经过时间猜测操作阶段；合成结果不替代实机拔插。
+- 复发记录：Seen 1x（2026-11-03）。
+
+## 预览恢复须比较运行态而非仅比较目标
+
+- 同一活动层也可能被其他客户端改色。只校验层标识会覆盖外部修改，并错误报告恢复成功。
+- 合成后端对目标和最后确认运行态执行原子比较，后续更新及结束恢复都受约束；冲突进入 Unknown，不重放。
+- 回归：`same_target_external_change_is_never_overwritten` 覆盖更新与恢复两条路径；修复前失败、修复后通过。该合成协议不构成固件具有原子比较能力的证据。Seen 1x（2026-11-03）。
 - 2026-11-03：切换水位必须取自唯一 reader 的入站序号，不能取消费者解码进度。未读的旧摇杆离中通知仍须按序更新物理状态；换扇区不能当作回中。回归：`testUnreadPreCutoffNorthRequiresRealCenterBeforeEast` 与 `ingress_watermark_precedes_decode_and_preserves_unread_radial_state`。
 - 2026-11-03：异步 Backend 测试替身不自动运行在 MainActor。跨 executor 暴露 continuation 时必须同步发布；无锁轮询会偶发在 `CheckedContinuation.resume` 崩溃。`NavigationTests.DelayedBackend` 使用 NSLock 保证读写一致。
 

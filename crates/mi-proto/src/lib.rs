@@ -1,5 +1,6 @@
 //! R-D04/R-D05/R-D08/R-D09: read-only RPC vocabulary and deliberately closed wire boundary.
 use serde_json::{json, Value};
+pub mod mutation;
 mod native;
 pub use native::{validate_read_only, NativeFramer};
 #[derive(Debug, Clone, thiserror::Error)]
@@ -118,7 +119,14 @@ impl RpcCodec for JsonCodec {
             if !is_response {
                 return Ok(Incoming::Notification(Notification { method, raw: v }));
             }
-            if !["device.status", "sys.version", "fs.list", "fs.readbin"].contains(&method.as_str())
+            if ![
+                "device.status",
+                "sys.version",
+                "fs.list",
+                "fs.readbin",
+                "fs.writebin",
+            ]
+            .contains(&method.as_str())
                 || v.get("params").is_some()
                 || v.get("p").is_some()
             {

@@ -70,3 +70,20 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 看到并刷新输出的 `READY_FOR_PHYSICAL_INPUT` 后，操作者才进行本轮约定的控件操作；被动窗口固定为 45 秒，事件上限 2048，gap/关闭/断连均停止订阅。准备阶段上限 100 秒，结束后状态复查上限 15 秒、shutdown join 上限 5 秒；外层启动器总预算 180 秒（包含构建），超时只停止并等待自己创建的进程组，不重试。可先运行默认入口完成构建。
 
 每次生成独立 experiment ID 与开始时间；0700 的 `.scratch/input-study/input-observation-<ID>/` 下仅保存 0600 的脱敏事件和启动器状态。记录事件分类、语义 binding ID、时间、计数、session、gap；不保存通知、配置、宏、设备路径或 serial。报告的 `active_source_verified=false`、`active_ag_binding_count=null` 是当前证据边界：设备返回活动索引不证明它与源配置对象的对应语义。静默为 `silence_unconfirmed`，不能据此证明未按键、映射正确或硬件支持完成；有候选消息也只支持其通知形态，实体位置与其他消费者共存仍须另行核对。E-094 保留给实际观测后的证据登记，本入口的合成通过不占用实机证据。
+
+## S3 离线验证入口
+
+文档模型与候选：`cargo test -p mi-model --test lighting`；合成端到端：`cargo test -p mi-session --features synthetic-backend --test config_write`。后者仅用自编夹具、私有临时备份和编译的合成transport，不枚举/打开真实设备。合成写入器仅由显式 `synthetic_config_writer` 构造的高层 UniFFI 工作流调用；普通合成实例与原生实例都不开放写入。默认统一门禁仍为 `scripts/check`，原生探针继续ignored。
+
+既有宿主回归使用 `scripts/build --synthetic` 后的 `MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=25`；该场景验证既有预设/宿主模拟未回退，不代表新增灯光UI或真实设备功能。生产离线启动必须设置 `MI_AUTO_HOST_READY=0`，本轮不启动生产应用。
+
+
+持久记录回归：`cargo test -p mi-model --test operation_record`；合成恢复链路仍用 `cargo test -p mi-session --features synthetic-backend --test config_write`。覆盖首次发送前落盘、中断重开、损坏现状恢复、恢复链失败、新计划绑定、读回失败、核验结果未落盘、文档冲突和重复本地修复。`apply_observed` 是仅合成模块的故障注入接缝，不开放到 FFI；生产后端继续拒绝构造 writer。完整检查使用 `MI_AUTO_HOST_READY=0 scripts/check`，真实硬件测试保持 ignored。
+
+
+高层集成与恢复界面：`MI_AUTO_HOST_READY=0 swift test --package-path app/MicroInput -Xswiftc -DMI_SYNTHETIC_BACKEND --filter DeviceOperationsTests`（先构建合成绑定）。隔离应用场景 `MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=config-write scripts/run --verify --timeout=55` 完成单键应用、完整读回、新计划恢复，并打开恢复记录面板。独立 `device-operations.jsonl` 只记录操作结果，实体键和视觉灯效固定 NOT_RUN。本地保存失败通过仅专用合成实例可用的故障开关注入，重开后用无设备会话的原生核心修复；不启动生产应用。
+
+
+RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和三个 QA 场景的总入口；`--qa-only` 用于已完成单元门禁后的应用复验。每个应用场景 TTL 45 秒，启动器负责退出/清理，验证器另核对进程消失、回执数量及隔离目录移除。失败写入 FAIL 结果并非零退出；finally 恢复匹配的生产绑定/库/应用但不启动它。环境强制 `MI_AUTO_HOST_READY=0`，不运行任何物理探针。
+
+`cargo test -p mi-session --features synthetic-backend lighting_preview` 覆盖合成运行态与文件分离、最新值合并、切层/断连、失败未知状态、编号保留、30 秒上限及所有者丢弃恢复。`LightingTests` 经实际 UniFFI 覆盖两区六效果、参数可用性、非法值、单次全层撤销、重开、RGB 应用/恢复及预览不修改本地文档。恢复设备保留本地目标意图；测试分别检查当前设备快照和本地草稿，不把两者相等当成要求。

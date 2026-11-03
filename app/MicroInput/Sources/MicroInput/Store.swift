@@ -2,6 +2,26 @@
 import Foundation
 import MicroInputCore
 protocol Backend {
+    func layerLighting(layerId: String) throws -> String
+    func editLighting(profileId: String, layerId: String, zone: String, field: String, value: String, allLayers: Bool) async throws -> String
+    func beginLightingPreview() async throws -> String
+    func updateLightingPreview(token: String, zone: String, field: String, value: String) throws
+    func lightingPreviewStatus() -> String
+    func endLightingPreview(token: String) async throws -> String
+    func deviceOperationCapabilities() -> String
+    func beginHostExecution() throws -> UInt64
+    func finishHostExecution(lease: UInt64)
+    func hostExecutionsPending() -> UInt64
+    func beginDeviceDrain() throws -> String
+    func abandonDeviceDrain(token: String)
+    func startDeviceApply(token: String, drainToken: String, restore: Bool) async throws -> String
+    func deviceOperationStatus(operationId: String) throws -> String
+    func cancelDeviceOperation(operationId: String)
+    func deviceOperations() async throws -> String
+    func discardDeviceRestore()
+    func prepareDeviceRestore(operationId: String) async throws -> String
+    func checkDeviceOperation(operationId: String) async throws -> String
+    func retryLocalSave(operationId: String) async throws -> String
     func hostRoutingState() -> String
     func hostInputWatermark() -> String
     func updateHostRouting(requestJson: String) async throws -> String
@@ -69,6 +89,26 @@ protocol Backend {
     func installCodingAgentPresets() async throws -> String
 }
 extension Backend {
+    func layerLighting(layerId: String) throws -> String { throw BridgeError.Failed(message: "灯光不可用") }
+    func editLighting(profileId: String, layerId: String, zone: String, field: String, value: String, allLayers: Bool) async throws -> String { throw BridgeError.Failed(message: "灯光不可用") }
+    func beginLightingPreview() async throws -> String { throw BridgeError.Failed(message: "预览未验收") }
+    func updateLightingPreview(token: String, zone: String, field: String, value: String) throws {}
+    func lightingPreviewStatus() -> String { "{}" }
+    func endLightingPreview(token: String) async throws -> String { "{}" }
+    func deviceOperationCapabilities() -> String { #"{"apply":false,"restore":false,"reason":"设备变更不可用"}"# }
+    func beginHostExecution() throws -> UInt64 { 0 }
+    func finishHostExecution(lease: UInt64) {}
+    func hostExecutionsPending() -> UInt64 { 0 }
+    func beginDeviceDrain() throws -> String { throw BridgeError.Failed(message: "设备变更不可用") }
+    func abandonDeviceDrain(token: String) {}
+    func startDeviceApply(token: String, drainToken: String, restore: Bool) async throws -> String { throw BridgeError.Failed(message: "设备变更不可用") }
+    func deviceOperationStatus(operationId: String) throws -> String { throw BridgeError.Failed(message: "操作记录不可用") }
+    func cancelDeviceOperation(operationId: String) {}
+    func deviceOperations() async throws -> String { "[]" }
+    func discardDeviceRestore() {}
+    func prepareDeviceRestore(operationId: String) async throws -> String { throw BridgeError.Failed(message: "恢复不可用") }
+    func checkDeviceOperation(operationId: String) async throws -> String { throw BridgeError.Failed(message: "核对不可用") }
+    func retryLocalSave(operationId: String) async throws -> String { throw BridgeError.Failed(message: "本地修复不可用") }
     func hostRoutingState() -> String { "{}" }
     func hostInputWatermark() -> String { #"{"session_id":null,"ingress_sequence":0}"# }
     func updateHostRouting(requestJson: String) async throws -> String { throw BridgeError.Unavailable }
@@ -160,7 +200,7 @@ extension MicroInput: Backend {}
     @Published var hostExecutionEnabled = false
     @Published var passThroughHealth: PassThroughHealthView = .disconnected
     @Published var lastHostActionReceipt: HostActionReceipt?
-    private var hostInputTask: Task<Void, Never>?
+    var hostInputTask: Task<Void, Never>?
     @Published var draft = DraftState()
     @Published var macros: [MacroSummary] = []
     @Published var multis: [MacroSummary] = []
@@ -195,7 +235,7 @@ extension MicroInput: Backend {}
     @Published private(set) var browsingDeviceSnapshot = false
     private var localSnapshot: Snapshot?
     private var localSelection: (profile: String?, layer: String?, slot: Int) = (nil, nil, 0)
-    var canEditDraft: Bool { documentReady && !browsingDeviceSnapshot }
+    var canEditDraft: Bool { documentReady && !browsingDeviceSnapshot && !deviceOperationRunning }
     func showLocalDraft() {
         guard !busy, let localSnapshot else { return }
         snapshot = localSnapshot; browsingDeviceSnapshot = false; stale = false
@@ -223,7 +263,9 @@ extension MicroInput: Backend {}
             catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await backend.actionCatalog().utf8))
             #if MI_SYNTHETIC_BACKEND
             let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
-            if ["reconnect", "reconnect-transient", "apply-preparation"].contains(scenario), !preparedReconnectScenario {
+            if scenario == "lighting-control" { await runSyntheticLightingScenario() }
+            else if scenario == "config-write" { await runSyntheticDeviceOperationScenario() }
+            else if ["reconnect", "reconnect-transient", "apply-preparation"].contains(scenario), !preparedReconnectScenario {
                 await prepareReconnectScenario()
             } else if scenario == "host-execution", !preparedHostExecutionScenario {
                 await prepareHostExecutionScenario()
@@ -241,7 +283,7 @@ extension MicroInput: Backend {}
         slot = min(slot, max(0, (layer.map {$0.keys.count+$0.encoders.count+$0.joystick.sectors.count} ?? 0)-1))
     }
     var hostProfiles: [Profile] { (localSnapshot ?? snapshot)?.profiles ?? [] }
-    private func applyDocument(_ json: String, fresh: Bool = false) throws {
+    func applyDocument(_ json: String, fresh: Bool = false) throws {
         let result = try JSONDecoder().decode(DocumentView.self, from: Data(json.utf8))
         if draft.document_id != result.draft.document_id || draft.revision != result.draft.revision {applyPreview=nil;preparedApplyBackup=nil}
         let oldProfile = fresh ? nil : profile?.id.text, oldLayer = fresh ? nil : layer?.id.text
@@ -294,7 +336,7 @@ extension MicroInput: Backend {}
         }
     }
     var canTryDesktopAction: Bool {
-        guard DesktopAgent.named(profile?.name ?? "") != nil, !browsingDeviceSnapshot,
+        guard !hostOperationPaused, DesktopAgent.named(profile?.name ?? "") != nil, !browsingDeviceSnapshot,
               profile?.id.text == hostActiveProfileId, hostExecutionEnabled, (0...19).contains(slot) else { return false }
         let binding = Self.desktopBindings[slot]
         return !busy && backend.resolveInputAction(bindingId: binding, isPressed: true) != nil
@@ -379,14 +421,15 @@ extension MicroInput: Backend {}
         backend.resolveInputAction(bindingId: bindingId, isPressed: isPressed)
     }
     func startHostInputLoop(token: Int) {
-        guard hostInputTask == nil else { return }
+        guard !hostOperationPaused, hostInputTask == nil else { return }
+        let routeEpoch = hostRouteEpoch
         hostInputTask = Task { @MainActor [weak self] in
             guard let self else { return }
             guard let stream = try? await self.subscribeVerifiedInput() else { self.hostInputTask = nil; return }
             self.readInputBoundary()
             await withTaskCancellationHandler(operation: {
                 while !Task.isCancelled, let event = await stream.nextEvent() {
-                    guard token == self.generation, !self.systemSleeping, !self.stopped else { break }
+                    guard token == self.generation, routeEpoch == self.hostRouteEpoch, !self.hostOperationPaused, !self.systemSleeping, !self.stopped else { break }
                     if event.kind == .inputStreamGap {
                         self.clearPendingActions(); self.inputNeedsResume = true
                         self.status = "输入流丢失，已暂停派发；请恢复输入并松开按键 / 摇杆回中"
@@ -399,7 +442,7 @@ extension MicroInput: Backend {}
                 }
             }, onCancel: { stream.close() })
             stream.close()
-            if token == self.generation { self.hostInputTask = nil }
+            if token == self.generation, routeEpoch == self.hostRouteEpoch { self.hostInputTask = nil }
         }
     }
     private func changeDocument(fresh: Bool = false, _ operation: @escaping () async throws -> String) async throws {
@@ -542,6 +585,22 @@ extension MicroInput: Backend {}
         }
     }
     #endif
+    @Published var showingLighting = false
+    @Published var lightingPreviewToken: String?
+    @Published var lightingPreviewResult = "未开始预览"
+    @Published var lightingPreviewPhase = "Idle"
+    var endingLightingPreview = false
+    @Published var operationCapabilities = DeviceOperationCapabilities()
+    @Published var operationRows: [DeviceOperationState] = []
+    @Published var operationResult: DeviceOperationState?
+    @Published var restorePreview: ApplyPreview?
+    @Published var showingDeviceOperations = false
+    @Published var deviceOperationRunning = false
+    @Published var hostOperationPaused = false
+    var inFlightHostActions = 0
+    var hostRouteEpoch = 0
+    var deviceCancellationRequested = false
+    var drainTimeout: TimeInterval = 2
     @Published var applyPreview: ApplyPreview?
     @Published var preparedApplyBackup: PreparedApplyBackup?
     func previewApply() async {
@@ -778,6 +837,7 @@ extension MicroInput: Backend {}
         do {
             try await backend.connect(id: id)
             guard token == generation else { return }
+            refreshOperationCapabilities()
             pendingID = nil; connectedID = id; status = "设备已打开 · 身份尚未读取 · 配置尚未读取"
             refreshPassthroughHealth()
             inputNeedsResume = false; inputBoundary = HostInputBoundary(); startHostInputLoop(token: token)
@@ -823,6 +883,8 @@ extension MicroInput: Backend {}
     }
 
     private func retireConnection(_ reason: String) {
+        cancelActiveDeviceOperation()
+        hostRouteEpoch += 1
         clearPendingActions(); inputBoundary.session = nil
         generation += 1; pendingID = nil; busy = false
         connectionWatcher?.cancel(); connectionWatcher = nil
@@ -837,6 +899,8 @@ extension MicroInput: Backend {}
         guard !stopped else { return }
         lifecycleGeneration += 1
         guard !systemSleeping else { return }
+        cancelActiveDeviceOperation()
+        hostRouteEpoch += 1
         invalidateHostWork()
         systemSleeping = true
         discoveryGeneration += 1
@@ -858,6 +922,8 @@ extension MicroInput: Backend {}
         if events != nil { await refresh() }
     }
     func shutdown() async {
+        await endLightingPreview()
+        cancelActiveDeviceOperation()
         invalidateHostWork()
         stopped = true; lifecycleGeneration += 1; discoveryGeneration += 1
         events?.invalidatePending()

@@ -107,7 +107,7 @@ fn firmware(v: &Value) -> Option<String> {
 }
 struct Pending {
     id: u16,
-    method: Method,
+    method: &'static str,
     sender: oneshot::Sender<Result<Value, SessionError>>,
 }
 struct PendingLease {
@@ -226,7 +226,7 @@ impl DeviceSession {
                                                 .get("method")
                                                 .or_else(|| r.raw.get("m"))
                                                 .and_then(Value::as_str)
-                                                .is_none_or(|m| m == p.method.name())
+                                                .is_none_or(|m| m == p.method)
                                     }) {
                                         if let Some(p) = held.take() {
                                             let _ = p.sender.send(Ok(r.raw));
@@ -348,6 +348,20 @@ impl DeviceSession {
         method: Method,
         params: Value,
     ) -> Result<Value, SessionError> {
+        // At exhaustion the encoded placeholder is never sent: exchange_encoded closes
+        // the connection before framing, retaining the established terminal error.
+        let request = RpcRequest::new(method, params, q.next_id.min(998))?;
+        mi_proto::validate_read_only(&request)?;
+        self.exchange_encoded(q, method.name(), JsonCodec.encode(&request)?)
+            .await
+    }
+    // Private: callers must validate and encode with the current queue ID before entry.
+    async fn exchange_encoded(
+        &self,
+        q: &mut Queue,
+        method: &'static str,
+        encoded: Vec<u8>,
+    ) -> Result<Value, SessionError> {
         if self.invalid.load(Ordering::SeqCst) {
             q.framer.lock().unwrap().clear();
             return Err(SessionError::Disconnected);
@@ -362,13 +376,7 @@ impl DeviceSession {
         }
         let id = q.next_id;
         q.next_id += 1;
-        let request = RpcRequest::new(method, params, id)?;
-        mi_proto::validate_read_only(&request)?;
-        let reports = q
-            .framer
-            .lock()
-            .unwrap()
-            .encode(&JsonCodec.encode(&request)?)?;
+        let reports = q.framer.lock().unwrap().encode(&encoded)?;
         if let Some(last) = q.last {
             tokio::time::sleep_until(last + self.config.interval).await;
         }
@@ -518,6 +526,41 @@ impl DeviceSession {
             bytes: bytes.into(),
         })
     }
+    async fn read_files_locked(&self, q: &mut Queue) -> Result<DeviceFiles, SessionError> {
+        let (m, p) = self.schema.list_request()?;
+        let first = self.schema.files(&self.exchange(q, m, p).await?)?;
+        let key = first
+            .iter()
+            .find(|m| m.file == ConfigFile::Keymap)
+            .ok_or_else(|| SessionError::Config("缺少 keymap.json".into()))?;
+        let smart = first.iter().find(|m| m.file == ConfigFile::SmartActions);
+        let total = first.iter().try_fold(0u64, |sum, m| {
+            if m.size > 4 * 1024 * 1024 {
+                None
+            } else {
+                sum.checked_add(m.size)
+            }
+        });
+        if total.is_none_or(|n| n > 8 * 1024 * 1024) {
+            return Err(SessionError::Config("配置超过本地读取预算".into()));
+        }
+        let smart_actions = match smart {
+            Some(m) => Some(self.read_file(q, m).await?),
+            None => None,
+        };
+        let keymap = self.read_file(q, key).await?;
+        let (m, p) = self.schema.list_request()?;
+        let second = self.schema.files(&self.exchange(q, m, p).await?)?;
+        if first != second {
+            return Err(SessionError::Config(
+                "前后文件元数据不同；本次快照未更新".into(),
+            ));
+        }
+        Ok(DeviceFiles {
+            keymap,
+            smart_actions,
+        })
+    }
     /// Bounded read transaction. A failed/cancelled attempt never publishes a partial snapshot.
     pub async fn read_config_snapshot(&self) -> Result<DeviceConfig, SessionError> {
         let _lease = self
@@ -541,35 +584,10 @@ impl DeviceSession {
             Duration::from_secs(60),
             self.guarded(async {
                 let mut q = self.queue.lock().await;
-                let (m, p) = self.schema.list_request()?;
-                let first = self.schema.files(&self.exchange(&mut q, m, p).await?)?;
-                let key = first
-                    .iter()
-                    .find(|m| m.file == ConfigFile::Keymap)
-                    .ok_or_else(|| SessionError::Config("缺少 keymap.json".into()))?;
-                let smart = first.iter().find(|m| m.file == ConfigFile::SmartActions);
-                let total = first.iter().try_fold(0u64, |sum, m| {
-                    if m.size > 4 * 1024 * 1024 {
-                        None
-                    } else {
-                        sum.checked_add(m.size)
-                    }
-                });
-                if total.is_none_or(|n| n > 8 * 1024 * 1024) {
-                    return Err(SessionError::Config("配置超过本地读取预算".into()));
-                }
-                let smart_actions = match smart {
-                    Some(m) => Some(self.read_file(&mut q, m).await?),
-                    None => None,
-                };
-                let keymap = self.read_file(&mut q, key).await?;
-                let (m, p) = self.schema.list_request()?;
-                let second = self.schema.files(&self.exchange(&mut q, m, p).await?)?;
-                if first != second {
-                    return Err(SessionError::Config(
-                        "前后文件元数据不同；本次快照未更新".into(),
-                    ));
-                }
+                let DeviceFiles {
+                    keymap,
+                    smart_actions,
+                } = self.read_files_locked(&mut q).await?;
                 let mut parsed = self.schema.parse(
                     &keymap.bytes,
                     smart_actions.as_ref().map(|f| f.bytes.as_ref()),
@@ -622,3 +640,9 @@ mod tests;
 
 #[cfg(test)]
 mod file_tests;
+
+#[cfg(feature = "synthetic-backend")]
+pub mod config_write;
+
+#[cfg(feature = "synthetic-backend")]
+pub mod lighting_preview;

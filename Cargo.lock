@@ -587,6 +587,7 @@ dependencies = [
 name = "mi-proto"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
  "thiserror",
@@ -603,6 +604,7 @@ dependencies = [
  "mi-transport",
  "serde_json",
  "sha1",
+ "tempfile",
  "thiserror",
  "tokio",
 ]
@@ -617,6 +619,7 @@ dependencies = [
  "hidapi",
  "serde",
  "serde_json",
+ "sha1",
  "thiserror",
  "tokio",
 ]

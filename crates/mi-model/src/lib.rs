@@ -333,3 +333,7 @@ pub mod preset;
 pub mod apply;
 
 pub mod host_router;
+
+pub mod lighting;
+
+pub mod operation_record;

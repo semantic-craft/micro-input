@@ -1,6 +1,6 @@
 //! T13 software preparation only. No transport, writer, activation or recovery execution.
 use crate::{comparison, document::LocalDocumentV2, draft::ActionKind};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, value::RawValue, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -8,7 +8,7 @@ use std::{
     fs::{self, DirBuilder, OpenOptions},
     io::Write,
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 pub const UNAVAILABLE: &str =
@@ -16,8 +16,9 @@ pub const UNAVAILABLE: &str =
 // TODO(UNKNOWN-08): implement a writer only after configuration commit/readback evidence.
 // TODO(UNKNOWN-09): implement device restore only after recovery evidence.
 // Both require explicit authorization. Temporary-file probes do not establish these capabilities.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Preview {
+    pub kind: String,
     pub token: String,
     pub document_id: String,
     pub revision: u64,
@@ -38,7 +39,7 @@ pub struct Preview {
     pub restore_available: bool,
     pub unavailable_reason: String,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Prepared {
     pub token: String,
     pub backup_path: String,
@@ -47,6 +48,7 @@ pub struct Prepared {
     pub unavailable_reason: String,
 }
 pub(crate) struct Pending {
+    pub prepared: Option<Prepared>,
     pub preview: Preview,
     baseline: Value,
     keymap: Vec<u8>,
@@ -187,7 +189,19 @@ impl Pending {
         if reference.editable.source_refs != doc.editable.source_refs {
             return Err("来源引用或结构变化不在单绑定范围内".into());
         }
+        if doc.editable.graph.layers.iter().any(|(id, layer)| {
+            layer.lighting.as_ref().is_some_and(|target| {
+                reference
+                    .lighting(id)
+                    .map_or(true, |original| original != *target)
+            })
+        }) {
+            return Self::lighting(doc, current, document_bytes, &reference, keymap, smart);
+        }
         let mut normalized = doc.editable.graph.clone();
+        for layer in normalized.layers.values_mut() {
+            layer.lighting = None;
+        }
         if normalized.actions.len() != 1 {
             return Err("仅支持一个普通设备按键意图；高级动作或多项改动尚不可用".into());
         }
@@ -241,6 +255,7 @@ impl Pending {
         let before = match &l.keys[slot] {
             crate::Binding::Basic(t) => t.0.clone(),
             crate::Binding::Empty => "空绑定".into(),
+            crate::Binding::Unknown(Value::String(t)) if known_passthrough(l, slot, t) => t.clone(),
             _ => return Err("原绑定未知或高级类型；不能准备覆盖".into()),
         };
         if before == token {
@@ -248,6 +263,7 @@ impl Pending {
         }
         let planned = splice(&keymap, pid, lid, slot, &token)?;
         let preview = Preview {
+            kind: "single_device_key".into(),
             token: crate::document::new_id(),
             document_id: doc.document_id.clone(),
             revision: doc.revision,
@@ -272,6 +288,7 @@ impl Pending {
             unavailable_reason: UNAVAILABLE.into(),
         };
         Ok(Self {
+            prepared: None,
             preview,
             baseline: current.clone(),
             keymap,
@@ -346,10 +363,312 @@ impl Pending {
         }
         Ok(Prepared {
             token: self.preview.token.clone(),
-            backup_path: path.to_string_lossy().into(),
+            backup_path: fs::canonicalize(&path)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .into(),
             manifest_sha256: digest(&manifest),
             status: "prepared-not-sent".into(),
             unavailable_reason: UNAVAILABLE.into(),
         })
+    }
+}
+
+/// Frozen candidate issued only after the private backup has been verified.
+/// It carries no transport authority. Production execution is not implemented.
+#[derive(Clone)]
+pub struct PreparedCandidate {
+    pub(crate) operation_id: String,
+    pub(crate) session_id: u64,
+    pub(crate) original: Vec<u8>,
+    pub(crate) candidate: Vec<u8>,
+    pub(crate) smart: Option<Vec<u8>>,
+    pub(crate) backup: Prepared,
+    pub(crate) document_path: PathBuf,
+    pub(crate) document_bytes: Vec<u8>,
+    pub(crate) baseline: Value,
+    pub(crate) restores: Option<String>,
+}
+impl PreparedCandidate {
+    pub fn record_path(&self) -> PathBuf {
+        PathBuf::from(&self.backup.backup_path).join("operation")
+    }
+    pub fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+    pub fn session_id(&self) -> u64 {
+        self.session_id
+    }
+    pub fn original(&self) -> &[u8] {
+        &self.original
+    }
+    pub fn candidate(&self) -> &[u8] {
+        &self.candidate
+    }
+    pub fn smart_actions(&self) -> Option<&[u8]> {
+        self.smart.as_deref()
+    }
+}
+impl Pending {
+    pub(crate) fn candidate(
+        &self,
+        document_path: PathBuf,
+        document_bytes: Vec<u8>,
+    ) -> Result<PreparedCandidate, String> {
+        let backup = self.prepared.clone().ok_or("先保存并核验原始副本")?;
+        Ok(PreparedCandidate {
+            backup,
+            document_path: fs::canonicalize(document_path).map_err(|e| e.to_string())?,
+            document_bytes,
+            baseline: self.baseline.clone(),
+            restores: None,
+            operation_id: self.preview.token.clone(),
+            session_id: self.preview.device_identity["session_id"]
+                .as_u64()
+                .ok_or("会话缺失")?,
+            original: self.keymap.clone(),
+            candidate: self.planned_keymap.clone(),
+            smart: self.smart.clone(),
+        })
+    }
+    fn lighting(
+        doc: &LocalDocumentV2,
+        current: &Value,
+        document_bytes: &[u8],
+        reference: &LocalDocumentV2,
+        keymap: Vec<u8>,
+        smart: Option<Vec<u8>>,
+    ) -> Result<Self, String> {
+        let mut normalized = doc.editable.graph.clone();
+        for layer in normalized.layers.values_mut() {
+            layer.lighting = None;
+        }
+        if normalized != reference.editable.graph {
+            return Err("灯光提交不能混合键位、动作或结构修改".into());
+        }
+        let root: &RawValue = serde_json::from_slice(&keymap).map_err(|e| e.to_string())?;
+        let mut patches = vec![];
+        let mut changes = vec![];
+        for (id, layer) in &doc.editable.graph.layers {
+            let Some(target) = &layer.lighting else {
+                continue;
+            };
+            let source = &doc.editable.source_refs[id];
+            if source["kind"] != "source-layer" {
+                return Err("灯光层来源不明确".into());
+            }
+            let pid = &source["profile_source_id"];
+            let lid = &source["source_id"];
+            let profile = unique(array(field(&object(root)?, "profiles")?)?, pid)?;
+            let raw_layer = unique(array(field(&object(profile)?, "layers")?)?, lid)?;
+            let lights = object(field(&object(raw_layer)?, "lights")?)?;
+            for zone in [
+                crate::lighting::Zone::Backlight,
+                crate::lighting::Zone::Underglow,
+            ] {
+                let raw = field(&lights, zone.name())?;
+                let before: Value = serde_json::from_str(raw.get()).map_err(|e| e.to_string())?;
+                let after = target.zone(zone);
+                if &before == after {
+                    continue;
+                }
+                let a = after.as_object().ok_or("目标灯区结构未知")?;
+                let b = before.as_object().ok_or("原灯区结构未知")?;
+                if a.keys().ne(b.keys()) {
+                    return Err("不能创建或删除灯光字段".into());
+                }
+                let _effect: crate::lighting::Effect =
+                    serde_json::from_value(before["effect"].clone())
+                        .map_err(|_| "原灯效未知，不可修改")?;
+                let new_effect: crate::lighting::Effect =
+                    serde_json::from_value(after["effect"].clone()).map_err(|_| "目标灯效未知")?;
+                let fields = object(raw)?;
+                for (key, value) in a {
+                    if b.get(key) == Some(value) {
+                        continue;
+                    }
+                    let valid = match key.as_str() {
+                        "effect" => true,
+                        "color" => value.as_u64().is_some_and(|n| n <= 0xffffff),
+                        "brightness" | "speed" | "magic" => value
+                            .as_f64()
+                            .is_some_and(|n| n.is_finite() && (0.0..=1.0).contains(&n)),
+                        _ => false,
+                    };
+                    use crate::lighting::Effect::*;
+                    let enabled = key == "effect"
+                        || match new_effect {
+                            Off => false,
+                            Solid => key != "speed" && key != "magic",
+                            Gradient => key != "speed",
+                            Snake => key != "magic",
+                            Rainbow => key != "color",
+                            Breath => true,
+                        };
+                    // Unknown original effects were rejected above.
+                    if !valid || !enabled || !crate::lighting::known_value(key, &b[key]) {
+                        return Err("未知字段、超界参数或禁用参数发生变化".into());
+                    }
+                    let token = field(&fields, key)?;
+                    let start = (token.get().as_ptr() as usize)
+                        .checked_sub(keymap.as_ptr() as usize)
+                        .ok_or("字节范围无效")?;
+                    let end = start
+                        .checked_add(token.get().len())
+                        .filter(|end| *end <= keymap.len())
+                        .ok_or("范围越界")?;
+                    patches.push((
+                        start,
+                        end,
+                        serde_json::to_vec(value).map_err(|e| e.to_string())?,
+                    ));
+                    changes.push(json!({"profile":pid,"layer":lid,"zone":zone.name(),"field":key,"before":b[key],"after":value}));
+                }
+            }
+        }
+        if patches.is_empty() {
+            return Err("灯光未发生变化，无候选".into());
+        }
+        patches.sort_by_key(|p| p.0);
+        if patches.windows(2).any(|w| w[0].1 > w[1].0) {
+            return Err("目标范围重叠".into());
+        }
+        let mut planned = keymap.clone();
+        for (start, end, bytes) in patches.into_iter().rev() {
+            planned.splice(start..end, bytes);
+        }
+        crate::parse_device_files(&planned, smart.as_deref()).map_err(|e| e.to_string())?;
+        let preview = Preview {
+            kind: "lighting".into(),
+            token: crate::document::new_id(),
+            document_id: doc.document_id.clone(),
+            revision: doc.revision,
+            document_sha256: digest(document_bytes),
+            device_identity: current["device_identity"].clone(),
+            firmware: current["firmware"].clone(),
+            files: metadata(current),
+            active_indices: current["active_indices"].clone(),
+            active_source: "不按活动索引选择编译目标".into(),
+            profile_source_id: Value::Null,
+            layer_source_id: Value::Null,
+            logical_control: String::new(),
+            physical_position: "灯光字段".into(),
+            before: "原始灯光字段".into(),
+            after: serde_json::to_string(&changes).map_err(|e| e.to_string())?,
+            planned_keymap_sha256: digest(&planned),
+            apply_available: false,
+            restore_available: false,
+            unavailable_reason: UNAVAILABLE.into(),
+        };
+        Ok(Self {
+            prepared: None,
+            preview,
+            baseline: current.clone(),
+            keymap,
+            planned_keymap: planned,
+            smart,
+        })
+    }
+}
+fn known_passthrough(layer: &crate::Layer, slot: usize, token: &str) -> bool {
+    let Some(binding) = token.strip_prefix("KV_OAI_") else {
+        return false;
+    };
+    let logical = if matches!(binding, "AG11" | "ACT11") {
+        Some("logical-11")
+    } else {
+        crate::host_router::verified_physical_mapping(binding).map(|s| s.logical_switch)
+    };
+    if logical != Some(format!("logical-{slot}").as_str()) {
+        return false;
+    }
+    let suffix = binding
+        .strip_prefix("AG")
+        .or_else(|| binding.strip_prefix("ACT"));
+    layer
+        .keys
+        .iter()
+        .filter(|b| match b {
+            crate::Binding::Unknown(Value::String(s)) => {
+                s.strip_prefix("KV_OAI_AG")
+                    .or_else(|| s.strip_prefix("KV_OAI_ACT"))
+                    == suffix
+            }
+            _ => false,
+        })
+        .count()
+        == 1
+}
+
+impl PreparedCandidate {
+    pub(crate) fn restore(
+        record: &crate::operation_record::OperationRecord,
+        current: Value,
+    ) -> Result<Self, String> {
+        let prior = record.plan()?;
+        crate::operation_record::same_device(&prior.baseline, &current)?;
+        let keymap = bytes(&current, "keymap")?.ok_or("缺少现状文件")?;
+        let smart = bytes(&current, "smart_actions")?;
+        let target = prior.original.clone();
+        crate::parse_device_files(&target, smart.as_deref()).map_err(|e| e.to_string())?;
+        let document_bytes = crate::storage::read(&prior.document_path)?.ok_or("文档缺失")?;
+        let draft = crate::draft::Draft::from_bytes(&document_bytes)?;
+        if draft.read_only || draft.loaded_format != 2 {
+            return Err("恢复不能覆盖未知本地格式".into());
+        }
+        let doc = draft.document;
+        let prior_doc: LocalDocumentV2 =
+            serde_json::from_slice(&prior.document_bytes).map_err(|e| e.to_string())?;
+        if doc.document_id != prior_doc.document_id {
+            return Err("恢复关联文档身份已变化".into());
+        }
+        doc.validate()?;
+        if keymap.len() > 4 * 1024 * 1024
+            || smart.as_ref().is_some_and(|b| b.len() > 4 * 1024 * 1024)
+        {
+            return Err("恢复现状超过读取预算".into());
+        }
+        let mut preview: Preview = serde_json::from_slice::<Value>(
+            &fs::read(PathBuf::from(&prior.backup.backup_path).join("manifest.json"))
+                .map_err(|e| e.to_string())?,
+        )
+        .and_then(|v| serde_json::from_value(v["plan"].clone()))
+        .map_err(|e| e.to_string())?;
+        preview.kind = "restore-keymap".into();
+        preview.token = crate::document::new_id();
+        preview.document_id = doc.document_id.clone();
+        preview.revision = doc.revision;
+        preview.document_sha256 = digest(&document_bytes);
+        preview.device_identity = current["device_identity"].clone();
+        preview.firmware = current["firmware"].clone();
+        preview.files = metadata(&current);
+        preview.before = "完整现状 keymap；可能不可解析".into();
+        preview.after = "关联原副本；保留现状 smart_actions".into();
+        preview.planned_keymap_sha256 = digest(&target);
+        let mut pending = Pending {
+            prepared: None,
+            preview,
+            baseline: current,
+            keymap,
+            planned_keymap: target,
+            smart,
+        };
+        let backup = pending.backup(prior.document_path.parent().ok_or("无效文档路径")?)?;
+        pending.prepared = Some(backup);
+        let mut result = pending.candidate(prior.document_path, document_bytes)?;
+        result.restores = Some(prior.operation_id);
+        Ok(result)
+    }
+}
+
+impl PreparedCandidate {
+    pub fn preview(&self) -> Result<Preview, String> {
+        let bytes = fs::read(Path::new(&self.backup.backup_path).join("manifest.json"))
+            .map_err(|e| e.to_string())?;
+        if digest(&bytes) != self.backup.manifest_sha256 {
+            return Err("副本校验失败".into());
+        }
+        let value: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        serde_json::from_value(value["plan"].clone()).map_err(|e| e.to_string())
     }
 }

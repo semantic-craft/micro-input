@@ -1,0 +1,2 @@
+{ "version":1, "future":1.2300e+04, "label":"中文", "activeProfileId":0,
+"profiles":[{"id":"p","name":"P","layers":[{"id":7,"name":"L","lights":{"backlight":{"effect":"solid","brightness":0.7500,"speed":0.4,"magic":0.2,"color":1193046,"future":{"x":true}},"underglow":{"effect":"rainbow","brightness":0.6,"speed":0.7,"magic":0.3,"color":6636321,"keep":"原值"},"unknown_region":[1,2]},"layout":{"keymap":[["KV_OAI_AG00","KC_A"],[null,null,null,null],[null,null,null,null],[null,null,null]],"encoders":[null,null,null]}}]}]}

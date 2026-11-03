@@ -36,6 +36,22 @@
 
 上述为主要序列化字段，不是包含全部 layout、灯效值域和型号分支的完整 schema。
 
+## RGB 静态参数规则
+
+Input 1.1.0 的两区为 backlight/underglow；effect 为 off、solid、snake、rainbow、breath、gradient。brightness/speed/magic 在 UI 为0–100，协议表示为0–1；color 为24位RGB整数（例如 #123456 → 1193046）。对应 IA-17（M:2015–2083、2867–2891），效果枚举 K:5358–5366；本机补充研究为 `.scratch/input-study/rea-s3-rgb-20261103/implementation-plan.md`。
+
+| 效果 | 客户端禁用参数 |
+| --- | --- |
+| Off | 全部参数 |
+| Solid | Speed、Magic |
+| Gradient | Speed |
+| Snake | Magic |
+| Rainbow | Color |
+
+这是客户端静态规则，不是固件范围或视觉验收；未知效果和字段保留，禁用参数不自动清零。预览关闭后的硬件恢复未获证，不开放生产预览。
+
+离线实现使用自编可变文件模拟器及明确的 `synthetic_written` ACK；它不表示固件真实回应。普通 Method/request 仍只读，候选分块编码器不能自行获得发送权限。
+
 ## 设备到主机通知
 
 SDK 区分有 ID 的回应与无 ID 的 method 通知，并兼容部分紧凑字段。下表来自 Input 主进程实际注册和处理代码；IA-10、11。

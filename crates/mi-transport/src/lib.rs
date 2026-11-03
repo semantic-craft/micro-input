@@ -487,6 +487,7 @@ mod tests {
 // R-D13/D05: explicit test-only OS discovery boundary; no physical open is possible.
 #[cfg(feature = "synthetic-backend")]
 pub struct SyntheticDiscovery {
+    files: Arc<Mutex<Option<SyntheticFiles>>>,
     state: Mutex<u8>,
     identity: std::sync::atomic::AtomicU8,
     configuration: Arc<std::sync::atomic::AtomicU8>,
@@ -500,6 +501,7 @@ impl Default for SyntheticDiscovery {
         let (events, _) = broadcast::channel(16);
         Self {
             state: Mutex::new(0),
+            files: Arc::new(Mutex::new(None)),
             identity: std::sync::atomic::AtomicU8::new(0),
             configuration: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             input_inject: Mutex::new(None),
@@ -552,6 +554,7 @@ impl HidTransport for SyntheticDiscovery {
         let (link, mut incoming) = MockLink::new();
         let scenario = self.identity.load(Ordering::SeqCst);
         let configuration = self.configuration.clone();
+        let files = self.files.clone();
         let requests = self.requests.clone();
         let inject = link.inject.clone();
         *self.input_inject.lock().unwrap() = Some(inject.clone());
@@ -570,7 +573,25 @@ impl HidTransport for SyntheticDiscovery {
                 let method = request["method"].as_str().unwrap_or("");
                 requests.lock().unwrap().push(method.to_owned());
                 let config = configuration.load(Ordering::SeqCst);
-                let response = if method == "fs.list" || method == "fs.readbin" {
+                let mutable_reply = if [
+                    "fs.list",
+                    "fs.readbin",
+                    "fs.writebin",
+                    "synthetic.lights.read",
+                    "synthetic.lights.set",
+                ]
+                .contains(&method)
+                {
+                    files.lock().unwrap().as_mut().map(|f| f.respond(&request))
+                } else {
+                    None
+                };
+                let response = if let Some(reply) = mutable_reply {
+                    let Some(reply) = reply else { continue };
+                    reply
+                } else if method == "fs.writebin" {
+                    serde_json::json!({"id":request["id"],"error":{"code":403,"message":"synthetic writes not enabled"}})
+                } else if method == "fs.list" || method == "fs.readbin" {
                     use base64::Engine;
                     let keymap: &[u8] = if config == 4 {
                         include_bytes!(
@@ -608,6 +629,8 @@ impl HidTransport for SyntheticDiscovery {
                     } else {
                         serde_json::json!({"id":request["id"],"result":result})
                     }
+                } else if scenario == 3 {
+                    serde_json::json!({"id":request["id"],"result":{"version":"synthetic-0.6.3","profile_index":0,"layer_index":0}})
                 } else if scenario == 2 {
                     serde_json::json!({"id":request["id"],"error":{"code":500,"message":"synthetic identity failure"}})
                 } else if method == "device.status" && scenario == 1 {
@@ -755,5 +778,165 @@ impl HidLink for SyntheticLink {
     }
     fn close(&self) {
         self.0.close();
+    }
+}
+
+/// Mutable, explicitly injected synthetic files; never populated from user configuration.
+#[cfg(feature = "synthetic-backend")]
+#[derive(Clone)]
+pub struct SyntheticFiles {
+    pub keymap: Vec<u8>,
+    pub smart_actions: Option<Vec<u8>>,
+    /// Reject the chunk at this byte offset before storing it.
+    pub reject_offset: Option<usize>,
+    /// Store the chunk but lose its response, modeling uncertain completion.
+    pub lose_ack_offset: Option<usize>,
+    pub corrupt_completed: bool,
+    pub missing_keymap: bool,
+    pub bad_checksum: bool,
+    pub fail_read: bool,
+    pub preview_target: u64,
+    pub preview_lights: serde_json::Value,
+    pub fail_preview: bool,
+    next_offset: usize,
+}
+#[cfg(feature = "synthetic-backend")]
+impl SyntheticFiles {
+    pub fn new(keymap: Vec<u8>, smart_actions: Option<Vec<u8>>) -> Self {
+        Self {
+            keymap,
+            smart_actions,
+            reject_offset: None,
+            lose_ack_offset: None,
+            corrupt_completed: false,
+            missing_keymap: false,
+            bad_checksum: false,
+            fail_read: false,
+            preview_target: 0,
+            preview_lights: serde_json::Value::Null,
+            fail_preview: false,
+            next_offset: 0,
+        }
+    }
+    fn respond(&mut self, request: &serde_json::Value) -> Option<serde_json::Value> {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use serde_json::json;
+        use sha1::{Digest, Sha1};
+        let params = &request["params"];
+        let result: Result<serde_json::Value, ()> = (|| {
+            match request["method"].as_str() {
+                Some("synthetic.lights.read" | "synthetic.lights.set") => {
+                    if self.fail_preview {
+                        return Err(());
+                    }
+                    if self.preview_lights.is_null() {
+                        let source: serde_json::Value =
+                            serde_json::from_slice(&self.keymap).map_err(|_| ())?;
+                        self.preview_lights = source["profiles"][0]["layers"][0]["lights"].clone();
+                    }
+                    if request["method"] == "synthetic.lights.set" {
+                        if params["target"].as_u64() != Some(self.preview_target)
+                            || params.get("expected") != Some(&self.preview_lights)
+                        {
+                            return Err(());
+                        }
+                        self.preview_lights = params["lights"].clone();
+                    }
+                    Ok(json!({"target":self.preview_target,"lights":self.preview_lights}))
+                }
+
+                Some("fs.list") => {
+                    let mut files = vec![
+                        json!({"name":"keymap.json","size":self.keymap.len(),"checksum":format!("{:x}",Sha1::digest(&self.keymap))}),
+                    ];
+                    if self.missing_keymap {
+                        files.clear();
+                    } else if self.bad_checksum {
+                        files[0]["checksum"] = json!("0000000000000000000000000000000000000000");
+                    }
+                    if let Some(smart) = &self.smart_actions {
+                        files.push(json!({"name":"smart_actions.json","size":smart.len(),"checksum":format!("{:x}",Sha1::digest(smart))}));
+                    }
+                    Ok(json!(files))
+                }
+                Some("fs.readbin") => {
+                    if self.fail_read {
+                        return Err(());
+                    }
+                    let bytes = match params["file"].as_str() {
+                        Some("keymap.json") => &self.keymap,
+                        Some("smart_actions.json") => self.smart_actions.as_ref().ok_or(())?,
+                        _ => return Err(()),
+                    };
+                    let offset =
+                        usize::try_from(params["offset"].as_u64().ok_or(())?).map_err(|_| ())?;
+                    let len = usize::try_from(params["len"].as_u64().ok_or(())?).map_err(|_| ())?;
+                    if len == 0 || len > 3072 || offset > bytes.len() {
+                        return Err(());
+                    }
+                    Ok(
+                        json!({"total_size":bytes.len(),"data":STANDARD.encode(&bytes[offset..offset.saturating_add(len).min(bytes.len())])}),
+                    )
+                }
+                Some("fs.writebin") => {
+                    if params.as_object().is_none_or(|p| p.len() != 5)
+                        || params["file"] != "keymap.json"
+                        || params["append"] != true
+                    {
+                        return Err(());
+                    }
+                    let offset =
+                        usize::try_from(params["offset"].as_u64().ok_or(())?).map_err(|_| ())?;
+                    let complete = params["completed"].as_bool().ok_or(())?;
+                    let data = STANDARD
+                        .decode(params["data"].as_str().ok_or(())?)
+                        .map_err(|_| ())?;
+                    if self.reject_offset == Some(offset)
+                        || data.is_empty()
+                        || data.len() > 3072
+                        || offset.saturating_add(data.len()) > 4 * 1024 * 1024
+                        || (offset != 0 && offset != self.next_offset)
+                    {
+                        return Err(());
+                    }
+                    // Original synthetic failure model: visible partial overwrite, no atomicity promise.
+                    if offset == 0 {
+                        self.keymap.clear();
+                        self.next_offset = 0;
+                    }
+                    self.keymap.extend_from_slice(&data);
+                    self.next_offset = self.keymap.len();
+                    if complete {
+                        self.next_offset = 0;
+                        if self.corrupt_completed {
+                            self.keymap.push(b'!');
+                        }
+                    }
+                    Ok(json!({"synthetic_written":true}))
+                }
+                _ => Err(()),
+            }
+        })();
+        if request["method"] == "fs.writebin"
+            && result.is_ok()
+            && self.lose_ack_offset == params["offset"].as_u64().map(|n| n as usize)
+        {
+            return None;
+        }
+        Some(match result {
+            Ok(result) => json!({"id":request["id"],"result":result}),
+            Err(()) => {
+                json!({"id":request["id"],"error":{"code":500,"message":"synthetic file fault"}})
+            }
+        })
+    }
+}
+#[cfg(feature = "synthetic-backend")]
+impl SyntheticDiscovery {
+    pub fn set_files(&self, files: SyntheticFiles) {
+        *self.files.lock().unwrap() = Some(files);
+    }
+    pub fn files(&self) -> Option<SyntheticFiles> {
+        self.files.lock().unwrap().clone()
     }
 }

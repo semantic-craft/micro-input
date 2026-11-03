@@ -15,7 +15,7 @@ struct ApplyPreparationView: View {
     let preview: ApplyPreview
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack { Text("基础绑定应用准备").font(.title2.bold()); Spacer(); Button("关闭准备") { Task { await store.cancelApplyPreview() } } }
+            HStack { Text("配置应用准备").font(.title2.bold()); Spacer(); Button("关闭准备") { Task { await store.cancelApplyPreview() } } }
             Text("\(preview.before) → \(preview.after)").font(.title3.monospaced())
             Text("来源 Profile \(preview.profile_source_id.text) / Layer \(preview.layer_source_id.text) / \(preview.logical_control)")
             Text("实体位置：\(preview.physical_position) · 活动来源：\(preview.active_source)").font(.caption).foregroundStyle(.secondary)
@@ -33,7 +33,13 @@ struct ApplyPreparationView: View {
                 Button("保存原配置副本到本机") { Task { await store.prepareApplyBackup() } }.disabled(store.busy)
             }
             Text(preview.unavailable_reason).font(.callout)
-            HStack { Button("应用到设备") {}.disabled(true); Button("恢复设备原配置") {}.disabled(true) }
+            HStack {
+                Button("应用到设备") { Task { await store.performDeviceOperation(token: preview.token) } }
+                    .disabled(!preview.apply_available || store.preparedApplyBackup?.token != preview.token || store.deviceOperationRunning)
+                Button("设备操作与恢复…") { Task { await store.cancelApplyPreview(); store.showingDeviceOperations = true } }
+            }
+            if store.deviceOperationRunning { Button("停止后续发送") { store.cancelActiveDeviceOperation() } }
+            if let result = store.operationResult { Text(result.title).font(.headline) }
             Text(store.status).font(.caption).foregroundStyle(.secondary)
         }.padding(24).frame(width:680)
     }

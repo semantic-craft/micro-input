@@ -22,7 +22,7 @@ pub struct DocumentStore {
     agent_preview: Option<agent::Pending>,
     apply_preview: Option<crate::apply::Pending>,
 }
-fn read(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn read(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
     let f = match fs::File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -43,6 +43,7 @@ impl DocumentStore {
             return Err("文档只读、未来格式或未载入；不能准备应用".into());
         }
         let path = self.path.as_ref().ok_or("请先打开已保存的本地草稿")?;
+        crate::operation_record::ensure_document_editable(path)?;
         let bytes = read(path)?.ok_or("本地草稿未保存")?;
         if Some(&bytes) != self.expected.as_ref() {
             return Err("本地文档原字节已变化；请重新打开并预览".into());
@@ -84,13 +85,33 @@ impl DocumentStore {
             .filter(|p| p.preview.token == token)
             .ok_or("预览已过期；请重新预览")?;
         pending.ensure_current(&self.draft.document, &bytes, current)?;
+        if pending.prepared.is_some() {
+            return Err("原副本已准备，不重复保存".into());
+        }
         let path = self.path.as_ref().ok_or("没有文档路径")?;
         let _guard = Lock::acquire(path.with_extension("lock"))?;
         self.ensure_apply_document()?;
         let result = pending.backup(path.parent().ok_or("无效文档目录")?)?;
         self.ensure_apply_document()?;
-        self.apply_preview = None;
+        self.apply_preview.as_mut().unwrap().prepared = Some(result.clone());
         Ok(result)
+    }
+    /// Consumes the frozen software plan once, after checking the saved document and session.
+    pub fn take_prepared_candidate(
+        &mut self,
+        token: &str,
+        current: &serde_json::Value,
+    ) -> Result<crate::apply::PreparedCandidate, String> {
+        let bytes = self.ensure_apply_document()?;
+        let pending = self
+            .apply_preview
+            .as_ref()
+            .filter(|p| p.preview.token == token)
+            .ok_or("计划不存在或已消费")?;
+        pending.ensure_current(&self.draft.document, &bytes, current)?;
+        let candidate = pending.candidate(self.path.as_ref().unwrap().clone(), bytes)?;
+        self.apply_preview = None;
+        Ok(candidate)
     }
     pub fn compare(
         &mut self,
@@ -183,6 +204,9 @@ impl DocumentStore {
             None => Draft::default(),
         };
         self.draft = draft;
+        if crate::operation_record::ensure_document_editable(&path).is_err() {
+            self.draft.read_only = true;
+        }
         self.path = Some(path);
         self.expected = bytes;
         self.selection = Some((selection_path, selection_bytes));
@@ -372,6 +396,9 @@ impl DocumentStore {
         if self.blocked {
             return Err("本地文档未成功载入，已停止保存；原文件保留".into());
         }
+        if let Some(path) = &self.path {
+            crate::operation_record::ensure_document_editable(path)?;
+        }
         let mut next = self.draft.clone();
         edit(&mut next)?;
         if next.revision == self.draft.revision {
@@ -382,6 +409,7 @@ impl DocumentStore {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             let lock = path.with_extension("lock");
             let _guard = Lock::acquire(lock)?;
+            crate::operation_record::ensure_document_editable(path)?;
             if read(path)? != self.expected {
                 return Err("本地文档已被其他实例修改；请重开应用后编辑".into());
             }
@@ -594,9 +622,9 @@ impl HostPreferencesStore {
         self.save(next)
     }
 }
-struct Lock(PathBuf);
+pub(crate) struct Lock(PathBuf);
 impl Lock {
-    fn acquire(path: PathBuf) -> Result<Self, String> {
+    pub(crate) fn acquire(path: PathBuf) -> Result<Self, String> {
         OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -617,3 +645,42 @@ pub use recovery::RecoveryPreview;
 
 #[path = "agent.rs"]
 pub mod agent;
+
+impl DocumentStore {
+    pub fn device_operation_paths(&self) -> Result<Vec<std::path::PathBuf>, String> {
+        let path = self.path.as_ref().ok_or("未打开文档")?;
+        let root = path.parent().ok_or("无文档目录")?.join("device-backups");
+        if !root.exists() {
+            return Ok(vec![]);
+        }
+        let current = fs::canonicalize(path).map_err(|e| e.to_string())?;
+        let mut paths = vec![];
+        for entry in fs::read_dir(root).map_err(|e| e.to_string())? {
+            let p = entry.map_err(|e| e.to_string())?.path().join("operation");
+            if p.exists() {
+                let p = fs::canonicalize(p).map_err(|e| e.to_string())?;
+                let r = crate::operation_record::OperationRecord::open(&p)?;
+                if r.document_path()? == current {
+                    paths.push(p);
+                }
+            }
+        }
+        Ok(paths)
+    }
+    pub fn reload_operation_document(
+        &mut self,
+        record: &crate::operation_record::OperationRecord,
+    ) -> Result<(), String> {
+        let path = self.path.as_ref().ok_or("未打开文档")?;
+        if fs::canonicalize(path).map_err(|e| e.to_string())? != record.document_path()? {
+            return Err("操作属于其他文档".into());
+        }
+        let bytes = read(path)?.ok_or("文档缺失")?;
+        self.draft = Draft::from_bytes(&bytes)?;
+        self.draft.read_only |= crate::operation_record::ensure_document_editable(path).is_err();
+        self.expected = Some(bytes);
+        self.apply_preview = None;
+        self.comparison = None;
+        Ok(())
+    }
+}

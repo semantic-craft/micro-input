@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Offline gates + isolated app scenarios, with automatic evidence validation and cleanup.
+No hardware probe or production app is launched. --qa-only skips unit gates, not builds.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def verify_evidence(run, scenario, started, process_alive):
+    evidence = run / "evidence"
+    launcher = json.loads((evidence / "launcher.json").read_text())
+    if launcher["bundle_id"] != "com.semanticcraft.microinput.qa" or launcher["started_ms"] < started:
+        raise ValueError("wrong QA identity or stale evidence")
+    if not all(launcher.get(k) for k in ("app_bundle_removed", "documents_removed", "preferences_removed")):
+        raise ValueError("QA cleanup incomplete")
+    if process_alive(launcher["pid"]) or Path(launcher["app_path"]).exists() or Path(launcher["document_dir"]).exists():
+        raise ValueError("QA process or temporary files remain")
+    result = {"status": "PASS", "scenario": scenario, "cleanup_confirmed": True,
+              "physical_key": "NOT_RUN", "lighting_visual": "NOT_RUN"}
+    if scenario == "host-execution":
+        rows = [json.loads(line) for line in (evidence / "audit.jsonl").read_text().splitlines()]
+        if len(rows) != 16 or any(r["outcome"] != "simulated" for r in rows):
+            raise ValueError("host simulation receipts incomplete")
+        if len({r["profile_id"] for r in rows}) != 8 or sum(r["binding_id"] in ("AG10", "AG11") for r in rows) != 1:
+            raise ValueError("profile/wide-key regression")
+        result["receipt_count"] = len(rows)
+    else:
+        rows = [json.loads(line) for line in (evidence / "device-operations.jsonl").read_text().splitlines()]
+        if len(rows) != 2 or any(r["phase"] != "Verified" or r["config_readback"] != "PASS" or r["physical_key"] != "NOT_RUN" or r["lighting_visual"] != "NOT_RUN" for r in rows):
+            raise ValueError("apply/restore receipts incomplete or overclaimed")
+        result.update(config_readback="PASS", restore="PASS", receipt_count=2)
+        if scenario == "lighting-control":
+            lights = json.loads((evidence / "lighting.json").read_text())
+            if lights != {"status": "PASS", "runtime_readback": "SYNTHETIC_PASS", "physical_key": "NOT_RUN", "lighting_visual": "NOT_RUN"}:
+                raise ValueError("lighting lifecycle did not pass")
+            result["runtime_readback"] = "SYNTHETIC_PASS"
+    return result
+
+
+def alive(pid):
+    if not isinstance(pid, int) or pid <= 0:
+        raise ValueError("invalid QA pid")
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--qa-only", action="store_true")
+    args = parser.parse_args()
+    env = dict(os.environ, MI_AUTO_HOST_READY="0")
+    env.pop("MI_SYNTHETIC_SCENARIO", None)
+    try:
+        if not args.qa_only:
+            subprocess.run(["scripts/check"], cwd=ROOT, env=env, check=True)
+        subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, env=env, check=True)
+        for scenario in ("host-execution", "config-write", "lighting-control"):
+            started = int(time.time() * 1000)
+            proc = subprocess.Popen(["scripts/run", "--verify", "--timeout=45"], cwd=ROOT,
+                                    env=dict(env, MI_SYNTHETIC_SCENARIO=scenario),
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            try:
+                output, _ = proc.communicate(timeout=90)
+            except BaseException:
+                proc.terminate()
+                try:
+                    proc.communicate(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                raise
+            print(output, end="", flush=True)
+            paths = [line.split("=", 1)[1] for line in output.splitlines() if line.startswith("QA_RUN_DIR=")]
+            if len(paths) != 1:
+                raise ValueError("launcher did not identify exactly one QA run")
+            run = Path(paths[0]).resolve()
+            if run.parent != (ROOT / ".scratch/qa-runs").resolve():
+                raise ValueError("QA path escaped isolated root")
+            try:
+                result = verify_evidence(run, scenario, started, alive)
+                if proc.returncode != 0:
+                    raise ValueError(f"launcher failed: {proc.returncode}")
+            except Exception as error:
+                (run / "evidence/result.json").write_text(json.dumps({"status": "FAIL", "scenario": scenario, "error": str(error)}, indent=2) + "\n")
+                raise
+            result.update(git_sha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                          working_tree_changes=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
+                          timestamp_ms=int(time.time() * 1000))
+            (run / "evidence/result.json").write_text(json.dumps(result, indent=2) + "\n")
+            print(f"{scenario}: PASS ({run / 'evidence/result.json'})", flush=True)
+    finally:
+        # Restore matching production bindings/library/app; never launch that app.
+        subprocess.run(["scripts/build"], cwd=ROOT, env=env, check=True)
+
+
+if __name__ == "__main__":
+    main()

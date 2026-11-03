@@ -1,7 +1,9 @@
 //! R-A02/R-A05: only high-level asynchronous operations cross the in-process UniFFI bridge.
 mod apply_preparation;
+mod device_operations;
 mod host_routing;
 mod input_monitor;
+mod lighting;
 mod reconnect;
 pub use input_monitor::*;
 use mi_session::{DeviceSession, ReadOnlySchema, SessionConfig, UnverifiedSchema};
@@ -137,6 +139,8 @@ pub trait DeviceEvents: Send + Sync {
 }
 #[derive(Default)]
 struct ConnectionState {
+    #[cfg(feature = "synthetic-backend")]
+    synthetic_write_enabled: bool,
     generation: u64,
     identity: Option<IdentityInfo>,
     pending: Option<String>,
@@ -170,6 +174,7 @@ pub struct MicroInput {
     draft: Mutex<mi_model::storage::DocumentStore>,
     transport: Arc<dyn HidTransport>,
     state: Mutex<ConnectionState>,
+    operations: Mutex<device_operations::Operations>,
     connect_gate: tokio::sync::Mutex<()>,
     stopped: tokio::sync::watch::Sender<bool>,
 }
@@ -181,6 +186,7 @@ impl MicroInput {
             draft: Mutex::new(mi_model::storage::DocumentStore::default()),
             transport: Arc::new(MacTransport::new()),
             state: Mutex::new(ConnectionState::default()),
+            operations: Mutex::new(device_operations::Operations::default()),
             connect_gate: tokio::sync::Mutex::new(()),
             stopped: tokio::sync::watch::channel(false).0,
         })
@@ -785,6 +791,9 @@ impl MicroInput {
         serde_json::to_string(&health).unwrap_or_else(|_| r#"{"status":"disconnected"}"#.into())
     }
     pub fn resolve_input_action(&self, binding_id: String, is_pressed: bool) -> Option<String> {
+        if !self.operation_allows_binding(&binding_id) {
+            return None;
+        }
         let store = self.draft.lock().unwrap();
         if !store.host_execution_enabled() {
             return None;
@@ -949,6 +958,7 @@ mod tests {
                 events: tokio::sync::broadcast::channel(1).0,
             }),
             state: Mutex::new(ConnectionState::default()),
+            operations: Mutex::new(device_operations::Operations::default()),
             connect_gate: tokio::sync::Mutex::new(()),
             stopped: tokio::sync::watch::channel(false).0,
         });
@@ -1005,6 +1015,7 @@ mod tests {
             draft: Mutex::new(mi_model::storage::DocumentStore::default()),
             transport: transport.clone(),
             state: Mutex::new(ConnectionState::default()),
+            operations: Mutex::new(device_operations::Operations::default()),
             connect_gate: tokio::sync::Mutex::new(()),
             stopped: tokio::sync::watch::channel(false).0,
         });
@@ -1047,6 +1058,7 @@ mod tests {
             draft: Mutex::new(mi_model::storage::DocumentStore::default()),
             transport: Arc::new(UnavailableTransport),
             state: Mutex::new(ConnectionState::default()),
+            operations: Mutex::new(device_operations::Operations::default()),
             connect_gate: tokio::sync::Mutex::new(()),
             stopped: tokio::sync::watch::channel(false).0,
         };
@@ -1081,6 +1093,7 @@ mod tests {
                 link: link.clone(),
             }),
             state: Mutex::new(ConnectionState::default()),
+            operations: Mutex::new(device_operations::Operations::default()),
             connect_gate: tokio::sync::Mutex::new(()),
             stopped: tokio::sync::watch::channel(false).0,
         });
@@ -1107,6 +1120,7 @@ mod tests {
                 link: MockLink::new().0,
             }),
             state: Mutex::new(ConnectionState::default()),
+            operations: Mutex::new(device_operations::Operations::default()),
             connect_gate: tokio::sync::Mutex::new(()),
             stopped: tokio::sync::watch::channel(false).0,
         });
@@ -1134,6 +1148,7 @@ impl MicroInput {
             draft: Mutex::new(mi_model::storage::DocumentStore::default()),
             transport: Arc::new(mi_transport::SyntheticDiscovery::default()),
             state: Mutex::new(ConnectionState::default()),
+            operations: Mutex::new(device_operations::Operations::default()),
             connect_gate: tokio::sync::Mutex::new(()),
             stopped: tokio::sync::watch::channel(false).0,
         })

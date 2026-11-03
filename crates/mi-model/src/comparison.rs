@@ -214,6 +214,33 @@ fn opaque(config: &DeviceConfig, other: &DeviceConfig) -> Value {
                         if lo.get("name").is_some_and(Value::is_string) {
                             lo.remove("name");
                         }
+                        if let Some(lights) = lo.get_mut("lights").and_then(Value::as_object_mut) {
+                            for zone in ["backlight", "underglow"] {
+                                if let Some(z) = lights.get_mut(zone).and_then(Value::as_object_mut)
+                                {
+                                    if serde_json::from_value::<crate::lighting::Effect>(
+                                        z.get("effect").cloned().unwrap_or(Value::Null),
+                                    )
+                                    .is_ok()
+                                    {
+                                        z.remove("effect");
+                                        for key in ["brightness", "speed", "magic"] {
+                                            if z.get(key).and_then(Value::as_f64).is_some_and(|n| {
+                                                n.is_finite() && (0.0..=1.0).contains(&n)
+                                            }) {
+                                                z.remove(key);
+                                            }
+                                        }
+                                        if z.get("color")
+                                            .and_then(Value::as_u64)
+                                            .is_some_and(|n| n <= 0xffffff)
+                                        {
+                                            z.remove("color");
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if let Some(layout) = lo.get_mut("layout").and_then(Value::as_object_mut) {
                             layout.remove("keymap");
                             if layout
@@ -417,8 +444,26 @@ impl Comparison {
                 device_summary: String::new(),
             });
         }
+        let mut local_lighting = local.clone();
+        for doc in [&mut base, &mut remote, &mut local_lighting] {
+            for lid in doc
+                .editable
+                .graph
+                .layers
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                if doc.editable.graph.layers[&lid].lighting.is_none() {
+                    if let Ok(lights) = doc.lighting(&lid) {
+                        // Only existing source state is projected, never default values.
+                        doc.editable.graph.layers.get_mut(&lid).unwrap().lighting = Some(lights);
+                    }
+                }
+            }
+        }
         let b = json!(base.editable);
-        let l = json!(local.editable);
+        let l = json!(local_lighting.editable);
         let r = json!(remote.editable);
         let merged = merge("", Some(&b), Some(&l), Some(&r), &mut rows, &mut conflicts).unwrap();
         let merged: EditableState = serde_json::from_value(merged).map_err(|e| e.to_string())?;
@@ -557,7 +602,15 @@ impl Comparison {
         }
         next.editable = match choice {
             Choice::Merge => self.merged.clone(),
-            Choice::KeepLocal => local.editable.clone(),
+            Choice::KeepLocal => {
+                let mut state = local.editable.clone();
+                for (lid, layer) in &mut state.graph.layers {
+                    if layer.lighting.is_none() {
+                        layer.lighting = local.lighting(lid).ok();
+                    }
+                }
+                state
+            }
             Choice::UseDevice => self.remote.editable.clone(),
             Choice::Cancel => unreachable!(),
         };

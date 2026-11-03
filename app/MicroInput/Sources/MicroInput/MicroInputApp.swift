@@ -8,7 +8,7 @@ import MicroInputCore
     init() {
         let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
         #if MI_SYNTHETIC_BACKEND
-        let core = ["reconnect", "reconnect-transient", "apply-preparation", "host-execution"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
+        let core = ["config-write", "lighting-control"].contains(scenario) ? MicroInput.syntheticConfigWriter() : ["reconnect", "reconnect-transient", "apply-preparation", "host-execution"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
         let store = Store(backend: core)
         #else
         let core = MicroInput()
