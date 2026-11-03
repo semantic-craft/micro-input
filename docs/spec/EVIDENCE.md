@@ -221,3 +221,8 @@
   以通用成功包络候选替换自造 synthetic_written；合成应用仍必须独立完整读回。新增成功响应但不写/损坏、写入后坏响应/错ID回归，均不能误报Verified或重放。新增无发送权限的两区RGB候选编码，保留可选字段省略，已知值域仅属客户端规则。当前代码的活动索引解析已拒绝负数/小数，但不能原子绑定预览。
   非合成会话在分帧前重新验证方法/参数/队列ID，并从受限请求重新编码。独立复审发现并修复重复JSON键的解析/发送歧义，MockLink回归检查实际发出规范化只读字节，变更候选及伪装方法零发送。原生Method、高层写/预览capability与设备授权均未开放。固定实现提交 `1cd9ac6` 的最后一轮 `MI_AUTO_HOST_READY=0 scripts/check` 退出0：21项Python、全工作区Rust（含13项协议、21项配置应用/恢复及歧义字节回归）、81项合成Swift、43项生产Swift、双后端构建及只读/零发送门禁均通过。此前 `scripts/verify-offline` 的三轮应用场景同样在该固定提交、干净工作树上取得PASS：host-execution、config-write、lighting-control，各轮进程/应用/文档/偏好清理均确认。最后统一检查覆盖了复审修正后的全部源码。日志为主工作区 `.scratch/input-study/native-protocol-20261103/check-final.log` 与 `acceptance.log`，三轮回执保存于该目录 `qa/`。生产包已恢复构建但未启动或安装，真实设备连接/写入、物理按键与灯效视觉均未运行。
   原生剩余缺口为文件覆盖/截断/应用时机与真实恢复、即时预览目标/原运行态读取/独立核验/恢复、竞争及断连超时语义。这些无法从本轮客户端静态与内存桩证明；UNKNOWN-08/09/17及#22/#24继续开放，不能将本次候选收口作为完整硬件能力签收。
+
+
+- **E-106 / PREPARATION + OFFLINE（实机验收方案与材料工具）**：2026-11-03，新增 `docs/designs/hardware-acceptance.md`，定义H0新鲜只读身份/配置备份、H1单新临时文件实验及停止/诊断/恢复规则，H2单键配置与H3灯光预览保持独立范围。H1固定最多5个writebin块、6220字节和1次删除，只涉及自编临时内容；不向keymap/smart_actions写入，不发送灯光或重启方法，不把不确定后的恢复放进finally。已有C诊断/清理工作线需先核清未决状态，本轮未合入或执行。
+  `scripts/prepare-hardware-acceptance` 只有prepare/verify/compare本地入口，无设备库、子进程、网络或execute/resume入口。生成0700/0600私有新包，保存固定计划、载荷和可选导入原字节；验证范围、库存、摘要及权限，拒绝覆盖、符号链接、非普通文件和缺失/空文件混淆。导入来源始终未核实，本地相等不报告设备/灯光已通过，ready_to_execute始终false。当前实际生成的 `.scratch/input-study/hardware-acceptance-preparation/offline-kit/` 仅含自编载荷，无设备备份。
+  参考IA-04/06/07/16/17、E-105与UNKNOWN-08/09/17；采用独立完整读回、未知状态停止不重放、备份与硬件恢复分离的约束。新增8项离线回归已通过；完整项目检查结果另记。本轮未连接、枚举或写入真实设备，未采集设备备份、执行物理探针或改变现有键位/灯光。
