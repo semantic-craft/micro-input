@@ -87,3 +87,7 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和三个 QA 场景的总入口；`--qa-only` 用于已完成单元门禁后的应用复验。每个应用场景 TTL 45 秒，启动器负责退出/清理，验证器另核对进程消失、回执数量及隔离目录移除。失败写入 FAIL 结果并非零退出；finally 恢复匹配的生产绑定/库/应用但不启动它。环境强制 `MI_AUTO_HOST_READY=0`，不运行任何物理探针。
 
 `cargo test -p mi-session --features synthetic-backend lighting_preview` 覆盖合成运行态与文件分离、最新值合并、切层/断连、失败未知状态、编号保留、30 秒上限及所有者丢弃恢复。`LightingTests` 经实际 UniFFI 覆盖两区六效果、参数可用性、非法值、单次全层撤销、重开、RGB 应用/恢复及预览不修改本地文档。恢复设备保留本地目标意图；测试分别检查当前设备快照和本地草稿，不把两者相等当成要求。
+
+## 实机验收材料的离线准备
+
+使用 `scripts/prepare-hardware-acceptance prepare` 生成新的私有准备包；`verify` 检查固定范围、权限及摘要，`compare` 比较调用方提供的本地原字节。工具没有设备I/O或执行入口，材料有效不等于设备备份或执行许可。最小实验、备份采集前提和恢复规则见 [实机验收准备](designs/hardware-acceptance.md)。回归 `test_hardware_acceptance_launcher.py` 随 `scripts/check` 运行，无需连接设备。
