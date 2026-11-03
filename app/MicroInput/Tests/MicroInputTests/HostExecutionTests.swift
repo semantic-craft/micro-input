@@ -117,6 +117,13 @@ final class HostExecutionTests: XCTestCase {
         await store.shutdown(); await reopened.shutdown()
     }
 
+    @MainActor func testQwenDictationRecognizesShortcutSuffixAndBothStates() {
+        XCTAssertTrue(DesktopAgentControls.extraControl(adapter: "qwenwork", command: "dictation", role: "AXButton", labels: ["停止录音（Right ⌘）"]))
+        XCTAssertTrue(DesktopAgentControls.dictationState(labels: ["停止录音（Right ⌘）"], recording: true))
+        XCTAssertTrue(DesktopAgentControls.dictationState(labels: ["语音输入（Right ⌘）"], recording: false))
+        XCTAssertFalse(DesktopAgentControls.dictationState(labels: ["语音输入（Right ⌘）"], recording: true))
+    }
+
     @MainActor func testDesktopControlsRejectContentAndUnavailableReasoningModes() {
         XCTAssertFalse(DesktopAgentControls.extraControl(adapter: "dsh-desktop", command: "model", role: "AXStaticText", labels: ["选择模型，当前 DeepSeek"]))
         XCTAssertTrue(DesktopAgentControls.extraControl(adapter: "dsh-desktop", command: "effort", role: "AXPopUpButton", labels: ["选择模型，当前 DeepSeek，推理等级 High"]))

@@ -120,8 +120,7 @@ struct DesktopAgent: Identifiable {
                     count += 1
                     let labels = [kAXTitleAttribute, kAXDescriptionAttribute].compactMap { attribute(e, $0) as? String }
                     if labels.contains(where: { ["Conversation turns", "Agent response", "User message"].contains($0) }) { continue }
-                    let names = wasStoppingDictation ? ["开始语音输入", "Record voice memo", "Dictate"] : ["停止语音输入", "结束语音输入", "Stop recording", "Stop dictation"]
-                    if labels.contains(where: names.contains) { return (true, wasStoppingDictation ? "已确认听写停止；未发送消息" : "已确认听写启动；再次按键停止") }
+                    if dictationState(labels: labels, recording: !wasStoppingDictation) { return (true, wasStoppingDictation ? "已确认听写停止；未发送消息" : "已确认听写启动；再次按键停止") }
                     if let children = attribute(e, kAXChildrenAttribute) as? [AXUIElement] { queue.append(contentsOf: children) }
                 }
             }
@@ -150,7 +149,7 @@ struct DesktopAgent: Identifiable {
         if command == "dictation" {
             switch adapter {
             case "antigravity": return exact(["Record voice memo", "Stop recording"])
-            case "qwenwork": return prefix("语音输入（") || exact(["停止录音"])
+            case "qwenwork": return prefix("语音输入（") || prefix("停止录音")
             case "cindy", "qoder-cn": return exact(["开始语音输入", "停止语音输入", "结束语音输入"])
             case "codex": return exact(["Dictate", "Stop dictation", "听写", "停止听写"])
             default: return false
@@ -168,6 +167,11 @@ struct DesktopAgent: Identifiable {
         return false
     }
 
+    static func dictationState(labels: [String], recording: Bool) -> Bool {
+        let exact = recording ? ["停止语音输入", "结束语音输入", "Stop recording", "Stop dictation"] : ["开始语音输入", "Record voice memo", "Dictate"]
+        return labels.contains { exact.contains($0) || (recording ? $0.hasPrefix("停止录音") : $0.hasPrefix("语音输入（")) }
+    }
+
     static func confirmFocus(_ read: () -> Bool, interval: UInt64 = 25_000_000) async -> Bool {
         for _ in 0..<20 {
             guard !Task.isCancelled else { return false }
@@ -181,10 +185,15 @@ struct DesktopAgent: Identifiable {
 
 struct AgentBadge: View {
     let name: String
+    var size: CGFloat = 28
     var body: some View {
-        Image(systemName: DesktopAgent.named(name)?.symbol ?? "square.stack")
-            .font(.system(size: 15, weight: .medium)).foregroundStyle(.tint)
-            .frame(width: 32, height: 32)
-            .background(.tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
+        Group {
+            if let agent = DesktopAgent.named(name), let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: agent.bundleID) {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: url.path)).resizable().interpolation(.high)
+            } else {
+                Image(systemName: DesktopAgent.named(name)?.symbol ?? "square.stack")
+                    .resizable().scaledToFit().padding(5).foregroundStyle(.secondary)
+            }
+        }.frame(width: size, height: size).accessibilityHidden(true)
     }
 }
