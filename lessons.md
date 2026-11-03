@@ -159,3 +159,5 @@
 
 - 2026-11-03：H1 首块 ACK 后目标尚未出现在目录，不能把中间不可见当作整文件失败。每块仍检查原配置与非目标目录，`completed:true` 后才核验目标完整内容。回归：`buffered_uncompleted_chunks_need_no_visible_file_until_completed`。
 - 唯一 reader 在同一 HID mutex 上执行 20ms read_timeout；逐报告重新拿锁会在长 RPC 中插入间隔。实际配置恢复曾收到缺少合法 ID / error 400；改为一个 RPC 一次锁定、连续发完后，原字节恢复成功。回归：`multiframe_request_uses_one_transport_batch`。保留严格响应检查，失败不自动重放，不把该修复当作多客户端竞争已解决。
+
+- 2026-11-04：设备写后逐绑定重验仍残留旧首行翻转，导致恢复原配置后 AG00/AG01 仍不可用。混合应用的真实 FFI 合成场景复现后，重验按 E-100 已核验顺序 AG00→slot0、AG01→slot1 修正；同时覆盖修改后仅对应绑定暂停、原值恢复后重新可用。不能只修输入解码而遗漏写后重验。

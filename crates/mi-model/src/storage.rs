@@ -11,6 +11,7 @@ const LIMIT: u64 = 4 * 1024 * 1024;
 #[derive(Default)]
 pub struct DocumentStore {
     pub draft: Draft,
+    host: Option<Box<DocumentStore>>,
     comparison: Option<crate::comparison::Comparison>,
     path: Option<PathBuf>,
     expected: Option<Vec<u8>>,
@@ -38,6 +39,62 @@ pub(crate) fn read(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(b))
 }
 impl DocumentStore {
+    pub fn editing_device(&self) -> bool {
+        self.host.is_some()
+    }
+    pub fn host_store(&self) -> &Self {
+        self.host.as_deref().unwrap_or(self)
+    }
+    fn device_editor_path(&self) -> Result<PathBuf, String> {
+        let host = self.host_store();
+        if host.blocked {
+            return Err("宿主文档未载入".into());
+        }
+        Ok(host
+            .selection
+            .as_ref()
+            .and_then(|(p, _)| p.parent())
+            .ok_or("请先打开工作台")?
+            .join("device-editor.json"))
+    }
+    fn select_device_editor(&mut self, device: Self) {
+        let host = if let Some(host) = self.host.take() {
+            host
+        } else {
+            Box::new(std::mem::take(self))
+        };
+        *self = device;
+        self.host = Some(host);
+    }
+    pub fn begin_device_editing(
+        &mut self,
+        config: crate::DeviceConfig,
+        baseline: serde_json::Value,
+    ) -> Result<(), String> {
+        let mut device = Self::default();
+        device.open(self.device_editor_path()?)?;
+        device.create_independent(config, baseline)?;
+        self.select_device_editor(device);
+        Ok(())
+    }
+    pub fn resume_device_editing(&mut self) -> Result<(), String> {
+        if self.editing_device() {
+            return Ok(());
+        }
+        let path = self.device_editor_path()?;
+        if !path.with_extension("active.json").exists() {
+            return Err("没有已保存的设备草稿；请从设备读取".into());
+        }
+        let mut device = Self::default();
+        device.open(path)?;
+        self.select_device_editor(device);
+        Ok(())
+    }
+    pub fn return_to_host(&mut self) {
+        if let Some(host) = self.host.take() {
+            *self = *host;
+        }
+    }
     fn ensure_apply_document(&self) -> Result<Vec<u8>, String> {
         if self.blocked || self.draft.read_only || self.draft.loaded_format != 2 {
             return Err("文档只读、未来格式或未载入；不能准备应用".into());
@@ -230,12 +287,21 @@ impl DocumentStore {
         self.preferences.set_favorite(id, favorite)
     }
     pub fn host_active_profile_id(&self) -> Option<String> {
+        if let Some(host) = &self.host {
+            return host.host_active_profile_id();
+        }
         self.preferences.value.host_active_profile_id.clone()
     }
     pub fn host_execution_enabled(&self) -> bool {
+        if let Some(host) = &self.host {
+            return host.host_execution_enabled();
+        }
         self.preferences.value.host_execution_enabled
     }
     pub fn set_host_active_profile(&mut self, profile_id: Option<String>) -> Result<(), String> {
+        if let Some(host) = &mut self.host {
+            return host.set_host_active_profile(profile_id);
+        }
         if self.blocked {
             return Err("本地文档未载入，宿主激活 Profile 未保存".into());
         }
@@ -259,6 +325,9 @@ impl DocumentStore {
         Ok(())
     }
     pub fn set_host_execution_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        if let Some(host) = &mut self.host {
+            return host.set_host_execution_enabled(enabled);
+        }
         if self.blocked {
             return Err("本地文档未载入，宿主执行开关未保存".into());
         }

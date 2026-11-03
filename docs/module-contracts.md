@@ -99,3 +99,9 @@ Swift 的所有宿主执行入口统一经过执行 lease；暂停新入口并�
 ## 原生配置计划入口（E-108）
 
 `ConfigWriter` 共用持久记录和独立读回，原生构造要求受支持后端，FFI另核对唯一USB8298/固件0.6.3。一般RPC仍只读；只有私有 `exchange_keymap` 为审阅计划构造固定keymap写块。MacLink按整条RPC持锁发送所有报告，唯一reader不会插入阻塞读取。原生基线包含随机connection_nonce，同连接原值恢复可用，跨连接旧记录拒绝。RGB编辑随keymap提交，原生即时预览仍关闭；文件读回不代表物理/视觉验收。
+
+## 设备编辑与宿主文档隔离
+
+`DocumentStore` 的设备工作区保留宿主 Store，宿主路由从 `host_store()` 取文档和偏好，设备修改只影响独立设备草稿。`begin_device_editing` 从当前核验快照创建新草稿，`resume_device_editing` 只打开已保存草稿，`return_to_host_document` 恢复宿主编辑状态；入口与设备操作互斥。设备草稿选择记录不改写宿主的 active 文件。
+
+`apply::Pending` 将多个普通键和已有 RGB 字段编译为一个候选；Preview.changes 给出逐项来源及前后值。实际应用和恢复复用 E-108 的计划入口，输入解析也复用逐绑定核验门禁，设备键替换后对应宿主绑定暂停，未受影响的已核验绑定继续可用。

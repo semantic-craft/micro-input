@@ -19,6 +19,29 @@ final class DeviceOperationsTests: XCTestCase {
         await core.shutdown()
     }
     #if MI_SYNTHETIC_BACKEND
+    @MainActor func testDeviceEditorMixedApplicationPreservesHostAndResumesSavedDraft() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let core = MicroInputCore.MicroInput.syntheticConfigWriter()
+        let store = Store(backend: core, documentURL: dir.appendingPathComponent("workbench.json"), actionExecutor: RecordingHostActionExecutor())
+        await store.loadWorkbench()
+        await store.runSyntheticDeviceOperationScenario()
+        XCTAssertFalse(store.editingDevice, store.status)
+        XCTAssertEqual(store.operationResult?.phase, "Verified", store.status)
+        XCTAssertEqual(store.operationRows.count, 2, store.status)
+        let host = store.draft.document_id
+        await store.resumeDeviceEditing()
+        XCTAssertTrue(store.editingDevice, store.status)
+        let previousDevice = store.draft.document_id
+        XCTAssertNotEqual(previousDevice, host)
+        await store.returnToHostDocument()
+        XCTAssertEqual(store.draft.document_id, host)
+        await store.editDeviceConfiguration()
+        XCTAssertTrue(store.editingDevice, store.status)
+        XCTAssertNotEqual(store.draft.document_id, previousDevice)
+        XCTAssertEqual(store.hostProfiles.map(\.name).contains("Cindy"), true)
+        await store.shutdown()
+    }
     @MainActor private func prepared(_ dir: URL, executor: HostActionExecuting? = nil) async throws -> (MicroInputCore.MicroInput, Store, String) {
         let core = MicroInputCore.MicroInput.syntheticConfigWriter()
         let store = Store(backend: core, documentURL: dir.appendingPathComponent("workbench.json"), actionExecutor: executor ?? RecordingHostActionExecutor())

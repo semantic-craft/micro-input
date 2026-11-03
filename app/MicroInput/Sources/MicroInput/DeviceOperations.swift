@@ -149,18 +149,47 @@ extension Store {
     #if MI_SYNTHETIC_BACKEND
     func runSyntheticDeviceOperationScenario() async {
         guard let core = backend as? MicroInputCore.MicroInput else { return }
-        do { try await core.setSyntheticDiscovery(state: .twoDevices) } catch { status = readableError(error); return }
-        await refresh(); selectDevice("synthetic-interface-0"); await connect("synthetic-interface-0")
-        await readIdentity(); await readDeviceConfig(); await createDraftFromSnapshot()
-        await assign("device-key"); await previewApply(); await prepareApplyBackup()
-        guard let token = applyPreview?.token else { return }
-        await performDeviceOperation(token: token)
-        guard operationResult?.phase == "Verified", let id = operationResult?.operation_id else { return }
-        await prepareDeviceRestore(id)
-        guard let restore = restorePreview else { return }
-        await performDeviceOperation(token: restore.token, restore: true)
-        showingDeviceOperations = true
+        do {
+            await installCodingAgentPresets()
+            await setHostExecutionEnabled(true)
+            let hostID = draft.document_id
+            let hostBytes = try Data(contentsOf: documentURL)
+            let preferenceURL = documentURL.deletingPathExtension().appendingPathExtension("preferences.json")
+            let preferences = try Data(contentsOf: preferenceURL)
+            let originalRoute = try JSONDecoder().decode(HostRoutingState.self, from: Data(core.hostRoutingState().utf8))
+            func resolves(_ binding: String) -> Bool {
+                core.resolveHostInput(bindingId: binding, expectedDocumentId: originalRoute.document_id, expectedDocumentRevision: originalRoute.document_revision, expectedHostStateRevision: originalRoute.host_state_revision) != nil
+            }
+            try await core.setSyntheticDiscovery(state: .twoDevices)
+            await refresh(); selectDevice("synthetic-interface-0")
+            await editDeviceConfiguration()
+            guard editingDevice, hostProfiles.contains(where: { $0.id.text == originalRoute.profile_id }), resolves("AG00") else { throw BridgeError.Failed(message: "设备编辑改变宿主路由") }
+            slot = 0; await assign("device-key")
+            slot = 1; await assign("device-key")
+            await editLighting(zone: "backlight", field: "color", value: "#3377CC", allLayers: false)
+            await previewApply()
+            guard applyPreview?.changes?.count == 3 else { throw BridgeError.Failed(message: "混合变更摘要不完整") }
+            await prepareApplyBackup()
+            guard let token = applyPreview?.token else { throw BridgeError.Failed(message: status) }
+            await performDeviceOperation(token: token)
+            guard operationResult?.phase == "Verified", let id = operationResult?.operation_id,
+                  !resolves("AG00"), !resolves("AG01"), resolves("AG02") else { throw BridgeError.Failed(message: "应用或逐绑定路由核对失败") }
+            await prepareDeviceRestore(id)
+            guard let restore = restorePreview else { throw BridgeError.Failed(message: status) }
+            await performDeviceOperation(token: restore.token, restore: true)
+            guard operationResult?.phase == "Verified", resolves("AG00") else { throw BridgeError.Failed(message: "恢复未核验或原绑定未恢复") }
+            await returnToHostDocument()
+            guard !editingDevice, draft.document_id == hostID,
+                  try Data(contentsOf: documentURL) == hostBytes,
+                  try Data(contentsOf: preferenceURL) == preferences else { throw BridgeError.Failed(message: "宿主草稿或偏好发生变化") }
+            if let audit = ProcessInfo.processInfo.environment["MI_HOST_AUDIT_LOG"] {
+                let payload = ["status":"PASS", "host_document":"UNCHANGED", "host_preferences":"UNCHANGED", "mixed_changes":"3", "routing":"PASS"]
+                try JSONEncoder().encode(payload).write(to: URL(fileURLWithPath: audit).deletingLastPathComponent().appendingPathComponent("device-editor.json"))
+            }
+            showingDeviceOperations = true
+        } catch { status = readableError(error) }
     }
+
     #endif
 }
 

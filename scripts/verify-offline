@@ -36,6 +36,11 @@ def verify_evidence(run, scenario, started, process_alive):
         if len(rows) != 2 or any(r["phase"] != "Verified" or r["config_readback"] != "PASS" or r["physical_key"] != "NOT_RUN" or r["lighting_visual"] != "NOT_RUN" for r in rows):
             raise ValueError("apply/restore receipts incomplete or overclaimed")
         result.update(config_readback="PASS", restore="PASS", receipt_count=2)
+        if scenario == "config-write":
+            editor = json.loads((evidence / "device-editor.json").read_text())
+            if editor != {"status": "PASS", "host_document": "UNCHANGED", "host_preferences": "UNCHANGED", "mixed_changes": "3", "routing": "PASS"}:
+                raise ValueError("device editing changed host state or mixed application failed")
+            result["device_editor"] = "PASS"
         if scenario == "lighting-control":
             lights = json.loads((evidence / "lighting.json").read_text())
             if lights != {"status": "PASS", "runtime_readback": "SYNTHETIC_PASS", "physical_key": "NOT_RUN", "lighting_visual": "NOT_RUN"}:

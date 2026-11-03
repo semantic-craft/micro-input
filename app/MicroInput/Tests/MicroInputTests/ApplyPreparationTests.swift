@@ -16,7 +16,7 @@ final class ApplyPreparationTests: XCTestCase {
         await store.previewApply();let preview=try XCTUnwrap(store.applyPreview)
         XCTAssertEqual(preview.logical_control,"logical-0");XCTAssertEqual(preview.after,"KC_B")
         XCTAssertFalse(preview.apply_available);XCTAssertFalse(preview.restore_available)
-        XCTAssertTrue(preview.unavailable_reason.contains("UNKNOWN-08/09"))
+        XCTAssertFalse(preview.unavailable_reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         await store.prepareApplyBackup()
         let prepared=try XCTUnwrap(store.preparedApplyBackup)
         XCTAssertEqual(prepared.status,"prepared-not-sent")

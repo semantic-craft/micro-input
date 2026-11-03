@@ -74,6 +74,9 @@ protocol Backend {
     func duplicateLayer(profileId: String, layerId: String, name: String) async throws -> String
     func deleteLayer(profileId: String, layerId: String) async throws -> String
     func moveLayer(profileId: String, layerId: String, toIndex: UInt32) async throws -> String
+    func beginDeviceEditing() async throws -> String
+    func resumeDeviceEditing() async throws -> String
+    func returnToHostDocument() async throws -> String
     func createDraftFromSnapshot() async throws -> String
     func previewApply() async throws -> String
     func cancelApplyPreview() async
@@ -162,6 +165,9 @@ extension Backend {
     func duplicateLayer(profileId: String, layerId: String, name: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func deleteLayer(profileId: String, layerId: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func moveLayer(profileId: String, layerId: String, toIndex: UInt32) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func resumeDeviceEditing() async throws -> String { throw BridgeError.Failed(message: "设备草稿不可用") }
+    func beginDeviceEditing() async throws -> String { throw BridgeError.Failed(message: "设备编辑不可用") }
+    func returnToHostDocument() async throws -> String { throw BridgeError.Failed(message: "宿主草稿不可用") }
     func createDraftFromSnapshot() async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func previewApply() async throws -> String { throw BridgeError.Failed(message:"设备应用准备不可用") }
     func cancelApplyPreview() async {}
@@ -233,6 +239,9 @@ extension MicroInput: Backend {}
     @Published var slot = 0
     @Published var documentReady = false
     @Published private(set) var browsingDeviceSnapshot = false
+    @Published var editingDevice = false
+    private var hostSnapshot: Snapshot?
+    private var hostEditorSelection: (String?, String?, Int)?
     private var localSnapshot: Snapshot?
     private var localSelection: (profile: String?, layer: String?, slot: Int) = (nil, nil, 0)
     var canEditDraft: Bool { documentReady && !browsingDeviceSnapshot && !deviceOperationRunning }
@@ -282,7 +291,7 @@ extension MicroInput: Backend {}
         layerIndex = profile?.layers.firstIndex(where: {$0.id.text == lid}) ?? min(fallbackLayer, max(0, (profile?.layers.count ?? 0)-1))
         slot = min(slot, max(0, (layer.map {$0.keys.count+$0.encoders.count+$0.joystick.sectors.count} ?? 0)-1))
     }
-    var hostProfiles: [Profile] { (localSnapshot ?? snapshot)?.profiles ?? [] }
+    var hostProfiles: [Profile] { (hostSnapshot ?? localSnapshot ?? snapshot)?.profiles ?? [] }
     func applyDocument(_ json: String, fresh: Bool = false) throws {
         let result = try JSONDecoder().decode(DocumentView.self, from: Data(json.utf8))
         if draft.document_id != result.draft.document_id || draft.revision != result.draft.revision {applyPreview=nil;preparedApplyBackup=nil}
@@ -291,6 +300,7 @@ extension MicroInput: Backend {}
         macros = result.macro_library ?? []
         multis = result.multi_library ?? []; graphActions = result.graph_actions ?? [:]
         draft = result.draft; snapshot = result.config; localSnapshot = result.config
+        editingDevice = result.editing_device ?? false; hostSnapshot = result.host_config
         actionCapabilities = result.action_capabilities ?? [:]
         controlSettings = result.control_settings ?? [:]; controlSettingsError = nil
         hostActiveProfileId = result.host_active_profile_id
@@ -312,7 +322,7 @@ extension MicroInput: Backend {}
         if connectedID != nil, hostInputTask == nil, !inputNeedsResume { startHostInputLoop(token: generation) }
     }
     func installCodingAgentPresets() async {
-        guard canEditDraft, !busy else { return }
+        guard canEditDraft, !busy, !editingDevice else { return }
         busy = true; defer { busy = false }
         do {
             try await changeDocument(fresh: false) { [self] in try await backend.installCodingAgentPresets() }
@@ -368,6 +378,7 @@ extension MicroInput: Backend {}
         autoSetupInFlight = true
         defer { autoSetupInFlight = false }
         if browsingDeviceSnapshot { showLocalDraft() }
+        if editingDevice { return }
         let presetNames = Set(DesktopAgent.all.map(\.name) + ["Antigravity", "Herdr", "DeepSeek Coder (DSH)"])
         let existingNames = Set(hostProfiles.map(\.name))
         if !presetNames.isSubset(of: existingNames), canEditDraft, !busy {
@@ -522,6 +533,44 @@ extension MicroInput: Backend {}
         try await backend.copyRecoveryOriginal(token: token, destination: destination)
         status = "已保存原始字节副本 · 未切换文档 · 不转换未知格式"
     }
+    func editDeviceConfiguration() async {
+        guard !busy, !deviceOperationRunning else { return }
+        let selection = editingDevice ? hostEditorSelection : (profile?.id.text, layer?.id.text, slot)
+        if connectedID == nil {
+            await refresh()
+            guard devices.count == 1 || selectedDeviceID != nil else { status = "请选择要编辑的设备"; return }
+            if selectedDeviceID == nil, let device = devices.first { selectDevice(device.id) }
+            if let id = selectedDeviceID { await connect(id) }
+        }
+        await readIdentity()
+        await readDeviceConfig()
+        guard browsingDeviceSnapshot, !stale else { return }
+        do {
+            try await changeDocument(fresh: true) { [self] in try await backend.beginDeviceEditing() }
+            hostEditorSelection = selection
+            status = "设备草稿 · 宿主配置保持不变 · 审阅后才应用到键盘"
+        } catch { showLocalDraft(); status = readableError(error) }
+    }
+    func resumeDeviceEditing() async {
+        guard !busy, !deviceOperationRunning, !editingDevice else { return }
+        let selection = (profile?.id.text, layer?.id.text, slot)
+        do {
+            try await changeDocument(fresh: true) { [self] in try await backend.resumeDeviceEditing() }
+            hostEditorSelection = selection
+            status = "已继续设备草稿 · 原基线可能过期，应用前请读取设备并比较"
+        } catch { status = readableError(error) }
+    }
+    func returnToHostDocument() async {
+        guard editingDevice, !busy, !deviceOperationRunning else { return }
+        do {
+            try await changeDocument(fresh: true) { [self] in try await backend.returnToHostDocument() }
+            if let selection = hostEditorSelection {
+                restoreSelection(profile: selection.0, layer: selection.1, fallbackProfile: 0, fallbackLayer: 0)
+                slot = selection.2
+            }
+            status = "已返回 Mac 宿主草稿 · 设备草稿另存保留"
+        } catch { status = readableError(error) }
+    }
     func createDraftFromSnapshot() async {
         guard browsingDeviceSnapshot, !stale, !busy else {return};busy=true;defer {busy=false}
         do {try await changeDocument(fresh: true) { [self] in try await backend.createDraftFromSnapshot() };status="已创建独立本地草稿 · 原工作台保留 · 重开继续此草稿"} catch {status=readableError(error)}
@@ -608,14 +657,14 @@ extension MicroInput: Backend {}
         do {
             let response=try await backend.previewApply()
             applyPreview=try JSONDecoder().decode(ApplyPreview.self,from:Data(response.utf8));preparedApplyBackup=nil
-            status="单绑定预览 · 未发送 · 下一步仅保存本机原字节副本"
+            status="配置变更预览 · 未发送 · 下一步保存原配置副本"
         } catch {applyPreview=nil;preparedApplyBackup=nil;status=readableError(error)}
     }
     func prepareApplyBackup() async {
         guard !busy, let preview=applyPreview else {return};busy=true;defer {busy=false}
         do {
             preparedApplyBackup=try JSONDecoder().decode(PreparedApplyBackup.self,from:Data(try await backend.prepareApplyBackup(token:preview.token).utf8))
-            status="原配置副本已核验 · 尚未发送 · 设备恢复仍待验收"
+            status="原配置副本已核验 · 尚未发送"
         } catch {preparedApplyBackup=nil;status=readableError(error)}
     }
     func cancelApplyPreview() async {

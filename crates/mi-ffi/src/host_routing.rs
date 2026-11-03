@@ -24,7 +24,11 @@ impl MicroInput {
         expected_document_revision: u64,
         expected_host_state_revision: u64,
     ) -> Option<String> {
+        if !self.operation_allows_binding(&binding_id) {
+            return None;
+        }
         let store = self.draft.lock().unwrap();
+        let store = store.host_store();
         if !store.host_execution_enabled()
             || store.draft.document_id != expected_document_id
             || store.draft.revision != expected_document_revision

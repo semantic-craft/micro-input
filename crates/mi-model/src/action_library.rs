@@ -22,7 +22,7 @@ pub fn capability(action: &Action) -> ActionCapability {
                 token,
                 false,
                 false,
-                "设备按键仅保存本地意图；配置写入与恢复尚未验证",
+                "设备按键需审阅并应用配置后生效；不是 Mac 宿主动作",
                 "Micro Input 自有离线意图；不是已验证的设备或工具能力",
                 "保存只改变本地草稿；没有执行结果",
             ),

@@ -1,4 +1,4 @@
-//! T13 software preparation only. No transport, writer, activation or recovery execution.
+//! Compile reviewed configuration changes without transport or device side effects.
 use crate::{comparison, document::LocalDocumentV2, draft::ActionKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, value::RawValue, Value};
@@ -11,14 +11,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const UNAVAILABLE: &str =
-    "UNKNOWN-08/09：配置写入、读回和设备恢复尚未实机验证；当前仅准备本机副本，未发送";
-// TODO(UNKNOWN-08): implement a writer only after configuration commit/readback evidence.
-// TODO(UNKNOWN-09): implement device restore only after recovery evidence.
-// Both require explicit authorization. Temporary-file probes do not establish these capabilities.
+pub const UNAVAILABLE: &str = "请核验当前连接并保存原配置副本后应用";
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Preview {
     pub kind: String,
+    #[serde(default)]
+    pub changes: Vec<Value>,
     pub token: String,
     pub document_id: String,
     pub revision: u64,
@@ -187,83 +185,100 @@ impl Pending {
         let mut reference = LocalDocumentV2::from_config(&config, None, "apply-reference")?;
         comparison::align(&mut reference, &doc.editable)?;
         if reference.editable.source_refs != doc.editable.source_refs {
-            return Err("来源引用或结构变化不在单绑定范围内".into());
-        }
-        if doc.editable.graph.layers.iter().any(|(id, layer)| {
-            layer.lighting.as_ref().is_some_and(|target| {
-                reference
-                    .lighting(id)
-                    .map_or(true, |original| original != *target)
-            })
-        }) {
-            return Self::lighting(doc, current, document_bytes, &reference, keymap, smart);
+            return Err("来源引用或结构变化不在配置应用范围内".into());
         }
         let mut normalized = doc.editable.graph.clone();
         for layer in normalized.layers.values_mut() {
             layer.lighting = None;
         }
-        if normalized.actions.len() != 1 {
-            return Err("仅支持一个普通设备按键意图；高级动作或多项改动尚不可用".into());
-        }
-        let mut target = None;
+        let mut targets = Vec::new();
+        let mut used_actions = std::collections::BTreeSet::new();
         for (lid, layer) in &mut normalized.layers {
             for (bid, binding) in &mut layer.controls {
                 if let Some(aid) = binding.action_id.take() {
-                    if target.replace((lid.clone(), bid.clone(), aid)).is_some() {
-                        return Err("仅支持单个普通键绑定".into());
-                    }
+                    used_actions.insert(aid.clone());
+                    targets.push((lid.clone(), bid.clone(), aid));
                 }
             }
         }
+        if used_actions.len() != normalized.actions.len() {
+            return Err("存在未绑定的动作；不能应用".into());
+        }
         normalized.actions.clear();
         if normalized != reference.editable.graph {
-            return Err("结构、模式或其他字段变化不在单绑定范围内".into());
+            return Err("结构、模式或其他字段变化不在配置应用范围内".into());
         }
-        let (local_lid, bid, aid) = target.ok_or("没有普通键变更")?;
-        let binding = &doc.editable.graph.layers[&local_lid].controls[&bid];
-        let slot = binding
-            .logical_control
-            .strip_prefix("logical-")
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|s| *s < 13)
-            .ok_or("只支持普通键，不支持旋钮或摇杆")?;
-        let action = &doc.editable.graph.actions[&aid];
-        action.validate()?;
-        let ActionKind::DeviceKey { token } =
-            serde_json::from_value(action.payload.clone()).map_err(|_| "动作类型未知")?
-        else {
-            return Err("只有 DeviceKey 普通设备按键可准备；宿主快捷键不可转换".into());
-        };
-        let source = &doc.editable.source_refs[&bid];
-        if source["kind"] != "source-binding"
-            || source["logical_control"] != binding.logical_control
-        {
-            return Err("绑定来源无效")?;
+        let mut planned = keymap.clone();
+        let mut changes = Vec::new();
+        for (local_lid, bid, aid) in targets {
+            let binding = &doc.editable.graph.layers[&local_lid].controls[&bid];
+            let slot = binding
+                .logical_control
+                .strip_prefix("logical-")
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|s| *s < 13)
+                .ok_or("只支持普通键，不支持旋钮或摇杆")?;
+            let action = &doc.editable.graph.actions[&aid];
+            action.validate()?;
+            let ActionKind::DeviceKey { token } =
+                serde_json::from_value(action.payload.clone()).map_err(|_| "动作类型未知")?
+            else {
+                return Err("只有 DeviceKey 普通设备按键可准备；宿主快捷键不可转换".into());
+            };
+            let source = &doc.editable.source_refs[&bid];
+            if source["kind"] != "source-binding"
+                || source["logical_control"] != binding.logical_control
+            {
+                return Err("绑定来源无效")?;
+            }
+            let pid = &source["profile_source_id"];
+            let lid = &source["layer_source_id"];
+            let p = config
+                .profiles
+                .iter()
+                .find(|p| p.id == *pid)
+                .ok_or("来源配置不存在")?;
+            let l = p
+                .layers
+                .iter()
+                .find(|l| l.id == *lid)
+                .ok_or("来源层不存在")?;
+            let before = match &l.keys[slot] {
+                crate::Binding::Basic(t) => t.0.clone(),
+                crate::Binding::Empty => "空绑定".into(),
+                crate::Binding::Unknown(Value::String(t)) if known_passthrough(l, slot, t) => {
+                    t.clone()
+                }
+                _ => return Err("原绑定未知或高级类型；不能准备覆盖".into()),
+            };
+            if before == token {
+                continue;
+            }
+            planned = splice(&planned, pid, lid, slot, &token)?;
+            changes.push(json!({"kind":"key","profile":pid,"layer":lid,"control":binding.logical_control,"before":before,"after":token}));
         }
-        let pid = &source["profile_source_id"];
-        let lid = &source["layer_source_id"];
-        let p = config
-            .profiles
-            .iter()
-            .find(|p| p.id == *pid)
-            .ok_or("来源配置不存在")?;
-        let l = p
-            .layers
-            .iter()
-            .find(|l| l.id == *lid)
-            .ok_or("来源层不存在")?;
-        let before = match &l.keys[slot] {
-            crate::Binding::Basic(t) => t.0.clone(),
-            crate::Binding::Empty => "空绑定".into(),
-            crate::Binding::Unknown(Value::String(t)) if known_passthrough(l, slot, t) => t.clone(),
-            _ => return Err("原绑定未知或高级类型；不能准备覆盖".into()),
-        };
-        if before == token {
-            return Err("普通键未发生变化".into());
+        let key_count = changes.len();
+        let (lighting_patches, lighting_changes) = Self::lighting_patches(doc, &planned)?;
+        for (start, end, bytes) in lighting_patches.into_iter().rev() {
+            planned.splice(start..end, bytes);
         }
-        let planned = splice(&keymap, pid, lid, slot, &token)?;
+        changes.extend(lighting_changes);
+        if changes.is_empty() {
+            return Err("没有键位或灯光变化".into());
+        }
+        crate::parse_device_files(&planned, smart.as_deref()).map_err(|e| e.to_string())?;
+        let single_key = key_count == 1 && changes.len() == 1;
+        let first = &changes[0];
         let preview = Preview {
-            kind: "single_device_key".into(),
+            kind: if single_key {
+                "single_device_key"
+            } else if key_count == 0 {
+                "lighting"
+            } else {
+                "configuration"
+            }
+            .into(),
+            changes: changes.clone(),
             token: crate::document::new_id(),
             document_id: doc.document_id.clone(),
             revision: doc.revision,
@@ -276,12 +291,32 @@ impl Pending {
                 .cloned()
                 .unwrap_or(Value::Null),
             active_source: "未知；活动索引未用于选择目标".into(),
-            profile_source_id: pid.clone(),
-            layer_source_id: lid.clone(),
-            logical_control: binding.logical_control.clone(),
+            profile_source_id: if single_key {
+                first["profile"].clone()
+            } else {
+                Value::Null
+            },
+            layer_source_id: if single_key {
+                first["layer"].clone()
+            } else {
+                Value::Null
+            },
+            logical_control: first["control"].as_str().unwrap_or("").into(),
             physical_position: "未核实；仅来源逻辑槽位".into(),
-            before,
-            after: token,
+            before: if single_key {
+                first["before"].as_str().unwrap_or("").into()
+            } else {
+                "当前设备配置".into()
+            },
+            after: if single_key {
+                first["after"].as_str().unwrap_or("").into()
+            } else {
+                format!(
+                    "{} 个键位、{} 个灯光字段",
+                    key_count,
+                    changes.len() - key_count
+                )
+            },
             planned_keymap_sha256: digest(&planned),
             apply_available: false,
             restore_available: false,
@@ -431,21 +466,10 @@ impl Pending {
             smart: self.smart.clone(),
         })
     }
-    fn lighting(
+    fn lighting_patches(
         doc: &LocalDocumentV2,
-        current: &Value,
-        document_bytes: &[u8],
-        reference: &LocalDocumentV2,
-        keymap: Vec<u8>,
-        smart: Option<Vec<u8>>,
-    ) -> Result<Self, String> {
-        let mut normalized = doc.editable.graph.clone();
-        for layer in normalized.layers.values_mut() {
-            layer.lighting = None;
-        }
-        if normalized != reference.editable.graph {
-            return Err("灯光提交不能混合键位、动作或结构修改".into());
-        }
+        keymap: &[u8],
+    ) -> Result<(Vec<(usize, usize, Vec<u8>)>, Vec<Value>), String> {
         let root: &RawValue = serde_json::from_slice(&keymap).map_err(|e| e.to_string())?;
         let mut patches = vec![];
         let mut changes = vec![];
@@ -522,52 +546,15 @@ impl Pending {
                         end,
                         serde_json::to_vec(value).map_err(|e| e.to_string())?,
                     ));
-                    changes.push(json!({"profile":pid,"layer":lid,"zone":zone.name(),"field":key,"before":b[key],"after":value}));
+                    changes.push(json!({"kind":"lighting","profile":pid,"layer":lid,"zone":zone.name(),"field":key,"before":b[key],"after":value}));
                 }
             }
-        }
-        if patches.is_empty() {
-            return Err("灯光未发生变化，无候选".into());
         }
         patches.sort_by_key(|p| p.0);
         if patches.windows(2).any(|w| w[0].1 > w[1].0) {
             return Err("目标范围重叠".into());
         }
-        let mut planned = keymap.clone();
-        for (start, end, bytes) in patches.into_iter().rev() {
-            planned.splice(start..end, bytes);
-        }
-        crate::parse_device_files(&planned, smart.as_deref()).map_err(|e| e.to_string())?;
-        let preview = Preview {
-            kind: "lighting".into(),
-            token: crate::document::new_id(),
-            document_id: doc.document_id.clone(),
-            revision: doc.revision,
-            document_sha256: digest(document_bytes),
-            device_identity: current["device_identity"].clone(),
-            firmware: current["firmware"].clone(),
-            files: metadata(current),
-            active_indices: current["active_indices"].clone(),
-            active_source: "不按活动索引选择编译目标".into(),
-            profile_source_id: Value::Null,
-            layer_source_id: Value::Null,
-            logical_control: String::new(),
-            physical_position: "灯光字段".into(),
-            before: "原始灯光字段".into(),
-            after: serde_json::to_string(&changes).map_err(|e| e.to_string())?,
-            planned_keymap_sha256: digest(&planned),
-            apply_available: false,
-            restore_available: false,
-            unavailable_reason: UNAVAILABLE.into(),
-        };
-        Ok(Self {
-            prepared: None,
-            preview,
-            baseline: current.clone(),
-            keymap,
-            planned_keymap: planned,
-            smart,
-        })
+        Ok((patches, changes))
     }
 }
 fn known_passthrough(layer: &crate::Layer, slot: usize, token: &str) -> bool {
@@ -635,6 +622,7 @@ impl PreparedCandidate {
         .and_then(|v| serde_json::from_value(v["plan"].clone()))
         .map_err(|e| e.to_string())?;
         preview.kind = "restore-keymap".into();
+        preview.changes.clear();
         preview.token = crate::document::new_id();
         preview.document_id = doc.document_id.clone();
         preview.revision = doc.revision;

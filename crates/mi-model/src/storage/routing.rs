@@ -36,9 +36,15 @@ pub enum RoutingOperation {
 }
 impl DocumentStore {
     pub fn host_revision(&self) -> u64 {
+        if let Some(host) = &self.host {
+            return host.host_revision();
+        }
         self.host_state_revision
     }
     pub fn routing_state(&self) -> Value {
+        if let Some(host) = &self.host {
+            return host.routing_state();
+        }
         let p = &self.preferences.value;
         let graph = &self.draft.document.editable.graph;
         let profile = p
@@ -75,6 +81,9 @@ impl DocumentStore {
             "app_profile_links":p.app_profile_links,"keys":keys})
     }
     pub fn update_routing(&mut self, request: RoutingRequest) -> Result<(), String> {
+        if let Some(host) = &mut self.host {
+            return host.update_routing(request);
+        }
         if self.blocked
             || request.document_id != self.draft.document_id
             || request.document_revision != self.draft.revision

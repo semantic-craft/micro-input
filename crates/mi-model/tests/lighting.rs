@@ -104,7 +104,7 @@ fn candidate_is_exact_field_patch_requires_backup_and_can_only_be_taken_once() {
     );
 }
 #[test]
-fn invalid_or_mixed_changes_rejected_and_noop_creates_no_revision() {
+fn invalid_values_reject_while_keys_and_lighting_compile_together() {
     let (_dir, mut store, base, p, l) = setup();
     let rev = store.draft.revision;
     store
@@ -136,7 +136,46 @@ fn invalid_or_mixed_changes_rejected_and_noop_creates_no_revision() {
             )
         })
         .unwrap();
-    assert!(store.preview_apply(&base).is_err());
+    store
+        .update(|d| {
+            d.assign(
+                &json!(p),
+                &json!(l),
+                1,
+                Action {
+                    id: "second-key".into(),
+                    name: "C".into(),
+                    category: "Device".into(),
+                    detail: "local".into(),
+                    payload: json!({"type":"device_key","token":"KC_ENTER"}),
+                },
+            )
+        })
+        .unwrap();
+    let preview = store.preview_apply(&base).unwrap();
+    assert_eq!(preview.kind, "configuration");
+    assert_eq!(preview.changes.len(), 3);
+    store.prepare_apply_backup(&preview.token, &base).unwrap();
+    let plan = store
+        .take_prepared_candidate(&preview.token, &base)
+        .unwrap();
+    let original: Value = serde_json::from_slice(RAW).unwrap();
+    let mut expected = original.clone();
+    expected["profiles"][0]["layers"][0]["layout"]["keymap"][0][0] = json!("KC_B");
+    expected["profiles"][0]["layers"][0]["layout"]["keymap"][0][1] = json!("KC_ENTER");
+    expected["profiles"][0]["layers"][0]["lights"]["backlight"]["brightness"] = json!(0.25);
+    assert_eq!(
+        serde_json::from_slice::<Value>(plan.candidate()).unwrap(),
+        expected
+    );
+    let exact = String::from_utf8(RAW.to_vec())
+        .unwrap()
+        .replacen("\"KV_OAI_AG00\"", "\"KC_B\"", 1)
+        .replacen("\"KC_A\"", "\"KC_ENTER\"", 1)
+        .replacen("0.7500", "0.25", 1);
+    assert_eq!(plan.candidate(), exact.as_bytes());
+    assert_eq!(plan.original(), RAW);
+
     let mut unknown = store.draft.document.lighting(&l).unwrap();
     unknown.backlight["effect"] = json!("future-effect");
     assert!(unknown
