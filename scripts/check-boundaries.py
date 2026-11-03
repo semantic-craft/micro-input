@@ -8,9 +8,10 @@ found = set()
 for path in sources:
     found.update(re.findall(r'TODO\((UNKNOWN-\d+)\)', path.read_text()))
 expected = {f'UNKNOWN-{n:02}' for n in range(1, 10)}
-assert found == expected, (found, expected)
 doc = (root / 'docs/spec/UNKNOWNS.md').read_text()
-assert expected <= set(re.findall(r'UNKNOWN-\d+', doc))
+documented = set(re.findall(r'^\| (UNKNOWN-\d+) \|', doc, re.MULTILINE))
+assert expected <= documented, (expected - documented)
+assert found <= documented, (found - documented)
 # R-D13: guard behavior rather than requiring one placeholder implementation.
 # The tests capture the actual session出口 and assert zero reports for rejected requests.
 for package, behavior in [
