@@ -621,6 +621,8 @@ impl HidTransport for SyntheticDiscovery {
                     } else {
                         serde_json::json!({"id":request["id"],"result":result})
                     }
+                } else if scenario == 3 {
+                    serde_json::json!({"id":request["id"],"result":{"version":"synthetic-0.6.3","profile_index":0,"layer_index":0}})
                 } else if scenario == 2 {
                     serde_json::json!({"id":request["id"],"error":{"code":500,"message":"synthetic identity failure"}})
                 } else if method == "device.status" && scenario == 1 {

@@ -1,4 +1,4 @@
-//! Offline verification harness, compiled only with synthetic-backend. No FFI/native writer.
+//! Offline verification harness, compiled only with synthetic-backend. Only the dedicated synthetic FFI constructor exposes this harness; no native writer.
 use super::*;
 use mi_model::{
     apply::PreparedCandidate,

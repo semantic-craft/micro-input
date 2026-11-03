@@ -425,3 +425,34 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
     );
     assert_eq!(edited.config.profiles.len(), 9);
 }
+
+#[test]
+fn verified_routes_require_positions_unique_aliases_and_complete_wide_pair() {
+    use mi_model::host_router::verified_bindings;
+    let mut cfg = Draft::default().config;
+    cfg.profiles[0].layers[0].keys = std::array::from_fn(|i| {
+        let n = match i {
+            0 => 1,
+            1 => 0,
+            n => n,
+        };
+        Binding::Unknown(json!(format!("KV_OAI_AG{n:02}")))
+    });
+    let mut identity = HostIdentityStatus {
+        version: Some("0.6.3".into()),
+        profile_index: Some(0),
+        layer_index: Some(1),
+    };
+    let allowed = verified_bindings(&cfg, &identity);
+    assert!(allowed.contains("AG01") && allowed.contains("ACT10"));
+    cfg.profiles[0].layers[0].keys.swap(0, 1);
+    let allowed = verified_bindings(&cfg, &identity);
+    assert!(!allowed.contains("AG00") && !allowed.contains("AG01"));
+    assert!(allowed.contains("AG02"));
+    cfg.profiles[0].layers[0].keys[11] = Binding::Unknown(json!("KV_OAI_ACT02"));
+    let allowed = verified_bindings(&cfg, &identity);
+    assert!(!allowed.contains("AG02") && !allowed.contains("AG10") && !allowed.contains("AG11"));
+    assert!(allowed.contains("AG12"));
+    identity.layer_index = None;
+    assert!(verified_bindings(&cfg, &identity).is_empty());
+}

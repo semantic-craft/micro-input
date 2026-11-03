@@ -624,3 +624,42 @@ pub use recovery::RecoveryPreview;
 
 #[path = "agent.rs"]
 pub mod agent;
+
+impl DocumentStore {
+    pub fn device_operation_paths(&self) -> Result<Vec<std::path::PathBuf>, String> {
+        let path = self.path.as_ref().ok_or("未打开文档")?;
+        let root = path.parent().ok_or("无文档目录")?.join("device-backups");
+        if !root.exists() {
+            return Ok(vec![]);
+        }
+        let current = fs::canonicalize(path).map_err(|e| e.to_string())?;
+        let mut paths = vec![];
+        for entry in fs::read_dir(root).map_err(|e| e.to_string())? {
+            let p = entry.map_err(|e| e.to_string())?.path().join("operation");
+            if p.exists() {
+                let p = fs::canonicalize(p).map_err(|e| e.to_string())?;
+                let r = crate::operation_record::OperationRecord::open(&p)?;
+                if r.document_path()? == current {
+                    paths.push(p);
+                }
+            }
+        }
+        Ok(paths)
+    }
+    pub fn reload_operation_document(
+        &mut self,
+        record: &crate::operation_record::OperationRecord,
+    ) -> Result<(), String> {
+        let path = self.path.as_ref().ok_or("未打开文档")?;
+        if fs::canonicalize(path).map_err(|e| e.to_string())? != record.document_path()? {
+            return Err("操作属于其他文档".into());
+        }
+        let bytes = read(path)?.ok_or("文档缺失")?;
+        self.draft = Draft::from_bytes(&bytes)?;
+        self.draft.read_only |= crate::operation_record::ensure_document_editable(path).is_err();
+        self.expected = Some(bytes);
+        self.apply_preview = None;
+        self.comparison = None;
+        Ok(())
+    }
+}

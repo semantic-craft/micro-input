@@ -73,9 +73,12 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 
 ## S3 离线验证入口
 
-文档模型与候选：`cargo test -p mi-model --test lighting`；合成端到端：`cargo test -p mi-session --features synthetic-backend --test config_write`。后者仅用自编夹具、私有临时备份和编译的合成transport，不枚举/打开真实设备。合成写入器不导出到UniFFI。默认统一门禁仍为 `scripts/check`，原生探针继续ignored。
+文档模型与候选：`cargo test -p mi-model --test lighting`；合成端到端：`cargo test -p mi-session --features synthetic-backend --test config_write`。后者仅用自编夹具、私有临时备份和编译的合成transport，不枚举/打开真实设备。合成写入器仅由显式 `synthetic_config_writer` 构造的高层 UniFFI 工作流调用；普通合成实例与原生实例都不开放写入。默认统一门禁仍为 `scripts/check`，原生探针继续ignored。
 
-应用冒烟只用 `scripts/build --synthetic` 后的 `MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=25`；该场景验证既有预设/宿主模拟未回退，不代表新增灯光UI或真实设备功能。生产离线启动必须设置 `MI_AUTO_HOST_READY=0`，本轮不启动生产应用。
+既有宿主回归使用 `scripts/build --synthetic` 后的 `MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=25`；该场景验证既有预设/宿主模拟未回退，不代表新增灯光UI或真实设备功能。生产离线启动必须设置 `MI_AUTO_HOST_READY=0`，本轮不启动生产应用。
 
 
 持久记录回归：`cargo test -p mi-model --test operation_record`；合成恢复链路仍用 `cargo test -p mi-session --features synthetic-backend --test config_write`。覆盖首次发送前落盘、中断重开、损坏现状恢复、恢复链失败、新计划绑定、读回失败、核验结果未落盘、文档冲突和重复本地修复。`apply_observed` 是仅合成模块的故障注入接缝，不开放到 FFI；生产后端继续拒绝构造 writer。完整检查使用 `MI_AUTO_HOST_READY=0 scripts/check`，真实硬件测试保持 ignored。
+
+
+高层集成与恢复界面：`MI_AUTO_HOST_READY=0 swift test --package-path app/MicroInput -Xswiftc -DMI_SYNTHETIC_BACKEND --filter DeviceOperationsTests`（先构建合成绑定）。隔离应用场景 `MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=config-write scripts/run --verify --timeout=55` 完成单键应用、完整读回、新计划恢复，并打开恢复记录面板。独立 `device-operations.jsonl` 只记录操作结果，实体键和视觉灯效固定 NOT_RUN。本地保存失败通过仅专用合成实例可用的故障开关注入，重开后用无设备会话的原生核心修复；不启动生产应用。

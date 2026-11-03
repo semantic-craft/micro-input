@@ -660,3 +660,15 @@ impl PreparedCandidate {
         Ok(result)
     }
 }
+
+impl PreparedCandidate {
+    pub fn preview(&self) -> Result<Preview, String> {
+        let bytes = fs::read(Path::new(&self.backup.backup_path).join("manifest.json"))
+            .map_err(|e| e.to_string())?;
+        if digest(&bytes) != self.backup.manifest_sha256 {
+            return Err("副本校验失败".into());
+        }
+        let value: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        serde_json::from_value(value["plan"].clone()).map_err(|e| e.to_string())
+    }
+}

@@ -463,3 +463,82 @@ pub fn resolve_host_action(
     let action = doc.editable.graph.actions.get(action_id)?;
     convert_action(doc, action)
 }
+
+/// Recheck each supported physical binding; counts alone do not establish position or uniqueness.
+pub fn verified_bindings(config: &DeviceConfig, identity: &HostIdentityStatus) -> BTreeSet<String> {
+    let mut allowed = BTreeSet::new();
+    let (Some(p), Some(l)) = (identity.profile_index, identity.layer_index) else {
+        return allowed;
+    };
+    let layer_index = match identity.version.as_deref() {
+        Some("0.6.3") if l > 0 => (l - 1) as usize,
+        Some("synthetic-0.6.3") => l as usize,
+        _ => return allowed,
+    };
+    let Some(layer) = config
+        .profiles
+        .get(p as usize)
+        .and_then(|p| p.layers.get(layer_index))
+    else {
+        return allowed;
+    };
+    let token = |b: &Binding| match b {
+        Binding::Basic(t) => Some(t.0.clone()),
+        Binding::Unknown(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+    let normalize = |s: &str| -> Option<String> {
+        let suffix = s
+            .strip_prefix("KV_OAI_AG")
+            .or_else(|| s.strip_prefix("KV_OAI_ACT"))?;
+        if suffix.len() != 2 {
+            return None;
+        }
+        let n = suffix.parse::<usize>().ok()?;
+        (n <= 12).then(|| format!("AG{n:02}"))
+    };
+    let names: Vec<_> = layer
+        .keys
+        .iter()
+        .map(|b| token(b).and_then(|s| normalize(&s)))
+        .collect();
+    for n in 0..13 {
+        let id = format!("AG{n:02}");
+        let slot = match n {
+            0 => 1,
+            1 => 0,
+            n => n,
+        };
+        if names[slot].as_deref() == Some(&id)
+            && names.iter().filter(|v| v.as_deref() == Some(&id)).count() == 1
+        {
+            allowed.insert(id);
+        }
+    }
+    if !(allowed.contains("AG10") && allowed.contains("AG11")) {
+        allowed.remove("AG10");
+        allowed.remove("AG11");
+    }
+    for (index, name, alias) in [
+        (0, "ENC_CC", "AG13"),
+        (1, "ENC_CW", "AG14"),
+        (2, "ENC_CLK", "ENC_CLK"),
+    ] {
+        if token(&layer.encoders[index]).as_deref() == Some(&format!("KV_OAI_{name}")) {
+            allowed.insert(name.into());
+            allowed.insert(alias.into());
+        }
+    }
+    if layer.joystick.kind == "VENDOR" && layer.joystick.sectors.is_empty() {
+        for n in 15..=18 {
+            allowed.insert(format!("AG{n:02}"));
+        }
+    }
+    // Retain factory ACT aliases without accepting movement or duplicate switches.
+    for n in 0..13 {
+        if allowed.contains(&format!("AG{n:02}")) {
+            allowed.insert(format!("ACT{n:02}"));
+        }
+    }
+    allowed
+}

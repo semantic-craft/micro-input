@@ -594,3 +594,9 @@ fn ensure_available(path: &Path, permitted: Option<&str>) -> Result<(), String> 
     }
     Ok(())
 }
+
+impl OperationRecord {
+    pub fn document_path(&self) -> Result<PathBuf, String> {
+        Ok(self.plan()?.document_path)
+    }
+}
