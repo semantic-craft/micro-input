@@ -1,10 +1,10 @@
 # Micro Input: App Following, Switch Notice, and Key Cheat Sheet
 
 * **Author:** semantic-craft
-* **Status:** Approved design, review repairs applied — one targeted re-review completed; its final clarification locally checked, not independently re-audited; implementation and acceptance pending
+* **Status:** Host following, switch notice, and passive cheat sheet implemented in PR #54. Physical input, full-screen Space, and installed-app acceptance remain open.
 * **Date:** 2026-11-03
 * **Project:** Micro Input
-* **Approval:** All design sections and this destination approved by the author on 2026-11-03. This document does not record an implementation start or completed verification.
+* **Approval:** All design sections and this destination approved by the author on 2026-11-03. Implementation evidence is recorded in PR #54 and docs/verification/app-following-and-hud.md.
 
 ## Overview
 
