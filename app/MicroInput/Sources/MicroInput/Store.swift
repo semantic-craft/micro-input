@@ -306,8 +306,7 @@ extension MicroInput: Backend {}
         }.map(\.element)
     }
     func prepareDesktopProfiles() async {
-        let missing = !Set(DesktopAgent.all.map(\.name)).isSubset(of: Set(hostProfiles.map(\.name)))
-        guard missing, canEditDraft else { return }
+        guard canEditDraft, !busy else { return }
         let untouched = snapshot?.source == "Demo" && draft.revision == 0 && draft.edits.isEmpty && draft.structure_changes.isEmpty
         await installCodingAgentPresets()
         if untouched, let index = snapshot?.profiles.firstIndex(where: { $0.name == "Cindy" }) {
@@ -317,12 +316,14 @@ extension MicroInput: Backend {}
     }
     var canTryDesktopAction: Bool {
         guard DesktopAgent.named(profile?.name ?? "") != nil, !browsingDeviceSnapshot,
-              profile?.id.text == hostActiveProfileId, hostExecutionEnabled, (0...3).contains(slot) else { return false }
-        return !busy
+              profile?.id.text == hostActiveProfileId, hostExecutionEnabled, (0...19).contains(slot) else { return false }
+        let binding = Self.desktopBindings[slot]
+        return !busy && backend.resolveInputAction(bindingId: binding, isPressed: true) != nil
     }
+    private static let desktopBindings = ["AG01", "AG00", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10", "AG11", "AG12", "AG13", "AG14", "ENC_CLK", "AG15", "AG16", "AG17", "AG18"]
     func tryDesktopAction() async {
         guard canTryDesktopAction else { return }
-        let binding = ["AG01", "AG00", "AG02", "AG03"][slot]
+        let binding = Self.desktopBindings[slot]
         guard let json = backend.resolveInputAction(bindingId: binding, isPressed: true),
               let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(json.utf8)),
               ["open_app", "shortcut", "agent_command"].contains(payload.action_type) else {
@@ -545,48 +546,21 @@ extension MicroInput: Backend {}
         showLocalDraft()
         // Wait briefly for hostInputLoop subscription to attach
         try? await Task.sleep(nanoseconds: 50_000_000)
-        // 1. Antigravity profile: AG01 (Row 0 left -> logical-0: OpenApp com.google.antigravity), AG00 (Row 0 right -> logical-1: Cmd+L), AG10+AG11 (Wide-Key -> 1 Cmd+Return), AG15 (Joystick Up -> Cmd+Opt+Up)
-        let antigravityId = hostProfiles.first(where: { $0.name == "Antigravity" })?.id.text
-        if let antigravityId {
-            await setHostActiveProfile(antigravityId)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: true)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: false)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG00", pressed: true)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG00", pressed: false)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG10", pressed: true)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG11", pressed: true)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG10", pressed: false)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG11", pressed: false)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG15", pressed: true)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG15", pressed: false)
-            try? await Task.sleep(nanoseconds: 80_000_000)
-        }
-        // 2. Herdr profile: AG01 (logical-0 -> FocusSession session-1), AG06 (logical-6 -> AgentCommand new-workspace)
-        if let herdrId = hostProfiles.first(where: { $0.name == "Herdr" })?.id.text {
-            await setHostActiveProfile(herdrId)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: true)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: false)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG06", pressed: true)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG06", pressed: false)
-            try? await Task.sleep(nanoseconds: 80_000_000)
-        }
-        // 3. DSH profile: AG01 (Row 0 left -> logical-0: FocusSession session-1), AG02 (logical-2 -> PasteText /explain), AG10 (logical-10 -> AgentCommand approve-current)
-        if let dshId = hostProfiles.first(where: { $0.name == "DeepSeek Coder (DSH)" })?.id.text {
-            await setHostActiveProfile(dshId)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: true)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: false)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG02", pressed: true)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG02", pressed: false)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG10", pressed: true)
-            try? await core.emitSyntheticBindingEvent(bindingId: "AG10", pressed: false)
-            try? await Task.sleep(nanoseconds: 80_000_000)
-        }
-        // Exercise each new target through the same HID decoder and routing loop.
+        // Real app actions through the HID decoder and normal executor; no send/approval actions.
         for agent in DesktopAgent.all {
-            if let id = hostProfiles.first(where: { $0.name == agent.name })?.id.text {
-                await setHostActiveProfile(id)
-                try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: true)
-                try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: false)
+            guard let id = hostProfiles.first(where: { $0.name == agent.name })?.id.text else { continue }
+            await setHostActiveProfile(id)
+            let bindings = ["Antigravity", "DeepSeek Coder (DSH)"].contains(agent.name)
+                ? ["AG01", "AG00", "AG02", "AG03"] : ["AG01"]
+            for binding in bindings {
+                try? await core.emitSyntheticBindingEvent(bindingId: binding, pressed: true)
+                try? await core.emitSyntheticBindingEvent(bindingId: binding, pressed: false)
+                try? await Task.sleep(nanoseconds: 80_000_000)
+            }
+            if agent.name == "Herdr" {
+                for (binding, pressed) in [("AG10", true), ("AG11", true), ("AG10", false), ("AG11", false), ("AG15", true), ("AG15", false)] {
+                    try? await core.emitSyntheticBindingEvent(bindingId: binding, pressed: pressed)
+                }
                 try? await Task.sleep(nanoseconds: 80_000_000)
             }
         }

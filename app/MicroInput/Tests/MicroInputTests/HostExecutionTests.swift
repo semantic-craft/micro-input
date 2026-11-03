@@ -96,7 +96,7 @@ final class HostExecutionTests: XCTestCase {
         await store.loadWorkbench()
         await store.prepareDesktopProfiles()
         XCTAssertEqual(store.profile?.name, "Cindy")
-        XCTAssertEqual(Array(store.orderedHostProfiles.prefix(4)).map(\.name), DesktopAgent.all.map(\.name))
+        XCTAssertEqual(Array(store.orderedHostProfiles.prefix(DesktopAgent.all.count)).map(\.name), DesktopAgent.all.map(\.name))
         XCTAssertFalse(store.hostProfiles.contains { $0.name.contains("演示") || $0.name.contains("示例") })
         await store.tryDesktopAction()
         XCTAssertTrue(executor.receipts.isEmpty, "Paused host execution must not run an action")
@@ -107,14 +107,23 @@ final class HostExecutionTests: XCTestCase {
             await store.setHostActiveProfile(store.profile?.id.text)
             await store.tryDesktopAction()
             XCTAssertEqual(executor.receipts.last?.target, agent.bundleID)
-            store.slot = 10
+            store.slot = 14
             XCTAssertFalse(store.canTryDesktopAction)
         }
         let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
         await reopened.loadWorkbench()
         XCTAssertEqual(reopened.hostActiveProfileId, store.hostActiveProfileId)
-        XCTAssertEqual(reopened.profile?.name, "ZCode", "Reopening shows the active desktop agent, not a hidden example")
+        XCTAssertEqual(reopened.profile?.name, DesktopAgent.all.last?.name, "Reopening shows the active desktop agent, not a hidden example")
         await store.shutdown(); await reopened.shutdown()
+    }
+
+    @MainActor func testDesktopControlsRejectContentAndUnavailableReasoningModes() {
+        XCTAssertFalse(DesktopAgentControls.extraControl(adapter: "dsh-desktop", command: "model", role: "AXStaticText", labels: ["选择模型，当前 DeepSeek"]))
+        XCTAssertTrue(DesktopAgentControls.extraControl(adapter: "dsh-desktop", command: "effort", role: "AXPopUpButton", labels: ["选择模型，当前 DeepSeek，推理等级 High"]))
+        XCTAssertFalse(DesktopAgentControls.extraControl(adapter: "qoder-cn", command: "effort", role: "AXPopUpButton", labels: ["模型"]))
+        XCTAssertTrue(DesktopAgentControls.extraControl(adapter: "qwenwork", command: "model", role: "AXPopUpButton", labels: ["高级"]))
+        XCTAssertFalse(DesktopAgentControls.extraControl(adapter: "qwenwork", command: "effort", role: "AXPopUpButton", labels: ["高级"]))
+        XCTAssertFalse(DesktopAgentControls.extraControl(adapter: "zcode", command: "model", role: "AXButton", labels: ["Ran code about GLM-5.3"]))
     }
 
     @MainActor func testDelayedAXFocusIsConfirmedWithoutRepeatingTheAction() async {
@@ -211,7 +220,7 @@ final class HostExecutionTests: XCTestCase {
     }
 
     #if MI_SYNTHETIC_BACKEND
-    @MainActor func testVerifiedInputLoopExecutesActionsAndMergesWideKey() async throws {
+    @MainActor func testVerifiedInputLoopExecutesTargetedActionsAndIgnoresUnboundControls() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -261,29 +270,19 @@ final class HostExecutionTests: XCTestCase {
         try await core.emitSyntheticBindingEvent(bindingId: "AG15", pressed: true)
         try await core.emitSyntheticBindingEvent(bindingId: "AG15", pressed: false)
 
-        for _ in 0..<25 where executor.receipts.count < 4 {
+        for _ in 0..<25 where executor.receipts.count < 2 {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
 
-        XCTAssertEqual(executor.receipts.count, 4)
+        XCTAssertEqual(executor.receipts.count, 2)
         XCTAssertEqual(executor.receipts[0].bindingId, "AG01")
         XCTAssertEqual(executor.receipts[0].actionType, "open_app")
         XCTAssertEqual(executor.receipts[0].target, "com.google.antigravity")
 
         XCTAssertEqual(executor.receipts[1].bindingId, "AG00")
-        XCTAssertEqual(executor.receipts[1].actionType, "shortcut")
-        XCTAssertEqual(executor.receipts[1].target, "frontmost-editor")
-        XCTAssertEqual(executor.receipts[1].detail, "command+L")
-
-        XCTAssertEqual(executor.receipts[2].bindingId, "AG10")
-        XCTAssertEqual(executor.receipts[2].actionType, "shortcut")
-        XCTAssertEqual(executor.receipts[2].target, "frontmost-editor")
-        XCTAssertEqual(executor.receipts[2].detail, "command+Return")
-
-        XCTAssertEqual(executor.receipts[3].bindingId, "AG15")
-        XCTAssertEqual(executor.receipts[3].actionType, "shortcut")
-        XCTAssertEqual(executor.receipts[3].target, "frontmost-editor")
-        XCTAssertEqual(executor.receipts[3].detail, "command+option+Up")
+        XCTAssertEqual(executor.receipts[1].actionType, "agent_command")
+        XCTAssertEqual(executor.receipts[1].target, "antigravity")
+        XCTAssertEqual(executor.receipts[1].detail, "antigravity/focus-input")
 
         await store.shutdown()
     }
@@ -329,9 +328,9 @@ final class HostExecutionTests: XCTestCase {
 
         XCTAssertEqual(executor.receipts.count, 1)
         XCTAssertEqual(executor.receipts.first?.bindingId, "AG00")
-        XCTAssertEqual(executor.receipts.first?.actionType, "shortcut")
-        XCTAssertEqual(executor.receipts.first?.target, "frontmost-editor")
-        XCTAssertEqual(executor.receipts.first?.detail, "command+L")
+        XCTAssertEqual(executor.receipts.first?.actionType, "agent_command")
+        XCTAssertEqual(executor.receipts.first?.target, "antigravity")
+        XCTAssertEqual(executor.receipts.first?.detail, "antigravity/focus-input")
 
         await store.shutdown()
     }

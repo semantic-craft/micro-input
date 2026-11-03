@@ -120,13 +120,16 @@ struct StatusPanel: View {
     @ObservedObject var store: Store
     let owner: StatusMenu
     @AppStorage("menuFavoriteProfileIDs") private var favoriteIDsJSON = "[]"
+    private var menuProfiles: [Profile] {
+        store.orderedHostProfiles.filter { !["通用 Coding · 演示", "Herdr · 示例"].contains($0.name) }
+    }
     private var favorites: [Profile] {
         let ids = (try? JSONDecoder().decode([String].self, from: Data(favoriteIDsJSON.utf8))) ?? []
-        return MenuFavorites.resolve(ids: ids, profiles: store.hostProfiles)
+        return MenuFavorites.resolve(ids: ids, profiles: menuProfiles)
     }
     private var otherProfiles: [Profile] {
         let pinned = Set(favorites.map { $0.id.text })
-        return store.orderedHostProfiles.filter { !pinned.contains($0.id.text) }
+        return menuProfiles.filter { !pinned.contains($0.id.text) }
     }
     private func pin(_ profile: Profile, at index: Int) {
         let ids = MenuFavorites.replacing(ids: favorites.map { $0.id.text }, at: index, with: profile.id.text)
@@ -177,7 +180,7 @@ struct StatusPanel: View {
                     Menu("调整常用配置") {
                         ForEach(0..<4, id: \.self) { index in
                             Menu(["左上", "右上", "左下", "右下"][index]) {
-                                ForEach(store.orderedHostProfiles, id: \.id.text) { profile in
+                                ForEach(menuProfiles, id: \.id.text) { profile in
                                     Button { pin(profile, at: index) } label: {
                                         if favorites.indices.contains(index), favorites[index].id.text == profile.id.text {
                                             Label(profile.name, systemImage: "checkmark")

@@ -6,6 +6,10 @@
 
 --------------------------------------------------------------------------------
 
+## 当前实现校正（2026-11-03）
+
+下文 Phase 3 的三套 CLI/通用快捷键方案保留为历史设计。当前实现以八个桌面 Profile 为准，DSH CLI 占位动作已阻止执行；Herdr Profile 指向独立的 Herdr App。默认动作、迁移规则、真实 UI 验收与未支持项见 [桌面控制验收](../verification/desktop-agent-controls.md)。合成场景为 16 条 simulated 回执，不等于真实应用接受操作。
+
 ## Overview
 
 本设计定义 Micro Input 从「只读离线配置工作台（`S1` + `S2a`，见 [`../spec/BUILD_PROMPT.md`](../spec/BUILD_PROMPT.md)）」演进为「支持宿主实时动作接管、多 Coding Agent 配置切换与端到端自验证闭环（`T04` + `S4: T17–T23`，见 [`../implementation-plan.md`](../implementation-plan.md) 及 [`../spec/SPEC.md`](../spec/SPEC.md)）」的技术方案。

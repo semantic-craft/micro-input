@@ -255,9 +255,16 @@ pub fn starter() -> Result<String, String> {
     serde_json::to_string_pretty(&preset).map_err(|e| e.to_string())
 }
 
-pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, String> {
-    let mut created_ids = Vec::new();
-    let mut specs = vec![
+type AgentAssignment = (
+    u32,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    ActionKind,
+);
+fn legacy_agent_specs() -> Vec<(&'static str, Vec<AgentAssignment>)> {
+    vec![
         (
             "Antigravity",
             vec![
@@ -905,7 +912,48 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 ),
             ],
         ),
-    ];
+    ]
+}
+
+pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, String> {
+    let mut created_ids = Vec::new();
+    // Retain the exact old built-ins only as migration fingerprints.
+    let mut legacy_specs = legacy_agent_specs();
+    let mut specs = legacy_specs.clone();
+    for (name, adapter, bundle) in [
+        ("Antigravity", "antigravity", "com.google.antigravity"),
+        ("DeepSeek Coder (DSH)", "dsh-desktop", "com.deepseek.dsh"),
+    ] {
+        let assignments = &mut specs.iter_mut().find(|(n, _)| *n == name).unwrap().1;
+        assignments.clear();
+        assignments.push((
+            0,
+            "desktop-open",
+            "打开 / 聚焦应用",
+            "应用",
+            bundle,
+            ActionKind::OpenApp {
+                bundle_id: bundle.into(),
+            },
+        ));
+        for (slot, id, label, command) in [
+            (1, "desktop-input", "聚焦当前输入框", "focus-input"),
+            (2, "desktop-search", "搜索会话", "search"),
+            (3, "desktop-new", "新建会话", "new-chat"),
+        ] {
+            assignments.push((
+                slot,
+                id,
+                label,
+                "Agent",
+                bundle,
+                ActionKind::AgentCommand {
+                    adapter: adapter.into(),
+                    command: command.into(),
+                },
+            ));
+        }
+    }
 
     // Desktop targets are bound explicitly; no inferred approval/send shortcuts.
     for (name, adapter, bundle) in [
@@ -913,6 +961,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         ("Codex", "codex", "com.openai.codex"),
         ("千问办公", "qwenwork", "cn.qwenwork.desktop.mac"),
         ("ZCode", "zcode", "dev.zcode.app"),
+        ("Qoder CN", "qoder-cn", "com.qodercn.app"),
     ] {
         let mut assignments = vec![(
             0,
@@ -937,7 +986,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 },
             ));
         }
-        if ["cindy", "zcode", "codex"].contains(&adapter) {
+        if ["cindy", "zcode", "codex", "qoder-cn"].contains(&adapter) {
             assignments.push((
                 2,
                 "desktop-search",
@@ -947,6 +996,19 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 ActionKind::AgentCommand {
                     adapter: adapter.into(),
                     command: "search".into(),
+                },
+            ));
+        }
+        if adapter == "qoder-cn" {
+            assignments.push((
+                3,
+                "desktop-new",
+                "新建任务",
+                "Agent",
+                bundle,
+                ActionKind::AgentCommand {
+                    adapter: adapter.into(),
+                    command: "new-chat".into(),
                 },
             ));
         }
@@ -979,6 +1041,108 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             ));
         }
         specs.push((name, assignments));
+    }
+
+    legacy_specs.extend(specs.clone());
+    for (name, assignments) in &mut specs {
+        let adapter = match *name {
+            "Cindy" => "cindy",
+            "Codex" => "codex",
+            "千问办公" => "qwenwork",
+            "ZCode" => "zcode",
+            "Antigravity" => "antigravity",
+            "DeepSeek Coder (DSH)" => "dsh-desktop",
+            "Qoder CN" => "qoder-cn",
+            _ => continue,
+        };
+        for (slot, id, label, command) in [
+            (4, "desktop-model", "选择模型", "model"),
+            (5, "desktop-effort", "调整思考力度", "effort"),
+            (6, "desktop-dictation", "听写 / 语音输入", "dictation"),
+            (7, "desktop-browser", "打开内置浏览器", "browser"),
+            (8, "desktop-terminal", "打开终端面板", "terminal"),
+        ] {
+            let kind = if adapter == "codex"
+                && matches!(command, "model" | "effort" | "browser" | "terminal")
+            {
+                let (key, modifiers) = match command {
+                    "model" | "effort" => ("M", vec!["control".into(), "shift".into()]),
+                    "browser" => ("T", vec!["command".into()]),
+                    _ => ("`", vec!["control".into()]),
+                };
+                ActionKind::Shortcut {
+                    key: key.into(),
+                    modifiers,
+                    target: "com.openai.codex".into(),
+                }
+            } else if adapter == "dsh-desktop" && command == "terminal" {
+                ActionKind::Shortcut {
+                    key: "`".into(),
+                    modifiers: vec!["control".into()],
+                    target: "com.deepseek.dsh".into(),
+                }
+            } else {
+                ActionKind::AgentCommand {
+                    adapter: adapter.into(),
+                    command: command.into(),
+                }
+            };
+            assignments.push((
+                slot,
+                id,
+                label,
+                "Agent",
+                "目标应用的原生控件；未提供时明确提示",
+                kind,
+            ));
+        }
+    }
+    let herdr = &mut specs
+        .iter_mut()
+        .find(|(name, _)| *name == "Herdr")
+        .unwrap()
+        .1;
+    herdr.clear();
+    herdr.push((
+        0,
+        "desktop-open",
+        "打开 Herdr",
+        "应用",
+        "dev.herdr.app",
+        ActionKind::OpenApp {
+            bundle_id: "dev.herdr.app".into(),
+        },
+    ));
+    for (slot, label, key, modifiers) in [
+        (1, "选择 Space / Tab", "p", vec!["command"]),
+        (2, "搜索命令", "p", vec!["command", "shift"]),
+        (3, "新建 Space", "n", vec!["command"]),
+        (4, "新建 Tab / 终端", "t", vec!["command"]),
+        (5, "向右分屏", "d", vec!["command"]),
+        (6, "向下分屏", "d", vec!["command", "shift"]),
+        (7, "上一个 Space", "[", vec!["command", "option"]),
+        (8, "下一个 Space", "]", vec!["command", "option"]),
+        (9, "上一个 Tab", "Tab", vec!["control", "shift"]),
+        (10, "下一个 Tab", "Tab", vec!["control"]),
+        (12, "放大 / 还原面板", "Return", vec!["command", "shift"]),
+        (15, "显示 / 隐藏侧栏", "b", vec!["command"]),
+        (16, "聚焦上方面板", "Up", vec!["command", "option"]),
+        (17, "聚焦左方面板", "Left", vec!["command", "option"]),
+        (18, "聚焦下方面板", "Down", vec!["command", "option"]),
+        (19, "聚焦右方面板", "Right", vec!["command", "option"]),
+    ] {
+        herdr.push((
+            slot,
+            "herdr-desktop",
+            label,
+            "快捷键",
+            "dev.herdr.app",
+            ActionKind::Shortcut {
+                key: key.into(),
+                modifiers: modifiers.into_iter().map(str::to_owned).collect(),
+                target: "dev.herdr.app".into(),
+            },
+        ));
     }
 
     let mut work = draft.clone();
@@ -1026,18 +1190,87 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         }
     }
     for (profile_name, assignments) in specs {
-        if let Some((existing_id, _)) = work
+        let existing_id = work
             .document
             .editable
             .graph
             .profiles
             .iter()
             .find(|(_, p)| p.name == profile_name)
-        {
-            created_ids.push(existing_id.clone());
-            continue;
-        }
-        let pid = work.create_profile(profile_name)?;
+            .map(|(id, _)| id.clone());
+        let pid = if let Some(pid) = existing_id {
+            let p = &work.document.editable.graph.profiles[&pid];
+            let can_upgrade = p.layer_order.len() == 1
+                && legacy_specs
+                    .iter()
+                    .filter(|(name, _)| *name == profile_name)
+                    .any(|(_, old)| {
+                        let layer = &work.document.editable.graph.layers[&p.layer_order[0]];
+                        layer.control_settings.as_ref().is_some_and(|settings| {
+                            settings.joystick_mode == "logical_sectors"
+                                && settings.active_sectors == 4
+                        }) && layer
+                            .controls
+                            .values()
+                            .filter(|b| b.action_id.is_some())
+                            .count()
+                            == old.len()
+                            && old.iter().all(|(slot, id, name, category, detail, kind)| {
+                                layer
+                                    .controls
+                                    .values()
+                                    .find(|b| b.logical_control == format!("logical-{slot}"))
+                                    .and_then(|b| b.action_id.as_ref())
+                                    .and_then(|id| work.document.editable.graph.actions.get(id))
+                                    .is_some_and(|a| {
+                                        a.id == *id
+                                            && a.name == *name
+                                            && a.category == *category
+                                            && a.detail == *detail
+                                            && serde_json::to_value(kind).ok().as_ref()
+                                                == Some(&a.payload)
+                                    })
+                            })
+                    });
+            if !can_upgrade {
+                created_ids.push(pid);
+                continue;
+            }
+            let lid = p.layer_order[0].clone();
+            work.mutate(|doc| {
+                let mut removed = std::collections::BTreeSet::new();
+                for binding in doc
+                    .editable
+                    .graph
+                    .layers
+                    .get_mut(&lid)
+                    .unwrap()
+                    .controls
+                    .values_mut()
+                {
+                    if let Some(id) = binding.action_id.take() {
+                        removed.insert(id);
+                    }
+                }
+                let used: std::collections::BTreeSet<_> = doc
+                    .editable
+                    .graph
+                    .layers
+                    .values()
+                    .flat_map(|l| l.controls.values().filter_map(|b| b.action_id.clone()))
+                    .collect();
+                for id in removed {
+                    if !used.contains(&id) && crate::multi::parent_references(doc, &id).is_empty() {
+                        doc.editable.graph.actions.remove(&id);
+                        doc.editable.source_refs.remove(&id);
+                    }
+                }
+                Ok(())
+            })?;
+            pid
+        } else {
+            work.create_profile(profile_name)?
+        };
         let lid = work.document.editable.graph.profiles[&pid].layer_order[0].clone();
         work.set_control_settings(
             &pid,
@@ -1063,4 +1296,96 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         doc.editable = work.document.editable;
         Ok(created_ids)
     })
+}
+
+#[cfg(test)]
+mod agent_migration_tests {
+    use super::*;
+    #[test]
+    fn upgrades_only_unchanged_legacy_agents_atomically() {
+        for customized in [false, true] {
+            let mut draft = Draft::default();
+            let mut old_ids = Vec::new();
+            for (name, assignments) in legacy_agent_specs() {
+                let pid = draft.create_profile(name).unwrap();
+                let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+                draft
+                    .set_control_settings(
+                        &pid,
+                        &lid,
+                        crate::control_settings::ControlSettings {
+                            joystick_mode: "logical_sectors".into(),
+                            active_sectors: 4,
+                        },
+                    )
+                    .unwrap();
+                for (slot, id, name, category, detail, kind) in assignments {
+                    draft
+                        .assign(
+                            &json!(pid),
+                            &json!(lid),
+                            slot,
+                            crate::draft::Action {
+                                id: id.into(),
+                                name: name.into(),
+                                category: category.into(),
+                                detail: detail.into(),
+                                payload: serde_json::to_value(kind).unwrap(),
+                            },
+                        )
+                        .unwrap();
+                }
+                old_ids.push(pid);
+            }
+            let ag = old_ids[0].clone();
+            let lid = draft.document.editable.graph.profiles[&ag].layer_order[0].clone();
+            if customized {
+                let id = draft.document.editable.graph.layers[&lid]
+                    .controls
+                    .values()
+                    .find_map(|b| b.action_id.clone())
+                    .unwrap();
+                draft
+                    .document
+                    .editable
+                    .graph
+                    .actions
+                    .get_mut(&id)
+                    .unwrap()
+                    .name = "My action".into();
+            }
+            let before = draft.document.editable.clone();
+            let revision = draft.revision;
+            let ids = install_agent_starter_profiles(&mut draft).unwrap();
+            assert_eq!(&ids[..3], &old_ids);
+            assert_eq!(draft.revision, revision + 1);
+            let count = draft.document.editable.graph.layers[&lid]
+                .controls
+                .values()
+                .filter(|b| b.action_id.is_some())
+                .count();
+            assert_eq!(
+                count,
+                if customized {
+                    legacy_agent_specs()[0].1.len()
+                } else {
+                    9
+                }
+            );
+            if customized {
+                assert!(draft.document.editable.graph.layers[&lid] == before.graph.layers[&lid]);
+            }
+            let after = serde_json::to_value(&draft.document.editable).unwrap();
+            install_agent_starter_profiles(&mut draft).unwrap();
+            assert_eq!(
+                serde_json::to_value(&draft.document.editable).unwrap(),
+                after
+            );
+            draft.undo(false).unwrap();
+            assert_eq!(
+                serde_json::to_value(&draft.document.editable).unwrap(),
+                serde_json::to_value(before).unwrap()
+            );
+        }
+    }
 }

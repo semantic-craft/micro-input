@@ -15,10 +15,10 @@
 ## Driving it with `verify-micro-input`
 
 1. 构建合成后端应用包：`scripts/build --synthetic`。
-2. 启动合成自检场景：`MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=15`。
+2. 启动合成自检场景：`MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=25`。
 3. 待进程退出后，读取 `$QA_RUN_DIR/evidence/audit.jsonl` 与 `$QA_RUN_DIR/evidence/launcher.json`。
-4. 确认 `audit.jsonl` 中包含 **9 条** 回执（涵盖 `open_app`、`paste_text`、`shortcut`、`focus_session`、`agent_command`），且 `launcher.json` 中 `app_bundle_removed == true`。
-5. 若连接了唯一实机 USB `303A:8298` 设备，运行 `scripts/build && scripts/run --verify --timeout=10`，确认 `audit.jsonl` 自动记录 `action_type: "host_ready"`（`passthrough=ready presets=5`）。
+4. 确认 `audit.jsonl` 中包含 **16 条** 回执（涵盖 `open_app`、`shortcut`、`agent_command`；不得把 simulated 当作真实控制），且 `launcher.json` 中 `app_bundle_removed == true`。
+5. 若连接了唯一实机 USB `303A:8298` 设备，运行 `scripts/build && scripts/run --verify --timeout=10`，确认 `audit.jsonl` 自动记录 `action_type: "host_ready"`（`passthrough=ready`）。
 
 ## Gotchas
 

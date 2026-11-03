@@ -15,7 +15,7 @@
 ## Driving it with `verify-micro-input`
 
 1. 运行 `cargo test --locked -p mi-session -p mi-model` 验证 `WideKeyMerger`、出厂 Codex `ACT06`–`12` / `ENC_*` / `v.oai.rad` 扇区切换状态机与 `check_passthrough_health` 单元测试。
-2. 运行 `MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=15`，该场景会连续注入 `AG10` 按下 → `AG11` 按下 → `AG10` 释放 → `AG11` 释放，检查 `$QA_RUN_DIR/evidence/audit.jsonl` 确认宽键动作仅被执行 1 次。
+2. 运行 `MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=25`，该场景会连续注入 `AG10` 按下 → `AG11` 按下 → `AG10` 释放 → `AG11` 释放，检查 `$QA_RUN_DIR/evidence/audit.jsonl` 确认宽键动作仅被执行 1 次。
 
 ## Gotchas
 

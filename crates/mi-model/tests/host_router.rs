@@ -149,7 +149,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     assert_eq!(draft.revision, 0);
     assert_eq!(draft.config.profiles.len(), 2);
     let created = install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(created.len(), 7);
+    assert_eq!(created.len(), 8);
     assert_eq!(
         draft.revision, 1,
         "install_agent_starter_profiles must commit as a single atomic revision"
@@ -158,10 +158,10 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     assert_eq!(
         draft.config.profiles.len(),
         2,
-        "single undo must revert all 7 starter profiles"
+        "single undo must revert all 8 starter profiles"
     );
     draft.undo(true).unwrap();
-    assert_eq!(draft.config.profiles.len(), 7);
+    assert_eq!(draft.config.profiles.len(), 8);
 
     let ag_pid = &created[0];
     let herdr_pid = &created[1];
@@ -178,102 +178,42 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         }
     );
 
-    // AG00 maps to logical-1 (Antigravity: Cmd+L)
-    let resolved_1 = resolve_host_action(&draft.document, Some(ag_pid), "AG00", true).unwrap();
     assert_eq!(
-        resolved_1,
-        ResolvedHostAction::Shortcut {
-            key: "L".into(),
-            key_code: 0x25,
-            modifiers: vec!["command".into()],
-            target_bundle_id: None,
-        }
-    );
-
-    // AG10 maps to logical-10 (Antigravity: Cmd+Return)
-    let resolved_10 = resolve_host_action(&draft.document, Some(ag_pid), "AG10", true).unwrap();
-    assert_eq!(
-        resolved_10,
-        ResolvedHostAction::Shortcut {
-            key: "Return".into(),
-            key_code: 0x24,
-            modifiers: vec!["command".into()],
-            target_bundle_id: None,
-        }
-    );
-
-    // AG15 maps to logical-16 (Antigravity: Cmd+Opt+Up)
-    let resolved_16 = resolve_host_action(&draft.document, Some(ag_pid), "AG15", true).unwrap();
-    assert_eq!(
-        resolved_16,
-        ResolvedHostAction::Shortcut {
-            key: "Up".into(),
-            key_code: 0x7E,
-            modifiers: vec!["command".into(), "option".into()],
-            target_bundle_id: None,
-        }
-    );
-
-    // ENC_CLK maps to logical-15 across all 3 Coding Agent presets
-    assert_eq!(
-        resolve_host_action(&draft.document, Some(ag_pid), "ENC_CLK", true).unwrap(),
-        ResolvedHostAction::Shortcut {
-            key: "B".into(),
-            key_code: 0x0B,
-            modifiers: vec!["command".into()],
-            target_bundle_id: None,
-        }
-    );
-    assert_eq!(
-        resolve_host_action(&draft.document, Some(herdr_pid), "ENC_CLK", true).unwrap(),
+        resolve_host_action(&draft.document, Some(ag_pid), "AG00", true).unwrap(),
         ResolvedHostAction::AgentCommand {
-            adapter: "herdr".into(),
-            command: "toggle-zoom".into(),
+            adapter: "antigravity".into(),
+            command: "focus-input".into()
         }
     );
-    assert_eq!(
-        resolve_host_action(&draft.document, Some(dsh_pid), "ENC_CLK", true).unwrap(),
-        ResolvedHostAction::AgentCommand {
-            adapter: "dsh".into(),
-            command: "status".into(),
+    for pid in [ag_pid, dsh_pid] {
+        for binding in ["AG10", "AG15", "ENC_CLK"] {
+            assert!(resolve_host_action(&draft.document, Some(pid), binding, true).is_none());
         }
-    );
-
-    // Herdr preset: AG01 -> FocusSession("herdr", "session-1"), AG10 -> AgentCommand("herdr", "approve-current")
+    }
     assert_eq!(
         resolve_host_action(&draft.document, Some(herdr_pid), "AG01", true).unwrap(),
-        ResolvedHostAction::FocusSession {
-            adapter: "herdr".into(),
-            session: "session-1".into(),
+        ResolvedHostAction::OpenApp {
+            bundle_id: "dev.herdr.app".into()
         }
     );
-    assert_eq!(
-        resolve_host_action(&draft.document, Some(herdr_pid), "AG10", true).unwrap(),
-        ResolvedHostAction::AgentCommand {
-            adapter: "herdr".into(),
-            command: "approve-current".into(),
-        }
-    );
+    for binding in ["AG00", "AG02", "AG10", "ENC_CLK"] {
+        assert!(
+            matches!(resolve_host_action(&draft.document, Some(herdr_pid), binding, true),
+            Some(ResolvedHostAction::Shortcut { target_bundle_id: Some(ref target), .. }) if target == "dev.herdr.app")
+        );
+    }
 
-    // DSH preset: AG01 -> FocusSession("dsh", "session-1"), AG02 -> PasteText, AG10 -> AgentCommand("dsh", "approve-current")
     assert_eq!(
         resolve_host_action(&draft.document, Some(dsh_pid), "AG01", true).unwrap(),
-        ResolvedHostAction::FocusSession {
-            adapter: "dsh".into(),
-            session: "session-1".into(),
+        ResolvedHostAction::OpenApp {
+            bundle_id: "com.deepseek.dsh".into()
         }
     );
     assert_eq!(
         resolve_host_action(&draft.document, Some(dsh_pid), "AG02", true).unwrap(),
-        ResolvedHostAction::PasteText {
-            text: "请定位根因并给出最小修复方案".into(),
-        }
-    );
-    assert_eq!(
-        resolve_host_action(&draft.document, Some(dsh_pid), "AG10", true).unwrap(),
         ResolvedHostAction::AgentCommand {
-            adapter: "dsh".into(),
-            command: "approve-current".into(),
+            adapter: "dsh-desktop".into(),
+            command: "search".into()
         }
     );
 
@@ -347,6 +287,25 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         Some(resolved_fallback)
     );
 
+    for slot in 16..20 {
+        draft
+            .assign(
+                &json!(ag_pid),
+                &json!(lid),
+                slot,
+                mi_model::draft::Action {
+                    id: format!("sector-{slot}"),
+                    name: "Sector fixture".into(),
+                    category: "应用".into(),
+                    detail: "test".into(),
+                    payload: serde_json::to_value(mi_model::draft::ActionKind::OpenApp {
+                        bundle_id: "com.google.antigravity".into(),
+                    })
+                    .unwrap(),
+                },
+            )
+            .unwrap();
+    }
     // Joystick sectors (logical-16..19) must only resolve when joystick_mode == "logical_sectors"
     // and sector_idx < active_sectors.
     draft
@@ -415,7 +374,7 @@ fn host_preferences_persist_active_profile_and_execution_enabled() {
 fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
     let mut draft = Draft::default();
     let ids = install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(draft.config.profiles.len(), 7);
+    assert_eq!(draft.config.profiles.len(), 8);
     assert!(!draft
         .config
         .profiles
@@ -426,6 +385,7 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
         ("Codex", "com.openai.codex"),
         ("千问办公", "cn.qwenwork.desktop.mac"),
         ("ZCode", "dev.zcode.app"),
+        ("Qoder CN", "com.qodercn.app"),
     ] {
         let pid = draft
             .document
@@ -463,5 +423,5 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
         edited.document.editable.graph.profiles[&pid].name,
         "My existing mapping"
     );
-    assert_eq!(edited.config.profiles.len(), 8);
+    assert_eq!(edited.config.profiles.len(), 9);
 }
