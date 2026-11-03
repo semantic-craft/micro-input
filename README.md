@@ -98,3 +98,5 @@ Herdr Profile 面向 `dev.herdr.app` 桌面 App：01 打开、02 Space/Tab 选�
 仅升级与旧内置动作完全一致的 Profile；保留 Profile/Layer ID、用户改过的动作及其他配置。新增操作不会写设备 Flash。当前验证证据与应用能力差异见 [桌面控制验收](docs/verification/desktop-agent-controls.md)。
 
 听写验收：Cindy、Codex、千问办公已由真实执行器核对启动和停止；千问按钮带快捷键后缀，状态识别同时接受“语音输入（…）”与“停止录音（…）”。若应用本身无响应需先恢复应用，不能把 AXPress 返回值当作录音成功。菜单与侧栏使用本机应用图标，紧凑窗口侧栏可独立滚动；四个菜单常用项仍固定平铺。
+
+H0/H1 独立验收执行器已接线：`scripts/hardware-acceptance` 默认只运行假 USB 回归，实机入口需要明确范围、路径及材料，H1 另需原配置摘要和未决操作核查。见[执行说明](docs/designs/hardware-acceptance.md#h0h1-独立执行入口已接线实机未运行)。本轮未连接设备，生产配置写入和 RGB 仍未开放。

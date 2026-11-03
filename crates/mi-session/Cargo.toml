@@ -15,5 +15,6 @@ base64 = "0.22.1"
 sha1 = "0.10.6"
 
 [dev-dependencies]
+sha2 = "0.10"
 async-trait = "0.1"
 tempfile = "3"

@@ -604,6 +604,7 @@ dependencies = [
  "mi-transport",
  "serde_json",
  "sha1",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",

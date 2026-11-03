@@ -364,6 +364,9 @@ struct Record {
 }
 impl Record {
     fn new(probe: Probe) -> Result<Self> {
+        Self::named(probe.label())
+    }
+    fn named(label: &str) -> Result<Self> {
         let token: String = random::<16>()?.iter().map(|b| format!("{b:02x}")).collect();
         let target = format!("mi_{}.txt", &token[..12]);
         temp_name(&target)?;
@@ -371,7 +374,7 @@ impl Record {
         fs::create_dir_all(&root).map_err(|_| "private_parent_failed")?;
         let directory = root.join(format!(
             "probe-{}-{}-{}-{}-{}-{}",
-            probe.label(),
+            label,
             &token[..8],
             &token[8..12],
             &token[12..16],
@@ -755,3 +758,5 @@ async fn native_exact(probe: Probe) -> Result<()> {
 }
 
 pub mod fixture;
+
+pub mod hardware;
