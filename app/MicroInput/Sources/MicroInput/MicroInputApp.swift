@@ -68,6 +68,7 @@ struct WorkbenchHost: View {
         item.button?.toolTip = "Micro Input"
         item.button?.target = self; item.button?.action = #selector(show)
         popover.behavior = .transient
+        popover.animates = false
         popover.contentViewController = NSHostingController(rootView: StatusPanel(store: store, owner: self))
     }
     @objc func show() {
@@ -118,12 +119,13 @@ struct WorkbenchHost: View {
 struct StatusPanel: View {
     @ObservedObject var store: Store
     let owner: StatusMenu
-    @State private var search = ""
-    @State private var showOther = false
-    var profiles: [Profile] {
-        store.orderedHostProfiles.filter { p in
-            (showOther || DesktopAgent.named(p.name) != nil) && (search.isEmpty || p.name.localizedCaseInsensitiveContains(search))
-        }
+    private var otherProfiles: [Profile] {
+        store.orderedHostProfiles.filter { DesktopAgent.named($0.name) == nil }
+    }
+    private var summary: String {
+        if !store.hostExecutionEnabled { return "按键控制已暂停" }
+        if !LiveHostActionExecutor.isAccessibilityTrusted { return "需要辅助功能权限" }
+        return store.connectedID == nil ? "设备未连接" : store.passThroughHealth.label
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -136,52 +138,78 @@ struct StatusPanel: View {
                 Label(store.connectedID == nil ? "未连接" : "已连接", systemImage: "cable.connector")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Toggle("启用按键控制", isOn: Binding(get: { store.hostExecutionEnabled }, set: { value in Task { await store.setHostExecutionEnabled(value) } }))
+            Toggle("按键控制", isOn: Binding(get: { store.hostExecutionEnabled }, set: { value in Task { await store.setHostExecutionEnabled(value) } }))
                 .toggleStyle(.switch).controlSize(.small)
-            TextField("搜索 Agent 配置", text: $search).textFieldStyle(.roundedBorder)
-            ScrollView {
-                VStack(spacing: 4) {
-                    ForEach(profiles, id: \.id.text) { p in
-                        Button { Task { await store.setHostActiveProfile(p.id.text) } } label: {
-                            HStack(spacing: 10) {
-                                AgentBadge(name: p.name)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(p.name).fontWeight(.medium)
-                                    if let agent = DesktopAgent.named(p.name) {
-                                        Text(agent.installed ? "已安装" : "未找到应用").font(.caption2).foregroundStyle(.secondary)
-                                    }
-                                }
-                                Spacer()
-                                if store.hostActiveProfileId == p.id.text { Image(systemName: "checkmark").foregroundStyle(.tint) }
-                            }.padding(8).contentShape(Rectangle())
-                                .background(store.hostActiveProfileId == p.id.text ? Color.accentColor.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
-                        }.buttonStyle(.plain).disabled(store.busy)
-                        .accessibilityLabel("控制 \(p.name)\(store.hostActiveProfileId == p.id.text ? "，当前配置" : "")")
-                    }
-                    if profiles.isEmpty { Text("没有匹配的配置").foregroundStyle(.secondary).padding() }
+            // Intrinsic, non-scrolling rows: a maxHeight-only ScrollView can collapse
+            // inside NSHostingController's initial popover size negotiation.
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    agentButton(DesktopAgent.all[0])
+                    agentButton(DesktopAgent.all[1])
                 }
-            }.frame(maxHeight: 290)
-            Toggle("显示其他配置", isOn: $showOther).toggleStyle(.checkbox).font(.caption)
-            Divider()
-            Text(store.hostExecutionEnabled ? store.passThroughHealth.label : "按键控制已暂停")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if !LiveHostActionExecutor.isAccessibilityTrusted {
-                Button("设置辅助功能权限…") { LiveHostActionExecutor.openAccessibilitySettings() }.font(.caption)
-            }
-            if let receipt = store.lastHostActionReceipt {
-                Text("最近动作：\(receipt.succeeded ? "已执行" : "未执行") · \(receipt.detail)")
-                    .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-            }
+                HStack(spacing: 8) {
+                    agentButton(DesktopAgent.all[2])
+                    agentButton(DesktopAgent.all[3])
+                }
+            }.fixedSize(horizontal: false, vertical: true)
             HStack {
-                Button(store.connectedID == nil ? "连接设备" : "检查连接") { Task { await store.autoSetupHostExecutionIfNeeded() } }.disabled(store.busy)
+                Menu("其他配置") {
+                    ForEach(otherProfiles, id: \.id.text) { p in
+                        Button { Task { await store.setHostActiveProfile(p.id.text) } } label: {
+                            if store.hostActiveProfileId == p.id.text { Label(p.name, systemImage: "checkmark") }
+                            else { Text(p.name) }
+                        }.disabled(store.busy)
+                    }
+                    if otherProfiles.isEmpty { Text("没有其他配置") }
+                }.fixedSize()
                 Spacer()
                 Button("编辑按键…") { owner.showWindow() }
+            }
+            Divider()
+            HStack(spacing: 8) {
+                Text(summary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 4)
+                Menu("连接详情") {
+                    Text(store.passThroughHealth.label)
+                    if let receipt = store.lastHostActionReceipt {
+                        Text("最近动作：\(receipt.succeeded ? "已执行" : "未执行") · \(receipt.detail)")
+                    }
+                    Divider()
+                    Button(store.connectedID == nil ? "连接设备" : "检查连接") {
+                        Task { await store.autoSetupHostExecutionIfNeeded() }
+                    }.disabled(store.busy)
+                    Button("设置辅助功能权限…") { LiveHostActionExecutor.openAccessibilitySettings() }
+                }.fixedSize().font(.caption)
             }
             HStack {
                 Text("配置切换仅作用于本机").font(.caption2).foregroundStyle(.secondary)
                 Spacer()
                 Button("退出") { owner.quitApp() }.buttonStyle(.plain).font(.caption)
             }
-        }.padding(16).frame(width: 336).tint(Color(red: 0.20, green: 0.43, blue: 0.34))
+        }.padding(16).frame(width: 336).fixedSize(horizontal: false, vertical: true)
+            .tint(Color(red: 0.20, green: 0.43, blue: 0.34))
+    }
+    private func agentButton(_ agent: DesktopAgent) -> some View {
+        let profile = store.hostProfiles.first { $0.name == agent.name }
+        let selected = profile != nil && store.hostActiveProfileId == profile?.id.text
+        return Button {
+            guard let profile else { return }
+            Task { await store.setHostActiveProfile(profile.id.text) }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: agent.symbol).foregroundStyle(.tint).frame(width: 20)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(agent.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                    if !agent.installed { Text("未找到应用").font(.caption2).foregroundStyle(.secondary) }
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "checkmark").font(.caption.weight(.semibold))
+                    .foregroundStyle(.tint).opacity(selected ? 1 : 0)
+            }.padding(.horizontal, 10).frame(maxWidth: .infinity).frame(height: 52)
+                .contentShape(RoundedRectangle(cornerRadius: 9))
+                .background(selected ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(selected ? Color.accentColor.opacity(0.4) : Color.primary.opacity(0.06)))
+        }.buttonStyle(.plain).disabled(store.busy || profile == nil)
+            .accessibilityLabel("控制 \(agent.name)\(selected ? "，当前配置" : "")")
     }
 }
