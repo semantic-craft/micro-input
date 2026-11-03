@@ -71,7 +71,7 @@ struct Workbench: View {
                             DocumentRecoveryMenu(store: store)
                             AgentProposalButton(store: store)
                             Button("补齐 Agent 配置") { Task { await store.installCodingAgentPresets() } }
-                            Button("准备基础绑定应用…") { Task { await store.previewApply() } }
+                            Button("准备应用键位或灯光…") { Task { await store.previewApply() } }
                         }.padding(.top, 8).disabled(!store.canEditDraft || store.busy)
                     }.font(.caption)
                     Button("RGB 灯光…") { store.showingLighting = true }.disabled(store.layer == nil || !store.canEditDraft)

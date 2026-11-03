@@ -169,7 +169,7 @@ struct DeviceOperationsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack { Text("设备操作与恢复").font(.title2); Spacer(); Button("关闭") { store.showingDeviceOperations = false } }
-            Text("配置文件核对与实体按键、灯光效果验收分别记录。当前只开放合成设备。")
+            Text("支持已核验的 Creator Micro 2 / 0.6.3 当前连接。配置读回与实体按键、灯光效果分别核验。")
             if let result = store.operationResult { Text(result.title).font(.headline) }
             if store.deviceOperationRunning { Button("停止后续发送") { store.cancelActiveDeviceOperation() } }
             ScrollView {
