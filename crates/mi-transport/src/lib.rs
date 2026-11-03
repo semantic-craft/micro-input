@@ -835,7 +835,9 @@ impl SyntheticFiles {
                         self.preview_lights = source["profiles"][0]["layers"][0]["lights"].clone();
                     }
                     if request["method"] == "synthetic.lights.set" {
-                        if params["target"].as_u64() != Some(self.preview_target) {
+                        if params["target"].as_u64() != Some(self.preview_target)
+                            || params.get("expected") != Some(&self.preview_lights)
+                        {
                             return Err(());
                         }
                         self.preview_lights = params["lights"].clone();

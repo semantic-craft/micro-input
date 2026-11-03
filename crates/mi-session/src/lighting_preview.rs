@@ -71,6 +71,7 @@ impl Preview {
             }
             let deadline = tokio::time::Instant::now() + lifetime;
             let mut failed = false;
+            let mut last = original.clone();
             loop {
                 tokio::select! {biased; _=session.changed.notified()=>{failed=true;break;}, _=tokio::time::sleep_until(deadline)=>break, changed=rx.changed()=>{if changed.is_err(){break;}} }
                 // Latest-only coalescing; never cancel an in-flight transport exchange.
@@ -83,18 +84,22 @@ impl Preview {
                 let mut target = original.clone();
                 target["lights"]["backlight"] = desired.backlight;
                 target["lights"]["underglow"] = desired.underglow;
-                match call(&session, &mut q, "synthetic.lights.set", target).await {
-                    Ok(v) if v["target"] == original["target"] => {}
+                let mut request = target.clone();
+                request["expected"] = last["lights"].clone();
+                match call(&session, &mut q, "synthetic.lights.set", request).await {
+                    Ok(v) if v == target => last = v,
                     _ => {
                         failed = true;
                         break;
                     }
                 }
             }
-            // Target comparison and update are atomic in the simulator. A layer switch
-            // rejects restoration instead of sending an old layer's values to a new target.
+            // Atomically compare both target and last verified runtime state. External
+            // changes must survive both subsequent updates and restoration.
             if !failed {
-                failed = call(&session, &mut q, "synthetic.lights.set", original.clone())
+                let mut restore = original.clone();
+                restore["expected"] = last["lights"].clone();
+                failed = call(&session, &mut q, "synthetic.lights.set", restore)
                     .await
                     .is_err();
                 if !failed {
@@ -224,6 +229,33 @@ mod tests {
             json!({"different":"layer"})
         );
         session.shutdown().await;
+    }
+    #[tokio::test]
+    async fn same_target_external_change_is_never_overwritten() {
+        for update_again in [false, true] {
+            let (device, session) = setup().await;
+            let preview = Preview::begin(session.clone()).await.unwrap();
+            preview.update(Zone::Backlight, Edit::Color(55)).unwrap();
+            color(&device, 55).await;
+            let mut files = device.files().unwrap();
+            files.preview_lights["backlight"]["color"] = json!(99);
+            let external = files.preview_lights.clone();
+            device.set_files(files);
+            if update_again {
+                preview.update(Zone::Backlight, Edit::Color(66)).unwrap();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while preview.status()["phase"] == "Active" {
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+            assert_eq!(preview.end().await["phase"], "Unknown");
+            assert_eq!(device.files().unwrap().preview_lights, external);
+            assert_eq!(device.files().unwrap().keymap, RAW);
+            session.shutdown().await;
+        }
     }
     #[tokio::test]
     async fn response_failure_never_claims_restoration_and_keeps_files_untouched() {
