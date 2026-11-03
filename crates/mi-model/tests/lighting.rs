@@ -11,8 +11,11 @@ fn baseline(bytes: &[u8]) -> Value {
     json!({"device_identity":{"confidence":"verified-serial","serial":"synthetic","session_id":4},"firmware":"synthetic-0.6.3","keymap":{"state":"present","size":bytes.len(),"sha1":format!("{:x}",Sha1::digest(bytes)),"bytes":bytes},"smart_actions":{"state":"missing"}})
 }
 fn setup() -> (tempfile::TempDir, DocumentStore, Value, String, String) {
-    let config = mi_model::parse_device_files(RAW, None).unwrap();
-    let base = baseline(RAW);
+    setup_bytes(RAW)
+}
+fn setup_bytes(raw: &[u8]) -> (tempfile::TempDir, DocumentStore, Value, String, String) {
+    let config = mi_model::parse_device_files(raw, None).unwrap();
+    let base = baseline(raw);
     let doc = LocalDocumentV2::from_config(&config, Some(base.clone()), "device-snapshot").unwrap();
     let p = doc.editable.graph.profile_order[0].clone();
     let l = doc.editable.graph.profiles[&p].layer_order[0].clone();
@@ -142,36 +145,48 @@ fn invalid_or_mixed_changes_rejected_and_noop_creates_no_revision() {
 }
 #[test]
 fn ag_original_is_allowed_only_at_known_unique_position() {
-    let (_dir, mut store, base, p, l) = setup();
-    store
-        .update(|d| {
-            d.assign(
-                &json!(p),
-                &json!(l),
-                0,
-                Action {
-                    id: "key".into(),
-                    name: "Key".into(),
-                    category: "Device".into(),
-                    detail: "local".into(),
-                    payload: json!({"type":"device_key","token":"KC_B"}),
-                },
-            )
-        })
-        .unwrap();
-    let preview = store.preview_apply(&base).unwrap();
-    assert_eq!(preview.before, "KV_OAI_AG01");
-    store.prepare_apply_backup(&preview.token, &base).unwrap();
-    let plan = store
-        .take_prepared_candidate(&preview.token, &base)
-        .unwrap();
-    assert_eq!(
-        plan.candidate(),
-        String::from_utf8(RAW.to_vec())
-            .unwrap()
-            .replacen("KV_OAI_AG01", "KC_B", 1)
-            .as_bytes()
-    );
+    for correct_position in [true, false] {
+        let raw = String::from_utf8(RAW.to_vec()).unwrap();
+        let raw = if correct_position {
+            raw
+        } else {
+            raw.replace("KV_OAI_AG00", "KV_OAI_AG01")
+        };
+        let (_dir, mut store, base, p, l) = setup_bytes(raw.as_bytes());
+        store
+            .update(|d| {
+                d.assign(
+                    &json!(p),
+                    &json!(l),
+                    0,
+                    Action {
+                        id: "key".into(),
+                        name: "Key".into(),
+                        category: "Device".into(),
+                        detail: "local".into(),
+                        payload: json!({"type":"device_key","token":"KC_B"}),
+                    },
+                )
+            })
+            .unwrap();
+        if !correct_position {
+            assert!(store.preview_apply(&base).is_err());
+            continue;
+        }
+        let preview = store.preview_apply(&base).unwrap();
+        assert_eq!(preview.before, "KV_OAI_AG00");
+        store.prepare_apply_backup(&preview.token, &base).unwrap();
+        let plan = store
+            .take_prepared_candidate(&preview.token, &base)
+            .unwrap();
+        assert_eq!(
+            plan.candidate(),
+            String::from_utf8(RAW.to_vec())
+                .unwrap()
+                .replacen("KV_OAI_AG00", "KC_B", 1)
+                .as_bytes()
+        );
+    }
 }
 #[test]
 fn three_way_lighting_merge_and_new_baseline_do_not_repeat_applied_differences() {
