@@ -132,3 +132,6 @@
 - 2026-11-03：AXPress 成功不证明听写启动；必须读取启动/停止状态。长会话的正文不能占满操作控件的有界扫描预算。
 
 - 2026-11-03：听写的启动/停止标签可能带当前快捷键后缀。千问办公使用“停止录音（Right ⌘）”；仅匹配无后缀名称会漏掉停止入口和状态。回归：`testQwenDictationRecognizesShortcutSuffixAndBothStates`，真实执行器启动/停止闭环，不用按钮调用成功替代状态确认。
+
+- 2026-11-03：切换水位必须取自唯一 reader 的入站序号，不能取消费者解码进度。未读的旧摇杆离中通知仍须按序更新物理状态；换扇区不能当作回中。回归：`testUnreadPreCutoffNorthRequiresRealCenterBeforeEast` 与 `ingress_watermark_precedes_decode_and_preserves_unread_radial_state`。
+- 2026-11-03：异步 Backend 测试替身不自动运行在 MainActor。跨 executor 暴露 continuation 时必须同步发布；无锁轮询会偶发在 `CheckedContinuation.resume` 崩溃。`NavigationTests.DelayedBackend` 使用 NSLock 保证读写一致。

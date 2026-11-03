@@ -19,6 +19,8 @@ pub enum InputKind {
 pub struct InputEventInfo {
     pub session_id: u64,
     pub sequence: u64,
+    pub ingress_sequence: u64,
+    pub radial_center: Option<bool>,
     pub timestamp_ms: u64,
     pub kind: InputKind,
     pub logical_switch: Option<String>,
@@ -102,6 +104,8 @@ impl InputSubscription {
         Some(InputEventInfo {
             session_id: event.session_id,
             sequence: event.sequence,
+            ingress_sequence: event.ingress_sequence,
+            radial_center: event.radial_center,
             timestamp_ms: event.timestamp_ms,
             kind,
             logical_switch: event.logical_switch,

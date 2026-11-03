@@ -146,6 +146,11 @@ pub struct Snapshot {
     pub stale: bool,
     pub files: DeviceFiles,
 }
+#[derive(Clone, Debug)]
+pub struct ReceivedNotification {
+    pub ingress_sequence: u64,
+    pub notification: HostNotification,
+}
 pub struct DeviceSession {
     pub id: u64,
     link: Arc<dyn HidLink>,
@@ -160,7 +165,8 @@ pub struct DeviceSession {
     firmware: Mutex<Option<String>>,
     schema: Arc<dyn DeviceSchema>,
     snapshot: Arc<Mutex<Option<Snapshot>>>,
-    notifications: broadcast::Sender<HostNotification>,
+    notifications: broadcast::Sender<ReceivedNotification>,
+    ingress_sequence: Arc<AtomicU64>,
 }
 impl DeviceSession {
     pub fn new(
@@ -170,6 +176,7 @@ impl DeviceSession {
         config: SessionConfig,
     ) -> Arc<Self> {
         let (notifications, _) = broadcast::channel(256);
+        let ingress_sequence = Arc::new(AtomicU64::new(0));
         let framer = Arc::new(Mutex::new(framer));
         let invalid = Arc::new(AtomicBool::new(false));
         let changed = Arc::new(Notify::new());
@@ -178,6 +185,7 @@ impl DeviceSession {
         let snapshot = Arc::new(Mutex::new(None::<Snapshot>));
         let reader = {
             let terminal = terminal.clone();
+            let ingress_sequence = ingress_sequence.clone();
             let (link, framer, invalid, changed, pending, notifications, snapshot) = (
                 link.clone(),
                 framer.clone(),
@@ -226,7 +234,12 @@ impl DeviceSession {
                                     }
                                 }
                                 Incoming::Notification(n) => {
-                                    let _ = notifications.send(n.into());
+                                    let sequence =
+                                        ingress_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                                    let _ = notifications.send(ReceivedNotification {
+                                        ingress_sequence: sequence,
+                                        notification: n.into(),
+                                    });
                                 }
                             }
                         }
@@ -273,6 +286,7 @@ impl DeviceSession {
             schema,
             snapshot,
             notifications,
+            ingress_sequence,
         })
     }
     /// R-D07/R-D13: close wakes read; await receiver termination before releasing the session.
@@ -305,7 +319,10 @@ impl DeviceSession {
             _ => "unverified",
         }
     }
-    pub fn notifications(&self) -> broadcast::Receiver<HostNotification> {
+    pub fn input_watermark(&self) -> u64 {
+        self.ingress_sequence.load(Ordering::SeqCst)
+    }
+    pub fn notifications(&self) -> broadcast::Receiver<ReceivedNotification> {
         self.notifications.subscribe()
     }
     pub fn snapshot(&self) -> Option<Snapshot> {

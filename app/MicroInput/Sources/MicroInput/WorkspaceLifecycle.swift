@@ -10,6 +10,15 @@ import AppKit
 
     init(store: Store, center: NotificationCenter = NSWorkspace.shared.notificationCenter) {
         self.center = center
+        observers.append(center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self, weak store] notification in
+            MainActor.assumeIsolated {
+                guard let self, self.active else { return }
+                let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                store?.foregroundChanged(bundleID: app?.bundleIdentifier)
+            }
+        })
+        store.reevaluateForeground()
+
         observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self, weak store] _ in
             MainActor.assumeIsolated {
                 guard let self, self.active else { return }
@@ -21,7 +30,7 @@ import AppKit
             MainActor.assumeIsolated {
                 guard let self, self.active else { return }
                 self.wakeTask?.cancel()
-                self.wakeTask = Task { await store?.systemDidWake() }
+                self.wakeTask = Task { await store?.systemDidWake(); store?.reevaluateForeground() }
             }
         })
     }

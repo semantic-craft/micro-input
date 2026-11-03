@@ -96,6 +96,8 @@ final class HostExecutionTests: XCTestCase {
         await store.loadWorkbench()
         await store.prepareDesktopProfiles()
         XCTAssertEqual(store.profile?.name, "Cindy")
+        XCTAssertEqual(store.hostActiveProfileId, store.profile?.id.text)
+        XCTAssertFalse(store.routing?.manual_override ?? true, "Initial default is not a manual override")
         XCTAssertEqual(Array(store.orderedHostProfiles.prefix(DesktopAgent.all.count)).map(\.name), DesktopAgent.all.map(\.name))
         XCTAssertFalse(store.hostProfiles.contains { $0.name.contains("演示") || $0.name.contains("示例") })
         await store.tryDesktopAction()
@@ -294,7 +296,7 @@ final class HostExecutionTests: XCTestCase {
         await store.shutdown()
     }
 
-    @MainActor func testInputStreamGapAutoResubscribesAndContinuesExecuting() async throws {
+    @MainActor func testInputStreamGapRequiresExplicitResumeAndReleaseBeforeExecuting() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -319,13 +321,23 @@ final class HostExecutionTests: XCTestCase {
 
         try await Task.sleep(nanoseconds: 50_000_000)
 
-        // Overflow the 512-entry bounded input queue to trigger InputStreamGap in hostInputTask
+        // Overflow the 256-entry reader broadcast queue to trigger InputStreamGap in hostInputTask
         try await core.emitSyntheticInput(count: 600)
 
-        // Wait briefly for hostInputTask to catch InputStreamGap and re-subscribe
+        // A gap invalidates the subscription, not the device session.
         try await Task.sleep(nanoseconds: 80_000_000)
 
-        // Emit a valid binding event after the gap and verify it still routes and executes
+        XCTAssertTrue(store.inputNeedsResume)
+        XCTAssertNotNil(store.connectedID)
+        XCTAssertTrue(store.hostExecutionEnabled)
+        store.resumeInput()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        // Quarantine the first held press until an observed release.
+        try await core.emitSyntheticBindingEvent(bindingId: "AG00", pressed: true)
+        try await core.emitSyntheticBindingEvent(bindingId: "AG00", pressed: false)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(executor.receipts.isEmpty)
+        // A fresh press after release is eligible.
         try await core.emitSyntheticBindingEvent(bindingId: "AG00", pressed: true)
         try await core.emitSyntheticBindingEvent(bindingId: "AG00", pressed: false)
 
@@ -361,7 +373,7 @@ final class HostExecutionTests: XCTestCase {
         XCTAssertTrue(names.contains("Antigravity"))
         XCTAssertTrue(names.contains("Herdr"))
         XCTAssertTrue(names.contains("DeepSeek Coder (DSH)"))
-        XCTAssertTrue(store.hostExecutionEnabled)
+        XCTAssertFalse(store.hostExecutionEnabled, "Startup must preserve the persisted execution pause")
         XCTAssertEqual(store.connectedID, "synthetic-reconnected-interface-0")
         XCTAssertEqual(store.identity?.version, "synthetic-0.6.3")
         XCTAssertNotEqual(store.passThroughHealth, .disconnected)
