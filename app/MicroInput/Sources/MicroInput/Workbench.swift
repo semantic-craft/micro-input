@@ -50,8 +50,8 @@ struct Workbench: View {
                     if let snapshot = store.snapshot {
                         ForEach(visibleProfileIndices, id: \.self) { i in
                             Button { store.selectProfile(i) } label: {
-                                HStack(spacing: 10) { AgentBadge(name: snapshot.profiles[i].name); Text(snapshot.profiles[i].name == "DeepSeek Coder (DSH)" ? "DSH" : snapshot.profiles[i].name).font(.system(size: 13, weight: .medium)).lineLimit(1); Spacer(); if i == store.profileIndex { Image(systemName: "checkmark").font(.caption) } }.padding(.horizontal, 10).padding(.vertical, 7).background(i == store.profileIndex ? Color.accentColor.opacity(0.09) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
-                            }.buttonStyle(.plain).accessibilityLabel(snapshot.profiles[i].name)
+                                HStack(spacing: 10) { AgentBadge(name: snapshot.profiles[i].name); Text(DesktopAgent.displayName(snapshot.profiles[i].name)).font(.system(size: 13, weight: .medium)).lineLimit(2).fixedSize(horizontal: false, vertical: true); Spacer(); if i == store.profileIndex { Image(systemName: "checkmark").font(.caption) } }.padding(.horizontal, 10).padding(.vertical, 7).background(i == store.profileIndex ? Color.accentColor.opacity(0.09) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                            }.buttonStyle(.plain).accessibilityLabel(DesktopAgent.displayName(snapshot.profiles[i].name))
                         }
                     }
                     Toggle("显示其他配置", isOn: $showOtherProfiles).toggleStyle(.checkbox).font(.caption)
@@ -85,7 +85,7 @@ struct Workbench: View {
                 Divider()
                 VStack(spacing: 0) {
                     HStack {
-                        VStack(alignment: .leading, spacing: 7) { Text(store.profile?.name ?? (store.snapshot == nil ? "载入中" : "暂无配置")).font(.system(size: 24, weight: .semibold)); Text(store.browsingDeviceSnapshot ? "设备快照只读；点选控件查看绑定。" : "点选控件，设置它要做的事。").foregroundStyle(.secondary) }
+                        VStack(alignment: .leading, spacing: 7) { Text(DesktopAgent.displayName(store.profile?.name ?? (store.snapshot == nil ? "载入中" : "暂无配置"))).font(.system(size: 24, weight: .semibold)); Text(store.browsingDeviceSnapshot ? "设备快照只读；点选控件查看绑定。" : "点选控件，设置它要做的事。").foregroundStyle(.secondary) }
                         Spacer()
                         Toggle("按键控制", isOn: Binding(get: { store.hostExecutionEnabled }, set: { value in Task { await store.setHostExecutionEnabled(value) } }))
                             .toggleStyle(.switch).controlSize(.small).fixedSize()
@@ -435,7 +435,7 @@ struct Workbench: View {
                                 let values = l.keys + l.encoders + l.joystick.sectors
                                 ForEach(values.indices, id: \.self) { si in
                                     if bindingKey(profile: p.id, layer: l.id, slot: si) == key, let action = store.draft.edits[key] {
-                                        VStack(alignment: .leading, spacing: 5) { Text("\(p.name) / \(l.name) / \(title(si))").bold(); Text("\(values[si].bindingLabel) → \(action.name)").font(.caption); Text(store.parameterSummary(action)).font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical,8)
+                                        VStack(alignment: .leading, spacing: 5) { Text("\(DesktopAgent.displayName(p.name)) / \(l.name) / \(title(si))").bold(); Text("\(values[si].bindingLabel) → \(action.name)").font(.caption); Text(store.parameterSummary(action)).font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical,8)
                                     }
                                 }
                             }

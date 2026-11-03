@@ -395,7 +395,7 @@ extension MicroInput: Backend {}
         }
         if passThroughHealth == .ready, hostExecutionEnabled {
             let activeName = hostProfiles.first(where: { $0.id.text == hostActiveProfileId })?.name ?? "默认"
-            status = "USB 透传层已就绪 · 宿主接管已开启（\(activeName)）· 不写设备"
+            status = "USB 透传层已就绪 · 宿主接管已开启（\(DesktopAgent.displayName(activeName))）· 不写设备"
             let receipt = HostActionReceipt(
                 timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
                 profileId: hostActiveProfileId ?? "",

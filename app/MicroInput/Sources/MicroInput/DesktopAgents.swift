@@ -19,7 +19,16 @@ struct DesktopAgent: Identifiable {
         .init(name: "Qoder CN", bundleID: "com.qodercn.app", symbol: "q.circle", capabilities: "打开应用 · 新任务 · 搜索 · 聚焦输入"),
         .init(name: "Herdr", bundleID: "dev.herdr.app", symbol: "rectangle.split.2x2", capabilities: "Space · Tab · 分屏 · 面板导航")
     ]
-    static func named(_ name: String) -> DesktopAgent? { all.first { $0.name == name } }
+    // Stored profile names remain stable so existing mappings and favorites survive.
+    static func displayName(_ name: String) -> String {
+        switch name {
+        case "DeepSeek Coder (DSH)", "DSH", "DeepSeek Harness": return "Deepseek Harness"
+        default: return name
+        }
+    }
+    static func named(_ name: String) -> DesktopAgent? {
+        all.first { $0.name == name || displayName($0.name) == displayName(name) }
+    }
 }
 
 // Restrict AX actions to one focused window in an allowlisted app. Never pick the
