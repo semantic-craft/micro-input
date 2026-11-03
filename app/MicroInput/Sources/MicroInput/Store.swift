@@ -442,7 +442,7 @@ extension MicroInput: Backend {}
                 }
             }, onCancel: { stream.close() })
             stream.close()
-            if token == self.generation { self.hostInputTask = nil }
+            if token == self.generation, routeEpoch == self.hostRouteEpoch { self.hostInputTask = nil }
         }
     }
     private func changeDocument(fresh: Bool = false, _ operation: @escaping () async throws -> String) async throws {
