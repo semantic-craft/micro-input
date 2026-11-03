@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import os
 import platform
 import signal
@@ -76,6 +77,10 @@ def stop_launcher(process):
         process.communicate(timeout=1)
     except (subprocess.TimeoutExpired, ValueError):
         pass
+
+
+def qa_timeout_for(seconds):
+    return max(45, math.ceil(seconds + 35))
 
 
 def summary(samples):
@@ -185,7 +190,7 @@ def main():
     env.pop("MI_SYNTHETIC_SCENARIO", None)
     started_ms = int(time.time() * 1000)
     process = subprocess.Popen(
-        ["scripts/run", "--verify", "--timeout=45"],
+        ["scripts/run", "--verify", f"--timeout={qa_timeout_for(args.seconds)}"],
         cwd=ROOT,
         env=env,
         stdout=subprocess.PIPE,

@@ -31,3 +31,8 @@ class PerformanceBaselineTests(unittest.TestCase):
             "cpu_percent_max": 3.0,
             "cpu_percent_avg": 2.0,
         })
+
+    def test_launcher_timeout_contains_startup_observation_and_stop(self):
+        self.assertEqual(module.qa_timeout_for(10), 45)
+        self.assertEqual(module.qa_timeout_for(45), 80)
+        self.assertEqual(module.qa_timeout_for(120), 155)
