@@ -226,3 +226,9 @@
 - **E-106 / PREPARATION + OFFLINE（实机验收方案与材料工具）**：2026-11-03，新增 `docs/designs/hardware-acceptance.md`，定义H0新鲜只读身份/配置备份、H1单新临时文件实验及停止/诊断/恢复规则，H2单键配置与H3灯光预览保持独立范围。H1固定最多5个writebin块、6220字节和1次删除，只涉及自编临时内容；不向keymap/smart_actions写入，不发送灯光或重启方法，不把不确定后的恢复放进finally。已有C诊断/清理工作线需先核清未决状态，本轮未合入或执行。
   `scripts/prepare-hardware-acceptance` 只有prepare/verify/compare本地入口，无设备库、子进程、网络或execute/resume入口。生成0700/0600私有新包，保存固定计划、载荷和可选导入原字节；验证范围、库存、摘要及权限，拒绝覆盖、符号链接、非普通文件和缺失/空文件混淆。导入来源始终未核实，本地相等不报告设备/灯光已通过，ready_to_execute始终false。当前实际生成的 `.scratch/input-study/hardware-acceptance-preparation/offline-kit/` 仅含自编载荷，无设备备份。
   参考IA-04/06/07/16/17、E-105与UNKNOWN-08/09/17；采用独立完整读回、未知状态停止不重放、备份与硬件恢复分离的约束。新增8项离线回归已通过；实现提交 `af73e6f` 的 `MI_AUTO_HOST_READY=0 scripts/check` 退出0，29项Python、全工作区Rust、81项合成Swift、43项生产Swift、双后端构建及UNKNOWN/只读/零发送边界通过，实机探针保持跳过。日志为主工作区 `.scratch/input-study/hardware-acceptance-preparation/check.log`。本轮未连接、枚举或写入真实设备，未采集设备备份、执行物理探针或改变现有键位/灯光。
+
+
+- **E-107 / IMPLEMENTATION + OFFLINE（H0/H1 独立实机执行器接线）**：2026-11-03，`scripts/hardware-acceptance` 接通两个 ignored 原生测试入口，默认仅运行假 USB。H0在同一句柄内重复核对状态、目录、原始配置，0700/0600落盘、fsync并读回，保存SHA-1/SHA-256、时间及缺失/空文件区别；不依赖产品JSON解析。H1要求显式路径、固定材料目标、预期keymap摘要及历史未决操作核查，重新取得自己的新鲜备份；五块固定载荷/一次删除，每块前后完整配置、目录、活动索引及目标字节核验。不开放生产Method、FFI或灯光方法。
+  执行器只有一个串行reader，ID不回绕，按配置大小预留完整核验预算；4秒RPC、240秒流程及300秒进程监督。首次可能发送前记录阶段，错误立即关闭，不追加诊断、不重试、不自动清理/恢复。启动器在材料旁持久独占占用目标，正常入口重复执行同一材料拒绝；这不是防手工绕过的安全系统。原生稳定硬件ID仍未知，只支持指定候选和当前同一连接，不声称跨连接恢复；未完成块不可见时保守停止，不猜测后续写入。
+  参考IA-04/06/07/16、E-105/E-106及批准验收方案。实现提交 `1e84a70` 新增7项Rust假USB回归和4项Python启动器系统边界回归；覆盖正常5块6220字节/删除、每一变更点失败即停、不截断、假成功、错ID、配置改变、删除超时、授权/路径/身份/预算拒绝、原字节备份与缺失/空文件、一次性占用及进程组超时回收。完整 `MI_AUTO_HOST_READY=0 scripts/check` 退出0：33项Python、全工作区Rust、81项合成Swift、43项生产Swift、双后端构建和只读/零发送门禁通过。最终H0/H1定向回归及实际默认脚本入口均7通过、2个实机用例ignored；日志为主工作区 `.scratch/input-study/hardware-executor/check.log`、`hardware-final.log`、`default-entry.log`。
+  本轮没有设备枚举、连接、真实备份、配置写入、灯光请求、应用启动或安装。实机H0/H1和实体/视觉行为仍NOT_RUN；实际覆盖/截断、分块可见性、竞争及恢复语义仍未验收，#22/#24不关闭。
