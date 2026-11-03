@@ -1,4 +1,4 @@
-//! Reviewed configuration application; native preview remains unavailable.
+//! Reviewed configuration application and explicit preview operation ownership.
 use super::*;
 use mi_model::operation_record::OperationRecord;
 use serde_json::{json, Value};
@@ -6,8 +6,7 @@ use std::collections::BTreeMap;
 use std::{collections::BTreeSet, path::PathBuf};
 #[derive(Default)]
 pub(super) struct Operations {
-    #[cfg(feature = "synthetic-backend")]
-    pub(super) preview: Option<(String, Arc<mi_session::lighting_preview::Preview>)>,
+    pub(super) preview: Option<OwnedPreview>,
     paused: bool,
     inspecting: bool,
     revalidate_routes: bool,
@@ -21,6 +20,13 @@ pub(super) struct Operations {
     restores: BTreeMap<String, mi_model::apply::PreparedCandidate>,
     writers: BTreeMap<String, Arc<mi_session::config_write::ConfigWriter>>,
 }
+pub(super) struct OwnedPreview {
+    pub token: String,
+    pub layer_id: String,
+    pub document_id: String,
+    pub revision: u64,
+    pub preview: Arc<mi_session::lighting_preview::Preview>,
+}
 pub(super) struct Inspection<'a>(&'a Mutex<Operations>);
 impl Drop for Inspection<'_> {
     fn drop(&mut self) {
@@ -30,9 +36,8 @@ impl Drop for Inspection<'_> {
 impl MicroInput {
     pub(super) fn reserve_inspection(&self) -> Result<Inspection<'_>, BridgeError> {
         let mut operations = self.operations.lock().unwrap();
-        #[cfg(feature = "synthetic-backend")]
         if operations.preview.is_some() {
-            return Err(failure("请先结束灯光预览并核对恢复"));
+            return Err(failure("请先结束灯光预览"));
         }
         if operations.inspecting || operations.running.is_some() || operations.drain.is_some() {
             return Err(failure("已有设备操作"));
@@ -168,12 +173,9 @@ impl MicroInput {
 #[uniffi::export(async_runtime = "tokio")]
 impl MicroInput {
     pub fn device_operation_capabilities(&self) -> String {
+        let capable = self.write_capable();
         {
-            let preview = self
-                .current()
-                .is_ok_and(|s| s.backend_name() == "synthetic/numbered-0x06")
-                && self.write_capable();
-            json!({"apply":self.write_capable(),"restore":self.write_capable(),"preview":preview,"synthetic_only":false,"reason":"需要唯一 Creator Micro 2、固件 0.6.3 和已核验的当前连接；即时灯光预览未开放"}).to_string()
+            json!({"apply":capable,"restore":capable,"preview":capable,"synthetic_only":false,"reason":"需要唯一 Creator Micro 2、固件 0.6.3 和已核验的当前连接；原生预览停止后不自动恢复灯光"}).to_string()
         }
     }
     pub fn begin_host_execution(&self) -> Result<u64, BridgeError> {
@@ -201,7 +203,6 @@ impl MicroInput {
         }
         let session = self.current()?;
         let mut o = self.operations.lock().unwrap();
-        #[cfg(feature = "synthetic-backend")]
         if o.preview.is_some() {
             return Err(failure("请先结束灯光预览"));
         }

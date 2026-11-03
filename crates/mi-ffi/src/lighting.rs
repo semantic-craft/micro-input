@@ -21,22 +21,19 @@ fn edit(zone: &str, field: &str, value: &str) -> Result<(Zone, Edit), BridgeErro
 #[uniffi::export(async_runtime = "tokio")]
 impl MicroInput {
     pub fn layer_lighting(&self, layer_id: String) -> Result<String, BridgeError> {
-        #[cfg(feature = "synthetic-backend")]
         let preview = self
             .operations
             .lock()
             .unwrap()
             .preview
             .as_ref()
-            .and_then(|(_, p)| {
-                if p.status()["phase"] == "Active" {
-                    p.lighting()
+            .and_then(|owned| {
+                if owned.layer_id == layer_id && owned.preview.status()["phase"] == "Active" {
+                    owned.preview.lighting()
                 } else {
                     None
                 }
             });
-        #[cfg(not(feature = "synthetic-backend"))]
-        let preview = None;
         let lights = match preview {
             Some(lights) => lights,
             None => self
@@ -72,9 +69,17 @@ impl MicroInput {
             zones.insert(zone.name().into(), json!(fields));
         }
         Ok(
-            json!({"zones":zones,"raw":serde_json::to_string(&lights).map_err(failure)?})
+            json!({"zones":zones,"can_add":self.draft.lock().unwrap().draft.document.can_add_lighting(&layer_id),"raw":serde_json::to_string(&lights).map_err(failure)?})
                 .to_string(),
         )
+    }
+    pub fn add_layer_lighting(&self, layer_id: String) -> Result<String, BridgeError> {
+        let _inspection = self.reserve_inspection()?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|draft| draft.add_lighting(&layer_id))
+            .map_err(failure)?;
+        document_response(&store, None)
     }
     pub async fn edit_lighting(
         &self,
@@ -92,35 +97,46 @@ impl MicroInput {
             .map_err(failure)?;
         document_response(&store, None)
     }
-    pub async fn begin_lighting_preview(&self) -> Result<String, BridgeError> {
+    pub async fn begin_lighting_preview(&self, layer_id: String) -> Result<String, BridgeError> {
+        if !self.write_capable() {
+            return Err(failure("当前连接不支持即时预览"));
+        }
+        let _inspection = self.reserve_inspection()?;
+        let session = self.current()?;
+        let session_id = session.id;
+        let (lights, document_id, revision) = {
+            let store = self.draft.lock().unwrap();
+            let doc = &store.draft.document;
+            (
+                doc.lighting(&layer_id).map_err(failure)?,
+                doc.document_id.clone(),
+                doc.revision,
+            )
+        };
         #[cfg(feature = "synthetic-backend")]
-        {
-            if !self.write_capable() {
-                return Err(failure("原生即时预览未验收"));
-            }
-            let _inspection = self.reserve_inspection()?;
-            let session = self.current()?;
-            let identity = session
-                .read_identity_info()
-                .await
-                .map_err(session_failure)?;
-            if identity.version.as_deref() != Some("synthetic-0.6.3")
-                || identity.profile_index != Some(0)
-                || identity.layer_index != Some(0)
-            {
-                return Err(failure("活动来源未核实；不开始预览"));
-            }
-            let preview = mi_session::lighting_preview::Preview::begin(session)
-                .await
-                .map_err(failure)?;
-            let token = mi_model::document::new_id();
-            self.operations.lock().unwrap().preview = Some((token.clone(), preview));
-            Ok(token)
+        let preview = if session.backend_name() == "synthetic/numbered-0x06" {
+            mi_session::lighting_preview::Preview::begin(session).await
+        } else {
+            mi_session::lighting_preview::Preview::begin_native(session, lights).await
         }
+        .map_err(failure)?;
         #[cfg(not(feature = "synthetic-backend"))]
-        {
-            Err(failure("原生即时预览未验收"))
+        let preview = mi_session::lighting_preview::Preview::begin_native(session, lights)
+            .await
+            .map_err(failure)?;
+        if !self.current().is_ok_and(|s| s.id == session_id) {
+            preview.end().await;
+            return Err(failure("预览连接已失效"));
         }
+        let token = mi_model::document::new_id();
+        self.operations.lock().unwrap().preview = Some(device_operations::OwnedPreview {
+            token: token.clone(),
+            layer_id,
+            document_id,
+            revision,
+            preview,
+        });
+        Ok(token)
     }
     pub fn update_lighting_preview(
         &self,
@@ -130,59 +146,73 @@ impl MicroInput {
         value: String,
     ) -> Result<(), BridgeError> {
         let (zone, edit) = edit(&zone, &field, &value)?;
-        #[cfg(feature = "synthetic-backend")]
-        {
-            let operations = self.operations.lock().unwrap();
-            let (_, preview) = operations
-                .preview
-                .as_ref()
-                .filter(|(t, _)| t == &token)
-                .ok_or_else(|| failure("预览已失效"))?;
-            preview.update(zone, edit).map_err(failure)
-        }
-        #[cfg(not(feature = "synthetic-backend"))]
-        {
-            let _ = (token, zone, edit);
-            Err(failure("原生即时预览未验收"))
-        }
+        let operations = self.operations.lock().unwrap();
+        let owned = operations
+            .preview
+            .as_ref()
+            .filter(|p| p.token == token)
+            .ok_or_else(|| failure("预览已失效"))?;
+        owned.preview.update(zone, edit).map_err(failure)
     }
     pub fn lighting_preview_status(&self) -> String {
-        #[cfg(feature = "synthetic-backend")]
-        if let Some((_, preview)) = &self.operations.lock().unwrap().preview {
-            return preview.status().to_string();
+        if let Some(owned) = &self.operations.lock().unwrap().preview {
+            return owned.preview.status().to_string();
         }
         json!({"phase":"Idle","physical_visual":"NOT_RUN"}).to_string()
     }
-    pub async fn end_lighting_preview(&self, token: String) -> Result<String, BridgeError> {
-        #[cfg(feature = "synthetic-backend")]
+    pub fn save_lighting_preview(&self, token: String) -> Result<String, BridgeError> {
+        let operations = self.operations.lock().unwrap();
+        let owned = operations
+            .preview
+            .as_ref()
+            .filter(|p| p.token == token)
+            .ok_or_else(|| failure("预览已失效"))?;
+        let lights = owned
+            .preview
+            .lighting()
+            .ok_or_else(|| failure("预览已结束"))?;
+        let mut store = self.draft.lock().unwrap();
+        if store.draft.document.document_id != owned.document_id
+            || store.draft.document.revision != owned.revision
         {
-            let preview = self
-                .operations
-                .lock()
-                .unwrap()
+            return Err(failure("草稿已变化，不能采纳旧预览"));
+        }
+        store
+            .update(|draft| {
+                draft.mutate(|doc| {
+                    doc.editable
+                        .graph
+                        .layers
+                        .get_mut(&owned.layer_id)
+                        .ok_or("层已不存在")?
+                        .lighting = Some(lights);
+                    Ok(())
+                })
+            })
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn end_lighting_preview(&self, token: String) -> Result<String, BridgeError> {
+        let preview = self
+            .operations
+            .lock()
+            .unwrap()
+            .preview
+            .as_ref()
+            .filter(|p| p.token == token)
+            .map(|p| p.preview.clone())
+            .ok_or_else(|| failure("预览已失效"))?;
+        let result = preview.end().await;
+        if result["phase"] == "Restored" || result["phase"] == "Stopped" {
+            let mut operations = self.operations.lock().unwrap();
+            if operations
                 .preview
                 .as_ref()
-                .filter(|(t, _)| t == &token)
-                .map(|(_, p)| p.clone())
-                .ok_or_else(|| failure("预览已失效"))?;
-            let result = preview.end().await;
-            if result["phase"] == "Restored" {
-                let mut operations = self.operations.lock().unwrap();
-                if operations
-                    .preview
-                    .as_ref()
-                    .is_some_and(|(t, _)| t == &token)
-                {
-                    operations.preview = None;
-                }
+                .is_some_and(|p| p.token == token)
+            {
+                operations.preview = None;
             }
-            // Unknown keeps the operation gate closed. Reconnection never restores or replays.
-            Ok(result.to_string())
         }
-        #[cfg(not(feature = "synthetic-backend"))]
-        {
-            let _ = token;
-            Err(failure("原生即时预览未验收"))
-        }
+        Ok(result.to_string())
     }
 }

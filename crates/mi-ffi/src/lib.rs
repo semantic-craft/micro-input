@@ -876,6 +876,7 @@ impl MicroInput {
 }
 impl MicroInput {
     fn invalidate(&self) -> (u64, Option<(String, Arc<DeviceSession>)>) {
+        self.operations.lock().unwrap().preview = None;
         let mut state = self.state.lock().unwrap();
         state.generation += 1;
         state.pending = None;

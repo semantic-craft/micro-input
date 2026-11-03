@@ -1,5 +1,4 @@
-//! Simulator-only lifecycle, not the vendor wire protocol. Targeted set/read semantics
-//! exist only in SyntheticFiles; native lights.preview and its recovery remain unverified.
+//! Explicit device preview. Native stop does not restore runtime state.
 use super::*;
 use mi_model::lighting::{Edit, Lighting, Zone};
 use serde_json::json;
@@ -9,6 +8,7 @@ pub struct Preview {
     commands: watch::Sender<Option<Lighting>>,
     state: watch::Receiver<Value>,
 }
+#[cfg(feature = "synthetic-backend")]
 async fn call(
     s: &DeviceSession,
     q: &mut Queue,
@@ -25,9 +25,11 @@ async fn call(
         .ok_or_else(|| SessionError::Config("synthetic preview rejected".into()))
 }
 impl Preview {
+    #[cfg(feature = "synthetic-backend")]
     pub async fn begin(session: Arc<DeviceSession>) -> Result<Arc<Self>, String> {
         Self::begin_bounded(session, Duration::from_secs(30)).await
     }
+    #[cfg(feature = "synthetic-backend")]
     async fn begin_bounded(
         session: Arc<DeviceSession>,
         lifetime: Duration,
@@ -121,6 +123,104 @@ impl Preview {
             state,
         }))
     }
+    pub async fn begin_native(
+        session: Arc<DeviceSession>,
+        lights: Lighting,
+    ) -> Result<Arc<Self>, String> {
+        if session.backend_name() != "hidapi-2.6.7/macOS/numbered-0x06" {
+            return Err("unsupported preview connection".into());
+        }
+        let info = session
+            .read_identity_info()
+            .await
+            .map_err(|e| e.to_string())?;
+        if info.version.as_deref() != Some("0.6.3") {
+            return Err("unsupported preview firmware".into());
+        }
+        Self::begin_native_task(session, lights).await
+    }
+    async fn begin_native_task(
+        session: Arc<DeviceSession>,
+        lights: Lighting,
+    ) -> Result<Arc<Self>, String> {
+        Self::native_params(&lights)?;
+        let (commands, mut rx) = watch::channel(Some(lights.clone()));
+        let (state_tx, state) =
+            watch::channel(json!({"phase":"Starting","physical_visual":"NOT_RUN"}));
+        let (ready_tx, ready_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            let mut ready = Some(ready_tx);
+            let mut failed = false;
+            'preview: loop {
+                let mut q = loop {
+                    tokio::select! { biased;
+                        _ = session.wait_disconnected() => { failed = true; break 'preview; }
+                        _ = tokio::time::sleep_until(deadline) => break 'preview,
+                        _ = async { if let Some(tx) = ready.as_mut() { tx.closed().await; } else { std::future::pending::<()>().await; } } => break 'preview,
+                        changed = rx.changed() => {
+                            if changed.is_err() || rx.borrow().is_none() { break 'preview; }
+                        }
+                        q = session.queue.lock() => break q,
+                    }
+                };
+                if rx.has_changed().is_err()
+                    || ready.as_ref().is_some_and(|tx| tx.is_closed())
+                    || tokio::time::Instant::now() >= deadline
+                {
+                    break;
+                }
+                let desired = rx.borrow_and_update().clone();
+                let Some(desired) = desired else { break };
+                let result = match Self::native_params(&desired) {
+                    Ok(params) => session.exchange_lighting(&mut q, &params).await,
+                    Err(error) => Err(SessionError::Config(error)),
+                };
+                drop(q);
+                if let Err(error) = result {
+                    if let Some(tx) = ready.take() {
+                        let _ = tx.send(Err(error.to_string()));
+                    }
+                    failed = true;
+                    break;
+                }
+                state_tx.send_replace(json!({"phase":"Active","physical_visual":"NOT_RUN","runtime_readback":"NOT_AVAILABLE"}));
+                if let Some(tx) = ready.take() {
+                    let _ = tx.send(Ok(()));
+                }
+                tokio::select! { biased;
+                    _ = session.wait_disconnected() => { failed = true; break; }
+                    _ = tokio::time::sleep_until(deadline) => break,
+                    change = rx.changed() => if change.is_err() { break; }
+                }
+                // Coalesce pending edits without cancelling an exchange already in flight.
+                tokio::select! { biased;
+                    _ = session.wait_disconnected() => { failed = true; break; }
+                    _ = tokio::time::sleep_until(deadline) => break,
+                    _ = tokio::time::sleep(Duration::from_millis(80)) => {}
+                }
+            }
+            if failed {
+                session.disconnect();
+            }
+            state_tx.send_replace(json!({"phase":if failed {"Unknown"} else {"Stopped"},"runtime_readback":"NOT_AVAILABLE","physical_visual":"NOT_RUN"}));
+        });
+        ready_rx.await.map_err(|e| e.to_string())??;
+        Ok(Arc::new(Self {
+            desired: Mutex::new(Some(lights)),
+            commands,
+            state,
+        }))
+    }
+    fn native_params(
+        lights: &Lighting,
+    ) -> Result<mi_proto::lighting_candidate::LightingPreviewCandidate, String> {
+        let params = serde_json::from_value(serde_json::to_value(lights).unwrap())
+            .map_err(|e| e.to_string())?;
+        mi_proto::lighting_candidate::encode_lighting_preview_candidate(&params, 0)
+            .map_err(|e| e.to_string())?;
+        Ok(params)
+    }
     pub fn lighting(&self) -> Option<Lighting> {
         self.desired.lock().unwrap().clone()
     }
@@ -154,7 +254,7 @@ impl Preview {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "synthetic-backend"))]
 mod tests {
     use super::*;
     use mi_transport::{HidTransport, SyntheticDiscovery, SyntheticFiles};
@@ -356,6 +456,163 @@ mod tests {
             .request(Method::DeviceStatus, Value::Null)
             .await
             .is_ok());
+        session.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+    use mi_transport::{HidLink, LinkBackend, MockLink, TransportError};
+    struct NativeLink(Arc<MockLink>);
+    #[async_trait::async_trait]
+    impl HidLink for NativeLink {
+        fn backend(&self) -> LinkBackend {
+            LinkBackend::MacHidapi267Numbered
+        }
+        async fn write(&self, report: &[u8]) -> Result<(), TransportError> {
+            self.0.write(report).await
+        }
+        async fn read(&self) -> Result<Vec<u8>, TransportError> {
+            self.0.read().await
+        }
+        fn close(&self) {
+            self.0.close();
+        }
+    }
+    async fn setup() -> (Arc<DeviceSession>, Arc<Mutex<Vec<Value>>>, Arc<AtomicBool>) {
+        let (link, mut outgoing) = MockLink::new();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let fail = Arc::new(AtomicBool::new(false));
+        let fault = fail.clone();
+        let incoming = link.clone();
+        tokio::spawn(async move {
+            let mut framer = mi_proto::NativeFramer::default();
+            while let Some(report) = outgoing.recv().await {
+                for line in framer.feed(&report).unwrap() {
+                    let request: Value = serde_json::from_slice(&line).unwrap();
+                    recorded.lock().unwrap().push(request.clone());
+                    let reply = if request["method"] == "sys.version"
+                        || request["method"] == "device.status"
+                    {
+                        json!({"id":request["id"],"result":{"version":"0.6.3"}})
+                    } else if fault.load(Ordering::SeqCst) {
+                        json!({"id":request["id"],"error":{"code":400,"message":"fixture rejected"}})
+                    } else {
+                        json!({"id":request["id"],"result":null})
+                    };
+                    for report in framer.encode(reply.to_string().as_bytes()).unwrap() {
+                        let _ = incoming.inject.send(report);
+                    }
+                }
+            }
+        });
+        let session = DeviceSession::new(
+            Arc::new(NativeLink(link)),
+            Box::<mi_proto::NativeFramer>::default(),
+            Arc::new(ReadOnlySchema),
+            SessionConfig {
+                timeout: Duration::from_millis(200),
+                interval: Duration::ZERO,
+            },
+        );
+        (session, requests, fail)
+    }
+    async fn wait_for(requests: &Mutex<Vec<Value>>, count: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while requests.lock().unwrap().len() < count {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn native_preview_uses_selected_values_and_stop_never_restores_or_writes_files() {
+        let (session, requests, _) = setup().await;
+        let mut lights = Lighting::creator_micro_2_defaults();
+        lights.backlight["color"] = json!(42);
+        let preview = Preview::begin_native(session.clone(), lights)
+            .await
+            .unwrap();
+        assert_eq!(
+            requests.lock().unwrap()[1]["params"]["backlight"]["color"],
+            42
+        );
+        for color in 1..=100 {
+            preview.update(Zone::Backlight, Edit::Color(color)).unwrap();
+        }
+        wait_for(&requests, 3).await;
+        assert_eq!(
+            requests.lock().unwrap()[2]["params"]["backlight"]["color"],
+            100
+        );
+        assert_eq!(preview.end().await["phase"], "Stopped");
+        assert_eq!(requests.lock().unwrap().len(), 3);
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r["method"] == "sys.version"
+                || r["method"] == "device.status"
+                || r["method"] == "lights.preview"));
+        session.shutdown().await;
+    }
+    #[tokio::test]
+    async fn stopping_while_queue_busy_discards_pending_update() {
+        let (session, requests, _) = setup().await;
+        let preview = Preview::begin_native(session.clone(), Lighting::creator_micro_2_defaults())
+            .await
+            .unwrap();
+        let queue = session.queue.lock().await;
+        preview.update(Zone::Backlight, Edit::Color(42)).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), preview.end())
+                .await
+                .unwrap()["phase"],
+            "Stopped"
+        );
+        drop(queue);
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        session.shutdown().await;
+    }
+    #[tokio::test]
+    async fn cancelling_begin_while_queued_never_sends_an_unowned_preview() {
+        let (session, requests, _) = setup().await;
+        let queue = session.queue.lock().await;
+        let other = session.clone();
+        let begin = tokio::spawn(async move {
+            Preview::begin_native_task(other, Lighting::creator_micro_2_defaults()).await
+        });
+        tokio::task::yield_now().await;
+        begin.abort();
+        let _ = begin.await;
+        drop(queue);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(requests.lock().unwrap().is_empty());
+        session.shutdown().await;
+    }
+    #[tokio::test]
+    async fn native_failure_stops_without_retry_and_drop_does_not_restore() {
+        let (session, requests, fail) = setup().await;
+        let preview = Preview::begin_native(session.clone(), Lighting::creator_micro_2_defaults())
+            .await
+            .unwrap();
+        fail.store(true, Ordering::SeqCst);
+        preview.update(Zone::Backlight, Edit::Color(42)).unwrap();
+        wait_for(&requests, 3).await;
+        assert_eq!(preview.end().await["phase"], "Unknown");
+        assert_eq!(requests.lock().unwrap().len(), 3);
+        session.shutdown().await;
+        let (session, requests, _) = setup().await;
+        let preview = Preview::begin_native(session.clone(), Lighting::creator_micro_2_defaults())
+            .await
+            .unwrap();
+        drop(preview);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(requests.lock().unwrap().len(), 2);
         session.shutdown().await;
     }
 }

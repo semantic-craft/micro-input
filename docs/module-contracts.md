@@ -69,14 +69,14 @@
 
 Swift 的所有宿主执行入口统一经过执行 lease；暂停新入口并等待已进入执行器的 await 完成，取消输入订阅不代表动作完成。排空超时或取消为 NotSent。旧 route epoch 的回执不发布；写后只刷新原会话，不能借旧回调读新连接。重新订阅前，Rust 按活动层中的位置、AG/ACT 唯一性及宽键成组关系逐项筛选；被改写的绑定关闭，其余已核实绑定可继续使用。未知结果保持暂停，显式读回成功才允许重新核对路由。没有实体映射证据时仍不能据此开放原生写入。
 
-恢复入口不依赖可编辑草稿，故未决文档可以查看记录、审阅恢复和离线修复。`DeviceOperationsTests` 使用实际 UniFFI 与挂起执行器检验零提前发送、超时/取消、旧回执、一次消费、跨会话拒绝、应用/恢复及无设备的重开修复。RGB 编辑与合成预览见下节；原生即时预览仍未开放。
+恢复入口不依赖可编辑草稿，故未决文档可以查看记录、审阅恢复和离线修复。`DeviceOperationsTests` 使用实际 UniFFI 与挂起执行器检验零提前发送、超时/取消、旧回执、一次消费、跨会话拒绝、应用/恢复及无设备的重开修复。RGB 编辑与预览见下节；原生语义以文末当前契约为准。
 
 
 ## RGB 编辑与合成预览
 
 `mi-ffi::lighting` 复用 `Draft::edit_lighting` 的校验与原子保存。颜色转换、百分比刻度和每项参数的可编辑性由 Rust 返回，Swift 不重新判断效果规则。预览目标存在独立会话中，文档修订保持不变；正常编辑不自动启动预览。
 
-`mi-session::lighting_preview` 只在 synthetic-backend 编译并拒绝非合成连接；使用明确标记的 `synthetic.lights.read/set` 测试协议，而非臆造官方预览 ACK/目标绑定规则。可变合成文件另存运行态和活动目标；目标及最后一次已确认运行态同时匹配的原子 set 才改变运行态，文件保持原字节。官方生产方法继续未开放。
+`mi-session::lighting_preview::Preview::begin` 只在 synthetic-backend 编译并拒绝非合成连接；使用明确标记的 `synthetic.lights.read/set` 测试协议，而非臆造官方预览 ACK/目标绑定规则。可变合成文件另存运行态和活动目标；目标及最后一次已确认运行态同时匹配的原子 set 才改变运行态，文件保持原字节。原生 `begin_native` 按文末契约单独发送，不复用这些合成消息。
 
 一个有界任务持有同一会话队列和唯一 reader，watch 槽只保留最新待发状态，80 ms 合并更新；不会取消已在途交换。队列持有期内其他读取不消耗 ID，更新始终为结束恢复和独立运行态读回保留两个 ID，30 秒自动结束。结束先停更新，再恢复、读回；切层或同层外部改色均拒绝覆盖更新和恢复，失败/断连为 Unknown 且断开旧会话，不自动重连/重试。配置操作与预览互斥，未知恢复结果保持关闭。合成运行态成功不证明真实灯光视觉效果。
 ## S5 宿主跟随与输入边界
@@ -91,17 +91,25 @@ Swift 的所有宿主执行入口统一经过执行 lease；暂停新入口并�
 
 ## 原生候选字节与发送权限
 
-`mi-proto::lighting_candidate` 的两区类型仅生成固定 `lights.preview` 候选字节，保留可选字段缺省，校验客户端已知范围；它不是配置往返模型，也没有发送入口。`mutation::validate_mutation_response_candidate` 只确认匹配ID的成功包络，不提升为写入或恢复结果。原生通用回应的 `result` 不限类型，不能继续依赖自造的 `synthetic_written`。
+`mi-proto::lighting_candidate` 的两区类型仅生成固定 `lights.preview` 候选字节，保留可选字段缺省，校验客户端已知范围；它不是配置往返模型；仅会话私有 `exchange_lighting` 为显式预览提供发送入口。`mutation::validate_mutation_response_candidate` 只确认匹配ID的成功包络，不提升为写入或恢复结果。原生通用回应的 `result` 不限类型，不能继续依赖自造的 `synthetic_written`。
 
-`DeviceSession::exchange_encoded` 在分帧前重新校验非合成连接的实际方法、参数与队列ID，再从受限对象重新编码，原始重复键等歧义字节不进入传输，候选字节即使被内部调用误标为只读也零发送、零消耗ID；合成后端继续承载受控写入/预览实验。原生 `Method` 和高层 capability 没有扩展。`check-boundaries.py` 同时运行候选字节绕过回归，硬件探针仍不执行。
+`DeviceSession::exchange_encoded` 在分帧前重新校验非合成连接的实际方法、参数与队列ID，再从受限对象重新编码，原始重复键等歧义字节不进入传输，候选字节即使被内部调用误标为只读也零发送、零消耗ID；合成后端继续承载受控写入/预览实验。原生通用 `Method` 未扩展，高层 capability 由明确的配置/预览入口拥有。`check-boundaries.py` 同时运行候选字节绕过回归，硬件探针仍不执行。
 
 
 ## 原生配置计划入口（E-108）
 
-`ConfigWriter` 共用持久记录和独立读回，原生构造要求受支持后端，FFI另核对唯一USB8298/固件0.6.3。一般RPC仍只读；只有私有 `exchange_keymap` 为审阅计划构造固定keymap写块。MacLink按整条RPC持锁发送所有报告，唯一reader不会插入阻塞读取。原生基线包含随机connection_nonce，同连接原值恢复可用，跨连接旧记录拒绝。RGB编辑随keymap提交，原生即时预览仍关闭；文件读回不代表物理/视觉验收。
+`ConfigWriter` 共用持久记录和独立读回，原生构造要求受支持后端，FFI另核对唯一USB8298/固件0.6.3。一般RPC仍只读；只有私有 `exchange_keymap` 为审阅计划构造固定keymap写块。MacLink按整条RPC持锁发送所有报告，唯一reader不会插入阻塞读取。原生基线包含随机connection_nonce，同连接原值恢复可用，跨连接旧记录拒绝。RGB编辑随keymap提交，原生即时预览按文末契约显式启动；文件读回不代表物理/视觉验收。
 
 ## 设备编辑与宿主文档隔离
 
 `DocumentStore` 的设备工作区保留宿主 Store，宿主路由从 `host_store()` 取文档和偏好，设备修改只影响独立设备草稿。`begin_device_editing` 从当前核验快照创建新草稿，`resume_device_editing` 只打开已保存草稿，`return_to_host_document` 恢复宿主编辑状态；入口与设备操作互斥。设备草稿选择记录不改写宿主的 active 文件。
 
 `apply::Pending` 将多个普通键和已有 RGB 字段编译为一个候选；Preview.changes 给出逐项来源及前后值。实际应用和恢复复用 E-108 的计划入口，输入解析也复用逐绑定核验门禁，设备键替换后对应宿主绑定暂停，未受影响的已核验绑定继续可用。
+
+## 原生 RGB 即时预览（2026-11-04）
+
+原生预览为显式设备级操作：将所选草稿灯光的两区已知参数发送到当前核验连接，不切换 Profile/Layer、不写配置文件。结束、关闭或 30 秒到期停止待发更新并等待在途请求，返回 Stopped；不声称自动恢复或运行态读回。失败停止且不重发，明确断连退役旧预览。合成恢复模拟器的 Restored/原子比较不作为原生开放前提。
+
+`Preview::begin_native` 接收所选层两区值，并经当前连接重新核对 0.6.3；FFI另复用唯一USB型号能力。每次持有现有队列后重新取最新watch值，停止/所有者取消/到期后不发送旧pending；已经发送的交换完成后再结束，失败断开旧会话、不重发。`exchange_lighting` 只编码固定两区DTO，通用字节出口仍拒绝灯光方法。
+
+预览采纳绑定进入时的文档身份与修订，通过现有 DocumentStore 原子保存并作为一次undo。`add_lighting` 只对原始来源完全不存在 lights 成员开放，新增成员编译保持所有非目标原字节；未知字段和已有null不补默认值。

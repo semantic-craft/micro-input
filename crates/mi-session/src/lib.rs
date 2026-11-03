@@ -364,7 +364,7 @@ impl DeviceSession {
         method: &'static str,
         encoded: Vec<u8>,
     ) -> Result<Value, SessionError> {
-        self.exchange_authorized(q, method, encoded, false).await
+        self.exchange_authorized(q, method, encoded, None).await
     }
     // Only the plan-owning writer reaches this typed, fixed-path entry.
     async fn exchange_keymap(
@@ -374,15 +374,29 @@ impl DeviceSession {
         offset: usize,
     ) -> Result<Value, SessionError> {
         let encoded = mi_proto::mutation::keymap_chunk(candidate, offset, q.next_id)?;
-        self.exchange_authorized(q, "fs.writebin", encoded, true)
+        self.exchange_authorized(q, "fs.writebin", encoded, Some("fs.writebin"))
             .await
+    }
+    async fn exchange_lighting(
+        &self,
+        q: &mut Queue,
+        lights: &mi_proto::lighting_candidate::LightingPreviewCandidate,
+    ) -> Result<Value, SessionError> {
+        let encoded =
+            mi_proto::lighting_candidate::encode_lighting_preview_candidate(lights, q.next_id)?;
+        let id = q.next_id;
+        let result = self
+            .exchange_authorized(q, "lights.preview", encoded, Some("lights.preview"))
+            .await?;
+        mi_proto::mutation::validate_mutation_response_candidate(&result, id)?;
+        Ok(result)
     }
     async fn exchange_authorized(
         &self,
         q: &mut Queue,
         method: &'static str,
         mut encoded: Vec<u8>,
-        keymap: bool,
+        mutation: Option<&'static str>,
     ) -> Result<Value, SessionError> {
         if self.invalid.load(Ordering::SeqCst) {
             q.framer.lock().unwrap().clear();
@@ -396,8 +410,7 @@ impl DeviceSession {
             self.shutdown().await;
             return Err(error);
         }
-        // General byte callers remain read-only. Only exchange_keymap constructs
-        // the fixed-path bytes for an already validated immutable plan.
+        // General byte callers remain read-only; typed mutation entries construct their own bytes.
         let synthetic = {
             #[cfg(feature = "synthetic-backend")]
             {
@@ -408,10 +421,10 @@ impl DeviceSession {
                 false
             }
         };
-        let native_keymap = keymap
-            && method == "fs.writebin"
+        let native_mutation = mutation == Some(method)
+            && matches!(method, "fs.writebin" | "lights.preview")
             && self.link.backend() == mi_transport::LinkBackend::MacHidapi267Numbered;
-        if !synthetic && !native_keymap {
+        if !synthetic && !native_mutation {
             let request: Value = serde_json::from_slice(&encoded)
                 .map_err(|_| ProtoError::Invalid("invalid encoded request".into()))?;
             let readonly = match method {
@@ -702,5 +715,4 @@ mod file_tests;
 
 pub mod config_write;
 
-#[cfg(feature = "synthetic-backend")]
 pub mod lighting_preview;

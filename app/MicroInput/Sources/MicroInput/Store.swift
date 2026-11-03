@@ -4,7 +4,9 @@ import MicroInputCore
 protocol Backend {
     func layerLighting(layerId: String) throws -> String
     func editLighting(profileId: String, layerId: String, zone: String, field: String, value: String, allLayers: Bool) async throws -> String
-    func beginLightingPreview() async throws -> String
+    func beginLightingPreview(layerId: String) async throws -> String
+    func addLayerLighting(layerId: String) throws -> String
+    func saveLightingPreview(token: String) throws -> String
     func updateLightingPreview(token: String, zone: String, field: String, value: String) throws
     func lightingPreviewStatus() -> String
     func endLightingPreview(token: String) async throws -> String
@@ -94,7 +96,9 @@ protocol Backend {
 extension Backend {
     func layerLighting(layerId: String) throws -> String { throw BridgeError.Failed(message: "灯光不可用") }
     func editLighting(profileId: String, layerId: String, zone: String, field: String, value: String, allLayers: Bool) async throws -> String { throw BridgeError.Failed(message: "灯光不可用") }
-    func beginLightingPreview() async throws -> String { throw BridgeError.Failed(message: "预览未验收") }
+    func beginLightingPreview(layerId: String) async throws -> String { throw BridgeError.Failed(message: "预览未验收") }
+    func addLayerLighting(layerId: String) throws -> String { throw BridgeError.Failed(message: "灯光编辑不可用") }
+    func saveLightingPreview(token: String) throws -> String { throw BridgeError.Failed(message: "预览不可用") }
     func updateLightingPreview(token: String, zone: String, field: String, value: String) throws {}
     func lightingPreviewStatus() -> String { "{}" }
     func endLightingPreview(token: String) async throws -> String { "{}" }
@@ -636,6 +640,8 @@ extension MicroInput: Backend {}
     #endif
     @Published var showingLighting = false
     @Published var lightingPreviewToken: String?
+    @Published var startingLightingPreview = false
+    var lightingPreviewGeneration = 0
     @Published var lightingPreviewResult = "未开始预览"
     @Published var lightingPreviewPhase = "Idle"
     var endingLightingPreview = false

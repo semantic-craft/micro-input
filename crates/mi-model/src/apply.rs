@@ -485,7 +485,24 @@ impl Pending {
             let lid = &source["source_id"];
             let profile = unique(array(field(&object(root)?, "profiles")?)?, pid)?;
             let raw_layer = unique(array(field(&object(profile)?, "layers")?)?, lid)?;
-            let lights = object(field(&object(raw_layer)?, "lights")?)?;
+            let layer_fields = object(raw_layer)?;
+            if !layer_fields.contains_key("lights") {
+                if !target.complete_known() {
+                    return Err("新增灯光必须为完整已知字段".into());
+                }
+                let end = raw_layer.get().as_ptr() as usize - keymap.as_ptr() as usize
+                    + raw_layer.get().len()
+                    - 1;
+                let bytes = format!(
+                    ",\"lights\":{}",
+                    serde_json::to_string(target).map_err(|e| e.to_string())?
+                )
+                .into_bytes();
+                patches.push((end, end, bytes));
+                changes.push(json!({"kind":"lighting","profile":pid,"layer":lid,"field":"lights","before":null,"after":target}));
+                continue;
+            }
+            let lights = object(field(&layer_fields, "lights")?)?;
             for zone in [
                 crate::lighting::Zone::Backlight,
                 crate::lighting::Zone::Underglow,

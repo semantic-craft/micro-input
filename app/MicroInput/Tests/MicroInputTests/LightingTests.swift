@@ -2,6 +2,16 @@ import XCTest
 @testable import MicroInput
 import MicroInputCore
 private final class EndedPreviewBackend: Backend {
+    var phase = "Restored"
+    var delayBegin = false
+    private let lock = NSLock()
+    private var pendingBegin: CheckedContinuation<String, Never>?
+    var beginning: Bool { lock.withLock { pendingBegin != nil } }
+    func releaseBegin() { lock.withLock { pendingBegin?.resume(returning: "late-token"); pendingBegin = nil } }
+    func beginLightingPreview(layerId: String) async throws -> String {
+        if delayBegin { return await withCheckedContinuation { continuation in lock.withLock { pendingBegin = continuation } } }
+        return "token"
+    }
     var endCalls = 0
     var deviceReads = 0
     func loadDemo() async throws -> String { "{}" }
@@ -10,7 +20,7 @@ private final class EndedPreviewBackend: Backend {
     func readConfig() async throws -> String { deviceReads += 1; return "{}" }
     func disconnect() async {}
     func inputMonitoringStatus() async -> Bool { false }
-    func lightingPreviewStatus() -> String { #"{"phase":"Restored"}"# }
+    func lightingPreviewStatus() -> String { "{\"phase\":\"\(phase)\"}" }
     func endLightingPreview(token: String) async throws -> String { endCalls += 1; return lightingPreviewStatus() }
 }
 final class LightingTests: XCTestCase {
@@ -29,9 +39,34 @@ final class LightingTests: XCTestCase {
         XCTAssertEqual(backend.endCalls,1)
         await observed.shutdown()
     }
+    @MainActor func testNativeStopDoesNotClaimRestoration() async {
+        let backend = EndedPreviewBackend(); backend.phase = "Stopped"
+        let store = Store(backend: backend)
+        store.lightingPreviewToken = "native-token"
+        await store.endLightingPreview()
+        XCTAssertEqual(store.lightingPreviewPhase, "Stopped")
+        XCTAssertTrue(store.lightingPreviewResult.contains("不自动恢复"))
+        XCTAssertEqual(backend.deviceReads, 0)
+        await store.shutdown()
+    }
+    @MainActor func testCloseDuringBeginRetiresLateToken() async throws {
+        let backend = EndedPreviewBackend(); backend.delayBegin = true; backend.phase = "Stopped"
+        let store = Store(backend: backend)
+        let core = MicroInputCore.MicroInput()
+        store.snapshot = try JSONDecoder().decode(Snapshot.self, from: Data(try await core.loadDemo().utf8))
+        let begin = Task { await store.beginLightingPreview() }
+        for _ in 0..<100 where !backend.beginning { await Task.yield() }
+        XCTAssertTrue(backend.beginning)
+        await store.endLightingPreview()
+        backend.releaseBegin()
+        await begin.value
+        XCTAssertNil(store.lightingPreviewToken)
+        XCTAssertEqual(backend.endCalls, 1)
+        await store.shutdown(); await core.shutdown()
+    }
     @MainActor func testNativePreviewIsClosedWithoutConnection() async {
         let core = MicroInputCore.MicroInput()
-        do { _ = try await core.beginLightingPreview(); XCTFail("native preview opened") } catch {}
+        do { _ = try await core.beginLightingPreview(layerId: "missing"); XCTFail("native preview opened") } catch {}
         await core.shutdown()
     }
     #if MI_SYNTHETIC_BACKEND
@@ -99,6 +134,44 @@ final class LightingTests: XCTestCase {
         await store.endLightingPreview();XCTAssertEqual(store.lightingPreviewPhase,"Restored")
         XCTAssertEqual(store.draft.revision,revision)
         let drain=try core.beginDeviceDrain();core.abandonDeviceDrain(token:drain)
+        await store.shutdown()
+    }
+    @MainActor func testPreviewCanBeAdoptedAsOneUndoableDraftChange() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (_, store) = try await setup(dir)
+        let revision = store.draft.revision
+        let original = store.lightingModel()?.zones["backlight"]?["color"]?.value
+        await store.beginLightingPreview()
+        await store.editLighting(zone: "backlight", field: "color", value: "#ABCDEF", allLayers: false)
+        await store.saveLightingPreview()
+        XCTAssertNil(store.lightingPreviewToken)
+        XCTAssertEqual(store.draft.revision, revision + 1)
+        XCTAssertEqual(store.lightingModel()?.zones["backlight"]?["color"]?.value, "#ABCDEF")
+        await store.previewApply()
+        XCTAssertNotNil(store.applyPreview, store.status)
+        await store.undoDraft()
+        XCTAssertEqual(store.lightingModel()?.zones["backlight"]?["color"]?.value, original)
+        await store.shutdown()
+    }
+    @MainActor func testDisconnectRetiresOldPreviewGateWithoutReplay() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (core, store) = try await setup(dir)
+        await store.beginLightingPreview()
+        let token = try XCTUnwrap(store.lightingPreviewToken)
+        await core.disconnect()
+        await store.endLightingPreview()
+        XCTAssertNil(store.lightingPreviewToken)
+        XCTAssertEqual(store.lightingPreviewPhase, "Unknown")
+        try await core.connect(id: "synthetic-interface-0")
+        _ = try await core.readIdentity()
+        let drain = try core.beginDeviceDrain()
+        core.abandonDeviceDrain(token: drain)
+        XCTAssertThrowsError(try core.updateLightingPreview(token: token, zone: "backlight", field: "color", value: "#ABCDEF"))
+        await store.beginLightingPreview()
+        XCTAssertNotNil(store.lightingPreviewToken, store.lightingPreviewResult)
+        await store.endLightingPreview()
         await store.shutdown()
     }
     @MainActor func testRGBApplyAndRestoreThroughExistingWorkflow() async throws {

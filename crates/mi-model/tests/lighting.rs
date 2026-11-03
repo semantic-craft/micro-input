@@ -419,3 +419,56 @@ fn unchanged_full_lighting_target_does_not_block_later_key_candidate() {
         "single_device_key"
     );
 }
+
+#[test]
+fn explicit_missing_lights_initialization_compiles_without_reformatting_other_bytes() {
+    let mut value: Value = serde_json::from_slice(RAW).unwrap();
+    value["profiles"][0]["layers"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("lights");
+    let raw = serde_json::to_vec_pretty(&value).unwrap();
+    let (dir, mut store, base, _, lid) = setup_bytes(&raw);
+    assert!(store.draft.document.can_add_lighting(&lid));
+    store.update(|d| d.add_lighting(&lid)).unwrap();
+    let default = lighting::Lighting::creator_micro_2_defaults();
+    assert_eq!(store.draft.document.lighting(&lid).unwrap(), default);
+    store.update(|d| d.undo(false)).unwrap();
+    assert!(store.draft.document.can_add_lighting(&lid));
+    store.update(|d| d.undo(true)).unwrap();
+    let mut reopened = DocumentStore::default();
+    reopened.open(dir.path().join("draft.json")).unwrap();
+    let preview = reopened.preview_apply(&base).unwrap();
+    assert_eq!(preview.changes.len(), 1);
+    reopened
+        .prepare_apply_backup(&preview.token, &base)
+        .unwrap();
+    let plan = reopened
+        .take_prepared_candidate(&preview.token, &base)
+        .unwrap();
+    let inserted = format!(",\"lights\":{}", serde_json::to_string(&default).unwrap());
+    let actual = String::from_utf8(plan.candidate().to_vec()).unwrap();
+    assert_eq!(actual.replacen(&inserted, "", 1).as_bytes(), raw);
+    assert_eq!(
+        serde_json::from_slice::<Value>(plan.candidate()).unwrap()["profiles"][0]["layers"][0]
+            ["lights"],
+        serde_json::to_value(default).unwrap()
+    );
+}
+
+#[test]
+fn present_null_or_unknown_lights_cannot_be_initialized_over() {
+    for lights in [
+        Value::Null,
+        json!({"future":true}),
+        json!({"backlight":null,"underglow":null}),
+    ] {
+        let mut value: Value = serde_json::from_slice(RAW).unwrap();
+        value["profiles"][0]["layers"][0]["lights"] = lights;
+        let raw = serde_json::to_vec(&value).unwrap();
+        let (_, mut store, _, _, lid) = setup_bytes(&raw);
+        assert!(!store.draft.document.can_add_lighting(&lid));
+        assert!(store.update(|d| d.add_lighting(&lid)).is_err());
+        assert_eq!(store.draft.revision, 0);
+    }
+}
