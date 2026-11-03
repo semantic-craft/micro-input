@@ -141,8 +141,9 @@ impl SyntheticWriter {
                     snapshot.stale = true;
                 }
                 for (n, offset) in (0..plan.candidate().len()).step_by(3072).enumerate() {
+                    let expected_id = q.next_id;
                     let encoded =
-                        mi_proto::mutation::keymap_chunk(plan.candidate(), offset, q.next_id)?;
+                        mi_proto::mutation::keymap_chunk(plan.candidate(), offset, expected_id)?;
                     observe(Checkpoint::BeforeWrite(n), record.path());
                     failure = Failure::Persistence;
                     record
@@ -154,7 +155,7 @@ impl SyntheticWriter {
                         .session
                         .exchange_encoded(&mut q, "fs.writebin", encoded)
                         .await?;
-                    mi_proto::mutation::synthetic_ack(&reply)?;
+                    mi_proto::mutation::validate_mutation_response_candidate(&reply, expected_id)?;
                     observe(Checkpoint::AfterAck(n + 1), record.path());
                     failure = Failure::Persistence;
                     record

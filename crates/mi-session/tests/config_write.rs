@@ -9,7 +9,8 @@ use mi_session::{
     DeviceSession, ReadOnlySchema, SessionConfig,
 };
 use mi_transport::{
-    HidLink, HidTransport, LinkBackend, SyntheticDiscovery, SyntheticFiles, TransportError,
+    HidLink, HidTransport, LinkBackend, SyntheticDiscovery, SyntheticFiles, SyntheticWriteResponse,
+    TransportError,
 };
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
@@ -85,6 +86,126 @@ async fn compiled_lighting_goes_through_real_codec_reader_and_explicit_restore()
     assert_eq!(writer.apply(&restore).await, Outcome::Verified);
     assert_eq!(device.files().unwrap().keymap, RAW);
     session.shutdown().await;
+}
+
+#[tokio::test]
+async fn candidate_result_payloads_still_require_independent_readback() {
+    for result in [Value::Null, json!(true), json!(false), json!({"opaque":42})] {
+        let mut files = SyntheticFiles::new(RAW.to_vec(), None);
+        files.write_response = SyntheticWriteResponse::Result(result.clone());
+        let (device, session) = setup(files).await;
+        let (_dir, plan) = plan(RAW, session.id, 0xabcdef);
+        let writer = SyntheticWriter::new(session.clone()).unwrap();
+        let mut requests_after_ack = 0;
+        assert_eq!(
+            writer
+                .apply_observed(&plan, |at, _| {
+                    if let Checkpoint::AfterAck(_) = at {
+                        requests_after_ack = device.synthetic_requests().len();
+                    }
+                })
+                .await,
+            Outcome::Verified,
+            "{result}"
+        );
+        let requests = device.synthetic_requests();
+        assert!(requests[requests_after_ack..]
+            .iter()
+            .any(|m| m == "fs.readbin"));
+        assert_eq!(device.files().unwrap().keymap, plan.candidate());
+        session.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn successful_response_without_expected_bytes_cannot_verify_or_save_locally() {
+    for ignore_writes in [true, false] {
+        let mut files = SyntheticFiles::new(RAW.to_vec(), None);
+        files.ignore_writes = ignore_writes;
+        files.corrupt_completed = !ignore_writes;
+        files.write_response = SyntheticWriteResponse::Result(json!(true));
+        let (device, session) = setup(files).await;
+        let (dir, plan) = plan(RAW, session.id, 0xabcdef);
+        let local_before = std::fs::read(dir.path().join("draft.json")).unwrap();
+        let writer = SyntheticWriter::new(session.clone()).unwrap();
+        let mut acknowledged = false;
+        assert_eq!(
+            writer
+                .apply_observed(&plan, |at, _| {
+                    if let Checkpoint::AfterAck(_) = at {
+                        acknowledged = true;
+                    }
+                })
+                .await,
+            Outcome::DeviceStateUnknown
+        );
+        assert!(acknowledged);
+        assert_ne!(device.files().unwrap().keymap, plan.candidate());
+        if ignore_writes {
+            assert_eq!(device.files().unwrap().keymap, RAW);
+        }
+        let record = OperationRecord::open(plan.record_path()).unwrap();
+        assert!(!record.status().device_verified);
+        assert!(!record.status().local_saved);
+        assert_eq!(
+            record.status().error_category,
+            Some(mi_model::operation_record::Failure::Readback)
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("draft.json")).unwrap(),
+            local_before
+        );
+        let count = mutations(&device);
+        assert_eq!(writer.apply(&plan).await, Outcome::NotSent);
+        assert_eq!(mutations(&device), count);
+        session.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn malformed_error_and_wrong_id_responses_leave_completed_writes_unknown() {
+    for response in [
+        SyntheticWriteResponse::MissingResult,
+        SyntheticWriteResponse::ResultAndError,
+        SyntheticWriteResponse::WrongId,
+        SyntheticWriteResponse::Error,
+    ] {
+        let mut files = SyntheticFiles::new(RAW.to_vec(), None);
+        files.write_response = response.clone();
+        let (device, session) = setup(files).await;
+        let (dir, plan) = plan(RAW, session.id, 0xabcdef);
+        let local_before = std::fs::read(dir.path().join("draft.json")).unwrap();
+        let writer = SyntheticWriter::new(session.clone()).unwrap();
+        let mut acknowledged = false;
+        assert_eq!(
+            writer
+                .apply_observed(&plan, |at, _| {
+                    if let Checkpoint::AfterAck(_) = at {
+                        acknowledged = true;
+                    }
+                })
+                .await,
+            Outcome::DeviceStateUnknown,
+            "{response:?}"
+        );
+        assert!(!acknowledged);
+        assert_eq!(device.files().unwrap().keymap, plan.candidate());
+        let record = OperationRecord::open(plan.record_path()).unwrap();
+        assert!(!record.status().device_verified);
+        assert!(!record.status().local_saved);
+        assert_eq!(
+            std::fs::read(dir.path().join("draft.json")).unwrap(),
+            local_before
+        );
+        let count = mutations(&device);
+        assert_eq!(writer.apply(&plan).await, Outcome::NotSent);
+        assert_eq!(mutations(&device), count);
+        assert!(session
+            .request(mi_proto::Method::SysVersion, Value::Null)
+            .await
+            .is_err());
+        session.shutdown().await;
+    }
 }
 #[tokio::test]
 async fn multichunk_partial_write_lost_ack_and_corrupt_readback_never_report_success() {

@@ -1,5 +1,6 @@
 //! R-D04/R-D05/R-D08/R-D09: read-only RPC vocabulary and deliberately closed wire boundary.
 use serde_json::{json, Value};
+pub mod lighting_candidate;
 pub mod mutation;
 mod native;
 pub use native::{validate_read_only, NativeFramer};

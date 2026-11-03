@@ -51,7 +51,7 @@
 
 `mi-model::lighting` 保存Layer目标并复用mutate/undo；`apply`在精确基线下生成单键或灯光候选，副本成功后才允许取得一次PreparedCandidate。此对象不携带生产发送权限。`mi-proto::mutation`仅编码限定keymap块；原Method/公开request的只读守卫不变。
 
-`mi-session::config_write::SyntheticWriter`只在synthetic-backend编译，构造时拒绝原生/未知backend，复用私有会话队列和唯一reader。显式合成文件按实际字节生成摘要，合成ACK不冒充固件事实；写后逐字节比较并保全smart_actions，失败/取消后不自动重试。它是离线验证工具，已接入持久操作记录和失败恢复；高层 FFI 已复用此工具，只有专用合成构造器开放；不能作为生产写入能力。只读快照复用抽出的原始文件校验；解析失败仍不发布快照。
+`mi-session::config_write::SyntheticWriter`只在synthetic-backend编译，构造时拒绝原生/未知backend，复用私有会话队列和唯一reader。显式合成文件按实际字节生成摘要，响应采用官方客户端通用成功包络候选（不限定result载荷），模拟响应不冒充固件事实；写后逐字节比较并保全smart_actions，失败/取消后不自动重试。它是离线验证工具，已接入持久操作记录和失败恢复；高层 FFI 已复用此工具，只有专用合成构造器开放；不能作为生产写入能力。只读快照复用抽出的原始文件校验；解析失败仍不发布快照。
 
 
 ## S3 离线持久记录与恢复
@@ -88,3 +88,9 @@ Swift 的所有宿主执行入口统一经过执行 lease；暂停新入口并�
 - `HostOverlay` 只读 Rust 的实际首层投影；非激活面板不执行动作。`WorkspaceSleepObserver` 在应用生命周期监听前台和睡眠，关闭主窗口不终止观察。
 
 采用 IA-09/11 作为静态研究背景，不实现厂商 AppSense 通知或设备自动激活；本轮验证须分别记录自动化输入夹具、原生窗口与真实硬件覆盖。
+
+## 原生候选字节与发送权限
+
+`mi-proto::lighting_candidate` 的两区类型仅生成固定 `lights.preview` 候选字节，保留可选字段缺省，校验客户端已知范围；它不是配置往返模型，也没有发送入口。`mutation::validate_mutation_response_candidate` 只确认匹配ID的成功包络，不提升为写入或恢复结果。原生通用回应的 `result` 不限类型，不能继续依赖自造的 `synthetic_written`。
+
+`DeviceSession::exchange_encoded` 在分帧前重新校验非合成连接的实际方法、参数与队列ID，再从受限对象重新编码，原始重复键等歧义字节不进入传输，候选字节即使被内部调用误标为只读也零发送、零消耗ID；合成后端继续承载受控写入/预览实验。原生 `Method` 和高层 capability 没有扩展。`check-boundaries.py` 同时运行候选字节绕过回归，硬件探针仍不执行。

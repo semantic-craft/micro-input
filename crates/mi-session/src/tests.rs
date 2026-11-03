@@ -1032,3 +1032,72 @@ async fn ingress_watermark_precedes_decode_and_preserves_unread_radial_state() {
     assert_eq!(east.radial_center, Some(false));
     session.shutdown().await;
 }
+
+// Candidate bytes can be inspected and framed offline, but cannot reach a native link.
+#[tokio::test]
+async fn encoded_mutation_candidates_cannot_bypass_production_exit() {
+    use mi_proto::lighting_candidate::{
+        encode_lighting_preview_candidate, LightingPreviewCandidate,
+    };
+    let (s, link, _) = setup(100);
+    let mut queue = s.queue.lock().await;
+    let id = queue.next_id;
+    let lighting =
+        encode_lighting_preview_candidate(&LightingPreviewCandidate::default(), id).unwrap();
+    let keymap = mi_proto::mutation::keymap_chunk(b"{}", 0, id).unwrap();
+    for (method, bytes) in [
+        ("lights.preview", lighting.clone()),
+        ("fs.writebin", keymap.clone()),
+        ("device.status", lighting),
+        ("fs.list", keymap),
+    ] {
+        assert!(s.exchange_encoded(&mut queue, method, bytes).await.is_err());
+        assert_eq!(queue.next_id, id);
+        assert!(link.writes.lock().unwrap().is_empty());
+    }
+    drop(queue);
+    s.shutdown().await;
+}
+
+#[tokio::test]
+async fn encoded_readonly_requests_never_forward_ambiguous_original_bytes() {
+    let (session, link, mut requests) = setup(500);
+    let task_session = session.clone();
+    let task = tokio::spawn(async move {
+        let mut queue = task_session.queue.lock().await;
+        let bytes = format!(
+            r#"{{"id":{},"method":"sys.bootloader","method":"device.status","params":null}}"#,
+            queue.next_id
+        )
+        .into_bytes();
+        task_session
+            .exchange_encoded(&mut queue, "device.status", bytes)
+            .await
+    });
+    let bytes = tokio::time::timeout(Duration::from_millis(500), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let request: Value = serde_json::from_slice(&bytes).unwrap();
+    let expected = JsonCodec
+        .encode(
+            &RpcRequest::new(
+                Method::DeviceStatus,
+                Value::Null,
+                request["id"].as_u64().unwrap() as u16,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(bytes, expected);
+    assert!(!String::from_utf8(bytes).unwrap().contains("bootloader"));
+    link.inject
+        .send(
+            json!({"id":request["id"],"result":{}})
+                .to_string()
+                .into_bytes(),
+        )
+        .unwrap();
+    assert!(task.await.unwrap().is_ok());
+    session.shutdown().await;
+}

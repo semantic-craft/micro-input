@@ -17,6 +17,8 @@ for package, behavior in [
     ('mi-proto', 'production_exit_is_strictly_read_only'),
     ('mi-session', 'production_exit_rejects_forbidden_parameters_without_sending'),
     ('mi-session', 'real_framer_never_writes'),
+    ('mi-session', 'encoded_mutation_candidates_cannot_bypass_production_exit'),
+    ('mi-session', 'encoded_readonly_requests_never_forward_ambiguous_original_bytes'),
 ]:
     subprocess.run(['cargo', 'test', '--locked', '-p', package, behavior], cwd=root, check=True)
 ffi = '\n'.join(p.read_text() for p in (root / 'crates/mi-ffi/src').rglob('*.rs'))
