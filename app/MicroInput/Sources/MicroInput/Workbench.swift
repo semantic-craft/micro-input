@@ -157,7 +157,7 @@ struct Workbench: View {
                                             Task { _ = await store.saveControlSettings(mode: "logical_sectors", sectors: "4") }
                                         }
                                         .font(.caption)
-                                        .disabled(!store.canEditDraft || store.busy)
+                                        .disabled(!store.canEditDraft || store.busy || store.editingDevice)
                                     }
                                     Text("CREATOR MICRO").font(.caption2).tracking(3).foregroundStyle(.secondary)
                                 }.padding(16).background(.background, in: RoundedRectangle(cornerRadius: 16)).overlay(RoundedRectangle(cornerRadius: 22).stroke(.quaternary)).shadow(color: .black.opacity(0.04), radius: 10, y: 4)
