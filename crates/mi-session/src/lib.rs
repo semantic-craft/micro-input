@@ -360,7 +360,7 @@ impl DeviceSession {
         &self,
         q: &mut Queue,
         method: &'static str,
-        encoded: Vec<u8>,
+        mut encoded: Vec<u8>,
     ) -> Result<Value, SessionError> {
         if self.invalid.load(Ordering::SeqCst) {
             q.framer.lock().unwrap().clear();
@@ -373,6 +373,42 @@ impl DeviceSession {
             *self.terminal.lock().unwrap() = Some(error.clone());
             self.shutdown().await;
             return Err(error);
+        }
+        // Candidate encoders never authorize a native mutation, even if a future
+        // caller reaches this private byte entry point or mislabels its method.
+        let synthetic = {
+            #[cfg(feature = "synthetic-backend")]
+            {
+                self.link.backend() == mi_transport::LinkBackend::SyntheticNumbered
+            }
+            #[cfg(not(feature = "synthetic-backend"))]
+            {
+                false
+            }
+        };
+        if !synthetic {
+            let request: Value = serde_json::from_slice(&encoded)
+                .map_err(|_| ProtoError::Invalid("invalid encoded request".into()))?;
+            let readonly = match method {
+                "sys.version" => Method::SysVersion,
+                "device.status" => Method::DeviceStatus,
+                "fs.list" => Method::FsList,
+                "fs.readbin" => Method::FsReadbin,
+                _ => return Err(ProtoError::Unverified("native mutations remain disabled").into()),
+            };
+            if request
+                != serde_json::json!({"id":q.next_id,"method":method,"params":request["params"]})
+            {
+                return Err(ProtoError::Invalid(
+                    "encoded request does not match queue ownership".into(),
+                )
+                .into());
+            }
+            let request = RpcRequest::new(readonly, request["params"].clone(), q.next_id)?;
+            mi_proto::validate_read_only(&request)?;
+            // Send only the validated object's canonical representation. Duplicate
+            // keys or alternative escaping in supplied bytes never reach firmware.
+            encoded = JsonCodec.encode(&request)?;
         }
         let id = q.next_id;
         q.next_id += 1;

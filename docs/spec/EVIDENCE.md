@@ -214,3 +214,9 @@
   整合 PR #54 的应用跟随/HUD 与 PR #55 的左右键映射修正。所有排队宿主动作复用执行 lease；设备操作暂停入口、丢弃积压并等待在途动作。新增真实 UniFFI/Swift 回归验证排空前零发送、迟到回执不发布、队列丢弃；旧输入任务不能清除恢复后的新任务。同步两处旧合成夹具为首键 AG00，错误位置仍拒绝编译候选。
   固定实现提交 `5184691` 的 `MI_AUTO_HOST_READY=0 scripts/verify-offline` 退出 0：21 项 Python、全工作区 Rust、81 项合成 Swift、43 项生产 Swift、双后端构建及只读/零发送边界全部通过；host-execution、config-write、lighting-control 三轮隔离应用场景均 PASS，QA 进程/应用副本/文档/偏好清理全部核实。日志保存在主工作区 `.scratch/input-study/rea-s3-rgb-20261103/merged-acceptance-final3.log`，对应回执保存在该目录 `merged-qa/`。此前整合中的旧夹具失败及并行 QA 引发的前台断言失败保留在中间日志，不计入通过结果；最终验收串行执行。
   参考 IA-06/07/12/13/14/15/16/17 与批准设计；保留未知字段、普通写入非事务、独立读回、本地修复与设备恢复分离。生产包已重新构建但未启动或安装；本轮未连接或写入真实设备，实体按键及灯光视觉仍 NOT_RUN。原生目标绑定、ACK/覆盖/恢复语义和硬件验收仍未完成，#22/#24 不关闭。
+
+
+- **E-105 / STATIC + CONTROLLED REPLAY + IMPLEMENTATION（原生协议候选离线收口）**：2026-11-03，复核 Input 1.1.0 安装包摘要与 IA 表一致。REA 定向 SDK 分析及独立 RGB 调用链核查的定位、覆盖限制和原生插件完整性告警见 `docs/protocol-candidates.md`。只使用摘要匹配的 JavaScript 源段；没有启动 Input 或加载插件。
+  官方通用成功响应仅要求 result/error 互斥，不给 fs.writebin 或 lights.preview 的 result 载荷加专用成功类型。离线受控重放使用摘要固定的 SDK 选定函数体与内存 RPC 桩，确认 null/false/object 成功包络、UTF-8原始字节3072切块、空字符串零请求、两区预览直传；它不证明完整应用或固件运行。原始脚本、REA Evidence与结果存于主工作区 `.scratch/input-study/native-protocol-20261103/`。
+  以通用成功包络候选替换自造 synthetic_written；合成应用仍必须独立完整读回。新增成功响应但不写/损坏、写入后坏响应/错ID回归，均不能误报Verified或重放。新增无发送权限的两区RGB候选编码，保留可选字段省略，已知值域仅属客户端规则。当前代码的活动索引解析已拒绝负数/小数，但不能原子绑定预览。
+  非合成会话在分帧前重新验证方法/参数/队列ID，并从受限请求重新编码。独立复审发现并修复重复JSON键的解析/发送歧义，MockLink回归检查实际发出规范化只读字节，变更候选及伪装方法零发送。原生Method、高层写/预览capability与设备授权均未开放。最终自动验收结果见本条后续记录。

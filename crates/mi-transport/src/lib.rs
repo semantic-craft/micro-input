@@ -781,6 +781,17 @@ impl HidLink for SyntheticLink {
     }
 }
 
+/// Response faults are simulator-only and do not describe firmware behavior.
+#[cfg(feature = "synthetic-backend")]
+#[derive(Clone, Debug)]
+pub enum SyntheticWriteResponse {
+    Result(serde_json::Value),
+    MissingResult,
+    ResultAndError,
+    WrongId,
+    Error,
+}
+
 /// Mutable, explicitly injected synthetic files; never populated from user configuration.
 #[cfg(feature = "synthetic-backend")]
 #[derive(Clone)]
@@ -791,6 +802,9 @@ pub struct SyntheticFiles {
     pub reject_offset: Option<usize>,
     /// Store the chunk but lose its response, modeling uncertain completion.
     pub lose_ack_offset: Option<usize>,
+    /// Return a response without storing any chunk; readback must catch this.
+    pub ignore_writes: bool,
+    pub write_response: SyntheticWriteResponse,
     pub corrupt_completed: bool,
     pub missing_keymap: bool,
     pub bad_checksum: bool,
@@ -808,6 +822,8 @@ impl SyntheticFiles {
             smart_actions,
             reject_offset: None,
             lose_ack_offset: None,
+            ignore_writes: false,
+            write_response: SyntheticWriteResponse::Result(serde_json::Value::Null),
             corrupt_completed: false,
             missing_keymap: false,
             bad_checksum: false,
@@ -901,18 +917,22 @@ impl SyntheticFiles {
                     }
                     // Original synthetic failure model: visible partial overwrite, no atomicity promise.
                     if offset == 0 {
-                        self.keymap.clear();
+                        if !self.ignore_writes {
+                            self.keymap.clear();
+                        }
                         self.next_offset = 0;
                     }
-                    self.keymap.extend_from_slice(&data);
-                    self.next_offset = self.keymap.len();
+                    if !self.ignore_writes {
+                        self.keymap.extend_from_slice(&data);
+                    }
+                    self.next_offset = offset + data.len();
                     if complete {
                         self.next_offset = 0;
-                        if self.corrupt_completed {
+                        if self.corrupt_completed && !self.ignore_writes {
                             self.keymap.push(b'!');
                         }
                     }
-                    Ok(json!({"synthetic_written":true}))
+                    Ok(serde_json::Value::Null)
                 }
                 _ => Err(()),
             }
@@ -922,6 +942,23 @@ impl SyntheticFiles {
             && self.lose_ack_offset == params["offset"].as_u64().map(|n| n as usize)
         {
             return None;
+        }
+        if request["method"] == "fs.writebin" && result.is_ok() {
+            return Some(match &self.write_response {
+                SyntheticWriteResponse::Result(result) => {
+                    json!({"id":request["id"],"result":result})
+                }
+                SyntheticWriteResponse::MissingResult => json!({"id":request["id"]}),
+                SyntheticWriteResponse::ResultAndError => {
+                    json!({"id":request["id"],"result":null,"error":{"code":500,"message":"synthetic response fault"}})
+                }
+                SyntheticWriteResponse::WrongId => {
+                    json!({"id":(request["id"].as_u64().unwrap() + 1) % 999,"result":null})
+                }
+                SyntheticWriteResponse::Error => {
+                    json!({"id":request["id"],"error":{"code":500,"message":"synthetic response fault"}})
+                }
+            });
         }
         Some(match result {
             Ok(result) => json!({"id":request["id"],"result":result}),
