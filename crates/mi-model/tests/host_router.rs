@@ -339,6 +339,66 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
 }
 
 #[test]
+fn local_multi_does_not_execute_tap_before_gesture_is_known() {
+    use mi_model::multi::{ActionReference, LocalMulti};
+
+    let mut draft = Draft::default();
+    let profile_id = draft.document.editable.graph.profile_order[0].clone();
+    let layer_id = draft.document.editable.graph.profiles[&profile_id].layer_order[0].clone();
+    draft
+        .assign(
+            &json!(profile_id),
+            &json!(layer_id),
+            1,
+            Action {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Tap target".into(),
+                category: "Test".into(),
+                detail: "Open app".into(),
+                payload: serde_json::to_value(ActionKind::OpenApp {
+                    bundle_id: "com.example.test".into(),
+                })
+                .unwrap(),
+            },
+        )
+        .unwrap();
+    let tap_id = draft.document.editable.graph.layers[&layer_id]
+        .controls
+        .values()
+        .find(|binding| binding.logical_control == "logical-1")
+        .unwrap()
+        .action_id
+        .clone()
+        .unwrap();
+    draft
+        .assign(
+            &json!(profile_id),
+            &json!(layer_id),
+            0,
+            Action {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Four gestures".into(),
+                category: "Test".into(),
+                detail: "Multi".into(),
+                payload: serde_json::to_value(ActionKind::LocalMulti {
+                    multi: LocalMulti {
+                        format_version: 1,
+                        term_ms: 250,
+                        tap: Some(ActionReference::Action { action_id: tap_id }),
+                        double_tap: None,
+                        hold: None,
+                        tap_hold: None,
+                    },
+                })
+                .unwrap(),
+            },
+        )
+        .unwrap();
+
+    assert!(resolve_host_action(&draft.document, Some(&profile_id), "AG00", true).is_none());
+}
+
+#[test]
 fn host_preferences_persist_active_profile_and_execution_enabled() {
     let dir = std::env::temp_dir().join(format!("mi-host-prefs-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
