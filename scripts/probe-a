@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""Private exact tempfile A acceptance; default runs fake USB only."""
+from pathlib import Path
+from probe_launcher import main
+
+main('a', Path(__file__).resolve().parent.parent)

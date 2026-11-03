@@ -171,3 +171,39 @@ HID 筛选顺序：
 **F（官方发布事实）**：同日查询[官方 latest](https://github.com/worklouder/cm-v2-fw-releases/releases/latest)为 [v0.6.3](https://github.com/worklouder/cm-v2-fw-releases/releases/tag/v0.6.3)，`prerelease=false`；[v0.7.0-rc.16](https://github.com/worklouder/cm-v2-fw-releases/releases/tag/v0.7.0-rc.16)为预发布，不是升级目标。遵循用户选择：保持最新稳定版，未来操作前重新查询发布状态并保留既有映射。发布说明可提示功能差异，但不能代替协议规格。
 
 实现交接仅提供本文及合成向量说明；不得导入原应用模块充当自研核心。下一步可据本文实现编解码器与只读 transport，再在明确可控的设备会话中验证。尚未核实 native HID 适配细节、完整键码/容量、固件实际错误码以及跨文件一致性，不把这些缺口补成假定规格。
+
+## 8. 当前独立后端与身份应用验收
+
+E-075核对Cargo.lock锁定hidapi crate 2.6.7的macOS后端：编号报告0x06保留在64字节buffer首部，IOKit另传相同report ID；入站callback buffer原样保留，不再拼ID。`macos-shared-device`开启非独占；该版使用run loop并在close中join原生read thread，不适用dispatch cancel-handler实现。生产adapter只为303A:8298/USB/macOS启用，其他组合仍Unverified/no-send。
+
+E-077受控本机观察补充：固件0.6.3回应包含`id/method/result`，method echo本次只读查询。自研RPC响应必须有合法id/i、result/error恰一项；可选method/m只允许四项只读查询名并与pending method匹配，不能带params/p。仅含method+id而无result/error的设备请求不满足pending，只读阶段不执行、不回复。RPC错误不伪装为成功。
+
+E-078已在原生应用路径查询到0.6.3（device.status），可选活动索引与本地浏览选中分开显示。连接、身份和配置读取独立；当前配置schema仍Unverified，不会导入演示解析器。任意长响应/UTF-8、完整配置、拔插/睡眠、权限错误、同ID外来回包与共享channel共存尚待对应实机验收。
+
+## 8. 输入监视的当前边界
+
+`DeviceSession` 的唯一 reader 把无 ID 通知分流到 256 项有界队列。`subscribe_input()` 及 UniFFI `InputSubscription.next_event()` 复用它，不发送轮询请求。SwiftUI 输入监视只显示本地会话、订阅序号、时间、通知数量和缺口数量，不返回、显示或记录通知载荷。
+
+当前生产 `UnverifiedInputDecoder` 不识别实体按下/释放、旋钮方向或摇杆。所有通知都返回 `UnknownNotification`、空逻辑引用和 `input-schema-unverified`，禁止动作执行；宿主动作名称也不能充当物理输入证据。物理控件、键帽覆盖和动作角色保留三个独立的空引用，不从 13 个逻辑位置推导实体键数或宽键去重。`InputDecoder` 仅提供未来有证据解码的 Rust 边界；合成测试里的逻辑开关不属于设备协议。
+
+订阅队列溢出返回 `InputStreamGap` 和丢失数，清除其按住状态，停止该订阅全部后续输入。用户必须明确重建监听；新订阅丢弃旧积压并从空状态开始，生产解码仍保持未验证，不能借重建开放动作。关闭订阅会唤醒等待，断连终止等待并拒绝旧会话缓冲事件；窗口停止 UI 订阅不关闭应用设备会话。
+
+这只交付监视基础。#14 的真实按下/释放、旋转方向、按压、摇杆回中、全部实体映射与宽键去重仍待当前配置和固件的独立证据及实机核对；本实现没有改变 keymap、准备最小绑定或写入设备。
+
+## 9. 当前配置读回与响应归属
+
+E-079/E-081：当前0.6.3/USB8298应用已通过显式身份→fs.list→smart/keymap分块→原始字节SHA-1→再次list，并在SwiftUI只读浏览实际Profile/Layer及逻辑开关。设备原字节仅保留在内存快照，和本地草稿分开；合成响应来源为Imported，不冒充设备。未知动作/字段/物理方向仍保留Unknown/raw，不从设备能返回JSON推定全部语义已验证。
+
+读取限额为本地策略：每文件4MiB、总量8MiB、每块最多3072字节、单请求10秒、整次60秒、无自动重试。失败/取消保留旧字节和时间并标stale；smart缺失、零字节、合法空对象分别处理。前后list一致不证明跨文件原子性或无ABA变化。
+
+接收循环先对完整JSON提取合法响应ID；非pending回应丢弃，不以其未知echo终结当前会话。只有当前请求的回应继续接受第8节严格echo/result/error验证；带method/id但无result/error的消息仍为未执行通知。这没有解决同ID跨进程冲突或共享channel写流交错，UNKNOWN-17保留。
+
+## 10. 会话终止、取消与退出
+
+T05 实现见 E-082。每次连接取得独立会话；取消原生 open 后仍会关闭迟到返回的句柄。接收错误使整条会话失效，通过不发送请求的 UniFFI 等待接口通知 Store；候选移除、断开和新连接都使旧 UI 代次失效，保留旧快照并标记过期，不覆盖本地草稿。
+
+单请求 10 秒预算现在覆盖发送报告和等待回应。完整发送后的超时/取消可显式重试，旧 request ID 不复用；发送途中超时或取消会关闭会话，因为设备可能收到不完整分帧，须重新连接。原生打开失败仅标为 I/O 原因未确认；不能从一个错误码判断是 Input Monitoring、Secure Input 或占用，不自动重启其他应用或更改权限。
+
+USB 发现的 IOKit 回调直接唤醒订阅，取消了原有 25 ms counter 轮询；退出停止发现订阅，在后台线程 stop/join 发现 run loop，关闭设备并等待 reader 后才答复 AppKit 退出。窗口关闭仍保留菜单栏。此处“事件驱动”仅指发现、会话终止及订阅通知；hidapi 接收仍使用既有的 20 ms `read_timeout`，未量化 CPU/功耗，不宣称全部空闲路径无轮询。
+
+已实测当前 macOS/arm64、USB8298、固件0.6.3的两次独立身份查询→shutdown→重开。实际配置读取中物理拔插、睡眠恢复、原有键/旋钮映射和共享通道干扰仍未在本版本验收；E-080仅证明旧版本发现插拔，不能替代这些项目。

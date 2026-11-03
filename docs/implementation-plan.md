@@ -4,7 +4,7 @@
 
 入口：SPEC、BUILD_PROMPT、README、development 及相关工单引用本文件。工单持有状态，本文件持有实施契约；不维护第二套工单系统。
 
-当前只修订规划，不运行设备查询、写入、宿主动作或自动化。保留 35 张工单和 48 条用户故事；所有原有验收继续有效，以下仅明确歧义或显式调整依赖。原厂代码/资源不进入实现；现有证据等级不因本设计升级。
+当前按用户最新指令在统一集成分支实施全部 35 张工单。按依赖推进代码与可验证切片；真实设备写入仍须满足协议、备份和恢复门槛，不接任务自动化。保留 35 张工单和 48 条用户故事；所有原有验收继续有效，以下仅明确歧义或显式调整依赖。原厂代码/资源不进入实现；现有证据等级不因本设计升级。
 
 ## D01 · 发现与身份分开交付（F01；#3/#4）
 
@@ -76,7 +76,7 @@ IOKit report ID 参数与回调格式单独归 adapter，不能把 node-hid 的 
 
 拟定 FFI InputEvent：session_id、sequence、timestamp、逻辑引用、已核实的事件类型、verification；未知事件不填造物理控件 ID。订阅返回可显式关闭的对象；窗口关闭可以停 UI 订阅，但菜单栏仍持有应用会话；退出必须结束任务与句柄。
 
-#14 增加输入解码和物理核对；#6 验证睡眠/断连/重连、错误分类和清理。权限/保护输入/占用不循环自动重启；提供原因和用户重试。无法区分的 native 错误标“原因未确认”，不能凭一个错误码猜权限。
+#14 已增加 Dispatch 0.6.2 的不可执行 AG 绑定候选解码（[契约](protocol-candidates.md#公开社区输入候选dispatch-062)，E-089）；当前固件、真实绑定与物理核对仍待验收。#6 验证睡眠/断连/重连、错误分类和清理。权限/保护输入/占用不循环自动重启；提供原因和用户重试。无法区分的 native 错误标“原因未确认”，不能凭一个错误码猜权限。
 
 ## D05 · 通过真实桥接验收（F05；#3–#6）
 
@@ -90,13 +90,21 @@ Swift Backend 加入所使用的草稿高层方法；Store 不再通过 `as? Mic
 
 规则 R-P03/R-E02/R-E09/R-E10；改动 `mi-model/src/draft.rs`、`storage.rs`、`document_tests.rs`，桥接文档状态及 Swift 投影。
 
-拟定 LocalDocumentV2：schema_version=2、document_id、revision、baseline、graph、source_refs。baseline 可为空；非空时含设备身份置信状态、固件、读取时间、两文件存在性/摘要/raw。graph 是可编辑对象与绑定。source_refs 映射本地稳定 ID 到设备源 ID 或 legacy logical-N；不把源 index 转成实体 ID。
+LocalDocumentV2（#15实现）：schema_version=2、document_id、revision、baseline、origin、graph、source_refs。origin.config是不可变来源投影及raw，graph是唯一可编辑图。baseline 可为空；非空时含设备身份置信状态、固件、读取时间、两文件存在性/摘要/raw。graph 是可编辑对象与绑定。source_refs 映射本地稳定 ID 到设备源 ID 或 legacy logical-N；不把源 index 转成实体 ID。
 
 新建 Profile/Layer/Action/Binding 使用文档内独立 UUID；导入冲突先建立映射再重写引用，校验无悬空引用。原始文件不随草稿正规化，不因编辑覆盖未知字段。未知结构采用只读/受限投影，不自行补全设备格式。
 
 v1→v2：先完整解析 v1 与 edits，保留其有效草稿语义和原始源值；baseline=null、来源=legacy-local，绝不伪装来自当前设备；持久化旧 logical 引用供后续显式核对。转换失败、高版本或未知字段仍保留原文件并只读。成功写新格式之前，把 v1 原字节写入独立不可覆盖备份并核验摘要；沿用锁、预期内容检查、pending+rename，任一步失败不提交内存状态。
 
 撤销单元为可编辑 graph 与 source_refs 的完整变更，包含重命名、结构和绑定；一次用户确认产生一次 revision。快照事实、设备状态和磁盘迁移不在撤销栈。重连接受新基线后清空旧撤销栈，以免撤销偷偷跨越外部版本；重启不恢复撤销历史。
+
+显式“从快照新建草稿”只复制当前会话完整、未过期的核验快照，保存独立draft-UUID.json和含文件精确字节的baseline，不覆盖原工作台。workbench.active.json仅保存同目录文档文件名，以独立锁、预期字节检查和原子替换切换；失败不改当前选择或内存，已生成新文件保留供检查。重开解析此选择记录；损坏或丢失不静默退回其他草稿。未知原绑定保留在original/origin，显式动作覆盖仅记录本地意图，不编译为设备载荷。
+
+T08 本地宏使用现有 graph.actions 的共享 UUID，不新增持久化文件：`ActionKind::LocalMacro` 的 payload 包含 `macro_sequence`（`format_version=1`、有序 `events`）。事件仅为本地 `press { key }`、`release { key }` 和 `delay { ms: UInt32 }`；key 是用户本地标签，毫秒类型不是固件范围。`mi-model/src/macro_sequence.rs` 校验顺序与配对，`macro_library.rs` 提供共享引用、原子保存并绑定、解绑和引用保护删除；`save_macro_action` / `bind_macro_action` / `delete_macro_action` 通过现有 DocumentStore 保存。未知原宏继续只读保留 raw；显式本地意图不转换设备格式。编辑共享宏前显示全部受影响控件，未绑定宏保留在图中，结构删除不会暗中删除宏。
+
+T09 的 Multi 继续使用 graph.actions 与同一 DocumentStore：`ActionKind::LocalMulti` 包含版本为 1 的本地 `multi`，`term_ms` 为正 UInt32 毫秒，`tap/double_tap/hold/tap_hold` 各为 null 或显式 `macro/action` 类型及 `action_id` UUID。该本地时序校验、初始值、可空分支均不是当前固件范围、容量或载荷 schema 的承诺。`mi-model/src/multi.rs` 拒绝悬空、类型不符和递归引用；原宏库统计并保护 Multi 父动作/分支引用，结构删除保留共享 Multi 及其分支动作。新建普通分支动作与四分支在一次事务中保存，已有宏复用同一宏库；编辑已有 Multi 仅更新共享对象，分配/解绑另有显式入口。专用 SwiftUI MultiEditor 显示动作名称、分支关系及影响范围；未知/未来格式只读保留原值，不接设备或宿主执行。
+
+T30 本地恢复在 `mi-model/src/recovery.rs` 复用 `Draft::from_bytes` 的 v1→v2 校验与 `DocumentStore::select_copy` 的独立文件/active-pointer CAS。`recovery_files` 发现本机草稿、backup 和 pending；`inspect_recovery` 固定精确来源字节，预览版本、来源、修订、配置数和 SHA-256；`recover_document(token)` 复核来源未变化后生成新 document_id 的独立 v2 草稿，既有 graph 内文档作用域 ID 保持语义。恢复和另存的视图与重开统一投影为 LocalDraft；origin.config 的历史设备来源原值保留，不能冒充当前设备快照。恢复不修改来源文件，选择记录替换前另存并核对原字节副本；锁、pending、CAS 或来源变化均不提交内存与选择。`save_document_as` 从当前已载入可编辑图另存并选中新文档，可避开当前文件的内容冲突或中断记录，但不绕过选择记录保护。未知/未来/损坏文件只有 `copy_recovery_original` 的 create-new 原字节副本出口；禁止转换、静默清空或覆盖目的文件。UniFFI 暴露同名高层接口，Swift `DocumentRecoveryMenu/Panel` 在坏文件启动时仍可进入，恢复后重载动作库并清空旧会话撤销。所有接口仅操作本机文件，无设备或宿主执行依赖；原生与桥接证据见 E-090。
 
 测试：v1 fixture 迁移语义等价、原件备份存在、失败保全、高版本拒写、结构删除引用拒绝、整次撤销/重做、导入重映射、损坏/锁/冲突失败不变内存。
 
@@ -116,9 +124,21 @@ v1→v2：先完整解析 v1 与 edits，保留其有效草稿语义和原始源
 
 “合并无冲突变化”：仅全体无冲突且引用有效时启用；base=R，draft=合并结果。“保留整份本地草稿”：显式确认忽略设备侧可编辑变化；base=R，draft=L，未知 raw 仍以 R 保存且只读，不用 L 覆盖。“采用整份设备版本”：显式确认舍弃本地编辑；base=R，draft=R。“取消”：B/L/revision 全不变。
 
+接受后的 baseline.comparison_config 保存本次核验投影，origin.config 继续保留初始来源；显示与 diff 使用当前基线，不改写不可变来源。当前 USB 来源只有 observed-interface，不等于可靠物理身份；跨重连需核对当前候选后明确选择整份版本，临时接口变化时先阻断版本接受；用户明确核对同一设备后，仅为当前比较 token、当前会话和快照解锁整份版本选择。baseline.identity_resolution 保存 user-confirmed 记录，device_identity.confidence 仍为 observed-interface，自动合并仍禁用；可靠序列号不同不能绕过。
+
 前三种操作先保存前态恢复副本，再原子保存新文档；成功 revision+1、清空旧撤销栈、diff 由新 base 与 draft 重算。保留本地仍有 diff；采用设备 diff 为空。保存失败不改变内存。
 
 #22 写前再次核验设备身份和文件摘要，变化即拒绝应用并要求重做比较；不能认为一次比较永久有效。
+
+### T13 单基础绑定准备契约（软件准备；设备应用仍未开放）
+
+`DeviceKey { token }` 是独立于宿主 Shortcut 的本地设备意图，只接受既有读取投影认识的 KC_A/KC_B/KC_ENTER/KC_ESC/KC_SPACE/KC_TAB。准备从当前会话完整、未过期的校验快照取得两文件原字节与有无、摘要、身份、固件及可确认的活动索引；不从活动索引选择目标，物理位置与活动源语义仍未知。仅允许一个来源唯一的普通键本地意图，任何结构、模式、高级绑定或其他字段变化均拒绝。
+
+`DocumentStore::preview_apply` 生成内存 token，绑定文档 ID/revision/磁盘 SHA-256、session/设备身份/固件与两文件摘要；取消只清预览。`prepare_apply_backup` 再次核对当前文档与当前会话快照，才在同目录私有 device-backups 下 create-new 0700 操作目录、0600 原字节文件与 manifest，fsync 并读回验证；planned-keymap.json 仅保存本机编译候选，原 keymap.json 保持原字节。备份记录两文件有无和元数据以及计划身份，不能称作已验证的设备恢复。失败不提交草稿或 prepared 状态。
+
+编译由 serde_json 借用 RawValue 定位唯一源 Profile/Layer/逻辑槽中的 token，以边界校验后的字节拼接替换该 token；不正规化整份文件，smart_actions 原样。重复 JSON 字段、重复源 ID、未知版本、只读本地文档或陈旧基线均拒绝。预览只使用缓存的核验快照，无 USB 请求；未来真实发送前仍必须重新读取身份与文件摘要，不能拿缓存预览授权写入。
+
+UniFFI 和 Swift Store 只暴露预览、取消和本机备份；Apply/Restore 显示 UNKNOWN-08/09 的具体不可用原因，不提供发送或伪成功实现。E-097 仅覆盖软件准备；#22 的真实应用、读回、控件操作、恢复及恢复后实测仍待独立授权与证据，A/B 临时文件及 C 的局部结果不证明这些能力。C 的局部结果不视为完整实验通过。
 
 ## D08 · 依赖与适配最低范围（F08/F09/F10）
 
@@ -138,7 +158,38 @@ v1→v2：先完整解析 v1 与 edits，保留其有效草稿语义和原始源
 
 操作机制仅采用核实的公开接口或明确的焦点操作；不臆造 CLI/RPC。无法保证指定目标的快捷键不充当专用会话控制。缺少最低能力时保持票未完成，并提交明确的范围调整；不能用“不支持”满足原目标。Task/Command/Skill 的类型保留；本轮不增加任务调度或执行。
 
-#29 即未来 Agent 草稿接口，首选一次性本地 CLI `mi draft read/validate/patch` + 版本化 JSON stdin/stdout，复用 Rust 文档服务的 revision 检查和锁；不开放网络服务、通用设备 RPC 或任务执行。本轮只固定接口形态；JSON 字段、错误码及客户端样例在其开工前单独补齐，未补齐前不标 ready。
+#38（T29）采用一次性本地 CLI `mi draft read/validate/patch`，JSON stdin/stdout 协议版本 1；只处理已保存的本地文档，不开放网络服务、通用设备 RPC 或任务执行。具体契约如下。
+
+### T29 Agent 本地提案契约
+
+`cargo build -p mi-model --bin mi` 生成 `target/debug/mi`。每进程读取一个至多 4 MiB 的 JSON 对象并退出；标准输出恰一份 JSON，成功 exit 0，结构化失败 exit 2。请求公共字段为 `api_version:1`、`workbench`（绝对工作台路径）；read 仅允许这两项。validate/patch 另带 `expected:{document_id,revision,sha256}` 和非空 `operations`（最多 100 项）；patch 还需 `output`（绝对新文件路径）。所有请求、expected、操作、提案 envelope 拒绝未知字段。SHA-256 覆盖 read 时实际选中文档原字节，revision 是 v2 文档修订；v1、未知字段/动作的文档可读但不可修改。缺失工作台不生成演示文档。
+
+操作白名单：`{op:"rename_profile",profile_id,name}`、`{op:"rename_layer",layer_id,name}`、`{op:"bind_action",profile_id,layer_id,binding_id,action_id}`。ID 均为 read 返回的本地 UUID；action_id 为已存在且已知的动作 UUID 或 null（解绑）。绑定归属与所有引用按 UI 同一 Rust Draft/LocalDocumentV2 校验。不提供任意 JSON Pointer、raw/origin/baseline 编辑、新动作执行或设备接口。read 的 capabilities 列出可用操作、local_proposal=true、device_apply=false、host_execute=false。
+
+成功包络 `{api_version:1,ok:true,result:{...}}`；read result 含 `stamp`、`document`、`source_kind`、`read_only`、`capabilities`。validate result 含 `base`、`document`、`changes`，仅计算，不落盘。patch result 另含 `proposal_path`；提案为 `{format:"micro-input-proposal",format_version:1,base,operations,document}`，document 使用新文档 UUID 和 origin.agent_proposal 来源身份/修订/摘要记录，其余内容来自同一核心模型的操作结果，未知来源 raw 保留；此标记使 UI 投影为 LocalDraft，origin.config 保持历史值。patch 在文档与选择记录的现有锁下复核原字节/修订和 active 指针，以 create_new/0600 输出；不改当前文档、选择记录或偏好。
+
+失败包络 `{api_version:1,ok:false,error:{code,message}}`，稳定 code：`invalid_request`（命令、JSON、字段、大小或路径），`unsupported_version`，`capability_unavailable`（设备应用、宿主执行或其他未提供的操作），`not_found`，`read_only`，`stale_revision`（身份/修订/原字节/选择变化），`invalid_operation`（参数或悬空/归属错误引用），`conflict`（锁、已存在输出/中断保存），`io_error`。message 是可读说明，不作为程序判别条件。
+
+工作台的“审阅 Agent 提案”通过同一 Rust 文档服务读取/锁定当前来源，验证 envelope、base 和受限操作重放结果与文档完全一致，再显示变化；接受前再次复核来源并新建独立草稿，原文档保留。拒绝只清除内存预览。预览后来源或工作台修订变化会拒绝接受，不能把旧提案套到新文档；提案文件在预览时固定为同一份有界内容，修改外部文件不会替换已预览内容。
+
+真实客户端样例 `scripts/draft-client.py WORKBENCH OUTPUT [NAME]` 通过 subprocess 调用 read→validate→patch，把第一个 Profile 改名为 NAME（默认 Agent 草稿示例），输出提案路径；没有任何 UI 接受或设备应用接口。随后在工作台选择该提案，核对差异，可拒绝或接受为独立草稿。read 会返回完整本地内容（可能含文本参数和历史来源），客户端应仅在本机受授权目录使用。
+
+
+### T10 本地控件编辑契约
+
+`mi-model/src/control_settings.rs` 在 v2 LayerNode 中保存可选的 `control_settings`，使用现有文档服务和撤销栈；`mi-ffi::set_control_settings` 只提供本地高层操作，SwiftUI `ControlSettingsEditor` 不访问设备。旋钮沿用独立逻辑槽位，不声称它们已对应顺转、逆转或按压。摇杆保存 `source`（保留来源）或 `logical_sectors`（本地扇区意图）；只有后者增加逻辑槽位，减少数量或切回来源模式保留所有旧槽位、原值及绑定。0–32 是本机编辑器预算，不是固件容量；未知模式拒绝覆盖，未来字段沿用整份文档只读保护。
+
+证据使用 `docs/agents/research-context.md`、IA-12/13/14 及模块契约：来源 raw 不改写，本地保存不激活设备、不发送 RPC，不推定物理方向。验收覆盖独立绑定、模式切换、参数错误、来源保全、未知字段拒写、保存重开及整次撤销/重做。物理输入属于 #14，设备模式和扇区容量仍须独立实机证据。
+
+### T11 自有预设交换契约
+
+`mi-model/src/preset.rs` 拥有 `micro-input-preset` / version 1 格式、结构/引用校验、范围裁剪及本地 ID 重映射；`mi-ffi` 仅暴露 export/inspect/import/starter 四个高层操作。SwiftUI `PresetMenu` 使用系统 JSON 打开/保存面板和导入预览，读取与核心处理上限均为 4 MiB。文件格式不是厂商配置格式；未知格式、未来字段或不支持的动作结构拒绝导入，原文件不变。
+
+整文档导出保留所有本地动作；Profile/Layer 导出仅保留选中的可编辑图及可达动作（含 Multi 分支递归引用）。为了无损保留未知来源值，三种范围都携带完整不可变 origin 与历史 baseline，导出前明确告知可能包含其他配置及文本参数。导入重新分配文档/Profile/Layer/Binding/Action UUID 并重写顺序、绑定和 Multi 引用，来源 source ID 保持原义。命名不覆盖或合并：同名内容位于不同文档，导入确认页说明这一策略。
+
+导入是独立文件与选中指针的事务，复用 DocumentStore 的锁、冲突检测、create_new 和原子切换；原工作台及已有草稿不覆盖。导入后的 baseline=null，原 baseline 仅在 origin.imported_baseline 中作历史保存；展示来源固定为 LocalDraft，修订和撤销历史从 0 开始。确认前的预览只检查内存里的同一份文本，确认后不会重新读取可能已变更的外部文件。内置“Coding 起步”是本项目原创的搜索/保存两个本地快捷键意图，不调用设备或宿主执行器。
+
+证据：研究入口、IA-05/08/12/15、候选协议配置格式及模块契约。验证覆盖共享宏/Multi/工具引用、范围裁剪、未知原值、非法版本/字段/引用、同名独立导入、旧实例选择冲突、原文件保全和真实 UniFFI 重开。T09 的已提交模型为 Multi 引用依赖；T09 界面和完整硬件能力不由 T11 签收。
 
 ## D09 · 远期交互的确定语义（F12/F13/F14）
 
@@ -157,3 +208,10 @@ v1→v2：先完整解析 v1 与 edits，保留其有效草稿语义和原始源
 技术准备按票评估。当前 #3/#4 补完明确契约后可进入实施候选；缺 native adapter 证据的子项仍受门槛约束。远期票没有文件/API/检查点或证据不足时保持 needs-info，说明具体缺什么。这里的报告不是 35 张工单整体通过零决策审查的证明。
 
 规划验收：35 票映射、48 故事保留；静态 DAG 无环；激活条件边 #23→#14 后也无环；每条发现有明确落点；链接与来源边界有效；GitHub 回读正文/标签/依赖一致。只修改文档时不把代码测试或原生验收标为本轮运行。复审单列结果，未复审不得宣称 EGM 已通过。
+
+### S2 / S4 宿主动作执行与 Coding Agent 预设契约（E-098）
+
+基于 IA-05/12/13/14 与 E-060/079/089 候选协议与逆向静态映射证据（并提供 `scripts/observe-input --observe-once` 供 E-094 实机 45 秒受控按键序列采集），完整技术方案与验收设计见 [docs/designs/host-execution-and-agent-presets.md](designs/host-execution-and-agent-presets.md)：
+- **硬件透传层健康检查**：`mi-model::host_router::check_passthrough_health` 检查当前活动层是否包含完整的 `KV_OAI_AG00`–`KV_OAI_AG12` 绑定，零 Flash 写入实现多套 Coding Agent Profile 切换。
+- **2U 宽键双微动状态机**：`mi-session::input::VerifiedInputDecoder` 按位掩码合并 `AG10` + `AG11`，先按触发一次 `Pressed(AG10)`、全松触发一次 `Released(AG10)`。
+- **宿主执行与菜单栏解耦**：`workbench.preferences.json` 持久化 `host_active_profile_id` 与 `host_execution_enabled`，与主窗口编辑器 `profileIndex` 独立；Swift `LiveHostActionExecutor` 支持 `Shortcut`、`PasteText`（剪贴板恢复且剥离末尾换行）、`OpenApp`、`OpenUrl` 以及 `HerdrAdapter` / `DshAdapter`。

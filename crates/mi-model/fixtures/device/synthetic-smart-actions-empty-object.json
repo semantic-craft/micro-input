@@ -1,0 +1,7 @@
+{
+  "syntheticFixture": {
+    "synthetic_only": true,
+    "purpose": "Independent read-only projection fixture; never send to a device; no manufacturer/user payload."
+  },
+  "smartActions": {}
+}

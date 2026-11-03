@@ -1,0 +1,35 @@
+{
+  "syntheticFixture": {
+    "synthetic_only": true,
+    "purpose": "Independent read-only projection fixture; never send to a device; no manufacturer/user payload."
+  },
+  "smartActions": {
+    "SA_19": {
+      "name": "Synthetic nineteen",
+      "synthetic_payload": {
+        "type": "not-a-real-action",
+        "text": "SYNTHETIC ONLY"
+      }
+    },
+    "SA_2": {
+      "name": "Synthetic two",
+      "future_field": {
+        "retained": true
+      }
+    },
+    "SA_9007199254740993": {
+      "id": "existing-id-must-not-be-overwritten",
+      "synthetic_payload": [
+        1,
+        2,
+        3
+      ]
+    },
+    "SYNTH_FUTURE_KEY": {
+      "unknown_key": true
+    }
+  },
+  "future_smart_root": {
+    "preserved": true
+  }
+}

@@ -2,6 +2,8 @@
 name = "mi-ffi"
 version.workspace = true
 edition.workspace = true
+[features]
+synthetic-backend = ["mi-transport/synthetic-backend", "mi-session/synthetic-backend"]
 [dependencies]
 mi-model = { path = "../mi-model" }
 mi-proto = { path = "../mi-proto" }

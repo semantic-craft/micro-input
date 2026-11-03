@@ -1,8 +1,12 @@
 # 当前实施入口
 
-PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与 Rust 本地持久化。下一实施前沿为 #3 设备发现 / #4 身份读取，限只读范围，未知后端继续禁止发送；并未完成真实配置读取。
+接手未完成工单或产品改动时，先执行[研究成果接入规则](agents/research-context.md)。其中包含 Input 1.1.0 的证据索引、按功能阅读路径和可直接使用的接续提示词；实际工单状态以 GitHub 当前记录为准。
 
-先读 [实施设计](implementation-plan.md) D01–D05 与 [BUILD_PROMPT](spec/BUILD_PROMPT.md) 的 S1，再按对应工单推进。完整产品与依赖入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)。本次批准仅更新规划，不启动设备操作、宿主执行或自动化。
+PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与 Rust 本地持久化。设备发现、身份查询及 #5 有界配置读取已实现；当前0.6.3的核心读回和原生只读浏览见E-079。#6完整生命周期、其他固件和物理映射仍待验收，未知后端继续禁止发送。
+
+本地v2文档、v1原字节备份迁移、Profile/Layer管理和真实快照显式创建独立草稿已实现，证据见E-083；三方比较已实现，身份仅有临时接口时保留明确的整份选择，自动合并保持禁用；设备应用仍未开放。
+
+先读 [实施设计](implementation-plan.md) D01–D07 与 [BUILD_PROMPT](spec/BUILD_PROMPT.md) 的 S1，再按对应工单推进。完整产品与依赖入口为 [#44](https://github.com/semantic-craft/micro-input/issues/44)。当前继续开发本地功能与适用验证；设备操作遵守证据和恢复门槛，不因规划批准而解锁宿主执行或自动化。
 
 # 开发起点
 
@@ -52,3 +56,17 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 已有材料包含官方文档、本机黑箱观察及带来源的社区公开研究，部分社区材料源自作者分析旧版应用；2026-11-02 按用户授权新增 Input 1.1.0 随包 JavaScript 静态分析，未执行原模块或反编译原生二进制。当前没有严格 clean-room 隔离证明。原始材料留在 .scratch，独立实现只接收整理后的协议说明和合成向量；不复制标注 UNLICENSED 的 device-kit 实现。新界面使用原创设计与素材，社区代码或模型按其许可和版本核查后再使用。
 
 当前应用实施与验收状态以 MVP 工单为准；本页的独立版本查询不代表应用已经完成。原有映射仍需保留；之前的临时 Profile 切换授权不等于任意设备写入、刷固件或安装替代驱动的授权。
+
+## 应用与菜单栏图标
+
+应用使用已选定的薄荷绿短发角色原画 `app/MicroInput/Resources/AppIcon-artwork.png`。`scripts/build` 调用 `scripts/generate-app-icon.swift` 生成 16–1024 px 的图标表示并打包为 AppIcon.icns；圆角和 5% 透明外边距与 Koe 的 macOS 图标一致。原画不带截图外框。
+
+菜单栏由 `StatusItemIcon.swift` 绘制 20 × 18 pt 的键盘与旋钮符号，设置 `isTemplate`，由系统处理深浅色及选中着色。尺寸是本项目选择，不是 Apple 强制尺寸。遵循 [Apple 菜单栏规范](https://developer.apple.com/design/human-interface-guidelines/the-menu-bar) 的黑色/透明符号建议及 [NSImage.isTemplate](https://developer.apple.com/documentation/appkit/nsimage/istemplate) 的模板语义。
+
+## 有界只读输入观测
+
+`scripts/observe-input`（或 `--dry-run`）默认只跑合成测试，原生测试保持 ignored。需要一次由操作者配合的物理观测时，显式运行 `scripts/observe-input --observe-once`。只复用生产 `MicroInput` / `DeviceSession` 的描述符、身份、完整性校验配置读取及唯一 reader 输入订阅；不激活 Profile/Layer、不写配置、不执行宿主动作、不申请权限或终止其他应用。
+
+看到并刷新输出的 `READY_FOR_PHYSICAL_INPUT` 后，操作者才进行本轮约定的控件操作；被动窗口固定为 45 秒，事件上限 2048，gap/关闭/断连均停止订阅。准备阶段上限 100 秒，结束后状态复查上限 15 秒、shutdown join 上限 5 秒；外层启动器总预算 180 秒（包含构建），超时只停止并等待自己创建的进程组，不重试。可先运行默认入口完成构建。
+
+每次生成独立 experiment ID 与开始时间；0700 的 `.scratch/input-study/input-observation-<ID>/` 下仅保存 0600 的脱敏事件和启动器状态。记录事件分类、语义 binding ID、时间、计数、session、gap；不保存通知、配置、宏、设备路径或 serial。报告的 `active_source_verified=false`、`active_ag_binding_count=null` 是当前证据边界：设备返回活动索引不证明它与源配置对象的对应语义。静默为 `silence_unconfirmed`，不能据此证明未按键、映射正确或硬件支持完成；有候选消息也只支持其通知形态，实体位置与其他消费者共存仍须另行核对。E-094 保留给实际观测后的证据登记，本入口的合成通过不占用实机证据。

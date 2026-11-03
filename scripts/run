@@ -1,31 +1,202 @@
 #!/usr/bin/env python3
-"""Run this checkout's build. --verify bounds the QA instance lifetime to ten minutes."""
+"""Launch this checkout; --verify uses an isolated QA app with preserved evidence."""
+import fcntl
+import json
 import os
-import tempfile
 import pathlib
+import plistlib
+import shutil
+import signal
 import subprocess
 import sys
-root = pathlib.Path(__file__).resolve().parent.parent
-app = root / 'target/MicroInput.app/Contents/MacOS/MicroInput'
-if not app.exists():
-    raise SystemExit('Run scripts/build first')
-qa = tempfile.TemporaryDirectory(prefix='micro-input-qa-') if '--verify' in sys.argv else None
-run_env = os.environ.copy()
-if qa:
-    run_env['MI_DOCUMENT_DIR'] = qa.name
-p = subprocess.Popen([str(app)], env=run_env)
-try:
-    p.wait(timeout=600 if '--verify' in sys.argv else None)
-except (subprocess.TimeoutExpired, KeyboardInterrupt):
-    p.terminate()
-    try:
-        p.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        p.kill()
-        p.wait()
-finally:
-    if p.poll() is None:
-        p.terminate()
+import time
+import uuid
 
-    if qa:
-        qa.cleanup()
+
+def _validate_qa_dir(path: pathlib.Path) -> pathlib.Path:
+    resolved = path.resolve()
+    raw = str(path)
+    resolved_str = str(resolved)
+    for candidate in (raw, resolved_str):
+        if candidate == '/tmp' or candidate.startswith('/tmp/') or candidate == '/private/tmp' or candidate.startswith('/private/tmp/'):
+            print('Refusing to run QA app in /tmp or /private/tmp; use a controlled directory.', file=sys.stderr)
+            raise SystemExit(2)
+    return resolved
+
+
+def _parse_timeout(argv: list[str], default: int) -> int:
+    for index, arg in enumerate(argv):
+        if arg == '--timeout' and index + 1 < len(argv):
+            return max(1, int(argv[index + 1]))
+        if arg.startswith('--timeout='):
+            return max(1, int(arg.split('=', 1)[1]))
+    return default
+
+
+def _write_json(path: pathlib.Path, payload: dict) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write('\n')
+
+
+def main() -> int:
+    root = pathlib.Path(__file__).resolve().parent.parent
+    source_app = root / 'target/MicroInput.app'
+    if not (source_app / 'Contents/MacOS/MicroInput').exists():
+        raise SystemExit('Run scripts/build first')
+
+    verify = '--verify' in sys.argv
+    unique_bundle = '--unique-bundle-id' in sys.argv
+    timeout_s = _parse_timeout(sys.argv[1:], 600) if verify else None
+    run_env = os.environ.copy()
+    app = source_app
+    run_dir = None
+    evidence_dir = None
+    documents_dir = None
+    bundle_id = None
+    lock_handle = None
+    launcher_record = {}
+
+    if verify:
+        qa_root = root / '.scratch/qa-runs'
+        qa_root.mkdir(parents=True, exist_ok=True)
+        os.chmod(qa_root, 0o700)
+
+        if not unique_bundle:
+            lock_path = qa_root / 'qa.lock'
+            lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            lock_handle = os.fdopen(lock_fd, 'r+', encoding='utf-8')
+            try:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_handle.close()
+                print('Another QA instance holds qa.lock; pass --unique-bundle-id or wait for completion.', file=sys.stderr)
+                raise SystemExit(2)
+            lock_handle.seek(0)
+            lock_handle.truncate()
+            lock_handle.write(f'{os.getpid()}\n')
+            lock_handle.flush()
+
+        override = os.environ.get('MI_QA_RUN_DIR')
+        if override:
+            run_dir = _validate_qa_dir(pathlib.Path(override))
+            run_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            ts_ms = int(time.time() * 1000)
+            run_id = f"{ts_ms}-{os.getpid()}"
+            while (qa_root / run_id).exists():
+                ts_ms += 1
+                run_id = f"{ts_ms}-{os.getpid()}"
+            run_dir = _validate_qa_dir(qa_root / run_id)
+            run_dir.mkdir(parents=True, exist_ok=False)
+        os.chmod(run_dir, 0o700)
+
+        documents_dir = run_dir / 'documents'
+        evidence_dir = run_dir / 'evidence'
+        documents_dir.mkdir(parents=True, exist_ok=True)
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(documents_dir, 0o700)
+        os.chmod(evidence_dir, 0o700)
+
+        app = run_dir / 'Micro Input QA.app'
+        shutil.copytree(source_app, app)
+        info_path = app / 'Contents/Info.plist'
+        with info_path.open('rb') as handle:
+            info = plistlib.load(handle)
+        if unique_bundle:
+            suffix = uuid.uuid4().hex
+            bundle_id = f'com.semanticcraft.microinput.qa.{suffix}'
+            display_name = f'Micro Input QA {suffix[:8]}'
+        else:
+            bundle_id = 'com.semanticcraft.microinput.qa'
+            display_name = 'Micro Input QA'
+        info['CFBundleIdentifier'] = bundle_id
+        info['CFBundleName'] = display_name
+        info['CFBundleDisplayName'] = display_name
+        with info_path.open('wb') as handle:
+            plistlib.dump(info, handle)
+        subprocess.run(['codesign', '--force', '--sign', '-', '--timestamp=none', str(app)], check=True)
+
+        audit_log = evidence_dir / 'audit.jsonl'
+        run_env['MI_DOCUMENT_DIR'] = str(documents_dir)
+        run_env['MI_HOST_AUDIT_LOG'] = str(audit_log)
+        launcher_record = {
+            'app_path': str(app),
+            'audit_log': str(audit_log),
+            'bundle_id': bundle_id,
+            'document_dir': str(documents_dir),
+            'pid': None,
+            'run_dir': str(run_dir),
+            'started_ms': int(time.time() * 1000),
+        }
+        _write_json(evidence_dir / 'launcher.json', launcher_record)
+        print(f'QA_APP_PATH={app}', flush=True)
+        print(f'QA_RUN_DIR={run_dir}', flush=True)
+        print(f'QA_AUDIT_LOG={audit_log}', flush=True)
+        print('QA identity is isolated; it does not validate production signing or permissions.', flush=True)
+
+    p = None
+
+    def _stop_child() -> None:
+        if p is not None and p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.wait(timeout=5)
+
+    def _handle_signal(signum, _frame):
+        _stop_child()
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
+    try:
+        p = subprocess.Popen([str(app / 'Contents/MacOS/MicroInput')], env=run_env)
+        if verify and evidence_dir is not None:
+            launcher_record['pid'] = p.pid
+            _write_json(evidence_dir / 'launcher.json', launcher_record)
+        p.wait(timeout=timeout_s)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt):
+        _stop_child()
+    finally:
+        _stop_child()
+        if verify and run_dir is not None:
+            if app.exists():
+                shutil.rmtree(app, ignore_errors=True)
+            if documents_dir is not None and documents_dir.exists():
+                shutil.rmtree(documents_dir, ignore_errors=True)
+            pref_removed = True
+            if bundle_id:
+                prefs_dir = pathlib.Path.home() / 'Library/Preferences'
+                candidates = [prefs_dir / f'{bundle_id}.plist']
+                if prefs_dir.is_dir():
+                    candidates.extend(prefs_dir.glob(f'{bundle_id}*.plist'))
+                    candidates.extend(prefs_dir.glob('com.semanticcraft.microinput.qa*.plist'))
+                for pref_plist in set(candidates):
+                    if pref_plist.exists():
+                        try:
+                            pref_plist.unlink()
+                        except OSError:
+                            pref_removed = False
+            if evidence_dir is not None:
+                launcher_record['finished_ms'] = int(time.time() * 1000)
+                launcher_record['returncode'] = p.returncode if p is not None else None
+                launcher_record['app_bundle_removed'] = not app.exists()
+                launcher_record['documents_removed'] = documents_dir is None or not documents_dir.exists()
+                launcher_record['preferences_removed'] = pref_removed
+                _write_json(evidence_dir / 'launcher.json', launcher_record)
+            if lock_handle is not None:
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                lock_handle.close()
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

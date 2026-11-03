@@ -1,10 +1,20 @@
 //! R-A02/R-A05: only high-level asynchronous operations cross the in-process UniFFI bridge.
-use mi_session::{DeviceSession, SessionConfig, UnverifiedSchema};
+mod apply_preparation;
+mod input_monitor;
+mod reconnect;
+pub use input_monitor::*;
+use mi_session::{DeviceSession, ReadOnlySchema, SessionConfig, UnverifiedSchema};
 use mi_transport::{HidCandidate, HidTransport, MacTransport};
 use std::sync::{Arc, Mutex};
 uniffi::setup_scaffolding!();
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum BridgeError {
+    #[error("设备已断开；请明确重新连接")]
+    Disconnected,
+    #[error("请求超时；可以手动重试")]
+    Timeout,
+    #[error("设备 I/O 失败，原因未确认；请检查连接后重试")]
+    Unavailable,
     #[error("{message}")]
     Failed { message: String },
 }
@@ -13,6 +23,66 @@ fn failure(e: impl std::fmt::Display) -> BridgeError {
         message: e.to_string(),
     }
 }
+fn document_response(
+    store: &mi_model::storage::DocumentStore,
+    selection: Option<(String, Option<String>)>,
+) -> Result<String, BridgeError> {
+    let draft = &store.draft;
+    let hint = selection.map(|(p, l)| serde_json::json!({"profile_id":p,"layer_id":l}));
+    let capabilities: std::collections::BTreeMap<_, _> = draft
+        .edits
+        .iter()
+        .map(|(key, action)| (key, mi_model::action_library::capability(action)))
+        .collect();
+    let settings: std::collections::BTreeMap<_, _> = draft
+        .document
+        .editable
+        .graph
+        .layers
+        .iter()
+        .filter_map(|(id, layer)| layer.control_settings.as_ref().map(|value| (id, value)))
+        .collect();
+    serde_json::to_string(&serde_json::json!({
+        "draft": draft,
+        "config": draft.config,
+        "selection_hint": hint,
+        "macro_library": draft.macros(),
+        "multi_library": draft.multis(),
+        "graph_actions": draft.document.editable.graph.actions,
+        "control_settings": settings,
+        "action_capabilities": capabilities,
+        "host_active_profile_id": store.host_active_profile_id(),
+        "host_execution_enabled": store.host_execution_enabled(),
+    }))
+    .map_err(failure)
+}
+fn session_failure(error: mi_session::SessionError) -> BridgeError {
+    match error {
+        mi_session::SessionError::Disconnected
+        | mi_session::SessionError::Transport(mi_transport::TransportError::Disconnected) => {
+            BridgeError::Disconnected
+        }
+        mi_session::SessionError::Timeout => BridgeError::Timeout,
+        mi_session::SessionError::Transport(mi_transport::TransportError::Unavailable(_)) => {
+            BridgeError::Unavailable
+        }
+        mi_session::SessionError::Config(_) => failure("设备配置读取失败；旧快照已过期，请重试"),
+        error => failure(error),
+    }
+}
+#[derive(Clone, uniffi::Record)]
+pub struct DeviceUsage {
+    pub page: u16,
+    pub usage: u16,
+}
+#[cfg(feature = "synthetic-backend")]
+#[derive(uniffi::Enum)]
+pub enum SyntheticDiscoveryState {
+    ReconnectedDevice,
+    NoDevices,
+    TwoDevices,
+    Failure,
+}
 #[derive(Clone, uniffi::Record)]
 pub struct DeviceInfo {
     pub id: String,
@@ -20,6 +90,9 @@ pub struct DeviceInfo {
     pub vid: u16,
     pub pid: u16,
     pub usage_page: u16,
+    pub usage: u16,
+    pub usage_pairs: Vec<DeviceUsage>,
+    pub verified_model: bool,
     pub transport: String,
 }
 impl From<HidCandidate> for DeviceInfo {
@@ -30,9 +103,30 @@ impl From<HidCandidate> for DeviceInfo {
             vid: c.vid,
             pid: c.pid,
             usage_page: c.usage_page,
+            usage: c.usage,
+            usage_pairs: c
+                .usage_pairs
+                .into_iter()
+                .map(|p| DeviceUsage {
+                    page: p.page,
+                    usage: p.usage,
+                })
+                .collect(),
+            verified_model: c.pid == 0x8298,
             transport: format!("{:?}", c.transport_hint),
         }
     }
+}
+#[derive(Clone, uniffi::Record)]
+pub struct IdentityInfo {
+    pub session_id: u64,
+    pub version: Option<String>,
+    pub profile_index: Option<u32>,
+    pub layer_index: Option<u32>,
+    pub source_method: String,
+    pub verification: String,
+    pub backend: String,
+    pub raw_json: String,
 }
 #[uniffi::export(callback_interface)]
 pub trait DeviceEvents: Send + Sync {
@@ -42,8 +136,32 @@ pub trait DeviceEvents: Send + Sync {
 #[derive(Default)]
 struct ConnectionState {
     generation: u64,
+    identity: Option<IdentityInfo>,
     pending: Option<String>,
     session: Option<(String, Arc<DeviceSession>)>,
+}
+// An OS open cannot be cancelled once spawn_blocking starts. Keep its result
+// under RAII until the current generation has adopted it as a session.
+struct OpenedLink(Option<Arc<dyn mi_transport::HidLink>>);
+impl Drop for OpenedLink {
+    fn drop(&mut self) {
+        if let Some(link) = self.0.take() {
+            link.close();
+        }
+    }
+}
+struct ConnectAttempt<'a> {
+    state: &'a Mutex<ConnectionState>,
+    generation: u64,
+}
+impl Drop for ConnectAttempt<'_> {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap();
+        if state.generation == self.generation && state.pending.is_some() {
+            state.generation += 1;
+            state.pending = None;
+        }
+    }
 }
 #[derive(uniffi::Object)]
 pub struct MicroInput {
@@ -51,6 +169,7 @@ pub struct MicroInput {
     transport: Arc<dyn HidTransport>,
     state: Mutex<ConnectionState>,
     connect_gate: tokio::sync::Mutex<()>,
+    stopped: tokio::sync::watch::Sender<bool>,
 }
 #[uniffi::export(async_runtime = "tokio")]
 impl MicroInput {
@@ -61,6 +180,7 @@ impl MicroInput {
             transport: Arc::new(MacTransport::new()),
             state: Mutex::new(ConnectionState::default()),
             connect_gate: tokio::sync::Mutex::new(()),
+            stopped: tokio::sync::watch::channel(false).0,
         })
     }
     // R-P03/R-E02: local intents only, no session or transport access.
@@ -70,13 +190,96 @@ impl MicroInput {
     pub async fn action_catalog(&self) -> Result<String, BridgeError> {
         serde_json::to_string(&mi_model::draft::actions()).map_err(failure)
     }
-    pub async fn open_document(&self, path: String) -> Result<String, BridgeError> {
+    pub async fn action_library(
+        &self,
+        query: String,
+        category: String,
+        favorites_only: bool,
+    ) -> Result<String, BridgeError> {
+        let store = self.draft.lock().unwrap();
+        let (favorites, preferences_error) = match store.favorite_actions() {
+            Ok(values) => (values.clone(), None),
+            Err(error) => (Default::default(), Some(error)),
+        };
+        let categories: std::collections::BTreeSet<_> = mi_model::draft::actions()
+            .into_iter()
+            .map(|a| a.category)
+            .collect();
+        serde_json::to_string(&serde_json::json!({
+            "entries":mi_model::action_library::search(&query, &category, favorites_only, &favorites),
+            "categories":categories,"preferences_error":preferences_error
+        })).map_err(failure)
+    }
+    pub async fn set_action_favorite(
+        &self,
+        action_id: String,
+        favorite: bool,
+    ) -> Result<(), BridgeError> {
         self.draft
             .lock()
             .unwrap()
-            .open(path.into())
+            .set_action_favorite(&action_id, favorite)
+            .map_err(failure)
+    }
+    pub async fn open_document(&self, path: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store.open(path.into()).map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn inspect_agent_proposal(&self, text: String) -> Result<String, BridgeError> {
+        let preview = self
+            .draft
+            .lock()
+            .unwrap()
+            .inspect_agent_proposal(&text)
+            .map_err(|e| failure(e.to_string()))?;
+        serde_json::to_string(&preview).map_err(|e| failure(e.to_string()))
+    }
+    pub async fn reject_agent_proposal(&self) {
+        self.draft.lock().unwrap().reject_agent_proposal();
+    }
+    pub async fn accept_agent_proposal(&self, token: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .accept_agent_proposal(&token)
+            .map_err(|e| failure(e.to_string()))?;
+        document_response(&store, None)
+    }
+    pub async fn recovery_files(&self) -> Result<Vec<String>, BridgeError> {
+        self.draft.lock().unwrap().recovery_files().map_err(failure)
+    }
+    pub async fn inspect_recovery(&self, path: String) -> Result<String, BridgeError> {
+        let preview = self
+            .draft
+            .lock()
+            .unwrap()
+            .inspect_recovery(path.into())
             .map_err(failure)?;
-        self.draft_state().await
+        serde_json::to_string(&preview).map_err(failure)
+    }
+    pub async fn recover_document(&self, token: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store.recover_document(&token).map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn save_document_as(&self) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store.save_document_as().map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn copy_recovery_original(
+        &self,
+        token: String,
+        destination: String,
+    ) -> Result<(), BridgeError> {
+        self.draft
+            .lock()
+            .unwrap()
+            .copy_recovery_original(&token, destination.into())
+            .map_err(failure)
+    }
+    pub async fn document_view(&self) -> Result<String, BridgeError> {
+        document_response(&self.draft.lock().unwrap(), None)
     }
     pub async fn assign_action(
         &self,
@@ -88,20 +291,277 @@ impl MicroInput {
         let profile = serde_json::from_str(&profile_id).map_err(failure)?;
         let layer = serde_json::from_str(&layer_id).map_err(failure)?;
         let action = serde_json::from_str(&action_json).map_err(failure)?;
-        self.draft
-            .lock()
-            .unwrap()
+        let mut store = self.draft.lock().unwrap();
+        store
             .update(|d| d.assign(&profile, &layer, slot, action))
             .map_err(failure)?;
-        self.draft_state().await
+        document_response(&store, None)
+    }
+    pub async fn export_preset(
+        &self,
+        profile_id: Option<String>,
+        layer_id: Option<String>,
+    ) -> Result<String, BridgeError> {
+        let store = self.draft.lock().unwrap();
+        mi_model::preset::export(&store.draft, profile_id.as_deref(), layer_id.as_deref())
+            .map_err(failure)
+    }
+    pub fn inspect_preset(&self, text: String) -> Result<String, BridgeError> {
+        mi_model::preset::inspect(&text).map_err(failure)
+    }
+    pub fn starter_preset(&self) -> Result<String, BridgeError> {
+        mi_model::preset::starter().map_err(failure)
+    }
+    pub async fn import_preset(&self, text: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store.import_preset(&text).map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn set_control_settings(
+        &self,
+        profile_id: String,
+        layer_id: String,
+        settings_json: String,
+    ) -> Result<String, BridgeError> {
+        let settings = serde_json::from_str(&settings_json).map_err(failure)?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.set_control_settings(&profile_id, &layer_id, settings))
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn save_macro_action(
+        &self,
+        macro_id: Option<String>,
+        profile_id: String,
+        layer_id: String,
+        slot: u32,
+        action_json: String,
+    ) -> Result<String, BridgeError> {
+        let profile = serde_json::from_str(&profile_id).map_err(failure)?;
+        let layer = serde_json::from_str(&layer_id).map_err(failure)?;
+        let action = serde_json::from_str(&action_json).map_err(failure)?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| {
+                d.save_macro_for_binding(macro_id.as_deref(), action, &profile, &layer, slot)
+                    .map(|_| ())
+            })
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn bind_macro_action(
+        &self,
+        macro_id: Option<String>,
+        profile_id: String,
+        layer_id: String,
+        slot: u32,
+    ) -> Result<String, BridgeError> {
+        let profile = serde_json::from_str(&profile_id).map_err(failure)?;
+        let layer = serde_json::from_str(&layer_id).map_err(failure)?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.bind_macro(&profile, &layer, slot, macro_id.as_deref()))
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn delete_macro_action(&self, macro_id: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.delete_macro(&macro_id))
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn save_multi_action(
+        &self,
+        multi_id: Option<String>,
+        profile_id: String,
+        layer_id: String,
+        slot: u32,
+        action_json: String,
+        additions_json: String,
+    ) -> Result<String, BridgeError> {
+        let profile = serde_json::from_str(&profile_id).map_err(failure)?;
+        let layer = serde_json::from_str(&layer_id).map_err(failure)?;
+        let action = serde_json::from_str(&action_json).map_err(failure)?;
+        let additions = serde_json::from_str(&additions_json).map_err(failure)?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| {
+                if let Some(id) = multi_id {
+                    d.save_multi(&id, action, additions).map(|_| ())
+                } else {
+                    d.save_multi_for_binding(None, action, additions, &profile, &layer, slot)
+                        .map(|_| ())
+                }
+            })
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn bind_multi_action(
+        &self,
+        multi_id: Option<String>,
+        profile_id: String,
+        layer_id: String,
+        slot: u32,
+    ) -> Result<String, BridgeError> {
+        let profile = serde_json::from_str(&profile_id).map_err(failure)?;
+        let layer = serde_json::from_str(&layer_id).map_err(failure)?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.bind_multi(&profile, &layer, slot, multi_id.as_deref()))
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn delete_multi_action(&self, multi_id: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.delete_multi(&multi_id))
+            .map_err(failure)?;
+        document_response(&store, None)
     }
     pub async fn undo_draft(&self, redo: bool) -> Result<String, BridgeError> {
-        self.draft
-            .lock()
-            .unwrap()
-            .update(|d| d.undo(redo))
+        let mut store = self.draft.lock().unwrap();
+        store.update(|d| d.undo(redo)).map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn create_profile(&self, name: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        let mut id = String::new();
+        store
+            .update(|d| {
+                id = d.create_profile(&name)?;
+                Ok(())
+            })
             .map_err(failure)?;
-        self.draft_state().await
+        let lid = store.draft.document.editable.graph.profiles[&id]
+            .layer_order
+            .first()
+            .cloned();
+        document_response(&store, Some((id, lid)))
+    }
+    pub async fn rename_profile(
+        &self,
+        profile_id: String,
+        name: String,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.rename_profile(&profile_id, &name))
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn duplicate_profile(
+        &self,
+        profile_id: String,
+        name: String,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        let mut id = String::new();
+        store
+            .update(|d| {
+                id = d.duplicate_profile(&profile_id, &name)?;
+                Ok(())
+            })
+            .map_err(failure)?;
+        let lid = store.draft.document.editable.graph.profiles[&id]
+            .layer_order
+            .first()
+            .cloned();
+        document_response(&store, Some((id, lid)))
+    }
+    pub async fn delete_profile(&self, profile_id: String) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.delete_profile(&profile_id))
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn move_profile(
+        &self,
+        profile_id: String,
+        to_index: u32,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.move_profile(&profile_id, to_index as usize))
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn create_layer(
+        &self,
+        profile_id: String,
+        name: String,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        let mut id = String::new();
+        store
+            .update(|d| {
+                id = d.create_layer(&profile_id, &name)?;
+                Ok(())
+            })
+            .map_err(failure)?;
+        document_response(&store, Some((profile_id, Some(id))))
+    }
+    pub async fn rename_layer(
+        &self,
+        layer_id: String,
+        name: String,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.rename_layer(&layer_id, &name))
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn duplicate_layer(
+        &self,
+        profile_id: String,
+        layer_id: String,
+        name: String,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        let mut id = String::new();
+        store
+            .update(|d| {
+                id = d.duplicate_layer(&profile_id, &layer_id, &name)?;
+                Ok(())
+            })
+            .map_err(failure)?;
+        document_response(&store, Some((profile_id, Some(id))))
+    }
+    pub async fn delete_layer(
+        &self,
+        profile_id: String,
+        layer_id: String,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.delete_layer(&profile_id, &layer_id))
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn move_layer(
+        &self,
+        profile_id: String,
+        layer_id: String,
+        to_index: u32,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| d.move_layer(&profile_id, &layer_id, to_index as usize))
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    /// Copy only the current session's completed, checksum-verified snapshot; never caller supplied JSON.
+    pub async fn create_draft_from_snapshot(&self) -> Result<String, BridgeError> {
+        let state = self.state.lock().unwrap();
+        let (config, baseline) = Self::comparison_snapshot(&state)?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .create_independent(config, baseline)
+            .map_err(failure)?;
+        document_response(&store, None)
     }
     pub async fn list_devices(&self) -> Result<Vec<DeviceInfo>, BridgeError> {
         let t = self.transport.clone();
@@ -114,16 +574,42 @@ impl MicroInput {
         .map_err(failure)
     }
     pub async fn subscribe_device_events(self: Arc<Self>, cb: Box<dyn DeviceEvents>) {
-        let mut rx = self.transport.subscribe();
+        let mut stopped = self.stopped.subscribe();
+        let mut rx = {
+            // Serialize watcher creation with shutdown's state invalidation.
+            let _state = self.state.lock().unwrap();
+            if *stopped.borrow() {
+                return;
+            }
+            self.transport.subscribe()
+        };
+        let devices = self.list_devices().await;
+        if *stopped.borrow() {
+            return;
+        }
+        match devices {
+            Ok(devices) => cb.changed(devices),
+            Err(e) => cb.failed(e.to_string()),
+        }
         let weak = Arc::downgrade(&self);
         tokio::spawn(async move {
             loop {
-                let result =
-                    tokio::time::timeout(std::time::Duration::from_millis(250), rx.recv()).await;
+                let result = tokio::select! {
+                    biased;
+                    _ = stopped.changed() => break,
+                    result = rx.recv() => result,
+                };
                 let Some(this) = weak.upgrade() else { break };
+                if *stopped.borrow() {
+                    break;
+                }
                 match result {
-                    Ok(Ok(())) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
-                        match this.list_devices().await {
+                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let devices = this.list_devices().await;
+                        if *stopped.borrow() {
+                            break;
+                        }
+                        match devices {
                             Ok(devices) => {
                                 this.devices_changed(&devices);
                                 cb.changed(devices);
@@ -131,68 +617,126 @@ impl MicroInput {
                             Err(e) => cb.failed(e.to_string()),
                         }
                     }
-                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
-                    Err(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
     }
     pub async fn connect(&self, id: String) -> Result<(), BridgeError> {
+        if *self.stopped.borrow() {
+            return Err(BridgeError::Disconnected);
+        }
         // Invalidate before awaiting the gate, so disconnect also cancels queued connects.
         let (generation, old) = {
             let mut state = self.state.lock().unwrap();
+            if *self.stopped.borrow() {
+                return Err(BridgeError::Disconnected);
+            }
             state.generation += 1;
             state.pending = Some(id.clone());
             (state.generation, state.session.take())
         };
+        let _attempt = ConnectAttempt {
+            state: &self.state,
+            generation,
+        };
         if let Some((_, s)) = old {
-            tokio::task::spawn_blocking(move || s.disconnect())
-                .await
-                .ok();
+            s.shutdown().await;
         }
         let _gate = self.connect_gate.lock().await;
-        if self.state.lock().unwrap().generation != generation {
+        if *self.stopped.borrow() || self.state.lock().unwrap().generation != generation {
             return Err(failure("连接已取消"));
         }
         let t = self.transport.clone();
         let path = id.clone();
-        let link = tokio::task::spawn_blocking(move || t.open(&path))
-            .await
-            .map_err(failure)?
-            .map_err(failure)?;
+        let mut opened =
+            tokio::task::spawn_blocking(move || t.open(&path).map(|link| OpenedLink(Some(link))))
+                .await
+                .map_err(failure)?
+                .map_err(|e| session_failure(e.into()))?;
         let mut state = self.state.lock().unwrap();
-        if state.generation != generation {
-            link.close();
+        if *self.stopped.borrow() || state.generation != generation {
             return Err(failure("连接已取消"));
         }
-        let s = DeviceSession::new(
-            link,
-            Box::new(mi_proto::UnimplementedFramer),
-            Arc::new(UnverifiedSchema),
-            SessionConfig::default(),
+        let link = opened.0.take().expect("native open returned a link");
+        // E-075: only the compiled, inspected native adapter can select numbered reports.
+        let supported = matches!(
+            link.backend(),
+            mi_transport::LinkBackend::MacHidapi267Numbered
         );
+        #[cfg(feature = "synthetic-backend")]
+        let supported =
+            supported || matches!(link.backend(), mi_transport::LinkBackend::SyntheticNumbered);
+        let framer: Box<dyn mi_proto::Framer> = if supported {
+            Box::new(mi_proto::NativeFramer::default())
+        } else {
+            Box::new(mi_proto::UnimplementedFramer)
+        };
+        let schema: Arc<dyn mi_session::DeviceSchema> = if supported {
+            Arc::new(ReadOnlySchema)
+        } else {
+            Arc::new(UnverifiedSchema)
+        };
+        let s = DeviceSession::new(link, framer, schema, SessionConfig::default());
         state.pending = None;
         state.session = Some((id, s));
         Ok(())
     }
+    pub async fn shutdown(&self) {
+        self.stopped.send_replace(true);
+        self.disconnect().await;
+        let _connecting = self.connect_gate.lock().await;
+        let transport = self.transport.clone();
+        // Native discovery joins off the UI executor after callbacks are unscheduled.
+        let _ = tokio::task::spawn_blocking(move || transport.stop_discovery()).await;
+    }
     pub async fn disconnect(&self) {
         let (_, old) = self.invalidate();
         if let Some((_, s)) = old {
-            tokio::task::spawn_blocking(move || s.disconnect())
-                .await
-                .ok();
+            s.shutdown().await;
         }
     }
-    pub async fn read_identity(&self) -> Result<String, BridgeError> {
+    /// Wait on the current generation without opening hardware or sending any request.
+    pub async fn wait_for_disconnect(&self) -> String {
+        let Ok(session) = self.current() else {
+            return "设备已断开".into();
+        };
+        session.wait_disconnected().await;
+        session
+            .terminal_failure()
+            .map(|e| session_failure(e).to_string())
+            .unwrap_or_else(|| "设备已断开".into())
+    }
+    pub async fn read_identity(&self) -> Result<IdentityInfo, BridgeError> {
         let s = self.current()?;
-        s.read_identity()
+        let info = s
+            .read_identity_info()
             .await
-            .map(|v| v.to_string())
-            .map_err(failure)
+            .map_err(|e| session_failure(s.terminal_failure().unwrap_or(e)))?;
+        // A reply verifies this identity query only, not configuration or broad compatibility.
+        let result = IdentityInfo {
+            session_id: info.session_id,
+            version: info.version,
+            profile_index: info.profile_index,
+            layer_index: info.layer_index,
+            source_method: info.source_method,
+            verification: "identity-query-observed".into(),
+            backend: s.backend_name().into(),
+            raw_json: info.raw.to_string(),
+        };
+        let mut state = self.state.lock().unwrap();
+        if state
+            .session
+            .as_ref()
+            .is_some_and(|(_, active)| active.id == result.session_id)
+        {
+            state.identity = Some(result.clone());
+        }
+        Ok(result)
     }
     pub async fn read_config(&self) -> Result<String, BridgeError> {
         let s = self.current()?;
-        let c = s.read_config_snapshot().await.map_err(failure)?;
+        let c = s.read_config_snapshot().await.map_err(session_failure)?;
         serde_json::to_string(&c).map_err(failure)
     }
     pub async fn load_demo(&self) -> Result<String, BridgeError> {
@@ -203,6 +747,108 @@ impl MicroInput {
         tokio::task::spawn_blocking(mi_transport::input_monitoring_allowed)
             .await
             .unwrap_or(false)
+    }
+    pub async fn set_host_active_profile(
+        &self,
+        profile_id: Option<String>,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store.set_host_active_profile(profile_id).map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn set_host_execution_enabled(&self, enabled: bool) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store.set_host_execution_enabled(enabled).map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub fn check_passthrough_health(&self) -> String {
+        let state = self.state.lock().unwrap();
+        let (snapshot, identity) = if let Some((_, session)) = &state.session {
+            let snap = session.snapshot().filter(|s| !s.stale).map(|s| s.config);
+            let ident = state
+                .identity
+                .as_ref()
+                .filter(|i| i.session_id == session.id)
+                .map(|i| mi_model::host_router::HostIdentityStatus {
+                    version: i.version.clone(),
+                    profile_index: i.profile_index,
+                    layer_index: i.layer_index,
+                });
+            (snap, ident)
+        } else {
+            (None, None)
+        };
+        let health =
+            mi_model::host_router::check_passthrough_health(snapshot.as_ref(), identity.as_ref());
+        serde_json::to_string(&health).unwrap_or_else(|_| r#"{"status":"disconnected"}"#.into())
+    }
+    pub fn resolve_input_action(&self, binding_id: String, is_pressed: bool) -> Option<String> {
+        let store = self.draft.lock().unwrap();
+        if !store.host_execution_enabled() {
+            return None;
+        }
+        let graph = &store.draft.document.editable.graph;
+        let active_pid = store
+            .host_active_profile_id()
+            .filter(|id| graph.profiles.contains_key(id))
+            .or_else(|| {
+                graph
+                    .profile_order
+                    .iter()
+                    .find(|id| {
+                        graph
+                            .profiles
+                            .get(*id)
+                            .is_some_and(|p| p.name == "Antigravity")
+                    })
+                    .cloned()
+            })
+            .or_else(|| graph.profile_order.first().cloned());
+        let resolved = mi_model::host_router::resolve_host_action(
+            &store.draft.document,
+            active_pid.as_deref(),
+            &binding_id,
+            is_pressed,
+        )?;
+        serde_json::to_string(&resolved).ok()
+    }
+    pub async fn install_coding_agent_presets(&self) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        let mut created = Vec::new();
+        store
+            .update(|d| {
+                created = mi_model::preset::install_agent_starter_profiles(d)?;
+                Ok(())
+            })
+            .map_err(failure)?;
+        let current_valid = store.host_active_profile_id().is_some_and(|id| {
+            store
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .contains_key(&id)
+        });
+        if !current_valid {
+            if let Some(first) = created.first() {
+                let _ = store.set_host_active_profile(Some(first.clone()));
+            }
+        }
+        let selection = created.first().and_then(|pid| {
+            let lid = store
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .get(pid)?
+                .layer_order
+                .first()
+                .cloned();
+            Some((pid.clone(), lid))
+        });
+        document_response(&store, selection)
     }
 }
 impl MicroInput {
@@ -238,7 +884,7 @@ impl MicroInput {
             .session
             .as_ref()
             .map(|(_, s)| s.clone())
-            .ok_or_else(|| failure("未连接设备"))
+            .ok_or(BridgeError::Disconnected)
     }
 }
 impl Drop for MicroInput {
@@ -255,6 +901,7 @@ mod tests {
     struct DelayedTransport {
         entered: Arc<tokio::sync::Notify>,
         release: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        link: Arc<MockLink>,
     }
     impl HidTransport for DelayedTransport {
         fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
@@ -271,8 +918,160 @@ mod tests {
             while !*released {
                 released = cv.wait(released).unwrap();
             }
-            let (l, _) = MockLink::new();
-            Ok(l)
+            Ok(self.link.clone())
+        }
+    }
+    struct SlowDiscoveryTransport {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        events: tokio::sync::broadcast::Sender<()>,
+    }
+    impl HidTransport for SlowDiscoveryTransport {
+        fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
+            self.entered.notify_one();
+            let mut released = self.release.0.lock().unwrap();
+            while !*released {
+                released = self.release.1.wait(released).unwrap();
+            }
+            Ok(vec![])
+        }
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {
+            self.events.subscribe()
+        }
+        fn open(&self, _: &str) -> Result<Arc<dyn HidLink>, TransportError> {
+            Err(TransportError::Unsupported)
+        }
+    }
+    struct CountEvents(Arc<std::sync::atomic::AtomicUsize>);
+    impl DeviceEvents for CountEvents {
+        fn changed(&self, _: Vec<DeviceInfo>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn failed(&self, _: String) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    #[tokio::test]
+    async fn shutdown_discards_discovery_result_that_was_already_in_flight() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let core = Arc::new(MicroInput {
+            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            transport: Arc::new(SlowDiscoveryTransport {
+                entered: entered.clone(),
+                release: release.clone(),
+                events: tokio::sync::broadcast::channel(1).0,
+            }),
+            state: Mutex::new(ConnectionState::default()),
+            connect_gate: tokio::sync::Mutex::new(()),
+            stopped: tokio::sync::watch::channel(false).0,
+        });
+        let callbacks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = core.clone();
+        let count = callbacks.clone();
+        let subscribed = tokio::spawn(async move {
+            c.subscribe_device_events(Box::new(CountEvents(count)))
+                .await
+        });
+        entered.notified().await;
+        core.shutdown().await;
+        *release.0.lock().unwrap() = true;
+        release.1.notify_one();
+        subscribed.await.unwrap();
+        assert_eq!(callbacks.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+    struct LifecycleTransport {
+        events: tokio::sync::broadcast::Sender<()>,
+        stopped: std::sync::atomic::AtomicBool,
+    }
+    impl HidTransport for LifecycleTransport {
+        fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
+            Ok(vec![])
+        }
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {
+            self.events.subscribe()
+        }
+        fn stop_discovery(&self) {
+            self.stopped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn open(&self, _: &str) -> Result<Arc<dyn HidLink>, TransportError> {
+            Ok(MockLink::new().0)
+        }
+    }
+    struct EventsLifetime(Arc<tokio::sync::Notify>);
+    impl DeviceEvents for EventsLifetime {
+        fn changed(&self, _: Vec<DeviceInfo>) {}
+        fn failed(&self, _: String) {}
+    }
+    impl Drop for EventsLifetime {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+    #[tokio::test]
+    async fn shutdown_releases_discovery_subscription_and_rejects_new_opens() {
+        let transport = Arc::new(LifecycleTransport {
+            events: tokio::sync::broadcast::channel(1).0,
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        });
+        let core = Arc::new(MicroInput {
+            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            transport: transport.clone(),
+            state: Mutex::new(ConnectionState::default()),
+            connect_gate: tokio::sync::Mutex::new(()),
+            stopped: tokio::sync::watch::channel(false).0,
+        });
+        let released = Arc::new(tokio::sync::Notify::new());
+        core.clone()
+            .subscribe_device_events(Box::new(EventsLifetime(released.clone())))
+            .await;
+        core.connect("mock".into()).await.unwrap();
+        core.shutdown().await;
+        tokio::time::timeout(std::time::Duration::from_millis(200), released.notified())
+            .await
+            .unwrap();
+        assert!(transport.stopped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(matches!(
+            core.connect("mock".into()).await,
+            Err(BridgeError::Disconnected)
+        ));
+        assert!(matches!(
+            core.read_identity().await,
+            Err(BridgeError::Disconnected)
+        ));
+    }
+    struct UnavailableTransport;
+    impl HidTransport for UnavailableTransport {
+        fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
+            Ok(vec![])
+        }
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {
+            tokio::sync::broadcast::channel(1).1
+        }
+        fn open(&self, _: &str) -> Result<Arc<dyn HidLink>, TransportError> {
+            Err(TransportError::Unavailable(
+                "native detail must stay local".into(),
+            ))
+        }
+    }
+    #[tokio::test]
+    async fn nonexclusive_open_failure_is_unconfirmed_and_manual_retry_is_available() {
+        let core = MicroInput {
+            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            transport: Arc::new(UnavailableTransport),
+            state: Mutex::new(ConnectionState::default()),
+            connect_gate: tokio::sync::Mutex::new(()),
+            stopped: tokio::sync::watch::channel(false).0,
+        };
+        for _ in 0..2 {
+            let error = core.connect("mock".into()).await.unwrap_err();
+            assert!(matches!(error, BridgeError::Unavailable));
+            assert!(!error.to_string().contains("native detail"));
+            assert!(matches!(
+                core.read_identity().await,
+                Err(BridgeError::Disconnected)
+            ));
         }
     }
     #[tokio::test]
@@ -283,6 +1082,34 @@ mod tests {
     async fn removal_cancels_in_flight_open() {
         cancellation_during_open(true).await;
     }
+    #[tokio::test]
+    async fn dropped_open_future_closes_late_native_handle() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (link, _) = MockLink::new();
+        let core = Arc::new(MicroInput {
+            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            transport: Arc::new(DelayedTransport {
+                entered: entered.clone(),
+                release: release.clone(),
+                link: link.clone(),
+            }),
+            state: Mutex::new(ConnectionState::default()),
+            connect_gate: tokio::sync::Mutex::new(()),
+            stopped: tokio::sync::watch::channel(false).0,
+        });
+        let c = core.clone();
+        let task = tokio::spawn(async move { c.connect("mock".into()).await });
+        entered.notified().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        *release.0.lock().unwrap() = true;
+        release.1.notify_one();
+        // The native open is not abortable; its late result must still close.
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), link.read()).await;
+        assert!(matches!(result, Ok(Err(TransportError::Disconnected))));
+        assert!(core.read_identity().await.is_err());
+    }
     async fn cancellation_during_open(removal: bool) {
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
@@ -291,9 +1118,11 @@ mod tests {
             transport: Arc::new(DelayedTransport {
                 entered: entered.clone(),
                 release: release.clone(),
+                link: MockLink::new().0,
             }),
             state: Mutex::new(ConnectionState::default()),
             connect_gate: tokio::sync::Mutex::new(()),
+            stopped: tokio::sync::watch::channel(false).0,
         });
         let c = core.clone();
         let task = tokio::spawn(async move { c.connect("mock".into()).await });
@@ -307,5 +1136,366 @@ mod tests {
         release.1.notify_one();
         assert!(task.await.unwrap().is_err());
         assert!(core.current().is_err());
+    }
+}
+
+#[cfg(feature = "synthetic-backend")]
+#[uniffi::export(async_runtime = "tokio")]
+impl MicroInput {
+    #[uniffi::constructor]
+    pub fn synthetic_discovery() -> Arc<Self> {
+        Arc::new(Self {
+            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            transport: Arc::new(mi_transport::SyntheticDiscovery::default()),
+            state: Mutex::new(ConnectionState::default()),
+            connect_gate: tokio::sync::Mutex::new(()),
+            stopped: tokio::sync::watch::channel(false).0,
+        })
+    }
+    pub async fn set_synthetic_identity(&self, scenario: u8) -> Result<(), BridgeError> {
+        self.transport
+            .set_synthetic_identity(scenario)
+            .map_err(failure)
+    }
+    pub async fn set_synthetic_config(&self, scenario: u8) -> Result<(), BridgeError> {
+        self.transport
+            .set_synthetic_config(scenario)
+            .map_err(failure)
+    }
+    pub async fn synthetic_requests(&self) -> Vec<String> {
+        self.transport.synthetic_requests()
+    }
+    pub async fn set_synthetic_discovery(
+        &self,
+        state: SyntheticDiscoveryState,
+    ) -> Result<(), BridgeError> {
+        self.transport
+            .set_synthetic_discovery(match state {
+                SyntheticDiscoveryState::ReconnectedDevice => 3,
+                SyntheticDiscoveryState::NoDevices => 0,
+                SyntheticDiscoveryState::TwoDevices => 1,
+                SyntheticDiscoveryState::Failure => 2,
+            })
+            .map_err(failure)
+    }
+}
+
+#[cfg(test)]
+mod hardware_tests {
+    use super::*;
+    #[tokio::test]
+    #[ignore = "requires explicitly authorized physical read-only snapshot and isolated local draft"]
+    async fn native_snapshot_to_independent_local_draft() {
+        struct Isolated(std::path::PathBuf);
+        impl Drop for Isolated {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory =
+            Isolated(std::env::temp_dir().join(format!("mi-t06-{}", mi_model::document::new_id())));
+        std::fs::create_dir(&directory.0).unwrap();
+        let path = directory.0.join("workbench.json");
+        let core = MicroInput::new();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+            let ensure = |ok: bool, message: &str| if ok { Ok(()) } else { Err(failure(message)) };
+            core.open_document(path.to_string_lossy().into_owned())
+                .await?;
+            core.create_profile("Existing local work".into()).await?;
+            let old = std::fs::read(&path).map_err(failure)?;
+            let devices: Vec<_> = core
+                .list_devices()
+                .await?
+                .into_iter()
+                .filter(|d| d.pid == 0x8298 && d.transport == "Usb")
+                .collect();
+            ensure(
+                devices.len() == 1,
+                "expected exactly one supported USB candidate",
+            )?;
+            core.connect(devices[0].id.clone()).await?;
+            let identity = core.read_identity().await?;
+            ensure(
+                identity.version.as_deref() == Some("0.6.3"),
+                "unexpected firmware",
+            )?;
+            let read: serde_json::Value =
+                serde_json::from_str(&core.read_config().await?).map_err(failure)?;
+            ensure(
+                read["source"] == "DeviceSnapshot",
+                "not a physical snapshot",
+            )?;
+            let created: serde_json::Value =
+                serde_json::from_str(&core.create_draft_from_snapshot().await?).map_err(failure)?;
+            let doc_id = created["draft"]["document_id"]
+                .as_str()
+                .ok_or_else(|| failure("new document identity missing"))?;
+            let pid = created["config"]["profiles"][0]["id"]
+                .as_str()
+                .ok_or_else(|| failure("source has no profile"))?;
+            core.rename_profile(pid.into(), "Acceptance local copy".into())
+                .await?;
+            ensure(
+                std::fs::read(&path).map_err(failure)? == old,
+                "previous local file changed",
+            )?;
+            let selected: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(directory.0.join(format!("draft-{doc_id}.json")))
+                    .map_err(failure)?,
+            )
+            .map_err(failure)?;
+            ensure(
+                selected["baseline"]["keymap"]["state"] == "present",
+                "baseline file missing",
+            )?;
+            let bytes = selected["baseline"]["keymap"]["bytes"]
+                .as_array()
+                .ok_or_else(|| failure("exact baseline bytes missing"))?;
+            ensure(!bytes.is_empty(), "empty baseline bytes")?;
+            let re = MicroInput::new();
+            let reopened: serde_json::Value = serde_json::from_str(
+                &re.open_document(path.to_string_lossy().into_owned())
+                    .await?,
+            )
+            .map_err(failure)?;
+            ensure(
+                reopened["draft"]["document_id"] == doc_id,
+                "selection not restored",
+            )?;
+            ensure(
+                reopened["config"]["source"] == "LocalDraft",
+                "new local source not restored",
+            )?;
+            ensure(
+                reopened["config"]["profiles"][0]["name"] == "Acceptance local copy",
+                "saved name not restored",
+            )?;
+            ensure(
+                reopened["draft"]["can_undo"] == false,
+                "history restored across restart",
+            )?;
+            re.shutdown().await;
+            Ok::<(), BridgeError>(())
+        })
+        .await;
+        core.shutdown().await;
+        outcome
+            .expect("bounded acceptance timed out")
+            .expect("read-only local-draft acceptance failed");
+        eprintln!("T06 physical read-only snapshot -> independent local document -> reopen PASS; firmware=0.6.3; no device mutation");
+    }
+    #[tokio::test]
+    #[ignore = "requires an explicitly authorized native read-only lifecycle session"]
+    async fn native_identity_shutdown_and_reopen() {
+        let mut previous = None;
+        for _ in 0..2 {
+            let core = MicroInput::new();
+            let candidates: Vec<_> = core
+                .list_devices()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|d| d.pid == 0x8298 && d.transport == "Usb")
+                .collect();
+            assert_eq!(candidates.len(), 1, "explicit selection required");
+            // Retain a real descriptor-only event subscription until shutdown.
+            struct Events;
+            impl DeviceEvents for Events {
+                fn changed(&self, _: Vec<DeviceInfo>) {}
+                fn failed(&self, _: String) {}
+            }
+            core.clone().subscribe_device_events(Box::new(Events)).await;
+            core.connect(candidates[0].id.clone()).await.unwrap();
+            let identity =
+                tokio::time::timeout(std::time::Duration::from_secs(25), core.read_identity())
+                    .await
+                    .expect("bounded query")
+                    .expect("identity query");
+            assert_eq!(identity.version.as_deref(), Some("0.6.3"));
+            assert_ne!(previous, Some(identity.session_id));
+            previous = Some(identity.session_id);
+            tokio::time::timeout(std::time::Duration::from_secs(3), core.shutdown())
+                .await
+                .expect("bounded reader and discovery shutdown");
+            assert!(matches!(
+                core.read_identity().await,
+                Err(BridgeError::Disconnected)
+            ));
+        }
+        eprintln!("native read-only lifecycle PASS: two fresh sessions, identity 0.6.3, reader/discovery shutdown, no configuration requests");
+    }
+    #[tokio::test]
+    #[ignore = "requires explicitly authorized physical read-only configuration session"]
+    async fn native_configuration_snapshot_read_only() {
+        let core = MicroInput::new();
+        let devices: Vec<_> = core
+            .list_devices()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.pid == 0x8298 && d.transport == "Usb")
+            .collect();
+        assert_eq!(devices.len(), 1, "explicit selection required");
+        core.connect(devices[0].id.clone()).await.unwrap();
+        let identity = core.read_identity().await.unwrap();
+        assert_eq!(identity.version.as_deref(), Some("0.6.3"));
+        let response =
+            tokio::time::timeout(std::time::Duration::from_secs(65), core.read_config()).await;
+        core.disconnect().await;
+        let text = response
+            .expect("bounded read")
+            .expect("verified configuration read");
+        let snapshot: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let profiles = snapshot["profiles"].as_array().unwrap();
+        assert!(!profiles.is_empty());
+        assert!(profiles
+            .iter()
+            .any(|p| p["layers"].as_array().is_some_and(|a| !a.is_empty())));
+        assert_eq!(snapshot["source"], "DeviceSnapshot");
+        assert_eq!(snapshot["firmware"], "0.6.3");
+        let files = snapshot["device_files"].as_array().unwrap();
+        assert!(!files.is_empty());
+        eprintln!(
+            "configuration read PASS: firmware=0.6.3 profiles={} files={} total_bytes={}",
+            profiles.len(),
+            files.len(),
+            files
+                .iter()
+                .map(|f| f["size"].as_u64().unwrap())
+                .sum::<u64>()
+        );
+    }
+    /// Opt-in only. R-D09: same core as UniFFI, exactly one supported USB candidate,
+    /// status/version only, bounded lifetime, no file reads or device mutations.
+    #[tokio::test]
+    #[ignore = "requires an explicitly authorized physical read-only device session"]
+    async fn native_identity_query_only() {
+        let core = MicroInput::new();
+        let devices = core.list_devices().await.unwrap();
+        let supported: Vec<_> = devices
+            .into_iter()
+            .filter(|d| d.pid == 0x8298 && d.transport == "Usb")
+            .collect();
+        assert_eq!(
+            supported.len(),
+            1,
+            "explicit selection required for zero/multiple candidates"
+        );
+        core.connect(supported[0].id.clone()).await.unwrap();
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(25), core.read_identity()).await;
+        core.disconnect().await;
+        let identity = result
+            .expect("bounded identity query")
+            .expect("native identity response");
+        eprintln!(
+            "identity version={:?} backend={} source={}",
+            identity.version, identity.backend, identity.source_method
+        );
+        assert!(identity.version.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an explicitly authorized physical read-only device session"]
+    async fn native_passthrough_health_and_host_routing_readiness() {
+        let core = MicroInput::new();
+        let devices: Vec<_> = core
+            .list_devices()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.pid == 0x8298 && d.transport == "Usb")
+            .collect();
+        assert_eq!(devices.len(), 1, "explicit selection required");
+        core.connect(devices[0].id.clone()).await.unwrap();
+        let identity = core.read_identity().await.unwrap();
+        assert_eq!(identity.version.as_deref(), Some("0.6.3"));
+        assert_eq!(identity.profile_index, Some(0));
+        assert_eq!(identity.layer_index, Some(1));
+        let config_json =
+            tokio::time::timeout(std::time::Duration::from_secs(65), core.read_config())
+                .await
+                .expect("bounded config read")
+                .expect("verified config read");
+        let snapshot: serde_json::Value = serde_json::from_str(&config_json).unwrap();
+        assert_eq!(snapshot["profiles"].as_array().map(Vec::len), Some(3));
+
+        let health_json = core.check_passthrough_health();
+        eprintln!("live check_passthrough_health() => {health_json}");
+        let health: serde_json::Value = serde_json::from_str(&health_json).unwrap();
+        assert_eq!(
+            health["status"].as_str(),
+            Some("ready"),
+            "stock Codex layer on live hardware must pass check_passthrough_health as ready"
+        );
+
+        let doc_json = core.install_coding_agent_presets().await.unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&doc_json).unwrap();
+        let profiles = doc["config"]["profiles"].as_array().unwrap();
+        assert!(profiles.len() >= 3);
+        let ag_id = profiles
+            .iter()
+            .find(|p| p["name"].as_str() == Some("Antigravity"))
+            .and_then(|p| p["id"].as_str())
+            .expect("Antigravity profile id")
+            .to_string();
+        let herdr_id = profiles
+            .iter()
+            .find(|p| p["name"].as_str() == Some("Herdr"))
+            .and_then(|p| p["id"].as_str())
+            .expect("Herdr profile id")
+            .to_string();
+        let dsh_id = profiles
+            .iter()
+            .find(|p| p["name"].as_str() == Some("DeepSeek Coder (DSH)"))
+            .and_then(|p| p["id"].as_str())
+            .expect("DSH profile id")
+            .to_string();
+
+        core.set_host_execution_enabled(true).await.unwrap();
+        core.set_host_active_profile(Some(ag_id)).await.unwrap();
+
+        // Verify live resolution for stock Codex tokens across AG, Herdr, and DSH
+        let ag_action: serde_json::Value = serde_json::from_str(
+            &core
+                .resolve_input_action("AG01".to_string(), true)
+                .expect("AG01 should resolve for Antigravity"),
+        )
+        .unwrap();
+        assert_eq!(ag_action["action_type"].as_str(), Some("open_app"));
+        assert_eq!(
+            ag_action["bundle_id"].as_str(),
+            Some("com.google.antigravity")
+        );
+
+        core.set_host_active_profile(Some(herdr_id)).await.unwrap();
+        let herdr_act06: serde_json::Value = serde_json::from_str(
+            &core
+                .resolve_input_action("ACT06".to_string(), true)
+                .expect("ACT06 should resolve for Herdr"),
+        )
+        .unwrap();
+        assert!(herdr_act06["action_type"].is_string());
+
+        core.set_host_active_profile(Some(dsh_id)).await.unwrap();
+        let dsh_enc: serde_json::Value = serde_json::from_str(
+            &core
+                .resolve_input_action("ENC_CC".to_string(), true)
+                .expect("ENC_CC should resolve for DSH"),
+        )
+        .unwrap();
+        assert!(dsh_enc["action_type"].is_string());
+        let dsh_enc_clk: serde_json::Value = serde_json::from_str(
+            &core
+                .resolve_input_action("ENC_CLK".to_string(), true)
+                .expect("ENC_CLK should resolve for DSH"),
+        )
+        .unwrap();
+        assert_eq!(dsh_enc_clk["action_type"].as_str(), Some("agent_command"));
+        assert_eq!(dsh_enc_clk["command"].as_str(), Some("status"));
+
+        let _sub = core.subscribe_verified_input().await.unwrap();
+
+        core.shutdown().await;
     }
 }

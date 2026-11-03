@@ -2,8 +2,12 @@
 name = "mi-transport"
 version.workspace = true
 edition.workspace = true
+[features]
+synthetic-backend = ["dep:base64"]
 [dependencies]
+base64 = { version = "0.22.1", optional = true }
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 async-trait = "0.1"

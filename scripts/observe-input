@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""One bounded read-only observation. Default is synthetic only; no retries."""
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+import uuid
+
+ROOT = Path(__file__).resolve().parent.parent
+MODE = sys.argv[1:]
+COMMAND = ['cargo', 'test', '--locked', '-p', 'mi-ffi', '--test', 'input_observation']
+ENV_KEYS = ('MI_INPUT_OBSERVATION_OPERATOR', 'MI_INPUT_OBSERVATION_ID',
+            'MI_INPUT_OBSERVATION_SECONDS', 'MI_INPUT_OBSERVATION_REPORT')
+env = dict(os.environ)
+for key in ENV_KEYS:
+    env.pop(key, None)
+if MODE in ([], ['--dry-run']):
+    result = subprocess.run(COMMAND + ['--features', 'synthetic-backend'], cwd=ROOT, env=env, check=False)
+    print('Dry-run: synthetic only; native observation remains ignored.', flush=True)
+    sys.exit(result.returncode)
+if MODE != ['--observe-once']:
+    print('Usage: scripts/observe-input [--dry-run | --observe-once]', file=sys.stderr)
+    sys.exit(2)
+
+experiment = str(uuid.uuid4())
+private = ROOT / '.scratch' / 'input-study' / ('input-observation-' + experiment)
+private.mkdir(parents=True, mode=0o700)
+env.update(MI_INPUT_OBSERVATION_OPERATOR='I_AUTHORIZE_ONE_READONLY_INPUT_OBSERVATION',
+           MI_INPUT_OBSERVATION_ID=experiment, MI_INPUT_OBSERVATION_SECONDS='45',
+           MI_INPUT_OBSERVATION_REPORT=str(private / 'observation.json'))
+child = None
+
+def journal(stage):
+    with open(private / (stage + '.json'), 'x', opener=lambda path, flags: os.open(path, flags, 0o600)) as file:
+        json.dump({'experiment': experiment, 'stage': stage, 'timestamp_ms': int(time.time() * 1000),
+                   'pid': child.pid if child else None, 'returncode': child.poll() if child else None,
+                   'interrupted_outcome': 'unconfirmed; no automatic retry'}, file)
+        file.flush()
+        os.fsync(file.fileno())
+
+def stop_own_child():
+    if child is None or child.poll() is not None:
+        return True
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(child.pid, sig)
+        except ProcessLookupError:
+            return child.poll() is not None
+        try:
+            child.wait(timeout=5)
+            return True
+        except subprocess.TimeoutExpired:
+            pass
+    return False
+
+def interrupted(_signal, _frame):
+    raise KeyboardInterrupt
+
+signal.signal(signal.SIGTERM, interrupted)
+signal.signal(signal.SIGHUP, interrupted)
+journal('prepared')
+print(f'OBSERVATION_PREPARED experiment={experiment} report={private / "observation.json"}', flush=True)
+try:
+    child = subprocess.Popen(COMMAND + ['native_input_observation', '--', '--ignored', '--exact', '--nocapture'],
+                             cwd=ROOT, env=env, start_new_session=True)
+    journal('started')
+    # Includes compilation, setup (100s), passive capture (45s), status recheck
+    # (15s) and joined shutdown (5s). First build may hit TTL; never auto-retry.
+    code = child.wait(timeout=180)
+    journal('child-exited')
+except (subprocess.TimeoutExpired, KeyboardInterrupt, OSError):
+    stopped = stop_own_child()
+    journal('child-stopped-unconfirmed' if stopped else 'exit-unconfirmed')
+    print(f'Observation interrupted: experiment={experiment} exit_confirmed={stopped}; no automatic retry.', file=sys.stderr)
+    sys.exit(124)
+sys.exit(code)

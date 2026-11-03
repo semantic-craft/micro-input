@@ -6,13 +6,23 @@ import MicroInputCore
     @StateObject private var store: Store
     private let statusMenu: StatusMenu
     init() {
-        let store = Store(backend: MicroInput())
+        let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
+        #if MI_SYNTHETIC_BACKEND
+        let core = ["reconnect", "reconnect-transient", "apply-preparation", "host-execution"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
+        let store = Store(backend: core)
+        #else
+        let core = MicroInput()
+        let store = Store(backend: core)
+        #endif
+        if scenario.isEmpty, ProcessInfo.processInfo.environment["MI_AUTO_HOST_READY"] != "0" {
+            store.autoHostReady = true
+        }
         _store = StateObject(wrappedValue: store)
         statusMenu = StatusMenu(store: store)
     }
     @State private var appearance = "system"
     var body: some Scene {
-        Window("Micro Input", id: "main") { WorkbenchHost(store: store, statusMenu: statusMenu).preferredColorScheme(appearance == "system" ? nil : appearance == "dark" ? .dark : .light) }.defaultSize(width: 1180, height: 730)
+        Window("Micro Input", id: "main") { WorkbenchHost(store: store, statusMenu: statusMenu).onAppear { lifetime.store = store }.preferredColorScheme(appearance == "system" ? nil : appearance == "dark" ? .dark : .light) }.defaultSize(width: 1180, height: 730)
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(after: .appInfo) {
@@ -54,13 +64,13 @@ struct WorkbenchHost: View {
     init(store: Store) {
         self.store = store
         super.init()
-        item.button?.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "Micro Input")
+        item.button?.image = StatusItemIcon.make()
         item.button?.toolTip = "Micro Input"
         item.button?.target = self; item.button?.action = #selector(show)
     }
     @objc func show() {
         if panel == nil {
-            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 280, height: 240), styleMask: [.titled, .utilityWindow], backing: .buffered, defer: false)
+            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 320, height: 380), styleMask: [.titled, .utilityWindow], backing: .buffered, defer: false)
             panel.title = "Micro Input 菜单栏"
             panel.isReleasedWhenClosed = false
             panel.contentView = NSHostingView(rootView: StatusPanel(store: store, owner: self))
@@ -72,22 +82,112 @@ struct WorkbenchHost: View {
     @objc func quitApp() { NSApp.terminate(nil) }
 }
 
-final class AppLifetime: NSObject, NSApplicationDelegate {
+@MainActor final class AppLifetime: NSObject, NSApplicationDelegate {
+    weak var store: Store? {
+        didSet {
+            // The main window may appear again while wake is waiting for close/join.
+            // Keep that lifecycle task when onAppear reassigns the same Store.
+            guard oldValue !== store else { return }
+            sleepObserver?.stop()
+            sleepObserver = store.map { WorkspaceSleepObserver(store: $0) }
+        }
+    }
+    private var sleepObserver: WorkspaceSleepObserver?
+    private var terminating = false
+    private let reply: (Bool) -> Void
+    override init() {
+        reply = { NSApplication.shared.reply(toApplicationShouldTerminate: $0) }
+        super.init()
+    }
+    init(store: Store, reply: @escaping (Bool) -> Void) {
+        self.store = store; self.reply = reply
+        super.init()
+        sleepObserver = WorkspaceSleepObserver(store: store)
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let store else { return .terminateNow }
+        if !terminating {
+            terminating = true
+            sleepObserver?.stop(); sleepObserver = nil
+            Task { await store.shutdown(); reply(true) }
+        }
+        return .terminateLater
+    }
 }
 
 struct StatusPanel: View {
     @ObservedObject var store: Store
     let owner: StatusMenu
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("离线演示 · 不激活设备配置").font(.caption).foregroundStyle(.secondary)
-            ForEach(Array((store.snapshot?.profiles ?? []).enumerated()), id: \.offset) { i,p in
-                Button(p.name) { store.selectProfile(i); owner.showWindow() }
+        VStack(alignment: .leading, spacing: 10) {
+            Text(store.passThroughHealth.label)
+                .font(.caption.bold())
+                .foregroundStyle(store.passThroughHealth == .ready ? Color.green : Color.secondary)
+            if case .layerDriftWarning = store.passThroughHealth {
+                Text("键盘当前不在宿主透传层，请轻触键盘左下角 Logo 切回第 0 层")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+            if store.connectedID != nil, store.passThroughHealth != .ready {
+                Button("重新检查身份/层状态") {
+                    Task {
+                        await store.readIdentity()
+                        if store.passThroughHealth == .snapshotMissing,
+                           ["0.6.3", "synthetic-0.6.3"].contains(store.identity?.version ?? "") {
+                            await store.readDeviceConfig()
+                            if store.browsingDeviceSnapshot {
+                                store.showLocalDraft()
+                            }
+                        }
+                    }
+                }
+                .font(.caption2)
+            }
+            Toggle("启用宿主动作执行", isOn: Binding(
+                get: { store.hostExecutionEnabled },
+                set: { enabled in Task { await store.setHostExecutionEnabled(enabled) } }
+            ))
+            .font(.caption)
+            let axTrusted = LiveHostActionExecutor.isAccessibilityTrusted
+            HStack(spacing: 6) {
+                Text(axTrusted ? "辅助功能权限：已授权" : "辅助功能权限：未授权（快捷键与粘贴需要）")
+                    .font(.caption2)
+                    .foregroundStyle(axTrusted ? Color.secondary : Color.orange)
+                if !axTrusted {
+                    Button("打开系统辅助功能设置…") {
+                        LiveHostActionExecutor.openAccessibilitySettings()
+                    }
+                    .font(.caption2)
+                }
+            }
+            if let receipt = store.lastHostActionReceipt {
+                Text("最近触发：\(receipt.bindingId) → \(receipt.actionType) (\(receipt.detail))")
+                    .font(.caption2)
+                    .foregroundStyle(receipt.succeeded ? Color.secondary : Color.red)
+                    .lineLimit(1)
             }
             Divider()
+            Text("宿主激活 Profile（切换不写设备 Flash）：")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            ForEach(Array(store.hostProfiles.enumerated()), id: \.offset) { _, p in
+                let active = store.hostActiveProfileId == p.id.text
+                Button(active ? "✓ \(p.name)" : p.name) {
+                    Task { await store.setHostActiveProfile(p.id.text) }
+                }
+            }
+            Divider()
+            Button("一键就绪（连接 USB + 预设 + 开启接管）") {
+                Task { await store.autoSetupHostExecutionIfNeeded() }
+            }
+            .disabled(store.busy)
+            Button("安装 Coding Agent 预设") {
+                Task { await store.installCodingAgentPresets() }
+            }
+            .disabled(!store.canEditDraft || store.busy)
             Button("打开工作台") { owner.showWindow() }
             Button("退出 Micro Input") { owner.quitApp() }
-        }.padding(20).frame(width: 280, height: 240, alignment: .topLeading)
+        }.padding(16).frame(width: 320, height: 450, alignment: .topLeading)
     }
 }

@@ -4,9 +4,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub const DEVICE_KEY_TOKENS: [&str; 6] =
+    ["KC_A", "KC_B", "KC_ENTER", "KC_ESC", "KC_SPACE", "KC_TAB"];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActionKind {
+    DeviceKey {
+        token: String,
+    },
+    LocalMulti {
+        multi: crate::multi::LocalMulti,
+    },
+    LocalMacro {
+        macro_sequence: crate::macro_sequence::LocalMacro,
+    },
     Shortcut {
         key: String,
         modifiers: Vec<String>,
@@ -17,6 +29,9 @@ pub enum ActionKind {
     },
     OpenUrl {
         url: String,
+    },
+    OpenApp {
+        bundle_id: String,
     },
     AgentCommand {
         adapter: String,
@@ -49,6 +64,9 @@ impl Action {
             serde_json::from_value(self.payload.clone()).map_err(|_| "动作参数未知或格式不正确")?;
         let bounded = |s: &str| !s.trim().is_empty() && s.len() <= 16384;
         let valid = match kind {
+            ActionKind::DeviceKey { token } => DEVICE_KEY_TOKENS.contains(&token.as_str()),
+            ActionKind::LocalMacro { macro_sequence } => return macro_sequence.validate(),
+            ActionKind::LocalMulti { multi } => return multi.validate(),
             ActionKind::Shortcut {
                 key,
                 modifiers,
@@ -66,6 +84,14 @@ impl Action {
                     && !url.chars().any(char::is_whitespace)
                     && url::Url::parse(&url).is_ok_and(|u| {
                         matches!(u.scheme(), "http" | "https") && u.host_str().is_some()
+                    })
+            }
+            ActionKind::OpenApp { bundle_id } => {
+                bundle_id.len() <= 256
+                    && bundle_id.split('.').count() >= 2
+                    && bundle_id.split('.').all(|part| {
+                        !part.is_empty()
+                            && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
                     })
             }
             ActionKind::AgentCommand { adapter, command } => bounded(&adapter) && bounded(&command),
@@ -89,6 +115,10 @@ pub fn actions() -> Vec<Action> {
         ("pane", "下一个 pane", "Herdr", "适配器未验证 · 不执行", json!({"type":"agent_command","adapter":"herdr","command":"next-pane"})),
         ("session", "切换会话", "DSH", "适配器未验证 · 不执行", json!({"type":"focus_session","adapter":"dsh","session":"unselected"})),
         ("skill", "Skill 引用", "Skill", "适配器未验证 · 不执行", json!({"type":"skill_reference","adapter":"unverified","skill":"unselected"})),
+        ("app", "打开应用", "应用", "本地应用意图 · 宿主执行未接入", json!({"type":"open_app","bundle_id":"com.apple.TextEdit"})),
+        ("local-multi", "Multi 动作", "Multi", "本地四分支 · 不执行 · 固件范围未知", json!({"type":"local_multi","multi":{"format_version":1,"term_ms":250,"tap":null,"double_tap":null,"hold":null,"tap_hold":null}})),
+        ("local-macro", "普通宏", "普通宏", "自有本地格式 · 仅草稿 · 不执行", json!({"type":"local_macro","macro_sequence":{"format_version":1,"events":[{"type":"press","key":"a"},{"type":"release","key":"a"}]}})),
+        ("device-key", "设备普通按键", "设备按键", "来源明确的普通键意图 · 尚未应用", json!({"type":"device_key","token":"KC_B"})),
     ].into_iter().map(|(id,name,category,detail,payload)| Action {id:id.into(),name:name.into(),category:category.into(),detail:detail.into(),payload}).collect()
 }
 
@@ -98,7 +128,7 @@ pub fn binding_key(profile: &Value, layer: &Value, slot: u32) -> String {
     serde_json::to_string(&(profile, layer, format!("logical-{slot}"))).unwrap()
 }
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Draft {
+pub struct LegacyDocumentV1 {
     pub schema_version: u32,
     pub config: DeviceConfig,
     pub edits: BTreeMap<String, Action>,
@@ -114,12 +144,12 @@ pub struct Draft {
     #[serde(skip_deserializing)]
     pub read_only: bool,
 }
-impl Default for Draft {
+impl Default for LegacyDocumentV1 {
     fn default() -> Self {
         Self::new(crate::demo().expect("valid bundled fixture")).unwrap()
     }
 }
-impl Draft {
+impl LegacyDocumentV1 {
     pub fn new(config: DeviceConfig) -> Result<Self, String> {
         let d = Self {
             schema_version: 1,
@@ -243,5 +273,253 @@ impl Draft {
         self.revision += 1;
         self.can_undo = !self.undo.is_empty();
         self.can_redo = !self.redo.is_empty();
+    }
+}
+
+/// Runtime projection plus one authoritative v2 document. History is session-local.
+#[derive(Clone, Serialize)]
+pub struct Draft {
+    pub config: DeviceConfig,
+    pub edits: BTreeMap<String, Action>,
+    pub revision: u64,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub read_only: bool,
+    pub loaded_format: u32,
+    pub document_id: String,
+    pub structure_changes: Vec<String>,
+    #[serde(skip)]
+    pub document: crate::document::LocalDocumentV2,
+    #[serde(skip)]
+    undo: Vec<crate::document::EditableState>,
+    #[serde(skip)]
+    redo: Vec<crate::document::EditableState>,
+}
+impl Default for Draft {
+    fn default() -> Self {
+        Self::new(crate::demo().expect("valid fixture")).unwrap()
+    }
+}
+impl Draft {
+    pub fn new(config: DeviceConfig) -> Result<Self, String> {
+        let doc = crate::document::LocalDocumentV2::from_config(&config, None, "synthetic-local")?;
+        Self::from_document(doc, 2, false)
+    }
+    pub fn from_document(
+        document: crate::document::LocalDocumentV2,
+        loaded_format: u32,
+        read_only: bool,
+    ) -> Result<Self, String> {
+        let (config, edits) = document.view()?;
+        Ok(Self {
+            structure_changes: document.structure_changes(),
+            revision: document.revision,
+            document_id: document.document_id.clone(),
+            config,
+            edits,
+            can_undo: false,
+            can_redo: false,
+            read_only,
+            loaded_format,
+            document,
+            undo: vec![],
+            redo: vec![],
+        })
+    }
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        use sha2::{Digest, Sha256};
+        let raw: Value = serde_json::from_slice(bytes).map_err(|_| "本地文档损坏；原文件保留")?;
+        match raw["schema_version"].as_u64() {
+            Some(1) => {
+                let legacy = LegacyDocumentV1::from_bytes(bytes)?;
+                let doc = crate::document::LocalDocumentV2::from_legacy(
+                    &legacy,
+                    Some(format!("{:x}", Sha256::digest(bytes))),
+                )?;
+                Self::from_document(doc, 1, legacy.read_only)
+            }
+            Some(2) => {
+                let doc: crate::document::LocalDocumentV2 = serde_json::from_value(raw.clone())
+                    .map_err(|_| "本地文档结构不合法；原文件保留")?;
+                doc.validate()?;
+                let read_only = serde_json::to_value(&doc).map_err(|e| e.to_string())? != raw
+                    || !doc.actions_known();
+                Self::from_document(doc, 2, read_only)
+            }
+            _ => Err("本地文档版本不支持；原文件保留".into()),
+        }
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        self.document.validate()
+    }
+    pub fn mutate<T>(
+        &mut self,
+        edit: impl FnOnce(&mut crate::document::LocalDocumentV2) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if self.read_only {
+            return Err("文档含未知动作或字段，仅可浏览；原文件保留".into());
+        }
+        let mut next = self.document.clone();
+        let result = edit(&mut next)?;
+        next.validate()?;
+        if next.editable == self.document.editable {
+            return Ok(result);
+        }
+        next.revision = self.revision.checked_add(1).ok_or("文档修订号已达上限")?;
+        let (config, edits) = next.view()?;
+        self.undo.push(self.document.editable.clone());
+        if self.undo.len() > 100 {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        self.document = next;
+        self.config = config;
+        self.edits = edits;
+        self.refresh();
+        Ok(result)
+    }
+    fn refresh(&mut self) {
+        self.structure_changes = self.document.structure_changes();
+        self.revision = self.document.revision;
+        self.can_undo = !self.undo.is_empty();
+        self.can_redo = !self.redo.is_empty();
+    }
+    pub fn create_profile(&mut self, name: &str) -> Result<String, String> {
+        self.mutate(|d| d.create_profile(name))
+    }
+    pub fn create_layer(&mut self, pid: &str, name: &str) -> Result<String, String> {
+        self.mutate(|d| d.create_layer(pid, name))
+    }
+    pub fn duplicate_profile(&mut self, pid: &str, name: &str) -> Result<String, String> {
+        self.mutate(|d| d.duplicate_profile(pid, name))
+    }
+    pub fn duplicate_layer(&mut self, pid: &str, lid: &str, name: &str) -> Result<String, String> {
+        self.mutate(|d| d.duplicate_layer(pid, lid, name))
+    }
+    pub fn rename_profile(&mut self, id: &str, name: &str) -> Result<(), String> {
+        self.mutate(|d| d.rename_profile(id, name))
+    }
+    pub fn rename_layer(&mut self, id: &str, name: &str) -> Result<(), String> {
+        self.mutate(|d| d.rename_layer(id, name))
+    }
+    pub fn move_profile(&mut self, id: &str, index: usize) -> Result<(), String> {
+        self.mutate(|d| d.move_profile(id, index))
+    }
+    pub fn move_layer(&mut self, pid: &str, id: &str, index: usize) -> Result<(), String> {
+        self.mutate(|d| d.move_layer(pid, id, index))
+    }
+    pub fn delete_profile(&mut self, id: &str) -> Result<(), String> {
+        self.mutate(|d| d.delete_profile(id))
+    }
+    pub fn delete_layer(&mut self, pid: &str, id: &str) -> Result<(), String> {
+        self.mutate(|d| d.delete_layer(pid, id))
+    }
+    pub fn assign(
+        &mut self,
+        profile: &Value,
+        layer: &Value,
+        slot: u32,
+        action: Action,
+    ) -> Result<(), String> {
+        action.validate()?;
+        let pid = profile.as_str().ok_or("配置必须是本地 UUID")?;
+        let lid = layer.as_str().ok_or("层必须是本地 UUID")?;
+        self.mutate(|d| {
+            let p = d.editable.graph.profiles.get(pid).ok_or("配置不存在")?;
+            if !p.layer_order.iter().any(|id| id == lid) {
+                return Err("层不属于所选配置".into());
+            }
+            let l = d.editable.graph.layers.get_mut(lid).ok_or("层不存在")?;
+            let binding = l
+                .controls
+                .values_mut()
+                .find(|b| b.logical_control == format!("logical-{slot}"))
+                .ok_or("控件不存在")?;
+            if binding
+                .action_id
+                .as_ref()
+                .and_then(|id| d.editable.graph.actions.get(id))
+                == Some(&action)
+            {
+                return Ok(());
+            }
+            let old = binding.action_id.replace(crate::document::new_id());
+            d.editable
+                .graph
+                .actions
+                .insert(binding.action_id.clone().unwrap(), action);
+            if let Some(old) = old {
+                if !d.editable.graph.actions.get(&old).is_some_and(|a| {
+                    crate::macro_library::is_local_macro(a) || crate::multi::is_local_multi(a)
+                }) && crate::multi::parent_references(d, &old).is_empty()
+                    && !d.editable.graph.layers.values().any(|l| {
+                        l.controls
+                            .values()
+                            .any(|b| b.action_id.as_ref() == Some(&old))
+                    })
+                {
+                    d.editable.graph.actions.remove(&old);
+                    d.editable.source_refs.remove(&old);
+                }
+            }
+            Ok(())
+        })
+    }
+    /// Bind an existing local action using stable ownership IDs; no action is executed.
+    pub fn bind_existing_action(
+        &mut self,
+        profile_id: &str,
+        layer_id: &str,
+        binding_id: &str,
+        action_id: Option<&str>,
+    ) -> Result<(), String> {
+        self.mutate(|d| {
+            let graph = &mut d.editable.graph;
+            if !graph
+                .profiles
+                .get(profile_id)
+                .is_some_and(|p| p.layer_order.iter().any(|id| id == layer_id))
+            {
+                return Err("层不属于配置".into());
+            }
+            if let Some(id) = action_id {
+                graph.actions.get(id).ok_or("动作引用不存在")?.validate()?;
+            }
+            let binding = graph
+                .layers
+                .get_mut(layer_id)
+                .ok_or("层不存在")?
+                .controls
+                .get_mut(binding_id)
+                .ok_or("控件不属于层")?;
+            binding.action_id = action_id.map(str::to_owned);
+            Ok(())
+        })
+    }
+    pub fn undo(&mut self, redo: bool) -> Result<(), String> {
+        if self.read_only {
+            return Err("文档仅可浏览".into());
+        }
+        let stack = if redo { &self.redo } else { &self.undo };
+        let Some(state) = stack.last().cloned() else {
+            return Ok(());
+        };
+        let mut next = self.document.clone();
+        next.editable = state;
+        next.revision = self.revision.checked_add(1).ok_or("文档修订号已达上限")?;
+        next.validate()?;
+        let (config, edits) = next.view()?;
+        if redo {
+            self.redo.pop();
+            self.undo.push(self.document.editable.clone());
+        } else {
+            self.undo.pop();
+            self.redo.push(self.document.editable.clone());
+        }
+        self.document = next;
+        self.config = config;
+        self.edits = edits;
+        self.refresh();
+        Ok(())
     }
 }

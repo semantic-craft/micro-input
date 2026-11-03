@@ -1,4 +1,4 @@
-//! R-C03/R-C05/R-N03: owned display model; raw JSON is retained losslessly.
+//! R-C03/R-C05/R-N03: owned display projection retaining raw values; exact device bytes remain in the session.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -7,9 +7,12 @@ pub enum Source {
     Demo,
     DeviceSnapshot,
     Imported,
+    LocalDraft,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_files: Option<Vec<FileVerification>>,
     pub source: Source,
     pub read_at: u64,
     pub firmware: Option<String>,
@@ -20,6 +23,12 @@ pub struct DeviceConfig {
     pub multi_actions: Vec<MultiAction>,
     pub smart_actions: Value,
     pub active_profile: ActiveProfile,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileVerification {
+    pub name: String,
+    pub size: u64,
+    pub sha1: String,
 }
 // TODO(UNKNOWN-06): device/cache schema equivalence and active profile semantics need device evidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,6 +255,7 @@ pub fn parse_config(bytes: &[u8]) -> Result<DeviceConfig, ParseError> {
     warnings.sort();
     warnings.dedup();
     Ok(DeviceConfig {
+        device_files: None,
         source: Source::Imported,
         read_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -298,3 +308,28 @@ pub mod storage;
 
 #[cfg(test)]
 mod document_tests;
+
+#[cfg(test)]
+mod device_tests;
+
+mod device;
+pub use device::parse_device_files;
+
+pub mod action_library;
+pub mod document;
+
+pub mod comparison;
+#[cfg(test)]
+mod comparison_tests;
+pub mod control_settings;
+pub mod macro_sequence;
+
+pub mod macro_library;
+
+pub mod multi;
+
+pub mod preset;
+
+pub mod apply;
+
+pub mod host_router;
