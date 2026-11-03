@@ -504,11 +504,7 @@ pub fn verified_bindings(config: &DeviceConfig, identity: &HostIdentityStatus) -
         .collect();
     for n in 0..13 {
         let id = format!("AG{n:02}");
-        let slot = match n {
-            0 => 1,
-            1 => 0,
-            n => n,
-        };
+        let slot = n;
         if names[slot].as_deref() == Some(&id)
             && names.iter().filter(|v| v.as_deref() == Some(&id)).count() == 1
         {

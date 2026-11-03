@@ -152,7 +152,7 @@ fn backup_failure_cancel_readonly_and_external_bytes_cannot_claim_prepared() {
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
 #[test]
-fn ambiguous_sources_host_shortcuts_and_multiple_binding_changes_are_rejected() {
+fn ambiguous_sources_and_host_shortcuts_reject_while_unchanged_keys_are_ignored() {
     let (_dir, mut store, baseline, p, l) = setup();
     let aid = store
         .draft
@@ -184,7 +184,7 @@ fn ambiguous_sources_host_shortcuts_and_multiple_binding_changes_are_rejected() 
     store
         .update(|d| d.assign(&json!(p), &json!(l), 1, action))
         .unwrap();
-    assert!(store.preview_apply(&baseline).is_err());
+    assert_eq!(store.preview_apply(&baseline).unwrap().changes.len(), 1);
     let (dir, mut store, baseline, _, l) = setup();
     let bids = store.draft.document.editable.graph.layers[&l]
         .control_order
@@ -243,4 +243,57 @@ fn backup_keeps_present_smart_file_opaque_and_does_not_overwrite_old_package() {
         .unwrap();
     assert_ne!(second.backup_path, prepared.backup_path);
     assert_eq!(std::fs::read(path).unwrap(), SMART);
+}
+
+#[test]
+fn device_workspace_keeps_host_document_routing_and_undo_separate() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workbench.json");
+    let mut store = DocumentStore::default();
+    store.open(path.clone()).unwrap();
+    store
+        .update(|d| mi_model::preset::install_agent_starter_profiles(d).map(|_| ()))
+        .unwrap();
+    let host_id = store.draft.document.editable.graph.profile_order[0].clone();
+    store
+        .set_host_active_profile(Some(host_id.clone()))
+        .unwrap();
+    store.set_host_execution_enabled(true).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let preferences = std::fs::read(path.with_extension("preferences.json")).unwrap();
+    let host_doc = store.draft.document_id.clone();
+    let host_undo = store.draft.can_undo;
+    let (_, _, baseline, _, _) = setup();
+    let config = mi_model::parse_device_files(RAW.as_bytes(), None).unwrap();
+    store
+        .begin_device_editing(config.clone(), baseline.clone())
+        .unwrap();
+    assert!(store.editing_device());
+    assert_eq!(store.host_store().draft.document_id, host_doc);
+    assert_eq!(store.host_active_profile_id(), Some(host_id));
+    assert!(store.host_execution_enabled());
+    assert_eq!(store.routing_state()["document_id"], host_doc);
+    let device_doc = store.draft.document_id.clone();
+    let pid = store.draft.document.editable.graph.profile_order[0].clone();
+    store
+        .update(|d| d.rename_profile(&pid, "Device work in progress"))
+        .unwrap();
+    store.return_to_host();
+    assert_eq!(store.draft.document_id, host_doc);
+    assert_eq!(store.draft.can_undo, host_undo);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(
+        std::fs::read(path.with_extension("preferences.json")).unwrap(),
+        preferences
+    );
+    assert!(!path.with_extension("active.json").exists());
+    let mut reopened = DocumentStore::default();
+    reopened.open(path).unwrap();
+    assert_eq!(reopened.draft.document_id, host_doc);
+    reopened.resume_device_editing().unwrap();
+    assert_eq!(reopened.draft.document_id, device_doc);
+    assert_eq!(
+        reopened.draft.document.editable.graph.profiles[&pid].name,
+        "Device work in progress"
+    );
 }

@@ -127,6 +127,8 @@ struct MacroReference: Decodable {
 }
 struct MacroSummary: Decodable, Identifiable { let id: String, action: CatalogAction, references: [MacroReference] }
 struct DocumentView: Decodable {
+    let editing_device: Bool?
+    let host_config: Snapshot?
     let control_settings: [String:LocalControlSettings]?
     let macro_library: [MacroSummary]?
     let multi_library: [MacroSummary]?

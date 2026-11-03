@@ -5,7 +5,13 @@ struct ApplyPreview: Decodable, Identifiable {
     let device_identity: JSONValue, firmware: JSONValue, files: JSONValue, active_indices: JSONValue
     let active_source: String, profile_source_id: JSONValue, layer_source_id: JSONValue
     let logical_control: String, physical_position: String, before: String, after: String, planned_keymap_sha256: String
+    let changes: [ConfigurationChange]?
     let apply_available: Bool, restore_available: Bool, unavailable_reason: String
+}
+struct ConfigurationChange: Decodable {
+    let kind: String, profile: JSONValue, layer: JSONValue, before: JSONValue, after: JSONValue
+    let control: String?, zone: String?, field: String?
+    var label: String { "Profile \(profile.text) / Layer \(layer.text) / " + (control ?? [zone, field].compactMap { $0 }.joined(separator: ".")) }
 }
 struct PreparedApplyBackup: Decodable {
     let token: String, backup_path: String, manifest_sha256: String, status: String, unavailable_reason: String
@@ -16,9 +22,17 @@ struct ApplyPreparationView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack { Text("配置应用准备").font(.title2.bold()); Spacer(); Button("关闭准备") { Task { await store.cancelApplyPreview() } } }
-            Text("\(preview.before) → \(preview.after)").font(.title3.monospaced())
-            Text("来源 Profile \(preview.profile_source_id.text) / Layer \(preview.layer_source_id.text) / \(preview.logical_control)")
-            Text("实体位置：\(preview.physical_position) · 活动来源：\(preview.active_source)").font(.caption).foregroundStyle(.secondary)
+            Text((preview.changes?.count ?? 0) > 1 ? preview.after : "\(preview.before) → \(preview.after)").font(.title3)
+            if let changes = preview.changes, !changes.isEmpty {
+                ScrollView { VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(changes.enumerated()), id: \.offset) { _, change in
+                        Text("\(change.label)：\(change.before.text) → \(change.after.text)")
+                    }
+                } }.frame(maxHeight: 180)
+            }
+            if preview.changes?.isEmpty != false {
+                Text("来源 Profile \(preview.profile_source_id.text) / Layer \(preview.layer_source_id.text) / \(preview.logical_control)")
+            }
             Text("文档 \(preview.document_id) · 修订 \(preview.revision)").font(.caption).textSelection(.enabled)
             Text("固件 \(preview.firmware.text) · 预览只使用本会话完整核验快照").font(.caption)
             DisclosureGroup("设备、活动索引与文件摘要") {

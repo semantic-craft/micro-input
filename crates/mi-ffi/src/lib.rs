@@ -47,6 +47,8 @@ fn document_response(
         .collect();
     serde_json::to_string(&serde_json::json!({
         "draft": draft,
+        "editing_device": store.editing_device(),
+        "host_config": store.host_store().draft.config,
         "config": draft.config,
         "selection_hint": hint,
         "macro_library": draft.macros(),
@@ -571,6 +573,28 @@ impl MicroInput {
             .map_err(failure)?;
         document_response(&store, None)
     }
+    pub async fn begin_device_editing(&self) -> Result<String, BridgeError> {
+        let _inspection = self.reserve_inspection()?;
+        let state = self.state.lock().unwrap();
+        let (config, baseline) = Self::comparison_snapshot(&state)?;
+        let mut store = self.draft.lock().unwrap();
+        store
+            .begin_device_editing(config, baseline)
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn resume_device_editing(&self) -> Result<String, BridgeError> {
+        let _inspection = self.reserve_inspection()?;
+        let mut store = self.draft.lock().unwrap();
+        store.resume_device_editing().map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub async fn return_to_host_document(&self) -> Result<String, BridgeError> {
+        let _inspection = self.reserve_inspection()?;
+        let mut store = self.draft.lock().unwrap();
+        store.return_to_host();
+        document_response(&store, None)
+    }
     pub async fn list_devices(&self) -> Result<Vec<DeviceInfo>, BridgeError> {
         let t = self.transport.clone();
         tokio::task::spawn_blocking(move || {
@@ -795,6 +819,7 @@ impl MicroInput {
             return None;
         }
         let store = self.draft.lock().unwrap();
+        let store = store.host_store();
         if !store.host_execution_enabled() {
             return None;
         }
@@ -809,6 +834,9 @@ impl MicroInput {
     }
     pub async fn install_coding_agent_presets(&self) -> Result<String, BridgeError> {
         let mut store = self.draft.lock().unwrap();
+        if store.editing_device() {
+            return document_response(&store, None);
+        }
         let mut created = Vec::new();
         store
             .update(|d| {

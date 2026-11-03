@@ -46,13 +46,23 @@ struct Workbench: View {
                 ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("Micro Input", systemImage: "keyboard").font(.system(size: 14, weight: .semibold)).padding(.bottom, 14)
-                    Text(store.browsingDeviceSnapshot ? "设备配置 · 只读" : "AGENTS").font(.caption).foregroundStyle(.secondary)
+                    Text(store.editingDevice ? "设备配置 · 编辑" : store.browsingDeviceSnapshot ? "设备配置 · 只读" : "AGENTS").font(.caption).foregroundStyle(.secondary)
                     if let snapshot = store.snapshot {
                         ForEach(visibleProfileIndices, id: \.self) { i in
                             Button { store.selectProfile(i) } label: {
                                 HStack(spacing: 10) { AgentBadge(name: snapshot.profiles[i].name); Text(DesktopAgent.displayName(snapshot.profiles[i].name)).font(.system(size: 13, weight: .medium)).lineLimit(2).fixedSize(horizontal: false, vertical: true); Spacer(); if i == store.profileIndex { Image(systemName: "checkmark").font(.caption) } }.padding(.horizontal, 10).padding(.vertical, 7).background(i == store.profileIndex ? Color.accentColor.opacity(0.09) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
                             }.buttonStyle(.plain).accessibilityLabel(DesktopAgent.displayName(snapshot.profiles[i].name))
                         }
+                    }
+                    if store.editingDevice {
+                        Text("支持普通键和已有灯光字段；其他原值保留。").font(.caption)
+                        Button("从当前设备新建草稿…") { Task { await store.editDeviceConfiguration() } }.disabled(store.busy || store.deviceOperationRunning)
+                        Button("读取并比较现有草稿…") { Task { await store.readDeviceConfig(); await store.compareSnapshot(); store.showLocalDraft() } }.disabled(store.busy || store.deviceOperationRunning)
+                        Button("返回 Mac 宿主草稿") { Task { await store.returnToHostDocument() } }.disabled(store.busy || store.deviceOperationRunning)
+                        Button("审阅并应用配置…") { Task { await store.previewApply() } }.disabled(store.busy || store.deviceOperationRunning)
+                    } else {
+                        Button("读取并编辑设备配置…") { Task { await store.editDeviceConfiguration() } }.disabled(store.busy || store.deviceOperationRunning)
+                        Button("继续已保存的设备草稿") { Task { await store.resumeDeviceEditing() } }.disabled(store.busy)
                     }
                     Toggle("显示其他配置", isOn: $showOtherProfiles).toggleStyle(.checkbox).font(.caption)
                     Divider()
@@ -64,13 +74,13 @@ struct Workbench: View {
                         Button("上移配置") { Task { await store.moveProfile(by: -1) } }.disabled(store.profileIndex == 0 || store.profile == nil)
                         Button("下移配置") { Task { await store.moveProfile(by: 1) } }.disabled(store.profileIndex + 1 >= (store.snapshot?.profiles.count ?? 0))
                         Button("删除配置…", role: .destructive) {deleteLayer=false;deleting=true}.disabled(store.profile == nil)
-                    }.menuStyle(.borderlessButton).fixedSize().disabled(!store.canEditDraft || store.busy)
+                    }.menuStyle(.borderlessButton).fixedSize().disabled(!store.canEditDraft || store.busy || store.editingDevice)
                     DisclosureGroup("配置工具") {
                         VStack(alignment: .leading, spacing: 12) {
-                            PresetMenu(store: store)
+                            PresetMenu(store: store).disabled(store.editingDevice)
                             DocumentRecoveryMenu(store: store)
-                            AgentProposalButton(store: store)
-                            Button("补齐 Agent 配置") { Task { await store.installCodingAgentPresets() } }
+                            AgentProposalButton(store: store).disabled(store.editingDevice)
+                            Button("补齐 Agent 配置") { Task { await store.installCodingAgentPresets() } }.disabled(store.editingDevice)
                             Button("准备应用键位或灯光…") { Task { await store.previewApply() } }
                         }.padding(.top, 8).disabled(!store.canEditDraft || store.busy)
                     }.font(.caption)
@@ -93,7 +103,7 @@ struct Workbench: View {
                         Button { Task { await store.undoDraft(redo: true) } } label: { Image(systemName: "arrow.uturn.forward") }.help("重做").accessibilityLabel("重做").disabled(!store.canEditDraft || !store.draft.can_redo || store.busy)
                         Button("查看变更 · \(changeCount)") { reviewing = true }.disabled(store.browsingDeviceSnapshot)
                     }.padding(24)
-                    if let agent = DesktopAgent.named(store.profile?.name ?? ""), !store.browsingDeviceSnapshot {
+                    if let agent = DesktopAgent.named(store.profile?.name ?? ""), !store.browsingDeviceSnapshot, !store.editingDevice {
                         HStack(spacing: 12) {
                             AgentBadge(name: agent.name)
                             VStack(alignment: .leading, spacing: 3) {
@@ -124,7 +134,7 @@ struct Workbench: View {
                                         Button("上移层") {Task {await store.moveLayer(by:-1)}}.disabled(store.layerIndex == 0 || store.layer == nil)
                                         Button("下移层") {Task {await store.moveLayer(by:1)}}.disabled(store.layerIndex+1 >= (store.profile?.layers.count ?? 0))
                                         Button("删除层…",role:.destructive) {deleteLayer=true;deleting=true}.disabled(store.layer == nil)
-                                    }.menuStyle(.borderlessButton).fixedSize().disabled(!store.canEditDraft || store.busy)
+                                    }.menuStyle(.borderlessButton).fixedSize().disabled(!store.canEditDraft || store.busy || store.editingDevice)
                                     }
                                 }
                                 if store.layer == nil {
@@ -201,7 +211,7 @@ struct Workbench: View {
     var visibleProfileIndices: [Int] {
         guard let profiles = store.snapshot?.profiles else { return [] }
         let order = DesktopAgent.all.map(\.name)
-        return profiles.indices.filter { store.browsingDeviceSnapshot || showOtherProfiles || DesktopAgent.named(profiles[$0].name) != nil }
+        return profiles.indices.filter { store.editingDevice || store.browsingDeviceSnapshot || showOtherProfiles || DesktopAgent.named(profiles[$0].name) != nil }
             .sorted { (order.firstIndex(of: profiles[$0].name) ?? (order.count + $0)) < (order.firstIndex(of: profiles[$1].name) ?? (order.count + $1)) }
     }
     var discoveryPanel: some View {
@@ -296,7 +306,7 @@ struct Workbench: View {
                 Text(settings.joystick_mode == "logical_sectors" && store.slot - 16 < Int(settings.active_sectors) ? "活动逻辑扇区 · 物理方向未核实" : "保留槽位 · 绑定未删除").font(.caption).foregroundStyle(.secondary)
             }
             if store.browsingDeviceSnapshot { Text("层颜色：\(store.layer?.displayColor ?? "未知（原值保留）")").font(.caption).foregroundStyle(.secondary) }
-            if !store.browsingDeviceSnapshot {
+            if !store.browsingDeviceSnapshot && !store.editingDevice {
                 if store.slot >= 13 {
                     ControlSettingsEditor(store: store).id((store.layer?.id.text ?? "") + String(store.draft.revision))
                     Divider()
@@ -307,9 +317,9 @@ struct Workbench: View {
                 }
             }
             Text("动作").foregroundStyle(.secondary)
-            Button { choosing = true } label: { HStack { Text(label(store.slot)).lineLimit(3); Spacer(); Text(store.browsingDeviceSnapshot ? "只读" : "更换").foregroundStyle(.blue) }.padding(14).frame(maxWidth: .infinity).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 9)) }.buttonStyle(.plain).disabled(!store.canEditDraft || store.layer == nil)
-            Button("已保存的普通宏（\(store.macros.count)）") { choosingMacro = true }.disabled(!store.canEditDraft)
-            Button("已保存的 Multi（\(store.multis.count)）") { choosingMulti = true }.disabled(!store.canEditDraft)
+            Button { choosing = true } label: { HStack { Text(label(store.slot)).lineLimit(3); Spacer(); Text(store.browsingDeviceSnapshot ? "只读" : "更换").foregroundStyle(.blue) }.padding(14).frame(maxWidth: .infinity).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 9)) }.buttonStyle(.plain).disabled(!store.canEditDraft || store.layer == nil || (store.editingDevice && store.slot >= 13))
+            Button("已保存的普通宏（\(store.macros.count)）") { choosingMacro = true }.disabled(!store.canEditDraft || store.editingDevice)
+            Button("已保存的 Multi（\(store.multis.count)）") { choosingMulti = true }.disabled(!store.canEditDraft || store.editingDevice)
             if let multi = store.selectedMulti {
                 Text("共享 Multi · \(multi.references.count) 个引用").font(.caption).foregroundStyle(.secondary)
                 Button("移除此控件的 Multi 引用") { Task { await store.bindMulti(nil) } }.disabled(store.busy || !store.canEditDraft)
@@ -373,7 +383,7 @@ struct Workbench: View {
                                 }.buttonStyle(.plain).disabled(store.busy || !store.canEditDraft)
                             }
                         }
-                        ForEach(store.library.entries) { entry in
+                        ForEach(store.library.entries.filter { !store.editingDevice || $0.action.payload["type"]?.text == "device_key" }) { entry in
                             HStack(alignment: .top) {
                                 Button { choose(entry.action) } label: {
                                     VStack(alignment: .leading, spacing: 5) {
