@@ -119,8 +119,20 @@ struct WorkbenchHost: View {
 struct StatusPanel: View {
     @ObservedObject var store: Store
     let owner: StatusMenu
+    @AppStorage("menuFavoriteProfileIDs") private var favoriteIDsJSON = "[]"
+    private var favorites: [Profile] {
+        let ids = (try? JSONDecoder().decode([String].self, from: Data(favoriteIDsJSON.utf8))) ?? []
+        return MenuFavorites.resolve(ids: ids, profiles: store.hostProfiles)
+    }
     private var otherProfiles: [Profile] {
-        store.orderedHostProfiles.filter { DesktopAgent.named($0.name) == nil }
+        let pinned = Set(favorites.map { $0.id.text })
+        return store.orderedHostProfiles.filter { !pinned.contains($0.id.text) }
+    }
+    private func pin(_ profile: Profile, at index: Int) {
+        let ids = MenuFavorites.replacing(ids: favorites.map { $0.id.text }, at: index, with: profile.id.text)
+        if let data = try? JSONEncoder().encode(ids), let json = String(data: data, encoding: .utf8) {
+            favoriteIDsJSON = json
+        }
     }
     private var summary: String {
         if !store.hostExecutionEnabled { return "按键控制已暂停" }
@@ -144,12 +156,12 @@ struct StatusPanel: View {
             // inside NSHostingController's initial popover size negotiation.
             VStack(spacing: 8) {
                 HStack(spacing: 8) {
-                    agentButton(DesktopAgent.all[0])
-                    agentButton(DesktopAgent.all[1])
+                    favoriteButton(at: 0)
+                    favoriteButton(at: 1)
                 }
                 HStack(spacing: 8) {
-                    agentButton(DesktopAgent.all[2])
-                    agentButton(DesktopAgent.all[3])
+                    favoriteButton(at: 2)
+                    favoriteButton(at: 3)
                 }
             }.fixedSize(horizontal: false, vertical: true)
             HStack {
@@ -161,6 +173,22 @@ struct StatusPanel: View {
                         }.disabled(store.busy)
                     }
                     if otherProfiles.isEmpty { Text("没有其他配置") }
+                    Divider()
+                    Menu("调整常用配置") {
+                        ForEach(0..<4, id: \.self) { index in
+                            Menu(["左上", "右上", "左下", "右下"][index]) {
+                                ForEach(store.orderedHostProfiles, id: \.id.text) { profile in
+                                    Button { pin(profile, at: index) } label: {
+                                        if favorites.indices.contains(index), favorites[index].id.text == profile.id.text {
+                                            Label(profile.name, systemImage: "checkmark")
+                                        } else { Text(profile.name) }
+                                    }
+                                }
+                            }
+                        }
+                        Divider()
+                        Button("恢复默认排列") { favoriteIDsJSON = "[]" }
+                    }
                 }.fixedSize()
                 Spacer()
                 Button("编辑按键…") { owner.showWindow() }
@@ -189,18 +217,22 @@ struct StatusPanel: View {
         }.padding(16).frame(width: 336).fixedSize(horizontal: false, vertical: true)
             .tint(Color(red: 0.20, green: 0.43, blue: 0.34))
     }
-    private func agentButton(_ agent: DesktopAgent) -> some View {
-        let profile = store.hostProfiles.first { $0.name == agent.name }
+    private func favoriteButton(at index: Int) -> some View {
+        let profile = favorites.indices.contains(index) ? favorites[index] : nil
+        let name = profile?.name ?? "未设置"
+        let agent = DesktopAgent.named(name)
+        let title = name == "Antigravity" ? "反重力" : name == "DeepSeek Coder (DSH)" ? "DSH" : name
+        let symbol = agent?.symbol ?? (name == "Antigravity" ? "sparkles" : "terminal")
         let selected = profile != nil && store.hostActiveProfileId == profile?.id.text
         return Button {
             guard let profile else { return }
             Task { await store.setHostActiveProfile(profile.id.text) }
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: agent.symbol).foregroundStyle(.tint).frame(width: 20)
+                Image(systemName: symbol).foregroundStyle(.tint).frame(width: 20)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(agent.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                    if !agent.installed { Text("未找到应用").font(.caption2).foregroundStyle(.secondary) }
+                    Text(title).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                    if let agent, !agent.installed { Text("未找到应用").font(.caption2).foregroundStyle(.secondary) }
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "checkmark").font(.caption.weight(.semibold))
@@ -210,6 +242,6 @@ struct StatusPanel: View {
                 .background(selected ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
                 .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(selected ? Color.accentColor.opacity(0.4) : Color.primary.opacity(0.06)))
         }.buttonStyle(.plain).disabled(store.busy || profile == nil)
-            .accessibilityLabel("控制 \(agent.name)\(selected ? "，当前配置" : "")")
+            .accessibilityLabel("控制 \(name)\(selected ? "，当前配置" : "")")
     }
 }
