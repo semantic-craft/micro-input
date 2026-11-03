@@ -31,6 +31,17 @@ def verify_evidence(run, scenario, started, process_alive):
         if len({r["profile_id"] for r in rows}) != 8 or sum(r["binding_id"] in ("AG10", "AG11") for r in rows) != 1:
             raise ValueError("profile/wide-key regression")
         result["receipt_count"] = len(rows)
+    elif scenario == "diagnostic-export":
+        diagnostics = json.loads((evidence / "diagnostics.json").read_text())
+        expected = {
+            "status": "PASS",
+            "failure_stage": "config_read",
+            "physical_key": "NOT_RUN",
+            "lighting_visual": "NOT_RUN",
+        }
+        if diagnostics != expected:
+            raise ValueError("diagnostic export evidence incomplete or overclaimed")
+        result.update(diagnostic_export="PASS", failure_stage="config_read")
     else:
         rows = [json.loads(line) for line in (evidence / "device-operations.jsonl").read_text().splitlines()]
         if len(rows) != 2 or any(r["phase"] != "Verified" or r["config_readback"] != "PASS" or r["physical_key"] != "NOT_RUN" or r["lighting_visual"] != "NOT_RUN" for r in rows):
@@ -69,10 +80,22 @@ def main():
         if not args.qa_only:
             subprocess.run(["scripts/check"], cwd=ROOT, env=env, check=True)
         subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, env=env, check=True)
-        for scenario in ("host-execution", "config-write", "lighting-control"):
+        for scenario in ("host-execution", "config-write", "lighting-control", "diagnostic-export"):
             started = int(time.time() * 1000)
+            scenario_env = dict(env, MI_SYNTHETIC_SCENARIO=scenario)
+            if scenario == "diagnostic-export":
+                qa_runs = ROOT / ".scratch/qa-runs"
+                qa_runs.mkdir(mode=0o700, parents=True, exist_ok=True)
+                run_dir = qa_runs / f"{started}-{os.getpid()}"
+                run_dir_index = 0
+                while run_dir.exists():
+                    run_dir_index += 1
+                    run_dir = qa_runs / f"{started}-{os.getpid()}-{run_dir_index}"
+                run_dir.mkdir(mode=0o700)
+                scenario_env["MI_QA_RUN_DIR"] = str(run_dir)
+                scenario_env["MI_DIAGNOSTIC_EVIDENCE_PATH"] = str(run_dir / "evidence/diagnostic-report.json")
             proc = subprocess.Popen(["scripts/run", "--verify", "--timeout=45"], cwd=ROOT,
-                                    env=dict(env, MI_SYNTHETIC_SCENARIO=scenario),
+                                    env=scenario_env,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             try:
                 output, _ = proc.communicate(timeout=90)

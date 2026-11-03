@@ -8,6 +8,7 @@ struct Workbench: View {
     @State private var reviewing = false
     @State private var choosingMacro = false
     @State private var choosingMulti = false
+    @State private var showingDiagnosticExport = false
     @State private var search = ""
     @State private var showDiagnostics = false
     @State private var showOtherProfiles = false
@@ -191,6 +192,9 @@ struct Workbench: View {
         .sheet(isPresented: $choosingMacro) { MacroLibraryView(store: store) }
         .sheet(isPresented: $reviewing) { diffSheet }
         .sheet(isPresented: $naming) { nameSheet }
+        .sheet(isPresented: $showingDiagnosticExport) {
+            DiagnosticsExportView(store: store, close: { showingDiagnosticExport = false })
+        }
         .alert(deleteLayer ? "删除所选层？" : "删除所选配置？", isPresented:$deleting) {
             Button("取消",role:.cancel) {}
             Button("删除",role:.destructive) {Task {if deleteLayer {await store.deleteLayer()} else {await store.deleteProfile()}}}
@@ -203,6 +207,9 @@ struct Workbench: View {
         .accentColor(Color(red: 0.20, green: 0.43, blue: 0.34))
         .task {
             if store.snapshot == nil { await store.loadWorkbench() }
+            if ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == "diagnostic-export" {
+                showingDiagnosticExport = true
+            }
             if (ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? "").isEmpty {
                 await store.prepareDesktopProfiles()
             }
@@ -239,6 +246,7 @@ struct Workbench: View {
                 Button("读取设备配置") { Task { await store.readDeviceConfig() } }
                     .disabled(store.busy || store.connectedID == nil || store.connectedID != store.selectedDeviceID || !["0.6.3", "synthetic-0.6.3"].contains(store.identity?.version ?? ""))
                 Button("断开") { Task { await store.suspend() } }.disabled(!store.canDisconnect)
+                Button("导出诊断") { showingDiagnosticExport = true }
                 if store.browsingDeviceSnapshot {
                     Button("从快照新建草稿") {Task {await store.createDraftFromSnapshot()}}
                         .disabled(store.busy || store.stale || store.connectedID == nil)

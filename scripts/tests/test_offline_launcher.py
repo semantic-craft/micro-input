@@ -37,6 +37,14 @@ class OfflineEvidenceTests(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(result["lighting_visual"], "NOT_RUN")
 
+    def test_diagnostic_export_requires_only_sanitized_wrapper(self):
+        (self.evidence / "diagnostics.json").write_text(json.dumps(dict(status="PASS", failure_stage="config_read", physical_key="NOT_RUN", lighting_visual="NOT_RUN")))
+        result = module.verify_evidence(self.run, "diagnostic-export", 99, lambda _: False)
+        self.assertEqual(result["diagnostic_export"], "PASS")
+        (self.evidence / "diagnostics.json").write_text(json.dumps(dict(status="PASS", failure_stage="config_read", physical_key="PASS", lighting_visual="NOT_RUN")))
+        with self.assertRaises(ValueError):
+            module.verify_evidence(self.run, "diagnostic-export", 99, lambda _: False)
+
     def test_stale_evidence_live_process_cleanup_and_overclaim_fail(self):
         for modify in (lambda: self.launcher.update(started_ms=98),
                        lambda: self.launcher.update(documents_removed=False)):

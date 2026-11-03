@@ -218,6 +218,7 @@ extension MicroInput: Backend {}
     @Published var catalog: [CatalogAction] = []
     @Published var library = ActionLibraryState()
     @Published var actionCapabilities: [String:ActionCapability] = [:]
+    @Published private(set) var lastFailure: DiagnosticFailure?
     private var libraryGeneration = 0
     private var libraryQuery = "", libraryCategory = "全部"
     private var libraryFavoritesOnly = false
@@ -278,6 +279,7 @@ extension MicroInput: Backend {}
             let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
             if scenario == "lighting-control" { await runSyntheticLightingScenario() }
             else if scenario == "config-write" { await runSyntheticDeviceOperationScenario() }
+            else if scenario == "diagnostic-export", !preparedDiagnosticScenario { await prepareDiagnosticExportScenario() }
             else if ["reconnect", "reconnect-transient", "apply-preparation"].contains(scenario), !preparedReconnectScenario {
                 await prepareReconnectScenario()
             } else if scenario == "host-execution", !preparedHostExecutionScenario {
@@ -288,7 +290,12 @@ extension MicroInput: Backend {}
                 await autoSetupHostExecutionIfNeeded()
             }
             await searchActions(query: "", category: "全部", favoritesOnly: false)
-        } catch { status = readableError(error); documentReady = false }
+        } catch {
+            let message = readableError(error)
+            recordFailure(stage: "workbench_load", message: message)
+            status = message
+            documentReady = false
+        }
     }
     private func restoreSelection(profile id: String?, layer lid: String?, fallbackProfile: Int, fallbackLayer: Int) {
         profileIndex = snapshot?.profiles.firstIndex(where: {$0.id.text == id}) ?? min(fallbackProfile, max(0, (snapshot?.profiles.count ?? 0)-1))
@@ -582,6 +589,13 @@ extension MicroInput: Backend {}
     #if MI_SYNTHETIC_BACKEND
     private var preparedReconnectScenario=false
     private var preparedHostExecutionScenario=false
+    private var preparedDiagnosticScenario=false
+    private func prepareDiagnosticExportScenario() async {
+        preparedDiagnosticScenario = true
+        await loadDemo()
+        recordFailure(stage: "config_read", message: "诊断导出夹具 · 配置读取失败")
+        status = "配置读取失败 · 诊断导出夹具"
+    }
     private func prepareReconnectScenario() async {
         preparedReconnectScenario=true
         guard let core=backend as? MicroInputCore.MicroInput else {return}
@@ -830,6 +844,7 @@ extension MicroInput: Backend {}
     }
     func discoveryFailed(_ message: String) {
         guard !systemSleeping, !stopped else { return }
+        recordFailure(stage: "usb_discovery", message: message)
         devices = []; selectedDeviceID = nil
         discoveryStatus = "发现失败 · \(message)"
     }
@@ -901,7 +916,13 @@ extension MicroInput: Backend {}
                 guard !Task.isCancelled, !reason.isEmpty, let self, token == self.generation else { return }
                 self.retireConnection(reason)
             }
-        } catch { if token == generation { pendingID = nil; stale = snapshot != nil; status = "连接失败 · \(readableError(error))" } }
+        } catch {
+            guard token == generation else { return }
+            let message = readableError(error)
+            pendingID = nil; stale = snapshot != nil
+            recordFailure(stage: "device_connect", message: message)
+            status = "连接失败 · \(message)"
+        }
     }
     func readIdentity() async {
         guard !busy, connectedID != nil else { return }
@@ -915,7 +936,12 @@ extension MicroInput: Backend {}
             identityStatus = "身份已读回 · \(result.sourceMethod)"
             status = "设备身份已读回 · 固件 \(result.version ?? "未知") · 配置尚未读取"
             refreshPassthroughHealth()
-        } catch { if token == generation { identityStatus = "身份读取失败 · \(readableError(error))" } }
+        } catch {
+            guard token == generation else { return }
+            let message = readableError(error)
+            recordFailure(stage: "identity_read", message: message)
+            identityStatus = "身份读取失败 · \(message)"
+        }
     }
     func readDeviceConfig() async {
         guard !busy, connectedID != nil else { return }
@@ -934,7 +960,13 @@ extension MicroInput: Backend {}
             snapshot = result; browsingDeviceSnapshot = true; stale = false; selectProfile(0)
             status = result.source == "DeviceSnapshot" ? "设备快照 · 只读 · 已核对文件大小及摘要" : "合成设备夹具 · 只读 · 不是实际设备快照"
             refreshPassthroughHealth()
-        } catch { if token == generation { stale = snapshot != nil; status = "配置读取失败 · \(readableError(error))" } }
+        } catch {
+            guard token == generation else { return }
+            let message = readableError(error)
+            stale = snapshot != nil
+            recordFailure(stage: "config_read", message: message)
+            status = "配置读取失败 · \(message)"
+        }
     }
 
     private func retireConnection(_ reason: String) {
@@ -1029,4 +1061,78 @@ func readableError(_ error: Error) -> String {
         return message
     }
     return error.localizedDescription
+}
+
+extension Store {
+    func recordFailure(stage: String, message: String) {
+        lastFailure = DiagnosticFailure(
+            stage: stage,
+            message: DiagnosticRedactor.sanitize(message),
+            timestampMs: UInt64(Date().timeIntervalSince1970 * 1000)
+        )
+    }
+
+    func makeDiagnosticReport() async -> DiagnosticsReport {
+        refreshOperationCapabilities()
+        let info = Bundle.main.infoDictionary
+        let connectionPhase: String
+        if stopped {
+            connectionPhase = "application_stopped"
+        } else if systemSleeping {
+            connectionPhase = "system_sleeping"
+        } else if connectedID != nil {
+            connectionPhase = "connected"
+        } else if pendingID != nil {
+            connectionPhase = "connecting"
+        } else if selectedDeviceID != nil {
+            connectionPhase = "candidate_selected"
+        } else {
+            connectionPhase = "disconnected"
+        }
+        return DiagnosticsReport(
+            schemaVersion: 1,
+            generatedAtMs: UInt64(Date().timeIntervalSince1970 * 1000),
+            application: DiagnosticsApplication(
+                version: info?["CFBundleShortVersionString"] as? String ?? "development",
+                build: info?["CFBundleVersion"] as? String ?? "unversioned"
+            ),
+            environment: DiagnosticsEnvironment(
+                osVersion: ProcessInfo.processInfo.operatingSystemVersionString
+            ),
+            connection: DiagnosticsConnection(
+                phase: connectionPhase,
+                candidateCount: devices.count,
+                selectedCandidate: selectedDeviceID != nil,
+                stale: stale
+            ),
+            document: DiagnosticsDocument(
+                source: snapshot?.source ?? "none",
+                revision: draft.revision,
+                readOnly: draft.read_only
+            ),
+            capabilities: operationCapabilities,
+            inputMonitorReady: await backend.inputMonitoringStatus(),
+            statusMessage: DiagnosticRedactor.sanitize(status),
+            discoveryMessage: DiagnosticRedactor.sanitize(discoveryStatus),
+            lastFailure: lastFailure,
+            lastHostAction: lastHostActionReceipt.map {
+                DiagnosticsHostAction(actionType: $0.actionType, outcome: $0.outcome, succeeded: $0.succeeded)
+            }
+        )
+    }
+
+    func diagnosticJSON() async throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted, .withoutEscapingSlashes]
+        return String(decoding: try encoder.encode(await makeDiagnosticReport()), as: UTF8.self)
+    }
+
+    func writeDiagnosticReport(to url: URL) async throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .prettyPrinted, .withoutEscapingSlashes]
+        let data = try encoder.encode(await makeDiagnosticReport())
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
 }
