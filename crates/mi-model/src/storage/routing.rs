@@ -46,7 +46,7 @@ impl DocumentStore {
             .as_ref()
             .and_then(|id| graph.profiles.get(id));
         let bindings = [
-            "AG01", "AG00", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10",
+            "AG00", "AG01", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10",
             "AG12", "AG13", "AG14", "ENC_CLK", "AG15", "AG16", "AG17", "AG18",
         ];
         let keys: Vec<Value> = bindings.iter().map(|binding| {
@@ -144,6 +144,12 @@ mod tests {
         store.update_routing(select).unwrap();
         assert_eq!(store.host_revision(), 1);
         assert_eq!(store.routing_state()["manual_override"], true);
+        // The HUD must keep physical left-to-right order, not the former inverted IDs.
+        let keys = store.routing_state()["keys"].as_array().unwrap().clone();
+        assert_eq!(keys[0]["binding_id"], "AG00");
+        assert_eq!(keys[0]["control"], "row0-col0-left");
+        assert_eq!(keys[1]["binding_id"], "AG01");
+        assert_eq!(keys[1]["control"], "row0-col1-right");
         assert!(store.update_routing(old).is_err());
         let same = request(&store, json!({"kind":"select","profile_id":ids[0]}));
         store.update_routing(same).unwrap();

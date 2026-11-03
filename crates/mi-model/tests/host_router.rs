@@ -11,9 +11,9 @@ use mi_model::{
 use serde_json::json;
 
 #[test]
-fn binding_to_logical_slot_handles_row0_inversion_and_joystick_sectors() {
-    assert_eq!(binding_to_logical_slot("AG01"), Some("logical-0"));
-    assert_eq!(binding_to_logical_slot("AG00"), Some("logical-1"));
+fn binding_to_logical_slot_handles_observed_row0_order_and_joystick_sectors() {
+    assert_eq!(binding_to_logical_slot("AG00"), Some("logical-0"));
+    assert_eq!(binding_to_logical_slot("AG01"), Some("logical-1"));
     assert_eq!(binding_to_logical_slot("AG02"), Some("logical-2"));
     assert_eq!(binding_to_logical_slot("AG10"), Some("logical-10"));
     assert_eq!(binding_to_logical_slot("AG11"), Some("logical-11"));
@@ -167,10 +167,10 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     let herdr_pid = &created[1];
     let dsh_pid = &created[2];
     // Released events never trigger host actions
-    assert!(resolve_host_action(&draft.document, Some(ag_pid), "AG01", false).is_none());
+    assert!(resolve_host_action(&draft.document, Some(ag_pid), "AG00", false).is_none());
 
-    // AG01 maps to logical-0 (Antigravity: OpenApp com.google.antigravity)
-    let resolved_0 = resolve_host_action(&draft.document, Some(ag_pid), "AG01", true).unwrap();
+    // AG00 maps to logical-0 (Antigravity: OpenApp com.google.antigravity)
+    let resolved_0 = resolve_host_action(&draft.document, Some(ag_pid), "AG00", true).unwrap();
     assert_eq!(
         resolved_0,
         ResolvedHostAction::OpenApp {
@@ -179,7 +179,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     );
 
     assert_eq!(
-        resolve_host_action(&draft.document, Some(ag_pid), "AG00", true).unwrap(),
+        resolve_host_action(&draft.document, Some(ag_pid), "AG01", true).unwrap(),
         ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
             command: "focus-input".into()
@@ -191,12 +191,12 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         }
     }
     assert_eq!(
-        resolve_host_action(&draft.document, Some(herdr_pid), "AG01", true).unwrap(),
+        resolve_host_action(&draft.document, Some(herdr_pid), "AG00", true).unwrap(),
         ResolvedHostAction::OpenApp {
             bundle_id: "dev.herdr.app".into()
         }
     );
-    for binding in ["AG00", "AG02", "AG10", "ENC_CLK"] {
+    for binding in ["AG01", "AG02", "AG10", "ENC_CLK"] {
         assert!(
             matches!(resolve_host_action(&draft.document, Some(herdr_pid), binding, true),
             Some(ResolvedHostAction::Shortcut { target_bundle_id: Some(ref target), .. }) if target == "dev.herdr.app")
@@ -204,7 +204,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     }
 
     assert_eq!(
-        resolve_host_action(&draft.document, Some(dsh_pid), "AG01", true).unwrap(),
+        resolve_host_action(&draft.document, Some(dsh_pid), "AG00", true).unwrap(),
         ResolvedHostAction::OpenApp {
             bundle_id: "com.deepseek.dsh".into()
         }
@@ -398,12 +398,12 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
             .0
             .clone();
         assert_eq!(
-            resolve_host_action(&draft.document, Some(&pid), "AG01", true),
+            resolve_host_action(&draft.document, Some(&pid), "AG00", true),
             Some(ResolvedHostAction::OpenApp {
                 bundle_id: bundle.into()
             })
         );
-        assert!(resolve_host_action(&draft.document, Some(&pid), "AG01", false).is_none());
+        assert!(resolve_host_action(&draft.document, Some(&pid), "AG00", false).is_none());
         assert!(
             resolve_host_action(&draft.document, Some(&pid), "AG10", true).is_none(),
             "no unverified submit/approval action"

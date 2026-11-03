@@ -147,15 +147,15 @@ pub struct PhysicalControlSpec {
 
 pub fn verified_physical_mapping(binding_id: &str) -> Option<PhysicalControlSpec> {
     let spec = match binding_id {
-        "AG01" => PhysicalControlSpec {
-            binding_id: "AG01",
+        "AG00" => PhysicalControlSpec {
+            binding_id: "AG00",
             logical_switch: "logical-0",
             physical_control: "row0-col0-left",
             keycap_group: "key-r0c0",
             action_role: "momentary_key",
         },
-        "AG00" => PhysicalControlSpec {
-            binding_id: "AG00",
+        "AG01" => PhysicalControlSpec {
+            binding_id: "AG01",
             logical_switch: "logical-1",
             physical_control: "row0-col1-right",
             keycap_group: "key-r0c1",

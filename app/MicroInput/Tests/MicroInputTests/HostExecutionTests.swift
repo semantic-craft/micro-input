@@ -79,7 +79,7 @@ final class HostExecutionTests: XCTestCase {
         // must fall back to "Antigravity" (and not profile_order.first() "日常办公").
         await reopened.setHostActiveProfile(nil)
         XCTAssertEqual(reopened.hostActiveProfileId, antigravity?.id.text)
-        let fallbackAction = try XCTUnwrap(reopened.resolveInputActionForTesting(bindingId: "AG01"))
+        let fallbackAction = try XCTUnwrap(reopened.resolveInputActionForTesting(bindingId: "AG00"))
         XCTAssertTrue(fallbackAction.contains("com.google.antigravity"))
 
         await store.shutdown()
@@ -263,11 +263,11 @@ final class HostExecutionTests: XCTestCase {
         // Wait briefly for hostInputLoop task to subscribe
         try await Task.sleep(nanoseconds: 50_000_000)
 
-        // 1. Row-0 inversion: AG01 -> logical-0 (OpenApp com.google.antigravity) and AG00 -> logical-1 (Cmd+L)
-        try await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: true)
-        try await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: false)
+        // 1. Observed row-0 order: AG00 -> logical-0 (OpenApp com.google.antigravity) and AG01 -> logical-1 (Cmd+L)
         try await core.emitSyntheticBindingEvent(bindingId: "AG00", pressed: true)
         try await core.emitSyntheticBindingEvent(bindingId: "AG00", pressed: false)
+        try await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: true)
+        try await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: false)
 
         // 2. WideKeyMerger: AG10 press + AG11 press + AG10 release + AG11 release -> exactly 1 Cmd+Return action
         try await core.emitSyntheticBindingEvent(bindingId: "AG10", pressed: true)
@@ -284,11 +284,11 @@ final class HostExecutionTests: XCTestCase {
         }
 
         XCTAssertEqual(executor.receipts.count, 2)
-        XCTAssertEqual(executor.receipts[0].bindingId, "AG01")
+        XCTAssertEqual(executor.receipts[0].bindingId, "AG00")
         XCTAssertEqual(executor.receipts[0].actionType, "open_app")
         XCTAssertEqual(executor.receipts[0].target, "com.google.antigravity")
 
-        XCTAssertEqual(executor.receipts[1].bindingId, "AG00")
+        XCTAssertEqual(executor.receipts[1].bindingId, "AG01")
         XCTAssertEqual(executor.receipts[1].actionType, "agent_command")
         XCTAssertEqual(executor.receipts[1].target, "antigravity")
         XCTAssertEqual(executor.receipts[1].detail, "antigravity/focus-input")
@@ -333,20 +333,20 @@ final class HostExecutionTests: XCTestCase {
         store.resumeInput()
         try await Task.sleep(nanoseconds: 50_000_000)
         // Quarantine the first held press until an observed release.
-        try await core.emitSyntheticBindingEvent(bindingId: "AG00", pressed: true)
-        try await core.emitSyntheticBindingEvent(bindingId: "AG00", pressed: false)
+        try await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: true)
+        try await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: false)
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertTrue(executor.receipts.isEmpty)
         // A fresh press after release is eligible.
-        try await core.emitSyntheticBindingEvent(bindingId: "AG00", pressed: true)
-        try await core.emitSyntheticBindingEvent(bindingId: "AG00", pressed: false)
+        try await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: true)
+        try await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: false)
 
         for _ in 0..<25 where executor.receipts.isEmpty {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
 
         XCTAssertEqual(executor.receipts.count, 1)
-        XCTAssertEqual(executor.receipts.first?.bindingId, "AG00")
+        XCTAssertEqual(executor.receipts.first?.bindingId, "AG01")
         XCTAssertEqual(executor.receipts.first?.actionType, "agent_command")
         XCTAssertEqual(executor.receipts.first?.target, "antigravity")
         XCTAssertEqual(executor.receipts.first?.detail, "antigravity/focus-input")

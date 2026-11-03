@@ -147,3 +147,10 @@
 - 回归：`same_target_external_change_is_never_overwritten` 覆盖更新与恢复两条路径；修复前失败、修复后通过。该合成协议不构成固件具有原子比较能力的证据。Seen 1x（2026-11-03）。
 - 2026-11-03：切换水位必须取自唯一 reader 的入站序号，不能取消费者解码进度。未读的旧摇杆离中通知仍须按序更新物理状态；换扇区不能当作回中。回归：`testUnreadPreCutoffNorthRequiresRealCenterBeforeEast` 与 `ingress_watermark_precedes_decode_and_preserves_unread_radial_state`。
 - 2026-11-03：异步 Backend 测试替身不自动运行在 MainActor。跨 executor 暴露 continuation 时必须同步发布；无锁轮询会偶发在 `CheckedContinuation.resume` 崩溃。`NavigationTests.DelayedBackend` 使用 NSLock 保证读写一致。
+
+## 绑定 ID 不能仅凭静态排列认定物理左右
+
+- 起因：将首行 AG01/AG00 反转写入“已验证”映射，合成用例又复用了同一假设。真实左键触发了右侧的聚焦动作。
+- 实测：2026-11-03，在固件 0.6.3、Profile 0／Layer 1 下逐颗确认：左键 AG00、右键 AG01；候选流和映射流的绑定 ID 一致，按下/释放完整，采集前后活动索引不变。
+- 修复：按实机证据修正路由、速查顺序与标签、UI 试运行和合成输入；不写设备，不迁移用户逻辑槽位。
+- 回归：`verified_input_maps_observed_row0_order_joystick_sectors_and_merges_wide_key` 修复前因 AG00 被映射到 logical-1 而失败，修复后通过。物理验收一次只提示一颗键，收到回执后再继续；不把复合口令的模糊结果判成证据。
