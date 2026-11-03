@@ -63,6 +63,23 @@ pub(crate) fn known_value(key: &str, value: &Value) -> bool {
     }
 }
 impl Lighting {
+    pub fn creator_micro_2_defaults() -> Self {
+        Self {
+            backlight: json!({"effect":"solid","brightness":1.0,"speed":0.5,"magic":1.0,"color":16777215}),
+            underglow: json!({"effect":"rainbow","brightness":1.0,"speed":0.55,"magic":1.0,"color":16777215}),
+        }
+    }
+    pub(crate) fn complete_known(&self) -> bool {
+        [Zone::Backlight, Zone::Underglow].into_iter().all(|zone| {
+            self.zone(zone).as_object().is_some_and(|fields| {
+                fields.len() == 5
+                    && ["effect", "brightness", "speed", "magic", "color"]
+                        .into_iter()
+                        .all(|key| fields.get(key).is_some_and(|v| known_value(key, v)))
+            })
+        })
+    }
+
     pub fn from_lights(lights: &Lights) -> Self {
         Self {
             backlight: lights.backlight.clone(),
@@ -115,6 +132,42 @@ impl Lighting {
     }
 }
 impl LocalDocumentV2 {
+    pub fn can_add_lighting(&self, lid: &str) -> bool {
+        let Some(layer) = self.editable.graph.layers.get(lid) else {
+            return false;
+        };
+        if layer.lighting.is_some() {
+            return false;
+        }
+        let Some(source) = self.editable.source_refs.get(lid) else {
+            return false;
+        };
+        let Ok(config) = crate::comparison::base_config(self) else {
+            return false;
+        };
+        let Some(profiles) = config.raw["profiles"].as_array() else {
+            return false;
+        };
+        let profiles: Vec<_> = profiles
+            .iter()
+            .filter(|p| p["id"] == source["profile_source_id"])
+            .collect();
+        if profiles.len() != 1 {
+            return false;
+        }
+        let Some(layers) = profiles[0]["layers"].as_array() else {
+            return false;
+        };
+        let layers: Vec<_> = layers
+            .iter()
+            .filter(|l| l["id"] == source["source_id"])
+            .collect();
+        layers.len() == 1
+            && layers[0]
+                .as_object()
+                .is_some_and(|l| !l.contains_key("lights"))
+    }
+
     pub fn lighting(&self, lid: &str) -> Result<Lighting, String> {
         let layer = self.editable.graph.layers.get(lid).ok_or("层不存在")?;
         if let Some(target) = &layer.lighting {
@@ -132,6 +185,17 @@ impl LocalDocumentV2 {
     }
 }
 impl Draft {
+    pub fn add_lighting(&mut self, lid: &str) -> Result<(), String> {
+        self.mutate(|doc| {
+            if !doc.can_add_lighting(lid) {
+                return Err("只能为来源中缺少 lights 的层添加灯光；已有或未知结构保持原值".into());
+            }
+            doc.editable.graph.layers.get_mut(lid).unwrap().lighting =
+                Some(Lighting::creator_micro_2_defaults());
+            Ok(())
+        })
+    }
+
     /// One history entry, including all-layer edits. Any invalid target rejects the whole edit.
     pub fn edit_lighting(
         &mut self,

@@ -1,15 +1,15 @@
-//! Offline `lights.preview` candidate encoding, without native sending authority.
+//! Fixed `lights.preview` encoding; sending authority belongs to the session preview.
 //!
 //! Input 1.1.0 passes the two-zone DTO directly as params (IA-17). Optional
 //! fields stay omitted; no defaults, target binding, readback, or restoration
 //! semantics are inferred. The known effects and numeric bounds below are
 //! client policy, not evidence of firmware acceptance or visual behavior.
 use crate::ProtoError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Only the known DTO fields can enter a candidate. Unknown source fields must
 /// remain in their original model; this type is not a lossless config editor.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LightingZoneCandidate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effect: Option<String>,
@@ -23,7 +23,7 @@ pub struct LightingZoneCandidate {
     pub color: Option<u32>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LightingPreviewCandidate {
     pub backlight: LightingZoneCandidate,
     pub underglow: LightingZoneCandidate,

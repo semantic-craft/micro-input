@@ -50,7 +50,7 @@ extension Store {
     }
     func performDeviceOperation(token: String, restore: Bool = false) async {
         guard !deviceOperationRunning else { return }
-        guard lightingPreviewToken == nil else { status = "请先结束灯光预览并确认恢复"; return }
+        guard lightingPreviewToken == nil else { status = "请先结束灯光预览"; return }
         refreshOperationCapabilities()
         guard restore ? operationCapabilities.restore : operationCapabilities.apply else { status = operationCapabilities.reason; return }
         deviceOperationRunning = true
