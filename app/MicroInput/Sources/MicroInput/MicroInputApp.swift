@@ -189,8 +189,8 @@ struct StatusPanel: View {
                 Menu("其他配置") {
                     ForEach(otherProfiles, id: \.id.text) { p in
                         Button { Task { await store.setHostActiveProfile(p.id.text) } } label: {
-                            if store.hostActiveProfileId == p.id.text { Label(p.name, systemImage: "checkmark") }
-                            else { Text(p.name) }
+                            if store.hostActiveProfileId == p.id.text { Label(DesktopAgent.displayName(p.name), systemImage: "checkmark") }
+                            else { Text(DesktopAgent.displayName(p.name)) }
                         }.disabled(store.busy)
                     }
                     if otherProfiles.isEmpty { Text("没有其他配置") }
@@ -201,8 +201,8 @@ struct StatusPanel: View {
                                 ForEach(menuProfiles, id: \.id.text) { profile in
                                     Button { pin(profile, at: index) } label: {
                                         if favorites.indices.contains(index), favorites[index].id.text == profile.id.text {
-                                            Label(profile.name, systemImage: "checkmark")
-                                        } else { Text(profile.name) }
+                                            Label(DesktopAgent.displayName(profile.name), systemImage: "checkmark")
+                                        } else { Text(DesktopAgent.displayName(profile.name)) }
                                     }
                                 }
                             }
@@ -255,7 +255,7 @@ struct StatusPanel: View {
         let profile = favorites.indices.contains(index) ? favorites[index] : nil
         let name = profile?.name ?? "未设置"
         let agent = DesktopAgent.named(name)
-        let title = name == "DeepSeek Coder (DSH)" ? "DSH" : name
+        let title = DesktopAgent.displayName(name)
         let selected = profile != nil && store.hostActiveProfileId == profile?.id.text
         return Button {
             guard let profile else { return }
@@ -264,7 +264,7 @@ struct StatusPanel: View {
             HStack(spacing: 8) {
                 AgentBadge(name: name, size: 28)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                    Text(title).font(.system(size: 12, weight: .medium)).lineLimit(2).fixedSize(horizontal: false, vertical: true)
                     Text(selected ? "正在控制" : (agent?.installed == false ? "未安装" : "切换配置"))
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                 }
@@ -276,6 +276,6 @@ struct StatusPanel: View {
                 .background(selected ? Color.accentColor.opacity(0.08) : Color(nsColor: .controlBackgroundColor).opacity(0.65), in: RoundedRectangle(cornerRadius: 9))
                 .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(selected ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.06)))
         }.buttonStyle(.plain).disabled(store.busy || profile == nil)
-            .accessibilityLabel("控制 \(name)\(selected ? "，当前配置" : "")")
+            .accessibilityLabel("控制 \(title)\(selected ? "，当前配置" : "")")
     }
 }

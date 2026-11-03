@@ -309,7 +309,7 @@ enum AuditLogWriter {
             if adapter == "herdr" {
                 return await HerdrAdapter.shared.executeCommand(cmd)
             } else if adapter == "dsh" {
-                return (false, "旧 DSH CLI 操作未接入；请使用桌面 DSH 配置")
+                return (false, "旧 DSH CLI 操作未接入；请使用桌面 Deepseek Harness 配置")
             }
             return (false, "未知适配器 \(adapter)")
 
@@ -319,7 +319,7 @@ enum AuditLogWriter {
             if adapter == "herdr" {
                 return await HerdrAdapter.shared.focusSession(session)
             } else if adapter == "dsh" {
-                return (false, "旧 DSH 会话占位符不可执行；请使用桌面 DSH 配置")
+                return (false, "旧 DSH 会话占位符不可执行；请使用桌面 Deepseek Harness 配置")
             }
             return (false, "未知适配器 \(adapter)")
 
