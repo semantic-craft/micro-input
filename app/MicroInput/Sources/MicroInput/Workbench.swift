@@ -9,6 +9,8 @@ struct Workbench: View {
     @State private var choosingMacro = false
     @State private var choosingMulti = false
     @State private var search = ""
+    @State private var showDiagnostics = false
+    @State private var showOtherProfiles = false
     @State private var category = "全部"
     @State private var favoritesOnly = false
     @State private var candidate: CatalogAction?
@@ -40,20 +42,19 @@ struct Workbench: View {
     func label(_ slot: Int) -> String { if let a = action(slot) {return a.name}; guard bindings.indices.contains(slot) else {return "未知"}; return bindings[slot].bindingLabel }
     var body: some View {
         VStack(spacing: 0) {
-            discoveryPanel
-            InputMonitorPanel(store: store)
-            Divider()
             HStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 16) {
                     Label("Micro Input", systemImage: "keyboard").font(.headline)
-                    Text(store.browsingDeviceSnapshot ? "设备配置 · 只读" : "我的本地配置").font(.caption).foregroundStyle(.secondary)
+                    Text(store.browsingDeviceSnapshot ? "设备配置 · 只读" : "常用 AGENT").font(.caption).foregroundStyle(.secondary)
                     if let snapshot = store.snapshot {
-                        ForEach(snapshot.profiles.indices, id: \.self) { i in
+                        ForEach(visibleProfileIndices, id: \.self) { i in
                             Button { store.selectProfile(i) } label: {
-                                HStack { Text(snapshot.profiles[i].name); Spacer(); if i == store.profileIndex { Image(systemName: "checkmark") } }.padding(10).background(i == store.profileIndex ? Color.accentColor.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                                HStack(spacing: 10) { AgentBadge(name: snapshot.profiles[i].name); Text(snapshot.profiles[i].name).fontWeight(.medium); Spacer(); if i == store.profileIndex { Image(systemName: "checkmark").font(.caption) } }.padding(10).background(i == store.profileIndex ? Color.accentColor.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
                             }.buttonStyle(.plain)
                         }
                     }
+                    Toggle("显示其他配置", isOn: $showOtherProfiles).toggleStyle(.checkbox).font(.caption)
+                    Divider()
                     Menu("管理配置") {
                         Button("新建配置") { promptName("新建配置") }
                         Button("重命名配置") { promptName("重命名配置") }.disabled(store.profile == nil)
@@ -63,24 +64,45 @@ struct Workbench: View {
                         Button("下移配置") { Task { await store.moveProfile(by: 1) } }.disabled(store.profileIndex + 1 >= (store.snapshot?.profiles.count ?? 0))
                         Button("删除配置…", role: .destructive) {deleteLayer=false;deleting=true}.disabled(store.profile == nil)
                     }.disabled(!store.canEditDraft || store.busy)
-                    PresetMenu(store: store)
-                    DocumentRecoveryMenu(store: store)
-                    AgentProposalButton(store: store)
-                    Button("准备基础绑定应用…") { Task {await store.previewApply()} }.disabled(!store.canEditDraft || store.busy)
+                    DisclosureGroup("配置工具") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            PresetMenu(store: store)
+                            DocumentRecoveryMenu(store: store)
+                            AgentProposalButton(store: store)
+                            Button("补齐 Agent 配置") { Task { await store.installCodingAgentPresets() } }
+                            Button("准备基础绑定应用…") { Task { await store.previewApply() } }
+                        }.padding(.top, 8).disabled(!store.canEditDraft || store.busy)
+                    }.font(.caption)
                     Text("切换配置不会应用到设备。").font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Label(store.browsingDeviceSnapshot ? (store.snapshot?.source == "DeviceSnapshot" ? "设备快照 · 只读" : "合成夹具 · 只读") : "本地草稿", systemImage: store.browsingDeviceSnapshot ? "eye" : "doc")
                     Text(store.browsingDeviceSnapshot ? "浏览不会激活设备配置\n原本地草稿已保留" : "设备活动配置：未知\n草稿自动保存到本机").font(.caption).foregroundStyle(.secondary)
-                }.padding(20).frame(width: 215).background(.quaternary.opacity(0.3))
+                }.padding(20).frame(width: 230).background(Color.accentColor.opacity(0.045))
                 Divider()
                 VStack(spacing: 0) {
                     HStack {
                         VStack(alignment: .leading, spacing: 7) { Text(store.profile?.name ?? (store.snapshot == nil ? "载入中" : "暂无配置")).font(.title.bold()); Text(store.browsingDeviceSnapshot ? "设备快照只读；点选控件查看绑定。" : "点选控件，设置它要做的事。").foregroundStyle(.secondary) }
                         Spacer()
+                        Toggle("按键控制", isOn: Binding(get: { store.hostExecutionEnabled }, set: { value in Task { await store.setHostExecutionEnabled(value) } }))
+                            .toggleStyle(.switch).controlSize(.small).fixedSize()
                         Button { Task { await store.undoDraft() } } label: { Image(systemName: "arrow.uturn.backward") }.help("撤销").accessibilityLabel("撤销").disabled(!store.canEditDraft || !store.draft.can_undo || store.busy)
                         Button { Task { await store.undoDraft(redo: true) } } label: { Image(systemName: "arrow.uturn.forward") }.help("重做").accessibilityLabel("重做").disabled(!store.canEditDraft || !store.draft.can_redo || store.busy)
                         Button("查看变更 · \(changeCount)") { reviewing = true }.disabled(store.browsingDeviceSnapshot)
                     }.padding(24)
+                    if let agent = DesktopAgent.named(store.profile?.name ?? ""), !store.browsingDeviceSnapshot {
+                        HStack(spacing: 12) {
+                            AgentBadge(name: agent.name)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(agent.installed ? "应用已安装" : "未找到目标应用").font(.callout.weight(.medium))
+                                Text(agent.capabilities).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("打开应用") { Task { await store.openDesktopAgent(agent) } }.disabled(!agent.installed)
+                            Button(store.hostActiveProfileId == store.profile?.id.text ? "当前控制配置" : "启用此配置") {
+                                Task { await store.setHostActiveProfile(store.profile?.id.text) }
+                            }.disabled(store.hostActiveProfileId == store.profile?.id.text || store.busy)
+                        }.padding(14).background(Color.accentColor.opacity(0.055), in: RoundedRectangle(cornerRadius: 10)).padding(.horizontal, 24).padding(.bottom, 16)
+                    }
                     Divider()
                     HStack(alignment: .top, spacing: 0) {
                         ScrollView {
@@ -106,7 +128,7 @@ struct Workbench: View {
                                         Button(store.profile == nil ? "新建配置" : "新建层") {promptName(store.profile == nil ? "新建配置" : "新建层")}.disabled(!store.canEditDraft || store.busy)
                                     }.frame(maxWidth:.infinity,minHeight:280)
                                 } else {
-                                VStack(spacing: 12) {
+                                VStack(spacing: 8) {
                                     HStack { ForEach(13..<16, id: \.self) { i in control(i, round: true) } }
                                     ForEach(0..<4, id: \.self) { row in
                                         HStack(spacing: 10) {
@@ -122,7 +144,7 @@ struct Workbench: View {
                                         .disabled(!store.canEditDraft || store.busy)
                                     }
                                     Text("CREATOR MICRO").font(.caption2).tracking(3).foregroundStyle(.secondary)
-                                }.padding(20).background(.background, in: RoundedRectangle(cornerRadius: 22)).overlay(RoundedRectangle(cornerRadius: 22).stroke(.quaternary)).shadow(color: .black.opacity(0.08), radius: 12, y: 8)
+                                }.padding(16).background(.background, in: RoundedRectangle(cornerRadius: 16)).overlay(RoundedRectangle(cornerRadius: 22).stroke(.quaternary)).shadow(color: .black.opacity(0.08), radius: 12, y: 8)
                                 Text("13 开关逻辑位置示意 · 实体宽键和方向待核对").font(.caption).foregroundStyle(.secondary)
                                 }
                             }.padding(24)
@@ -132,6 +154,11 @@ struct Workbench: View {
                     }
                 }
             }
+            Divider()
+            DisclosureGroup("设备与连接详情", isExpanded: $showDiagnostics) {
+                discoveryPanel
+                InputMonitorPanel(store: store)
+            }.font(.caption).padding(.horizontal, 20).padding(.vertical, 8)
             Divider()
             HStack { Text(store.status); Spacer(); Text("草稿修订 \(store.draft.revision) · 不写设备") }.font(.caption).foregroundStyle(.secondary).padding(10)
         }.frame(minWidth: 1020, minHeight: 620)
@@ -154,7 +181,20 @@ struct Workbench: View {
         } message: {Text("仅删除本地草稿中的对象及其所属内容。原始来源保留，可撤销；设备不会改变。") }
         .sheet(item: $store.applyPreview, onDismiss: { Task { await store.cancelApplyPreview() } }) { preview in ApplyPreparationView(store:store,preview:preview) }
         .sheet(item: $store.comparison) { comparison in ReconnectComparisonView(store: store, initialComparison: comparison) }
-        .task { if store.snapshot == nil { await store.loadWorkbench() } }
+        .tint(Color(red: 0.20, green: 0.43, blue: 0.34))
+        .accentColor(Color(red: 0.20, green: 0.43, blue: 0.34))
+        .task {
+            if store.snapshot == nil { await store.loadWorkbench() }
+            if (ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? "").isEmpty {
+                await store.prepareDesktopProfiles()
+            }
+        }
+    }
+    var visibleProfileIndices: [Int] {
+        guard let profiles = store.snapshot?.profiles else { return [] }
+        let order = DesktopAgent.all.map(\.name)
+        return profiles.indices.filter { store.browsingDeviceSnapshot || showOtherProfiles || DesktopAgent.named(profiles[$0].name) != nil }
+            .sorted { (order.firstIndex(of: profiles[$0].name) ?? (order.count + $0)) < (order.firstIndex(of: profiles[$1].name) ?? (order.count + $1)) }
     }
     var discoveryPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -225,7 +265,7 @@ struct Workbench: View {
     func control(_ slot: Int, round: Bool = false) -> some View {
         Button { store.slot = slot } label: {
             VStack(spacing: 5) { Text(slot < 13 ? String(format: "%02d",slot+1) : slot < 16 ? "E\(slot-12)" : "J\(slot-15)").font(.headline); Text(label(slot)).font(.caption2).lineLimit(2) }
-                .frame(width: 73, height: 62).padding(3)
+                .frame(width: 73, height: 44).padding(3)
                 .background(store.slot == slot ? Color.accentColor.opacity(0.14) : Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: round ? 25 : 9))
                 .overlay(RoundedRectangle(cornerRadius: round ? 25 : 9).stroke(store.slot == slot ? Color.accentColor : Color.gray.opacity(0.2)))
         }.buttonStyle(.plain).accessibilityLabel("\(title(slot))，\(label(slot))")
@@ -234,6 +274,10 @@ struct Workbench: View {
         VStack(alignment: .leading, spacing: 22) {
             Text(title(store.slot)).font(.title3.bold())
             Text(store.layer?.name ?? "").font(.caption).foregroundStyle(.secondary)
+            if DesktopAgent.named(store.profile?.name ?? "") != nil, !store.browsingDeviceSnapshot {
+                Button("试运行此动作") { Task { await store.tryDesktopAction() } }.disabled(!store.canTryDesktopAction)
+                Text("需先启用此配置与按键控制；会操作真实目标应用。").font(.caption).foregroundStyle(.secondary)
+            }
             if store.slot == 10 || store.slot == 11 {
                 Text("底部 2U 宽键覆盖开关 11 与 12（双轴合并触发，优先使用按键 11 绑定，未设时回退按键 12）。").font(.caption).foregroundStyle(.secondary)
                 if store.slot == 11, !store.browsingDeviceSnapshot {
@@ -413,8 +457,8 @@ struct ActionParameters: View {
         case "text": return [("text","文本内容")]
         case "open_url": return [("url","网址（HTTP / HTTPS）")]
         case "shortcut": return [("key","按键"),("target","目标应用条件")]
-        case "agent_command": return [("adapter","适配器（herdr / dsh）"),("command","命令引用")]
-        case "focus_session": return [("adapter","适配器（herdr / dsh）"),("session","会话引用")]
+        case "agent_command": return [("adapter","适配器标识"),("command","命令引用")]
+        case "focus_session": return [("adapter","适配器标识"),("session","会话引用")]
         case "skill_reference": return [("adapter","适配器（未验证）"),("skill","Skill 引用")]
         default: return []
         }

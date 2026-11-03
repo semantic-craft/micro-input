@@ -192,6 +192,11 @@ extension MicroInput: Backend {}
     func loadWorkbench() async {
         do {
             try applyDocument(try await backend.openDocument(path: documentURL.path))
+            if let index = snapshot?.profiles.firstIndex(where: {
+                $0.id.text == hostActiveProfileId && DesktopAgent.named($0.name) != nil
+            }) {
+                selectProfile(index)
+            }
             catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await backend.actionCatalog().utf8))
             #if MI_SYNTHETIC_BACKEND
             let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
@@ -289,20 +294,60 @@ extension MicroInput: Backend {}
         busy = true; defer { busy = false }
         do {
             try applyDocument(try await backend.installCodingAgentPresets())
-            status = "已安装 Antigravity / Herdr / DSH 预设 · 可在菜单栏切换宿主激活 Profile"
+            status = "已安装常用 Agent 配置 · 可在菜单栏选择当前控制目标"
         } catch { status = readableError(error) }
+    }
+    var orderedHostProfiles: [Profile] {
+        let priorities = DesktopAgent.all.map(\.name)
+        return hostProfiles.enumerated().sorted {
+            let a = priorities.firstIndex(of: $0.element.name) ?? (priorities.count + $0.offset)
+            let b = priorities.firstIndex(of: $1.element.name) ?? (priorities.count + $1.offset)
+            return a < b
+        }.map(\.element)
+    }
+    func prepareDesktopProfiles() async {
+        let missing = !Set(DesktopAgent.all.map(\.name)).isSubset(of: Set(hostProfiles.map(\.name)))
+        guard missing, canEditDraft else { return }
+        let untouched = snapshot?.source == "Demo" && draft.revision == 0 && draft.edits.isEmpty && draft.structure_changes.isEmpty
+        await installCodingAgentPresets()
+        if untouched, let index = snapshot?.profiles.firstIndex(where: { $0.name == "Cindy" }) {
+            selectProfile(index)
+            await setHostActiveProfile(profile?.id.text)
+        }
+    }
+    var canTryDesktopAction: Bool {
+        guard DesktopAgent.named(profile?.name ?? "") != nil, !browsingDeviceSnapshot,
+              profile?.id.text == hostActiveProfileId, hostExecutionEnabled, (0...3).contains(slot) else { return false }
+        return !busy
+    }
+    func tryDesktopAction() async {
+        guard canTryDesktopAction else { return }
+        let binding = ["AG01", "AG00", "AG02", "AG03"][slot]
+        guard let json = backend.resolveInputAction(bindingId: binding, isPressed: true),
+              let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(json.utf8)),
+              ["open_app", "shortcut", "agent_command"].contains(payload.action_type) else {
+            status = "此按键未配置可试运行动作"; return
+        }
+        busy = true; defer { busy = false }
+        lastHostActionReceipt = await actionExecutor.execute(actionJSON: json, bindingId: "ui-" + binding, profileId: hostActiveProfileId ?? "")
+        status = lastHostActionReceipt?.detail ?? "没有执行回执"
+    }
+    func openDesktopAgent(_ agent: DesktopAgent) async {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["action_type": "open_app", "bundle_id": agent.bundleID]),
+              let json = String(data: data, encoding: .utf8) else { return }
+        lastHostActionReceipt = await actionExecutor.execute(actionJSON: json, bindingId: "ui-open", profileId: profile?.id.text ?? "")
     }
     func autoSetupHostExecutionIfNeeded() async {
         guard !autoSetupInFlight, !systemSleeping, !stopped else { return }
         autoSetupInFlight = true
         defer { autoSetupInFlight = false }
         if browsingDeviceSnapshot { showLocalDraft() }
-        let presetNames: Set<String> = ["Antigravity", "Herdr", "DeepSeek Coder (DSH)"]
+        let presetNames = Set(DesktopAgent.all.map(\.name) + ["Antigravity", "Herdr", "DeepSeek Coder (DSH)"])
         let existingNames = Set(hostProfiles.map(\.name))
         if !presetNames.isSubset(of: existingNames), canEditDraft, !busy {
-            await installCodingAgentPresets()
+            await prepareDesktopProfiles()
         }
-        if let agProfile = hostProfiles.first(where: { $0.name == "Antigravity" }),
+        if let agProfile = hostProfiles.first(where: { $0.name == "Cindy" }),
            !presetNames.contains(hostProfiles.first(where: { $0.id.text == hostActiveProfileId })?.name ?? "") {
             await setHostActiveProfile(agProfile.id.text)
         }
@@ -535,6 +580,15 @@ extension MicroInput: Backend {}
             try? await core.emitSyntheticBindingEvent(bindingId: "AG10", pressed: true)
             try? await core.emitSyntheticBindingEvent(bindingId: "AG10", pressed: false)
             try? await Task.sleep(nanoseconds: 80_000_000)
+        }
+        // Exercise each new target through the same HID decoder and routing loop.
+        for agent in DesktopAgent.all {
+            if let id = hostProfiles.first(where: { $0.name == agent.name })?.id.text {
+                await setHostActiveProfile(id)
+                try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: true)
+                try? await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: false)
+                try? await Task.sleep(nanoseconds: 80_000_000)
+            }
         }
     }
     #endif

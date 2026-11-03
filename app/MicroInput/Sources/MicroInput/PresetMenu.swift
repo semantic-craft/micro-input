@@ -17,9 +17,6 @@ struct PresetMenu: View {
     var body: some View {
         Menu("导入与导出") {
             Button("导入自有预设…") { chooseImport() }
-            Button("安装 Coding 起步预设…") {
-                do { try prepare(store.starterPreset()) } catch { failure = readableError(error) }
-            }
             Divider()
             Button("导出整个本地文档…") { exportScope = "document"; exportConfirm = true }
             Button("导出当前配置…") { exportScope = "profile"; exportConfirm = true }.disabled(store.profile == nil)

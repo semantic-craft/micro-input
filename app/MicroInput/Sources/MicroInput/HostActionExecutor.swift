@@ -302,6 +302,10 @@ enum AuditLogWriter {
         case "agent_command":
             let adapter = payload.adapter ?? ""
             let cmd = payload.command ?? ""
+            if let bundle = DesktopAgentControls.bundles[adapter] {
+                guard await activateAppAndWait(bundleId: bundle) else { return (false, "目标应用无法激活") }
+                return await DesktopAgentControls.perform(adapter: adapter, command: cmd)
+            }
             if adapter == "herdr" {
                 return await HerdrAdapter.shared.executeCommand(cmd)
             } else if adapter == "dsh" {

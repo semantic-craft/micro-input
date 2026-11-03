@@ -257,7 +257,7 @@ pub fn starter() -> Result<String, String> {
 
 pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, String> {
     let mut created_ids = Vec::new();
-    let specs = [
+    let mut specs = vec![
         (
             "Antigravity",
             vec![
@@ -907,7 +907,124 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         ),
     ];
 
+    // Desktop targets are bound explicitly; no inferred approval/send shortcuts.
+    for (name, adapter, bundle) in [
+        ("Cindy", "cindy", "com.xd.cindy"),
+        ("Codex", "codex", "com.openai.codex"),
+        ("千问办公", "qwenwork", "cn.qwenwork.desktop.mac"),
+        ("ZCode", "zcode", "dev.zcode.app"),
+    ] {
+        let mut assignments = vec![(
+            0,
+            "desktop-open",
+            "打开 / 聚焦应用",
+            "应用",
+            bundle,
+            ActionKind::OpenApp {
+                bundle_id: bundle.into(),
+            },
+        )];
+        {
+            assignments.push((
+                1,
+                "desktop-input",
+                "聚焦当前输入框",
+                "Agent",
+                bundle,
+                ActionKind::AgentCommand {
+                    adapter: adapter.into(),
+                    command: "focus-input".into(),
+                },
+            ));
+        }
+        if ["cindy", "zcode", "codex"].contains(&adapter) {
+            assignments.push((
+                2,
+                "desktop-search",
+                "搜索任务",
+                "Agent",
+                bundle,
+                ActionKind::AgentCommand {
+                    adapter: adapter.into(),
+                    command: "search".into(),
+                },
+            ));
+        }
+        if adapter == "qwenwork" || adapter == "zcode" {
+            assignments.push((
+                3,
+                "desktop-new",
+                "新建任务",
+                "快捷键",
+                bundle,
+                ActionKind::Shortcut {
+                    key: "n".into(),
+                    modifiers: vec!["command".into()],
+                    target: bundle.into(),
+                },
+            ));
+        }
+        if adapter == "qwenwork" {
+            assignments.push((
+                2,
+                "desktop-search",
+                "搜索全部任务",
+                "快捷键",
+                bundle,
+                ActionKind::Shortcut {
+                    key: "g".into(),
+                    modifiers: vec!["command".into()],
+                    target: bundle.into(),
+                },
+            ));
+        }
+        specs.push((name, assignments));
+    }
+
     let mut work = draft.clone();
+    // Retire only unchanged source profiles from the exact bundled fixture, even
+    // when other profiles have since been added. Preserve edited and imported data.
+    let seed = crate::demo().map_err(|e| format!("{e:?}"))?;
+    if draft.document.origin["kind"] == "synthetic-local"
+        && draft.document.origin["config"]
+            == serde_json::to_value(&seed).map_err(|e| e.to_string())?
+    {
+        for mut current in draft.config.profiles.clone() {
+            let Some(pid) = current.id.as_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(source) = draft.document.editable.source_refs.get(&pid) else {
+                continue;
+            };
+            if source["kind"] != "source-profile" {
+                continue;
+            }
+            let Some(original) = seed.profiles.iter().find(|p| p.id == source["source_id"]) else {
+                continue;
+            };
+            let node = &draft.document.editable.graph.profiles[&pid];
+            if node.layer_order.iter().any(|lid| {
+                let l = &draft.document.editable.graph.layers[lid];
+                l.control_settings.is_some() || l.controls.values().any(|b| b.action_id.is_some())
+            }) {
+                continue;
+            }
+            current.id = original.id.clone();
+            current.index = original.index;
+            for (layer, lid) in current.layers.iter_mut().zip(&node.layer_order) {
+                layer.id = draft
+                    .document
+                    .editable
+                    .source_refs
+                    .get(lid)
+                    .map(|r| r["source_id"].clone())
+                    .unwrap_or(Value::Null);
+            }
+            if serde_json::to_value(current).ok() == serde_json::to_value(original).ok() {
+                work.delete_profile(&pid)?;
+            }
+        }
+    }
     for (profile_name, assignments) in specs {
         if let Some((existing_id, _)) = work
             .document

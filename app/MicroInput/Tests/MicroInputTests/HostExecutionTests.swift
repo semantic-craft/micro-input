@@ -86,6 +86,46 @@ final class HostExecutionTests: XCTestCase {
         await reopened.shutdown()
     }
 
+    @MainActor func testDesktopProfilesDefaultToCindyAndRespectExecutionGate() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("workbench.json")
+        let executor = RecordingHostActionExecutor()
+        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        await store.loadWorkbench()
+        await store.prepareDesktopProfiles()
+        XCTAssertEqual(store.profile?.name, "Cindy")
+        XCTAssertEqual(Array(store.orderedHostProfiles.prefix(4)).map(\.name), DesktopAgent.all.map(\.name))
+        XCTAssertFalse(store.hostProfiles.contains { $0.name.contains("演示") || $0.name.contains("示例") })
+        await store.tryDesktopAction()
+        XCTAssertTrue(executor.receipts.isEmpty, "Paused host execution must not run an action")
+        await store.setHostExecutionEnabled(true)
+        for agent in DesktopAgent.all {
+            let index = try XCTUnwrap(store.snapshot?.profiles.firstIndex { $0.name == agent.name })
+            store.selectProfile(index)
+            await store.setHostActiveProfile(store.profile?.id.text)
+            await store.tryDesktopAction()
+            XCTAssertEqual(executor.receipts.last?.target, agent.bundleID)
+            store.slot = 10
+            XCTAssertFalse(store.canTryDesktopAction)
+        }
+        let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        await reopened.loadWorkbench()
+        XCTAssertEqual(reopened.hostActiveProfileId, store.hostActiveProfileId)
+        XCTAssertEqual(reopened.profile?.name, "ZCode", "Reopening shows the active desktop agent, not a hidden example")
+        await store.shutdown(); await reopened.shutdown()
+    }
+
+    @MainActor func testDelayedAXFocusIsConfirmedWithoutRepeatingTheAction() async {
+        var reads = 0
+        let confirmed = await DesktopAgentControls.confirmFocus({ reads += 1; return reads >= 3 }, interval: 1)
+        XCTAssertTrue(confirmed)
+        XCTAssertEqual(reads, 3)
+        let absent = await DesktopAgentControls.confirmFocus({ false }, interval: 1)
+        XCTAssertFalse(absent)
+    }
+
     @MainActor func testAuditLogWriterSchemaAndPasteTextRedaction() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
