@@ -46,3 +46,9 @@
 2. 以一个明确、合成、非破坏性场景验证 Inspector 或原生观察点确实命中，记录 API 层与物理层边界。
 3. 将单个协议候选与实际固件回应对照，再决定对应能力是否可进入模型与会话。
 4. 对写入阶段单独验证设备基线、读回和恢复；对物理输入单独验证键帽/开关/旋钮对应关系。
+
+## S3 首段离线扩展
+
+`mi-model::lighting` 保存Layer目标并复用mutate/undo；`apply`在精确基线下生成单键或灯光候选，副本成功后才允许取得一次PreparedCandidate。此对象不携带生产发送权限。`mi-proto::mutation`仅编码限定keymap块；原Method/公开request的只读守卫不变。
+
+`mi-session::config_write::SyntheticWriter`只在synthetic-backend编译，构造时拒绝原生/未知backend，复用私有会话队列和唯一reader。显式合成文件按实际字节生成摘要，合成ACK不冒充固件事实；写后逐字节比较并保全smart_actions，失败/取消后不自动重试。它是离线验证工具，不是具有持久操作日志、宿主排空或产品恢复UI的生产协调器。只读快照复用抽出的原始文件校验；解析失败仍不发布快照。

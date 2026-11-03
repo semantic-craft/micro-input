@@ -3,8 +3,9 @@ name = "mi-transport"
 version.workspace = true
 edition.workspace = true
 [features]
-synthetic-backend = ["dep:base64"]
+synthetic-backend = ["dep:base64", "dep:sha1"]
 [dependencies]
+sha1 = { version = "0.10.6", optional = true }
 base64 = { version = "0.22.1", optional = true }
 serde.workspace = true
 serde_json.workspace = true

@@ -19,6 +19,7 @@ for package, behavior in [
     ('mi-session', 'real_framer_never_writes'),
 ]:
     subprocess.run(['cargo', 'test', '--locked', '-p', package, behavior], cwd=root, check=True)
-ffi = (root / 'crates/mi-ffi/src/lib.rs').read_text()
+ffi = '\n'.join(p.read_text() for p in (root / 'crates/mi-ffi/src').rglob('*.rs'))
 assert not re.search(r'pub async fn (?:request|rpc|send_report)\b', ffi), 'raw RPC exposed through UniFFI'
+subprocess.run(['cargo', 'test', '--locked', '-p', 'mi-session', '--features', 'synthetic-backend', 'synthetic_writer_rejects_native_backend_even_when_feature_is_built'], cwd=root, check=True)
 print('UNKNOWN inventory and read-only/no-send boundaries: PASS')

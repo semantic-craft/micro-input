@@ -32,6 +32,14 @@ Agent 可通过 `target/debug/mi draft read/validate/patch` 读取已保存的�
 
 规格见 [SPEC](docs/spec/SPEC.md)、分阶段验收见 [BUILD_PROMPT](docs/spec/BUILD_PROMPT.md)、[证据](docs/spec/EVIDENCE.md)和[未知项](docs/spec/UNKNOWNS.md)。
 
+## S3 首段离线实现
+
+Rust 模型已支持 Layer 可选灯光目标、单区/当前Profile多层编辑、撤销/重开/复制及自有预设往返。准备器支持单个普通键（包含有限已知AG/ACT原绑定）或仅灯光字段的候选；未知字段、另一灯区和其他映射保持原字节。保存副本后冻结计划仍可取得一次，产品应用/恢复按钮继续禁用。
+
+`cargo test -p mi-model --test lighting` 验证文档与候选；`cargo test -p mi-session --features synthetic-backend --test config_write` 用实际codec/framer/唯一reader和可变合成文件验证写回、恢复及失败路径。合成写入器仅在synthetic-backend构建中存在，并拒绝原生后端；没有FFI或UI设备写入口。生产读接口仍只读。
+
+这不是完整S3交付：持久操作日志与崩溃后产品恢复、逐绑定宿主重验/动作排空、RGB界面、预览生命周期及真实设备验收仍待后续阶段。当前验证不连接真实设备。方案见[设备改键与RGB设计](docs/designs/device-write-and-rgb.md)。
+
 ## 常用 Agent 与日常界面
 
 菜单栏采用原生锚定弹出面板：四个常用配置以 2×2 按钮完整平铺（默认第一行 Antigravity、DSH，第二行 Cindy、Codex；“其他配置 → 调整常用配置”可逐位置更换，已置顶项会交换位置，排列自动保存），无需滚动即可切换当前控制配置；其他配置与连接详情使用次级菜单，支持暂停按键控制和打开工作台。工作台采用浅绿强调色、常用 Agent 侧栏、按键预览与动作编辑区；设备发现和输入监视收在“设备与连接详情”。浏览配置不会改变当前控制目标，需点“启用此配置”。
@@ -61,6 +69,8 @@ Input 1.1.0 的[业务架构与证据定位](docs/input-architecture.md)、[写�
 T05已补取消、会话终止通知及退出时等待资源释放；当前设备两次独立身份查询→关闭→重开已通过。配置读取中物理拔插、睡眠和原有映射行为仍待实际验收，不能据此签收完整生命周期。见[E-082](docs/spec/EVIDENCE.md)。
 
 ## 下一步
+
+S3 首段离线模型、候选与合成链路已完成（E-100）；下一段可继续离线实现持久操作记录及失败恢复，再接入 FFI 与 RGB 编辑界面。真实设备连接与写入不属于本轮授权。
 
 PR #12/#13 已交付原生离线工作台、结构化动作和本地持久化。当前已有设备发现、身份查询与[#5 配置读取](https://github.com/semantic-craft/micro-input/issues/5)实现；配置原生浏览验收见[E-079](docs/spec/EVIDENCE.md)，[#6 生命周期](https://github.com/semantic-craft/micro-input/issues/6)及完整硬件写入恢复仍待验证。范围继续保持设备 Flash 只读，不从核心读回推定全部 S3 完成。
 

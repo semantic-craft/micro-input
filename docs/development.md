@@ -70,3 +70,9 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 看到并刷新输出的 `READY_FOR_PHYSICAL_INPUT` 后，操作者才进行本轮约定的控件操作；被动窗口固定为 45 秒，事件上限 2048，gap/关闭/断连均停止订阅。准备阶段上限 100 秒，结束后状态复查上限 15 秒、shutdown join 上限 5 秒；外层启动器总预算 180 秒（包含构建），超时只停止并等待自己创建的进程组，不重试。可先运行默认入口完成构建。
 
 每次生成独立 experiment ID 与开始时间；0700 的 `.scratch/input-study/input-observation-<ID>/` 下仅保存 0600 的脱敏事件和启动器状态。记录事件分类、语义 binding ID、时间、计数、session、gap；不保存通知、配置、宏、设备路径或 serial。报告的 `active_source_verified=false`、`active_ag_binding_count=null` 是当前证据边界：设备返回活动索引不证明它与源配置对象的对应语义。静默为 `silence_unconfirmed`，不能据此证明未按键、映射正确或硬件支持完成；有候选消息也只支持其通知形态，实体位置与其他消费者共存仍须另行核对。E-094 保留给实际观测后的证据登记，本入口的合成通过不占用实机证据。
+
+## S3 离线验证入口
+
+文档模型与候选：`cargo test -p mi-model --test lighting`；合成端到端：`cargo test -p mi-session --features synthetic-backend --test config_write`。后者仅用自编夹具、私有临时备份和编译的合成transport，不枚举/打开真实设备。合成写入器不导出到UniFFI。默认统一门禁仍为 `scripts/check`，原生探针继续ignored。
+
+应用冒烟只用 `scripts/build --synthetic` 后的 `MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=25`；该场景验证既有预设/宿主模拟未回退，不代表新增灯光UI或真实设备功能。生产离线启动必须设置 `MI_AUTO_HOST_READY=0`，本轮不启动生产应用。

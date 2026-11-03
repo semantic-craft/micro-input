@@ -16,3 +16,4 @@ sha1 = "0.10.6"
 
 [dev-dependencies]
 async-trait = "0.1"
+tempfile = "3"

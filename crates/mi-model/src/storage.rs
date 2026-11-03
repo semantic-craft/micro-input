@@ -82,13 +82,33 @@ impl DocumentStore {
             .filter(|p| p.preview.token == token)
             .ok_or("预览已过期；请重新预览")?;
         pending.ensure_current(&self.draft.document, &bytes, current)?;
+        if pending.prepared {
+            return Err("原副本已准备，不重复保存".into());
+        }
         let path = self.path.as_ref().ok_or("没有文档路径")?;
         let _guard = Lock::acquire(path.with_extension("lock"))?;
         self.ensure_apply_document()?;
         let result = pending.backup(path.parent().ok_or("无效文档目录")?)?;
         self.ensure_apply_document()?;
-        self.apply_preview = None;
+        self.apply_preview.as_mut().unwrap().prepared = true;
         Ok(result)
+    }
+    /// Consumes the frozen software plan once, after checking the saved document and session.
+    pub fn take_prepared_candidate(
+        &mut self,
+        token: &str,
+        current: &serde_json::Value,
+    ) -> Result<crate::apply::PreparedCandidate, String> {
+        let bytes = self.ensure_apply_document()?;
+        let pending = self
+            .apply_preview
+            .as_ref()
+            .filter(|p| p.preview.token == token)
+            .ok_or("计划不存在或已消费")?;
+        pending.ensure_current(&self.draft.document, &bytes, current)?;
+        let candidate = pending.candidate()?;
+        self.apply_preview = None;
+        Ok(candidate)
     }
     pub fn compare(
         &mut self,
