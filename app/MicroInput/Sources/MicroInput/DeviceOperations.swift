@@ -56,6 +56,7 @@ extension Store {
         deviceOperationRunning = true
         deviceCancellationRequested = false
         hostOperationPaused = true
+        clearPendingActions()
         hostRouteEpoch += 1
         hostInputTask?.cancel(); hostInputTask = nil
         let connection = generation, document = draft.document_id

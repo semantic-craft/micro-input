@@ -63,7 +63,7 @@ async fn queue_interval_notifications_and_id_matching() {
         .unwrap();
     assert!(first.await.unwrap().is_ok());
     assert!(matches!(
-        notices.recv().await.unwrap(),
+        notices.recv().await.unwrap().notification,
         HostNotification::Exec(_)
     ));
     let req: Value = serde_json::from_slice(&rx.recv().await.unwrap()).unwrap();
@@ -183,7 +183,10 @@ async fn notification_after_response_in_same_report_is_not_lost() {
     assert!(f.await.unwrap().is_ok());
     assert!(matches!(
         notices.try_recv().unwrap(),
-        HostNotification::Radial(_)
+        crate::ReceivedNotification {
+            notification: HostNotification::Radial(_),
+            ..
+        }
     ));
 }
 
@@ -200,7 +203,10 @@ async fn idle_notifications_are_received_without_a_request() {
             .await
             .unwrap()
             .unwrap(),
-        HostNotification::Radial(_)
+        crate::ReceivedNotification {
+            notification: HostNotification::Radial(_),
+            ..
+        }
     ));
     s.shutdown().await;
     assert!(matches!(
@@ -939,6 +945,11 @@ async fn verified_input_decodes_stock_codex_act_enc_and_radial_joystick() {
         assert_eq!(press.logical_switch.as_deref(), Some(expected_switch));
         assert!(press.action_eligible);
 
+        if expected_ag == "AG18" {
+            let held = monitor.next().await.unwrap();
+            assert_eq!(held.radial_center, Some(false));
+            assert!(!held.action_eligible);
+        }
         let release = monitor.next().await.unwrap();
         assert_eq!(release.kind, crate::InputEventKind::Released);
         assert_eq!(release.binding_id.as_deref(), Some(expected_ag));
@@ -982,4 +993,40 @@ async fn verified_input_decodes_stock_codex_act_enc_and_radial_joystick() {
     assert!(monitor.pressed_switches().is_empty());
 
     s.shutdown().await;
+}
+
+#[tokio::test]
+async fn ingress_watermark_precedes_decode_and_preserves_unread_radial_state() {
+    let (session, link, _rx) = setup(500);
+    let mut monitor = session.subscribe_verified_input();
+    for raw in [
+        json!({"m":"v.oai.rad","p":{"a":0.0,"d":0.0}}),
+        json!({"m":"v.oai.rad","p":{"a":0.75,"d":0.9}}),
+    ] {
+        link.inject.send(raw.to_string().into_bytes()).unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while session.input_watermark() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let cutoff = session.input_watermark();
+    assert_eq!(cutoff, 2);
+    assert_eq!(monitor.next().await.unwrap().radial_center, Some(true));
+    let unread_north = monitor.next().await.unwrap();
+    assert_eq!(unread_north.ingress_sequence, cutoff);
+    assert_eq!(unread_north.radial_center, Some(false));
+    link.inject
+        .send(
+            json!({"m":"v.oai.rad","p":{"a":0.0,"d":0.9}})
+                .to_string()
+                .into_bytes(),
+        )
+        .unwrap();
+    let east = monitor.next().await.unwrap();
+    assert!(east.ingress_sequence > cutoff);
+    assert_eq!(east.radial_center, Some(false));
+    session.shutdown().await;
 }

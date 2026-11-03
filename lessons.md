@@ -145,3 +145,5 @@
 - 同一活动层也可能被其他客户端改色。只校验层标识会覆盖外部修改，并错误报告恢复成功。
 - 合成后端对目标和最后确认运行态执行原子比较，后续更新及结束恢复都受约束；冲突进入 Unknown，不重放。
 - 回归：`same_target_external_change_is_never_overwritten` 覆盖更新与恢复两条路径；修复前失败、修复后通过。该合成协议不构成固件具有原子比较能力的证据。Seen 1x（2026-11-03）。
+- 2026-11-03：切换水位必须取自唯一 reader 的入站序号，不能取消费者解码进度。未读的旧摇杆离中通知仍须按序更新物理状态；换扇区不能当作回中。回归：`testUnreadPreCutoffNorthRequiresRealCenterBeforeEast` 与 `ingress_watermark_precedes_decode_and_preserves_unread_radial_state`。
+- 2026-11-03：异步 Backend 测试替身不自动运行在 MainActor。跨 executor 暴露 continuation 时必须同步发布；无锁轮询会偶发在 `CheckedContinuation.resume` 崩溃。`NavigationTests.DelayedBackend` 使用 NSLock 保证读写一致。

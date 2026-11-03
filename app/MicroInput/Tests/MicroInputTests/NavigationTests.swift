@@ -44,7 +44,13 @@ final class NavigationTests: XCTestCase {
     }
 }
 private final class DelayedBackend: Backend {
-    var release: CheckedContinuation<Void, Never>?
+    // Backend async methods run off MainActor; publish the continuation atomically.
+    private let lock = NSLock()
+    private var pendingRelease: CheckedContinuation<Void, Never>?
+    var release: CheckedContinuation<Void, Never>? {
+        get { lock.withLock { pendingRelease } }
+        set { lock.withLock { pendingRelease = newValue } }
+    }
     var reads = 0
     func loadDemo() async throws -> String { "{}" }
     func listDevices() async throws -> [DeviceInfo] { [] }

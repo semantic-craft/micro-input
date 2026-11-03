@@ -25,6 +25,9 @@ pub struct InputEvent {
     pub session_id: u64,
     /// Local subscription order, including skipped items; not a firmware sequence.
     pub sequence: u64,
+    pub ingress_sequence: u64,
+    /// Physical radial state, including notifications that do not create an action edge.
+    pub radial_center: Option<bool>,
     /// Local receipt time, not a device timestamp.
     pub timestamp_ms: u64,
     pub kind: InputEventKind,
@@ -212,7 +215,7 @@ impl InputDecoder for UnverifiedInputDecoder {
 }
 pub struct InputMonitor {
     session: Arc<DeviceSession>,
-    receiver: broadcast::Receiver<HostNotification>,
+    receiver: broadcast::Receiver<crate::ReceivedNotification>,
     decoder: Box<dyn InputDecoder>,
     sequence: u64,
     stopped: bool,
@@ -256,6 +259,24 @@ impl DeviceSession {
     }
 }
 impl InputMonitor {
+    fn radial_state_event(&mut self, ingress_sequence: u64, centered: bool) -> InputEvent {
+        self.sequence += 1;
+        InputEvent {
+            session_id: self.session.id,
+            sequence: self.sequence,
+            ingress_sequence,
+            radial_center: Some(centered),
+            timestamp_ms: 0,
+            kind: InputEventKind::UnknownNotification,
+            logical_switch: None,
+            binding_id: None,
+            physical_control: None,
+            keycap_group: None,
+            action_role: None,
+            lost_count: 0,
+            action_eligible: false,
+        }
+    }
     pub fn pressed_switches(&self) -> Vec<String> {
         self.pressed.iter().cloned().collect()
     }
@@ -279,7 +300,8 @@ impl InputMonitor {
                 self.close();
                 return None;
             }
-            let changed = self.session.changed.notified();
+            let session = self.session.clone();
+            let changed = session.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
             if self.session.invalid.load(Ordering::SeqCst) {
@@ -297,6 +319,8 @@ impl InputMonitor {
                 self.active_radial_sector = None;
                 return None;
             }
+            let mut ingress_sequence = 0;
+            let mut radial_center = None;
             let (
                 kind,
                 logical_switch,
@@ -307,13 +331,22 @@ impl InputMonitor {
                 lost_count,
                 action_eligible,
             ) = match result.unwrap() {
-                Ok(notification) => {
+                Ok(received) => {
+                    ingress_sequence = received.ingress_sequence;
+                    let notification = received.notification;
                     let is_radial = is_radial_notification(&notification);
                     let decoded = self.decoder.decode(&notification);
+                    if is_radial {
+                        radial_center = match &decoded {
+                            Some((_, id)) if id == "__RADIAL_CENTER__" => Some(true),
+                            Some(_) => Some(false),
+                            _ => None,
+                        };
+                    }
                     let normalized = match decoded {
                         Some((InputEventKind::Pressed, sector)) if is_radial => {
                             if self.active_radial_sector.as_deref() == Some(sector.as_str()) {
-                                continue;
+                                return Some(self.radial_state_event(ingress_sequence, false));
                             }
                             if let Some(prev) = self.active_radial_sector.replace(sector.clone()) {
                                 if let Some(prev_spec) = verified_physical_mapping(&prev) {
@@ -328,12 +361,12 @@ impl InputMonitor {
                             if raw_id == "__RADIAL_CENTER__" =>
                         {
                             let Some(prev) = self.active_radial_sector.take() else {
-                                continue;
+                                return Some(self.radial_state_event(ingress_sequence, true));
                             };
                             Some((InputEventKind::Released, prev))
                         }
                         Some((_, ref raw_id)) if raw_id == "__RADIAL_MID__" => {
-                            continue;
+                            return Some(self.radial_state_event(ingress_sequence, false));
                         }
                         other => other,
                     };
@@ -360,7 +393,9 @@ impl InputMonitor {
                                 )
                             } else if let Some(spec) = verified_physical_mapping(&raw_id) {
                                 if spec.action_role != "encoder_step" {
-                                    self.pressed.insert(spec.logical_switch.to_owned());
+                                    if !self.pressed.insert(spec.logical_switch.to_owned()) {
+                                        continue;
+                                    }
                                 }
                                 (
                                     InputEventKind::Pressed,
@@ -475,6 +510,8 @@ impl InputMonitor {
             return Some(InputEvent {
                 session_id: self.session.id,
                 sequence: self.sequence,
+                ingress_sequence,
+                radial_center,
                 timestamp_ms: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()

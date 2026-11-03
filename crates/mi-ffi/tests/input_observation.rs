@@ -98,6 +98,19 @@ async fn verified_input_subscription_merges_wide_key_and_resolves_host_actions()
     let doc: serde_json::Value = serde_json::from_str(&doc_json).unwrap();
     let active_pid = doc["host_active_profile_id"].as_str().unwrap().to_owned();
     assert!(!active_pid.is_empty());
+    // This test exercises Antigravity mappings, independently of the initial UI default.
+    let antigravity = doc["config"]["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|profile| profile["name"] == "Antigravity")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    core.set_host_active_profile(Some(antigravity))
+        .await
+        .unwrap();
     core.set_host_execution_enabled(true).await.unwrap();
 
     let sub = core.subscribe_verified_input().await.unwrap();

@@ -74,6 +74,32 @@ final class DeviceOperationsTests: XCTestCase {
         XCTAssertEqual(core.hostExecutionsPending(), 0)
         await store.shutdown()
     }
+    @MainActor func testRoutingQueueDrainsAndDiscardsPendingActions() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let executor = HeldExecutor()
+        let (core, store, token) = try await prepared(dir, executor: executor)
+        let state = try XCTUnwrap(store.routing)
+        XCTAssertTrue(store.enqueueHostAction(json: "{}", binding: "AG01", profile: "synthetic", state: state, requiresEnabled: false))
+        while executor.pending == nil { await Task.yield() }
+        XCTAssertEqual(core.hostExecutionsPending(), 1)
+        XCTAssertTrue(store.enqueueHostAction(json: "{}", binding: "AG02", profile: "synthetic", state: state, requiresEnabled: false))
+        let count = await core.syntheticRequests().count
+        let operation = Task { await store.performDeviceOperation(token: token) }
+        while !store.hostOperationPaused { await Task.yield() }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        let whileHeld = await core.syntheticRequests().count
+        XCTAssertEqual(count, whileHeld)
+        XCTAssertThrowsError(try core.beginHostExecution())
+        XCTAssertTrue(store.pendingHostActions.isEmpty)
+        XCTAssertFalse(store.dispatchOpen)
+        executor.release()
+        await operation.value
+        XCTAssertEqual(store.operationResult?.phase, "Verified", store.status)
+        XCTAssertNil(store.lastHostActionReceipt)
+        XCTAssertEqual(core.hostExecutionsPending(), 0)
+        await store.shutdown()
+    }
     @MainActor func testDrainTimeoutAndCancellationSendNothing() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
