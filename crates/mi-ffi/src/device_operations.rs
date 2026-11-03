@@ -476,7 +476,7 @@ impl MicroInput {
         ))
         .unwrap();
         raw["profiles"][0]["layers"][0]["layout"]["keymap"] = json!([
-            ["KV_OAI_AG01", "KV_OAI_AG00"],
+            ["KV_OAI_AG00", "KV_OAI_AG01"],
             ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"],
             ["KV_OAI_AG06", "KV_OAI_AG07", "KV_OAI_AG08", "KV_OAI_AG09"],
             ["KV_OAI_AG10", "KV_OAI_AG11", "KV_OAI_AG12"]
