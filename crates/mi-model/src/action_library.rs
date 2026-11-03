@@ -92,9 +92,23 @@ pub fn capability(action: &Action) -> ActionCapability {
                 )
             }
             Ok(ActionKind::AgentCommand { adapter, command }) => {
-                let desktop = matches!(adapter.as_str(), "cindy" | "zcode" | "qwenwork" | "codex")
-                    && (command == "focus-input" || (command == "search" && adapter != "qwenwork"));
-                let verified = matches!(adapter.as_str(), "herdr" | "dsh") || desktop;
+                let desktop = matches!(
+                    adapter.as_str(),
+                    "cindy"
+                        | "zcode"
+                        | "qwenwork"
+                        | "codex"
+                        | "antigravity"
+                        | "dsh-desktop"
+                        | "qoder-cn"
+                ) && (matches!(
+                    command.as_str(),
+                    "model" | "effort" | "dictation" | "browser" | "terminal"
+                ) || command == "focus-input"
+                    || (command == "search" && adapter != "qwenwork")
+                    || (command == "new-chat"
+                        && matches!(adapter.as_str(), "antigravity" | "dsh-desktop" | "qoder-cn")));
+                let verified = matches!(adapter.as_str(), "herdr") || desktop;
                 if verified {
                     prerequisites.push(if desktop {
                         "需要目标应用、辅助功能权限及唯一可访问控件".into()
@@ -121,8 +135,7 @@ pub fn capability(action: &Action) -> ActionCapability {
                 }
             }
             Ok(ActionKind::FocusSession { adapter, session }) => {
-                let verified =
-                    matches!(adapter.as_str(), "herdr" | "dsh") && session != "unselected";
+                let verified = matches!(adapter.as_str(), "herdr") && session != "unselected";
                 if session == "unselected" {
                     prerequisites.push("缺失具体会话引用；请先填写本地意图".into());
                 }
@@ -133,7 +146,7 @@ pub fn capability(action: &Action) -> ActionCapability {
                         true,
                         true,
                         "",
-                        "Mac 宿主 CLI 适配器（herdr / dsh）",
+                        "Mac 宿主 CLI 适配器（herdr）",
                         "宿主激活对应 Profile 时按键可实时触发此动作",
                     )
                 } else {
