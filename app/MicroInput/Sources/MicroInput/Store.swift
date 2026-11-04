@@ -201,6 +201,7 @@ extension MicroInput: Backend {}
     var inputBoundary = HostInputBoundary()
     var pendingHostActions: [PendingHostAction] = []
     var hostExecutionTask: Task<Void, Never>?
+    var hostExecutionGeneration = 0
     var overflowDraining = false
     var observationSequence: UInt64 = 0
     var externalBundleID: String?
@@ -369,7 +370,7 @@ extension MicroInput: Backend {}
         let binding = Self.desktopBindings[slot]
         guard let json = backend.resolveInputAction(bindingId: binding, isPressed: true),
               let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(json.utf8)),
-              ["open_app", "shortcut", "agent_command"].contains(payload.action_type) else {
+              ["open_app", "shortcut", "agent_command", "macro_sequence"].contains(payload.action_type) else {
             status = "此按键未配置可试运行动作"; return
         }
         guard let (resolved, profile, state) = resolveHostAction(binding) else { return }
@@ -650,6 +651,13 @@ extension MicroInput: Backend {}
                 try? await Task.sleep(nanoseconds: 80_000_000)
             }
         }
+        await setHostActiveProfile(hostProfiles.first?.id.text)
+        slot = 12
+        guard let macroTemplate = catalog.first(where: { $0.id == "local-macro" }) else { return }
+        await saveAction(macroTemplate)
+        try? await core.emitSyntheticBindingEvent(bindingId: "AG12", pressed: true)
+        try? await core.emitSyntheticBindingEvent(bindingId: "AG12", pressed: false)
+        try? await Task.sleep(nanoseconds: 80_000_000)
     }
     #endif
     @Published var showingLighting = false
@@ -972,6 +980,7 @@ extension MicroInput: Backend {}
     private func retireConnection(_ reason: String) {
         cancelActiveDeviceOperation()
         hostRouteEpoch += 1
+        cancelHostExecution()
         clearPendingActions(); inputBoundary.session = nil
         generation += 1; pendingID = nil; busy = false
         connectionWatcher?.cancel(); connectionWatcher = nil
@@ -1011,13 +1020,13 @@ extension MicroInput: Backend {}
     func shutdown() async {
         await endLightingPreview()
         cancelActiveDeviceOperation()
-        invalidateHostWork()
+        let cancelledExecution = invalidateHostWork()
         stopped = true; lifecycleGeneration += 1; discoveryGeneration += 1
         events?.invalidatePending()
         retireConnection("应用正在退出")
         await sleepDisconnect?.value
         sleepDisconnect = nil
-        await hostExecutionTask?.value
+        await cancelledExecution?.value
         await backend.shutdown()
     }
     private func replace(_ json: String) throws { let result = try JSONDecoder().decode(Snapshot.self, from: Data(json.utf8)); snapshot = result; stale = false; selectProfile(0) }

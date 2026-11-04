@@ -45,18 +45,38 @@ pub fn capability(action: &Action) -> ActionCapability {
                 "Micro Input 自有离线意图；不是已验证的设备或工具能力",
                 "保存只改变本地草稿；没有执行结果",
             ),
-            Ok(ActionKind::LocalMacro { .. }) => {
-                prerequisites.push(
-                    "自有本地序列；按键名称不是固件 token，设备与宿主执行能力均未核实".into(),
-                );
-                (
-                    "本地普通宏序列".into(),
-                    false,
-                    false,
-                    "宏执行未接入；设备驻留与宿主要求未核实",
-                    "Micro Input 自有离线意图；不是已验证的设备或工具能力",
-                    "保存只改变本地草稿；没有执行结果",
-                )
+            Ok(ActionKind::LocalMacro { macro_sequence }) => {
+                let supported = macro_sequence.validate().is_ok()
+                    && macro_sequence.events.iter().all(|event| match event {
+                        crate::macro_sequence::MacroEvent::Press { key }
+                        | crate::macro_sequence::MacroEvent::Release { key } => {
+                            crate::host_router::macos_virtual_key_code(key).is_some()
+                        }
+                        crate::macro_sequence::MacroEvent::Delay { .. } => true,
+                    });
+                if supported {
+                    prerequisites
+                        .push("序列只能使用已接入的 macOS 键名；辅助功能权限由宿主按需调用".into());
+                    (
+                        "本地普通宏序列".into(),
+                        true,
+                        true,
+                        "",
+                        "Mac 宿主动作执行器（CGEvent 逐步按下 / 释放）",
+                        "宿主激活对应 Profile 时按键可按顺序执行；Multi 与设备驻留不在本能力内",
+                    )
+                } else {
+                    prerequisites
+                        .push("自有本地序列；按键名称不是固件 token，未知键名只保留为草稿".into());
+                    (
+                        "本地普通宏序列".into(),
+                        false,
+                        false,
+                        "存在未知键名或无效序列；仅支持已验证的 macOS 键名执行",
+                        "Micro Input 自有离线意图；不是已验证的设备或工具能力",
+                        "保存只改变本地草稿；没有执行结果",
+                    )
+                }
             }
             Ok(ActionKind::Text { .. }) => {
                 prerequisites.push("需要 Mac 宿主常驻与明确的文本输入目标".into());

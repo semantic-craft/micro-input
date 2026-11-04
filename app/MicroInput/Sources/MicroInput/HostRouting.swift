@@ -81,16 +81,26 @@ extension Store {
         }
         inputBoundary.advance(watermark)
     }
-    func invalidateHostWork() {
+    func clearPendingActions() {
+        let discarded = pendingHostActions; pendingHostActions.removeAll()
+        discarded.forEach { $0.done?() }
+    }
+    @discardableResult
+    func cancelHostExecution() -> Task<Void, Never>? {
+        let execution = hostExecutionTask
+        hostExecutionTask = nil
+        hostExecutionGeneration += 1
+        clearPendingActions()
+        execution?.cancel()
+        return execution
+    }
+    @discardableResult func invalidateHostWork() -> Task<Void, Never>? {
         observationSequence += 1
         foregroundTask?.cancel()
         let queued = hostMutations; hostMutations.removeAll()
         queued.forEach { $0.cancel() }
-        clearPendingActions(); overlay.hide()
-    }
-    func clearPendingActions() {
-        let discarded = pendingHostActions; pendingHostActions.removeAll()
-        discarded.forEach { $0.done?() }
+        let execution = cancelHostExecution(); overlay.hide()
+        return execution
     }
     // Document edits and preference changes share this drain. Manual work precedes queued observations.
     func hostMutation<T>(automatic: Bool = false, _ operation: @escaping () async throws -> T) async throws -> T {
@@ -176,6 +186,7 @@ extension Store {
         }
         pendingHostActions.append(PendingHostAction(json: json, binding: binding, profile: profile, state: state, deviceSession: deviceSession, deviceIngress: deviceIngress, admitted: .now, requiresEnabled: requiresEnabled, done: done))
         guard hostExecutionTask == nil else { return true }
+        let executionGeneration = hostExecutionGeneration
         hostExecutionTask = Task { @MainActor [self] in
             while !pendingHostActions.isEmpty {
                 let entry = pendingHostActions.removeFirst()
@@ -189,7 +200,7 @@ extension Store {
                 _ = await executeHostAction(actionJSON: entry.json, bindingId: entry.binding, profileId: entry.profile)
             }
             if overflowDraining { readInputBoundary(); overflowDraining = false }
-            hostExecutionTask = nil
+            if executionGeneration == hostExecutionGeneration { hostExecutionTask = nil }
         }
         return true
     }

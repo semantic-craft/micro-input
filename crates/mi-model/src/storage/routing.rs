@@ -69,6 +69,7 @@ impl DocumentStore {
                     "browser" => "打开内置浏览器", "terminal" => "打开终端面板", _ => "Agent 动作",
                 }.into(),
                 Some(FocusSession{..}) => "聚焦会话".into(),
+                Some(MacroSequence{events}) => format!("本地宏 · {} 步", events.len()),
                 None => "不可用 / 未配置".into(),
             };
             let spec = crate::host_router::verified_physical_mapping(binding).unwrap();
