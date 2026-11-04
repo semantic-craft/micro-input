@@ -36,6 +36,113 @@ final class MacroEditorTests: XCTestCase {
 }
 
 extension MacroEditorTests {
+    @MainActor func testVerifiedMacroRoutesThroughRealBridgeAndRecordingExecutorReportsSequence() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("workbench.json")
+        let executor = RecordingHostActionExecutor()
+        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        await store.loadWorkbench()
+        await store.setHostExecutionEnabled(true)
+        await store.setHostActiveProfile(store.profile?.id.text)
+        let template = try XCTUnwrap(store.catalog.first { $0.id == "local-macro" })
+        await store.saveAction(template)
+        XCTAssertTrue(store.draft.edits.keys.contains(store.slotKey))
+        XCTAssertEqual(store.actionCapabilities[store.slotKey]?.execution_available, true)
+
+        let rawAction = store.resolveInputActionForTesting(bindingId: "AG00")
+        let actionJSON = try XCTUnwrap(rawAction)
+        let payload = try JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(actionJSON.utf8))
+        XCTAssertEqual(payload.action_type, "macro_sequence")
+        XCTAssertEqual(payload.events?.map(\.event_type), ["press", "release"])
+        XCTAssertEqual(payload.events?.compactMap(\.key_code), [0x00, 0x00])
+
+        let executed = await store.executeHostAction(
+            actionJSON: actionJSON,
+            bindingId: "AG00",
+            profileId: try XCTUnwrap(store.hostActiveProfileId)
+        )
+        let receipt = try XCTUnwrap(executed)
+        XCTAssertTrue(receipt.succeeded)
+        XCTAssertEqual(receipt.actionType, "macro_sequence")
+        XCTAssertEqual(receipt.detail, "steps=2 keys=2 delays=0")
+        XCTAssertEqual(executor.receipts.last, receipt)
+    }
+
+    @MainActor func testCancelledMacroSequenceReleasesPressedKeys() async throws {
+        let executor = LiveHostActionExecutor()
+        var posted: [(keyCode: UInt16, down: Bool)] = []
+        executor.macroAccessibilityChecker = { true }
+        executor.macroKeyEventPoster = { keyCode, down in
+            posted.append((keyCode, down))
+            return true
+        }
+        let actionJSON = """
+        {"action_type":"macro_sequence","events":[
+          {"event_type":"press","key":"a","key_code":1},
+          {"event_type":"delay","ms":300},
+          {"event_type":"release","key":"a","key_code":1}
+        ]}
+        """
+        let execution = Task { await executor.execute(actionJSON: actionJSON, bindingId: "AG12", profileId: "macro-profile") }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        execution.cancel()
+        let receipt = await execution.value
+
+        XCTAssertFalse(receipt.succeeded)
+        XCTAssertTrue(receipt.detail.contains("已释放"))
+        XCTAssertEqual(posted.map(\.keyCode), [1, 1])
+        XCTAssertEqual(posted.map(\.down), [true, false])
+    }
+
+    @MainActor func testStoreSleepCancelsRunningMacroAndReleasesHeldKeys() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("workbench.json")
+        let executor = LiveHostActionExecutor()
+        var posted: [(keyCode: UInt16, down: Bool)] = []
+        executor.macroAccessibilityChecker = { true }
+        executor.macroKeyEventPoster = { keyCode, down in
+            posted.append((keyCode, down))
+            return true
+        }
+        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        await store.loadWorkbench()
+        await store.setHostExecutionEnabled(true)
+        await store.setHostActiveProfile(store.profile?.id.text)
+        let template = try XCTUnwrap(store.catalog.first { $0.id == "local-macro" })
+        var editor = try XCTUnwrap(MacroEditorDraft(action: template))
+        editor.insert(kind: "delay", at: 1)
+        editor.update(index: 1, milliseconds: "500")
+        await store.saveAction(try editor.action(named: "Sleep-cancelled macro"))
+
+        let actionJSON = try XCTUnwrap(store.resolveInputActionForTesting(bindingId: "AG00"))
+        let state = try XCTUnwrap(store.routing)
+        XCTAssertTrue(store.enqueueHostAction(
+            json: actionJSON,
+            binding: "AG00",
+            profile: try XCTUnwrap(store.hostActiveProfileId),
+            state: state
+        ))
+
+        let started = Date()
+        while posted.isEmpty, Date().timeIntervalSince(started) < 1 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(posted.map(\.down), [true])
+
+        store.systemWillSleep()
+        let released = Date()
+        while posted.count < 2, Date().timeIntervalSince(released) < 0.1 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(posted.map(\.keyCode), [0x00, 0x00])
+        XCTAssertEqual(posted.map(\.down), [true, false])
+        await store.shutdown()
+    }
+}
+
+extension MacroEditorTests {
     @MainActor func testSharedMacroBindingEditUnlinkAndGuardedDeleteThroughRealBridge() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

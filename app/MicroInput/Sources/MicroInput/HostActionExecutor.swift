@@ -40,6 +40,14 @@ struct ResolvedHostActionPayload: Codable, Equatable {
     let adapter: String?
     var command: String?
     let session: String?
+    let events: [ResolvedMacroEventPayload]?
+}
+
+struct ResolvedMacroEventPayload: Codable, Equatable {
+    let event_type: String
+    let key: String?
+    let key_code: UInt16?
+    let ms: UInt32?
 }
 
 enum PassThroughHealthView: Codable, Equatable {
@@ -204,6 +212,11 @@ enum AuditLogWriter {
             let adapter = payload.adapter ?? ""
             let session = payload.session ?? ""
             return ("\(adapter):\(session)", nil, "\(adapter)/\(session)")
+        case "macro_sequence":
+            let events = payload.events ?? []
+            let delays = events.filter { $0.event_type == "delay" }.count
+            let keys = events.filter { $0.event_type == "press" || $0.event_type == "release" }.count
+            return ("frontmost-editor", nil, "steps=\(events.count) keys=\(keys) delays=\(delays)")
         default:
             return ("unknown", nil, payload.action_type)
         }
@@ -213,6 +226,18 @@ enum AuditLogWriter {
 @MainActor final class LiveHostActionExecutor: HostActionExecuting {
     private var savedClipboardItems: [[NSPasteboard.PasteboardType: Data]]?
     private var clipboardRestoreTask: Task<Void, Never>?
+    var macroAccessibilityChecker: () -> Bool = { AXIsProcessTrusted() }
+    var macroKeyEventPoster: (CGKeyCode, Bool) -> Bool = { keyCode, down in
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: down) else {
+            return false
+        }
+        event.post(tap: .cghidEventTap)
+        return true
+    }
+    var macroSleeper: (UInt64) async throws -> Void = { nanoseconds in
+        try await Task.sleep(nanoseconds: nanoseconds)
+    }
 
     static var isAccessibilityTrusted: Bool {
         AXIsProcessTrusted()
@@ -323,6 +348,9 @@ enum AuditLogWriter {
             }
             return (false, "未知适配器 \(adapter)")
 
+        case "macro_sequence":
+            return await performMacroSequence(payload.events ?? [])
+
         default:
             return (false, "不支持的动作类型 \(payload.action_type)")
         }
@@ -345,6 +373,59 @@ enum AuditLogWriter {
             try? await Task.sleep(nanoseconds: 15_000_000)
         }
         return NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleId
+    }
+
+    private func performMacroSequence(_ events: [ResolvedMacroEventPayload]) async -> (Bool, String) {
+        guard !events.isEmpty else { return (false, "宏序列为空") }
+        guard macroAccessibilityChecker() else {
+            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+            return (false, "辅助功能未授权")
+        }
+
+        var heldKeyCodes: Set<UInt16> = []
+        do {
+            for event in events {
+                switch event.event_type {
+                case "press":
+                    guard let keyCode = event.key_code, !heldKeyCodes.contains(keyCode),
+                    macroKeyEventPoster(keyCode, true) else {
+                        releaseHeldKeys(heldKeyCodes)
+                        return (false, "宏第 \(event.key_code == nil ? 0 : 1) 个键事件合成失败")
+                    }
+                    heldKeyCodes.insert(keyCode)
+                case "release":
+                    guard let keyCode = event.key_code, heldKeyCodes.contains(keyCode),
+                    macroKeyEventPoster(keyCode, false) else {
+                        releaseHeldKeys(heldKeyCodes)
+                        return (false, "宏释放事件无效或合成失败")
+                    }
+                    heldKeyCodes.remove(keyCode)
+                case "delay":
+                    guard let milliseconds = event.ms, milliseconds > 0 else {
+                        releaseHeldKeys(heldKeyCodes)
+                        return (false, "宏延时无效")
+                    }
+                    try await macroSleeper(UInt64(milliseconds) * 1_000_000)
+                default:
+                    releaseHeldKeys(heldKeyCodes)
+                    return (false, "宏包含不支持的事件")
+                }
+            }
+            return (true, "宏序列完成")
+        } catch is CancellationError {
+            releaseHeldKeys(heldKeyCodes)
+            return (false, "宏已取消，按下的键已释放")
+        } catch {
+            releaseHeldKeys(heldKeyCodes)
+            return (false, "宏执行中断，按下的键已释放")
+        }
+    }
+
+    private func releaseHeldKeys(_ keyCodes: Set<UInt16>) {
+        for keyCode in keyCodes {
+            _ = macroKeyEventPoster(keyCode, false)
+        }
     }
 
     private func postShortcut(keyCode: CGKeyCode, modifiers: [String]) -> Bool {

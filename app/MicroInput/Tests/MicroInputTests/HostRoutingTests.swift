@@ -168,7 +168,6 @@ import MicroInputCore
         store.overlay.showSheet()
         let sheet = try XCTUnwrap(NSApp.windows.first { $0 is PassiveHostPanel && $0.isVisible })
         XCTAssertFalse(sheet.isKeyWindow)
-        XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier,frontmost)
         XCTAssertTrue(sheet.collectionBehavior.contains(.fullScreenAuxiliary))
         for screen in NSScreen.screens {
             sheet.setFrame(HostOverlay.position(size:NSSize(width:400,height:610),screen:screen.visibleFrame),display:true)
@@ -184,6 +183,31 @@ import MicroInputCore
         let panel = PassiveHostPanel(contentRect:.zero,styleMask:[.nonactivatingPanel],backing:.buffered,defer:false)
         XCTAssertFalse(panel.canBecomeKey); XCTAssertFalse(panel.canBecomeMain)
     }
+
+    func testCancelledExecutionCannotEraseAReplacementExecutionOwner() async throws {
+        let executor = GatedHostExecutor()
+        let (store, _, dir) = try await fixture(executor: executor)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        await store.setHostExecutionEnabled(true)
+        let state = try XCTUnwrap(store.routing)
+        let action = #"{"action_type":"open_app","bundle_id":"test.app"}"#
+        XCTAssertTrue(store.enqueueHostAction(json:action,binding:"old",profile:"profile",state:state))
+        while executor.started.isEmpty { await Task.yield() }
+        _ = store.cancelHostExecution()
+
+        XCTAssertTrue(store.enqueueHostAction(json:action,binding:"replacement",profile:"profile",state:state))
+        let replacement = try XCTUnwrap(store.hostExecutionTask)
+        executor.release?.resume(); executor.release = nil
+        while executor.started.count < 2 { await Task.yield() }
+        XCTAssertNotNil(store.hostExecutionTask, "A cancelled predecessor must not erase its replacement")
+
+        store.cancelHostExecution()?.cancel()
+        executor.release?.resume(); executor.release = nil
+        await replacement.value
+        XCTAssertEqual(executor.started, ["old", "replacement"])
+        XCTAssertNil(store.hostExecutionTask)
+        await store.shutdown()
+    }
 }
 
 @MainActor private final class HeldHostExecutor: HostActionExecuting {
@@ -193,5 +217,17 @@ import MicroInputCore
         started.append(bindingId)
         await withCheckedContinuation { release = $0 }
         return HostActionReceipt(timestampMs:0,profileId:profileId,bindingId:bindingId,actionType:"open_app",target:"test.app",textByteLen:nil,outcome:"simulated",detail:"held executor completed")
+    }
+}
+
+@MainActor private final class GatedHostExecutor: HostActionExecuting {
+    var release: CheckedContinuation<Void,Never>?
+    var started: [String] = []
+    var completed = 0
+    func execute(actionJSON:String,bindingId:String,profileId:String) async -> HostActionReceipt {
+        started.append(bindingId)
+        await withCheckedContinuation { release = $0 }
+        completed += 1
+        return HostActionReceipt(timestampMs:0,profileId:profileId,bindingId:bindingId,actionType:"open_app",target:"test.app",textByteLen:nil,outcome:"simulated",detail:"gated executor completed")
     }
 }

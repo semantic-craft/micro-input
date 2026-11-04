@@ -399,6 +399,63 @@ fn local_multi_does_not_execute_tap_before_gesture_is_known() {
 }
 
 #[test]
+fn verified_local_macro_resolves_as_host_sequence_and_unknown_keys_stay_draft_only() {
+    use mi_model::host_router::ResolvedMacroEvent;
+    use mi_model::macro_sequence::{LocalMacro, MacroEvent};
+
+    let mut draft = Draft::default();
+    let profile_id = draft.document.editable.graph.profile_order[0].clone();
+    let layer_id = draft.document.editable.graph.profiles[&profile_id].layer_order[0].clone();
+    let macro_action = |key: &str| Action {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: "Local macro".into(),
+        category: "Test".into(),
+        detail: "Host sequence".into(),
+        payload: serde_json::to_value(ActionKind::LocalMacro {
+            macro_sequence: LocalMacro {
+                format_version: 1,
+                events: vec![
+                    MacroEvent::Press { key: key.into() },
+                    MacroEvent::Delay { ms: 20 },
+                    MacroEvent::Release { key: key.into() },
+                ],
+            },
+        })
+        .unwrap(),
+    };
+
+    draft
+        .assign(&json!(profile_id), &json!(layer_id), 0, macro_action("a"))
+        .unwrap();
+    assert_eq!(
+        resolve_host_action(&draft.document, Some(&profile_id), "AG00", true),
+        Some(ResolvedHostAction::MacroSequence {
+            events: vec![
+                ResolvedMacroEvent::Press {
+                    key: "a".into(),
+                    key_code: 0x00,
+                },
+                ResolvedMacroEvent::Delay { ms: 20 },
+                ResolvedMacroEvent::Release {
+                    key: "a".into(),
+                    key_code: 0x00,
+                },
+            ],
+        })
+    );
+
+    draft
+        .assign(
+            &json!(profile_id),
+            &json!(layer_id),
+            0,
+            macro_action("unknown-key"),
+        )
+        .unwrap();
+    assert!(resolve_host_action(&draft.document, Some(&profile_id), "AG00", true).is_none());
+}
+
+#[test]
 fn host_preferences_persist_active_profile_and_execution_enabled() {
     let dir = std::env::temp_dir().join(format!("mi-host-prefs-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
