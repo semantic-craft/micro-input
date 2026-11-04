@@ -324,3 +324,66 @@ extension PushToTalkTests {
         XCTAssertFalse(held.cleanupConfirmed)
     }
 }
+
+@MainActor final class AXDictationRecordingTests: XCTestCase {
+    @MainActor private final class Target {
+        var window = true
+        var control = true
+        var uniqueIdle = true
+        var presses = 0
+        var reads = 0
+        var invalidateWindowOnStop = false
+        func recording() -> AXDictationRecording {
+            AXDictationRecording(access: DictationTargetAccess(
+                terminated: { false }, originalWindow: { self.window },
+                originalControl: { self.window && self.control }, labels: { ["停止语音输入"] },
+                uniqueIdleInWindow: { self.reads += 1; return self.uniqueIdle },
+                pressOriginal: {
+                    self.presses += 1; self.control = false
+                    if self.invalidateWindowOnStop { self.window = false }
+                }))
+        }
+    }
+    func testStopReadsReplacementButNeverPressesIt() async {
+        let target = Target(), recording = target.recording()
+        let result = await recording.stop()
+        XCTAssertTrue(result.0)
+        XCTAssertEqual(target.presses, 1)
+        XCTAssertGreaterThan(target.reads, 0)
+        let checked = await recording.isStopped()
+        XCTAssertTrue(checked)
+        let repeated = await recording.stop()
+        XCTAssertFalse(repeated.0)
+        XCTAssertEqual(target.presses, 1)
+    }
+    func testReplacementBeforeStopCannotBeAdopted() async {
+        let target = Target(), recording = target.recording()
+        target.control = false
+        let checked = await recording.isStopped()
+        let result = await recording.stop()
+        XCTAssertFalse(checked)
+        XCTAssertFalse(result.0)
+        XCTAssertEqual(target.presses, 0)
+        XCTAssertEqual(target.reads, 0)
+    }
+    func testChangedWindowCannotConfirmOrReadReplacement() async {
+        let target = Target(), recording = target.recording()
+        target.invalidateWindowOnStop = true
+        let result = await recording.stop()
+        XCTAssertFalse(result.0)
+        XCTAssertEqual(target.presses, 1)
+        XCTAssertEqual(target.reads, 0)
+    }
+    func testAmbiguousOrIncompleteReadbackStaysUnknownUntilVerified() async {
+        let target = Target(), recording = target.recording()
+        target.uniqueIdle = false
+        let result = await recording.stop()
+        XCTAssertFalse(result.0)
+        let unknown = await recording.isStopped()
+        XCTAssertFalse(unknown)
+        target.uniqueIdle = true
+        let verified = await recording.isStopped()
+        XCTAssertTrue(verified)
+        XCTAssertEqual(target.presses, 1)
+    }
+}

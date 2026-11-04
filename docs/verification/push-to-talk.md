@@ -19,7 +19,7 @@ MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=push-to-talk scripts/run --verify --t
 MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=push-to-talk-live MI_LIVE_DICTATION_ADAPTER=cindy scripts/run --verify --timeout=40
 ```
 
-`MI_LIVE_DICTATION_ADAPTER` 只接受 `cindy`、`codex` 或 `qwenwork`。此场景使用合成 HID，但调用真实辅助功能录音控件。它不发送消息，也不连接实际键盘。核对原应用先出现停止录音状态，释放后回到开始录音状态。核对审计的开始和停止均为 `executed`；权限缺失、控件重建或状态未知均登记为未通过。
+`MI_LIVE_DICTATION_ADAPTER` 只接受 `cindy`、`codex` 或 `qwenwork`。此场景使用合成 HID，但调用真实辅助功能录音控件。它不发送消息，也不连接实际键盘。核对原应用先出现停止录音状态，释放后回到开始录音状态。核对审计的开始和停止均为 `executed`；权限缺失或状态未知均登记为未通过。停止后控件重建时，仅允许在原进程实例、窗口身份及标题不变且原控件已尝试停止的条件下，完整扫描原窗口内唯一空闲控件来只读确认；替代控件永不接收操作。
 
 测试退出后检查 `launcher.json` 的退出和副本清理字段。启动器清理并不能证明录音已停止，必须同时检查原应用与 `dictation_stop` 回执。不要重开已退出的 QA 应用获取状态。
 
