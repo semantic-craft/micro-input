@@ -38,7 +38,7 @@ final class HostExecutionTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent("workbench.json")
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await store.loadWorkbench()
         await store.installCodingAgentPresets()
         let profile = try XCTUnwrap(store.hostProfiles.first { $0.name == "Cindy" })
@@ -67,7 +67,7 @@ final class HostExecutionTests: XCTestCase {
             "Action library capability must follow the command consent switch"
         )
 
-        let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        let reopened = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await reopened.loadWorkbench()
         XCTAssertTrue(reopened.commandExecutionEnabled, "Command consent must persist independently")
         XCTAssertNotNil(reopened.resolveInputActionForTesting(bindingId: "AG00"))
@@ -105,6 +105,7 @@ final class HostExecutionTests: XCTestCase {
         let auditPath = directory.appendingPathComponent("audit.jsonl").path
         let url = directory.appendingPathComponent("workbench.json")
         let store = Store(
+            nativeOwnership: NativeOwnershipController(isolated: true),
             backend: MicroInputCore.MicroInput(),
             documentURL: url,
             actionExecutor: LiveHostActionExecutor(auditLogPath: auditPath)
@@ -158,7 +159,7 @@ final class HostExecutionTests: XCTestCase {
 
         let core = MicroInputCore.MicroInput()
         let executor = RecordingHostActionExecutor()
-        let store = Store(backend: core, documentURL: url, actionExecutor: executor)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: url, actionExecutor: executor)
         await store.loadWorkbench()
 
         await store.installCodingAgentPresets()
@@ -187,7 +188,7 @@ final class HostExecutionTests: XCTestCase {
         XCTAssertEqual(store.profile?.id.text, workbenchProfileBefore)
 
         // Reopen Store and verify hostActiveProfileId and hostExecutionEnabled survive restart
-        let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        let reopened = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
         await reopened.loadWorkbench()
         XCTAssertEqual(reopened.hostActiveProfileId, herdr?.id.text)
         XCTAssertTrue(reopened.hostExecutionEnabled)
@@ -209,7 +210,7 @@ final class HostExecutionTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent("workbench.json")
         let executor = RecordingHostActionExecutor()
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
         await store.loadWorkbench()
         await store.prepareDesktopProfiles()
         XCTAssertEqual(store.profile?.name, "Cindy")
@@ -231,7 +232,7 @@ final class HostExecutionTests: XCTestCase {
             store.slot = agent.name == "Herdr" ? 13 : 10
             XCTAssertFalse(store.canTryDesktopAction)
         }
-        let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        let reopened = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
         await reopened.loadWorkbench()
         XCTAssertEqual(reopened.hostActiveProfileId, store.hostActiveProfileId)
         XCTAssertEqual(reopened.profile?.name, DesktopAgent.all.last?.name, "Reopening shows the active desktop agent, not a hidden example")
@@ -373,7 +374,7 @@ final class HostExecutionTests: XCTestCase {
         let url = directory.appendingPathComponent("workbench.json")
 
         let executor = SlowRecordingExecutor()
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
         await store.loadWorkbench()
         await store.installCodingAgentPresets()
         await store.setHostExecutionEnabled(true)
@@ -512,7 +513,7 @@ final class HostExecutionTests: XCTestCase {
 
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         let executor = RecordingHostActionExecutor()
-        let store = Store(backend: core, documentURL: url, actionExecutor: executor)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: url, actionExecutor: executor)
         await store.loadWorkbench()
         await store.installCodingAgentPresets()
         await store.setHostExecutionEnabled(true)
@@ -606,7 +607,7 @@ final class HostExecutionTests: XCTestCase {
 
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         let executor = RecordingHostActionExecutor()
-        let store = Store(backend: core, documentURL: url, actionExecutor: executor)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: url, actionExecutor: executor)
         await store.loadWorkbench()
         await store.installCodingAgentPresets()
         await store.setHostExecutionEnabled(true)
@@ -667,7 +668,7 @@ final class HostExecutionTests: XCTestCase {
         try await core.setSyntheticConfig(scenario: 1)
 
         let executor = RecordingHostActionExecutor()
-        let store = Store(backend: core, documentURL: url, actionExecutor: executor)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: url, actionExecutor: executor)
         store.autoHostReady = true
         await store.loadWorkbench()
 
@@ -699,7 +700,7 @@ final class HostExecutionTests: XCTestCase {
 
         // R-D04: Multiple USB candidates (.twoDevices) must NOT auto-open on startup
         try await core.setSyntheticDiscovery(state: .twoDevices)
-        let storeMulti = Store(backend: core, documentURL: url, actionExecutor: executor)
+        let storeMulti = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: url, actionExecutor: executor)
         storeMulti.autoHostReady = true
         await storeMulti.loadWorkbench()
         XCTAssertNil(storeMulti.connectedID)
@@ -716,7 +717,7 @@ final class HostExecutionTests: XCTestCase {
 
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         let executor = RecordingHostActionExecutor()
-        let store = Store(backend: core, documentURL: url, actionExecutor: executor)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: url, actionExecutor: executor)
         await store.loadWorkbench()
         await store.prepareHostExecutionScenario()
         XCTAssertEqual(executor.receipts.count, 24, "Receipts: \(executor.receipts.map(\.detail)) status=\(store.status) profile=\(store.profile?.name ?? "nil") active=\(store.hostActiveProfileId ?? "nil")")
@@ -795,7 +796,7 @@ final class HostExecutionTests: XCTestCase {
         let url = directory.appendingPathComponent("workbench.json")
 
         let executor = RecordingHostActionExecutor()
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
         await store.loadWorkbench()
         await store.installCodingAgentPresets()
         await store.setHostExecutionEnabled(true)
@@ -916,7 +917,7 @@ final class HostExecutionTests: XCTestCase {
             return true
         }
 
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
         await store.loadWorkbench()
         await store.installCodingAgentPresets()
         await store.setHostExecutionEnabled(true)
@@ -1051,7 +1052,7 @@ final class HostExecutionTests: XCTestCase {
         }
 
         let pttDriver = ControllableDictationDriver()
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor, dictationDriver: pttDriver)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor, dictationDriver: pttDriver)
         await store.loadWorkbench()
         await store.installCodingAgentPresets()
         await store.setHostExecutionEnabled(true)

@@ -57,6 +57,7 @@ struct HostCheatSheet: View {
             HStack { Text("按键速查").font(.headline); Spacer(); Button(action: close) { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).accessibilityLabel("关闭按键速查") }
             Text(store.routing?.profile_name ?? "Profile 不可用").font(.title3)
             Text("\(store.routingMode) · \(store.hostExecutionEnabled ? "按键控制开启" : "按键控制暂停") · 首层映射").font(.caption).foregroundStyle(.secondary)
+            Text(store.nativeOwnership.summary).font(.caption).foregroundStyle(.secondary)
             ScrollView {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                     ForEach(store.routing?.keys ?? []) { key in

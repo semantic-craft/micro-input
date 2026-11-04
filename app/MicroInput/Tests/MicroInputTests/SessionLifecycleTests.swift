@@ -19,7 +19,7 @@ private final class SuspendedSessionBackend: Backend {
 final class SessionLifecycleTests: XCTestCase {
     @MainActor func testCancelReadAllowsReconnectBeforeOldCallbackAndPreservesDraft() async throws {
         let backend = SuspendedSessionBackend()
-        let store = Store(backend: backend)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: backend)
         await store.loadDemo()
         let local = store.snapshot?.raw.text
         await store.connect("first")
@@ -50,7 +50,7 @@ extension SessionLifecycleTests {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
         try await core.setSyntheticConfig(scenario: 1)
-        let store = Store(backend: core)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core)
         await store.connect("synthetic-interface-0"); await store.readIdentity(); await store.readDeviceConfig()
         XCTAssertFalse(store.stale)
         let previous = store.snapshot?.raw.text
@@ -63,7 +63,7 @@ extension SessionLifecycleTests {
     @MainActor func testEndedBridgeSessionClearsStoreAndReconnectRequiresNewIdentity() async throws {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
-        let store = Store(backend: core)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core)
         await store.loadDemo()
         let local = store.snapshot?.raw.text
         await store.connect("synthetic-interface-0")
@@ -87,7 +87,7 @@ extension SessionLifecycleTests {
 extension SessionLifecycleTests {
     @MainActor func testQuitWaitsForBackendShutdownBeforeReplyingToAppKit() async {
         let backend = SuspendedSessionBackend()
-        let store = Store(backend: backend)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: backend)
         var replies: [Bool] = []
         let lifetime = AppLifetime(store: store, reply: { replies.append($0) })
         XCTAssertEqual(lifetime.applicationShouldTerminate(NSApplication.shared), .terminateLater)

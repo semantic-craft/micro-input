@@ -8,7 +8,7 @@ final class MacroEditorTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("workbench.json")
         let core = MicroInputCore.MicroInput()
-        let store = Store(backend: core, documentURL: url)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: url)
         await store.loadWorkbench()
         let template = try XCTUnwrap(store.catalog.first { $0.id == "local-macro" })
         var editor = try XCTUnwrap(MacroEditorDraft(action: template))
@@ -21,7 +21,7 @@ final class MacroEditorTests: XCTestCase {
         await store.saveAction(edited)
         XCTAssertEqual(store.draft.revision, 1)
         XCTAssertEqual(store.draft.edits[store.slotKey]?.name, "My local macro")
-        let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        let reopened = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await reopened.loadWorkbench()
         let saved = try XCTUnwrap(reopened.draft.edits[reopened.slotKey])
         let restored = try XCTUnwrap(MacroEditorDraft(action: saved))
@@ -41,7 +41,7 @@ extension MacroEditorTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("workbench.json")
         let executor = RecordingHostActionExecutor()
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
         await store.loadWorkbench()
         await store.setHostExecutionEnabled(true)
         await store.setHostActiveProfile(store.profile?.id.text)
@@ -106,7 +106,7 @@ extension MacroEditorTests {
             posted.append((keyCode, down))
             return true
         }
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
         await store.loadWorkbench()
         await store.setHostExecutionEnabled(true)
         await store.setHostActiveProfile(store.profile?.id.text)
@@ -147,7 +147,7 @@ extension MacroEditorTests {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("workbench.json")
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await store.loadWorkbench()
         let template = try XCTUnwrap(store.catalog.first { $0.id == "local-macro" })
         let saved = await store.saveMacro(template)
@@ -163,7 +163,7 @@ extension MacroEditorTests {
         await store.deleteMacro(id)
         XCTAssertEqual(store.draft.revision, 3)
         XCTAssertTrue(store.status.contains("logical-0"))
-        let re = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        let re = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await re.loadWorkbench()
         XCTAssertEqual(re.macros.first?.id, id)
         XCTAssertEqual(re.macros.first?.references.count, 2)

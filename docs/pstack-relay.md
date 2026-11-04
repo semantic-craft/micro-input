@@ -47,12 +47,14 @@
 
 A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制通过。2026-11-05 用户明确只做 Antigravity、Cindy、ZCode、桌面 DeepSeek Harness，并保留 Cindy 原生能力。上轮未开始的 F–K 由下列切片替代，不建立 Paseo 适配器，不强制复制 MCP/CLI 出口。
 
-源码与边界见[四应用接口](four-app-interfaces.md)，实现细节、依赖和完整验收见[四应用计划](designs/four-app-control.md)，状态归 [#81](https://github.com/semantic-craft/micro-input/issues/81) 及责任票。以下编号只用于接力，不代表已实现。
+源码与边界见[四应用接口](four-app-interfaces.md)，实现细节、依赖和完整验收见[四应用计划](designs/four-app-control.md)，状态归 [#81](https://github.com/semantic-craft/micro-input/issues/81) 及责任票。各片状态由勾选与证据记录确认；软件、原生安装和实体结果分别验收。
 
-### [ ] Slice F: 保留 Cindy 原生输入和灯光所有权
+### [x] Slice F: 保留 Cindy 原生输入和灯光所有权
 - **Outcome**: 增加 Cindy 原生所有权的活跃握手和代次确认；原生持有期间暂停 Micro Input 重叠按键、PTT 与灯光，未知时保持暂停。
 - **Done Predicate**: 同一宽键/旋钮输入投递两端后业务动作仅一次；切 Profile、失联和旧代回调不双执行；不切换 Cindy 设备开关或改 keymap。 不能只看进程存在；失联标 unknown，移交其他应用前取得释放回执，未确认就不接管。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: 无。责任票 #82。
+- **Evidence**: .scratch/qa-runs/1793813638607-83009/evidence/result.json
+- **Verification scope**: 软件片通过全量离线检查、Cindy 源码 187 项测试及完整类型检查、真实 UDS 双端配对 8 事件；安装版 Cindy、实体按键和灯光视觉为 NOT_RUN。补丁、恢复限制及重跑命令见 [原生所有权桥](../integrations/cindy/README.md)。
 
 ### [ ] Slice G: 接通 ZCode 同实例状态与精确导航
 - **Outcome**: 通过最小桌面桥读取 v4 任务索引，在两个同名会话间准确打开目标。

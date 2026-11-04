@@ -7,7 +7,7 @@ final class MultiEditorTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("workbench.json")
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await store.loadWorkbench()
         let macro = try XCTUnwrap(store.catalog.first { $0.id == "local-macro" })
         assertSaved( await store.saveMacro(macro))
@@ -38,7 +38,7 @@ final class MultiEditorTests: XCTestCase {
         await store.undoDraft()
         XCTAssertNotNil(MultiEditorDraft(action: store.multis[0].action)?.branches[.tap])
         await store.undoDraft(redo: true)
-        let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        let reopened = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await reopened.loadWorkbench()
         let restored = try XCTUnwrap(MultiEditorDraft(action: reopened.multis[0].action))
         XCTAssertNil(restored.branches[.tap]); XCTAssertEqual(restored.term, "375")

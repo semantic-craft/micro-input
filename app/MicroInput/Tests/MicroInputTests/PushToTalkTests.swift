@@ -109,7 +109,7 @@ extension PushToTalkTests {
     @MainActor private func fixture() async throws -> (Store, TestDictationDriver, URL) {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let driver = TestDictationDriver()
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: dir.appendingPathComponent("draft.json"),
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: dir.appendingPathComponent("draft.json"),
             actionExecutor: RecordingHostActionExecutor(), dictationDriver: driver)
         await store.loadWorkbench(); await store.installCodingAgentPresets()
         let profile = try XCTUnwrap(store.hostProfiles.first { $0.name == "Cindy" })
@@ -183,7 +183,7 @@ extension PushToTalkTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         let driver = TestDictationDriver()
-        let store = Store(backend: core, documentURL: dir.appendingPathComponent("draft.json"),
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: dir.appendingPathComponent("draft.json"),
             actionExecutor: RecordingHostActionExecutor(), dictationDriver: driver)
         await store.loadWorkbench(); await store.installCodingAgentPresets()
         let index = try XCTUnwrap(store.snapshot?.profiles.firstIndex { $0.name == "Cindy" })
@@ -212,7 +212,7 @@ extension PushToTalkTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let core = MicroInputCore.MicroInput.syntheticConfigWriter()
         let driver = TestDictationDriver(); driver.recording.succeeds = false
-        let store = Store(backend: core, documentURL: dir.appendingPathComponent("draft.json"),
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: dir.appendingPathComponent("draft.json"),
             actionExecutor: RecordingHostActionExecutor(), dictationDriver: driver)
         await store.loadWorkbench()
         try await core.setSyntheticDiscovery(state: .twoDevices)
@@ -398,5 +398,34 @@ extension PushToTalkTests {
         let verified = await recording.isStopped()
         XCTAssertTrue(verified)
         XCTAssertEqual(target.presses, 1)
+    }
+}
+
+extension PushToTalkTests {
+    @MainActor func testOwnershipHandoffWaitsForLateVoiceStartAndRejectsUnconfirmedStop() async throws {
+        let driver = TestDictationDriver(); driver.holdStart = true; driver.recording.succeeds = false
+        let ownership = NativeOwnershipController(transport: nil)
+        ownership.setDesiredOwner("micro-input")
+        let request = ownership.beginRequest(microDrained: true)
+        ownership.receive(NativeOwnershipReply(version: 1, requestId: request.requestId,
+            clientInstance: request.clientInstance, generation: request.generation,
+            nativeInstance: UUID(), nativeGeneration: 1, state: "released", reason: "fixture",
+            inputDrained: true, pttDrained: true, lightingDrained: true, capabilities: ["fenced-release-v1"]), for: request)
+        let core = MicroInputCore.MicroInput()
+        let store = Store(nativeOwnership: ownership, backend: core, dictationDriver: driver)
+        store.routingValid = true; store.hostExecutionEnabled = true
+        store.startHeldDictation(adapter: "cindy", binding: "AG10", profile: "fixture")
+        await until { driver.continuation != nil }
+        ownership.invalidate("peer lost")
+        var finished = false
+        let drain = Task { let result = await store.drainForNativeOwnership(); finished = true; return result }
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertFalse(finished)
+        driver.continuation?.resume(); driver.continuation = nil
+        let result = await drain.value
+        XCTAssertFalse(result)
+        XCTAssertEqual(driver.recording.stops, 1)
+        XCTAssertFalse(store.pushToTalk.cleanupConfirmed)
+        await store.shutdown()
     }
 }

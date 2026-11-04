@@ -121,7 +121,7 @@ final class RadialMenuStateTests: XCTestCase {
         let suite = "radial-tests-\(UUID().uuidString)", executor = RecordingHostActionExecutor()
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         let core = MicroInputCore.MicroInput.syntheticRadialDevice()
-        let store = Store(backend: core, documentURL: directory.appendingPathComponent("workbench.json"), actionExecutor: override ?? executor, dictationDriver: dictation, t3Attention: t3, radialPreferences: preferences)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: directory.appendingPathComponent("workbench.json"), actionExecutor: override ?? executor, dictationDriver: dictation, t3Attention: t3, radialPreferences: preferences)
         await store.loadWorkbench(); await store.installCodingAgentPresets(); await store.setHostExecutionEnabled(true)
         try await core.setSyntheticDiscovery(state: .reconnectedDevice)
         await store.refresh(); await store.connect("synthetic-reconnected-interface-0"); await store.readIdentity(); await store.readDeviceConfig(); store.showLocalDraft()

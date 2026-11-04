@@ -66,6 +66,19 @@ class PStackRelayLauncherTests(unittest.TestCase):
         doc_text = (self.root / "docs" / "pstack-relay.md").read_text(encoding="utf-8")
         self.assertIn("### [x] Slice B:", doc_text)
 
+    def test_advance_adds_missing_evidence_and_updates_it_without_duplicates(self) -> None:
+        doc = self.root / "docs" / "pstack-relay.md"
+        doc.write_text("### [ ] Slice F: Ownership\n- **Outcome**: Preserve native owner\n"
+                       "- **Done Predicate**: one action\n\n"
+                       "### [ ] Slice G: Navigation\n- **Outcome**: precise target\n")
+        for receipt in ("receipt-one.json", "receipt-two.json"):
+            result = subprocess.run(["python3", str(SCRIPT), "advance", "F", "--evidence", receipt],
+                                    env=self.env, capture_output=True, text=True, check=True)
+            self.assertIn("Next: Slice G", result.stdout)
+            self.assertIn(f"evidence: {receipt}", result.stdout)
+            self.assertEqual(doc.read_text().count("- **Evidence**:"), 1)
+            self.assertIn(f"- **Evidence**: {receipt}", doc.read_text())
+
     def test_hooks_return_valid_json_for_session_start_and_stop(self) -> None:
         start_res = subprocess.run(
             ["python3", str(SCRIPT), "hook", "SessionStart"],

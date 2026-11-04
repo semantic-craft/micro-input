@@ -31,7 +31,7 @@ final class DiagnosticsTests: XCTestCase {
 
     @MainActor func testFailedDeviceReadProducesActionableSanitizedReport() async throws {
         let backend = DiagnosticBackend()
-        let store = Store(backend: backend)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: backend)
         await store.loadDemo()
         await store.connect("synthetic")
         await store.readDeviceConfig()

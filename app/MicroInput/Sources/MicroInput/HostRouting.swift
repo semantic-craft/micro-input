@@ -155,13 +155,16 @@ extension Store {
         if routing.manual_override { return "手动保持" }
         return routing.auto_follow_enabled ? "自动跟随" : "自动跟随已关闭"
     }
-    var dispatchOpen: Bool { !hostOperationPaused && !mutationDraining && routingValid && !systemSleeping && !stopped && !overflowDraining }
+    var dispatchOpen: Bool { nativeOwnership.allowsExecution && !hostOperationPaused && !mutationDraining && routingValid && !systemSleeping && !stopped && !overflowDraining }
     func refreshRouting() throws {
         let value = try JSONDecoder().decode(HostRoutingState.self, from: Data(backend.hostRoutingState().utf8))
+        let changed = routing?.document_id != value.document_id || routing?.document_revision != value.document_revision || routing?.host_state_revision != value.host_state_revision
+        if changed { nativeOwnership.invalidate("路由已换代，等待原生确认") }
         routing = value; hostActiveProfileId = value.profile_id
         hostExecutionEnabled = value.execution_enabled
         commandExecutionEnabled = value.command_execution_enabled
         routingValid = true
+        nativeOwnership.setDesiredOwner(activeDesktopAgentAdapter(for: value.profile_id ?? "") == "cindy" ? "native" : "micro-input")
     }
     func readInputBoundary() {
         cancelRadialMenu()

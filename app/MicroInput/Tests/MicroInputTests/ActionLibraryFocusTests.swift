@@ -18,7 +18,7 @@ private struct ActionLibrarySheetHost: View {
 @MainActor
 final class ActionLibraryFocusTests: XCTestCase {
     func testActionLibrarySearchStartsFocusedInASheet() async throws {
-        let store = Store(backend: MicroInputCore.MicroInput())
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput())
         await store.loadDemo()
         let host = ActionLibrarySheetHost(
             sheet: ActionLibrarySheet(store: store) {}

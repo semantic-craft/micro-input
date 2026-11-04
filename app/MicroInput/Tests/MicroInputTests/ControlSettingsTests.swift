@@ -7,7 +7,7 @@ final class ControlSettingsTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("workbench.json")
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await store.loadWorkbench()
         let configured = await store.saveControlSettings(mode: "logical_sectors", sectors: "5")
         XCTAssertTrue(configured)
@@ -27,7 +27,7 @@ final class ControlSettingsTests: XCTestCase {
         XCTAssertFalse(invalid)
         XCTAssertTrue(store.controlSettingsError?.contains("活动扇区数") == true)
         XCTAssertEqual(store.draft.revision, revision)
-        let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        let reopened = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await reopened.loadWorkbench()
         XCTAssertEqual(reopened.currentControlSettings?.active_sectors, 1)
         XCTAssertEqual(reopened.draft.edits[sectorKey]?.id, "review")
