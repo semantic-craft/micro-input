@@ -710,6 +710,15 @@ impl HidTransport for SyntheticDiscovery {
                 serde_json::json!({"m":"v.oai.hid","p":{"k":"AG00","act":true}}),
                 serde_json::json!({"m":"test.synthetic","p":"private payload must not cross FFI"}),
             ],
+            2 => vec![serde_json::json!({"m":"v.oai.rad","p":{"a":0.0,"d":0.0}})],
+            3..=10 => vec![
+                serde_json::json!({"m":"v.oai.rad","p":{"a":f64::from(input_case - 3) / 8.0,"d":0.9}}),
+            ],
+            11 => vec![serde_json::json!({"m":"v.oai.rad","p":{"a":0.125,"d":0.4}})],
+            12 => vec![
+                serde_json::json!({"m":"v.oai.hid","p":{"k":"ENC_CLK","act":1}}),
+                serde_json::json!({"m":"v.oai.hid","p":{"k":"ENC_CLK","act":0}}),
+            ],
             _ => return Err(TransportError::Unsupported),
         };
         let inject = self.input_inject.lock().unwrap();

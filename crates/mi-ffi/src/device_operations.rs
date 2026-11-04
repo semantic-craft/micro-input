@@ -473,6 +473,16 @@ impl MicroInput {
     }
     #[uniffi::constructor]
     pub fn synthetic_config_writer() -> Arc<Self> {
+        Self::synthetic_config_fixture(false)
+    }
+    #[uniffi::constructor]
+    pub fn synthetic_radial_device() -> Arc<Self> {
+        Self::synthetic_config_fixture(true)
+    }
+}
+#[cfg(feature = "synthetic-backend")]
+impl MicroInput {
+    fn synthetic_config_fixture(radial: bool) -> Arc<Self> {
         let transport = mi_transport::SyntheticDiscovery::default();
         transport.set_synthetic_identity(3).unwrap();
         let mut raw: Value = serde_json::from_slice(include_bytes!(
@@ -485,6 +495,11 @@ impl MicroInput {
             ["KV_OAI_AG06", "KV_OAI_AG07", "KV_OAI_AG08", "KV_OAI_AG09"],
             ["KV_OAI_AG10", "KV_OAI_AG11", "KV_OAI_AG12"]
         ]);
+        if radial {
+            raw["profiles"][0]["layers"][0]["layout"]["encoders"] =
+                json!(["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"]);
+            raw["profiles"][0]["layers"][0]["layout"]["joystick"] = json!("VENDOR");
+        }
         transport.set_files(mi_transport::SyntheticFiles::new(
             serde_json::to_vec(&raw).unwrap(),
             None,

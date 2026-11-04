@@ -1171,3 +1171,52 @@ async fn multiframe_request_uses_one_transport_batch() {
     assert!(task.await.unwrap().is_ok());
     s.shutdown().await;
 }
+
+#[tokio::test]
+async fn radial_positions_preserve_continuous_motion_without_upgrading_candidate_sources() {
+    let (session, link, _rx) = setup(500);
+    let mut verified = session.subscribe_verified_input();
+    let mut candidate = session.subscribe_input();
+    for (angle, distance, kind) in [
+        (0.0, 0.0, InputEventKind::UnknownNotification),
+        (0.0, 0.9, InputEventKind::Pressed),
+        (0.08, 0.9, InputEventKind::UnknownNotification),
+        (0.125, 0.4, InputEventKind::UnknownNotification),
+        (1.0, 0.0, InputEventKind::Released),
+    ] {
+        link.inject
+            .send(
+                json!({"m":"v.oai.rad","p":{"a":angle,"d":distance}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .unwrap();
+        let event = verified.next().await.unwrap();
+        let position = event.radial_position.unwrap();
+        assert_eq!(position.angle_turns, angle % 1.0);
+        assert_eq!(position.distance, distance);
+        assert_eq!(event.kind, kind);
+        assert!(candidate.next().await.unwrap().radial_position.is_none());
+    }
+    for raw in [
+        json!({"m":"v.oai.rad","p":{"a":1.1,"d":0.9}}),
+        json!({"m":"v.oai.rad","p":{"a":0.1,"d":-0.1}}),
+        json!({"m":"v.oai.rad","p":{"a":null,"d":0.9}}),
+        json!({"m":"kb.radial","p":{"a":0.1,"d":0.9}}),
+    ] {
+        link.inject.send(raw.to_string().into_bytes()).unwrap();
+        let event = verified.next().await.unwrap();
+        assert!(event.radial_position.is_none());
+        assert!(!event.action_eligible);
+    }
+    for raw in [
+        json!({"m":"v.oai.rad","method":"other","p":{"a":0.1,"d":0.9}}),
+        json!({"m":"v.oai.rad","p":{"a":0.1,"d":0.9},"params":{"a":0.2,"d":0.9}}),
+        json!({"m":"v.oai.rad","id":1,"p":{"a":0.1,"d":0.9}}),
+    ] {
+        assert!(VerifiedInputDecoder
+            .decode(&HostNotification::Unknown(raw))
+            .is_none());
+    }
+    session.shutdown().await;
+}

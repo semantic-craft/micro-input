@@ -26,6 +26,7 @@ protocol Backend {
     func retryLocalSave(operationId: String) async throws -> String
     func hostRoutingState() -> String
     func hostInputWatermark() -> String
+    func radialMenuInputReadiness(sessionId: UInt64) -> RadialInputReadiness
     func updateHostRouting(requestJson: String) async throws -> String
     func resolveHostInput(bindingId: String, expectedDocumentId: String, expectedDocumentRevision: UInt64, expectedHostStateRevision: UInt64) -> String?
 
@@ -117,6 +118,7 @@ extension Backend {
     func checkDeviceOperation(operationId: String) async throws -> String { throw BridgeError.Failed(message: "核对不可用") }
     func retryLocalSave(operationId: String) async throws -> String { throw BridgeError.Failed(message: "本地修复不可用") }
     func hostRoutingState() -> String { "{}" }
+    func radialMenuInputReadiness(sessionId: UInt64) -> RadialInputReadiness { .disconnected }
     func hostInputWatermark() -> String { #"{"session_id":null,"ingress_sequence":0}"# }
     func updateHostRouting(requestJson: String) async throws -> String { throw BridgeError.Unavailable }
     func resolveHostInput(bindingId: String, expectedDocumentId: String, expectedDocumentRevision: UInt64, expectedHostStateRevision: UInt64) -> String? { nil }
@@ -210,6 +212,9 @@ extension MicroInput: Backend {}
     var externalBundleID: String?
     var foregroundTask: Task<Void, Never>?
     lazy var overlay = HostOverlay(store: self)
+    lazy var radialOverlay = RadialMenuOverlay()
+    @Published var radialMenu = RadialMenuState()
+    let radialPreferences: UserDefaults
     @Published var hostActiveProfileId: String?
     @Published var hostExecutionEnabled = false
     @Published var passThroughHealth: PassThroughHealthView = .disconnected
@@ -284,6 +289,7 @@ extension MicroInput: Backend {}
             if ["push-to-talk", "push-to-talk-live"].contains(scenario), !preparedHostExecutionScenario {
                 await preparePushToTalkScenario(live: scenario == "push-to-talk-live")
             }
+            else if scenario == "radial-menu", !preparedHostExecutionScenario { preparedHostExecutionScenario = true; await prepareRadialMenuScenario() }
             else if scenario == "lighting-control" { await runSyntheticLightingScenario() }
             else if scenario == "config-write" { await runSyntheticDeviceOperationScenario() }
             else if scenario == "diagnostic-export", !preparedDiagnosticScenario { await prepareDiagnosticExportScenario() }
@@ -889,8 +895,9 @@ extension MicroInput: Backend {}
     @Published var connectedID: String?
     @Published var stale = false
     @Published var busy = false
-    init(backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil, dictationDriver: (any DictationDriving)? = nil, t3Attention: T3AttentionController? = nil) {
+    init(backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil, dictationDriver: (any DictationDriving)? = nil, t3Attention: T3AttentionController? = nil, radialPreferences: UserDefaults = .standard) {
         self.backend = backend
+        self.radialPreferences = radialPreferences
         self.t3Attention = t3Attention ?? T3AttentionController()
         self.documentOverride = documentURL
         self.actionExecutor = actionExecutor ?? LiveHostActionExecutor()
@@ -900,6 +907,7 @@ extension MicroInput: Backend {}
         #else
         self.pushToTalk = PushToTalkController(driver: dictationDriver ?? AXDictationDriver())
         #endif
+        self.radialMenu.setEnabled(radialPreferences.bool(forKey: "radialMenuEnabled"))
     }
     var profile: Profile? { guard let ps = snapshot?.profiles, ps.indices.contains(profileIndex) else { return nil }; return ps[profileIndex] }
     var layer: Layer? { guard let ls = profile?.layers, ls.indices.contains(layerIndex) else { return nil }; return ls[layerIndex] }

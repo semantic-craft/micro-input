@@ -9,7 +9,7 @@ import MicroInputCore
         PerformanceProbe.start()
         let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
         #if MI_SYNTHETIC_BACKEND
-        let core = ["config-write", "lighting-control"].contains(scenario) ? MicroInput.syntheticConfigWriter() : ["reconnect", "reconnect-transient", "apply-preparation", "host-execution", "diagnostic-export", "push-to-talk", "push-to-talk-live"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
+        let core = scenario == "radial-menu" ? MicroInput.syntheticRadialDevice() : ["config-write", "lighting-control"].contains(scenario) ? MicroInput.syntheticConfigWriter() : ["reconnect", "reconnect-transient", "apply-preparation", "host-execution", "diagnostic-export", "push-to-talk", "push-to-talk-live"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
         let store = Store(backend: core)
         #else
         let core = MicroInput()
@@ -250,6 +250,9 @@ struct StatusPanel: View {
                 Button("编辑按键…") { owner.showWindow() }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Divider()
+            Toggle("摇杆径向菜单", isOn: Binding(get: { store.radialMenu.enabled }, set: store.setRadialMenuEnabled))
+                .toggleStyle(.switch).controlSize(.small)
+            if store.radialMenu.enabled { Text(store.radialReadiness.label).font(.caption2).foregroundStyle(.secondary) }
             T3AttentionPanel(controller: store.t3Attention, next: { store.openNextT3Attention() })
             Divider()
             Toggle("自动跟随前台应用", isOn: Binding(get: { store.routing?.auto_follow_enabled ?? false }, set: { value in Task { await store.setAutoFollow(value) } })).toggleStyle(.switch).controlSize(.small)

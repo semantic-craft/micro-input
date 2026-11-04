@@ -359,9 +359,10 @@ extension T3AttentionControllerTests {
         store.openNextT3Attention()
         while client.waiter == nil { await Task.yield() }
         XCTAssertEqual(core.hostExecutionsPending(), 1)
+        let execution = try XCTUnwrap(store.hostExecutionTask)
         store.systemWillSleep()
         client.waiter?.resume(); client.waiter = nil
-        await store.hostExecutionTask?.value
+        await execution.value
         XCTAssertEqual(opens, 2); XCTAssertEqual(core.hostExecutionsPending(), 0)
         await store.shutdown()
     }

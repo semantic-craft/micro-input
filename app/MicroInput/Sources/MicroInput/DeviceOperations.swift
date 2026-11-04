@@ -53,7 +53,7 @@ extension Store {
         } else {
             receipt = await actionExecutor.execute(actionJSON: actionJSON, bindingId: bindingId, profileId: profileId)
         }
-        guard epoch == hostRouteEpoch, !hostOperationPaused else { return nil }
+        guard !Task.isCancelled, epoch == hostRouteEpoch, !hostOperationPaused else { return nil }
         lastHostActionReceipt = receipt
         return receipt
     }
