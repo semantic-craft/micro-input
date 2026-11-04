@@ -454,3 +454,48 @@ extension T3AttentionControllerTests {
         await controller.shutdown()
     }
 }
+
+@MainActor private final class T3DelayedExpiryReader: T3Reading {
+    let snapshot: T3ReadSnapshot
+    var waiter: CheckedContinuation<Void, Never>?
+    var connections = 0, closes = 0, reads = 0
+    init() throws { snapshot = try t3Snapshot([t3Thread(changes: ["pendingRuntimeRequest": t3Request()])]) }
+    func connect() async throws -> T3ReadSnapshot { connections += 1; return snapshot }
+    func read() async throws -> T3ReadSnapshot {
+        reads += 1
+        if reads == 1 {
+            await withCheckedContinuation { waiter = $0 }
+            throw T3Failure.expired
+        }
+        return snapshot
+    }
+    func close() async -> Bool { closes += 1; return true }
+}
+extension T3AttentionControllerTests {
+    func testExpiredOldPollCannotOverwriteDisabledConnection() async throws {
+        let reader = try T3DelayedExpiryReader()
+        let controller = T3AttentionController(client: reader, pollNanoseconds: 1_000_000, opener: { _ in true })
+        controller.setEnabled(true); await ready(controller)
+        while reader.waiter == nil { await Task.yield() }
+        let closes = reader.closes
+        controller.setEnabled(false)
+        reader.waiter?.resume(); reader.waiter = nil
+        try await Task.sleep(nanoseconds: 10_000_000)
+        XCTAssertFalse(controller.enabled); XCTAssertEqual(controller.state, .disabled)
+        XCTAssertTrue(controller.items.isEmpty); XCTAssertEqual(reader.connections, 1)
+        XCTAssertEqual(reader.closes, closes + 1)
+        await controller.shutdown()
+    }
+    func testExpiredOldPollCannotCloseNewGeneration() async throws {
+        let reader = try T3DelayedExpiryReader()
+        let controller = T3AttentionController(client: reader, pollNanoseconds: 1_000_000, opener: { _ in true })
+        controller.setEnabled(true); await ready(controller)
+        while reader.waiter == nil { await Task.yield() }
+        controller.setEnabled(false); controller.setEnabled(true)
+        reader.waiter?.resume(); reader.waiter = nil
+        await ready(controller)
+        XCTAssertTrue(controller.enabled); XCTAssertEqual(reader.connections, 2)
+        XCTAssertEqual(controller.items.count, 1)
+        await controller.shutdown()
+    }
+}

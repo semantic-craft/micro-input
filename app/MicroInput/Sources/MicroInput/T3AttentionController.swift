@@ -97,6 +97,7 @@ final class T3AttentionController: ObservableObject {
                     let next: T3ReadSnapshot
                     do { next = try await client.read() }
                     catch T3Failure.expired {
+                        guard self.generation == epoch, !Task.isCancelled else { return }
                         self.state = .connecting; self.items = []; self.snapshot = nil; self.receivedAt = nil
                         guard await client.close() else { throw T3Failure.revocation }
                         guard self.generation == epoch, !Task.isCancelled else { return }
@@ -162,6 +163,7 @@ final class T3AttentionController: ObservableObject {
             state = .unavailable(error as? T3Failure ?? .transport)
             loop?.cancel()
             if !(await client.close()), epoch == generation { state = .unavailable(.revocation) }
+            guard epoch == generation else { return .stale }
             lastResult = result
             return result
         }
