@@ -115,12 +115,12 @@ final class RadialMenuStateTests: XCTestCase {
             for _ in 0..<count { let event = try await radialNext(stream); _ = store.consumeHostInput(event) }
         }
     }
-    func fixture(t3: T3AttentionController? = nil, dictation: (any DictationDriving)? = nil) async throws -> Fixture {
+    func fixture(t3: T3AttentionController? = nil, dictation: (any DictationDriving)? = nil, executor override: (any HostActionExecuting)? = nil) async throws -> Fixture {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let suite = "radial-tests-\(UUID().uuidString)", executor = RecordingHostActionExecutor()
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         let core = MicroInputCore.MicroInput.syntheticRadialDevice()
-        let store = Store(backend: core, documentURL: directory.appendingPathComponent("workbench.json"), actionExecutor: executor, dictationDriver: dictation, t3Attention: t3, radialPreferences: preferences)
+        let store = Store(backend: core, documentURL: directory.appendingPathComponent("workbench.json"), actionExecutor: override ?? executor, dictationDriver: dictation, t3Attention: t3, radialPreferences: preferences)
         await store.loadWorkbench(); await store.installCodingAgentPresets(); await store.setHostExecutionEnabled(true)
         try await core.setSyntheticDiscovery(state: .reconnectedDevice)
         await store.refresh(); await store.connect("synthetic-reconnected-interface-0"); await store.readIdentity(); await store.readDeviceConfig(); store.showLocalDraft()
@@ -211,6 +211,64 @@ final class RadialMenuStateTests: XCTestCase {
         await core.disconnect()
         XCTAssertEqual(core.radialMenuInputReadiness(sessionId: session), .disconnected)
         await core.shutdown()
+    }
+    func testCancelledPredecessorCannotConsumeReplacementRadialQueue() async throws {
+        let executor = RadialGatedExecutor()
+        let f = try await fixture(executor: executor)
+        f.store.setRadialMenuEnabled(true)
+        let state = try XCTUnwrap(f.store.routing)
+        let action = #"{"action_type":"open_app","bundle_id":"test.app"}"#
+        var sheets = 0
+        let watch = f.store.$lastHostActionReceipt.sink { if $0?.actionType == "cheat_sheet" { sheets += 1 } }
+        XCTAssertTrue(f.store.enqueueHostAction(json: action, binding: "A", profile: state.profile_id ?? "", state: state))
+        for _ in 0..<100 where executor.pending["A"] == nil { try await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertNotNil(executor.pending["A"])
+        let old = try XCTUnwrap(f.store.cancelHostExecution())
+        XCTAssertTrue(f.store.enqueueHostAction(json: action, binding: "B", profile: state.profile_id ?? "", state: state))
+        let replacement = try XCTUnwrap(f.store.hostExecutionTask)
+        for _ in 0..<100 where executor.pending["B"] == nil { try await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertNotNil(executor.pending["B"])
+        try await f.feed(.radialCenter); try await f.feed(.radialSouthEast)
+        try await f.feed(.encoderClick, count: 2)
+        XCTAssertEqual(f.store.pendingHostActions.count, 1)
+        executor.pending.removeValue(forKey: "A")?.resume()
+        await old.value
+        XCTAssertEqual(sheets, 0)
+        XCTAssertEqual(f.store.pendingHostActions.count, 1)
+        XCTAssertNotNil(f.store.hostExecutionTask)
+        XCTAssertNil(f.store.lastHostActionReceipt)
+        XCTAssertEqual(f.core.hostExecutionsPending(), 1)
+        executor.pending.removeValue(forKey: "B")?.resume()
+        await replacement.value
+        XCTAssertEqual(sheets, 1)
+        XCTAssertTrue(f.store.pendingHostActions.isEmpty)
+        XCTAssertEqual(f.core.hostExecutionsPending(), 0)
+        watch.cancel(); await f.close()
+    }
+    func testCancelledPredecessorCannotClearReplacementOverflow() async throws {
+        let executor = RadialGatedExecutor()
+        let f = try await fixture(executor: executor)
+        let state = try XCTUnwrap(f.store.routing)
+        let action = #"{"action_type":"open_app","bundle_id":"test.app"}"#
+        XCTAssertTrue(f.store.enqueueHostAction(json: action, binding: "A", profile: "profile", state: state))
+        for _ in 0..<100 where executor.pending["A"] == nil { try await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertNotNil(executor.pending["A"])
+        let old = try XCTUnwrap(f.store.cancelHostExecution())
+        XCTAssertTrue(f.store.enqueueHostAction(json: action, binding: "B", profile: "profile", state: state))
+        let replacement = try XCTUnwrap(f.store.hostExecutionTask)
+        for _ in 0..<100 where executor.pending["B"] == nil { try await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertNotNil(executor.pending["B"])
+        for index in 0..<33 { f.store.enqueueHostAction(json: action, binding: "queued-\(index)", profile: "profile", state: state) }
+        XCTAssertTrue(f.store.overflowDraining)
+        executor.pending.removeValue(forKey: "A")?.resume()
+        await old.value
+        XCTAssertTrue(f.store.overflowDraining)
+        XCTAssertNotNil(f.store.hostExecutionTask)
+        executor.pending.removeValue(forKey: "B")?.resume()
+        await replacement.value
+        XCTAssertFalse(f.store.overflowDraining)
+        XCTAssertTrue(f.store.pendingHostActions.isEmpty)
+        await f.close()
     }
     func testFiveSecondSelectionUsesConfirmationTimeForQueueAdmission() async throws {
         let f = try await fixture(); f.store.setRadialMenuEnabled(true)
@@ -331,5 +389,16 @@ final class RadialMenuStateTests: XCTestCase {
     func start(adapter: String, isHeld: @escaping () -> Bool) async -> DictationStart { starts += 1; return .started(self) }
     func stop() async -> (Bool, String) { stops += 1; return (true, "synthetic stopped") }
     func isStopped() async -> Bool { stops > 0 }
+}
+#endif
+
+#if MI_SYNTHETIC_BACKEND
+@MainActor private final class RadialGatedExecutor: HostActionExecuting {
+    var pending: [String: CheckedContinuation<Void, Never>] = [:]
+    func execute(actionJSON: String, bindingId: String, profileId: String) async -> HostActionReceipt {
+        await withCheckedContinuation { pending[bindingId] = $0 }
+        return HostActionReceipt(timestampMs: 0, profileId: profileId, bindingId: bindingId, actionType: "open_app",
+            target: "test.app", textByteLen: nil, outcome: "simulated", detail: "released")
+    }
 }
 #endif

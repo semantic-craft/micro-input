@@ -209,7 +209,7 @@ extension Store {
         guard hostExecutionTask == nil else { return true }
         let executionGeneration = hostExecutionGeneration
         hostExecutionTask = Task { @MainActor [self] in
-            while !pendingHostActions.isEmpty {
+            while hostExecutionIsCurrent(executionGeneration), !pendingHostActions.isEmpty {
                 let entry = pendingHostActions.removeFirst()
                 defer { entry.done?() }
                 guard dispatchOpen, let current = routing,
@@ -225,7 +225,7 @@ extension Store {
                         startHeldDictation(adapter: adapter, binding: entry.binding, profile: entry.profile, ingress: entry.deviceIngress ?? 0)
                     } else {
                         pushToTalk.cancel(); await pushToTalk.waitUntilStopped()
-                        guard admitAfterDictationCleanup(entry) else { continue }
+                        guard admitAfterDictationCleanup(entry, executionGeneration: executionGeneration) else { continue }
                         var toggle = payload; toggle.command = "dictation"
                         if let data = try? JSONEncoder().encode(toggle) {
                             _ = await executeHostAction(actionJSON: String(decoding: data, as: UTF8.self), bindingId: entry.binding, profileId: entry.profile)
@@ -233,23 +233,27 @@ extension Store {
                     }
                 } else {
                     pushToTalk.cancel(); await pushToTalk.waitUntilStopped()
-                    guard admitAfterDictationCleanup(entry) else { continue }
+                    guard admitAfterDictationCleanup(entry, executionGeneration: executionGeneration) else { continue }
                     if entry.radialIntent == .cheatSheet {
                         showRadialCheatSheet(entry)
                         continue
                     }
                     _ = await executeHostAction(actionJSON: entry.json, bindingId: entry.binding, profileId: entry.profile, t3Selection: entry.t3Selection, stillAdmitted: { [weak self] in
-                        self?.admitAfterDictationCleanup(entry, checkAge: false) == true
+                        self?.admitAfterDictationCleanup(entry, executionGeneration: executionGeneration, checkAge: false) == true
                     })
                 }
             }
+            guard hostExecutionIsCurrent(executionGeneration) else { return }
             if overflowDraining { readInputBoundary(); overflowDraining = false }
-            if executionGeneration == hostExecutionGeneration { hostExecutionTask = nil }
+            hostExecutionTask = nil
         }
         return true
     }
-    private func admitAfterDictationCleanup(_ entry: PendingHostAction, checkAge: Bool = true) -> Bool {
-        dispatchOpen && pushToTalk.cleanupConfirmed && radialEntryReady(entry) && routing?.host_state_revision == entry.state.host_state_revision
+    private func hostExecutionIsCurrent(_ generation: Int) -> Bool {
+        generation == hostExecutionGeneration && !Task.isCancelled
+    }
+    private func admitAfterDictationCleanup(_ entry: PendingHostAction, executionGeneration: Int, checkAge: Bool = true) -> Bool {
+        hostExecutionIsCurrent(executionGeneration) && dispatchOpen && pushToTalk.cleanupConfirmed && radialEntryReady(entry) && routing?.host_state_revision == entry.state.host_state_revision
             && routing?.document_revision == entry.state.document_revision && routing?.document_id == entry.state.document_id
             && (!entry.requiresEnabled || hostExecutionEnabled)
             && (entry.deviceSession == nil || (entry.deviceSession == inputBoundary.session && (entry.deviceIngress ?? 0) > inputBoundary.cutoff))

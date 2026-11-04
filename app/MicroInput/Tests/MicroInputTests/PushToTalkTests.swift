@@ -279,7 +279,7 @@ extension PushToTalkTests {
         await held.waitUntilStopped()
     }
     @MainActor func testQueuedUIToggleRechecksRouteAfterAwaitingStopAndRejectsUnknownCleanup() async throws {
-        for cause in ["profile", "unknown"] {
+        for cause in ["profile", "unknown", "cancel"] {
             let (store, driver, dir) = try await fixture()
             defer { try? FileManager.default.removeItem(at: dir) }
             let executor = try XCTUnwrap(store.actionExecutor as? RecordingHostActionExecutor)
@@ -291,13 +291,15 @@ extension PushToTalkTests {
             store.enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"cindy","command":"push-to-talk"}"#,
                 binding: "ui-AG06", profile: state.profile_id ?? "", state: state)
             await until { driver.recording.stopContinuation != nil }
+            let execution = try XCTUnwrap(store.hostExecutionTask)
             var change: Task<Void, Never>?
+            if cause == "cancel" { store.cancelHostExecution() }
             if cause == "profile" {
                 change = Task { await store.setHostActiveProfile(store.hostProfiles.first { $0.name == "Codex" }?.id.text) }
                 await until { store.mutationDraining }
             }
             driver.recording.stopContinuation?.resume(); driver.recording.stopContinuation = nil
-            await store.hostExecutionTask?.value; await change?.value
+            await execution.value; await change?.value
             XCTAssertTrue(executor.receipts.isEmpty, cause)
             await store.shutdown()
         }
