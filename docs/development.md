@@ -1,6 +1,6 @@
 # 当前实施入口
 
-当前前沿：主线已包含 Paseo 通用交互迁移；全面覆盖仍有缺口，见[能力清单](designs/paseo-coverage.md)与[接力 F–K](pstack-relay.md)。下一步先核对原生集成所有权。下文“首轮开发范围”与 Dispatch 顺序为早期阶段背景，当前能力以 README、源码与现行验收为准。
+当前前沿：[四应用控制计划](designs/four-app-control.md)。只对 Antigravity、Cindy、ZCode、桌面 DeepSeek Harness 深入接入，保留 Cindy 原生能力；先核对[源码与接口证据](four-app-interfaces.md)，再按[接力队列](pstack-relay.md)领取可验收切片。下文早期 MVP 范围仅作阶段背景。
 
 接手未完成工单或产品改动时，先执行[研究成果接入规则](agents/research-context.md)。其中包含 Input 1.1.0 的证据索引、按功能阅读路径和可直接使用的接续提示词；实际工单状态以 GitHub 当前记录为准。
 

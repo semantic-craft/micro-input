@@ -2,7 +2,9 @@
 
 ## 结论与基线
 
-目标：覆盖 `mattt/paseo-creator-micro` 已利用的键盘能力，并保留 Micro Input 的独立配置器和多应用定位。2026-11-05 本轮只做源码评估、进度校正与仓库整理；下列缺口不冒充已实现。
+目标已于 2026-11-05 明确收敛：只在 Antigravity、Cindy、ZCode、桌面版 DeepSeek Harness 达到参考项目控制 Paseo 的深度，不使用 Paseo。保留 Cindy 原生集成，只补缺口。当前接入证据见[四应用接口](../four-app-interfaces.md)，执行任务见[四应用控制计划](four-app-control.md)。
+
+本页保留参考项目的能力基准，用于发现遗漏。下表描述本地 e9d435e 之前的 Micro Input 实现，不包含目标应用自身已经提供的全部能力，尤其不能用它判断 Cindy 原生能力缺失。
 
 比较基线：上游 [aca834c3094a64d2d2db001fb1c89f9c4d36e584](https://github.com/mattt/paseo-creator-micro/tree/aca834c3094a64d2d2db001fb1c89f9c4d36e584)，Micro Input `dead00254b6729af77b1fd220bcfd65edacd0c42`。上游源码与测试已阅读，未构建运行上游、未向设备发送命令。以下上游路径均相对此固定提交。
 
@@ -24,7 +26,7 @@
 
 “部分”包括实现语义不同、仅部分适配器接通或缺少最终效果验证。动作名来自上游 `Plugin/shared/actions.ts`，包含全部 27 个非空动作及 `none`。
 
-| 能力 / 上游动作 | 当前证据与差距 | 接力 |
+| 能力 / 上游动作 | 当前证据与差距 | 上轮接力编号 |
 | --- | --- | --- |
 | USB、RPC、热插拔、层识别、宽键合并 | 已有独立后端、唯一 reader、固件门禁及 AG/ACT/ENC 映射；完整断连/睡眠实体验收仍待补。上游的 `kb.radial` 不因源码发现而自动开放 | K |
 | `none`、自定义映射、输入区聚焦 `focusComposer` | 本地动作与目标应用聚焦已实现；各应用可达性分别判断 | F/K |
@@ -34,7 +36,7 @@
 | `nextActionableAgent`、`nextStuckWorkspace` | T3 只有专用待办导航；缺跨适配器统一的失败/权限/未读状态及工作区轮询。完成状态不能推测未读 | G |
 | `previousProject/nextProject`、`previousWorkspace/nextWorkspace` | 个别应用快捷键不能替代稳定项目/工作区身份、排序、排除归档和选择规则；通用模型未覆盖 | G |
 | `selectNextWorkspace/selectPreviousWorkspace/openSelectedWorkspace` | 本地 Profile 选择与应用打开不是工作区选择；未建立等价接口 | G |
-| Recent agents / Workspaces / Pinned workspaces / Off 顶部六键模式 | 缺稳定六槽、固定工作区、单击选择/双击打开、子 Agent 筛选、亮度表示当前选择及选择恢复 | G/H |
+| Recent agents / Workspaces / Pinned workspaces / Off 顶部六键模式 | Micro Input 通用路径缺稳定六槽、固定工作区、单击选择/双击打开、子 Agent 筛选、亮度表示当前选择及选择恢复；Cindy 原生路径另见四应用接口 | G/H |
 | `newAgent` | 千问、ZCode 等有新任务动作；各适配器缺统一创建后目标身份确认，不能算全覆盖 | G |
 | `approvePermission/denyPermission` | 尚无通用请求 ID 绑定的审批/拒绝执行；通用 Return 或快捷键不等价，过期请求必须零操作 | G |
 | `stopAgent`、`thinkingUp/thinkingDown`、`toggleVoiceMode` | 未形成跨适配器可核验能力；按住听写不等于语音回答开关；思考级别须读取目标模型可用选项 | G |
@@ -42,16 +44,16 @@
 | 八向径向手势、禁用/取消、槽位外观 | `RadialMenuState.swift` 为旋钮确认/回中取消；上游 `RadialSelector.swift` 为快速回弹确认/慢回中取消。当前预设以 Submit 代替上游 Stop，图标/颜色配置与 Escape 拦截也未对齐 | I |
 | 逐键状态与双区运行时反馈 | 当前 RGB 编辑/预览不等于 `v.oai.thstatus` / `v.oai.rgbcfg` 的实时状态灯；红失败/黄待输入/蓝运行/绿未读、选中亮度、失败闪烁与思考级别提示缺闭环 | H |
 | 灯光效果、当前层可见性、竞争/重连 | 上游另含 shallowBreathing=6 候选、AG 与 ACT 的逐键灯光差异、期望状态重发；我们需核验当前固件并提供释放/恢复，不凭 setter ACK 宣称恢复 | H |
-| MCP / CLI / 仿真 | 上游有状态、逐键/分区灯光、清灯、等待输入五项 MCP 工具，以及 socket CLI / 仿真。我们只有本地草稿 CLI 和隔离 QA，不等价；此前暂缓，现按全覆盖目标纳入待实现 | J |
+| MCP / CLI / 仿真 | 上游有状态、逐键/分区灯光、清灯、等待输入五项 MCP 工具，以及 socket CLI / 仿真。我们只有本地草稿 CLI 和隔离 QA；此项不是本次用户目标。仅当四应用接入需要时采用 MCP/CLI，不复制 Paseo 的五工具产品出口 | J |
 | 登录启动、权限、安装/升级、状态界面 | 已有菜单栏/诊断/QA，但未找到等价 SMAppService 登录启动；安装包升级及权限维持仍归 #43，不以开发构建通过替代 | K |
 
 本地入口：`app/MicroInput/Sources/MicroInput/{DesktopAgents,HostRouting,DeviceOperations,PushToTalk,RadialMenuState,RadialMenuRouting}.swift`；`crates/mi-model/src/navigation_history.rs`；协议与配置见 [模块契约](../module-contracts.md)。
 
 ## 复用决定与验证边界
 
-上游根 `LICENSE.md` 为 MIT，允许复用，复制或实质移植时保留 Mattt 版权及许可；本轮没有引入第三方代码。优先复用/移植纯状态算法及其行为向量：`actionable.ts`、`slots.ts`、`projects.ts`、`workspaces.ts`、`RadialSelector.swift`、灯光计算。Paseo SDK 调用封装成专用适配器；其他应用必须用自己的可用接口，不能宣称自动获得同等能力。上游带副作用的模拟桥会执行真实 Paseo 动作，不能当离线测试入口。
+上游根 `LICENSE.md` 为 MIT，允许复用，复制或实质移植时保留 Mattt 版权及许可；本轮没有引入第三方代码。优先复用/移植纯状态算法及其行为向量：`actionable.ts`、`slots.ts`、`projects.ts`、`workspaces.ts`、`RadialSelector.swift`、灯光计算。不建立 Paseo 适配器；四款目标应用各用自己的可用接口，不能宣称自动获得同等能力。上游带副作用的模拟桥会执行真实 Paseo 动作，不能当离线测试入口。
 
-“全部覆盖”保留为验收目标：缺少接口的应用明确记缺口，不用 disabled 或快捷键占位关闭。Cindy 已有原生键盘能力应保留；先逐能力确定唯一消费者，再补其没有的能力。F 先确定所有权，G 建立可核验的语义，再 H/I/J，K 收口；灯光与设备文件写入仍须具体目标、备份/恢复条件，不能从本次评估推导任意改写授权。
+“四应用达到同等级控制深度”是验收目标：缺少接口的应用明确记缺口，不用 disabled 或快捷键占位关闭。Cindy 已有原生键盘能力应保留；先逐能力确定唯一消费者，再补其没有的能力。旧 F–K 是上轮范围，已由四应用控制计划与现行接力队列替代；灯光与设备文件写入仍须具体目标、备份/恢复条件，不能从本次评估推导任意改写授权。
 
 本轮复核了 A–E 引用的 E 回执：`1793801884388-98896/evidence/result.json` 是 host-execution 的 24 项回执，status=PASS、physical_key/lighting_visual=NOT_RUN，记录基线 `95012d0` 且 working_tree_changes=true；它不是当前 clean HEAD 的全量验收证明。安装版与本地 target 的主可执行文件 SHA-256 相同（`00d266d68fd5aaccfc0b006bccbaad7abca023984f8b6b6df2319687a0a2e2c4`），只能证明两份二进制相同，不证明源码对应关系、整个 app bundle 或实时体验。
 
