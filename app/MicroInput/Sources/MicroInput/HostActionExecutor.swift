@@ -37,6 +37,7 @@ struct ResolvedHostActionPayload: Codable, Equatable {
     let text: String?
     let bundle_id: String?
     let url: String?
+    let working_directory: String?
     let adapter: String?
     var command: String?
     let session: String?
@@ -204,6 +205,10 @@ enum AuditLogWriter {
         case "open_url":
             let url = payload.url ?? ""
             return (url, nil, url)
+        case "shell_command":
+            let workingDirectory = payload.working_directory ?? ""
+            let commandBytes = (payload.command ?? "").utf8.count
+            return (workingDirectory, commandBytes, "cwd_bytes=\(workingDirectory.utf8.count) command_bytes=\(commandBytes)")
         case "agent_command":
             let adapter = payload.adapter ?? ""
             let cmd = payload.command ?? ""
@@ -226,6 +231,7 @@ enum AuditLogWriter {
 @MainActor final class LiveHostActionExecutor: HostActionExecuting {
     private var savedClipboardItems: [[NSPasteboard.PasteboardType: Data]]?
     private var clipboardRestoreTask: Task<Void, Never>?
+    private let auditLogPath: String?
     var macroAccessibilityChecker: () -> Bool = { AXIsProcessTrusted() }
     var macroKeyEventPoster: (CGKeyCode, Bool) -> Bool = { keyCode, down in
         guard let source = CGEventSource(stateID: .hidSystemState),
@@ -249,6 +255,10 @@ enum AuditLogWriter {
         }
     }
 
+    init(auditLogPath: String? = nil) {
+        self.auditLogPath = auditLogPath
+    }
+
     func execute(actionJSON: String, bindingId: String, profileId: String) async -> HostActionReceipt {
         let now = UInt64(Date().timeIntervalSince1970 * 1000)
         guard let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(actionJSON.utf8)) else {
@@ -262,7 +272,7 @@ enum AuditLogWriter {
                 outcome: "blocked",
                 detail: "JSON 解析失败"
             )
-            AuditLogWriter.append(receipt)
+            AuditLogWriter.append(receipt, pathOverride: auditLogPath)
             return receipt
         }
         let meta = RecordingHostActionExecutor.describeMetadata(payload)
@@ -278,7 +288,7 @@ enum AuditLogWriter {
                 outcome: "simulated",
                 detail: meta.detail
             )
-            AuditLogWriter.append(receipt)
+            AuditLogWriter.append(receipt, pathOverride: auditLogPath)
             return receipt
         }
 
@@ -293,7 +303,7 @@ enum AuditLogWriter {
             outcome: ok ? "executed" : "blocked",
             detail: detail
         )
-        AuditLogWriter.append(receipt)
+        AuditLogWriter.append(receipt, pathOverride: auditLogPath)
         return receipt
     }
 
@@ -323,6 +333,20 @@ enum AuditLogWriter {
             guard let raw = payload.url, let url = URL(string: raw) else { return (false, "无效 URL") }
             let ok = NSWorkspace.shared.open(url)
             return (ok, raw)
+
+        case "shell_command":
+            guard let command = payload.command, !command.isEmpty,
+                  let workingDirectory = payload.working_directory, !workingDirectory.isEmpty else {
+                return (false, "缺失命令或绝对工作目录")
+            }
+            let (ok, _) = await AgentAdapters.runProcess(
+                executable: "/bin/sh",
+                arguments: ["-c", command],
+                workingDirectory: workingDirectory,
+                timeoutSeconds: 10.0
+            )
+            let commandBytes = command.utf8.count
+            return (ok, ok ? "exit=0 cwd_bytes=\(workingDirectory.utf8.count) command_bytes=\(commandBytes)" : "命令执行失败；输出不进入审计")
 
         case "agent_command":
             let adapter = payload.adapter ?? ""

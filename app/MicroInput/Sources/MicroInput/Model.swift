@@ -139,6 +139,7 @@ struct DocumentView: Decodable {
     let action_capabilities: [String:ActionCapability]?
     let host_active_profile_id: String?
     let host_execution_enabled: Bool?
+    let command_execution_enabled: Bool?
 }
 struct ActionCapability: Decodable {
     let target: String, prerequisites: [String], host_required: Bool, execution_available: Bool

@@ -43,6 +43,10 @@ pub enum ResolvedHostAction {
     OpenApp {
         bundle_id: String,
     },
+    ShellCommand {
+        command: String,
+        working_directory: String,
+    },
     OpenUrl {
         url: String,
     },
@@ -376,7 +380,7 @@ pub fn macos_virtual_key_code(key: &str) -> Option<u16> {
     }
 }
 
-fn convert_action(action: &Action) -> Option<ResolvedHostAction> {
+fn convert_action(action: &Action, command_execution_enabled: bool) -> Option<ResolvedHostAction> {
     let kind: ActionKind = serde_json::from_value(action.payload.clone()).ok()?;
     match kind {
         ActionKind::Shortcut {
@@ -402,6 +406,14 @@ fn convert_action(action: &Action) -> Option<ResolvedHostAction> {
         ActionKind::Text { text } => Some(ResolvedHostAction::PasteText { text }),
         ActionKind::OpenApp { bundle_id } => Some(ResolvedHostAction::OpenApp { bundle_id }),
         ActionKind::OpenUrl { url } => Some(ResolvedHostAction::OpenUrl { url }),
+        ActionKind::ShellCommand {
+            command,
+            working_directory,
+        } if command_execution_enabled => Some(ResolvedHostAction::ShellCommand {
+            command,
+            working_directory,
+        }),
+        ActionKind::ShellCommand { .. } => None,
         ActionKind::AgentCommand { adapter, command } => {
             Some(ResolvedHostAction::AgentCommand { adapter, command })
         }
@@ -444,11 +456,12 @@ fn convert_action(action: &Action) -> Option<ResolvedHostAction> {
     }
 }
 
-pub fn resolve_host_action(
+pub fn resolve_host_action_with_command_consent(
     doc: &LocalDocumentV2,
     host_active_profile_id: Option<&str>,
     binding_id: &str,
     is_pressed: bool,
+    command_execution_enabled: bool,
 ) -> Option<ResolvedHostAction> {
     if !is_pressed {
         return None;
@@ -489,7 +502,22 @@ pub fn resolve_host_action(
     })?;
 
     let action = doc.editable.graph.actions.get(action_id)?;
-    convert_action(action)
+    convert_action(action, command_execution_enabled)
+}
+
+pub fn resolve_host_action(
+    doc: &LocalDocumentV2,
+    host_active_profile_id: Option<&str>,
+    binding_id: &str,
+    is_pressed: bool,
+) -> Option<ResolvedHostAction> {
+    resolve_host_action_with_command_consent(
+        doc,
+        host_active_profile_id,
+        binding_id,
+        is_pressed,
+        false,
+    )
 }
 
 /// Recheck each supported physical binding; counts alone do not establish position or uniqueness.

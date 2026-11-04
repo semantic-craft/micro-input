@@ -298,6 +298,12 @@ impl DocumentStore {
         }
         self.preferences.value.host_execution_enabled
     }
+    pub fn command_execution_enabled(&self) -> bool {
+        if let Some(host) = &self.host {
+            return host.command_execution_enabled();
+        }
+        self.preferences.value.command_execution_enabled
+    }
     pub fn set_host_active_profile(&mut self, profile_id: Option<String>) -> Result<(), String> {
         if let Some(host) = &mut self.host {
             return host.set_host_active_profile(profile_id);
@@ -333,6 +339,20 @@ impl DocumentStore {
         }
         let changed = self.preferences.value.host_execution_enabled != enabled;
         self.preferences.set_host_execution_enabled(enabled)?;
+        if changed {
+            self.host_state_revision += 1;
+        }
+        Ok(())
+    }
+    pub fn set_command_execution_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        if let Some(host) = &mut self.host {
+            return host.set_command_execution_enabled(enabled);
+        }
+        if self.blocked {
+            return Err("本地文档未载入，命令执行开关未保存".into());
+        }
+        let changed = self.preferences.value.command_execution_enabled != enabled;
+        self.preferences.set_command_execution_enabled(enabled)?;
         if changed {
             self.host_state_revision += 1;
         }
@@ -577,6 +597,8 @@ struct HostPreferences {
     #[serde(default)]
     host_execution_enabled: bool,
     #[serde(default)]
+    command_execution_enabled: bool,
+    #[serde(default)]
     auto_follow_enabled: bool,
     #[serde(default)]
     manual_override: bool,
@@ -590,6 +612,7 @@ impl Default for HostPreferences {
             favorites: Default::default(),
             host_active_profile_id: None,
             host_execution_enabled: false,
+            command_execution_enabled: false,
             auto_follow_enabled: false,
             manual_override: false,
             app_profile_links: Default::default(),
@@ -688,6 +711,11 @@ impl HostPreferencesStore {
     fn set_host_execution_enabled(&mut self, enabled: bool) -> Result<(), String> {
         let mut next = self.value.clone();
         next.host_execution_enabled = enabled;
+        self.save(next)
+    }
+    fn set_command_execution_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        let mut next = self.value.clone();
+        next.command_execution_enabled = enabled;
         self.save(next)
     }
 }

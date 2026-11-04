@@ -83,11 +83,12 @@ impl MicroInput {
             return None;
         }
         let profile = store.host_active_profile_id()?;
-        let action = mi_model::host_router::resolve_host_action(
+        let action = mi_model::host_router::resolve_host_action_with_command_consent(
             &store.draft.document,
             Some(&profile),
             &binding_id,
             true,
+            store.command_execution_enabled(),
         )?;
         Some(serde_json::json!({"profile_id":profile,"document_id":store.draft.document_id,"document_revision":store.draft.revision,"host_state_revision":store.host_revision(),"action":action}).to_string())
     }

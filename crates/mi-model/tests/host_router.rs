@@ -1,8 +1,9 @@
 use mi_model::{
     draft::{Action, ActionKind, Draft},
     host_router::{
-        binding_to_logical_slot, check_passthrough_health, resolve_host_action, HostIdentityStatus,
-        PassThroughHealth, ResolvedHostAction,
+        binding_to_logical_slot, check_passthrough_health, resolve_host_action,
+        resolve_host_action_with_command_consent, HostIdentityStatus, PassThroughHealth,
+        ResolvedHostAction,
     },
     preset::install_agent_starter_profiles,
     storage::DocumentStore,
@@ -140,6 +141,38 @@ fn passthrough_health_inspects_connection_snapshot_and_layer_drift() {
             active_layer: 1,
             bound_ag_count: 0,
         }
+    );
+}
+
+#[test]
+fn shell_commands_route_only_after_an_independent_consent_gate() {
+    let mut draft = Draft::default();
+    let pid = draft.document.editable.graph.profile_order[0].clone();
+    let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+    let action = Action {
+        id: "safe-command".into(),
+        name: "写入命令标记".into(),
+        category: "命令".into(),
+        detail: "默认关闭 · /bin/sh · 10 秒上限".into(),
+        payload: serde_json::to_value(ActionKind::ShellCommand {
+            command: "printf command-marker > marker".into(),
+            working_directory: "/tmp".into(),
+        })
+        .unwrap(),
+    };
+    draft.assign(&json!(pid), &json!(lid), 0, action).unwrap();
+
+    assert!(
+        resolve_host_action_with_command_consent(&draft.document, Some(&pid), "AG00", true, false)
+            .is_none(),
+        "command consent defaults to off and must not resolve a shell action"
+    );
+    assert_eq!(
+        resolve_host_action_with_command_consent(&draft.document, Some(&pid), "AG00", true, true),
+        Some(ResolvedHostAction::ShellCommand {
+            command: "printf command-marker > marker".into(),
+            working_directory: "/tmp".into(),
+        })
     );
 }
 

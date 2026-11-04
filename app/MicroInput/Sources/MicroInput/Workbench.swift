@@ -90,6 +90,8 @@ struct Workbench: View {
                         Spacer()
                         Toggle("按键控制", isOn: Binding(get: { store.hostExecutionEnabled }, set: { value in Task { await store.setHostExecutionEnabled(value) } }))
                             .toggleStyle(.switch).controlSize(.small).fixedSize()
+                        Toggle("命令同意", isOn: Binding(get: { store.commandExecutionEnabled }, set: { value in Task { await store.setCommandExecutionEnabled(value) } }))
+                            .toggleStyle(.switch).controlSize(.small).fixedSize()
                         Button { Task { await store.undoDraft() } } label: { Image(systemName: "arrow.uturn.backward") }.help("撤销").accessibilityLabel("撤销").disabled(!store.canEditDraft || !store.draft.can_undo || store.busy)
                         Button { Task { await store.undoDraft(redo: true) } } label: { Image(systemName: "arrow.uturn.forward") }.help("重做").accessibilityLabel("重做").disabled(!store.canEditDraft || !store.draft.can_redo || store.busy)
                         Button("查看变更 · \(changeCount)") { reviewing = true }.disabled(store.browsingDeviceSnapshot)
@@ -536,6 +538,11 @@ struct ActionParameters: View {
                         }
                     }
                 }
+            }
+            if type == "shell_command" {
+                Text("固定使用 /bin/sh -c；10 秒超时；输出不进入回执。").font(.caption).foregroundStyle(.secondary)
+                TextField("命令内容", text: Binding(get: {action.payload["command"]?.text ?? ""}, set: {action.payload["command"] = .string($0)}), axis: .vertical).lineLimit(1...6)
+                TextField("绝对工作目录", text: Binding(get: {action.payload["working_directory"]?.text ?? ""}, set: {action.payload["working_directory"] = .string($0)}))
             }
             if type == "shortcut" {
                 ForEach(["command","shift","option","control"], id: \.self) { modifier in

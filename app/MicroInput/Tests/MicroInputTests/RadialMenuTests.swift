@@ -6,7 +6,8 @@ import MicroInputCore
 
 private func radialRoute(_ revision: UInt64 = 1) -> HostRoutingState {
     HostRoutingState(document_id: "doc", document_revision: revision, host_state_revision: 1, profile_id: "profile", profile_name: "Synthetic profile",
-                     execution_enabled: true, auto_follow_enabled: false, manual_override: false, app_profile_links: [:], keys: [])
+                     execution_enabled: true, auto_follow_enabled: false, manual_override: false,
+                     command_execution_enabled: false, app_profile_links: [:], keys: [])
 }
 private func radialSession(intent: RadialIntent = .cheatSheet) -> RadialMenuSession {
     RadialMenuSession(inputSession: 7, routing: radialRoute(), slots: (0..<8).map { RadialSlot(label: "Slot \($0)", intent: intent, unavailableReason: nil) }, selected: nil)
@@ -375,8 +376,9 @@ final class RadialMenuStateTests: XCTestCase {
         let f = try await fixture()
         let route = try XCTUnwrap(f.store.routing)
         f.store.routing = HostRoutingState(document_id: route.document_id, document_revision: route.document_revision,
-            host_state_revision: route.host_state_revision, profile_id: "missing", profile_name: nil, execution_enabled: true,
-            auto_follow_enabled: false, manual_override: false, app_profile_links: [:], keys: [])
+            host_state_revision: route.host_state_revision, profile_id: "missing", profile_name: nil,
+            execution_enabled: true, auto_follow_enabled: false, manual_override: false,
+            command_execution_enabled: false, app_profile_links: [:], keys: [])
         let slot = f.store.radialSlots()[1]
         XCTAssertNil(slot.intent); XCTAssertEqual(slot.unavailableReason, "当前配置不可用")
         await f.close()

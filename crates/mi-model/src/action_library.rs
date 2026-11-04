@@ -14,7 +14,7 @@ pub struct ActionCapability {
     pub result_semantics: String,
 }
 
-pub fn capability(action: &Action) -> ActionCapability {
+pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCapability {
     let mut prerequisites = vec!["可分配到本地逻辑槽位；宿主执行基于 0.6.3 物理映射验证".into()];
     let (target, host_required, execution_available, reason, source, result_semantics) =
         match serde_json::from_value::<ActionKind>(action.payload.clone()) {
@@ -124,6 +124,32 @@ pub fn capability(action: &Action) -> ActionCapability {
                     "T3 Code v0.1.6 只读 shell 与身份深链",
                     "交付打开请求与目标访问确认分别报告；不发送或批准会话内容",
                 )
+            }
+            Ok(ActionKind::ShellCommand {
+                command: _,
+                working_directory,
+            }) => {
+                prerequisites.push("固定使用 /bin/sh -c；工作目录必须是绝对路径".into());
+                prerequisites.push("10 秒超时；回执只含退出状态、路径和命令字节数".into());
+                if command_execution_enabled {
+                    (
+                        working_directory,
+                        true,
+                        true,
+                        "",
+                        "Mac 宿主命令执行器（独立同意开关）",
+                        "成功或失败表示子进程退出状态；命令文本和输出不进入审计",
+                    )
+                } else {
+                    (
+                        working_directory,
+                        true,
+                        false,
+                        "命令执行同意未开启；默认不会路由或启动子进程",
+                        "Micro Input 自有离线意图；不是已验证的设备或工具能力",
+                        "保存只改变本地草稿；没有执行结果",
+                    )
+                }
             }
             Ok(ActionKind::AgentCommand { adapter, command }) => {
                 let desktop = matches!(
@@ -244,13 +270,14 @@ pub fn search(
     category: &str,
     favorites_only: bool,
     favorites: &BTreeSet<String>,
+    command_execution_enabled: bool,
 ) -> Vec<LibraryEntry> {
     let query = query.trim().to_lowercase();
     actions()
         .into_iter()
         .filter_map(|action| {
             let favorite = favorites.contains(&action.id);
-            let info = capability(&action);
+            let info = capability(&action, command_execution_enabled);
             let text = format!(
                 "{} {} {} {} {}",
                 action.name, action.category, action.detail, info.target, action.payload

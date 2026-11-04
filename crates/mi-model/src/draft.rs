@@ -33,6 +33,10 @@ pub enum ActionKind {
     OpenApp {
         bundle_id: String,
     },
+    ShellCommand {
+        command: String,
+        working_directory: String,
+    },
     AgentCommand {
         adapter: String,
         command: String,
@@ -94,6 +98,16 @@ impl Action {
                             && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
                     })
             }
+            ActionKind::ShellCommand {
+                command,
+                working_directory,
+            } => {
+                bounded(&command)
+                    && !command.bytes().any(|b| b == 0)
+                    && bounded(&working_directory)
+                    && !working_directory.bytes().any(|b| b == 0)
+                    && working_directory.starts_with('/')
+            }
             ActionKind::AgentCommand { adapter, command } => bounded(&adapter) && bounded(&command),
             ActionKind::FocusSession { adapter, session } => bounded(&adapter) && bounded(&session),
             ActionKind::SkillReference { adapter, skill } => bounded(&adapter) && bounded(&skill),
@@ -117,6 +131,7 @@ pub fn actions() -> Vec<Action> {
         ("session", "切换会话", "DSH", "适配器未验证 · 不执行", json!({"type":"focus_session","adapter":"dsh","session":"unselected"})),
         ("skill", "Skill 引用", "Skill", "适配器未验证 · 不执行", json!({"type":"skill_reference","adapter":"unverified","skill":"unselected"})),
         ("app", "打开应用", "应用", "本地应用意图 · 宿主执行未接入", json!({"type":"open_app","bundle_id":"com.apple.TextEdit"})),
+        ("shell-command", "命令动作", "命令", "默认关闭 · /bin/sh · 10 秒上限", json!({"type":"shell_command","command":"printf command-marker","working_directory":"/tmp"})),
         ("local-multi", "Multi 动作", "Multi", "本地四分支 · 不执行 · 固件范围未知", json!({"type":"local_multi","multi":{"format_version":1,"term_ms":250,"tap":null,"double_tap":null,"hold":null,"tap_hold":null}})),
         ("local-macro", "普通宏", "普通宏", "自有本地序列 · 已验证键名可宿主执行", json!({"type":"local_macro","macro_sequence":{"format_version":1,"events":[{"type":"press","key":"a"},{"type":"release","key":"a"}]}})),
         ("device-key", "设备普通按键", "设备按键", "来源明确的普通键意图 · 尚未应用", json!({"type":"device_key","token":"KC_B"})),
