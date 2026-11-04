@@ -193,6 +193,8 @@ extension MicroInput: Backend {}
     }
     let backend: Backend
     let actionExecutor: HostActionExecuting
+    let pushToTalk: PushToTalkController
+    @Published var dictationNeedsAttention = false
     @Published var routing: HostRoutingState?
     @Published var inputNeedsResume = false
     var routingValid = false
@@ -278,7 +280,10 @@ extension MicroInput: Backend {}
             catalog = try JSONDecoder().decode([CatalogAction].self, from: Data(try await backend.actionCatalog().utf8))
             #if MI_SYNTHETIC_BACKEND
             let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
-            if scenario == "lighting-control" { await runSyntheticLightingScenario() }
+            if ["push-to-talk", "push-to-talk-live"].contains(scenario), !preparedHostExecutionScenario {
+                await preparePushToTalkScenario(live: scenario == "push-to-talk-live")
+            }
+            else if scenario == "lighting-control" { await runSyntheticLightingScenario() }
             else if scenario == "config-write" { await runSyntheticDeviceOperationScenario() }
             else if scenario == "diagnostic-export", !preparedDiagnosticScenario { await prepareDiagnosticExportScenario() }
             else if ["reconnect", "reconnect-transient", "apply-preparation"].contains(scenario), !preparedReconnectScenario {
@@ -453,15 +458,7 @@ extension MicroInput: Backend {}
             await withTaskCancellationHandler(operation: {
                 while !Task.isCancelled, let event = await stream.nextEvent() {
                     guard token == self.generation, routeEpoch == self.hostRouteEpoch, !self.hostOperationPaused, !self.systemSleeping, !self.stopped else { break }
-                    if event.kind == .inputStreamGap {
-                        self.clearPendingActions(); self.inputNeedsResume = true
-                        self.status = "输入流丢失，已暂停派发；请恢复输入并松开按键 / 摇杆回中"
-                        break
-                    }
-                    if self.inputBoundary.consume(event, gateOpen: self.dispatchOpen && !self.inputNeedsResume),
-                       let binding = event.bindingId, let (json, profile, state) = self.resolveHostAction(binding) {
-                        self.enqueueHostAction(json: json, binding: binding, profile: profile, state: state, deviceSession: event.sessionId, deviceIngress: event.ingressSequence)
-                    }
+                    if !self.consumeHostInput(event) { break }
                 }
             }, onCancel: { stream.close() })
             stream.close()
@@ -615,6 +612,33 @@ extension MicroInput: Backend {}
         }
         do {try await core.setSyntheticConfig(scenario:4)} catch {status=readableError(error);return}
         await readDeviceConfig();await compareSnapshot()
+    }
+    private func preparePushToTalkScenario(live: Bool) async {
+        preparedHostExecutionScenario = true
+        let adapter = live ? ProcessInfo.processInfo.environment["MI_LIVE_DICTATION_ADAPTER"] : "cindy"
+        guard let adapter, ["cindy", "codex", "qwenwork"].contains(adapter),
+              let core = backend as? MicroInputCore.MicroInput else { return }
+        await installCodingAgentPresets(); await setHostExecutionEnabled(true)
+        do {
+            try await core.setSyntheticDiscovery(state: .reconnectedDevice)
+            try await core.setSyntheticConfig(scenario: 1)
+            await refresh(); selectDevice("synthetic-reconnected-interface-0")
+            await connect("synthetic-reconnected-interface-0"); await readIdentity(); await readDeviceConfig(); showLocalDraft()
+            let name = ["cindy": "Cindy", "codex": "Codex", "qwenwork": "千问办公"][adapter]
+            guard let profile = hostProfiles.first(where: { $0.name == name }) else { return }
+            await setHostActiveProfile(profile.id.text)
+            try await Task.sleep(nanoseconds: 50_000_000)
+            try await core.emitSyntheticBindingEvent(bindingId: "AG06", pressed: true)
+            for _ in 0..<100 where lastHostActionReceipt?.actionType != "dictation_start" {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            try await Task.sleep(nanoseconds: 300_000_000)
+            try await core.emitSyntheticBindingEvent(bindingId: "AG06", pressed: false)
+            for _ in 0..<100 where pushToTalk.isActive {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            status = lastHostActionReceipt?.detail ?? "按住说话场景没有回执"
+        } catch { pushToTalk.cancel(); await pushToTalk.waitUntilStopped(); status = readableError(error) }
     }
     private func prepareHostExecutionScenario() async {
         preparedHostExecutionScenario=true
@@ -864,10 +888,16 @@ extension MicroInput: Backend {}
     @Published var connectedID: String?
     @Published var stale = false
     @Published var busy = false
-    init(backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil) {
+    init(backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil, dictationDriver: (any DictationDriving)? = nil) {
         self.backend = backend
         self.documentOverride = documentURL
         self.actionExecutor = actionExecutor ?? LiveHostActionExecutor()
+        #if MI_SYNTHETIC_BACKEND
+        let simulatedTalk = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == "push-to-talk"
+        self.pushToTalk = PushToTalkController(driver: dictationDriver ?? (simulatedTalk ? SyntheticDictationDriver() : AXDictationDriver()))
+        #else
+        self.pushToTalk = PushToTalkController(driver: dictationDriver ?? AXDictationDriver())
+        #endif
     }
     var profile: Profile? { guard let ps = snapshot?.profiles, ps.indices.contains(profileIndex) else { return nil }; return ps[profileIndex] }
     var layer: Layer? { guard let ls = profile?.layers, ls.indices.contains(layerIndex) else { return nil }; return ls[layerIndex] }
@@ -989,7 +1019,7 @@ extension MicroInput: Backend {}
         passThroughHealth = .disconnected
         stale = snapshot != nil; status = reason
     }
-    func suspend() async { retireConnection("会话已断开"); await backend.disconnect() }
+    func suspend() async { retireConnection("会话已断开"); await pushToTalk.waitUntilStopped(); await backend.disconnect() }
     // Retire synchronously in the notification callback, before asynchronous close/join.
     func systemWillSleep() {
         guard !stopped else { return }
@@ -1027,6 +1057,7 @@ extension MicroInput: Backend {}
         await sleepDisconnect?.value
         sleepDisconnect = nil
         await cancelledExecution?.value
+        await pushToTalk.waitUntilStopped()
         await backend.shutdown()
     }
     private func replace(_ json: String) throws { let result = try JSONDecoder().decode(Snapshot.self, from: Data(json.utf8)); snapshot = result; stale = false; selectProfile(0) }

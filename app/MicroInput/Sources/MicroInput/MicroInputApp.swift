@@ -9,7 +9,7 @@ import MicroInputCore
         PerformanceProbe.start()
         let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
         #if MI_SYNTHETIC_BACKEND
-        let core = ["config-write", "lighting-control"].contains(scenario) ? MicroInput.syntheticConfigWriter() : ["reconnect", "reconnect-transient", "apply-preparation", "host-execution", "diagnostic-export"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
+        let core = ["config-write", "lighting-control"].contains(scenario) ? MicroInput.syntheticConfigWriter() : ["reconnect", "reconnect-transient", "apply-preparation", "host-execution", "diagnostic-export", "push-to-talk", "push-to-talk-live"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
         let store = Store(backend: core)
         #else
         let core = MicroInput()
@@ -203,6 +203,10 @@ struct StatusPanel: View {
                 Spacer()
                 Toggle("按键控制", isOn: Binding(get: { store.hostExecutionEnabled }, set: { value in Task { await store.setHostExecutionEnabled(value) } }))
                     .labelsHidden().toggleStyle(.switch).controlSize(.small).help("启用或暂停按键控制")
+            }
+            if store.dictationNeedsAttention {
+                Text("原听写停止未确认，请检查原应用").font(.caption).foregroundStyle(.orange)
+                Button("复核原听写已停止") { Task { await store.verifyDictationStopped() } }
             }
             // Intrinsic, non-scrolling rows: a maxHeight-only ScrollView can collapse
             // inside NSHostingController's initial popover size negotiation.

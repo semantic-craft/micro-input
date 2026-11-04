@@ -38,7 +38,7 @@ struct ResolvedHostActionPayload: Codable, Equatable {
     let bundle_id: String?
     let url: String?
     let adapter: String?
-    let command: String?
+    var command: String?
     let session: String?
     let events: [ResolvedMacroEventPayload]?
 }

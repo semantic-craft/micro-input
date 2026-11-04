@@ -124,7 +124,12 @@ pub fn capability(action: &Action) -> ActionCapability {
                 ) && (matches!(
                     command.as_str(),
                     "model" | "effort" | "dictation" | "browser" | "terminal"
-                ) || command == "focus-input"
+                ) || (command == "push-to-talk"
+                    && matches!(
+                        adapter.as_str(),
+                        "cindy" | "codex" | "qwenwork" | "antigravity" | "qoder-cn"
+                    ))
+                    || command == "focus-input"
                     || (command == "search" && adapter != "qwenwork")
                     || (command == "new-chat"
                         && matches!(adapter.as_str(), "antigravity" | "dsh-desktop" | "qoder-cn")));
