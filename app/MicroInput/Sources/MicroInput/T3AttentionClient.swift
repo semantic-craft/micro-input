@@ -136,11 +136,14 @@ actor T3AttentionClient: T3Reading {
     private var issuing = false
     private var readTask: Task<T3ReadSnapshot, Error>?
     private var readID: UInt64 = 0
+    private var unrevokedUntil: Date?
+    private var hasUnconfirmedRevocation: Bool { (unrevokedUntil ?? .distantPast) > Date() }
     init(discovery: @escaping () throws -> T3ConnectionInfo = { try T3ConnectionInfo.discover() },
          process: @escaping ProcessRunner = T3PrivateProcess.run, http: @escaping HTTPReader = T3PrivateHTTP.read) {
         self.discovery = discovery; self.process = process; self.http = http
     }
     func connect() async throws -> T3ReadSnapshot {
+        guard !hasUnconfirmedRevocation else { throw T3Failure.revocation }
         guard connection == nil, !issuing else { throw T3Failure.authDenied }
         let info = try discovery(), epoch = generation
         issuing = true
@@ -151,7 +154,7 @@ actor T3AttentionClient: T3Reading {
               !session.token.isEmpty, session.token.utf8.count < 8192,
               !session.token.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.contains($0) }),
               epoch == generation, !Task.isCancelled else {
-            _ = await revoke(info, session)
+            guard await revoke(info, session) else { throw T3Failure.revocation }
             throw T3Failure.authDenied
         }
         connection = (info, session)
@@ -187,12 +190,18 @@ actor T3AttentionClient: T3Reading {
     func close() async -> Bool {
         generation &+= 1
         readID &+= 1; readTask?.cancel(); readTask = nil
-        guard let (info, session) = connection else { return !issuing }
+        guard let (info, session) = connection else { return !issuing && !hasUnconfirmedRevocation }
         connection = nil
-        return await revoke(info, session)
+        let revoked = await revoke(info, session)
+        return revoked && !hasUnconfirmedRevocation
     }
     private func revoke(_ info: T3ConnectionInfo, _ session: Session) async -> Bool {
-        guard !session.sessionId.isEmpty, session.sessionId.utf8.count <= 512, !session.sessionId.hasPrefix("-") else { return false }
-        return (try? await process(info, ["auth", "session", "revoke", session.sessionId]))?.status == 0
+        let validID = !session.sessionId.isEmpty && session.sessionId.utf8.count <= 512 && !session.sessionId.hasPrefix("-")
+        let revoked = validID ? (try? await process(info, ["auth", "session", "revoke", session.sessionId]))?.status == 0 : false
+        if !revoked {
+            let expiry = T3Shell.date(session.expiresAt) ?? Date().addingTimeInterval(300)
+            unrevokedUntil = max(unrevokedUntil ?? .distantPast, expiry)
+        }
+        return revoked
     }
 }

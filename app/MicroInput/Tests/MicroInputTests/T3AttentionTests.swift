@@ -499,3 +499,40 @@ extension T3AttentionControllerTests {
         await controller.shutdown()
     }
 }
+extension T3AttentionClientTests {
+    func testLateCancelledIssuanceCannotHideFailedRevocationWithEmptyClose() async throws {
+        let probe = T3ClientProbe(); await probe.configure(holdIssue: true, failRevoke: true)
+        let client = T3AttentionClient(discovery: t3Connection, process: probe.process, http: probe.http)
+        let task = Task { try await client.connect() }
+        while !(await probe.waitingIssue()) { await Task.yield() }
+        task.cancel()
+        _ = await client.close()
+        await probe.releaseIssue()
+        do { _ = try await task.value; XCTFail("Cancelled issue became usable") }
+        catch { XCTAssertEqual(error as? T3Failure, .revocation) }
+        for _ in 0..<2 {
+            let closed = await client.close()
+            XCTAssertFalse(closed, "An empty close must retain unresolved revocation")
+        }
+        do { _ = try await client.connect(); XCTFail("Issued another credential while revocation was unresolved") }
+        catch { XCTAssertEqual(error as? T3Failure, .revocation) }
+        let counts = await probe.counts()
+        XCTAssertEqual(counts, [1, 1, 0])
+    }
+}
+extension T3AttentionControllerTests {
+    func testDisableDuringIssuanceShowsFailedRevocationAfterCancelledLoop() async throws {
+        let probe = T3ClientProbe(); await probe.configure(holdIssue: true, failRevoke: true)
+        let client = T3AttentionClient(discovery: t3Connection, process: probe.process, http: probe.http)
+        let controller = T3AttentionController(client: client, opener: { _ in true })
+        controller.setEnabled(true)
+        while !(await probe.waitingIssue()) { await Task.yield() }
+        controller.setEnabled(false)
+        await probe.releaseIssue()
+        for _ in 0..<1000 where controller.state != .unavailable(.revocation) { try await Task.sleep(nanoseconds: 1_000_000) }
+        XCTAssertFalse(controller.enabled); XCTAssertTrue(controller.items.isEmpty)
+        XCTAssertEqual(controller.state, .unavailable(.revocation))
+        await controller.shutdown()
+        XCTAssertEqual(controller.state, .unavailable(.revocation))
+    }
+}
