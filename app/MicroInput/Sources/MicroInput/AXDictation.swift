@@ -108,15 +108,27 @@ import ApplicationServices
                     }
                     var raw: CFTypeRef?
                     let result = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &raw)
-                    if result == .success {
-                        guard let children = raw as? [AXUIElement] else { return false }
-                        pending.append(contentsOf: children)
-                    } else if result != .attributeUnsupported { return false }
+                    var attributes: CFArray?
+                    let validLeaf = result == .noValue
+                        && DesktopAgentControls.attribute(element, kAXRoleAttribute) as? String == role
+                        && !role.isEmpty
+                        && AXUIElementCopyAttributeNames(element, &attributes) == .success
+                        && (attributes as? [String])?.contains(kAXChildrenAttribute) == false
+                    guard let children = Self.children(result: result, value: raw, validLeaf: validLeaf) else { return false }
+                    pending.append(contentsOf: children)
                 }
                 guard pending.isEmpty, visited < 1800, Date() < deadline, matches.count == 1,
                       let match = matches.first, originalWindow() else { return false }
                 return DesktopAgentControls.dictationState(labels: Self.labels(match), recording: false)
             }, pressOriginal: { _ = AXUIElementPerformAction(control, kAXPressAction as CFString) }))
+    }
+    static func children(result: AXError, value: CFTypeRef?, validLeaf: Bool) -> [AXUIElement]? {
+        switch result {
+        case .success: return value as? [AXUIElement]
+        case .attributeUnsupported: return []
+        case .noValue: return validLeaf ? [] : nil
+        default: return nil
+        }
     }
     static func labels(_ element: AXUIElement) -> [String] {
         [kAXTitleAttribute, kAXDescriptionAttribute].compactMap { DesktopAgentControls.attribute(element, $0) as? String }

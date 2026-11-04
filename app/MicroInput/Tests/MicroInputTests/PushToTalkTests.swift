@@ -1,4 +1,5 @@
 import XCTest
+import ApplicationServices
 @testable import MicroInput
 
 @MainActor private final class TestRecording: DictationRecording {
@@ -326,6 +327,16 @@ extension PushToTalkTests {
 }
 
 @MainActor final class AXDictationRecordingTests: XCTestCase {
+    func testChildrenReadDistinguishesVerifiedLeavesFromMissingOrFailedValues() {
+        XCTAssertNotNil(AXDictationRecording.children(result: .noValue, value: nil, validLeaf: true))
+        XCTAssertNil(AXDictationRecording.children(result: .noValue, value: nil, validLeaf: false))
+        XCTAssertNotNil(AXDictationRecording.children(result: .attributeUnsupported, value: nil, validLeaf: false))
+        XCTAssertNil(AXDictationRecording.children(result: .success, value: nil, validLeaf: true))
+        XCTAssertNil(AXDictationRecording.children(result: .invalidUIElement, value: nil, validLeaf: true))
+        XCTAssertNil(AXDictationRecording.children(result: .cannotComplete, value: nil, validLeaf: true))
+        XCTAssertNil(AXDictationRecording.children(result: .apiDisabled, value: nil, validLeaf: true))
+    }
+
     @MainActor private final class Target {
         var window = true
         var control = true
