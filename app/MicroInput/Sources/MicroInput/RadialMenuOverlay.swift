@@ -61,6 +61,6 @@ struct RadialMenuView: View {
                               y: center.y + sin(Double(index) * .pi / 4) * radius)
                 }
             }
-        }.accessibilityLabel("径向菜单")
+        }
     }
 }
