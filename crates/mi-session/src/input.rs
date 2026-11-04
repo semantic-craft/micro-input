@@ -20,6 +20,12 @@ pub enum InputEventKind {
 
 pub use mi_model::host_router::{verified_physical_mapping, PhysicalControlSpec};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RadialPosition {
+    pub angle_turns: f64,
+    pub distance: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct InputEvent {
     pub session_id: u64,
@@ -28,6 +34,7 @@ pub struct InputEvent {
     pub ingress_sequence: u64,
     /// Physical radial state, including notifications that do not create an action edge.
     pub radial_center: Option<bool>,
+    pub radial_position: Option<RadialPosition>,
     /// Local receipt time, not a device timestamp.
     pub timestamp_ms: u64,
     pub kind: InputEventKind,
@@ -130,15 +137,10 @@ fn parse_verified_notification(
             }
         }
         "v.oai.rad" => {
-            let angle = params.get("a")?.as_f64()?;
-            let distance = params.get("d")?.as_f64()?;
-            if !angle.is_finite()
-                || !distance.is_finite()
-                || !(0.0..=1.0).contains(&angle)
-                || !(0.0..=1.0).contains(&distance)
-            {
-                return None;
-            }
+            let RadialPosition {
+                angle_turns: angle,
+                distance,
+            } = parse_radial_position(notification)?;
             if distance >= 0.5 {
                 let norm = angle.rem_euclid(1.0);
                 // Firmware 0.6.3 radial turns are normalized [0.0, 1.0) in screen coordinates
@@ -162,6 +164,35 @@ fn parse_verified_notification(
         }
         _ => None,
     }
+}
+
+fn parse_radial_position(notification: &HostNotification) -> Option<RadialPosition> {
+    let HostNotification::Unknown(raw) = notification else {
+        return None;
+    };
+    if ["id", "i", "result", "error"]
+        .iter()
+        .any(|key| raw.get(key).is_some())
+    {
+        return None;
+    }
+    if candidate_alias(raw, "method", "m")?.as_str()? != "v.oai.rad" {
+        return None;
+    }
+    let params = candidate_alias(raw, "params", "p")?.as_object()?;
+    let angle = params.get("a")?.as_f64()?;
+    let distance = params.get("d")?.as_f64()?;
+    if !angle.is_finite()
+        || !distance.is_finite()
+        || !(0.0..=1.0).contains(&angle)
+        || !(0.0..=1.0).contains(&distance)
+    {
+        return None;
+    }
+    Some(RadialPosition {
+        angle_turns: angle.rem_euclid(1.0),
+        distance,
+    })
 }
 
 fn is_radial_notification(notification: &HostNotification) -> bool {
@@ -259,13 +290,19 @@ impl DeviceSession {
     }
 }
 impl InputMonitor {
-    fn radial_state_event(&mut self, ingress_sequence: u64, centered: bool) -> InputEvent {
+    fn radial_state_event(
+        &mut self,
+        ingress_sequence: u64,
+        centered: bool,
+        radial_position: Option<RadialPosition>,
+    ) -> InputEvent {
         self.sequence += 1;
         InputEvent {
             session_id: self.session.id,
             sequence: self.sequence,
             ingress_sequence,
             radial_center: Some(centered),
+            radial_position,
             timestamp_ms: 0,
             kind: InputEventKind::UnknownNotification,
             logical_switch: None,
@@ -321,6 +358,7 @@ impl InputMonitor {
             }
             let mut ingress_sequence = 0;
             let mut radial_center = None;
+            let mut radial_position = None;
             let (
                 kind,
                 logical_switch,
@@ -335,6 +373,9 @@ impl InputMonitor {
                     ingress_sequence = received.ingress_sequence;
                     let notification = received.notification;
                     let is_radial = is_radial_notification(&notification);
+                    if self.merge_wide_key {
+                        radial_position = parse_radial_position(&notification);
+                    }
                     let decoded = self.decoder.decode(&notification);
                     if is_radial {
                         radial_center = match &decoded {
@@ -346,7 +387,11 @@ impl InputMonitor {
                     let normalized = match decoded {
                         Some((InputEventKind::Pressed, sector)) if is_radial => {
                             if self.active_radial_sector.as_deref() == Some(sector.as_str()) {
-                                return Some(self.radial_state_event(ingress_sequence, false));
+                                return Some(self.radial_state_event(
+                                    ingress_sequence,
+                                    false,
+                                    radial_position,
+                                ));
                             }
                             if let Some(prev) = self.active_radial_sector.replace(sector.clone()) {
                                 if let Some(prev_spec) = verified_physical_mapping(&prev) {
@@ -361,12 +406,20 @@ impl InputMonitor {
                             if raw_id == "__RADIAL_CENTER__" =>
                         {
                             let Some(prev) = self.active_radial_sector.take() else {
-                                return Some(self.radial_state_event(ingress_sequence, true));
+                                return Some(self.radial_state_event(
+                                    ingress_sequence,
+                                    true,
+                                    radial_position,
+                                ));
                             };
                             Some((InputEventKind::Released, prev))
                         }
                         Some((_, ref raw_id)) if raw_id == "__RADIAL_MID__" => {
-                            return Some(self.radial_state_event(ingress_sequence, false));
+                            return Some(self.radial_state_event(
+                                ingress_sequence,
+                                false,
+                                radial_position,
+                            ));
                         }
                         other => other,
                     };
@@ -512,6 +565,7 @@ impl InputMonitor {
                 sequence: self.sequence,
                 ingress_sequence,
                 radial_center,
+                radial_position,
                 timestamp_ms: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()

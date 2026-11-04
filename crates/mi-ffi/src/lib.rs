@@ -2,6 +2,7 @@
 mod apply_preparation;
 mod device_operations;
 mod host_routing;
+pub use host_routing::RadialInputReadiness;
 mod input_monitor;
 mod lighting;
 mod reconnect;

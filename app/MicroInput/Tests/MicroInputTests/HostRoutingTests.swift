@@ -5,34 +5,34 @@ import MicroInputCore
 
 @MainActor final class HostRoutingTests: XCTestCase {
     func event(_ sequence: UInt64, _ binding: String?, _ center: Bool?, kind: InputKind = .pressed, session: UInt64 = 1) -> InputEventInfo {
-        InputEventInfo(sessionId: session, sequence: sequence, ingressSequence: sequence, radialCenter: center, timestampMs: 0, kind: kind, logicalSwitch: nil, bindingId: binding, physicalControl: nil, keycapGroup: nil, actionRole: center == nil ? "momentary_key" : "joystick_sector", lostCount: 0, verification: "test", actionEligible: kind == .pressed)
+        InputEventInfo(sessionId: session, sequence: sequence, ingressSequence: sequence, radialCenter: center, radialPosition: nil, timestampMs: 0, kind: kind, logicalSwitch: nil, bindingId: binding, physicalControl: nil, keycapGroup: nil, actionRole: center == nil ? "momentary_key" : "joystick_sector", lostCount: 0, verification: "test", actionEligible: kind == .pressed)
     }
     func testUnreadPreCutoffNorthRequiresRealCenterBeforeEast() {
         var boundary = HostInputBoundary()
         boundary.advance(InputWatermark(session_id: 1, ingress_sequence: 0))
-        XCTAssertFalse(boundary.consume(event(1, nil, true, kind: .unknownNotification), gateOpen: true))
+        XCTAssertFalse(boundary.consume(event(1, nil, true, kind: .unknownNotification), gateOpen: true).pressed)
         // Sole reader has already published north #10, decoder has not consumed it.
         boundary.advance(InputWatermark(session_id: 1, ingress_sequence: 10))
-        XCTAssertFalse(boundary.consume(event(10, "AG15", false), gateOpen: true))
-        XCTAssertFalse(boundary.consume(event(11, "AG18", false), gateOpen: true), "A sector change is not a center release")
-        XCTAssertFalse(boundary.consume(event(12, "AG18", true, kind: .released), gateOpen: true))
-        XCTAssertTrue(boundary.consume(event(13, "AG18", false), gateOpen: true))
+        XCTAssertFalse(boundary.consume(event(10, "AG15", false), gateOpen: true).pressed)
+        XCTAssertFalse(boundary.consume(event(11, "AG18", false), gateOpen: true).pressed, "A sector change is not a center release")
+        XCTAssertFalse(boundary.consume(event(12, "AG18", true, kind: .released), gateOpen: true).pressed)
+        XCTAssertTrue(boundary.consume(event(13, "AG18", false), gateOpen: true).pressed)
     }
     func testJoystickHeldDuringGateAndNewSessionAndGapQuarantine() {
         var boundary = HostInputBoundary()
         boundary.advance(InputWatermark(session_id: 1, ingress_sequence: 0))
         _ = boundary.consume(event(1, nil, true, kind: .unknownNotification), gateOpen: true)
-        XCTAssertTrue(boundary.consume(event(2, "AG15", false), gateOpen: true))
+        XCTAssertTrue(boundary.consume(event(2, "AG15", false), gateOpen: true).pressed)
         boundary.advance(InputWatermark(session_id: 1, ingress_sequence: 2))
-        XCTAssertFalse(boundary.consume(event(3, "AG18", false), gateOpen: true))
+        XCTAssertFalse(boundary.consume(event(3, "AG18", false), gateOpen: true).pressed)
         _ = boundary.consume(event(4, nil, true, kind: .unknownNotification), gateOpen: false)
-        XCTAssertFalse(boundary.consume(event(5, "AG15", false), gateOpen: false))
-        XCTAssertFalse(boundary.consume(event(6, "AG18", false), gateOpen: true))
+        XCTAssertFalse(boundary.consume(event(5, "AG15", false), gateOpen: false).pressed)
+        XCTAssertFalse(boundary.consume(event(6, "AG18", false), gateOpen: true).pressed)
         boundary.recovery = true
-        XCTAssertFalse(boundary.consume(event(7, "AG01", nil), gateOpen: true))
+        XCTAssertFalse(boundary.consume(event(7, "AG01", nil), gateOpen: true).pressed)
         _ = boundary.consume(event(8, "AG01", nil, kind: .released), gateOpen: true)
-        XCTAssertTrue(boundary.consume(event(9, "AG01", nil), gateOpen: true))
-        XCTAssertFalse(boundary.consume(event(10, "AG01", nil, session: 2), gateOpen: true))
+        XCTAssertTrue(boundary.consume(event(9, "AG01", nil), gateOpen: true).pressed)
+        XCTAssertFalse(boundary.consume(event(10, "AG01", nil, session: 2), gateOpen: true).pressed)
     }
     func fixture(executor: HostActionExecuting? = nil) async throws -> (Store, MicroInputCore.MicroInput, URL) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

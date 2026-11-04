@@ -109,3 +109,10 @@ RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和
 打开动作经现有宿主队列、PTT 清理和 Rust lease。目标在入队时冻结，打开前刷新并核对环境、会话、事件、连接代次及宿主身份。轮询与打开合并正在进行的 HTTP 请求；请求序号区分本地迟到响应与服务器 sequence 倒退。原生打开最多等待 5 秒，迟到回调不能重复完成。成功只报告 `delivered`，不会用 visit 水位推断精确打开。审计只记录固定类别，不记录会话标题、会话 ID、正文、凭据或深链。标题仅用于内存中的菜单显示，实体状态灯仍未接通。
 
 离线行为与真实 UniFFI 回归使用 `swift test --package-path app/MicroInput --filter T3Attention`，先用对应后端运行 `scripts/build`。只有显式设置 `MI_T3_READONLY_PROBE=1` 才执行当前已安装 T3 的只读签发、读取、撤销测试；它不打开、创建、发送、审批或停止会话。原生验收见 [T3 会话配方](../skills/verify-micro-input/features/t3-attention.md)。安装版依据为 `2359643` 的 `threadShell.ts`、`models.ts`、`threadSettled.ts` 和 shell 契约；Input 研究 IA-10/16 约束宿主生命周期和身份门禁，不提供 T3 或设备灯光能力证明。
+
+
+## 径向菜单
+
+`RadialMenuState` 持有启用、等待回中、选择和确认后等待回中的状态。`RadialMenuRouting` 将冻结的菜单意图送入现有宿主队列及 lease，确认时重验同一会话和路由。原始角度/距离由 `mi-session` 验证，通过 UniFFI 的 `RadialPositionInfo` 传递；连续位置资格独立于按键边沿。没有新硬件订阅或通用 RPC。
+
+菜单默认关闭，本机偏好为 `radialMenuEnabled`。启用或恢复后的旧缓冲回中不能解除隔离。实现与合成原生验收见[径向菜单验证配方](../skills/verify-micro-input/features/radial-menu.md)。当前软件策略的距离阈值和八向手感仍待实体核验，`kb.radial` 没有因此解锁。

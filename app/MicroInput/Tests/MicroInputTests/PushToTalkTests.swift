@@ -118,7 +118,7 @@ extension PushToTalkTests {
         return (store, driver, dir)
     }
     private func event(_ sequence: UInt64, _ kind: InputKind, session: UInt64 = 1) -> InputEventInfo {
-        InputEventInfo(sessionId: session, sequence: sequence, ingressSequence: sequence, radialCenter: nil,
+        InputEventInfo(sessionId: session, sequence: sequence, ingressSequence: sequence, radialCenter: nil, radialPosition: nil,
             timestampMs: 0, kind: kind, logicalSwitch: "logical-6", bindingId: "AG06", physicalControl: nil,
             keycapGroup: nil, actionRole: "momentary_key", lostCount: 0, verification: "test", actionEligible: kind == .pressed)
     }

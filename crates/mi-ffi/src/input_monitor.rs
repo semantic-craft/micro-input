@@ -16,11 +16,17 @@ pub enum InputKind {
     InputStreamGap,
 }
 #[derive(Clone, Debug, uniffi::Record)]
+pub struct RadialPositionInfo {
+    pub angle_turns: f64,
+    pub distance: f64,
+}
+#[derive(Clone, Debug, uniffi::Record)]
 pub struct InputEventInfo {
     pub session_id: u64,
     pub sequence: u64,
     pub ingress_sequence: u64,
     pub radial_center: Option<bool>,
+    pub radial_position: Option<RadialPositionInfo>,
     pub timestamp_ms: u64,
     pub kind: InputKind,
     pub logical_switch: Option<String>,
@@ -106,6 +112,10 @@ impl InputSubscription {
             sequence: event.sequence,
             ingress_sequence: event.ingress_sequence,
             radial_center: event.radial_center,
+            radial_position: event.radial_position.map(|p| RadialPositionInfo {
+                angle_turns: p.angle_turns,
+                distance: p.distance,
+            }),
             timestamp_ms: event.timestamp_ms,
             kind,
             logical_switch: event.logical_switch,
@@ -156,6 +166,17 @@ impl MicroInput {
 pub enum SyntheticInputCase {
     CandidateBindings,
     UnsupportedVariants,
+    RadialCenter,
+    RadialEast,
+    RadialSouthEast,
+    RadialSouth,
+    RadialSouthWest,
+    RadialWest,
+    RadialNorthWest,
+    RadialNorth,
+    RadialNorthEast,
+    RadialMiddle,
+    EncoderClick,
 }
 #[cfg(feature = "synthetic-backend")]
 #[uniffi::export(async_runtime = "tokio")]
@@ -170,6 +191,17 @@ impl MicroInput {
             .emit_synthetic_input_case(match input_case {
                 SyntheticInputCase::CandidateBindings => 0,
                 SyntheticInputCase::UnsupportedVariants => 1,
+                SyntheticInputCase::RadialCenter => 2,
+                SyntheticInputCase::RadialEast => 3,
+                SyntheticInputCase::RadialSouthEast => 4,
+                SyntheticInputCase::RadialSouth => 5,
+                SyntheticInputCase::RadialSouthWest => 6,
+                SyntheticInputCase::RadialWest => 7,
+                SyntheticInputCase::RadialNorthWest => 8,
+                SyntheticInputCase::RadialNorth => 9,
+                SyntheticInputCase::RadialNorthEast => 10,
+                SyntheticInputCase::RadialMiddle => 11,
+                SyntheticInputCase::EncoderClick => 12,
             })
             .map_err(failure)
     }

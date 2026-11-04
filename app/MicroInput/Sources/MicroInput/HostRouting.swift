@@ -22,6 +22,10 @@ struct ResolvedInput: Decodable {
 }
 
 // Intake always advances physical state, including discarded, buffered pre-cutoff events.
+struct HostInputAdmission {
+    var pressed = false
+    var radial = false
+}
 struct HostInputBoundary {
     var session: UInt64?
     var cutoff: UInt64 = 0
@@ -36,19 +40,22 @@ struct HostInputBoundary {
         held.removeAll()
         radialQuarantined = radialQuarantined || radialHeld
     }
-    mutating func consume(_ event: InputEventInfo, gateOpen: Bool) -> Bool {
-        guard session == event.sessionId else { return false }
+    mutating func consume(_ event: InputEventInfo, gateOpen: Bool) -> HostInputAdmission {
+        guard session == event.sessionId else { return HostInputAdmission() }
         if let center = event.radialCenter {
             radialHeld = !center
-            if center { radialQuarantined = false }
+            if center && event.ingressSequence > cutoff { radialQuarantined = false }
             else if !gateOpen || event.ingressSequence <= cutoff { radialQuarantined = true }
         }
         if event.kind == .released, let binding = event.bindingId { released.insert(binding); held.removeValue(forKey: binding) }
         if event.kind == .pressed, let binding = event.bindingId { held[binding] = event.ingressSequence }
-        guard gateOpen, event.ingressSequence > cutoff, event.kind == .pressed, event.actionEligible else { return false }
-        if event.radialCenter != nil { return !radialQuarantined }
-        if recovery, event.actionRole != "encoder_step", let binding = event.bindingId { return released.contains(binding) }
-        return true
+        guard gateOpen, event.ingressSequence > cutoff else { return HostInputAdmission() }
+        var admission = HostInputAdmission(radial: event.radialPosition != nil && !radialQuarantined)
+        guard event.kind == .pressed, event.actionEligible else { return admission }
+        if event.radialCenter != nil { admission.pressed = !radialQuarantined }
+        else if recovery, event.actionRole != "encoder_step", let binding = event.bindingId { admission.pressed = released.contains(binding) }
+        else { admission.pressed = true }
+        return admission
     }
 }
 struct HostMutation {
@@ -65,6 +72,7 @@ struct PendingHostAction {
     let requiresEnabled: Bool
     let done: (() -> Void)?
     var t3Selection: T3Selection? = nil
+    var radialIntent: RadialIntent? = nil
 }
 
 extension Store {
@@ -80,6 +88,7 @@ extension Store {
         routingValid = true
     }
     func readInputBoundary() {
+        cancelRadialMenu()
         guard let watermark = try? JSONDecoder().decode(InputWatermark.self, from: Data(backend.hostInputWatermark().utf8)) else {
             inputBoundary.session = nil; return
         }
@@ -93,6 +102,7 @@ extension Store {
         clearPendingActions(); overlay.hide()
     }
     func clearPendingActions() {
+        cancelRadialMenu()
         pushToTalk.cancel()
         let discarded = pendingHostActions; pendingHostActions.removeAll()
         discarded.forEach { $0.done?() }
@@ -174,7 +184,7 @@ extension Store {
               let data = try? JSONEncoder().encode(resolved.action) else { return nil }
         return (String(decoding: data, as: UTF8.self), resolved.profile_id, state)
     }
-    @discardableResult func enqueueHostAction(json: String, binding: String, profile: String, state: HostRoutingState, deviceSession: UInt64? = nil, deviceIngress: UInt64? = nil, requiresEnabled: Bool = true, done: (() -> Void)? = nil) -> Bool {
+    @discardableResult func enqueueHostAction(json: String, binding: String, profile: String, state: HostRoutingState, deviceSession: UInt64? = nil, deviceIngress: UInt64? = nil, requiresEnabled: Bool = true, radialIntent: RadialIntent? = nil, done: (() -> Void)? = nil) -> Bool {
         guard dispatchOpen, !requiresEnabled || hostExecutionEnabled else { status = "正在切换或输入已暂停，请稍后重试"; done?(); return false }
         if pendingHostActions.count >= 32 {
             clearPendingActions(); overflowDraining = true
@@ -182,8 +192,10 @@ extension Store {
             done?(); return false
         }
         let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(json.utf8))
-        let selection = payload?.adapter == "t3" && payload?.command == "next-attention" ? t3Attention.selectNext() : nil
-        pendingHostActions.append(PendingHostAction(json: json, binding: binding, profile: profile, state: state, deviceSession: deviceSession, deviceIngress: deviceIngress, admitted: .now, requiresEnabled: requiresEnabled, done: done, t3Selection: selection))
+        let selection: T3Selection?
+        if case .t3(let frozen) = radialIntent { selection = frozen }
+        else { selection = payload?.adapter == "t3" && payload?.command == "next-attention" ? t3Attention.selectNext() : nil }
+        pendingHostActions.append(PendingHostAction(json: json, binding: binding, profile: profile, state: state, deviceSession: deviceSession, deviceIngress: deviceIngress, admitted: .now, requiresEnabled: requiresEnabled, done: done, t3Selection: selection, radialIntent: radialIntent))
         guard hostExecutionTask == nil else { return true }
         hostExecutionTask = Task { @MainActor [self] in
             while !pendingHostActions.isEmpty {
@@ -194,7 +206,7 @@ extension Store {
                       current.host_state_revision == entry.state.host_state_revision,
                       !entry.requiresEnabled || current.execution_enabled,
                       entry.deviceSession == nil || (entry.deviceSession == inputBoundary.session && (entry.deviceIngress ?? 0) > inputBoundary.cutoff),
-                      entry.admitted.duration(to: .now) < .seconds(1) else { continue }
+                      entry.admitted.duration(to: .now) < .seconds(1), radialEntryReady(entry) else { continue }
                 if let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(entry.json.utf8)),
                    payload.action_type == "agent_command", payload.command == "push-to-talk", let adapter = payload.adapter {
                     if entry.deviceSession != nil {
@@ -211,6 +223,10 @@ extension Store {
                 } else {
                     pushToTalk.cancel(); await pushToTalk.waitUntilStopped()
                     guard admitAfterDictationCleanup(entry) else { continue }
+                    if entry.radialIntent == .cheatSheet {
+                        showRadialCheatSheet(entry)
+                        continue
+                    }
                     _ = await executeHostAction(actionJSON: entry.json, bindingId: entry.binding, profileId: entry.profile, t3Selection: entry.t3Selection, stillAdmitted: { [weak self] in
                         self?.admitAfterDictationCleanup(entry, checkAge: false) == true
                     })
@@ -222,7 +238,7 @@ extension Store {
         return true
     }
     private func admitAfterDictationCleanup(_ entry: PendingHostAction, checkAge: Bool = true) -> Bool {
-        dispatchOpen && pushToTalk.cleanupConfirmed && routing?.host_state_revision == entry.state.host_state_revision
+        dispatchOpen && pushToTalk.cleanupConfirmed && radialEntryReady(entry) && routing?.host_state_revision == entry.state.host_state_revision
             && routing?.document_revision == entry.state.document_revision && routing?.document_id == entry.state.document_id
             && (!entry.requiresEnabled || hostExecutionEnabled)
             && (entry.deviceSession == nil || (entry.deviceSession == inputBoundary.session && (entry.deviceIngress ?? 0) > inputBoundary.cutoff))
@@ -262,7 +278,9 @@ extension Store {
             status = "输入流丢失，已暂停派发；请恢复输入并松开按键 / 摇杆回中"
             return false
         }
-        if inputBoundary.consume(event, gateOpen: dispatchOpen && !inputNeedsResume),
+        let admission = inputBoundary.consume(event, gateOpen: dispatchOpen && !inputNeedsResume)
+        if consumeRadialInput(event, admission: admission) { return true }
+        if admission.pressed,
            let binding = event.bindingId, let (json, profile, state) = resolveHostAction(binding) {
             enqueueHostAction(json: json, binding: binding, profile: profile, state: state,
                 deviceSession: event.sessionId, deviceIngress: event.ingressSequence)
