@@ -177,7 +177,7 @@ struct DesktopAgent: Identifiable {
     }
 
     static func dictationState(labels: [String], recording: Bool) -> Bool {
-        let exact = recording ? ["停止语音输入", "结束语音输入", "Stop recording", "Stop dictation"] : ["开始语音输入", "Record voice memo", "Dictate"]
+        let exact = recording ? ["停止语音输入", "结束语音输入", "Stop recording", "Stop dictation", "停止听写"] : ["开始语音输入", "Record voice memo", "Dictate", "听写"]
         return labels.contains { exact.contains($0) || (recording ? $0.hasPrefix("停止录音") : $0.hasPrefix("语音输入（")) }
     }
 

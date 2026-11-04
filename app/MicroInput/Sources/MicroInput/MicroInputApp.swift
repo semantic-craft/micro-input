@@ -204,6 +204,10 @@ struct StatusPanel: View {
                 Toggle("按键控制", isOn: Binding(get: { store.hostExecutionEnabled }, set: { value in Task { await store.setHostExecutionEnabled(value) } }))
                     .labelsHidden().toggleStyle(.switch).controlSize(.small).help("启用或暂停按键控制")
             }
+            if store.dictationNeedsAttention {
+                Text("原听写停止未确认，请检查原应用").font(.caption).foregroundStyle(.orange)
+                Button("复核原听写已停止") { Task { await store.verifyDictationStopped() } }
+            }
             // Intrinsic, non-scrolling rows: a maxHeight-only ScrollView can collapse
             // inside NSHostingController's initial popover size negotiation.
             VStack(spacing: 8) {

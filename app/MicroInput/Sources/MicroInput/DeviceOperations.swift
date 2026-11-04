@@ -75,6 +75,7 @@ extension Store {
                 }
                 try await Task.sleep(nanoseconds: 10_000_000)
             }
+            guard pushToTalk.cleanupConfirmed else { throw BridgeError.Failed(message: "原听写停止未确认；未发送设备变更") }
             guard connection == generation, !Task.isCancelled, !deviceCancellationRequested else { throw BridgeError.Disconnected }
             let id = try await backend.startDeviceApply(token: token, drainToken: ticket, restore: restore)
             drain = nil
