@@ -7,7 +7,7 @@ final class PresetTests: XCTestCase {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("workbench.json")
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await store.loadWorkbench()
         await store.assign("save")
         let original = try Data(contentsOf: url)
@@ -22,7 +22,7 @@ final class PresetTests: XCTestCase {
         XCTAssertEqual(store.draft.edits.values.first?.id, "save")
         XCTAssertFalse(store.draft.can_undo)
         XCTAssertEqual(try Data(contentsOf: url), original)
-        let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        let reopened = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await reopened.loadWorkbench()
         XCTAssertEqual(reopened.draft.edits.values.first?.id, "save")
         let installed = await reopened.importPreset(try reopened.starterPreset())

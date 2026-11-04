@@ -7,7 +7,7 @@ final class ActionLibraryTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("workbench.json")
-        let core = MicroInputCore.MicroInput(), store = Store(backend: core, documentURL: url)
+        let core = MicroInputCore.MicroInput(), store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: url)
         await store.loadWorkbench()
         let revision = store.draft.revision
         await store.setFavorite("app", favorite: true)
@@ -22,7 +22,7 @@ final class ActionLibraryTests: XCTestCase {
         XCTAssertEqual(store.actionCapabilities[store.slotKey]?.execution_available, true)
         await store.undoDraft()
         XCTAssertTrue(store.draft.edits.isEmpty)
-        let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        let reopened = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await reopened.loadWorkbench()
         await reopened.searchActions(query: "", category: "应用", favoritesOnly: true)
         XCTAssertEqual(reopened.library.entries.map { $0.action.id }, ["app"])

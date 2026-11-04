@@ -101,7 +101,7 @@ extension InputMonitorTests {
     @MainActor func testCandidatePresentationNamesBindingAndSourceWithoutPhysicalIdentity() async throws {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
-        let store = Store(backend: core)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core)
         await store.connect("synthetic-interface-0")
         let monitor = InputMonitorState()
         let task = Task { await monitor.listen(store: store) }
@@ -123,7 +123,7 @@ extension InputMonitorTests {
     @MainActor func testMonitorPresentationUsesRealBridgeAndClearsOldSessionOnRestart() async throws {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
-        let store = Store(backend: core)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core)
         await store.connect("synthetic-interface-0")
         let monitor = InputMonitorState()
         let task = Task { await monitor.listen(store: store) }
@@ -144,7 +144,7 @@ extension InputMonitorTests {
     @MainActor func testVerifiedPresentationWhenIdentityReadEvenWithHostExecutionPaused() async throws {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
-        let store = Store(backend: core)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core)
         store.selectDevice("synthetic-interface-0")
         await store.connect("synthetic-interface-0")
         await store.readIdentity()

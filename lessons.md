@@ -199,3 +199,16 @@
 - 起因：把参考实现的模块清单直接变成交付范围，并以通用宿主动作替代应用内部会话语义；遗漏 Cindy 已有原生集成的能力归属。
 - 正确做法：先核对目标桌面版本、原生能力、源码和接口权限范围，再确定需要补充的能力。创建自有 runtime 的 SDK 或只能管理调用方会话的 API，不能充当控制用户现有桌面会话的接口。
 - 验证点：四应用接入证据必须列出稳定目标身份、状态来源、动作回执和原生所有者；未能操作既有会话时保留缺口。Seen 1x（2026-11-05）。
+
+## 原生所有权释放必须包含迟到操作的停止确认
+
+- 起因与后果：所有权撤销时灯光预览可能仍在启动。若迟到 token 没有先保存在 Store，停止调用失败后界面仍为空，排空检查会误报成功。
+- 修复：先保留 token，再走统一停止路径；只有明确 Stopped/Restored 才确认清理。握手同时等待宿主动作计数、PTT 的迟到启动和停止确认、设备操作及预览启动结束。
+- 验证点：`testOwnershipDrainRetainsLatePreviewWhenStopFails`、`testOwnershipHandoffWaitsForLateVoiceStartAndRejectsUnconfirmedStop`、`testDrainWaitsForAlreadyAdmittedActionToFinish`。原生及实体证据单列，不用合成 peer 的释放回执替代 Cindy 实际排空。
+- 复发记录：Seen 1x（2026-11-05）。
+
+## 接力记录必须给新切片补写证据字段
+
+- 起因：新版队列的未完成切片没有预置 Evidence 行，advance 只替换已有字段，标记完成后生成的下一棒提示证据为空。
+- 修复：缺失时插入，已有时替换；重复执行不产生重复字段。
+- 验证点：`test_advance_adds_missing_evidence_and_updates_it_without_duplicates` 与 `scripts/pstack-relay selftest`。Seen 1x（2026-11-05）。

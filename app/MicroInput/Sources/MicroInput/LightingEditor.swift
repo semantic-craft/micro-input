@@ -13,20 +13,23 @@ extension Store {
         busy = true
         defer { busy = false }
         do {
-            if let token = lightingPreviewToken { try backend.updateLightingPreview(token: token, zone: zone, field: field, value: value); lightingPreviewResult = "即时预览中 · 未改配置文件" }
+            if let token = lightingPreviewToken {
+                guard nativeOwnership.allowsExecution else { await endLightingPreview(); return }
+                try backend.updateLightingPreview(token: token, zone: zone, field: field, value: value); lightingPreviewResult = "即时预览中 · 未改配置文件" }
             else { try applyDocument(try await backend.editLighting(profileId: pid, layerId: lid, zone: zone, field: field, value: value, allLayers: allLayers)) }
         } catch { status = readableError(error) }
     }
     func beginLightingPreview() async {
-        guard lightingPreviewToken == nil, !startingLightingPreview, !deviceOperationRunning, let lid = layer?.id.text else { return }
+        guard nativeOwnership.allowsExecution, lightingPreviewToken == nil, !startingLightingPreview, !deviceOperationRunning, let lid = layer?.id.text else { return }
         startingLightingPreview = true
+        lightingCleanupConfirmed = false
         lightingPreviewGeneration += 1
         let generation = lightingPreviewGeneration
         defer { startingLightingPreview = false }
         do {
             let token = try await backend.beginLightingPreview(layerId: lid)
-            guard generation == lightingPreviewGeneration else { _ = try await backend.endLightingPreview(token: token); return }
             lightingPreviewToken = token
+            guard generation == lightingPreviewGeneration, nativeOwnership.allowsExecution else { await endLightingPreview(); return }
             lightingPreviewPhase = "Active"
             lightingPreviewResult = "在当前连接设备显示所选层灯光 · 30 秒后停止发送 · 未保存草稿"
         } catch { if generation == lightingPreviewGeneration { lightingPreviewResult = readableError(error) } }
@@ -41,6 +44,7 @@ extension Store {
             let state = try JSONDecoder().decode(PreviewStatus.self, from: Data(raw.utf8))
             guard lightingPreviewToken == token else { return }
             lightingPreviewPhase = state.phase
+            lightingCleanupConfirmed = ["Stopped", "Restored"].contains(state.phase)
             switch state.phase {
             case "Restored": lightingPreviewResult = "合成灯光已恢复 · 实体灯效尚未验收"
             case "Stopped": lightingPreviewResult = "已停止预览发送 · 不自动恢复设备灯光，配置文件未改变"

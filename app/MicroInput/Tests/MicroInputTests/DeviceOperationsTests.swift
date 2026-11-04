@@ -23,7 +23,7 @@ final class DeviceOperationsTests: XCTestCase {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }
         let core = MicroInputCore.MicroInput.syntheticConfigWriter()
-        let store = Store(backend: core, documentURL: dir.appendingPathComponent("workbench.json"), actionExecutor: RecordingHostActionExecutor())
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: dir.appendingPathComponent("workbench.json"), actionExecutor: RecordingHostActionExecutor())
         await store.loadWorkbench()
         await store.runSyntheticDeviceOperationScenario()
         XCTAssertFalse(store.editingDevice, store.status)
@@ -44,7 +44,7 @@ final class DeviceOperationsTests: XCTestCase {
     }
     @MainActor private func prepared(_ dir: URL, executor: HostActionExecuting? = nil) async throws -> (MicroInputCore.MicroInput, Store, String) {
         let core = MicroInputCore.MicroInput.syntheticConfigWriter()
-        let store = Store(backend: core, documentURL: dir.appendingPathComponent("workbench.json"), actionExecutor: executor ?? RecordingHostActionExecutor())
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: dir.appendingPathComponent("workbench.json"), actionExecutor: executor ?? RecordingHostActionExecutor())
         await store.loadWorkbench()
         try await core.setSyntheticDiscovery(state: .twoDevices)
         await store.refresh(); store.selectDevice("synthetic-interface-0"); await store.connect("synthetic-interface-0")
@@ -179,7 +179,7 @@ final class DeviceOperationsTests: XCTestCase {
         let requests = await core.syntheticRequests().count
         await store.shutdown()
         let reopenedCore = MicroInputCore.MicroInput()
-        let reopened = Store(backend: reopenedCore, documentURL: dir.appendingPathComponent("workbench.json"))
+        let reopened = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: reopenedCore, documentURL: dir.appendingPathComponent("workbench.json"))
         await reopened.loadWorkbench(); await reopened.refreshDeviceOperations()
         XCTAssertEqual(reopened.operationRows.count, 1)
         XCTAssertFalse(reopened.operationCapabilities.apply)

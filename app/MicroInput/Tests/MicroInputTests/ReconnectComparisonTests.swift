@@ -7,7 +7,7 @@ final class ReconnectComparisonTests: XCTestCase {
         let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {try? FileManager.default.removeItem(at:dir)}
         let url=dir.appendingPathComponent("workbench.json"), core=MicroInputCore.MicroInput.syntheticDiscovery()
-        let store=Store(backend:core,documentURL:url)
+        let store=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:core,documentURL:url)
         await store.loadWorkbench();try await core.setSyntheticDiscovery(state:.twoDevices);try await core.setSyntheticConfig(scenario:1)
         await store.refresh();store.selectDevice("synthetic-interface-0")
         await store.connect("synthetic-interface-0");await store.readIdentity();await store.readDeviceConfig();await store.createDraftFromSnapshot()
@@ -25,7 +25,7 @@ final class ReconnectComparisonTests: XCTestCase {
         XCTAssertEqual(store.profile?.name,"Synthetic external edit");XCTAssertEqual(store.draft.revision,beforeRevision+1)
         XCTAssertFalse(store.draft.can_undo);XCTAssertTrue(store.draft.structure_changes.isEmpty)
         let finalCount=await core.syntheticRequests().count;XCTAssertEqual(finalCount,count)
-        let reopened=Store(backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench()
+        let reopened=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench()
         XCTAssertEqual(reopened.profile?.name,"Synthetic external edit");XCTAssertEqual(reopened.draft.revision,beforeRevision+1)
         await core.shutdown()
     }
@@ -33,7 +33,7 @@ final class ReconnectComparisonTests: XCTestCase {
         let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {try? FileManager.default.removeItem(at:dir)}
         let url=dir.appendingPathComponent("workbench.json"),core=MicroInputCore.MicroInput.syntheticDiscovery()
-        let store=Store(backend:core,documentURL:url);await store.loadWorkbench()
+        let store=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:core,documentURL:url);await store.loadWorkbench()
         try await core.setSyntheticDiscovery(state:.twoDevices);try await core.setSyntheticConfig(scenario:1)
         await store.refresh();store.selectDevice("synthetic-interface-0");await store.connect("synthetic-interface-0")
         await store.readIdentity();await store.readDeviceConfig();await store.createDraftFromSnapshot()
@@ -46,7 +46,7 @@ final class ReconnectComparisonTests: XCTestCase {
         XCTAssertEqual(store.profile?.name,"Whole local choice");XCTAssertFalse(store.draft.can_undo)
         XCTAssertEqual(store.draft.revision,revision+1)
         XCTAssertEqual(store.draft.structure_changes,["配置改名：Synthetic external edit → Whole local choice"])
-        let reopened=Store(backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench()
+        let reopened=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench()
         XCTAssertEqual(reopened.profile?.name,"Whole local choice");XCTAssertEqual(reopened.draft.structure_changes,store.draft.structure_changes)
         await core.shutdown()
     }
@@ -55,7 +55,7 @@ final class ReconnectComparisonTests: XCTestCase {
         let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {try? FileManager.default.removeItem(at:dir)}
         let url=dir.appendingPathComponent("workbench.json"),core=MicroInputCore.MicroInput.syntheticDiscovery()
-        let store=Store(backend:core,documentURL:url);await store.loadWorkbench()
+        let store=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:core,documentURL:url);await store.loadWorkbench()
         try await core.setSyntheticDiscovery(state:.twoDevices);try await core.setSyntheticConfig(scenario:1)
         await store.refresh();store.selectDevice("synthetic-interface-0");await store.connect("synthetic-interface-0")
         await store.readIdentity();await store.readDeviceConfig();await store.createDraftFromSnapshot()
@@ -77,7 +77,7 @@ final class ReconnectComparisonTests: XCTestCase {
         XCTAssertEqual(identity["confidence"] as? String,"observed-interface")
         XCTAssertEqual((baseline["identity_resolution"] as? [String:Any])?["comparison_token"] as? String,unconfirmed.token)
         do {_ = try await core.confirmComparisonIdentity(token:unconfirmed.token);XCTFail("Consumed token accepted")}catch {}
-        let reopened=Store(backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench()
+        let reopened=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench()
         XCTAssertEqual(reopened.profile?.name,"Synthetic external edit")
         await core.shutdown()
     }

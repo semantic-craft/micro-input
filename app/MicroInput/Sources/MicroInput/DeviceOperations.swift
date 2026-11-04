@@ -53,7 +53,7 @@ extension Store {
 
     @discardableResult
     func executeHostAction(actionJSON: String, bindingId: String, profileId: String, t3Selection: T3Selection? = nil, stillAdmitted: (() -> Bool)? = nil) async -> HostActionReceipt? {
-        guard !hostOperationPaused, let lease = try? backend.beginHostExecution() else { return nil }
+        guard nativeOwnership.allowsExecution, !hostOperationPaused, let lease = try? backend.beginHostExecution() else { return nil }
         let epoch = hostRouteEpoch
         inFlightHostActions += 1
         defer { inFlightHostActions -= 1; backend.finishHostExecution(lease: lease) }
@@ -226,6 +226,7 @@ extension Store {
         catch { status = readableError(error) }
     }
     func performDeviceOperation(token: String, restore: Bool = false) async {
+        guard nativeOwnership.allowsExecution else { status = nativeOwnership.summary; return }
         guard !deviceOperationRunning else { return }
         guard lightingPreviewToken == nil else { status = "请先结束灯光预览"; return }
         refreshOperationCapabilities()

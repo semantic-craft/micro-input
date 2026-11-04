@@ -12,6 +12,7 @@ private final class EndedPreviewBackend: Backend {
         if delayBegin { return await withCheckedContinuation { continuation in lock.withLock { pendingBegin = continuation } } }
         return "token"
     }
+    var failEnd = false
     var endCalls = 0
     var deviceReads = 0
     func loadDemo() async throws -> String { "{}" }
@@ -21,12 +22,16 @@ private final class EndedPreviewBackend: Backend {
     func disconnect() async {}
     func inputMonitoringStatus() async -> Bool { false }
     func lightingPreviewStatus() -> String { "{\"phase\":\"\(phase)\"}" }
-    func endLightingPreview(token: String) async throws -> String { endCalls += 1; return lightingPreviewStatus() }
+    func endLightingPreview(token: String) async throws -> String {
+        endCalls += 1
+        if failEnd { throw BridgeError.Failed(message: "stop unconfirmed") }
+        return lightingPreviewStatus()
+    }
 }
 final class LightingTests: XCTestCase {
     @MainActor func testAutomaticEndUpdatesUIWithoutDevicePolling() async {
         let backend = EndedPreviewBackend()
-        let observed = Store(backend: backend)
+        let observed = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: backend)
         observed.lightingPreviewToken = "synthetic-token"
         observed.lightingPreviewPhase = "Active"
         await observed.observeLightingPreview()
@@ -41,7 +46,7 @@ final class LightingTests: XCTestCase {
     }
     @MainActor func testNativeStopDoesNotClaimRestoration() async {
         let backend = EndedPreviewBackend(); backend.phase = "Stopped"
-        let store = Store(backend: backend)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: backend)
         store.lightingPreviewToken = "native-token"
         await store.endLightingPreview()
         XCTAssertEqual(store.lightingPreviewPhase, "Stopped")
@@ -51,7 +56,7 @@ final class LightingTests: XCTestCase {
     }
     @MainActor func testCloseDuringBeginRetiresLateToken() async throws {
         let backend = EndedPreviewBackend(); backend.delayBegin = true; backend.phase = "Stopped"
-        let store = Store(backend: backend)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: backend)
         let core = MicroInputCore.MicroInput()
         store.snapshot = try JSONDecoder().decode(Snapshot.self, from: Data(try await core.loadDemo().utf8))
         let begin = Task { await store.beginLightingPreview() }
@@ -64,6 +69,33 @@ final class LightingTests: XCTestCase {
         XCTAssertEqual(backend.endCalls, 1)
         await store.shutdown(); await core.shutdown()
     }
+    @MainActor func testOwnershipDrainRetainsLatePreviewWhenStopFails() async throws {
+        let backend = EndedPreviewBackend(); backend.delayBegin = true; backend.failEnd = true
+        let ownership = NativeOwnershipController(transport: nil)
+        ownership.setDesiredOwner("micro-input")
+        let request = ownership.beginRequest(microDrained: true)
+        ownership.receive(NativeOwnershipReply(version: 1, requestId: request.requestId,
+            clientInstance: request.clientInstance, generation: request.generation,
+            nativeInstance: UUID(), nativeGeneration: 1, state: "released", reason: "fixture",
+            inputDrained: true, pttDrained: true, lightingDrained: true, capabilities: ["fenced-release-v1"]), for: request)
+        let store = Store(nativeOwnership: ownership, backend: backend)
+        let core = MicroInputCore.MicroInput()
+        store.snapshot = try JSONDecoder().decode(Snapshot.self, from: Data(try await core.loadDemo().utf8))
+        let begin = Task { await store.beginLightingPreview() }
+        for _ in 0..<100 where !backend.beginning { await Task.yield() }
+        XCTAssertTrue(backend.beginning)
+        ownership.invalidate("connection lost")
+        backend.releaseBegin()
+        await begin.value
+        XCTAssertEqual(store.lightingPreviewToken, "late-token")
+        XCTAssertFalse(store.lightingCleanupConfirmed)
+        let drained = await store.drainForNativeOwnership()
+        XCTAssertFalse(drained)
+        backend.failEnd = false; backend.phase = "Stopped"
+        let retry = await store.drainForNativeOwnership()
+        XCTAssertTrue(retry)
+        await store.shutdown(); await core.shutdown()
+    }
     @MainActor func testNativePreviewIsClosedWithoutConnection() async {
         let core = MicroInputCore.MicroInput()
         do { _ = try await core.beginLightingPreview(layerId: "missing"); XCTFail("native preview opened") } catch {}
@@ -72,7 +104,7 @@ final class LightingTests: XCTestCase {
     #if MI_SYNTHETIC_BACKEND
     @MainActor private func setup(_ directory: URL) async throws -> (MicroInputCore.MicroInput, Store) {
         let core = MicroInputCore.MicroInput.syntheticConfigWriter()
-        let store = Store(backend: core, documentURL: directory.appendingPathComponent("workbench.json"), actionExecutor: RecordingHostActionExecutor())
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: directory.appendingPathComponent("workbench.json"), actionExecutor: RecordingHostActionExecutor())
         await store.loadWorkbench(); try await core.setSyntheticDiscovery(state: .twoDevices)
         await store.refresh(); await store.connect("synthetic-interface-0"); await store.readIdentity(); await store.readDeviceConfig(); await store.createDraftFromSnapshot()
         return (core,store)
@@ -99,7 +131,7 @@ final class LightingTests: XCTestCase {
         await store.undoDraft(); XCTAssertEqual(store.lightingModel()?.zones["backlight"]?["color"]?.value,original.zones["backlight"]?["color"]?.value)
         let after=await core.syntheticRequests().count;XCTAssertEqual(before,after)
         await store.shutdown()
-        let reopened=Store(backend:MicroInputCore.MicroInput(),documentURL:dir.appendingPathComponent("workbench.json"))
+        let reopened=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:MicroInputCore.MicroInput(),documentURL:dir.appendingPathComponent("workbench.json"))
         await reopened.loadWorkbench();XCTAssertEqual(reopened.lightingModel()?.zones["underglow"]?["effect"]?.value,"gradient")
         await reopened.shutdown()
     }

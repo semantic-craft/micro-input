@@ -7,7 +7,7 @@ final class ApplyPreparationTests: XCTestCase {
         let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {try? FileManager.default.removeItem(at:dir)}
         let core=MicroInputCore.MicroInput.syntheticDiscovery(),url=dir.appendingPathComponent("workbench.json")
-        let store=Store(backend:core,documentURL:url);await store.loadWorkbench()
+        let store=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:core,documentURL:url);await store.loadWorkbench()
         try await core.setSyntheticDiscovery(state:.twoDevices);try await core.setSyntheticConfig(scenario:1)
         await store.refresh();store.selectDevice("synthetic-interface-0");await store.connect("synthetic-interface-0")
         await store.readIdentity();await store.readDeviceConfig();await store.createDraftFromSnapshot()
@@ -30,7 +30,7 @@ final class ApplyPreparationTests: XCTestCase {
     @MainActor func testReadOnlyAndStaleSnapshotsNeverPrepareThroughBridge() async throws {
         let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {try? FileManager.default.removeItem(at:dir)}
-        let core=MicroInputCore.MicroInput.syntheticDiscovery(),store=Store(backend:core,documentURL:dir.appendingPathComponent("workbench.json"))
+        let core=MicroInputCore.MicroInput.syntheticDiscovery(),store=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:core,documentURL:dir.appendingPathComponent("workbench.json"))
         await store.loadWorkbench();await store.previewApply();XCTAssertNil(store.applyPreview)
         try await core.setSyntheticDiscovery(state:.twoDevices);try await core.setSyntheticConfig(scenario:1)
         await store.refresh();store.selectDevice("synthetic-interface-0");await store.connect("synthetic-interface-0")

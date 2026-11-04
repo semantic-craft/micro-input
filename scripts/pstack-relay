@@ -380,13 +380,15 @@ def cmd_advance(root: Path, slice_id: str, evidence: str, why: str, copy: bool) 
             start = m.end()
             end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
             section = text[start:end]
-            section = re.sub(
-                r"^(- \*\*Evidence\*\*:\s*)(.+)$",
+            section, evidence_count = re.subn(
+                r"^(- \*\*Evidence\*\*:[ \t]*)(.*)$",
                 lambda em: em.group(1) + evidence,
                 section,
                 count=1,
                 flags=re.MULTILINE,
             )
+            if evidence_count == 0:
+                section = section.rstrip() + f"\n- **Evidence**: {evidence}\n\n"
             text = text[:start] + section + text[end:]
             break
 

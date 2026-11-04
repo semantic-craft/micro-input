@@ -16,7 +16,7 @@ private final class SpyBackend: Backend {
 }
 final class NavigationTests: XCTestCase {
     @MainActor func testRustBridgeAndNavigationNeverRequestsDevice() async throws {
-        let backend = SpyBackend(); let store = Store(backend: backend)
+        let backend = SpyBackend(); let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: backend)
         await store.loadDemo()
         XCTAssertEqual(store.snapshot?.source, "Demo")
         XCTAssertEqual(store.snapshot?.profiles.count, 2)
@@ -32,7 +32,7 @@ final class NavigationTests: XCTestCase {
         XCTAssertTrue(store.layer?.keys[1].bindingLabel.contains("Unknown") == true)
     }
     @MainActor func testFailedDeviceReadRetainsDemoProvenance() async {
-        let backend = SpyBackend(); let store = Store(backend: backend)
+        let backend = SpyBackend(); let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: backend)
         await store.loadDemo(); await store.connect("synthetic"); await store.readDeviceConfig()
         XCTAssertEqual(store.snapshot?.source, "Demo")
         XCTAssertTrue(store.stale)
@@ -61,7 +61,7 @@ private final class DelayedBackend: Backend {
 }
 extension NavigationTests {
     @MainActor func testSuspendInvalidatesDelayedConnect() async {
-        let backend = DelayedBackend(); let store = Store(backend: backend)
+        let backend = DelayedBackend(); let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: backend)
         let task = Task { await store.connect("delayed") }
         while backend.release == nil { await Task.yield() }
         await store.suspend()
@@ -78,7 +78,7 @@ extension NavigationTests {
 }
 extension NavigationTests {
     @MainActor func testRemovalInvalidatesDelayedConnect() async {
-        let backend = DelayedBackend(); let store = Store(backend: backend)
+        let backend = DelayedBackend(); let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: backend)
         let task = Task { await store.connect("delayed") }
         while backend.release == nil { await Task.yield() }
         store.received([])
@@ -106,14 +106,14 @@ extension NavigationTests {
         let action:[String:Any] = ["id":"review","name":"Saved text","category":"文本","detail":"local","payload":["type":"text","text":"保留参数\n第二行"]]
         let bytes=try JSONSerialization.data(withJSONObject:["schema_version":1,"config":config,"edits":[key:action],"revision":7],options:[.sortedKeys])
         try bytes.write(to:url)
-        let store=Store(backend:core,documentURL:url);await store.loadWorkbench()
+        let store=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:core,documentURL:url);await store.loadWorkbench()
         XCTAssertEqual(try Data(contentsOf:url),bytes);XCTAssertEqual(store.draft.loaded_format,1)
         store.slot=1;XCTAssertEqual(store.draft.edits[store.slotKey]?.payload["text"]?.text,"保留参数\n第二行")
         await store.renameProfile(name:"Migrated")
         XCTAssertEqual(store.draft.revision,8);XCTAssertEqual(store.draft.loaded_format,2)
         let backup=try FileManager.default.contentsOfDirectory(at:dir,includingPropertiesForKeys:nil).first {$0.pathExtension=="backup"}
         XCTAssertNotNil(backup);XCTAssertEqual(try Data(contentsOf:backup!),bytes)
-        let reopened=Store(backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench();reopened.slot=1
+        let reopened=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench();reopened.slot=1
         XCTAssertEqual(reopened.profile?.name,"Migrated")
         XCTAssertEqual(reopened.draft.edits[reopened.slotKey]?.payload["text"]?.text,"保留参数\n第二行")
     }
@@ -121,7 +121,7 @@ extension NavigationTests {
         let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {try? FileManager.default.removeItem(at:directory)}
         let url=directory.appendingPathComponent("workbench.json")
-        let store=Store(backend:MicroInputCore.MicroInput(),documentURL:url)
+        let store=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:MicroInputCore.MicroInput(),documentURL:url)
         await store.loadWorkbench();let oldID=store.profile?.id.text
         await store.createProfile(name:"Local profile")
         let created=store.profile?.id.text
@@ -133,7 +133,7 @@ extension NavigationTests {
         await store.duplicateProfile(name:"Independent copy");let copy=store.profile?.id.text
         XCTAssertNotEqual(copy,created);await store.undoDraft();XCTAssertEqual(store.snapshot?.profiles.count,3)
         await store.undoDraft(redo:true);XCTAssertEqual(store.snapshot?.profiles.last?.id.text,copy)
-        let reopened=Store(backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench()
+        let reopened=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench()
         XCTAssertEqual(reopened.snapshot?.profiles.count,4)
         XCTAssertTrue(reopened.snapshot?.profiles.contains {$0.id.text==created && $0.name=="Renamed"} == true)
         XCTAssertFalse(reopened.draft.can_undo)
@@ -142,7 +142,7 @@ extension NavigationTests {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("workbench.json")
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await store.loadWorkbench()
         let before = store.snapshot?.raw.text
         store.slot = 1
@@ -156,7 +156,7 @@ extension NavigationTests {
         XCTAssertEqual(store.draft.edits.count, 1)
         XCTAssertEqual(store.snapshot?.raw.text, before)
         XCTAssertNil(store.connectedID)
-        let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        let reopened = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await reopened.loadWorkbench()
         reopened.slot = 1
         XCTAssertEqual(reopened.draft.edits[reopened.slotKey]?.id, "save")
@@ -176,7 +176,7 @@ extension NavigationTests {
 extension NavigationTests {
     @MainActor func testDiscoveryKeepsCandidatesSeparateAndRemovalClearsSelection() async throws {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
-        let store = Store(backend: core)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core)
         await store.startDiscovery()
         XCTAssertEqual(store.discoveryStatus, "无 USB 候选设备")
         try await core.setSyntheticDiscovery(state: .twoDevices)
@@ -206,7 +206,7 @@ extension NavigationTests {
         let url=dir.appendingPathComponent("workbench.json")
         let core=MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state:.twoDevices);try await core.setSyntheticConfig(scenario:1)
-        let store=Store(backend:core,documentURL:url);await store.loadWorkbench();await store.assign("save")
+        let store=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:core,documentURL:url);await store.loadWorkbench();await store.assign("save")
         let original=try Data(contentsOf:url)
         await store.refresh();store.selectDevice("synthetic-interface-0");await store.connect("synthetic-interface-0")
         await store.readIdentity();await store.readDeviceConfig()
@@ -222,7 +222,7 @@ extension NavigationTests {
         XCTAssertEqual(try Data(contentsOf:url),original)
         let finalRequests=await core.syntheticRequests().count;XCTAssertEqual(finalRequests,requestCount)
         await store.suspend()
-        let reopened=Store(backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench()
+        let reopened=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:MicroInputCore.MicroInput(),documentURL:url);await reopened.loadWorkbench()
         XCTAssertEqual(reopened.draft.document_id,chosen)
         XCTAssertEqual(reopened.profile?.name,"Device working copy")
         XCTAssertEqual(reopened.draft.edits.count,1);XCTAssertFalse(reopened.draft.can_undo)
@@ -231,7 +231,7 @@ extension NavigationTests {
     @MainActor func testIdentityThroughRealBridgeIsSeparateFromConnectionAndConfig() async throws {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
-        let store = Store(backend: core)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core)
         await store.loadDemo(); await store.refresh()
         store.selectDevice("synthetic-interface-0")
         await store.connect("synthetic-interface-0")
@@ -260,7 +260,7 @@ extension NavigationTests {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
         try await core.setSyntheticIdentity(scenario: 1)
-        let store = Store(backend: core)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core)
         await store.connect("synthetic-interface-0"); await store.readIdentity()
         XCTAssertEqual(store.identity?.sourceMethod, "sys.version")
         XCTAssertNil(store.identity?.profileIndex)
@@ -285,7 +285,7 @@ extension NavigationTests {
         let core=MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state:.twoDevices)
         try await core.setSyntheticConfig(scenario:1)
-        let store=Store(backend:core,documentURL:url)
+        let store=Store(nativeOwnership: NativeOwnershipController(isolated: true), backend:core,documentURL:url)
         await store.loadWorkbench()
         await store.assign("save")
         let localFile=try Data(contentsOf:url)

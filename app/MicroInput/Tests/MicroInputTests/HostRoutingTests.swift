@@ -38,7 +38,7 @@ import MicroInputCore
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let core = MicroInputCore.MicroInput()
-        let store = Store(backend: core, documentURL: directory.appendingPathComponent("workbench.json"), actionExecutor: executor ?? RecordingHostActionExecutor())
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: directory.appendingPathComponent("workbench.json"), actionExecutor: executor ?? RecordingHostActionExecutor())
         await store.loadWorkbench(); await store.installCodingAgentPresets()
         return (store, core, directory)
     }
@@ -64,7 +64,7 @@ import MicroInputCore
         await store.linkApp("test.editor", profileID: a)
         store.foregroundChanged(bundleID: "test.editor"); await settle(store)
         XCTAssertEqual(store.hostActiveProfileId, b)
-        let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: dir.appendingPathComponent("workbench.json"))
+        let reopened = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: dir.appendingPathComponent("workbench.json"))
         await reopened.loadWorkbench()
         XCTAssertTrue(try XCTUnwrap(reopened.routing).manual_override)
         XCTAssertFalse(reopened.hostExecutionEnabled)

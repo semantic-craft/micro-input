@@ -22,7 +22,7 @@ final class WorkspaceLifecycleTests: XCTestCase {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
         try await core.setSyntheticConfig(scenario: 1)
-        let store = Store(backend: core, documentURL: directory.appendingPathComponent("workbench.json"))
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: directory.appendingPathComponent("workbench.json"))
         await store.loadWorkbench()
         await store.assign("save")
         let revision = store.draft.revision
@@ -69,7 +69,7 @@ final class WorkspaceLifecycleTests: XCTestCase {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
         try await core.setSyntheticConfig(scenario: 1)
-        let store = Store(backend: core)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core)
         await store.loadDemo()
         let original = store.snapshot?.raw.text
         await store.connect("synthetic-interface-0")
@@ -120,7 +120,7 @@ final class WorkspaceLifecycleTests: XCTestCase {
     @MainActor func testQueuedDiscoveryCallbacksCannotRetireANewConnectionAfterInvalidation() async throws {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
-        let store = Store(backend: core)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core)
         await store.refresh()
         store.selectDevice("synthetic-interface-0")
         await store.connect("synthetic-interface-0")
@@ -140,7 +140,7 @@ final class WorkspaceLifecycleTests: XCTestCase {
 
     @MainActor func testWakeWaitsForDisconnectAndAnotherSleepInvalidatesPendingWake() async throws {
         let backend = DelayedSleepBackend()
-        let store = Store(backend: backend)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: backend)
         await store.connect("first")
         let center = NotificationCenter()
         let observer = WorkspaceSleepObserver(store: store, center: center)
@@ -166,7 +166,7 @@ final class WorkspaceLifecycleTests: XCTestCase {
 
     @MainActor func testReopeningWindowWithSameStoreDoesNotCancelPendingWake() async throws {
         let backend = DelayedSleepBackend()
-        let store = Store(backend: backend)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: backend)
         await store.connect("first")
         let lifetime = AppLifetime(store: store, reply: { _ in })
         defer { lifetime.store = nil }
@@ -189,7 +189,7 @@ final class WorkspaceLifecycleTests: XCTestCase {
     @MainActor func testObserverStopAndDeinitRemoveNotificationEffects() async throws {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
-        let store = Store(backend: core)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core)
         await store.connect("synthetic-interface-0")
         let center = NotificationCenter()
         var observer: WorkspaceSleepObserver? = WorkspaceSleepObserver(store: store, center: center)

@@ -350,7 +350,7 @@ extension T3AttentionControllerTests {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let core = MicroInputCore.MicroInput()
-        let store = Store(backend: core, documentURL: directory.appendingPathComponent("workbench.json"), t3Attention: controller)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: directory.appendingPathComponent("workbench.json"), t3Attention: controller)
         await store.loadWorkbench(); await store.installCodingAgentPresets()
         let profile = try XCTUnwrap(store.profile?.id.text)
         await store.setHostActiveProfile(profile)
@@ -391,7 +391,7 @@ extension T3AttentionControllerTests {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let executor = RecordingHostActionExecutor()
-        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: directory.appendingPathComponent("workbench.json"), actionExecutor: executor, t3Attention: controller)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: directory.appendingPathComponent("workbench.json"), actionExecutor: executor, t3Attention: controller)
         await store.loadWorkbench(); await store.installCodingAgentPresets()
         let profile = try XCTUnwrap(store.profile?.id.text)
         await store.setHostActiveProfile(profile)

@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Pair Cindy's real controller and UDS coordinator with isolated Micro Input HID QA.
+Requires the pinned Cindy checkout with integrations/cindy/native-ownership.patch applied.
+Never launches installed Cindy or opens hardware. Builds restore production ABI on exit.
+"""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+import uuid
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def verify_pair(ownership, native):
+    expected = {"native-wide": (1, 0), "native-encoder": (1, 0),
+                "released-wide": (0, 1), "released-encoder": (0, 1),
+                "stale-profile-encoder": (0, 0), "fresh-encoder": (0, 1),
+                "lost-wide": (0, 0), "lost-encoder": (0, 0)}
+    if ownership.get("paired_native_source") != "PASS":
+        raise ValueError("paired QA did not pass")
+    rows = ownership.get("paired_events", [])
+    if len(rows) != len(expected) or len({row["event_id"] for row in rows}) != len(expected):
+        raise ValueError("paired event coverage incomplete")
+    if native.get("native_source") != "WorkLouderCodexLightingController" or native.get("backend") != "synthetic-sink":
+        raise ValueError("wrong native fixture")
+    if native.get("transport") != "real-unix-socket" or native.get("native_install") != "NOT_RUN" or native.get("physical") != "NOT_RUN":
+        raise ValueError("native evidence missing or overclaimed")
+    native_rows = native.get("events", [])
+    if len(native_rows) != len(expected) or len({row["eventId"] for row in native_rows}) != len(expected):
+        raise ValueError("native event coverage incomplete")
+    independent = {row["eventId"]: row for row in native_rows}
+    for row in rows:
+        key = row["event_id"]
+        actual = (row["native_actions"], row["micro_actions"])
+        if actual != expected.get(key) or independent[key]["nativeBusinessActions"] != actual[0]:
+            raise ValueError(f"double execution or missing expected action: {key}")
+        if independent[key]["disconnected"] != key.startswith("lost-"):
+            raise ValueError("loss was not exercised at native endpoint")
+    return len(rows)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument("--skip-build", action="store_true", help="use an already built synthetic app")
+    args = parser.parse_args()
+    source = args.source.resolve()
+    base = (ROOT / "integrations/cindy/BASE_SHA").read_text().strip()
+    if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip() != base:
+        raise ValueError("Cindy checkout does not match pinned source")
+    patch = ROOT / "integrations/cindy/native-ownership.patch"
+    source_diff = subprocess.check_output(["git", "diff", "--binary", "--no-ext-diff", "--no-color",
+                                           "--src-prefix=a/", "--dst-prefix=b/", "HEAD"], cwd=source)
+    if patch.is_file() and source_diff != patch.read_bytes():
+        raise ValueError("native checkout diff differs from packaged patch")
+    fixture = source / "scripts/micro-input-ownership-fixture.ts"
+    runner = source / "node_modules/.bin/tsx"
+    if not fixture.is_file() or not runner.exists():
+        raise ValueError("apply native patch and install locked desktop dependencies first")
+    started = int(time.time() * 1000)
+    output = ROOT / ".scratch/cindy-ownership/paired" / f"{started}-{os.getpid()}"
+    output.mkdir(parents=True, mode=0o700)
+    endpoint = ROOT / ".scratch" / f"own-{uuid.uuid4().hex[:8]}.sock"
+    if len(str(endpoint).encode()) + len(".control") >= 104:
+        raise ValueError("checkout path is too long for macOS Unix sockets")
+    env = dict(os.environ, MI_AUTO_HOST_READY="0", MI_SYNTHETIC_SCENARIO="native-ownership",
+               MI_OWNERSHIP_FIXTURE_SOCKET=str(endpoint))
+    env.pop("MI_QA_RUN_DIR", None)
+    loader = importlib.machinery.SourceFileLoader("offline", str(ROOT / "scripts/verify-offline"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    offline = importlib.util.module_from_spec(spec)
+    loader.exec_module(offline)
+    peer = None
+    try:
+        if not args.skip_build:
+            subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, check=True)
+        with (output / "native.log").open("w") as log:
+            peer = subprocess.Popen([str(runner), str(fixture), "--socket", str(endpoint),
+                                     "--evidence", str(output / "native.json"), "--timeout", "90"],
+                                    cwd=source, stdout=log, stderr=subprocess.STDOUT)
+            for _ in range(200):
+                if endpoint.exists() and Path(str(endpoint) + ".control").exists():
+                    break
+                if peer.poll() is not None:
+                    raise ValueError("native fixture exited before readiness")
+                time.sleep(0.05)
+            else:
+                raise ValueError("native fixture readiness timed out")
+            proc = subprocess.run(["scripts/run", "--verify", "--timeout=15"], cwd=ROOT, env=env,
+                                  capture_output=True, text=True, timeout=45)
+            (output / "launcher.log").write_text(proc.stdout + proc.stderr)
+            paths = [line.split("=", 1)[1] for line in proc.stdout.splitlines() if line.startswith("QA_RUN_DIR=")]
+            if proc.returncode != 0 or len(paths) != 1:
+                raise ValueError("isolated QA failed to launch/exit")
+            run = Path(paths[0]).resolve()
+            if run.parent != (ROOT / ".scratch/qa-runs").resolve():
+                raise ValueError("QA path escaped isolated root")
+            result = offline.verify_evidence(run, "native-ownership", started, offline.alive)
+            ownership = json.loads((run / "evidence/ownership.json").read_text())
+            native = json.loads((output / "native.json").read_text())
+            count = verify_pair(ownership, native)
+            result.update(paired_native_source="PASS", paired_event_count=count,
+                          native_base_sha=base, native_source_diff_sha256=hashlib.sha256(source_diff).hexdigest(), native_evidence=str(output / "native.json"),
+                          git_sha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                          working_tree_changes=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
+                          timestamp_ms=int(time.time() * 1000))
+            if patch.is_file():
+                result["native_patch_sha256"] = hashlib.sha256(patch.read_bytes()).hexdigest()
+            receipt = run / "evidence/result.json"
+            receipt.write_text(json.dumps(result, indent=2) + "\n")
+            print(f"paired-native-source: PASS ({receipt})", flush=True)
+    finally:
+        if peer is not None and peer.poll() is None:
+            peer.terminate()
+            try:
+                peer.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                peer.kill(); peer.wait()
+        if not args.skip_build:
+            subprocess.run(["scripts/build"], cwd=ROOT, check=True)
+
+
+if __name__ == "__main__":
+    main()

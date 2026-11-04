@@ -47,6 +47,20 @@ def verify_evidence(run, scenario, started, process_alive):
         if rows[-1]["action_type"] != "macro_sequence" or rows[-1]["detail"] != "steps=2 keys=2 delays=0":
             raise ValueError("local macro simulation receipt missing")
         result["receipt_count"] = len(rows)
+    elif scenario == "native-ownership":
+        ownership = json.loads((evidence / "ownership.json").read_text())
+        expected = {"native_blocks_wide_and_encoder", "released_wide_once_encoder_once",
+                    "profile_switch_rejects_old_release", "fresh_release_routes_current_profile",
+                    "lost_peer_blocks_input", "unknown_blocks_direct_action", "unknown_blocks_ptt_and_lighting"}
+        if (ownership.get("status") != "PASS" or set(ownership.get("checks", {})) != expected
+                or not all(value is True for value in ownership["checks"].values())
+                or ownership.get("receipt_count") != 3 or ownership.get("native_app") != "NOT_RUN"
+                or ownership.get("physical_key") != "NOT_RUN" or ownership.get("lighting_visual") != "NOT_RUN"):
+            raise ValueError("native ownership scenario incomplete or overclaimed")
+        rows = [json.loads(line) for line in (evidence / "audit.jsonl").read_text().splitlines()]
+        if len(rows) != 3 or any(row["outcome"] != "simulated" for row in rows):
+            raise ValueError("ownership host receipts differ from fixture counts")
+        result.update(ownership="SYNTHETIC_PASS", native_app="NOT_RUN", receipt_count=3)
     elif scenario == "diagnostic-export":
         diagnostics = json.loads((evidence / "diagnostics.json").read_text())
         expected = {
@@ -96,7 +110,7 @@ def main():
         if not args.qa_only:
             subprocess.run(["scripts/check"], cwd=ROOT, env=env, check=True)
         subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, env=env, check=True)
-        for scenario in ("host-execution", "config-write", "lighting-control", "diagnostic-export"):
+        for scenario in ("host-execution", "native-ownership", "config-write", "lighting-control", "diagnostic-export"):
             started = int(time.time() * 1000)
             scenario_env = dict(env, MI_SYNTHETIC_SCENARIO=scenario)
             if scenario == "diagnostic-export":

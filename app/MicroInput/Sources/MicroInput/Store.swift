@@ -196,6 +196,7 @@ extension MicroInput: Backend {}
     let backend: Backend
     let actionExecutor: HostActionExecuting
     let t3Attention: T3AttentionController
+    let nativeOwnership: NativeOwnershipController
     let pushToTalk: PushToTalkController
     @Published var dictationNeedsAttention = false
     @Published var routing: HostRoutingState?
@@ -293,6 +294,7 @@ extension MicroInput: Backend {}
                 await preparePushToTalkScenario(live: scenario == "push-to-talk-live")
             }
             else if scenario == "radial-menu", !preparedHostExecutionScenario { preparedHostExecutionScenario = true; await prepareRadialMenuScenario() }
+            else if scenario == "native-ownership", !preparedHostExecutionScenario { preparedHostExecutionScenario = true; await prepareNativeOwnershipScenario() }
             else if scenario == "lighting-control" { await runSyntheticLightingScenario() }
             else if scenario == "config-write" { await runSyntheticDeviceOperationScenario() }
             else if scenario == "diagnostic-export", !preparedDiagnosticScenario { await prepareDiagnosticExportScenario() }
@@ -381,13 +383,14 @@ extension MicroInput: Backend {}
         }
     }
     var canTryDesktopAction: Bool {
-        guard !hostOperationPaused, DesktopAgent.named(profile?.name ?? "") != nil, !browsingDeviceSnapshot,
+        guard nativeOwnership.allowsExecution, !hostOperationPaused, DesktopAgent.named(profile?.name ?? "") != nil, !browsingDeviceSnapshot,
               profile?.id.text == hostActiveProfileId, hostExecutionEnabled, (0...19).contains(slot) else { return false }
         let binding = Self.desktopBindings[slot]
         return !busy && backend.resolveInputAction(bindingId: binding, isPressed: true) != nil
     }
     private static let desktopBindings = ["AG00", "AG01", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10", "AG11", "AG12", "AG13", "AG14", "ENC_CLK", "AG15", "AG16", "AG17", "AG18"]
     func tryDesktopAction() async {
+        guard nativeOwnership.allowsExecution else { status = nativeOwnership.summary; return }
         guard dispatchOpen else { status = "正在切换或路由尚未就绪，请稍后重试"; return }
         guard canTryDesktopAction else { return }
         let binding = Self.desktopBindings[slot]
@@ -441,7 +444,8 @@ extension MicroInput: Backend {}
         }
         if passThroughHealth == .ready, hostExecutionEnabled {
             let activeName = hostProfiles.first(where: { $0.id.text == hostActiveProfileId })?.name ?? "默认"
-            status = "USB 透传层已就绪 · 宿主接管已开启（\(DesktopAgent.displayName(activeName))）· 不写设备"
+            let ownershipReady = nativeOwnership.allowsExecution
+            status = ownershipReady ? "USB 透传层已就绪 · 宿主接管已开启（\(DesktopAgent.displayName(activeName))）· 不写设备" : "USB 透传层已就绪 · \(nativeOwnership.summary)"
             let receipt = HostActionReceipt(
                 timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
                 profileId: hostActiveProfileId ?? "",
@@ -449,8 +453,8 @@ extension MicroInput: Backend {}
                 actionType: "host_ready",
                 target: identity?.version ?? "unknown",
                 textByteLen: nil,
-                outcome: "executed",
-                detail: "passthrough=ready presets=\(hostProfiles.count) ax_trusted=\(LiveHostActionExecutor.isAccessibilityTrusted)"
+                outcome: ownershipReady ? "executed" : "blocked",
+                detail: "ownership_confirmed=\(ownershipReady) passthrough=ready presets=\(hostProfiles.count) ax_trusted=\(LiveHostActionExecutor.isAccessibilityTrusted)"
             )
             AuditLogWriter.append(receipt)
         }
@@ -737,6 +741,7 @@ extension MicroInput: Backend {}
     @Published var lightingPreviewResult = "未开始预览"
     @Published var lightingPreviewPhase = "Idle"
     var endingLightingPreview = false
+    var lightingCleanupConfirmed = true
     @Published var operationCapabilities = DeviceOperationCapabilities()
     @Published var operationRows: [DeviceOperationState] = []
     @Published var operationResult: DeviceOperationState?
@@ -940,8 +945,9 @@ extension MicroInput: Backend {}
     @Published var connectedID: String?
     @Published var stale = false
     @Published var busy = false
-    init(backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil, dictationDriver: (any DictationDriving)? = nil, t3Attention: T3AttentionController? = nil, radialPreferences: UserDefaults = .standard) {
+    init(nativeOwnership: NativeOwnershipController? = nil, backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil, dictationDriver: (any DictationDriving)? = nil, t3Attention: T3AttentionController? = nil, radialPreferences: UserDefaults = .standard) {
         self.backend = backend
+        self.nativeOwnership = nativeOwnership ?? NativeOwnershipController()
         self.radialPreferences = radialPreferences
         self.t3Attention = t3Attention ?? T3AttentionController()
         self.documentOverride = documentURL
@@ -953,6 +959,7 @@ extension MicroInput: Backend {}
         self.pushToTalk = PushToTalkController(driver: dictationDriver ?? AXDictationDriver())
         #endif
         self.radialMenu.setEnabled(radialPreferences.bool(forKey: "radialMenuEnabled"))
+        configureNativeOwnership()
     }
     var profile: Profile? { guard let ps = snapshot?.profiles, ps.indices.contains(profileIndex) else { return nil }; return ps[profileIndex] }
     var layer: Layer? { guard let ls = profile?.layers, ls.indices.contains(layerIndex) else { return nil }; return ls[layerIndex] }
@@ -1063,6 +1070,7 @@ extension MicroInput: Backend {}
     }
 
     private func retireConnection(_ reason: String) {
+        nativeOwnership.invalidate("设备连接已换代")
         cancelActiveDeviceOperation()
         hostRouteEpoch += 1
         cancelHostExecution()
@@ -1084,6 +1092,7 @@ extension MicroInput: Backend {}
         hostRouteEpoch += 1
         invalidateHostWork()
         systemSleeping = true
+        nativeOwnership.stop()
         t3Attention.suspend()
         discoveryGeneration += 1
         events?.invalidatePending()
@@ -1100,11 +1109,13 @@ extension MicroInput: Backend {}
         sleepDisconnect = nil
         events?.invalidatePending()
         systemSleeping = false
+        nativeOwnership.start()
         t3Attention.resume()
         discoveryStatus = events == nil ? "USB 发现尚未开始" : "系统已唤醒 · 请明确选择设备并重新连接"
         if events != nil { await refresh() }
     }
     func shutdown() async {
+        nativeOwnership.stop()
         await endLightingPreview()
         cancelActiveDeviceOperation()
         let cancelledExecution = invalidateHostWork()
@@ -1117,6 +1128,7 @@ extension MicroInput: Backend {}
         await pushToTalk.waitUntilStopped()
         await t3Attention.shutdown()
         await backend.shutdown()
+        await nativeOwnership.returnToNative()
     }
     private func replace(_ json: String) throws { let result = try JSONDecoder().decode(Snapshot.self, from: Data(json.utf8)); snapshot = result; stale = false; selectProfile(0) }
 }
