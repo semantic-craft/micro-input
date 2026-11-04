@@ -2,6 +2,10 @@
 
 本页用于设计时选择原始来源；协议事实归 [protocol-readonly.md](protocol-readonly.md)，实施顺序归 [development.md](development.md)。公开仓库的说明、源码和测试不等于本机验收。Creator Micro 2、Codex Micro、旧款 Figma/VIA/QMK 设备与兼容仿真硬件分别核对 VID/PID、固件、传输及许可，不共用未经验证的规格。
 
+## 当前四应用接入
+
+Antigravity 官方 Sidecars/Hooks 与 REA 静态证据、Cindy、ZCode、桌面 DeepSeek Harness 的固定源码版本和许可统一见[四应用接口](four-app-interfaces.md)。Paseo 只作控制深度参照，现行任务见[四应用计划](designs/four-app-control.md)。
+
 ## 优先参考
 
 | 仓库 | 预期用途 | 边界 |

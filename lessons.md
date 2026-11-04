@@ -192,3 +192,10 @@
 - 修复与证据：取队列、等待后执行、T3 准入及收尾都检查当前执行代；取消时同步收回本代 overflow 并刷新输入水位。旧回调不修改新队列或覆盖最近动作。最终 1f1b758 的五项集成定向回归与完整检查通过。
 - 验证点：RadialMenuTests 的 testCancelledPredecessorCannotConsumeReplacementRadialQueue、testCancelledPredecessorCannotClearReplacementOverflow、testCancellingOverflowOwnerReleasesItsGateAndRefreshesInputCutoff。分别覆盖旧代不能动新状态，以及当前代取消后能够恢复，不能只测其中一侧。T3 睡眠测试须等待取消前捕获的任务句柄，再断言 lease 为零，不能等待已清空的当前任务引用。
 - 复发记录：Seen 1x（2026-11-04）。两次补丁属于同一集成事件，不重复计数。
+
+## 对标控制深度前先固定目标应用
+
+- 用户纠正：Paseo 仓库只用于对标控制深度；实际目标是 Antigravity、Cindy、ZCode 和桌面版 DeepSeek Harness，不使用 Paseo，也不要求复制它全部 MCP/CLI 产品出口。
+- 起因：把参考实现的模块清单直接变成交付范围，并以通用宿主动作替代应用内部会话语义；遗漏 Cindy 已有原生集成的能力归属。
+- 正确做法：先核对目标桌面版本、原生能力、源码和接口权限范围，再确定需要补充的能力。创建自有 runtime 的 SDK 或只能管理调用方会话的 API，不能充当控制用户现有桌面会话的接口。
+- 验证点：四应用接入证据必须列出稳定目标身份、状态来源、动作回执和原生所有者；未能操作既有会话时保留缺口。Seen 1x（2026-11-05）。

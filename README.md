@@ -84,7 +84,7 @@ T05已补取消、会话终止通知及退出时等待资源释放；当前设�
 
 ## 下一步
 
-2026-11-05 对照 Paseo 源码：第一轮旋钮、历史与 Prompt 迁移已进入主线，但**全功能覆盖尚未完成**。逐项范围与证据见[能力覆盖与架构决策](docs/designs/paseo-coverage.md)，下一片为[接力队列 F](docs/pstack-relay.md)：先确定 Cindy 原生集成与本项目补充能力的唯一消费者，再推进会话控制、状态灯等剩余项。
+2026-11-05 当前目标限定为 Antigravity、Cindy、ZCode、桌面版 DeepSeek Harness 的深度控制，Paseo 只作能力参照。先查明四应用接口并保留 Cindy 原生集成，再逐片实现准确会话控制与状态反馈。见[接口证据](docs/four-app-interfaces.md)、[实施任务](docs/designs/four-app-control.md)与[下一片](docs/pstack-relay.md)。
 
 五项持续交付范围及领取下一片的规则见[持续交付入口](docs/autonomous-delivery.md)。PR #64 已接通原生 `lights.preview` 离线路径；真实颜色、停止后的设备表现和多客户端竞争仍待实机验收。后续同时推进常用设备键与层、宏与 Multi 执行、独立日用及交互便利性，不以本段“下一步”缩小 #44 的完整范围。
 
