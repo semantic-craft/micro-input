@@ -167,3 +167,28 @@
 - 起因与后果：径向菜单在消费旋钮确认时发现路由变化，先取消菜单，再按当前“菜单未打开”分支返回，可能将同一确认事件执行为普通旋钮绑定。
 - 修复：保留事件进入时的菜单所有权。路由或会话校验取消菜单后，原本属于菜单的确认仍被消费，零菜单动作、零普通绑定动作。
 - 验证点：`RadialMenuBridgeTests.testRouteChangeConsumesMenuConfirmationWithoutFallingBackToBinding` 使用真实 UniFFI 草稿为新 Profile 旋钮绑定可执行动作，明确断言普通回退原本可执行，再核对确认零动作。测试只保留一条输入消费路径，保存草稿重新启动的自动订阅须与手动测试流互斥。Seen 1x（2026-11-04）。
+
+
+## AX 停止后的控件重建与有效叶节点
+
+- 起因与后果：千问停止录音后已回到空闲，但原控件重建使停止确认失败。改为原窗口只读回读后仍失败；只读探针发现有效 AXMenuButton 对未声明的 AXChildren 返回 noValue，被误当成扫描不完整。
+- 修复与证据：PR #74 仅在对原控件尝试停止后，允许原进程实例、窗口身份与标题不变时完整扫描唯一空闲控件。noValue 仅在角色仍有效、属性列表成功且未声明 AXChildren 时作为叶节点；其他错误仍未知。最终 a683a857 的千问原生启停通过，替代控件不接收动作。
+- 正确做法：连续修复仍未通过时先检查正常空闲状态下的扫描前提；区分没有子节点与读取失败，不根据 AXPress 返回值推定录音结束。
+- 验证点：PushToTalkTests.swift 中 testChildrenReadDistinguishesVerifiedLeavesFromMissingOrFailedValues、testStopReadsReplacementButNeverPressesIt 和 testChangedWindowCannotConfirmOrReadReplacement；原生验收同时核对开始/停止回执与最终空闲界面。软件与合成输入不替代实体宽键验收。
+- 复发记录：Seen 1x（2026-11-04）。两轮修复属于同一次原生失败，不重复计数。
+
+
+## 旧代异步失败也须保持身份与未确认状态
+
+- 起因与后果：T3 独立审查复现旧轮询在关闭后返回 expired，先把界面设为 connecting 再检查代次；另一条取消签发路径忽略撤销失败，后续空 close 报成功，掩盖仍存活的短期授权。
+- 修复与证据：PR #76 在旧回调的任何状态或关闭副作用前校验代次；撤销未确认保留到授权有效期结束，空 close 不清除该事实且期间不再签发。独立原始复现与最终完整门禁均通过。
+- 验证点：T3AttentionTests 的 testExpiredOldPollCannotCloseNewGeneration、testLateCancelledIssuanceCannotHideFailedRevocationWithEmptyClose 与 testDisableDuringIssuanceShowsFailedRevocationAfterCancelledLoop。测试须检查状态和副作用次数，不能只断言抛出错误。
+- 复发记录：Seen 1x（2026-11-04）。
+
+
+## 取消执行代时同时移交队列与恢复状态
+
+- 起因与后果：径向菜单集成宏执行主线后，旧任务虽然被取消，恢复时仍能从新代共享队列取走动作。增加尾部代次门后，又暴露当前溢出代取消时无人清理 overflow，后续 dispatch 永久关闭。
+- 修复与证据：取队列、等待后执行、T3 准入及收尾都检查当前执行代；取消时同步收回本代 overflow 并刷新输入水位。旧回调不修改新队列或覆盖最近动作。最终 1f1b758 的五项集成定向回归与完整检查通过。
+- 验证点：RadialMenuTests 的 testCancelledPredecessorCannotConsumeReplacementRadialQueue、testCancelledPredecessorCannotClearReplacementOverflow、testCancellingOverflowOwnerReleasesItsGateAndRefreshesInputCutoff。分别覆盖旧代不能动新状态，以及当前代取消后能够恢复，不能只测其中一侧。T3 睡眠测试须等待取消前捕获的任务句柄，再断言 lease 为零，不能等待已清空的当前任务引用。
+- 复发记录：Seen 1x（2026-11-04）。两次补丁属于同一集成事件，不重复计数。
