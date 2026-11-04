@@ -29,9 +29,11 @@ struct HostInputBoundary {
     var radialQuarantined = false
     var recovery = false
     var released: Set<String> = []
+    var held: [String: UInt64] = [:]
     mutating func advance(_ watermark: InputWatermark) {
         if session != watermark.session_id { radialHeld = false; radialQuarantined = true }
         session = watermark.session_id; cutoff = watermark.ingress_sequence
+        held.removeAll()
         radialQuarantined = radialQuarantined || radialHeld
     }
     mutating func consume(_ event: InputEventInfo, gateOpen: Bool) -> Bool {
@@ -41,7 +43,8 @@ struct HostInputBoundary {
             if center { radialQuarantined = false }
             else if !gateOpen || event.ingressSequence <= cutoff { radialQuarantined = true }
         }
-        if event.kind == .released, let binding = event.bindingId { released.insert(binding) }
+        if event.kind == .released, let binding = event.bindingId { released.insert(binding); held.removeValue(forKey: binding) }
+        if event.kind == .pressed, let binding = event.bindingId { held[binding] = event.ingressSequence }
         guard gateOpen, event.ingressSequence > cutoff, event.kind == .pressed, event.actionEligible else { return false }
         if event.radialCenter != nil { return !radialQuarantined }
         if recovery, event.actionRole != "encoder_step", let binding = event.bindingId { return released.contains(binding) }
@@ -89,6 +92,7 @@ extension Store {
         clearPendingActions(); overlay.hide()
     }
     func clearPendingActions() {
+        pushToTalk.cancel()
         let discarded = pendingHostActions; pendingHostActions.removeAll()
         discarded.forEach { $0.done?() }
     }
@@ -110,6 +114,7 @@ extension Store {
             guard !mutationDraining else { return }
             mutationDraining = true; clearPendingActions()
             Task { @MainActor in
+                await pushToTalk.waitUntilStopped()
                 let before = routing?.profile_id
                 var completions: [() -> Void] = []
                 while !hostMutations.isEmpty {
@@ -145,6 +150,7 @@ extension Store {
         } catch is CancellationError { } catch { status = readableError(error) }
     }
     func foregroundChanged(bundleID: String?) {
+        if let target = pushToTalk.targetBundle, bundleID != target { pushToTalk.cancel() }
         guard !systemSleeping, !stopped, let bundleID, bundleID != Bundle.main.bundleIdentifier else { return }
         externalBundleID = bundleID; observationSequence += 1
         guard let routing, routing.auto_follow_enabled, !routing.manual_override,
@@ -186,10 +192,70 @@ extension Store {
                       !entry.requiresEnabled || current.execution_enabled,
                       entry.deviceSession == nil || (entry.deviceSession == inputBoundary.session && (entry.deviceIngress ?? 0) > inputBoundary.cutoff),
                       entry.admitted.duration(to: .now) < .seconds(1) else { continue }
-                _ = await executeHostAction(actionJSON: entry.json, bindingId: entry.binding, profileId: entry.profile)
+                if let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(entry.json.utf8)),
+                   payload.action_type == "agent_command", payload.command == "push-to-talk", let adapter = payload.adapter {
+                    if entry.deviceSession != nil {
+                        guard inputBoundary.held[entry.binding] == entry.deviceIngress else { continue }
+                        startHeldDictation(adapter: adapter, binding: entry.binding, profile: entry.profile, ingress: entry.deviceIngress ?? 0)
+                    } else {
+                        pushToTalk.cancel(); await pushToTalk.waitUntilStopped()
+                        guard admitAfterDictationCleanup(entry) else { continue }
+                        var toggle = payload; toggle.command = "dictation"
+                        if let data = try? JSONEncoder().encode(toggle) {
+                            _ = await executeHostAction(actionJSON: String(decoding: data, as: UTF8.self), bindingId: entry.binding, profileId: entry.profile)
+                        }
+                    }
+                } else {
+                    pushToTalk.cancel(); await pushToTalk.waitUntilStopped()
+                    guard admitAfterDictationCleanup(entry) else { continue }
+                    _ = await executeHostAction(actionJSON: entry.json, bindingId: entry.binding, profileId: entry.profile)
+                }
             }
             if overflowDraining { readInputBoundary(); overflowDraining = false }
             hostExecutionTask = nil
+        }
+        return true
+    }
+    private func admitAfterDictationCleanup(_ entry: PendingHostAction) -> Bool {
+        dispatchOpen && pushToTalk.cleanupConfirmed && routing?.host_state_revision == entry.state.host_state_revision
+            && routing?.document_revision == entry.state.document_revision && routing?.document_id == entry.state.document_id
+            && (!entry.requiresEnabled || hostExecutionEnabled)
+            && (entry.deviceSession == nil || (entry.deviceSession == inputBoundary.session && (entry.deviceIngress ?? 0) > inputBoundary.cutoff))
+            && entry.admitted.duration(to: .now) < .seconds(1)
+    }
+    func startHeldDictation(adapter: String, binding: String, profile: String, ingress: UInt64 = 0) {
+        guard dispatchOpen, hostExecutionEnabled, pushToTalk.cleanupConfirmed, !pushToTalk.isActive, let lease = try? backend.beginHostExecution() else { return }
+        inFlightHostActions += 1
+        let started = pushToTalk.press(binding: binding, adapter: adapter, ingress: ingress, report: { [weak self] action, succeeded, detail in
+            let receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profile,
+                bindingId: binding, actionType: action, target: adapter, textByteLen: nil,
+                outcome: succeeded ? (self?.pushToTalk.simulated == true ? "simulated" : "executed") : "blocked", detail: detail)
+            AuditLogWriter.append(receipt)
+            self?.lastHostActionReceipt = receipt
+            self?.dictationNeedsAttention = self?.pushToTalk.cleanupConfirmed == false
+            if !succeeded { self?.status = detail }
+        }, finished: { [self] in
+            inFlightHostActions -= 1; backend.finishHostExecution(lease: lease)
+        })
+        if !started { inFlightHostActions -= 1; backend.finishHostExecution(lease: lease) }
+    }
+    func verifyDictationStopped() async {
+        let confirmed = await pushToTalk.verifyStopped()
+        dictationNeedsAttention = !confirmed
+        status = confirmed ? "已确认原听写停止，可继续按住说话" : "原听写仍未确认停止；请在原应用停止录音后重试"
+    }
+    @discardableResult func consumeHostInput(_ event: InputEventInfo) -> Bool {
+        guard event.sessionId == inputBoundary.session else { return true }
+        if event.kind == .released, let binding = event.bindingId { pushToTalk.release(binding: binding, ingress: event.ingressSequence) }
+        if event.kind == .inputStreamGap {
+            clearPendingActions(); inputNeedsResume = true
+            status = "输入流丢失，已暂停派发；请恢复输入并松开按键 / 摇杆回中"
+            return false
+        }
+        if inputBoundary.consume(event, gateOpen: dispatchOpen && !inputNeedsResume),
+           let binding = event.bindingId, let (json, profile, state) = resolveHostAction(binding) {
+            enqueueHostAction(json: json, binding: binding, profile: profile, state: state,
+                deviceSession: event.sessionId, deviceIngress: event.ingressSequence)
         }
         return true
     }

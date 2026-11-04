@@ -1097,6 +1097,32 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             ));
         }
     }
+    legacy_specs.extend(
+        specs
+            .iter()
+            .filter(|(name, _)| {
+                matches!(
+                    *name,
+                    "Cindy" | "Codex" | "千问办公" | "Antigravity" | "Qoder CN"
+                )
+            })
+            .cloned(),
+    );
+    for (_, assignments) in &mut specs {
+        for (_, _, label, _, _, kind) in assignments {
+            if let ActionKind::AgentCommand { adapter, command } = kind {
+                if command == "dictation"
+                    && matches!(
+                        adapter.as_str(),
+                        "cindy" | "codex" | "qwenwork" | "antigravity" | "qoder-cn"
+                    )
+                {
+                    *command = "push-to-talk".into();
+                    *label = "按住说话 · 松开停止";
+                }
+            }
+        }
+    }
     let herdr = &mut specs
         .iter_mut()
         .find(|(name, _)| *name == "Herdr")

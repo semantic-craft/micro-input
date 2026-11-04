@@ -75,6 +75,15 @@ extension Store {
                 }
                 try await Task.sleep(nanoseconds: 10_000_000)
             }
+            guard pushToTalk.cleanupConfirmed else {
+                backend.abandonDeviceDrain(token: ticket); drain = nil
+                operationResult = DeviceOperationState(operation_id: nil, phase: "NotSent", running: false, can_retry_local: false, local_saved: false)
+                hostOperationPaused = false
+                readInputBoundary()
+                if hostExecutionEnabled { startHostInputLoop(token: generation) }
+                status = "原听写停止未确认；未发送设备变更"
+                return
+            }
             guard connection == generation, !Task.isCancelled, !deviceCancellationRequested else { throw BridgeError.Disconnected }
             let id = try await backend.startDeviceApply(token: token, drainToken: ticket, restore: restore)
             drain = nil
