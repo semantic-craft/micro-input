@@ -219,8 +219,25 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         }
     );
     for pid in [ag_pid, dsh_pid] {
-        for binding in ["AG10", "AG15", "ENC_CLK"] {
+        for binding in ["AG10", "AG15"] {
             assert!(resolve_host_action(&draft.document, Some(pid), binding, true).is_none());
+        }
+    }
+    for (pid, adapter) in [(ag_pid, "antigravity"), (dsh_pid, "dsh-desktop")] {
+        for (binding, command) in [
+            ("AG13", "scroll-up"),
+            ("ENC_CC", "scroll-up"),
+            ("AG14", "scroll-down"),
+            ("ENC_CW", "scroll-down"),
+            ("ENC_CLK", "scroll-to-bottom"),
+        ] {
+            assert_eq!(
+                resolve_host_action(&draft.document, Some(pid), binding, true),
+                Some(ResolvedHostAction::AgentCommand {
+                    adapter: adapter.into(),
+                    command: command.into(),
+                })
+            );
         }
     }
     assert_eq!(
@@ -559,6 +576,51 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
             "no unverified submit/approval action"
         );
     }
+    for (name, adapter) in [
+        ("Antigravity", "antigravity"),
+        ("千问办公", "qwenwork"),
+        ("Cindy", "cindy"),
+        ("Codex", "codex"),
+        ("ZCode", "zcode"),
+        ("DeepSeek Coder (DSH)", "dsh-desktop"),
+        ("Qoder CN", "qoder-cn"),
+    ] {
+        let pid = draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == name)
+            .unwrap()
+            .0
+            .clone();
+        for (binding, expected_cmd) in [
+            ("AG13", "scroll-up"),
+            ("ENC_CC", "scroll-up"),
+            ("AG14", "scroll-down"),
+            ("ENC_CW", "scroll-down"),
+            ("ENC_CLK", "scroll-to-bottom"),
+        ] {
+            assert_eq!(
+                resolve_host_action(&draft.document, Some(&pid), binding, true),
+                Some(ResolvedHostAction::AgentCommand {
+                    adapter: adapter.into(),
+                    command: expected_cmd.into(),
+                }),
+                "{name} {binding} must resolve to {adapter}/{expected_cmd}"
+            );
+        }
+        let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+        for slot in [13, 14, 15] {
+            let key = mi_model::draft::binding_key(&json!(pid), &json!(lid), slot);
+            let action = &draft.edits[&key];
+            assert!(
+                mi_model::action_library::capability(action, false).execution_available,
+                "{name} slot {slot} dial action must be execution_available"
+            );
+        }
+    }
     let before = serde_json::to_value(&draft.document.editable).unwrap();
     assert_eq!(install_agent_starter_profiles(&mut draft).unwrap(), ids);
     assert_eq!(
@@ -599,4 +661,105 @@ fn verified_routes_require_positions_unique_aliases_and_complete_wide_pair() {
     assert!(allowed.contains("AG12"));
     identity.layer_index = None;
     assert!(verified_bindings(&cfg, &identity).is_empty());
+}
+
+#[test]
+fn joystick_prompt_slots_and_submit_control_route_to_target_agent_without_auto_enter_by_default() {
+    let mut draft = Draft::default();
+    install_agent_starter_profiles(&mut draft).unwrap();
+
+    let catalog = mi_model::draft::actions();
+    let prompt_continue = catalog.iter().find(|a| a.id == "prompt-continue").unwrap();
+    let prompt_test = catalog.iter().find(|a| a.id == "prompt-test").unwrap();
+    let prompt_review = catalog.iter().find(|a| a.id == "prompt-review").unwrap();
+    let prompt_commit = catalog.iter().find(|a| a.id == "prompt-commit").unwrap();
+    let prompt_summary = catalog.iter().find(|a| a.id == "prompt-summary").unwrap();
+    let agent_submit = catalog.iter().find(|a| a.id == "agent-submit").unwrap();
+    let agent_prompt_submit = catalog
+        .iter()
+        .find(|a| a.id == "agent-prompt-submit")
+        .unwrap();
+
+    for (profile_name, expected_adapter, expected_bundle) in [
+        ("Antigravity", "antigravity", "com.google.antigravity"),
+        ("千问办公", "qwenwork", "cn.qwenwork.desktop.mac"),
+        ("Cindy", "cindy", "com.xd.cindy"),
+        ("Codex", "codex", "com.openai.codex"),
+    ] {
+        let pid = draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == profile_name)
+            .unwrap()
+            .0
+            .clone();
+        let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+
+        // Bind 4-way joystick sectors (slots 16..19 -> AG15..AG18) to Continue, Test, Review, Summary
+        draft
+            .assign(&json!(pid), &json!(lid), 16, prompt_continue.clone())
+            .unwrap();
+        draft
+            .assign(&json!(pid), &json!(lid), 17, prompt_test.clone())
+            .unwrap();
+        draft
+            .assign(&json!(pid), &json!(lid), 18, prompt_review.clone())
+            .unwrap();
+        draft
+            .assign(&json!(pid), &json!(lid), 19, prompt_summary.clone())
+            .unwrap();
+        // Bind slot 9 (AG09) to Commit prompt and slot 12 (AG12) to explicit Submit control
+        draft
+            .assign(&json!(pid), &json!(lid), 9, prompt_commit.clone())
+            .unwrap();
+        draft
+            .assign(&json!(pid), &json!(lid), 12, agent_submit.clone())
+            .unwrap();
+
+        for (binding, expected_text) in [
+            ("AG15", "Continue"),
+            ("AG16", "Run the tests and fix any failures"),
+            ("AG17", "Review your diff for bugs"),
+            ("AG18", "Summarize where things stand and what's left"),
+            ("AG09", "Commit this work"),
+        ] {
+            let resolved = resolve_host_action(&draft.document, Some(&pid), binding, true)
+                .unwrap_or_else(|| panic!("{profile_name} {binding} should resolve"));
+            assert_eq!(
+                resolved,
+                ResolvedHostAction::PasteText {
+                    text: expected_text.into(),
+                    target_bundle_id: Some(expected_bundle.into()),
+                    adapter: Some(expected_adapter.into()),
+                    no_newline: true,
+                    submit: false,
+                },
+                "{profile_name} {binding} must default to paste-only (no_newline=true, submit=false)"
+            );
+        }
+
+        // Explicit submit key resolves to the active Desktop Agent's submit command
+        assert_eq!(
+            resolve_host_action(&draft.document, Some(&pid), "AG12", true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: expected_adapter.into(),
+                command: "submit".into(),
+            })
+        );
+
+        // Explicit submit-prompt resolves only when explicitly bound
+        draft
+            .assign(&json!(pid), &json!(lid), 8, agent_prompt_submit.clone())
+            .unwrap();
+        assert_eq!(
+            resolve_host_action(&draft.document, Some(&pid), "AG08", true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: expected_adapter.into(),
+                command: "submit-prompt:Continue".into(),
+            })
+        );
+    }
 }

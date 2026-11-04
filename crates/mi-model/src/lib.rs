@@ -336,4 +336,6 @@ pub mod host_router;
 
 pub mod lighting;
 
+pub mod navigation_history;
+
 pub mod operation_record;

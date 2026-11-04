@@ -135,6 +135,23 @@ final class T3AttentionController: ObservableObject {
               let event = round.next(items) else { return nil }
         return T3Selection(event: event, generation: generation)
     }
+    func noteOpened(_ identity: T3ThreadIdentity?) {
+        round.noteOpened(identity)
+    }
+    func canNavigate(to identity: T3ThreadIdentity) -> Bool {
+        guard state == .ready, identity.deepLink != nil, let snapshot, snapshot.environmentID == identity.environmentID else { return false }
+        return snapshot.shell.threads.contains { $0.id == identity.threadID && $0.archivedAt == nil && $0.deletedAt == nil }
+    }
+    func navigate(to identity: T3ThreadIdentity, admitted: @escaping @MainActor () -> Bool) async -> Bool {
+        guard !opening, state == .ready, admitted(), canNavigate(to: identity), let url = identity.deepLink else { return false }
+        opening = true
+        defer { opening = false }
+        let epoch = generation
+        let delivered = await opener(url)
+        guard epoch == generation, delivered else { return false }
+        round.noteOpened(identity)
+        return true
+    }
     func open(_ selection: T3Selection?, admitted: @escaping @MainActor () -> Bool) async -> T3OpenResult {
         guard let selection else { lastResult = .noCandidate; return .noCandidate }
         guard !opening, selection.generation == generation, state == .ready, admitted() else { return .stale }

@@ -1123,6 +1123,57 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             }
         }
     }
+    legacy_specs.extend(
+        specs
+            .iter()
+            .filter(|(name, _)| {
+                matches!(
+                    *name,
+                    "Cindy"
+                        | "Codex"
+                        | "千问办公"
+                        | "ZCode"
+                        | "Antigravity"
+                        | "DeepSeek Coder (DSH)"
+                        | "Qoder CN"
+                )
+            })
+            .cloned(),
+    );
+    for (name, assignments) in &mut specs {
+        let adapter = match *name {
+            "Cindy" => "cindy",
+            "Codex" => "codex",
+            "千问办公" => "qwenwork",
+            "ZCode" => "zcode",
+            "Antigravity" => "antigravity",
+            "DeepSeek Coder (DSH)" => "dsh-desktop",
+            "Qoder CN" => "qoder-cn",
+            _ => continue,
+        };
+        for (slot, id, label, command) in [
+            (13, "desktop-scroll-up", "向上滚动对话", "scroll-up"),
+            (14, "desktop-scroll-down", "向下滚动对话", "scroll-down"),
+            (
+                15,
+                "desktop-scroll-bottom",
+                "跳到底部并聚焦输入",
+                "scroll-to-bottom",
+            ),
+        ] {
+            assignments.push((
+                slot,
+                id,
+                label,
+                "Agent",
+                "目标应用的原生对话滚动与输入框定位；不抢占非目标窗口焦点",
+                ActionKind::AgentCommand {
+                    adapter: adapter.into(),
+                    command: command.into(),
+                },
+            ));
+        }
+    }
     let herdr = &mut specs
         .iter_mut()
         .find(|(name, _)| *name == "Herdr")
@@ -1174,7 +1225,10 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     let mut work = draft.clone();
     // Retire only unchanged source profiles from the exact bundled fixture, even
     // when other profiles have since been added. Preserve edited and imported data.
-    let seed = crate::demo().map_err(|e| format!("{e:?}"))?;
+    let mut seed = crate::demo().map_err(|e| format!("{e:?}"))?;
+    if let Some(read_at) = draft.document.origin["config"]["read_at"].as_u64() {
+        seed.read_at = read_at;
+    }
     if draft.document.origin["kind"] == "synthetic-local"
         && draft.document.origin["config"]
             == serde_json::to_value(&seed).map_err(|e| e.to_string())?
@@ -1399,7 +1453,7 @@ mod agent_migration_tests {
                 if customized {
                     legacy_agent_specs()[0].1.len()
                 } else {
-                    9
+                    12
                 }
             );
             if customized {
@@ -1417,5 +1471,107 @@ mod agent_migration_tests {
                 serde_json::to_value(before).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn upgrades_pre_dial_conversational_presets_while_preserving_customized_profiles() {
+        let mut draft = Draft::default();
+        let ids = install_agent_starter_profiles(&mut draft).unwrap();
+        assert_eq!(ids.len(), 8);
+
+        // Downgrade Antigravity and Cindy to pre-Slice-B 9-slot push-to-talk state (remove slots 13, 14, 15),
+        // and customize Codex by adding a joystick prompt slot (slot 16 -> prompt-continue).
+        for profile_name in ["Antigravity", "Cindy"] {
+            let pid = draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, p)| p.name == profile_name)
+                .unwrap()
+                .0
+                .clone();
+            let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+            draft
+                .mutate(|doc| {
+                    let layer = doc.editable.graph.layers.get_mut(&lid).unwrap();
+                    let mut removed = std::collections::BTreeSet::new();
+                    for slot in [13, 14, 15] {
+                        if let Some(aid) = layer
+                            .controls
+                            .values_mut()
+                            .find(|b| b.logical_control == format!("logical-{slot}"))
+                            .and_then(|b| b.action_id.take())
+                        {
+                            removed.insert(aid);
+                        }
+                    }
+                    for aid in removed {
+                        doc.editable.graph.actions.remove(&aid);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        let codex_pid = draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == "Codex")
+            .unwrap()
+            .0
+            .clone();
+        let codex_lid = draft.document.editable.graph.profiles[&codex_pid].layer_order[0].clone();
+        let prompt_continue = crate::draft::actions()
+            .into_iter()
+            .find(|a| a.id == "prompt-continue")
+            .unwrap();
+        draft
+            .assign(&json!(codex_pid), &json!(codex_lid), 16, prompt_continue)
+            .unwrap();
+        let codex_before = draft.document.editable.graph.layers[&codex_lid].clone();
+
+        let upgraded_ids = install_agent_starter_profiles(&mut draft).unwrap();
+        assert_eq!(
+            upgraded_ids, ids,
+            "Profile UUIDs must be preserved on upgrade"
+        );
+
+        for profile_name in ["Antigravity", "Cindy"] {
+            let pid = draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, p)| p.name == profile_name)
+                .unwrap()
+                .0
+                .clone();
+            assert!(
+                crate::host_router::resolve_host_action(&draft.document, Some(&pid), "AG13", true)
+                    .is_some(),
+                "{profile_name} AG13 dial scroll must be restored by lossless upgrade"
+            );
+            assert!(
+                crate::host_router::resolve_host_action(
+                    &draft.document,
+                    Some(&pid),
+                    "ENC_CLK",
+                    true
+                )
+                .is_some(),
+                "{profile_name} ENC_CLK jump-to-bottom must be restored by lossless upgrade"
+            );
+        }
+
+        assert!(
+            draft.document.editable.graph.layers[&codex_lid] == codex_before,
+            "User-customized Codex profile (with joystick prompt) must remain untouched"
+        );
     }
 }

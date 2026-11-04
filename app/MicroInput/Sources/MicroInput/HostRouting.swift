@@ -76,6 +76,79 @@ struct PendingHostAction {
     var radialIntent: RadialIntent? = nil
 }
 
+enum KeypadNavigationPlace: Equatable, Hashable, Codable {
+    case app(bundleID: String)
+    case session(adapter: String, session: String)
+    case t3Thread(environmentID: String, threadID: String)
+
+    var receiptTarget: String {
+        switch self {
+        case .app(let bundleID): return bundleID
+        case .session(let adapter, let session): return "\(adapter):\(session)"
+        case .t3Thread: return "t3"
+        }
+    }
+}
+
+struct KeypadNavigationHistory: Equatable {
+    static let maxHistory = 50
+    private(set) var entries: [KeypadNavigationPlace] = []
+    private(set) var index: Int? = nil
+
+    var current: KeypadNavigationPlace? {
+        guard let index, entries.indices.contains(index) else { return nil }
+        return entries[index]
+    }
+
+    mutating func visit(_ place: KeypadNavigationPlace) {
+        if current == place { return }
+        if let index {
+            if index + 1 < entries.count {
+                entries.removeSubrange((index + 1)..<entries.count)
+            }
+        } else {
+            entries.removeAll()
+        }
+        entries.append(place)
+        if entries.count > Self.maxHistory {
+            entries.removeFirst(entries.count - Self.maxHistory)
+        }
+        index = entries.count - 1
+    }
+
+    mutating func back(available: (KeypadNavigationPlace) -> Bool = { _ in true }) -> KeypadNavigationPlace? {
+        guard let current = index, current > 0 else { return nil }
+        for candidate in stride(from: current - 1, through: 0, by: -1) {
+            if available(entries[candidate]) {
+                index = candidate
+                return entries[candidate]
+            }
+        }
+        return nil
+    }
+
+    mutating func forward(available: (KeypadNavigationPlace) -> Bool = { _ in true }) -> KeypadNavigationPlace? {
+        guard let current = index, current + 1 < entries.count else { return nil }
+        for candidate in (current + 1)..<entries.count {
+            if available(entries[candidate]) {
+                index = candidate
+                return entries[candidate]
+            }
+        }
+        return nil
+    }
+
+    func canGoBack(available: (KeypadNavigationPlace) -> Bool = { _ in true }) -> Bool {
+        guard let current = index, current > 0 else { return false }
+        return stride(from: current - 1, through: 0, by: -1).contains { available(entries[$0]) }
+    }
+
+    func canGoForward(available: (KeypadNavigationPlace) -> Bool = { _ in true }) -> Bool {
+        guard let current = index, current + 1 < entries.count else { return false }
+        return ((current + 1)..<entries.count).contains { available(entries[$0]) }
+    }
+}
+
 extension Store {
     var routingMode: String {
         guard let routing else { return "配置尚未载入" }
@@ -200,12 +273,69 @@ extension Store {
     }
     @discardableResult func enqueueHostAction(json: String, binding: String, profile: String, state: HostRoutingState, deviceSession: UInt64? = nil, deviceIngress: UInt64? = nil, requiresEnabled: Bool = true, radialIntent: RadialIntent? = nil, done: (() -> Void)? = nil) -> Bool {
         guard dispatchOpen, !requiresEnabled || hostExecutionEnabled else { status = "正在切换或输入已暂停，请稍后重试"; done?(); return false }
+        let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(json.utf8))
+        if radialIntent == nil,
+           let payload, payload.action_type == "agent_command",
+           let adapter = payload.adapter, let cmd = payload.command,
+           let incomingScroll = DialScrollRequest.from(command: cmd) {
+            if incomingScroll.mode == .bottom {
+                let duplicate = pendingHostActions.contains { existing in
+                    guard existing.profile == profile,
+                          existing.state.document_id == state.document_id,
+                          existing.state.document_revision == state.document_revision,
+                          existing.state.host_state_revision == state.host_state_revision,
+                          let existingPayload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(existing.json.utf8)),
+                          existingPayload.action_type == "agent_command",
+                          existingPayload.adapter == adapter,
+                          let existingCmd = existingPayload.command,
+                          let existingScroll = DialScrollRequest.from(command: existingCmd) else { return false }
+                    return existingScroll.mode == .bottom
+                }
+                if duplicate {
+                    done?()
+                    return true
+                }
+            } else if let last = pendingHostActions.last,
+                      last.profile == profile,
+                      last.state.document_id == state.document_id,
+                      last.state.document_revision == state.document_revision,
+                      last.state.host_state_revision == state.host_state_revision,
+                      last.radialIntent == nil,
+                      var lastPayload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(last.json.utf8)),
+                      lastPayload.action_type == "agent_command",
+                      lastPayload.adapter == adapter,
+                      let lastCmd = lastPayload.command,
+                      let waitingScroll = DialScrollRequest.from(command: lastCmd),
+                      let mergedScroll = waitingScroll.coalesced(with: incomingScroll) {
+                lastPayload.command = mergedScroll.canonicalCommand
+                if let mergedData = try? JSONEncoder().encode(lastPayload) {
+                    let previousDone = last.done
+                    let combinedDone: (() -> Void)? = (previousDone == nil && done == nil) ? nil : {
+                        previousDone?()
+                        done?()
+                    }
+                    pendingHostActions[pendingHostActions.count - 1] = PendingHostAction(
+                        json: String(decoding: mergedData, as: UTF8.self),
+                        binding: binding,
+                        profile: profile,
+                        state: state,
+                        deviceSession: deviceSession ?? last.deviceSession,
+                        deviceIngress: deviceIngress ?? last.deviceIngress,
+                        admitted: .now,
+                        requiresEnabled: requiresEnabled,
+                        done: combinedDone,
+                        t3Selection: last.t3Selection,
+                        radialIntent: nil
+                    )
+                    return true
+                }
+            }
+        }
         if pendingHostActions.count >= 32 {
             clearPendingActions(); overflowDraining = true
             status = "输入过快，已丢弃积压；当前动作结束后恢复"
             done?(); return false
         }
-        let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(json.utf8))
         let selection: T3Selection?
         if case .t3(let frozen) = radialIntent { selection = frozen }
         else { selection = payload?.adapter == "t3" && payload?.command == "next-attention" ? t3Attention.selectNext() : nil }
@@ -237,7 +367,25 @@ extension Store {
                     }
                 } else {
                     pushToTalk.cancel(); await pushToTalk.waitUntilStopped()
-                    guard admitAfterDictationCleanup(entry, executionGeneration: executionGeneration) else { continue }
+                    guard admitAfterDictationCleanup(entry, executionGeneration: executionGeneration) else {
+                        if !pushToTalk.cleanupConfirmed,
+                           let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(entry.json.utf8)) {
+                            let meta = RecordingHostActionExecutor.describeMetadata(payload)
+                            let blockedReceipt = HostActionReceipt(
+                                timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                                profileId: entry.profile,
+                                bindingId: entry.binding,
+                                actionType: payload.action_type,
+                                target: meta.target,
+                                textByteLen: meta.textByteLen,
+                                outcome: "blocked",
+                                detail: "dictation_cleanup_unconfirmed:\(meta.detail)"
+                            )
+                            AuditLogWriter.append(blockedReceipt)
+                            lastHostActionReceipt = blockedReceipt
+                        }
+                        continue
+                    }
                     if entry.radialIntent == .cheatSheet {
                         showRadialCheatSheet(entry)
                         continue
@@ -267,6 +415,33 @@ extension Store {
         guard let state = routing, let profile = state.profile_id else { return }
         enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"t3","command":"next-attention"}"#,
                           binding: "menu-t3-attention", profile: profile, state: state, requiresEnabled: false)
+    }
+    func navigateBack() {
+        guard let state = routing, let profile = state.profile_id else { return }
+        enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"navigation","command":"back"}"#,
+                          binding: "menu-navigate-back", profile: profile, state: state, requiresEnabled: false)
+    }
+    func navigateForward() {
+        guard let state = routing, let profile = state.profile_id else { return }
+        enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"navigation","command":"forward"}"#,
+                          binding: "menu-navigate-forward", profile: profile, state: state, requiresEnabled: false)
+    }
+    func isNavigationPlaceAvailable(_ place: KeypadNavigationPlace) -> Bool {
+        if let custom = navigationPlaceAvailable {
+            return custom(place)
+        }
+        switch place {
+        case .app(let bundleID):
+            guard !bundleID.isEmpty else { return false }
+            if actionExecutor is RecordingHostActionExecutor || ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == "host-execution" {
+                return true
+            }
+            return NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil
+        case .session(let adapter, let session):
+            return !adapter.isEmpty && !session.isEmpty && session != "unselected"
+        case .t3Thread(let environmentID, let threadID):
+            return t3Attention.canNavigate(to: T3ThreadIdentity(environmentID: environmentID, threadID: threadID))
+        }
     }
     func startHeldDictation(adapter: String, binding: String, profile: String, ingress: UInt64 = 0) {
         guard dispatchOpen, hostExecutionEnabled, pushToTalk.cleanupConfirmed, !pushToTalk.isActive, let lease = try? backend.beginHostExecution() else { return }
@@ -300,7 +475,19 @@ extension Store {
         let admission = inputBoundary.consume(event, gateOpen: dispatchOpen && !inputNeedsResume)
         if consumeRadialInput(event, admission: admission) { return true }
         if admission.pressed,
-           let binding = event.bindingId, let (json, profile, state) = resolveHostAction(binding) {
+           let binding = event.bindingId, let (rawJSON, profile, state) = resolveHostAction(binding) {
+            var json = rawJSON
+            if ["AG13", "ENC_CC", "AG14", "ENC_CW"].contains(binding),
+               inputBoundary.held["ENC_CLK"] != nil,
+               var payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(rawJSON.utf8)),
+               payload.action_type == "agent_command",
+               let cmd = payload.command,
+               let fastScroll = DialScrollRequest.from(command: cmd, dialHeld: true) {
+                payload.command = fastScroll.canonicalCommand
+                if let encoded = try? JSONEncoder().encode(payload) {
+                    json = String(decoding: encoded, as: UTF8.self)
+                }
+            }
             enqueueHostAction(json: json, binding: binding, profile: profile, state: state,
                 deviceSession: event.sessionId, deviceIngress: event.ingressSequence)
         }

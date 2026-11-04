@@ -220,6 +220,8 @@ extension MicroInput: Backend {}
     @Published var commandExecutionEnabled = false
     @Published var passThroughHealth: PassThroughHealthView = .disconnected
     @Published var lastHostActionReceipt: HostActionReceipt?
+    var navigationHistory = KeypadNavigationHistory()
+    var navigationPlaceAvailable: ((KeypadNavigationPlace) -> Bool)?
     var hostInputTask: Task<Void, Never>?
     @Published var draft = DraftState()
     @Published var macros: [MacroSummary] = []
@@ -391,7 +393,7 @@ extension MicroInput: Backend {}
         let binding = Self.desktopBindings[slot]
         guard let json = backend.resolveInputAction(bindingId: binding, isPressed: true),
               let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(json.utf8)),
-              ["open_app", "shortcut", "agent_command", "macro_sequence", "shell_command"].contains(payload.action_type) else {
+              ["open_app", "shortcut", "agent_command", "macro_sequence", "shell_command", "paste_text"].contains(payload.action_type) else {
             status = "此按键未配置可试运行动作"; return
         }
         guard let (resolved, profile, state) = resolveHostAction(binding) else { return }
@@ -656,7 +658,7 @@ extension MicroInput: Backend {}
             status = lastHostActionReceipt?.detail ?? "按住说话场景没有回执"
         } catch { pushToTalk.cancel(); await pushToTalk.waitUntilStopped(); status = readableError(error) }
     }
-    private func prepareHostExecutionScenario() async {
+    func prepareHostExecutionScenario() async {
         preparedHostExecutionScenario=true
         guard let core=backend as? MicroInputCore.MicroInput else {return}
         await installCodingAgentPresets()
@@ -684,6 +686,13 @@ extension MicroInput: Backend {}
                 try? await core.emitSyntheticBindingEvent(bindingId: binding, pressed: false)
                 try? await Task.sleep(nanoseconds: 80_000_000)
             }
+            if agent.name == "Antigravity" {
+                for binding in ["AG13", "AG14", "ENC_CLK"] {
+                    try? await core.emitSyntheticBindingEvent(bindingId: binding, pressed: true)
+                    try? await core.emitSyntheticBindingEvent(bindingId: binding, pressed: false)
+                    try? await Task.sleep(nanoseconds: 80_000_000)
+                }
+            }
             if agent.name == "Herdr" {
                 for (binding, pressed) in [("AG10", true), ("AG11", true), ("AG10", false), ("AG11", false), ("AG15", true), ("AG15", false)] {
                     try? await core.emitSyntheticBindingEvent(bindingId: binding, pressed: pressed)
@@ -691,7 +700,18 @@ extension MicroInput: Backend {}
                 try? await Task.sleep(nanoseconds: 80_000_000)
             }
         }
+        navigateBack()
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        navigateForward()
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        if profileIndex != 0 { selectProfile(0) }
         await setHostActiveProfile(hostProfiles.first?.id.text)
+        slot = 16
+        guard let promptTemplate = catalog.first(where: { $0.id == "prompt-continue" }) else { return }
+        await saveAction(promptTemplate)
+        slot = 9
+        guard let submitTemplate = catalog.first(where: { $0.id == "agent-submit" }) else { return }
+        await saveAction(submitTemplate)
         slot = 12
         guard let macroTemplate = catalog.first(where: { $0.id == "local-macro" }) else { return }
         await saveAction(macroTemplate)
@@ -700,9 +720,14 @@ extension MicroInput: Backend {}
             try? await Task.sleep(nanoseconds: 10_000_000)
             drainChecks += 1
         }
-        try? await core.emitSyntheticBindingEvent(bindingId: "AG12", pressed: true)
-        try? await core.emitSyntheticBindingEvent(bindingId: "AG12", pressed: false)
-        try? await Task.sleep(nanoseconds: 80_000_000)
+        for binding in ["AG15", "AG09", "AG12"] {
+            try? await core.emitSyntheticBindingEvent(bindingId: binding, pressed: true)
+            try? await core.emitSyntheticBindingEvent(bindingId: binding, pressed: false)
+            try? await Task.sleep(nanoseconds: 80_000_000)
+        }
+        for _ in 0..<50 where lastHostActionReceipt?.actionType != "macro_sequence" {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
     #endif
     @Published var showingLighting = false
@@ -781,7 +806,8 @@ extension MicroInput: Backend {}
             let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
             let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
             let a = String(decoding: try encoder.encode(action), as: UTF8.self)
-            try await changeDocument(fresh: false) { [self] in try await backend.assignAction(profileId: p, layerId: l, slot: UInt32(slot), actionJson: a) }
+            let s = UInt32(slot)
+            try await changeDocument(fresh: false) { [self] in try await backend.assignAction(profileId: p, layerId: l, slot: s, actionJson: a) }
             status = "草稿已保存到本机 · 不执行动作 · 不写设备"
             return true
         } catch { status = readableError(error); return false }
@@ -794,8 +820,9 @@ extension MicroInput: Backend {}
         }
         busy = true; defer { busy = false }
         do {
+            let pid = profile.id.text, lid = layer.id.text
             let data = try JSONEncoder().encode(LocalControlSettings(joystick_mode: mode, active_sectors: count))
-            try await changeDocument(fresh: false) { [self] in try await backend.setControlSettings(profileId: profile.id.text, layerId: layer.id.text, settingsJson: String(decoding: data, as: UTF8.self)) }
+            try await changeDocument(fresh: false) { [self] in try await backend.setControlSettings(profileId: pid, layerId: lid, settingsJson: String(decoding: data, as: UTF8.self)) }
             status = "控件意图已保存到本机 · 旧槽位及绑定保留 · 不写设备"
             return true
         } catch { controlSettingsError = readableError(error); return false }
@@ -811,7 +838,8 @@ extension MicroInput: Backend {}
             let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
             let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
             let a = String(decoding: try encoder.encode(action), as: UTF8.self)
-            try await changeDocument(fresh: false) { [self] in try await backend.saveMacroAction(macroId: id, profileId: p, layerId: l, slot: UInt32(slot), actionJson: a) }
+            let s = UInt32(slot)
+            try await changeDocument(fresh: false) { [self] in try await backend.saveMacroAction(macroId: id, profileId: p, layerId: l, slot: s, actionJson: a) }
             return true
         } catch { status = readableError(error); return false }
     }
@@ -821,7 +849,8 @@ extension MicroInput: Backend {}
         do {
             let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
             let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
-            await editDocument { [self] in try await backend.bindMacroAction(macroId: id, profileId: p, layerId: l, slot: UInt32(slot)) }
+            let s = UInt32(slot)
+            await editDocument { [self] in try await backend.bindMacroAction(macroId: id, profileId: p, layerId: l, slot: s) }
         } catch { status = readableError(error) }
     }
     func deleteMacro(_ id: String) async { await editDocument { [self] in try await backend.deleteMacroAction(macroId: id) } }
@@ -834,7 +863,8 @@ extension MicroInput: Backend {}
         do {
             let encoder = JSONEncoder()
             func json<T: Encodable>(_ value: T) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
-            try await changeDocument(fresh: false) { [self] in try await backend.saveMultiAction(multiId: id, profileId: json(profile.id), layerId: json(layer.id), slot: UInt32(slot), actionJson: json(action), additionsJson: json(additions)) }
+            let p = try json(profile.id), l = try json(layer.id), a = try json(action), add = try json(additions), s = UInt32(slot)
+            try await changeDocument(fresh: false) { [self] in try await backend.saveMultiAction(multiId: id, profileId: p, layerId: l, slot: s, actionJson: a, additionsJson: add) }
             return true
         } catch { status = readableError(error); return false }
     }
@@ -844,7 +874,8 @@ extension MicroInput: Backend {}
             let encoder = JSONEncoder()
             let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
             let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
-            await editDocument { [self] in try await backend.bindMultiAction(multiId: id, profileId: p, layerId: l, slot: UInt32(slot)) }
+            let s = UInt32(slot)
+            await editDocument { [self] in try await backend.bindMultiAction(multiId: id, profileId: p, layerId: l, slot: s) }
         } catch { status = readableError(error) }
     }
     func deleteMulti(_ id: String) async { await editDocument { [self] in try await backend.deleteMultiAction(multiId: id) } }

@@ -200,13 +200,26 @@ struct T3Shell: Decodable {
 }
 struct T3AttentionRound {
     private(set) var delivered: Set<T3AttentionEvent> = []
+    private(set) var lastOpenedIdentity: T3ThreadIdentity?
     mutating func next(_ items: [T3AttentionItem]) -> T3AttentionEvent? {
         delivered.formIntersection(Set(items.map(\.event)))
-        if let next = items.first(where: { !delivered.contains($0.event) }) { return next.event }
-        return items.first?.event
+        let pool = items.count > 1 && lastOpenedIdentity != nil
+            ? items.filter { $0.event.identity != lastOpenedIdentity }
+            : items
+        let candidates = pool.isEmpty ? items : pool
+        if let next = candidates.first(where: { !delivered.contains($0.event) }) { return next.event }
+        return candidates.first?.event
     }
     mutating func record(_ event: T3AttentionEvent, items: [T3AttentionItem]) {
-        if items.allSatisfy({ delivered.contains($0.event) }) { delivered.removeAll() }
+        let pool = items.count > 1 && lastOpenedIdentity != nil
+            ? items.filter { $0.event.identity != lastOpenedIdentity }
+            : items
+        let candidates = pool.isEmpty ? items : pool
+        if candidates.allSatisfy({ delivered.contains($0.event) }) { delivered.removeAll() }
         delivered.insert(event)
+        lastOpenedIdentity = event.identity
+    }
+    mutating func noteOpened(_ identity: T3ThreadIdentity?) {
+        lastOpenedIdentity = identity
     }
 }

@@ -201,3 +201,117 @@ fn starter_contains_only_original_local_content() {
     assert!(config["firmware"].is_null());
     assert!(config["smart_actions"].is_null());
 }
+
+#[test]
+fn eight_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
+    let mut d = Draft::default();
+    let ids = preset::install_agent_starter_profiles(&mut d).unwrap();
+    assert_eq!(ids.len(), 8);
+
+    // Bind Slice C & D actions (navigation, prompts, submit) onto Antigravity before exporting
+    let ag_pid = ids[0].clone();
+    let ag_lid = d.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
+    let catalog = mi_model::draft::actions();
+    let find_cat = |id: &str| catalog.iter().find(|a| a.id == id).unwrap().clone();
+    for (slot, action_id) in [
+        (9, "navigate-back"),
+        (10, "navigate-forward"),
+        (12, "agent-submit"),
+        (16, "prompt-continue"),
+        (17, "prompt-test"),
+        (18, "prompt-review"),
+        (19, "prompt-summary"),
+    ] {
+        d.assign(&json!(ag_pid), &json!(ag_lid), slot, find_cat(action_id))
+            .unwrap();
+    }
+
+    // 1. Full document export/import round-trip
+    let doc_text = preset::export(&d, None, None).unwrap();
+    let doc_imported = preset::import(&doc_text).unwrap();
+    assert_eq!(doc_imported.config.profiles.len(), 8);
+    let imported_ag_pid = doc_imported
+        .document
+        .editable
+        .graph
+        .profiles
+        .iter()
+        .find(|(_, p)| p.name == "Antigravity")
+        .unwrap()
+        .0
+        .clone();
+    for (binding, expected) in [
+        (
+            "AG13",
+            mi_model::host_router::ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "scroll-up".into(),
+            },
+        ),
+        (
+            "ENC_CLK",
+            mi_model::host_router::ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "scroll-to-bottom".into(),
+            },
+        ),
+        (
+            "AG09",
+            mi_model::host_router::ResolvedHostAction::AgentCommand {
+                adapter: "navigation".into(),
+                command: "back".into(),
+            },
+        ),
+        (
+            "AG10",
+            mi_model::host_router::ResolvedHostAction::AgentCommand {
+                adapter: "navigation".into(),
+                command: "forward".into(),
+            },
+        ),
+        (
+            "AG12",
+            mi_model::host_router::ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "submit".into(),
+            },
+        ),
+        (
+            "AG15",
+            mi_model::host_router::ResolvedHostAction::PasteText {
+                text: "Continue".into(),
+                target_bundle_id: Some("com.google.antigravity".into()),
+                adapter: Some("antigravity".into()),
+                no_newline: true,
+                submit: false,
+            },
+        ),
+    ] {
+        assert_eq!(
+            mi_model::host_router::resolve_host_action(
+                &doc_imported.document,
+                Some(&imported_ag_pid),
+                binding,
+                true
+            ),
+            Some(expected),
+            "Imported {binding} must preserve exact Paseo/Agent routing semantics"
+        );
+    }
+
+    // 2. Profile-scoped and Layer-scoped export/import round-trip
+    for scope_layer in [None, Some(ag_lid.as_str())] {
+        let scoped_text = preset::export(&d, Some(&ag_pid), scope_layer).unwrap();
+        let scoped_imported = preset::import(&scoped_text).unwrap();
+        assert_eq!(scoped_imported.config.profiles.len(), 1);
+        assert_eq!(scoped_imported.config.profiles[0].name, "Antigravity");
+        let pid = &scoped_imported.document.editable.graph.profile_order[0];
+        assert!(mi_model::host_router::resolve_host_action(
+            &scoped_imported.document,
+            Some(pid),
+            "AG15",
+            true
+        )
+        .is_some());
+    }
+}

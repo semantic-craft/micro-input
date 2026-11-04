@@ -227,6 +227,8 @@ final class HostExecutionTests: XCTestCase {
             await store.tryDesktopAction()
             XCTAssertEqual(executor.receipts.last?.target, agent.bundleID)
             store.slot = 14
+            XCTAssertEqual(store.canTryDesktopAction, agent.name != "Herdr")
+            store.slot = agent.name == "Herdr" ? 13 : 10
             XCTAssertFalse(store.canTryDesktopAction)
         }
         let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
@@ -241,6 +243,162 @@ final class HostExecutionTests: XCTestCase {
         XCTAssertTrue(DesktopAgentControls.dictationState(labels: ["停止录音（Right ⌘）"], recording: true))
         XCTAssertTrue(DesktopAgentControls.dictationState(labels: ["语音输入（Right ⌘）"], recording: false))
         XCTAssertFalse(DesktopAgentControls.dictationState(labels: ["语音输入（Right ⌘）"], recording: true))
+    }
+
+    @MainActor func testDialScrollRequestMathCoalescingAndWindowTargeting() async throws {
+        defer { DesktopAgentControls.resetScrollHooks() }
+
+        XCTAssertEqual(DialScrollRequest.from(command: "scroll-up")?.mode, .lines(-3))
+        XCTAssertEqual(DialScrollRequest.from(command: "scroll-down")?.mode, .lines(3))
+        XCTAssertEqual(DialScrollRequest.from(command: "scroll-up", dialHeld: true)?.mode, .lines(-15))
+        XCTAssertEqual(DialScrollRequest.from(command: "scroll-down", dialHeld: true)?.mode, .lines(15))
+        XCTAssertEqual(DialScrollRequest.from(command: "scroll-to-bottom")?.mode, .bottom)
+        XCTAssertEqual(DialScrollRequest.from(command: "scroll-lines:42")?.mode, .lines(42))
+        XCTAssertEqual(DialScrollRequest.from(command: "scroll-lines:250")?.mode, .lines(100))
+        XCTAssertNil(DialScrollRequest.from(command: "scroll-lines:0"))
+
+        // Positive lines (scroll down) map to negative wheel1 delta; clamped to [-100, 100].
+        XCTAssertEqual(DialScrollRequest.wheelDelta(lines: 3), -3)
+        XCTAssertEqual(DialScrollRequest.wheelDelta(lines: -15), 15)
+        XCTAssertEqual(DialScrollRequest.wheelDelta(lines: 180), -100)
+        XCTAssertEqual(DialScrollRequest.wheelDelta(lines: -180), 100)
+
+        let down3 = try XCTUnwrap(DialScrollRequest.from(command: "scroll-down"))
+        let down15 = try XCTUnwrap(DialScrollRequest.from(command: "scroll-down-fast"))
+        let merged18 = try XCTUnwrap(down3.coalesced(with: down15))
+        XCTAssertEqual(merged18.mode, .lines(18))
+        XCTAssertEqual(merged18.canonicalCommand, "scroll-lines:18")
+
+        let down90 = try XCTUnwrap(DialScrollRequest.from(command: "scroll-lines:90"))
+        let capped100 = try XCTUnwrap(down90.coalesced(with: down15))
+        XCTAssertEqual(capped100.mode, .lines(100))
+        XCTAssertEqual(capped100.canonicalCommand, "scroll-lines:100")
+
+        let windows: [[String: Any]] = [
+            [
+                kCGWindowOwnerPID as String: pid_t(777),
+                kCGWindowLayer as String: 3, // non-normal overlay layer ignored
+                kCGWindowNumber as String: 10,
+                kCGWindowBounds as String: CGRect(x: 0, y: 0, width: 800, height: 600).dictionaryRepresentation as NSDictionary
+            ],
+            [
+                kCGWindowOwnerPID as String: pid_t(777),
+                kCGWindowLayer as String: 0,
+                kCGWindowNumber as String: 11,
+                kCGWindowBounds as String: CGRect(x: 0, y: 0, width: 60, height: 60).dictionaryRepresentation as NSDictionary // too small ignored
+            ],
+            [
+                kCGWindowOwnerPID as String: pid_t(777),
+                kCGWindowLayer as String: 0,
+                kCGWindowNumber as String: 42,
+                kCGWindowBounds as String: CGRect(x: 100, y: 200, width: 1000, height: 800).dictionaryRepresentation as NSDictionary
+            ]
+        ]
+        let matched = try XCTUnwrap(DialScrollWindow.frontmost(in: windows, processID: 777))
+        XCTAssertEqual(matched.windowNumber, 42)
+        XCTAssertEqual(matched.scrollPoint(), CGPoint(x: 600, y: 520))
+
+        var warpedPoints: [CGPoint] = []
+        var postedWheels: [(Int32, Int)] = []
+        var focusedAdapters: [String] = []
+        DesktopAgentControls.scrollTrustChecker = { true }
+        DesktopAgentControls.scrollRunningProcessID = { bundle in
+            bundle == "com.google.antigravity" ? 777 : nil
+        }
+        DesktopAgentControls.scrollWindowFinder = { pid in
+            pid == 777 ? matched : nil
+        }
+        DesktopAgentControls.scrollMouseLocation = { CGPoint(x: 12, y: 34) }
+        DesktopAgentControls.scrollMouseWarper = { warpedPoints.append($0) }
+        DesktopAgentControls.scrollWheelPoster = { delta, win in
+            postedWheels.append((delta, win))
+            return true
+        }
+        DesktopAgentControls.scrollSleeper = { _ in }
+        DesktopAgentControls.scrollInputFocuser = { adapter, _ in
+            focusedAdapters.append(adapter)
+            return true
+        }
+
+        let (okDown, detailDown) = await DesktopAgentControls.performScroll(adapter: "antigravity", command: "scroll-down")
+        XCTAssertTrue(okDown)
+        XCTAssertTrue(detailDown.contains("antigravity/scroll-down"))
+        XCTAssertEqual(warpedPoints, [CGPoint(x: 600, y: 520), CGPoint(x: 12, y: 34)], "Cursor must warp to conversation point and restore original location")
+        XCTAssertEqual(postedWheels.map(\.0), [-3])
+        XCTAssertEqual(postedWheels.map(\.1), [42])
+
+        warpedPoints.removeAll()
+        postedWheels.removeAll()
+        let (okBottom, detailBottom) = await DesktopAgentControls.performScroll(adapter: "antigravity", command: "scroll-to-bottom")
+        XCTAssertTrue(okBottom)
+        XCTAssertTrue(detailBottom.contains("lines=1000"))
+        XCTAssertEqual(postedWheels.count, 10)
+        XCTAssertTrue(postedWheels.allSatisfy { $0.0 == -100 && $0.1 == 42 })
+        XCTAssertEqual(focusedAdapters, ["antigravity"])
+        XCTAssertEqual(warpedPoints, [CGPoint(x: 600, y: 520), CGPoint(x: 12, y: 34)])
+
+        // Non-running target app must not warp cursor or post wheel events to non-target windows.
+        warpedPoints.removeAll()
+        postedWheels.removeAll()
+        let (okMissing, _) = await DesktopAgentControls.performScroll(adapter: "cindy", command: "scroll-down")
+        XCTAssertFalse(okMissing)
+        XCTAssertTrue(warpedPoints.isEmpty)
+        XCTAssertTrue(postedWheels.isEmpty)
+    }
+
+    @MainActor func testDialQueueCoalescesPendingScrollStepsAndSuppressesDuplicateJumpToBottom() async throws {
+        final class SlowRecordingExecutor: HostActionExecuting {
+            var details: [String] = []
+            func execute(actionJSON: String, bindingId: String, profileId: String) async -> HostActionReceipt {
+                try? await Task.sleep(nanoseconds: 40_000_000)
+                let payload = try! JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(actionJSON.utf8))
+                let meta = RecordingHostActionExecutor.describeMetadata(payload)
+                details.append(meta.detail)
+                return HostActionReceipt(
+                    timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                    profileId: profileId,
+                    bindingId: bindingId,
+                    actionType: payload.action_type,
+                    target: meta.target,
+                    textByteLen: nil,
+                    outcome: "simulated",
+                    detail: meta.detail
+                )
+            }
+        }
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("workbench.json")
+
+        let executor = SlowRecordingExecutor()
+        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        await store.loadWorkbench()
+        await store.installCodingAgentPresets()
+        await store.setHostExecutionEnabled(true)
+        let state = try XCTUnwrap(store.routing)
+        let profile = try XCTUnwrap(state.profile_id)
+
+        // All 4 synchronous scroll-down steps on MainActor coalesce in pendingHostActions into scroll-lines:12 before the Task drains.
+        let downJSON = #"{"action_type":"agent_command","adapter":"antigravity","command":"scroll-down"}"#
+        let bottomJSON = #"{"action_type":"agent_command","adapter":"antigravity","command":"scroll-to-bottom"}"#
+        store.enqueueHostAction(json: downJSON, binding: "AG14", profile: profile, state: state)
+        store.enqueueHostAction(json: downJSON, binding: "AG14", profile: profile, state: state)
+        store.enqueueHostAction(json: downJSON, binding: "AG14", profile: profile, state: state)
+        store.enqueueHostAction(json: downJSON, binding: "AG14", profile: profile, state: state)
+        // Two queued scroll-to-bottom requests collapse into one pending jump-to-bottom burst.
+        store.enqueueHostAction(json: bottomJSON, binding: "ENC_CLK", profile: profile, state: state)
+        store.enqueueHostAction(json: bottomJSON, binding: "ENC_CLK", profile: profile, state: state)
+
+        for _ in 0..<40 where store.hostExecutionTask != nil || !store.pendingHostActions.isEmpty {
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        XCTAssertEqual(executor.details, [
+            "antigravity/scroll-lines:12",
+            "antigravity/scroll-to-bottom"
+        ])
+        await store.shutdown()
     }
 
     @MainActor func testDesktopControlsRejectContentAndUnavailableReasoningModes() {
@@ -410,6 +568,33 @@ final class HostExecutionTests: XCTestCase {
         XCTAssertEqual(executor.receipts[1].target, "antigravity")
         XCTAssertEqual(executor.receipts[1].detail, "antigravity/focus-input")
 
+        // 4. Dial clockwise/counterclockwise/click and held-dial fast scroll on Antigravity, Qianwen, Cindy, Codex
+        for (agentName, adapter) in [("Antigravity", "antigravity"), ("千问办公", "qwenwork"), ("Cindy", "cindy"), ("Codex", "codex")] {
+            let pid = try XCTUnwrap(store.hostProfiles.first(where: { $0.name == agentName })?.id.text)
+            await store.setHostActiveProfile(pid)
+            let startIndex = executor.receipts.count
+
+            try await core.emitSyntheticBindingEvent(bindingId: "AG13", pressed: true)
+            try await core.emitSyntheticBindingEvent(bindingId: "AG13", pressed: false)
+            try await core.emitSyntheticBindingEvent(bindingId: "AG14", pressed: true)
+            try await core.emitSyntheticBindingEvent(bindingId: "AG14", pressed: false)
+            // Hold ENC_CLK and turn AG14 -> upgrades to scroll-down-fast
+            try await core.emitSyntheticBindingEvent(bindingId: "ENC_CLK", pressed: true)
+            try await core.emitSyntheticBindingEvent(bindingId: "AG14", pressed: true)
+            try await core.emitSyntheticBindingEvent(bindingId: "AG14", pressed: false)
+            try await core.emitSyntheticBindingEvent(bindingId: "ENC_CLK", pressed: false)
+
+            for _ in 0..<25 where executor.receipts.count - startIndex < 4 {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            XCTAssertEqual(Array(executor.receipts.dropFirst(startIndex)).map(\.detail), [
+                "\(adapter)/scroll-up",
+                "\(adapter)/scroll-down",
+                "\(adapter)/scroll-to-bottom",
+                "\(adapter)/scroll-down-fast"
+            ])
+        }
+
         await store.shutdown()
     }
 
@@ -522,5 +707,477 @@ final class HostExecutionTests: XCTestCase {
         await storeMulti.shutdown()
         await store.shutdown()
     }
+
+    @MainActor func testPrepareHostExecutionScenarioProducesAllTwentyReceipts() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("workbench.json")
+
+        let core = MicroInputCore.MicroInput.syntheticDiscovery()
+        let executor = RecordingHostActionExecutor()
+        let store = Store(backend: core, documentURL: url, actionExecutor: executor)
+        await store.loadWorkbench()
+        await store.prepareHostExecutionScenario()
+        XCTAssertEqual(executor.receipts.count, 24, "Receipts: \(executor.receipts.map(\.detail)) status=\(store.status) profile=\(store.profile?.name ?? "nil") active=\(store.hostActiveProfileId ?? "nil")")
+        let details = Set(executor.receipts.map(\.detail))
+        let bindings = Set(executor.receipts.map(\.bindingId))
+        XCTAssertTrue(bindings.contains("menu-navigate-back"))
+        XCTAssertTrue(bindings.contains("menu-navigate-forward"))
+        XCTAssertTrue(details.contains("no_newline=true (bytes=8)"))
+        XCTAssertTrue(details.contains(where: { $0.hasSuffix("/submit") }))
+        await store.shutdown()
+    }
     #endif
+
+    func testKeypadNavigationHistoryStateMachineCoversBackForwardTruncationDedupSkipAndCapacity() {
+        var history = KeypadNavigationHistory()
+        let herdr = KeypadNavigationPlace.app(bundleID: "dev.herdr.app")
+        let antigravity = KeypadNavigationPlace.app(bundleID: "com.google.antigravity")
+        let qwen = KeypadNavigationPlace.app(bundleID: "cn.qwenwork.desktop.mac")
+        let cindy = KeypadNavigationPlace.app(bundleID: "com.xd.cindy")
+        let codex = KeypadNavigationPlace.app(bundleID: "com.openai.codex")
+
+        XCTAssertFalse(history.canGoBack())
+        XCTAssertFalse(history.canGoForward())
+        XCTAssertNil(history.back())
+        XCTAssertNil(history.forward())
+
+        for place in [herdr, antigravity, qwen, cindy, codex] {
+            history.visit(place)
+        }
+        // Consecutive duplicate visit is deduplicated
+        history.visit(codex)
+        XCTAssertEqual(history.entries.count, 5)
+        XCTAssertEqual(history.current, codex)
+
+        // Step back across Codex -> Cindy -> Qwen -> Antigravity -> Herdr
+        XCTAssertEqual(history.back(), cindy)
+        XCTAssertEqual(history.back(), qwen)
+        // Re-visiting current place while in the middle of history preserves forward stack
+        history.visit(qwen)
+        XCTAssertTrue(history.canGoForward())
+        XCTAssertEqual(history.back(), antigravity)
+        XCTAssertEqual(history.back(), herdr)
+        XCTAssertNil(history.back())
+
+        // Step forward Herdr -> Antigravity -> Qwen
+        XCTAssertEqual(history.forward(), antigravity)
+        XCTAssertEqual(history.forward(), qwen)
+
+        // Visiting a new place after stepping back truncates forward branch (cindy, codex)
+        let sessionPlace = KeypadNavigationPlace.session(adapter: "herdr", session: "agent-1")
+        history.visit(sessionPlace)
+        XCTAssertFalse(history.canGoForward())
+        XCTAssertNil(history.forward())
+        XCTAssertEqual(history.entries, [herdr, antigravity, qwen, sessionPlace])
+
+        // Skipping unavailable places in both directions
+        XCTAssertEqual(history.back(available: { $0 != qwen }), antigravity)
+        XCTAssertEqual(history.forward(available: { $0 != qwen }), sessionPlace)
+        XCTAssertNil(history.back(available: { _ in false }))
+        XCTAssertEqual(history.current, sessionPlace)
+
+        // Capacity cap of 50 entries
+        var capped = KeypadNavigationHistory()
+        for i in 0..<60 {
+            capped.visit(.session(adapter: "herdr", session: "s-\(i)"))
+        }
+        XCTAssertEqual(capped.entries.count, KeypadNavigationHistory.maxHistory)
+        XCTAssertEqual(capped.entries.first, .session(adapter: "herdr", session: "s-10"))
+        XCTAssertEqual(capped.current, .session(adapter: "herdr", session: "s-59"))
+    }
+
+    @MainActor func testCrossAgentKeypadBackAndForwardReplaysHistoryWithoutBreakingForwardStack() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("workbench.json")
+
+        let executor = RecordingHostActionExecutor()
+        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        await store.loadWorkbench()
+        await store.installCodingAgentPresets()
+        await store.setHostExecutionEnabled(true)
+
+        let apps = [
+            "dev.herdr.app",
+            "com.google.antigravity",
+            "cn.qwenwork.desktop.mac",
+            "com.xd.cindy",
+            "com.openai.codex"
+        ]
+        for bundleID in apps {
+            let receipt = await store.executeHostAction(
+                actionJSON: #"{"action_type":"open_app","bundle_id":"\#(bundleID)"}"#,
+                bindingId: "AG00",
+                profileId: "p-test"
+            )
+            XCTAssertEqual(receipt?.outcome, "simulated")
+        }
+        // Consecutive action in the same app (Codex focus-input) does not duplicate the top history entry
+        _ = await store.executeHostAction(
+            actionJSON: #"{"action_type":"agent_command","adapter":"codex","command":"focus-input"}"#,
+            bindingId: "AG01",
+            profileId: "p-test"
+        )
+        // Non-activating dial scroll does not pollute navigation history
+        _ = await store.executeHostAction(
+            actionJSON: #"{"action_type":"agent_command","adapter":"antigravity","command":"scroll-down"}"#,
+            bindingId: "ENC_CW",
+            profileId: "p-test"
+        )
+        XCTAssertEqual(store.navigationHistory.entries.count, 5)
+        XCTAssertEqual(store.navigationHistory.current, .app(bundleID: "com.openai.codex"))
+
+        // Back: Codex -> Cindy -> Qwen
+        let back1 = await store.executeHostAction(
+            actionJSON: #"{"action_type":"agent_command","adapter":"navigation","command":"back"}"#,
+            bindingId: "AG11",
+            profileId: "p-test"
+        )
+        XCTAssertEqual(back1?.target, "com.xd.cindy")
+        XCTAssertTrue(store.navigationHistory.canGoForward())
+
+        let back2 = await store.executeHostAction(
+            actionJSON: #"{"action_type":"agent_command","adapter":"navigation","command":"back"}"#,
+            bindingId: "AG11",
+            profileId: "p-test"
+        )
+        XCTAssertEqual(back2?.target, "cn.qwenwork.desktop.mac")
+
+        // Forward: Qwen -> Cindy
+        let forward1 = await store.executeHostAction(
+            actionJSON: #"{"action_type":"agent_command","adapter":"navigation","command":"forward"}"#,
+            bindingId: "AG12",
+            profileId: "p-test"
+        )
+        XCTAssertEqual(forward1?.target, "com.xd.cindy")
+        XCTAssertTrue(store.navigationHistory.canGoForward())
+
+        // Opening Herdr anew after stepping back truncates Codex from forward stack
+        _ = await store.executeHostAction(
+            actionJSON: #"{"action_type":"open_app","bundle_id":"dev.herdr.app"}"#,
+            bindingId: "AG00",
+            profileId: "p-test"
+        )
+        XCTAssertFalse(store.navigationHistory.canGoForward())
+        let blockedForward = await store.executeHostAction(
+            actionJSON: #"{"action_type":"agent_command","adapter":"navigation","command":"forward"}"#,
+            bindingId: "AG12",
+            profileId: "p-test"
+        )
+        XCTAssertEqual(blockedForward?.outcome, "blocked")
+        XCTAssertEqual(blockedForward?.actionType, "navigate_forward")
+
+        await store.shutdown()
+    }
+
+    @MainActor func testJoystickPromptSlotsFocusTargetInputStashRestoreClipboardAndDefaultToPasteOnly() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("workbench.json")
+        let auditPath = directory.appendingPathComponent("audit.jsonl").path
+
+        let pasteboard = InMemoryPasteboard(items: [
+            [.string: Data("user-original-clip".utf8), .rtf: Data("{\\rtf1 original}".utf8)]
+        ])
+        let executor = LiveHostActionExecutor(auditLogPath: auditPath)
+        executor.pasteboard = pasteboard
+        executor.clipboardRestoreDelayNanoseconds = 5_000_000
+        executor.submitSettleDelayNanoseconds = 1_000_000
+        executor.macroAccessibilityChecker = { true }
+        executor.macroSleeper = { _ in }
+
+        var callLog: [String] = []
+        var pastedClipboardSnapshots: [String?] = []
+        var focusShouldSucceed = true
+
+        executor.appActivator = { bundleId in
+            callLog.append("activate:\(bundleId)")
+            return true
+        }
+        executor.agentInputFocuser = { adapter in
+            callLog.append("focus:\(adapter)")
+            return focusShouldSucceed ? (true, "已确认输入框焦点；未输入或发送文本") : (false, "输入框未确认获得焦点")
+        }
+        executor.activeDictationStopper = { adapter in
+            callLog.append("stop_dictation:\(adapter)")
+            return (true, "dictation_inactive:\(adapter)")
+        }
+        executor.pasteShortcutPoster = {
+            callLog.append("cmd_v")
+            pastedClipboardSnapshots.append(pasteboard.currentPlainText)
+            return true
+        }
+        executor.returnKeyPoster = {
+            callLog.append("return")
+            return true
+        }
+
+        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
+        await store.loadWorkbench()
+        await store.installCodingAgentPresets()
+        await store.setHostExecutionEnabled(true)
+
+        let targetAgents: [(name: String, adapter: String, bundleID: String)] = [
+            ("Antigravity", "antigravity", "com.google.antigravity"),
+            ("千问办公", "qwenwork", "cn.qwenwork.desktop.mac"),
+            ("Cindy", "cindy", "com.xd.cindy"),
+            ("Codex", "codex", "com.openai.codex")
+        ]
+
+        let promptIDs = ["prompt-continue", "prompt-test", "prompt-review", "prompt-summary"]
+        let expectedTexts = [
+            "Continue",
+            "Run the tests and fix any failures",
+            "Review your diff for bugs",
+            "Summarize where things stand and what's left"
+        ]
+        let bindings = ["AG15", "AG16", "AG17", "AG18"]
+
+        for agent in targetAgents {
+            let profile = try XCTUnwrap(store.hostProfiles.first { $0.name == agent.name })
+            let profileIdx = try XCTUnwrap(store.snapshot?.profiles.firstIndex { $0.id.text == profile.id.text })
+            store.selectProfile(profileIdx)
+            await store.setHostActiveProfile(profile.id.text)
+
+            // Assign 4-way joystick sectors (slots 16..19 -> AG15..AG18)
+            for (offset, promptID) in promptIDs.enumerated() {
+                store.slot = 16 + offset
+                await store.assign(promptID)
+            }
+
+            for (offset, binding) in bindings.enumerated() {
+                callLog.removeAll()
+                pastedClipboardSnapshots.removeAll()
+                let resolved = try XCTUnwrap(store.resolveInputActionForTesting(bindingId: binding))
+                let rawReceipt = await store.executeHostAction(actionJSON: resolved, bindingId: binding, profileId: profile.id.text)
+                let receipt = try XCTUnwrap(rawReceipt)
+                await executor.flushClipboardRestoreForTesting()
+
+                XCTAssertEqual(receipt.outcome, "executed")
+                XCTAssertEqual(receipt.actionType, "paste_text")
+                XCTAssertEqual(receipt.target, agent.bundleID)
+                XCTAssertEqual(receipt.textByteLen, expectedTexts[offset].utf8.count)
+                XCTAssertTrue(receipt.detail.contains("no_newline=true"))
+                XCTAssertTrue(receipt.detail.contains("auto_submit=false"))
+
+                // Must activate app -> focus input -> Cmd+V, and NEVER press Return
+                XCTAssertEqual(callLog, ["activate:\(agent.bundleID)", "focus:\(agent.adapter)", "cmd_v"])
+                XCTAssertEqual(pastedClipboardSnapshots, [expectedTexts[offset]])
+                // Original multi-type clipboard must be restored after paste
+                XCTAssertEqual(pasteboard.currentPlainText, "user-original-clip")
+                XCTAssertEqual(pasteboard.items.first?[.rtf], Data("{\\rtf1 original}".utf8))
+            }
+        }
+
+        // Custom prompt with trailing CRLF strips newlines, and if input focus fails, clipboard & keys remain untouched
+        focusShouldSucceed = false
+        callLog.removeAll()
+        pastedClipboardSnapshots.removeAll()
+        let changeCountBeforeFailedFocus = pasteboard.changeCount
+        let rawFailedFocusReceipt = await store.executeHostAction(
+            actionJSON: #"{"action_type":"paste_text","text":"Custom engineering check\r\n","adapter":"antigravity","target_bundle_id":"com.google.antigravity","no_newline":true,"submit":false}"#,
+            bindingId: "AG15",
+            profileId: "p-ag"
+        )
+        let failedFocusReceipt = try XCTUnwrap(rawFailedFocusReceipt)
+        XCTAssertEqual(failedFocusReceipt.outcome, "blocked")
+        XCTAssertEqual(callLog, ["activate:com.google.antigravity", "focus:antigravity"])
+        XCTAssertTrue(pastedClipboardSnapshots.isEmpty)
+        XCTAssertEqual(pasteboard.changeCount, changeCountBeforeFailedFocus, "Failed input focus must not touch clipboard")
+        XCTAssertEqual(pasteboard.currentPlainText, "user-original-clip")
+
+        // External clipboard modification during restore window is preserved (not overwritten by stale restore)
+        focusShouldSucceed = true
+        var simulateExternalCopy = false
+        executor.macroSleeper = { _ in
+            if simulateExternalCopy {
+                pasteboard.writePlainText("external-user-copy-during-window")
+            }
+        }
+        simulateExternalCopy = true
+        let rawExtReceipt = await store.executeHostAction(
+            actionJSON: #"{"action_type":"paste_text","text":"Continue\n","adapter":"codex","target_bundle_id":"com.openai.codex","no_newline":true,"submit":false}"#,
+            bindingId: "AG15",
+            profileId: "p-codex"
+        )
+        let extReceipt = try XCTUnwrap(rawExtReceipt)
+        await executor.flushClipboardRestoreForTesting()
+        XCTAssertEqual(extReceipt.outcome, "executed")
+        XCTAssertEqual(pasteboard.currentPlainText, "external-user-copy-during-window", "External user copy during restore window must not be overwritten")
+
+        await store.shutdown()
+    }
+
+    @MainActor func testSubmitControlStopsActiveDictationBeforeSendingReturnAndBlocksWhenUnconfirmed() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("workbench.json")
+
+        let pasteboard = InMemoryPasteboard(items: [[.string: Data("keep-me".utf8)]])
+        let executor = LiveHostActionExecutor()
+        executor.pasteboard = pasteboard
+        executor.clipboardRestoreDelayNanoseconds = 1_000_000
+        executor.submitSettleDelayNanoseconds = 1_000_000
+        executor.macroAccessibilityChecker = { true }
+        executor.macroSleeper = { _ in }
+
+        var callLog: [String] = []
+        var dictationStopResult: (Bool, String) = (true, "dictation_stopped:antigravity")
+
+        executor.appActivator = { bundleId in
+            callLog.append("activate:\(bundleId)")
+            return true
+        }
+        executor.activeDictationStopper = { adapter in
+            callLog.append("stop_dictation:\(adapter)")
+            return dictationStopResult
+        }
+        executor.agentInputFocuser = { adapter in
+            callLog.append("focus:\(adapter)")
+            return (true, "已确认输入框焦点；未输入或发送文本")
+        }
+        executor.pasteShortcutPoster = {
+            callLog.append("cmd_v:\(pasteboard.currentPlainText ?? "")")
+            return true
+        }
+        executor.returnKeyPoster = {
+            callLog.append("return")
+            return true
+        }
+
+        let pttDriver = ControllableDictationDriver()
+        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor, dictationDriver: pttDriver)
+        await store.loadWorkbench()
+        await store.installCodingAgentPresets()
+        await store.setHostExecutionEnabled(true)
+
+        let agProfile = try XCTUnwrap(store.hostProfiles.first { $0.name == "Antigravity" })
+        let agIdx = try XCTUnwrap(store.snapshot?.profiles.firstIndex { $0.id.text == agProfile.id.text })
+        store.selectProfile(agIdx)
+        await store.setHostActiveProfile(agProfile.id.text)
+
+        // Bind AG12 (slot 12) to agent-submit and AG08 (slot 8) to agent-prompt-submit
+        store.slot = 12
+        await store.assign("agent-submit")
+        store.slot = 8
+        await store.assign("agent-prompt-submit")
+
+        // 1. Explicit submit key stops active dictation FIRST, focuses input SECOND, and sends Return THIRD
+        callLog.removeAll()
+        let submitJSON = try XCTUnwrap(store.resolveInputActionForTesting(bindingId: "AG12"))
+        let rawSubmitReceipt = await store.executeHostAction(actionJSON: submitJSON, bindingId: "AG12", profileId: agProfile.id.text)
+        let submitReceipt = try XCTUnwrap(rawSubmitReceipt)
+        XCTAssertEqual(submitReceipt.outcome, "executed")
+        XCTAssertEqual(callLog, [
+            "activate:com.google.antigravity",
+            "stop_dictation:antigravity",
+            "focus:antigravity",
+            "return"
+        ])
+
+        // 2. Explicit submit-prompt stops active dictation -> focuses input -> pastes without newline -> sends Return -> restores clipboard
+        callLog.removeAll()
+        dictationStopResult = (true, "dictation_stopped:antigravity")
+        let submitPromptJSON = try XCTUnwrap(store.resolveInputActionForTesting(bindingId: "AG08"))
+        let rawSubmitPromptReceipt = await store.executeHostAction(actionJSON: submitPromptJSON, bindingId: "AG08", profileId: agProfile.id.text)
+        let submitPromptReceipt = try XCTUnwrap(rawSubmitPromptReceipt)
+        await executor.flushClipboardRestoreForTesting()
+        XCTAssertEqual(submitPromptReceipt.outcome, "executed")
+        XCTAssertEqual(callLog, [
+            "activate:com.google.antigravity",
+            "stop_dictation:antigravity",
+            "focus:antigravity",
+            "cmd_v:Continue",
+            "return"
+        ])
+        XCTAssertEqual(pasteboard.currentPlainText, "keep-me")
+
+        // 3. If active dictation cannot be confirmed stopped, both submit and submit-prompt are BLOCKED before focus/paste/Return
+        callLog.removeAll()
+        dictationStopResult = (false, "dictation_stop_unconfirmed:antigravity")
+        let rawBlockedSubmit = await store.executeHostAction(actionJSON: submitJSON, bindingId: "AG12", profileId: agProfile.id.text)
+        let blockedSubmit = try XCTUnwrap(rawBlockedSubmit)
+        XCTAssertEqual(blockedSubmit.outcome, "blocked")
+        XCTAssertTrue(blockedSubmit.detail.contains("dictation_stop_unconfirmed"))
+        XCTAssertEqual(callLog, ["activate:com.google.antigravity", "stop_dictation:antigravity"])
+
+        callLog.removeAll()
+        let rawBlockedPromptSubmit = await store.executeHostAction(actionJSON: submitPromptJSON, bindingId: "AG08", profileId: agProfile.id.text)
+        let blockedPromptSubmit = try XCTUnwrap(rawBlockedPromptSubmit)
+        XCTAssertEqual(blockedPromptSubmit.outcome, "blocked")
+        XCTAssertEqual(callLog, ["activate:com.google.antigravity", "stop_dictation:antigravity"])
+        XCTAssertEqual(pasteboard.currentPlainText, "keep-me")
+
+        // 4. Queue-level PushToTalk protection: if PushToTalk stop is unconfirmed, queued submit is blocked at the routing gate
+        dictationStopResult = (true, "dictation_inactive:antigravity")
+        pttDriver.stopSucceeded = false
+        store.startHeldDictation(adapter: "antigravity", binding: "AG06", profile: agProfile.id.text, ingress: 1)
+        for _ in 0..<20 where !store.pushToTalk.isActive {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        callLog.removeAll()
+        let state = try XCTUnwrap(store.routing)
+        await withCheckedContinuation { continuation in
+            store.enqueueHostAction(
+                json: submitJSON,
+                binding: "AG12",
+                profile: agProfile.id.text,
+                state: state,
+                done: { continuation.resume() }
+            )
+        }
+        XCTAssertFalse(store.pushToTalk.cleanupConfirmed)
+        XCTAssertEqual(store.lastHostActionReceipt?.outcome, "blocked")
+        XCTAssertTrue(store.lastHostActionReceipt?.detail.contains("dictation_cleanup_unconfirmed") == true)
+        XCTAssertTrue(callLog.isEmpty, "Executor must not run when Push-to-Talk cleanup is unconfirmed")
+
+        await store.shutdown()
+    }
+}
+
+@MainActor private final class InMemoryPasteboard: PasteboardAccessing {
+    private(set) var changeCount: Int = 1
+    private(set) var items: [[NSPasteboard.PasteboardType: Data]]
+
+    init(items: [[NSPasteboard.PasteboardType: Data]] = []) {
+        self.items = items
+    }
+
+    var currentPlainText: String? {
+        guard let data = items.first?[.string] else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    func snapshotItems(maxBytes: Int) -> [[NSPasteboard.PasteboardType: Data]] {
+        items
+    }
+
+    func writePlainText(_ text: String) {
+        changeCount += 1
+        items = [[.string: Data(text.utf8)]]
+    }
+
+    func restoreItems(_ restored: [[NSPasteboard.PasteboardType: Data]]) {
+        changeCount += 1
+        items = restored
+    }
+}
+
+@MainActor private final class ControllableDictationDriver: DictationDriving, DictationRecording {
+    var stopSucceeded = true
+    var simulated: Bool { true }
+    func start(adapter: String, isHeld: @escaping () -> Bool) async -> DictationStart {
+        .started(self)
+    }
+    func stop() async -> (Bool, String) {
+        (stopSucceeded, stopSucceeded ? "已确认听写停止；未发送消息" : "听写停止未确认")
+    }
+    func isStopped() async -> Bool {
+        stopSucceeded
+    }
 }

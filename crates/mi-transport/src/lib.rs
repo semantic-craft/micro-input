@@ -742,16 +742,13 @@ impl HidTransport for SyntheticDiscovery {
         binding_id: &str,
         pressed: bool,
     ) -> Result<(), TransportError> {
-        let digits = binding_id
-            .strip_prefix("AG")
-            .ok_or(TransportError::Unsupported)?;
-        if digits.len() != 2
-            || !digits.bytes().all(|b| b.is_ascii_digit())
-            || digits
-                .parse::<u8>()
-                .map_err(|_| TransportError::Unsupported)?
-                > 18
-        {
+        let valid_ag = binding_id.strip_prefix("AG").is_some_and(|digits| {
+            digits.len() == 2
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && digits.parse::<u8>().is_ok_and(|n| n <= 18)
+        });
+        let valid_enc = matches!(binding_id, "ENC_CLK" | "ENC_CW" | "ENC_CC");
+        if !valid_ag && !valid_enc {
             return Err(TransportError::Unsupported);
         }
         let message = serde_json::json!({"m":"v.oai.hid","p":{"k":binding_id,"act":if pressed { 1 } else { 0 }}});

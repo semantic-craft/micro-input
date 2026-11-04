@@ -10,13 +10,13 @@ struct DesktopAgent: Identifiable {
     var id: String { name }
     var installed: Bool { NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil }
     static let all: [DesktopAgent] = [
-        .init(name: "Cindy", bundleID: "com.xd.cindy", symbol: "sparkles", capabilities: "打开应用 · 搜索任务 · 聚焦输入"),
-        .init(name: "Codex", bundleID: "com.openai.codex", symbol: "terminal", capabilities: "打开应用 · 搜索 · 聚焦输入"),
-        .init(name: "千问办公", bundleID: "cn.qwenwork.desktop.mac", symbol: "text.bubble", capabilities: "打开应用 · 新任务 · 搜索 · 聚焦输入"),
-        .init(name: "ZCode", bundleID: "dev.zcode.app", symbol: "chevron.left.forwardslash.chevron.right", capabilities: "打开应用 · 新任务 · 搜索 · 聚焦输入"),
-        .init(name: "Antigravity", bundleID: "com.google.antigravity", symbol: "sparkles", capabilities: "打开应用 · 新会话 · 搜索 · 聚焦输入"),
-        .init(name: "DeepSeek Coder (DSH)", bundleID: "com.deepseek.dsh", symbol: "terminal", capabilities: "打开应用 · 新会话 · 搜索 · 聚焦输入"),
-        .init(name: "Qoder CN", bundleID: "com.qodercn.app", symbol: "q.circle", capabilities: "打开应用 · 新任务 · 搜索 · 聚焦输入"),
+        .init(name: "Cindy", bundleID: "com.xd.cindy", symbol: "sparkles", capabilities: "打开应用 · 搜索任务 · 聚焦输入 · 旋钮滚动/跳底"),
+        .init(name: "Codex", bundleID: "com.openai.codex", symbol: "terminal", capabilities: "打开应用 · 搜索 · 聚焦输入 · 旋钮滚动/跳底"),
+        .init(name: "千问办公", bundleID: "cn.qwenwork.desktop.mac", symbol: "text.bubble", capabilities: "打开应用 · 新任务 · 搜索 · 聚焦输入 · 旋钮滚动/跳底"),
+        .init(name: "ZCode", bundleID: "dev.zcode.app", symbol: "chevron.left.forwardslash.chevron.right", capabilities: "打开应用 · 新任务 · 搜索 · 聚焦输入 · 旋钮滚动/跳底"),
+        .init(name: "Antigravity", bundleID: "com.google.antigravity", symbol: "sparkles", capabilities: "打开应用 · 新会话 · 搜索 · 聚焦输入 · 旋钮滚动/跳底"),
+        .init(name: "DeepSeek Coder (DSH)", bundleID: "com.deepseek.dsh", symbol: "terminal", capabilities: "打开应用 · 新会话 · 搜索 · 聚焦输入 · 旋钮滚动/跳底"),
+        .init(name: "Qoder CN", bundleID: "com.qodercn.app", symbol: "q.circle", capabilities: "打开应用 · 新任务 · 搜索 · 聚焦输入 · 旋钮滚动/跳底"),
         .init(name: "Herdr", bundleID: "dev.herdr.app", symbol: "rectangle.split.2x2", capabilities: "Space · Tab · 分屏 · 面板导航")
     ]
     // Stored profile names remain stable so existing mappings and favorites survive.
@@ -28,6 +28,22 @@ struct DesktopAgent: Identifiable {
     }
     static func named(_ name: String) -> DesktopAgent? {
         all.first { $0.name == name || displayName($0.name) == displayName(name) }
+    }
+    static func adapterForName(_ name: String) -> String? {
+        switch name.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "Cindy": return "cindy"
+        case "Codex": return "codex"
+        case "千问办公", "QwenWork": return "qwenwork"
+        case "ZCode": return "zcode"
+        case "Antigravity": return "antigravity"
+        case "DeepSeek Coder (DSH)", "DSH", "DeepSeek Harness", "Deepseek Harness": return "dsh-desktop"
+        case "Qoder CN": return "qoder-cn"
+        default: return nil
+        }
+    }
+    @MainActor static func forAdapter(_ adapter: String) -> DesktopAgent? {
+        guard let bundleID = DesktopAgentControls.bundles[adapter] else { return nil }
+        return all.first { $0.bundleID == bundleID }
     }
 }
 
@@ -181,6 +197,53 @@ struct DesktopAgent: Identifiable {
         return labels.contains { exact.contains($0) || (recording ? $0.hasPrefix("停止录音") : $0.hasPrefix("语音输入（")) }
     }
 
+    static func stopActiveDictationIfNeeded(adapter: String) async -> (Bool, String) {
+        guard let bundle = bundles[adapter] else { return (false, "unknown_agent_adapter:\(adapter)") }
+        guard ["antigravity", "qwenwork", "cindy", "codex", "qoder-cn"].contains(adapter) else {
+            return (true, "dictation_not_applicable:\(adapter)")
+        }
+        guard AXIsProcessTrusted() else { return (false, "需要辅助功能权限") }
+        guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == bundle else {
+            return (true, "dictation_inactive:\(adapter)")
+        }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(root, 0.3)
+        var focusedWindow: AXUIElement?
+        if let value = attribute(root, kAXFocusedWindowAttribute), CFGetTypeID(value) == AXUIElementGetTypeID() {
+            focusedWindow = unsafeBitCast(value, to: AXUIElement.self)
+        } else if let windows = attribute(root, kAXWindowsAttribute) as? [AXUIElement], windows.count == 1 {
+            focusedWindow = windows[0]
+        }
+        guard let window = focusedWindow else { return (true, "dictation_inactive:\(adapter)") }
+        var pending = [window]
+        var recordingControls: [AXUIElement] = []
+        var visited = 0
+        while let element = pending.popLast(), visited < 1800 {
+            visited += 1
+            let role = attribute(element, kAXRoleAttribute) as? String ?? ""
+            let title = attribute(element, kAXTitleAttribute) as? String ?? ""
+            let description = attribute(element, kAXDescriptionAttribute) as? String ?? ""
+            let placeholder = attribute(element, kAXPlaceholderValueAttribute) as? String ?? ""
+            let labels = [title, description, placeholder]
+            if labels.contains(where: { ["Conversation turns", "Agent response", "User message"].contains($0) }) { continue }
+            if extraControl(adapter: adapter, command: "dictation", role: role, labels: labels),
+               dictationState(labels: labels, recording: true) {
+                recordingControls.append(element)
+            }
+            if let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] {
+                pending.append(contentsOf: children)
+            }
+        }
+        if recordingControls.isEmpty {
+            return (true, "dictation_inactive:\(adapter)")
+        }
+        let stopped = await perform(adapter: adapter, command: "dictation", revealTools: false)
+        if stopped.0 && stopped.1.contains("停止") {
+            return (true, "dictation_stopped:\(adapter)")
+        }
+        return (false, "dictation_stop_unconfirmed:\(adapter):\(stopped.1)")
+    }
+
     static func confirmFocus(_ read: () -> Bool, interval: UInt64 = 25_000_000) async -> Bool {
         for _ in 0..<20 {
             guard !Task.isCancelled else { return false }
@@ -190,6 +253,261 @@ struct DesktopAgent: Identifiable {
         return false
     }
 
+    static var scrollTrustChecker: () -> Bool = { AXIsProcessTrusted() }
+    static var scrollRunningProcessID: (String) -> pid_t? = { bundleID in
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first(where: { !$0.isTerminated })?.processIdentifier
+    }
+    static var scrollWindowFinder: (pid_t) -> DialScrollWindow? = { pid in
+        let list = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
+        return DialScrollWindow.frontmost(in: list, processID: pid)
+    }
+    static var scrollMouseLocation: () -> CGPoint? = {
+        CGEvent(source: nil)?.location
+    }
+    static var scrollMouseWarper: (CGPoint) -> Void = { point in
+        CGWarpMouseCursorPosition(point)
+    }
+    static var scrollWheelPoster: (Int32, Int) -> Bool = { wheelDelta, windowNumber in
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let event = CGEvent(
+                  scrollWheelEvent2Source: source,
+                  units: .line,
+                  wheelCount: 1,
+                  wheel1: wheelDelta,
+                  wheel2: 0,
+                  wheel3: 0
+              ) else { return false }
+        event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowNumber))
+        event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowNumber))
+        event.post(tap: .cghidEventTap)
+        return true
+    }
+    static var scrollSleeper: (UInt64) async -> Void = { nanoseconds in
+        try? await Task.sleep(nanoseconds: nanoseconds)
+    }
+    static var scrollInputFocuser: (String, pid_t) -> Bool = { adapter, pid in
+        focusInputWithoutStealingActivation(adapter: adapter, pid: pid)
+    }
+
+    static func resetScrollHooks() {
+        scrollTrustChecker = { AXIsProcessTrusted() }
+        scrollRunningProcessID = { bundleID in
+            NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first(where: { !$0.isTerminated })?.processIdentifier
+        }
+        scrollWindowFinder = { pid in
+            let list = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
+            return DialScrollWindow.frontmost(in: list, processID: pid)
+        }
+        scrollMouseLocation = { CGEvent(source: nil)?.location }
+        scrollMouseWarper = { point in CGWarpMouseCursorPosition(point) }
+        scrollWheelPoster = { wheelDelta, windowNumber in
+            guard let source = CGEventSource(stateID: .hidSystemState),
+                  let event = CGEvent(
+                      scrollWheelEvent2Source: source,
+                      units: .line,
+                      wheelCount: 1,
+                      wheel1: wheelDelta,
+                      wheel2: 0,
+                      wheel3: 0
+                  ) else { return false }
+            event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowNumber))
+            event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowNumber))
+            event.post(tap: .cghidEventTap)
+            return true
+        }
+        scrollSleeper = { nanoseconds in try? await Task.sleep(nanoseconds: nanoseconds) }
+        scrollInputFocuser = { adapter, pid in
+            focusInputWithoutStealingActivation(adapter: adapter, pid: pid)
+        }
+    }
+
+    static func performScroll(adapter: String, command: String) async -> (Bool, String) {
+        guard let bundle = bundles[adapter],
+              let request = DialScrollRequest.from(command: command) else {
+            return (false, "未接入的滚动操作")
+        }
+        guard scrollTrustChecker() else {
+            return (false, "需要辅助功能权限")
+        }
+        guard let pid = scrollRunningProcessID(bundle) else {
+            return (false, "目标应用未运行，未滚动且不改变当前窗口焦点")
+        }
+        guard let window = scrollWindowFinder(pid) else {
+            return (false, "目标应用没有可滚动的可见窗口，未滚动且不改变当前窗口焦点")
+        }
+        let targetPoint = window.scrollPoint(fromTop: request.fromTop)
+        let savedLocation = scrollMouseLocation()
+        scrollMouseWarper(targetPoint)
+        defer {
+            if let savedLocation {
+                scrollMouseWarper(savedLocation)
+            }
+        }
+        switch request.mode {
+        case .lines(let lines):
+            let delta = DialScrollRequest.wheelDelta(lines: lines)
+            guard scrollWheelPoster(delta, window.windowNumber) else {
+                return (false, "滚动事件合成失败")
+            }
+            return (true, "\(adapter)/\(request.canonicalCommand) (lines=\(lines) window=\(window.windowNumber))")
+        case .bottom:
+            let stepDelta = DialScrollRequest.wheelDelta(lines: DialScrollRequest.maximumLines)
+            let steps = DialScrollRequest.edgeLines / DialScrollRequest.maximumLines
+            for index in 0..<steps {
+                guard scrollWheelPoster(stepDelta, window.windowNumber) else {
+                    return (false, "跳到底部滚动事件合成失败")
+                }
+                if index + 1 < steps {
+                    await scrollSleeper(DialScrollRequest.burstIntervalNanoseconds)
+                }
+            }
+            let focused = scrollInputFocuser(adapter, pid)
+            return (true, "\(adapter)/scroll-to-bottom (lines=\(DialScrollRequest.edgeLines) window=\(window.windowNumber) focused=\(focused))")
+        }
+    }
+
+    private static func focusInputWithoutStealingActivation(adapter: String, pid: pid_t) -> Bool {
+        // Only focus the AX input field if the target app is already frontmost, so dial press
+        // never steals keyboard focus from a non-target window.
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+            return false
+        }
+        let root = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(root, 0.25)
+        let window: AXUIElement?
+        if let value = attribute(root, kAXFocusedWindowAttribute), CFGetTypeID(value) == AXUIElementGetTypeID() {
+            window = unsafeBitCast(value, to: AXUIElement.self)
+        } else if let windows = attribute(root, kAXWindowsAttribute) as? [AXUIElement], windows.count == 1 {
+            window = windows[0]
+        } else {
+            window = nil
+        }
+        guard let window else { return false }
+        var pending = [window]
+        var matches: [AXUIElement] = []
+        var visited = 0
+        while let element = pending.popLast(), visited < 1200 {
+            visited += 1
+            let role = attribute(element, kAXRoleAttribute) as? String ?? ""
+            let title = attribute(element, kAXTitleAttribute) as? String ?? ""
+            let description = attribute(element, kAXDescriptionAttribute) as? String ?? ""
+            let placeholder = attribute(element, kAXPlaceholderValueAttribute) as? String ?? ""
+            let enabled = attribute(element, kAXEnabledAttribute) as? Bool ?? true
+            let labels = [title, description, placeholder]
+            if labels.contains(where: { ["Conversation turns", "Agent response", "User message"].contains($0) }) { continue }
+            if enabled && (role == kAXTextAreaRole || (adapter == "codex" && role == kAXTextFieldRole && (title == "Work with Codex" || description == "Work with Codex"))) {
+                matches.append(element)
+            }
+            if let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] {
+                pending.append(contentsOf: children)
+            }
+        }
+        guard matches.count == 1, let target = matches.first else { return false }
+        return AXUIElementSetAttributeValue(target, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+    }
+
+}
+
+struct DialScrollRequest: Equatable, Sendable {
+    static let standardLines = 3
+    static let fastLines = 15
+    static let maximumLines = 100
+    static let edgeLines = 1_000
+    static let burstIntervalNanoseconds: UInt64 = 16_000_000
+    static let defaultFromTop = 0.4
+
+    enum Mode: Equatable, Sendable {
+        case lines(Int)
+        case bottom
+    }
+
+    let mode: Mode
+    let fromTop: Double
+
+    init(mode: Mode, fromTop: Double = Self.defaultFromTop) {
+        self.mode = mode
+        self.fromTop = max(0.15, min(0.85, fromTop))
+    }
+
+    static func wheelDelta(lines: Int) -> Int32 {
+        let clamped = max(-maximumLines, min(maximumLines, lines))
+        return Int32(-clamped)
+    }
+
+    static func from(command: String, dialHeld: Bool = false) -> DialScrollRequest? {
+        switch command {
+        case "scroll-up":
+            return DialScrollRequest(mode: .lines(dialHeld ? -fastLines : -standardLines))
+        case "scroll-down":
+            return DialScrollRequest(mode: .lines(dialHeld ? fastLines : standardLines))
+        case "scroll-up-fast":
+            return DialScrollRequest(mode: .lines(-fastLines))
+        case "scroll-down-fast":
+            return DialScrollRequest(mode: .lines(fastLines))
+        case "scroll-to-bottom", "jump-to-bottom":
+            return DialScrollRequest(mode: .bottom)
+        default:
+            guard command.hasPrefix("scroll-lines:"),
+                  let parsed = Int(command.dropFirst("scroll-lines:".count)),
+                  parsed != 0 else {
+                return nil
+            }
+            let clamped = max(-maximumLines, min(maximumLines, parsed))
+            return DialScrollRequest(mode: .lines(clamped))
+        }
+    }
+
+    var canonicalCommand: String {
+        switch mode {
+        case .bottom:
+            return "scroll-to-bottom"
+        case .lines(let rawLines):
+            let lines = max(-Self.maximumLines, min(Self.maximumLines, rawLines))
+            switch lines {
+            case -Self.standardLines: return "scroll-up"
+            case Self.standardLines: return "scroll-down"
+            case -Self.fastLines: return "scroll-up-fast"
+            case Self.fastLines: return "scroll-down-fast"
+            default: return "scroll-lines:\(lines)"
+            }
+        }
+    }
+
+    func coalesced(with incoming: DialScrollRequest) -> DialScrollRequest? {
+        guard case .lines(let current) = mode,
+              case .lines(let delta) = incoming.mode else {
+            return nil
+        }
+        let sum = current + delta
+        let resolved = sum == 0 ? (delta >= 0 ? Self.standardLines : -Self.standardLines) : max(-Self.maximumLines, min(Self.maximumLines, sum))
+        return DialScrollRequest(mode: .lines(resolved), fromTop: incoming.fromTop)
+    }
+}
+
+struct DialScrollWindow: Equatable, Sendable {
+    let windowNumber: Int
+    let bounds: CGRect
+
+    func scrollPoint(fromTop: Double = DialScrollRequest.defaultFromTop) -> CGPoint {
+        let ratio = max(0.15, min(0.85, fromTop))
+        return CGPoint(x: bounds.midX, y: bounds.minY + bounds.height * ratio)
+    }
+
+    static func frontmost(in windowList: [[String: Any]], processID: pid_t) -> DialScrollWindow? {
+        for info in windowList {
+            guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t,
+                  ownerPID == processID else { continue }
+            let layer = info[kCGWindowLayer as String] as? Int ?? 0
+            guard layer == 0,
+                  let windowNumber = info[kCGWindowNumber as String] as? Int,
+                  let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: boundsDict),
+                  bounds.width >= 100,
+                  bounds.height >= 100 else { continue }
+            return DialScrollWindow(windowNumber: windowNumber, bounds: bounds)
+        }
+        return nil
+    }
 }
 
 struct AgentBadge: View {

@@ -26,8 +26,22 @@ def verify_evidence(run, scenario, started, process_alive):
               "physical_key": "NOT_RUN", "lighting_visual": "NOT_RUN"}
     if scenario == "host-execution":
         rows = [json.loads(line) for line in (evidence / "audit.jsonl").read_text().splitlines()]
-        if len(rows) != 17 or any(r["outcome"] != "simulated" for r in rows):
+        if len(rows) != 24 or any(r["outcome"] != "simulated" for r in rows):
             raise ValueError("host simulation receipts incomplete")
+        details = {r.get("detail") for r in rows}
+        for required_detail in (
+            "antigravity/scroll-up",
+            "antigravity/scroll-down",
+            "antigravity/scroll-to-bottom",
+            "no_newline=true (bytes=8)",
+        ):
+            if required_detail not in details:
+                raise ValueError(f"missing host simulation receipt: {required_detail}")
+        bindings = {r.get("binding_id") for r in rows}
+        if not {"menu-navigate-back", "menu-navigate-forward"}.issubset(bindings) or not any(
+            (d or "").endswith("/submit") for d in details
+        ):
+            raise ValueError("missing back/forward navigation or submit simulation receipt")
         if len({r["profile_id"] for r in rows}) != 8 or sum(r["binding_id"] in ("AG10", "AG11") for r in rows) != 1:
             raise ValueError("profile/wide-key regression")
         if rows[-1]["action_type"] != "macro_sequence" or rows[-1]["detail"] != "steps=2 keys=2 delays=0":

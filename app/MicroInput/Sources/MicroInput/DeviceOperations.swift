@@ -33,6 +33,24 @@ extension Store {
         operationCapabilities = (try? JSONDecoder().decode(DeviceOperationCapabilities.self, from: Data(backend.deviceOperationCapabilities().utf8))) ?? DeviceOperationCapabilities()
     }
 
+    func activeDesktopAgentAdapter(for profileId: String? = nil) -> String? {
+        let targetProfileID = (profileId?.isEmpty == false) ? profileId : hostActiveProfileId
+        if let targetProfileID,
+           let matchedProfile = hostProfiles.first(where: { $0.id.text == targetProfileID }),
+           let adapter = DesktopAgent.adapterForName(matchedProfile.name) {
+            return adapter
+        }
+        if let idx = navigationHistory.index, navigationHistory.entries.indices.contains(idx) {
+            for place in navigationHistory.entries[0...idx].reversed() {
+                if case .app(let bundleID) = place,
+                   let match = DesktopAgentControls.bundles.first(where: { $0.value == bundleID }) {
+                    return match.key
+                }
+            }
+        }
+        return nil
+    }
+
     @discardableResult
     func executeHostAction(actionJSON: String, bindingId: String, profileId: String, t3Selection: T3Selection? = nil, stillAdmitted: (() -> Bool)? = nil) async -> HostActionReceipt? {
         guard !hostOperationPaused, let lease = try? backend.beginHostExecution() else { return nil }
@@ -40,21 +58,166 @@ extension Store {
         inFlightHostActions += 1
         defer { inFlightHostActions -= 1; backend.finishHostExecution(lease: lease) }
         let receipt: HostActionReceipt
-        let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(actionJSON.utf8))
-        if payload?.action_type == "agent_command", payload?.adapter == "t3", payload?.command == "next-attention" {
+        var effectiveJSON = actionJSON
+        var payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(actionJSON.utf8))
+        if let decoded = payload,
+           decoded.action_type == "agent_command",
+           decoded.adapter == "host",
+           let cmd = decoded.command,
+           (cmd == "submit" || cmd == "focus-input" || cmd.hasPrefix("prompt:") || cmd.hasPrefix("submit-prompt:")),
+           let resolvedAdapter = activeDesktopAgentAdapter(for: profileId) {
+            let rewritten = ResolvedHostActionPayload(
+                action_type: decoded.action_type,
+                key: decoded.key,
+                key_code: decoded.key_code,
+                modifiers: decoded.modifiers,
+                target_bundle_id: DesktopAgentControls.bundles[resolvedAdapter] ?? decoded.target_bundle_id,
+                text: decoded.text,
+                bundle_id: decoded.bundle_id,
+                url: decoded.url,
+                working_directory: decoded.working_directory,
+                adapter: resolvedAdapter,
+                command: decoded.command,
+                session: decoded.session,
+                events: decoded.events,
+                no_newline: decoded.no_newline,
+                submit: decoded.submit
+            )
+            if let encoded = try? JSONEncoder().encode(rewritten) {
+                effectiveJSON = String(decoding: encoded, as: UTF8.self)
+                payload = rewritten
+            }
+        }
+        if payload?.action_type == "agent_command",
+           let command = payload?.command,
+           ["back", "navigate-back", "forward", "navigate-forward"].contains(command),
+           let adapter = payload?.adapter,
+           ["navigation", "host", "cindy", "zcode", "qwenwork", "codex", "antigravity", "dsh-desktop", "qoder-cn", "herdr", "t3"].contains(adapter) {
+            let isBack = command == "back" || command == "navigate-back"
+            let destination = isBack
+                ? navigationHistory.back(available: { [weak self] place in self?.isNavigationPlaceAvailable(place) == true })
+                : navigationHistory.forward(available: { [weak self] place in self?.isNavigationPlaceAvailable(place) == true })
+            receipt = await replayNavigationPlace(destination, isBack: isBack, bindingId: bindingId, profileId: profileId, epoch: epoch, stillAdmitted: stillAdmitted)
+        } else if payload?.action_type == "agent_command", payload?.adapter == "t3", payload?.command == "next-attention" {
             let result = await t3Attention.open(t3Selection, admitted: { [weak self] in
                 guard let self else { return false }
                 return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
             })
+            if result == .delivered, let identity = t3Selection?.event.identity {
+                navigationHistory.visit(.t3Thread(environmentID: identity.environmentID, threadID: identity.threadID))
+            }
             receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
                 bindingId: bindingId, actionType: "t3_next_attention", target: "t3", textByteLen: nil,
                 outcome: result.rawValue, detail: result.label)
             AuditLogWriter.append(receipt)
         } else {
-            receipt = await actionExecutor.execute(actionJSON: actionJSON, bindingId: bindingId, profileId: profileId)
+            receipt = await actionExecutor.execute(actionJSON: effectiveJSON, bindingId: bindingId, profileId: profileId)
+            if receipt.succeeded, let payload {
+                recordNavigationVisitIfApplicable(payload)
+            }
         }
         guard !Task.isCancelled, epoch == hostRouteEpoch, !hostOperationPaused else { return nil }
         lastHostActionReceipt = receipt
+        return receipt
+    }
+
+    private func recordNavigationVisitIfApplicable(_ payload: ResolvedHostActionPayload) {
+        switch payload.action_type {
+        case "open_app":
+            if let bundleID = payload.bundle_id, !bundleID.isEmpty {
+                navigationHistory.visit(.app(bundleID: bundleID))
+            }
+        case "paste_text":
+            if let targetBundle = payload.target_bundle_id, !targetBundle.isEmpty, targetBundle != "frontmost-editor" {
+                navigationHistory.visit(.app(bundleID: targetBundle))
+            } else if let adapter = payload.adapter, let bundleID = DesktopAgentControls.bundles[adapter] {
+                navigationHistory.visit(.app(bundleID: bundleID))
+            }
+        case "focus_session":
+            if let adapter = payload.adapter, let session = payload.session,
+               !adapter.isEmpty, !session.isEmpty, session != "unselected" {
+                navigationHistory.visit(.session(adapter: adapter, session: session))
+            }
+        case "agent_command":
+            guard let adapter = payload.adapter, let cmd = payload.command else { return }
+            if let bundleID = DesktopAgentControls.bundles[adapter], DialScrollRequest.from(command: cmd) == nil {
+                navigationHistory.visit(.app(bundleID: bundleID))
+            } else if adapter == "herdr" {
+                navigationHistory.visit(.app(bundleID: "dev.herdr.app"))
+            }
+        case "shortcut":
+            if let targetBundle = payload.target_bundle_id, !targetBundle.isEmpty, targetBundle != "frontmost-editor" {
+                navigationHistory.visit(.app(bundleID: targetBundle))
+            }
+        default:
+            break
+        }
+    }
+
+    private func replayNavigationPlace(
+        _ destination: KeypadNavigationPlace?,
+        isBack: Bool,
+        bindingId: String,
+        profileId: String,
+        epoch: Int,
+        stillAdmitted: (() -> Bool)?
+    ) async -> HostActionReceipt {
+        let actionType = isBack ? "navigate_back" : "navigate_forward"
+        guard let destination else {
+            let receipt = HostActionReceipt(
+                timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                profileId: profileId,
+                bindingId: bindingId,
+                actionType: actionType,
+                target: "navigation",
+                textByteLen: nil,
+                outcome: "blocked",
+                detail: isBack ? "没有可后退的打开历史" : "没有可前进的打开历史"
+            )
+            AuditLogWriter.append(receipt)
+            return receipt
+        }
+        switch destination {
+        case .app(let bundleID):
+            if let data = try? JSONSerialization.data(withJSONObject: ["action_type": "open_app", "bundle_id": bundleID]),
+               let replayJSON = String(data: data, encoding: .utf8) {
+                return await actionExecutor.execute(actionJSON: replayJSON, bindingId: bindingId, profileId: profileId)
+            }
+        case .session(let adapter, let session):
+            if let data = try? JSONSerialization.data(withJSONObject: ["action_type": "focus_session", "adapter": adapter, "session": session]),
+               let replayJSON = String(data: data, encoding: .utf8) {
+                return await actionExecutor.execute(actionJSON: replayJSON, bindingId: bindingId, profileId: profileId)
+            }
+        case .t3Thread(let environmentID, let threadID):
+            let identity = T3ThreadIdentity(environmentID: environmentID, threadID: threadID)
+            let delivered = await t3Attention.navigate(to: identity, admitted: { [weak self] in
+                guard let self else { return false }
+                return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? true)
+            })
+            let receipt = HostActionReceipt(
+                timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                profileId: profileId,
+                bindingId: bindingId,
+                actionType: actionType,
+                target: "t3",
+                textByteLen: nil,
+                outcome: delivered ? "delivered" : "failed",
+                detail: delivered ? (isBack ? "已后退到 T3 会话" : "已前进到 T3 会话") : "T3 历史目标不可达"
+            )
+            AuditLogWriter.append(receipt)
+            return receipt
+        }
+        let receipt = HostActionReceipt(
+            timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+            profileId: profileId,
+            bindingId: bindingId,
+            actionType: actionType,
+            target: destination.receiptTarget,
+            textByteLen: nil,
+            outcome: "blocked",
+            detail: "历史目标编码失败"
+        )
+        AuditLogWriter.append(receipt)
         return receipt
     }
     func refreshDeviceOperations() async {

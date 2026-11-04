@@ -79,14 +79,17 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                 }
             }
             Ok(ActionKind::Text { .. }) => {
-                prerequisites.push("需要 Mac 宿主常驻与明确的文本输入目标".into());
+                prerequisites.push(
+                    "需要 Mac 宿主常驻与明确的文本输入目标；桌面 Agent 下自动聚焦输入区并暂存恢复原剪贴板"
+                        .into(),
+                );
                 (
                     "当前文本输入目标".into(),
                     true,
                     true,
                     "",
-                    "Mac 宿主动作执行器（剪贴板恢复 + Cmd+V）",
-                    "宿主激活对应 Profile 时按键可实时触发此动作",
+                    "Mac 宿主动作执行器（输入区聚焦 + 剪贴板暂存恢复 + Cmd+V）",
+                    "默认仅粘贴不自动回车（no_newline=true）；仅在显式配置或按提交键时停止活跃听写并提交",
                 )
             }
             Ok(ActionKind::OpenUrl { url }) => {
@@ -125,6 +128,40 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                     "交付打开请求与目标访问确认分别报告；不发送或批准会话内容",
                 )
             }
+            Ok(ActionKind::AgentCommand { adapter, command })
+                if matches!(
+                    command.as_str(),
+                    "back" | "navigate-back" | "forward" | "navigate-forward"
+                ) && matches!(
+                    adapter.as_str(),
+                    "navigation"
+                        | "host"
+                        | "cindy"
+                        | "zcode"
+                        | "qwenwork"
+                        | "codex"
+                        | "antigravity"
+                        | "dsh-desktop"
+                        | "qoder-cn"
+                        | "herdr"
+                        | "t3"
+                ) =>
+            {
+                prerequisites.push("需要 Mac 宿主常驻及至少一条小键盘打开历史".into());
+                let direction = if matches!(command.as_str(), "back" | "navigate-back") {
+                    "后退"
+                } else {
+                    "前进"
+                };
+                (
+                    format!("跨 Agent 导航 / {direction}"),
+                    true,
+                    true,
+                    "",
+                    "Mac 宿主跨 Agent 导航历史栈（最多 50 条）",
+                    "回放小键盘打开历史中的上一/下一可用目标；后退保留前进栈，新打开截断前进栈",
+                )
+            }
             Ok(ActionKind::ShellCommand {
                 command: _,
                 working_directory,
@@ -151,6 +188,43 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                     )
                 }
             }
+            Ok(ActionKind::AgentCommand { adapter, command })
+                if matches!(
+                    adapter.as_str(),
+                    "host"
+                        | "cindy"
+                        | "zcode"
+                        | "qwenwork"
+                        | "codex"
+                        | "antigravity"
+                        | "dsh-desktop"
+                        | "qoder-cn"
+                ) && (command == "submit"
+                    || command
+                        .strip_prefix("prompt:")
+                        .is_some_and(|s| !s.trim_end_matches(['\r', '\n']).trim().is_empty())
+                    || command
+                        .strip_prefix("submit-prompt:")
+                        .is_some_and(|s| !s.trim_end_matches(['\r', '\n']).trim().is_empty())) =>
+            {
+                prerequisites.push(
+                    "需要目标桌面 Agent 运行、辅助功能权限及唯一可访问输入框；活跃听写未确认停止时自动阻断提交"
+                        .into(),
+                );
+                let semantics = if command.starts_with("prompt:") {
+                    "聚焦目标输入区、暂存并恢复原剪贴板后仅粘贴文本（no_newline=true，不自动回车）"
+                } else {
+                    "若听写激活则先停并确认停止，随后聚焦目标输入区（粘贴后）回车提交"
+                };
+                (
+                    format!("{adapter} / {command}"),
+                    true,
+                    true,
+                    "",
+                    "Mac 宿主防冲突提交与 Prompt 派发器（AX 输入区聚焦 + 听写清理门禁）",
+                    semantics,
+                )
+            }
             Ok(ActionKind::AgentCommand { adapter, command }) => {
                 let desktop = matches!(
                     adapter.as_str(),
@@ -163,7 +237,16 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                         | "qoder-cn"
                 ) && (matches!(
                     command.as_str(),
-                    "model" | "effort" | "dictation" | "browser" | "terminal"
+                    "model"
+                        | "effort"
+                        | "dictation"
+                        | "browser"
+                        | "terminal"
+                        | "scroll-up"
+                        | "scroll-down"
+                        | "scroll-up-fast"
+                        | "scroll-down-fast"
+                        | "scroll-to-bottom"
                 ) || (command == "push-to-talk"
                     && matches!(
                         adapter.as_str(),

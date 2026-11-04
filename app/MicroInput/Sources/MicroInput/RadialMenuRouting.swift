@@ -13,20 +13,108 @@ extension Store {
         radialOverlay.hide()
     }
     func cancelRadialMenu() { radialMenu.cancel(); radialOverlay.hide() }
-    func radialSlots() -> [RadialSlot] {
-        let selection = t3Attention.selectNext()
-        let title = selection.flatMap { selected in t3Attention.items.first(where: { $0.event == selected.event })?.title }
-        let hasProfile = routing?.profile_id.map { id in hostProfiles.contains(where: { $0.id.text == id }) } ?? false
-        var slots = [RadialSlot(label: title.map { "需要我 · \($0)" } ?? "T3 下一个需要我", intent: selection.map(RadialIntent.t3),
-                                unavailableReason: selection == nil ? "没有新鲜待处理目标" : nil),
-                     RadialSlot(label: "按键速查", intent: hasProfile ? .cheatSheet : nil,
-                                unavailableReason: hasProfile ? nil : "当前配置不可用")]
-        for adapter in ["cindy", "codex", "qwenwork", "zcode", "antigravity", "dsh-desktop"] {
-            guard let bundle = DesktopAgentControls.bundles[adapter], let app = DesktopAgent.all.first(where: { $0.bundleID == bundle }) else { continue }
-            let installed = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil
-            slots.append(RadialSlot(label: app.name, intent: installed ? .openApp(bundle) : nil, unavailableReason: installed ? nil : "应用未安装"))
+    private static let radialSlotConfigsPreferencesKey = "radialMenuSlotConfigs"
+
+    func radialSlotConfigs() -> [RadialSlotConfig]? {
+        guard let data = radialPreferences.data(forKey: Self.radialSlotConfigsPreferencesKey),
+              let decoded = try? JSONDecoder().decode([RadialSlotConfig].self, from: data),
+              decoded.count == 8 else { return nil }
+        return decoded
+    }
+    func setRadialSlotConfigs(_ configs: [RadialSlotConfig]?) {
+        if let configs, configs.count == 8, let data = try? JSONEncoder().encode(configs) {
+            radialPreferences.set(data, forKey: Self.radialSlotConfigsPreferencesKey)
+        } else {
+            radialPreferences.removeObject(forKey: Self.radialSlotConfigsPreferencesKey)
         }
-        return slots
+        cancelRadialMenu()
+    }
+    func setRadialSlotConfig(at index: Int, _ config: RadialSlotConfig) {
+        guard (0..<8).contains(index) else { return }
+        var current = radialSlotConfigs() ?? defaultRadialSlotConfigs()
+        guard current.indices.contains(index) else { return }
+        current[index] = config
+        setRadialSlotConfigs(current)
+    }
+    func applyPaseoRadialPreset() {
+        setRadialSlotConfigs(RadialSlotConfig.paseoEngineeringSlots)
+    }
+    private func defaultRadialSlotConfigs() -> [RadialSlotConfig] {
+        var configs: [RadialSlotConfig] = [
+            .t3(),
+            .cheatSheet()
+        ]
+        for adapter in ["cindy", "codex", "qwenwork", "zcode", "antigravity", "dsh-desktop"] {
+            if let bundle = DesktopAgentControls.bundles[adapter],
+               let app = DesktopAgent.all.first(where: { $0.bundleID == bundle }) {
+                configs.append(.openApp(label: app.name, bundleID: bundle))
+            }
+        }
+        return configs
+    }
+    private func resolveRadialSlot(_ config: RadialSlotConfig, hasProfile: Bool) -> RadialSlot {
+        switch config.kind {
+        case .t3:
+            let selection = t3Attention.selectNext()
+            let title = selection.flatMap { selected in t3Attention.items.first(where: { $0.event == selected.event })?.title }
+            return RadialSlot(
+                label: title.map { "需要我 · \($0)" } ?? config.label,
+                intent: selection.map(RadialIntent.t3),
+                unavailableReason: selection == nil ? "没有新鲜待处理目标" : nil
+            )
+        case .cheatSheet:
+            return RadialSlot(
+                label: config.label,
+                intent: hasProfile ? .cheatSheet : nil,
+                unavailableReason: hasProfile ? nil : "当前配置不可用"
+            )
+        case .openApp:
+            let bundle = config.bundleID ?? ""
+            let installed = !bundle.isEmpty && NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) != nil
+            return RadialSlot(
+                label: config.label,
+                intent: installed ? .openApp(bundle) : nil,
+                unavailableReason: installed ? nil : "应用未安装"
+            )
+        case .prompt:
+            let sanitized = RecordingHostActionExecutor.stripTrailingNewlines(config.text ?? "")
+            guard !sanitized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return RadialSlot(label: config.label, intent: nil, unavailableReason: "未设置指令文本")
+            }
+            let adapter = config.adapter ?? activeDesktopAgentAdapter()
+            let available = adapter != nil || hasProfile
+            return RadialSlot(
+                label: config.label,
+                intent: available ? .prompt(text: sanitized, adapter: adapter, submit: config.submit) : nil,
+                unavailableReason: available ? nil : "没有可用的目标配置"
+            )
+        case .submit:
+            let adapter = config.adapter ?? activeDesktopAgentAdapter()
+            return RadialSlot(
+                label: config.label,
+                intent: adapter != nil ? .submit(adapter: adapter) : nil,
+                unavailableReason: adapter != nil ? nil : "当前配置不是桌面 Agent"
+            )
+        case .navigateBack:
+            let canBack = navigationHistory.canGoBack(available: { [weak self] place in self?.isNavigationPlaceAvailable(place) == true })
+            return RadialSlot(
+                label: config.label,
+                intent: canBack ? .navigateBack : nil,
+                unavailableReason: canBack ? nil : "没有可后退的打开历史"
+            )
+        case .navigateForward:
+            let canForward = navigationHistory.canGoForward(available: { [weak self] place in self?.isNavigationPlaceAvailable(place) == true })
+            return RadialSlot(
+                label: config.label,
+                intent: canForward ? .navigateForward : nil,
+                unavailableReason: canForward ? nil : "没有可前进的打开历史"
+            )
+        }
+    }
+    func radialSlots() -> [RadialSlot] {
+        let hasProfile = routing?.profile_id.map { id in hostProfiles.contains(where: { $0.id.text == id }) } ?? false
+        let configs = radialSlotConfigs() ?? defaultRadialSlotConfigs()
+        return configs.map { resolveRadialSlot($0, hasProfile: hasProfile) }
     }
     func consumeRadialInput(_ event: InputEventInfo, admission: HostInputAdmission) -> Bool {
         guard radialMenu.enabled else { return false }
@@ -75,6 +163,33 @@ extension Store {
             json = String(decoding: data, as: UTF8.self)
         case .t3: json = #"{"action_type":"agent_command","adapter":"t3","command":"next-attention"}"#
         case .cheatSheet: json = "{}"
+        case .prompt(let text, let adapter, let submit):
+            let resolvedAdapter = adapter ?? activeDesktopAgentAdapter(for: profile)
+            let targetBundleID = resolvedAdapter.flatMap { DesktopAgentControls.bundles[$0] }
+            let payload = ResolvedHostActionPayload(
+                action_type: "paste_text",
+                target_bundle_id: targetBundleID,
+                text: text,
+                adapter: resolvedAdapter,
+                no_newline: true,
+                submit: submit
+            )
+            guard let data = try? JSONEncoder().encode(payload) else { return }
+            json = String(decoding: data, as: UTF8.self)
+        case .submit(let adapter):
+            let resolvedAdapter = adapter ?? activeDesktopAgentAdapter(for: profile) ?? "host"
+            let payload = ResolvedHostActionPayload(
+                action_type: "agent_command",
+                target_bundle_id: DesktopAgentControls.bundles[resolvedAdapter],
+                adapter: resolvedAdapter,
+                command: "submit"
+            )
+            guard let data = try? JSONEncoder().encode(payload) else { return }
+            json = String(decoding: data, as: UTF8.self)
+        case .navigateBack:
+            json = #"{"action_type":"agent_command","adapter":"navigation","command":"back"}"#
+        case .navigateForward:
+            json = #"{"action_type":"agent_command","adapter":"navigation","command":"forward"}"#
         }
         enqueueHostAction(json: json, binding: "radial-menu", profile: profile, state: session.routing,
                           deviceSession: session.inputSession, deviceIngress: ingress, radialIntent: intent)

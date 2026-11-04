@@ -119,3 +119,52 @@ fn shell_command_capability_hides_execution_until_consent_is_enabled() {
     assert!(command.capability.unavailable_reason.is_empty());
     assert!(command.capability.result_semantics.contains("退出状态"));
 }
+
+#[test]
+fn cross_agent_navigation_actions_are_executable_and_assignable_to_any_slot() {
+    let entries = action_library::search("", "导航", false, &BTreeSet::new(), false);
+    assert_eq!(entries.len(), 2);
+    let back = entries
+        .iter()
+        .find(|entry| entry.action.id == "navigate-back")
+        .unwrap();
+    let forward = entries
+        .iter()
+        .find(|entry| entry.action.id == "navigate-forward")
+        .unwrap();
+    for entry in [back, forward] {
+        assert!(entry.capability.host_required);
+        assert!(entry.capability.execution_available);
+        assert!(entry.capability.unavailable_reason.is_empty());
+    }
+
+    let mut draft = Draft::default();
+    let p = draft.config.profiles[0].id.clone();
+    let l = draft.config.profiles[0].layers[0].id.clone();
+    draft.assign(&p, &l, 0, back.action.clone()).unwrap();
+    draft.assign(&p, &l, 1, forward.action.clone()).unwrap();
+}
+
+#[test]
+fn prompt_slots_and_submit_control_actions_report_paste_only_vs_explicit_submit_semantics() {
+    let text_entries = action_library::search("工程指令", "文本", false, &BTreeSet::new(), false);
+    assert_eq!(text_entries.len(), 5);
+    for entry in &text_entries {
+        assert!(entry.capability.host_required);
+        assert!(entry.capability.execution_available);
+        assert!(entry
+            .capability
+            .result_semantics
+            .contains("no_newline=true"));
+        assert!(entry.capability.result_semantics.contains("不自动回车"));
+    }
+
+    let submit_entries = action_library::search("", "提交控制", false, &BTreeSet::new(), false);
+    assert_eq!(submit_entries.len(), 2);
+    for entry in &submit_entries {
+        assert!(entry.capability.host_required);
+        assert!(entry.capability.execution_available);
+        assert!(entry.capability.unavailable_reason.is_empty());
+        assert!(entry.capability.result_semantics.contains("先停"));
+    }
+}

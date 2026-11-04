@@ -89,6 +89,18 @@ final class T3AttentionModelTests: XCTestCase {
         let replacement = try t3Items([t3Thread("a", changes: ["pendingRuntimeRequest": t3Request("r3")]), t3Thread("b", changes: ["pendingRuntimeRequest": t3Request("r2")])])
         XCTAssertEqual(round.next(replacement), replacement[0].event)
     }
+    func testRoundAvoidsLastOpenedSessionWhenMultipleItemsWait() throws {
+        let items = try t3Items([
+            t3Thread("a", changes: ["pendingRuntimeRequest": t3Request("r1")]),
+            t3Thread("b", changes: ["pendingRuntimeRequest": t3Request("r2")])
+        ])
+        var round = T3AttentionRound()
+        // If user navigated back/focused thread "a" via keypad history, next() picks "b" instead of re-opening "a"
+        round.noteOpened(items[0].event.identity)
+        XCTAssertEqual(round.next(items), items[1].event)
+        round.record(items[1].event, items: items)
+        XCTAssertEqual(round.next(items), items[0].event)
+    }
     func testSnoozeWakesForRequestsGuestAndFreshFailureButNotCompletion() throws {
         let snooze: [String: Any] = ["snoozedUntil": "2099-11-04T10:00:00Z", "snoozedAt": t3Earlier]
         for wake: [String: Any] in [["pendingRuntimeRequest": t3Request()], ["pendingGuestMessageCount": 1], ["status": "failed", "latestRunCompletedAt": t3Time]] {
@@ -364,6 +376,52 @@ extension T3AttentionControllerTests {
         client.waiter?.resume(); client.waiter = nil
         await execution.value
         XCTAssertEqual(opens, 2); XCTAssertEqual(core.hostExecutionsPending(), 0)
+        await store.shutdown()
+    }
+    func testCrossAgentNavigationHistoryAndPendingAttentionCooperateConflictFree() async throws {
+        let client = T3TestReader(try t3Snapshot([
+            t3Thread("thread-a", changes: ["pendingRuntimeRequest": t3Request("req-a")]),
+            t3Thread("thread-b", changes: ["pendingRuntimeRequest": t3Request("req-b")])
+        ]))
+        var openedURLs: [URL] = []
+        let controller = T3AttentionController(client: client, pollNanoseconds: 60_000_000_000, opener: { url in
+            openedURLs.append(url)
+            return true
+        })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = RecordingHostActionExecutor()
+        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: directory.appendingPathComponent("workbench.json"), actionExecutor: executor, t3Attention: controller)
+        await store.loadWorkbench(); await store.installCodingAgentPresets()
+        let profile = try XCTUnwrap(store.profile?.id.text)
+        await store.setHostActiveProfile(profile)
+        await store.setHostExecutionEnabled(true)
+        controller.setEnabled(true); await ready(controller)
+
+        // 1. Open T3 pending session A via next-attention
+        store.openNextT3Attention(); await store.hostExecutionTask?.value
+        XCTAssertEqual(openedURLs.count, 1)
+        XCTAssertTrue(openedURLs.last?.absoluteString.contains("thread-a") == true)
+
+        // 2. Open Herdr and Codex via keypad
+        _ = await store.executeHostAction(actionJSON: #"{"action_type":"open_app","bundle_id":"dev.herdr.app"}"#, bindingId: "AG00", profileId: profile)
+        _ = await store.executeHostAction(actionJSON: #"{"action_type":"open_app","bundle_id":"com.openai.codex"}"#, bindingId: "AG00", profileId: profile)
+
+        // 3. Navigate back twice: Codex -> Herdr -> T3 thread-a (preserving forward stack)
+        store.navigateBack(); await store.hostExecutionTask?.value
+        XCTAssertEqual(store.lastHostActionReceipt?.target, "dev.herdr.app")
+        store.navigateBack(); await store.hostExecutionTask?.value
+        XCTAssertEqual(store.lastHostActionReceipt?.target, "t3")
+        XCTAssertEqual(store.lastHostActionReceipt?.outcome, "delivered")
+        XCTAssertEqual(openedURLs.count, 2)
+        XCTAssertTrue(openedURLs.last?.absoluteString.contains("thread-a") == true)
+
+        // 4. Triggering next-attention now skips just-focused thread-a and opens thread-b
+        store.openNextT3Attention(); await store.hostExecutionTask?.value
+        XCTAssertEqual(openedURLs.count, 3)
+        XCTAssertTrue(openedURLs.last?.absoluteString.contains("thread-b") == true)
+        XCTAssertFalse(store.navigationHistory.canGoForward())
+
         await store.shutdown()
     }
 }

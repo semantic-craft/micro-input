@@ -5,6 +5,61 @@ enum RadialIntent: Equatable {
     case openApp(String)
     case t3(T3Selection)
     case cheatSheet
+    case prompt(text: String, adapter: String?, submit: Bool)
+    case submit(adapter: String?)
+    case navigateBack
+    case navigateForward
+}
+
+struct RadialSlotConfig: Codable, Equatable {
+    enum Kind: String, Codable, Equatable {
+        case t3 = "t3"
+        case cheatSheet = "cheat_sheet"
+        case openApp = "open_app"
+        case prompt = "prompt"
+        case submit = "submit"
+        case navigateBack = "navigate_back"
+        case navigateForward = "navigate_forward"
+    }
+    var kind: Kind
+    var label: String
+    var text: String?
+    var bundleID: String?
+    var adapter: String?
+    var submit: Bool
+
+    static func prompt(label: String, text: String, adapter: String? = nil, submit: Bool = false) -> RadialSlotConfig {
+        RadialSlotConfig(kind: .prompt, label: label, text: text, bundleID: nil, adapter: adapter, submit: submit)
+    }
+    static func submit(label: String = "提交", adapter: String? = nil) -> RadialSlotConfig {
+        RadialSlotConfig(kind: .submit, label: label, text: nil, bundleID: nil, adapter: adapter, submit: true)
+    }
+    static func navigateBack(label: String = "后退") -> RadialSlotConfig {
+        RadialSlotConfig(kind: .navigateBack, label: label, text: nil, bundleID: nil, adapter: nil, submit: false)
+    }
+    static func navigateForward(label: String = "前进") -> RadialSlotConfig {
+        RadialSlotConfig(kind: .navigateForward, label: label, text: nil, bundleID: nil, adapter: nil, submit: false)
+    }
+    static func t3(label: String = "T3 下一个需要我") -> RadialSlotConfig {
+        RadialSlotConfig(kind: .t3, label: label, text: nil, bundleID: nil, adapter: nil, submit: false)
+    }
+    static func cheatSheet(label: String = "按键速查") -> RadialSlotConfig {
+        RadialSlotConfig(kind: .cheatSheet, label: label, text: nil, bundleID: nil, adapter: nil, submit: false)
+    }
+    static func openApp(label: String, bundleID: String) -> RadialSlotConfig {
+        RadialSlotConfig(kind: .openApp, label: label, text: nil, bundleID: bundleID, adapter: nil, submit: false)
+    }
+
+    static let paseoEngineeringSlots: [RadialSlotConfig] = [
+        .navigateBack(label: "Back · 后退"),
+        .prompt(label: "Test", text: "Run the tests and fix any failures", submit: false),
+        .prompt(label: "Continue", text: "Continue", submit: false),
+        .prompt(label: "Commit", text: "Commit this work", submit: false),
+        .navigateForward(label: "Forward · 前进"),
+        .prompt(label: "Review", text: "Review your diff for bugs", submit: false),
+        .submit(label: "Submit · 提交"),
+        .prompt(label: "Summary", text: "Summarize where things stand and what's left", submit: false)
+    ]
 }
 struct RadialSlot: Identifiable {
     let label: String

@@ -400,6 +400,73 @@ final class RadialMenuStateTests: XCTestCase {
         XCTAssertNil(f.store.radialMenu.session)
         await f.close()
     }
+
+    func testConfigurablePaseoRadialPromptAndSubmitSlotsDispatchToActiveDesktopAgents() async throws {
+        let f = try await fixture()
+        f.store.setRadialMenuEnabled(true)
+        f.store.applyPaseoRadialPreset()
+
+        // Seed cross-agent navigation history so Back (slot 0) and Forward (slot 4) are testable
+        _ = await f.store.executeHostAction(
+            actionJSON: #"{"action_type":"open_app","bundle_id":"com.google.antigravity"}"#,
+            bindingId: "AG00",
+            profileId: "p-seed"
+        )
+        _ = await f.store.executeHostAction(
+            actionJSON: #"{"action_type":"open_app","bundle_id":"cn.qwenwork.desktop.mac"}"#,
+            bindingId: "AG00",
+            profileId: "p-seed"
+        )
+
+        for (agentName, expectedAdapter, expectedBundle) in [
+            ("Antigravity", "antigravity", "com.google.antigravity"),
+            ("千问办公", "qwenwork", "cn.qwenwork.desktop.mac"),
+            ("Cindy", "cindy", "com.xd.cindy"),
+            ("Codex", "codex", "com.openai.codex")
+        ] {
+            let profile = try XCTUnwrap(f.store.hostProfiles.first { $0.name == agentName })
+            await f.store.setHostActiveProfile(profile.id.text)
+            let slots = f.store.radialSlots()
+            XCTAssertEqual(slots.count, 8)
+            XCTAssertEqual(slots[1].intent, .prompt(text: "Run the tests and fix any failures", adapter: expectedAdapter, submit: false))
+            XCTAssertEqual(slots[2].intent, .prompt(text: "Continue", adapter: expectedAdapter, submit: false))
+            XCTAssertEqual(slots[3].intent, .prompt(text: "Commit this work", adapter: expectedAdapter, submit: false))
+            XCTAssertEqual(slots[5].intent, .prompt(text: "Review your diff for bugs", adapter: expectedAdapter, submit: false))
+            XCTAssertEqual(slots[6].intent, .submit(adapter: expectedAdapter))
+            XCTAssertEqual(slots[7].intent, .prompt(text: "Summarize where things stand and what's left", adapter: expectedAdapter, submit: false))
+
+            // Confirm slot 1 (SouthEast -> Test prompt, paste-only no_newline=true)
+            try await f.feed(.radialCenter)
+            try await f.feed(.radialSouthEast)
+            try await f.feed(.encoderClick, count: 2)
+            await f.store.hostExecutionTask?.value
+
+            let receipt = try XCTUnwrap(f.store.lastHostActionReceipt)
+            XCTAssertEqual(receipt.actionType, "paste_text")
+            XCTAssertEqual(receipt.target, expectedBundle)
+            XCTAssertEqual(receipt.textByteLen, "Run the tests and fix any failures".utf8.count)
+            XCTAssertTrue(receipt.detail.contains("no_newline=true"))
+            XCTAssertFalse(receipt.detail.contains("auto_submit=true"))
+        }
+
+        // Custom per-slot override with explicit submit=true on slot 1
+        f.store.setRadialSlotConfig(
+            at: 1,
+            .prompt(label: "Custom + Submit", text: "Fix lint warnings\r\n", adapter: "codex", submit: true)
+        )
+        try await f.feed(.radialCenter)
+        try await f.feed(.radialSouthEast)
+        try await f.feed(.encoderClick, count: 2)
+        await f.store.hostExecutionTask?.value
+
+        let explicitSubmitReceipt = try XCTUnwrap(f.store.lastHostActionReceipt)
+        XCTAssertEqual(explicitSubmitReceipt.actionType, "paste_text")
+        XCTAssertEqual(explicitSubmitReceipt.target, "com.openai.codex")
+        XCTAssertEqual(explicitSubmitReceipt.textByteLen, "Fix lint warnings".utf8.count)
+        XCTAssertTrue(explicitSubmitReceipt.detail.contains("auto_submit=true"))
+
+        await f.close()
+    }
 }
 @MainActor private final class RadialT3Reader: T3Reading {
     var value: T3ReadSnapshot

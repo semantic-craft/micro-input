@@ -28,6 +28,23 @@ pub enum PassThroughHealth {
     Disconnected,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+pub fn desktop_agent_for_profile_name(name: &str) -> Option<(&'static str, &'static str)> {
+    match name.trim() {
+        "Antigravity" => Some(("antigravity", "com.google.antigravity")),
+        "千问办公" | "QwenWork" => Some(("qwenwork", "cn.qwenwork.desktop.mac")),
+        "Cindy" => Some(("cindy", "com.xd.cindy")),
+        "Codex" => Some(("codex", "com.openai.codex")),
+        "ZCode" => Some(("zcode", "dev.zcode.app")),
+        "DeepSeek Coder (DSH)" | "DSH" => Some(("dsh-desktop", "com.deepseek.dsh")),
+        "Qoder CN" => Some(("qoder-cn", "com.qodercn.app")),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "action_type", rename_all = "snake_case")]
 pub enum ResolvedHostAction {
@@ -39,6 +56,14 @@ pub enum ResolvedHostAction {
     },
     PasteText {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_bundle_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter: Option<String>,
+        #[serde(default = "default_true")]
+        no_newline: bool,
+        #[serde(default)]
+        submit: bool,
     },
     OpenApp {
         bundle_id: String,
@@ -380,7 +405,11 @@ pub fn macos_virtual_key_code(key: &str) -> Option<u16> {
     }
 }
 
-fn convert_action(action: &Action, command_execution_enabled: bool) -> Option<ResolvedHostAction> {
+fn convert_action(
+    action: &Action,
+    profile_name: Option<&str>,
+    command_execution_enabled: bool,
+) -> Option<ResolvedHostAction> {
     let kind: ActionKind = serde_json::from_value(action.payload.clone()).ok()?;
     match kind {
         ActionKind::Shortcut {
@@ -403,7 +432,22 @@ fn convert_action(action: &Action, command_execution_enabled: bool) -> Option<Re
                 target_bundle_id,
             })
         }
-        ActionKind::Text { text } => Some(ResolvedHostAction::PasteText { text }),
+        ActionKind::Text { text } => {
+            if text.trim_end_matches(['\r', '\n']).trim().is_empty() {
+                return None;
+            }
+            let (adapter, target_bundle_id) = profile_name
+                .and_then(desktop_agent_for_profile_name)
+                .map(|(a, b)| (Some(a.to_owned()), Some(b.to_owned())))
+                .unwrap_or((None, None));
+            Some(ResolvedHostAction::PasteText {
+                text,
+                target_bundle_id,
+                adapter,
+                no_newline: true,
+                submit: false,
+            })
+        }
         ActionKind::OpenApp { bundle_id } => Some(ResolvedHostAction::OpenApp { bundle_id }),
         ActionKind::OpenUrl { url } => Some(ResolvedHostAction::OpenUrl { url }),
         ActionKind::ShellCommand {
@@ -415,7 +459,31 @@ fn convert_action(action: &Action, command_execution_enabled: bool) -> Option<Re
         }),
         ActionKind::ShellCommand { .. } => None,
         ActionKind::AgentCommand { adapter, command } => {
-            Some(ResolvedHostAction::AgentCommand { adapter, command })
+            if let Some(prompt) = command
+                .strip_prefix("prompt:")
+                .or_else(|| command.strip_prefix("submit-prompt:"))
+            {
+                if prompt.trim_end_matches(['\r', '\n']).trim().is_empty() {
+                    return None;
+                }
+            }
+            let resolved_adapter = if adapter == "host"
+                && (command == "submit"
+                    || command == "focus-input"
+                    || command.starts_with("prompt:")
+                    || command.starts_with("submit-prompt:"))
+            {
+                profile_name
+                    .and_then(desktop_agent_for_profile_name)
+                    .map(|(a, _)| a.to_owned())
+                    .unwrap_or(adapter)
+            } else {
+                adapter
+            };
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: resolved_adapter,
+                command,
+            })
         }
         ActionKind::FocusSession { adapter, session } => {
             if session == "unselected" {
@@ -502,7 +570,7 @@ pub fn resolve_host_action_with_command_consent(
     })?;
 
     let action = doc.editable.graph.actions.get(action_id)?;
-    convert_action(action, command_execution_enabled)
+    convert_action(action, Some(&profile.name), command_execution_enabled)
 }
 
 pub fn resolve_host_action(
