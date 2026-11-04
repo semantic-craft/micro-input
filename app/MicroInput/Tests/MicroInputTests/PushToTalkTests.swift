@@ -229,6 +229,12 @@ extension PushToTalkTests {
         let after = await core.syntheticRequests().count
         XCTAssertEqual(after, before, "Unknown dictation cleanup must not permit a device write")
         XCTAssertTrue(store.status.contains("听写"), store.status)
+        XCTAssertEqual(store.operationResult?.phase, "NotSent")
+        XCTAssertFalse(store.hostOperationPaused, "A rejected write must not leave the routing pause stuck")
+        driver.recording.externallyStopped = true
+        await store.verifyDictationStopped()
+        XCTAssertFalse(store.dictationNeedsAttention)
+        XCTAssertTrue(store.dispatchOpen)
         await store.shutdown()
     }
 }
