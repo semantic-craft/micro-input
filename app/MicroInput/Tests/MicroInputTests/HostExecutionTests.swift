@@ -33,6 +33,123 @@ private final class MockCommandRunner: CommandRunning, @unchecked Sendable {
 }
 
 final class HostExecutionTests: XCTestCase {
+    @MainActor func testShellCommandRequiresExplicitConsentAndPersistsAcrossRestart() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("workbench.json")
+        let store = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        await store.loadWorkbench()
+        await store.installCodingAgentPresets()
+        let profile = try XCTUnwrap(store.hostProfiles.first { $0.name == "Cindy" })
+        let profileIndex = try XCTUnwrap(store.snapshot?.profiles.firstIndex { $0.id.text == profile.id.text })
+        store.selectProfile(profileIndex)
+        await store.setHostActiveProfile(profile.id.text)
+        await store.setHostExecutionEnabled(true)
+        store.slot = 0
+        await store.searchActions(query: "命令动作", category: "命令", favoritesOnly: false)
+        let template = try XCTUnwrap(store.library.entries.first { $0.action.id == "shell-command" }?.action)
+        await store.assign(template.id)
+        XCTAssertEqual(store.draft.edits[store.slotKey]?.payload["type"]?.text, "shell_command")
+        XCTAssertEqual(store.profile?.id.text, profile.id.text, "workbench profile mismatch")
+        XCTAssertEqual(store.hostActiveProfileId, profile.id.text, "active profile mismatch")
+        XCTAssertFalse(store.editingDevice, "assign accidentally entered device editor")
+
+        XCTAssertNil(store.resolveInputActionForTesting(bindingId: "AG00"), "Command consent must default to off")
+        await store.setCommandExecutionEnabled(true)
+        let resolved = try XCTUnwrap(store.resolveInputActionForTesting(bindingId: "AG00"))
+        let payload = try JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(resolved.utf8))
+        XCTAssertEqual(payload.action_type, "shell_command")
+        XCTAssertEqual(payload.working_directory, "/tmp")
+        XCTAssertTrue(store.actionCapabilities[store.slotKey]?.execution_available == true, "Workbench capability must follow the command consent switch")
+        XCTAssertTrue(
+            store.library.entries.first { $0.action.id == "shell-command" }?.capability.execution_available == true,
+            "Action library capability must follow the command consent switch"
+        )
+
+        let reopened = Store(backend: MicroInputCore.MicroInput(), documentURL: url)
+        await reopened.loadWorkbench()
+        XCTAssertTrue(reopened.commandExecutionEnabled, "Command consent must persist independently")
+        XCTAssertNotNil(reopened.resolveInputActionForTesting(bindingId: "AG00"))
+        await store.shutdown()
+        await reopened.shutdown()
+    }
+
+    @MainActor func testLiveShellCommandRunsInWorkingDirectoryAndRedactsCommandAndOutput() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let auditPath = directory.appendingPathComponent("audit.jsonl").path
+        let executor = LiveHostActionExecutor(auditLogPath: auditPath)
+        let command = #"printf secret-command-output > shell-marker"#
+        let actionJSON = #"{"action_type":"shell_command","command":"\#(command)","working_directory":"\#(directory.path)"}"#
+        let receipt = await executor.execute(actionJSON: actionJSON, bindingId: "AG00", profileId: "profile-command")
+
+        XCTAssertTrue(receipt.succeeded)
+        XCTAssertEqual(receipt.actionType, "shell_command")
+        XCTAssertEqual(receipt.target, directory.path)
+        XCTAssertEqual(receipt.textByteLen, command.utf8.count)
+        XCTAssertFalse(receipt.detail.contains(command))
+        XCTAssertFalse(receipt.detail.contains("secret-command-output"))
+        XCTAssertEqual(try String(contentsOf: directory.appendingPathComponent("shell-marker"), encoding: .utf8), "secret-command-output")
+
+        let audit = try String(contentsOfFile: auditPath, encoding: .utf8)
+        XCTAssertFalse(audit.contains(command))
+        XCTAssertFalse(audit.contains("secret-command-output"))
+    }
+
+    @MainActor func testTryActionRunsAShellCommandOnceOnlyAfterConsent() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let auditPath = directory.appendingPathComponent("audit.jsonl").path
+        let url = directory.appendingPathComponent("workbench.json")
+        let store = Store(
+            backend: MicroInputCore.MicroInput(),
+            documentURL: url,
+            actionExecutor: LiveHostActionExecutor(auditLogPath: auditPath)
+        )
+        await store.loadWorkbench()
+        await store.installCodingAgentPresets()
+        let profile = try XCTUnwrap(store.hostProfiles.first { $0.name == "Cindy" })
+        let profileIndex = try XCTUnwrap(store.snapshot?.profiles.firstIndex { $0.id.text == profile.id.text })
+        store.selectProfile(profileIndex)
+        await store.setHostActiveProfile(profile.id.text)
+        await store.setHostExecutionEnabled(true)
+        store.slot = 0
+        await store.searchActions(query: "命令动作", category: "命令", favoritesOnly: false)
+        var commandAction = try XCTUnwrap(
+            store.library.entries.first { $0.action.id == "shell-command" }?.action
+        )
+        let command = #"printf command-result > ui-command-marker"#
+        commandAction.payload["command"] = .string(command)
+        commandAction.payload["working_directory"] = .string(directory.path)
+        let saved = await store.saveAction(commandAction)
+        XCTAssertTrue(saved)
+
+        XCTAssertFalse(store.canTryDesktopAction, "Default consent must leave the try action disabled")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("ui-command-marker").path))
+        await store.setCommandExecutionEnabled(true)
+        XCTAssertTrue(store.actionCapabilities[store.slotKey]?.execution_available == true)
+        XCTAssertTrue(store.canTryDesktopAction, "Explicit consent enables the visible try action")
+
+        await store.tryDesktopAction()
+        let receipt = try XCTUnwrap(store.lastHostActionReceipt)
+        XCTAssertTrue(receipt.succeeded)
+        XCTAssertEqual(receipt.actionType, "shell_command")
+        XCTAssertEqual(receipt.target, directory.path)
+        XCTAssertEqual(receipt.textByteLen, command.utf8.count)
+        XCTAssertEqual(receipt.detail, "exit=0 cwd_bytes=\(directory.path.utf8.count) command_bytes=\(command.utf8.count)")
+        XCTAssertEqual(
+            try String(contentsOf: directory.appendingPathComponent("ui-command-marker"), encoding: .utf8),
+            "command-result"
+        )
+        let audit = try String(contentsOfFile: auditPath, encoding: .utf8)
+        XCTAssertFalse(audit.contains(command))
+        XCTAssertFalse(audit.contains("command-result"))
+        await store.shutdown()
+    }
+
     @MainActor func testInstallCodingAgentPresetsAndMenuBarProfileSwitchingDecoupledFromWorkbench() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

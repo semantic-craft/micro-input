@@ -54,11 +54,23 @@ enum AgentAdapters {
     }
 
     static func runProcess(executable: String, arguments: [String], timeoutSeconds: TimeInterval = 2.0) async -> (Bool, String) {
+        await runProcess(executable: executable, arguments: arguments, workingDirectory: nil, timeoutSeconds: timeoutSeconds)
+    }
+
+    static func runProcess(executable: String, arguments: [String], workingDirectory: String?, timeoutSeconds: TimeInterval) async -> (Bool, String) {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: executable)
                 process.arguments = arguments
+                if let workingDirectory {
+                    var isDirectory: ObjCBool = false
+                    guard FileManager.default.fileExists(atPath: workingDirectory, isDirectory: &isDirectory), isDirectory.boolValue else {
+                        continuation.resume(returning: (false, "工作目录不存在"))
+                        return
+                    }
+                    process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory, isDirectory: true)
+                }
                 let pipe = Pipe()
                 process.standardOutput = pipe
                 process.standardError = pipe

@@ -204,6 +204,9 @@ struct StatusPanel: View {
                 Toggle("按键控制", isOn: Binding(get: { store.hostExecutionEnabled }, set: { value in Task { await store.setHostExecutionEnabled(value) } }))
                     .labelsHidden().toggleStyle(.switch).controlSize(.small).help("启用或暂停按键控制")
             }
+            Toggle("命令执行同意", isOn: Binding(get: { store.commandExecutionEnabled }, set: { value in Task { await store.setCommandExecutionEnabled(value) } }))
+                .toggleStyle(.switch).controlSize(.small).font(.caption)
+                .help("默认关闭。开启后，配置过的 shell_command 才会路由执行")
             if store.dictationNeedsAttention {
                 Text("原听写停止未确认，请检查原应用").font(.caption).foregroundStyle(.orange)
                 Button("复核原听写已停止") { Task { await store.verifyDictationStopped() } }

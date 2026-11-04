@@ -217,6 +217,7 @@ extension MicroInput: Backend {}
     let radialPreferences: UserDefaults
     @Published var hostActiveProfileId: String?
     @Published var hostExecutionEnabled = false
+    @Published var commandExecutionEnabled = false
     @Published var passThroughHealth: PassThroughHealthView = .disconnected
     @Published var lastHostActionReceipt: HostActionReceipt?
     var hostInputTask: Task<Void, Never>?
@@ -329,6 +330,7 @@ extension MicroInput: Backend {}
         controlSettings = result.control_settings ?? [:]; controlSettingsError = nil
         hostActiveProfileId = result.host_active_profile_id
         if let enabled = result.host_execution_enabled { hostExecutionEnabled = enabled }
+        if let enabled = result.command_execution_enabled { commandExecutionEnabled = enabled }
         try? refreshRouting()
         if connectedID != nil, hostInputTask == nil, !inputNeedsResume { startHostInputLoop(token: generation) }
         browsingDeviceSnapshot = false; stale = false; documentReady = !draft.read_only
@@ -344,6 +346,13 @@ extension MicroInput: Backend {}
     func setHostExecutionEnabled(_ enabled: Bool) async {
         await routingChange(["kind":"execution", "enabled":enabled])
         if connectedID != nil, hostInputTask == nil, !inputNeedsResume { startHostInputLoop(token: generation) }
+    }
+    func setCommandExecutionEnabled(_ enabled: Bool) async {
+        await routingChange(["kind":"command_execution", "enabled":enabled])
+        do {
+            try await changeDocument { [self] in try await backend.documentView() }
+            await searchActions(query: libraryQuery, category: libraryCategory, favoritesOnly: libraryFavoritesOnly)
+        } catch { status = readableError(error) }
     }
     func installCodingAgentPresets() async {
         guard canEditDraft, !busy, !editingDevice else { return }
@@ -382,7 +391,7 @@ extension MicroInput: Backend {}
         let binding = Self.desktopBindings[slot]
         guard let json = backend.resolveInputAction(bindingId: binding, isPressed: true),
               let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(json.utf8)),
-              ["open_app", "shortcut", "agent_command", "macro_sequence"].contains(payload.action_type) else {
+              ["open_app", "shortcut", "agent_command", "macro_sequence", "shell_command"].contains(payload.action_type) else {
             status = "此按键未配置可试运行动作"; return
         }
         guard let (resolved, profile, state) = resolveHostAction(binding) else { return }
@@ -686,6 +695,11 @@ extension MicroInput: Backend {}
         slot = 12
         guard let macroTemplate = catalog.first(where: { $0.id == "local-macro" }) else { return }
         await saveAction(macroTemplate)
+        var drainChecks = 0
+        while drainChecks < 100, hostExecutionTask != nil || !pendingHostActions.isEmpty {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            drainChecks += 1
+        }
         try? await core.emitSyntheticBindingEvent(bindingId: "AG12", pressed: true)
         try? await core.emitSyntheticBindingEvent(bindingId: "AG12", pressed: false)
         try? await Task.sleep(nanoseconds: 80_000_000)

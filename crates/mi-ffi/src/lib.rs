@@ -36,7 +36,12 @@ fn document_response(
     let capabilities: std::collections::BTreeMap<_, _> = draft
         .edits
         .iter()
-        .map(|(key, action)| (key, mi_model::action_library::capability(action)))
+        .map(|(key, action)| {
+            (
+                key,
+                mi_model::action_library::capability(action, store.command_execution_enabled()),
+            )
+        })
         .collect();
     let settings: std::collections::BTreeMap<_, _> = draft
         .document
@@ -59,6 +64,7 @@ fn document_response(
         "action_capabilities": capabilities,
         "host_active_profile_id": store.host_active_profile_id(),
         "host_execution_enabled": store.host_execution_enabled(),
+        "command_execution_enabled": store.command_execution_enabled(),
         "host_routing": store.routing_state(),
     }))
     .map_err(failure)
@@ -208,6 +214,7 @@ impl MicroInput {
         favorites_only: bool,
     ) -> Result<String, BridgeError> {
         let store = self.draft.lock().unwrap();
+        let command_enabled = store.command_execution_enabled();
         let (favorites, preferences_error) = match store.favorite_actions() {
             Ok(values) => (values.clone(), None),
             Err(error) => (Default::default(), Some(error)),
@@ -217,7 +224,7 @@ impl MicroInput {
             .map(|a| a.category)
             .collect();
         serde_json::to_string(&serde_json::json!({
-            "entries":mi_model::action_library::search(&query, &category, favorites_only, &favorites),
+            "entries":mi_model::action_library::search(&query, &category, favorites_only, &favorites, command_enabled),
             "categories":categories,"preferences_error":preferences_error
         })).map_err(failure)
     }
@@ -794,6 +801,16 @@ impl MicroInput {
         store.set_host_execution_enabled(enabled).map_err(failure)?;
         document_response(&store, None)
     }
+    pub async fn set_command_execution_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        store
+            .set_command_execution_enabled(enabled)
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
     pub fn check_passthrough_health(&self) -> String {
         let state = self.state.lock().unwrap();
         let (snapshot, identity) = if let Some((_, session)) = &state.session {
@@ -825,11 +842,12 @@ impl MicroInput {
             return None;
         }
         let active_pid = store.host_active_profile_id();
-        let resolved = mi_model::host_router::resolve_host_action(
+        let resolved = mi_model::host_router::resolve_host_action_with_command_consent(
             &store.draft.document,
             active_pid.as_deref(),
             &binding_id,
             is_pressed,
+            store.command_execution_enabled(),
         )?;
         serde_json::to_string(&resolved).ok()
     }

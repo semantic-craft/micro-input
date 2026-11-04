@@ -22,6 +22,9 @@ pub enum RoutingOperation {
     Execution {
         enabled: bool,
     },
+    CommandExecution {
+        enabled: bool,
+    },
     Resume,
     Upsert {
         bundle_id: String,
@@ -57,11 +60,12 @@ impl DocumentStore {
         ];
         let keys: Vec<Value> = bindings.iter().map(|binding| {
             use crate::host_router::ResolvedHostAction::*;
-            let action = crate::host_router::resolve_host_action(&self.draft.document, p.host_active_profile_id.as_deref(), binding, true);
+            let action = crate::host_router::resolve_host_action_with_command_consent(&self.draft.document, p.host_active_profile_id.as_deref(), binding, true, p.command_execution_enabled);
             let label = match &action {
                 Some(Shortcut{key,modifiers,..}) => format!("{} {}", modifiers.join("+"), key),
                 Some(PasteText{..}) => "粘贴文本".into(),
                 Some(OpenApp{bundle_id}) => format!("打开 {}", bundle_id),
+                Some(ShellCommand{working_directory,..}) => format!("命令 · {}", working_directory),
                 Some(OpenUrl{..}) => "打开网址".into(),
                 Some(AgentCommand{command,..}) => match command.as_str() {
                     "focus-input" => "聚焦输入框", "search" => "搜索会话", "new-chat" => "新建会话",
@@ -78,6 +82,7 @@ impl DocumentStore {
         json!({"document_id":self.draft.document_id,"document_revision":self.draft.revision,
             "host_state_revision":self.host_state_revision,"profile_id":p.host_active_profile_id,
             "profile_name":profile.map(|p| &p.name),"execution_enabled":p.host_execution_enabled,
+            "command_execution_enabled":p.command_execution_enabled,
             "auto_follow_enabled":p.auto_follow_enabled,"manual_override":p.manual_override,
             "app_profile_links":p.app_profile_links,"keys":keys})
     }
@@ -104,6 +109,9 @@ impl DocumentStore {
             }
             RoutingOperation::Enable { enabled } => next.auto_follow_enabled = enabled,
             RoutingOperation::Execution { enabled } => next.host_execution_enabled = enabled,
+            RoutingOperation::CommandExecution { enabled } => {
+                next.command_execution_enabled = enabled
+            }
             RoutingOperation::Resume => next.manual_override = false,
             RoutingOperation::Upsert {
                 bundle_id,
@@ -175,6 +183,10 @@ mod tests {
         assert_eq!(store.host_active_profile_id(), Some(ids[0].clone()));
         assert_eq!(store.routing_state()["manual_override"], false);
         assert!(!store.host_execution_enabled());
+        let command = request(&store, json!({"kind":"command_execution","enabled":true}));
+        store.update_routing(command).unwrap();
+        assert_eq!(store.routing_state()["command_execution_enabled"], true);
+        assert_eq!(store.command_execution_enabled(), true);
     }
     #[test]
     fn legacy_defaults_and_failed_save_do_not_change_profile_or_override() {

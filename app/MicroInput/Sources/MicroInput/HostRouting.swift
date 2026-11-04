@@ -6,6 +6,7 @@ struct HostRoutingState: Decodable {
     let document_id: String, document_revision: UInt64, host_state_revision: UInt64
     let profile_id: String?, profile_name: String?
     let execution_enabled: Bool, auto_follow_enabled: Bool, manual_override: Bool
+    let command_execution_enabled: Bool
     let app_profile_links: [String: String]
     let keys: [HostKey]
 }
@@ -84,7 +85,9 @@ extension Store {
     var dispatchOpen: Bool { !hostOperationPaused && !mutationDraining && routingValid && !systemSleeping && !stopped && !overflowDraining }
     func refreshRouting() throws {
         let value = try JSONDecoder().decode(HostRoutingState.self, from: Data(backend.hostRoutingState().utf8))
-        routing = value; hostActiveProfileId = value.profile_id; hostExecutionEnabled = value.execution_enabled
+        routing = value; hostActiveProfileId = value.profile_id
+        hostExecutionEnabled = value.execution_enabled
+        commandExecutionEnabled = value.command_execution_enabled
         routingValid = true
     }
     func readInputBoundary() {
