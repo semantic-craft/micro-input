@@ -193,6 +193,7 @@ extension MicroInput: Backend {}
     }
     let backend: Backend
     let actionExecutor: HostActionExecuting
+    let t3Attention: T3AttentionController
     let pushToTalk: PushToTalkController
     @Published var dictationNeedsAttention = false
     @Published var routing: HostRoutingState?
@@ -880,8 +881,9 @@ extension MicroInput: Backend {}
     @Published var connectedID: String?
     @Published var stale = false
     @Published var busy = false
-    init(backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil, dictationDriver: (any DictationDriving)? = nil) {
+    init(backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil, dictationDriver: (any DictationDriving)? = nil, t3Attention: T3AttentionController? = nil) {
         self.backend = backend
+        self.t3Attention = t3Attention ?? T3AttentionController()
         self.documentOverride = documentURL
         self.actionExecutor = actionExecutor ?? LiveHostActionExecutor()
         #if MI_SYNTHETIC_BACKEND
@@ -1020,6 +1022,7 @@ extension MicroInput: Backend {}
         hostRouteEpoch += 1
         invalidateHostWork()
         systemSleeping = true
+        t3Attention.suspend()
         discoveryGeneration += 1
         events?.invalidatePending()
         retireConnection("系统睡眠 · 设备快照已过期，唤醒后请明确选择并重新连接")
@@ -1035,6 +1038,7 @@ extension MicroInput: Backend {}
         sleepDisconnect = nil
         events?.invalidatePending()
         systemSleeping = false
+        t3Attention.resume()
         discoveryStatus = events == nil ? "USB 发现尚未开始" : "系统已唤醒 · 请明确选择设备并重新连接"
         if events != nil { await refresh() }
     }
@@ -1049,6 +1053,7 @@ extension MicroInput: Backend {}
         sleepDisconnect = nil
         await hostExecutionTask?.value
         await pushToTalk.waitUntilStopped()
+        await t3Attention.shutdown()
         await backend.shutdown()
     }
     private func replace(_ json: String) throws { let result = try JSONDecoder().decode(Snapshot.self, from: Data(json.utf8)); snapshot = result; stale = false; selectProfile(0) }

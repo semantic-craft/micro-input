@@ -250,6 +250,8 @@ struct StatusPanel: View {
                 Button("编辑按键…") { owner.showWindow() }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Divider()
+            T3AttentionPanel(controller: store.t3Attention, next: { store.openNextT3Attention() })
+            Divider()
             Toggle("自动跟随前台应用", isOn: Binding(get: { store.routing?.auto_follow_enabled ?? false }, set: { value in Task { await store.setAutoFollow(value) } })).toggleStyle(.switch).controlSize(.small)
             HStack {
                 Text(store.routingMode).font(.caption).foregroundStyle(.secondary)
@@ -271,7 +273,7 @@ struct StatusPanel: View {
                     Text(summary)
                     Text(store.passThroughHealth.label)
                     if let receipt = store.lastHostActionReceipt {
-                        Text("最近动作：\(receipt.succeeded ? "已执行" : "未执行") · \(receipt.detail)")
+                        Text("最近动作：\(receipt.detail)")
                     }
                     Divider()
                     Button(store.connectedID == nil ? "连接设备" : "检查连接") {
@@ -312,5 +314,35 @@ struct StatusPanel: View {
                 .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(selected ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.06)))
         }.buttonStyle(.plain).disabled(store.busy || profile == nil)
             .accessibilityLabel("控制 \(title)\(selected ? "，当前配置" : "")")
+    }
+}
+
+struct T3AttentionPanel: View {
+    @ObservedObject var controller: T3AttentionController
+    let next: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("T3 Code 只读连接", isOn: Binding(get: { controller.enabled }, set: controller.setEnabled))
+                .toggleStyle(.switch).controlSize(.small)
+            Text(controller.state.label).font(.caption).foregroundStyle(.secondary)
+            if controller.enabled {
+                HStack {
+                    Button("下一个需要我 (\(controller.items.count))", action: next)
+                        .disabled(controller.state != .ready || controller.items.isEmpty)
+                    Spacer()
+                    if case .unavailable = controller.state {
+                        Button("重连") { controller.setEnabled(true) }
+                    }
+                }.font(.caption)
+                ForEach(Array(controller.items.prefix(3))) { item in
+                    Text("\(item.event.reason.label) · \(item.title)")
+                        .font(.caption).lineLimit(1).help(item.firstObserved ? "等待时间从首次观察计起" : "按事件等待时间排序")
+                }
+                if let result = controller.lastResult {
+                    Text(result.label).font(.caption).foregroundStyle(.secondary)
+                }
+                Text("实体状态灯尚未接通").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
     }
 }
