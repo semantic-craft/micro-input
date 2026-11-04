@@ -6,6 +6,7 @@
 
 | 仓库 | 预期用途 | 边界 |
 | --- | --- | --- |
+| [paseo-creator-micro](https://github.com/mattt/paseo-creator-micro) | Swift HID/会话、Paseo 插件、状态灯、工作区与径向交互 | MIT；固定版本、复用决定与全部差距见[能力覆盖](designs/paseo-coverage.md)；上游自定义层不等于当前实机已支持 |
 | [Dispatch](https://github.com/thefotes/Dispatch) | Swift IOKit 生命周期、帧重组、权限诊断、宽键双开关与 Codex 层 | 作者主要实测 0.6.2；MIT；补充清单见协议第 7 节 |
 | [cm2-probe](https://github.com/panghy/cm2-probe) | Rust/hidapi 非独占打开、只读版本/文件查询、USB/BLE 探针设计 | README 实测 0.6.0/Input 0.18.0-rc.8；Apache-2.0；工具也有灯光写操作，不整体作为只读工具运行 |
 | [creator-micro-kit](https://github.com/00cyre/creator-micro-kit) | Node + Swift 桥接、分块文件读取、事件与灯光 API 组织 | MIT；包含写入/删除方法；非独占无需权限的说法需与 Dispatch 的不同观察核对 |

@@ -1,5 +1,7 @@
 # Agent 控制交付计划
 
+> 2026-11-05：本页保留首轮交付与验收约束；旧分支/负责人描述为当时现场，不是当前工作树清单。用户现要求覆盖 Paseo 全部能力，后续范围由[能力覆盖与架构决策](paseo-coverage.md)及[接力 F–K](../pstack-relay.md)接续；本页 MCP/CLI 暂缓决定已由新范围替代，尚未实现。
+
 用户于 2026-11-04 授权本聊天作为协调者，自主设计计划并全程使用 Poteto Mode 推进。范围是按住说话、运行时状态灯验证、T3 Code 的下一个需要我，以及径向菜单。MCP/CLI 产品出口暂缓。
 
 计划起点为 origin/main 6e9ae3f。按住说话、T3 导航和径向菜单已分别由 PR #74、#76、#77 合并，软件交付主线为 4be36ce。根仓 codex/device-write-rgb-offline 保留原状。实现负责人只写独立 worktree。已有 local-macro-host-sequence 为其他会话所有，集成前核对其差异。

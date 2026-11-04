@@ -13,7 +13,7 @@
 
 ### [x] Slice A: 全景差距对表、防冲突护栏与接力机关就位
 - **Playbook**: `Investigation` + `Authoring or modifying a skill` (`encode-lessons-in-structure`)
-- **Outcome**: 梳理 `.scratch/reference/paseo-creator-micro` 与当前 `Micro Input` 的逐项能力对比表；明确 8 套 Agent（重点为 `Herdr`、`Antigravity`、`千问办公`、`Cindy`、`Codex`）的按键/旋钮/摇杆布局与 Codex/Cindy 防冲突边界；装好 `scripts/pstack-relay` 与 `.agents/hooks.json` 自动接力钩子。
+- **Outcome**: 梳理 固定提交的 `mattt/paseo-creator-micro` 与当前 `Micro Input` 的逐项能力对比表；明确 8 套 Agent（重点为 `Herdr`、`Antigravity`、`千问办公`、`Cindy`、`Codex`）的按键/旋钮/摇杆布局与 Codex/Cindy 防冲突边界；装好 `scripts/pstack-relay` 与 `.agents/hooks.json` 自动接力钩子。
 - **Done Predicate**: `scripts/pstack-relay selftest` 与 `python3 -B -m unittest discover -s scripts/tests -p 'test_pstack_relay_launcher.py'` 通过；产出下一棒 Slice B 的完整 `/poteto-mode` 提示词并写入 `.scratch/pstack-relay/NEXT_PROMPT.md` 及系统剪贴板。
 - **Evidence**: docs/pstack-relay.md;scripts/pstack-relay;.agents/hooks.json
 
@@ -43,14 +43,30 @@
 
 ---
 
-## Slice A 成果：`paseo-creator-micro` vs `Micro Input` 全景能力对表与防冲突边界
+## 当前覆盖与接续
 
-| 能力维度 | `mattt/paseo-creator-micro` 做法 | `Micro Input` 当前状态 | 差距与后续切片动作 |
-| :--- | :--- | :--- | :--- |
-| **适用范围与配置方式** | 仅限 Paseo 0.13+ 插件体系，设置存于 Paseo 插件内 | **已完成**：Rust + SwiftUI 独立原生工作台 + 菜单栏，支持任意自定义 Profile/Layer/宏/Multi，零 Flash 写入切换 | 保持通用架构，所有新增 Agent 能力均作为可自由改绑的 `ActionKind` 提供 |
-| **Codex / Cindy 防冲突** | 要求用户手动退出 ChatGPT App 防止抢键 | **已完成**：按 `hostActiveProfileId` + `target_bundle_id` / AX 控件定向路由；菜单栏支持一键暂停与前台自动跟随 | 在 Slice B–D 中严禁发送无目标全局快捷键，所有动作必须带目标应用确认 |
-| **底部 2U 宽键按住说话** | `ACT10`+`ACT11` 合并，按下 `Cmd+D`、松开停止 | **已完成（PR #74）**：`WideKeyMerger` 合并 `AG10`+`AG11`，AX 录音状态实测回读（支持 Cindy、Codex、千问办公、Antigravity、Qoder CN） | 在 Slice D 中补齐“若正在听写时触发提交，先停止听写再提交”的联动保护 |
-| **下一个待处理 Agent** | Key 6 按等待时长轮询待处理 Agent | **已完成（PR #76）**：T3 Code 待处理会话只读导航与菜单栏/径向菜单接入 | 在 Slice C 中与跨应用历史栈联动记录 |
-| **摇杆八向径向菜单** | 8 槽固定/可配（Back/Test/Continue/Commit/Forward/Review/Stop/Summary） | **已完成基础框架（PR #77）**：八槽 UI、旋钮确认、回中取消，当前固定为 T3 导航 + 速查 + 6 个应用打开 | **Slice D** 增加可配置 Prompt / 快捷动作槽位支持 |
-| **旋钮滚动与按压跳底** | 顺/逆时针滚动窗口 3 行（按住 15 行，步进合并上限 100 行），按压跳到底部 | **待补齐**：当前 `Herdr` 绑定了侧栏，其他对话型 Agent 的 `logical-13..15` 尚未预置对话滚动与跳底 | **Slice B** 实现目标窗口安全滚动与跳底动作 |
-| **Key 0/1 历史前进/后退** | 记录小键盘打开过的最近 50 个 Agent/Workspace 供 Key 0/1 回溯 | **待补齐**：当前 Key 0/1 固定为打开应用和聚焦输入框 | **Slice C** 实现宿主级小键盘导航历史栈（Back / Forward） |
+A–E 是第一轮通用交互迁移的历史完成记录；其回执不证明 Paseo 全功能或八套应用实机覆盖。原对表已由[当前能力清单与架构决策](designs/paseo-coverage.md)替代，避免同一能力同时标记“完成”和“待补齐”。
+
+### [ ] Slice F: 原生集成所有权与适配器能力边界
+- **Outcome**: Cindy 保留原生键盘集成；逐动作确定 Cindy/Codex 与 Micro Input 的唯一消费者，缺失能力才由本项目补充。
+- **Done Predicate**: 原生能力与宿主补充能力逐项有源码定位；用可重放输入证明单次物理事件不会双执行；不支持的目标明确显示缺口。更新现有适配器入口与适用回归，不修改用户设备映射。
+
+### [ ] Slice G: 会话与工作区语义控制
+- **Outcome**: 覆盖能力清单的项目/工作区/最近与固定六槽、准确会话历史、待办轮询、创建、权限批准/拒绝、停止、思考级别、语音模式与准确目标 Prompt/steering。
+- **Done Predicate**: 适配器返回稳定身份与真实状态；目标/请求过期零操作；工作区选择、子 Agent 筛选和未读语义均有测试及实际适配器证据。快捷键占位不能关闭缺口；实施时按适配器拆为可独立验收的小片。
+
+### [ ] Slice H: 逐键与双区运行时状态灯
+- **Outcome**: 状态、选中项、失败与思考级别能够反馈到正确键和灯区，并遵守当前层及其他客户端的所有权。
+- **Done Predicate**: 核实当前固件的 thstatus/rgbcfg、可亮灯键、效果及释放/恢复；原始映射保留；断连/重连和共存有证据。视觉验收与协议/合成检查分开。
+
+### [ ] Slice I: 完整径向交互与可配置槽位
+- **Outcome**: 在现有确认方式之外提供可选的快速回弹确认/慢回中取消，补齐 Stop、图标/颜色与取消按键消费，保留四向 Prompt。
+- **Done Predicate**: 边界轨迹、Escape/普通键/旋钮取消均不误发；目标冻结、听写先停后提交通过回归；当前设备的角度/速度与实际手感分别核验。
+
+### [ ] Slice J: 设备服务 MCP 与 CLI 出口
+- **Outcome**: 提供与上游五项工具等价的状态、逐键灯、分区灯、清灯和等待输入，以及 CLI/仿真接入。
+- **Done Predicate**: 复用唯一设备 session；明确本机访问边界、超时/取消/退出清理；仿真零真实副作用；灯光出口依赖 H 的已验证能力。
+
+### [ ] Slice K: 日常交付与全覆盖收口
+- **Outcome**: 登录启动、权限、升级、诊断、实体旋钮/宽键、准确目标、所有灯光/摇杆体验形成可使用的交付版。
+- **Done Predicate**: 最终 clean commit 的 scripts/verify-offline 全量通过；记录构建与安装身份、原生及物理缺口；逐项关闭能力清单并核对 #44，不能只用接力全部勾选证明交付。
