@@ -270,6 +270,37 @@ final class RadialMenuStateTests: XCTestCase {
         XCTAssertTrue(f.store.pendingHostActions.isEmpty)
         await f.close()
     }
+    func testCancellingOverflowOwnerReleasesItsGateAndRefreshesInputCutoff() async throws {
+        let executor = RadialGatedExecutor()
+        let f = try await fixture(executor: executor)
+        let state = try XCTUnwrap(f.store.routing)
+        let action = #"{"action_type":"open_app","bundle_id":"test.app"}"#
+        XCTAssertTrue(f.store.enqueueHostAction(json: action, binding: "A", profile: "profile", state: state))
+        for _ in 0..<100 where executor.pending["A"] == nil { try await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertNotNil(executor.pending["A"])
+        for index in 0..<33 { f.store.enqueueHostAction(json: action, binding: "queued-\(index)", profile: "profile", state: state) }
+        XCTAssertTrue(f.store.overflowDraining)
+        try await f.core.emitSyntheticInputCase(inputCase: .radialEast)
+        _ = try await radialNext(f.stream)
+        let watermark = try JSONDecoder().decode(InputWatermark.self, from: Data(f.core.hostInputWatermark().utf8))
+        XCTAssertGreaterThan(watermark.ingress_sequence, f.store.inputBoundary.cutoff)
+        let old = try XCTUnwrap(f.store.cancelHostExecution())
+        XCTAssertFalse(f.store.overflowDraining)
+        XCTAssertTrue(f.store.dispatchOpen)
+        XCTAssertEqual(f.store.inputBoundary.cutoff, watermark.ingress_sequence)
+        XCTAssertTrue(f.store.enqueueHostAction(json: action, binding: "B", profile: "profile", state: state))
+        let replacement = try XCTUnwrap(f.store.hostExecutionTask)
+        for _ in 0..<100 where executor.pending["B"] == nil { try await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertNotNil(executor.pending["B"])
+        executor.pending.removeValue(forKey: "A")?.resume()
+        await old.value
+        XCTAssertNotNil(f.store.hostExecutionTask)
+        XCTAssertFalse(f.store.overflowDraining)
+        executor.pending.removeValue(forKey: "B")?.resume()
+        await replacement.value
+        XCTAssertEqual(f.store.lastHostActionReceipt?.bindingId, "B")
+        await f.close()
+    }
     func testFiveSecondSelectionUsesConfirmationTimeForQueueAdmission() async throws {
         let f = try await fixture(); f.store.setRadialMenuEnabled(true)
         try await f.feed(.radialCenter); try await f.feed(.radialSouthEast)

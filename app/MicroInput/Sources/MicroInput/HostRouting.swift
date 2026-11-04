@@ -107,6 +107,7 @@ extension Store {
         hostExecutionGeneration += 1
         clearPendingActions()
         execution?.cancel()
+        if overflowDraining { readInputBoundary(); overflowDraining = false }
         return execution
     }
     @discardableResult func invalidateHostWork() -> Task<Void, Never>? {
