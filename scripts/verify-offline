@@ -26,10 +26,12 @@ def verify_evidence(run, scenario, started, process_alive):
               "physical_key": "NOT_RUN", "lighting_visual": "NOT_RUN"}
     if scenario == "host-execution":
         rows = [json.loads(line) for line in (evidence / "audit.jsonl").read_text().splitlines()]
-        if len(rows) != 16 or any(r["outcome"] != "simulated" for r in rows):
+        if len(rows) != 17 or any(r["outcome"] != "simulated" for r in rows):
             raise ValueError("host simulation receipts incomplete")
         if len({r["profile_id"] for r in rows}) != 8 or sum(r["binding_id"] in ("AG10", "AG11") for r in rows) != 1:
             raise ValueError("profile/wide-key regression")
+        if rows[-1]["action_type"] != "macro_sequence" or rows[-1]["detail"] != "steps=2 keys=2 delays=0":
+            raise ValueError("local macro simulation receipt missing")
         result["receipt_count"] = len(rows)
     elif scenario == "diagnostic-export":
         diagnostics = json.loads((evidence / "diagnostics.json").read_text())

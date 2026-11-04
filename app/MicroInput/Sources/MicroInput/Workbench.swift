@@ -508,7 +508,7 @@ struct ActionParameters: View {
             }
             if type == "local_macro", MacroEditorDraft(action: action) != nil {
                 Button("编辑宏步骤") { editingMacro = true }.disabled(!store.canEditDraft || store.busy)
-                Text("自有本地序列 · 按下 / 释放 / 延时 · 不执行").font(.caption).foregroundStyle(.secondary)
+                Text("自有本地序列 · 按下 / 释放 / 延时 · 执行能力以动作详情为准").font(.caption).foregroundStyle(.secondary)
             }
             if !["local_macro", "local_multi"].contains(type) {
             Text("动作名称").font(.caption).foregroundStyle(.secondary)

@@ -118,7 +118,7 @@ pub fn actions() -> Vec<Action> {
         ("skill", "Skill 引用", "Skill", "适配器未验证 · 不执行", json!({"type":"skill_reference","adapter":"unverified","skill":"unselected"})),
         ("app", "打开应用", "应用", "本地应用意图 · 宿主执行未接入", json!({"type":"open_app","bundle_id":"com.apple.TextEdit"})),
         ("local-multi", "Multi 动作", "Multi", "本地四分支 · 不执行 · 固件范围未知", json!({"type":"local_multi","multi":{"format_version":1,"term_ms":250,"tap":null,"double_tap":null,"hold":null,"tap_hold":null}})),
-        ("local-macro", "普通宏", "普通宏", "自有本地格式 · 仅草稿 · 不执行", json!({"type":"local_macro","macro_sequence":{"format_version":1,"events":[{"type":"press","key":"a"},{"type":"release","key":"a"}]}})),
+        ("local-macro", "普通宏", "普通宏", "自有本地序列 · 已验证键名可宿主执行", json!({"type":"local_macro","macro_sequence":{"format_version":1,"events":[{"type":"press","key":"a"},{"type":"release","key":"a"}]}})),
         ("device-key", "设备普通按键", "设备按键", "来源明确的普通键意图 · 尚未应用", json!({"type":"device_key","token":"KC_B"})),
     ].into_iter().map(|(id,name,category,detail,payload)| Action {id:id.into(),name:name.into(),category:category.into(),detail:detail.into(),payload}).collect()
 }

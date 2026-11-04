@@ -54,6 +54,17 @@ pub enum ResolvedHostAction {
         adapter: String,
         session: String,
     },
+    MacroSequence {
+        events: Vec<ResolvedMacroEvent>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "event_type", rename_all = "snake_case")]
+pub enum ResolvedMacroEvent {
+    Press { key: String, key_code: u16 },
+    Release { key: String, key_code: u16 },
+    Delay { ms: u32 },
 }
 
 fn layer_passthrough_key_count(layer: &crate::Layer) -> u32 {
@@ -401,9 +412,34 @@ fn convert_action(action: &Action) -> Option<ResolvedHostAction> {
                 Some(ResolvedHostAction::FocusSession { adapter, session })
             }
         }
+        ActionKind::LocalMacro { macro_sequence } => {
+            macro_sequence.validate().ok()?;
+            let mut events = Vec::with_capacity(macro_sequence.events.len());
+            for event in &macro_sequence.events {
+                match event {
+                    crate::macro_sequence::MacroEvent::Press { key } => {
+                        let key_code = macos_virtual_key_code(key)?;
+                        events.push(ResolvedMacroEvent::Press {
+                            key: key.clone(),
+                            key_code,
+                        });
+                    }
+                    crate::macro_sequence::MacroEvent::Release { key } => {
+                        let key_code = macos_virtual_key_code(key)?;
+                        events.push(ResolvedMacroEvent::Release {
+                            key: key.clone(),
+                            key_code,
+                        });
+                    }
+                    crate::macro_sequence::MacroEvent::Delay { ms } => {
+                        events.push(ResolvedMacroEvent::Delay { ms: *ms });
+                    }
+                }
+            }
+            Some(ResolvedHostAction::MacroSequence { events })
+        }
         ActionKind::LocalMulti { .. }
         | ActionKind::DeviceKey { .. }
-        | ActionKind::LocalMacro { .. }
         | ActionKind::SkillReference { .. } => None,
     }
 }

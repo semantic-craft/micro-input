@@ -72,7 +72,7 @@ struct MacroEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("编辑普通宏").font(.title2.bold())
-            Text("自有本地格式 · 按键名称仅为本地标签 · 不执行输入、不写设备").font(.caption).foregroundStyle(.secondary)
+            Text("已验证 macOS 键名可在宿主执行；未知键名只保留，不写设备").font(.caption).foregroundStyle(.secondary)
             if let id = macroID, let macro = store.macros.first(where: { $0.id == id }) {
                 Text("保存将更新以下 \(macro.references.count) 个共享引用：").font(.caption).bold()
                 Text(macro.references.map { $0.displayName }.joined(separator: "、")).font(.caption).textSelection(.enabled)
@@ -131,7 +131,7 @@ struct MacroLibraryView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack { Text("已保存的普通宏").font(.title2.bold()); Spacer(); Button("关闭") { dismiss() } }
-            Text("引用同一宏的控件共享后续编辑；移除绑定保留宏。仅本地草稿，不执行。").font(.caption).foregroundStyle(.secondary)
+            Text("引用同一宏的控件共享后续编辑；移除绑定保留宏。已验证键名可由 Mac 宿主执行。").font(.caption).foregroundStyle(.secondary)
             if store.macros.isEmpty { Text("尚无本地宏。请在动作库选择“普通宏”并保存步骤。").foregroundStyle(.secondary) }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
