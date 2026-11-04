@@ -113,6 +113,7 @@ pub fn actions() -> Vec<Action> {
         ("review", "插入审查提示", "文本", "仅保存文本，不执行", json!({"type":"text","text":"请检查当前变更，优先报告可复现的问题。"})),
         ("url", "打开网址", "URL", "仅保存网址，不打开", json!({"type":"open_url","url":"https://example.com"})),
         ("pane", "下一个 pane", "Herdr", "适配器未验证 · 不执行", json!({"type":"agent_command","adapter":"herdr","command":"next-pane"})),
+        ("t3-next-attention", "下一个需要我", "T3 Code", "显式开启 T3 只读连接；按等待时间打开待处理会话", json!({"type":"agent_command","adapter":"t3","command":"next-attention"})),
         ("session", "切换会话", "DSH", "适配器未验证 · 不执行", json!({"type":"focus_session","adapter":"dsh","session":"unselected"})),
         ("skill", "Skill 引用", "Skill", "适配器未验证 · 不执行", json!({"type":"skill_reference","adapter":"unverified","skill":"unselected"})),
         ("app", "打开应用", "应用", "本地应用意图 · 宿主执行未接入", json!({"type":"open_app","bundle_id":"com.apple.TextEdit"})),

@@ -34,12 +34,25 @@ extension Store {
     }
 
     @discardableResult
-    func executeHostAction(actionJSON: String, bindingId: String, profileId: String) async -> HostActionReceipt? {
+    func executeHostAction(actionJSON: String, bindingId: String, profileId: String, t3Selection: T3Selection? = nil, stillAdmitted: (() -> Bool)? = nil) async -> HostActionReceipt? {
         guard !hostOperationPaused, let lease = try? backend.beginHostExecution() else { return nil }
         let epoch = hostRouteEpoch
         inFlightHostActions += 1
         defer { inFlightHostActions -= 1; backend.finishHostExecution(lease: lease) }
-        let receipt = await actionExecutor.execute(actionJSON: actionJSON, bindingId: bindingId, profileId: profileId)
+        let receipt: HostActionReceipt
+        let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(actionJSON.utf8))
+        if payload?.action_type == "agent_command", payload?.adapter == "t3", payload?.command == "next-attention" {
+            let result = await t3Attention.open(t3Selection, admitted: { [weak self] in
+                guard let self else { return false }
+                return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
+            })
+            receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
+                bindingId: bindingId, actionType: "t3_next_attention", target: "t3", textByteLen: nil,
+                outcome: result.rawValue, detail: result.label)
+            AuditLogWriter.append(receipt)
+        } else {
+            receipt = await actionExecutor.execute(actionJSON: actionJSON, bindingId: bindingId, profileId: profileId)
+        }
         guard epoch == hostRouteEpoch, !hostOperationPaused else { return nil }
         lastHostActionReceipt = receipt
         return receipt

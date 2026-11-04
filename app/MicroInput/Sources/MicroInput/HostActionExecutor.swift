@@ -13,7 +13,7 @@ struct HostActionReceipt: Codable, Equatable {
     let detail: String
 
     var succeeded: Bool {
-        outcome == "executed" || outcome == "simulated"
+        ["executed", "simulated", "delivered"].contains(outcome)
     }
 
     enum CodingKeys: String, CodingKey {

@@ -27,6 +27,7 @@
 
 | 功能 | 用户路径与驱动入口 | 可观察的通过证据 | 限制 |
 | :--- | :--- | :--- | :--- |
+| [T3 待处理会话 (`t3-attention`)](t3-attention.md) | 显式开启只读连接 → 下一个需要我；或绑定同名宿主动作 | 固定类别回执 `delivered`，精确目标另由原生 UI 核对 | 不发送、审批或创建会话；灯光未接通 |
 | [宿主动作路由与执行 (`host-execution`)](host-execution.md) | 菜单栏开启「启用宿主动作执行」（或点「一键就绪」）→ 按键触发 `Shortcut` / `PasteText` / `OpenApp` / `OpenUrl` / `AgentCommand` / `FocusSession` | `audit.jsonl` 产生 `host_ready` 或 16 条合成动作回执，`no_newline=true`，工作台浏览位置不变 | 合成模式下默认记录审计回执，不抢占用户桌面焦点 |
 | [三大 Coding Agent 预设与切换 (`agent-presets`)](agent-presets.md) | 安装 Coding Agent 预设 → 菜单栏切换 `Antigravity` / `Herdr` / `DeepSeek Coder (DSH)` → 触发按键、旋钮与摇杆 | 3 套 Profile 覆盖 20 槽位中的 19 个有效动作槽（含 `logical-15` `ENC_CLK` 按压与 `logical-16..19` 摇杆扇区），切换后同一按键路由至对应 Agent | `Herdr` / `DSH` 真实 CLI 调用视本机是否安装对应二进制而定 |
 | [2U 宽键合并防抖与透传层健康检查 (`wide-key-and-passthrough`)](wide-key-and-passthrough.md) | 底部宽键双开关 (`AG10`+`AG11` / `ACT10`+`ACT11`) 先后按下/释放；检查 `KV_OAI_AG*` / `KV_OAI_ACT*` 透传层状态 | 宽键重叠按压仅触发 1 次动作且 `logical-10`↔`logical-11` 对称回退；非透传层返回 `LayerDriftWarning` | 电容触摸切层的实机通知形态需连接实机核验 |

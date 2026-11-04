@@ -91,6 +91,20 @@ pub fn capability(action: &Action) -> ActionCapability {
                     "宿主激活对应 Profile 时按键可实时触发此动作",
                 )
             }
+            Ok(ActionKind::AgentCommand { adapter, command })
+                if adapter == "t3" && command == "next-attention" =>
+            {
+                prerequisites
+                    .push("需要已安装的 T3 Code、显式开启只读连接及新鲜的待处理目标".into());
+                (
+                    "T3 Code / 下一个需要我".into(),
+                    true,
+                    true,
+                    "",
+                    "T3 Code v0.1.6 只读 shell 与身份深链",
+                    "交付打开请求与目标访问确认分别报告；不发送或批准会话内容",
+                )
+            }
             Ok(ActionKind::AgentCommand { adapter, command }) => {
                 let desktop = matches!(
                     adapter.as_str(),

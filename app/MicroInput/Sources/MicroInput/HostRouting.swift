@@ -64,6 +64,7 @@ struct PendingHostAction {
     let admitted: ContinuousClock.Instant
     let requiresEnabled: Bool
     let done: (() -> Void)?
+    var t3Selection: T3Selection? = nil
 }
 
 extension Store {
@@ -180,7 +181,9 @@ extension Store {
             status = "输入过快，已丢弃积压；当前动作结束后恢复"
             done?(); return false
         }
-        pendingHostActions.append(PendingHostAction(json: json, binding: binding, profile: profile, state: state, deviceSession: deviceSession, deviceIngress: deviceIngress, admitted: .now, requiresEnabled: requiresEnabled, done: done))
+        let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(json.utf8))
+        let selection = payload?.adapter == "t3" && payload?.command == "next-attention" ? t3Attention.selectNext() : nil
+        pendingHostActions.append(PendingHostAction(json: json, binding: binding, profile: profile, state: state, deviceSession: deviceSession, deviceIngress: deviceIngress, admitted: .now, requiresEnabled: requiresEnabled, done: done, t3Selection: selection))
         guard hostExecutionTask == nil else { return true }
         hostExecutionTask = Task { @MainActor [self] in
             while !pendingHostActions.isEmpty {
@@ -208,7 +211,9 @@ extension Store {
                 } else {
                     pushToTalk.cancel(); await pushToTalk.waitUntilStopped()
                     guard admitAfterDictationCleanup(entry) else { continue }
-                    _ = await executeHostAction(actionJSON: entry.json, bindingId: entry.binding, profileId: entry.profile)
+                    _ = await executeHostAction(actionJSON: entry.json, bindingId: entry.binding, profileId: entry.profile, t3Selection: entry.t3Selection, stillAdmitted: { [weak self] in
+                        self?.admitAfterDictationCleanup(entry, checkAge: false) == true
+                    })
                 }
             }
             if overflowDraining { readInputBoundary(); overflowDraining = false }
@@ -216,12 +221,17 @@ extension Store {
         }
         return true
     }
-    private func admitAfterDictationCleanup(_ entry: PendingHostAction) -> Bool {
+    private func admitAfterDictationCleanup(_ entry: PendingHostAction, checkAge: Bool = true) -> Bool {
         dispatchOpen && pushToTalk.cleanupConfirmed && routing?.host_state_revision == entry.state.host_state_revision
             && routing?.document_revision == entry.state.document_revision && routing?.document_id == entry.state.document_id
             && (!entry.requiresEnabled || hostExecutionEnabled)
             && (entry.deviceSession == nil || (entry.deviceSession == inputBoundary.session && (entry.deviceIngress ?? 0) > inputBoundary.cutoff))
-            && entry.admitted.duration(to: .now) < .seconds(1)
+            && (!checkAge || entry.admitted.duration(to: .now) < .seconds(1))
+    }
+    func openNextT3Attention() {
+        guard let state = routing, let profile = state.profile_id else { return }
+        enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"t3","command":"next-attention"}"#,
+                          binding: "menu-t3-attention", profile: profile, state: state, requiresEnabled: false)
     }
     func startHeldDictation(adapter: String, binding: String, profile: String, ingress: UInt64 = 0) {
         guard dispatchOpen, hostExecutionEnabled, pushToTalk.cleanupConfirmed, !pushToTalk.isActive, let lease = try? backend.beginHostExecution() else { return }
