@@ -84,7 +84,7 @@ T05已补取消、会话终止通知及退出时等待资源释放；当前设�
 
 ## 下一步
 
-Slice G 的 ZCode 同实例导航软件片已通过离线和双端源码验收；下一片为 H，接通 DSH 同 Host 状态与精确导航。ZCode 原生补丁、安装边界和重跑入口见 [ZCode 桥](integrations/zcode/README.md)。完整 Electron 窗口、日常安装版与实体结果仍未验收。
+Slice H 的 DSH 同 Host 状态与精确导航软件片已通过全量离线、原生源码及真实 UDS 双端验收；下一片为 I，验证 Antigravity 官方桌面扩展与状态事件。DSH 固定于 0.2.1-rc.5，只读取已加载且元数据就绪的授权会话，原生补丁与重跑入口见 [DSH 桥](integrations/dsh/README.md)。此前 ZCode 能力见 [ZCode 桥](integrations/zcode/README.md)。两者的补丁日常安装、完整 Electron 窗口与实体结果仍未验收。
 
 2026-11-05 当前目标限定为 Antigravity、Cindy、ZCode、桌面版 DeepSeek Harness 的深度控制，Paseo 只作能力参照。先查明四应用接口并保留 Cindy 原生集成，再逐片实现准确会话控制与状态反馈。见[接口证据](docs/four-app-interfaces.md)、[实施任务](docs/designs/four-app-control.md)与[下一片](docs/pstack-relay.md)。
 

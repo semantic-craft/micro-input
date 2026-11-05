@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Verify the pinned DSH Host bridge and Swift client over private Unix sockets."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import time
+import uuid
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def exchange(path, request):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+        peer.settimeout(4)
+        peer.connect(str(path))
+        peer.sendall(json.dumps(request).encode() + b"\n")
+        data = b""
+        while b"\n" not in data:
+            chunk = peer.recv(65536)
+            if not chunk or len(data) + len(chunk) > 1048576:
+                raise ValueError("invalid fixture response")
+            data += chunk
+        return json.loads(data)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument("--skip-build", action="store_true")
+    args = parser.parse_args()
+    source = args.source.resolve()
+    base = (ROOT / "integrations/dsh/BASE_SHA").read_text().strip()
+    patch = ROOT / "integrations/dsh/navigation.patch"
+    if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip() != base:
+        raise ValueError("wrong native base")
+    actual = subprocess.check_output(["git", "diff", "--binary", "--no-ext-diff", "--no-color",
+        "--src-prefix=a/", "--dst-prefix=b/", "HEAD"], cwd=source)
+    if actual != patch.read_bytes():
+        raise ValueError("native source differs from packaged patch")
+    run = ROOT / ".scratch" / ("dh-" + uuid.uuid4().hex[:8])
+    run.mkdir(mode=0o700)
+    env = dict(os.environ, MI_AUTO_HOST_READY="0")
+    grant_path, control = run / "dsh-grant.json", run / "control.sock"
+    log = (run / "native.log").open("w")
+    process = None
+    try:
+        if not args.skip_build:
+            subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, env=env, check=True)
+        process = subprocess.Popen(["pnpm", "exec", "tsx", "--tsconfig", "tsconfig.base.json",
+            "scripts/micro-input-fixture.ts", "--directory", str(run), "--ttl", "120"],
+            cwd=source, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        for _ in range(400):
+            if grant_path.exists() and control.exists():
+                break
+            if process.poll() is not None:
+                raise ValueError("native fixture exited before ready")
+            time.sleep(0.05)
+        else:
+            raise ValueError("native fixture did not become ready")
+        grant = json.loads(grant_path.read_text())
+        subscription_id = str(uuid.uuid4())
+
+        def request(op="subscribe", **extra):
+            nonlocal subscription_id
+            if op == "subscribe":
+                subscription_id = str(uuid.uuid4())
+            return dict(version=1, id=str(uuid.uuid4()), token=grant["token"], hostId=grant["hostId"],
+                        generation=grant["generation"], subscriptionId=subscription_id, op=op, **extra)
+
+        def stats():
+            return exchange(control, {"op": "stats"})
+
+        def assert_zero_read_rejection(raw):
+            before = stats()
+            reply = exchange(grant["socketPath"], raw)
+            after = stats()
+            if reply.get("status") not in ("denied", "stale") or "rows" in reply or "changes" in reply:
+                raise ValueError("unauthorized request leaked metadata")
+            if before["metadataReads"] != after["metadataReads"] or before["navigationCount"] != after["navigationCount"]:
+                raise ValueError("unauthorized request reached data or navigation")
+
+        assert_zero_read_rejection({"version": 1, "op": "subscribe", "activate": False})
+        bad = request(activate=False); bad["token"] = "unauthorized-" * 4
+        assert_zero_read_rejection(bad)
+        bad = request(activate=False); bad["hostId"] = "old-host"
+        assert_zero_read_rejection(bad)
+        assert_zero_read_rejection(request(activate=True))
+        snapshot = exchange(grant["socketPath"], request(activate=False))
+        if (snapshot.get("status") != "ok" or len(snapshot["rows"]) != 2
+                or snapshot["unavailableSessionIds"] != ["dsh-cold"] or stats()["activationCount"] != 0):
+            raise ValueError("subscription activated a cold session or lost its unavailable state")
+        old_subscription = subscription_id
+        closed = exchange(grant["socketPath"], request("close"))
+        if closed.get("status") != "ok":
+            raise ValueError("old subscription did not close")
+        snapshot = exchange(grant["socketPath"], request(activate=False))
+        old_close = request("close"); old_close["subscriptionId"] = old_subscription
+        assert_zero_read_rejection(old_close)
+        active_subscription = subscription_id
+        contender = request(activate=False)
+        assert_zero_read_rejection(contender)
+        subscription_id = active_subscription
+        assert_zero_read_rejection(request("open", sessionId="outside-scope", workspaceId="workspace-a"))
+        exchange(control, {"op": "pending-pulse"})
+        changed = exchange(grant["socketPath"], request("read", after=snapshot["cursor"]))
+        transitions = changed.get("changes", [])
+        sequences = [item["sequence"] for item in transitions]
+        if (changed.get("status") != "ok" or not transitions
+                or sequences != list(range(snapshot["cursor"] + 1, changed["cursor"] + 1))
+                or not any(item["row"]["pendingInput"] > 0 for item in transitions)
+                or transitions[-1]["row"]["pendingInput"] != 0):
+            raise ValueError("pending-input transition was lost")
+        if exchange(grant["socketPath"], request("close")).get("status") != "ok":
+            raise ValueError("paired probe subscription did not close")
+        swift_result = run / "swift-result.json"
+        swift_env = dict(env, MI_DSH_PAIRED_GRANT=str(grant_path), MI_DSH_PAIRED_RESULT=str(swift_result))
+        with (run / "swift.log").open("w") as swift_log:
+            subprocess.run(["swift", "test", "--package-path", "app/MicroInput", "-Xswiftc",
+                "-DMI_SYNTHETIC_BACKEND", "--filter", "DSHPairedTests"], cwd=ROOT, env=swift_env,
+                stdout=swift_log, stderr=subprocess.STDOUT, timeout=90, check=True)
+        swift = json.loads(swift_result.read_text())
+        if swift.get("status") != "PASS" or swift.get("confirmed_targets") != 2:
+            raise ValueError("Swift pair incomplete")
+        after_swift = stats()
+        if after_swift["navigationCount"] != 2 or after_swift["hostStopped"] or after_swift["activationCount"] != 0:
+            raise ValueError("Swift close affected Host ownership or navigation counts differ")
+        snapshot = exchange(grant["socketPath"], request(activate=False))
+        target = snapshot["rows"][0]
+        before = stats()["navigationCount"]
+        exchange(control, {"op": "delete", "sessionId": target["sessionId"]})
+        deleted = exchange(grant["socketPath"], request("open", sessionId=target["sessionId"], workspaceId=target["workspaceId"]))
+        if deleted["status"] == "confirmed" or stats()["navigationCount"] != before:
+            raise ValueError("deleted target redirected")
+        remaining = snapshot["rows"][1]
+        exchange(control, {"op": "rotate", "sessionId": remaining["sessionId"]})
+        replaced = exchange(grant["socketPath"], request("open", sessionId=remaining["sessionId"], workspaceId=remaining["workspaceId"]))
+        if replaced["status"] != "stale" or stats()["navigationCount"] != before:
+            raise ValueError("replaced session accepted an old selection")
+        exchange(control, {"op": "stop-bridge"})
+        if stats()["hostStopped"] or process.poll() is not None:
+            raise ValueError("stopping the bridge stopped its Host")
+        result = dict(status="PASS", native_source_sha=base, patch_sha256=hashlib.sha256(actual).hexdigest(),
+            transport="real-unix-socket", confirmed_targets=2, unauthorized_metadata_reads=0,
+            cold_session_activations=0, pending_transitions=len(transitions), deleted_target="REJECTED",
+            replaced_session="REJECTED", stale_close="REJECTED", competing_subscribe="REJECTED",
+            host_survives_bridge_stop=True,
+            native_install="NOT_RUN", renderer_ui="NOT_RUN", physical_key="NOT_RUN",
+            git_sha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+            working_tree_changes=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)))
+    except BaseException as error:
+        (run / "result.json").write_text(json.dumps({"status": "FAIL", "failure_type": type(error).__name__}, indent=2) + "\n")
+        raise
+    finally:
+        if process is not None and process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL); process.wait()
+        log.close()
+        if not args.skip_build:
+            subprocess.run(["scripts/build"], cwd=ROOT, env=env, check=True)
+    if process is None or process.poll() is None or any((run / name).exists() for name in ("dsh-grant.json", "dsh.sock", "control.sock", "dsh.lock")):
+        raise ValueError("paired fixture cleanup incomplete")
+    result["cleanup_confirmed"] = True
+    (run / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    print("DSH_PAIRED_RESULT=" + str(run / "result.json"))
+
+
+if __name__ == "__main__":
+    main()

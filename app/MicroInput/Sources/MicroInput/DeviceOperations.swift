@@ -52,7 +52,7 @@ extension Store {
     }
 
     @discardableResult
-    func executeHostAction(actionJSON: String, bindingId: String, profileId: String, t3Selection: T3Selection? = nil, zcodeSelection: ZCodeSelection? = nil, stillAdmitted: (() -> Bool)? = nil) async -> HostActionReceipt? {
+    func executeHostAction(actionJSON: String, bindingId: String, profileId: String, t3Selection: T3Selection? = nil, zcodeSelection: ZCodeSelection? = nil, dshSelection: DSHSelection? = nil, stillAdmitted: (() -> Bool)? = nil) async -> HostActionReceipt? {
         guard nativeOwnership.allowsExecution, !hostOperationPaused, let lease = try? backend.beginHostExecution() else { return nil }
         let epoch = hostRouteEpoch
         inFlightHostActions += 1
@@ -105,6 +105,15 @@ extension Store {
             })
             receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
                 bindingId: bindingId, actionType: "zcode_open", target: "zcode", textByteLen: nil,
+                outcome: result.rawValue, detail: result.label)
+            AuditLogWriter.append(receipt)
+        } else if payload?.action_type == "agent_command", payload?.adapter == "dsh-desktop", payload?.command == "open-session" {
+            let result = await dshSessions.open(dshSelection, admitted: { [weak self] in
+                guard let self else { return false }
+                return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
+            })
+            receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
+                bindingId: bindingId, actionType: "dsh_open", target: "dsh", textByteLen: nil,
                 outcome: result.rawValue, detail: result.label)
             AuditLogWriter.append(receipt)
         } else if payload?.action_type == "agent_command", payload?.adapter == "t3", payload?.command == "next-attention" {

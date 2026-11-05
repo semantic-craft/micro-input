@@ -9,9 +9,9 @@ import MicroInputCore
         PerformanceProbe.start()
         let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
         #if MI_SYNTHETIC_BACKEND
-        let core = scenario == "radial-menu" ? MicroInput.syntheticRadialDevice() : ["config-write", "lighting-control"].contains(scenario) ? MicroInput.syntheticConfigWriter() : ["reconnect", "reconnect-transient", "apply-preparation", "host-execution", "zcode-navigation", "native-ownership", "diagnostic-export", "push-to-talk", "push-to-talk-live"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
+        let core = scenario == "radial-menu" ? MicroInput.syntheticRadialDevice() : ["config-write", "lighting-control"].contains(scenario) ? MicroInput.syntheticConfigWriter() : ["reconnect", "reconnect-transient", "apply-preparation", "host-execution", "zcode-navigation", "dsh-navigation", "native-ownership", "diagnostic-export", "push-to-talk", "push-to-talk-live"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
         let ownership = scenario == "native-ownership" ? NativeOwnershipController(transport: nil) : NativeOwnershipController(isolated: true)
-        let store = Store(nativeOwnership: ownership, backend: core, actionExecutor: ["native-ownership", "zcode-navigation"].contains(scenario) ? RecordingHostActionExecutor() : nil, zcodeSessions: scenario == "zcode-navigation" ? ZCodeSessionController(client: ZCodeNavigationFixture.shared, pollNanoseconds: 60_000_000_000) : nil)
+        let store = Store(nativeOwnership: ownership, backend: core, actionExecutor: ["native-ownership", "zcode-navigation", "dsh-navigation"].contains(scenario) ? RecordingHostActionExecutor() : nil, zcodeSessions: scenario == "zcode-navigation" ? ZCodeSessionController(client: ZCodeNavigationFixture.shared, pollNanoseconds: 60_000_000_000) : nil, dshSessions: scenario == "dsh-navigation" ? DSHSessionController(client: DSHNavigationFixture.shared, pollNanoseconds: 60_000_000_000) : nil)
         #else
         let core = MicroInput()
         let store = Store(backend: core)
@@ -258,6 +258,7 @@ struct StatusPanel: View {
                 .toggleStyle(.switch).controlSize(.small)
             if store.radialMenu.enabled { Text(store.radialReadiness.label).font(.caption2).foregroundStyle(.secondary) }
             ZCodeSessionPanel(controller: store.zcodeSessions, open: { store.openZCodeSession($0) })
+            DSHSessionPanel(controller: store.dshSessions, open: { store.openDSHSession($0) })
             T3AttentionPanel(controller: store.t3Attention, next: { store.openNextT3Attention() })
             Divider()
             Toggle("自动跟随前台应用", isOn: Binding(get: { store.routing?.auto_follow_enabled ?? false }, set: { value in Task { await store.setAutoFollow(value) } })).toggleStyle(.switch).controlSize(.small)
@@ -380,6 +381,45 @@ struct ZCodeSessionPanel: View {
                                 .truncationMode(.middle).help(row.address.workspacePath)
                         }
                     }.buttonStyle(.plain).disabled(controller.state != .ready)
+                }
+                if let result = controller.lastResult {
+                    Text(result.label).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+}
+
+struct DSHSessionPanel: View {
+    @ObservedObject var controller: DSHSessionController
+    let open: (DSHSelection) -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("DSH 会话连接", isOn: Binding(get: { controller.enabled }, set: controller.setEnabled))
+                .toggleStyle(.switch).controlSize(.small)
+            Text(controller.state.label).font(.caption).foregroundStyle(.secondary)
+            if controller.enabled {
+                if case .unavailable = controller.state {
+                    Button("重连") { controller.setEnabled(true) }.font(.caption)
+                }
+                ForEach(controller.rows) { row in
+                    Button {
+                        if let selection = controller.selection(for: row.sessionId) { open(selection) }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Text(row.title.isEmpty ? "未命名会话" : row.title).lineLimit(1)
+                                if controller.selected == row.sessionId { Image(systemName: "checkmark").accessibilityLabel("已选中") }
+                            }
+                            Text(row.workspaceId.isEmpty ? "未分组" : row.workspaceId).font(.caption2)
+                                .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                            Text(row.statusLabel).font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }.buttonStyle(.plain).disabled(controller.state != .ready)
+                }
+                if !controller.unavailableSessionIds.isEmpty {
+                    Text("另有 \(controller.unavailableSessionIds.count) 个授权会话当前不可用，状态未知")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 if let result = controller.lastResult {
                     Text(result.label).font(.caption).foregroundStyle(.secondary)

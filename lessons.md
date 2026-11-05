@@ -212,3 +212,15 @@
 - 起因：新版队列的未完成切片没有预置 Evidence 行，advance 只替换已有字段，标记完成后生成的下一棒提示证据为空。
 - 修复：缺失时插入，已有时替换；重复执行不产生重复字段。
 - 验证点：`test_advance_adds_missing_evidence_and_updates_it_without_duplicates` 与 `scripts/pstack-relay selftest`。Seen 1x（2026-11-05）。
+
+## 订阅关闭与重新连接必须绑定同一个订阅身份
+
+- 起因：DSH 桥初版只绑定授权和 Host 代次。旧关闭请求迟到时可能关闭新订阅；只给关闭增加身份后，迟到的旧订阅请求仍可能替换新订阅。
+- 修复：每次订阅生成独立 ID，原生端拒绝其他 ID 替换活动订阅。控制器先等待旧连接结束，再关闭其订阅并建立新连接；清理未确认时保持关闭，不接管未知订阅。
+- 验证点：`DSHSessionTests.testReconnectWaitsForLateSubscribeBeforeClosingItsSubscription`、`scripts/verify-dsh-native` 的旧订阅回归，以及 `scripts/verify-dsh-paired` 的迟到关闭和竞争订阅检查。Seen 1x（2026-11-05）。
+
+## 只请求一个投影不代表只读取元数据
+
+- 起因：DSH `stateOf(session, key)` 会先生成全部已注册投影，缺缓存时遍历内存历史。桥没有调用 transcript API，仍不足以证明没有读取正文。
+- 修复：增加只读取当前缓存的 `cachedStateOf`，缓存不存在或水位不符时返回未知。待回应计数由生产者和当前缓存提供；桥不主动补历史。状态观察在同一事件的投影全部更新后同步读取，保留连续变化。
+- 验证点：`scripts/verify-dsh-native` 包含未生成缓存会话的历史读取陷阱、连接前已存在的审批，以及连续待回应变化回归。安装版与实体结果单列。Seen 1x（2026-11-05）。

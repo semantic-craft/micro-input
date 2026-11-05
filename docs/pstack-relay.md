@@ -63,10 +63,12 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Evidence**: .scratch/qa-runs/1793838585847-10402/evidence/result.json
 - **Verification scope**: 软件片通过全量离线门禁及六个隔离应用场景；固定 ZCode 源码检查、16 项原生边界检查和真实 UDS Swift 双端联测通过。真实 renderer store 使用合成任务 owner；完整 Electron 窗口、安装版与实体为 NOT_RUN。补丁与重跑入口见 [ZCode 桥](../integrations/zcode/README.md)。
 
-### [ ] Slice H: 接通 DSH 同 Host 状态与精确导航
+### [x] Slice H: 接通 DSH 同 Host 状态与精确导航
 - **Outcome**: 先核验 0.2.1-rc.5 接口，再在同 Host 读取状态并打开准确会话。
 - **Done Predicate**: activate=false 的订阅不启动后台会话；pendingInput 变化不漏；导航回读 ID；停止桥不停止 Host；无认证零读取。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: 无。责任票 #32。
+- **Evidence**: .scratch/qa-runs/1793841784754-43891/evidence/result.json
+- **Verification scope**: 软件片通过全量离线门禁及七个隔离应用场景；固定 rc.5 原生源码契约、类型、lint 和 191 项测试通过。真实 UDS Swift 双端确认两个目标、四次待回应变化、零未授权读取及关闭后 Host 存活；最新 Swift 回归在合成和生产 ABI 各 13 项通过。配对导航端口为合成选择，真实 UI store 另有源码测试。日常 DSH 补丁安装、完整 Electron 窗口和实体均为 NOT_RUN；冷目录发现未实现。见 [DSH 桥](../integrations/dsh/README.md)。
 
 ### [ ] Slice I: 验证 Antigravity 官方桌面扩展与状态事件
 - **Outcome**: 只读确认安装版 agentapi/Sidecars/Hooks 契约，再在隔离测试工作区接元数据事件。

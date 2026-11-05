@@ -52,18 +52,22 @@ REA 对上述安装包作静态部分分析：`dist/languageServer.js:startLangu
 
 ## DeepSeek Harness 桌面版
 
-官方仓库 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness/tree/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159)，SHA `fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159`，MIT。本机 `com.deepseek.dsh`、`0.2.1-rc.5`；公开源码桌面包为 `0.2.2-rc.1`，先核验版本差异，不直接按主线接口调用安装版。
+本机 `com.deepseek.dsh` 的版本为 `0.2.1-rc.5`。本轮改用对应官方 tag [dsh-v0.2.1-rc.5](https://github.com/deepseek-ai/deepseek-harness/tree/b830ec950faba0a46dda564be3e2d854afed94f1)，固定 SHA `b830ec950faba0a46dda564be3e2d854afed94f1`，MIT。此前调查的 `fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159` 为较新源码，不能作为安装版契约。
 
-| 源码定位 | 已观察接口 | 待验证边界 |
+`scripts/verify-dsh-installed-static` 核验 Info.plist、ASAR 文件完整性和随包接口。安装包 ASAR SHA-256 为 `8dad52f295bdbe9fa71948fdf38ac2ce3c910213d3b89c37174b2af77db9fb31`。这证明本轮检查了安装包静态接口，不证明源码与整个二进制逐字对应，也没有读取账户凭据或会话数据库。
+
+| rc.5 固定源码入口 | 本轮确认 | H 的接入约束 |
 | --- | --- | --- |
-| [Desktop README](https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/apps/desktop/README.md) | Electron 启动 bundled Host，HTTP/WS 接认证 Web Host，随机 loopback 端口 | 凭据只给所属窗口；不提取 cookie。Python SDK 的独立 runtime 不能替代同 Host 接入 |
-| [SessionController](https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/api/session-controller/src/index.ts) | ctx.remote.session 的 list/search/create/selectModel/prompt/updateQueue/cancel/follow/projections | 需要同 Host 插件或受限本机桥，外部接入尚未实测 |
-| [types.ts](https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/api/session-controller/src/types.ts) | active/running/queue/pendingInput；SessionControlFrame baseline+projection | pending 变化不独立触发 observeState，不得漏掉待回应；follow 默认为 activate=false，首片保持不激活 |
-| [ISession](https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/api/session-controller/src/client/contract/session.ts) | prompt 的 queue/steer 与 requestId，cancel | cancel 只取消当前 turn，队列仍可能继续，原生契约未提供 expected turn。K2 须补同 Host 原子核对，客户端先读再取消不构成保证；停止与清队列分开定义 |
-| [UI apply.ts](https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/client/ui-chat/src/client/apply.ts) | ctx.uiWorkspace.openSession(childId) | 候选精确导航；dsh://open 仅聚焦主窗，不能作为会话确认 |
-| [UserApproval](https://github.com/deepseek-ai/deepseek-harness/blob/fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159/packages/interaction/user-approval/src/index.ts) | ask/answerer、取消与迟到答案丢弃 | 仍须核对桌面 Remote 请求/答案接线；不能套用独立 SDK 协议 |
+| `apps/desktop-host/src/index.ts` | 桌面启动已有 Host Context，生命周期由桌面拥有 | 桥装入同一个 Host；不得另起 SDK runtime，也不提取 Web Host cookie |
+| `packages/api/session-controller/src/history.ts`、`types.ts` | `follow` 调用 `sourceFor(address, signal, true)` 并返回历史记录；`SessionFollowRequest` 没有 `activate` 字段 | 不使用这个正文流。桥的 `subscribe(activate:false)` 是新加的限定契约，认证后只读已加载会话的内存状态 |
+| `packages/api/session-controller/src/control.ts` | control 的基线和更新是投影；不存在此前描述的原生 `observeState`、`pendingInput` API | 桥只投影标题、workspace/session ID、active/running 和待回应数量，不传播投影正文 |
+| `packages/interaction/user-questions/src/index.ts`、`types.ts` | 定时提问有 `userQuestions.active` 投影；旧式阻塞提问由服务持有请求 | H 给生产服务增加只读待回应计数与观察口，覆盖订阅前已存在的提问和之后的变化，不把排队消息当成等待用户 |
+| `packages/interaction/user-approval/src/index.ts` | approval request 生命周期由服务拥有，历史审计含 asked/decided | H 在生产者保存当前待审批计数，桥无需扫描历史；`pendingInput` 为提问与审批数之和 |
+| `packages/client/ui-workspace/src/client/navigation.ts` | `openSession` 沿真实 selection 与 layout 选择会话 | 原桌面窗口回读选中 session ID；workspace 和 Host 代次也必须吻合，才返回 confirmed |
 
-推荐同 Host 插件连接 sessionController 与 UI 导航。模型档位以实际 provider 返回为准；语音输入、语音回答开关仍是独立缺口。
+[DSH 导航桥](../integrations/dsh/README.md) 默认关闭，只连接显式授权的 session ID。授权范围内尚未加载、当前元数据尚未就绪或已经消失的会话单列为不可用，不伪装为空闲，也不为了列举而加载或启动会话。订阅返回基线，后续按连续序号返回状态变化；即使同一次轮询前等待状态已经出现又消失，两个变化仍保留。日志缓冲耗尽返回 gap，客户端清空旧目标并要求重新连接。
+
+每次连接有独立 subscriptionId；旧订阅的迟到关闭不能清除新连接，已有订阅也不接受另一个 ID 的替换。旧连接尚未完成时先排空，再清理并重连；清理无法确认时拒绝接管，须重置桥恢复。停止桥只释放自己的观察器、订阅和端点，不停止 Host、Agent 或会话。H 不实现发送、取消当前轮次、审批动作或模型档位；这些仍属于 K2/L2。安装版原生窗口、已安装桥和实体控件的结果与源码配对验收分别记录。
 
 ## 本轮验证与后续入口
 
