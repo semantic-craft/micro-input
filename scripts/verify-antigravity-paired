@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import sys
+import time
+import uuid
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def exchange(path, request):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+        peer.settimeout(4)
+        peer.connect(str(path))
+        peer.sendall(json.dumps(request).encode("utf-8") + b"\n")
+        data = b""
+        while b"\n" not in data:
+            chunk = peer.recv(65536)
+            if not chunk or len(data) + len(chunk) > 1048576:
+                raise ValueError("invalid bridge response")
+            data += chunk
+        return json.loads(data.split(b"\n", 1)[0].decode("utf-8"))
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--skip-build", action="store_true")
+    args = parser.parse_args()
+
+    env = dict(os.environ, MI_AUTO_HOST_READY="0")
+    static_out = ROOT / ".scratch/antigravity-status/installed-static.json"
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts/verify-antigravity-installed-static"), "--output", str(static_out)],
+        cwd=ROOT,
+        env=env,
+        check=True,
+    )
+    static_receipt = json.loads(static_out.read_text(encoding="utf-8"))
+    if static_receipt.get("status") != "PASS":
+        raise ValueError("installed static verification did not pass")
+
+    run = ROOT / ".scratch" / ("ag-" + uuid.uuid4().hex[:8])
+    run.mkdir(mode=0o700, parents=True)
+    ws_alpha = str(run / "ws-alpha")
+    ws_beta = str(run / "ws-beta")
+    Path(ws_alpha).mkdir(mode=0o700)
+    Path(ws_beta).mkdir(mode=0o700)
+
+    canary_transcript = run / "canary-transcript.jsonl"
+    canary_transcript.write_text('{"secret":"never-read-me"}\n', encoding="utf-8")
+    os.chmod(canary_transcript, 0o000)
+
+    bridge_script = ROOT / "integrations/antigravity/hooks-bridge.py"
+    grant_path = run / "antigravity-grant.json"
+    control_path = run / "control.sock"
+    log = (run / "bridge.log").open("w", encoding="utf-8")
+    process = None
+    try:
+        if not args.skip_build:
+            subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, env=env, check=True)
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(bridge_script),
+                "serve",
+                "--directory",
+                str(run),
+                "--instance-id",
+                "ag-paired-instance",
+                "--generation",
+                "1",
+                "--workspace",
+                ws_alpha,
+                "--workspace",
+                ws_beta,
+                "--ttl",
+                "120",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        for _ in range(400):
+            if grant_path.exists() and control_path.exists():
+                break
+            if process.poll() is not None:
+                raise ValueError("antigravity bridge exited before ready")
+            time.sleep(0.02)
+        else:
+            raise ValueError("antigravity bridge did not become ready")
+
+        grant = json.loads(grant_path.read_text(encoding="utf-8"))
+        subscription_id = str(uuid.uuid4())
+
+        def request(op="subscribe", **extra):
+            nonlocal subscription_id
+            if op == "subscribe":
+                subscription_id = str(uuid.uuid4())
+            return dict(
+                version=1,
+                id=str(uuid.uuid4()),
+                token=grant["token"],
+                instanceId=grant["instanceId"],
+                generation=grant["generation"],
+                subscriptionId=subscription_id,
+                op=op,
+                **extra,
+            )
+
+        def stats():
+            return exchange(control_path, {"op": "stats"})
+
+        def assert_zero_read_rejection(raw, expected_status=("denied", "stale")):
+            before = stats()
+            reply = exchange(grant["socketPath"], raw)
+            after = stats()
+            if reply.get("status") not in expected_status or "rows" in reply or "changes" in reply:
+                raise ValueError(f"unauthorized request leaked metadata: {reply}")
+            if before["metadataReads"] != after["metadataReads"]:
+                raise ValueError("unauthorized request incremented metadataReads")
+
+        def emit_hook(event_name, payload, strict=True):
+            receipt_path = run / f"emit-{uuid.uuid4().hex[:8]}.json"
+            cmd = [
+                sys.executable,
+                str(bridge_script),
+                "emit",
+                "--socket",
+                grant["socketPath"],
+                "--token",
+                grant["token"],
+                "--instance-id",
+                grant["instanceId"],
+                "--generation",
+                str(grant["generation"]),
+                "--event",
+                event_name,
+                "--receipt-file",
+                str(receipt_path),
+            ]
+            if strict:
+                cmd.append("--strict")
+            proc = subprocess.run(
+                cmd,
+                input=json.dumps(payload),
+                text=True,
+                capture_output=True,
+                cwd=ROOT,
+                env=env,
+                check=True,
+            )
+            stdout_obj = json.loads(proc.stdout.strip())
+            expected_stdout = {"decision": "allow"} if event_name in ("PreInvocation", "PreToolUse") else {}
+            if stdout_obj != expected_stdout:
+                raise ValueError(f"unexpected hook stdout for {event_name}: {stdout_obj}")
+            return json.loads(receipt_path.read_text(encoding="utf-8"))
+
+        assert_zero_read_rejection({"version": 1, "op": "subscribe", "activate": False})
+        bad_token = request(activate=False)
+        bad_token["token"] = "unauthorized-" * 4
+        assert_zero_read_rejection(bad_token, ("denied",))
+        bad_instance = request(activate=False)
+        bad_instance["instanceId"] = "other-instance"
+        assert_zero_read_rejection(bad_instance, ("stale",))
+        assert_zero_read_rejection(request(activate=True), ("denied",))
+
+        forbidden_req = request(activate=False)
+        forbidden_req["transcriptPath"] = str(canary_transcript)
+        assert_zero_read_rejection(forbidden_req, ("denied",))
+
+        unauth_ws = emit_hook(
+            "SessionStart",
+            {
+                "conversationId": "conv-outside",
+                "workspacePaths": ["/unauthorized/workspace"],
+                "transcriptPath": str(canary_transcript),
+                "modelName": "gemini-2.5-pro",
+            },
+            strict=False,
+        )
+        if unauth_ws.get("status") != "denied":
+            raise ValueError("unauthorized workspace was not denied")
+
+        emit_hook(
+            "SessionStart",
+            {
+                "conversationId": "conv-alpha",
+                "workspacePaths": [ws_alpha],
+                "transcriptPath": str(canary_transcript),
+                "artifactDirectoryPath": str(run / "artifacts-a"),
+                "modelName": "gemini-2.5-pro",
+                "invocationNum": 0,
+                "stepIdx": 0,
+                "executionNum": 0,
+            },
+        )
+        emit_hook(
+            "SessionStart",
+            {
+                "conversationId": "conv-beta",
+                "workspacePaths": [ws_beta],
+                "transcriptPath": str(canary_transcript),
+                "artifactDirectoryPath": str(run / "artifacts-b"),
+                "modelName": "gemini-2.5-flash",
+                "invocationNum": 0,
+                "stepIdx": 0,
+                "executionNum": 0,
+            },
+        )
+        tool_payload = {
+            "conversationId": "conv-alpha",
+            "workspacePaths": [ws_alpha],
+            "transcriptPath": str(canary_transcript),
+            "lastUserInput": "sensitive user prompt body",
+            "modelName": "gemini-2.5-pro",
+            "invocationNum": 1,
+            "stepIdx": 2,
+            "executionNum": 1,
+            "toolCall": {"name": "run_command", "args": {"CommandLine": "echo secret"}},
+        }
+        r1 = emit_hook("PreToolUse", tool_payload)
+        r2 = emit_hook("PreToolUse", tool_payload)
+        if r1.get("status") != "ok" or r2.get("status") != "duplicate" or r1.get("cursor") != r2.get("cursor"):
+            raise ValueError(f"duplicate hook event was not deduplicated: {r1} vs {r2}")
+
+        stop_alpha_payload = {
+            "conversationId": "conv-alpha",
+            "workspacePaths": [ws_alpha],
+            "transcriptPath": str(canary_transcript),
+            "modelName": "gemini-2.5-pro",
+            "terminationReason": "NO_TOOL_CALL",
+            "fullyIdle": False,
+        }
+        s1 = emit_hook("Stop", stop_alpha_payload)
+        s2 = emit_hook("Stop", stop_alpha_payload)
+        if s1.get("status") != "ok" or s2.get("status") != "duplicate" or s1.get("cursor") != s2.get("cursor"):
+            raise ValueError(f"duplicate Stop(fullyIdle=false) was not deduplicated: {s1} vs {s2}")
+        emit_hook(
+            "Stop",
+            {
+                "conversationId": "conv-beta",
+                "workspacePaths": [ws_beta],
+                "transcriptPath": str(canary_transcript),
+                "modelName": "gemini-2.5-flash",
+                "terminationReason": "NO_TOOL_CALL",
+                "fullyIdle": True,
+            },
+        )
+
+        snapshot = exchange(grant["socketPath"], request(activate=False))
+        if snapshot.get("status") != "ok" or len(snapshot.get("rows", [])) != 2 or snapshot.get("transcriptReads") != 0:
+            raise ValueError(f"unexpected subscribe snapshot: {snapshot}")
+        active_sub = subscription_id
+        contender = request(activate=False)
+        assert_zero_read_rejection(contender, ("denied",))
+        subscription_id = active_sub
+        if exchange(grant["socketPath"], request("close")).get("status") != "ok":
+            raise ValueError("failed to close probe subscription")
+        stale_close = request("close")
+        assert_zero_read_rejection(stale_close, ("denied",))
+
+        swift_result = run / "swift-result.json"
+        swift_env = dict(
+            env,
+            MI_ANTIGRAVITY_PAIRED_GRANT=str(grant_path),
+            MI_ANTIGRAVITY_PAIRED_RESULT=str(swift_result),
+        )
+        with (run / "swift.log").open("w", encoding="utf-8") as swift_log:
+            subprocess.run(
+                [
+                    "swift",
+                    "test",
+                    "--package-path",
+                    "app/MicroInput",
+                    "-Xswiftc",
+                    "-DMI_SYNTHETIC_BACKEND",
+                    "--filter",
+                    "AntigravityPairedTests",
+                ],
+                cwd=ROOT,
+                env=swift_env,
+                stdout=swift_log,
+                stderr=subprocess.STDOUT,
+                timeout=90,
+                check=True,
+            )
+        swift = json.loads(swift_result.read_text(encoding="utf-8"))
+        if (
+            swift.get("status") != "PASS"
+            or swift.get("session_a_phase") != "backgroundActive"
+            or swift.get("session_b_phase") != "completed"
+            or swift.get("transcript_reads") != 0
+        ):
+            raise ValueError(f"Swift paired verification failed: {swift}")
+
+        exchange(control_path, {"op": "disconnect"})
+        disconnected_reply = exchange(grant["socketPath"], request(activate=False))
+        if disconnected_reply.get("status") != "stale":
+            raise ValueError(f"disconnected stream did not report stale: {disconnected_reply}")
+
+        exchange(control_path, {"op": "reconnect"})
+        reconnected = exchange(grant["socketPath"], request(activate=False))
+        if reconnected.get("status") != "ok":
+            raise ValueError("reconnect did not restore ok status")
+
+        exchange(control_path, {"op": "expire-heartbeat"})
+        expired_reply = exchange(grant["socketPath"], request("read", after=reconnected["cursor"]))
+        if expired_reply.get("status") != "stale":
+            raise ValueError(f"expired heartbeat did not report stale: {expired_reply}")
+
+        exchange(control_path, {"op": "reconnect"})
+        exchange(control_path, {"op": "gap"})
+        gapped = exchange(grant["socketPath"], request("read", after=0))
+        if gapped.get("status") != "gap":
+            raise ValueError("forced gap did not return gap status")
+        recovered_after_gap = exchange(grant["socketPath"], request("read", after=reconnected["cursor"]))
+        if recovered_after_gap.get("status") != "ok":
+            raise ValueError("read after gap did not recover cleanly")
+
+        exchange(control_path, {"op": "rotate"})
+        rotated = exchange(grant["socketPath"], request("read", after=reconnected["cursor"]))
+        if rotated.get("status") != "stale":
+            raise ValueError("rotated generation did not return stale")
+
+        final_stats = stats()
+        if (
+            final_stats["transcriptReads"] != 0
+            or final_stats["duplicateEventsDropped"] != 2
+            or final_stats["ingestedEvents"] != 5
+            or final_stats["sessionCount"] != 2
+        ):
+            raise ValueError(f"unexpected final bridge stats: {final_stats}")
+
+        result = dict(
+            status="PASS",
+            installed_version=static_receipt["version"],
+            language_server_cl=static_receipt["build_cl"],
+            bridge_sha256=hashlib.sha256(bridge_script.read_bytes()).hexdigest(),
+            transport="real-unix-socket",
+            sessions_verified=2,
+            duplicate_events_dropped=final_stats["duplicateEventsDropped"],
+            stop_fully_idle_false_phase=swift["session_a_phase"],
+            stop_fully_idle_true_phase=swift["session_b_phase"],
+            stream_disconnect="STALE_CONFIRMED",
+            generation_rotate="STALE_CONFIRMED",
+            journal_gap="GAP_CONFIRMED",
+            transcript_reads=0,
+            canary_transcript_mode="0000_UNTOUCHED",
+            native_install="NOT_RUN",
+            renderer_ui="NOT_RUN",
+            physical_key="NOT_RUN",
+            git_sha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+            working_tree_changes=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
+        )
+    except BaseException as error:
+        (run / "result.json").write_text(
+            json.dumps({"status": "FAIL", "failure_type": type(error).__name__, "message": str(error)}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        raise
+    finally:
+        try:
+            os.chmod(canary_transcript, 0o600)
+            canary_transcript.unlink()
+        except FileNotFoundError:
+            pass
+        if process is not None and process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+        log.close()
+        if not args.skip_build:
+            subprocess.run(["scripts/build"], cwd=ROOT, env=env, check=True)
+
+    if process is None or process.poll() is None or any(
+        (run / name).exists() for name in ("antigravity-grant.json", "antigravity.sock", "control.sock", "antigravity.lock")
+    ):
+        raise ValueError("paired fixture cleanup incomplete")
+    result["cleanup_confirmed"] = True
+    (run / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    print("ANTIGRAVITY_PAIRED_RESULT=" + str(run / "result.json"))
+
+
+if __name__ == "__main__":
+    main()

@@ -35,3 +35,5 @@
 - [径向菜单](radial-menu.md)：八向选择、冻结目标、一次确认与回中取消；合成输入和实体手感分开验收。
 
 - [ZCode 精确会话导航](zcode-navigation.md)：授权工作区元数据、完整身份导航和选中回读；合成、原生源码与安装版证据分开。
+
+- [Antigravity 官方桌面扩展与状态事件](antigravity-status.md)：安装版 2.29.0 只读契约核对、隔离测试工作区 Lifecycle Hooks 元数据事件归并、两会话隔离、去重、`Stop` `fullyIdle=false` 不报完成、断流标 `stale`、不读 `transcriptPath`。

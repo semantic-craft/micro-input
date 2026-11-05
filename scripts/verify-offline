@@ -77,6 +77,39 @@ def verify_evidence(run, scenario, started, process_alive):
         if len(confirmed) != 2 or any(row.get("target") != "dsh" for row in rows):
             raise ValueError("DSH exact navigation receipts missing")
         result.update(dsh_navigation="SYNTHETIC_PASS", native_app="NOT_RUN", receipt_count=len(rows))
+    elif scenario == "antigravity-status":
+        status_doc = json.loads((evidence / "antigravity-status.json").read_text())
+        expected = {
+            "version_and_capabilities_recorded",
+            "disabled_zero_reads",
+            "two_sessions_isolated",
+            "duplicate_events_deduplicated",
+            "stop_fully_idle_false_not_completed",
+            "stop_fully_idle_true_completed",
+            "stream_disconnect_marks_stale",
+            "generation_change_marks_stale",
+            "journal_gap_marks_unavailable",
+            "zero_transcript_reads",
+            "bridge_subscription_closed",
+        }
+        if (
+            status_doc.get("status") != "PASS"
+            or status_doc.get("installed_version") != "2.29.0"
+            or status_doc.get("language_server_cl") != "1013060670"
+            or status_doc.get("transcript_reads") != 0
+            or set(status_doc.get("checks", {})) != expected
+            or not all(value is True for value in status_doc["checks"].values())
+            or status_doc.get("native_app") != "NOT_RUN"
+            or status_doc.get("physical_key") != "NOT_RUN"
+        ):
+            raise ValueError("Antigravity status evidence incomplete or overclaimed")
+        result.update(
+            antigravity_status="SYNTHETIC_PASS",
+            installed_version="2.29.0",
+            language_server_cl="1013060670",
+            transcript_reads=0,
+            native_app="NOT_RUN",
+        )
     elif scenario == "native-ownership":
         ownership = json.loads((evidence / "ownership.json").read_text())
         expected = {"native_blocks_wide_and_encoder", "released_wide_once_encoder_once",
@@ -140,7 +173,7 @@ def main():
         if not args.qa_only:
             subprocess.run(["scripts/check"], cwd=ROOT, env=env, check=True)
         subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, env=env, check=True)
-        for scenario in ("host-execution", "native-ownership", "zcode-navigation", "dsh-navigation", "config-write", "lighting-control", "diagnostic-export"):
+        for scenario in ("host-execution", "native-ownership", "zcode-navigation", "dsh-navigation", "antigravity-status", "config-write", "lighting-control", "diagnostic-export"):
             started = int(time.time() * 1000)
             scenario_env = dict(env, MI_SYNTHETIC_SCENARIO=scenario)
             if scenario == "diagnostic-export":
