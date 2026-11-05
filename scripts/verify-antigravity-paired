@@ -361,6 +361,11 @@ def main():
             or not swift.get("same_title_isolated")
             or not swift.get("open_a_confirmed")
             or not swift.get("open_b_confirmed")
+            or not swift.get("create_project_bound_confirmed")
+            or not swift.get("two_sessions_only_target_modified")
+            or not swift.get("missing_target_zero_redirect")
+            or not swift.get("running_send_queued_next_invocation")
+            or not swift.get("query_reconciled_without_resend")
             or swift.get("session_a_phase") != "backgroundActive"
             or swift.get("session_b_phase") != "completed"
             or swift.get("transcript_reads") != 0
@@ -402,6 +407,73 @@ def main():
         if confirm_alpha.get("status") != "ok":
             raise ValueError(f"confirm alpha failed: {confirm_alpha}")
 
+        # Verify running-session steering mode when explicitly enabled vs default nextInvocation queueing
+        exchange(control_path, {"op": "set-in-flight-steer", "enabled": True})
+        steered_reply = exchange(
+            grant["socketPath"],
+            request(
+                "send",
+                schemaVersion="antigravity-agentapi-v1",
+                intent={
+                    "requestId": "probe-steered-alpha-1",
+                    "target": {"conversationId": "conv-alpha", "workspacePath": ws_alpha},
+                    "projectId": "proj-alpha",
+                    "message": "Explicit steer on backgroundActive alpha",
+                    "deliveryMode": "steer",
+                },
+            ),
+        )
+        exchange(control_path, {"op": "set-in-flight-steer", "enabled": False})
+        if (
+            steered_reply.get("status") != "steered"
+            or steered_reply.get("delivery") != "steered"
+            or steered_reply.get("inFlightSteering") is not True
+            or "message" in steered_reply
+        ):
+            raise ValueError(f"explicit in-flight steer failed or leaked plaintext: {steered_reply}")
+
+        # Verify timeout/unknown outcome latches and reconciles via query without resending
+        stats_before_unknown = stats()
+        exchange(control_path, {"op": "unknown-next-command", "enabled": True})
+        unknown_reply = exchange(
+            grant["socketPath"],
+            request(
+                "send",
+                schemaVersion="antigravity-agentapi-v1",
+                intent={
+                    "requestId": "probe-unknown-alpha-2",
+                    "target": {"conversationId": "conv-alpha", "workspacePath": ws_alpha},
+                    "projectId": "proj-alpha",
+                    "message": "Unknown delivery test message",
+                    "deliveryMode": "queue",
+                },
+            ),
+        )
+        if unknown_reply.get("status") != "unknown" or unknown_reply.get("reasonCode") != "bridge.deliveryUnconfirmed":
+            raise ValueError(f"unknown-next-command did not return unknown: {unknown_reply}")
+        reconciled_reply = exchange(
+            grant["socketPath"],
+            request(
+                "query",
+                schemaVersion="antigravity-agentapi-v1",
+                intent={
+                    "requestId": "probe-unknown-alpha-2",
+                    "expectedOp": "send",
+                    "conversationId": "conv-alpha",
+                    "workspacePath": ws_alpha,
+                    "projectId": "proj-alpha",
+                },
+            ),
+        )
+        stats_after_reconcile = stats()
+        if (
+            reconciled_reply.get("status") != "queued"
+            or reconciled_reply.get("reconciled") is not True
+            or reconciled_reply.get("duplicate") is not True
+            or stats_after_reconcile["sendConfirmed"] != stats_before_unknown["sendConfirmed"] + 1
+        ):
+            raise ValueError(f"query reconciliation after unknown failed or resent: {reconciled_reply}")
+
         exchange(
             control_path,
             {"op": "delete-session", "conversationId": "conv-beta", "workspacePath": ws_beta},
@@ -419,6 +491,28 @@ def main():
             or deleted_open.get("selected") != {"conversationId": "conv-alpha", "workspacePath": ws_alpha}
         ):
             raise ValueError(f"deleted target redirected or failed unexpectedly: {deleted_open}")
+
+        deleted_send = exchange(
+            grant["socketPath"],
+            request(
+                "send",
+                schemaVersion="antigravity-agentapi-v1",
+                intent={
+                    "requestId": "probe-send-deleted-beta",
+                    "target": {"conversationId": "conv-beta", "workspacePath": ws_beta},
+                    "projectId": "proj-beta",
+                    "message": "Send to deleted session must not redirect or create",
+                    "deliveryMode": "auto",
+                },
+            ),
+        )
+        if (
+            deleted_send.get("status") != "unconfirmed"
+            or deleted_send.get("reasonCode") != "guard.targetNotFound"
+            or deleted_send.get("selected") != {"conversationId": "conv-alpha", "workspacePath": ws_alpha}
+            or len(deleted_send.get("rows", [])) != 2
+        ):
+            raise ValueError(f"deleted target send redirected or created session: {deleted_send}")
 
         exchange(control_path, {"op": "set-schema-verified", "verified": False})
         assert_zero_read_rejection(
@@ -466,10 +560,14 @@ def main():
         if (
             final_stats["transcriptReads"] != 0
             or final_stats["tokenReads"] != 0
-            or final_stats["openConfirmed"] != 3
+            or final_stats["openConfirmed"] != 4
+            or final_stats["createConfirmed"] != 1
+            or final_stats["sendConfirmed"] != 4
+            or final_stats["queryRequests"] != 2
+            or final_stats["duplicateCommandsDropped"] != 1
             or final_stats["duplicateEventsDropped"] != 2
             or final_stats["ingestedEvents"] != 3
-            or final_stats["sessionCount"] != 1
+            or final_stats["sessionCount"] != 2
         ):
             raise ValueError(f"unexpected final bridge stats: {final_stats}")
 
@@ -479,9 +577,19 @@ def main():
             language_server_cl=static_receipt["build_cl"],
             bridge_sha256=hashlib.sha256(bridge_script.read_bytes()).hexdigest(),
             transport="real-unix-socket",
-            sessions_verified=2,
+            sessions_verified=3,
             same_title_cross_workspace_isolated=True,
             open_confirmed_count=final_stats["openConfirmed"],
+            create_confirmed_count=final_stats["createConfirmed"],
+            send_confirmed_count=final_stats["sendConfirmed"],
+            query_reconciled_count=final_stats["queryRequests"],
+            duplicate_commands_dropped=final_stats["duplicateCommandsDropped"],
+            create_binds_project_id="VERIFIED",
+            two_sessions_only_target_modified="VERIFIED",
+            missing_or_deleted_target_zero_redirect="VERIFIED",
+            timeout_unknown_reconciled_without_resend="VERIFIED",
+            running_send_default_delivery="NEXT_INVOCATION_QUEUED_VERIFIED",
+            running_send_explicit_steer_mode="STEERED_VERIFIED",
             wrong_selected_readback="UNCONFIRMED_VERIFIED",
             deleted_target_no_redirect="VERIFIED",
             missing_schema_fail_closed="DENIED_VERIFIED",

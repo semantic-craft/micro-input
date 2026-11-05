@@ -59,6 +59,116 @@ final class AntigravityPairedTests: XCTestCase {
         XCTAssertEqual(readback.transcriptReads, 0)
         XCTAssertEqual(readback.tokenReads, 0)
 
+        // Slice K3: create bound to projectId
+        let badProjectCreate = try await client.create(AntigravityCreateIntent(
+            requestId: "paired-create-bad-project",
+            workspacePath: rowA.workspacePath,
+            projectId: "proj-wrong",
+            prompt: "Must reject mismatched projectId",
+            title: "Bad Project",
+            conversationId: "conv-bad-proj"
+        ))
+        XCTAssertEqual(badProjectCreate.status, "unconfirmed")
+        XCTAssertEqual(badProjectCreate.reasonCode, "guard.projectIdMismatch")
+        XCTAssertEqual(badProjectCreate.rows.count, 2)
+
+        let createdKey = AntigravitySessionKey(
+            conversationId: "conv-alpha-created",
+            workspacePath: rowA.workspacePath
+        )
+        let createReply = try await client.create(AntigravityCreateIntent(
+            requestId: "paired-create-alpha-1",
+            workspacePath: rowA.workspacePath,
+            projectId: "proj-alpha",
+            prompt: "Create new conversation bound to proj-alpha",
+            title: "Alpha Created",
+            modelName: "gemini-2.5-flash",
+            conversationId: createdKey.conversationId
+        ))
+        XCTAssertEqual(createReply.status, "created")
+        XCTAssertEqual(createReply.projectId, "proj-alpha")
+        XCTAssertEqual(createReply.selected, createdKey)
+        XCTAssertEqual(createReply.rows.count, 3)
+
+        let dupCreateReply = try await client.create(AntigravityCreateIntent(
+            requestId: "paired-create-alpha-1",
+            workspacePath: rowA.workspacePath,
+            projectId: "proj-alpha",
+            prompt: "Duplicate create request must not create another conversation",
+            title: "Alpha Created",
+            modelName: "gemini-2.5-flash",
+            conversationId: createdKey.conversationId
+        ))
+        XCTAssertEqual(dupCreateReply.status, "created")
+        XCTAssertTrue(dupCreateReply.duplicate)
+        XCTAssertEqual(dupCreateReply.rows.count, 3)
+
+        // Select rowB (completed) and verify two-session target isolation and missing-target zero redirect
+        _ = try await client.open(rowB.key)
+        let unselectedSend = try await client.send(AntigravitySendIntent(
+            requestId: "paired-send-unselected-a",
+            target: rowA.key,
+            projectId: "proj-alpha",
+            message: "Must not modify unselected session A",
+            deliveryMode: .auto
+        ))
+        XCTAssertEqual(unselectedSend.status, "unconfirmed")
+        XCTAssertEqual(unselectedSend.reasonCode, "guard.selectionMismatch")
+        XCTAssertEqual(unselectedSend.selected, rowB.key)
+
+        let missingTargetSend = try await client.send(AntigravitySendIntent(
+            requestId: "paired-send-missing",
+            target: AntigravitySessionKey(conversationId: "conv-nonexistent", workspacePath: rowB.workspacePath),
+            projectId: "proj-beta",
+            message: "Must not redirect or create session",
+            deliveryMode: .auto
+        ))
+        XCTAssertEqual(missingTargetSend.status, "unconfirmed")
+        XCTAssertEqual(missingTargetSend.reasonCode, "guard.targetNotFound")
+        XCTAssertEqual(missingTargetSend.selected, rowB.key)
+        XCTAssertEqual(missingTargetSend.rows.count, 3)
+
+        // Send to selected idle/completed rowB starts execution on rowB only; rowA and createdKey untouched
+        let sendIdleB = try await client.send(AntigravitySendIntent(
+            requestId: "paired-send-b-start",
+            target: rowB.key,
+            projectId: "proj-beta",
+            message: "Start session B",
+            deliveryMode: .auto
+        ))
+        XCTAssertEqual(sendIdleB.status, "started")
+        XCTAssertEqual(sendIdleB.delivery, .started)
+        XCTAssertFalse(sendIdleB.inFlightSteering)
+        XCTAssertEqual(sendIdleB.rows.first(where: { $0.key == rowB.key })?.phase, .running)
+        XCTAssertEqual(sendIdleB.rows.first(where: { $0.key == rowA.key })?.transitionCount, 3)
+        XCTAssertEqual(sendIdleB.rows.first(where: { $0.key == createdKey })?.transitionCount, 1)
+
+        // Send to running rowB with deliveryMode .steer under official agentapi contract queues for nextInvocation
+        let sendRunningB = try await client.send(AntigravitySendIntent(
+            requestId: "paired-send-b-running-default",
+            target: rowB.key,
+            projectId: "proj-beta",
+            message: "Follow-up while B is running",
+            deliveryMode: .steer
+        ))
+        XCTAssertEqual(sendRunningB.status, "queued")
+        XCTAssertEqual(sendRunningB.delivery, .nextInvocation)
+        XCTAssertFalse(sendRunningB.inFlightSteering)
+        XCTAssertEqual(sendRunningB.reasonCode, "agentapi.steerUnsupportedQueuedNextInvocation")
+        XCTAssertEqual(sendRunningB.rows.count, 3)
+
+        // Reconcile via query without resending
+        let queryReconciled = try await client.query(AntigravityQueryIntent(
+            requestId: "paired-send-b-running-default",
+            expectedOp: "send",
+            conversationId: rowB.conversationId,
+            workspacePath: rowB.workspacePath,
+            projectId: "proj-beta"
+        ))
+        XCTAssertEqual(queryReconciled.status, "queued")
+        XCTAssertTrue(queryReconciled.reconciled)
+        XCTAssertTrue(queryReconciled.duplicate)
+
         await client.close()
         var closedDenied = false
         do { _ = try await client.read() } catch { closedDenied = true }
@@ -77,6 +187,11 @@ final class AntigravityPairedTests: XCTestCase {
             "same_title_isolated": rowA.title == rowB.title && rowA.key != rowB.key,
             "open_a_confirmed": openA.selected == rowA.key,
             "open_b_confirmed": openB.selected == rowB.key,
+            "create_project_bound_confirmed": createReply.status == "created" && createReply.projectId == "proj-alpha",
+            "two_sessions_only_target_modified": unselectedSend.status == "unconfirmed" && sendIdleB.status == "started",
+            "missing_target_zero_redirect": missingTargetSend.status == "unconfirmed" && missingTargetSend.rows.count == 3,
+            "running_send_queued_next_invocation": sendRunningB.status == "queued" && sendRunningB.delivery == .nextInvocation && !sendRunningB.inFlightSteering,
+            "query_reconciled_without_resend": queryReconciled.reconciled && queryReconciled.duplicate,
             "session_a_phase": rowA.phase.rawValue,
             "session_b_phase": rowB.phase.rawValue,
             "transcript_reads": snapshot.transcriptReads,

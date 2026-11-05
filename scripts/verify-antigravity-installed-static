@@ -99,10 +99,17 @@ def verify_language_server_and_agentapi(ls_bin: Path) -> dict:
     )
     if (
         "--model=" not in new_conv_help
+        or "--title=" not in new_conv_help
         or "<recipient_id>" not in send_msg_help
+        or "<content>" not in send_msg_help
         or "<conversation_id>" not in meta_help
     ):
         raise ValueError("agentapi subcommand help flags differ from expected contract")
+    agentapi_explicit_steer_flag = (
+        "--steer" in send_msg_help or "--delivery-strategy" in send_msg_help
+    )
+    if agentapi_explicit_steer_flag:
+        raise ValueError("unexpected explicit steer flag in agentapi send-message help")
     required_proto_markers = (
         b"GetConversationMetadataRequest",
         b"GetConversationMetadataResponse",
@@ -112,14 +119,23 @@ def verify_language_server_and_agentapi(ls_bin: Path) -> dict:
         b"CortexWorkspaceMetadata",
         b"workspace_folder_absolute_uri",
         b"x-codeium-csrf-token",
+        b"SendAgentMessageRequest",
+        b"SendAgentMessageResponse",
+        b"NewConversationEvent",
+        b"SendMessageEvent",
+        b"MessageDeliveryStrategy",
+        b"MESSAGE_DELIVERY_STRATEGY_NEXT_INVOCATION",
+        b"MESSAGE_DELIVERY_STRATEGY_WHEN_IDLE",
+        b"ANTIGRAVITY_PROJECT_ID",
     )
     proto_marker_map = {m.decode("ascii"): (m in raw_bytes) for m in required_proto_markers}
     if not all(proto_marker_map.values()):
-        raise ValueError(f"language_server missing expected catalog/navigation proto markers: {proto_marker_map}")
+        raise ValueError(f"language_server missing expected catalog/navigation/agentapi proto markers: {proto_marker_map}")
     return {
         "language_server_sha256": ls_sha256,
         "build_cl": match.group(1),
         "agentapi_commands": commands,
+        "agentapi_explicit_steer_flag": agentapi_explicit_steer_flag,
         "catalog_proto_markers": proto_marker_map,
     }
 
@@ -208,6 +224,10 @@ def main():
         "stop_fully_idle_field": True,
         "transcript_path_redacted": True,
         "agentapi_commands": ls_info["agentapi_commands"],
+        "agentapi_create_binds_project_id": True,
+        "agentapi_send_binds_conversation_id": True,
+        "agentapi_explicit_steer_flag": ls_info["agentapi_explicit_steer_flag"],
+        "agentapi_running_delivery_default": "nextInvocation",
         "sidecar_loopback_only": True,
         "sidecar_ui_messages": sidecar_info["ui_messages"],
         "catalog_proto_markers": ls_info["catalog_proto_markers"],
