@@ -118,3 +118,10 @@ RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和
 `RadialMenuState` 持有启用、等待回中、选择和确认后等待回中的状态。`RadialMenuRouting` 将冻结的菜单意图送入现有宿主队列及 lease，确认时重验同一会话和路由。原始角度/距离由 `mi-session` 验证，通过 UniFFI 的 `RadialPositionInfo` 传递；连续位置资格独立于按键边沿。没有新硬件订阅或通用 RPC。
 
 菜单默认关闭，本机偏好为 `radialMenuEnabled`。启用或恢复后的旧缓冲回中不能解除隔离。实现与合成原生验收见[径向菜单验证配方](../skills/verify-micro-input/features/radial-menu.md)。当前软件策略的距离阈值和八向手感仍待实体核验，`kb.radial` 没有因此解锁。
+
+
+## ZCode 同实例会话导航
+
+菜单栏的「ZCode 会话连接」默认关闭。显式连接读取原生桥授予的工作区元数据，完整地址与实例代次固定后，经宿主队列、听写清理和 Rust lease 打开目标。只有选中回读完全一致才记录 `confirmed`，不按标题匹配，不自动重试打开。断连、授权变化与来源换代清空旧目标。
+
+原生增量补丁和授权入口见 [ZCode 桥](../integrations/zcode/README.md)，隔离验收见 [ZCode 配方](../skills/verify-micro-input/features/zcode-navigation.md)。`scripts/verify-offline` 包含 `zcode-navigation`，`scripts/verify-zcode-paired --source <patched-source>` 检查固定源码与 Swift 客户端的真实 Unix socket 交换。源码、渲染状态存储、安装版窗口及实体按键分别记录。当前片不新增发送、停止、审批或设备写入。

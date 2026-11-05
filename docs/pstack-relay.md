@@ -56,10 +56,12 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Evidence**: .scratch/qa-runs/1793813638607-83009/evidence/result.json
 - **Verification scope**: 软件片通过全量离线检查、Cindy 源码 187 项测试及完整类型检查、真实 UDS 双端配对 8 事件；安装版 Cindy、实体按键和灯光视觉为 NOT_RUN。补丁、恢复限制及重跑命令见 [原生所有权桥](../integrations/cindy/README.md)。
 
-### [ ] Slice G: 接通 ZCode 同实例状态与精确导航
+### [x] Slice G: 接通 ZCode 同实例状态与精确导航
 - **Outcome**: 通过最小桌面桥读取 v4 任务索引，在两个同名会话间准确打开目标。
 - **Done Predicate**: 两个工作区与同名任务身份不混淆；selected session 回读吻合；断连/换代/删除后不改开其他任务；默认不读正文。 未授权或越权请求零元数据读取。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: 无。责任票 #33。
+- **Evidence**: .scratch/qa-runs/1793838585847-10402/evidence/result.json
+- **Verification scope**: 软件片通过全量离线门禁及六个隔离应用场景；固定 ZCode 源码检查、16 项原生边界检查和真实 UDS Swift 双端联测通过。真实 renderer store 使用合成任务 owner；完整 Electron 窗口、安装版与实体为 NOT_RUN。补丁与重跑入口见 [ZCode 桥](../integrations/zcode/README.md)。
 
 ### [ ] Slice H: 接通 DSH 同 Host 状态与精确导航
 - **Outcome**: 先核验 0.2.1-rc.5 接口，再在同 Host 读取状态并打开准确会话。

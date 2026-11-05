@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Exercise the patched native bridge over real Unix sockets using synthetic task owners."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def exchange(path, value):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(3)
+        connection.connect(str(path))
+        connection.sendall(json.dumps(value).encode() + b"\n")
+        result = bytearray()
+        while not result.endswith(b"\n"):
+            chunk = connection.recv(65536)
+            if not chunk:
+                raise RuntimeError("incomplete response")
+            result.extend(chunk)
+            if len(result) > 1048576:
+                raise RuntimeError("oversized response")
+        return json.loads(result)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--output", type=Path, default=ROOT / ".scratch/zcode-native-result.json")
+    args = parser.parse_args()
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps({"status": "INCOMPLETE", "cleanup_confirmed": False}) + "\n")
+    source = args.source.resolve()
+    expected_sha = (ROOT / "integrations/zcode/BASE_SHA").read_text().strip()
+    source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    diff_command = ["git", "diff", "--no-ext-diff", "--no-color", "--binary", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"]
+    source_diff = subprocess.check_output(diff_command, cwd=source)
+    if source_sha != expected_sha or source_diff != (ROOT / "integrations/zcode/navigation.patch").read_bytes():
+        raise RuntimeError("source does not exactly match fixed base and shipped patch")
+    run = ROOT / ".scratch" / f"zn{os.getpid()}"
+    run.mkdir(mode=0o700)
+    checks = {}
+    boundary_dir = ROOT / ".scratch" / f"zb{os.getpid()}"
+    subprocess.run(["pnpm", "exec", "tsx", "scripts/micro-input-boundaries.ts", str(boundary_dir)], cwd=source, check=True)
+    checks["socket_owner_interleaving"] = True
+    checks["confirmed_window_focus"] = True
+    subprocess.run(["pnpm", "exec", "tsx", "scripts/micro-input-host-boundary.mjs"], cwd=source, check=True)
+    checks["host_projection_no_preview_or_error_payload"] = True
+    process = subprocess.Popen(["pnpm", "exec", "tsx", "--tsconfig", "packages/ui/tsconfig.json", "scripts/micro-input-fixture.ts", "--directory", str(run), "--ttl", "90"], cwd=source, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    result = {"status": "FAIL", "native_app": "NOT_RUN", "physical_key": "NOT_RUN", "surface": "patched-source-uds-real-renderer-stores-synthetic-owners"}
+    try:
+        deadline = time.monotonic() + 20
+        while not (run / "control.sock").exists():
+            if process.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError("fixture did not become ready")
+            time.sleep(0.05)
+        grant = json.loads((run / "zcode-grant.json").read_text())
+        def control(op, **fields):
+            return exchange(run / "control.sock", {"op": op, **fields})
+        serial = 0
+        def request(op="list", scope=None, target=None, **fields):
+            nonlocal serial
+            serial += 1
+            value = {"version": 1, "id": str(serial), "token": grant["token"], "instanceId": grant["instanceId"], "generation": grant["generation"], "op": op, "scope": scope or grant["scopes"][0]}
+            if target is not None:
+                value["target"] = target
+            value.update(fields)
+            return exchange(grant["socketPath"], value)
+        def check(name, predicate):
+            if not predicate:
+                raise AssertionError(name)
+            checks[name] = True
+        check("unauthorized_zero_metadata", request(token="denied")["status"] == "denied" and control("stats")["metadataReads"] == 0)
+        check("out_of_scope_zero_metadata", request(scope={"workspacePath": "/outside"})["status"] == "denied" and control("stats")["metadataReads"] == 0)
+        check("unknown_fields_zero_metadata", request(readBody=True)["status"] == "denied" and control("stats")["metadataReads"] == 0)
+        first = request()
+        second = request(scope=grant["scopes"][1])
+        one, two = first["rows"][0], second["rows"][0]
+        check("same_names_and_ids_distinct_workspaces", one["title"] == two["title"] and one["address"]["taskId"] == two["address"]["taskId"] and one["address"] != two["address"])
+        check("metadata_projection_only", all(set(row) == {"address", "title", "liveStatus"} for row in first["rows"] + second["rows"]))
+        selected = request("open", grant["scopes"][1], two["address"])
+        check("exact_selected_readback", selected["status"] == "confirmed" and selected["selected"] == two["address"] and control("stats")["selected"] == two["address"])
+        before = control("stats")
+        check("cross_scope_open_zero_metadata", request("open", grant["scopes"][0], two["address"])["status"] == "denied" and control("stats")["metadataReads"] == before["metadataReads"])
+        control("delete")
+        check("deleted_zero_navigation", request("open", target=one["address"])["status"] == "unavailable" and control("stats")["navigationCount"] == before["navigationCount"])
+        control("reset")
+        request()
+        control("delete-during-open")
+        check("deletion_during_validation_zero_navigation", request("open", target=one["address"])["status"] == "unavailable" and control("stats")["navigationCount"] == 0)
+        control("reset")
+        control("disconnect")
+        before = control("stats")
+        check("disconnected_zero_navigation", request("open", target=one["address"])["status"] == "unavailable" and control("stats")["navigationCount"] == 0 and control("stats")["metadataReads"] == before["metadataReads"])
+        control("reset")
+        request()
+        control("rotate-during-open")
+        check("source_replaced_during_open_zero_navigation", request("open", target=one["address"])["status"] == "stale" and control("stats")["navigationCount"] == 0)
+        check("source_replacement_stays_stale", request()["status"] == "stale" and request("open", target=one["address"])["status"] == "stale" and control("stats")["navigationCount"] == 0)
+        control("rotate")
+        before = control("stats")
+        check("grant_generation_zero_metadata", request()["status"] == "stale" and control("stats")["metadataReads"] == before["metadataReads"])
+        result.update(status="PASS", checks=checks, transcript_api="NOT_EXPOSED")
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+        result["cleanup_confirmed"] = not (run / "zcode.sock").exists() and not (run / "control.sock").exists() and not (run / "zcode-grant.json").exists()
+        result["source_sha"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+        diff = subprocess.check_output(diff_command, cwd=source)
+        result["source_diff_sha256"] = hashlib.sha256(diff).hexdigest()
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2) + "\n")
+        if result["cleanup_confirmed"]:
+            run.rmdir()
+    if result["status"] != "PASS" or not result["cleanup_confirmed"]:
+        raise RuntimeError("native verification failed")
+    print(f"zcode-native: PASS ({len(checks)} checks; {args.output})")
+
+
+if __name__ == "__main__":
+    main()
