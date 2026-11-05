@@ -52,7 +52,7 @@ extension Store {
     }
 
     @discardableResult
-    func executeHostAction(actionJSON: String, bindingId: String, profileId: String, t3Selection: T3Selection? = nil, zcodeSelection: ZCodeSelection? = nil, zcodeCommand: ZCodeQueuedCommand? = nil, dshSelection: DSHSelection? = nil, dshCommand: DSHQueuedCommand? = nil, cindySelection: CindySelection? = nil, antigravitySelection: AntigravitySelection? = nil, antigravityCommand: AntigravityQueuedCommand? = nil, stillAdmitted: (() -> Bool)? = nil) async -> HostActionReceipt? {
+    func executeHostAction(actionJSON: String, bindingId: String, profileId: String, t3Selection: T3Selection? = nil, zcodeSelection: ZCodeSelection? = nil, zcodeCommand: ZCodeQueuedCommand? = nil, dshSelection: DSHSelection? = nil, dshCommand: DSHQueuedCommand? = nil, cindySelection: CindySelection? = nil, cindyCommand: CindyQueuedCommand? = nil, antigravitySelection: AntigravitySelection? = nil, antigravityCommand: AntigravityQueuedCommand? = nil, stillAdmitted: (() -> Bool)? = nil) async -> HostActionReceipt? {
         guard nativeOwnership.allowsExecution, !hostOperationPaused, let lease = try? backend.beginHostExecution() else { return nil }
         let epoch = hostRouteEpoch
         inFlightHostActions += 1
@@ -167,6 +167,35 @@ extension Store {
             receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
                 bindingId: bindingId, actionType: "cindy_open", target: "cindy", textByteLen: nil,
                 outcome: result.rawValue, detail: result.label)
+            AuditLogWriter.append(receipt)
+        } else if payload?.action_type == "agent_command", payload?.adapter == "cindy",
+                  let cmd = payload?.command,
+                  ["create-session", "send-text", "stop-session", "resolve-interaction", "query-command", "next-attention"].contains(cmd) {
+            let effectiveCmd = cindyCommand ?? (cmd == "next-attention" ? .nextAttention : nil)
+            let reply: CindyCommandReply
+            if let effectiveCmd {
+                reply = await cindySessions.execute(effectiveCmd, admitted: { [weak self] in
+                    guard let self else { return false }
+                    return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
+                })
+            } else {
+                reply = CindyCommandReply(commandId: "missing", instanceId: "", generation: 0, ownerEpoch: "", status: .stale, reasonCode: "guard.missingCommand")
+            }
+            if reply.status == .confirmed, let selected = reply.selected {
+                navigationHistory.visit(.session(adapter: "cindy", session: selected.sessionId))
+            }
+            let actionType: String
+            switch cmd {
+            case "create-session": actionType = "cindy_create"
+            case "send-text": actionType = "cindy_send"
+            case "stop-session": actionType = "cindy_stop"
+            case "resolve-interaction": actionType = "cindy_resolve"
+            case "next-attention": actionType = "cindy_next_attention"
+            default: actionType = "cindy_query"
+            }
+            receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
+                bindingId: bindingId, actionType: actionType, target: "cindy", textByteLen: nil,
+                outcome: reply.status.rawValue, detail: reply.status.label)
             AuditLogWriter.append(receipt)
         } else if payload?.action_type == "agent_command", payload?.adapter == "antigravity", payload?.command == "open-session" {
             let result = await antigravityStatus.open(antigravitySelection, admitted: { [weak self] in

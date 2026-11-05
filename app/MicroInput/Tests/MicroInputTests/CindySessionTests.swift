@@ -42,6 +42,12 @@ private actor CindyTestPeer: CindySessionServing {
     var connections = 0
     var reads = 0
     var opens: [CindyTaskAddress] = []
+    var creates = 0
+    var sends = 0
+    var stops = 0
+    var resolves = 0
+    var timeoutNextSend = false
+    var recordedCommands: [String: CindyCommandReply] = [:]
 
     func connect() async -> Result<CindySessionSnapshot, CindyFailure> {
         connections += 1
@@ -85,6 +91,7 @@ private actor CindyTestPeer: CindySessionServing {
             )
         }
         opens.append(selection.address)
+        snapshot.selected = selection.address
         return CindyOpenReply(
             instanceId: snapshot.instanceId,
             generation: snapshot.generation,
@@ -96,12 +103,195 @@ private actor CindyTestPeer: CindySessionServing {
         )
     }
 
+    func create(_ intent: CindyCreateIntent) async -> CindyCommandReply {
+        creates += 1
+        let created = CindyTaskAddress(
+            workspacePath: intent.scope.workspacePath,
+            sessionId: "sess-created-\(creates)"
+        )
+        let row = CindyTaskRow(
+            address: created,
+            title: intent.text ?? "Created",
+            phase: intent.text != nil ? "running" : "idle",
+            attention: false,
+            pinned: false,
+            runId: intent.text != nil ? "run-created-\(creates)" : nil,
+            unread: false,
+            eventWatermark: UInt64(100 + creates)
+        )
+        snapshot.rows.append(row)
+        snapshot.selected = created
+        let reply = CindyCommandReply(
+            commandId: intent.commandId,
+            instanceId: snapshot.instanceId,
+            generation: snapshot.generation,
+            ownerEpoch: snapshot.ownerEpoch,
+            status: .confirmed,
+            delivered: created,
+            selected: created,
+            deepLink: created.deepLink,
+            runId: row.runId
+        )
+        recordedCommands["\(intent.scope.workspacePath)::\(intent.commandId)"] = reply
+        return reply
+    }
+
+    func send(_ intent: CindySendIntent) async -> CindyCommandReply {
+        let addr = intent.selection.address
+        guard let idx = snapshot.rows.firstIndex(where: { $0.address == addr }) else {
+            return CindyCommandReply(
+                commandId: intent.commandId,
+                instanceId: snapshot.instanceId,
+                generation: snapshot.generation,
+                ownerEpoch: snapshot.ownerEpoch,
+                status: .stale,
+                reasonCode: "guard.targetMissing"
+            )
+        }
+        sends += 1
+        let reply: CindyCommandReply
+        if snapshot.rows[idx].phase != "running" {
+            let runId = "run-send-\(sends)"
+            snapshot.rows[idx].phase = "running"
+            snapshot.rows[idx].runId = runId
+            reply = CindyCommandReply(
+                commandId: intent.commandId,
+                instanceId: snapshot.instanceId,
+                generation: snapshot.generation,
+                ownerEpoch: snapshot.ownerEpoch,
+                status: .started,
+                selected: addr,
+                delivery: .auto,
+                runId: runId
+            )
+        } else if intent.deliveryMode == .steer {
+            reply = CindyCommandReply(
+                commandId: intent.commandId,
+                instanceId: snapshot.instanceId,
+                generation: snapshot.generation,
+                ownerEpoch: snapshot.ownerEpoch,
+                status: .steered,
+                selected: addr,
+                delivery: .steer,
+                runId: snapshot.rows[idx].runId
+            )
+        } else {
+            snapshot.rows[idx].queuedCount += 1
+            reply = CindyCommandReply(
+                commandId: intent.commandId,
+                instanceId: snapshot.instanceId,
+                generation: snapshot.generation,
+                ownerEpoch: snapshot.ownerEpoch,
+                status: .queued,
+                selected: addr,
+                delivery: .queue,
+                runId: snapshot.rows[idx].runId,
+                queuedCount: snapshot.rows[idx].queuedCount
+            )
+        }
+        recordedCommands["\(addr.workspacePath)::\(intent.commandId)"] = reply
+        if timeoutNextSend {
+            timeoutNextSend = false
+            return CindyCommandReply(
+                commandId: intent.commandId,
+                instanceId: snapshot.instanceId,
+                generation: snapshot.generation,
+                ownerEpoch: snapshot.ownerEpoch,
+                status: .unknown,
+                reasonCode: "bridge.transportTimeout"
+            )
+        }
+        return reply
+    }
+
+    func stop(_ intent: CindyStopIntent) async -> CindyCommandReply {
+        let addr = intent.selection.address
+        guard let idx = snapshot.rows.firstIndex(where: { $0.address == addr }),
+              snapshot.rows[idx].phase == "running",
+              snapshot.rows[idx].runId == intent.expectedRunId else {
+            return CindyCommandReply(
+                commandId: intent.commandId,
+                instanceId: snapshot.instanceId,
+                generation: snapshot.generation,
+                ownerEpoch: snapshot.ownerEpoch,
+                status: .noop,
+                selected: addr,
+                reasonCode: "guard.stopTargetChanged"
+            )
+        }
+        stops += 1
+        snapshot.rows[idx].phase = "idle"
+        snapshot.rows[idx].runId = nil
+        let reply = CindyCommandReply(
+            commandId: intent.commandId,
+            instanceId: snapshot.instanceId,
+            generation: snapshot.generation,
+            ownerEpoch: snapshot.ownerEpoch,
+            status: .stopped,
+            selected: addr,
+            runId: intent.expectedRunId
+        )
+        recordedCommands["\(addr.workspacePath)::\(intent.commandId)"] = reply
+        return reply
+    }
+
+    func resolve(_ intent: CindyResolveIntent) async -> CindyCommandReply {
+        let addr = intent.selection.address
+        guard let idx = snapshot.rows.firstIndex(where: { $0.address == addr }),
+              let pending = snapshot.rows[idx].pendingInteraction,
+              pending.interactionId == intent.interactionId else {
+            return CindyCommandReply(
+                commandId: intent.commandId,
+                instanceId: snapshot.instanceId,
+                generation: snapshot.generation,
+                ownerEpoch: snapshot.ownerEpoch,
+                status: .noop,
+                selected: addr,
+                reasonCode: "guard.interactionAlreadyResolved"
+            )
+        }
+        resolves += 1
+        snapshot.rows[idx].pendingInteraction = nil
+        snapshot.rows[idx].attention = false
+        snapshot.rows[idx].phase = "running"
+        let reply = CindyCommandReply(
+            commandId: intent.commandId,
+            instanceId: snapshot.instanceId,
+            generation: snapshot.generation,
+            ownerEpoch: snapshot.ownerEpoch,
+            status: .resolved,
+            selected: addr,
+            interactionId: pending.interactionId,
+            interactionType: pending.interactionType
+        )
+        recordedCommands["\(addr.workspacePath)::\(intent.commandId)"] = reply
+        return reply
+    }
+
+    func query(_ intent: CindyQueryIntent) async -> CindyCommandReply {
+        if let recorded = recordedCommands["\(intent.scope.workspacePath)::\(intent.commandId)"] {
+            var dup = recorded
+            dup.duplicate = true
+            return dup
+        }
+        return CindyCommandReply(
+            commandId: intent.commandId,
+            instanceId: snapshot.instanceId,
+            generation: snapshot.generation,
+            ownerEpoch: snapshot.ownerEpoch,
+            status: .noop,
+            reasonCode: "query.notFound"
+        )
+    }
+
     func close() async {}
 
     func setSnapshot(_ value: CindySessionSnapshot) { snapshot = value }
     func setReplyOverride(_ value: CindyOpenReply?) { replyOverride = value }
     func setFailure(_ value: CindyFailure?) { failure = value }
+    func setTimeoutNextSend(_ value: Bool) { timeoutNextSend = value }
     func counts() -> (Int, Int, Int) { (connections, reads, opens.count) }
+    func commandStats() -> (creates: Int, sends: Int, stops: Int, resolves: Int) { (creates, sends, stops, resolves) }
     func opened() -> [CindyTaskAddress] { opens }
 }
 
@@ -284,6 +474,298 @@ final class CindySessionTests: XCTestCase {
             .session(adapter: "cindy", session: "sess-alpha-2")
         )
         await store.shutdown()
+    }
+
+    func testStopAndResolveRequireCommittedSelectionAndExactRunOrInteractionIdentity() async throws {
+        let peer = CindyTestPeer()
+        await peer.setSnapshot(
+            CindySessionSnapshot(
+                instanceId: "cindy-instance-a",
+                generation: 1,
+                ownerEpoch: "owner-1:1",
+                scopes: [
+                    CindyScope(workspacePath: "/workspace/alpha"),
+                    CindyScope(workspacePath: "/workspace/beta"),
+                ],
+                rows: [
+                    CindyTaskRow(
+                        address: cindyAlpha1,
+                        title: "Running Task",
+                        phase: "running",
+                        attention: false,
+                        pinned: true,
+                        runId: "run-alpha-1",
+                        unread: false,
+                        eventWatermark: 10
+                    ),
+                    CindyTaskRow(
+                        address: cindyAlpha2,
+                        title: "Interaction Task",
+                        phase: "needs-interaction",
+                        attention: true,
+                        pinned: false,
+                        runId: "run-alpha-2",
+                        unread: false,
+                        eventWatermark: 20,
+                        pendingInteraction: CindyPendingInteraction(
+                            interactionId: "perm-alpha-2",
+                            interactionType: .permission,
+                            toolName: "bash"
+                        )
+                    ),
+                ],
+                selected: cindyAlpha1
+            )
+        )
+        let controller = CindySessionController(client: peer, pollNanoseconds: 60_000_000_000)
+        controller.setEnabled(true)
+        await controller.refreshNow()
+
+        // Unselected target cannot be stopped.
+        let unselectedStop = await controller.stop(address: cindyAlpha2, expectedRunId: "run-alpha-2")
+        XCTAssertEqual(unselectedStop.status, .unconfirmed)
+        XCTAssertEqual(unselectedStop.reasonCode, "guard.selectionNotCommitted")
+        let stats1 = await peer.commandStats()
+        XCTAssertEqual(stats1.stops, 0)
+
+        // Mismatched runId on selected target is noop with zero abort calls.
+        let mismatchStop = await controller.stop(address: cindyAlpha1, expectedRunId: "run-old-0")
+        XCTAssertEqual(mismatchStop.status, .noop)
+        XCTAssertEqual(mismatchStop.reasonCode, "guard.stopTargetChanged")
+        let stats2 = await peer.commandStats()
+        XCTAssertEqual(stats2.stops, 0)
+
+        // Exact runId stops once; duplicate commandId returns duplicate without re-running.
+        let exactStop = await controller.stop(
+            address: cindyAlpha1,
+            expectedRunId: "run-alpha-1",
+            commandId: "cmd-stop-1"
+        )
+        XCTAssertEqual(exactStop.status, .stopped)
+        let dupStop = await controller.stop(
+            address: cindyAlpha1,
+            expectedRunId: "run-alpha-1",
+            commandId: "cmd-stop-1"
+        )
+        XCTAssertEqual(dupStop.status, .stopped)
+        XCTAssertTrue(dupStop.duplicate)
+        let stats3 = await peer.commandStats()
+        XCTAssertEqual(stats3.stops, 1)
+
+        // Select cindyAlpha2 to test resolve guards.
+        _ = await controller.open(cindyAlpha2)
+        let questionAsPerm = await controller.resolve(
+            address: cindyAlpha2,
+            interactionId: "perm-alpha-2",
+            interactionType: .question,
+            decision: .approve
+        )
+        XCTAssertEqual(questionAsPerm.status, .interactionTypeMismatch)
+        XCTAssertEqual(questionAsPerm.reasonCode, "guard.questionCannotApproveAsPermission")
+
+        let expiredResolve = await controller.resolve(
+            address: cindyAlpha2,
+            interactionId: "perm-expired",
+            interactionType: .permission,
+            decision: .approve
+        )
+        XCTAssertEqual(expiredResolve.status, .noop)
+        XCTAssertEqual(expiredResolve.reasonCode, "guard.interactionAlreadyResolved")
+        let stats4 = await peer.commandStats()
+        XCTAssertEqual(stats4.resolves, 0)
+
+        let exactResolve = await controller.resolve(
+            address: cindyAlpha2,
+            interactionId: "perm-alpha-2",
+            interactionType: .permission,
+            decision: .approve,
+            commandId: "cmd-resolve-1"
+        )
+        XCTAssertEqual(exactResolve.status, .resolved)
+        let stats5 = await peer.commandStats()
+        XCTAssertEqual(stats5.resolves, 1)
+
+        await controller.shutdown()
+    }
+
+    func testUnreadTriStateNeverFabricatesUnreadFromCompletedAndPendingRoundDoesNotRepeat() async throws {
+        let completedRead = CindyTaskAddress(workspacePath: "/workspace/alpha", sessionId: "sess-completed-read")
+        let completedUnknown = CindyTaskAddress(workspacePath: "/workspace/alpha", sessionId: "sess-completed-unknown")
+        let completedUnread = CindyTaskAddress(workspacePath: "/workspace/alpha", sessionId: "sess-completed-unread")
+        let errorUnread = CindyTaskAddress(workspacePath: "/workspace/beta", sessionId: "sess-error-unread")
+
+        let peer = CindyTestPeer()
+        await peer.setSnapshot(
+            CindySessionSnapshot(
+                instanceId: "cindy-instance-a",
+                generation: 1,
+                ownerEpoch: "owner-1:1",
+                scopes: [
+                    CindyScope(workspacePath: "/workspace/alpha"),
+                    CindyScope(workspacePath: "/workspace/beta"),
+                ],
+                rows: [
+                    CindyTaskRow(
+                        address: completedRead,
+                        title: "Completed Read",
+                        phase: "completed",
+                        attention: false,
+                        pinned: false,
+                        unread: false,
+                        eventWatermark: 10
+                    ),
+                    CindyTaskRow(
+                        address: completedUnknown,
+                        title: "Completed Unknown Unread",
+                        phase: "completed",
+                        attention: false,
+                        pinned: false,
+                        unread: nil,
+                        eventWatermark: 11
+                    ),
+                    CindyTaskRow(
+                        address: completedUnread,
+                        title: "Completed Unread",
+                        phase: "completed",
+                        attention: true,
+                        pinned: false,
+                        unread: true,
+                        eventWatermark: 12
+                    ),
+                    CindyTaskRow(
+                        address: errorUnread,
+                        title: "Error Unread",
+                        phase: "error",
+                        attention: true,
+                        pinned: false,
+                        unread: true,
+                        eventWatermark: 13
+                    ),
+                ],
+                selected: nil
+            )
+        )
+        let controller = CindySessionController(client: peer, pollNanoseconds: 60_000_000_000)
+        controller.setEnabled(true)
+        await controller.refreshNow()
+
+        let first = await controller.advanceAttentionRound()
+        XCTAssertEqual(first.status, .confirmed)
+        XCTAssertEqual(first.selected, errorUnread)
+
+        let second = await controller.advanceAttentionRound()
+        XCTAssertEqual(second.status, .confirmed)
+        XCTAssertEqual(second.selected, completedUnread)
+
+        // Neither completedRead nor completedUnknown is ever visited, and the round is now exhausted.
+        let third = await controller.advanceAttentionRound()
+        XCTAssertEqual(third.status, .noop)
+        XCTAssertEqual(third.reasonCode, "round.exhausted")
+
+        // When completedUnread receives a new eventWatermark, it immediately re-enters the round.
+        var updatedSnapshot = await peer.snapshot
+        updatedSnapshot.rows[2].eventWatermark = 14
+        await peer.setSnapshot(updatedSnapshot)
+        await controller.refreshNow()
+
+        let fourth = await controller.advanceAttentionRound()
+        XCTAssertEqual(fourth.status, .confirmed)
+        XCTAssertEqual(fourth.selected, completedUnread)
+
+        await controller.shutdown()
+    }
+
+    func testCreateSendAndTimeoutQueryReconcileWithoutDoubleSend() async throws {
+        let peer = CindyTestPeer()
+        await peer.setSnapshot(
+            CindySessionSnapshot(
+                instanceId: "cindy-instance-a",
+                generation: 1,
+                ownerEpoch: "owner-1:1",
+                scopes: [
+                    CindyScope(workspacePath: "/workspace/alpha"),
+                    CindyScope(workspacePath: "/workspace/beta"),
+                ],
+                rows: [
+                    CindyTaskRow(
+                        address: cindyBeta1,
+                        title: "Beta Idle Task",
+                        phase: "idle",
+                        attention: false,
+                        pinned: false,
+                        unread: nil,
+                        eventWatermark: 1
+                    ),
+                ],
+                selected: cindyBeta1
+            )
+        )
+        let controller = CindySessionController(client: peer, pollNanoseconds: 60_000_000_000)
+        controller.setEnabled(true)
+        await controller.refreshNow()
+
+        // Steer on idle session is rejected locally.
+        let steerIdle = await controller.send(
+            address: cindyBeta1,
+            text: "Steer while idle",
+            deliveryMode: .steer
+        )
+        XCTAssertEqual(steerIdle.status, .denied)
+        XCTAssertEqual(steerIdle.reasonCode, "guard.steerRequiresRunningTurn")
+
+        // Start turn on cindyBeta1.
+        let started = await controller.send(
+            address: cindyBeta1,
+            text: "Start turn",
+            deliveryMode: .auto,
+            commandId: "cmd-start-1"
+        )
+        XCTAssertEqual(started.status, .started)
+
+        // Simulate transport timeout on next queued message.
+        await peer.setTimeoutNextSend(true)
+        let timedOut = await controller.send(
+            address: cindyBeta1,
+            text: "Queue follow-up",
+            deliveryMode: .queue,
+            commandId: "cmd-queue-timeout"
+        )
+        XCTAssertEqual(timedOut.status, .unknown)
+        XCTAssertEqual(controller.pendingUnknownCommand?.commandId, "cmd-queue-timeout")
+
+        // Any new command in /workspace/beta is blocked until cmd-queue-timeout is reconciled.
+        let blocked = await controller.send(
+            address: cindyBeta1,
+            text: "Must be blocked",
+            deliveryMode: .queue,
+            commandId: "cmd-queue-blocked"
+        )
+        XCTAssertEqual(blocked.status, .unknown)
+        XCTAssertEqual(blocked.reasonCode, "guard.unknownOutcomeRequiresReconcile")
+
+        // Reconcile via query with the original commandId.
+        let reconciled = await controller.query(
+            scope: CindyScope(workspacePath: "/workspace/beta"),
+            target: cindyBeta1,
+            commandId: "cmd-queue-timeout"
+        )
+        XCTAssertEqual(reconciled.status, .queued)
+        XCTAssertTrue(reconciled.duplicate)
+        XCTAssertNil(controller.pendingUnknownCommand)
+        let stats = await peer.commandStats()
+        XCTAssertEqual(stats.sends, 2)
+
+        // Create a new session in /workspace/alpha and confirm selected readback.
+        let created = await controller.create(
+            scope: CindyScope(workspacePath: "/workspace/alpha"),
+            text: "New Alpha Task",
+            commandId: "cmd-create-alpha"
+        )
+        XCTAssertEqual(created.status, .confirmed)
+        XCTAssertEqual(created.selected?.workspacePath, "/workspace/alpha")
+        XCTAssertEqual(controller.selected, created.selected)
+
+        await controller.shutdown()
     }
 }
 

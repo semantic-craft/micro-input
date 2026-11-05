@@ -1,5 +1,5 @@
 diff --git a/apps/desktop/src/main/deepLink.ts b/apps/desktop/src/main/deepLink.ts
-index 120daf0b..a1c90137 100644
+index 120daf0ba..a1c901378 100644
 --- a/apps/desktop/src/main/deepLink.ts
 +++ b/apps/desktop/src/main/deepLink.ts
 @@ -473,6 +473,8 @@ export function openMainWindowBillingTopUp(): void {
@@ -12,7 +12,7 @@ index 120daf0b..a1c90137 100644
    sessionId: string,
    options?: { focus?: boolean | 'if-active'; islandEntryId?: string; deviceId?: string; messageClientId?: string },
 diff --git a/apps/desktop/src/main/voice-input/global.ts b/apps/desktop/src/main/voice-input/global.ts
-index fa441b97..1bc44306 100644
+index fa441b975..1bc44306d 100644
 --- a/apps/desktop/src/main/voice-input/global.ts
 +++ b/apps/desktop/src/main/voice-input/global.ts
 @@ -173,6 +173,11 @@ export function releaseActiveGlobalVoiceInputShortcut(): void {
@@ -28,7 +28,7 @@ index fa441b97..1bc44306 100644
    handleNativeGlobalShortcutPhase(phase, 'hardware');
  }
 diff --git a/apps/desktop/src/main/worklouder-codex/WorkLouderCodexHostClient.ts b/apps/desktop/src/main/worklouder-codex/WorkLouderCodexHostClient.ts
-index bd083729..576e5d5d 100644
+index bd0837298..576e5d5df 100644
 --- a/apps/desktop/src/main/worklouder-codex/WorkLouderCodexHostClient.ts
 +++ b/apps/desktop/src/main/worklouder-codex/WorkLouderCodexHostClient.ts
 @@ -67,6 +67,54 @@ export class WorkLouderCodexHostClient implements WorkLouderCodexLightingSink {
@@ -145,7 +145,7 @@ index bd083729..576e5d5d 100644
        this.completeDispose(child);
        return;
 diff --git a/apps/desktop/src/main/worklouder-codex/WorkLouderCodexLightingController.ts b/apps/desktop/src/main/worklouder-codex/WorkLouderCodexLightingController.ts
-index 3c003eea..3a4c9523 100644
+index 3c003eea3..3a4c9523c 100644
 --- a/apps/desktop/src/main/worklouder-codex/WorkLouderCodexLightingController.ts
 +++ b/apps/desktop/src/main/worklouder-codex/WorkLouderCodexLightingController.ts
 @@ -135,6 +135,8 @@ export class WorkLouderCodexLightingController {
@@ -274,7 +274,7 @@ index 3c003eea..3a4c9523 100644
  
 diff --git a/apps/desktop/src/main/worklouder-codex/WorkLouderOwnershipFence.ts b/apps/desktop/src/main/worklouder-codex/WorkLouderOwnershipFence.ts
 new file mode 100644
-index 00000000..722d63f1
+index 000000000..722d63f19
 --- /dev/null
 +++ b/apps/desktop/src/main/worklouder-codex/WorkLouderOwnershipFence.ts
 @@ -0,0 +1,21 @@
@@ -300,7 +300,7 @@ index 00000000..722d63f1
 +  }
 +}
 diff --git a/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostClient.test.ts b/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostClient.test.ts
-index 855567ab..7478cb4e 100644
+index 855567ab4..7478cb4ea 100644
 --- a/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostClient.test.ts
 +++ b/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostClient.test.ts
 @@ -25,6 +25,64 @@ function logger() {
@@ -369,7 +369,7 @@ index 855567ab..7478cb4e 100644
      vi.useFakeTimers();
      let ready!: () => void;
 diff --git a/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostProcess.test.ts b/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostProcess.test.ts
-index d213f095..fdad2ecb 100644
+index d213f0957..fdad2ecb1 100644
 --- a/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostProcess.test.ts
 +++ b/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostProcess.test.ts
 @@ -1,10 +1,14 @@
@@ -465,7 +465,7 @@ index d213f095..fdad2ecb 100644
 +  });
 +});
 diff --git a/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexLightingController.test.ts b/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexLightingController.test.ts
-index 8b0e3256..90b09131 100644
+index 8b0e32564..90b091310 100644
 --- a/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexLightingController.test.ts
 +++ b/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexLightingController.test.ts
 @@ -12,6 +12,69 @@ function settings(patch: Partial<WorkLouderCodexSettings>): WorkLouderCodexSetti
@@ -539,7 +539,7 @@ index 8b0e3256..90b09131 100644
      const sink = {
        update: vi.fn(),
 diff --git a/apps/desktop/src/main/worklouder-codex/__tests__/systemFrontmostInput.test.ts b/apps/desktop/src/main/worklouder-codex/__tests__/systemFrontmostInput.test.ts
-index 83d1590c..31889dfa 100644
+index 83d1590cb..31889dfaa 100644
 --- a/apps/desktop/src/main/worklouder-codex/__tests__/systemFrontmostInput.test.ts
 +++ b/apps/desktop/src/main/worklouder-codex/__tests__/systemFrontmostInput.test.ts
 @@ -1,3 +1,4 @@
@@ -578,7 +578,7 @@ index 83d1590c..31889dfa 100644
      let resolveSpawn!: (child: {
        stdin: {
 diff --git a/apps/desktop/src/main/worklouder-codex/index.ts b/apps/desktop/src/main/worklouder-codex/index.ts
-index e3d28fa4..ed27df60 100644
+index e3d28fa40..5c7e1367c 100644
 --- a/apps/desktop/src/main/worklouder-codex/index.ts
 +++ b/apps/desktop/src/main/worklouder-codex/index.ts
 @@ -1,6 +1,8 @@
@@ -606,7 +606,7 @@ index e3d28fa4..ed27df60 100644
    WORKLOUDER_CODEX_PREVIEW_INPUT_CHANNEL,
    WORKLOUDER_CODEX_GET_STATE_CHANNEL,
    WORKLOUDER_CODEX_OPEN_INPUT_MONITORING_CHANNEL,
-@@ -48,22 +52,33 @@ import {
+@@ -48,22 +52,34 @@ import {
  import {
    assertTrustedAppRendererEvent,
    isTrustedAppRendererWindow,
@@ -621,6 +621,7 @@ index e3d28fa4..ed27df60 100644
 +  readCindyMicroInputNavigationConfig,
 +  startCindyMicroInputNavigationBridge,
 +} from './microInputNavigation.js';
++import { hasSessionAttention } from '../appBadgeService.js';
  import { WorkLouderAccessories, WorkLouderLayoutPreviewSession } from './accessories.js';
  import { createWorkLouderCodexSettingsIpc } from './settingsIpc.js';
  import { CodexMicroGuardService } from './CodexMicroGuardService.js';
@@ -640,7 +641,7 @@ index e3d28fa4..ed27df60 100644
    ownerScopedUserDataPath,
  } from '../appSessionState.js';
  import {
-@@ -74,6 +89,8 @@ import {
+@@ -74,6 +90,8 @@ import {
  } from './settingsStore.js';
  import {
    buildWorkLouderCodexTaskCatalog,
@@ -649,7 +650,7 @@ index e3d28fa4..ed27df60 100644
    listWorkLouderCodexTaskCatalog,
    type WorkLouderCodexTaskCatalogInput,
  } from './taskSlots.js';
-@@ -107,6 +124,40 @@ const hostClient = new WorkLouderCodexHostClient({
+@@ -107,6 +125,40 @@ const hostClient = new WorkLouderCodexHostClient({
    keymapBackupDir: () => ownerScopedUserDataPath('worklouder-creator-micro-2'),
  });
  const codexMicroGuardService = new CodexMicroGuardService();
@@ -690,7 +691,7 @@ index e3d28fa4..ed27df60 100644
  
  /**
   * Tasks as the sidebar currently shows them, published by the renderer.
-@@ -137,7 +188,12 @@ function currentRendererTaskCatalog(): WorkLouderCodexTaskCatalogInput[] | null
+@@ -137,7 +189,12 @@ function currentRendererTaskCatalog(): WorkLouderCodexTaskCatalogInput[] | null
  
  export const workLouderCodexLightingController = new WorkLouderCodexLightingController(
    hostClient,
@@ -704,7 +705,7 @@ index e3d28fa4..ed27df60 100644
    async () => {
      const catalog = currentRendererTaskCatalog();
      return catalog
-@@ -148,6 +204,8 @@ export const workLouderCodexLightingController = new WorkLouderCodexLightingCont
+@@ -148,6 +205,8 @@ export const workLouderCodexLightingController = new WorkLouderCodexLightingCont
    dispatchPreviewInput,
  );
  
@@ -713,7 +714,7 @@ index e3d28fa4..ed27df60 100644
  const workLouderAccessories = new WorkLouderAccessories(workLouderCodexLightingController, () => {
    hostClient.probe();
  });
-@@ -238,6 +296,232 @@ export function registerWorkLouderCodexSettingsIpc(): void {
+@@ -238,6 +297,241 @@ export function registerWorkLouderCodexSettingsIpc(): void {
    if (settingsIpcRegistered) return;
    settingsIpcRegistered = true;
  
@@ -758,12 +759,21 @@ index e3d28fa4..ed27df60 100644
 +            sourceGeneration: stamp.sourceGeneration,
 +            rows: rows.map((row) => {
 +              const act = activity.get(row.sessionId);
++              const badgeAttention = hasSessionAttention(row.sessionId);
++              const unread =
++                act !== undefined || badgeAttention
++                  ? Boolean(
++                      badgeAttention || (act?.attention && act.phase !== 'needs-interaction'),
++                    )
++                  : null;
 +              return {
 +                address: { workspacePath: row.workspacePath, sessionId: row.sessionId },
 +                title: (row.title ?? row.sessionId).trim() || row.sessionId,
 +                phase: act?.phase ?? 'idle',
-+                attention: act?.attention ?? false,
++                attention: Boolean(act?.attention || badgeAttention),
 +                pinned: row.pinnedAt !== null,
++                unread,
++                eventWatermark: Math.max(0, Math.trunc(row.updatedAt ?? 0)),
 +              };
 +            }),
 +          };
@@ -946,7 +956,7 @@ index e3d28fa4..ed27df60 100644
    // macOS can report the same HID denial while the screen is locked. The
    // client keeps that failure circuit-broken until unlock, then makes one
    // bounded recovery attempt instead of relying on the settings poller to
-@@ -344,17 +628,46 @@ function sendWindowMessage(win: BrowserWindow, channel: string, payload: unknown
+@@ -344,17 +638,46 @@ function sendWindowMessage(win: BrowserWindow, channel: string, payload: unknown
    return true;
  }
  
@@ -997,10 +1007,10 @@ index e3d28fa4..ed27df60 100644
      type: action.type,
 diff --git a/apps/desktop/src/main/worklouder-codex/microInputNavigation.ts b/apps/desktop/src/main/worklouder-codex/microInputNavigation.ts
 new file mode 100644
-index 00000000..35bfcc81
+index 000000000..6896abe82
 --- /dev/null
 +++ b/apps/desktop/src/main/worklouder-codex/microInputNavigation.ts
-@@ -0,0 +1,572 @@
+@@ -0,0 +1,1303 @@
 +import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 +import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
 +import { chmod, lstat, mkdir, open, rename, rmdir, unlink } from 'node:fs/promises';
@@ -1031,12 +1041,44 @@ index 00000000..35bfcc81
 +  'error',
 +]);
 +
++export const cindyMicroInputInteractionTypeSchema = z.enum([
++  'permission',
++  'question',
++  'plan',
++]);
++
++export const cindyMicroInputInteractionDecisionSchema = z.enum([
++  'approve',
++  'allowForSession',
++  'reject',
++  'accept',
++  'cancel',
++]);
++
++export const cindyMicroInputDeliveryModeSchema = z.enum([
++  'auto',
++  'steer',
++  'queue',
++]);
++
++export const cindyMicroInputPendingInteractionSchema = z.strictObject({
++  interactionId: identifier,
++  interactionType: cindyMicroInputInteractionTypeSchema,
++  toolName: identifier.optional().nullable(),
++  options: z.array(identifier).max(64).optional().nullable(),
++});
++
 +export const cindyMicroInputRowSchema = z.strictObject({
 +  address: cindyMicroInputAddressSchema,
 +  title: z.string().max(4096),
 +  phase: cindyMicroInputTaskPhaseSchema,
 +  attention: z.boolean(),
 +  pinned: z.boolean(),
++  runId: identifier.optional().nullable(),
++  unread: z.boolean().nullable().optional(),
++  eventWatermark: z.number().int().nonnegative().safe().optional(),
++  queuedCount: z.number().int().nonnegative().safe().optional(),
++  pendingInteraction: cindyMicroInputPendingInteractionSchema.optional().nullable(),
 +});
 +
 +export const cindyMicroInputGrantSchema = z.strictObject({
@@ -1049,6 +1091,12 @@ index 00000000..35bfcc81
 +  scopes: z.array(cindyMicroInputScopeSchema).min(1).max(64),
 +});
 +
++const promptText = z
++  .string()
++  .min(1)
++  .max(16384)
++  .refine((value) => value.trim().length > 0 && !value.includes('\0'));
++
 +export const cindyMicroInputRequestSchema = z
 +  .strictObject({
 +    version: z.literal(1),
@@ -1057,13 +1105,60 @@ index 00000000..35bfcc81
 +    instanceId: identifier,
 +    generation: z.number().int().positive().safe(),
 +    ownerEpoch: identifier,
-+    op: z.enum(['list', 'open']),
++    op: z.enum(['list', 'open', 'create', 'send', 'stop', 'resolve', 'query']),
 +    scope: cindyMicroInputScopeSchema,
 +    target: cindyMicroInputAddressSchema.optional(),
++    commandId: identifier.optional(),
++    text: promptText.optional(),
++    deliveryMode: cindyMicroInputDeliveryModeSchema.optional(),
++    expectedRunId: identifier.optional(),
++    interactionId: identifier.optional(),
++    interactionType: cindyMicroInputInteractionTypeSchema.optional(),
++    decision: cindyMicroInputInteractionDecisionSchema.optional(),
++    optionId: identifier.optional(),
 +  })
-+  .refine((request) =>
-+    request.op === 'open' ? request.target !== undefined : request.target === undefined,
-+  );
++  .refine((request) => {
++    switch (request.op) {
++      case 'list':
++        return (
++          request.target === undefined &&
++          request.commandId === undefined &&
++          request.text === undefined &&
++          request.deliveryMode === undefined &&
++          request.expectedRunId === undefined &&
++          request.interactionId === undefined &&
++          request.interactionType === undefined &&
++          request.decision === undefined &&
++          request.optionId === undefined
++        );
++      case 'open':
++        return request.target !== undefined;
++      case 'create':
++        return request.commandId !== undefined && request.target === undefined;
++      case 'send':
++        return (
++          request.commandId !== undefined &&
++          request.target !== undefined &&
++          request.text !== undefined
++        );
++      case 'stop':
++        return (
++          request.commandId !== undefined &&
++          request.target !== undefined &&
++          request.expectedRunId !== undefined
++        );
++      case 'resolve':
++        return (
++          request.commandId !== undefined &&
++          request.target !== undefined &&
++          request.interactionId !== undefined &&
++          request.interactionType !== undefined &&
++          request.decision !== undefined
++        );
++      case 'query':
++        return request.commandId !== undefined;
++    }
++  });
 +
 +const cindyMicroInputConfigSchema = z.strictObject({
 +  scopes: z.array(cindyMicroInputScopeSchema).min(1).max(64),
@@ -1073,6 +1168,14 @@ index 00000000..35bfcc81
 +export type CindyMicroInputScope = z.infer<typeof cindyMicroInputScopeSchema>;
 +export type CindyMicroInputAddress = z.infer<typeof cindyMicroInputAddressSchema>;
 +export type CindyMicroInputTaskPhase = z.infer<typeof cindyMicroInputTaskPhaseSchema>;
++export type CindyMicroInputInteractionType = z.infer<typeof cindyMicroInputInteractionTypeSchema>;
++export type CindyMicroInputInteractionDecision = z.infer<
++  typeof cindyMicroInputInteractionDecisionSchema
++>;
++export type CindyMicroInputDeliveryMode = z.infer<typeof cindyMicroInputDeliveryModeSchema>;
++export type CindyMicroInputPendingInteraction = z.infer<
++  typeof cindyMicroInputPendingInteractionSchema
++>;
 +export type CindyMicroInputRow = z.infer<typeof cindyMicroInputRowSchema>;
 +export type CindyMicroInputGrant = z.infer<typeof cindyMicroInputGrantSchema>;
 +export type CindyMicroInputRequest = z.infer<typeof cindyMicroInputRequestSchema>;
@@ -1081,6 +1184,13 @@ index 00000000..35bfcc81
 +  | 'ok'
 +  | 'delivered'
 +  | 'confirmed'
++  | 'started'
++  | 'steered'
++  | 'queued'
++  | 'stopped'
++  | 'resolved'
++  | 'noop'
++  | 'interactionTypeMismatch'
 +  | 'denied'
 +  | 'stale'
 +  | 'unavailable'
@@ -1093,10 +1203,18 @@ index 00000000..35bfcc81
 +  generation: number;
 +  ownerEpoch: string;
 +  status: CindyMicroInputStatus;
++  commandId?: string;
++  duplicate?: boolean;
 +  rows?: CindyMicroInputRow[];
 +  delivered?: CindyMicroInputAddress | null;
 +  selected?: CindyMicroInputAddress | null;
 +  deepLink?: string | null;
++  delivery?: CindyMicroInputDeliveryMode | null;
++  runId?: string | null;
++  queuedCount?: number;
++  interactionId?: string | null;
++  interactionType?: CindyMicroInputInteractionType | null;
++  reasonCode?: string | null;
 +}
 +
 +export type CindyMicroInputDeliveryOutcome =
@@ -1105,6 +1223,49 @@ index 00000000..35bfcc81
 +  | { status: 'unconfirmed'; selected?: CindyMicroInputAddress | null }
 +  | { status: 'unavailable' }
 +  | { status: 'stale' };
++
++export type CindyMicroInputCreateOutcome =
++  | {
++      status: 'confirmed';
++      created: CindyMicroInputAddress;
++      selected: CindyMicroInputAddress;
++      runId?: string | null;
++    }
++  | { status: 'delivered'; created: CindyMicroInputAddress; runId?: string | null }
++  | {
++      status: 'unconfirmed';
++      created?: CindyMicroInputAddress | null;
++      selected?: CindyMicroInputAddress | null;
++    }
++  | { status: 'unavailable'; reasonCode?: string }
++  | { status: 'stale'; reasonCode?: string };
++
++export type CindyMicroInputSendOutcome =
++  | { status: 'started'; delivery: 'auto'; runId: string; queuedCount?: number }
++  | { status: 'steered'; delivery: 'steer'; runId: string; queuedCount?: number }
++  | { status: 'queued'; delivery: 'queue'; runId?: string | null; queuedCount: number }
++  | { status: 'denied'; reasonCode: string }
++  | { status: 'noop'; reasonCode: string }
++  | { status: 'unavailable'; reasonCode?: string }
++  | { status: 'stale'; reasonCode?: string };
++
++export type CindyMicroInputStopOutcome =
++  | { status: 'stopped'; runId: string }
++  | { status: 'noop'; reasonCode: string }
++  | { status: 'unavailable'; reasonCode?: string }
++  | { status: 'stale'; reasonCode?: string };
++
++export type CindyMicroInputResolveOutcome =
++  | {
++      status: 'resolved';
++      interactionId: string;
++      interactionType: CindyMicroInputInteractionType;
++    }
++  | { status: 'noop'; reasonCode: string }
++  | { status: 'interactionTypeMismatch'; reasonCode: string }
++  | { status: 'denied'; reasonCode: string }
++  | { status: 'unavailable'; reasonCode?: string }
++  | { status: 'stale'; reasonCode?: string };
 +
 +export function sameCindyMicroInputScope(
 +  a: CindyMicroInputScope,
@@ -1230,8 +1391,31 @@ index 00000000..35bfcc81
 +    deepLink: string,
 +  ) => Promise<CindyMicroInputDeliveryOutcome>;
 +  focusWindow?: () => boolean;
++  createTask?: (
++    scope: CindyMicroInputScope,
++    input: { commandId: string; text?: string },
++  ) => Promise<CindyMicroInputCreateOutcome>;
++  sendTask?: (
++    target: CindyMicroInputAddress,
++    input: { commandId: string; text: string; deliveryMode: CindyMicroInputDeliveryMode },
++  ) => Promise<CindyMicroInputSendOutcome>;
++  stopTask?: (
++    target: CindyMicroInputAddress,
++    input: { commandId: string; expectedRunId: string },
++  ) => Promise<CindyMicroInputStopOutcome>;
++  resolveTask?: (
++    target: CindyMicroInputAddress,
++    input: {
++      commandId: string;
++      interactionId: string;
++      interactionType: CindyMicroInputInteractionType;
++      decision: CindyMicroInputInteractionDecision;
++      optionId?: string;
++    },
++  ) => Promise<CindyMicroInputResolveOutcome>;
 +}) {
 +  const sources = new Map<string, { ownerEpoch: string; sourceGeneration: string }>();
++  const completedCommands = new Map<string, CindyMicroInputResponse>();
 +  let inFlight = false;
 +  return async (
 +    raw: unknown,
@@ -1261,13 +1445,72 @@ index 00000000..35bfcc81
 +      request.ownerEpoch !== grant.ownerEpoch
 +    ) {
 +      sources.clear();
-+      return { ...base, ownerEpoch: liveOwner ?? grant.ownerEpoch, status: 'stale' };
++      completedCommands.clear();
++      return {
++        ...base,
++        ...(request.commandId ? { commandId: request.commandId } : {}),
++        ownerEpoch: liveOwner ?? grant.ownerEpoch,
++        status: 'stale',
++      };
 +    }
-+    if (inFlight) return { ...base, status: 'unavailable' };
++    if (inFlight) {
++      return {
++        ...base,
++        ...(request.commandId ? { commandId: request.commandId } : {}),
++        status: 'unavailable',
++      };
++    }
 +    const key = request.scope.workspacePath;
++    const commandKey = request.commandId ? `${key}::${request.commandId}` : null;
++    if (commandKey) {
++      const recorded = completedCommands.get(commandKey);
++      if (
++        recorded &&
++        recorded.ownerEpoch === liveOwner &&
++        recorded.instanceId === grant.instanceId &&
++        recorded.generation === grant.generation
++      ) {
++        return {
++          ...recorded,
++          id: request.id,
++          duplicate: true,
++        };
++      }
++      if (request.op === 'query') {
++        const expectedForQuery = sources.get(key);
++        if (!expectedForQuery || expectedForQuery.ownerEpoch !== liveOwner) {
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        return {
++          ...base,
++          commandId: request.commandId,
++          status: 'noop',
++          reasonCode: 'query.notFound',
++        };
++      }
++    }
++    if (
++      request.op === 'resolve' &&
++      request.interactionType === 'question' &&
++      (request.decision === 'approve' || request.decision === 'allowForSession') &&
++      !request.optionId
++    ) {
++      return {
++        ...base,
++        commandId: request.commandId,
++        interactionId: request.interactionId ?? null,
++        interactionType: request.interactionType,
++        status: 'interactionTypeMismatch',
++        reasonCode: 'guard.questionCannotApproveAsPermission',
++      };
++    }
 +    const expected = sources.get(key);
-+    if (request.op === 'open' && (!expected || expected.ownerEpoch !== liveOwner)) {
-+      return { ...base, status: 'stale' };
++    if (request.op !== 'list' && (!expected || expected.ownerEpoch !== liveOwner)) {
++      return {
++        ...base,
++        ...(request.commandId ? { commandId: request.commandId } : {}),
++        status: 'stale',
++      };
 +    }
 +    inFlight = true;
 +    try {
@@ -1279,16 +1522,25 @@ index 00000000..35bfcc81
 +        ports.currentOwnerEpoch() !== grant.ownerEpoch
 +      ) {
 +        sources.clear();
-+        return { ...base, status: 'stale' };
++        completedCommands.clear();
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId } : {}),
++          status: 'stale',
++        };
 +      }
 +      if (
-+        request.op === 'open' &&
++        request.op !== 'list' &&
 +        expected !== undefined &&
 +        (expected.ownerEpoch !== index.ownerEpoch ||
 +          expected.sourceGeneration !== index.sourceGeneration)
 +      ) {
 +        sources.delete(key);
-+        return { ...base, status: 'stale' };
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId } : {}),
++          status: 'stale',
++        };
 +      }
 +      const seenIds = new Set<string>();
 +      if (
@@ -1300,7 +1552,11 @@ index 00000000..35bfcc81
 +          return false;
 +        })
 +      ) {
-+        return { ...base, status: 'unavailable' };
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId } : {}),
++          status: 'unavailable',
++        };
 +      }
 +      if (request.op === 'list') {
 +        sources.set(key, {
@@ -1315,16 +1571,139 @@ index 00000000..35bfcc81
 +          selected: selected && sameCindyMicroInputScope(selected, request.scope) ? selected : null,
 +        };
 +      }
++      if (request.op === 'create') {
++        if (!ports.createTask) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: 'bridge.createUnsupported',
++          };
++        }
++        const createdOutcome = await ports.createTask(request.scope, {
++          commandId: request.commandId!,
++          text: request.text,
++        });
++        if (!isCurrent() || ports.currentOwnerEpoch() !== grant.ownerEpoch) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        if (createdOutcome.status === 'stale') {
++          sources.clear();
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'stale',
++            reasonCode: createdOutcome.reasonCode ?? null,
++          };
++        }
++        if (createdOutcome.status === 'unavailable') {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: createdOutcome.reasonCode ?? null,
++          };
++        }
++        const postIndex = await ports.readIndex(request.scope);
++        if (
++          !isCurrent() ||
++          postIndex.ownerEpoch !== grant.ownerEpoch ||
++          ports.currentOwnerEpoch() !== grant.ownerEpoch
++        ) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        sources.set(key, {
++          ownerEpoch: postIndex.ownerEpoch,
++          sourceGeneration: postIndex.sourceGeneration,
++        });
++        if (createdOutcome.status === 'unconfirmed') {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unconfirmed',
++            delivered: createdOutcome.created ?? null,
++            selected: null,
++          };
++        }
++        const createdAddress = createdOutcome.created;
++        if (
++          !sameCindyMicroInputScope(createdAddress, request.scope) ||
++          !postIndex.rows.some((row) => sameCindyMicroInputAddress(row.address, createdAddress))
++        ) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: 'guard.createdTargetMissing',
++          };
++        }
++        const deepLink = buildVerifiedCindySessionDeepLink(createdAddress.sessionId);
++        if (createdOutcome.status === 'delivered') {
++          const reply: CindyMicroInputResponse = {
++            ...base,
++            commandId: request.commandId,
++            status: 'delivered',
++            delivered: createdAddress,
++            selected: null,
++            deepLink,
++            runId: createdOutcome.runId ?? null,
++          };
++          if (commandKey) completedCommands.set(commandKey, reply);
++          return reply;
++        }
++        const selected = ports.selected(request.scope) ?? createdOutcome.selected;
++        if (!sameCindyMicroInputAddress(selected, createdAddress)) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unconfirmed',
++            delivered: createdAddress,
++            selected: null,
++            deepLink,
++            reasonCode: 'guard.selectionNotCommitted',
++          };
++        }
++        const reply: CindyMicroInputResponse = {
++          ...base,
++          commandId: request.commandId,
++          status: 'confirmed',
++          delivered: createdAddress,
++          selected: createdAddress,
++          deepLink,
++          runId: createdOutcome.runId ?? null,
++        };
++        if (commandKey) completedCommands.set(commandKey, reply);
++        return reply;
++      }
 +      const target = request.target;
 +      if (!target || !index.rows.some((row) => sameCindyMicroInputAddress(row.address, target))) {
-+        return { ...base, status: 'unavailable' };
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId, reasonCode: 'guard.targetMissing' } : {}),
++          status: 'unavailable',
++        };
 +      }
 +      const stillExists = await ports.exists(target);
 +      if (!isCurrent() || ports.currentOwnerEpoch() !== grant.ownerEpoch) {
 +        sources.clear();
-+        return { ...base, status: 'stale' };
++        completedCommands.clear();
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId } : {}),
++          status: 'stale',
++        };
 +      }
-+      if (!stillExists) return { ...base, status: 'unavailable' };
++      if (!stillExists) {
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId, reasonCode: 'guard.targetMissing' } : {}),
++          status: 'unavailable',
++        };
++      }
 +      const finalIndex = await ports.readIndex(request.scope);
 +      if (
 +        !isCurrent() ||
@@ -1333,82 +1712,444 @@ index 00000000..35bfcc81
 +        ports.currentOwnerEpoch() !== grant.ownerEpoch
 +      ) {
 +        sources.clear();
-+        return { ...base, status: 'stale' };
-+      }
-+      if (!finalIndex.rows.some((row) => sameCindyMicroInputAddress(row.address, target))) {
-+        return { ...base, status: 'unavailable' };
-+      }
-+      const deepLink = buildVerifiedCindySessionDeepLink(target.sessionId);
-+      if (!deepLink) return { ...base, status: 'unavailable' };
-+      const delivery = await ports.deliverSessionDeepLink(target, deepLink);
-+      if (!isCurrent() || ports.currentOwnerEpoch() !== grant.ownerEpoch) {
-+        sources.clear();
-+        return { ...base, status: 'stale' };
-+      }
-+      if (delivery.status === 'stale') {
-+        sources.clear();
-+        return { ...base, status: 'stale' };
-+      }
-+      if (delivery.status === 'unavailable') {
-+        return { ...base, status: 'unavailable' };
-+      }
-+      const postIndex = await ports.readIndex(request.scope);
-+      if (
-+        !isCurrent() ||
-+        postIndex.ownerEpoch !== grant.ownerEpoch ||
-+        postIndex.sourceGeneration !== expected!.sourceGeneration ||
-+        ports.currentOwnerEpoch() !== grant.ownerEpoch
-+      ) {
-+        sources.clear();
-+        return { ...base, status: 'stale' };
-+      }
-+      if (!postIndex.rows.some((row) => sameCindyMicroInputAddress(row.address, target))) {
-+        return { ...base, status: 'unavailable' };
-+      }
-+      if (delivery.status === 'delivered') {
 +        return {
 +          ...base,
-+          status: 'delivered',
++          ...(request.commandId ? { commandId: request.commandId } : {}),
++          status: 'stale',
++        };
++      }
++      const finalRow = finalIndex.rows.find((row) => sameCindyMicroInputAddress(row.address, target));
++      if (!finalRow) {
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId, reasonCode: 'guard.targetMissing' } : {}),
++          status: 'unavailable',
++        };
++      }
++      if (request.op === 'open') {
++        const deepLink = buildVerifiedCindySessionDeepLink(target.sessionId);
++        if (!deepLink) return { ...base, status: 'unavailable' };
++        const delivery = await ports.deliverSessionDeepLink(target, deepLink);
++        if (!isCurrent() || ports.currentOwnerEpoch() !== grant.ownerEpoch) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, status: 'stale' };
++        }
++        if (delivery.status === 'stale') {
++          sources.clear();
++          return { ...base, status: 'stale' };
++        }
++        if (delivery.status === 'unavailable') {
++          return { ...base, status: 'unavailable' };
++        }
++        const postIndex = await ports.readIndex(request.scope);
++        if (
++          !isCurrent() ||
++          postIndex.ownerEpoch !== grant.ownerEpoch ||
++          postIndex.sourceGeneration !== expected!.sourceGeneration ||
++          ports.currentOwnerEpoch() !== grant.ownerEpoch
++        ) {
++          sources.clear();
++          return { ...base, status: 'stale' };
++        }
++        if (!postIndex.rows.some((row) => sameCindyMicroInputAddress(row.address, target))) {
++          return { ...base, status: 'unavailable' };
++        }
++        if (delivery.status === 'delivered') {
++          return {
++            ...base,
++            status: 'delivered',
++            delivered: target,
++            selected: null,
++            deepLink,
++          };
++        }
++        if (delivery.status === 'unconfirmed') {
++          return {
++            ...base,
++            status: 'unconfirmed',
++            delivered: target,
++            selected: null,
++            deepLink,
++          };
++        }
++        const selected = ports.selected(request.scope) ?? delivery.selected;
++        if (!sameCindyMicroInputAddress(selected, target)) {
++          return {
++            ...base,
++            status: 'unconfirmed',
++            delivered: target,
++            selected: null,
++            deepLink,
++          };
++        }
++        if (ports.focusWindow && !ports.focusWindow()) {
++          return {
++            ...base,
++            status: 'unconfirmed',
++            delivered: target,
++            selected: null,
++            deepLink,
++          };
++        }
++        return {
++          ...base,
++          status: 'confirmed',
 +          delivered: target,
-+          selected: null,
++          selected: target,
 +          deepLink,
 +        };
 +      }
-+      if (delivery.status === 'unconfirmed') {
++      const currentSelected = ports.selected(request.scope);
++      if (!sameCindyMicroInputAddress(currentSelected, target)) {
 +        return {
 +          ...base,
++          commandId: request.commandId,
++          selected:
++            currentSelected && sameCindyMicroInputScope(currentSelected, request.scope)
++              ? currentSelected
++              : null,
 +          status: 'unconfirmed',
-+          delivered: target,
-+          selected: null,
-+          deepLink,
++          reasonCode: 'guard.selectionNotCommitted',
 +        };
 +      }
-+      const selected = ports.selected(request.scope) ?? delivery.selected;
-+      if (!sameCindyMicroInputAddress(selected, target)) {
-+        return {
-+          ...base,
-+          status: 'unconfirmed',
-+          delivered: target,
-+          selected: null,
-+          deepLink,
-+        };
++      if (request.op === 'stop') {
++        if (
++          finalRow.phase !== 'running' ||
++          !finalRow.runId ||
++          finalRow.runId !== request.expectedRunId
++        ) {
++          const reply: CindyMicroInputResponse = {
++            ...base,
++            commandId: request.commandId,
++            selected: target,
++            runId: finalRow.runId ?? null,
++            status: 'noop',
++            reasonCode:
++              finalRow.phase !== 'running' ? 'guard.notRunning' : 'guard.stopTargetChanged',
++          };
++          if (commandKey) completedCommands.set(commandKey, reply);
++          return reply;
++        }
++        if (!ports.stopTask) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: 'bridge.stopUnsupported',
++          };
++        }
++        const stopOutcome = await ports.stopTask(target, {
++          commandId: request.commandId!,
++          expectedRunId: request.expectedRunId!,
++        });
++        if (!isCurrent() || ports.currentOwnerEpoch() !== grant.ownerEpoch) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        if (stopOutcome.status === 'stale') {
++          sources.clear();
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'stale',
++            reasonCode: stopOutcome.reasonCode ?? null,
++          };
++        }
++        if (stopOutcome.status === 'unavailable') {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: stopOutcome.reasonCode ?? null,
++          };
++        }
++        const postIndex = await ports.readIndex(request.scope);
++        if (
++          !isCurrent() ||
++          postIndex.ownerEpoch !== grant.ownerEpoch ||
++          ports.currentOwnerEpoch() !== grant.ownerEpoch
++        ) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        sources.set(key, {
++          ownerEpoch: postIndex.ownerEpoch,
++          sourceGeneration: postIndex.sourceGeneration,
++        });
++        const reply: CindyMicroInputResponse =
++          stopOutcome.status === 'stopped'
++            ? {
++                ...base,
++                commandId: request.commandId,
++                selected: target,
++                runId: stopOutcome.runId,
++                status: 'stopped',
++              }
++            : {
++                ...base,
++                commandId: request.commandId,
++                selected: target,
++                runId: finalRow.runId,
++                status: 'noop',
++                reasonCode: stopOutcome.reasonCode,
++              };
++        if (commandKey) completedCommands.set(commandKey, reply);
++        return reply;
 +      }
-+      if (ports.focusWindow && !ports.focusWindow()) {
-+        return {
-+          ...base,
-+          status: 'unconfirmed',
-+          delivered: target,
-+          selected: null,
-+          deepLink,
-+        };
++      if (request.op === 'resolve') {
++        const pending = finalRow.pendingInteraction;
++        if (!pending || pending.interactionId !== request.interactionId) {
++          const reply: CindyMicroInputResponse = {
++            ...base,
++            commandId: request.commandId,
++            selected: target,
++            interactionId: request.interactionId ?? null,
++            interactionType: request.interactionType ?? null,
++            status: 'noop',
++            reasonCode: 'guard.interactionAlreadyResolved',
++          };
++          if (commandKey) completedCommands.set(commandKey, reply);
++          return reply;
++        }
++        if (pending.interactionType !== request.interactionType) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            selected: target,
++            interactionId: pending.interactionId,
++            interactionType: pending.interactionType,
++            status: 'interactionTypeMismatch',
++            reasonCode: 'guard.interactionTypeMismatch',
++          };
++        }
++        if (request.interactionType === 'question') {
++          if (request.decision === 'accept') {
++            if (
++              !request.optionId ||
++              (pending.options &&
++                pending.options.length > 0 &&
++                !pending.options.includes(request.optionId))
++            ) {
++              return {
++                ...base,
++                commandId: request.commandId,
++                selected: target,
++                interactionId: pending.interactionId,
++                interactionType: pending.interactionType,
++                status: 'interactionTypeMismatch',
++                reasonCode: 'guard.questionOptionInvalid',
++              };
++            }
++          } else if (request.decision !== 'cancel' && request.decision !== 'reject') {
++            return {
++              ...base,
++              commandId: request.commandId,
++              selected: target,
++              interactionId: pending.interactionId,
++              interactionType: pending.interactionType,
++              status: 'interactionTypeMismatch',
++              reasonCode: 'guard.questionCannotApproveAsPermission',
++            };
++          }
++        } else if (request.interactionType === 'permission') {
++          if (
++            (request.decision !== 'approve' &&
++              request.decision !== 'allowForSession' &&
++              request.decision !== 'reject') ||
++            request.optionId !== undefined
++          ) {
++            return {
++              ...base,
++              commandId: request.commandId,
++              selected: target,
++              interactionId: pending.interactionId,
++              interactionType: pending.interactionType,
++              status: 'interactionTypeMismatch',
++              reasonCode: 'guard.permissionDecisionInvalid',
++            };
++          }
++        }
++        if (!ports.resolveTask) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: 'bridge.resolveUnsupported',
++          };
++        }
++        const resolveOutcome = await ports.resolveTask(target, {
++          commandId: request.commandId!,
++          interactionId: request.interactionId!,
++          interactionType: request.interactionType!,
++          decision: request.decision!,
++          optionId: request.optionId,
++        });
++        if (!isCurrent() || ports.currentOwnerEpoch() !== grant.ownerEpoch) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        if (resolveOutcome.status === 'stale') {
++          sources.clear();
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'stale',
++            reasonCode: resolveOutcome.reasonCode ?? null,
++          };
++        }
++        if (resolveOutcome.status === 'unavailable') {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: resolveOutcome.reasonCode ?? null,
++          };
++        }
++        if (
++          resolveOutcome.status === 'interactionTypeMismatch' ||
++          resolveOutcome.status === 'denied'
++        ) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            selected: target,
++            interactionId: request.interactionId ?? null,
++            interactionType: request.interactionType ?? null,
++            status: resolveOutcome.status,
++            reasonCode: resolveOutcome.reasonCode,
++          };
++        }
++        const postIndex = await ports.readIndex(request.scope);
++        if (
++          !isCurrent() ||
++          postIndex.ownerEpoch !== grant.ownerEpoch ||
++          ports.currentOwnerEpoch() !== grant.ownerEpoch
++        ) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        sources.set(key, {
++          ownerEpoch: postIndex.ownerEpoch,
++          sourceGeneration: postIndex.sourceGeneration,
++        });
++        const reply: CindyMicroInputResponse =
++          resolveOutcome.status === 'resolved'
++            ? {
++                ...base,
++                commandId: request.commandId,
++                selected: target,
++                interactionId: resolveOutcome.interactionId,
++                interactionType: resolveOutcome.interactionType,
++                status: 'resolved',
++              }
++            : {
++                ...base,
++                commandId: request.commandId,
++                selected: target,
++                interactionId: request.interactionId ?? null,
++                interactionType: request.interactionType ?? null,
++                status: 'noop',
++                reasonCode: resolveOutcome.reasonCode,
++              };
++        if (commandKey) completedCommands.set(commandKey, reply);
++        return reply;
 +      }
-+      return {
-+        ...base,
-+        status: 'confirmed',
-+        delivered: target,
-+        selected: target,
-+        deepLink,
-+      };
++      if (request.op === 'send') {
++        const deliveryMode = request.deliveryMode ?? 'auto';
++        if (deliveryMode === 'steer' && finalRow.phase !== 'running') {
++          return {
++            ...base,
++            commandId: request.commandId,
++            selected: target,
++            status: 'denied',
++            reasonCode: 'guard.steerRequiresRunningTurn',
++          };
++        }
++        if (!ports.sendTask) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: 'bridge.sendUnsupported',
++          };
++        }
++        const sendOutcome = await ports.sendTask(target, {
++          commandId: request.commandId!,
++          text: request.text!,
++          deliveryMode,
++        });
++        if (!isCurrent() || ports.currentOwnerEpoch() !== grant.ownerEpoch) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        if (sendOutcome.status === 'stale') {
++          sources.clear();
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'stale',
++            reasonCode: sendOutcome.reasonCode ?? null,
++          };
++        }
++        if (sendOutcome.status === 'unavailable') {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: sendOutcome.reasonCode ?? null,
++          };
++        }
++        if (sendOutcome.status === 'denied') {
++          return {
++            ...base,
++            commandId: request.commandId,
++            selected: target,
++            status: 'denied',
++            reasonCode: sendOutcome.reasonCode,
++          };
++        }
++        const postIndex = await ports.readIndex(request.scope);
++        if (
++          !isCurrent() ||
++          postIndex.ownerEpoch !== grant.ownerEpoch ||
++          ports.currentOwnerEpoch() !== grant.ownerEpoch
++        ) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        sources.set(key, {
++          ownerEpoch: postIndex.ownerEpoch,
++          sourceGeneration: postIndex.sourceGeneration,
++        });
++        const reply: CindyMicroInputResponse =
++          sendOutcome.status === 'noop'
++            ? {
++                ...base,
++                commandId: request.commandId,
++                selected: target,
++                status: 'noop',
++                reasonCode: sendOutcome.reasonCode,
++              }
++            : {
++                ...base,
++                commandId: request.commandId,
++                selected: target,
++                status: sendOutcome.status,
++                delivery: sendOutcome.delivery,
++                runId: sendOutcome.runId ?? null,
++                queuedCount: sendOutcome.queuedCount ?? 0,
++              };
++        if (commandKey) completedCommands.set(commandKey, reply);
++        return reply;
++      }
++      return { ...base, status: 'denied' };
 +    } catch {
 +      return { ...base, status: 'unavailable' };
 +    } finally {
@@ -1575,7 +2316,7 @@ index 00000000..35bfcc81
 +}
 diff --git a/apps/desktop/src/main/worklouder-codex/microInputOwnership.ts b/apps/desktop/src/main/worklouder-codex/microInputOwnership.ts
 new file mode 100644
-index 00000000..2a05a927
+index 000000000..2a05a9270
 --- /dev/null
 +++ b/apps/desktop/src/main/worklouder-codex/microInputOwnership.ts
 @@ -0,0 +1,229 @@
@@ -1809,7 +2550,7 @@ index 00000000..2a05a927
 +  };
 +}
 diff --git a/apps/desktop/src/main/worklouder-codex/protocol.ts b/apps/desktop/src/main/worklouder-codex/protocol.ts
-index 03a6c9d0..08fc8b44 100644
+index 03a6c9d0b..08fc8b44c 100644
 --- a/apps/desktop/src/main/worklouder-codex/protocol.ts
 +++ b/apps/desktop/src/main/worklouder-codex/protocol.ts
 @@ -50,7 +50,7 @@ export interface WorkLouderCodexLightingFrame {
@@ -1885,7 +2626,7 @@ index 03a6c9d0..08fc8b44 100644
    if (message.kind === 'activity') return true;
    if (message.kind === 'agent-key') {
 diff --git a/apps/desktop/src/main/worklouder-codex/systemFrontmostInput.ts b/apps/desktop/src/main/worklouder-codex/systemFrontmostInput.ts
-index 01be591c..670c5992 100644
+index 01be591c0..670c59920 100644
 --- a/apps/desktop/src/main/worklouder-codex/systemFrontmostInput.ts
 +++ b/apps/desktop/src/main/worklouder-codex/systemFrontmostInput.ts
 @@ -9,6 +9,7 @@ import {
@@ -2023,7 +2764,7 @@ index 01be591c..670c5992 100644
    };
  }
 diff --git a/apps/desktop/src/main/worklouder-codex/taskSlots.ts b/apps/desktop/src/main/worklouder-codex/taskSlots.ts
-index c6b758a2..187afd2d 100644
+index c6b758a20..187afd2d2 100644
 --- a/apps/desktop/src/main/worklouder-codex/taskSlots.ts
 +++ b/apps/desktop/src/main/worklouder-codex/taskSlots.ts
 @@ -143,3 +143,73 @@ function sortLastSentRows(rows: WorkLouderCodexTaskCatalogRow[]): WorkLouderCode
@@ -2101,7 +2842,7 @@ index c6b758a2..187afd2d 100644
 +  return rows.length === 1;
 +}
 diff --git a/apps/desktop/src/main/worklouder-codex/workLouderCodexHostProcess.ts b/apps/desktop/src/main/worklouder-codex/workLouderCodexHostProcess.ts
-index 3810072b..0a5868f1 100644
+index 3810072b6..0a5868f19 100644
 --- a/apps/desktop/src/main/worklouder-codex/workLouderCodexHostProcess.ts
 +++ b/apps/desktop/src/main/worklouder-codex/workLouderCodexHostProcess.ts
 @@ -7,6 +7,7 @@
@@ -2437,7 +3178,7 @@ index 3810072b..0a5868f1 100644
      await awaitWithTimeout(
        Promise.allSettled([
 diff --git a/apps/desktop/src/preload/preload.ts b/apps/desktop/src/preload/preload.ts
-index 1b45c2f5..b99278a0 100644
+index 1b45c2f51..b99278a09 100644
 --- a/apps/desktop/src/preload/preload.ts
 +++ b/apps/desktop/src/preload/preload.ts
 @@ -140,6 +140,13 @@ import {
@@ -2500,7 +3241,7 @@ index 1b45c2f5..b99278a0 100644
        return () => ipcRenderer.removeListener(WORKLOUDER_CODEX_ACTION_CHANNEL, listener);
      },
 diff --git a/apps/desktop/src/renderer/components/layout/MainLayout.tsx b/apps/desktop/src/renderer/components/layout/MainLayout.tsx
-index 72a3c5e5..47288357 100644
+index 72a3c5e5b..472883573 100644
 --- a/apps/desktop/src/renderer/components/layout/MainLayout.tsx
 +++ b/apps/desktop/src/renderer/components/layout/MainLayout.tsx
 @@ -124,6 +124,7 @@ import { cn } from '@/lib/utils';
@@ -2629,7 +3370,7 @@ index 72a3c5e5..47288357 100644
              if (routed !== 'attached') return;
              if (rightSidebarSessionIdRef.current !== sessionId) return;
 diff --git a/apps/desktop/src/renderer/components/new-chat/ChatInput.tsx b/apps/desktop/src/renderer/components/new-chat/ChatInput.tsx
-index d30e7032..ebf69fdb 100644
+index d30e70328..ebf69fdb2 100644
 --- a/apps/desktop/src/renderer/components/new-chat/ChatInput.tsx
 +++ b/apps/desktop/src/renderer/components/new-chat/ChatInput.tsx
 @@ -336,6 +336,7 @@ import {
@@ -2734,7 +3475,7 @@ index d30e7032..ebf69fdb 100644
          }
          default:
 diff --git a/apps/desktop/src/renderer/features/bots/botSessionOwners.ts b/apps/desktop/src/renderer/features/bots/botSessionOwners.ts
-index d4685fea..2bd5ca62 100644
+index d4685feaf..2bd5ca62a 100644
 --- a/apps/desktop/src/renderer/features/bots/botSessionOwners.ts
 +++ b/apps/desktop/src/renderer/features/bots/botSessionOwners.ts
 @@ -129,8 +129,32 @@ export interface SessionEntryNavigatorDeps {
@@ -2864,7 +3605,7 @@ index d4685fea..2bd5ca62 100644
        if (!waiting) return;
        pending = null;
 diff --git a/apps/desktop/src/renderer/features/cc-agent/CCAgentSessionView.tsx b/apps/desktop/src/renderer/features/cc-agent/CCAgentSessionView.tsx
-index f836112b..8acc0fbc 100644
+index f836112b9..8acc0fbc1 100644
 --- a/apps/desktop/src/renderer/features/cc-agent/CCAgentSessionView.tsx
 +++ b/apps/desktop/src/renderer/features/cc-agent/CCAgentSessionView.tsx
 @@ -2097,23 +2097,23 @@ function CCAgentSessionContent({
@@ -2931,7 +3672,7 @@ index f836112b..8acc0fbc 100644
        }
        return false;
 diff --git a/apps/desktop/src/renderer/features/cc-agent/CCAgentSidebarUpper.tsx b/apps/desktop/src/renderer/features/cc-agent/CCAgentSidebarUpper.tsx
-index 17a58f26..c0071b43 100644
+index 17a58f265..c0071b431 100644
 --- a/apps/desktop/src/renderer/features/cc-agent/CCAgentSidebarUpper.tsx
 +++ b/apps/desktop/src/renderer/features/cc-agent/CCAgentSidebarUpper.tsx
 @@ -2615,7 +2615,7 @@ function ExpandedView({
@@ -2953,7 +3694,7 @@ index 17a58f26..c0071b43 100644
    }, [handleSessionClick, location.pathname, navigate, sessionSwitchEnabled]);
  
 diff --git a/apps/desktop/src/renderer/features/cc-agent/lib/sessionSwitchCommands.ts b/apps/desktop/src/renderer/features/cc-agent/lib/sessionSwitchCommands.ts
-index 6ecda4a2..dafe0f06 100644
+index 6ecda4a27..dafe0f064 100644
 --- a/apps/desktop/src/renderer/features/cc-agent/lib/sessionSwitchCommands.ts
 +++ b/apps/desktop/src/renderer/features/cc-agent/lib/sessionSwitchCommands.ts
 @@ -14,15 +14,16 @@
@@ -2977,7 +3718,7 @@ index 6ecda4a2..dafe0f06 100644
        // A broken subscriber must not poison-pill the caller.
      }
 diff --git a/apps/desktop/src/renderer/lib/__tests__/inputDeviceActions.test.ts b/apps/desktop/src/renderer/lib/__tests__/inputDeviceActions.test.ts
-index dff563bd..8b37e3d4 100644
+index dff563bd6..8b37e3d47 100644
 --- a/apps/desktop/src/renderer/lib/__tests__/inputDeviceActions.test.ts
 +++ b/apps/desktop/src/renderer/lib/__tests__/inputDeviceActions.test.ts
 @@ -34,4 +34,17 @@ describe('inputDeviceActions', () => {
@@ -3000,7 +3741,7 @@ index dff563bd..8b37e3d4 100644
  });
 diff --git a/apps/desktop/src/renderer/lib/__tests__/workLouderCodexOwnership.test.ts b/apps/desktop/src/renderer/lib/__tests__/workLouderCodexOwnership.test.ts
 new file mode 100644
-index 00000000..69634a71
+index 000000000..69634a715
 --- /dev/null
 +++ b/apps/desktop/src/renderer/lib/__tests__/workLouderCodexOwnership.test.ts
 @@ -0,0 +1,99 @@
@@ -3104,7 +3845,7 @@ index 00000000..69634a71
 +  });
 +});
 diff --git a/apps/desktop/src/renderer/lib/__tests__/workLouderCodexVoiceGesture.test.ts b/apps/desktop/src/renderer/lib/__tests__/workLouderCodexVoiceGesture.test.ts
-index 755c910f..aba81150 100644
+index 755c910f8..aba811506 100644
 --- a/apps/desktop/src/renderer/lib/__tests__/workLouderCodexVoiceGesture.test.ts
 +++ b/apps/desktop/src/renderer/lib/__tests__/workLouderCodexVoiceGesture.test.ts
 @@ -225,4 +225,86 @@ describe('createWorkLouderCodexVoiceGesture', () => {
@@ -3196,7 +3937,7 @@ index 755c910f..aba81150 100644
  });
 diff --git a/apps/desktop/src/renderer/lib/__tests__/workLouderNavigationDrain.test.ts b/apps/desktop/src/renderer/lib/__tests__/workLouderNavigationDrain.test.ts
 new file mode 100644
-index 00000000..d696362a
+index 000000000..d696362af
 --- /dev/null
 +++ b/apps/desktop/src/renderer/lib/__tests__/workLouderNavigationDrain.test.ts
 @@ -0,0 +1,73 @@
@@ -3274,7 +4015,7 @@ index 00000000..d696362a
 +  });
 +});
 diff --git a/apps/desktop/src/renderer/lib/inputDeviceActions.ts b/apps/desktop/src/renderer/lib/inputDeviceActions.ts
-index 8ab70f2e..8bf33511 100644
+index 8ab70f2ed..8bf335114 100644
 --- a/apps/desktop/src/renderer/lib/inputDeviceActions.ts
 +++ b/apps/desktop/src/renderer/lib/inputDeviceActions.ts
 @@ -1,6 +1,6 @@
@@ -3300,7 +4041,7 @@ index 8ab70f2e..8bf33511 100644
  }
  
 diff --git a/apps/desktop/src/renderer/lib/makerChatStore.ts b/apps/desktop/src/renderer/lib/makerChatStore.ts
-index 2591c78e..29657e26 100644
+index 2591c78e4..29657e26f 100644
 --- a/apps/desktop/src/renderer/lib/makerChatStore.ts
 +++ b/apps/desktop/src/renderer/lib/makerChatStore.ts
 @@ -1,3 +1,4 @@
@@ -3359,7 +4100,7 @@ index 2591c78e..29657e26 100644
  
  /**
 diff --git a/apps/desktop/src/renderer/lib/workLouderCodexActions.ts b/apps/desktop/src/renderer/lib/workLouderCodexActions.ts
-index aa4049b9..13a133a0 100644
+index aa4049b96..13a133a0b 100644
 --- a/apps/desktop/src/renderer/lib/workLouderCodexActions.ts
 +++ b/apps/desktop/src/renderer/lib/workLouderCodexActions.ts
 @@ -4,10 +4,12 @@ import {
@@ -3409,7 +4150,7 @@ index aa4049b9..13a133a0 100644
  }
 diff --git a/apps/desktop/src/renderer/lib/workLouderCodexOwnership.ts b/apps/desktop/src/renderer/lib/workLouderCodexOwnership.ts
 new file mode 100644
-index 00000000..ebd25605
+index 000000000..ebd256057
 --- /dev/null
 +++ b/apps/desktop/src/renderer/lib/workLouderCodexOwnership.ts
 @@ -0,0 +1,67 @@
@@ -3481,7 +4222,7 @@ index 00000000..ebd25605
 +  };
 +}
 diff --git a/apps/desktop/src/renderer/lib/workLouderCodexVoiceGesture.ts b/apps/desktop/src/renderer/lib/workLouderCodexVoiceGesture.ts
-index 6220a067..5e50d89d 100644
+index 6220a0678..5e50d89da 100644
 --- a/apps/desktop/src/renderer/lib/workLouderCodexVoiceGesture.ts
 +++ b/apps/desktop/src/renderer/lib/workLouderCodexVoiceGesture.ts
 @@ -7,7 +7,7 @@ export type WorkLouderPushToTalkAction = {
@@ -3616,7 +4357,7 @@ index 6220a067..5e50d89d 100644
        disposed = true;
        clearPressTimer();
 diff --git a/apps/desktop/src/renderer/vite-env.d.ts b/apps/desktop/src/renderer/vite-env.d.ts
-index 27eac533..fbcece60 100644
+index 27eac5331..fbcece602 100644
 --- a/apps/desktop/src/renderer/vite-env.d.ts
 +++ b/apps/desktop/src/renderer/vite-env.d.ts
 @@ -1992,7 +1992,10 @@ interface ElectronAPI {
@@ -3632,7 +4373,7 @@ index 27eac533..fbcece60 100644
        callback: (input: import('../shared/workLouderCodex').WorkLouderCodexPreviewInput) => void,
      ) => () => void;
 diff --git a/apps/desktop/src/renderer/voice-input/VoiceInputOverlay.tsx b/apps/desktop/src/renderer/voice-input/VoiceInputOverlay.tsx
-index 40dab767..8568501f 100644
+index 40dab7674..8568501f6 100644
 --- a/apps/desktop/src/renderer/voice-input/VoiceInputOverlay.tsx
 +++ b/apps/desktop/src/renderer/voice-input/VoiceInputOverlay.tsx
 @@ -21,6 +21,8 @@ import type {
@@ -3844,7 +4585,7 @@ index 40dab767..8568501f 100644
      closeOverlayAndReset,
      commitUsageStats,
 diff --git a/apps/desktop/src/shared/workLouderCodex.ts b/apps/desktop/src/shared/workLouderCodex.ts
-index 48082340..fd95b85f 100644
+index 480823404..fd95b85fe 100644
 --- a/apps/desktop/src/shared/workLouderCodex.ts
 +++ b/apps/desktop/src/shared/workLouderCodex.ts
 @@ -59,6 +59,19 @@ export const WORKLOUDER_CODEX_SET_LAYOUT_PREVIEW_CHANNEL = 'worklouder-codex:set
@@ -3869,10 +4610,10 @@ index 48082340..fd95b85f 100644
  export const WORKLOUDER_CODEX_AGENT_SLOT_COUNT = 6;
 diff --git a/scripts/micro-input-navigation-fixture.ts b/scripts/micro-input-navigation-fixture.ts
 new file mode 100644
-index 00000000..33edd684
+index 000000000..aa03c9f43
 --- /dev/null
 +++ b/scripts/micro-input-navigation-fixture.ts
-@@ -0,0 +1,286 @@
+@@ -0,0 +1,435 @@
 +import { randomUUID } from 'node:crypto';
 +import { chmod, mkdir, writeFile } from 'node:fs/promises';
 +import net from 'node:net';
@@ -3915,11 +4656,20 @@ index 00000000..33edd684
 +  let deliveryMode: 'confirmed' | 'delivered' | 'unconfirmed' = 'confirmed';
 +  let metadataReads = 0;
 +  let unauthorizedMetadataReads = 0;
++  let createCounter = 0;
++  let runCounter = 10;
 +  const deepLinkLog: Array<{
 +    sessionId: string;
 +    workspacePath: string;
 +    deepLink: string;
 +    mode: string;
++  }> = [];
++  const actionLog: Array<{
++    op: string;
++    commandId: string;
++    sessionId?: string;
++    workspacePath: string;
++    detail?: string;
 +  }> = [];
 +
 +  const tasks = new Map<string, CindyMicroInputRow>([
@@ -3931,6 +4681,11 @@ index 00000000..33edd684
 +        phase: 'running',
 +        attention: false,
 +        pinned: true,
++        runId: 'run-cindy-alpha-1',
++        unread: false,
++        eventWatermark: 10,
++        queuedCount: 0,
++        pendingInteraction: null,
 +      },
 +    ],
 +    [
@@ -3941,6 +4696,16 @@ index 00000000..33edd684
 +        phase: 'needs-interaction',
 +        attention: true,
 +        pinned: false,
++        runId: 'run-cindy-alpha-2',
++        unread: false,
++        eventWatermark: 20,
++        queuedCount: 0,
++        pendingInteraction: {
++          interactionId: 'perm-cindy-alpha-2',
++          interactionType: 'permission',
++          toolName: 'bash',
++          options: null,
++        },
 +      },
 +    ],
 +    [
@@ -3951,6 +4716,11 @@ index 00000000..33edd684
 +        phase: 'idle',
 +        attention: false,
 +        pinned: false,
++        runId: null,
++        unread: null,
++        eventWatermark: 5,
++        queuedCount: 0,
++        pendingInteraction: null,
 +      },
 +    ],
 +    [
@@ -3961,6 +4731,11 @@ index 00000000..33edd684
 +        phase: 'error',
 +        attention: true,
 +        pinned: true,
++        runId: null,
++        unread: true,
++        eventWatermark: 99,
++        queuedCount: 0,
++        pendingInteraction: null,
 +      },
 +    ],
 +  ]);
@@ -4014,6 +4789,120 @@ index 00000000..33edd684
 +      return { status: 'unconfirmed' as const, selected: null };
 +    },
 +    focusWindow: () => true,
++    createTask: async (scope, input) => {
++      createCounter += 1;
++      const sessionId = `cindy-created-${createCounter}`;
++      const created = { workspacePath: scope.workspacePath, sessionId };
++      const runId = input.text ? `run-created-${createCounter}` : null;
++      tasks.set(`${created.workspacePath}::${created.sessionId}`, {
++        address: created,
++        title: 'Duplicate Task Title',
++        phase: input.text ? 'running' : 'idle',
++        attention: false,
++        pinned: false,
++        runId,
++        unread: false,
++        eventWatermark: 100 + createCounter,
++        queuedCount: 0,
++        pendingInteraction: null,
++      });
++      actionLog.push({
++        op: 'create',
++        commandId: input.commandId,
++        sessionId: created.sessionId,
++        workspacePath: scope.workspacePath,
++      });
++      activeSessionId = created.sessionId;
++      return { status: 'confirmed' as const, created, selected: created, runId };
++    },
++    sendTask: async (target, input) => {
++      const key = `${target.workspacePath}::${target.sessionId}`;
++      const row = tasks.get(key);
++      if (!row) return { status: 'unavailable' as const, reasonCode: 'guard.targetMissing' };
++      actionLog.push({
++        op: 'send',
++        commandId: input.commandId,
++        sessionId: target.sessionId,
++        workspacePath: target.workspacePath,
++        detail: input.deliveryMode,
++      });
++      if (row.phase !== 'running') {
++        runCounter += 1;
++        const nextRunId = `run-started-${runCounter}`;
++        row.phase = 'running';
++        row.runId = nextRunId;
++        row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++        return {
++          status: 'started' as const,
++          delivery: 'auto' as const,
++          runId: nextRunId,
++          queuedCount: row.queuedCount ?? 0,
++        };
++      }
++      if (input.deliveryMode === 'steer') {
++        row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++        return {
++          status: 'steered' as const,
++          delivery: 'steer' as const,
++          runId: row.runId ?? 'run-active',
++          queuedCount: row.queuedCount ?? 0,
++        };
++      }
++      row.queuedCount = (row.queuedCount ?? 0) + 1;
++      row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++      return {
++        status: 'queued' as const,
++        delivery: 'queue' as const,
++        runId: row.runId ?? null,
++        queuedCount: row.queuedCount,
++      };
++    },
++    stopTask: async (target, input) => {
++      const key = `${target.workspacePath}::${target.sessionId}`;
++      const row = tasks.get(key);
++      if (!row) return { status: 'unavailable' as const, reasonCode: 'guard.targetMissing' };
++      if (row.phase !== 'running' || row.runId !== input.expectedRunId) {
++        return { status: 'noop' as const, reasonCode: 'guard.stopTargetChanged' };
++      }
++      const stoppedRunId = row.runId;
++      row.phase = 'idle';
++      row.runId = null;
++      row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++      actionLog.push({
++        op: 'stop',
++        commandId: input.commandId,
++        sessionId: target.sessionId,
++        workspacePath: target.workspacePath,
++        detail: stoppedRunId,
++      });
++      return { status: 'stopped' as const, runId: stoppedRunId };
++    },
++    resolveTask: async (target, input) => {
++      const key = `${target.workspacePath}::${target.sessionId}`;
++      const row = tasks.get(key);
++      if (!row) return { status: 'unavailable' as const, reasonCode: 'guard.targetMissing' };
++      if (!row.pendingInteraction || row.pendingInteraction.interactionId !== input.interactionId) {
++        return { status: 'noop' as const, reasonCode: 'guard.interactionAlreadyResolved' };
++      }
++      const resolvedId = row.pendingInteraction.interactionId;
++      const resolvedType = row.pendingInteraction.interactionType;
++      row.pendingInteraction = null;
++      row.phase = input.decision === 'reject' || input.decision === 'cancel' ? 'idle' : 'running';
++      row.attention = false;
++      row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++      actionLog.push({
++        op: 'resolve',
++        commandId: input.commandId,
++        sessionId: target.sessionId,
++        workspacePath: target.workspacePath,
++        detail: `${resolvedType}:${resolvedId}:${input.decision}`,
++      });
++      return {
++        status: 'resolved' as const,
++        interactionId: resolvedId,
++        interactionType: resolvedType,
++      };
++    },
 +  });
 +
 +  const bridge = await startCindyMicroInputNavigationBridge({
@@ -4035,6 +4924,7 @@ index 00000000..33edd684
 +          metadata_reads: metadataReads,
 +          unauthorized_metadata_reads: unauthorizedMetadataReads,
 +          deep_link_dispatches: deepLinkLog,
++          action_dispatches: actionLog,
 +          native_install: 'NOT_RUN',
 +          physical: 'NOT_RUN',
 +        },
@@ -4161,7 +5051,7 @@ index 00000000..33edd684
 +});
 diff --git a/scripts/micro-input-ownership-fixture.ts b/scripts/micro-input-ownership-fixture.ts
 new file mode 100644
-index 00000000..6d916fa5
+index 000000000..6d916fa5e
 --- /dev/null
 +++ b/scripts/micro-input-ownership-fixture.ts
 @@ -0,0 +1,96 @@
@@ -4263,10 +5153,10 @@ index 00000000..6d916fa5
 +void main().catch((error: unknown) => { console.error(error); process.exitCode = 1; });
 diff --git a/scripts/test-micro-input-navigation.mjs b/scripts/test-micro-input-navigation.mjs
 new file mode 100644
-index 00000000..38b4f5a2
+index 000000000..949ca8ad9
 --- /dev/null
 +++ b/scripts/test-micro-input-navigation.mjs
-@@ -0,0 +1,403 @@
+@@ -0,0 +1,967 @@
 +// Integration tier: verifies Cindy's restricted metadata & session deep-link bridge over real UDS.
 +import assert from 'node:assert/strict';
 +import { randomUUID } from 'node:crypto';
@@ -4316,7 +5206,13 @@ index 00000000..38b4f5a2
 +  let activeSessionId = 'sess-alpha-1';
 +  let deliveryMode = 'confirmed';
 +  let metadataReads = 0;
++  let createCounter = 0;
++  let runCounter = 10;
 +  const deepLinkDispatches = [];
++  const createDispatches = [];
++  const sendDispatches = [];
++  const stopDispatches = [];
++  const resolveDispatches = [];
 +  const tasks = new Map(
 +    (
 +      options.initialTasks ?? [
@@ -4326,6 +5222,11 @@ index 00000000..38b4f5a2
 +          phase: 'running',
 +          attention: false,
 +          pinned: true,
++          runId: 'run-alpha-1',
++          unread: false,
++          eventWatermark: 10,
++          queuedCount: 0,
++          pendingInteraction: null,
 +        },
 +        {
 +          address: { workspacePath: '/Users/test/Alpha', sessionId: 'sess-alpha-2' },
@@ -4333,6 +5234,16 @@ index 00000000..38b4f5a2
 +          phase: 'needs-interaction',
 +          attention: true,
 +          pinned: false,
++          runId: 'run-alpha-2',
++          unread: false,
++          eventWatermark: 20,
++          queuedCount: 0,
++          pendingInteraction: {
++            interactionId: 'perm-alpha-2',
++            interactionType: 'permission',
++            toolName: 'bash',
++            options: null,
++          },
 +        },
 +        {
 +          address: { workspacePath: '/Users/test/Beta', sessionId: 'sess-beta-1' },
@@ -4340,6 +5251,11 @@ index 00000000..38b4f5a2
 +          phase: 'idle',
 +          attention: false,
 +          pinned: false,
++          runId: null,
++          unread: null,
++          eventWatermark: 5,
++          queuedCount: 0,
++          pendingInteraction: null,
 +        },
 +        {
 +          address: { workspacePath: '/Users/test/Secret', sessionId: 'sess-secret-1' },
@@ -4347,6 +5263,11 @@ index 00000000..38b4f5a2
 +          phase: 'error',
 +          attention: true,
 +          pinned: true,
++          runId: null,
++          unread: true,
++          eventWatermark: 99,
++          queuedCount: 0,
++          pendingInteraction: null,
 +        },
 +      ]
 +    ).map((row) => [`${row.address.workspacePath}::${row.address.sessionId}`, row]),
@@ -4388,6 +5309,89 @@ index 00000000..38b4f5a2
 +      return { status: 'unconfirmed', selected: null };
 +    },
 +    focusWindow: () => true,
++    createTask: async (scope, input) => {
++      createCounter += 1;
++      const sessionId = `sess-created-${createCounter}`;
++      const created = { workspacePath: scope.workspacePath, sessionId };
++      const runId = input.text ? `run-created-${createCounter}` : null;
++      const row = {
++        address: created,
++        title: input.text ? input.text.slice(0, 48) : `New Task ${createCounter}`,
++        phase: input.text ? 'running' : 'idle',
++        attention: false,
++        pinned: false,
++        runId,
++        unread: false,
++        eventWatermark: 100 + createCounter,
++        queuedCount: 0,
++        pendingInteraction: null,
++      };
++      tasks.set(`${created.workspacePath}::${created.sessionId}`, row);
++      sourceGeneration = String(Number(sourceGeneration) + 1);
++      createDispatches.push({ scope, input, created });
++      if (deliveryMode === 'confirmed') {
++        activeSessionId = created.sessionId;
++        return { status: 'confirmed', created, selected: created, runId };
++      }
++      if (deliveryMode === 'delivered') {
++        return { status: 'delivered', created, runId };
++      }
++      return { status: 'unconfirmed', created, selected: null };
++    },
++    sendTask: async (target, input) => {
++      const key = `${target.workspacePath}::${target.sessionId}`;
++      const row = tasks.get(key);
++      if (!row) return { status: 'unavailable', reasonCode: 'guard.targetMissing' };
++      sendDispatches.push({ target, input });
++      sourceGeneration = String(Number(sourceGeneration) + 1);
++      if (row.phase !== 'running') {
++        runCounter += 1;
++        const nextRunId = `run-started-${runCounter}`;
++        row.phase = 'running';
++        row.runId = nextRunId;
++        row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++        return { status: 'started', delivery: 'auto', runId: nextRunId, queuedCount: row.queuedCount ?? 0 };
++      }
++      if (input.deliveryMode === 'steer') {
++        row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++        return { status: 'steered', delivery: 'steer', runId: row.runId, queuedCount: row.queuedCount ?? 0 };
++      }
++      row.queuedCount = (row.queuedCount ?? 0) + 1;
++      row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++      return { status: 'queued', delivery: 'queue', runId: row.runId, queuedCount: row.queuedCount };
++    },
++    stopTask: async (target, input) => {
++      const key = `${target.workspacePath}::${target.sessionId}`;
++      const row = tasks.get(key);
++      if (!row) return { status: 'unavailable', reasonCode: 'guard.targetMissing' };
++      if (row.phase !== 'running' || row.runId !== input.expectedRunId) {
++        return { status: 'noop', reasonCode: 'guard.stopTargetChanged' };
++      }
++      stopDispatches.push({ target, input });
++      const stoppedRunId = row.runId;
++      row.phase = 'idle';
++      row.runId = null;
++      row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++      sourceGeneration = String(Number(sourceGeneration) + 1);
++      return { status: 'stopped', runId: stoppedRunId };
++    },
++    resolveTask: async (target, input) => {
++      const key = `${target.workspacePath}::${target.sessionId}`;
++      const row = tasks.get(key);
++      if (!row) return { status: 'unavailable', reasonCode: 'guard.targetMissing' };
++      if (!row.pendingInteraction || row.pendingInteraction.interactionId !== input.interactionId) {
++        return { status: 'noop', reasonCode: 'guard.interactionAlreadyResolved' };
++      }
++      resolveDispatches.push({ target, input });
++      const resolvedId = row.pendingInteraction.interactionId;
++      const resolvedType = row.pendingInteraction.interactionType;
++      row.pendingInteraction = null;
++      row.phase = input.decision === 'reject' || input.decision === 'cancel' ? 'idle' : 'running';
++      row.attention = false;
++      row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++      sourceGeneration = String(Number(sourceGeneration) + 1);
++      return { status: 'resolved', interactionId: resolvedId, interactionType: resolvedType };
++    },
 +  });
 +
 +  const bridge = await startCindyMicroInputNavigationBridge({
@@ -4410,6 +5414,13 @@ index 00000000..38b4f5a2
 +    tasks,
 +    getMetadataReads: () => metadataReads,
 +    getDeepLinkDispatches: () => deepLinkDispatches,
++    getCreateDispatches: () => createDispatches,
++    getSendDispatches: () => sendDispatches,
++    getStopDispatches: () => stopDispatches,
++    getResolveDispatches: () => resolveDispatches,
++    setActiveSessionId: (next) => {
++      activeSessionId = next;
++    },
 +    setDeliveryMode: (mode) => {
 +      deliveryMode = mode;
 +    },
@@ -4670,9 +5681,452 @@ index 00000000..38b4f5a2
 +  );
 +  assert.equal(buildVerifiedCindySessionDeepLink(''), null);
 +});
++
++test('binds stop to (target, expectedRunId) and selected == target, returning noop on stale runId with zero abort calls', async (t) => {
++  const fx = await createBridgeFixture(t);
++  const grant = await readGrant(fx.grantPath);
++  const scopeAlpha = { workspacePath: '/Users/test/Alpha' };
++  const targetAlpha1 = { workspacePath: '/Users/test/Alpha', sessionId: 'sess-alpha-1' };
++  const targetAlpha2 = { workspacePath: '/Users/test/Alpha', sessionId: 'sess-alpha-2' };
++
++  await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'list',
++    scope: scopeAlpha,
++  });
++
++  // Attempting to stop unselected targetAlpha2 must fail with unconfirmed and zero stop calls.
++  const unselectedStop = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'stop',
++    scope: scopeAlpha,
++    target: targetAlpha2,
++    commandId: 'cmd-stop-unselected',
++    expectedRunId: 'run-alpha-2',
++  });
++  assert.equal(unselectedStop.status, 'unconfirmed');
++  assert.equal(unselectedStop.reasonCode, 'guard.selectionNotCommitted');
++  assert.equal(fx.getStopDispatches().length, 0);
++
++  // Mismatched expectedRunId on selected targetAlpha1 must return noop with zero stop calls.
++  const mismatchedStop = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'stop',
++    scope: scopeAlpha,
++    target: targetAlpha1,
++    commandId: 'cmd-stop-mismatch',
++    expectedRunId: 'run-old-turn-0',
++  });
++  assert.equal(mismatchedStop.status, 'noop');
++  assert.equal(mismatchedStop.reasonCode, 'guard.stopTargetChanged');
++  assert.equal(fx.getStopDispatches().length, 0);
++
++  // Matching expectedRunId stops the run and advances sourceGeneration.
++  const stopped = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'stop',
++    scope: scopeAlpha,
++    target: targetAlpha1,
++    commandId: 'cmd-stop-valid',
++    expectedRunId: 'run-alpha-1',
++  });
++  assert.equal(stopped.status, 'stopped');
++  assert.equal(stopped.runId, 'run-alpha-1');
++  assert.equal(fx.getStopDispatches().length, 1);
++
++  // Re-sending the same commandId is idempotent and does not invoke stopTask a second time.
++  const duplicateStop = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'stop',
++    scope: scopeAlpha,
++    target: targetAlpha1,
++    commandId: 'cmd-stop-valid',
++    expectedRunId: 'run-alpha-1',
++  });
++  assert.equal(duplicateStop.status, 'stopped');
++  assert.equal(duplicateStop.duplicate, true);
++  assert.equal(fx.getStopDispatches().length, 1);
++
++  // New stop command after run is already idle returns noop (guard.notRunning).
++  const stopAfterIdle = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'stop',
++    scope: scopeAlpha,
++    target: targetAlpha1,
++    commandId: 'cmd-stop-after-idle',
++    expectedRunId: 'run-alpha-1',
++  });
++  assert.equal(stopAfterIdle.status, 'noop');
++  assert.equal(stopAfterIdle.reasonCode, 'guard.notRunning');
++  assert.equal(fx.getStopDispatches().length, 1);
++});
++
++test('binds resolve to (target, interactionId, interactionType) and rejects approving a question as permission', async (t) => {
++  const fx = await createBridgeFixture(t);
++  const grant = await readGrant(fx.grantPath);
++  const scopeAlpha = { workspacePath: '/Users/test/Alpha' };
++  const targetAlpha2 = { workspacePath: '/Users/test/Alpha', sessionId: 'sess-alpha-2' };
++
++  await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'list',
++    scope: scopeAlpha,
++  });
++
++  // Select targetAlpha2 first.
++  const opened = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'open',
++    scope: scopeAlpha,
++    target: targetAlpha2,
++  });
++  assert.equal(opened.status, 'confirmed');
++
++  // Approving a question as a permission is rejected before any resolver executes.
++  const questionAsPerm = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'resolve',
++    scope: scopeAlpha,
++    target: targetAlpha2,
++    commandId: 'cmd-resolve-q-as-perm',
++    interactionId: 'perm-alpha-2',
++    interactionType: 'question',
++    decision: 'approve',
++  });
++  assert.equal(questionAsPerm.status, 'interactionTypeMismatch');
++  assert.equal(questionAsPerm.reasonCode, 'guard.questionCannotApproveAsPermission');
++  assert.equal(fx.getResolveDispatches().length, 0);
++
++  // Resolving with a mismatched/expired interactionId returns noop with zero resolver calls.
++  const expiredResolve = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'resolve',
++    scope: scopeAlpha,
++    target: targetAlpha2,
++    commandId: 'cmd-resolve-expired',
++    interactionId: 'perm-expired-0',
++    interactionType: 'permission',
++    decision: 'approve',
++  });
++  assert.equal(expiredResolve.status, 'noop');
++  assert.equal(expiredResolve.reasonCode, 'guard.interactionAlreadyResolved');
++  assert.equal(fx.getResolveDispatches().length, 0);
++
++  // Resolving with the exact interactionId and interactionType succeeds once.
++  const resolved = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'resolve',
++    scope: scopeAlpha,
++    target: targetAlpha2,
++    commandId: 'cmd-resolve-valid',
++    interactionId: 'perm-alpha-2',
++    interactionType: 'permission',
++    decision: 'approve',
++  });
++  assert.equal(resolved.status, 'resolved');
++  assert.equal(resolved.interactionId, 'perm-alpha-2');
++  assert.equal(resolved.interactionType, 'permission');
++  assert.equal(fx.getResolveDispatches().length, 1);
++
++  // A new commandId trying to resolve the now-cleared interactionId returns noop.
++  const secondResolve = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'resolve',
++    scope: scopeAlpha,
++    target: targetAlpha2,
++    commandId: 'cmd-resolve-second',
++    interactionId: 'perm-alpha-2',
++    interactionType: 'permission',
++    decision: 'approve',
++  });
++  assert.equal(secondResolve.status, 'noop');
++  assert.equal(secondResolve.reasonCode, 'guard.interactionAlreadyResolved');
++  assert.equal(fx.getResolveDispatches().length, 1);
++});
++
++test('supports workspace-bound create, target-bound send (started/steered/queued), and query reconciliation', async (t) => {
++  const fx = await createBridgeFixture(t);
++  const grant = await readGrant(fx.grantPath);
++  const scopeBeta = { workspacePath: '/Users/test/Beta' };
++  const targetBeta1 = { workspacePath: '/Users/test/Beta', sessionId: 'sess-beta-1' };
++
++  await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'list',
++    scope: scopeBeta,
++  });
++
++  // Select targetBeta1 first.
++  const opened = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'open',
++    scope: scopeBeta,
++    target: targetBeta1,
++  });
++  assert.equal(opened.status, 'confirmed');
++
++  // Steer on idle session is rejected with denied (guard.steerRequiresRunningTurn).
++  const steerOnIdle = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'send',
++    scope: scopeBeta,
++    target: targetBeta1,
++    commandId: 'cmd-steer-idle',
++    text: 'Try steering idle session',
++    deliveryMode: 'steer',
++  });
++  assert.equal(steerOnIdle.status, 'denied');
++  assert.equal(steerOnIdle.reasonCode, 'guard.steerRequiresRunningTurn');
++  assert.equal(fx.getSendDispatches().length, 0);
++
++  // Send on idle session starts a turn.
++  const started = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'send',
++    scope: scopeBeta,
++    target: targetBeta1,
++    commandId: 'cmd-send-start',
++    text: 'Start investigating Beta',
++    deliveryMode: 'auto',
++  });
++  assert.equal(started.status, 'started');
++  assert.equal(started.delivery, 'auto');
++  assert.ok(started.runId);
++  assert.equal(fx.getSendDispatches().length, 1);
++
++  // Querying the completed commandId reconciles the exact outcome with duplicate: true.
++  const queried = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'query',
++    scope: scopeBeta,
++    target: targetBeta1,
++    commandId: 'cmd-send-start',
++  });
++  assert.equal(queried.status, 'started');
++  assert.equal(queried.duplicate, true);
++  assert.equal(queried.runId, started.runId);
++
++  // Steer on running session steers the active turn.
++  const steered = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'send',
++    scope: scopeBeta,
++    target: targetBeta1,
++    commandId: 'cmd-send-steer',
++    text: 'Focus on the root cause first',
++    deliveryMode: 'steer',
++  });
++  assert.equal(steered.status, 'steered');
++  assert.equal(steered.delivery, 'steer');
++  assert.equal(steered.runId, started.runId);
++
++  // Queue on running session queues a follow-up.
++  const queued = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'send',
++    scope: scopeBeta,
++    target: targetBeta1,
++    commandId: 'cmd-send-queue',
++    text: 'Run tests after the fix',
++    deliveryMode: 'queue',
++  });
++  assert.equal(queued.status, 'queued');
++  assert.equal(queued.delivery, 'queue');
++  assert.equal(queued.queuedCount, 1);
++
++  // Create a new task in Beta workspace and confirm selected == created.
++  const created = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'create',
++    scope: scopeBeta,
++    commandId: 'cmd-create-beta-2',
++    text: 'Fresh task in Beta',
++  });
++  assert.equal(created.status, 'confirmed');
++  assert.deepEqual(created.delivered, {
++    workspacePath: '/Users/test/Beta',
++    sessionId: 'sess-created-1',
++  });
++  assert.deepEqual(created.selected, created.delivered);
++  assert.equal(fx.getCreateDispatches().length, 1);
++
++  // Deleting the target and attempting send returns unavailable without creating or redirecting.
++  fx.tasks.delete('/Users/test/Beta::sess-created-1');
++  const sendDeleted = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'send',
++    scope: scopeBeta,
++    target: { workspacePath: '/Users/test/Beta', sessionId: 'sess-created-1' },
++    commandId: 'cmd-send-deleted',
++    text: 'Must not create or redirect',
++    deliveryMode: 'auto',
++  });
++  assert.equal(sendDeleted.status, 'unavailable');
++  assert.equal(fx.getCreateDispatches().length, 1);
++  assert.equal(fx.getSendDispatches().length, 3);
++});
++
++test('preserves native unread tri-state (true, false, null) without fabricating unread from completed phase', async (t) => {
++  const fx = await createBridgeFixture(t, {
++    initialTasks: [
++      {
++        address: { workspacePath: '/Users/test/Alpha', sessionId: 'sess-completed-read' },
++        title: 'Completed Already Read',
++        phase: 'completed',
++        attention: false,
++        pinned: false,
++        unread: false,
++        eventWatermark: 10,
++      },
++      {
++        address: { workspacePath: '/Users/test/Alpha', sessionId: 'sess-completed-unknown' },
++        title: 'Completed Without Unread Source',
++        phase: 'completed',
++        attention: false,
++        pinned: false,
++        unread: null,
++        eventWatermark: 11,
++      },
++      {
++        address: { workspacePath: '/Users/test/Alpha', sessionId: 'sess-completed-unread' },
++        title: 'Completed With Unread Attention',
++        phase: 'completed',
++        attention: true,
++        pinned: false,
++        unread: true,
++        eventWatermark: 12,
++      },
++    ],
++  });
++  const grant = await readGrant(fx.grantPath);
++  const listed = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'list',
++    scope: { workspacePath: '/Users/test/Alpha' },
++  });
++  assert.equal(listed.status, 'ok');
++  assert.deepEqual(
++    listed.rows.map((r) => ({ id: r.address.sessionId, phase: r.phase, unread: r.unread, attention: r.attention })),
++    [
++      { id: 'sess-completed-read', phase: 'completed', unread: false, attention: false },
++      { id: 'sess-completed-unknown', phase: 'completed', unread: null, attention: false },
++      { id: 'sess-completed-unread', phase: 'completed', unread: true, attention: true },
++    ],
++  );
++});
 diff --git a/scripts/test-micro-input-ownership.mjs b/scripts/test-micro-input-ownership.mjs
 new file mode 100644
-index 00000000..f179e9c1
+index 000000000..f179e9c1b
 --- /dev/null
 +++ b/scripts/test-micro-input-ownership.mjs
 @@ -0,0 +1,203 @@

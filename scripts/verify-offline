@@ -199,6 +199,10 @@ def verify_evidence(run, scenario, started, process_alive):
             "out_of_scope_zero_reads",
             "deleted_target_no_redirect",
             "account_or_generation_change_blocks_old_selection",
+            "stop_bound_to_run_and_stale_noop",
+            "resolve_bound_and_question_guard",
+            "workspace_create_and_target_prompt_steering",
+            "unread_tristate_and_pending_round",
         }
         checks = {item["name"]: item["status"] for item in navigation.get("checks", [])}
         if (
@@ -217,16 +221,41 @@ def verify_evidence(run, scenario, started, process_alive):
         confirmed = [row for row in cindy_rows if row["outcome"] == "confirmed"]
         unconfirmed = [row for row in cindy_rows if row["outcome"] == "unconfirmed"]
         stale = [row for row in cindy_rows if row["outcome"] == "stale"]
+        stop_stopped = [row for row in rows if row["action_type"] == "cindy_stop" and row["outcome"] == "stopped"]
+        stop_noop = [row for row in rows if row["action_type"] == "cindy_stop" and row["outcome"] == "noop"]
+        resolve_ok = [row for row in rows if row["action_type"] == "cindy_resolve" and row["outcome"] == "resolved"]
+        resolve_mismatch = [row for row in rows if row["action_type"] == "cindy_resolve" and row["outcome"] == "interactionTypeMismatch"]
+        resolve_noop = [row for row in rows if row["action_type"] == "cindy_resolve" and row["outcome"] == "noop"]
+        created_ok = [row for row in rows if row["action_type"] == "cindy_create" and row["outcome"] == "confirmed"]
+        send_started = [row for row in rows if row["action_type"] == "cindy_send" and row["outcome"] == "started"]
+        send_steered = [row for row in rows if row["action_type"] == "cindy_send" and row["outcome"] == "steered"]
+        send_unknown = [row for row in rows if row["action_type"] == "cindy_send" and row["outcome"] == "unknown"]
+        query_queued = [row for row in rows if row["action_type"] == "cindy_query" and row["outcome"] == "queued"]
+        round_confirmed = [row for row in rows if row["action_type"] == "cindy_next_attention" and row["outcome"] == "confirmed"]
+        round_noop = [row for row in rows if row["action_type"] == "cindy_next_attention" and row["outcome"] == "noop"]
         if (
             len(delivered) != 1
             or len(confirmed) < 2
             or len(unconfirmed) != 1
             or len(stale) < 2
+            or len(stop_stopped) != 1
+            or len(stop_noop) != 2
+            or len(resolve_ok) != 1
+            or len(resolve_mismatch) != 1
+            or len(resolve_noop) != 2
+            or len(created_ok) != 1
+            or len(send_started) != 1
+            or len(send_steered) != 1
+            or len(send_unknown) != 2
+            or len(query_queued) != 1
+            or len(round_confirmed) != 3
+            or len(round_noop) != 1
             or any(row.get("target") != "cindy" for row in rows)
         ):
-            raise ValueError("Cindy exact navigation receipts missing or unexpected")
+            raise ValueError("Cindy exact navigation/action receipts missing or unexpected")
         result.update(
             cindy_navigation="SYNTHETIC_PASS",
+            cindy_actions="SYNTHETIC_PASS",
             unauthorized_metadata_reads=0,
             local_agent_api_relaxed=False,
             native_app="NOT_RUN",

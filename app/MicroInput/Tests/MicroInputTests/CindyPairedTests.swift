@@ -68,6 +68,46 @@ final class CindyPairedTests: XCTestCase {
         }
         XCTAssertEqual(readbackAlpha2.selected, alpha2)
 
+        // Verify resolve guards and exact request-bound resolution on alpha2 over real UDS.
+        let questionAsPermReply = await client.resolve(
+            CindyResolveIntent(
+                commandId: "paired-resolve-q-guard",
+                selection: alpha2Selection,
+                interactionId: "perm-cindy-alpha-2",
+                interactionType: .question,
+                decision: .approve,
+                optionId: nil
+            )
+        )
+        XCTAssertEqual(questionAsPermReply.status, .interactionTypeMismatch)
+        XCTAssertEqual(questionAsPermReply.reasonCode, "guard.questionCannotApproveAsPermission")
+
+        let expiredResolveReply = await client.resolve(
+            CindyResolveIntent(
+                commandId: "paired-resolve-expired",
+                selection: alpha2Selection,
+                interactionId: "perm-expired-0",
+                interactionType: .permission,
+                decision: .approve,
+                optionId: nil
+            )
+        )
+        XCTAssertEqual(expiredResolveReply.status, .noop)
+        XCTAssertEqual(expiredResolveReply.reasonCode, "guard.interactionAlreadyResolved")
+
+        let exactResolveReply = await client.resolve(
+            CindyResolveIntent(
+                commandId: "paired-resolve-exact",
+                selection: alpha2Selection,
+                interactionId: "perm-cindy-alpha-2",
+                interactionType: .permission,
+                decision: .approve,
+                optionId: nil
+            )
+        )
+        XCTAssertEqual(exactResolveReply.status, .resolved)
+        XCTAssertEqual(exactResolveReply.interactionId, "perm-cindy-alpha-2")
+
         let beta1Selection = CindySelection(
             address: beta1,
             instanceId: snapshot.instanceId,
@@ -85,6 +125,64 @@ final class CindyPairedTests: XCTestCase {
             throw Failure.verification
         }
         XCTAssertEqual(readbackBeta1.selected, beta1)
+
+        // Verify send (started/steered/queued), query reconciliation, and run-bound stop on beta1 over real UDS.
+        let startedReply = await client.send(
+            CindySendIntent(
+                commandId: "paired-send-start",
+                selection: beta1Selection,
+                text: "Start turn on beta1",
+                deliveryMode: .auto
+            )
+        )
+        XCTAssertEqual(startedReply.status, .started)
+        let startedRunId = try XCTUnwrap(startedReply.runId)
+
+        let queriedReply = await client.query(
+            CindyQueryIntent(
+                commandId: "paired-send-start",
+                scope: CindyScope(workspacePath: "/Users/test/CindyBeta"),
+                target: beta1,
+                instanceId: snapshot.instanceId,
+                generation: snapshot.generation,
+                ownerEpoch: snapshot.ownerEpoch,
+                localEpoch: 1
+            )
+        )
+        XCTAssertEqual(queriedReply.status, .started)
+        XCTAssertTrue(queriedReply.duplicate)
+        XCTAssertEqual(queriedReply.runId, startedRunId)
+
+        let steeredReply = await client.send(
+            CindySendIntent(
+                commandId: "paired-send-steer",
+                selection: beta1Selection,
+                text: "Steer beta1 active turn",
+                deliveryMode: .steer
+            )
+        )
+        XCTAssertEqual(steeredReply.status, .steered)
+        XCTAssertEqual(steeredReply.runId, startedRunId)
+
+        let staleStopReply = await client.stop(
+            CindyStopIntent(
+                commandId: "paired-stop-stale",
+                selection: beta1Selection,
+                expectedRunId: "run-wrong-0"
+            )
+        )
+        XCTAssertEqual(staleStopReply.status, .noop)
+        XCTAssertEqual(staleStopReply.reasonCode, "guard.stopTargetChanged")
+
+        let exactStopReply = await client.stop(
+            CindyStopIntent(
+                commandId: "paired-stop-exact",
+                selection: beta1Selection,
+                expectedRunId: startedRunId
+            )
+        )
+        XCTAssertEqual(exactStopReply.status, .stopped)
+        XCTAssertEqual(exactStopReply.runId, startedRunId)
 
         try await sendControlCommand(
             ["cmd": "remove-task", "workspacePath": "/Users/test/CindyAlpha", "sessionId": "cindy-alpha-2"],

@@ -125,10 +125,11 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Depends on**: I2、K3。责任票 #83。
 - **Evidence**: .scratch/qa-runs/1793888574124-27851/evidence/result.json
 
-### [ ] Slice M: 补 Cindy 原生任务动作缺口
+### [x] Slice M: 补 Cindy 原生任务动作缺口
 - **Outcome**: 复用原生服务补准确停止、请求绑定、目标 Prompt/steering 及工作区/待办动作。
 - **Done Predicate**: 已有任务槽/PTT/思考/灯光行为不退化；停止/审批固定身份，过期零操作；原生未读事实和待办轮次独立核验。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: J。责任票 #82。
+- **Evidence**: .scratch/qa-runs/1793891819365-57507/evidence/result.json
 
 ### [ ] Slice N: 交付四应用稳定槽位和历史待办导航
 - **Outcome**: 共享稳定目标选择、六槽固定/最近、项目/工作区导航、历史和本轮不重复的待办轮询。

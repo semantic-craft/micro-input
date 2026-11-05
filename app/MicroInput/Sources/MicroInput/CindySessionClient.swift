@@ -97,6 +97,14 @@ private struct CindyRequest: Encodable {
     var op: String
     var scope: CindyScope
     var target: CindyTaskAddress?
+    var commandId: String? = nil
+    var text: String? = nil
+    var deliveryMode: CindyDeliveryMode? = nil
+    var expectedRunId: String? = nil
+    var interactionId: String? = nil
+    var interactionType: CindyInteractionType? = nil
+    var decision: CindyInteractionDecision? = nil
+    var optionId: String? = nil
 }
 
 private struct CindyReply: Decodable {
@@ -106,10 +114,18 @@ private struct CindyReply: Decodable {
     var generation: UInt64
     var ownerEpoch: String
     var status: String
+    var commandId: String?
+    var duplicate: Bool?
     var rows: [CindyTaskRow]?
     var delivered: CindyTaskAddress?
     var selected: CindyTaskAddress?
     var deepLink: String?
+    var delivery: CindyDeliveryMode?
+    var runId: String?
+    var queuedCount: Int?
+    var interactionId: String?
+    var interactionType: CindyInteractionType?
+    var reasonCode: String?
 }
 
 actor CindySessionClient: CindySessionServing {
@@ -278,8 +294,247 @@ actor CindySessionClient: CindySessionServing {
         )
     }
 
+    func create(_ intent: CindyCreateIntent) async -> CindyCommandReply {
+        await performCommand(
+            commandId: intent.commandId,
+            scope: intent.scope,
+            target: nil,
+            instanceId: intent.instanceId,
+            generation: intent.generation,
+            ownerEpoch: intent.ownerEpoch,
+            op: "create",
+            text: intent.text,
+            deliveryMode: nil,
+            expectedRunId: nil,
+            interactionId: nil,
+            interactionType: nil,
+            decision: nil,
+            optionId: nil
+        )
+    }
+
+    func send(_ intent: CindySendIntent) async -> CindyCommandReply {
+        let scope = CindyScope(workspacePath: intent.selection.address.workspacePath)
+        return await performCommand(
+            commandId: intent.commandId,
+            scope: scope,
+            target: intent.selection.address,
+            instanceId: intent.selection.instanceId,
+            generation: intent.selection.generation,
+            ownerEpoch: intent.selection.ownerEpoch,
+            op: "send",
+            text: intent.text,
+            deliveryMode: intent.deliveryMode,
+            expectedRunId: nil,
+            interactionId: nil,
+            interactionType: nil,
+            decision: nil,
+            optionId: nil
+        )
+    }
+
+    func stop(_ intent: CindyStopIntent) async -> CindyCommandReply {
+        let scope = CindyScope(workspacePath: intent.selection.address.workspacePath)
+        return await performCommand(
+            commandId: intent.commandId,
+            scope: scope,
+            target: intent.selection.address,
+            instanceId: intent.selection.instanceId,
+            generation: intent.selection.generation,
+            ownerEpoch: intent.selection.ownerEpoch,
+            op: "stop",
+            text: nil,
+            deliveryMode: nil,
+            expectedRunId: intent.expectedRunId,
+            interactionId: nil,
+            interactionType: nil,
+            decision: nil,
+            optionId: nil
+        )
+    }
+
+    func resolve(_ intent: CindyResolveIntent) async -> CindyCommandReply {
+        let scope = CindyScope(workspacePath: intent.selection.address.workspacePath)
+        return await performCommand(
+            commandId: intent.commandId,
+            scope: scope,
+            target: intent.selection.address,
+            instanceId: intent.selection.instanceId,
+            generation: intent.selection.generation,
+            ownerEpoch: intent.selection.ownerEpoch,
+            op: "resolve",
+            text: nil,
+            deliveryMode: nil,
+            expectedRunId: nil,
+            interactionId: intent.interactionId,
+            interactionType: intent.interactionType,
+            decision: intent.decision,
+            optionId: intent.optionId
+        )
+    }
+
+    func query(_ intent: CindyQueryIntent) async -> CindyCommandReply {
+        await performCommand(
+            commandId: intent.commandId,
+            scope: intent.scope,
+            target: intent.target,
+            instanceId: intent.instanceId,
+            generation: intent.generation,
+            ownerEpoch: intent.ownerEpoch,
+            op: "query",
+            text: nil,
+            deliveryMode: nil,
+            expectedRunId: nil,
+            interactionId: nil,
+            interactionType: nil,
+            decision: nil,
+            optionId: nil
+        )
+    }
+
     func close() async {
         activeGrant = nil
+    }
+
+    private func performCommand(
+        commandId: String,
+        scope: CindyScope,
+        target: CindyTaskAddress?,
+        instanceId: String,
+        generation: UInt64,
+        ownerEpoch: String,
+        op: String,
+        text: String?,
+        deliveryMode: CindyDeliveryMode?,
+        expectedRunId: String?,
+        interactionId: String?,
+        interactionType: CindyInteractionType?,
+        decision: CindyInteractionDecision?,
+        optionId: String?
+    ) async -> CindyCommandReply {
+        let fallback = { (status: CindyCommandResult, reason: String?) -> CindyCommandReply in
+            CindyCommandReply(
+                commandId: commandId,
+                instanceId: instanceId,
+                generation: generation,
+                ownerEpoch: ownerEpoch,
+                status: status,
+                reasonCode: reason
+            )
+        }
+        guard let grant = activeGrant else {
+            return fallback(.unavailable, "bridge.notConnected")
+        }
+        guard let currentGrant = try? CindyGrant.load(path: grantPath),
+              currentGrant.token == grant.token,
+              currentGrant.socketPath == grant.socketPath,
+              currentGrant.scopes == grant.scopes else {
+            activeGrant = nil
+            return fallback(.denied, "guard.grantMismatch")
+        }
+        guard instanceId == grant.instanceId,
+              generation == grant.generation,
+              ownerEpoch == grant.ownerEpoch,
+              currentGrant.instanceId == grant.instanceId,
+              currentGrant.generation == grant.generation,
+              currentGrant.ownerEpoch == grant.ownerEpoch else {
+            activeGrant = nil
+            return CindyCommandReply(
+                commandId: commandId,
+                instanceId: currentGrant.instanceId,
+                generation: currentGrant.generation,
+                ownerEpoch: currentGrant.ownerEpoch,
+                status: .stale,
+                reasonCode: "guard.epochRotated"
+            )
+        }
+        guard grant.scopes.contains(scope), scope.isValid else {
+            activeGrant = nil
+            return fallback(.denied, "guard.scopeOutOfBounds")
+        }
+        if let target {
+            guard target.isValid, target.workspacePath == scope.workspacePath else {
+                activeGrant = nil
+                return fallback(.denied, "guard.targetScopeMismatch")
+            }
+        }
+        let requestId = UUID().uuidString
+        let request = CindyRequest(
+            id: requestId,
+            token: grant.token,
+            instanceId: grant.instanceId,
+            generation: grant.generation,
+            ownerEpoch: grant.ownerEpoch,
+            op: op,
+            scope: scope,
+            target: target,
+            commandId: commandId,
+            text: text,
+            deliveryMode: deliveryMode,
+            expectedRunId: expectedRunId,
+            interactionId: interactionId,
+            interactionType: interactionType,
+            decision: decision,
+            optionId: optionId
+        )
+        guard let reply = await send(request, socketPath: grant.socketPath) else {
+            if op == "query" {
+                return fallback(.unavailable, "bridge.transportFailed")
+            }
+            return fallback(.unknown, "bridge.transportTimeout")
+        }
+        guard reply.version == 1, reply.id == requestId else {
+            activeGrant = nil
+            return fallback(.unavailable, "bridge.invalidReply")
+        }
+        if reply.status == "denied" {
+            return fallback(.denied, reply.reasonCode)
+        }
+        if reply.status == "stale" ||
+            reply.instanceId != grant.instanceId ||
+            reply.generation != grant.generation ||
+            reply.ownerEpoch != grant.ownerEpoch {
+            activeGrant = nil
+            return CindyCommandReply(
+                commandId: reply.commandId ?? commandId,
+                instanceId: reply.instanceId,
+                generation: reply.generation,
+                ownerEpoch: reply.ownerEpoch,
+                status: .stale,
+                reasonCode: reply.reasonCode
+            )
+        }
+        guard let status = CindyCommandResult(rawValue: reply.status) else {
+            activeGrant = nil
+            return fallback(.unavailable, "bridge.unknownStatus")
+        }
+        if let selected = reply.selected,
+           !grant.scopes.contains(CindyScope(workspacePath: selected.workspacePath)) {
+            activeGrant = nil
+            return fallback(.denied, "guard.selectedOutOfScope")
+        }
+        if let delivered = reply.delivered,
+           !grant.scopes.contains(CindyScope(workspacePath: delivered.workspacePath)) {
+            activeGrant = nil
+            return fallback(.denied, "guard.deliveredOutOfScope")
+        }
+        return CindyCommandReply(
+            commandId: reply.commandId ?? commandId,
+            instanceId: reply.instanceId,
+            generation: reply.generation,
+            ownerEpoch: reply.ownerEpoch,
+            status: status,
+            duplicate: reply.duplicate ?? false,
+            delivered: reply.delivered,
+            selected: reply.selected,
+            deepLink: reply.deepLink,
+            delivery: reply.delivery,
+            runId: reply.runId,
+            queuedCount: reply.queuedCount ?? 0,
+            interactionId: reply.interactionId,
+            interactionType: reply.interactionType,
+            reasonCode: reply.reasonCode
+        )
     }
 
     private func list(using grant: CindyGrant) async -> Result<CindySessionSnapshot, CindyFailure> {
@@ -383,21 +638,62 @@ actor CindySessionClient: CindySessionServing {
                   "generation",
                   "ownerEpoch",
                   "status",
+                  "commandId",
+                  "duplicate",
                   "rows",
                   "delivered",
                   "selected",
                   "deepLink",
+                  "delivery",
+                  "runId",
+                  "queuedCount",
+                  "interactionId",
+                  "interactionType",
+                  "reasonCode",
               ]) else {
             return nil
         }
         let addressKeys: Set<String> = ["workspacePath", "sessionId"]
+        let requiredRowKeys: Set<String> = ["address", "title", "phase", "attention", "pinned"]
+        let allowedRowKeys: Set<String> = [
+            "address",
+            "title",
+            "phase",
+            "attention",
+            "pinned",
+            "runId",
+            "unread",
+            "eventWatermark",
+            "queuedCount",
+            "pendingInteraction",
+        ]
+        let allowedPendingKeys: Set<String> = [
+            "interactionId",
+            "interactionType",
+            "toolName",
+            "options",
+        ]
         if let rows = object["rows"] as? [[String: Any]] {
             guard rows.allSatisfy({ row in
-                guard Set(row.keys) == ["address", "title", "phase", "attention", "pinned"],
-                      let address = row["address"] as? [String: Any] else {
+                let keys = Set(row.keys)
+                guard requiredRowKeys.isSubset(of: keys),
+                      keys.isSubset(of: allowedRowKeys),
+                      let address = row["address"] as? [String: Any],
+                      Set(address.keys) == addressKeys else {
                     return false
                 }
-                return Set(address.keys) == addressKeys
+                if let pending = row["pendingInteraction"], !(pending is NSNull) {
+                    guard let pendingDict = pending as? [String: Any] else {
+                        return false
+                    }
+                    let pendingKeys = Set(pendingDict.keys)
+                    guard pendingKeys.contains("interactionId"),
+                          pendingKeys.contains("interactionType"),
+                          pendingKeys.isSubset(of: allowedPendingKeys) else {
+                        return false
+                    }
+                }
+                return true
             }) else {
                 return nil
             }
