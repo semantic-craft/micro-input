@@ -88,12 +88,20 @@ enum KeypadNavigationPlace: Equatable, Hashable, Codable {
     case app(bundleID: String)
     case session(adapter: String, session: String)
     case t3Thread(environmentID: String, threadID: String)
+    case antigravity(conversationId: String, workspacePath: String)
+    case cindy(workspacePath: String, sessionId: String)
+    case zcode(sourceServer: String, remoteSession: String, workspace: String, taskId: String)
+    case dsh(sessionId: String, workspaceId: String, hostId: String)
 
     var receiptTarget: String {
         switch self {
         case .app(let bundleID): return bundleID
         case .session(let adapter, let session): return "\(adapter):\(session)"
         case .t3Thread: return "t3"
+        case .antigravity(let conv, let ws): return "antigravity:\(conv)@\(ws)"
+        case .cindy(let ws, let sess): return "cindy:\(sess)@\(ws)"
+        case .zcode(let src, let rem, let ws, let tid): return "zcode:\(src):\(rem):\(ws):\(tid)"
+        case .dsh(let sess, let ws, let host): return "dsh:\(host):\(ws):\(sess)"
         }
     }
 }
@@ -577,6 +585,27 @@ extension Store {
         enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"t3","command":"next-attention"}"#,
                           binding: "menu-t3-attention", profile: profile, state: state, requiresEnabled: false)
     }
+    @discardableResult func executeFourAppSlot(_ index: Int) -> Bool {
+        guard let state = routing, let profile = state.profile_id else { return false }
+        return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"host","command":"slot-open:\#(index)"}"#,
+                                 binding: "menu-slot-\(index)", profile: profile, state: state, requiresEnabled: false)
+    }
+    @discardableResult func advanceFourAppAttention(allowWrap: Bool = false) -> Bool {
+        guard let state = routing, let profile = state.profile_id else { return false }
+        let cmd = allowWrap ? "four-app-attention-wrap" : "four-app-attention"
+        return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"host","command":"\#(cmd)"}"#,
+                                 binding: "menu-four-app-attention", profile: profile, state: state, requiresEnabled: false)
+    }
+    @discardableResult func selectNextWorkspace() -> Bool {
+        guard let state = routing, let profile = state.profile_id else { return false }
+        return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"host","command":"next-workspace"}"#,
+                                 binding: "menu-next-workspace", profile: profile, state: state, requiresEnabled: false)
+    }
+    @discardableResult func selectPreviousWorkspace() -> Bool {
+        guard let state = routing, let profile = state.profile_id else { return false }
+        return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"host","command":"previous-workspace"}"#,
+                                 binding: "menu-prev-workspace", profile: profile, state: state, requiresEnabled: false)
+    }
     func navigateBack() {
         guard let state = routing, let profile = state.profile_id else { return }
         enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"navigation","command":"back"}"#,
@@ -602,6 +631,15 @@ extension Store {
             return !adapter.isEmpty && !session.isEmpty && session != "unselected"
         case .t3Thread(let environmentID, let threadID):
             return t3Attention.canNavigate(to: T3ThreadIdentity(environmentID: environmentID, threadID: threadID))
+        case .antigravity(let conversationId, let workspacePath):
+            return antigravityStatus.selection(for: AntigravitySessionKey(conversationId: conversationId, workspacePath: workspacePath)) != nil
+        case .cindy(let workspacePath, let sessionId):
+            return cindySessions.selection(for: CindyTaskAddress(workspacePath: workspacePath, sessionId: sessionId)) != nil
+        case .zcode(let sourceServer, let remoteSession, let workspace, let taskId):
+            let address = ZCodeTaskAddress(workspacePath: workspace, workspaceIdentity: nil, sourceServerId: sourceServer.isEmpty ? nil : sourceServer, remoteSessionId: remoteSession.isEmpty ? nil : remoteSession, taskId: taskId)
+            return zcodeSessions.selection(for: address) != nil
+        case .dsh(let sessionId, _, _):
+            return dshSessions.selection(for: sessionId) != nil
         }
     }
     func startHeldDictation(adapter: String, binding: String, profile: String, ingress: UInt64 = 0) {

@@ -339,3 +339,9 @@ pub mod lighting;
 pub mod navigation_history;
 
 pub mod operation_record;
+
+pub mod slot_table;
+
+pub mod workspace_nav;
+
+pub mod attention_round;
