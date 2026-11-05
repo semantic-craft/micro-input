@@ -20,6 +20,8 @@
 
 [workLouderCodexHostProcess.ts](https://github.com/makecindy/cindy/blob/3568430ec3751a53d5746a19fb9a1002b8b3b8e7/apps/desktop/src/main/worklouder-codex/workLouderCodexHostProcess.ts) 有 keymap 备份、重绑和恢复；开关原生功能可能触及设备，不能作为无副作用握手。[sdkResolver.ts](https://github.com/makecindy/cindy/blob/3568430ec3751a53d5746a19fb9a1002b8b3b8e7/apps/desktop/src/main/worklouder-codex/sdkResolver.ts) 可加载厂商 SDK 或其他应用内 device-kit，Cindy 的 Apache 许可不覆盖这些依赖。[CodexMicroGuardService.ts](https://github.com/makecindy/cindy/blob/3568430ec3751a53d5746a19fb9a1002b8b3b8e7/apps/desktop/src/main/worklouder-codex/CodexMicroGuardService.ts) 当前为 cleanup-only，不能当作已生效的冲突隔离。
 
+Slice J 已在固定提交的 Cindy `worklouder-codex` 原生服务旁加入受限任务元数据与深链导航确认桥（见 [Cindy 原生所有权与任务导航桥](../integrations/cindy/README.md)）：仅列出 `cindy-grant.json` 显式授权工作区（`scopes: [{ workspacePath }]`）内的既有活跃可见任务（过滤归档、隐藏与 Orca worker），不创建任务、不暴露消息正文，且保持 `apps/desktop/src/main/local-agent/` 与 `cindy.tasks` 插件隔离零改动；导航请求先经 `buildSessionDeepLink` + `parseDeepLink` 校验 `cindy://session/<sessionId>`，渲染端尚未提交目标路由时返回 `delivered`（`delivered = target`, `selected = nil`），渲染端经 `createSessionEntryNavigator.onLocationCommitted` 回报路由提交且窗口聚焦确认后才返回 `confirmed`（`delivered = target`, `selected = target`）；账号/实例换代（`instanceId` / `generation` / `ownerEpoch` / `sourceGeneration`）使旧目录与选择立即 `stale` 失效，删除目标绝不回退打开同名兄弟会话，未授权或越权请求零元数据读取。
+
 ## Antigravity
 
 本机为独立 Electron App `2.29.0`，bundle `com.google.antigravity`，不是旧 VS Code IDE。`app.asar` SHA-256 为 `290e1b7a1caa430a0c5367c7b433e8d284e2ca5d0b305e91e5ce8ec926f43283`。

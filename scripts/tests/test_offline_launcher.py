@@ -195,3 +195,59 @@ class OfflineEvidenceTests(unittest.TestCase):
         audit.write_text(json.dumps(dict(action_type="antigravity_open", outcome="confirmed", target="antigravity")))
         with self.assertRaises(ValueError):
             module.verify_evidence(self.run, "antigravity-status", 99, lambda _: False)
+
+    def test_cindy_navigation_requires_delivered_vs_confirmed_and_zero_unauthorized_reads(self):
+        names = [
+            "disabled_zero_reads",
+            "scoped_catalog_only",
+            "delivered_vs_confirmed_separated",
+            "same_name_exact_identity",
+            "selected_readback_matches",
+            "wrong_selected_unconfirmed",
+            "out_of_scope_zero_reads",
+            "deleted_target_no_redirect",
+            "account_or_generation_change_blocks_old_selection",
+        ]
+        payload = dict(
+            scenario="cindy-navigation",
+            status="PASS",
+            unauthorized_metadata_reads=0,
+            authorized_metadata_reads=6,
+            local_agent_api_relaxed=False,
+            checks=[dict(name=name, status="PASS", detail="ok") for name in names],
+            native_app="NOT_RUN",
+            physical_key="NOT_RUN",
+        )
+        path = self.evidence / "cindy-navigation.json"
+        audit = self.evidence / "audit.jsonl"
+        path.write_text(json.dumps(payload))
+        audit.write_text("\n".join(
+            json.dumps(dict(action_type="cindy_open", outcome=outcome, target="cindy"))
+            for outcome in ("delivered", "confirmed", "confirmed", "unconfirmed", "stale", "stale", "confirmed")
+        ))
+        verified = module.verify_evidence(self.run, "cindy-navigation", 99, lambda _: False)
+        self.assertEqual(verified["cindy_navigation"], "SYNTHETIC_PASS")
+        self.assertEqual(verified["unauthorized_metadata_reads"], 0)
+        self.assertIs(verified["local_agent_api_relaxed"], False)
+        for index in range(len(names)):
+            payload["checks"][index]["status"] = "FAIL"
+            path.write_text(json.dumps(payload))
+            with self.assertRaises(ValueError):
+                module.verify_evidence(self.run, "cindy-navigation", 99, lambda _: False)
+            payload["checks"][index]["status"] = "PASS"
+        for field, wrong in [
+            ("unauthorized_metadata_reads", 1),
+            ("local_agent_api_relaxed", True),
+            ("native_app", "PASS"),
+            ("physical_key", "PASS"),
+        ]:
+            prior = payload[field]
+            payload[field] = wrong
+            path.write_text(json.dumps(payload))
+            with self.assertRaises(ValueError):
+                module.verify_evidence(self.run, "cindy-navigation", 99, lambda _: False)
+            payload[field] = prior
+        path.write_text(json.dumps(payload))
+        audit.write_text(json.dumps(dict(action_type="cindy_open", outcome="confirmed", target="cindy")))
+        with self.assertRaises(ValueError):
+            module.verify_evidence(self.run, "cindy-navigation", 99, lambda _: False)

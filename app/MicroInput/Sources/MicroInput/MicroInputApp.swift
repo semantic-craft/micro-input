@@ -9,12 +9,12 @@ import MicroInputCore
         PerformanceProbe.start()
         let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
         #if MI_SYNTHETIC_BACKEND
-        let core = scenario == "radial-menu" ? MicroInput.syntheticRadialDevice() : ["config-write", "lighting-control"].contains(scenario) ? MicroInput.syntheticConfigWriter() : ["reconnect", "reconnect-transient", "apply-preparation", "host-execution", "zcode-navigation", "dsh-navigation", "antigravity-status", "native-ownership", "diagnostic-export", "push-to-talk", "push-to-talk-live"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
+        let core = scenario == "radial-menu" ? MicroInput.syntheticRadialDevice() : ["config-write", "lighting-control"].contains(scenario) ? MicroInput.syntheticConfigWriter() : ["reconnect", "reconnect-transient", "apply-preparation", "host-execution", "zcode-navigation", "dsh-navigation", "cindy-navigation", "antigravity-status", "native-ownership", "diagnostic-export", "push-to-talk", "push-to-talk-live"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
         let ownership = scenario == "native-ownership" ? NativeOwnershipController(transport: nil) : NativeOwnershipController(isolated: true)
-        let store = Store(nativeOwnership: ownership, backend: core, actionExecutor: ["native-ownership", "zcode-navigation", "dsh-navigation", "antigravity-status"].contains(scenario) ? RecordingHostActionExecutor() : nil, zcodeSessions: scenario == "zcode-navigation" ? ZCodeSessionController(client: ZCodeNavigationFixture.shared, pollNanoseconds: 60_000_000_000) : nil, dshSessions: scenario == "dsh-navigation" ? DSHSessionController(client: DSHNavigationFixture.shared, pollNanoseconds: 60_000_000_000) : nil, antigravityStatus: scenario == "antigravity-status" ? AntigravityStatusController(client: AntigravityStatusFixture.shared, pollNanoseconds: 60_000_000_000) : nil)
+        let store = Store(nativeOwnership: ownership, backend: core, actionExecutor: ["native-ownership", "zcode-navigation", "dsh-navigation", "cindy-navigation", "antigravity-status"].contains(scenario) ? RecordingHostActionExecutor() : nil, zcodeSessions: scenario == "zcode-navigation" ? ZCodeSessionController(client: ZCodeNavigationFixture.shared, pollNanoseconds: 60_000_000_000) : nil, dshSessions: scenario == "dsh-navigation" ? DSHSessionController(client: DSHNavigationFixture.shared, pollNanoseconds: 60_000_000_000) : nil, cindySessions: scenario == "cindy-navigation" ? CindySessionController(client: CindyNavigationFixture.shared, pollNanoseconds: 60_000_000_000) : nil, antigravityStatus: scenario == "antigravity-status" ? AntigravityStatusController(client: AntigravityStatusFixture.shared, pollNanoseconds: 60_000_000_000) : nil)
         #else
         let core = MicroInput()
-        let store = Store(backend: core)
+        let store = Store(nativeOwnership: NativeOwnershipController(allowUnbridgedDesktop: true), backend: core)
         #endif
         if scenario.isEmpty, ProcessInfo.processInfo.environment["MI_AUTO_HOST_READY"] != "0" {
             store.autoHostReady = true
@@ -130,7 +130,7 @@ struct WorkbenchHost: View {
         }
         NSApp.activate(ignoringOtherApps: true); linksWindow?.makeKeyAndOrderFront(nil)
     }
-    @objc func showWindow() { popover.performClose(nil); open?() }
+    @objc func showWindow() { popover.performClose(nil); store.syncWorkbenchToActiveProfile(); open?() }
     @objc func quitApp() { NSApp.terminate(nil) }
 }
 
@@ -208,6 +208,16 @@ struct StatusPanel: View {
             Toggle("命令执行同意", isOn: Binding(get: { store.commandExecutionEnabled }, set: { value in Task { await store.setCommandExecutionEnabled(value) } }))
                 .toggleStyle(.switch).controlSize(.small).font(.caption)
                 .help("默认关闭。开启后，配置过的 shell_command 才会路由执行")
+            if !LiveHostActionExecutor.isAccessibilityTrusted {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text("未获辅助功能权限，按键与听写被拦截").font(.caption).foregroundStyle(.orange)
+                    Spacer()
+                    Button("授权…") {
+                        LiveHostActionExecutor.openAccessibilitySettings()
+                    }.font(.caption)
+                }
+            }
             if store.dictationNeedsAttention {
                 Text("原听写停止未确认，请检查原应用").font(.caption).foregroundStyle(.orange)
                 Button("复核原听写已停止") { Task { await store.verifyDictationStopped() } }
@@ -227,7 +237,7 @@ struct StatusPanel: View {
             HStack {
                 Menu("其他配置") {
                     ForEach(otherProfiles, id: \.id.text) { p in
-                        Button { Task { await store.setHostActiveProfile(p.id.text) } } label: {
+                        Button { Task { await store.setHostActiveProfile(p.id.text, syncWorkbench: true) } } label: {
                             if store.hostActiveProfileId == p.id.text { Label(DesktopAgent.displayName(p.name), systemImage: "checkmark") }
                             else { Text(DesktopAgent.displayName(p.name)) }
                         }.disabled(store.busy)
@@ -259,10 +269,11 @@ struct StatusPanel: View {
             if store.radialMenu.enabled { Text(store.radialReadiness.label).font(.caption2).foregroundStyle(.secondary) }
             ZCodeSessionPanel(controller: store.zcodeSessions, open: { store.openZCodeSession($0) })
             DSHSessionPanel(controller: store.dshSessions, open: { store.openDSHSession($0) })
+            CindySessionPanel(controller: store.cindySessions, open: { store.openCindySession($0) })
             AntigravityStatusPanel(controller: store.antigravityStatus, open: { store.openAntigravitySession($0) })
             T3AttentionPanel(controller: store.t3Attention, next: { store.openNextT3Attention() })
             Divider()
-            Toggle("自动跟随前台应用", isOn: Binding(get: { store.routing?.auto_follow_enabled ?? false }, set: { value in Task { await store.setAutoFollow(value) } })).toggleStyle(.switch).controlSize(.small)
+            Toggle("自动跟随前台应用", isOn: Binding(get: { store.routing?.auto_follow_enabled ?? false }, set: { value in Task { await store.setAutoFollow(value); if value, store.routing?.manual_override == true { await store.resumeFollowing() } } })).toggleStyle(.switch).controlSize(.small)
             HStack {
                 Text(store.routingMode).font(.caption).foregroundStyle(.secondary)
                 Spacer()
@@ -306,7 +317,7 @@ struct StatusPanel: View {
         let selected = profile != nil && store.hostActiveProfileId == profile?.id.text
         return Button {
             guard let profile else { return }
-            Task { await store.setHostActiveProfile(profile.id.text) }
+            Task { await store.setHostActiveProfile(profile.id.text, syncWorkbench: true) }
         } label: {
             HStack(spacing: 8) {
                 AgentBadge(name: name, size: 28)
@@ -460,6 +471,45 @@ struct AntigravityStatusPanel: View {
                             Text(row.workspacePath).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                                 .truncationMode(.middle).help(row.workspacePath)
                             Text("\(row.conversationId) · \(row.statusLabel)").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }.buttonStyle(.plain).disabled(controller.state != .ready)
+                }
+                if let result = controller.lastResult {
+                    Text(result.label).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+}
+
+struct CindySessionPanel: View {
+    @ObservedObject var controller: CindySessionController
+    let open: (CindySelection) -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Cindy 任务连接", isOn: Binding(get: { controller.enabled }, set: controller.setEnabled))
+                .toggleStyle(.switch).controlSize(.small)
+            Text(controller.state.label).font(.caption).foregroundStyle(.secondary)
+            if controller.enabled {
+                if case .unavailable = controller.state {
+                    Button("重连") { controller.setEnabled(true) }.font(.caption)
+                }
+                ForEach(controller.rows) { row in
+                    Button {
+                        if let selection = controller.selection(for: row.address) { open(selection) }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Text(row.title.isEmpty ? "未命名任务" : row.title).lineLimit(1)
+                                if controller.selected == row.address {
+                                    Image(systemName: "checkmark").accessibilityLabel("已确认")
+                                } else if controller.delivered == row.address {
+                                    Image(systemName: "arrow.up.right").accessibilityLabel("已投递")
+                                }
+                            }
+                            Text(row.address.workspacePath).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                .truncationMode(.middle).help(row.address.workspacePath)
+                            Text("\(row.address.sessionId) · \(row.phase)").font(.caption2).foregroundStyle(.secondary)
                         }
                     }.buttonStyle(.plain).disabled(controller.state != .ready)
                 }

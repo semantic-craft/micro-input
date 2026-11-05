@@ -77,6 +77,51 @@ def verify_evidence(run, scenario, started, process_alive):
         if len(confirmed) != 2 or any(row.get("target") != "dsh" for row in rows):
             raise ValueError("DSH exact navigation receipts missing")
         result.update(dsh_navigation="SYNTHETIC_PASS", native_app="NOT_RUN", receipt_count=len(rows))
+    elif scenario == "cindy-navigation":
+        navigation = json.loads((evidence / "cindy-navigation.json").read_text())
+        expected = {
+            "disabled_zero_reads",
+            "scoped_catalog_only",
+            "delivered_vs_confirmed_separated",
+            "same_name_exact_identity",
+            "selected_readback_matches",
+            "wrong_selected_unconfirmed",
+            "out_of_scope_zero_reads",
+            "deleted_target_no_redirect",
+            "account_or_generation_change_blocks_old_selection",
+        }
+        checks = {item["name"]: item["status"] for item in navigation.get("checks", [])}
+        if (
+            navigation.get("status") != "PASS"
+            or set(checks) != expected
+            or not all(value == "PASS" for value in checks.values())
+            or navigation.get("unauthorized_metadata_reads") != 0
+            or navigation.get("local_agent_api_relaxed") is not False
+            or navigation.get("native_app") != "NOT_RUN"
+            or navigation.get("physical_key") != "NOT_RUN"
+        ):
+            raise ValueError("Cindy navigation evidence incomplete or overclaimed")
+        rows = [json.loads(line) for line in (evidence / "audit.jsonl").read_text().splitlines()]
+        cindy_rows = [row for row in rows if row["action_type"] == "cindy_open"]
+        delivered = [row for row in cindy_rows if row["outcome"] == "delivered"]
+        confirmed = [row for row in cindy_rows if row["outcome"] == "confirmed"]
+        unconfirmed = [row for row in cindy_rows if row["outcome"] == "unconfirmed"]
+        stale = [row for row in cindy_rows if row["outcome"] == "stale"]
+        if (
+            len(delivered) != 1
+            or len(confirmed) < 2
+            or len(unconfirmed) != 1
+            or len(stale) < 2
+            or any(row.get("target") != "cindy" for row in rows)
+        ):
+            raise ValueError("Cindy exact navigation receipts missing or unexpected")
+        result.update(
+            cindy_navigation="SYNTHETIC_PASS",
+            unauthorized_metadata_reads=0,
+            local_agent_api_relaxed=False,
+            native_app="NOT_RUN",
+            receipt_count=len(rows),
+        )
     elif scenario == "antigravity-status":
         status_doc = json.loads((evidence / "antigravity-status.json").read_text())
         expected = {
@@ -194,7 +239,7 @@ def main():
         if not args.qa_only:
             subprocess.run(["scripts/check"], cwd=ROOT, env=env, check=True)
         subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, env=env, check=True)
-        for scenario in ("host-execution", "native-ownership", "zcode-navigation", "dsh-navigation", "antigravity-status", "config-write", "lighting-control", "diagnostic-export"):
+        for scenario in ("host-execution", "native-ownership", "zcode-navigation", "dsh-navigation", "cindy-navigation", "antigravity-status", "config-write", "lighting-control", "diagnostic-export"):
             started = int(time.time() * 1000)
             scenario_env = dict(env, MI_SYNTHETIC_SCENARIO=scenario)
             if scenario == "diagnostic-export":

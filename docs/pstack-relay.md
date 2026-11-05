@@ -83,10 +83,11 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Depends on**: I。责任票 #83。
 - **Evidence**: .scratch/qa-runs/1793854250379-53064/evidence/result.json
 
-### [ ] Slice J: 补 Cindy 既有任务目录和导航确认
+### [x] Slice J: 补 Cindy 既有任务目录和导航确认
 - **Outcome**: 在原生服务旁加受限元数据桥，沿用 session 深链并回读目标。
 - **Done Predicate**: 只列显式授权范围的既有任务；同名会话正确；账号/实例换代失效；delivered 与 confirmed 分开；不放宽 Local Agent API 隔离。 未授权或越权请求零元数据读取。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: F。责任票 #82。
+- **Evidence**: .scratch/qa-runs/1793857584441-83439/evidence/result.json
 
 ### [ ] Slice K1: 向 ZCode 准确发送并停止指定执行
 - **Outcome**: 接 createSession、sendText 和携带 execution ID 的 stop；运行中发送的 steering 语义单独确认。

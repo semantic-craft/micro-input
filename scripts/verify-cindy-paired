@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -62,8 +63,9 @@ def main():
     if patch.is_file() and source_diff != patch.read_bytes():
         raise ValueError("native checkout diff differs from packaged patch")
     fixture = source / "scripts/micro-input-ownership-fixture.ts"
+    nav_fixture = source / "scripts/micro-input-navigation-fixture.ts"
     runner = source / "node_modules/.bin/tsx"
-    if not fixture.is_file() or not runner.exists():
+    if not fixture.is_file() or not nav_fixture.is_file() or not runner.exists():
         raise ValueError("apply native patch and install locked desktop dependencies first")
     started = int(time.time() * 1000)
     output = ROOT / ".scratch/cindy-ownership/paired" / f"{started}-{os.getpid()}"
@@ -107,8 +109,83 @@ def main():
             ownership = json.loads((run / "evidence/ownership.json").read_text())
             native = json.loads((output / "native.json").read_text())
             count = verify_pair(ownership, native)
-            result.update(paired_native_source="PASS", paired_event_count=count,
+            nav_dir = ROOT / ".scratch" / f"cnav-{uuid.uuid4().hex[:8]}"
+            nav_dir.mkdir(parents=True, mode=0o700)
+            nav_peer = None
+            try:
+                with (output / "navigation-native.log").open("w") as nav_log:
+                    nav_peer = subprocess.Popen(
+                        [
+                            str(runner),
+                            str(nav_fixture),
+                            "--directory",
+                            str(nav_dir),
+                            "--evidence",
+                            str(output / "navigation-native.json"),
+                            "--timeout",
+                            "45",
+                        ],
+                        cwd=source,
+                        stdout=nav_log,
+                        stderr=subprocess.STDOUT,
+                    )
+                    grant_file = nav_dir / "cindy-grant.json"
+                    sock_file = nav_dir / "cindy.sock"
+                    ctrl_file = nav_dir / "cindy.control"
+                    for _ in range(200):
+                        if grant_file.exists() and sock_file.exists() and ctrl_file.exists():
+                            break
+                        if nav_peer.poll() is not None:
+                            raise ValueError("navigation fixture exited before readiness")
+                        time.sleep(0.05)
+                    else:
+                        raise ValueError("navigation fixture readiness timed out")
+                    nav_env = dict(
+                        os.environ,
+                        MI_CINDY_PAIRED_GRANT=str(grant_file),
+                        MI_CINDY_PAIRED_RESULT=str(output / "navigation-client.json"),
+                    )
+                    subprocess.run(
+                        ["swift", "test", "--package-path", "app/MicroInput", "--filter", "CindyPairedTests"],
+                        cwd=ROOT,
+                        env=nav_env,
+                        check=True,
+                    )
+            finally:
+                if nav_peer is not None and nav_peer.poll() is None:
+                    nav_peer.terminate()
+                    try:
+                        nav_peer.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        nav_peer.kill()
+                        nav_peer.wait()
+                shutil.rmtree(nav_dir, ignore_errors=True)
+            nav_native = json.loads((output / "navigation-native.json").read_text())
+            nav_client = json.loads((output / "navigation-client.json").read_text())
+            if (
+                nav_client.get("status") != "PASS"
+                or nav_client.get("delivered_target") != "/Users/test/CindyAlpha#cindy-alpha-2"
+                or nav_client.get("confirmed_targets") != [
+                    "/Users/test/CindyAlpha#cindy-alpha-2",
+                    "/Users/test/CindyBeta#cindy-beta-1",
+                ]
+                or nav_client.get("deep_link") != "cindy://session/cindy-alpha-2"
+                or nav_client.get("local_agent_api_relaxed") is not False
+                or nav_native.get("unauthorized_metadata_reads") != 0
+                or nav_native.get("local_agent_api_relaxed") is not False
+                or nav_native.get("plugin_tasks_api_relaxed") is not False
+                or [item.get("deepLink") for item in nav_native.get("deep_link_dispatches", [])]
+                != [
+                    "cindy://session/cindy-alpha-2",
+                    "cindy://session/cindy-alpha-2",
+                    "cindy://session/cindy-beta-1",
+                ]
+            ):
+                raise ValueError("paired Cindy navigation evidence incomplete or mismatched")
+            result.update(paired_native_source="PASS", paired_navigation_source="PASS", paired_event_count=count,
                           native_base_sha=base, native_source_diff_sha256=hashlib.sha256(source_diff).hexdigest(), native_evidence=str(output / "native.json"),
+                          navigation_native_evidence=str(output / "navigation-native.json"),
+                          navigation_client_evidence=str(output / "navigation-client.json"),
                           git_sha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                           working_tree_changes=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
                           timestamp_ms=int(time.time() * 1000))

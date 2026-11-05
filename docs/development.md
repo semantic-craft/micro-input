@@ -125,3 +125,7 @@ RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和
 菜单栏的「ZCode 会话连接」默认关闭。显式连接读取原生桥授予的工作区元数据，完整地址与实例代次固定后，经宿主队列、听写清理和 Rust lease 打开目标。只有选中回读完全一致才记录 `confirmed`，不按标题匹配，不自动重试打开。断连、授权变化与来源换代清空旧目标。
 
 原生增量补丁和授权入口见 [ZCode 桥](../integrations/zcode/README.md)，隔离验收见 [ZCode 配方](../skills/verify-micro-input/features/zcode-navigation.md)。`scripts/verify-offline` 包含 `zcode-navigation`，`scripts/verify-zcode-paired --source <patched-source>` 检查固定源码与 Swift 客户端的真实 Unix socket 交换。源码、渲染状态存储、安装版窗口及实体按键分别记录。当前片不新增发送、停止、审批或设备写入。
+
+## Cindy 既有任务目录与导航确认
+
+菜单栏的「Cindy 任务连接」默认关闭。开启后读取 `cindy-grant.json` 显式授权工作区（`scopes: [{ workspacePath }]`）内的既有活跃可见任务元数据（`workspacePath`、`sessionId`、`title`、`phase`、`attention`、`pinned`），不创建任务，不暴露消息正文，且不放宽 Local Agent API 或插件 `cindy.tasks` 隔离。导航沿用 `cindy://session/<sessionId>` 深链，将 `delivered`（深链已被主进程接受但渲染端尚未提交目标路由）与 `confirmed`（渲染端已提交目标路由且回读 `selected == target`）严格分开。账号/实例/代次换代（`instanceId` / `generation` / `ownerEpoch`）使旧目录与选择立即失效。详见 [Cindy 桥](../integrations/cindy/README.md) 与 [Cindy 导航配方](../skills/verify-micro-input/features/cindy-navigation.md)。

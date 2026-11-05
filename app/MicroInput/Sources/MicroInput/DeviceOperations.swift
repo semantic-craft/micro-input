@@ -52,7 +52,7 @@ extension Store {
     }
 
     @discardableResult
-    func executeHostAction(actionJSON: String, bindingId: String, profileId: String, t3Selection: T3Selection? = nil, zcodeSelection: ZCodeSelection? = nil, dshSelection: DSHSelection? = nil, antigravitySelection: AntigravitySelection? = nil, stillAdmitted: (() -> Bool)? = nil) async -> HostActionReceipt? {
+    func executeHostAction(actionJSON: String, bindingId: String, profileId: String, t3Selection: T3Selection? = nil, zcodeSelection: ZCodeSelection? = nil, dshSelection: DSHSelection? = nil, cindySelection: CindySelection? = nil, antigravitySelection: AntigravitySelection? = nil, stillAdmitted: (() -> Bool)? = nil) async -> HostActionReceipt? {
         guard nativeOwnership.allowsExecution, !hostOperationPaused, let lease = try? backend.beginHostExecution() else { return nil }
         let epoch = hostRouteEpoch
         inFlightHostActions += 1
@@ -114,6 +114,18 @@ extension Store {
             })
             receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
                 bindingId: bindingId, actionType: "dsh_open", target: "dsh", textByteLen: nil,
+                outcome: result.rawValue, detail: result.label)
+            AuditLogWriter.append(receipt)
+        } else if payload?.action_type == "agent_command", payload?.adapter == "cindy", payload?.command == "open-session" {
+            let result = await cindySessions.open(cindySelection, admitted: { [weak self] in
+                guard let self else { return false }
+                return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
+            })
+            if result == .confirmed, let selection = cindySelection {
+                navigationHistory.visit(.session(adapter: "cindy", session: selection.address.sessionId))
+            }
+            receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
+                bindingId: bindingId, actionType: "cindy_open", target: "cindy", textByteLen: nil,
                 outcome: result.rawValue, detail: result.label)
             AuditLogWriter.append(receipt)
         } else if payload?.action_type == "agent_command", payload?.adapter == "antigravity", payload?.command == "open-session" {
