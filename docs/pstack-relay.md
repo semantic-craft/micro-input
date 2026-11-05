@@ -131,10 +131,11 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Depends on**: J。责任票 #82。
 - **Evidence**: .scratch/qa-runs/1793891819365-57507/evidence/result.json
 
-### [ ] Slice N: 交付四应用稳定槽位和历史待办导航
+### [x] Slice N: 交付四应用稳定槽位和历史待办导航
 - **Outcome**: 共享稳定目标选择、六槽固定/最近、项目/工作区导航、历史和本轮不重复的待办轮询。
 - **Done Predicate**: 四应用相同名称/不同实例不混淆；新事件重新入队；未知未读不推断；历史回到准确会话；Cindy 原生槽位可复用且不双消费。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: G、H、I2、J；写动作按 K/L/M 能力就绪。责任票 #84。
+- **Evidence**: .scratch/qa-runs/1793895420106-11007/evidence/result.json
 
 ### [ ] Slice O1: 逐应用补齐听写和语音回复控制
 - **Outcome**: Cindy 复用原生语音；其余逐款确认并接入按住听写、释放停止、提交前停止，以及独立的语音回复开关。缺少原生能力的开源应用按其语音服务增量实现。
