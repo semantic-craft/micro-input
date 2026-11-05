@@ -121,8 +121,17 @@ final class AntigravityStatusTests: XCTestCase {
         XCTAssertTrue(caps.supportsSessionCatalog)
         XCTAssertTrue(caps.supportsTargetFocus)
         XCTAssertTrue(caps.schemaVerified)
-        XCTAssertFalse(caps.supportsStopTurn)
-        XCTAssertFalse(caps.supportsApprovalGate)
+        XCTAssertTrue(caps.supportsStopTurn)
+        XCTAssertTrue(caps.supportsApprovalGate)
+        XCTAssertTrue(caps.supportsModelConfig)
+        XCTAssertTrue(caps.stopSchemaVerified)
+        XCTAssertTrue(caps.approvalSchemaVerified)
+        XCTAssertTrue(caps.modelConfigSchemaVerified)
+        XCTAssertTrue(caps.csrfAuthVerified)
+        XCTAssertFalse(caps.arbitraryRpcExposed)
+        XCTAssertTrue(caps.supportsStopConversation)
+        XCTAssertTrue(caps.supportsResolveInteraction)
+        XCTAssertTrue(caps.supportsSwitchModelConfig)
 
         let overclaimed = AntigravityCapabilities(
             bundleId: caps.bundleId,
@@ -135,9 +144,36 @@ final class AntigravityStatusTests: XCTestCase {
             supportsTargetFocus: true,
             supportsStopTurn: true,
             supportsApprovalGate: false,
-            schemaVerified: true
+            supportsModelConfig: false,
+            schemaVerified: true,
+            stopSchemaVerified: false,
+            approvalSchemaVerified: false,
+            modelConfigSchemaVerified: false,
+            csrfAuthVerified: true,
+            arbitraryRpcExposed: false
         )
         XCTAssertFalse(overclaimed.valid)
+
+        let arbitraryExposed = AntigravityCapabilities(
+            bundleId: caps.bundleId,
+            installedVersion: caps.installedVersion,
+            languageServerCl: caps.languageServerCl,
+            agentapiCommands: caps.agentapiCommands,
+            sidecarSdkVersion: caps.sidecarSdkVersion,
+            hookEvents: caps.hookEvents,
+            supportsSessionCatalog: true,
+            supportsTargetFocus: true,
+            supportsStopTurn: true,
+            supportsApprovalGate: true,
+            supportsModelConfig: true,
+            schemaVerified: true,
+            stopSchemaVerified: true,
+            approvalSchemaVerified: true,
+            modelConfigSchemaVerified: true,
+            csrfAuthVerified: true,
+            arbitraryRpcExposed: true
+        )
+        XCTAssertFalse(arbitraryExposed.valid)
 
         let unverifiedSchema = AntigravityCapabilities(
             bundleId: caps.bundleId,
@@ -620,7 +656,6 @@ final class AntigravityStatusTests: XCTestCase {
         }
         XCTAssertEqual(controller.state, .ready)
 
-        // Mismatched projectId on workspaceA must be rejected as .unconfirmed without creating a session
         let wrongCreate = try XCTUnwrap(controller.createIntent(
             workspacePath: AntigravityStatusFixture.workspaceA,
             projectId: "proj-beta",
@@ -634,7 +669,6 @@ final class AntigravityStatusTests: XCTestCase {
         XCTAssertEqual(controller.lastCommandReply?.reasonCode, "guard.projectIdMismatch")
         XCTAssertEqual(controller.rows.count, 2)
 
-        // Valid create bound to proj-alpha creates and selects the new conversation
         let createdKey = AntigravitySessionKey(
             conversationId: "conv-alpha-2",
             workspacePath: AntigravityStatusFixture.workspaceA
@@ -655,7 +689,6 @@ final class AntigravityStatusTests: XCTestCase {
         XCTAssertEqual(controller.row(for: createdKey)?.phase, .running)
         XCTAssertEqual(controller.rows.count, 3)
 
-        // Select session A and verify sending to unselected session B returns .unconfirmed and touches neither A nor B
         _ = await controller.open(try XCTUnwrap(controller.selection(for: AntigravityStatusFixture.sessionA)), admitted: { true })
         XCTAssertEqual(controller.selected, AntigravityStatusFixture.sessionA)
         let beforeA = try XCTUnwrap(controller.row(for: AntigravityStatusFixture.sessionA))
@@ -674,7 +707,6 @@ final class AntigravityStatusTests: XCTestCase {
         XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA), beforeA)
         XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionB), beforeB)
 
-        // Sending to selected session A modifies only session A; session B and createdKey remain untouched
         let beforeCreated = try XCTUnwrap(controller.row(for: createdKey))
         let sendSelectedA = try XCTUnwrap(controller.sendIntent(
             for: AntigravityStatusFixture.sessionA,
@@ -693,7 +725,6 @@ final class AntigravityStatusTests: XCTestCase {
         XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionB), beforeB)
         XCTAssertEqual(controller.row(for: createdKey), beforeCreated)
 
-        // Sending to non-existent target returns .unconfirmed with zero redirect and zero new session
         let afterASend = try XCTUnwrap(controller.row(for: AntigravityStatusFixture.sessionA))
         let missingKey = AntigravitySessionKey(
             conversationId: "conv-nonexistent",
@@ -746,7 +777,6 @@ final class AntigravityStatusTests: XCTestCase {
         XCTAssertEqual(controller.selected, AntigravityStatusFixture.sessionA)
         XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.phase, .running)
 
-        // 1. Default official agentapi send-message on a running session queues for nextInvocation (no CLI --steer flag)
         let steerAttemptDefault = try XCTUnwrap(controller.sendIntent(
             for: AntigravityStatusFixture.sessionA,
             projectId: "proj-alpha",
@@ -761,7 +791,6 @@ final class AntigravityStatusTests: XCTestCase {
         XCTAssertEqual(controller.lastCommandReply?.reasonCode, "agentapi.steerUnsupportedQueuedNextInvocation")
         XCTAssertEqual(controller.rows.count, 1)
 
-        // 2. When in-flight steering is enabled on the bridge, deliveryMode == .steer is confirmed as .steered
         await fixture.setInFlightSteerEnabled(true)
         let steerEnabledCmd = try XCTUnwrap(controller.sendIntent(
             for: AntigravityStatusFixture.sessionA,
@@ -778,7 +807,6 @@ final class AntigravityStatusTests: XCTestCase {
         XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.stepIdx, 2)
         await fixture.setInFlightSteerEnabled(false)
 
-        // 3. Timeout / unknown outcome latches requestId, blocks new requests, and reconciles via query without resending
         await fixture.setUnknownNextCommand(true)
         let timeoutCmd = try XCTUnwrap(controller.sendIntent(
             for: AntigravityStatusFixture.sessionA,
@@ -793,7 +821,6 @@ final class AntigravityStatusTests: XCTestCase {
         let countsAfterTimeout = await fixture.commandCounts()
         XCTAssertEqual(countsAfterTimeout.sends, 3)
 
-        // New send with different requestId is blocked while unknown is latched
         XCTAssertNil(controller.sendIntent(
             for: AntigravityStatusFixture.sessionA,
             projectId: "proj-alpha",
@@ -803,7 +830,6 @@ final class AntigravityStatusTests: XCTestCase {
         ))
         XCTAssertEqual(controller.lastCommandResult, .unknown)
 
-        // Reconciling via query uses the same requestId without incrementing sends
         let queryCmd = try XCTUnwrap(controller.queryIntent(requestId: "req-timeout-3"))
         let resReconciled = await controller.execute(queryCmd, admitted: { true })
         XCTAssertEqual(resReconciled, .queued)
@@ -813,6 +839,201 @@ final class AntigravityStatusTests: XCTestCase {
         let countsAfterReconcile = await fixture.commandCounts()
         XCTAssertEqual(countsAfterReconcile.sends, 3)
         XCTAssertEqual(countsAfterReconcile.queries, 1)
+
+        await controller.shutdown()
+    }
+
+    func testL3StopResolveAndSwitchModelTwoSessionIsolationStaleNoopAndFailClosed() async throws {
+        let fixture = AntigravityStatusFixture()
+        let controller = AntigravityStatusController(client: fixture, pollNanoseconds: 60_000_000_000)
+
+        try await fixture.ingest(AntigravityHookEvent(
+            conversationId: AntigravityStatusFixture.sessionA.conversationId,
+            workspacePath: AntigravityStatusFixture.sessionA.workspacePath,
+            eventType: .preInvocation,
+            modelName: "gemini-2.5-pro",
+            invocationNum: 2,
+            stepIdx: 1,
+            executionNum: 1,
+            toolName: nil,
+            terminationReason: nil,
+            hasError: false,
+            fullyIdle: false,
+            eventId: nil,
+            title: "Alpha L3",
+            projectId: "proj-alpha"
+        ))
+        try await fixture.ingest(AntigravityHookEvent(
+            conversationId: AntigravityStatusFixture.sessionB.conversationId,
+            workspacePath: AntigravityStatusFixture.sessionB.workspacePath,
+            eventType: .preInvocation,
+            modelName: "gemini-2.5-flash",
+            invocationNum: 1,
+            stepIdx: 1,
+            executionNum: 1,
+            toolName: nil,
+            terminationReason: nil,
+            hasError: false,
+            fullyIdle: false,
+            eventId: nil,
+            title: "Beta L3",
+            projectId: "proj-beta"
+        ))
+
+        controller.setEnabled(true)
+        for _ in 0..<200 {
+            if controller.state == .ready { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        _ = await controller.open(try XCTUnwrap(controller.selection(for: AntigravityStatusFixture.sessionA)), admitted: { true })
+        XCTAssertEqual(controller.selected, AntigravityStatusFixture.sessionA)
+        let bInitial = try XCTUnwrap(controller.row(for: AntigravityStatusFixture.sessionB))
+
+        let stopUnselectedB = try XCTUnwrap(controller.stopIntent(
+            for: AntigravityStatusFixture.sessionB,
+            requestId: "unit-stop-unselected-b"
+        ))
+        let resStopUnselected = await controller.execute(stopUnselectedB, admitted: { true })
+        XCTAssertEqual(resStopUnselected, .unconfirmed)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "guard.selectionMismatch")
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionB), bInitial)
+
+        let stopStaleA = try XCTUnwrap(controller.stopIntent(
+            for: AntigravityStatusFixture.sessionA,
+            expectedInvocationNum: 1,
+            expectedExecutionNum: 1,
+            requestId: "unit-stop-stale-a"
+        ))
+        let resStopStale = await controller.execute(stopStaleA, admitted: { true })
+        XCTAssertEqual(resStopStale, .noop)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "guard.stopTargetChanged")
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.phase, .running)
+
+        let stopValidA = try XCTUnwrap(controller.stopIntent(
+            for: AntigravityStatusFixture.sessionA,
+            expectedInvocationNum: 2,
+            expectedExecutionNum: 1,
+            requestId: "unit-stop-valid-a"
+        ))
+        let resStopValid = await controller.execute(stopValidA, admitted: { true })
+        XCTAssertEqual(resStopValid, .stopped)
+        XCTAssertEqual(controller.lastCommandReply?.delivery, .canceled)
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.phase, .canceled)
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.fullyIdle, true)
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.terminationReason, "USER_CANCELED")
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionB), bInitial)
+
+        await fixture.setPendingInteraction(
+            for: AntigravityStatusFixture.sessionA,
+            pending: AntigravityPendingInteraction(
+                interactionId: "unit-q-1",
+                interactionType: .question,
+                stepIndex: 3,
+                optionIds: ["opt-a", "opt-b"]
+            )
+        )
+        await fixture.setPendingInteraction(
+            for: AntigravityStatusFixture.sessionB,
+            pending: AntigravityPendingInteraction(
+                interactionId: "unit-perm-b",
+                interactionType: .filePermission,
+                stepIndex: 2
+            )
+        )
+        await controller.refresh()
+
+        let badQuestionApprove = try XCTUnwrap(controller.resolveIntent(
+            for: AntigravityStatusFixture.sessionA,
+            interactionId: "unit-q-1",
+            interactionType: .question,
+            decision: .allow,
+            requestId: "unit-q-bad-allow"
+        ))
+        let resBadQuestion = await controller.execute(badQuestionApprove, admitted: { true })
+        XCTAssertEqual(resBadQuestion, .unconfirmed)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "guard.questionCannotApproveAsPermission")
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.pendingInteraction?.interactionId, "unit-q-1")
+
+        let goodQuestionAnswer = try XCTUnwrap(controller.resolveIntent(
+            for: AntigravityStatusFixture.sessionA,
+            interactionId: "unit-q-1",
+            interactionType: .question,
+            decision: .answer,
+            selectedOptionIds: ["opt-a"],
+            requestId: "unit-q-answer"
+        ))
+        let resGoodQuestion = await controller.execute(goodQuestionAnswer, admitted: { true })
+        XCTAssertEqual(resGoodQuestion, .resolved)
+        XCTAssertEqual(controller.lastCommandReply?.delivery, .answer)
+        XCTAssertNil(controller.row(for: AntigravityStatusFixture.sessionA)?.pendingInteraction)
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionB)?.pendingInteraction?.interactionId, "unit-perm-b")
+
+        await fixture.setPendingInteraction(
+            for: AntigravityStatusFixture.sessionA,
+            pending: AntigravityPendingInteraction(
+                interactionId: "unit-exp-1",
+                interactionType: .runCommand,
+                stepIndex: 4
+            )
+        )
+        await controller.refresh()
+        let expiredCmd = try XCTUnwrap(controller.resolveIntent(
+            for: AntigravityStatusFixture.sessionA,
+            interactionId: "unit-exp-1",
+            interactionType: .runCommand,
+            decision: .allow,
+            requestId: "unit-exp-allow"
+        ))
+        await fixture.expirePendingInteraction(for: AntigravityStatusFixture.sessionA, interactionId: "unit-exp-1")
+        let resExpired = await controller.execute(expiredCmd, admitted: { true })
+        XCTAssertEqual(resExpired, .noop)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "guard.interactionAlreadyResolved")
+
+        let unsupportedModelCmd = try XCTUnwrap(controller.switchModelIntent(
+            for: AntigravityStatusFixture.sessionA,
+            modelName: "gemini-2.5-flash-lite",
+            thinkingLevel: "high",
+            requestId: "unit-model-unsupported"
+        ))
+        let resUnsupportedModel = await controller.execute(unsupportedModelCmd, admitted: { true })
+        XCTAssertEqual(resUnsupportedModel, .unconfirmed)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "guard.unsupportedThinkingLevel")
+        let countsAfterUnsupported = await fixture.commandCounts()
+        XCTAssertEqual(countsAfterUnsupported.modelSwitches, 0)
+
+        let validModelCmd = try XCTUnwrap(controller.switchModelIntent(
+            for: AntigravityStatusFixture.sessionA,
+            modelName: "gemini-2.5-flash",
+            thinkingLevel: "medium",
+            requestId: "unit-model-valid"
+        ))
+        let resValidModel = await controller.execute(validModelCmd, admitted: { true })
+        XCTAssertEqual(resValidModel, .modelSwitched)
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.modelName, "gemini-2.5-flash")
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.thinkingLevel, "medium")
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionB)?.modelName, "gemini-2.5-flash")
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionB)?.thinkingLevel, "high")
+
+        await fixture.setModelReadbackOverride(modelName: "gemini-2.5-pro", thinkingLevel: "low")
+        let mismatchModelCmd = try XCTUnwrap(controller.switchModelIntent(
+            for: AntigravityStatusFixture.sessionA,
+            modelName: "gemini-2.5-pro",
+            thinkingLevel: "high",
+            requestId: "unit-model-mismatch"
+        ))
+        let resMismatchModel = await controller.execute(mismatchModelCmd, admitted: { true })
+        XCTAssertEqual(resMismatchModel, .unconfirmed)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "guard.modelReadbackMismatch")
+        await fixture.setModelReadbackOverride(modelName: nil, thinkingLevel: nil)
+
+        let stopBeforeCsrfFail = try XCTUnwrap(controller.stopIntent(
+            for: AntigravityStatusFixture.sessionA,
+            requestId: "unit-stop-csrf-fail"
+        ))
+        await fixture.setCsrfAuth(false)
+        let resCsrfFail = await controller.execute(stopBeforeCsrfFail, admitted: { true })
+        XCTAssertEqual(resCsrfFail, .denied)
+        XCTAssertEqual(controller.state, .unavailable(.denied))
 
         await controller.shutdown()
     }

@@ -202,6 +202,93 @@ final class AntigravityStatusController: ObservableObject {
         )
     }
 
+    func stopIntent(
+        for target: AntigravitySessionKey,
+        expectedInvocationNum: UInt64? = nil,
+        expectedExecutionNum: UInt64? = nil,
+        killBackgroundTasks: Bool = true,
+        requestId: String? = nil
+    ) -> AntigravityQueuedCommand? {
+        guard enabled, !suspended, state == .ready, let snapshot else { return nil }
+        if let pending = pendingUnknownCommand, requestId != pending.operation.requestId {
+            lastCommandResult = .unknown
+            return nil
+        }
+        let targetRow = rows.first(where: { $0.key == target })
+        let resolvedInv = expectedInvocationNum ?? targetRow?.invocationNum ?? 0
+        let resolvedExec = expectedExecutionNum ?? targetRow?.executionNum
+        let intent = AntigravityStopIntent(
+            requestId: makeRequestId(requestId),
+            target: target,
+            expectedInvocationNum: resolvedInv,
+            expectedExecutionNum: resolvedExec,
+            killBackgroundTasks: killBackgroundTasks
+        )
+        guard intent.valid else { return nil }
+        return AntigravityQueuedCommand(
+            operation: .stop(intent),
+            instanceId: snapshot.instanceId,
+            generation: snapshot.generation,
+            localEpoch: epoch
+        )
+    }
+
+    func resolveIntent(
+        for target: AntigravitySessionKey,
+        interactionId: String,
+        interactionType: AntigravityInteractionType,
+        decision: AntigravityInteractionDecision,
+        selectedOptionIds: [String] = [],
+        requestId: String? = nil
+    ) -> AntigravityQueuedCommand? {
+        guard enabled, !suspended, state == .ready, let snapshot else { return nil }
+        if let pending = pendingUnknownCommand, requestId != pending.operation.requestId {
+            lastCommandResult = .unknown
+            return nil
+        }
+        let intent = AntigravityResolveIntent(
+            requestId: makeRequestId(requestId),
+            target: target,
+            interactionId: interactionId,
+            interactionType: interactionType,
+            decision: decision,
+            selectedOptionIds: selectedOptionIds
+        )
+        guard intent.valid else { return nil }
+        return AntigravityQueuedCommand(
+            operation: .resolve(intent),
+            instanceId: snapshot.instanceId,
+            generation: snapshot.generation,
+            localEpoch: epoch
+        )
+    }
+
+    func switchModelIntent(
+        for target: AntigravitySessionKey,
+        modelName: String,
+        thinkingLevel: String,
+        requestId: String? = nil
+    ) -> AntigravityQueuedCommand? {
+        guard enabled, !suspended, state == .ready, let snapshot else { return nil }
+        if let pending = pendingUnknownCommand, requestId != pending.operation.requestId {
+            lastCommandResult = .unknown
+            return nil
+        }
+        let intent = AntigravitySwitchModelIntent(
+            requestId: makeRequestId(requestId),
+            target: target,
+            modelName: modelName,
+            thinkingLevel: thinkingLevel
+        )
+        guard intent.valid else { return nil }
+        return AntigravityQueuedCommand(
+            operation: .switchModel(intent),
+            instanceId: snapshot.instanceId,
+            generation: snapshot.generation,
+            localEpoch: epoch
+        )
+    }
+
     func queryIntent(
         requestId: String? = nil,
         expectedOp: String? = nil,
@@ -349,6 +436,233 @@ final class AntigravityStatusController: ObservableObject {
                 lastCommandResult = .unconfirmed
                 return .unconfirmed
             }
+        case .stop(let intent):
+            guard currentSnapshot.capabilities.supportsStopConversation,
+                  currentSnapshot.allowedWorkspaces.contains(intent.target.workspacePath),
+                  intent.valid else {
+                await fail(AntigravityFailure.denied, epoch: expected)
+                guard current(expected) else { return .denied }
+                lastCommandResult = .denied
+                return .denied
+            }
+            guard let targetRow = rows.first(where: { $0.key == intent.target }) else {
+                lastCommandReply = AntigravityCommandReply(
+                    instanceId: currentSnapshot.instanceId,
+                    generation: currentSnapshot.generation,
+                    status: "unconfirmed",
+                    commandOp: "stop",
+                    requestId: intent.requestId,
+                    conversationId: intent.target.conversationId,
+                    workspacePath: intent.target.workspacePath,
+                    projectId: "",
+                    delivery: .none,
+                    inFlightSteering: false,
+                    reasonCode: "guard.targetNotFound",
+                    duplicate: false,
+                    reconciled: false,
+                    cursor: cursor,
+                    rows: rows,
+                    selected: selected
+                )
+                lastCommandResult = .unconfirmed
+                return .unconfirmed
+            }
+            guard selected == intent.target else {
+                lastCommandReply = AntigravityCommandReply(
+                    instanceId: currentSnapshot.instanceId,
+                    generation: currentSnapshot.generation,
+                    status: "unconfirmed",
+                    commandOp: "stop",
+                    requestId: intent.requestId,
+                    conversationId: intent.target.conversationId,
+                    workspacePath: intent.target.workspacePath,
+                    projectId: targetRow.projectId,
+                    delivery: .none,
+                    inFlightSteering: false,
+                    reasonCode: "guard.selectionMismatch",
+                    duplicate: false,
+                    reconciled: false,
+                    cursor: cursor,
+                    rows: rows,
+                    selected: selected
+                )
+                lastCommandResult = .unconfirmed
+                return .unconfirmed
+            }
+        case .resolve(let intent):
+            guard currentSnapshot.capabilities.supportsResolveInteraction,
+                  currentSnapshot.allowedWorkspaces.contains(intent.target.workspacePath),
+                  intent.valid else {
+                await fail(AntigravityFailure.denied, epoch: expected)
+                guard current(expected) else { return .denied }
+                lastCommandResult = .denied
+                return .denied
+            }
+            guard let targetRow = rows.first(where: { $0.key == intent.target }) else {
+                lastCommandReply = AntigravityCommandReply(
+                    instanceId: currentSnapshot.instanceId,
+                    generation: currentSnapshot.generation,
+                    status: "unconfirmed",
+                    commandOp: "resolve",
+                    requestId: intent.requestId,
+                    conversationId: intent.target.conversationId,
+                    workspacePath: intent.target.workspacePath,
+                    projectId: "",
+                    delivery: .none,
+                    inFlightSteering: false,
+                    reasonCode: "guard.targetNotFound",
+                    duplicate: false,
+                    reconciled: false,
+                    cursor: cursor,
+                    rows: rows,
+                    selected: selected
+                )
+                lastCommandResult = .unconfirmed
+                return .unconfirmed
+            }
+            guard selected == intent.target else {
+                lastCommandReply = AntigravityCommandReply(
+                    instanceId: currentSnapshot.instanceId,
+                    generation: currentSnapshot.generation,
+                    status: "unconfirmed",
+                    commandOp: "resolve",
+                    requestId: intent.requestId,
+                    conversationId: intent.target.conversationId,
+                    workspacePath: intent.target.workspacePath,
+                    projectId: targetRow.projectId,
+                    delivery: .none,
+                    inFlightSteering: false,
+                    reasonCode: "guard.selectionMismatch",
+                    duplicate: false,
+                    reconciled: false,
+                    cursor: cursor,
+                    rows: rows,
+                    selected: selected
+                )
+                lastCommandResult = .unconfirmed
+                return .unconfirmed
+            }
+            let isQuestionAsPermission = (intent.interactionType == .question && (intent.decision == .allow || intent.decision == .deny))
+                || (targetRow.pendingInteraction?.interactionType == .question && (intent.interactionType != .question || intent.decision == .allow || intent.decision == .deny))
+            if isQuestionAsPermission {
+                lastCommandReply = AntigravityCommandReply(
+                    instanceId: currentSnapshot.instanceId,
+                    generation: currentSnapshot.generation,
+                    status: "unconfirmed",
+                    commandOp: "resolve",
+                    requestId: intent.requestId,
+                    conversationId: intent.target.conversationId,
+                    workspacePath: intent.target.workspacePath,
+                    projectId: targetRow.projectId,
+                    delivery: .none,
+                    inFlightSteering: false,
+                    reasonCode: "guard.questionCannotApproveAsPermission",
+                    duplicate: false,
+                    reconciled: false,
+                    cursor: cursor,
+                    rows: rows,
+                    selected: selected
+                )
+                lastCommandResult = .unconfirmed
+                return .unconfirmed
+            }
+        case .switchModel(let intent):
+            guard currentSnapshot.capabilities.supportsSwitchModelConfig,
+                  currentSnapshot.allowedWorkspaces.contains(intent.target.workspacePath),
+                  intent.valid else {
+                await fail(AntigravityFailure.denied, epoch: expected)
+                guard current(expected) else { return .denied }
+                lastCommandResult = .denied
+                return .denied
+            }
+            guard let targetRow = rows.first(where: { $0.key == intent.target }) else {
+                lastCommandReply = AntigravityCommandReply(
+                    instanceId: currentSnapshot.instanceId,
+                    generation: currentSnapshot.generation,
+                    status: "unconfirmed",
+                    commandOp: "switch-model",
+                    requestId: intent.requestId,
+                    conversationId: intent.target.conversationId,
+                    workspacePath: intent.target.workspacePath,
+                    projectId: "",
+                    delivery: .none,
+                    inFlightSteering: false,
+                    reasonCode: "guard.targetNotFound",
+                    duplicate: false,
+                    reconciled: false,
+                    cursor: cursor,
+                    rows: rows,
+                    selected: selected
+                )
+                lastCommandResult = .unconfirmed
+                return .unconfirmed
+            }
+            guard selected == intent.target else {
+                lastCommandReply = AntigravityCommandReply(
+                    instanceId: currentSnapshot.instanceId,
+                    generation: currentSnapshot.generation,
+                    status: "unconfirmed",
+                    commandOp: "switch-model",
+                    requestId: intent.requestId,
+                    conversationId: intent.target.conversationId,
+                    workspacePath: intent.target.workspacePath,
+                    projectId: targetRow.projectId,
+                    delivery: .none,
+                    inFlightSteering: false,
+                    reasonCode: "guard.selectionMismatch",
+                    duplicate: false,
+                    reconciled: false,
+                    cursor: cursor,
+                    rows: rows,
+                    selected: selected
+                )
+                lastCommandResult = .unconfirmed
+                return .unconfirmed
+            }
+            guard targetRow.availableModels.contains(where: { $0.modelName == intent.modelName }) else {
+                lastCommandReply = AntigravityCommandReply(
+                    instanceId: currentSnapshot.instanceId,
+                    generation: currentSnapshot.generation,
+                    status: "unconfirmed",
+                    commandOp: "switch-model",
+                    requestId: intent.requestId,
+                    conversationId: intent.target.conversationId,
+                    workspacePath: intent.target.workspacePath,
+                    projectId: targetRow.projectId,
+                    delivery: .none,
+                    inFlightSteering: false,
+                    reasonCode: "guard.unsupportedModel",
+                    duplicate: false,
+                    reconciled: false,
+                    cursor: cursor,
+                    rows: rows,
+                    selected: selected
+                )
+                lastCommandResult = .unconfirmed
+                return .unconfirmed
+            }
+            guard targetRow.supportsThinkingLevel(intent.thinkingLevel, for: intent.modelName) else {
+                lastCommandReply = AntigravityCommandReply(
+                    instanceId: currentSnapshot.instanceId,
+                    generation: currentSnapshot.generation,
+                    status: "unconfirmed",
+                    commandOp: "switch-model",
+                    requestId: intent.requestId,
+                    conversationId: intent.target.conversationId,
+                    workspacePath: intent.target.workspacePath,
+                    projectId: targetRow.projectId,
+                    delivery: .none,
+                    inFlightSteering: false,
+                    reasonCode: "guard.unsupportedThinkingLevel",
+                    duplicate: false,
+                    reconciled: false,
+                    cursor: cursor,
+                    rows: rows,
+                    selected: selected
+                )
+                lastCommandResult = .unconfirmed
+                return .unconfirmed
+            }
         case .query(let intent):
             guard currentSnapshot.capabilities.schemaVerified, intent.valid else {
                 await fail(AntigravityFailure.denied, epoch: expected)
@@ -369,6 +683,12 @@ final class AntigravityStatusController: ObservableObject {
                 response = try await client.create(intent)
             case .send(let intent):
                 response = try await client.send(intent)
+            case .stop(let intent):
+                response = try await client.stop(intent)
+            case .resolve(let intent):
+                response = try await client.resolve(intent)
+            case .switchModel(let intent):
+                response = try await client.switchModel(intent)
             case .query(let intent):
                 response = try await client.query(intent)
             }
@@ -406,7 +726,7 @@ final class AntigravityStatusController: ObservableObject {
             tokenReads = response.tokenReads
             lastCommandReply = response
 
-            let mapped = mapCommandReply(response)
+            let mapped = mapCommandReply(response, operation: command.operation)
             if mapped == .unknown {
                 if pendingUnknownCommand == nil {
                     pendingUnknownCommand = command
@@ -455,7 +775,10 @@ final class AntigravityStatusController: ObservableObject {
         }
     }
 
-    private func mapCommandReply(_ response: AntigravityCommandReply) -> AntigravityCommandResult {
+    private func mapCommandReply(
+        _ response: AntigravityCommandReply,
+        operation: AntigravityCommandOperation
+    ) -> AntigravityCommandResult {
         switch response.status {
         case "created":
             let createdKey = AntigravitySessionKey(
@@ -506,6 +829,50 @@ final class AntigravityStatusController: ObservableObject {
                 return .unconfirmed
             }
             return .steered
+        case "stopped":
+            let targetKey = AntigravitySessionKey(
+                conversationId: response.conversationId,
+                workspacePath: response.workspacePath
+            )
+            guard response.delivery == .canceled,
+                  !response.inFlightSteering,
+                  response.selected == targetKey,
+                  response.rows.contains(where: { $0.key == targetKey && $0.phase == .canceled && $0.terminationReason == "USER_CANCELED" }) else {
+                return .unconfirmed
+            }
+            return .stopped
+        case "resolved":
+            let targetKey = AntigravitySessionKey(
+                conversationId: response.conversationId,
+                workspacePath: response.workspacePath
+            )
+            guard [.allow, .deny, .answer, .cancel].contains(response.delivery),
+                  !response.inFlightSteering,
+                  response.selected == targetKey,
+                  response.rows.contains(where: { $0.key == targetKey && $0.pendingInteraction == nil }) else {
+                return .unconfirmed
+            }
+            return .resolved
+        case "modelSwitched":
+            let targetKey = AntigravitySessionKey(
+                conversationId: response.conversationId,
+                workspacePath: response.workspacePath
+            )
+            guard response.delivery == .modelSwitched,
+                  !response.inFlightSteering,
+                  response.selected == targetKey,
+                  let targetRow = response.rows.first(where: { $0.key == targetKey }) else {
+                return .unconfirmed
+            }
+            if case .switchModel(let intent) = operation {
+                guard targetRow.modelName == intent.modelName,
+                      targetRow.thinkingLevel == intent.thinkingLevel else {
+                    return .unconfirmed
+                }
+            }
+            return .modelSwitched
+        case "noop":
+            return .noop
         case "unknown":
             return .unknown
         default:

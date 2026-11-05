@@ -11,7 +11,13 @@ struct AntigravityCapabilities: Codable, Equatable, Sendable {
     let supportsTargetFocus: Bool
     let supportsStopTurn: Bool
     let supportsApprovalGate: Bool
+    let supportsModelConfig: Bool
     let schemaVerified: Bool
+    let stopSchemaVerified: Bool
+    let approvalSchemaVerified: Bool
+    let modelConfigSchemaVerified: Bool
+    let csrfAuthVerified: Bool
+    let arbitraryRpcExposed: Bool
 
     init(
         bundleId: String,
@@ -24,7 +30,13 @@ struct AntigravityCapabilities: Codable, Equatable, Sendable {
         supportsTargetFocus: Bool,
         supportsStopTurn: Bool,
         supportsApprovalGate: Bool,
-        schemaVerified: Bool = true
+        supportsModelConfig: Bool = true,
+        schemaVerified: Bool = true,
+        stopSchemaVerified: Bool = true,
+        approvalSchemaVerified: Bool = true,
+        modelConfigSchemaVerified: Bool = true,
+        csrfAuthVerified: Bool = true,
+        arbitraryRpcExposed: Bool = false
     ) {
         self.bundleId = bundleId
         self.installedVersion = installedVersion
@@ -36,7 +48,13 @@ struct AntigravityCapabilities: Codable, Equatable, Sendable {
         self.supportsTargetFocus = supportsTargetFocus
         self.supportsStopTurn = supportsStopTurn
         self.supportsApprovalGate = supportsApprovalGate
+        self.supportsModelConfig = supportsModelConfig
         self.schemaVerified = schemaVerified
+        self.stopSchemaVerified = stopSchemaVerified
+        self.approvalSchemaVerified = approvalSchemaVerified
+        self.modelConfigSchemaVerified = modelConfigSchemaVerified
+        self.csrfAuthVerified = csrfAuthVerified
+        self.arbitraryRpcExposed = arbitraryRpcExposed
     }
 
     enum CodingKeys: String, CodingKey {
@@ -50,7 +68,13 @@ struct AntigravityCapabilities: Codable, Equatable, Sendable {
         case supportsTargetFocus
         case supportsStopTurn
         case supportsApprovalGate
+        case supportsModelConfig
         case schemaVerified
+        case stopSchemaVerified
+        case approvalSchemaVerified
+        case modelConfigSchemaVerified
+        case csrfAuthVerified
+        case arbitraryRpcExposed
     }
 
     init(from decoder: Decoder) throws {
@@ -65,7 +89,14 @@ struct AntigravityCapabilities: Codable, Equatable, Sendable {
         supportsTargetFocus = try c.decode(Bool.self, forKey: .supportsTargetFocus)
         supportsStopTurn = try c.decode(Bool.self, forKey: .supportsStopTurn)
         supportsApprovalGate = try c.decode(Bool.self, forKey: .supportsApprovalGate)
-        schemaVerified = try c.decodeIfPresent(Bool.self, forKey: .schemaVerified) ?? true
+        let verified = try c.decodeIfPresent(Bool.self, forKey: .schemaVerified) ?? true
+        schemaVerified = verified
+        supportsModelConfig = try c.decodeIfPresent(Bool.self, forKey: .supportsModelConfig) ?? verified
+        stopSchemaVerified = try c.decodeIfPresent(Bool.self, forKey: .stopSchemaVerified) ?? verified
+        approvalSchemaVerified = try c.decodeIfPresent(Bool.self, forKey: .approvalSchemaVerified) ?? verified
+        modelConfigSchemaVerified = try c.decodeIfPresent(Bool.self, forKey: .modelConfigSchemaVerified) ?? verified
+        csrfAuthVerified = try c.decodeIfPresent(Bool.self, forKey: .csrfAuthVerified) ?? true
+        arbitraryRpcExposed = try c.decodeIfPresent(Bool.self, forKey: .arbitraryRpcExposed) ?? false
     }
 
     static let installed2_29_0 = AntigravityCapabilities(
@@ -77,9 +108,15 @@ struct AntigravityCapabilities: Codable, Equatable, Sendable {
         hookEvents: ["SessionStart", "PreInvocation", "PostInvocation", "PreToolUse", "PostToolUse", "Stop"],
         supportsSessionCatalog: true,
         supportsTargetFocus: true,
-        supportsStopTurn: false,
-        supportsApprovalGate: false,
-        schemaVerified: true
+        supportsStopTurn: true,
+        supportsApprovalGate: true,
+        supportsModelConfig: true,
+        schemaVerified: true,
+        stopSchemaVerified: true,
+        approvalSchemaVerified: true,
+        modelConfigSchemaVerified: true,
+        csrfAuthVerified: true,
+        arbitraryRpcExposed: false
     )
 
     var valid: Bool {
@@ -89,8 +126,11 @@ struct AntigravityCapabilities: Codable, Equatable, Sendable {
             && agentapiCommands == ["get-conversation-metadata", "new-conversation", "send-message"]
             && !sidecarSdkVersion.isEmpty && sidecarSdkVersion.utf8.count <= 64
             && hookEvents == ["SessionStart", "PreInvocation", "PostInvocation", "PreToolUse", "PostToolUse", "Stop"]
-            && !supportsStopTurn && !supportsApprovalGate
+            && !arbitraryRpcExposed
             && (!supportsSessionCatalog && !supportsTargetFocus || schemaVerified)
+            && (!supportsStopTurn || (schemaVerified && stopSchemaVerified && csrfAuthVerified))
+            && (!supportsApprovalGate || (schemaVerified && approvalSchemaVerified && csrfAuthVerified))
+            && (!supportsModelConfig || (schemaVerified && modelConfigSchemaVerified && csrfAuthVerified))
     }
 
     var supportsCatalogNavigation: Bool {
@@ -103,6 +143,18 @@ struct AntigravityCapabilities: Codable, Equatable, Sendable {
 
     var supportsSendMessage: Bool {
         valid && schemaVerified && agentapiCommands.contains("send-message")
+    }
+
+    var supportsStopConversation: Bool {
+        valid && schemaVerified && stopSchemaVerified && csrfAuthVerified && supportsStopTurn
+    }
+
+    var supportsResolveInteraction: Bool {
+        valid && schemaVerified && approvalSchemaVerified && csrfAuthVerified && supportsApprovalGate
+    }
+
+    var supportsSwitchModelConfig: Bool {
+        valid && schemaVerified && modelConfigSchemaVerified && csrfAuthVerified && supportsModelConfig
     }
 }
 
@@ -221,12 +273,86 @@ struct AntigravityHookEvent: Codable, Equatable, Sendable {
     }
 }
 
+enum AntigravityInteractionType: String, Codable, Equatable, CaseIterable, Sendable {
+    case permission
+    case runCommand
+    case filePermission
+    case question
+    case approval
+
+    var label: String {
+        switch self {
+        case .permission: return "工具权限审批"
+        case .runCommand: return "终端命令确认"
+        case .filePermission: return "文件访问审批"
+        case .question: return "问题选择确认"
+        case .approval: return "阶段审批确认"
+        }
+    }
+}
+
+enum AntigravityInteractionDecision: String, Codable, Equatable, CaseIterable, Sendable {
+    case allow
+    case deny
+    case answer
+    case cancel
+}
+
+struct AntigravityPendingInteraction: Codable, Equatable, Sendable {
+    let interactionId: String
+    let interactionType: AntigravityInteractionType
+    let stepIndex: UInt64
+    let optionIds: [String]
+
+    init(
+        interactionId: String,
+        interactionType: AntigravityInteractionType,
+        stepIndex: UInt64 = 0,
+        optionIds: [String] = []
+    ) {
+        self.interactionId = interactionId
+        self.interactionType = interactionType
+        self.stepIndex = stepIndex
+        self.optionIds = optionIds
+    }
+
+    var valid: Bool {
+        AntigravityStatusSnapshot.validID(interactionId, limit: 256)
+            && stepIndex <= 1_000_000_000
+            && optionIds.count <= 64
+            && optionIds.allSatisfy({ AntigravityStatusSnapshot.validID($0, limit: 128) })
+    }
+}
+
+struct AntigravityModelOption: Codable, Equatable, Sendable {
+    let modelName: String
+    let supportedThinkingLevels: [String]
+
+    static let defaultCatalog: [AntigravityModelOption] = [
+        AntigravityModelOption(modelName: "gemini-2.5-pro", supportedThinkingLevels: ["low", "medium", "high"]),
+        AntigravityModelOption(modelName: "gemini-2.5-flash", supportedThinkingLevels: ["minimal", "low", "medium", "high"]),
+        AntigravityModelOption(modelName: "gemini-2.5-flash-lite", supportedThinkingLevels: ["minimal", "low"]),
+        AntigravityModelOption(modelName: "claude-sonnet-4-5", supportedThinkingLevels: ["low", "medium", "high"]),
+        AntigravityModelOption(modelName: "flash", supportedThinkingLevels: ["minimal", "low", "medium", "high"]),
+    ]
+
+    var valid: Bool {
+        AntigravityStatusSnapshot.validID(modelName, limit: 256)
+            && !supportedThinkingLevels.isEmpty
+            && supportedThinkingLevels.count <= 16
+            && supportedThinkingLevels.allSatisfy({
+                ["minimal", "low", "medium", "high", "modelDefault"].contains($0)
+            })
+    }
+}
+
 struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
     let conversationId: String
     let workspacePath: String
     let title: String
     let projectId: String
     let modelName: String
+    let thinkingLevel: String
     let phase: AntigravitySessionPhase
     let lastEventType: AntigravityHookEventType
     let invocationNum: UInt64
@@ -236,6 +362,8 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
     let terminationReason: String?
     let fullyIdle: Bool
     let transitionCount: UInt64
+    let pendingInteraction: AntigravityPendingInteraction?
+    let availableModels: [AntigravityModelOption]
 
     init(
         conversationId: String,
@@ -243,6 +371,7 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
         title: String? = nil,
         projectId: String = "",
         modelName: String,
+        thinkingLevel: String = "high",
         phase: AntigravitySessionPhase,
         lastEventType: AntigravityHookEventType,
         invocationNum: UInt64,
@@ -251,13 +380,16 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
         lastToolName: String?,
         terminationReason: String?,
         fullyIdle: Bool,
-        transitionCount: UInt64
+        transitionCount: UInt64,
+        pendingInteraction: AntigravityPendingInteraction? = nil,
+        availableModels: [AntigravityModelOption] = AntigravityModelOption.defaultCatalog
     ) {
         self.conversationId = conversationId
         self.workspacePath = workspacePath
         self.title = (title?.isEmpty == false) ? title! : conversationId
         self.projectId = projectId
         self.modelName = modelName
+        self.thinkingLevel = thinkingLevel.isEmpty ? "high" : thinkingLevel
         self.phase = phase
         self.lastEventType = lastEventType
         self.invocationNum = invocationNum
@@ -267,6 +399,8 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
         self.terminationReason = terminationReason
         self.fullyIdle = fullyIdle
         self.transitionCount = transitionCount
+        self.pendingInteraction = pendingInteraction
+        self.availableModels = availableModels.isEmpty ? AntigravityModelOption.defaultCatalog : availableModels
     }
 
     enum CodingKeys: String, CodingKey {
@@ -275,6 +409,7 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
         case title
         case projectId
         case modelName
+        case thinkingLevel
         case phase
         case lastEventType
         case invocationNum
@@ -284,6 +419,8 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
         case terminationReason
         case fullyIdle
         case transitionCount
+        case pendingInteraction
+        case availableModels
     }
 
     init(from decoder: Decoder) throws {
@@ -295,6 +432,8 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
         title = (decodedTitle?.isEmpty == false) ? decodedTitle! : conv
         projectId = try c.decodeIfPresent(String.self, forKey: .projectId) ?? ""
         modelName = try c.decode(String.self, forKey: .modelName)
+        let decodedThinking = try c.decodeIfPresent(String.self, forKey: .thinkingLevel)
+        thinkingLevel = (decodedThinking?.isEmpty == false) ? decodedThinking! : "high"
         phase = try c.decode(AntigravitySessionPhase.self, forKey: .phase)
         lastEventType = try c.decode(AntigravityHookEventType.self, forKey: .lastEventType)
         invocationNum = try c.decode(UInt64.self, forKey: .invocationNum)
@@ -304,6 +443,9 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
         terminationReason = try c.decodeIfPresent(String.self, forKey: .terminationReason)
         fullyIdle = try c.decode(Bool.self, forKey: .fullyIdle)
         transitionCount = try c.decode(UInt64.self, forKey: .transitionCount)
+        pendingInteraction = try c.decodeIfPresent(AntigravityPendingInteraction.self, forKey: .pendingInteraction)
+        let decodedModels = try c.decodeIfPresent([AntigravityModelOption].self, forKey: .availableModels)
+        availableModels = (decodedModels?.isEmpty == false) ? decodedModels! : AntigravityModelOption.defaultCatalog
     }
 
     var key: AntigravitySessionKey {
@@ -318,17 +460,30 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
             && AntigravityStatusSnapshot.validID(title, limit: 512)
             && projectId.utf8.count <= 256
             && modelName.utf8.count <= 256
+            && ["minimal", "low", "medium", "high", "modelDefault"].contains(thinkingLevel)
             && invocationNum <= 1_000_000_000
             && stepIdx <= 1_000_000_000
             && executionNum <= 1_000_000_000
             && (lastToolName == nil || AntigravityStatusSnapshot.validID(lastToolName!, limit: 256))
             && (terminationReason == nil || AntigravityStatusSnapshot.validID(terminationReason!, limit: 128))
             && transitionCount > 0 && transitionCount <= 1_000_000_000
+            && (pendingInteraction == nil || pendingInteraction!.valid)
+            && !availableModels.isEmpty && availableModels.allSatisfy(\.valid)
             && (phase != .completed || (fullyIdle && terminationReason == "NO_TOOL_CALL"))
             && (phase != .backgroundActive || !fullyIdle)
     }
 
+    func supportsThinkingLevel(_ level: String, for targetModel: String) -> Bool {
+        guard let opt = availableModels.first(where: { $0.modelName == targetModel }) else {
+            return false
+        }
+        return opt.supportedThinkingLevels.contains(level)
+    }
+
     var statusLabel: String {
+        if let pending = pendingInteraction {
+            return "\(phase.label) · 待处理\(pending.interactionType.label)"
+        }
         if phase == .runningTool, let tool = lastToolName, !tool.isEmpty {
             return "\(phase.label)（\(tool)）"
         }
@@ -339,6 +494,8 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
         let title = (event.title?.isEmpty == false) ? event.title! : (prior?.title ?? event.conversationId)
         let projectId = (event.projectId?.isEmpty == false) ? event.projectId! : (prior?.projectId ?? "")
         let model = event.modelName.isEmpty ? (prior?.modelName ?? "") : event.modelName
+        let thinking = prior?.thinkingLevel ?? "high"
+        let models = prior?.availableModels ?? AntigravityModelOption.defaultCatalog
         let inv = event.invocationNum ?? prior?.invocationNum ?? 0
         let step = event.stepIdx ?? prior?.stepIdx ?? 0
         let exec = event.executionNum ?? prior?.executionNum ?? 0
@@ -346,6 +503,7 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
         let tool: String?
         let reason: String?
         let idle: Bool
+        var pending = prior?.pendingInteraction
 
         switch event.eventType {
         case .sessionStart:
@@ -353,6 +511,7 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
             tool = nil
             reason = nil
             idle = true
+            pending = nil
         case .preInvocation:
             phase = .running
             tool = prior?.lastToolName
@@ -368,6 +527,7 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
             tool = (event.toolName?.isEmpty == false) ? event.toolName : prior?.lastToolName
             reason = nil
             idle = false
+            pending = nil
         case .postInvocation:
             phase = event.hasError ? .failed : .running
             tool = prior?.lastToolName
@@ -376,6 +536,7 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
         case .stop:
             tool = prior?.lastToolName
             reason = (event.terminationReason?.isEmpty == false) ? event.terminationReason : nil
+            pending = nil
             if reason == "ERROR" || event.hasError {
                 phase = .failed
                 idle = event.fullyIdle ?? false
@@ -397,6 +558,7 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
             title: title,
             projectId: projectId,
             modelName: model,
+            thinkingLevel: thinking,
             phase: phase,
             lastEventType: event.eventType,
             invocationNum: inv,
@@ -405,7 +567,9 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
             lastToolName: tool,
             terminationReason: reason,
             fullyIdle: idle,
-            transitionCount: (prior?.transitionCount ?? 0) + 1
+            transitionCount: (prior?.transitionCount ?? 0) + 1,
+            pendingInteraction: pending,
+            availableModels: models
         )
     }
 }
@@ -548,6 +712,12 @@ enum AntigravityDeliveryOutcome: String, Codable, Equatable, Sendable {
     case started
     case nextInvocation
     case steered
+    case canceled
+    case allow
+    case deny
+    case answer
+    case cancel
+    case modelSwitched
     case none
 }
 
@@ -619,6 +789,97 @@ struct AntigravitySendIntent: Codable, Equatable, Sendable {
     }
 }
 
+struct AntigravityStopIntent: Codable, Equatable, Sendable {
+    let requestId: String
+    let target: AntigravitySessionKey
+    let expectedInvocationNum: UInt64
+    let expectedExecutionNum: UInt64?
+    let killBackgroundTasks: Bool
+
+    init(
+        requestId: String = UUID().uuidString,
+        target: AntigravitySessionKey,
+        expectedInvocationNum: UInt64,
+        expectedExecutionNum: UInt64? = nil,
+        killBackgroundTasks: Bool = true
+    ) {
+        self.requestId = requestId
+        self.target = target
+        self.expectedInvocationNum = expectedInvocationNum
+        self.expectedExecutionNum = expectedExecutionNum
+        self.killBackgroundTasks = killBackgroundTasks
+    }
+
+    var valid: Bool {
+        AntigravityStatusSnapshot.validID(requestId, limit: 256)
+            && AntigravityStatusSnapshot.validID(target.conversationId, limit: 256)
+            && AntigravityStatusSnapshot.validID(target.workspacePath, limit: 4096)
+            && expectedInvocationNum <= 1_000_000_000
+            && (expectedExecutionNum == nil || expectedExecutionNum! <= 1_000_000_000)
+    }
+}
+
+struct AntigravityResolveIntent: Codable, Equatable, Sendable {
+    let requestId: String
+    let target: AntigravitySessionKey
+    let interactionId: String
+    let interactionType: AntigravityInteractionType
+    let decision: AntigravityInteractionDecision
+    let selectedOptionIds: [String]
+
+    init(
+        requestId: String = UUID().uuidString,
+        target: AntigravitySessionKey,
+        interactionId: String,
+        interactionType: AntigravityInteractionType,
+        decision: AntigravityInteractionDecision,
+        selectedOptionIds: [String] = []
+    ) {
+        self.requestId = requestId
+        self.target = target
+        self.interactionId = interactionId
+        self.interactionType = interactionType
+        self.decision = decision
+        self.selectedOptionIds = selectedOptionIds
+    }
+
+    var valid: Bool {
+        AntigravityStatusSnapshot.validID(requestId, limit: 256)
+            && AntigravityStatusSnapshot.validID(target.conversationId, limit: 256)
+            && AntigravityStatusSnapshot.validID(target.workspacePath, limit: 4096)
+            && AntigravityStatusSnapshot.validID(interactionId, limit: 256)
+            && selectedOptionIds.count <= 64
+            && selectedOptionIds.allSatisfy({ AntigravityStatusSnapshot.validID($0, limit: 128) })
+    }
+}
+
+struct AntigravitySwitchModelIntent: Codable, Equatable, Sendable {
+    let requestId: String
+    let target: AntigravitySessionKey
+    let modelName: String
+    let thinkingLevel: String
+
+    init(
+        requestId: String = UUID().uuidString,
+        target: AntigravitySessionKey,
+        modelName: String,
+        thinkingLevel: String
+    ) {
+        self.requestId = requestId
+        self.target = target
+        self.modelName = modelName
+        self.thinkingLevel = thinkingLevel
+    }
+
+    var valid: Bool {
+        AntigravityStatusSnapshot.validID(requestId, limit: 256)
+            && AntigravityStatusSnapshot.validID(target.conversationId, limit: 256)
+            && AntigravityStatusSnapshot.validID(target.workspacePath, limit: 4096)
+            && AntigravityStatusSnapshot.validID(modelName, limit: 256)
+            && ["minimal", "low", "medium", "high", "modelDefault"].contains(thinkingLevel)
+    }
+}
+
 struct AntigravityQueryIntent: Codable, Equatable, Sendable {
     let requestId: String
     let expectedOp: String?
@@ -652,12 +913,18 @@ struct AntigravityQueryIntent: Codable, Equatable, Sendable {
 enum AntigravityCommandOperation: Equatable, Sendable {
     case create(AntigravityCreateIntent)
     case send(AntigravitySendIntent)
+    case stop(AntigravityStopIntent)
+    case resolve(AntigravityResolveIntent)
+    case switchModel(AntigravitySwitchModelIntent)
     case query(AntigravityQueryIntent)
 
     var requestId: String {
         switch self {
         case .create(let intent): return intent.requestId
         case .send(let intent): return intent.requestId
+        case .stop(let intent): return intent.requestId
+        case .resolve(let intent): return intent.requestId
+        case .switchModel(let intent): return intent.requestId
         case .query(let intent): return intent.requestId
         }
     }
@@ -666,6 +933,9 @@ enum AntigravityCommandOperation: Equatable, Sendable {
         switch self {
         case .create: return "create"
         case .send: return "send"
+        case .stop: return "stop"
+        case .resolve: return "resolve"
+        case .switchModel: return "switch-model"
         case .query: return "query"
         }
     }
@@ -744,6 +1014,10 @@ enum AntigravityCommandResult: String, Equatable, Sendable {
     case started
     case queued
     case steered
+    case stopped
+    case resolved
+    case modelSwitched
+    case noop
     case unconfirmed
     case unknown
     case stale
@@ -756,6 +1030,10 @@ enum AntigravityCommandResult: String, Equatable, Sendable {
         case .started: return "已向 Antigravity 会话发送消息并开始执行"
         case .queued: return "Antigravity 会话运行中，消息已排入下一轮调用（nextInvocation）"
         case .steered: return "已向运行中的 Antigravity 会话注入 steering 消息"
+        case .stopped: return "已通过 CancelCascadeInvocation 停止 Antigravity 当前轮次"
+        case .resolved: return "已通过 HandleCascadeUserInteraction 确认 Antigravity 待处理请求"
+        case .modelSwitched: return "已切换 Antigravity 模型与思考档位并完成读回确认"
+        case .noop: return "目标状态已变更或已结束，安全跳过无副作用"
         case .unconfirmed: return "Antigravity 命令未确认或被安全守卫拦截"
         case .unknown: return "Antigravity 命令响应超时，已锁定 requestId 待查询对账"
         case .stale: return "Antigravity 会话快照已过期，未发送命令"
@@ -800,6 +1078,9 @@ protocol AntigravityStatusServing: Sendable {
     func open(_ target: AntigravitySessionKey) async throws -> AntigravityOpenReply
     func create(_ intent: AntigravityCreateIntent) async throws -> AntigravityCommandReply
     func send(_ intent: AntigravitySendIntent) async throws -> AntigravityCommandReply
+    func stop(_ intent: AntigravityStopIntent) async throws -> AntigravityCommandReply
+    func resolve(_ intent: AntigravityResolveIntent) async throws -> AntigravityCommandReply
+    func switchModel(_ intent: AntigravitySwitchModelIntent) async throws -> AntigravityCommandReply
     func query(_ intent: AntigravityQueryIntent) async throws -> AntigravityCommandReply
     func close() async
 }
@@ -814,6 +1095,18 @@ extension AntigravityStatusServing {
     }
 
     func send(_ intent: AntigravitySendIntent) async throws -> AntigravityCommandReply {
+        throw AntigravityFailure.denied
+    }
+
+    func stop(_ intent: AntigravityStopIntent) async throws -> AntigravityCommandReply {
+        throw AntigravityFailure.denied
+    }
+
+    func resolve(_ intent: AntigravityResolveIntent) async throws -> AntigravityCommandReply {
+        throw AntigravityFailure.denied
+    }
+
+    func switchModel(_ intent: AntigravitySwitchModelIntent) async throws -> AntigravityCommandReply {
         throw AntigravityFailure.denied
     }
 

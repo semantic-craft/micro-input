@@ -538,6 +538,24 @@ extension Store {
                                  binding: "menu-antigravity-query", profile: profile, state: state,
                                  requiresEnabled: false, antigravityCommand: command)
     }
+    @discardableResult func stopAntigravityConversation(_ command: AntigravityQueuedCommand?) -> Bool {
+        guard let command, case .stop = command.operation, let state = routing, let profile = state.profile_id else { return false }
+        return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"antigravity","command":"stop-conversation"}"#,
+                                 binding: "menu-antigravity-stop", profile: profile, state: state,
+                                 requiresEnabled: false, antigravityCommand: command)
+    }
+    @discardableResult func resolveAntigravityInteraction(_ command: AntigravityQueuedCommand?) -> Bool {
+        guard let command, case .resolve = command.operation, let state = routing, let profile = state.profile_id else { return false }
+        return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"antigravity","command":"resolve-interaction"}"#,
+                                 binding: "menu-antigravity-resolve", profile: profile, state: state,
+                                 requiresEnabled: false, antigravityCommand: command)
+    }
+    @discardableResult func switchAntigravityModel(_ command: AntigravityQueuedCommand?) -> Bool {
+        guard let command, case .switchModel = command.operation, let state = routing, let profile = state.profile_id else { return false }
+        return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"antigravity","command":"switch-model"}"#,
+                                 binding: "menu-antigravity-model", profile: profile, state: state,
+                                 requiresEnabled: false, antigravityCommand: command)
+    }
     func openNextT3Attention() {
         guard let state = routing, let profile = state.profile_id else { return }
         enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"t3","command":"next-attention"}"#,

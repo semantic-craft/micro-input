@@ -29,6 +29,9 @@ FORBIDDEN_WIRE_KEYS = {
     "oauthToken",
     "sidecarUiToken",
     "apiKey",
+    "proposedCommandLine",
+    "submittedCommandLine",
+    "questionText",
 }
 
 VALID_PHASES = (
@@ -43,7 +46,42 @@ VALID_PHASES = (
 
 CATALOG_NAV_SCHEMA_VERSION = "antigravity-catalog-nav-v1"
 AGENTAPI_COMMAND_SCHEMA_VERSION = "antigravity-agentapi-v1"
+STOP_COMMAND_SCHEMA_VERSION = "antigravity-stop-v1"
+INTERACTION_COMMAND_SCHEMA_VERSION = "antigravity-interaction-v1"
+MODEL_CONFIG_SCHEMA_VERSION = "antigravity-model-config-v1"
 VALID_DELIVERY_MODES = ("auto", "steer", "queue")
+VALID_INTERACTION_TYPES = (
+    "permission",
+    "runCommand",
+    "filePermission",
+    "question",
+    "approval",
+)
+VALID_INTERACTION_DECISIONS = ("allow", "deny", "answer", "cancel")
+VALID_THINKING_LEVELS = ("minimal", "low", "medium", "high", "modelDefault")
+
+DEFAULT_AVAILABLE_MODELS = [
+    {
+        "modelName": "gemini-2.5-pro",
+        "supportedThinkingLevels": ["low", "medium", "high"],
+    },
+    {
+        "modelName": "gemini-2.5-flash",
+        "supportedThinkingLevels": ["minimal", "low", "medium", "high"],
+    },
+    {
+        "modelName": "gemini-2.5-flash-lite",
+        "supportedThinkingLevels": ["minimal", "low"],
+    },
+    {
+        "modelName": "claude-sonnet-4-5",
+        "supportedThinkingLevels": ["low", "medium", "high"],
+    },
+    {
+        "modelName": "flash",
+        "supportedThinkingLevels": ["minimal", "low", "medium", "high"],
+    },
+]
 
 DEFAULT_CAPABILITIES = {
     "bundleId": "com.google.antigravity",
@@ -58,9 +96,15 @@ DEFAULT_CAPABILITIES = {
     "hookEvents": list(VALID_EVENTS),
     "supportsSessionCatalog": True,
     "supportsTargetFocus": True,
-    "supportsStopTurn": False,
-    "supportsApprovalGate": False,
+    "supportsStopTurn": True,
+    "supportsApprovalGate": True,
+    "supportsModelConfig": True,
     "schemaVerified": True,
+    "stopSchemaVerified": True,
+    "approvalSchemaVerified": True,
+    "modelConfigSchemaVerified": True,
+    "csrfAuthVerified": True,
+    "arbitraryRpcExposed": False,
 }
 
 
@@ -102,6 +146,52 @@ def canonical_event_key(conversation_id, workspace_path, event, prior=None):
     )
 
 
+def sanitize_pending_interaction(raw_pending, default_step=0):
+    if raw_pending is None:
+        return None
+    if not isinstance(raw_pending, dict):
+        raise ValueError("pendingInteraction must be a JSON object")
+    interaction_id = raw_pending.get("interactionId")
+    interaction_type = raw_pending.get("interactionType")
+    if not valid_id(interaction_id, 256) or interaction_type not in VALID_INTERACTION_TYPES:
+        raise ValueError("invalid pendingInteraction fields")
+    step_idx = raw_pending.get("stepIndex")
+    if not (isinstance(step_idx, int) and not isinstance(step_idx, bool) and step_idx >= 0):
+        step_idx = default_step
+    option_ids = []
+    raw_opts = raw_pending.get("optionIds")
+    if isinstance(raw_opts, list):
+        for item in raw_opts:
+            if valid_id(item, 128):
+                option_ids.append(item)
+    return {
+        "interactionId": interaction_id,
+        "interactionType": interaction_type,
+        "stepIndex": step_idx,
+        "optionIds": option_ids,
+    }
+
+
+def sanitize_available_models(raw_models):
+    if not isinstance(raw_models, list) or not raw_models:
+        return [dict(item) for item in DEFAULT_AVAILABLE_MODELS]
+    out = []
+    for item in raw_models:
+        if not isinstance(item, dict):
+            continue
+        model_name = item.get("modelName")
+        levels = item.get("supportedThinkingLevels")
+        if not valid_id(model_name, 256) or not isinstance(levels, list):
+            continue
+        clean_levels = [lvl for lvl in levels if lvl in VALID_THINKING_LEVELS]
+        if clean_levels:
+            out.append({
+                "modelName": model_name,
+                "supportedThinkingLevels": clean_levels,
+            })
+    return out if out else [dict(item) for item in DEFAULT_AVAILABLE_MODELS]
+
+
 def reduce_row(prior, event):
     conversation_id = event["conversationId"]
     workspace_path = event["workspacePath"]
@@ -109,6 +199,16 @@ def reduce_row(prior, event):
     title = event.get("title") or (prior.get("title") if prior else None) or conversation_id
     project_id = event.get("projectId") if isinstance(event.get("projectId"), str) else (prior.get("projectId") if prior else "")
     model_name = event.get("modelName") or (prior["modelName"] if prior else "")
+    thinking_level = (
+        event.get("thinkingLevel")
+        if event.get("thinkingLevel") in VALID_THINKING_LEVELS
+        else (prior.get("thinkingLevel") if prior and prior.get("thinkingLevel") in VALID_THINKING_LEVELS else "high")
+    )
+    available_models = (
+        sanitize_available_models(event.get("availableModels"))
+        if "availableModels" in event
+        else (prior.get("availableModels") if prior and prior.get("availableModels") else [dict(item) for item in DEFAULT_AVAILABLE_MODELS])
+    )
     inv = event.get("invocationNum")
     if not (isinstance(inv, int) and not isinstance(inv, bool)):
         inv = prior["invocationNum"] if prior else 0
@@ -122,12 +222,16 @@ def reduce_row(prior, event):
     has_error = bool(event.get("hasError", False))
     term_reason = event.get("terminationReason")
     fully_idle = event.get("fullyIdle")
+    pending_interaction = prior.get("pendingInteraction") if prior else None
+    if "pendingInteraction" in event:
+        pending_interaction = sanitize_pending_interaction(event.get("pendingInteraction"), default_step=max(0, int(step)))
 
     if event_type == "SessionStart":
         phase = "idle"
         last_tool = None
         term_out = None
         idle_out = True
+        pending_interaction = None
     elif event_type == "PreInvocation":
         phase = "running"
         last_tool = prior["lastToolName"] if prior else None
@@ -143,6 +247,7 @@ def reduce_row(prior, event):
         last_tool = tool_name if isinstance(tool_name, str) and tool_name else (prior["lastToolName"] if prior else None)
         term_out = None
         idle_out = False
+        pending_interaction = None
     elif event_type == "PostInvocation":
         phase = "failed" if has_error else "running"
         last_tool = prior["lastToolName"] if prior else None
@@ -151,6 +256,7 @@ def reduce_row(prior, event):
     elif event_type == "Stop":
         last_tool = prior["lastToolName"] if prior else None
         term_out = term_reason if isinstance(term_reason, str) and term_reason else None
+        pending_interaction = None
         if term_out == "ERROR" or has_error:
             phase = "failed"
             idle_out = bool(fully_idle) if isinstance(fully_idle, bool) else False
@@ -173,6 +279,7 @@ def reduce_row(prior, event):
         "title": title,
         "projectId": project_id,
         "modelName": model_name,
+        "thinkingLevel": thinking_level,
         "phase": phase,
         "lastEventType": event_type,
         "invocationNum": max(0, int(inv)),
@@ -182,6 +289,8 @@ def reduce_row(prior, event):
         "terminationReason": term_out,
         "fullyIdle": idle_out,
         "transitionCount": transitions,
+        "pendingInteraction": pending_interaction,
+        "availableModels": available_models,
     }
 
 
@@ -224,6 +333,8 @@ def sanitize_catalog_entry(raw_entry):
         raw_project = ""
 
     raw_model = raw_entry.get("modelName") if valid_id(raw_entry.get("modelName"), 256) else ""
+    raw_thinking = raw_entry.get("thinkingLevel")
+    thinking_level = raw_thinking if raw_thinking in VALID_THINKING_LEVELS else "high"
     phase = raw_entry.get("phase") if raw_entry.get("phase") in VALID_PHASES else "idle"
     last_event = raw_entry.get("lastEventType") if raw_entry.get("lastEventType") in VALID_EVENTS else "SessionStart"
     fully_idle = raw_entry.get("fullyIdle")
@@ -234,6 +345,9 @@ def sanitize_catalog_entry(raw_entry):
     step = raw_entry.get("stepIdx") if "stepIdx" in raw_entry else raw_entry.get("stepCount")
     exec_num = raw_entry.get("executionNum")
     transitions = raw_entry.get("transitionCount")
+    resolved_step = step if isinstance(step, int) and not isinstance(step, bool) and step >= 0 else 0
+    pending_interaction = sanitize_pending_interaction(raw_entry.get("pendingInteraction"), default_step=resolved_step)
+    available_models = sanitize_available_models(raw_entry.get("availableModels"))
 
     return {
         "conversationId": conversation_id,
@@ -241,15 +355,18 @@ def sanitize_catalog_entry(raw_entry):
         "title": raw_title,
         "projectId": raw_project,
         "modelName": raw_model,
+        "thinkingLevel": thinking_level,
         "phase": phase,
         "lastEventType": last_event,
         "invocationNum": inv if isinstance(inv, int) and not isinstance(inv, bool) and inv >= 0 else 0,
-        "stepIdx": step if isinstance(step, int) and not isinstance(step, bool) and step >= 0 else 0,
+        "stepIdx": resolved_step,
         "executionNum": exec_num if isinstance(exec_num, int) and not isinstance(exec_num, bool) and exec_num >= 0 else 0,
         "lastToolName": raw_entry.get("lastToolName") if valid_id(raw_entry.get("lastToolName"), 256) else None,
         "terminationReason": raw_entry.get("terminationReason") if valid_id(raw_entry.get("terminationReason"), 128) else None,
         "fullyIdle": fully_idle,
         "transitionCount": transitions if isinstance(transitions, int) and not isinstance(transitions, bool) and transitions >= 1 else 1,
+        "pendingInteraction": pending_interaction,
+        "availableModels": available_models,
     }
 
 
@@ -340,10 +457,12 @@ class BridgeDaemon:
         self.heartbeat_ttl = heartbeat_ttl
         self.token = secrets.token_hex(32)
         self.schema_verified = bool(schema_verified)
+        self.stop_schema_verified = bool(schema_verified)
+        self.approval_schema_verified = bool(schema_verified)
+        self.model_config_schema_verified = bool(schema_verified)
+        self.csrf_auth_verified = True
         self.capabilities = dict(DEFAULT_CAPABILITIES)
-        self.capabilities["schemaVerified"] = self.schema_verified
-        self.capabilities["supportsSessionCatalog"] = self.schema_verified
-        self.capabilities["supportsTargetFocus"] = self.schema_verified
+        self.sync_capabilities()
 
         self.subscription_id = None
         self.cursor = 0
@@ -353,6 +472,7 @@ class BridgeDaemon:
         self.changes = []
         self.selected = None
         self.select_override = None
+        self.model_readback_override = None
         self.stream_healthy = True
         self.forced_gap = False
         self.last_heartbeat = time.monotonic()
@@ -361,6 +481,7 @@ class BridgeDaemon:
         self.ingested_events = 0
         self.duplicate_events_dropped = 0
         self.unauthorized_rejections = 0
+        self.arbitrary_rpc_rejections = 0
         self.transcript_reads = 0
         self.token_reads = 0
         self.open_requests = 0
@@ -369,16 +490,43 @@ class BridgeDaemon:
         self.create_confirmed = 0
         self.send_requests = 0
         self.send_confirmed = 0
+        self.stop_requests = 0
+        self.stop_confirmed = 0
+        self.resolve_requests = 0
+        self.resolve_confirmed = 0
+        self.mis_approvals = 0
+        self.switch_model_requests = 0
+        self.switch_model_confirmed = 0
         self.query_requests = 0
         self.duplicate_commands_dropped = 0
         self.created_seq = 0
         self.workspace_projects = {}
         self.command_ledger = {}
+        self.resolved_interactions = {}
         self.in_flight_steer_enabled = False
         self.unknown_next_command = False
         self.timeout_next_command_ms = 0
         self.close_count = 0
         self.running = True
+
+    def sync_capabilities(self):
+        self.capabilities["schemaVerified"] = self.schema_verified
+        self.capabilities["supportsSessionCatalog"] = self.schema_verified
+        self.capabilities["supportsTargetFocus"] = self.schema_verified
+        self.capabilities["stopSchemaVerified"] = self.stop_schema_verified
+        self.capabilities["approvalSchemaVerified"] = self.approval_schema_verified
+        self.capabilities["modelConfigSchemaVerified"] = self.model_config_schema_verified
+        self.capabilities["csrfAuthVerified"] = self.csrf_auth_verified
+        self.capabilities["supportsStopTurn"] = (
+            self.schema_verified and self.stop_schema_verified and self.csrf_auth_verified
+        )
+        self.capabilities["supportsApprovalGate"] = (
+            self.schema_verified and self.approval_schema_verified and self.csrf_auth_verified
+        )
+        self.capabilities["supportsModelConfig"] = (
+            self.schema_verified and self.model_config_schema_verified and self.csrf_auth_verified
+        )
+        self.capabilities["arbitraryRpcExposed"] = False
 
     def is_stream_healthy(self):
         if not self.stream_healthy:
@@ -397,9 +545,10 @@ class BridgeDaemon:
 
     def set_schema_verified(self, verified):
         self.schema_verified = bool(verified)
-        self.capabilities["schemaVerified"] = self.schema_verified
-        self.capabilities["supportsSessionCatalog"] = self.schema_verified
-        self.capabilities["supportsTargetFocus"] = self.schema_verified
+        self.stop_schema_verified = bool(verified)
+        self.approval_schema_verified = bool(verified)
+        self.model_config_schema_verified = bool(verified)
+        self.sync_capabilities()
 
     def seed_catalog_entries(self, raw_entries, initial_selected=None):
         if not isinstance(raw_entries, list):
@@ -490,6 +639,36 @@ class BridgeDaemon:
         reason_code,
     ):
         reply = self.base_reply(req, "unconfirmed")
+        reply.update(
+            commandOp=command_op,
+            requestId=request_id,
+            conversationId=conv_id,
+            workspacePath=ws_path,
+            projectId=project_id,
+            delivery="none",
+            inFlightSteering=False,
+            reasonCode=reason_code,
+            duplicate=False,
+            reconciled=False,
+            cursor=self.cursor,
+            rows=self.sorted_rows(),
+            selected=self.selected_payload(),
+            transcriptReads=self.transcript_reads,
+            tokenReads=self.token_reads,
+        )
+        return reply
+
+    def base_command_noop(
+        self,
+        req,
+        request_id,
+        command_op,
+        conv_id,
+        ws_path,
+        project_id,
+        reason_code,
+    ):
+        reply = self.base_reply(req, "noop")
         reply.update(
             commandOp=command_op,
             requestId=request_id,
@@ -780,12 +959,15 @@ class BridgeDaemon:
             resolved_title = raw_title if valid_id(raw_title, 512) else f"Conversation {self.created_seq}"
             raw_model = intent.get("modelName")
             resolved_model = raw_model if valid_id(raw_model, 256) else "flash"
+            raw_thinking = intent.get("thinkingLevel")
+            resolved_thinking = raw_thinking if raw_thinking in VALID_THINKING_LEVELS else "high"
             row = {
                 "conversationId": conv_id,
                 "workspacePath": ws_path,
                 "title": resolved_title,
                 "projectId": project_id,
                 "modelName": resolved_model,
+                "thinkingLevel": resolved_thinking,
                 "phase": "running",
                 "lastEventType": "PreInvocation",
                 "invocationNum": 1,
@@ -795,6 +977,8 @@ class BridgeDaemon:
                 "terminationReason": None,
                 "fullyIdle": False,
                 "transitionCount": 1,
+                "pendingInteraction": None,
+                "availableModels": [dict(item) for item in DEFAULT_AVAILABLE_MODELS],
             }
             target_key = (conv_id, ws_path)
             self.rows[target_key] = row
@@ -1030,11 +1214,568 @@ class BridgeDaemon:
                 )
             return self.command_reply(req, ledger_entry, duplicate=False, reconciled=False)
 
+        if op == "stop":
+            if self.subscription_id is None or self.subscription_id != sub_id:
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if (
+                not self.schema_verified
+                or not self.stop_schema_verified
+                or not self.csrf_auth_verified
+                or not self.capabilities.get("supportsStopTurn")
+                or req.get("schemaVersion") != STOP_COMMAND_SCHEMA_VERSION
+            ):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if not self.is_stream_healthy():
+                return self.base_reply(req, "stale")
+            intent = req.get("intent")
+            if not isinstance(intent, dict) or contains_forbidden_keys(intent):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            request_id = intent.get("requestId")
+            target = intent.get("target")
+            if not isinstance(target, dict) or contains_forbidden_keys(target):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            conv_id = target.get("conversationId")
+            ws_path = normalize_workspace_uri(target.get("workspacePath"))
+            expected_inv = intent.get("expectedInvocationNum")
+            expected_exec = intent.get("expectedExecutionNum")
+            kill_bg = bool(intent.get("killBackgroundTasks", True))
+            if (
+                not valid_id(request_id, 256)
+                or not valid_id(conv_id, 256)
+                or not valid_id(ws_path, 4096)
+                or ws_path not in self.allowed_workspaces
+                or not (isinstance(expected_inv, int) and not isinstance(expected_inv, bool) and expected_inv >= 0)
+                or (
+                    expected_exec is not None
+                    and not (isinstance(expected_exec, int) and not isinstance(expected_exec, bool) and expected_exec >= 0)
+                )
+            ):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            self.stop_requests += 1
+            self.metadata_reads += 1
+
+            existing = self.command_ledger.get(request_id)
+            if existing is not None:
+                if (
+                    existing["op"] != "stop"
+                    or existing["conversationId"] != conv_id
+                    or existing["workspacePath"] != ws_path
+                ):
+                    return self.base_command_unconfirmed(
+                        req,
+                        request_id=request_id,
+                        command_op="stop",
+                        conv_id=conv_id,
+                        ws_path=ws_path,
+                        project_id="",
+                        reason_code="guard.requestIdConflict",
+                    )
+                self.duplicate_commands_dropped += 1
+                return self.command_reply(req, existing, duplicate=True, reconciled=False)
+
+            target_key = (conv_id, ws_path)
+            if target_key not in self.rows:
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="stop",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id="",
+                    reason_code="guard.targetNotFound",
+                )
+            prior = self.rows[target_key]
+            row_project_id = prior.get("projectId") or ""
+            if self.selected != target_key:
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="stop",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id=row_project_id,
+                    reason_code="guard.selectionMismatch",
+                )
+            if prior["invocationNum"] != expected_inv or (
+                expected_exec is not None and prior["executionNum"] != expected_exec
+            ):
+                return self.base_command_noop(
+                    req,
+                    request_id=request_id,
+                    command_op="stop",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id=row_project_id,
+                    reason_code="guard.stopTargetChanged",
+                )
+            if prior["phase"] not in ("running", "runningTool", "backgroundActive"):
+                return self.base_command_noop(
+                    req,
+                    request_id=request_id,
+                    command_op="stop",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id=row_project_id,
+                    reason_code="guard.alreadyStopped",
+                )
+
+            updated_row = dict(prior)
+            updated_row["phase"] = "canceled"
+            updated_row["lastEventType"] = "Stop"
+            updated_row["terminationReason"] = "USER_CANCELED"
+            updated_row["fullyIdle"] = bool(kill_bg)
+            updated_row["pendingInteraction"] = None
+            updated_row["transitionCount"] = prior["transitionCount"] + 1
+            self.rows[target_key] = updated_row
+            self.cursor += 1
+            ev_key = f"{conv_id}:{ws_path}:stop:{request_id}"
+            self.seen_keys.setdefault(target_key, set()).add(ev_key)
+            self.changes.append({
+                "sequence": self.cursor,
+                "eventKey": ev_key,
+                "row": updated_row,
+            })
+            if len(self.changes) > 1024:
+                self.changes = self.changes[-1024:]
+                self.min_cursor = self.changes[0]["sequence"] - 1
+
+            self.stop_confirmed += 1
+            ledger_entry = {
+                "op": "stop",
+                "requestId": request_id,
+                "status": "stopped",
+                "conversationId": conv_id,
+                "workspacePath": ws_path,
+                "projectId": row_project_id,
+                "delivery": "canceled",
+                "inFlightSteering": False,
+                "reasonCode": "languageServer.cancelCascadeInvocationConfirmed",
+            }
+            self.command_ledger[request_id] = ledger_entry
+            self.last_heartbeat = time.monotonic()
+            if self.timeout_next_command_ms > 0:
+                sleep_s = self.timeout_next_command_ms / 1000.0
+                self.timeout_next_command_ms = 0
+                self.unknown_next_command = False
+                time.sleep(sleep_s)
+            elif self.unknown_next_command:
+                self.unknown_next_command = False
+                return self.command_reply(
+                    req,
+                    ledger_entry,
+                    status_override="unknown",
+                    reason_override="bridge.deliveryUnconfirmed",
+                    duplicate=False,
+                    reconciled=False,
+                )
+            return self.command_reply(req, ledger_entry, duplicate=False, reconciled=False)
+
+        if op == "resolve":
+            if self.subscription_id is None or self.subscription_id != sub_id:
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if (
+                not self.schema_verified
+                or not self.approval_schema_verified
+                or not self.csrf_auth_verified
+                or not self.capabilities.get("supportsApprovalGate")
+                or req.get("schemaVersion") != INTERACTION_COMMAND_SCHEMA_VERSION
+            ):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if not self.is_stream_healthy():
+                return self.base_reply(req, "stale")
+            intent = req.get("intent")
+            if not isinstance(intent, dict) or contains_forbidden_keys(intent):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            request_id = intent.get("requestId")
+            target = intent.get("target")
+            if not isinstance(target, dict) or contains_forbidden_keys(target):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            conv_id = target.get("conversationId")
+            ws_path = normalize_workspace_uri(target.get("workspacePath"))
+            interaction_id = intent.get("interactionId")
+            interaction_type = intent.get("interactionType")
+            decision = intent.get("decision")
+            raw_selected_opts = intent.get("selectedOptionIds") or []
+            if (
+                not valid_id(request_id, 256)
+                or not valid_id(conv_id, 256)
+                or not valid_id(ws_path, 4096)
+                or ws_path not in self.allowed_workspaces
+                or not valid_id(interaction_id, 256)
+                or interaction_type not in VALID_INTERACTION_TYPES
+                or decision not in VALID_INTERACTION_DECISIONS
+                or not isinstance(raw_selected_opts, list)
+                or any(not valid_id(opt, 128) for opt in raw_selected_opts)
+            ):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            self.resolve_requests += 1
+            self.metadata_reads += 1
+
+            existing = self.command_ledger.get(request_id)
+            if existing is not None:
+                if (
+                    existing["op"] != "resolve"
+                    or existing["conversationId"] != conv_id
+                    or existing["workspacePath"] != ws_path
+                    or existing.get("interactionId") != interaction_id
+                ):
+                    return self.base_command_unconfirmed(
+                        req,
+                        request_id=request_id,
+                        command_op="resolve",
+                        conv_id=conv_id,
+                        ws_path=ws_path,
+                        project_id="",
+                        reason_code="guard.requestIdConflict",
+                    )
+                self.duplicate_commands_dropped += 1
+                return self.command_reply(req, existing, duplicate=True, reconciled=False)
+
+            target_key = (conv_id, ws_path)
+            if target_key not in self.rows:
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="resolve",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id="",
+                    reason_code="guard.targetNotFound",
+                )
+            prior = self.rows[target_key]
+            row_project_id = prior.get("projectId") or ""
+            if self.selected != target_key:
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="resolve",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id=row_project_id,
+                    reason_code="guard.selectionMismatch",
+                )
+
+            pending = prior.get("pendingInteraction")
+            if interaction_type == "question" and decision in ("allow", "deny"):
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="resolve",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id=row_project_id,
+                    reason_code="guard.questionCannotApproveAsPermission",
+                )
+            if pending is not None and pending.get("interactionType") == "question":
+                if interaction_type != "question" or decision in ("allow", "deny"):
+                    return self.base_command_unconfirmed(
+                        req,
+                        request_id=request_id,
+                        command_op="resolve",
+                        conv_id=conv_id,
+                        ws_path=ws_path,
+                        project_id=row_project_id,
+                        reason_code="guard.questionCannotApproveAsPermission",
+                    )
+
+            resolved_set = self.resolved_interactions.setdefault(target_key, set())
+            if pending is None or pending.get("interactionId") != interaction_id:
+                reason = (
+                    "guard.interactionAlreadyResolved"
+                    if interaction_id in resolved_set
+                    else "guard.noMatchingPendingInteraction"
+                )
+                return self.base_command_noop(
+                    req,
+                    request_id=request_id,
+                    command_op="resolve",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id=row_project_id,
+                    reason_code=reason,
+                )
+            if pending.get("interactionType") != interaction_type:
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="resolve",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id=row_project_id,
+                    reason_code="guard.interactionTypeMismatch",
+                )
+            if interaction_type != "question" and decision not in ("allow", "deny"):
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="resolve",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id=row_project_id,
+                    reason_code="guard.invalidInteractionDecision",
+                )
+            if interaction_type == "question" and decision == "answer":
+                allowed_opts = pending.get("optionIds") or []
+                if not raw_selected_opts or (allowed_opts and any(opt not in allowed_opts for opt in raw_selected_opts)):
+                    return self.base_command_unconfirmed(
+                        req,
+                        request_id=request_id,
+                        command_op="resolve",
+                        conv_id=conv_id,
+                        ws_path=ws_path,
+                        project_id=row_project_id,
+                        reason_code="guard.invalidQuestionOption",
+                    )
+
+            resolved_set.add(interaction_id)
+            updated_row = dict(prior)
+            updated_row["pendingInteraction"] = None
+            updated_row["stepIdx"] = prior["stepIdx"] + 1
+            updated_row["transitionCount"] = prior["transitionCount"] + 1
+            if decision in ("allow", "answer"):
+                updated_row["phase"] = "running"
+                updated_row["lastEventType"] = "PostToolUse"
+                updated_row["fullyIdle"] = False
+            else:
+                updated_row["phase"] = "running"
+                updated_row["lastEventType"] = "PostToolUse"
+                updated_row["fullyIdle"] = False
+            self.rows[target_key] = updated_row
+            self.cursor += 1
+            ev_key = f"{conv_id}:{ws_path}:resolve:{request_id}"
+            self.seen_keys.setdefault(target_key, set()).add(ev_key)
+            self.changes.append({
+                "sequence": self.cursor,
+                "eventKey": ev_key,
+                "row": updated_row,
+            })
+            if len(self.changes) > 1024:
+                self.changes = self.changes[-1024:]
+                self.min_cursor = self.changes[0]["sequence"] - 1
+
+            self.resolve_confirmed += 1
+            ledger_entry = {
+                "op": "resolve",
+                "requestId": request_id,
+                "interactionId": interaction_id,
+                "status": "resolved",
+                "conversationId": conv_id,
+                "workspacePath": ws_path,
+                "projectId": row_project_id,
+                "delivery": decision,
+                "inFlightSteering": False,
+                "reasonCode": "languageServer.handleCascadeUserInteractionConfirmed",
+            }
+            self.command_ledger[request_id] = ledger_entry
+            self.last_heartbeat = time.monotonic()
+            if self.timeout_next_command_ms > 0:
+                sleep_s = self.timeout_next_command_ms / 1000.0
+                self.timeout_next_command_ms = 0
+                self.unknown_next_command = False
+                time.sleep(sleep_s)
+            elif self.unknown_next_command:
+                self.unknown_next_command = False
+                return self.command_reply(
+                    req,
+                    ledger_entry,
+                    status_override="unknown",
+                    reason_override="bridge.deliveryUnconfirmed",
+                    duplicate=False,
+                    reconciled=False,
+                )
+            return self.command_reply(req, ledger_entry, duplicate=False, reconciled=False)
+
+        if op == "switch-model":
+            if self.subscription_id is None or self.subscription_id != sub_id:
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if (
+                not self.schema_verified
+                or not self.model_config_schema_verified
+                or not self.csrf_auth_verified
+                or not self.capabilities.get("supportsModelConfig")
+                or req.get("schemaVersion") != MODEL_CONFIG_SCHEMA_VERSION
+            ):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if not self.is_stream_healthy():
+                return self.base_reply(req, "stale")
+            intent = req.get("intent")
+            if not isinstance(intent, dict) or contains_forbidden_keys(intent):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            request_id = intent.get("requestId")
+            target = intent.get("target")
+            if not isinstance(target, dict) or contains_forbidden_keys(target):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            conv_id = target.get("conversationId")
+            ws_path = normalize_workspace_uri(target.get("workspacePath"))
+            model_name = intent.get("modelName")
+            thinking_level = intent.get("thinkingLevel")
+            if (
+                not valid_id(request_id, 256)
+                or not valid_id(conv_id, 256)
+                or not valid_id(ws_path, 4096)
+                or ws_path not in self.allowed_workspaces
+                or not valid_id(model_name, 256)
+                or thinking_level not in VALID_THINKING_LEVELS
+            ):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            self.switch_model_requests += 1
+            self.metadata_reads += 1
+
+            existing = self.command_ledger.get(request_id)
+            if existing is not None:
+                if (
+                    existing["op"] != "switch-model"
+                    or existing["conversationId"] != conv_id
+                    or existing["workspacePath"] != ws_path
+                ):
+                    return self.base_command_unconfirmed(
+                        req,
+                        request_id=request_id,
+                        command_op="switch-model",
+                        conv_id=conv_id,
+                        ws_path=ws_path,
+                        project_id="",
+                        reason_code="guard.requestIdConflict",
+                    )
+                self.duplicate_commands_dropped += 1
+                return self.command_reply(req, existing, duplicate=True, reconciled=False)
+
+            target_key = (conv_id, ws_path)
+            if target_key not in self.rows:
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="switch-model",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id="",
+                    reason_code="guard.targetNotFound",
+                )
+            prior = self.rows[target_key]
+            row_project_id = prior.get("projectId") or ""
+            if self.selected != target_key:
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="switch-model",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id=row_project_id,
+                    reason_code="guard.selectionMismatch",
+                )
+
+            models = prior.get("availableModels") or DEFAULT_AVAILABLE_MODELS
+            matched_model = next((m for m in models if m.get("modelName") == model_name), None)
+            if matched_model is None:
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="switch-model",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id=row_project_id,
+                    reason_code="guard.unsupportedModel",
+                )
+            supported_levels = matched_model.get("supportedThinkingLevels") or []
+            if thinking_level not in supported_levels:
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="switch-model",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id=row_project_id,
+                    reason_code="guard.unsupportedThinkingLevel",
+                )
+
+            readback_model = model_name
+            readback_thinking = thinking_level
+            if isinstance(self.model_readback_override, dict):
+                readback_model = self.model_readback_override.get("modelName", model_name)
+                readback_thinking = self.model_readback_override.get("thinkingLevel", thinking_level)
+
+            updated_row = dict(prior)
+            updated_row["modelName"] = readback_model
+            updated_row["thinkingLevel"] = readback_thinking
+            updated_row["transitionCount"] = prior["transitionCount"] + 1
+            self.rows[target_key] = updated_row
+            self.cursor += 1
+            ev_key = f"{conv_id}:{ws_path}:switch-model:{request_id}"
+            self.seen_keys.setdefault(target_key, set()).add(ev_key)
+            self.changes.append({
+                "sequence": self.cursor,
+                "eventKey": ev_key,
+                "row": updated_row,
+            })
+            if len(self.changes) > 1024:
+                self.changes = self.changes[-1024:]
+                self.min_cursor = self.changes[0]["sequence"] - 1
+
+            if readback_model == model_name and readback_thinking == thinking_level:
+                self.switch_model_confirmed += 1
+                status = "modelSwitched"
+                delivery = "modelSwitched"
+                reason_code = "languageServer.cascadeModelConfigConfirmed"
+            else:
+                status = "unconfirmed"
+                delivery = "none"
+                reason_code = "guard.modelReadbackMismatch"
+
+            ledger_entry = {
+                "op": "switch-model",
+                "requestId": request_id,
+                "status": status,
+                "conversationId": conv_id,
+                "workspacePath": ws_path,
+                "projectId": row_project_id,
+                "delivery": delivery,
+                "inFlightSteering": False,
+                "reasonCode": reason_code,
+            }
+            self.command_ledger[request_id] = ledger_entry
+            self.last_heartbeat = time.monotonic()
+            if self.timeout_next_command_ms > 0:
+                sleep_s = self.timeout_next_command_ms / 1000.0
+                self.timeout_next_command_ms = 0
+                self.unknown_next_command = False
+                time.sleep(sleep_s)
+            elif self.unknown_next_command:
+                self.unknown_next_command = False
+                return self.command_reply(
+                    req,
+                    ledger_entry,
+                    status_override="unknown",
+                    reason_override="bridge.deliveryUnconfirmed",
+                    duplicate=False,
+                    reconciled=False,
+                )
+            return self.command_reply(req, ledger_entry, duplicate=False, reconciled=False)
+
         if op == "query":
             if self.subscription_id is None or self.subscription_id != sub_id:
                 self.unauthorized_rejections += 1
                 return self.base_reply(req, "denied")
-            if not self.schema_verified or req.get("schemaVersion") != AGENTAPI_COMMAND_SCHEMA_VERSION:
+            if not self.schema_verified or req.get("schemaVersion") not in (
+                AGENTAPI_COMMAND_SCHEMA_VERSION,
+                STOP_COMMAND_SCHEMA_VERSION,
+                INTERACTION_COMMAND_SCHEMA_VERSION,
+                MODEL_CONFIG_SCHEMA_VERSION,
+            ):
                 self.unauthorized_rejections += 1
                 return self.base_reply(req, "denied")
             if not self.is_stream_healthy():
@@ -1071,7 +1812,10 @@ class BridgeDaemon:
             return self.base_reply(req, "ok")
 
         self.unauthorized_rejections += 1
-        return self.base_reply(req, "denied")
+        self.arbitrary_rpc_rejections += 1
+        reply = self.base_reply(req, "denied")
+        reply["reasonCode"] = "error.unsupportedOperation"
+        return reply
 
     def handle_control_request(self, req):
         op = req.get("op") if isinstance(req, dict) else None
@@ -1082,6 +1826,7 @@ class BridgeDaemon:
                 "ingestedEvents": self.ingested_events,
                 "duplicateEventsDropped": self.duplicate_events_dropped,
                 "unauthorizedRejections": self.unauthorized_rejections,
+                "arbitraryRpcRejections": self.arbitrary_rpc_rejections,
                 "transcriptReads": self.transcript_reads,
                 "tokenReads": self.token_reads,
                 "openRequests": self.open_requests,
@@ -1090,17 +1835,101 @@ class BridgeDaemon:
                 "createConfirmed": self.create_confirmed,
                 "sendRequests": self.send_requests,
                 "sendConfirmed": self.send_confirmed,
+                "stopRequests": self.stop_requests,
+                "stopConfirmed": self.stop_confirmed,
+                "resolveRequests": self.resolve_requests,
+                "resolveConfirmed": self.resolve_confirmed,
+                "misApprovals": self.mis_approvals,
+                "switchModelRequests": self.switch_model_requests,
+                "switchModelConfirmed": self.switch_model_confirmed,
                 "queryRequests": self.query_requests,
                 "duplicateCommandsDropped": self.duplicate_commands_dropped,
                 "inFlightSteerEnabled": self.in_flight_steer_enabled,
                 "selected": self.selected_payload(),
                 "schemaVerified": self.schema_verified,
+                "stopSchemaVerified": self.stop_schema_verified,
+                "approvalSchemaVerified": self.approval_schema_verified,
+                "modelConfigSchemaVerified": self.model_config_schema_verified,
+                "csrfAuthVerified": self.csrf_auth_verified,
                 "closeCount": self.close_count,
                 "cursor": self.cursor,
                 "sessionCount": len(self.rows),
                 "streamHealthy": self.is_stream_healthy(),
                 "generation": self.generation,
             }
+        if op == "set-pending-interaction":
+            conv_id = req.get("conversationId")
+            ws_path = normalize_workspace_uri(req.get("workspacePath"))
+            key = (conv_id, ws_path)
+            if key not in self.rows:
+                return {"status": "error", "message": "session not found"}
+            try:
+                pending = sanitize_pending_interaction(
+                    req.get("pendingInteraction"),
+                    default_step=self.rows[key]["stepIdx"],
+                )
+            except Exception as exc:
+                return {"status": "error", "message": str(exc)}
+            updated = dict(self.rows[key])
+            updated["pendingInteraction"] = pending
+            if pending is not None and updated["phase"] == "idle":
+                updated["phase"] = "runningTool"
+                updated["fullyIdle"] = False
+            updated["transitionCount"] = updated["transitionCount"] + 1
+            self.rows[key] = updated
+            self.cursor += 1
+            ev_key = f"{conv_id}:{ws_path}:pending:{self.cursor}"
+            self.seen_keys.setdefault(key, set()).add(ev_key)
+            self.changes.append({
+                "sequence": self.cursor,
+                "eventKey": ev_key,
+                "row": updated,
+            })
+            return {"status": "ok", "cursor": self.cursor, "pendingInteraction": pending}
+        if op == "expire-pending-interaction":
+            conv_id = req.get("conversationId")
+            ws_path = normalize_workspace_uri(req.get("workspacePath"))
+            key = (conv_id, ws_path)
+            if key not in self.rows:
+                return {"status": "error", "message": "session not found"}
+            prior = self.rows[key]
+            pending = prior.get("pendingInteraction")
+            expired_id = req.get("interactionId") or (pending.get("interactionId") if isinstance(pending, dict) else None)
+            if valid_id(expired_id, 256):
+                self.resolved_interactions.setdefault(key, set()).add(expired_id)
+            updated = dict(prior)
+            updated["pendingInteraction"] = None
+            updated["transitionCount"] = prior["transitionCount"] + 1
+            self.rows[key] = updated
+            self.cursor += 1
+            ev_key = f"{conv_id}:{ws_path}:expire-pending:{self.cursor}"
+            self.seen_keys.setdefault(key, set()).add(ev_key)
+            self.changes.append({
+                "sequence": self.cursor,
+                "eventKey": ev_key,
+                "row": updated,
+            })
+            return {"status": "ok", "cursor": self.cursor, "expiredInteractionId": expired_id}
+        if op == "set-l3-schema":
+            if "stop" in req:
+                self.stop_schema_verified = bool(req["stop"])
+            if "approval" in req:
+                self.approval_schema_verified = bool(req["approval"])
+            if "modelConfig" in req:
+                self.model_config_schema_verified = bool(req["modelConfig"])
+            self.sync_capabilities()
+            return {"status": "ok", "capabilities": dict(self.capabilities)}
+        if op == "set-csrf-auth":
+            self.csrf_auth_verified = bool(req.get("verified", True))
+            self.sync_capabilities()
+            return {"status": "ok", "csrfAuthVerified": self.csrf_auth_verified, "capabilities": dict(self.capabilities)}
+        if op == "set-model-readback-override":
+            override = req.get("override")
+            self.model_readback_override = dict(override) if isinstance(override, dict) else None
+            return {"status": "ok", "modelReadbackOverride": self.model_readback_override}
+        if op == "clear-model-readback-override":
+            self.model_readback_override = None
+            return {"status": "ok", "modelReadbackOverride": None}
         if op == "unknown-next-command":
             self.unknown_next_command = bool(req.get("enabled", True))
             return {"status": "ok", "unknownNextCommand": self.unknown_next_command}

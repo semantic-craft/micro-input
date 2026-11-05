@@ -119,10 +119,11 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Depends on**: K2。责任票 #32。
 - **Evidence**: .scratch/qa-runs/1793881371629-18575/evidence/result.json
 
-### [ ] Slice L3: 补 Antigravity 请求与模型控制缺口
+### [x] Slice L3: 补 Antigravity 请求与模型控制缺口
 - **Outcome**: 逐能力用 REA 核实停止、审批、模型/思考入口，按能力分 PR；语音归 O1。
 - **Done Predicate**: 每条候选都取得 schema、合法鉴权和两个测试会话结果；字符串存在不算完成；升级/认证失效关闭；不开放任意 RPC。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: I2、K3。责任票 #83。
+- **Evidence**: .scratch/qa-runs/1793888574124-27851/evidence/result.json
 
 ### [ ] Slice M: 补 Cindy 原生任务动作缺口
 - **Outcome**: 复用原生服务补准确停止、请求绑定、目标 Prompt/steering 及工作区/待办动作。
