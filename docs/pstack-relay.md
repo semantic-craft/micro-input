@@ -70,10 +70,12 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Evidence**: .scratch/qa-runs/1793841784754-43891/evidence/result.json
 - **Verification scope**: 软件片通过全量离线门禁及七个隔离应用场景；固定 rc.5 原生源码契约、类型、lint 和 191 项测试通过。真实 UDS Swift 双端确认两个目标、四次待回应变化、零未授权读取及关闭后 Host 存活；最新 Swift 回归在合成和生产 ABI 各 13 项通过。配对导航端口为合成选择，真实 UI store 另有源码测试。日常 DSH 补丁安装、完整 Electron 窗口和实体均为 NOT_RUN；冷目录发现未实现。见 [DSH 桥](../integrations/dsh/README.md)。
 
-### [ ] Slice I: 验证 Antigravity 官方桌面扩展与状态事件
+### [x] Slice I: 验证 Antigravity 官方桌面扩展与状态事件
 - **Outcome**: 只读确认安装版 agentapi/Sidecars/Hooks 契约，再在隔离测试工作区接元数据事件。
 - **Done Predicate**: 记录版本及能力；两会话事件不串、重复事件去重、断流标 stale；Stop fullyIdle=false 不报完成；不读 transcriptPath。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: 无。责任票 #83。
+- **Evidence**: .scratch/qa-runs/1793851247890-30095/evidence/result.json
+- **Verification scope**: 软件片通过全量离线门禁及八个隔离应用场景；安装版 2.29.0（language_server CL 1013060670）只读静态核对、7 项合成/生产双 ABI Swift 单元测试及真实 UDS 双端联测（.scratch/ag-07a1bcc7/result.json）通过。验证两会话隔离、重复事件去重、Stop(fullyIdle=false) 归入 backgroundActive、断流/心跳超时/换代标 stale、0000 权限金丝雀 transcriptPath 零读取。安装版桌面 GUI、既有会话目录与实体按键均为 NOT_RUN。见 [Antigravity 状态桥](../integrations/antigravity/README.md)。
 
 ### [ ] Slice I2: 核验 Antigravity 既有会话目录与精确导航
 - **Outcome**: 先用官方可用入口，缺少时用 REA 验证会话元数据、工作区与聚焦协议，仅限只读和测试导航。

@@ -9,9 +9,9 @@ import MicroInputCore
         PerformanceProbe.start()
         let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
         #if MI_SYNTHETIC_BACKEND
-        let core = scenario == "radial-menu" ? MicroInput.syntheticRadialDevice() : ["config-write", "lighting-control"].contains(scenario) ? MicroInput.syntheticConfigWriter() : ["reconnect", "reconnect-transient", "apply-preparation", "host-execution", "zcode-navigation", "dsh-navigation", "native-ownership", "diagnostic-export", "push-to-talk", "push-to-talk-live"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
+        let core = scenario == "radial-menu" ? MicroInput.syntheticRadialDevice() : ["config-write", "lighting-control"].contains(scenario) ? MicroInput.syntheticConfigWriter() : ["reconnect", "reconnect-transient", "apply-preparation", "host-execution", "zcode-navigation", "dsh-navigation", "antigravity-status", "native-ownership", "diagnostic-export", "push-to-talk", "push-to-talk-live"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()
         let ownership = scenario == "native-ownership" ? NativeOwnershipController(transport: nil) : NativeOwnershipController(isolated: true)
-        let store = Store(nativeOwnership: ownership, backend: core, actionExecutor: ["native-ownership", "zcode-navigation", "dsh-navigation"].contains(scenario) ? RecordingHostActionExecutor() : nil, zcodeSessions: scenario == "zcode-navigation" ? ZCodeSessionController(client: ZCodeNavigationFixture.shared, pollNanoseconds: 60_000_000_000) : nil, dshSessions: scenario == "dsh-navigation" ? DSHSessionController(client: DSHNavigationFixture.shared, pollNanoseconds: 60_000_000_000) : nil)
+        let store = Store(nativeOwnership: ownership, backend: core, actionExecutor: ["native-ownership", "zcode-navigation", "dsh-navigation", "antigravity-status"].contains(scenario) ? RecordingHostActionExecutor() : nil, zcodeSessions: scenario == "zcode-navigation" ? ZCodeSessionController(client: ZCodeNavigationFixture.shared, pollNanoseconds: 60_000_000_000) : nil, dshSessions: scenario == "dsh-navigation" ? DSHSessionController(client: DSHNavigationFixture.shared, pollNanoseconds: 60_000_000_000) : nil, antigravityStatus: scenario == "antigravity-status" ? AntigravityStatusController(client: AntigravityStatusFixture.shared, pollNanoseconds: 60_000_000_000) : nil)
         #else
         let core = MicroInput()
         let store = Store(backend: core)
@@ -259,6 +259,7 @@ struct StatusPanel: View {
             if store.radialMenu.enabled { Text(store.radialReadiness.label).font(.caption2).foregroundStyle(.secondary) }
             ZCodeSessionPanel(controller: store.zcodeSessions, open: { store.openZCodeSession($0) })
             DSHSessionPanel(controller: store.dshSessions, open: { store.openDSHSession($0) })
+            AntigravityStatusPanel(controller: store.antigravityStatus)
             T3AttentionPanel(controller: store.t3Attention, next: { store.openNextT3Attention() })
             Divider()
             Toggle("自动跟随前台应用", isOn: Binding(get: { store.routing?.auto_follow_enabled ?? false }, set: { value in Task { await store.setAutoFollow(value) } })).toggleStyle(.switch).controlSize(.small)
@@ -423,6 +424,34 @@ struct DSHSessionPanel: View {
                 }
                 if let result = controller.lastResult {
                     Text(result.label).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+}
+
+struct AntigravityStatusPanel: View {
+    @ObservedObject var controller: AntigravityStatusController
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Antigravity 状态连接", isOn: Binding(get: { controller.enabled }, set: controller.setEnabled))
+                .toggleStyle(.switch).controlSize(.small)
+            Text(controller.state.label).font(.caption).foregroundStyle(.secondary)
+            if controller.enabled {
+                if case .unavailable = controller.state {
+                    Button("重连") { controller.setEnabled(true) }.font(.caption)
+                }
+                if let caps = controller.capabilities {
+                    Text("版本 \(caps.installedVersion) · CL \(caps.languageServerCl)")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                ForEach(controller.rows) { row in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(row.conversationId).lineLimit(1)
+                        Text(row.workspacePath).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(row.statusLabel).font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
             }
         }

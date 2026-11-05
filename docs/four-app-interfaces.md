@@ -36,6 +36,8 @@ REA 对上述安装包作静态部分分析：`dist/languageServer.js:startLangu
 
 本地证据为 `.scratch/four-app-control/antigravity/rea-evidence.json`，parent Evidence `ev_3120193348899ade4fa5dca5cc986cd6a08051c5c00e36c57ed13b268bf459b9` 与 `ev_14b4cad671897cd858021eb13e2d0725c520eb7c23d6d6efdc3feb0a659d1e37`。原始包内容不提交。推荐官方 Sidecar/Hooks 优先，REA 只针对剩余元数据、导航与请求控制，不扩成任意 RPC 代理。
 
+Slice I 已由 `scripts/verify-antigravity-installed-static` 在只读模式下核对安装版 `/Applications/Antigravity.app`（`2.29.0`，`language_server` `Built at CL: 1013060670`）、`agentapi --help`（仅暴露 `get-conversation-metadata`、`new-conversation`、`send-message`）与 `sidecar_sdk` `1.0.0`（绑定 `127.0.0.1`，要求 `ANTIGRAVITY_LS_ADDRESS`、`ANTIGRAVITY_CSRF_TOKEN`、`ANTIGRAVITY_SIDECAR_WEB_PORT` 与 `X-Sidecar-Token`），并在隔离测试工作区经 [Antigravity 状态桥](../integrations/antigravity/README.md) 与 `scripts/verify-antigravity-paired` 验证六个官方 Lifecycle Hooks 元数据事件：两会话按键 `(conversationId, workspacePath)` 隔离、重复事件按标准键去重、`Stop` `fullyIdle=false` 归入 `backgroundActive` 绝不报 `completed`、断流或换代标 `stale`、全程剥离且零次读取 `transcriptPath`。精确会话导航与审批/停止控制归入后续 Slice I2 / K3 / L3。
+
 ## ZCode
 
 官方仓库 [zai-org/ZCode](https://github.com/zai-org/ZCode/tree/a9fe401eede6e6e5e01be9048679c206fe6f02d9)，SHA `a9fe401eede6e6e5e01be9048679c206fe6f02d9`，Apache-2.0。本机 `dev.zcode.app`，版本 `3.17.2`、build `3.17.2.9661`；公开源码版本同为 3.17.2，但不证明逐字对应。

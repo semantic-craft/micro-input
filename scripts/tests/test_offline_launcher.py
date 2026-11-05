@@ -129,3 +129,51 @@ class OfflineEvidenceTests(unittest.TestCase):
         path.write_text(json.dumps(payload))
         audit.write_text(json.dumps(dict(action_type="dsh_open", outcome="delivered", target="dsh")))
         with self.assertRaises(ValueError): module.verify_evidence(self.run, "dsh-navigation", 99, lambda _: False)
+
+    def test_antigravity_status_requires_all_checks_and_zero_transcript_reads(self):
+        names = [
+            "version_and_capabilities_recorded",
+            "disabled_zero_reads",
+            "two_sessions_isolated",
+            "duplicate_events_deduplicated",
+            "stop_fully_idle_false_not_completed",
+            "stop_fully_idle_true_completed",
+            "stream_disconnect_marks_stale",
+            "generation_change_marks_stale",
+            "journal_gap_marks_unavailable",
+            "zero_transcript_reads",
+            "bridge_subscription_closed",
+        ]
+        payload = dict(
+            status="PASS",
+            installed_version="2.29.0",
+            language_server_cl="1013060670",
+            transcript_reads=0,
+            checks=dict.fromkeys(names, True),
+            native_app="NOT_RUN",
+            physical_key="NOT_RUN",
+        )
+        path = self.evidence / "antigravity-status.json"
+        path.write_text(json.dumps(payload))
+        verified = module.verify_evidence(self.run, "antigravity-status", 99, lambda _: False)
+        self.assertEqual(verified["antigravity_status"], "SYNTHETIC_PASS")
+        self.assertEqual(verified["transcript_reads"], 0)
+        for name in names:
+            payload["checks"][name] = False
+            path.write_text(json.dumps(payload))
+            with self.assertRaises(ValueError):
+                module.verify_evidence(self.run, "antigravity-status", 99, lambda _: False)
+            payload["checks"][name] = True
+        for field, wrong in [
+            ("installed_version", "2.28.0"),
+            ("language_server_cl", "0"),
+            ("transcript_reads", 1),
+            ("native_app", "PASS"),
+            ("physical_key", "PASS"),
+        ]:
+            prior = payload[field]
+            payload[field] = wrong
+            path.write_text(json.dumps(payload))
+            with self.assertRaises(ValueError):
+                module.verify_evidence(self.run, "antigravity-status", 99, lambda _: False)
+            payload[field] = prior
