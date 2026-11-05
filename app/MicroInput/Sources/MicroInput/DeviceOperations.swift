@@ -52,7 +52,7 @@ extension Store {
     }
 
     @discardableResult
-    func executeHostAction(actionJSON: String, bindingId: String, profileId: String, t3Selection: T3Selection? = nil, zcodeSelection: ZCodeSelection? = nil, dshSelection: DSHSelection? = nil, cindySelection: CindySelection? = nil, antigravitySelection: AntigravitySelection? = nil, stillAdmitted: (() -> Bool)? = nil) async -> HostActionReceipt? {
+    func executeHostAction(actionJSON: String, bindingId: String, profileId: String, t3Selection: T3Selection? = nil, zcodeSelection: ZCodeSelection? = nil, zcodeCommand: ZCodeQueuedCommand? = nil, dshSelection: DSHSelection? = nil, cindySelection: CindySelection? = nil, antigravitySelection: AntigravitySelection? = nil, stillAdmitted: (() -> Bool)? = nil) async -> HostActionReceipt? {
         guard nativeOwnership.allowsExecution, !hostOperationPaused, let lease = try? backend.beginHostExecution() else { return nil }
         let epoch = hostRouteEpoch
         inFlightHostActions += 1
@@ -105,6 +105,24 @@ extension Store {
             })
             receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
                 bindingId: bindingId, actionType: "zcode_open", target: "zcode", textByteLen: nil,
+                outcome: result.rawValue, detail: result.label)
+            AuditLogWriter.append(receipt)
+        } else if payload?.action_type == "agent_command", payload?.adapter == "zcode",
+                  let cmd = payload?.command,
+                  ["create-session", "send-text", "stop-session", "query-command"].contains(cmd) {
+            let result = await zcodeSessions.execute(zcodeCommand, admitted: { [weak self] in
+                guard let self else { return false }
+                return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
+            })
+            let actionType: String
+            switch cmd {
+            case "create-session": actionType = "zcode_create"
+            case "send-text": actionType = "zcode_send"
+            case "stop-session": actionType = "zcode_stop"
+            default: actionType = "zcode_query"
+            }
+            receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
+                bindingId: bindingId, actionType: actionType, target: "zcode", textByteLen: nil,
                 outcome: result.rawValue, detail: result.label)
             AuditLogWriter.append(receipt)
         } else if payload?.action_type == "agent_command", payload?.adapter == "dsh-desktop", payload?.command == "open-session" {
