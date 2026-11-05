@@ -143,12 +143,110 @@ final class ZCodePairedTests: XCTestCase {
         ))
         XCTAssertEqual(queriedReply.status, .confirmed)
         XCTAssertTrue(queriedReply.duplicate)
+
+        // 9. Slice L1: Interaction resolution & switchModelConfig over real Unix socket
+        let createdSelection = ZCodeSelection(
+            address: try XCTUnwrap(createdReply.selected),
+            instanceId: snapshot.instanceId,
+            generation: snapshot.generation,
+            localEpoch: 1
+        )
+        if let controlPath = ProcessInfo.processInfo.environment["MI_ZCODE_PAIRED_CONTROL"] {
+            let controlPayload: [String: Any] = [
+                "op": "set-task-state",
+                "workspacePath": createdSelection.address.workspacePath,
+                "taskId": createdSelection.address.taskId,
+                "liveStatus": "waiting",
+                "pendingInteraction": [
+                    "interactionId": "paired-q-1",
+                    "interactionType": "question",
+                    "toolName": "AskUserQuestion",
+                    "options": ["Option A", "Option B"]
+                ]
+            ]
+            let controlData = try JSONSerialization.data(withJSONObject: controlPayload)
+            _ = try await UnixNativeOwnershipTransport(path: controlPath).exchangeJSON(controlData)
+        }
+        let misapproveQuestion = try await client.resolve(ZCodeResolveIntent(
+            selection: createdSelection,
+            commandId: "paired-cmd-misapprove-q",
+            clientId: "paired-swift",
+            interactionId: "paired-q-1",
+            interactionType: .permission,
+            decision: .approve
+        ))
+        XCTAssertEqual(misapproveQuestion.status, .interactionTypeMismatch)
+        XCTAssertEqual(misapproveQuestion.reasonCode, "guard.questionCannotApproveAsPermission")
+
+        let answerQuestion = try await client.resolve(ZCodeResolveIntent(
+            selection: createdSelection,
+            commandId: "paired-cmd-answer-q",
+            clientId: "paired-swift",
+            interactionId: "paired-q-1",
+            interactionType: .question,
+            decision: .accept,
+            optionId: "Option A"
+        ))
+        XCTAssertEqual(answerQuestion.status, .resolved)
+
+        let dupQuestion = try await client.resolve(ZCodeResolveIntent(
+            selection: createdSelection,
+            commandId: "paired-cmd-answer-q",
+            clientId: "paired-swift",
+            interactionId: "paired-q-1",
+            interactionType: .question,
+            decision: .accept,
+            optionId: "Option A"
+        ))
+        XCTAssertEqual(dupQuestion.status, .resolved)
+        XCTAssertTrue(dupQuestion.duplicate)
+
+        let expiredInteraction = try await client.resolve(ZCodeResolveIntent(
+            selection: createdSelection,
+            commandId: "paired-cmd-expired-perm",
+            clientId: "paired-swift",
+            interactionId: "paired-perm-expired",
+            interactionType: .permission,
+            decision: .approve
+        ))
+        XCTAssertEqual(expiredInteraction.status, .noop)
+        XCTAssertEqual(expiredInteraction.reasonCode, "proto.alreadyResolved")
+
+        let unsupportedThought = try await client.switchModel(ZCodeSwitchModelIntent(
+            selection: createdSelection,
+            commandId: "paired-cmd-switch-unsupported",
+            clientId: "paired-swift",
+            provider: "glm",
+            model: "glm-5.1",
+            thought: "xhigh"
+        ))
+        XCTAssertEqual(unsupportedThought.status, .unsupportedThought)
+        XCTAssertEqual(unsupportedThought.reasonCode, "guard.unsupportedThoughtLevel")
+
+        let switchedModel = try await client.switchModel(ZCodeSwitchModelIntent(
+            selection: createdSelection,
+            commandId: "paired-cmd-switch-high",
+            clientId: "paired-swift",
+            provider: "glm",
+            model: "glm-5.1",
+            thought: "high"
+        ))
+        XCTAssertEqual(switchedModel.status, .modelSwitched)
+        XCTAssertEqual(switchedModel.modelConfig?.provider, "glm")
+        XCTAssertEqual(switchedModel.modelConfig?.model, "glm-5.1")
+        XCTAssertEqual(switchedModel.modelConfig?.thought, "high")
+        let afterSwitchSnapshot = try await client.read()
+        let switchedRow = try XCTUnwrap(afterSwitchSnapshot.rows.first(where: { $0.address == createdSelection.address }))
+        XCTAssertEqual(switchedRow.modelConfig?.provider, "glm")
+        XCTAssertEqual(switchedRow.modelConfig?.model, "glm-5.1")
+        XCTAssertEqual(switchedRow.modelConfig?.thought, "high")
         await client.close()
 
         let data = try JSONSerialization.data(withJSONObject: [
             "status": "PASS", "transport": "real-unix-socket", "confirmed_targets": selected.count,
             "controlled_execution": "PASS", "steering_vs_queue": "PASS", "late_stop_noop": "PASS",
             "create_workspace_readback": "PASS", "duplicate_dedup": "PASS",
+            "interaction_resolution": "PASS", "model_switch_readback": "PASS",
             "native_install": "NOT_RUN", "physical_key": "NOT_RUN", "transcript_api": "NOT_EXPOSED",
         ], options: [.prettyPrinted, .sortedKeys])
         try data.write(to: URL(fileURLWithPath: output))

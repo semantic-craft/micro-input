@@ -107,10 +107,11 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Depends on**: I、I2。责任票 #83。
 - **Evidence**: .scratch/qa-runs/1793871576128-81269/evidence/result.json
 
-### [ ] Slice L1: 接 ZCode 请求审批与思考档位
+### [x] Slice L1: 接 ZCode 请求审批与思考档位
 - **Outcome**: 按 interactionId/type 处理批准拒绝、问题和计划，复用 switchModelConfig。
 - **Done Predicate**: 过期/重复请求零误批；问题不当权限批准；模型无该档位不发送；回读模型和档位一致。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: K1。责任票 #33。
+- **Evidence**: .scratch/qa-runs/1793874716941-62949/evidence/result.json
 
 ### [ ] Slice L2: 接 DSH 请求审批与思考档位
 - **Outcome**: 先证明当前桌面 approval 接线，再接 request 级回答和 selectModel。

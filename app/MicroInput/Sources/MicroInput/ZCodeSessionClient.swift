@@ -52,6 +52,13 @@ private struct ZCodeRequest: Encodable {
     var text: String? = nil
     var requestedDelivery: String? = nil
     var executionId: String? = nil
+    var interactionId: String? = nil
+    var interactionType: String? = nil
+    var decision: String? = nil
+    var optionId: String? = nil
+    var provider: String? = nil
+    var model: String? = nil
+    var thought: String? = nil
 }
 
 private struct ZCodeReply: Decodable {
@@ -66,6 +73,9 @@ private struct ZCodeReply: Decodable {
     let duplicate: Bool?
     let delivery: ZCodeDelivery?
     let executionId: String?
+    let interactionId: String?
+    let interactionType: ZCodeInteractionType?
+    let modelConfig: ZCodeModelConfig?
     let reasonCode: String?
 }
 
@@ -186,6 +196,84 @@ actor ZCodeSessionClient: ZCodeSessionServing {
         }
         return mapCommandReply(result, status: status)
     }
+    func resolve(_ intent: ZCodeResolveIntent) async throws -> ZCodeCommandReply {
+        let current = try currentGrant(), expected = epoch
+        guard intent.selection.instanceId == current.instanceId, intent.selection.generation == current.generation else { throw ZCodeFailure.stale }
+        guard intent.selection.address.valid, current.scopes.contains(intent.selection.address.scope),
+              !intent.commandId.isEmpty, intent.commandId.utf8.count <= 4096,
+              !intent.clientId.isEmpty, intent.clientId.utf8.count <= 4096,
+              !intent.interactionId.isEmpty, intent.interactionId.utf8.count <= 4096,
+              intent.optionId == nil || (intent.optionId?.isEmpty == false && (intent.optionId?.utf8.count ?? 0) <= 4096) else { throw ZCodeFailure.denied }
+        let result = try await exchange(
+            op: "resolve",
+            scope: intent.selection.address.scope,
+            target: intent.selection.address,
+            commandId: intent.commandId,
+            clientId: intent.clientId,
+            interactionId: intent.interactionId,
+            interactionType: intent.interactionType.rawValue,
+            decision: intent.decision.rawValue,
+            optionId: intent.optionId,
+            grant: current,
+            expected: expected,
+            transportTimeoutEligible: true
+        )
+        guard let rawStatus = ZCodeCommandResult(rawValue: result.status),
+              [.resolved, .noop, .unconfirmed, .stale, .denied, .unavailable].contains(rawStatus),
+              result.rows == nil else { throw ZCodeFailure.invalidReply }
+        if [.resolved, .noop].contains(rawStatus) {
+            guard result.selected == intent.selection.address,
+                  result.interactionId == nil || result.interactionId == intent.interactionId,
+                  result.interactionType == nil || result.interactionType == intent.interactionType else { throw ZCodeFailure.invalidReply }
+        }
+        let mappedStatus: ZCodeCommandResult = (rawStatus == .unconfirmed && (result.reasonCode == "guard.questionCannotApproveAsPermission" || result.reasonCode == "guard.interactionTypeMismatch"))
+            ? .interactionTypeMismatch
+            : rawStatus
+        return mapCommandReply(result, status: mappedStatus)
+    }
+    func switchModel(_ intent: ZCodeSwitchModelIntent) async throws -> ZCodeCommandReply {
+        let current = try currentGrant(), expected = epoch
+        guard intent.selection.instanceId == current.instanceId, intent.selection.generation == current.generation else { throw ZCodeFailure.stale }
+        guard intent.selection.address.valid, current.scopes.contains(intent.selection.address.scope),
+              !intent.commandId.isEmpty, intent.commandId.utf8.count <= 4096,
+              !intent.clientId.isEmpty, intent.clientId.utf8.count <= 4096,
+              !intent.provider.isEmpty, intent.provider.utf8.count <= 4096,
+              !intent.model.isEmpty, intent.model.utf8.count <= 4096,
+              !intent.thought.isEmpty, intent.thought.utf8.count <= 4096 else { throw ZCodeFailure.denied }
+        let result = try await exchange(
+            op: "switchModel",
+            scope: intent.selection.address.scope,
+            target: intent.selection.address,
+            commandId: intent.commandId,
+            clientId: intent.clientId,
+            provider: intent.provider,
+            model: intent.model,
+            thought: intent.thought,
+            grant: current,
+            expected: expected,
+            transportTimeoutEligible: true
+        )
+        guard let rawStatus = ZCodeCommandResult(rawValue: result.status),
+              [.confirmed, .modelSwitched, .unconfirmed, .stale, .denied, .unavailable].contains(rawStatus),
+              result.rows == nil else { throw ZCodeFailure.invalidReply }
+        let mappedStatus: ZCodeCommandResult
+        if rawStatus == .confirmed || rawStatus == .modelSwitched {
+            guard result.selected == intent.selection.address,
+                  let readback = result.modelConfig,
+                  readback.valid,
+                  readback.provider == intent.provider,
+                  readback.model == intent.model,
+                  readback.thought == intent.thought else {
+                return mapCommandReply(result, status: .unconfirmed)
+            }
+            mappedStatus = .modelSwitched
+        } else if rawStatus == .unconfirmed && result.reasonCode == "guard.unsupportedThoughtLevel" {
+            mappedStatus = .unsupportedThought
+        } else {
+            mappedStatus = rawStatus
+        }
+        return mapCommandReply(result, status: mappedStatus)
+    }
     func query(_ intent: ZCodeQueryIntent) async throws -> ZCodeCommandReply {
         let current = try currentGrant(), expected = epoch
         guard intent.instanceId == current.instanceId, intent.generation == current.generation else { throw ZCodeFailure.stale }
@@ -196,7 +284,7 @@ actor ZCodeSessionClient: ZCodeSessionServing {
                                         commandId: intent.commandId, grant: current, expected: expected,
                                         transportTimeoutEligible: true)
         guard let status = ZCodeCommandResult(rawValue: result.status), result.rows == nil else { throw ZCodeFailure.invalidReply }
-        if [.started, .queued, .steered, .stopped, .noop].contains(status), let target = intent.target {
+        if [.started, .queued, .steered, .stopped, .resolved, .noop].contains(status), let target = intent.target {
             guard result.selected == target else { throw ZCodeFailure.invalidReply }
         }
         if status == .confirmed {
@@ -207,7 +295,9 @@ actor ZCodeSessionClient: ZCodeSessionServing {
     private func mapCommandReply(_ reply: ZCodeReply, status: ZCodeCommandResult) -> ZCodeCommandReply {
         ZCodeCommandReply(instanceId: reply.instanceId, generation: reply.generation, status: status,
                           selected: reply.selected, commandId: reply.commandId, duplicate: reply.duplicate ?? false,
-                          delivery: reply.delivery, executionId: reply.executionId, reasonCode: reply.reasonCode)
+                          delivery: reply.delivery, executionId: reply.executionId,
+                          interactionId: reply.interactionId, interactionType: reply.interactionType,
+                          modelConfig: reply.modelConfig, reasonCode: reply.reasonCode)
     }
     private func failure(_ status: String) -> ZCodeFailure {
         switch status {
@@ -220,12 +310,18 @@ actor ZCodeSessionClient: ZCodeSessionServing {
     private func exchange(op: String, scope: ZCodeScope, target: ZCodeTaskAddress?,
                           commandId: String? = nil, clientId: String? = nil, sessionId: String? = nil,
                           text: String? = nil, requestedDelivery: String? = nil, executionId: String? = nil,
+                          interactionId: String? = nil, interactionType: String? = nil,
+                          decision: String? = nil, optionId: String? = nil,
+                          provider: String? = nil, model: String? = nil, thought: String? = nil,
                           grant: ZCodeGrant, expected: UInt64, transportTimeoutEligible: Bool = false) async throws -> ZCodeReply {
         guard expected == epoch, self.grant == grant, grant.scopes.contains(scope), !Task.isCancelled else { throw ZCodeFailure.stale }
         let request = ZCodeRequest(id: UUID().uuidString, token: grant.token, instanceId: grant.instanceId,
                                    generation: grant.generation, op: op, scope: scope, target: target,
                                    commandId: commandId, clientId: clientId, sessionId: sessionId,
-                                   text: text, requestedDelivery: requestedDelivery, executionId: executionId)
+                                   text: text, requestedDelivery: requestedDelivery, executionId: executionId,
+                                   interactionId: interactionId, interactionType: interactionType,
+                                   decision: decision, optionId: optionId,
+                                   provider: provider, model: model, thought: thought)
         let wire = try JSONEncoder().encode(request)
         let data: Data
         do {
@@ -241,28 +337,49 @@ actor ZCodeSessionClient: ZCodeSessionServing {
               try currentGrant() == grant else { throw ZCodeFailure.stale }
         let allowedKeys: Set<String> = [
             "version", "id", "instanceId", "generation", "status", "rows",
-            "selected", "commandId", "duplicate", "delivery", "executionId", "reasonCode"
+            "selected", "commandId", "duplicate", "delivery", "executionId",
+            "interactionId", "interactionType", "modelConfig", "reasonCode"
         ]
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(object.keys).isSubset(of: allowedKeys) else { throw ZCodeFailure.invalidReply }
         let addressKeys: Set<String> = ["workspacePath", "workspaceIdentity", "sourceServerId", "remoteSessionId", "taskId"]
-        let rowKeys: Set<String> = ["address", "title", "liveStatus", "executionId"]
+        let pendingInteractionKeys: Set<String> = ["interactionId", "interactionType", "toolName", "options"]
+        let modelOptionKeys: Set<String> = ["provider", "model", "defaultThought", "supportedThoughts"]
+        let modelConfigKeys: Set<String> = ["provider", "model", "thought", "supportedThoughts", "availableModels"]
+        let rowKeys: Set<String> = ["address", "title", "liveStatus", "executionId", "pendingInteraction", "modelConfig"]
+        func validModelConfigObject(_ raw: Any?) -> Bool {
+            guard let raw else { return true }
+            guard let config = raw as? [String: Any], Set(config.keys).isSubset(of: modelConfigKeys) else { return false }
+            if let available = config["availableModels"] {
+                guard let list = available as? [[String: Any]],
+                      list.allSatisfy({ Set($0.keys).isSubset(of: modelOptionKeys) }) else { return false }
+            }
+            return true
+        }
         if let rows = object["rows"] as? [[String: Any]] {
             guard rows.allSatisfy({ row in
                 guard Set(row.keys).isSubset(of: rowKeys),
                       row["address"] != nil, row["title"] != nil, row["liveStatus"] != nil,
-                      let address = row["address"] as? [String: Any] else { return false }
-                return Set(address.keys).isSubset(of: addressKeys)
+                      let address = row["address"] as? [String: Any],
+                      Set(address.keys).isSubset(of: addressKeys) else { return false }
+                if let pending = row["pendingInteraction"] {
+                    guard let pendingDict = pending as? [String: Any],
+                          Set(pendingDict.keys).isSubset(of: pendingInteractionKeys) else { return false }
+                }
+                return validModelConfigObject(row["modelConfig"])
             }) else { throw ZCodeFailure.invalidReply }
         }
         if let selected = object["selected"] as? [String: Any], !Set(selected.keys).isSubset(of: addressKeys) {
+            throw ZCodeFailure.invalidReply
+        }
+        if !validModelConfigObject(object["modelConfig"]) {
             throw ZCodeFailure.invalidReply
         }
         let result = try JSONDecoder().decode(ZCodeReply.self, from: data)
         guard result.version == 1, result.id == request.id else { throw ZCodeFailure.invalidReply }
         guard result.instanceId == grant.instanceId, result.generation == grant.generation else { throw ZCodeFailure.stale }
         let validStatuses: Set<String> = [
-            "ok", "confirmed", "started", "queued", "steered", "stopped",
+            "ok", "confirmed", "started", "queued", "steered", "stopped", "resolved",
             "noop", "unknown", "denied", "stale", "unavailable", "unconfirmed"
         ]
         guard validStatuses.contains(result.status),

@@ -448,6 +448,18 @@ extension Store {
                                  binding: "menu-zcode-stop", profile: profile, state: state,
                                  requiresEnabled: false, zcodeCommand: .stop(intent))
     }
+    @discardableResult func resolveZCodeInteraction(_ intent: ZCodeResolveIntent) -> Bool {
+        guard let state = routing, let profile = state.profile_id else { return false }
+        return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"zcode","command":"resolve-interaction"}"#,
+                                 binding: "menu-zcode-resolve", profile: profile, state: state,
+                                 requiresEnabled: false, zcodeCommand: .resolve(intent))
+    }
+    @discardableResult func switchZCodeModel(_ intent: ZCodeSwitchModelIntent) -> Bool {
+        guard let state = routing, let profile = state.profile_id else { return false }
+        return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"zcode","command":"switch-model"}"#,
+                                 binding: "menu-zcode-switch-model", profile: profile, state: state,
+                                 requiresEnabled: false, zcodeCommand: .switchModel(intent))
+    }
     @discardableResult func queryZCodeCommand(_ intent: ZCodeQueryIntent) -> Bool {
         guard let state = routing, let profile = state.profile_id else { return false }
         return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"zcode","command":"query-command"}"#,

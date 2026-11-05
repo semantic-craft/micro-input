@@ -58,6 +58,10 @@ def verify_evidence(run, scenario, started, process_alive):
             "late_stop_noop",
             "timeout_same_id_no_replay",
             "create_workspace_readback",
+            "question_never_approved_as_permission",
+            "expired_and_duplicate_interaction_zero_misapproval",
+            "unsupported_thought_not_sent",
+            "model_and_thought_readback_consistent",
             "wrong_selected_unconfirmed",
             "deleted_target_no_redirect",
             "generation_change_blocks_old_selection",
@@ -78,6 +82,11 @@ def verify_evidence(run, scenario, started, process_alive):
         unknown = [row for row in rows if row["action_type"] == "zcode_send" and row["outcome"] == "unknown"]
         noop = [row for row in rows if row["action_type"] == "zcode_stop" and row["outcome"] == "noop"]
         stopped = [row for row in rows if row["action_type"] == "zcode_stop" and row["outcome"] == "stopped"]
+        resolved = [row for row in rows if row["action_type"] == "zcode_resolve" and row["outcome"] == "resolved"]
+        resolve_mismatch = [row for row in rows if row["action_type"] == "zcode_resolve" and row["outcome"] == "interactionTypeMismatch"]
+        resolve_noop = [row for row in rows if row["action_type"] == "zcode_resolve" and row["outcome"] == "noop"]
+        model_switched = [row for row in rows if row["action_type"] == "zcode_switch_model" and row["outcome"] == "modelSwitched"]
+        unsupported_thought = [row for row in rows if row["action_type"] == "zcode_switch_model" and row["outcome"] == "unsupportedThought"]
         if (
             len(confirmed) < 2
             or len(created) != 1
@@ -86,12 +95,18 @@ def verify_evidence(run, scenario, started, process_alive):
             or len(unknown) != 1
             or len(noop) != 1
             or len(stopped) != 1
+            or len(resolved) != 4
+            or len(resolve_mismatch) != 2
+            or len(resolve_noop) != 1
+            or len(model_switched) != 1
+            or len(unsupported_thought) != 1
             or any(row.get("target") != "zcode" or row.get("text_byte_len") is not None for row in rows)
         ):
             raise ValueError("ZCode exact navigation/execution receipts missing")
         result.update(
             zcode_navigation="SYNTHETIC_PASS",
             zcode_execution="SYNTHETIC_PASS",
+            zcode_interactions_and_model="SYNTHETIC_PASS",
             native_app="NOT_RUN",
             receipt_count=len(rows),
             body_reads=0,

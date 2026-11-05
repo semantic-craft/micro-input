@@ -83,7 +83,7 @@ def main():
         bad = request(); bad["instanceId"] = "old-instance"
         assert_zero_read_rejection(bad)
         swift_result = run / "swift-result.json"
-        swift_env = dict(env, MI_ZCODE_PAIRED_GRANT=str(grant_path), MI_ZCODE_PAIRED_RESULT=str(swift_result))
+        swift_env = dict(env, MI_ZCODE_PAIRED_GRANT=str(grant_path), MI_ZCODE_PAIRED_CONTROL=str(control), MI_ZCODE_PAIRED_RESULT=str(swift_result))
         with (run / "swift.log").open("w") as swift_log:
             subprocess.run(["swift", "test", "--package-path", "app/MicroInput", "-Xswiftc", "-DMI_SYNTHETIC_BACKEND",
                             "--filter", "ZCodePairedTests"], cwd=ROOT, env=swift_env, stdout=swift_log,
@@ -97,6 +97,8 @@ def main():
             or swift.get("late_stop_noop") != "PASS"
             or swift.get("create_workspace_readback") != "PASS"
             or swift.get("duplicate_dedup") != "PASS"
+            or swift.get("interaction_resolution") != "PASS"
+            or swift.get("model_switch_readback") != "PASS"
         ):
             raise ValueError("Swift pair incomplete")
         after_swift = stats()
@@ -105,9 +107,11 @@ def main():
             or after_swift.get("createCount") != 1
             or after_swift.get("sendCount") != 3
             or after_swift.get("stopCount") != 2
-            or after_swift.get("queryCount") != 1
+            or after_swift.get("resolveCount") != 1
+            or after_swift.get("switchModelCount") != 1
+            or after_swift.get("queryCount") != 3
         ):
-            raise ValueError("native and Swift command/navigation counts differ")
+            raise ValueError(f"native and Swift command/navigation counts differ: {after_swift}")
         exchange(control, {"op": "reset"})
         listed = exchange(grant["socketPath"], request())
         target = listed["rows"][0]["address"]
@@ -139,6 +143,7 @@ def main():
                       transport="real-unix-socket", confirmed_targets=2, unauthorized_metadata_reads=0,
                       controlled_execution="PASS", steering_vs_queue="PASS", late_stop_noop="PASS",
                       create_workspace_readback="PASS", duplicate_dedup="PASS",
+                      interaction_resolution="PASS", model_switch_readback="PASS",
                       deleted_target="REJECTED", deleted_during_open="REJECTED", replaced_source="REJECTED", old_generation="REJECTED", disconnected="REJECTED",
                       native_install="NOT_RUN", renderer_store="PASS", renderer_ui="NOT_RUN", physical_key="NOT_RUN", transcript_api="NOT_EXPOSED",
                       git_sha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),

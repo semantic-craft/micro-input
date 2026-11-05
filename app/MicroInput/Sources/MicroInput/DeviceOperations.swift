@@ -109,7 +109,7 @@ extension Store {
             AuditLogWriter.append(receipt)
         } else if payload?.action_type == "agent_command", payload?.adapter == "zcode",
                   let cmd = payload?.command,
-                  ["create-session", "send-text", "stop-session", "query-command"].contains(cmd) {
+                  ["create-session", "send-text", "stop-session", "resolve-interaction", "switch-model", "query-command"].contains(cmd) {
             let result = await zcodeSessions.execute(zcodeCommand, admitted: { [weak self] in
                 guard let self else { return false }
                 return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
@@ -119,6 +119,8 @@ extension Store {
             case "create-session": actionType = "zcode_create"
             case "send-text": actionType = "zcode_send"
             case "stop-session": actionType = "zcode_stop"
+            case "resolve-interaction": actionType = "zcode_resolve"
+            case "switch-model": actionType = "zcode_switch_model"
             default: actionType = "zcode_query"
             }
             receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
