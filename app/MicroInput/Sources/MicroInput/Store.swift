@@ -227,6 +227,9 @@ extension MicroInput: Backend {}
     @Published var lastHostActionReceipt: HostActionReceipt?
     var navigationHistory = KeypadNavigationHistory()
     var navigationPlaceAvailable: ((KeypadNavigationPlace) -> Bool)?
+    @Published var fourAppSlots = FourAppSlotTable()
+    @Published var workspaceNavigator = FourAppWorkspaceNavigator()
+    var fourAppAttention = FourAppAttentionRound()
     var hostInputTask: Task<Void, Never>?
     @Published var draft = DraftState()
     @Published var macros: [MacroSummary] = []

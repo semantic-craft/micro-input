@@ -810,6 +810,7 @@ extension Store {
             cindySessions.delivered == alpha2 &&
             cindySessions.selected == nil &&
             cindySessions.lastDeepLink == "cindy://session/sess-alpha-2" &&
+            navigationHistory.current != .cindy(workspacePath: alpha2.workspacePath, sessionId: alpha2.sessionId) &&
             navigationHistory.current != .session(adapter: "cindy", session: "sess-alpha-2")
 
         if let alpha2Selection = cindySessions.selection(for: alpha2) {
@@ -822,7 +823,8 @@ extension Store {
             cindySessions.delivered == alpha2 &&
             cindySessions.selected == alpha2 &&
             cindySessions.lastDeepLink == "cindy://session/sess-alpha-2" &&
-            navigationHistory.current == .session(adapter: "cindy", session: "sess-alpha-2")
+            (navigationHistory.current == .cindy(workspacePath: alpha2.workspacePath, sessionId: alpha2.sessionId) ||
+             navigationHistory.current == .session(adapter: "cindy", session: "sess-alpha-2"))
         checks.append(
             CindyScenarioCheckReceipt(
                 name: "delivered_vs_confirmed_separated",
@@ -850,7 +852,8 @@ extension Store {
         let readbackPass =
             cindySessions.lastResult == .confirmed &&
             cindySessions.selected == beta1 &&
-            navigationHistory.current == .session(adapter: "cindy", session: "sess-beta-1")
+            (navigationHistory.current == .cindy(workspacePath: beta1.workspacePath, sessionId: beta1.sessionId) ||
+             navigationHistory.current == .session(adapter: "cindy", session: "sess-beta-1"))
         checks.append(
             CindyScenarioCheckReceipt(
                 name: "selected_readback_matches",

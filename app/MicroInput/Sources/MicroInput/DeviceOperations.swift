@@ -103,6 +103,14 @@ extension Store {
                 guard let self else { return false }
                 return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
             })
+            if result == .confirmed, let selection = zcodeSelection {
+                navigationHistory.visit(.zcode(
+                    sourceServer: selection.address.sourceServerId ?? "",
+                    remoteSession: selection.address.remoteSessionId ?? "",
+                    workspace: selection.address.workspacePath,
+                    taskId: selection.address.taskId
+                ))
+            }
             receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
                 bindingId: bindingId, actionType: "zcode_open", target: "zcode", textByteLen: nil,
                 outcome: result.rawValue, detail: result.label)
@@ -114,6 +122,14 @@ extension Store {
                 guard let self else { return false }
                 return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
             })
+            if cmd == "create-session", result == .confirmed, let selected = zcodeSessions.selected {
+                navigationHistory.visit(.zcode(
+                    sourceServer: selected.sourceServerId ?? "",
+                    remoteSession: selected.remoteSessionId ?? "",
+                    workspace: selected.workspacePath,
+                    taskId: selected.taskId
+                ))
+            }
             let actionType: String
             switch cmd {
             case "create-session": actionType = "zcode_create"
@@ -132,6 +148,13 @@ extension Store {
                 guard let self else { return false }
                 return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
             })
+            if result == .confirmed, let selection = dshSelection {
+                navigationHistory.visit(.dsh(
+                    sessionId: selection.sessionId,
+                    workspaceId: selection.workspaceId,
+                    hostId: selection.hostId
+                ))
+            }
             receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
                 bindingId: bindingId, actionType: "dsh_open", target: "dsh", textByteLen: nil,
                 outcome: result.rawValue, detail: result.label)
@@ -162,7 +185,10 @@ extension Store {
                 return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
             })
             if result == .confirmed, let selection = cindySelection {
-                navigationHistory.visit(.session(adapter: "cindy", session: selection.address.sessionId))
+                navigationHistory.visit(.cindy(
+                    workspacePath: selection.address.workspacePath,
+                    sessionId: selection.address.sessionId
+                ))
             }
             receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
                 bindingId: bindingId, actionType: "cindy_open", target: "cindy", textByteLen: nil,
@@ -182,7 +208,10 @@ extension Store {
                 reply = CindyCommandReply(commandId: "missing", instanceId: "", generation: 0, ownerEpoch: "", status: .stale, reasonCode: "guard.missingCommand")
             }
             if reply.status == .confirmed, let selected = reply.selected {
-                navigationHistory.visit(.session(adapter: "cindy", session: selected.sessionId))
+                navigationHistory.visit(.cindy(
+                    workspacePath: selected.workspacePath,
+                    sessionId: selected.sessionId
+                ))
             }
             let actionType: String
             switch cmd {
@@ -202,6 +231,12 @@ extension Store {
                 guard let self else { return false }
                 return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
             })
+            if result == .confirmed, let selected = antigravitySelection {
+                navigationHistory.visit(.antigravity(
+                    conversationId: selected.key.conversationId,
+                    workspacePath: selected.key.workspacePath
+                ))
+            }
             receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
                 bindingId: bindingId, actionType: "antigravity_open", target: "antigravity", textByteLen: nil,
                 outcome: result.rawValue, detail: result.label)
@@ -237,6 +272,52 @@ extension Store {
             receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
                 bindingId: bindingId, actionType: "t3_next_attention", target: "t3", textByteLen: nil,
                 outcome: result.rawValue, detail: result.label)
+            AuditLogWriter.append(receipt)
+        } else if payload?.action_type == "agent_command",
+                  let cmd = payload?.command,
+                  cmd.hasPrefix("slot-open:") {
+            let indexStr = String(cmd.dropFirst("slot-open:".count))
+            let slotIndex = Int(indexStr) ?? 0
+            receipt = await fourAppSlots.executeSlot(
+                slotIndex,
+                in: self,
+                profileId: profileId,
+                bindingId: bindingId,
+                admitted: { [weak self] in
+                    guard let self else { return false }
+                    return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
+                }
+            )
+        } else if payload?.action_type == "agent_command",
+                  let cmd = payload?.command,
+                  cmd == "four-app-attention" || cmd == "four-app-attention-wrap" {
+            let allowWrap = cmd == "four-app-attention-wrap"
+            receipt = await fourAppAttention.advanceAttentionRound(
+                in: self,
+                profileId: profileId,
+                bindingId: bindingId,
+                allowWrap: allowWrap,
+                admitted: { [weak self] in
+                    guard let self else { return false }
+                    return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
+                }
+            )
+        } else if payload?.action_type == "agent_command",
+                  let cmd = payload?.command,
+                  cmd == "next-workspace" || cmd == "previous-workspace" {
+            let (outcome, detail) = cmd == "next-workspace"
+                ? workspaceNavigator.cycleNext(in: self)
+                : workspaceNavigator.cyclePrevious(in: self)
+            receipt = HostActionReceipt(
+                timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                profileId: profileId,
+                bindingId: bindingId,
+                actionType: cmd == "next-workspace" ? "next_workspace" : "previous_workspace",
+                target: "workspace",
+                textByteLen: nil,
+                outcome: outcome,
+                detail: detail
+            )
             AuditLogWriter.append(receipt)
         } else {
             receipt = await actionExecutor.execute(actionJSON: effectiveJSON, bindingId: bindingId, profileId: profileId)
@@ -331,6 +412,99 @@ extension Store {
                 textByteLen: nil,
                 outcome: delivered ? "delivered" : "failed",
                 detail: delivered ? (isBack ? "已后退到 T3 会话" : "已前进到 T3 会话") : "T3 历史目标不可达"
+            )
+            AuditLogWriter.append(receipt)
+            return receipt
+        case .antigravity(let conversationId, let workspacePath):
+            let key = AntigravitySessionKey(conversationId: conversationId, workspacePath: workspacePath)
+            let result: AntigravityOpenResult
+            if let selection = antigravityStatus.selection(for: key) {
+                result = await antigravityStatus.open(selection, admitted: { [weak self] in
+                    guard let self else { return false }
+                    return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? true)
+                })
+            } else {
+                result = .unconfirmed
+            }
+            let success = result == .confirmed
+            let receipt = HostActionReceipt(
+                timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                profileId: profileId,
+                bindingId: bindingId,
+                actionType: actionType,
+                target: "antigravity",
+                textByteLen: nil,
+                outcome: result.rawValue,
+                detail: success ? (isBack ? "已后退到 Antigravity 会话" : "已前进到 Antigravity 会话") : "Antigravity 历史目标未确认"
+            )
+            AuditLogWriter.append(receipt)
+            return receipt
+        case .cindy(let workspacePath, let sessionId):
+            let address = CindyTaskAddress(workspacePath: workspacePath, sessionId: sessionId)
+            let result: CindyOpenResult
+            if let selection = cindySessions.selection(for: address) {
+                result = await cindySessions.open(selection, admitted: { [weak self] in
+                    guard let self else { return false }
+                    return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? true)
+                })
+            } else {
+                result = .unconfirmed
+            }
+            let receipt = HostActionReceipt(
+                timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                profileId: profileId,
+                bindingId: bindingId,
+                actionType: actionType,
+                target: "cindy",
+                textByteLen: nil,
+                outcome: result.rawValue,
+                detail: result == .confirmed ? (isBack ? "已后退到 Cindy 会话" : "已前进到 Cindy 会话") : "Cindy 历史目标未确认"
+            )
+            AuditLogWriter.append(receipt)
+            return receipt
+        case .zcode(let sourceServer, let remoteSession, let workspace, let taskId):
+            let address = ZCodeTaskAddress(workspacePath: workspace, workspaceIdentity: nil, sourceServerId: sourceServer.isEmpty ? nil : sourceServer, remoteSessionId: remoteSession.isEmpty ? nil : remoteSession, taskId: taskId)
+            let result: ZCodeOpenResult
+            if let selection = zcodeSessions.selection(for: address) {
+                result = await zcodeSessions.open(selection, admitted: { [weak self] in
+                    guard let self else { return false }
+                    return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? true)
+                })
+            } else {
+                result = .unconfirmed
+            }
+            let receipt = HostActionReceipt(
+                timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                profileId: profileId,
+                bindingId: bindingId,
+                actionType: actionType,
+                target: "zcode",
+                textByteLen: nil,
+                outcome: result.rawValue,
+                detail: result == .confirmed ? (isBack ? "已后退到 ZCode 会话" : "已前进到 ZCode 会话") : "ZCode 历史目标未确认"
+            )
+            AuditLogWriter.append(receipt)
+            return receipt
+        case .dsh(let sessionId, _, _):
+            let result: DSHOpenResult
+            if let selection = dshSessions.selection(for: sessionId) {
+                result = await dshSessions.open(selection, admitted: { [weak self] in
+                    guard let self else { return false }
+                    return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? true)
+                })
+            } else {
+                result = .unconfirmed
+            }
+            let success = result == .confirmed
+            let receipt = HostActionReceipt(
+                timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                profileId: profileId,
+                bindingId: bindingId,
+                actionType: actionType,
+                target: "dsh",
+                textByteLen: nil,
+                outcome: result.rawValue,
+                detail: success ? (isBack ? "已后退到 DSH 会话" : "已前进到 DSH 会话") : "DSH 历史目标未确认"
             )
             AuditLogWriter.append(receipt)
             return receipt

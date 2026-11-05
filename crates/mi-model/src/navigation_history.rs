@@ -19,6 +19,25 @@ pub enum NavigationPlace {
         environment_id: String,
         thread_id: String,
     },
+    Antigravity {
+        conversation_id: String,
+        workspace_path: String,
+    },
+    Cindy {
+        workspace_path: String,
+        session_id: String,
+    },
+    ZCode {
+        source_server: String,
+        remote_session: String,
+        workspace: String,
+        task_id: String,
+    },
+    Dsh {
+        session_id: String,
+        workspace_id: String,
+        host_id: String,
+    },
 }
 
 impl NavigationPlace {
@@ -42,6 +61,49 @@ impl NavigationPlace {
         }
     }
 
+    pub fn antigravity(
+        conversation_id: impl Into<String>,
+        workspace_path: impl Into<String>,
+    ) -> Self {
+        Self::Antigravity {
+            conversation_id: conversation_id.into(),
+            workspace_path: workspace_path.into(),
+        }
+    }
+
+    pub fn cindy(workspace_path: impl Into<String>, session_id: impl Into<String>) -> Self {
+        Self::Cindy {
+            workspace_path: workspace_path.into(),
+            session_id: session_id.into(),
+        }
+    }
+
+    pub fn zcode(
+        source_server: impl Into<String>,
+        remote_session: impl Into<String>,
+        workspace: impl Into<String>,
+        task_id: impl Into<String>,
+    ) -> Self {
+        Self::ZCode {
+            source_server: source_server.into(),
+            remote_session: remote_session.into(),
+            workspace: workspace.into(),
+            task_id: task_id.into(),
+        }
+    }
+
+    pub fn dsh(
+        session_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        host_id: impl Into<String>,
+    ) -> Self {
+        Self::Dsh {
+            session_id: session_id.into(),
+            workspace_id: workspace_id.into(),
+            host_id: host_id.into(),
+        }
+    }
+
     pub fn target_id(&self) -> String {
         match self {
             Self::App { bundle_id } => bundle_id.clone(),
@@ -50,6 +112,25 @@ impl NavigationPlace {
                 environment_id,
                 thread_id,
             } => format!("t3:{environment_id}/{thread_id}"),
+            Self::Antigravity {
+                conversation_id,
+                workspace_path,
+            } => format!("antigravity:{conversation_id}@{workspace_path}"),
+            Self::Cindy {
+                workspace_path,
+                session_id,
+            } => format!("cindy:{session_id}@{workspace_path}"),
+            Self::ZCode {
+                source_server,
+                remote_session,
+                workspace,
+                task_id,
+            } => format!("zcode:{source_server}:{remote_session}:{workspace}:{task_id}"),
+            Self::Dsh {
+                session_id,
+                workspace_id,
+                host_id,
+            } => format!("dsh:{host_id}:{workspace_id}:{session_id}"),
         }
     }
 }
@@ -284,5 +365,52 @@ mod tests {
             Some(&NavigationPlace::session("herdr", "session-59"))
         );
         assert_eq!(history.index(), Some(MAX_HISTORY - 1));
+    }
+
+    #[test]
+    fn four_app_places_disambiguate_same_name_across_different_workspaces_and_instances() {
+        let mut history = NavigationHistory::new();
+        // Antigravity: same conversation ID in two different workspaces
+        let ag_ws1 = NavigationPlace::antigravity("conv-1", "/path/workspace-alpha");
+        let ag_ws2 = NavigationPlace::antigravity("conv-1", "/path/workspace-beta");
+        assert_ne!(ag_ws1, ag_ws2);
+        assert_ne!(ag_ws1.target_id(), ag_ws2.target_id());
+
+        // Cindy: same session ID in two different workspaces
+        let cindy_ws1 = NavigationPlace::cindy("/path/workspace-alpha", "sess-1");
+        let cindy_ws2 = NavigationPlace::cindy("/path/workspace-beta", "sess-1");
+        assert_ne!(cindy_ws1, cindy_ws2);
+        assert_ne!(cindy_ws1.target_id(), cindy_ws2.target_id());
+
+        // ZCode: same task ID in two different workspaces/remote sessions
+        let zcode_ws1 = NavigationPlace::zcode("srv1", "rem1", "/path/workspace-alpha", "task-1");
+        let zcode_ws2 = NavigationPlace::zcode("srv1", "rem1", "/path/workspace-beta", "task-1");
+        assert_ne!(zcode_ws1, zcode_ws2);
+        assert_ne!(zcode_ws1.target_id(), zcode_ws2.target_id());
+
+        // DSH: same session ID across two different workspaces or hosts
+        let dsh_ws1 = NavigationPlace::dsh("sess-1", "workspace-alpha", "host-1");
+        let dsh_ws2 = NavigationPlace::dsh("sess-1", "workspace-beta", "host-1");
+        let dsh_host2 = NavigationPlace::dsh("sess-1", "workspace-alpha", "host-2");
+        assert_ne!(dsh_ws1, dsh_ws2);
+        assert_ne!(dsh_ws1, dsh_host2);
+        assert_ne!(dsh_ws1.target_id(), dsh_ws2.target_id());
+        assert_ne!(dsh_ws1.target_id(), dsh_host2.target_id());
+
+        // Visiting each place records distinct history entries without collision
+        for p in [
+            &ag_ws1, &ag_ws2, &cindy_ws1, &cindy_ws2, &zcode_ws1, &zcode_ws2, &dsh_ws1, &dsh_ws2,
+        ] {
+            history.visit((*p).clone());
+        }
+        assert_eq!(history.len(), 8);
+        assert_eq!(history.current(), Some(&dsh_ws2));
+        assert_eq!(history.back(|_| true), Some(dsh_ws1));
+        assert_eq!(history.back(|_| true), Some(zcode_ws2));
+        assert_eq!(history.back(|_| true), Some(zcode_ws1));
+        assert_eq!(history.back(|_| true), Some(cindy_ws2));
+        assert_eq!(history.back(|_| true), Some(cindy_ws1));
+        assert_eq!(history.back(|_| true), Some(ag_ws2));
+        assert_eq!(history.back(|_| true), Some(ag_ws1));
     }
 }

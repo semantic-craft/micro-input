@@ -460,7 +460,7 @@ final class CindySessionTests: XCTestCase {
         XCTAssertEqual(store.lastHostActionReceipt?.outcome, "delivered")
         XCTAssertNotEqual(
             store.navigationHistory.current,
-            .session(adapter: "cindy", session: "sess-alpha-2")
+            .cindy(workspacePath: "/workspace/alpha", sessionId: "sess-alpha-2")
         )
 
         await peer.setReplyOverride(nil)
@@ -471,7 +471,7 @@ final class CindySessionTests: XCTestCase {
         XCTAssertEqual(store.lastHostActionReceipt?.outcome, "confirmed")
         XCTAssertEqual(
             store.navigationHistory.current,
-            .session(adapter: "cindy", session: "sess-alpha-2")
+            .cindy(workspacePath: "/workspace/alpha", sessionId: "sess-alpha-2")
         )
         await store.shutdown()
     }
