@@ -119,6 +119,7 @@ impl DocumentStore {
                     "focus-input" => "聚焦输入框", "search" => "搜索会话", "new-chat" => "新建会话",
                     "model" => "选择模型", "effort" => "思考力度", "dictation" => "听写 / 语音输入",
                     "push-to-talk" => "按住说话",
+                    "voice-reply" | "toggle-voice-reply" => "切换语音回复",
                     "browser" => "打开内置浏览器", "terminal" => "打开终端面板",
                     "scroll-up" => "向上滚动对话", "scroll-down" => "向下滚动对话",
                     "scroll-up-fast" => "快速向上滚动", "scroll-down-fast" => "快速向下滚动",

@@ -1114,7 +1114,13 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 if command == "dictation"
                     && matches!(
                         adapter.as_str(),
-                        "cindy" | "codex" | "qwenwork" | "antigravity" | "qoder-cn"
+                        "cindy"
+                            | "codex"
+                            | "qwenwork"
+                            | "antigravity"
+                            | "qoder-cn"
+                            | "zcode"
+                            | "dsh-desktop"
                     )
                 {
                     *command = "push-to-talk".into();

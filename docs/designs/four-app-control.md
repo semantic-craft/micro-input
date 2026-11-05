@@ -138,6 +138,13 @@ F、G、H、I 无互相依赖；默认先做 F 保护 Cindy，再选 G 获得首
 - 实现入口：四应用语音服务/实际接口；Micro Input PushToTalk；Antigravity 未公开部分按 REA 证据。
 - 验收：四应用分别确认开始/停止和目标绑定；听写转写与发送分开；开启/关闭语音回复须回读真实模式并验证输出。模型/接口不支持时保持该应用未完成，不以禁用或听写成功代替。
 
+### O2 · 复刻官方 Input.app 受保护宿主层与多 Profile 切换让渡机制
+
+- 应用：Cindy / Codex 与四应用切换协调。依赖：F、N。设计详稿：[official-codex-profile-model.md](official-codex-profile-model.md)。责任票：[#82](https://github.com/semantic-craft/micro-input/issues/82)、[#84](https://github.com/semantic-craft/micro-input/issues/84)。
+- 结果：复刻官方 `Input 1.1.0` 的 `Mg1`（`KV_OAI_*`）受保护宿主层判定、四项界面与编辑硬隔离（键盘画布锁定遮罩、收起改键抽屉、禁用静态灯光/导出/复制、跨层合并键跳过保护层），以及切换至 `Cindy` / `Codex` Profile 时的精简板载 `keymap.json`（`< 1 KB`）与 USB HID 通道让渡闭环。
+- 实现入口：`crates/mi-model`（受保护层判定、编辑守卫、精简宿主载荷生成）；`app/MicroInput`（受保护层遮罩、Profile 切换时的 `drainForNativeOwnership` 与 HID 让渡/恢复）。
+- 验收：`mi-model` 与 Swift 单测覆盖受保护层识别、四项隔离与精简配置往返；`scripts/verify-offline` 全量 `PASS`。
+
 ### O · 补齐四应用实体交互与状态反馈
 
 - 应用：共享。依赖：F、N、O1；对应动作能力就绪。责任票：[#84](https://github.com/semantic-craft/micro-input/issues/84)。

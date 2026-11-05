@@ -319,6 +319,29 @@ extension Store {
                 detail: detail
             )
             AuditLogWriter.append(receipt)
+        } else if payload?.action_type == "agent_command",
+                  let cmd = payload?.command,
+                  ["voice-reply", "toggle-voice-reply"].contains(cmd),
+                  let adapter = payload?.adapter {
+            let (_, mode, detail) = await fourAppVoice.toggleVoiceReply(app: adapter, store: self)
+            let outcome: String
+            switch mode {
+            case .supported(let enabled):
+                outcome = enabled ? "voiceReplyEnabled" : "voiceReplyDisabled"
+            case .unsupported:
+                outcome = "unsupported"
+            }
+            receipt = HostActionReceipt(
+                timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                profileId: profileId,
+                bindingId: bindingId,
+                actionType: "\(adapter)_voice_reply",
+                target: adapter,
+                textByteLen: nil,
+                outcome: outcome,
+                detail: detail
+            )
+            AuditLogWriter.append(receipt)
         } else {
             receipt = await actionExecutor.execute(actionJSON: effectiveJSON, bindingId: bindingId, profileId: profileId)
             if receipt.succeeded, let payload {

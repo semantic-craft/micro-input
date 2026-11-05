@@ -345,3 +345,5 @@ pub mod slot_table;
 pub mod workspace_nav;
 
 pub mod attention_round;
+
+pub mod voice_control;

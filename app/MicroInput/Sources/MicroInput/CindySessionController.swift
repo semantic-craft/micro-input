@@ -16,6 +16,12 @@ final class CindySessionController: ObservableObject {
     @Published private(set) var lastCommandReply: CindyCommandReply?
     @Published private(set) var pendingUnknownCommand: CindyQueryIntent?
     @Published private(set) var attentionRoundVisitedCount: Int = 0
+    @Published private(set) var voiceReplyEnabled: Bool = false
+
+    func setVoiceReply(enabled: Bool) async -> (Bool, String) {
+        voiceReplyEnabled = enabled
+        return (true, enabled ? "已开启 Cindy 原生语音对话回复" : "已关闭 Cindy 原生语音对话回复")
+    }
 
     var onOpenConfirmed: ((CindyTaskRow) -> Void)?
     var onCommandCompleted: ((CindyCommandReply, CindyTaskRow?) -> Void)?

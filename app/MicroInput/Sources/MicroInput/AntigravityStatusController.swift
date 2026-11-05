@@ -17,6 +17,10 @@ final class AntigravityStatusController: ObservableObject {
     @Published private(set) var lastCommandReply: AntigravityCommandReply?
     @Published private(set) var pendingUnknownCommand: AntigravityQueuedCommand?
 
+    func setVoiceReply(enabled: Bool) async -> (Bool, String) {
+        return (false, "Antigravity 2.29.0 language_server does not expose speech generation or voice reply mode")
+    }
+
     private let client: any AntigravityStatusServing
     private let pollNanoseconds: UInt64
     private var snapshot: AntigravityStatusSnapshot?

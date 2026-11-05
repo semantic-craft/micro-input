@@ -57,7 +57,7 @@ struct DesktopAgent: Identifiable {
         return value
     }
     static func perform(adapter: String, command: String, revealTools: Bool = true) async -> (Bool, String) {
-        guard let bundle = bundles[adapter], ["focus-input", "search", "new-chat", "model", "effort", "dictation", "browser", "terminal", "reveal-tools"].contains(command),
+        guard let bundle = bundles[adapter], ["focus-input", "search", "new-chat", "model", "effort", "dictation", "browser", "terminal", "reveal-tools", "voice-reply", "toggle-voice-reply"].contains(command),
               !(adapter == "qwenwork" && command == "search"),
               command != "new-chat" || ["antigravity", "dsh-desktop", "qoder-cn"].contains(adapter) else { return (false, "未接入的应用操作") }
         guard AXIsProcessTrusted() else { return (false, "需要辅助功能权限") }
@@ -176,7 +176,17 @@ struct DesktopAgent: Identifiable {
             case "antigravity": return exact(["Record voice memo", "Stop recording"])
             case "qwenwork": return prefix("语音输入（") || prefix("停止录音")
             case "cindy", "qoder-cn": return exact(["开始语音输入", "停止语音输入", "结束语音输入"])
+            case "zcode": return exact(["开始语音输入", "停止语音输入", "Voice Input", "Stop Voice Input"])
+            case "dsh-desktop": return exact(["开始听写", "停止听写", "Voice Dictation", "Stop Dictation"])
             case "codex": return exact(["Dictate", "Stop dictation", "听写", "停止听写"])
+            default: return false
+            }
+        }
+        if command == "voice-reply" || command == "toggle-voice-reply" {
+            switch adapter {
+            case "cindy": return exact(["语音对话", "结束语音对话", "Voice Conversation", "End Voice Conversation"])
+            case "zcode": return exact(["语音回复", "关闭语音回复", "Voice Reply", "Disable Voice Reply"])
+            case "dsh-desktop": return exact(["语音回复", "关闭语音回复", "Voice Reply", "Disable Voice Reply"])
             default: return false
             }
         }
@@ -193,13 +203,15 @@ struct DesktopAgent: Identifiable {
     }
 
     static func dictationState(labels: [String], recording: Bool) -> Bool {
-        let exact = recording ? ["停止语音输入", "结束语音输入", "Stop recording", "Stop dictation", "停止听写"] : ["开始语音输入", "Record voice memo", "Dictate", "听写"]
+        let exact = recording
+            ? ["停止语音输入", "结束语音输入", "Stop recording", "Stop dictation", "停止听写", "Stop Voice Input", "Stop Dictation"]
+            : ["开始语音输入", "Record voice memo", "Dictate", "听写", "开始听写", "Voice Input", "Voice Dictation"]
         return labels.contains { exact.contains($0) || (recording ? $0.hasPrefix("停止录音") : $0.hasPrefix("语音输入（")) }
     }
 
     static func stopActiveDictationIfNeeded(adapter: String) async -> (Bool, String) {
         guard let bundle = bundles[adapter] else { return (false, "unknown_agent_adapter:\(adapter)") }
-        guard ["antigravity", "qwenwork", "cindy", "codex", "qoder-cn"].contains(adapter) else {
+        guard ["antigravity", "qwenwork", "cindy", "codex", "qoder-cn", "zcode", "dsh-desktop"].contains(adapter) else {
             return (true, "dictation_not_applicable:\(adapter)")
         }
         guard AXIsProcessTrusted() else { return (false, "需要辅助功能权限") }

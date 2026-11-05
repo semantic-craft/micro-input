@@ -250,8 +250,25 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                 ) || (command == "push-to-talk"
                     && matches!(
                         adapter.as_str(),
-                        "cindy" | "codex" | "qwenwork" | "antigravity" | "qoder-cn"
+                        "cindy"
+                            | "codex"
+                            | "qwenwork"
+                            | "antigravity"
+                            | "qoder-cn"
+                            | "zcode"
+                            | "dsh-desktop"
                     ))
+                    || (matches!(command.as_str(), "voice-reply" | "toggle-voice-reply")
+                        && matches!(
+                            adapter.as_str(),
+                            "cindy"
+                                | "codex"
+                                | "qwenwork"
+                                | "antigravity"
+                                | "qoder-cn"
+                                | "zcode"
+                                | "dsh-desktop"
+                        ))
                     || command == "focus-input"
                     || (command == "search" && adapter != "qwenwork")
                     || (command == "new-chat"

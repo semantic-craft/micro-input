@@ -20,6 +20,12 @@ final class ZCodeSessionController: ObservableObject {
     @Published private(set) var lastCommandResult: ZCodeCommandResult?
     @Published private(set) var lastCommandReply: ZCodeCommandReply?
     @Published private(set) var pendingCommands: [String: LatchedCommand] = [:]
+    @Published private(set) var voiceReplyEnabled: Bool = false
+
+    func setVoiceReply(enabled: Bool) async -> (Bool, String) {
+        voiceReplyEnabled = enabled
+        return (true, enabled ? "已开启 ZCode 语音回复服务" : "已关闭 ZCode 语音回复服务")
+    }
     private var resolvedCommands: [String: (address: ZCodeTaskAddress, interactionId: String, interactionType: ZCodeInteractionType)] = [:]
     private let client: any ZCodeSessionServing
     private let pollNanoseconds: UInt64

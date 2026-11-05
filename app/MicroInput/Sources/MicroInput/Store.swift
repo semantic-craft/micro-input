@@ -230,6 +230,7 @@ extension MicroInput: Backend {}
     @Published var fourAppSlots = FourAppSlotTable()
     @Published var workspaceNavigator = FourAppWorkspaceNavigator()
     var fourAppAttention = FourAppAttentionRound()
+    @Published var fourAppVoice = FourAppVoiceManager()
     var hostInputTask: Task<Void, Never>?
     @Published var draft = DraftState()
     @Published var macros: [MacroSummary] = []

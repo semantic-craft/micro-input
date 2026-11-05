@@ -14,6 +14,12 @@ final class DSHSessionController: ObservableObject {
     @Published private(set) var lastCommandResult: DSHCommandResult?
     @Published private(set) var atomicTurnCheckSupported = true
     @Published private(set) var pendingUnknownCommand: DSHQueuedCommand?
+    @Published private(set) var voiceReplyEnabled: Bool = false
+
+    func setVoiceReply(enabled: Bool) async -> (Bool, String) {
+        voiceReplyEnabled = enabled
+        return (true, enabled ? "已开启 DSH 语音回复服务" : "已关闭 DSH 语音回复服务")
+    }
     private let client: any DSHSessionServing
     private let pollNanoseconds: UInt64
     private var snapshot: DSHSessionSnapshot?
