@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""Verify the pinned native ZCode bridge and Swift client over private Unix sockets."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import time
+import uuid
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def exchange(path, request):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+        peer.settimeout(3)
+        peer.connect(str(path))
+        peer.sendall(json.dumps(request).encode() + b"\n")
+        data = b""
+        while b"\n" not in data:
+            chunk = peer.recv(65536)
+            if not chunk or len(data) + len(chunk) > 1048576:
+                raise ValueError("invalid fixture response")
+            data += chunk
+        return json.loads(data)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument("--skip-build", action="store_true")
+    args = parser.parse_args()
+    source = args.source.resolve()
+    base = (ROOT / "integrations/zcode/BASE_SHA").read_text().strip()
+    patch = ROOT / "integrations/zcode/navigation.patch"
+    if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip() != base:
+        raise ValueError("wrong native base")
+    actual = subprocess.check_output(["git", "diff", "--binary", "--no-ext-diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"], cwd=source)
+    if actual != patch.read_bytes():
+        raise ValueError("native source differs from packaged patch")
+    run = ROOT / ".scratch" / ("zg-" + uuid.uuid4().hex[:8])
+    run.mkdir(mode=0o700)
+    env = dict(os.environ, MI_AUTO_HOST_READY="0")
+    grant_path = run / "zcode-grant.json"
+    control = run / "control.sock"
+    log = (run / "native.log").open("w")
+    process = None
+    try:
+        if not args.skip_build:
+            subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, env=env, check=True)
+        process = subprocess.Popen(["pnpm", "exec", "tsx", "--tsconfig", "packages/ui/tsconfig.json", "scripts/micro-input-fixture.ts", "--directory", str(run), "--ttl", "120"],
+                                   cwd=source, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        for _ in range(200):
+            if grant_path.exists() and control.exists():
+                break
+            if process.poll() is not None:
+                raise ValueError("native fixture exited before ready")
+            time.sleep(0.05)
+        else:
+            raise ValueError("native fixture did not become ready")
+        grant = json.loads(grant_path.read_text())
+        scope = grant["scopes"][0]
+        def request(op="list", **extra):
+            return dict(version=1, id=str(uuid.uuid4()), token=grant["token"], instanceId=grant["instanceId"],
+                        generation=grant["generation"], op=op, scope=scope, **extra)
+        def stats():
+            return exchange(control, {"op": "stats"})
+        def assert_zero_read_rejection(raw):
+            before = stats()
+            reply = exchange(grant["socketPath"], raw)
+            after = stats()
+            if reply.get("status") not in ("denied", "stale") or "rows" in reply or "selected" in reply:
+                raise ValueError("unauthorized request leaked metadata")
+            if before["metadataReads"] != after["metadataReads"] or before["navigationCount"] != after["navigationCount"]:
+                raise ValueError("unauthorized request reached data or navigation")
+        bad = request(); bad["token"] = "unauthorized-" * 4
+        assert_zero_read_rejection(bad)
+        bad = request(); bad["scope"] = {"workspacePath": "/synthetic/not-authorized"}
+        assert_zero_read_rejection(bad)
+        bad = request(); bad["instanceId"] = "old-instance"
+        assert_zero_read_rejection(bad)
+        swift_result = run / "swift-result.json"
+        swift_env = dict(env, MI_ZCODE_PAIRED_GRANT=str(grant_path), MI_ZCODE_PAIRED_RESULT=str(swift_result))
+        with (run / "swift.log").open("w") as swift_log:
+            subprocess.run(["swift", "test", "--package-path", "app/MicroInput", "-Xswiftc", "-DMI_SYNTHETIC_BACKEND",
+                            "--filter", "ZCodePairedTests"], cwd=ROOT, env=swift_env, stdout=swift_log,
+                           stderr=subprocess.STDOUT, timeout=90, check=True)
+        swift = json.loads(swift_result.read_text())
+        if swift.get("status") != "PASS" or swift.get("confirmed_targets") != 2:
+            raise ValueError("Swift pair incomplete")
+        after_swift = stats()
+        if after_swift["navigationCount"] != 2:
+            raise ValueError("native and Swift navigation counts differ")
+        listed = exchange(grant["socketPath"], request())
+        target = listed["rows"][0]["address"]
+        before = stats()["navigationCount"]
+        exchange(control, {"op": "delete", "workspacePath": target["workspacePath"]})
+        deleted = exchange(grant["socketPath"], request("open", target=target))
+        if deleted["status"] == "confirmed" or stats()["navigationCount"] != before:
+            raise ValueError("deleted target redirected")
+        exchange(control, {"op": "reset"})
+        before = stats()["navigationCount"]
+        exchange(control, {"op": "delete-during-open"})
+        deleted_midflight = exchange(grant["socketPath"], request("open", target=target))
+        if deleted_midflight["status"] == "confirmed" or stats()["navigationCount"] != before:
+            raise ValueError("target deleted during open redirected")
+        exchange(control, {"op": "reset"})
+        before = stats()["navigationCount"]
+        exchange(control, {"op": "replace-source"})
+        replaced = exchange(grant["socketPath"], request("open", target=target))
+        if replaced["status"] != "stale" or stats()["navigationCount"] != before:
+            raise ValueError("replaced source accepted old selection")
+        exchange(control, {"op": "rotate"})
+        assert_zero_read_rejection(request("open", target=target))
+        grant = json.loads(grant_path.read_text())
+        exchange(control, {"op": "disconnect"})
+        disconnected = exchange(grant["socketPath"], request("open", target=target))
+        if disconnected["status"] == "confirmed" or stats()["navigationCount"] != before:
+            raise ValueError("disconnected peer navigated")
+        result = dict(status="PASS", native_source_sha=base, patch_sha256=hashlib.sha256(actual).hexdigest(),
+                      transport="real-unix-socket", confirmed_targets=2, unauthorized_metadata_reads=0,
+                      deleted_target="REJECTED", deleted_during_open="REJECTED", replaced_source="REJECTED", old_generation="REJECTED", disconnected="REJECTED",
+                      native_install="NOT_RUN", renderer_store="PASS", renderer_ui="NOT_RUN", physical_key="NOT_RUN", transcript_api="NOT_EXPOSED",
+                      git_sha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                      working_tree_changes=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)))
+    except BaseException as error:
+        (run / "result.json").write_text(json.dumps({"status": "FAIL", "failure_type": type(error).__name__,
+            "native_install": "NOT_RUN", "renderer_ui": "NOT_RUN", "physical_key": "NOT_RUN"}, indent=2) + "\n")
+        raise
+    finally:
+        if process is not None and process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL); process.wait()
+        log.close()
+        grant_path.unlink(missing_ok=True)
+        if not args.skip_build:
+            subprocess.run(["scripts/build"], cwd=ROOT, env=env, check=True)
+    if process is None or process.poll() is None or any((run / name).exists() for name in ("zcode-grant.json", "zcode.sock", "control.sock", ".zcode-owner")):
+        raise ValueError("paired fixture cleanup incomplete")
+    result["cleanup_confirmed"] = True
+    (run / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    print("ZCODE_PAIRED_RESULT=" + str(run / "result.json"))
+
+
+if __name__ == "__main__":
+    main()

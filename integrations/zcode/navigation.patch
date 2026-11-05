@@ -1,0 +1,1326 @@
+diff --git a/architecture-policy.yaml b/architecture-policy.yaml
+index 32879481..20f4fb46 100644
+--- a/architecture-policy.yaml
++++ b/architecture-policy.yaml
+@@ -1184,6 +1184,46 @@ modules:
+       adapters: .
+     owner: desktop
+ 
++  # micro-input-contract：由 architecture:adopt 登记
++  - id: micro-input-contract
++    roots:
++      - packages/shared/src/micro-input
++    managed: true
++    requires: []
++    publicEntrypoints:
++      - packages/shared/src/micro-input/index.ts
++      - packages/shared/src/micro-input/contract.ts
++    layers:
++      contract: .
++    owner: desktop
++  # micro-input-desktop：由 architecture:adopt 登记
++  - id: micro-input-desktop
++    roots:
++      - packages/desktop/src/main/micro-input
++    managed: true
++    requires:
++      - shared
++    publicEntrypoints:
++      - packages/desktop/src/main/micro-input/index.ts
++      - packages/desktop/src/main/micro-input/contract.ts
++    layers:
++      adapters: .
++    owner: desktop
++  # micro-input-ui：由 architecture:adopt 登记
++  - id: micro-input-ui
++    roots:
++      - packages/ui/src/app-shell/micro-input
++    managed: true
++    requires:
++      - shared
++      - ui
++    publicEntrypoints:
++      - packages/ui/src/app-shell/micro-input/index.ts
++      - packages/ui/src/app-shell/micro-input/contract.ts
++    layers:
++      ui: .
++    owner: desktop
++
+ global:
+   # 临时时间戳（2026-09-10）：unmanaged-new-file 只约束此日期之后首次入库的文件。
+   # 基于领先 staging 很多的分支开工时，merge-base 之前的"新增"文件不应被追溯。
+diff --git a/docs/micro-input/bridge.md b/docs/micro-input/bridge.md
+new file mode 100644
+index 00000000..123afb34
+--- /dev/null
++++ b/docs/micro-input/bridge.md
+@@ -0,0 +1,23 @@
++# Micro Input navigation bridge
++
++The bridge is disabled unless `MI_ZCODE_BRIDGE_CONFIG` names a private JSON file containing explicit `scopes` and an optional private `directory`. It creates a fresh capability and generation for one window renderer. Additional windows never take over an occupied socket. Renderer replacement invalidates all outstanding requests.
++
++Requests are bounded NDJSON, authenticated before metadata access, and scoped by the complete workspace/source address. Only list and exact open are allowed. The scoped Controller list reuses its v4 source index; no conversation subscription, transcript read, text search or command execution is exposed. Responses project only address, title and live status.
++
++Open rechecks the owner metadata, live attachment and exact existing workspace tab. It then selects and reads the same task in one synchronous renderer turn. Missing targets never create a workspace or choose another task. Successful readback means the renderer selected the address, not that an installed build or physical device was tested.
++
++```mermaid
++sequenceDiagram
++  participant MI as Micro Input
++  participant Main as Desktop main
++  participant UI as Window renderer
++  participant Host as Same Host Controller
++  MI->>Main: capability + generation + exact scope
++  Main->>Main: authenticate and authorize before forwarding
++  Main->>UI: scoped request
++  UI->>Host: scoped metadata index / getTaskMeta
++  Host-->>UI: metadata
++  UI->>UI: recheck attachment, select exact tab/task, read selection
++  UI-->>Main: projected result
++  Main-->>MI: generation-bound result
++```
+diff --git a/packages/desktop/src/host/windowHostControllerProjection.ts b/packages/desktop/src/host/windowHostControllerProjection.ts
+index 468f6bd9..75ad6f17 100644
+--- a/packages/desktop/src/host/windowHostControllerProjection.ts
++++ b/packages/desktop/src/host/windowHostControllerProjection.ts
+@@ -511,6 +511,8 @@ export function createWindowHostControllerProjection(options: { createId: () =>
+     },
+ 
+     getTasks: allRows,
++    getSourceTasks: (scope: WindowHostControllerSourceScope): WindowHostControllerTaskRow[] =>
++      Array.from(sources.get(sourceKey(scope))?.rows.values() ?? []),
+     async mutate(
+       address: WindowHostTaskAddress,
+       mutation: WindowHostControllerMutation,
+diff --git a/packages/desktop/src/host/windowHostControllerService.ts b/packages/desktop/src/host/windowHostControllerService.ts
+index 663386a1..c417680e 100644
+--- a/packages/desktop/src/host/windowHostControllerService.ts
++++ b/packages/desktop/src/host/windowHostControllerService.ts
+@@ -153,6 +153,7 @@ export function createWindowHostControllerRuntime(options: {
+ }) {
+   const projection = createWindowHostControllerProjection({ createId: options.createId });
+   const unreadSignals = new Emitter<WindowHostTaskUnreadSignal>();
++  const microInputGenerations = new WeakMap<IZCodeTaskService, string>();
+   const registeredScopes = new Map<string, WindowHostControllerSourceScope>();
+   const sourceAvailability = new Map<string, "online" | "offline">();
+   const sourceTaskServices = new Map<string, IZCodeTaskService>();
+@@ -172,6 +173,8 @@ export function createWindowHostControllerRuntime(options: {
+ 
+   function forgetRegisteredSource(scope: WindowHostControllerSourceScope): void {
+     const key = sourceKey(scope);
++    const previousService = sourceTaskServices.get(key);
++    if (previousService) microInputGenerations.delete(previousService);
+     registeredScopes.delete(key);
+     sourceAvailability.delete(key);
+     sourceTaskServices.delete(key);
+@@ -414,6 +417,8 @@ export function createWindowHostControllerRuntime(options: {
+       );
+     }
+     if (resolved.sourceAvailability === "offline" && previousAvailability === "online") {
++      const previousService = sourceTaskServices.get(key);
++      if (previousService) microInputGenerations.delete(previousService);
+       sourceSessionObservers.get(key)?.observer.dispose();
+       sourceSessionObservers.delete(key);
+       sourceSnapshotTaskServices.delete(key);
+@@ -828,6 +833,35 @@ export function createWindowHostControllerRuntime(options: {
+         }
+         return deleted === true;
+       },
++      async hasMicroInputTask(params) {
++        return (await this.getTaskMeta(params)) !== null;
++      },
++      async readMicroInputIndex({ scope }) {
++        const resolved = options.resolveSource(scope);
++        const taskService = resolved?.taskService;
++        const assertSource = () => {
++          const current = options.resolveSource(scope);
++          if (attachmentDisposed || !resolved || !taskService || !current ||
++              current.taskService !== taskService || current.sourceAvailability !== "online" ||
++              current.scope.workspacePath !== scope.workspacePath ||
++              current.scope.workspaceIdentity !== scope.workspaceIdentity ||
++              (current.scope.kind === "local" ? !!(scope.sourceServerId || scope.remoteSessionId) :
++                current.scope.sourceServerId !== scope.sourceServerId || current.scope.remoteSessionId !== scope.remoteSessionId))
++            throw new Error("Micro Input source unavailable");
++          return current;
++        };
++        assertSource();
++        await refreshSource(resolved!, true);
++        assertSource();
++        if (!microInputGenerations.has(taskService!)) microInputGenerations.set(taskService!, options.createId());
++        return {
++          sourceGeneration: microInputGenerations.get(taskService!)!,
++          rows: projection.getSourceTasks(resolved!.scope).filter((row) =>
++            row.address.workspacePath === scope.workspacePath && row.address.workspaceIdentity === scope.workspaceIdentity &&
++            row.address.sourceServerId === scope.sourceServerId && row.address.remoteSessionId === scope.remoteSessionId)
++            .map((row) => ({ address: row.address, title: row.meta.title, liveStatus: row.liveStatus })),
++        };
++      },
+       async mutateTask({ address, mutation }) {
+         const resolved = options.resolveSource({
+           workspacePath: address.workspacePath,
+diff --git a/packages/desktop/src/main/index.ts b/packages/desktop/src/main/index.ts
+index c8d0c0fa..3e3ba938 100644
+--- a/packages/desktop/src/main/index.ts
++++ b/packages/desktop/src/main/index.ts
+@@ -1,3 +1,4 @@
++import { installMicroInputBridge } from "./micro-input/contract.js";
+ import {
+   BROWSER_LOCAL_PREVIEW_PRIVILEGES,
+   installBrowserLocalPreview,
+@@ -2072,6 +2073,7 @@ function createWindowInstance(startupBootstrap: StartupWindowBootstrap = {}) {
+     },
+   });
+   registerStabilityMainWindow(win);
++  installMicroInputBridge(win);
+   return win;
+ }
+ 
+diff --git a/packages/desktop/src/main/micro-input/CONTRACT.md b/packages/desktop/src/main/micro-input/CONTRACT.md
+new file mode 100644
+index 00000000..16c6cfb0
+--- /dev/null
++++ b/packages/desktop/src/main/micro-input/CONTRACT.md
+@@ -0,0 +1,3 @@
++# Micro Input navigation
++
++Owns the private Unix socket and one renderer capability. It creates no task state. Explicit scoped configuration enables the bridge; default startup does nothing. Renderer replacement, cancellation and window closure revoke in-flight requests and remove socket/grant files. An occupied socket is never removed or taken over.
+diff --git a/packages/desktop/src/main/micro-input/confirmation.ts b/packages/desktop/src/main/micro-input/confirmation.ts
+new file mode 100644
+index 00000000..9bf12e4d
+--- /dev/null
++++ b/packages/desktop/src/main/micro-input/confirmation.ts
+@@ -0,0 +1,33 @@
++import {
++  sameMicroInputAddress,
++  type MicroInputRequest,
++  type MicroInputResponse,
++} from "@zcode/shared";
++
++export function focusConfirmedMicroInputWindow(
++  request: MicroInputRequest,
++  response: MicroInputResponse,
++  window: {
++    isDestroyed(): boolean;
++    isMinimized(): boolean;
++    restore(): void;
++    show(): void;
++    focus(): void;
++  },
++): boolean {
++  if (
++    response.status !== "confirmed" ||
++    request.op !== "open" ||
++    !request.target ||
++    response.id !== request.id ||
++    response.instanceId !== request.instanceId ||
++    response.generation !== request.generation ||
++    !sameMicroInputAddress(response.selected ?? null, request.target) ||
++    window.isDestroyed()
++  )
++    return false;
++  if (window.isMinimized()) window.restore();
++  window.show();
++  window.focus();
++  return true;
++}
+diff --git a/packages/desktop/src/main/micro-input/contract.example.ts b/packages/desktop/src/main/micro-input/contract.example.ts
+new file mode 100644
+index 00000000..4c95c776
+--- /dev/null
++++ b/packages/desktop/src/main/micro-input/contract.example.ts
+@@ -0,0 +1,3 @@
++import { installMicroInputBridge } from "./contract.js";
++import type { BrowserWindow } from "electron";
++export const installForWindow = (window: BrowserWindow) => installMicroInputBridge(window);
+diff --git a/packages/desktop/src/main/micro-input/contract.ts b/packages/desktop/src/main/micro-input/contract.ts
+new file mode 100644
+index 00000000..e449e770
+--- /dev/null
++++ b/packages/desktop/src/main/micro-input/contract.ts
+@@ -0,0 +1,2 @@
++export { installMicroInputBridge } from "./electronBridge.js";
++export { startMicroInputSocket } from "./socket.js";
+diff --git a/packages/desktop/src/main/micro-input/electronBridge.ts b/packages/desktop/src/main/micro-input/electronBridge.ts
+new file mode 100644
+index 00000000..5721fe20
+--- /dev/null
++++ b/packages/desktop/src/main/micro-input/electronBridge.ts
+@@ -0,0 +1,135 @@
++import { focusConfirmedMicroInputWindow } from "./confirmation.js";
++import { ipcMain, type BrowserWindow } from "electron";
++import { lstat, readFile } from "node:fs/promises";
++import { homedir } from "node:os";
++import { join, isAbsolute } from "node:path";
++import { z } from "zod";
++import {
++  microInputScopeSchema,
++  type MicroInputRequest,
++  type MicroInputResponse,
++} from "@zcode/shared";
++import { startMicroInputSocket } from "./socket.js";
++
++const configSchema = z
++  .object({
++    scopes: z.array(microInputScopeSchema).min(1).max(64),
++    directory: z.string().optional(),
++  })
++  .strict();
++let claimed = false;
++export function installMicroInputBridge(win: BrowserWindow): void {
++  const configPath = process.env.MI_ZCODE_BRIDGE_CONFIG;
++  if (!configPath || claimed || !isAbsolute(configPath)) return;
++  claimed = true;
++  let server: Awaited<ReturnType<typeof startMicroInputSocket>> | undefined;
++  let generation = 0;
++  let closed = false;
++  const pending = new Map<
++    string,
++    { resolve: (value: MicroInputResponse) => void; reject: () => void }
++  >();
++  let lifecycle = Promise.resolve();
++  const invalidate = () => {
++    generation++;
++    for (const request of pending.values()) request.reject();
++    pending.clear();
++    lifecycle = lifecycle.then(async () => {
++      await server?.dispose();
++      server = undefined;
++    });
++  };
++  const ready = (event: Electron.IpcMainEvent) => {
++    if (event.sender !== win.webContents || closed) return;
++    invalidate();
++    const captured = generation;
++    lifecycle = lifecycle
++      .then(async () => {
++        if (closed || generation !== captured) return;
++        const stat = await lstat(configPath);
++        if (
++          !stat.isFile() ||
++          stat.isSymbolicLink() ||
++          stat.uid !== process.getuid?.() ||
++          (stat.mode & 0o077) !== 0 ||
++          stat.size > 65536
++        )
++          return;
++        const config = configSchema.parse(JSON.parse(await readFile(configPath, "utf8")));
++        if (closed || generation !== captured) return;
++        server = await startMicroInputSocket({
++          directory:
++            config.directory ?? join(homedir(), "Library", "Application Support", "MicroInput"),
++          scopes: config.scopes,
++          dispatch: (request, grant, signal) =>
++            new Promise((resolve, reject) => {
++              if (closed || generation !== captured || signal.aborted || pending.has(request.id)) {
++                reject();
++                return;
++              }
++              const cleanup = () => {
++                pending.delete(request.id);
++                signal.removeEventListener("abort", cancel);
++              };
++              const cancel = () => {
++                cleanup();
++                if (!win.isDestroyed()) win.webContents.send("micro-input:cancel", request.id);
++                reject();
++              };
++              pending.set(request.id, {
++                resolve: (result) => {
++                  cleanup();
++                  resolve(result);
++                },
++                reject: cancel,
++              });
++              signal.addEventListener("abort", cancel, { once: true });
++              win.webContents.send("micro-input:request", request, grant);
++            }),
++        });
++      })
++      .catch(() => {});
++  };
++  const reply = (
++    event: Electron.IpcMainEvent,
++    request: MicroInputRequest,
++    response: MicroInputResponse,
++  ) => {
++    if (
++      event.sender !== win.webContents ||
++      !server ||
++      closed ||
++      response.instanceId !== server.grant.instanceId ||
++      response.generation !== server.grant.generation ||
++      response.id !== request.id ||
++      response.version !== 1
++    )
++      return;
++    const active = pending.get(request.id);
++    if (!active) return;
++    if (
++      response.status === "confirmed" &&
++      !focusConfirmedMicroInputWindow(request, response, win)
++    ) {
++      active.resolve({
++        version: 1,
++        id: request.id,
++        instanceId: response.instanceId,
++        generation: response.generation,
++        status: "unconfirmed",
++      });
++      return;
++    }
++    active.resolve(response);
++  };
++  ipcMain.on("micro-input:ready", ready);
++  ipcMain.on("micro-input:reply", reply);
++  win.webContents.on("did-start-navigation", invalidate);
++  win.webContents.on("render-process-gone", invalidate);
++  win.once("closed", () => {
++    closed = true;
++    invalidate();
++    ipcMain.removeListener("micro-input:ready", ready);
++    ipcMain.removeListener("micro-input:reply", reply);
++  });
++}
+diff --git a/packages/desktop/src/main/micro-input/module.ts b/packages/desktop/src/main/micro-input/module.ts
+new file mode 100644
+index 00000000..34cbf7d2
+--- /dev/null
++++ b/packages/desktop/src/main/micro-input/module.ts
+@@ -0,0 +1,10 @@
++/**
++ * micro-input-desktop 模块清单（architecture-governance managed 模块）。
++ * 层：adapters。修改 requires 时同步更新 architecture-policy.yaml（检查器会校验两者一致）。
++ */
++export const microInputDesktopModule = {
++  id: "micro-input-desktop",
++  requires: ["shared"],
++  provides: ["micro-input-desktop"],
++  publicEntrypoints: ["index.ts", "contract.ts"],
++} as const;
+diff --git a/packages/desktop/src/main/micro-input/socket.ts b/packages/desktop/src/main/micro-input/socket.ts
+new file mode 100644
+index 00000000..422f12dd
+--- /dev/null
++++ b/packages/desktop/src/main/micro-input/socket.ts
+@@ -0,0 +1,148 @@
++import { createServer, type Socket } from "node:net";
++import { chmod, lstat, mkdir, open, rename, unlink, rmdir } from "node:fs/promises";
++import { join } from "node:path";
++import { randomBytes, randomUUID } from "node:crypto";
++import {
++  authorizeMicroInput,
++  type MicroInputGrant,
++  type MicroInputRequest,
++  type MicroInputResponse,
++  type MicroInputScope,
++} from "@zcode/shared";
++
++export async function startMicroInputSocket(options: {
++  directory: string;
++  scopes: MicroInputScope[];
++  dispatch: (
++    request: MicroInputRequest,
++    grant: MicroInputGrant,
++    signal: AbortSignal,
++  ) => Promise<MicroInputResponse>;
++}) {
++  await mkdir(options.directory, { recursive: true, mode: 0o700 });
++  const directoryStat = await lstat(options.directory);
++  if (
++    !directoryStat.isDirectory() ||
++    directoryStat.isSymbolicLink() ||
++    directoryStat.uid !== process.getuid?.() ||
++    (directoryStat.mode & 0o077) !== 0
++  )
++    throw new Error("private bridge directory required");
++  const grant: MicroInputGrant = {
++    version: 1,
++    socketPath: join(options.directory, "zcode.sock"),
++    token: randomBytes(32).toString("hex"),
++    instanceId: randomUUID(),
++    generation: 1,
++    scopes: options.scopes,
++  };
++  if (Buffer.byteLength(grant.socketPath) > 100) throw new Error("bridge socket path too long");
++  const ownerPath = join(options.directory, ".zcode-owner");
++  await mkdir(ownerPath, { mode: 0o700 });
++  const clients = new Set<Socket>();
++  let disposed = false;
++  const server = createServer((socket) => {
++    clients.add(socket);
++    const abort = new AbortController();
++    let buffer = Buffer.alloc(0);
++    let accepted = false;
++    socket.setTimeout(2000, () => socket.destroy());
++    socket.on("error", () => {});
++    socket.once("close", () => {
++      clients.delete(socket);
++      abort.abort();
++    });
++    socket.on("data", (data) => {
++      if (accepted) {
++        socket.destroy();
++        return;
++      }
++      buffer = Buffer.concat([buffer, typeof data === "string" ? Buffer.from(data) : data]);
++      if (buffer.length > 65536) {
++        socket.destroy();
++        return;
++      }
++      const end = buffer.indexOf(10);
++      if (end < 0) return;
++      accepted = true;
++      if (end !== buffer.length - 1) {
++        socket.destroy();
++        return;
++      }
++      let raw: unknown;
++      try {
++        raw = JSON.parse(buffer.subarray(0, end).toString("utf8"));
++      } catch {
++        socket.destroy();
++        return;
++      }
++      const request = authorizeMicroInput(raw, grant);
++      const response = (status: MicroInputResponse["status"]): MicroInputResponse => ({
++        version: 1,
++        id: request?.id ?? "invalid",
++        instanceId: grant.instanceId,
++        generation: grant.generation,
++        status,
++      });
++      void (async () => {
++        let result = response("denied");
++        if (request) {
++          if (request.instanceId !== grant.instanceId || request.generation !== grant.generation)
++            result = response("stale");
++          else if (!disposed) {
++            try {
++              result = await options.dispatch(request, grant, abort.signal);
++            } catch {
++              result = response("unavailable");
++            }
++          }
++        }
++        if (disposed || abort.signal.aborted) return;
++        const output = JSON.stringify(result) + "\n";
++        if (Buffer.byteLength(output) > 1048576)
++          socket.end(JSON.stringify(response("unavailable")) + "\n");
++        else socket.end(output);
++      })();
++    });
++  });
++  try {
++    await new Promise<void>((resolve, reject) => {
++      server.once("error", reject);
++      server.listen(grant.socketPath, () => {
++        server.removeListener("error", reject);
++        resolve();
++      });
++    });
++  } catch (error) {
++    await rmdir(ownerPath);
++    throw error;
++  }
++  server.on("error", () => {});
++  const grantPath = join(options.directory, "zcode-grant.json");
++  try {
++    await chmod(grant.socketPath, 0o600);
++    const temporary = join(options.directory, `.grant-${randomUUID()}`);
++    const file = await open(temporary, "wx", 0o600);
++    try {
++      await file.writeFile(JSON.stringify(grant));
++    } finally {
++      await file.close();
++    }
++    await rename(temporary, grantPath);
++  } catch (error) {
++    await new Promise<void>((resolve) => server.close(() => resolve()));
++    await rmdir(ownerPath);
++    throw error;
++  }
++  return {
++    grant,
++    async dispose() {
++      if (disposed) return;
++      disposed = true;
++      for (const client of clients) client.destroy();
++      await unlink(grantPath).catch(() => {});
++      await new Promise<void>((resolve) => server.close(() => resolve()));
++      await rmdir(ownerPath);
++    },
++  };
++}
+diff --git a/packages/desktop/src/preload/index.ts b/packages/desktop/src/preload/index.ts
+index 5a588863..0c74617f 100644
+--- a/packages/desktop/src/preload/index.ts
++++ b/packages/desktop/src/preload/index.ts
+@@ -1076,3 +1076,20 @@ window.addEventListener("message", (event) => {
+   const parsed = databaseStartupControlSchema.safeParse(event.data.control);
+   if (parsed.success) ipcRenderer.send(InternalChannels.DatabaseStartupControl, parsed.data);
+ });
++
++contextBridge.exposeInMainWorld("microInputNavigation", {
++  listen(handler: import("@zcode/shared").MicroInputRendererBridge["listen"] extends (handler: infer H) => unknown ? H : never) {
++    let current = true;
++    const cancelled = new Set<string>();
++    const cancel = (_event: Electron.IpcRendererEvent, id: string) => cancelled.add(id);
++    const listener = async (_event: Electron.IpcRendererEvent, request: import("@zcode/shared").MicroInputRequest, grant: import("@zcode/shared").MicroInputGrant) => {
++      const result = await handler(request, grant, () => current && !cancelled.has(request.id));
++      if (current && !cancelled.has(request.id)) ipcRenderer.send("micro-input:reply", request, result);
++      cancelled.delete(request.id);
++    };
++    ipcRenderer.on("micro-input:cancel", cancel);
++    ipcRenderer.on("micro-input:request", listener);
++    ipcRenderer.send("micro-input:ready");
++    return () => { current = false; ipcRenderer.removeListener("micro-input:cancel", cancel); ipcRenderer.removeListener("micro-input:request", listener); };
++  },
++});
+diff --git a/packages/services/src/window-controller/windowController.ts b/packages/services/src/window-controller/windowController.ts
+index 20eef3b5..d58b2a5c 100644
+--- a/packages/services/src/window-controller/windowController.ts
++++ b/packages/services/src/window-controller/windowController.ts
+@@ -1,6 +1,6 @@
+ import type { Event } from "@zcode/rpc";
+ import { ServiceChannels } from "@zcode/shared";
+-import type { ZCodeTaskMeta } from "@zcode/shared";
++import type { MicroInputRow, ZCodeTaskMeta } from "@zcode/shared";
+ import type {
+   ControllerResyncParams,
+   ControllerResyncResult,
+@@ -60,6 +60,8 @@ export interface WindowHostTaskUnreadSignal {
+  * conversation/file/git/terminal 仍由 attachment 对应的 scoped facade 提供。
+  */
+ export interface IWindowControllerService {
++  readMicroInputIndex(params: { scope: Omit<WindowHostTaskAddress, "taskId"> }): Promise<{ sourceGeneration: string; rows: MicroInputRow[] }>;
++  hasMicroInputTask(params: { address: WindowHostTaskAddress }): Promise<boolean>;
+   deleteArchivedTask(params: { address: WindowHostTaskAddress }): Promise<boolean>;
+   deleteArchivedTasks(params: {
+     address: WindowHostTaskAddress;
+diff --git a/packages/shared/src/index.ts b/packages/shared/src/index.ts
+index 00e277c0..52cb22c4 100644
+--- a/packages/shared/src/index.ts
++++ b/packages/shared/src/index.ts
+@@ -387,3 +387,4 @@ export {
+ export * from "./request-security-edition/verification-policy.js";
+ 
+ export * from "./conversation-share-tool-presentation.js";
++export * from "./micro-input/contract.js";
+diff --git a/packages/shared/src/micro-input/CONTRACT.md b/packages/shared/src/micro-input/CONTRACT.md
+new file mode 100644
+index 00000000..9d8b8ba1
+--- /dev/null
++++ b/packages/shared/src/micro-input/CONTRACT.md
+@@ -0,0 +1,3 @@
++# Micro Input navigation
++
++Defines the bounded capability contract shared by the desktop bridge and renderer. Authorization precedes metadata access. Complete source/workspace addresses are compared exactly; empty or unknown fields are rejected. It exposes no transcript or execution API.
+diff --git a/packages/shared/src/micro-input/contract.example.ts b/packages/shared/src/micro-input/contract.example.ts
+new file mode 100644
+index 00000000..4779de97
+--- /dev/null
++++ b/packages/shared/src/micro-input/contract.example.ts
+@@ -0,0 +1,3 @@
++import { authorizeMicroInput, type MicroInputGrant } from "./contract.js";
++export const validateNavigationRequest = (input: unknown, grant: MicroInputGrant) =>
++  authorizeMicroInput(input, grant);
+diff --git a/packages/shared/src/micro-input/contract.ts b/packages/shared/src/micro-input/contract.ts
+new file mode 100644
+index 00000000..ec59dcad
+--- /dev/null
++++ b/packages/shared/src/micro-input/contract.ts
+@@ -0,0 +1,106 @@
++import { z } from "zod";
++
++const identifier = z
++  .string()
++  .min(1)
++  .max(4096)
++  .refine((value) => value.trim() === value && !value.includes("\0"));
++export const microInputScopeSchema = z
++  .object({
++    workspacePath: identifier,
++    workspaceIdentity: identifier.optional(),
++    sourceServerId: identifier.optional(),
++    remoteSessionId: identifier.optional(),
++  })
++  .strict();
++export const microInputAddressSchema = microInputScopeSchema.extend({ taskId: identifier });
++export const microInputRequestSchema = z
++  .object({
++    version: z.literal(1),
++    id: identifier,
++    token: identifier,
++    instanceId: identifier,
++    generation: z.number().int().positive().safe(),
++    op: z.enum(["list", "open"]),
++    scope: microInputScopeSchema,
++    target: microInputAddressSchema.optional(),
++  })
++  .strict()
++  .refine((request) =>
++    request.op === "open" ? request.target !== undefined : request.target === undefined,
++  );
++export const microInputGrantSchema = z
++  .object({
++    version: z.literal(1),
++    socketPath: identifier,
++    token: identifier,
++    instanceId: identifier,
++    generation: z.number().int().positive().safe(),
++    scopes: z.array(microInputScopeSchema).min(1).max(64),
++  })
++  .strict();
++export type MicroInputScope = z.infer<typeof microInputScopeSchema>;
++export type MicroInputAddress = z.infer<typeof microInputAddressSchema>;
++export type MicroInputRequest = z.infer<typeof microInputRequestSchema>;
++export type MicroInputGrant = z.infer<typeof microInputGrantSchema>;
++export type MicroInputStatus =
++  | "ok"
++  | "confirmed"
++  | "denied"
++  | "stale"
++  | "unavailable"
++  | "unconfirmed";
++export interface MicroInputRow {
++  address: MicroInputAddress;
++  title: string;
++  liveStatus: string;
++}
++export interface MicroInputResponse {
++  version: 1;
++  id: string;
++  instanceId: string;
++  generation: number;
++  status: MicroInputStatus;
++  rows?: MicroInputRow[];
++  selected?: MicroInputAddress | null;
++}
++export function sameMicroInputScope(a: MicroInputScope, b: MicroInputScope): boolean {
++  return (
++    a.workspacePath === b.workspacePath &&
++    a.workspaceIdentity === b.workspaceIdentity &&
++    a.sourceServerId === b.sourceServerId &&
++    a.remoteSessionId === b.remoteSessionId
++  );
++}
++export function sameMicroInputAddress(a: MicroInputAddress | null, b: MicroInputAddress): boolean {
++  return a !== null && sameMicroInputScope(a, b) && a.taskId === b.taskId;
++}
++export function authorizeMicroInput(
++  raw: unknown,
++  grant: MicroInputGrant,
++): MicroInputRequest | null {
++  const parsed = microInputRequestSchema.safeParse(raw);
++  if (!parsed.success) return null;
++  const request = parsed.data;
++  if (
++    request.token !== grant.token ||
++    !grant.scopes.some((scope) => sameMicroInputScope(scope, request.scope)) ||
++    (request.target && !sameMicroInputScope(request.target, request.scope))
++  )
++    return null;
++  return request;
++}
++export interface MicroInputRendererBridge {
++  listen(
++    handler: (
++      request: MicroInputRequest,
++      grant: MicroInputGrant,
++      isCurrent: () => boolean,
++    ) => Promise<MicroInputResponse>,
++  ): () => void;
++}
++declare global {
++  interface Window {
++    microInputNavigation?: MicroInputRendererBridge;
++  }
++}
+diff --git a/packages/shared/src/micro-input/module.ts b/packages/shared/src/micro-input/module.ts
+new file mode 100644
+index 00000000..dbae148f
+--- /dev/null
++++ b/packages/shared/src/micro-input/module.ts
+@@ -0,0 +1,10 @@
++/**
++ * micro-input-contract 模块清单（architecture-governance managed 模块）。
++ * 层：contract。修改 requires 时同步更新 architecture-policy.yaml（检查器会校验两者一致）。
++ */
++export const microInputContractModule = {
++  id: "micro-input-contract",
++  requires: [],
++  provides: ["micro-input-contract"],
++  publicEntrypoints: ["index.ts", "contract.ts"],
++} as const;
+diff --git a/packages/ui/src/App.tsx b/packages/ui/src/App.tsx
+index b1659106..b2abc7a2 100644
+--- a/packages/ui/src/App.tsx
++++ b/packages/ui/src/App.tsx
+@@ -1,3 +1,4 @@
++import { useMicroInputNavigation } from "@/app-shell/micro-input/contract.js";
+ import { PluginUiWorkspaceProvider } from "@/plugin-ui/index.js";
+ /* eslint-disable max-lines -- App 当前集中编排 workspace 级状态、导航、Git 派生数据和 shell wiring；已将新增 side pane memory 桥接抽出，剩余拆分需要按 shell 边界单独重构。 */
+ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+@@ -870,6 +871,7 @@ export function App({
+   const handleNavigateToTaskMain = useCallback(() => {
+     setWorkspaceMainView("chat");
+   }, []);
++  useMicroInputNavigation(handleNavigateToTaskMain);
+   const { preserveNextSettingsExit } = useWorkspaceMainViewSettingsExit({
+     isWorkspaceVisible,
+     workspaceMainView,
+diff --git a/packages/ui/src/app-shell/micro-input/CONTRACT.md b/packages/ui/src/app-shell/micro-input/CONTRACT.md
+new file mode 100644
+index 00000000..c2600806
+--- /dev/null
++++ b/packages/ui/src/app-shell/micro-input/CONTRACT.md
+@@ -0,0 +1,3 @@
++# Micro Input navigation
++
++Owns exact navigation admission within the existing window. It reads the scoped Host controller metadata and then selects an existing tab and task in one synchronous turn. Source generations are pinned on first list; later replacement stays stale until a new renderer registration. Selected addresses come from the actual tab/session stores. No fallback, transcript read, search or text command is permitted.
+diff --git a/packages/ui/src/app-shell/micro-input/contract.example.ts b/packages/ui/src/app-shell/micro-input/contract.example.ts
+new file mode 100644
+index 00000000..4d9c729f
+--- /dev/null
++++ b/packages/ui/src/app-shell/micro-input/contract.example.ts
+@@ -0,0 +1,3 @@
++import { createMicroInputNavigation } from "./contract.js";
++export const bindNavigation = (ports: Parameters<typeof createMicroInputNavigation>[0]) =>
++  createMicroInputNavigation(ports);
+diff --git a/packages/ui/src/app-shell/micro-input/contract.ts b/packages/ui/src/app-shell/micro-input/contract.ts
+new file mode 100644
+index 00000000..1ce60eb6
+--- /dev/null
++++ b/packages/ui/src/app-shell/micro-input/contract.ts
+@@ -0,0 +1,2 @@
++export { useMicroInputNavigation } from "./useNavigation.js";
++export { createMicroInputNavigation } from "./navigation.js";
+diff --git a/packages/ui/src/app-shell/micro-input/module.ts b/packages/ui/src/app-shell/micro-input/module.ts
+new file mode 100644
+index 00000000..5a508d9e
+--- /dev/null
++++ b/packages/ui/src/app-shell/micro-input/module.ts
+@@ -0,0 +1,10 @@
++/**
++ * micro-input-ui 模块清单（architecture-governance managed 模块）。
++ * 层：ui。修改 requires 时同步更新 architecture-policy.yaml（检查器会校验两者一致）。
++ */
++export const microInputUiModule = {
++  id: "micro-input-ui",
++  requires: ["shared", "ui"],
++  provides: ["micro-input-ui"],
++  publicEntrypoints: ["index.ts", "contract.ts"],
++} as const;
+diff --git a/packages/ui/src/app-shell/micro-input/navigation.ts b/packages/ui/src/app-shell/micro-input/navigation.ts
+new file mode 100644
+index 00000000..7252d2a0
+--- /dev/null
++++ b/packages/ui/src/app-shell/micro-input/navigation.ts
+@@ -0,0 +1,94 @@
++import {
++  authorizeMicroInput,
++  sameMicroInputAddress,
++  sameMicroInputScope,
++  type MicroInputAddress,
++  type MicroInputGrant,
++  type MicroInputRequest,
++  type MicroInputResponse,
++  type MicroInputRow,
++  type MicroInputScope,
++} from "@zcode/shared";
++
++export function createMicroInputNavigation(ports: {
++  readIndex: (
++    scope: MicroInputScope,
++  ) => Promise<{ sourceGeneration: string; rows: MicroInputRow[] }>;
++  exists: (address: MicroInputAddress) => Promise<boolean>;
++  current: (scope: MicroInputScope) => (() => boolean) | null;
++  select: (address: MicroInputAddress) => boolean;
++  selected: (scope: MicroInputScope) => MicroInputAddress | null;
++}) {
++  const sources = new Map<string, string>();
++  let inFlight = false;
++  return async (
++    raw: MicroInputRequest,
++    grant: MicroInputGrant,
++    isCurrent: () => boolean,
++  ): Promise<MicroInputResponse> => {
++    const request = authorizeMicroInput(raw, grant);
++    const base = {
++      version: 1 as const,
++      id: raw.id,
++      instanceId: grant.instanceId,
++      generation: grant.generation,
++    };
++    if (!request) return { ...base, status: "denied" };
++    if (
++      request.instanceId !== grant.instanceId ||
++      request.generation !== grant.generation ||
++      !isCurrent()
++    )
++      return { ...base, status: "stale" };
++    if (inFlight) return { ...base, status: "unavailable" };
++    const current = ports.current(request.scope);
++    if (!current) return { ...base, status: "unavailable" };
++    const valid = () => isCurrent() && current();
++    const key = JSON.stringify([
++      request.scope.workspacePath,
++      request.scope.workspaceIdentity,
++      request.scope.sourceServerId,
++      request.scope.remoteSessionId,
++    ]);
++    const expected = sources.get(key);
++    if (request.op === "open" && expected === undefined) return { ...base, status: "stale" };
++    inFlight = true;
++    try {
++      const index = await ports.readIndex(request.scope);
++      if (!valid() || (expected !== undefined && expected !== index.sourceGeneration))
++        return { ...base, status: "stale" };
++      if (
++        index.rows.length > 4096 ||
++        index.rows.some((row) => !sameMicroInputScope(row.address, request.scope))
++      )
++        return { ...base, status: "unavailable" };
++      if (request.op === "list") {
++        sources.set(key, index.sourceGeneration);
++        const selected = ports.selected(request.scope);
++        return {
++          ...base,
++          status: "ok",
++          rows: index.rows,
++          selected: selected && sameMicroInputScope(selected, request.scope) ? selected : null,
++        };
++      }
++      const target = request.target;
++      if (!target || !index.rows.some((row) => sameMicroInputAddress(row.address, target)))
++        return { ...base, status: "unavailable" };
++      if (!(await ports.exists(target)) || !valid()) return { ...base, status: "unavailable" };
++      const finalIndex = await ports.readIndex(request.scope);
++      if (!valid() || finalIndex.sourceGeneration !== expected) return { ...base, status: "stale" };
++      if (!finalIndex.rows.some((row) => sameMicroInputAddress(row.address, target)))
++        return { ...base, status: "unavailable" };
++      if (!ports.select(target)) return { ...base, status: "unavailable" };
++      const selected = ports.selected(request.scope);
++      return sameMicroInputAddress(selected, target)
++        ? { ...base, status: "confirmed", selected }
++        : { ...base, status: "unconfirmed" };
++    } catch {
++      return { ...base, status: "unavailable" };
++    } finally {
++      inFlight = false;
++    }
++  };
++}
+diff --git a/packages/ui/src/app-shell/micro-input/selection.ts b/packages/ui/src/app-shell/micro-input/selection.ts
+new file mode 100644
+index 00000000..cdbc9f4d
+--- /dev/null
++++ b/packages/ui/src/app-shell/micro-input/selection.ts
+@@ -0,0 +1,76 @@
++import { sameMicroInputScope, type MicroInputAddress, type MicroInputScope } from "@zcode/shared";
++import { isWorkspaceTab, type TabStore } from "@/store/tabStore.js";
++import { useZCodeSessionStore } from "@/store/zcodeSessionStore.js";
++import {
++  getRemoteWorkspaceSession,
++  useRemoteWorkspaceSessionStore,
++} from "@/store/remoteWorkspaceSessionStore.js";
++
++export function createMicroInputSelection(tabs: TabStore, onNavigate: () => void) {
++  const scopeOf = (
++    tab: ReturnType<typeof tabs.getState>["tabs"][number],
++  ): MicroInputScope | null => {
++    if (!isWorkspaceTab(tab)) return null;
++    const remote = tab.remoteSessionId ? getRemoteWorkspaceSession(tab.remoteSessionId) : null;
++    return {
++      workspacePath: tab.workspacePath,
++      ...(tab.workspaceIdentity ? { workspaceIdentity: tab.workspaceIdentity } : {}),
++      ...(tab.remoteSessionId ? { remoteSessionId: tab.remoteSessionId } : {}),
++      ...(remote?.sourceServerId ? { sourceServerId: remote.sourceServerId } : {}),
++    };
++  };
++  const findTab = (scope: MicroInputScope) => {
++    const matches = tabs.getState().tabs.filter((tab) => {
++      const candidate = scopeOf(tab);
++      return candidate && sameMicroInputScope(candidate, scope);
++    });
++    return matches.length === 1 && isWorkspaceTab(matches[0]!) ? matches[0] : null;
++  };
++  const selected = (authorizedScope: MicroInputScope): MicroInputAddress | null => {
++    const tab = tabs
++      .getState()
++      .tabs.find((candidate) => candidate.id === tabs.getState().activeTabId);
++    if (!tab || !isWorkspaceTab(tab)) return null;
++    const scope = scopeOf(tab);
++    if (!scope || !sameMicroInputScope(scope, authorizedScope)) return null;
++    const taskId =
++      useZCodeSessionStore.getState().workspaces[tab.workspaceIdentity?.trim() || tab.workspacePath]
++        ?.activeTaskId;
++    return scope && taskId ? { ...scope, taskId } : null;
++  };
++  return {
++    current: (scope: MicroInputScope) => {
++      const tab = findTab(scope);
++      if (!tab) return null;
++      const remote = scope.remoteSessionId
++        ? getRemoteWorkspaceSession(scope.remoteSessionId)
++        : null;
++      if ((scope.remoteSessionId && !remote) || (scope.sourceServerId && !scope.remoteSessionId))
++        return null;
++      const overlay = () =>
++        useRemoteWorkspaceSessionStore.getState().connectionOverlayByWorkspaceKey[
++          scope.workspaceIdentity || scope.workspacePath
++        ];
++      if (overlay()) return null;
++      return () =>
++        findTab(scope)?.id === tab.id &&
++        !overlay() &&
++        (!scope.remoteSessionId || getRemoteWorkspaceSession(scope.remoteSessionId) === remote);
++    },
++    select: (address: MicroInputAddress) => {
++      const tab = findTab(address);
++      if (!tab) return false;
++      const state = useZCodeSessionStore
++        .getState()
++        .getWorkspaceState(address.workspacePath, address.workspaceIdentity);
++      if (state.modelSwitchPending || state.modelSwitchStage !== "idle") return false;
++      tabs.getState().activateTab(tab.id);
++      useZCodeSessionStore
++        .getState()
++        .setActiveTaskId(address.workspacePath, address.taskId, address.workspaceIdentity);
++      onNavigate();
++      return true;
++    },
++    selected,
++  };
++}
+diff --git a/packages/ui/src/app-shell/micro-input/useNavigation.ts b/packages/ui/src/app-shell/micro-input/useNavigation.ts
+new file mode 100644
+index 00000000..a0422ba7
+--- /dev/null
++++ b/packages/ui/src/app-shell/micro-input/useNavigation.ts
+@@ -0,0 +1,20 @@
++import { useEffect } from "react";
++import { useBaseWorkspaceServices } from "@/hooks/useWorkspaceServices.js";
++import { useTabStoreApi } from "@/store/TabStoreProvider.js";
++import { createMicroInputNavigation } from "./navigation.js";
++import { createMicroInputSelection } from "./selection.js";
++
++export function useMicroInputNavigation(onNavigate: () => void): void {
++  const services = useBaseWorkspaceServices();
++  const tabs = useTabStoreApi();
++  useEffect(() => {
++    const controller = services.windowControllerService;
++    if (!window.microInputNavigation || !controller) return;
++    const handler = createMicroInputNavigation({
++      ...createMicroInputSelection(tabs, onNavigate),
++      readIndex: (scope) => controller.readMicroInputIndex({ scope }),
++      exists: (address) => controller.hasMicroInputTask({ address }),
++    });
++    return window.microInputNavigation.listen(handler);
++  }, [services, tabs, onNavigate]);
++}
+diff --git a/scripts/micro-input-boundaries.ts b/scripts/micro-input-boundaries.ts
+new file mode 100644
+index 00000000..103293cc
+--- /dev/null
++++ b/scripts/micro-input-boundaries.ts
+@@ -0,0 +1,91 @@
++import assert from "node:assert/strict";
++import { mkdir, readFile, rmdir } from "node:fs/promises";
++import { resolve, join } from "node:path";
++import { startMicroInputSocket } from "../packages/desktop/src/main/micro-input/socket.ts";
++import { focusConfirmedMicroInputWindow } from "../packages/desktop/src/main/micro-input/confirmation.ts";
++import type {
++  MicroInputRequest,
++  MicroInputResponse,
++} from "../packages/shared/src/micro-input/contract.ts";
++
++const directory = resolve(process.argv[2]!);
++await mkdir(directory, { mode: 0o700 });
++const options = {
++  directory,
++  scopes: [{ workspacePath: "/fixture" }],
++  dispatch: async (): Promise<MicroInputResponse> => {
++    throw new Error("unused");
++  },
++};
++let one: Awaited<ReturnType<typeof startMicroInputSocket>> | undefined;
++let two: Awaited<ReturnType<typeof startMicroInputSocket>> | undefined;
++try {
++  one = await startMicroInputSocket(options);
++  await assert.rejects(startMicroInputSocket(options));
++  const closing = one.dispose();
++  const contender = startMicroInputSocket(options).catch(() => undefined);
++  await closing;
++  two = (await contender) ?? (await startMicroInputSocket(options));
++  await one.dispose();
++  assert.equal(
++    JSON.parse(await readFile(join(directory, "zcode-grant.json"), "utf8")).instanceId,
++    two.grant.instanceId,
++  );
++} finally {
++  await one?.dispose();
++  await two?.dispose();
++  await rmdir(directory);
++}
++const request: MicroInputRequest = {
++  version: 1,
++  id: "1",
++  instanceId: "fixture",
++  generation: 1,
++  token: "fixture",
++  op: "open",
++  scope: { workspacePath: "/a" },
++  target: { workspacePath: "/a", taskId: "t" },
++};
++const response: MicroInputResponse = {
++  version: 1,
++  id: "1",
++  instanceId: "fixture",
++  generation: 1,
++  status: "confirmed",
++  selected: request.target,
++};
++const effects: string[] = [];
++const window = {
++  isDestroyed: () => false,
++  isMinimized: () => true,
++  restore: () => {
++    effects.push("restore");
++  },
++  show: () => {
++    effects.push("show");
++  },
++  focus: () => {
++    effects.push("focus");
++  },
++};
++assert.equal(focusConfirmedMicroInputWindow(request, response, window), true);
++assert.deepEqual(effects, ["restore", "show", "focus"]);
++effects.length = 0;
++assert.equal(
++  focusConfirmedMicroInputWindow(request, { ...response, generation: 2 }, window),
++  false,
++);
++assert.equal(
++  focusConfirmedMicroInputWindow(
++    request,
++    { ...response, selected: { workspacePath: "/b", taskId: "t" } },
++    window,
++  ),
++  false,
++);
++assert.equal(
++  focusConfirmedMicroInputWindow(request, { ...response, status: "unconfirmed" }, window),
++  false,
++);
++assert.deepEqual(effects, []);
++console.log("socket ownership interleaving and exact confirmed window focus: PASS");
+diff --git a/scripts/micro-input-fixture.ts b/scripts/micro-input-fixture.ts
+new file mode 100644
+index 00000000..74a57a3f
+--- /dev/null
++++ b/scripts/micro-input-fixture.ts
+@@ -0,0 +1,164 @@
++import { createServer } from "node:net";
++import { chmod, mkdir, writeFile, unlink } from "node:fs/promises";
++import { join, resolve } from "node:path";
++import { parseArgs } from "node:util";
++import { startMicroInputSocket } from "../packages/desktop/src/main/micro-input/socket.ts";
++import { createMicroInputNavigation } from "../packages/ui/src/app-shell/micro-input/navigation.ts";
++import {
++  sameMicroInputScope,
++  type MicroInputRow,
++} from "../packages/shared/src/micro-input/contract.ts";
++
++const { values } = parseArgs({
++  options: { directory: { type: "string" }, ttl: { type: "string", default: "120" } },
++});
++if (!values.directory) throw new Error("--directory required");
++const directory = resolve(values.directory);
++await mkdir(directory, { recursive: true, mode: 0o700 });
++const scopes = [
++  { workspacePath: "/synthetic/workspace-a" },
++  { workspacePath: "/synthetic/workspace-b" },
++];
++let rows: MicroInputRow[] = [];
++const { createTabStore } = await import("../packages/ui/src/store/tabStore.ts");
++const { useZCodeSessionStore } = await import("../packages/ui/src/store/zcodeSessionStore.ts");
++const { createMicroInputSelection } =
++  await import("../packages/ui/src/app-shell/micro-input/selection.ts");
++const tabs = createTabStore(null);
++for (const scope of scopes) tabs.getState().addTab(scope.workspacePath);
++let sourceGeneration = "source-1";
++let connected = true;
++let metadataReads = 0;
++let navigationCount = 0;
++let deleteDuringOpen = false;
++let rotateDuringOpen = false;
++const reset = () => {
++  rows = scopes.map((scope) => ({
++    address: { ...scope, taskId: "same-task-id" },
++    title: "Same task",
++    liveStatus: "idle",
++  }));
++  for (const scope of scopes)
++    useZCodeSessionStore.getState().setActiveTaskId(scope.workspacePath, null);
++  connected = true;
++  metadataReads = 0;
++  navigationCount = 0;
++  deleteDuringOpen = false;
++  rotateDuringOpen = false;
++};
++reset();
++const selection = createMicroInputSelection(tabs, () => {
++  navigationCount++;
++});
++const handler = createMicroInputNavigation({
++  ...selection,
++  readIndex: async (scope) => {
++    metadataReads++;
++    if (!connected) throw new Error("offline");
++    return {
++      sourceGeneration,
++      rows: rows.filter((row) => sameMicroInputScope(row.address, scope)),
++    };
++  },
++  exists: async (address) => {
++    metadataReads++;
++    const exists = rows.some(
++      (row) => sameMicroInputScope(row.address, address) && row.address.taskId === address.taskId,
++    );
++    if (deleteDuringOpen) rows = rows.filter((row) => !sameMicroInputScope(row.address, address));
++    if (rotateDuringOpen) sourceGeneration += "-next";
++    return exists;
++  },
++  current: (scope) => {
++    const current = selection.current(scope);
++    return connected && current ? () => connected && current() : null;
++  },
++});
++const socket = await startMicroInputSocket({
++  directory,
++  scopes,
++  dispatch: (request, grant, signal) => handler(request, grant, () => !signal.aborted),
++});
++const controlPath = join(directory, "control.sock");
++const control = createServer((client) => {
++  let data = "";
++  client.setTimeout(2000, () => client.destroy());
++  client.on("error", () => {});
++  client.on("data", (chunk) => {
++    data += chunk.toString("utf8");
++    if (data.length > 65536) {
++      client.destroy();
++      return;
++    }
++    if (!data.endsWith("\n")) return;
++    void (async () => {
++      try {
++        const command = JSON.parse(data);
++        switch (command.op) {
++          case "delete":
++            rows = rows.filter(
++              (row) =>
++                row.address.workspacePath !== (command.workspacePath ?? scopes[0]!.workspacePath),
++            );
++            break;
++          case "rotate":
++            socket.grant.generation++;
++            await writeFile(join(directory, "zcode-grant.json"), JSON.stringify(socket.grant), {
++              mode: 0o600,
++            });
++            break;
++          case "replace-source":
++            sourceGeneration += "-next";
++            break;
++          case "disconnect":
++            connected = false;
++            break;
++          case "reset":
++            reset();
++            break;
++          case "delete-during-open":
++            deleteDuringOpen = true;
++            break;
++          case "rotate-during-open":
++            rotateDuringOpen = true;
++            break;
++          case "stats":
++            break;
++          default:
++            client.end(JSON.stringify({ error: "unknown" }) + "\n");
++            return;
++        }
++        client.end(
++          JSON.stringify({
++            metadataReads,
++            navigationCount,
++            selected: selection.selected(scopes[0]!) ?? selection.selected(scopes[1]!),
++            connected,
++            sourceGeneration,
++          }) + "\n",
++        );
++      } catch {
++        client.destroy();
++      }
++    })();
++  });
++});
++await new Promise<void>((resolve, reject) => {
++  control.once("error", reject);
++  control.listen(controlPath, resolve);
++});
++await chmod(controlPath, 0o600);
++console.log(`GRANT_PATH=${join(directory, "zcode-grant.json")}`);
++console.log(`CONTROL_PATH=${controlPath}`);
++let closing = false;
++const close = async () => {
++  if (closing) return;
++  closing = true;
++  await socket.dispose();
++  control.close();
++  await unlink(controlPath).catch(() => {});
++  process.exit(0);
++};
++process.once("SIGTERM", () => void close());
++process.once("SIGINT", () => void close());
++setTimeout(() => void close(), Math.min(600, Math.max(1, Number(values.ttl))) * 1000).unref();
+diff --git a/scripts/micro-input-host-boundary.mjs b/scripts/micro-input-host-boundary.mjs
+new file mode 100644
+index 00000000..f0609bb1
+--- /dev/null
++++ b/scripts/micro-input-host-boundary.mjs
+@@ -0,0 +1,33 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { createWindowHostControllerRuntime } from "../packages/desktop/src/host/windowHostControllerService.ts";
++
++const scope = { kind: "local", workspacePath: "/synthetic/workspace" };
++const meta = {
++  taskId: "task", workspacePath: scope.workspacePath, title: "Same task", status: "completed",
++  createdAt: 1, updatedAt: 2, lastAssistantPreview: "PRIVATE_PREVIEW", lastError: { message: "PRIVATE_ERROR" },
++};
++let exists = true;
++const taskService = {
++  listTasks: async () => exists ? [meta] : [],
++  listPinnedTasks: async () => [],
++  listArchivedTasks: async () => [],
++  getTaskMeta: async () => exists ? meta : null,
++};
++const controller = createWindowHostControllerRuntime({
++  createId: randomUUID,
++  readHostTaskList: async () => { throw new Error("unscoped read forbidden"); },
++  resolveSource: (target) => target.workspacePath === scope.workspacePath
++    ? { scope, taskService, sourceAvailability: "online" } : null,
++});
++try {
++  const result = await controller.service.readMicroInputIndex({ scope: { workspacePath: scope.workspacePath } });
++  assert.deepEqual(result.rows, [{ address: { workspacePath: scope.workspacePath, taskId: meta.taskId }, title: meta.title, liveStatus: "completed" }]);
++  assert.equal(JSON.stringify(result).includes("PRIVATE"), false);
++  const target = { address: { workspacePath: scope.workspacePath, taskId: meta.taskId } };
++  assert.equal(await controller.service.hasMicroInputTask(target), true);
++  exists = false;
++  assert.equal(await controller.service.hasMicroInputTask(target), false);
++  assert.deepEqual((await controller.service.readMicroInputIndex({ scope: { workspacePath: scope.workspacePath } })).rows, []);
++} finally { controller.dispose(); }
++console.log("Host metadata projection and boolean existence boundary: PASS");

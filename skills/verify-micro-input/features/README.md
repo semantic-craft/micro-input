@@ -33,3 +33,5 @@
 | [2U 宽键合并防抖与透传层健康检查 (`wide-key-and-passthrough`)](wide-key-and-passthrough.md) | 底部宽键双开关 (`AG10`+`AG11` / `ACT10`+`ACT11`) 先后按下/释放；检查 `KV_OAI_AG*` / `KV_OAI_ACT*` 透传层状态 | 宽键重叠按压仅触发 1 次动作且 `logical-10`↔`logical-11` 对称回退；非透传层返回 `LayerDriftWarning` | 电容触摸切层的实机通知形态需连接实机核验 |
 
 - [径向菜单](radial-menu.md)：八向选择、冻结目标、一次确认与回中取消；合成输入和实体手感分开验收。
+
+- [ZCode 精确会话导航](zcode-navigation.md)：授权工作区元数据、完整身份导航和选中回读；合成、原生源码与安装版证据分开。

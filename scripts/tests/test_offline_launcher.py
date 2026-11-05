@@ -78,3 +78,29 @@ class OfflineEvidenceTests(unittest.TestCase):
         payload["native_app"] = "PASS"
         path.write_text(json.dumps(payload))
         with self.assertRaises(ValueError): module.verify_evidence(self.run, "native-ownership", 99, lambda _: False)
+
+    def test_zcode_navigation_requires_all_checks_and_exact_confirmation(self):
+        names = ["same_name_two_workspaces", "selected_readback_matches", "wrong_selected_unconfirmed",
+                 "deleted_target_no_redirect", "generation_change_blocks_old_selection",
+                 "disconnect_clears_targets", "disabled_zero_reads", "out_of_scope_zero_reads"]
+        payload = dict(status="PASS", checks=dict.fromkeys(names, True), body_reads=0,
+                       native_app="NOT_RUN", physical_key="NOT_RUN")
+        path = self.evidence / "zcode-navigation.json"
+        audit = self.evidence / "audit.jsonl"
+        audit.write_text("\n".join(json.dumps(dict(action_type="zcode_open", outcome="confirmed", target="zcode")) for _ in range(2)))
+        path.write_text(json.dumps(payload))
+        self.assertEqual(module.verify_evidence(self.run, "zcode-navigation", 99, lambda _: False)["zcode_navigation"], "SYNTHETIC_PASS")
+        for name in names:
+            payload["checks"][name] = False
+            path.write_text(json.dumps(payload))
+            with self.assertRaises(ValueError): module.verify_evidence(self.run, "zcode-navigation", 99, lambda _: False)
+            payload["checks"][name] = True
+        for field, wrong in [("body_reads", 1), ("native_app", "PASS"), ("physical_key", "PASS")]:
+            prior = payload[field]
+            payload[field] = wrong
+            path.write_text(json.dumps(payload))
+            with self.assertRaises(ValueError): module.verify_evidence(self.run, "zcode-navigation", 99, lambda _: False)
+            payload[field] = prior
+        path.write_text(json.dumps(payload))
+        audit.write_text(json.dumps(dict(action_type="zcode_open", outcome="delivered", target="zcode")))
+        with self.assertRaises(ValueError): module.verify_evidence(self.run, "zcode-navigation", 99, lambda _: False)

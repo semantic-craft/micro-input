@@ -5,19 +5,23 @@ struct UnixNativeOwnershipTransport: NativeOwnershipTransport {
     var path = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/MicroInput/cindy-ownership.sock").path
 
+    var requestLimit = 4096
+    var responseLimit = 4096
+    var timeout: Duration = .milliseconds(750)
+
     func exchange(_ request: NativeOwnershipRequest) async throws -> NativeOwnershipReply {
         let data = try await exchangeJSON(JSONEncoder().encode(request))
         return try JSONDecoder().decode(NativeOwnershipReply.self, from: data)
     }
     func exchangeJSON(_ request: Data) async throws -> Data {
-        let path = self.path
+        let path = self.path, requestLimit = self.requestLimit, responseLimit = self.responseLimit, timeout = self.timeout
         return try await Task.detached {
-            try Self.exchangeBlocking(request, path: path)
+            try Self.exchangeBlocking(request, path: path, requestLimit: requestLimit, responseLimit: responseLimit, timeout: timeout)
         }.value
     }
     enum Failure: Error { case unavailable, invalidPeer, invalidReply }
 
-    private static func exchangeBlocking(_ request: Data, path: String) throws -> Data {
+    private static func exchangeBlocking(_ request: Data, path: String, requestLimit: Int, responseLimit: Int, timeout: Duration) throws -> Data {
         var metadata = stat()
         guard lstat(path, &metadata) == 0, metadata.st_uid == getuid(),
               metadata.st_mode & S_IFMT == S_IFSOCK, metadata.st_mode & 0o077 == 0 else { throw Failure.invalidPeer }
@@ -38,7 +42,7 @@ struct UnixNativeOwnershipTransport: NativeOwnershipTransport {
                 connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+        let deadline = ContinuousClock.now.advanced(by: timeout)
         if result != 0 {
             guard errno == EINPROGRESS else { throw Failure.unavailable }
             try wait(fd, for: Int16(POLLOUT), deadline: deadline)
@@ -49,7 +53,7 @@ struct UnixNativeOwnershipTransport: NativeOwnershipTransport {
         var uid: uid_t = 0
         var gid: gid_t = 0
         guard getpeereid(fd, &uid, &gid) == 0, uid == getuid() else { throw Failure.invalidPeer }
-        guard request.count <= 4096 else { throw Failure.invalidReply }
+        guard request.count <= requestLimit else { throw Failure.invalidReply }
         var data = request
         data.append(0x0a)
         var written = 0
@@ -62,14 +66,14 @@ struct UnixNativeOwnershipTransport: NativeOwnershipTransport {
         }
         var response = Data()
         var buffer = [UInt8](repeating: 0, count: 1024)
-        while response.count <= 4096 {
+        while response.count <= responseLimit {
             try wait(fd, for: Int16(POLLIN), deadline: deadline)
             let count = recv(fd, &buffer, buffer.count, 0)
             if count < 0, errno == EAGAIN || errno == EINTR { continue }
             guard count > 0 else { throw Failure.unavailable }
             response.append(contentsOf: buffer.prefix(count))
             if let newline = response.firstIndex(of: 0x0a) {
-                guard newline <= 4096, response.count == newline + 1 else { throw Failure.invalidReply }
+                guard newline <= responseLimit, response.count == newline + 1 else { throw Failure.invalidReply }
                 return Data(response.prefix(upTo: newline))
             }
         }
