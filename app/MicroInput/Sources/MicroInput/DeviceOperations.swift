@@ -179,7 +179,7 @@ extension Store {
             AuditLogWriter.append(receipt)
         } else if payload?.action_type == "agent_command", payload?.adapter == "antigravity",
                   let cmd = payload?.command,
-                  ["create-conversation", "send-message", "query-command"].contains(cmd) {
+                  ["create-conversation", "send-message", "query-command", "stop-conversation", "resolve-interaction", "switch-model"].contains(cmd) {
             let result = await antigravityStatus.execute(antigravityCommand, admitted: { [weak self] in
                 guard let self else { return false }
                 return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
@@ -188,6 +188,9 @@ extension Store {
             switch cmd {
             case "create-conversation": actionType = "antigravity_create"
             case "send-message": actionType = "antigravity_send"
+            case "stop-conversation": actionType = "antigravity_stop"
+            case "resolve-interaction": actionType = "antigravity_resolve"
+            case "switch-model": actionType = "antigravity_switch_model"
             default: actionType = "antigravity_query"
             }
             receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,

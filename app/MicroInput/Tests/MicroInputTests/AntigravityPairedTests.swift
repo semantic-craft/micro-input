@@ -59,7 +59,6 @@ final class AntigravityPairedTests: XCTestCase {
         XCTAssertEqual(readback.transcriptReads, 0)
         XCTAssertEqual(readback.tokenReads, 0)
 
-        // Slice K3: create bound to projectId
         let badProjectCreate = try await client.create(AntigravityCreateIntent(
             requestId: "paired-create-bad-project",
             workspacePath: rowA.workspacePath,
@@ -103,7 +102,6 @@ final class AntigravityPairedTests: XCTestCase {
         XCTAssertTrue(dupCreateReply.duplicate)
         XCTAssertEqual(dupCreateReply.rows.count, 3)
 
-        // Select rowB (completed) and verify two-session target isolation and missing-target zero redirect
         _ = try await client.open(rowB.key)
         let unselectedSend = try await client.send(AntigravitySendIntent(
             requestId: "paired-send-unselected-a",
@@ -128,7 +126,6 @@ final class AntigravityPairedTests: XCTestCase {
         XCTAssertEqual(missingTargetSend.selected, rowB.key)
         XCTAssertEqual(missingTargetSend.rows.count, 3)
 
-        // Send to selected idle/completed rowB starts execution on rowB only; rowA and createdKey untouched
         let sendIdleB = try await client.send(AntigravitySendIntent(
             requestId: "paired-send-b-start",
             target: rowB.key,
@@ -143,7 +140,6 @@ final class AntigravityPairedTests: XCTestCase {
         XCTAssertEqual(sendIdleB.rows.first(where: { $0.key == rowA.key })?.transitionCount, 3)
         XCTAssertEqual(sendIdleB.rows.first(where: { $0.key == createdKey })?.transitionCount, 1)
 
-        // Send to running rowB with deliveryMode .steer under official agentapi contract queues for nextInvocation
         let sendRunningB = try await client.send(AntigravitySendIntent(
             requestId: "paired-send-b-running-default",
             target: rowB.key,
@@ -157,7 +153,6 @@ final class AntigravityPairedTests: XCTestCase {
         XCTAssertEqual(sendRunningB.reasonCode, "agentapi.steerUnsupportedQueuedNextInvocation")
         XCTAssertEqual(sendRunningB.rows.count, 3)
 
-        // Reconcile via query without resending
         let queryReconciled = try await client.query(AntigravityQueryIntent(
             requestId: "paired-send-b-running-default",
             expectedOp: "send",
@@ -168,6 +163,58 @@ final class AntigravityPairedTests: XCTestCase {
         XCTAssertEqual(queryReconciled.status, "queued")
         XCTAssertTrue(queryReconciled.reconciled)
         XCTAssertTrue(queryReconciled.duplicate)
+
+        let unselectedStopA = try await client.stop(AntigravityStopIntent(
+            requestId: "paired-stop-unselected-a",
+            target: rowA.key,
+            expectedInvocationNum: 1
+        ))
+        XCTAssertEqual(unselectedStopA.status, "unconfirmed")
+        XCTAssertEqual(unselectedStopA.reasonCode, "guard.selectionMismatch")
+
+        let staleStopB = try await client.stop(AntigravityStopIntent(
+            requestId: "paired-stop-stale-b",
+            target: rowB.key,
+            expectedInvocationNum: 99,
+            expectedExecutionNum: 1
+        ))
+        XCTAssertEqual(staleStopB.status, "noop")
+        XCTAssertEqual(staleStopB.reasonCode, "guard.stopTargetChanged")
+        XCTAssertEqual(staleStopB.rows.first(where: { $0.key == rowB.key })?.phase, .running)
+
+        let validStopB = try await client.stop(AntigravityStopIntent(
+            requestId: "paired-stop-valid-b",
+            target: rowB.key,
+            expectedInvocationNum: 1,
+            expectedExecutionNum: 1
+        ))
+        XCTAssertEqual(validStopB.status, "stopped")
+        XCTAssertEqual(validStopB.delivery, .canceled)
+        XCTAssertEqual(validStopB.rows.first(where: { $0.key == rowB.key })?.phase, .canceled)
+        XCTAssertEqual(validStopB.rows.first(where: { $0.key == rowB.key })?.terminationReason, "USER_CANCELED")
+        XCTAssertEqual(validStopB.rows.first(where: { $0.key == rowA.key })?.phase, .backgroundActive)
+
+        let unsupportedModelB = try await client.switchModel(AntigravitySwitchModelIntent(
+            requestId: "paired-model-unsupported-b",
+            target: rowB.key,
+            modelName: "gemini-2.5-flash-lite",
+            thinkingLevel: "high"
+        ))
+        XCTAssertEqual(unsupportedModelB.status, "unconfirmed")
+        XCTAssertEqual(unsupportedModelB.reasonCode, "guard.unsupportedThinkingLevel")
+
+        let validModelB = try await client.switchModel(AntigravitySwitchModelIntent(
+            requestId: "paired-model-switch-b",
+            target: rowB.key,
+            modelName: "gemini-2.5-pro",
+            thinkingLevel: "medium"
+        ))
+        XCTAssertEqual(validModelB.status, "modelSwitched")
+        XCTAssertEqual(validModelB.delivery, .modelSwitched)
+        XCTAssertEqual(validModelB.rows.first(where: { $0.key == rowB.key })?.modelName, "gemini-2.5-pro")
+        XCTAssertEqual(validModelB.rows.first(where: { $0.key == rowB.key })?.thinkingLevel, "medium")
+        XCTAssertEqual(validModelB.rows.first(where: { $0.key == rowA.key })?.modelName, "gemini-2.5-pro")
+        XCTAssertEqual(validModelB.rows.first(where: { $0.key == rowA.key })?.thinkingLevel, "high")
 
         await client.close()
         var closedDenied = false
@@ -192,6 +239,8 @@ final class AntigravityPairedTests: XCTestCase {
             "missing_target_zero_redirect": missingTargetSend.status == "unconfirmed" && missingTargetSend.rows.count == 3,
             "running_send_queued_next_invocation": sendRunningB.status == "queued" && sendRunningB.delivery == .nextInvocation && !sendRunningB.inFlightSteering,
             "query_reconciled_without_resend": queryReconciled.reconciled && queryReconciled.duplicate,
+            "stop_isolated_and_stale_noop_confirmed": unselectedStopA.status == "unconfirmed" && staleStopB.status == "noop" && validStopB.status == "stopped",
+            "model_switch_and_thinking_guard_confirmed": unsupportedModelB.status == "unconfirmed" && validModelB.status == "modelSwitched",
             "session_a_phase": rowA.phase.rawValue,
             "session_b_phase": rowB.phase.rawValue,
             "transcript_reads": snapshot.transcriptReads,

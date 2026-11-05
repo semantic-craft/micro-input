@@ -62,6 +62,9 @@ struct AntigravityGrant: Codable, Equatable, Sendable {
 private enum AntigravityWireIntent: Encodable {
     case create(AntigravityCreateIntent)
     case send(AntigravitySendIntent)
+    case stop(AntigravityStopIntent)
+    case resolve(AntigravityResolveIntent)
+    case switchModel(AntigravitySwitchModelIntent)
     case query(AntigravityQueryIntent)
 
     func encode(to encoder: Encoder) throws {
@@ -69,6 +72,12 @@ private enum AntigravityWireIntent: Encodable {
         case .create(let value):
             try value.encode(to: encoder)
         case .send(let value):
+            try value.encode(to: encoder)
+        case .stop(let value):
+            try value.encode(to: encoder)
+        case .resolve(let value):
+            try value.encode(to: encoder)
+        case .switchModel(let value):
             try value.encode(to: encoder)
         case .query(let value):
             try value.encode(to: encoder)
@@ -120,6 +129,9 @@ private struct AntigravityReply: Decodable {
 actor AntigravityStatusClient: AntigravityStatusServing {
     private static let catalogNavSchemaVersion = "antigravity-catalog-nav-v1"
     private static let agentapiCommandSchemaVersion = "antigravity-agentapi-v1"
+    private static let stopCommandSchemaVersion = "antigravity-stop-v1"
+    private static let interactionCommandSchemaVersion = "antigravity-interaction-v1"
+    private static let modelConfigSchemaVersion = "antigravity-model-config-v1"
     private let grantURL: URL
     private let commandTimeout: Duration
     private var grant: AntigravityGrant?
@@ -283,6 +295,66 @@ actor AntigravityStatusClient: AntigravityStatusServing {
         return reply
     }
 
+    func stop(_ intent: AntigravityStopIntent) async throws -> AntigravityCommandReply {
+        guard intent.valid else { throw AntigravityFailure.denied }
+        let current = try currentGrant()
+        guard current.capabilities.supportsStopConversation,
+              current.allowedWorkspaces.contains(intent.target.workspacePath) else {
+            throw AntigravityFailure.denied
+        }
+        let expected = epoch
+        let response = try await exchange(
+            op: "stop",
+            schemaVersion: Self.stopCommandSchemaVersion,
+            intent: .stop(intent),
+            grant: current,
+            expected: expected
+        )
+        let reply = try commandReply(response, grant: current, expectedRequestId: intent.requestId)
+        cursor = reply.cursor
+        return reply
+    }
+
+    func resolve(_ intent: AntigravityResolveIntent) async throws -> AntigravityCommandReply {
+        guard intent.valid else { throw AntigravityFailure.denied }
+        let current = try currentGrant()
+        guard current.capabilities.supportsResolveInteraction,
+              current.allowedWorkspaces.contains(intent.target.workspacePath) else {
+            throw AntigravityFailure.denied
+        }
+        let expected = epoch
+        let response = try await exchange(
+            op: "resolve",
+            schemaVersion: Self.interactionCommandSchemaVersion,
+            intent: .resolve(intent),
+            grant: current,
+            expected: expected
+        )
+        let reply = try commandReply(response, grant: current, expectedRequestId: intent.requestId)
+        cursor = reply.cursor
+        return reply
+    }
+
+    func switchModel(_ intent: AntigravitySwitchModelIntent) async throws -> AntigravityCommandReply {
+        guard intent.valid else { throw AntigravityFailure.denied }
+        let current = try currentGrant()
+        guard current.capabilities.supportsSwitchModelConfig,
+              current.allowedWorkspaces.contains(intent.target.workspacePath) else {
+            throw AntigravityFailure.denied
+        }
+        let expected = epoch
+        let response = try await exchange(
+            op: "switch-model",
+            schemaVersion: Self.modelConfigSchemaVersion,
+            intent: .switchModel(intent),
+            grant: current,
+            expected: expected
+        )
+        let reply = try commandReply(response, grant: current, expectedRequestId: intent.requestId)
+        cursor = reply.cursor
+        return reply
+    }
+
     func query(_ intent: AntigravityQueryIntent) async throws -> AntigravityCommandReply {
         guard intent.valid else { throw AntigravityFailure.denied }
         let current = try currentGrant()
@@ -313,7 +385,9 @@ actor AntigravityStatusClient: AntigravityStatusServing {
         expectedRequestId: String
     ) throws -> AntigravityCommandReply {
         let allowedCommandStatuses: Set<String> = [
-            "created", "started", "queued", "steered", "unconfirmed", "unknown"
+            "created", "started", "queued", "steered",
+            "stopped", "resolved", "modelSwitched", "noop",
+            "unconfirmed", "unknown"
         ]
         guard allowedCommandStatuses.contains(response.status) else {
             throw failure(response.status)
@@ -323,7 +397,7 @@ actor AntigravityStatusClient: AntigravityStatusServing {
         guard transcriptReads == 0,
               tokenReads == 0,
               let commandOp = response.commandOp,
-              ["create", "send", "query"].contains(commandOp),
+              ["create", "send", "stop", "resolve", "switch-model", "query"].contains(commandOp),
               let requestId = response.requestId,
               requestId == expectedRequestId,
               let conversationId = response.conversationId,
@@ -433,12 +507,34 @@ actor AntigravityStatusClient: AntigravityStatusServing {
         "fullyIdle", "transitionCount"
     ]
     private static let allowedRowKeys: Set<String> = requiredRowKeys.union([
-        "title", "projectId", "lastToolName", "terminationReason"
+        "title", "projectId", "thinkingLevel", "lastToolName",
+        "terminationReason", "pendingInteraction", "availableModels"
     ])
+    private static let allowedPendingInteractionKeys: Set<String> = [
+        "interactionId", "interactionType", "stepIndex", "optionIds"
+    ]
+    private static let allowedModelOptionKeys: Set<String> = [
+        "modelName", "supportedThinkingLevels"
+    ]
 
     private static func validRowObject(_ row: [String: Any]) -> Bool {
         let keys = Set(row.keys)
-        return requiredRowKeys.isSubset(of: keys) && keys.isSubset(of: allowedRowKeys)
+        guard requiredRowKeys.isSubset(of: keys) && keys.isSubset(of: allowedRowKeys) else {
+            return false
+        }
+        if let rawPending = row["pendingInteraction"], !(rawPending is NSNull) {
+            guard let pending = rawPending as? [String: Any],
+                  Set(pending.keys).isSubset(of: allowedPendingInteractionKeys) else {
+                return false
+            }
+        }
+        if let rawModels = row["availableModels"], !(rawModels is NSNull) {
+            guard let models = rawModels as? [[String: Any]],
+                  models.allSatisfy({ Set($0.keys) == allowedModelOptionKeys }) else {
+                return false
+            }
+        }
+        return true
     }
 
     private static func validSelectedObject(_ raw: Any) -> Bool {
@@ -472,7 +568,7 @@ actor AntigravityStatusClient: AntigravityStatusServing {
             target: target,
             intent: intent
         )
-        let isCommandOp = ["create", "send", "query"].contains(op)
+        let isCommandOp = ["create", "send", "stop", "resolve", "switch-model", "query"].contains(op)
         let timeout = isCommandOp ? commandTimeout : .seconds(2)
         let startedAt = ContinuousClock.now
         let data: Data
@@ -525,8 +621,9 @@ actor AntigravityStatusClient: AntigravityStatusServing {
         }
         if isCommandOp {
             let allowedCommandStatuses: Set<String> = [
-                "created", "started", "queued", "steered", "unconfirmed",
-                "unknown", "denied", "stale", "unavailable"
+                "created", "started", "queued", "steered",
+                "stopped", "resolved", "modelSwitched", "noop",
+                "unconfirmed", "unknown", "denied", "stale", "unavailable"
             ]
             guard allowedCommandStatuses.contains(response.status) else {
                 throw AntigravityFailure.invalidReply

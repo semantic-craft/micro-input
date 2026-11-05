@@ -249,8 +249,12 @@ def verify_evidence(run, scenario, started, process_alive):
             "running_session_send_steering_verified_separately",
             "missing_or_deleted_target_send_zero_redirect",
             "timeout_unknown_reconciles_without_resend",
+            "stop_selected_session_only_and_stale_noop",
+            "resolve_interaction_and_question_guard",
+            "switch_model_and_thinking_guard",
             "deleted_target_no_redirect",
             "missing_schema_or_auth_fails_closed",
+            "l3_schema_or_csrf_invalidation_fails_closed",
             "stream_disconnect_marks_stale",
             "generation_change_marks_stale",
             "journal_gap_marks_unavailable",
@@ -269,7 +273,7 @@ def verify_evidence(run, scenario, started, process_alive):
             or status_doc.get("native_app") != "NOT_RUN"
             or status_doc.get("physical_key") != "NOT_RUN"
         ):
-            raise ValueError("Antigravity status/navigation/agentapi evidence incomplete or overclaimed")
+            raise ValueError("Antigravity status/navigation/agentapi/l3 evidence incomplete or overclaimed")
         rows = [json.loads(line) for line in (evidence / "audit.jsonl").read_text().splitlines()]
         confirmed = [row for row in rows if row["action_type"] == "antigravity_open" and row["outcome"] == "confirmed"]
         unconfirmed = [row for row in rows if row["action_type"] == "antigravity_open" and row["outcome"] == "unconfirmed"]
@@ -282,6 +286,15 @@ def verify_evidence(run, scenario, started, process_alive):
         send_unconfirmed = [row for row in rows if row["action_type"] == "antigravity_send" and row["outcome"] == "unconfirmed"]
         send_unknown = [row for row in rows if row["action_type"] == "antigravity_send" and row["outcome"] == "unknown"]
         query_reconciled = [row for row in rows if row["action_type"] == "antigravity_query" and row["outcome"] == "queued"]
+        stop_stopped = [row for row in rows if row["action_type"] == "antigravity_stop" and row["outcome"] == "stopped"]
+        stop_noop = [row for row in rows if row["action_type"] == "antigravity_stop" and row["outcome"] == "noop"]
+        stop_unconfirmed = [row for row in rows if row["action_type"] == "antigravity_stop" and row["outcome"] == "unconfirmed"]
+        stop_denied = [row for row in rows if row["action_type"] == "antigravity_stop" and row["outcome"] == "denied"]
+        resolve_resolved = [row for row in rows if row["action_type"] == "antigravity_resolve" and row["outcome"] == "resolved"]
+        resolve_unconfirmed = [row for row in rows if row["action_type"] == "antigravity_resolve" and row["outcome"] == "unconfirmed"]
+        resolve_noop = [row for row in rows if row["action_type"] == "antigravity_resolve" and row["outcome"] == "noop"]
+        model_switched = [row for row in rows if row["action_type"] == "antigravity_switch_model" and row["outcome"] == "modelSwitched"]
+        model_unconfirmed = [row for row in rows if row["action_type"] == "antigravity_switch_model" and row["outcome"] == "unconfirmed"]
         if (
             len(confirmed) < 2
             or len(unconfirmed) != 2
@@ -294,13 +307,23 @@ def verify_evidence(run, scenario, started, process_alive):
             or len(send_unconfirmed) != 2
             or len(send_unknown) != 1
             or len(query_reconciled) != 1
+            or len(stop_stopped) != 1
+            or len(stop_noop) != 1
+            or len(stop_unconfirmed) != 1
+            or len(stop_denied) != 1
+            or len(resolve_resolved) != 3
+            or len(resolve_unconfirmed) != 1
+            or len(resolve_noop) != 1
+            or len(model_switched) != 2
+            or len(model_unconfirmed) != 2
             or any(row.get("target") != "antigravity" or row.get("text_byte_len") is not None for row in rows)
         ):
-            raise ValueError("Antigravity exact navigation/agentapi receipts missing or unexpected")
+            raise ValueError("Antigravity exact navigation/agentapi/l3 receipts missing or unexpected")
         result.update(
             antigravity_status="SYNTHETIC_PASS",
             antigravity_navigation="SYNTHETIC_PASS",
             antigravity_agentapi="SYNTHETIC_PASS",
+            antigravity_l3_control="SYNTHETIC_PASS",
             installed_version="2.29.0",
             language_server_cl="1013060670",
             transcript_reads=0,

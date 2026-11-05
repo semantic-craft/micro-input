@@ -366,6 +366,8 @@ def main():
             or not swift.get("missing_target_zero_redirect")
             or not swift.get("running_send_queued_next_invocation")
             or not swift.get("query_reconciled_without_resend")
+            or not swift.get("stop_isolated_and_stale_noop_confirmed")
+            or not swift.get("model_switch_and_thinking_guard_confirmed")
             or swift.get("session_a_phase") != "backgroundActive"
             or swift.get("session_b_phase") != "completed"
             or swift.get("transcript_reads") != 0
@@ -407,7 +409,6 @@ def main():
         if confirm_alpha.get("status") != "ok":
             raise ValueError(f"confirm alpha failed: {confirm_alpha}")
 
-        # Verify running-session steering mode when explicitly enabled vs default nextInvocation queueing
         exchange(control_path, {"op": "set-in-flight-steer", "enabled": True})
         steered_reply = exchange(
             grant["socketPath"],
@@ -432,7 +433,6 @@ def main():
         ):
             raise ValueError(f"explicit in-flight steer failed or leaked plaintext: {steered_reply}")
 
-        # Verify timeout/unknown outcome latches and reconciles via query without resending
         stats_before_unknown = stats()
         exchange(control_path, {"op": "unknown-next-command", "enabled": True})
         unknown_reply = exchange(
@@ -473,6 +473,222 @@ def main():
             or stats_after_reconcile["sendConfirmed"] != stats_before_unknown["sendConfirmed"] + 1
         ):
             raise ValueError(f"query reconciliation after unknown failed or resent: {reconciled_reply}")
+
+        exchange(
+            control_path,
+            {
+                "op": "set-pending-interaction",
+                "conversationId": "conv-alpha",
+                "workspacePath": ws_alpha,
+                "pendingInteraction": {
+                    "interactionId": "int-paired-q1",
+                    "interactionType": "question",
+                    "stepIndex": 4,
+                    "optionIds": ["opt-1", "opt-2"],
+                },
+            },
+        )
+        exchange(
+            control_path,
+            {
+                "op": "set-pending-interaction",
+                "conversationId": "conv-beta",
+                "workspacePath": ws_beta,
+                "pendingInteraction": {
+                    "interactionId": "int-paired-perm-beta",
+                    "interactionType": "filePermission",
+                    "stepIndex": 2,
+                },
+            },
+        )
+        bad_q_allow = exchange(
+            grant["socketPath"],
+            request(
+                "resolve",
+                schemaVersion="antigravity-interaction-v1",
+                intent={
+                    "requestId": "probe-resolve-q-bad",
+                    "target": {"conversationId": "conv-alpha", "workspacePath": ws_alpha},
+                    "interactionId": "int-paired-q1",
+                    "interactionType": "question",
+                    "decision": "allow",
+                },
+            ),
+        )
+        if bad_q_allow.get("status") != "unconfirmed" or bad_q_allow.get("reasonCode") != "guard.questionCannotApproveAsPermission":
+            raise ValueError(f"question approved as permission was not rejected: {bad_q_allow}")
+
+        good_q_answer = exchange(
+            grant["socketPath"],
+            request(
+                "resolve",
+                schemaVersion="antigravity-interaction-v1",
+                intent={
+                    "requestId": "probe-resolve-q-ok",
+                    "target": {"conversationId": "conv-alpha", "workspacePath": ws_alpha},
+                    "interactionId": "int-paired-q1",
+                    "interactionType": "question",
+                    "decision": "answer",
+                    "selectedOptionIds": ["opt-1"],
+                },
+            ),
+        )
+        if (
+            good_q_answer.get("status") != "resolved"
+            or good_q_answer.get("delivery") != "answer"
+        ):
+            raise ValueError(f"valid question answer failed: {good_q_answer}")
+
+        exchange(
+            control_path,
+            {
+                "op": "set-pending-interaction",
+                "conversationId": "conv-alpha",
+                "workspacePath": ws_alpha,
+                "pendingInteraction": {
+                    "interactionId": "int-paired-cmd1",
+                    "interactionType": "runCommand",
+                    "stepIndex": 5,
+                },
+            },
+        )
+        perm_allow = exchange(
+            grant["socketPath"],
+            request(
+                "resolve",
+                schemaVersion="antigravity-interaction-v1",
+                intent={
+                    "requestId": "probe-resolve-cmd-1",
+                    "target": {"conversationId": "conv-alpha", "workspacePath": ws_alpha},
+                    "interactionId": "int-paired-cmd1",
+                    "interactionType": "runCommand",
+                    "decision": "allow",
+                },
+            ),
+        )
+        perm_dup = exchange(
+            grant["socketPath"],
+            request(
+                "resolve",
+                schemaVersion="antigravity-interaction-v1",
+                intent={
+                    "requestId": "probe-resolve-cmd-1",
+                    "target": {"conversationId": "conv-alpha", "workspacePath": ws_alpha},
+                    "interactionId": "int-paired-cmd1",
+                    "interactionType": "runCommand",
+                    "decision": "allow",
+                },
+            ),
+        )
+        beta_row_after_alpha_resolve = next(
+            (r for r in perm_allow.get("rows", []) if r.get("conversationId") == "conv-beta"),
+            {},
+        )
+        if (
+            perm_allow.get("status") != "resolved"
+            or perm_dup.get("status") != "resolved"
+            or perm_dup.get("duplicate") is not True
+            or (beta_row_after_alpha_resolve.get("pendingInteraction") or {}).get("interactionId") != "int-paired-perm-beta"
+        ):
+            raise ValueError(f"permission resolve or two-session isolation failed: {perm_allow} / {perm_dup}")
+
+        exchange(
+            control_path,
+            {
+                "op": "set-pending-interaction",
+                "conversationId": "conv-alpha",
+                "workspacePath": ws_alpha,
+                "pendingInteraction": {
+                    "interactionId": "int-paired-exp1",
+                    "interactionType": "permission",
+                    "stepIndex": 6,
+                },
+            },
+        )
+        exchange(
+            control_path,
+            {
+                "op": "expire-pending-interaction",
+                "conversationId": "conv-alpha",
+                "workspacePath": ws_alpha,
+                "interactionId": "int-paired-exp1",
+            },
+        )
+        expired_resolve = exchange(
+            grant["socketPath"],
+            request(
+                "resolve",
+                schemaVersion="antigravity-interaction-v1",
+                intent={
+                    "requestId": "probe-resolve-exp-1",
+                    "target": {"conversationId": "conv-alpha", "workspacePath": ws_alpha},
+                    "interactionId": "int-paired-exp1",
+                    "interactionType": "permission",
+                    "decision": "allow",
+                },
+            ),
+        )
+        if expired_resolve.get("status") != "noop" or expired_resolve.get("reasonCode") != "guard.interactionAlreadyResolved":
+            raise ValueError(f"expired interaction resolve did not return noop: {expired_resolve}")
+
+        exchange(
+            control_path,
+            {"op": "set-model-readback-override", "override": {"modelName": "gemini-2.5-pro", "thinkingLevel": "low"}},
+        )
+        mismatch_model = exchange(
+            grant["socketPath"],
+            request(
+                "switch-model",
+                schemaVersion="antigravity-model-config-v1",
+                intent={
+                    "requestId": "probe-model-mismatch-alpha",
+                    "target": {"conversationId": "conv-alpha", "workspacePath": ws_alpha},
+                    "modelName": "gemini-2.5-pro",
+                    "thinkingLevel": "high",
+                },
+            ),
+        )
+        exchange(control_path, {"op": "clear-model-readback-override"})
+        if mismatch_model.get("status") != "unconfirmed" or mismatch_model.get("reasonCode") != "guard.modelReadbackMismatch":
+            raise ValueError(f"model readback mismatch was not rejected: {mismatch_model}")
+
+        raw_rpc_reply = exchange(
+            grant["socketPath"],
+            request("raw-rpc", method="/exa.language_server_pb.LanguageServerService/DeleteTrajectory"),
+        )
+        if raw_rpc_reply.get("status") != "denied" or raw_rpc_reply.get("reasonCode") != "error.unsupportedOperation":
+            raise ValueError(f"arbitrary RPC was not rejected with error.unsupportedOperation: {raw_rpc_reply}")
+
+        exchange(control_path, {"op": "set-csrf-auth", "verified": False})
+        assert_zero_read_rejection(
+            request(
+                "stop",
+                schemaVersion="antigravity-stop-v1",
+                intent={
+                    "requestId": "probe-stop-no-csrf",
+                    "target": {"conversationId": "conv-alpha", "workspacePath": ws_alpha},
+                    "expectedInvocationNum": 1,
+                },
+            ),
+            ("denied",),
+        )
+        exchange(control_path, {"op": "set-csrf-auth", "verified": True})
+
+        exchange(control_path, {"op": "set-l3-schema", "stop": False, "approval": False, "modelConfig": False})
+        assert_zero_read_rejection(
+            request(
+                "switch-model",
+                schemaVersion="antigravity-model-config-v1",
+                intent={
+                    "requestId": "probe-model-no-schema",
+                    "target": {"conversationId": "conv-alpha", "workspacePath": ws_alpha},
+                    "modelName": "gemini-2.5-flash",
+                    "thinkingLevel": "medium",
+                },
+            ),
+            ("denied",),
+        )
+        exchange(control_path, {"op": "set-l3-schema", "stop": True, "approval": True, "modelConfig": True})
 
         exchange(
             control_path,
@@ -564,7 +780,11 @@ def main():
             or final_stats["createConfirmed"] != 1
             or final_stats["sendConfirmed"] != 4
             or final_stats["queryRequests"] != 2
-            or final_stats["duplicateCommandsDropped"] != 1
+            or final_stats["stopConfirmed"] != 1
+            or final_stats["resolveConfirmed"] != 2
+            or final_stats["switchModelConfirmed"] != 1
+            or final_stats["arbitraryRpcRejections"] != 1
+            or final_stats["duplicateCommandsDropped"] != 2
             or final_stats["duplicateEventsDropped"] != 2
             or final_stats["ingestedEvents"] != 3
             or final_stats["sessionCount"] != 2
@@ -583,6 +803,10 @@ def main():
             create_confirmed_count=final_stats["createConfirmed"],
             send_confirmed_count=final_stats["sendConfirmed"],
             query_reconciled_count=final_stats["queryRequests"],
+            stop_confirmed_count=final_stats["stopConfirmed"],
+            resolve_confirmed_count=final_stats["resolveConfirmed"],
+            switch_model_confirmed_count=final_stats["switchModelConfirmed"],
+            arbitrary_rpc_rejections=final_stats["arbitraryRpcRejections"],
             duplicate_commands_dropped=final_stats["duplicateCommandsDropped"],
             create_binds_project_id="VERIFIED",
             two_sessions_only_target_modified="VERIFIED",
@@ -590,6 +814,11 @@ def main():
             timeout_unknown_reconciled_without_resend="VERIFIED",
             running_send_default_delivery="NEXT_INVOCATION_QUEUED_VERIFIED",
             running_send_explicit_steer_mode="STEERED_VERIFIED",
+            stop_selected_and_stale_noop="VERIFIED",
+            resolve_interaction_and_question_guard="VERIFIED",
+            switch_model_and_thinking_guard="VERIFIED",
+            csrf_and_l3_schema_fail_closed="DENIED_VERIFIED",
+            arbitrary_rpc_exposed=False,
             wrong_selected_readback="UNCONFIRMED_VERIFIED",
             deleted_target_no_redirect="VERIFIED",
             missing_schema_fail_closed="DENIED_VERIFIED",
