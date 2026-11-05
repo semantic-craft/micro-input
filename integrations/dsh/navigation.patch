@@ -17,7 +17,7 @@ index 3bb27d7d..2f2223b4 100644
    "devDependencies": {
      "@deepseek-ai/cordis-plugin-loader": "workspace:~",
 diff --git a/apps/desktop-host/src/index.ts b/apps/desktop-host/src/index.ts
-index 3086755b..cde8234b 100644
+index 3086755b..db884ae2 100644
 --- a/apps/desktop-host/src/index.ts
 +++ b/apps/desktop-host/src/index.ts
 @@ -14,6 +14,9 @@ import { installDesktopUpdateTaskControl } from './update-tasks.ts'
@@ -30,17 +30,20 @@ index 3086755b..cde8234b 100644
  
  async function main(): Promise<void> {
    const runtimeDir = process.argv[2] as string
-@@ -90,6 +93,36 @@ async function main(): Promise<void> {
+@@ -90,6 +93,39 @@ async function main(): Promise<void> {
    })
    process.once('disconnect', () => { void stop() })
    const { ctx } = await application
 +  if (process.env.MI_DSH_BRIDGE_CONFIG !== undefined) {
 +    const requests = new Map<string, (selected: string | undefined) => void>()
++    let currentSelected: string | undefined
 +    const onReply = (message: unknown) => {
 +      if (typeof message !== 'object' || message === null) return
 +      const reply = message as Record<string, unknown>
 +      if (reply.type !== 'micro-input-selected' || typeof reply.requestId !== 'string') return
-+      requests.get(reply.requestId)?.(typeof reply.selected === 'string' ? reply.selected : undefined)
++      const selected = typeof reply.selected === 'string' ? reply.selected : undefined
++      currentSelected = selected
++      requests.get(reply.requestId)?.(selected)
 +    }
 +    const bridge = await startOptionalMicroInputBridge(process.env.MI_DSH_BRIDGE_CONFIG, microInputHost(ctx,
 +      (sessionId, signal) => new Promise<string | undefined>((resolve) => {
@@ -53,7 +56,7 @@ index 3086755b..cde8234b 100644
 +        signal.addEventListener('abort', abort, { once: true })
 +        if (signal.aborted || !process.connected) { settle(undefined); return }
 +        process.send?.({ type: 'micro-input-open', requestId, sessionId, expiresAt: Date.now() + 1000 })
-+      })))
++      }), () => currentSelected))
 +    if (bridge !== undefined) {
 +      process.on('message', onReply)
 +      ctx.effect(() => async () => {
@@ -69,36 +72,68 @@ index 3086755b..cde8234b 100644
    await ctx.plugin(desktopOffice, {
 diff --git a/apps/desktop-host/src/micro-input-host.ts b/apps/desktop-host/src/micro-input-host.ts
 new file mode 100644
-index 00000000..0c477f42
+index 00000000..2cb3c4f4
 --- /dev/null
 +++ b/apps/desktop-host/src/micro-input-host.ts
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,176 @@
++import { randomUUID } from 'node:crypto'
 +import type { Context } from '@deepseek-ai/cordis'
-+import { SessionId } from '@deepseek-ai/dsh-session'
-+import type {} from '@deepseek-ai/dsh-agent'
++import { SessionId, type Session, type UserMessage } from '@deepseek-ai/dsh-session'
++import type { Agent } from '@deepseek-ai/dsh-agent'
 +import type {} from '@deepseek-ai/dsh-session-projection'
 +import type {} from '@deepseek-ai/dsh-session-title/types'
 +import type {} from '@deepseek-ai/dsh-user-approval'
 +import type {} from '@deepseek-ai/dsh-user-questions'
 +import type {} from '@deepseek-ai/dsh-workspace'
-+import type { MicroInputHost } from './micro-input.ts'
++import type { MicroInputHost, MicroInputPromptOutcome } from './micro-input.ts'
 +
-+export function microInputHost(ctx: Context, navigate: MicroInputHost['navigate']): MicroInputHost {
++export function microInputHost(
++  ctx: Context,
++  navigate: MicroInputHost['navigate'],
++  selected?: MicroInputHost['selected'],
++): MicroInputHost & Required<Pick<MicroInputHost, 'create' | 'prompt' | 'cancel'>> {
++  const createdAgents = new Map<string, Agent>()
++  const promptLedger = new WeakMap<Session, Map<string, 'queue' | 'steer'>>()
++  let createdCounter = 0
++  const readTurnAndQueue = (session: Session) => {
++    const boundary = ctx.sessionProjections.cachedStateOf(session, 'turnBoundary')
++    const inbox = ctx.sessionProjections.cachedStateOf(session, 'inbox')
++    if (boundary !== undefined && inbox !== undefined) {
++      return {
++        currentTurn: boundary.openTurnStartSeq === null ? null : boundary.lastTurn,
++        queuedCount: inbox['next-step'].length + inbox['next-turn'].length,
++      }
++    }
++    return ctx.sessionProjections.cachedTurnAndQueueOf(session)
++  }
++  const resolveAgent = (session: Session): Agent | undefined =>
++    ctx.agents.get(session.id) ?? createdAgents.get(session.id)
++
 +  return {
 +    read(id) {
 +      const session = ctx.sessions.get(SessionId(id))
 +      if (session === undefined) return undefined
 +      const questions = ctx.userQuestions.pendingCount(session)
 +      if (questions === undefined) return undefined
-+      const agent = ctx.agents.get(session.id)
++      const turnAndQueue = readTurnAndQueue(session)
++      if (turnAndQueue === undefined) return undefined
++      const agent = resolveAgent(session)
 +      const workspace = ctx.workspaceRegistry.list().find(item => item.sessionIds.includes(session.id))
-+      return { identity: session, row: {
-+        sessionId: id, workspaceId: workspace?.id ?? '',
-+        title: ctx.sessionProjections.cachedStateOf(session, 'title') ?? id,
-+        active: agent?.session === session,
-+        running: agent?.session === session && agent.status === 'running',
-+        pendingInput: ctx.approval.pendingCount(session) + questions,
-+      } }
++      const active = agent?.session === session
++      const running = active && agent.status === 'running'
++      return {
++        identity: session,
++        row: {
++          sessionId: id,
++          workspaceId: workspace?.id ?? '',
++          title: ctx.sessionProjections.cachedStateOf(session, 'title') ?? id,
++          active,
++          running,
++          pendingInput: ctx.approval.pendingCount(session) + questions,
++          currentTurn: turnAndQueue.currentTurn,
++          queuedCount: turnAndQueue.queuedCount,
++        },
++      }
 +    },
 +    observe(changed) {
 +      const stops = [
@@ -106,22 +141,123 @@ index 00000000..0c477f42
 +        ctx.on('agent/created', ({ agent }) => { changed(agent.id) }, { global: true }),
 +        ctx.on('agent/disposed', ({ agent }) => { changed(agent.id) }, { global: true }),
 +        ctx.on('session/created', (session) => { changed(session.id) }, { global: true }),
-+        ctx.on('session/disposed', (session) => { changed(session.id) }, { global: true }),
++        ctx.on('session/disposed', (session) => { createdAgents.delete(session.id); changed(session.id) }, { global: true }),
 +        ctx.on('session/event', (session) => { changed(session.id) }, { global: true }),
 +        ctx.approval.observePending((session) => { changed(session.id) }),
 +        ctx.userQuestions.observePending((session) => { changed(session.id) }),
 +      ]
-+      return () => { for (const stop of stops)  stop() }
++      return () => { for (const stop of stops) stop() }
 +    },
 +    navigate,
++    ...(selected === undefined ? {} : { selected }),
++    async create(workspaceId, signal) {
++      signal.throwIfAborted()
++      const workspace = ctx.workspaceRegistry.list().find(item => item.id === workspaceId)
++      if (workspace === undefined) return undefined
++      const sessionId = SessionId(`dsh-created-${++createdCounter}`)
++      const session = ctx.sessions.create(sessionId)
++      const attach = (workspace as { attachSession?: (id: SessionId) => Promise<void> }).attachSession
++      if (typeof attach === 'function') await attach.call(workspace, session.id)
++      else if (Array.isArray(workspace.sessionIds) && !workspace.sessionIds.includes(session.id)) {
++        (workspace.sessionIds as SessionId[]).push(session.id)
++      }
++      createdAgents.set(session.id, {
++        id: session.id,
++        session,
++        status: 'idle',
++        inbox: { nextStep: [], nextTurn: [] },
++      } as unknown as Agent)
++      return session.id
++    },
++    prompt(sessionId, mode, text, requestId, signal): Promise<MicroInputPromptOutcome> {
++      try {
++        signal.throwIfAborted()
++      } catch (error) {
++        return Promise.reject(error instanceof Error ? error : new Error(String(error)))
++      }
++      const session = ctx.sessions.get(SessionId(sessionId))
++      const agent = session === undefined ? undefined : resolveAgent(session)
++      if (session === undefined || agent === undefined || agent.session !== session) {
++        return Promise.resolve({ status: 'unavailable', reasonCode: 'session.notFound' })
++      }
++      if (text.trim().length === 0) return Promise.resolve({ status: 'denied', reasonCode: 'prompt.empty' })
++      const turnAndQueue = readTurnAndQueue(session)
++      if (turnAndQueue === undefined) return Promise.resolve({ status: 'unavailable', reasonCode: 'session.unmaterialized' })
++      let ledger = promptLedger.get(session)
++      if (ledger === undefined) {
++        ledger = new Map()
++        promptLedger.set(session, ledger)
++      }
++      const existingDelivery = ledger.get(requestId)
++      if (existingDelivery !== undefined) {
++        return Promise.resolve(existingDelivery === 'steer'
++          ? { status: 'steered', delivery: 'steer', currentTurn: turnAndQueue.currentTurn, queuedCount: turnAndQueue.queuedCount }
++          : { status: 'queued', delivery: 'queue', currentTurn: turnAndQueue.currentTurn, queuedCount: turnAndQueue.queuedCount })
++      }
++      if (mode === 'steer' && (agent.status !== 'running' || turnAndQueue.currentTurn === null)) {
++        return Promise.resolve({ status: 'unavailable', reasonCode: 'session.steerUnavailable' })
++      }
++      const message = {
++        id: randomUUID(),
++        role: 'user',
++        content: [{ type: 'text', text }],
++        source: { kind: 'user', rpcId: requestId },
++      } as unknown as UserMessage
++      if (mode === 'steer') {
++        const steer = (agent as unknown as { steer?: (input: UserMessage) => void }).steer
++        if (typeof steer === 'function') steer.call(agent, message)
++        else {
++          session.append('agent/inbox/spliced', { target: 'next-step', start: turnAndQueue.queuedCount, inserted: [message] })
++        }
++      } else {
++        const followup = (agent as unknown as { followup?: (input: UserMessage) => void }).followup
++        if (typeof followup === 'function') followup.call(agent, message)
++        else {
++          session.append('agent/inbox/spliced', { target: 'next-turn', start: turnAndQueue.queuedCount, inserted: [message] })
++        }
++      }
++      ledger.set(requestId, mode)
++      const after = readTurnAndQueue(session) ?? turnAndQueue
++      return Promise.resolve(mode === 'steer'
++        ? { status: 'steered', delivery: 'steer', currentTurn: after.currentTurn, queuedCount: after.queuedCount }
++        : { status: 'queued', delivery: 'queue', currentTurn: after.currentTurn, queuedCount: after.queuedCount })
++    },
++    cancel(sessionId, expectedTurn) {
++      const session = ctx.sessions.get(SessionId(sessionId))
++      const agent = session === undefined ? undefined : resolveAgent(session)
++      if (session === undefined || agent === undefined || agent.session !== session) {
++        return { status: 'unavailable', reasonCode: 'session.notFound' }
++      }
++      const turnAndQueue = readTurnAndQueue(session)
++      if (turnAndQueue === undefined || (agent.status === 'running' && turnAndQueue.currentTurn === null)) {
++        return { status: 'denied', reasonCode: 'guard.unprovableTurnAtomicity' }
++      }
++      if (agent.status !== 'running' || turnAndQueue.currentTurn === null) {
++        return { status: 'noop', reasonCode: 'guard.notRunning', currentTurn: null, queuedCount: turnAndQueue.queuedCount }
++      }
++      if (turnAndQueue.currentTurn !== expectedTurn) {
++        return { status: 'noop', reasonCode: 'guard.turnChanged', currentTurn: turnAndQueue.currentTurn, queuedCount: turnAndQueue.queuedCount }
++      }
++      const cancelAgent = (agent as unknown as { cancel?: (cause: { kind: 'user' }, options: { keepInbox: true }) => void }).cancel
++      if (typeof cancelAgent === 'function') cancelAgent.call(agent, { kind: 'user' }, { keepInbox: true })
++      if ((readTurnAndQueue(session)?.currentTurn ?? null) === expectedTurn) {
++        ;(agent as unknown as { status: string }).status = 'idle'
++        session.append('turn/end', { turn: expectedTurn, reason: { kind: 'aborted', reason: { kind: 'user' } } })
++        ctx.emit('agent/status', { agent, status: 'idle' })
++      }
++      const after = readTurnAndQueue(session) ?? { currentTurn: null, queuedCount: turnAndQueue.queuedCount }
++      return after.queuedCount > 0
++        ? { status: 'cancelledQueueRemaining', currentTurn: after.currentTurn, queuedCount: after.queuedCount }
++        : { status: 'cancelled', currentTurn: after.currentTurn, queuedCount: 0 }
++    },
 +  }
 +}
 diff --git a/apps/desktop-host/src/micro-input.ts b/apps/desktop-host/src/micro-input.ts
 new file mode 100644
-index 00000000..138ffe00
+index 00000000..f883f2cb
 --- /dev/null
 +++ b/apps/desktop-host/src/micro-input.ts
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,438 @@
 +import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 +import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs'
 +import { chmod, lstat, mkdir, rm, writeFile } from 'node:fs/promises'
@@ -135,11 +271,69 @@ index 00000000..138ffe00
 +  readonly active: boolean
 +  readonly running: boolean
 +  readonly pendingInput: number
++  readonly currentTurn: number | null
++  readonly queuedCount: number
 +}
++export type MicroInputPromptOutcome =
++  | {
++    readonly status: 'queued'
++    readonly delivery: 'queue'
++    readonly currentTurn: number | null
++    readonly queuedCount: number
++  }
++  | {
++    readonly status: 'steered'
++    readonly delivery: 'steer'
++    readonly currentTurn: number | null
++    readonly queuedCount: number
++  }
++  | {
++    readonly status: 'unavailable'
++    readonly reasonCode: string
++  }
++  | {
++    readonly status: 'denied'
++    readonly reasonCode: string
++  }
++export type MicroInputCancelOutcome =
++  | {
++    readonly status: 'cancelled'
++    readonly currentTurn: number | null
++    readonly queuedCount: number
++  }
++  | {
++    readonly status: 'cancelledQueueRemaining'
++    readonly currentTurn: number | null
++    readonly queuedCount: number
++  }
++  | {
++    readonly status: 'noop'
++    readonly reasonCode: string
++    readonly currentTurn: number | null
++    readonly queuedCount: number
++  }
++  | {
++    readonly status: 'unavailable'
++    readonly reasonCode: string
++  }
++  | {
++    readonly status: 'denied'
++    readonly reasonCode: string
++  }
 +export interface MicroInputHost {
 +  read(sessionId: string): { row: MicroInputRow; identity: object } | undefined
 +  observe(changed: (sessionId: string) => void): () => void
 +  navigate(sessionId: string, signal: AbortSignal): Promise<string | undefined>
++  selected?(): string | undefined
++  create?(workspaceId: string, signal: AbortSignal): Promise<string | undefined>
++  prompt?(
++    sessionId: string,
++    mode: 'queue' | 'steer',
++    text: string,
++    requestId: string,
++    signal: AbortSignal,
++  ): Promise<MicroInputPromptOutcome>
++  cancel?(sessionId: string, expectedTurn: number): MicroInputCancelOutcome
 +}
 +interface Config { readonly directory: string; readonly sessionIds: readonly string[] }
 +export interface MicroInputGrant extends Config {
@@ -156,11 +350,15 @@ index 00000000..138ffe00
 +  readonly hostId: string
 +  readonly generation: number
 +  readonly subscriptionId: string
-+  readonly op: 'subscribe' | 'read' | 'open' | 'close'
++  readonly op: 'subscribe' | 'read' | 'open' | 'create' | 'prompt' | 'cancel' | 'query' | 'close'
 +  readonly activate?: false
 +  readonly after?: number
 +  readonly sessionId?: string
 +  readonly workspaceId?: string
++  readonly requestId?: string
++  readonly mode?: 'queue' | 'steer'
++  readonly text?: string
++  readonly expectedTurn?: number
 +}
 +interface Change { readonly sequence: number; readonly row: MicroInputRow }
 +const text = (value: unknown, max = 4096): value is string => typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= max
@@ -199,14 +397,19 @@ index 00000000..138ffe00
 +  const grant: MicroInputGrant = { version: 1, directory: config.directory, sessionIds: config.sessionIds,
 +    socketPath, token: randomBytes(32).toString('hex'), hostId: randomUUID(), generation: 1 }
 +  let disposed = false, stale = false, subscribed = false, cursor = 0
-+  let subscriptionId: string | undefined
++  let subscriptionId: string | undefined, lastSelected: string | undefined
++  const allowedSessionIds = [...config.sessionIds]
++  const allowedWorkspaces = new Set<string>()
 +  const isStale = () => stale
 +  const isDisposed = () => disposed
 +  const isSubscribed = () => subscribed
 +  const rows = new Map<string, MicroInputRow>(), identities = new Map<string, object>()
++  const settledCommands = new Map<string, Record<string, unknown>>()
 +  const journal: Change[] = [], sockets = new Set<Socket>()
 +  const opens = new Set<AbortController>()
 +  let unobserve: (() => void) | undefined
++  const validTurn = (turn: unknown): turn is number | null =>
++    turn === null || (typeof turn === 'number' && Number.isSafeInteger(turn) && turn >= 1)
 +  const read = (id: string): MicroInputRow | undefined => {
 +    const value = host.read(id)
 +    if (value === undefined) { rows.delete(id); return undefined }
@@ -216,11 +419,13 @@ index 00000000..138ffe00
 +    const row = value.row
 +    if (row.sessionId !== id || typeof row.title !== 'string' || Buffer.byteLength(row.title) > 4096 || typeof row.workspaceId !== 'string'
 +      || Buffer.byteLength(row.workspaceId) > 4096 || typeof row.active !== 'boolean' || typeof row.running !== 'boolean'
-+      || !Number.isSafeInteger(row.pendingInput) || row.pendingInput < 0) { stale = true; return undefined }
++      || !Number.isSafeInteger(row.pendingInput) || row.pendingInput < 0
++      || !validTurn(row.currentTurn) || !Number.isSafeInteger(row.queuedCount) || row.queuedCount < 0) { stale = true; return undefined }
++    if (row.workspaceId.length > 0) allowedWorkspaces.add(row.workspaceId)
 +    return row
 +  }
 +  const change = (id: string) => {
-+    if (!subscribed || disposed || stale || !config.sessionIds.includes(id)) return
++    if (!subscribed || disposed || stale || !allowedSessionIds.includes(id)) return
 +    const row = read(id)
 +    if (row === undefined) return
 +    if (JSON.stringify(rows.get(id)) !== JSON.stringify(row)) {
@@ -230,17 +435,24 @@ index 00000000..138ffe00
 +    }
 +  }
 +  const stopSubscription = () => {
-+    subscribed = false; unobserve?.(); unobserve = undefined
++    subscribed = false; unobserve?.(); unobserve = undefined; lastSelected = undefined
 +    for (const open of opens) open.abort()
-+    opens.clear(); rows.clear(); journal.length = 0
++    opens.clear(); rows.clear(); journal.length = 0; settledCommands.clear()
 +  }
++  const currentSelected = () => host.selected !== undefined ? host.selected() : lastSelected
 +  const requestValid = (value: unknown): value is Request => {
 +    if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
 +    const r = value as Record<string, unknown>
-+    return Object.keys(r).every(key => ['version', 'id', 'token', 'hostId', 'generation', 'subscriptionId', 'op', 'activate', 'after', 'sessionId', 'workspaceId'].includes(key))
++    return Object.keys(r).every(key => [
++      'version', 'id', 'token', 'hostId', 'generation', 'subscriptionId', 'op',
++      'activate', 'after', 'sessionId', 'workspaceId', 'requestId', 'mode', 'text', 'expectedTurn',
++    ].includes(key))
 +      && r.version === 1 && text(r.subscriptionId, 256) && text(r.id, 256) && text(r.token, 256) && text(r.hostId, 256)
-+      && Number.isSafeInteger(r.generation) && ['subscribe', 'read', 'open', 'close'].includes(String(r.op))
++      && Number.isSafeInteger(r.generation)
++      && ['subscribe', 'read', 'open', 'create', 'prompt', 'cancel', 'query', 'close'].includes(String(r.op))
 +  }
++  const hasExtraFields = (input: Request, allowed: readonly string[]) =>
++    Object.keys(input).some(key => !['version', 'id', 'token', 'hostId', 'generation', 'subscriptionId', 'op', ...allowed].includes(key))
 +  const dispatch = async (input: unknown): Promise<object> => {
 +    const base = { version: 1, id: requestValid(input) ? input.id : '', subscriptionId: requestValid(input) ? input.subscriptionId : '', hostId: grant.hostId, generation: grant.generation }
 +    if (!requestValid(input)) return { ...base, status: 'denied' }
@@ -249,43 +461,202 @@ index 00000000..138ffe00
 +    if (disposed || stale || input.hostId !== grant.hostId || input.generation !== grant.generation) return { ...base, status: 'stale' }
 +    if (input.op !== 'subscribe' && input.subscriptionId !== subscriptionId) return { ...base, status: 'stale' }
 +    if (input.op === 'close') {
-+      if (input.activate !== undefined || input.after !== undefined || input.sessionId !== undefined || input.workspaceId !== undefined) return { ...base, status: 'denied' }
++      if (hasExtraFields(input, [])) return { ...base, status: 'denied' }
 +      stopSubscription(); return { ...base, status: 'ok' }
 +    }
 +    if (input.op === 'subscribe') {
 +      if (subscribed && input.subscriptionId !== subscriptionId) return { ...base, status: 'stale' }
-+      if (input.activate !== false || input.after !== undefined || input.sessionId !== undefined || input.workspaceId !== undefined) return { ...base, status: 'denied' }
++      if (input.activate !== false || hasExtraFields(input, ['activate'])) return { ...base, status: 'denied' }
 +      stopSubscription(); subscriptionId = input.subscriptionId; subscribed = true
 +      unobserve = host.observe(change)
-+      for (const id of config.sessionIds) { const row = read(id); if (row !== undefined) rows.set(id, row) }
++      for (const id of allowedSessionIds) { const row = read(id); if (row !== undefined) rows.set(id, row) }
 +      if (isStale()) { stopSubscription(); return { ...base, status: 'stale' } }
-+      return { ...base, status: 'ok', cursor, rows: [...rows.values()], changes: [], unavailableSessionIds: config.sessionIds.filter(id => !rows.has(id)) }
++      const activeSelected = currentSelected()
++      const validSelected = activeSelected !== undefined && rows.has(activeSelected) ? activeSelected : undefined
++      return {
++        ...base,
++        status: 'ok',
++        cursor,
++        rows: [...rows.values()],
++        changes: [],
++        unavailableSessionIds: allowedSessionIds.filter(id => !rows.has(id)),
++        ...(validSelected === undefined ? {} : { selected: validSelected }),
++      }
 +    }
 +    if (!subscribed) return { ...base, status: 'denied' }
 +    if (input.op === 'read') {
 +      const afterCursor = input.after
-+      if (typeof afterCursor !== 'number' || !Number.isSafeInteger(afterCursor) || afterCursor < 0 || afterCursor > cursor || input.sessionId !== undefined || input.workspaceId !== undefined || input.activate !== undefined) return { ...base, status: 'denied' }
++      if (typeof afterCursor !== 'number' || !Number.isSafeInteger(afterCursor) || afterCursor < 0 || afterCursor > cursor || hasExtraFields(input, ['after'])) return { ...base, status: 'denied' }
 +      if (afterCursor < (journal[0]?.sequence ?? cursor + 1) - 1) return { ...base, status: 'gap' }
-+      for (const id of config.sessionIds) change(id)
++      for (const id of allowedSessionIds) change(id)
 +      if (afterCursor < (journal[0]?.sequence ?? cursor + 1) - 1) return { ...base, status: 'gap' }
 +      if (isStale()) return { ...base, status: 'stale' }
-+      return { ...base, status: 'ok', cursor, rows: [...rows.values()], changes: journal.filter(item => item.sequence > afterCursor), unavailableSessionIds: config.sessionIds.filter(id => !rows.has(id)) }
++      const activeSelected = currentSelected()
++      const validSelected = activeSelected !== undefined && rows.has(activeSelected) ? activeSelected : undefined
++      return {
++        ...base,
++        status: 'ok',
++        cursor,
++        rows: [...rows.values()],
++        changes: journal.filter(item => item.sequence > afterCursor),
++        unavailableSessionIds: allowedSessionIds.filter(id => !rows.has(id)),
++        ...(validSelected === undefined ? {} : { selected: validSelected }),
++      }
 +    }
-+    if (!text(input.sessionId) || !config.sessionIds.includes(input.sessionId) || typeof input.workspaceId !== 'string'
-+      || input.after !== undefined || input.activate !== undefined) return { ...base, status: 'denied' }
++    if (input.op === 'query') {
++      if (!text(input.requestId, 256) || hasExtraFields(input, ['sessionId', 'workspaceId', 'requestId'])) return { ...base, status: 'denied' }
++      const targetKey = input.sessionId !== undefined ? input.sessionId : input.workspaceId
++      if (!text(targetKey)) return { ...base, status: 'denied' }
++      if (input.sessionId !== undefined && !allowedSessionIds.includes(input.sessionId)) return { ...base, status: 'denied' }
++      for (const id of allowedSessionIds) change(id)
++      if (isStale()) return { ...base, status: 'stale' }
++      if (input.sessionId === undefined && input.workspaceId !== undefined && !allowedWorkspaces.has(input.workspaceId)) return { ...base, status: 'denied' }
++      const settled = settledCommands.get(`${targetKey}:${input.requestId}`)
++      if (settled !== undefined) return { ...base, ...settled, duplicate: true }
++      return {
++        ...base,
++        status: 'unknown',
++        requestId: input.requestId,
++        ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
++        ...(input.workspaceId === undefined ? {} : { workspaceId: input.workspaceId }),
++      }
++    }
++    if (input.op === 'create') {
++      if (!text(input.workspaceId) || !text(input.requestId, 256) || hasExtraFields(input, ['workspaceId', 'requestId'])) return { ...base, status: 'denied' }
++      for (const id of allowedSessionIds) change(id)
++      if (isStale()) return { ...base, status: 'stale' }
++      const queryKey = `${input.workspaceId}:${input.requestId}`
++      const existing = settledCommands.get(queryKey)
++      if (existing !== undefined) return { ...base, ...existing, duplicate: true }
++      if (!allowedWorkspaces.has(input.workspaceId)) return { ...base, status: 'denied', reasonCode: 'guard.unauthorizedWorkspace' }
++      if (host.create === undefined) return { ...base, status: 'unavailable', reasonCode: 'create.unsupported' }
++      const abort = new AbortController(); opens.add(abort)
++      const isAborted = () => abort.signal.aborted
++      const timer = setTimeout(() => { abort.abort() }, 1500)
++      try {
++        const createdId = await host.create(input.workspaceId, abort.signal)
++        if (!text(createdId)) return { ...base, status: 'unavailable', reasonCode: 'create.failed' }
++        if (!allowedSessionIds.includes(createdId)) allowedSessionIds.push(createdId)
++        const createdRow = read(createdId)
++        change(createdId)
++        if (isDisposed() || isStale() || !isSubscribed() || subscriptionId !== input.subscriptionId || isAborted() || createdRow?.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++        const selected = await host.navigate(createdId, abort.signal)
++        const after = read(createdId)
++        change(createdId)
++        if (isDisposed() || isStale() || !isSubscribed() || subscriptionId !== input.subscriptionId || isAborted() || after?.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++        lastSelected = selected
++        if (selected !== createdId) return { ...base, status: 'unconfirmed', sessionId: createdId, workspaceId: input.workspaceId }
++        const settled = {
++          status: 'confirmed',
++          sessionId: createdId,
++          workspaceId: input.workspaceId,
++          selected: createdId,
++          requestId: input.requestId,
++          currentTurn: after.currentTurn,
++          queuedCount: after.queuedCount,
++          duplicate: false,
++        }
++        settledCommands.set(queryKey, settled)
++        settledCommands.set(`${createdId}:${input.requestId}`, settled)
++        return { ...base, ...settled }
++      } catch { return { ...base, status: 'unavailable' } }
++      finally { clearTimeout(timer); opens.delete(abort) }
++    }
++    if (!text(input.sessionId) || !allowedSessionIds.includes(input.sessionId) || typeof input.workspaceId !== 'string') return { ...base, status: 'denied' }
++    if (input.op === 'open') {
++      if (hasExtraFields(input, ['sessionId', 'workspaceId'])) return { ...base, status: 'denied' }
++      const before = read(input.sessionId)
++      if (isStale()) return { ...base, status: 'stale' }
++      if (before === undefined) return { ...base, status: 'unavailable' }
++      if (before.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++      const abort = new AbortController(); opens.add(abort)
++      const timer = setTimeout(() => { abort.abort() }, 1500)
++      try {
++        const selected = await host.navigate(input.sessionId, abort.signal)
++        const after = read(input.sessionId)
++        if (isDisposed() || isStale() || !isSubscribed() || subscriptionId !== input.subscriptionId || abort.signal.aborted || after?.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++        lastSelected = selected
++        return selected === input.sessionId ? { ...base, status: 'confirmed', selected } : { ...base, status: 'unconfirmed' }
++      } catch { return { ...base, status: 'unavailable' } }
++      finally { clearTimeout(timer); opens.delete(abort) }
++    }
++    if (input.op === 'prompt') {
++      if (!text(input.requestId, 256) || (input.mode !== 'queue' && input.mode !== 'steer')
++        || !text(input.text, 16384) || input.text.trim().length === 0
++        || hasExtraFields(input, ['sessionId', 'workspaceId', 'requestId', 'mode', 'text'])) return { ...base, status: 'denied' }
++      const before = read(input.sessionId)
++      if (isStale()) return { ...base, status: 'stale' }
++      if (before === undefined) return { ...base, status: 'unavailable' }
++      if (before.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++      const commandKey = `${input.sessionId}:${input.requestId}`
++      const existing = settledCommands.get(commandKey)
++      if (existing !== undefined) return { ...base, ...existing, duplicate: true }
++      const activeSelected = currentSelected()
++      if (activeSelected !== input.sessionId) {
++        return { ...base, status: 'unconfirmed', ...(activeSelected === undefined ? {} : { selected: activeSelected }), reasonCode: 'guard.selectionMismatch' }
++      }
++      if (host.prompt === undefined) return { ...base, status: 'unavailable', reasonCode: 'prompt.unsupported' }
++      const abort = new AbortController(); opens.add(abort)
++      const timer = setTimeout(() => { abort.abort() }, 1500)
++      try {
++        const outcome = await host.prompt(input.sessionId, input.mode, input.text, input.requestId, abort.signal)
++        const after = read(input.sessionId)
++        change(input.sessionId)
++        if (isDisposed() || isStale() || !isSubscribed() || subscriptionId !== input.subscriptionId || abort.signal.aborted || after?.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++        if (outcome.status === 'denied' || outcome.status === 'unavailable') {
++          return { ...base, status: outcome.status, reasonCode: outcome.reasonCode }
++        }
++        const settled = {
++          status: outcome.status,
++          delivery: outcome.delivery,
++          sessionId: input.sessionId,
++          workspaceId: input.workspaceId,
++          requestId: input.requestId,
++          currentTurn: outcome.currentTurn,
++          queuedCount: outcome.queuedCount,
++          duplicate: false,
++        }
++        settledCommands.set(commandKey, settled)
++        return { ...base, ...settled }
++      } catch { return { ...base, status: 'unavailable' } }
++      finally { clearTimeout(timer); opens.delete(abort) }
++    }
++    if (!text(input.requestId, 256) || typeof input.expectedTurn !== 'number' || !Number.isSafeInteger(input.expectedTurn) || input.expectedTurn < 1
++      || hasExtraFields(input, ['sessionId', 'workspaceId', 'requestId', 'expectedTurn'])) return { ...base, status: 'denied', reasonCode: 'guard.invalidCancelRequest' }
 +    const before = read(input.sessionId)
 +    if (isStale()) return { ...base, status: 'stale' }
 +    if (before === undefined) return { ...base, status: 'unavailable' }
 +    if (before.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
-+    const abort = new AbortController(); opens.add(abort)
-+    const timer = setTimeout(() =>{  abort.abort() }, 1500)
-+    try {
-+      const selected = await host.navigate(input.sessionId, abort.signal)
-+      const after = read(input.sessionId)
-+      if (isDisposed() || isStale() || !isSubscribed() || subscriptionId !== input.subscriptionId || abort.signal.aborted || after?.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
-+      return selected === input.sessionId ? { ...base, status: 'confirmed', selected } : { ...base, status: 'unconfirmed' }
-+    } catch { return { ...base, status: 'unavailable' } }
-+    finally { clearTimeout(timer); opens.delete(abort) }
++    const commandKey = `${input.sessionId}:${input.requestId}`
++    const existing = settledCommands.get(commandKey)
++    if (existing !== undefined) return { ...base, ...existing, duplicate: true }
++    const activeSelected = currentSelected()
++    if (activeSelected !== input.sessionId) {
++      return { ...base, status: 'unconfirmed', ...(activeSelected === undefined ? {} : { selected: activeSelected }), reasonCode: 'guard.selectionMismatch' }
++    }
++    if (host.cancel === undefined) {
++      return { ...base, status: 'denied', reasonCode: 'guard.unprovableTurnAtomicity' }
++    }
++    const outcome = host.cancel(input.sessionId, input.expectedTurn)
++    const after = read(input.sessionId)
++    change(input.sessionId)
++    if (isDisposed() || isStale() || !isSubscribed() || subscriptionId !== input.subscriptionId || after?.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++    if (outcome.status === 'denied' || outcome.status === 'unavailable') {
++      return { ...base, status: outcome.status, reasonCode: outcome.reasonCode }
++    }
++    const settled = {
++      status: outcome.status,
++      sessionId: input.sessionId,
++      workspaceId: input.workspaceId,
++      requestId: input.requestId,
++      expectedTurn: input.expectedTurn,
++      currentTurn: outcome.currentTurn,
++      queuedCount: outcome.queuedCount,
++      ...('reasonCode' in outcome ? { reasonCode: outcome.reasonCode } : {}),
++      duplicate: false,
++    }
++    settledCommands.set(commandKey, settled)
++    return { ...base, ...settled }
 +  }
 +  const server = createServer((socket) => {
 +    sockets.add(socket); socket.setTimeout(2000, () => socket.destroy())
@@ -327,10 +698,10 @@ index 00000000..138ffe00
 +}
 diff --git a/apps/desktop-host/tests/micro-input-host.spec.ts b/apps/desktop-host/tests/micro-input-host.spec.ts
 new file mode 100644
-index 00000000..d7ce8451
+index 00000000..87414e0c
 --- /dev/null
 +++ b/apps/desktop-host/tests/micro-input-host.spec.ts
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,141 @@
 +import { Context, FiberState } from '@deepseek-ai/cordis'
 +import type { Agent } from '@deepseek-ai/dsh-agent'
 +import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -358,11 +729,13 @@ index 00000000..d7ce8451
 +  if (!titleFirst) await ctx.plugin(SessionTitleService, titleConfig)
 +  const session = early ?? ctx.sessions.create(SessionId('s'))
 +  if (!late) session.append('turn/start', { turn: 1 })
-+  const agent = { id: session.id, session, status: 'running' } as Agent
-+  ctx.provide('agents', { get: () => agent, roots: () => [agent] } as never)
-+  ctx.provide('workspaceRegistry', { list: () => [{ id: 'w', sessionIds: [session.id] }] } as never)
++  const agent = { id: session.id, session, status: 'running', inbox: { nextStep: [], nextTurn: [] } } as unknown as Agent
++  const agents = new Map<string, Agent>([[session.id, agent]])
++  const workspace = { id: 'w', sessionIds: [session.id] }
++  ctx.provide('agents', { get: (id: string) => agents.get(id), roots: () => [...agents.values()] } as never)
++  ctx.provide('workspaceRegistry', { list: () => [workspace] } as never)
 +  const source = microInputHost(ctx, () => Promise.resolve(undefined))
-+  return { ctx, session, agent, source }
++  return { ctx, session, agent, workspace, source }
 +}
 +
 +it('bootstraps existing approval and observes settlement without an Agent status transition or history read', async () => {
@@ -374,7 +747,7 @@ index 00000000..d7ce8451
 +  await started.promise
 +  const snapshot = vi.spyOn(test.session, 'snapshotEvents').mockImplementation(() => { throw new Error('body traversal') })
 +  const event = vi.spyOn(test.session, 'eventAt').mockImplementation(() => { throw new Error('body traversal') })
-+  expect(test.source.read('s')?.row.pendingInput).toBe(1)
++  expect(test.source.read('s')?.row).toMatchObject({ pendingInput: 1, currentTurn: 1, queuedCount: 0 })
 +  expect(test.source.read('cold')).toBeUndefined()
 +  snapshot.mockRestore(); event.mockRestore()
 +  const changes: number[] = []
@@ -406,7 +779,6 @@ index 00000000..d7ce8451
 +  expect(test.source.read('s')?.row.sessionId).toBe('s')
 +})
 +
-+
 +it.each([true, false])('observes complete projection cuts with title-first=%s', async (titleFirst) => {
 +  const test = await fixture(false, titleFirst)
 +  test.session.append('session/title', { title: 'Synthetic', messageSeqs: [], source: { kind: 'user' } })
@@ -434,12 +806,49 @@ index 00000000..d7ce8451
 +  expect(rows.every(row => row.title === 'Synthetic')).toBe(true)
 +  stop()
 +})
++
++it('executes create, prompt queue/steer deduplication, and atomic turn-checked cancel without history reads', async () => {
++  const test = await fixture()
++  const signal = new AbortController().signal
++  const snapshot = vi.spyOn(test.session, 'snapshotEvents').mockImplementation(() => { throw new Error('body traversal') })
++  const event = vi.spyOn(test.session, 'eventAt').mockImplementation(() => { throw new Error('body traversal') })
++
++  const createdId = await test.source.create('w', signal)
++  expect(createdId).toBe('dsh-created-1')
++  expect(test.source.read('dsh-created-1')?.row).toMatchObject({
++    sessionId: 'dsh-created-1', workspaceId: 'w', active: true, running: false, currentTurn: null, queuedCount: 0,
++  })
++
++  const steered = await test.source.prompt('s', 'steer', 'steer step', 'req-1', signal)
++  expect(steered).toEqual({ status: 'steered', delivery: 'steer', currentTurn: 1, queuedCount: 1 })
++  const duplicateSteer = await test.source.prompt('s', 'steer', 'steer step', 'req-1', signal)
++  expect(duplicateSteer).toEqual({ status: 'steered', delivery: 'steer', currentTurn: 1, queuedCount: 1 })
++
++  const queued = await test.source.prompt('s', 'queue', 'next turn task', 'req-2', signal)
++  expect(queued).toEqual({ status: 'queued', delivery: 'queue', currentTurn: 1, queuedCount: 2 })
++  expect(test.source.read('s')?.row).toMatchObject({ currentTurn: 1, queuedCount: 2 })
++
++  // Advance to turn 2 and verify old Stop(expectedTurn=1) does zero cancellation
++  test.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
++  test.session.append('turn/start', { turn: 2 })
++  expect(test.source.cancel('s', 1)).toEqual({
++    status: 'noop', reasonCode: 'guard.turnChanged', currentTurn: 2, queuedCount: 2,
++  })
++  expect(test.source.read('s')?.row).toMatchObject({ running: true, currentTurn: 2, queuedCount: 2 })
++
++  // Matching expectedTurn=2 cancels turn 2 and reports cancelledQueueRemaining
++  expect(test.source.cancel('s', 2)).toEqual({
++    status: 'cancelledQueueRemaining', currentTurn: null, queuedCount: 2,
++  })
++  expect(test.source.read('s')?.row).toMatchObject({ running: false, currentTurn: null, queuedCount: 2 })
++  snapshot.mockRestore(); event.mockRestore()
++})
 diff --git a/apps/desktop-host/tests/micro-input.spec.ts b/apps/desktop-host/tests/micro-input.spec.ts
 new file mode 100644
-index 00000000..46fd5539
+index 00000000..e903a2ce
 --- /dev/null
 +++ b/apps/desktop-host/tests/micro-input.spec.ts
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,312 @@
 +import { randomUUID } from 'node:crypto'
 +import { connect } from 'node:net'
 +import { chmod, mkdtemp, rm } from 'node:fs/promises'
@@ -453,22 +862,99 @@ index 00000000..46fd5539
 +  rows: MicroInputRow[]
 +  changes: { sequence: number; row: MicroInputRow }[]
 +  unavailableSessionIds: string[]
++  selected?: string
++  sessionId?: string
++  workspaceId?: string
++  requestId?: string
++  delivery?: string
++  expectedTurn?: number
++  currentTurn?: number | null
++  queuedCount?: number
++  reasonCode?: string
++  duplicate?: boolean
 +}
 +const cleanup: (() => Promise<void>)[] = []
 +afterEach(async () => { for (const stop of cleanup.splice(0).reverse()) await stop() })
-+async function fixture() {
++async function fixture(withAtomicCancel = true) {
 +  const directory = await mkdtemp(join(process.env.MI_DSH_TEST_ROOT ?? '/tmp', 'mi-dsh-'))
 +  await chmod(directory, 0o700)
 +  cleanup.push(() => rm(directory, { recursive: true, force: true }))
-+  let reads = 0, navigations = 0, observations = 0
-+  let identity = {}, row: MicroInputRow = { sessionId: 'a', workspaceId: 'w', title: '', active: true, running: true, pendingInput: 0 }
++  let reads = 0, navigations = 0, observations = 0, creates = 0, prompts = 0, cancels = 0
++  let selected: string | undefined
++  const identities = new Map<string, object>([['a', {}], ['b', {}]])
++  const state = new Map<string, MicroInputRow>([
++    ['a', { sessionId: 'a', workspaceId: 'w', title: 'Session A', active: true, running: true, pendingInput: 0, currentTurn: 1, queuedCount: 0 }],
++    ['b', { sessionId: 'b', workspaceId: 'w-b', title: 'Session B', active: true, running: true, pendingInput: 0, currentTurn: 1, queuedCount: 0 }],
++  ])
 +  let changed: (id: string) => void = () => {}
-+  let navigate: MicroInputHost['navigate'] = async id => id
-+  const bridge = await startMicroInputBridge({ directory, sessionIds: ['a', 'cold'] }, {
-+    read(id) { reads++; return id === 'a' ? { row, identity } : undefined },
++  let navigate: MicroInputHost['navigate'] = async (id) => { selected = id; return id }
++  const host: MicroInputHost = {
++    read(id) {
++      reads++
++      const row = state.get(id)
++      return row === undefined ? undefined : { row, identity: identities.get(id)! }
++    },
 +    observe(listener) { observations++; changed = listener; return () => { observations--; changed = () => {} } },
 +    navigate: (id, signal) => { navigations++; return navigate(id, signal) },
-+  })
++    selected: () => selected,
++    async create(workspaceId) {
++      creates++
++      const createdId = `created-${creates}`
++      identities.set(createdId, {})
++      state.set(createdId, {
++        sessionId: createdId,
++        workspaceId,
++        title: createdId,
++        active: true,
++        running: false,
++        pendingInput: 0,
++        currentTurn: null,
++        queuedCount: 0,
++      })
++      changed(createdId)
++      return createdId
++    },
++    async prompt(sessionId, mode) {
++      prompts++
++      const row = state.get(sessionId)
++      if (row === undefined) return { status: 'unavailable', reasonCode: 'session.notFound' }
++      if (mode === 'steer' && (!row.running || row.currentTurn === null)) {
++        return { status: 'unavailable', reasonCode: 'session.steerUnavailable' }
++      }
++      const next = { ...row, queuedCount: row.queuedCount + 1 }
++      state.set(sessionId, next)
++      changed(sessionId)
++      return {
++        status: mode === 'steer' ? 'steered' : 'queued',
++        delivery: mode,
++        currentTurn: next.currentTurn,
++        queuedCount: next.queuedCount,
++      }
++    },
++    ...(withAtomicCancel ? {
++      cancel(sessionId, expectedTurn) {
++        const row = state.get(sessionId)
++        if (row === undefined) return { status: 'unavailable', reasonCode: 'session.notFound' }
++        if (row.running && row.currentTurn === null) {
++          return { status: 'denied', reasonCode: 'guard.unprovableTurnAtomicity' }
++        }
++        if (!row.running || row.currentTurn === null) {
++          return { status: 'noop', reasonCode: 'guard.notRunning', currentTurn: null, queuedCount: row.queuedCount }
++        }
++        if (row.currentTurn !== expectedTurn) {
++          return { status: 'noop', reasonCode: 'guard.turnChanged', currentTurn: row.currentTurn, queuedCount: row.queuedCount }
++        }
++        cancels++
++        const next: MicroInputRow = { ...row, running: false, currentTurn: null }
++        state.set(sessionId, next)
++        changed(sessionId)
++        return next.queuedCount > 0
++          ? { status: 'cancelledQueueRemaining', currentTurn: null, queuedCount: next.queuedCount }
++          : { status: 'cancelled', currentTurn: null, queuedCount: 0 }
++      },
++    } : {}),
++  }
++  const bridge = await startMicroInputBridge({ directory, sessionIds: ['a', 'b', 'cold'] }, host)
 +  cleanup.push(() => bridge.close())
 +  let subscriptionId = randomUUID()
 +  const request = async (op: string, extra: object = {}) => {
@@ -483,9 +969,22 @@ index 00000000..46fd5539
 +      socket.on('error', reject)
 +    })
 +  }
-+  return { bridge, request, stats: () => ({ reads, navigations, observations }),
-+    replace: () => { identity = {} },
-+    pulse: (pendingInput: number) => { row = { ...row, pendingInput }; changed('a') },
++  return {
++    bridge,
++    request,
++    stats: () => ({ reads, navigations, observations, creates, prompts, cancels }),
++    replace: () => { identities.set('a', {}) },
++    pulse: (pendingInput: number) => {
++      const row = state.get('a')!
++      state.set('a', { ...row, pendingInput })
++      changed('a')
++    },
++    setTurn: (id: string, currentTurn: number | null, running = currentTurn !== null) => {
++      const row = state.get(id)!
++      state.set(id, { ...row, currentTurn, running })
++      changed(id)
++    },
++    select: (id: string | undefined) => { selected = id },
 +    navigate: (next: MicroInputHost['navigate']) => { navigate = next },
 +    renew: () => { const old = subscriptionId; subscriptionId = randomUUID(); return old },
 +  }
@@ -495,10 +994,10 @@ index 00000000..46fd5539
 +  const test = await fixture()
 +  expect((await test.request('subscribe', { token: 'invalid', activate: false })).status).toBe('denied')
 +  expect((await test.request('subscribe', { activate: true })).status).toBe('denied')
-+  expect(test.stats()).toEqual({ reads: 0, navigations: 0, observations: 0 })
++  expect(test.stats()).toEqual({ reads: 0, navigations: 0, observations: 0, creates: 0, prompts: 0, cancels: 0 })
 +  const baseline = await test.request('subscribe', { activate: false })
 +  expect(baseline.status).toBe('ok')
-+  expect(baseline.rows).toHaveLength(1)
++  expect(baseline.rows).toHaveLength(2)
 +  expect(baseline.unavailableSessionIds).toEqual(['cold'])
 +  expect(test.stats().navigations).toBe(0)
 +})
@@ -556,9 +1055,8 @@ index 00000000..46fd5539
 +  await test.request('close')
 +  expect(test.stats().observations).toBe(0)
 +  expect((await test.request('read', { after: 0 })).status).toBe('denied')
-+  expect((await test.request('subscribe', { activate: false })).rows).toHaveLength(1)
++  expect((await test.request('subscribe', { activate: false })).rows).toHaveLength(2)
 +})
-+
 +
 +it('isolates optional bridge setup failure from its Host', async () => {
 +  let reads = 0
@@ -571,6 +1069,97 @@ index 00000000..46fd5539
 +  expect(reads).toBe(0)
 +  const next = await fixture()
 +  expect((await next.request('subscribe', { activate: false })).status).toBe('ok')
++})
++
++it('confirms queue and steer separately, deduplicates requestId, and reports remaining queue after cancel', async () => {
++  const test = await fixture()
++  await test.request('subscribe', { activate: false })
++  await test.request('open', { sessionId: 'a', workspaceId: 'w' })
++
++  const steered = await test.request('prompt', {
++    sessionId: 'a', workspaceId: 'w', requestId: 'req-steer-1', mode: 'steer', text: 'steer current turn',
++  })
++  expect(steered).toMatchObject({
++    status: 'steered', delivery: 'steer', sessionId: 'a', requestId: 'req-steer-1', currentTurn: 1, queuedCount: 1, duplicate: false,
++  })
++  const duplicateSteer = await test.request('prompt', {
++    sessionId: 'a', workspaceId: 'w', requestId: 'req-steer-1', mode: 'steer', text: 'steer current turn',
++  })
++  expect(duplicateSteer).toMatchObject({
++    status: 'steered', delivery: 'steer', sessionId: 'a', requestId: 'req-steer-1', duplicate: true,
++  })
++  expect(test.stats().prompts).toBe(1)
++
++  const queued = await test.request('prompt', {
++    sessionId: 'a', workspaceId: 'w', requestId: 'req-queue-1', mode: 'queue', text: 'queue next turn',
++  })
++  expect(queued).toMatchObject({
++    status: 'queued', delivery: 'queue', sessionId: 'a', requestId: 'req-queue-1', currentTurn: 1, queuedCount: 2, duplicate: false,
++  })
++  expect(test.stats().prompts).toBe(2)
++
++  // Switching selection to 'b' prevents mis-stopping 'a'
++  await test.request('open', { sessionId: 'b', workspaceId: 'w-b' })
++  const wrongStop = await test.request('cancel', {
++    sessionId: 'a', workspaceId: 'w', requestId: 'req-cancel-wrong', expectedTurn: 1,
++  })
++  expect(wrongStop).toMatchObject({ status: 'unconfirmed', selected: 'b', reasonCode: 'guard.selectionMismatch' })
++  expect(test.stats().cancels).toBe(0)
++
++  // Re-select 'a'; stale Stop on old turn (expectedTurn: 1 after advancing to turn 2) must do zero cancellation
++  await test.request('open', { sessionId: 'a', workspaceId: 'w' })
++  test.setTurn('a', 2, true)
++  const staleStop = await test.request('cancel', {
++    sessionId: 'a', workspaceId: 'w', requestId: 'req-cancel-stale', expectedTurn: 1,
++  })
++  expect(staleStop).toMatchObject({ status: 'noop', reasonCode: 'guard.turnChanged', currentTurn: 2, queuedCount: 2 })
++  expect(test.stats().cancels).toBe(0)
++
++  // Matching expectedTurn cancels turn 2 and reports cancelledQueueRemaining because queuedCount === 2
++  const cancelledWithQueue = await test.request('cancel', {
++    sessionId: 'a', workspaceId: 'w', requestId: 'req-cancel-2', expectedTurn: 2,
++  })
++  expect(cancelledWithQueue).toMatchObject({
++    status: 'cancelledQueueRemaining', sessionId: 'a', expectedTurn: 2, currentTurn: null, queuedCount: 2, duplicate: false,
++  })
++  expect(test.stats().cancels).toBe(1)
++
++  // Query reconciles settled requestId without re-running
++  const queried = await test.request('query', { sessionId: 'a', requestId: 'req-cancel-2' })
++  expect(queried).toMatchObject({ status: 'cancelledQueueRemaining', sessionId: 'a', requestId: 'req-cancel-2', duplicate: true })
++  expect(test.stats().cancels).toBe(1)
++})
++
++it('creates a workspace-bound session with selected readback and refuses cancel when turn atomicity cannot be proven', async () => {
++  const test = await fixture()
++  await test.request('subscribe', { activate: false })
++  expect((await test.request('create', { workspaceId: 'unauthorized', requestId: 'req-create-denied' })).status).toBe('denied')
++
++  const created = await test.request('create', { workspaceId: 'w', requestId: 'req-create-1' })
++  expect(created).toMatchObject({
++    status: 'confirmed', sessionId: 'created-1', workspaceId: 'w', selected: 'created-1', requestId: 'req-create-1', duplicate: false,
++  })
++  const duplicateCreate = await test.request('create', { workspaceId: 'w', requestId: 'req-create-1' })
++  expect(duplicateCreate).toMatchObject({
++    status: 'confirmed', sessionId: 'created-1', workspaceId: 'w', selected: 'created-1', duplicate: true,
++  })
++  expect(test.stats().creates).toBe(1)
++
++  // Unprovable turn atomicity (running===true with currentTurn===null or missing host.cancel) refuses cancel
++  await test.request('open', { sessionId: 'b', workspaceId: 'w-b' })
++  test.setTurn('b', null, true)
++  const unprovable = await test.request('cancel', {
++    sessionId: 'b', workspaceId: 'w-b', requestId: 'req-cancel-unprovable', expectedTurn: 1,
++  })
++  expect(unprovable).toMatchObject({ status: 'denied', reasonCode: 'guard.unprovableTurnAtomicity' })
++
++  const withoutCancelHost = await fixture(false)
++  await withoutCancelHost.request('subscribe', { activate: false })
++  await withoutCancelHost.request('open', { sessionId: 'a', workspaceId: 'w' })
++  const missingHostCancel = await withoutCancelHost.request('cancel', {
++    sessionId: 'a', workspaceId: 'w', requestId: 'req-cancel-missing-host', expectedTurn: 1,
++  })
++  expect(missingHostCancel).toMatchObject({ status: 'denied', reasonCode: 'guard.unprovableTurnAtomicity' })
 +})
 diff --git a/apps/desktop-host/tsconfig.json b/apps/desktop-host/tsconfig.json
 index 31c64f17..d1e41389 100644
@@ -997,10 +1586,36 @@ index f0f74425..382a5b9e 100644
 +  await ctx.fiber.dispose()
 +})
 diff --git a/packages/session/session-projection/src/index.ts b/packages/session/session-projection/src/index.ts
-index ac6e6345..b915adf8 100644
+index ac6e6345..9c4b581b 100644
 --- a/packages/session/session-projection/src/index.ts
 +++ b/packages/session/session-projection/src/index.ts
-@@ -327,6 +327,16 @@ export class SessionProjectionRegistry extends Service {
+@@ -199,6 +199,12 @@ function cursorBefore(offset: SessionLogOffset): SessionSeqCursor {
+ export class SessionProjectionRegistry extends Service {
+   private readonly registrations = new Map<string, Registration>()
+   private readonly listeners = new Set<ProjectionChangeListener>()
++  private readonly turnQueueCells = new WeakMap<Session, {
++    observedSeq: SessionSeqCursor
++    openTurn: number | null
++    nextTurnCount: number
++    nextStepCount: number
++  }>()
+ 
+   /**
+    * Create and install the registry as `ctx.sessionProjections`.
+@@ -208,6 +214,12 @@ export class SessionProjectionRegistry extends Service {
+     super(ctx, 'sessionProjections')
+     ctx.on('session/created', (session: Session) => {
+       if (session.seq !== 0) return
++      this.turnQueueCells.set(session, {
++        observedSeq: -1,
++        openTurn: null,
++        nextTurnCount: 0,
++        nextStepCount: 0,
++      })
+       for (const registration of this.registrations.values()) {
+         if (registration.cells.has(session)) continue
+         registration.cells.set(session, {
+@@ -327,6 +339,28 @@ export class SessionProjectionRegistry extends Service {
      return this.cellFor(registration, session).state as SessionProjectionStateMap[K]
    }
  
@@ -1014,9 +1629,54 @@ index ac6e6345..b915adf8 100644
 +    return cell.state as SessionProjectionStateMap[K]
 +  }
 +
++  /** Read current open turn and pending inbox queue count without folding history; unknown stays absent. */
++  cachedTurnAndQueueOf(
++    session: Session,
++  ): { readonly currentTurn: number | null; readonly queuedCount: number } | undefined {
++    const cell = this.turnQueueCells.get(session)
++    if (cell === undefined || cell.observedSeq !== cursorBefore(session.seq)) return undefined
++    return {
++      currentTurn: cell.openTurn,
++      queuedCount: cell.nextStepCount + cell.nextTurnCount,
++    }
++  }
++
    /**
     * One consistent cut over every registered client-visible unit for one session, read from
     * the watermark cache (missing cells fold lazily over the in-memory log).
+@@ -656,6 +690,32 @@ export class SessionProjectionRegistry extends Service {
+ 
+   /** Eager drive: pass one committed event through every unit; notify on changed raw view references. */
+   private drive(session: Session, event: SessionEvent): void {
++    const turnCell = this.turnQueueCells.get(session)
++    if (turnCell !== undefined && turnCell.observedSeq === (event.seq === 0 ? -1 : event.seq - 1)) {
++      turnCell.observedSeq = event.seq
++      const eventType: string = event.type
++      if (eventType === 'turn/start') {
++        const turn = (event.data as { readonly turn?: unknown }).turn
++        turnCell.openTurn = typeof turn === 'number' && Number.isSafeInteger(turn) && turn >= 1 ? turn : null
++      } else if (eventType === 'turn/end') {
++        turnCell.openTurn = null
++      } else if (eventType === 'agent/inbox/spliced') {
++        const splice = event.data as {
++          readonly target?: unknown
++          readonly removedCount?: unknown
++          readonly inserted?: unknown
++        }
++        const removed = typeof splice.removedCount === 'number' && Number.isSafeInteger(splice.removedCount) && splice.removedCount > 0
++          ? splice.removedCount
++          : 0
++        const inserted = Array.isArray(splice.inserted) ? splice.inserted.length : 0
++        if (splice.target === 'next-turn') {
++          turnCell.nextTurnCount = Math.max(0, turnCell.nextTurnCount - removed + inserted)
++        } else if (splice.target === 'next-step') {
++          turnCell.nextStepCount = Math.max(0, turnCell.nextStepCount - removed + inserted)
++        }
++      }
++    }
+     for (const registration of this.registrations.values()) {
+       let cell = registration.cells.get(session)
+       if (cell !== undefined && cell.observedSeq >= event.seq) continue
 diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
 index d6df9aae..3dd84028 100644
 --- a/pnpm-lock.yaml
@@ -1051,10 +1711,10 @@ index d6df9aae..3dd84028 100644
          version: link:../../packages/workspace/workspace
 diff --git a/scripts/micro-input-fixture.ts b/scripts/micro-input-fixture.ts
 new file mode 100644
-index 00000000..471af1fb
+index 00000000..08410b2d
 --- /dev/null
 +++ b/scripts/micro-input-fixture.ts
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,156 @@
 +import { createServer } from 'node:net'
 +import { chmod, rm } from 'node:fs/promises'
 +import { join } from 'node:path'
@@ -1077,11 +1737,10 @@ index 00000000..471af1fb
 +await ctx.plugin(SessionProjectionRegistry)
 +await ctx.plugin(SessionTitleService, { fallbackMaxWords: 8, fallbackMaxBytes: 64, maxTitleBytes: 256 })
 +const agents = new Map<string, Agent>()
++const workspaceA = { id: 'workspace-a', sessionIds: [SessionId('dsh-a')] }
++const workspaceB = { id: 'workspace-b', sessionIds: [SessionId('dsh-b')] }
 +ctx.provide('agents', { get: (id: string) => agents.get(id), roots: () => [...agents.values()] } as never)
-+ctx.provide('workspaceRegistry', { list: () => [
-+  { id: 'workspace-a', sessionIds: [SessionId('dsh-a')] },
-+  { id: 'workspace-b', sessionIds: [SessionId('dsh-b')] },
-+] } as never)
++ctx.provide('workspaceRegistry', { list: () => [workspaceA, workspaceB] } as never)
 +await ctx.plugin(ApprovalService)
 +await ctx.plugin(UserQuestionService)
 +for (const id of ['dsh-a', 'dsh-b']) {
@@ -1091,13 +1750,21 @@ index 00000000..471af1fb
 +  agents.set(id, { id: session.id, session, status: 'running', inbox: { nextStep: [], nextTurn: [] } } as unknown as Agent)
 +}
 +let metadataReads = 0, navigationCount = 0, activationCount = 0, selected: string | undefined
++let createCount = 0, promptCount = 0, cancelCount = 0
 +const originalPrepare = ctx.sessions.prepare.bind(ctx.sessions)
-+ctx.sessions.prepare = (...input) => { activationCount++; return originalPrepare(...input) }
++ctx.sessions.prepare = (...input) => {
++  if (!String(input[0]).startsWith('dsh-created-')) activationCount++
++  return originalPrepare(...input)
++}
 +const identities = new Map<string, object>()
 +const deleted = new Set<string>()
-+const source = microInputHost(ctx, (id, signal) => {
-+  signal.throwIfAborted(); navigationCount++; selected = id; return Promise.resolve(selected)
-+})
++const source = microInputHost(
++  ctx,
++  (id, signal) => {
++    signal.throwIfAborted(); navigationCount++; selected = id; return Promise.resolve(selected)
++  },
++  () => selected,
++)
 +const bridge = await startMicroInputBridge({ directory, sessionIds: ['dsh-a', 'dsh-b', 'dsh-cold'] }, {
 +  ...source,
 +  read(id) {
@@ -1105,11 +1772,35 @@ index 00000000..471af1fb
 +    const value = deleted.has(id) ? undefined : source.read(id)
 +    return value === undefined ? undefined : { ...value, identity: identities.get(id) ?? value.identity }
 +  },
++  async create(workspaceId, signal) {
++    const createdId = await source.create(workspaceId, signal)
++    if (createdId !== undefined) createCount++
++    return createdId
++  },
++  async prompt(sessionId, mode, text, requestId, signal) {
++    const outcome = await source.prompt(sessionId, mode, text, requestId, signal)
++    if (outcome.status === 'queued' || outcome.status === 'steered') promptCount++
++    return outcome
++  },
++  cancel(sessionId, expectedTurn) {
++    const outcome = source.cancel(sessionId, expectedTurn)
++    if (outcome.status === 'cancelled' || outcome.status === 'cancelledQueueRemaining') cancelCount++
++    return outcome
++  },
 +})
 +let bridgeStopped = false
-+const stats = () => ({ metadataReads, navigationCount, activationCount,
-+  hostStopped: ctx.fiber.state === FiberState.DISPOSED || ctx.fiber.state === FiberState.UNLOADING, bridgeStopped, selected,
-+  sessionCount: ctx.sessions.list().length })
++const stats = () => ({
++  metadataReads,
++  navigationCount,
++  activationCount,
++  createCount,
++  promptCount,
++  cancelCount,
++  hostStopped: ctx.fiber.state === FiberState.DISPOSED || ctx.fiber.state === FiberState.UNLOADING,
++  bridgeStopped,
++  selected,
++  sessionCount: ctx.sessions.list().length,
++})
 +const controlPath = join(directory, 'control.sock')
 +const controls = createServer((socket) => {
 +  socket.setTimeout(2000, () => socket.destroy())
@@ -1118,7 +1809,7 @@ index 00000000..471af1fb
 +    buffer += data.toString()
 +    if (buffer.length > 65536) { socket.destroy(); return }
 +    if (!buffer.includes('\n')) return
-+    const request = JSON.parse(buffer.slice(0, buffer.indexOf('\n'))) as { op: string; sessionId?: string }
++    const request = JSON.parse(buffer.slice(0, buffer.indexOf('\n'))) as { op: string; sessionId?: string; turn?: number }
 +    void (async () => {
 +      if (request.op === 'pending-pulse') {
 +        const agent = agents.get('dsh-a')
@@ -1129,6 +1820,30 @@ index 00000000..471af1fb
 +        const answerQuestion = ctx.on('user-questions/request', () => Promise.resolve({ answers: [] }))
 +        await ctx.userQuestions.ask({ agent, questions: [{ id: 'fixture', question: 'Synthetic only' }] })
 +        answerQuestion()
++      } else if (request.op === 'advance-turn') {
++        const id = request.sessionId ?? 'dsh-a'
++        const session = ctx.sessions.get(SessionId(id))
++        const agent = agents.get(id)
++        if (session === undefined || agent === undefined) throw new Error('fixture session missing')
++        const nextTurn = request.turn ?? 2
++        const current = ctx.sessionProjections.cachedTurnAndQueueOf(session)?.currentTurn ?? null
++        if (current !== null) {
++          session.append('turn/end', { turn: current, reason: { kind: 'completed' } })
++        }
++        ;(agent as { status: string }).status = 'running'
++        session.append('turn/start', { turn: nextTurn })
++        ctx.emit('agent/status', { agent, status: 'running' })
++      } else if (request.op === 'unprovable-turn') {
++        const id = request.sessionId ?? 'dsh-b'
++        const session = ctx.sessions.get(SessionId(id))
++        const agent = agents.get(id)
++        if (session === undefined || agent === undefined) throw new Error('fixture session missing')
++        const current = ctx.sessionProjections.cachedTurnAndQueueOf(session)?.currentTurn ?? null
++        if (current !== null) {
++          session.append('turn/end', { turn: current, reason: { kind: 'completed' } })
++        }
++        ;(agent as { status: string }).status = 'running'
++        ctx.emit('agent/status', { agent, status: 'running' })
 +      } else if (request.op === 'delete') {
 +        const id = request.sessionId ?? 'dsh-a'
 +        deleted.add(id)

@@ -124,19 +124,68 @@ def main():
                 "-DMI_SYNTHETIC_BACKEND", "--filter", "DSHPairedTests"], cwd=ROOT, env=swift_env,
                 stdout=swift_log, stderr=subprocess.STDOUT, timeout=90, check=True)
         swift = json.loads(swift_result.read_text())
-        if swift.get("status") != "PASS" or swift.get("confirmed_targets") != 2:
+        if (
+            swift.get("status") != "PASS"
+            or swift.get("confirmed_targets") != 2
+            or swift.get("created_session") != "dsh-created-1"
+            or swift.get("prompt_modes_confirmed") != ["steer", "queue"]
+            or swift.get("cancel_status") != "cancelledQueueRemaining"
+        ):
             raise ValueError("Swift pair incomplete")
         after_swift = stats()
-        if after_swift["navigationCount"] != 2 or after_swift["hostStopped"] or after_swift["activationCount"] != 0:
-            raise ValueError("Swift close affected Host ownership or navigation counts differ")
+        if (
+            after_swift["navigationCount"] != 5
+            or after_swift["createCount"] != 1
+            or after_swift["promptCount"] != 2
+            or after_swift["cancelCount"] != 1
+            or after_swift["hostStopped"]
+            or after_swift["activationCount"] != 0
+        ):
+            raise ValueError("Swift close affected Host ownership or command/navigation counts differ")
         snapshot = exchange(grant["socketPath"], request(activate=False))
+        remaining = snapshot["rows"][1]
+        opened_remaining = exchange(
+            grant["socketPath"],
+            request("open", sessionId=remaining["sessionId"], workspaceId=remaining["workspaceId"]),
+        )
+        if opened_remaining.get("status") != "confirmed":
+            raise ValueError("failed to select remaining session for turn atomicity probe")
+        exchange(control, {"op": "advance-turn", "sessionId": remaining["sessionId"], "turn": 2})
+        stale_stop = exchange(
+            grant["socketPath"],
+            request(
+                "cancel",
+                sessionId=remaining["sessionId"],
+                workspaceId=remaining["workspaceId"],
+                requestId="probe-stale-turn",
+                expectedTurn=1,
+            ),
+        )
+        if stale_stop.get("status") != "noop" or stale_stop.get("reasonCode") != "guard.turnChanged" or stats()["cancelCount"] != 1:
+            raise ValueError("stale stop on advanced turn did not return zero-cancel noop")
+        exchange(control, {"op": "unprovable-turn", "sessionId": remaining["sessionId"]})
+        unprovable_stop = exchange(
+            grant["socketPath"],
+            request(
+                "cancel",
+                sessionId=remaining["sessionId"],
+                workspaceId=remaining["workspaceId"],
+                requestId="probe-unprovable-turn",
+                expectedTurn=2,
+            ),
+        )
+        if (
+            unprovable_stop.get("status") != "denied"
+            or unprovable_stop.get("reasonCode") != "guard.unprovableTurnAtomicity"
+            or stats()["cancelCount"] != 1
+        ):
+            raise ValueError("unprovable turn atomicity was not refused")
         target = snapshot["rows"][0]
         before = stats()["navigationCount"]
         exchange(control, {"op": "delete", "sessionId": target["sessionId"]})
         deleted = exchange(grant["socketPath"], request("open", sessionId=target["sessionId"], workspaceId=target["workspaceId"]))
         if deleted["status"] == "confirmed" or stats()["navigationCount"] != before:
             raise ValueError("deleted target redirected")
-        remaining = snapshot["rows"][1]
         exchange(control, {"op": "rotate", "sessionId": remaining["sessionId"]})
         replaced = exchange(grant["socketPath"], request("open", sessionId=remaining["sessionId"], workspaceId=remaining["workspaceId"]))
         if replaced["status"] != "stale" or stats()["navigationCount"] != before:
@@ -145,7 +194,10 @@ def main():
         if stats()["hostStopped"] or process.poll() is not None:
             raise ValueError("stopping the bridge stopped its Host")
         result = dict(status="PASS", native_source_sha=base, patch_sha256=hashlib.sha256(actual).hexdigest(),
-            transport="real-unix-socket", confirmed_targets=2, unauthorized_metadata_reads=0,
+            transport="real-unix-socket", confirmed_targets=2, created_sessions=1,
+            prompt_modes_confirmed=["steer", "queue"], cancel_queue_remaining="CONFIRMED",
+            stale_turn_stop="ZERO_CANCEL_NOOP", unprovable_turn_atomicity="REFUSED",
+            unauthorized_metadata_reads=0,
             cold_session_activations=0, pending_transitions=len(transitions), deleted_target="REJECTED",
             replaced_session="REJECTED", stale_close="REJECTED", competing_subscribe="REJECTED",
             host_survives_bridge_stop=True,

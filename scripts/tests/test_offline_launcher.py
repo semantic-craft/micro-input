@@ -119,14 +119,46 @@ class OfflineEvidenceTests(unittest.TestCase):
         with self.assertRaises(ValueError): module.verify_evidence(self.run, "zcode-navigation", 99, lambda _: False)
 
     def test_dsh_navigation_requires_pending_journal_and_exact_readback(self):
-        names = ["disabled_zero_reads", "same_name_exact_identity", "cold_target_unavailable",
-                 "pending_only_transitions_retained", "selected_id_readback", "wrong_selected_unconfirmed",
-                 "out_of_scope_zero_reads", "deleted_target_no_redirect", "host_generation_rejects_old_selection",
-                 "journal_gap_clears_targets", "bridge_subscription_closed"]
-        payload = dict(status="PASS", checks=dict.fromkeys(names, True), native_app="NOT_RUN", physical_key="NOT_RUN")
+        names = [
+            "disabled_zero_reads",
+            "same_name_exact_identity",
+            "cold_target_unavailable",
+            "pending_only_transitions_retained",
+            "selected_id_readback",
+            "duplicate_request_no_double_send",
+            "queue_and_steer_confirmed_separately",
+            "switch_session_no_misstop",
+            "same_session_stale_stop_zero_cancel",
+            "cancel_queue_remaining_not_all_stopped",
+            "unprovable_turn_atomicity_refused",
+            "create_workspace_bound_readback",
+            "wrong_selected_unconfirmed",
+            "out_of_scope_zero_reads",
+            "deleted_target_no_redirect",
+            "host_generation_rejects_old_selection",
+            "journal_gap_clears_targets",
+            "bridge_subscription_closed",
+        ]
+        payload = dict(
+            status="PASS",
+            checks=dict.fromkeys(names, True),
+            body_reads=0,
+            native_app="NOT_RUN",
+            physical_key="NOT_RUN",
+        )
         path = self.evidence / "dsh-navigation.json"
         audit = self.evidence / "audit.jsonl"
-        audit.write_text("\n".join(json.dumps(dict(action_type="dsh_open", outcome="confirmed", target="dsh")) for _ in range(2)))
+        audit_rows = [
+            dict(action_type="dsh_open", outcome="confirmed", target="dsh", text_byte_len=None),
+            dict(action_type="dsh_open", outcome="confirmed", target="dsh", text_byte_len=None),
+            dict(action_type="dsh_create", outcome="confirmed", target="dsh", text_byte_len=None),
+            dict(action_type="dsh_prompt", outcome="steered", target="dsh", text_byte_len=None),
+            dict(action_type="dsh_prompt", outcome="queued", target="dsh", text_byte_len=None),
+            dict(action_type="dsh_cancel", outcome="noop", target="dsh", text_byte_len=None),
+            dict(action_type="dsh_cancel", outcome="cancelledQueueRemaining", target="dsh", text_byte_len=None),
+            dict(action_type="dsh_cancel", outcome="denied", target="dsh", text_byte_len=None),
+        ]
+        audit.write_text("\n".join(json.dumps(r) for r in audit_rows))
         path.write_text(json.dumps(payload))
         self.assertEqual(module.verify_evidence(self.run, "dsh-navigation", 99, lambda _: False)["dsh_navigation"], "SYNTHETIC_PASS")
         for name in names:
@@ -139,6 +171,10 @@ class OfflineEvidenceTests(unittest.TestCase):
             path.write_text(json.dumps(payload))
             with self.assertRaises(ValueError): module.verify_evidence(self.run, "dsh-navigation", 99, lambda _: False)
             payload[field] = "NOT_RUN"
+        payload["body_reads"] = 1
+        path.write_text(json.dumps(payload))
+        with self.assertRaises(ValueError): module.verify_evidence(self.run, "dsh-navigation", 99, lambda _: False)
+        payload["body_reads"] = 0
         path.write_text(json.dumps(payload))
         audit.write_text(json.dumps(dict(action_type="dsh_open", outcome="delivered", target="dsh")))
         with self.assertRaises(ValueError): module.verify_evidence(self.run, "dsh-navigation", 99, lambda _: False)

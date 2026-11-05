@@ -84,7 +84,7 @@ T05已补取消、会话终止通知及退出时等待资源释放；当前设�
 
 ## 下一步
 
-Slice K1 已接通 ZCode v4 受控会话新建（`createSession`）、文本发送（`sendText`，严格区分运行中 `guide` 实时 steering 与 `queue` 普通排队，不误建新会话）、带 `expectedForegroundExecutionId` 的精确停止（迟到 `stop` 返回 `noop` 不停新执行）与原 `commandId` 幂等去重/超时对账（`queryConversationCommandsV4`），并通过全量离线、固定源码桥测试及真实 UDS 双端验收；下一片为 K2，向桌面版 DSH 准确发送与取消当前轮次。各应用桥能力与重跑入口见 [ZCode 桥](integrations/zcode/README.md)、[Cindy 桥](integrations/cindy/README.md)、[Antigravity 状态桥](integrations/antigravity/README.md) 与 [DSH 桥](integrations/dsh/README.md)。日常 GUI 与实体按键结果仍单列未验收。
+Slice K2 已接通桌面版 DSH 受控会话新建（`create`，绑定工作区并回读新 ID）、提示发送（`prompt`，分别确认 `steer` 与 `queue`）、`requestId` 幂等去重/`query` 对账，以及带同 Host `expectedTurn` 原子核对的 `cancel`（分别显示当前轮次与队列；取消后队列非空时返回 `cancelledQueueRemaining` 而不报全部停止；切会话不误停；同会话旧 Stop 遇新轮次零取消 `noop`；无法证明轮次原子性时拒绝发送），并通过全量离线、固定源码桥测试及真实 UDS 双端验收；下一片为 K3，向 Cindy 已选任务发送消息、新建并停止运行。各应用桥能力与重跑入口见 [ZCode 桥](integrations/zcode/README.md)、[Cindy 桥](integrations/cindy/README.md)、[Antigravity 状态桥](integrations/antigravity/README.md) 与 [DSH 桥](integrations/dsh/README.md)。日常 GUI 与实体按键结果仍单列未验收。
 
 2026-11-05 当前目标限定为 Antigravity、Cindy、ZCode、桌面版 DeepSeek Harness 的深度控制，Paseo 只作能力参照。先查明四应用接口并保留 Cindy 原生集成，再逐片实现准确会话控制与状态反馈。见[接口证据](docs/four-app-interfaces.md)、[实施任务](docs/designs/four-app-control.md)与[下一片](docs/pstack-relay.md)。
 

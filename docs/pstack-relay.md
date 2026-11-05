@@ -95,10 +95,11 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Depends on**: G。责任票 #33。
 - **Evidence**: .scratch/qa-runs/1793862357974-42746/evidence/result.json
 
-### [ ] Slice K2: 向 DSH 准确发送并停止当前轮次
+### [x] Slice K2: 向 DSH 准确发送并停止当前轮次
 - **Outcome**: 接 create、prompt queue/steer、requestId 与 cancel。补同 Host 的预期 turn 核对，分别显示当前轮次和队列。
 - **Done Predicate**: queue 与 steer 两种结果分别确认；cancel 后队列可能继续时不报全部停止；重复请求无双发；切会话无误停。 新建绑定工作区并回读新 ID；同会话旧 Stop 遇新轮次必须零取消，未能证明原子性就拒绝发送。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: H。责任票 #32。
+- **Evidence**: .scratch/qa-runs/1793867145490-44990/evidence/result.json
 
 ### [ ] Slice K3: 用 Antigravity agentapi 创建和发送
 - **Outcome**: 创建绑定 projectId，发送绑定 conversationId，取得结果确认。

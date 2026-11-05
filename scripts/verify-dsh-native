@@ -61,7 +61,11 @@ def main():
                       checks=["unauthorized-zero-metadata", "activate-false-no-session-open", "pending-only-journal",
                               "existing-pending-bootstrap", "no-history-materialization", "projection-registration-order",
                               "selected-id-readback", "subscription-generation", "source-replacement", "journal-gap",
-                              "optional-bridge-failure-preserves-host", "bridge-close-preserves-host"],
+                              "optional-bridge-failure-preserves-host", "bridge-close-preserves-host",
+                              "create-workspace-bound-readback", "prompt-queue-and-steer-confirmed",
+                              "request-id-deduplication", "cancel-queue-remaining-not-all-stopped",
+                              "switch-session-no-misstop", "same-session-stale-stop-zero-cancel",
+                              "unprovable-turn-atomicity-refused"],
                       timestamp_ms=int(time.time() * 1000))
     if subprocess.check_output(diff_command, cwd=source) != patch:
         raise RuntimeError("native source changed during verification")
