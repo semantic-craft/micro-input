@@ -1,0 +1,5 @@
+DeepSeek Harness source integration
+Base: deepseek-ai/deepseek-harness tag dsh-v0.2.1-rc.5
+Commit: b830ec950faba0a46dda564be3e2d854afed94f1
+Upstream licensed under MIT. See LICENSE.
+Micro Input additions are distributed under this repository's license.

@@ -196,6 +196,7 @@ extension MicroInput: Backend {}
     let backend: Backend
     let actionExecutor: HostActionExecuting
     let zcodeSessions: ZCodeSessionController
+    let dshSessions: DSHSessionController
     let t3Attention: T3AttentionController
     let nativeOwnership: NativeOwnershipController
     let pushToTalk: PushToTalkController
@@ -296,6 +297,7 @@ extension MicroInput: Backend {}
             }
             else if scenario == "radial-menu", !preparedHostExecutionScenario { preparedHostExecutionScenario = true; await prepareRadialMenuScenario() }
             else if scenario == "zcode-navigation", !preparedHostExecutionScenario { preparedHostExecutionScenario = true; await prepareZCodeNavigationScenario() }
+            else if scenario == "dsh-navigation", !preparedHostExecutionScenario { preparedHostExecutionScenario = true; await prepareDSHNavigationScenario() }
             else if scenario == "native-ownership", !preparedHostExecutionScenario { preparedHostExecutionScenario = true; await prepareNativeOwnershipScenario() }
             else if scenario == "lighting-control" { await runSyntheticLightingScenario() }
             else if scenario == "config-write" { await runSyntheticDeviceOperationScenario() }
@@ -947,12 +949,13 @@ extension MicroInput: Backend {}
     @Published var connectedID: String?
     @Published var stale = false
     @Published var busy = false
-    init(nativeOwnership: NativeOwnershipController? = nil, backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil, dictationDriver: (any DictationDriving)? = nil, t3Attention: T3AttentionController? = nil, zcodeSessions: ZCodeSessionController? = nil, radialPreferences: UserDefaults = .standard) {
+    init(nativeOwnership: NativeOwnershipController? = nil, backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil, dictationDriver: (any DictationDriving)? = nil, t3Attention: T3AttentionController? = nil, zcodeSessions: ZCodeSessionController? = nil, dshSessions: DSHSessionController? = nil, radialPreferences: UserDefaults = .standard) {
         self.backend = backend
         self.nativeOwnership = nativeOwnership ?? NativeOwnershipController()
         self.radialPreferences = radialPreferences
         self.t3Attention = t3Attention ?? T3AttentionController()
         self.zcodeSessions = zcodeSessions ?? ZCodeSessionController()
+        self.dshSessions = dshSessions ?? DSHSessionController()
         self.documentOverride = documentURL
         self.actionExecutor = actionExecutor ?? LiveHostActionExecutor()
         #if MI_SYNTHETIC_BACKEND
@@ -1098,6 +1101,7 @@ extension MicroInput: Backend {}
         nativeOwnership.stop()
         t3Attention.suspend()
         zcodeSessions.suspend()
+        dshSessions.suspend()
         discoveryGeneration += 1
         events?.invalidatePending()
         retireConnection("系统睡眠 · 设备快照已过期，唤醒后请明确选择并重新连接")
@@ -1116,6 +1120,7 @@ extension MicroInput: Backend {}
         nativeOwnership.start()
         t3Attention.resume()
         zcodeSessions.resume()
+        dshSessions.resume()
         discoveryStatus = events == nil ? "USB 发现尚未开始" : "系统已唤醒 · 请明确选择设备并重新连接"
         if events != nil { await refresh() }
     }
@@ -1133,6 +1138,7 @@ extension MicroInput: Backend {}
         await pushToTalk.waitUntilStopped()
         await t3Attention.shutdown()
         await zcodeSessions.shutdown()
+        await dshSessions.shutdown()
         await backend.shutdown()
         await nativeOwnership.returnToNative()
     }

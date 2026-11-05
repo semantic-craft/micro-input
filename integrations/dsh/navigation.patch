@@ -1,0 +1,1158 @@
+diff --git a/apps/desktop-host/package.json b/apps/desktop-host/package.json
+index 3bb27d7d..2f2223b4 100644
+--- a/apps/desktop-host/package.json
++++ b/apps/desktop-host/package.json
+@@ -25,7 +25,12 @@
+     "@deepseek-ai/dsh-tool-workspace-dependencies": "workspace:*",
+     "@deepseek-ai/dsh-skill-office": "workspace:*",
+     "@deepseek-ai/dsh-deepseek-account": "workspace:*",
+-    "@deepseek-ai/dsh-workspace": "workspace:*"
++    "@deepseek-ai/dsh-workspace": "workspace:*",
++    "@deepseek-ai/dsh-session": "workspace:*",
++    "@deepseek-ai/dsh-session-projection": "workspace:*",
++    "@deepseek-ai/dsh-session-title": "workspace:*",
++    "@deepseek-ai/dsh-user-approval": "workspace:*",
++    "@deepseek-ai/dsh-user-questions": "workspace:*"
+   },
+   "devDependencies": {
+     "@deepseek-ai/cordis-plugin-loader": "workspace:~",
+diff --git a/apps/desktop-host/src/index.ts b/apps/desktop-host/src/index.ts
+index 3086755b..cde8234b 100644
+--- a/apps/desktop-host/src/index.ts
++++ b/apps/desktop-host/src/index.ts
+@@ -14,6 +14,9 @@ import { installDesktopUpdateTaskControl } from './update-tasks.ts'
+ import { installDesktopQuitInspection } from './quit-inspection.ts'
+ import { installPlatformSessionPublisher } from './platform-session.ts'
+ import { installOfficeEngineResolution } from './office-engine.ts'
++import { startOptionalMicroInputBridge } from './micro-input.ts'
++import { microInputHost } from './micro-input-host.ts'
++import { randomUUID } from 'node:crypto'
+ 
+ async function main(): Promise<void> {
+   const runtimeDir = process.argv[2] as string
+@@ -90,6 +93,36 @@ async function main(): Promise<void> {
+   })
+   process.once('disconnect', () => { void stop() })
+   const { ctx } = await application
++  if (process.env.MI_DSH_BRIDGE_CONFIG !== undefined) {
++    const requests = new Map<string, (selected: string | undefined) => void>()
++    const onReply = (message: unknown) => {
++      if (typeof message !== 'object' || message === null) return
++      const reply = message as Record<string, unknown>
++      if (reply.type !== 'micro-input-selected' || typeof reply.requestId !== 'string') return
++      requests.get(reply.requestId)?.(typeof reply.selected === 'string' ? reply.selected : undefined)
++    }
++    const bridge = await startOptionalMicroInputBridge(process.env.MI_DSH_BRIDGE_CONFIG, microInputHost(ctx,
++      (sessionId, signal) => new Promise<string | undefined>((resolve) => {
++        const requestId = randomUUID()
++        const settle = (selected: string | undefined) => {
++          requests.delete(requestId); signal.removeEventListener('abort', abort); resolve(selected)
++        }
++        const abort = () => { settle(undefined) }
++        requests.set(requestId, settle)
++        signal.addEventListener('abort', abort, { once: true })
++        if (signal.aborted || !process.connected) { settle(undefined); return }
++        process.send?.({ type: 'micro-input-open', requestId, sessionId, expiresAt: Date.now() + 1000 })
++      })))
++    if (bridge !== undefined) {
++      process.on('message', onReply)
++      ctx.effect(() => async () => {
++        await bridge.close()
++        process.off('message', onReply)
++        for (const settle of requests.values()) settle(undefined)
++      }, 'desktop micro input bridge')
++    }
++  }
++
+   control.updateTasks = installDesktopUpdateTaskControl(ctx)
+   control.quitInspection = installDesktopQuitInspection(ctx)
+   await ctx.plugin(desktopOffice, {
+diff --git a/apps/desktop-host/src/micro-input-host.ts b/apps/desktop-host/src/micro-input-host.ts
+new file mode 100644
+index 00000000..0c477f42
+--- /dev/null
++++ b/apps/desktop-host/src/micro-input-host.ts
+@@ -0,0 +1,43 @@
++import type { Context } from '@deepseek-ai/cordis'
++import { SessionId } from '@deepseek-ai/dsh-session'
++import type {} from '@deepseek-ai/dsh-agent'
++import type {} from '@deepseek-ai/dsh-session-projection'
++import type {} from '@deepseek-ai/dsh-session-title/types'
++import type {} from '@deepseek-ai/dsh-user-approval'
++import type {} from '@deepseek-ai/dsh-user-questions'
++import type {} from '@deepseek-ai/dsh-workspace'
++import type { MicroInputHost } from './micro-input.ts'
++
++export function microInputHost(ctx: Context, navigate: MicroInputHost['navigate']): MicroInputHost {
++  return {
++    read(id) {
++      const session = ctx.sessions.get(SessionId(id))
++      if (session === undefined) return undefined
++      const questions = ctx.userQuestions.pendingCount(session)
++      if (questions === undefined) return undefined
++      const agent = ctx.agents.get(session.id)
++      const workspace = ctx.workspaceRegistry.list().find(item => item.sessionIds.includes(session.id))
++      return { identity: session, row: {
++        sessionId: id, workspaceId: workspace?.id ?? '',
++        title: ctx.sessionProjections.cachedStateOf(session, 'title') ?? id,
++        active: agent?.session === session,
++        running: agent?.session === session && agent.status === 'running',
++        pendingInput: ctx.approval.pendingCount(session) + questions,
++      } }
++    },
++    observe(changed) {
++      const stops = [
++        ctx.on('agent/status', ({ agent }) => { changed(agent.id) }, { global: true }),
++        ctx.on('agent/created', ({ agent }) => { changed(agent.id) }, { global: true }),
++        ctx.on('agent/disposed', ({ agent }) => { changed(agent.id) }, { global: true }),
++        ctx.on('session/created', (session) => { changed(session.id) }, { global: true }),
++        ctx.on('session/disposed', (session) => { changed(session.id) }, { global: true }),
++        ctx.on('session/event', (session) => { changed(session.id) }, { global: true }),
++        ctx.approval.observePending((session) => { changed(session.id) }),
++        ctx.userQuestions.observePending((session) => { changed(session.id) }),
++      ]
++      return () => { for (const stop of stops)  stop() }
++    },
++    navigate,
++  }
++}
+diff --git a/apps/desktop-host/src/micro-input.ts b/apps/desktop-host/src/micro-input.ts
+new file mode 100644
+index 00000000..138ffe00
+--- /dev/null
++++ b/apps/desktop-host/src/micro-input.ts
+@@ -0,0 +1,203 @@
++import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
++import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs'
++import { chmod, lstat, mkdir, rm, writeFile } from 'node:fs/promises'
++import { createServer, type Socket } from 'node:net'
++import { dirname, isAbsolute, join } from 'node:path'
++
++export interface MicroInputRow {
++  readonly sessionId: string
++  readonly workspaceId: string
++  readonly title: string
++  readonly active: boolean
++  readonly running: boolean
++  readonly pendingInput: number
++}
++export interface MicroInputHost {
++  read(sessionId: string): { row: MicroInputRow; identity: object } | undefined
++  observe(changed: (sessionId: string) => void): () => void
++  navigate(sessionId: string, signal: AbortSignal): Promise<string | undefined>
++}
++interface Config { readonly directory: string; readonly sessionIds: readonly string[] }
++export interface MicroInputGrant extends Config {
++  readonly version: 1
++  readonly socketPath: string
++  readonly token: string
++  readonly hostId: string
++  readonly generation: number
++}
++interface Request {
++  readonly version: 1
++  readonly id: string
++  readonly token: string
++  readonly hostId: string
++  readonly generation: number
++  readonly subscriptionId: string
++  readonly op: 'subscribe' | 'read' | 'open' | 'close'
++  readonly activate?: false
++  readonly after?: number
++  readonly sessionId?: string
++  readonly workspaceId?: string
++}
++interface Change { readonly sequence: number; readonly row: MicroInputRow }
++const text = (value: unknown, max = 4096): value is string => typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= max
++
++export function readMicroInputConfig(path: string): Config {
++  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
++  try {
++    const info = fstatSync(fd)
++    if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0 || info.size > 65536) throw new Error('invalid Micro Input config')
++    const config = JSON.parse(readFileSync(fd, 'utf8')) as Record<string, unknown>
++    if (Object.keys(config).some(key => !['directory', 'sessionIds'].includes(key))
++      || typeof config.directory !== 'string' || !isAbsolute(config.directory)
++      || !Array.isArray(config.sessionIds) || config.sessionIds.length < 1 || config.sessionIds.length > 64
++      || !config.sessionIds.every(id => text(id)) || new Set(config.sessionIds).size !== config.sessionIds.length) throw new Error('invalid Micro Input scope')
++    return config as unknown as Config
++  } finally { closeSync(fd) }
++}
++
++export async function startOptionalMicroInputBridge(path: string, host: MicroInputHost) {
++  try { return await startMicroInputBridge(readMicroInputConfig(path), host) }
++  catch { return undefined }
++}
++
++export async function startMicroInputBridge(config: Config, host: MicroInputHost) {
++  const parent = lstatSync(dirname(config.directory))
++  if (!parent.isDirectory() || parent.uid !== process.getuid?.()) throw new Error('invalid Micro Input parent')
++  await mkdir(config.directory, { mode: 0o700, recursive: false }).catch((error: unknown) => {
++    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
++  })
++  const directory = await lstat(config.directory)
++  if (!directory.isDirectory() || directory.uid !== process.getuid() || (directory.mode & 0o077) !== 0) throw new Error('invalid Micro Input directory')
++  const lock = join(config.directory, 'dsh.lock')
++  await mkdir(lock, { mode: 0o700 })
++  const socketPath = join(config.directory, 'dsh.sock')
++  const grantPath = join(config.directory, 'dsh-grant.json')
++  const grant: MicroInputGrant = { version: 1, directory: config.directory, sessionIds: config.sessionIds,
++    socketPath, token: randomBytes(32).toString('hex'), hostId: randomUUID(), generation: 1 }
++  let disposed = false, stale = false, subscribed = false, cursor = 0
++  let subscriptionId: string | undefined
++  const isStale = () => stale
++  const isDisposed = () => disposed
++  const isSubscribed = () => subscribed
++  const rows = new Map<string, MicroInputRow>(), identities = new Map<string, object>()
++  const journal: Change[] = [], sockets = new Set<Socket>()
++  const opens = new Set<AbortController>()
++  let unobserve: (() => void) | undefined
++  const read = (id: string): MicroInputRow | undefined => {
++    const value = host.read(id)
++    if (value === undefined) { rows.delete(id); return undefined }
++    const old = identities.get(id)
++    if (old !== undefined && old !== value.identity) { stale = true; return undefined }
++    identities.set(id, value.identity)
++    const row = value.row
++    if (row.sessionId !== id || typeof row.title !== 'string' || Buffer.byteLength(row.title) > 4096 || typeof row.workspaceId !== 'string'
++      || Buffer.byteLength(row.workspaceId) > 4096 || typeof row.active !== 'boolean' || typeof row.running !== 'boolean'
++      || !Number.isSafeInteger(row.pendingInput) || row.pendingInput < 0) { stale = true; return undefined }
++    return row
++  }
++  const change = (id: string) => {
++    if (!subscribed || disposed || stale || !config.sessionIds.includes(id)) return
++    const row = read(id)
++    if (row === undefined) return
++    if (JSON.stringify(rows.get(id)) !== JSON.stringify(row)) {
++      rows.set(id, row)
++      journal.push({ sequence: ++cursor, row })
++      if (journal.length > 1024) journal.shift()
++    }
++  }
++  const stopSubscription = () => {
++    subscribed = false; unobserve?.(); unobserve = undefined
++    for (const open of opens) open.abort()
++    opens.clear(); rows.clear(); journal.length = 0
++  }
++  const requestValid = (value: unknown): value is Request => {
++    if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
++    const r = value as Record<string, unknown>
++    return Object.keys(r).every(key => ['version', 'id', 'token', 'hostId', 'generation', 'subscriptionId', 'op', 'activate', 'after', 'sessionId', 'workspaceId'].includes(key))
++      && r.version === 1 && text(r.subscriptionId, 256) && text(r.id, 256) && text(r.token, 256) && text(r.hostId, 256)
++      && Number.isSafeInteger(r.generation) && ['subscribe', 'read', 'open', 'close'].includes(String(r.op))
++  }
++  const dispatch = async (input: unknown): Promise<object> => {
++    const base = { version: 1, id: requestValid(input) ? input.id : '', subscriptionId: requestValid(input) ? input.subscriptionId : '', hostId: grant.hostId, generation: grant.generation }
++    if (!requestValid(input)) return { ...base, status: 'denied' }
++    const token = Buffer.from(input.token), expected = Buffer.from(grant.token)
++    if (token.length !== expected.length || !timingSafeEqual(token, expected)) return { ...base, status: 'denied' }
++    if (disposed || stale || input.hostId !== grant.hostId || input.generation !== grant.generation) return { ...base, status: 'stale' }
++    if (input.op !== 'subscribe' && input.subscriptionId !== subscriptionId) return { ...base, status: 'stale' }
++    if (input.op === 'close') {
++      if (input.activate !== undefined || input.after !== undefined || input.sessionId !== undefined || input.workspaceId !== undefined) return { ...base, status: 'denied' }
++      stopSubscription(); return { ...base, status: 'ok' }
++    }
++    if (input.op === 'subscribe') {
++      if (subscribed && input.subscriptionId !== subscriptionId) return { ...base, status: 'stale' }
++      if (input.activate !== false || input.after !== undefined || input.sessionId !== undefined || input.workspaceId !== undefined) return { ...base, status: 'denied' }
++      stopSubscription(); subscriptionId = input.subscriptionId; subscribed = true
++      unobserve = host.observe(change)
++      for (const id of config.sessionIds) { const row = read(id); if (row !== undefined) rows.set(id, row) }
++      if (isStale()) { stopSubscription(); return { ...base, status: 'stale' } }
++      return { ...base, status: 'ok', cursor, rows: [...rows.values()], changes: [], unavailableSessionIds: config.sessionIds.filter(id => !rows.has(id)) }
++    }
++    if (!subscribed) return { ...base, status: 'denied' }
++    if (input.op === 'read') {
++      const afterCursor = input.after
++      if (typeof afterCursor !== 'number' || !Number.isSafeInteger(afterCursor) || afterCursor < 0 || afterCursor > cursor || input.sessionId !== undefined || input.workspaceId !== undefined || input.activate !== undefined) return { ...base, status: 'denied' }
++      if (afterCursor < (journal[0]?.sequence ?? cursor + 1) - 1) return { ...base, status: 'gap' }
++      for (const id of config.sessionIds) change(id)
++      if (afterCursor < (journal[0]?.sequence ?? cursor + 1) - 1) return { ...base, status: 'gap' }
++      if (isStale()) return { ...base, status: 'stale' }
++      return { ...base, status: 'ok', cursor, rows: [...rows.values()], changes: journal.filter(item => item.sequence > afterCursor), unavailableSessionIds: config.sessionIds.filter(id => !rows.has(id)) }
++    }
++    if (!text(input.sessionId) || !config.sessionIds.includes(input.sessionId) || typeof input.workspaceId !== 'string'
++      || input.after !== undefined || input.activate !== undefined) return { ...base, status: 'denied' }
++    const before = read(input.sessionId)
++    if (isStale()) return { ...base, status: 'stale' }
++    if (before === undefined) return { ...base, status: 'unavailable' }
++    if (before.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++    const abort = new AbortController(); opens.add(abort)
++    const timer = setTimeout(() =>{  abort.abort() }, 1500)
++    try {
++      const selected = await host.navigate(input.sessionId, abort.signal)
++      const after = read(input.sessionId)
++      if (isDisposed() || isStale() || !isSubscribed() || subscriptionId !== input.subscriptionId || abort.signal.aborted || after?.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++      return selected === input.sessionId ? { ...base, status: 'confirmed', selected } : { ...base, status: 'unconfirmed' }
++    } catch { return { ...base, status: 'unavailable' } }
++    finally { clearTimeout(timer); opens.delete(abort) }
++  }
++  const server = createServer((socket) => {
++    sockets.add(socket); socket.setTimeout(2000, () => socket.destroy())
++    let buffer = Buffer.alloc(0), used = false
++    socket.on('error', () => {})
++    socket.on('close', () => sockets.delete(socket))
++    socket.on('data', (chunk) => {
++      if (used) return
++      buffer = Buffer.concat([buffer, chunk])
++      if (buffer.length > 65536) { socket.destroy(); return }
++      const end = buffer.indexOf(10)
++      if (end < 0) return
++      used = true
++      let request: unknown
++      try { request = JSON.parse(buffer.subarray(0, end).toString()) } catch { socket.end('{}\n'); return }
++      void dispatch(request).then(reply => socket.end(`${JSON.stringify(reply)}\n`), () => socket.end('{}\n'))
++    })
++  })
++  const ownership = { socket: false }
++  try {
++    if (Buffer.byteLength(socketPath) >= 104) throw new Error('Micro Input socket path too long')
++    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, () => { ownership.socket = true; resolve() }) })
++    await chmod(socketPath, 0o600)
++    const { directory: _directory, ...publicGrant } = grant
++    await writeFile(grantPath, JSON.stringify(publicGrant), { mode: 0o600, flag: 'wx' })
++  } catch (error) {
++    server.close()
++    if (ownership.socket) await rm(socketPath, { force: true })
++    await rm(lock, { recursive: true, force: true })
++    throw error
++  }
++  return { grantPath, grant, async close() {
++    if (disposed) return
++    disposed = true; stopSubscription()
++    for (const socket of sockets) socket.destroy()
++    await new Promise<void>(resolve => server.close(() =>{  resolve() }))
++    await rm(grantPath, { force: true }); await rm(socketPath, { force: true }); await rm(lock, { recursive: true, force: true })
++  } }
++}
+diff --git a/apps/desktop-host/tests/micro-input-host.spec.ts b/apps/desktop-host/tests/micro-input-host.spec.ts
+new file mode 100644
+index 00000000..d7ce8451
+--- /dev/null
++++ b/apps/desktop-host/tests/micro-input-host.spec.ts
+@@ -0,0 +1,103 @@
++import { Context, FiberState } from '@deepseek-ai/cordis'
++import type { Agent } from '@deepseek-ai/dsh-agent'
++import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
++import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
++import SessionTitleService from '@deepseek-ai/dsh-session-title'
++import { ToolCallId, createToolResultMessage } from '@deepseek-ai/dsh-llm'
++import ApprovalService, { type ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
++import UserQuestionService from '@deepseek-ai/dsh-user-questions'
++import { afterEach, expect, it, vi } from 'vitest'
++import { microInputHost } from '../src/micro-input-host.ts'
++import { startOptionalMicroInputBridge } from '../src/micro-input.ts'
++
++const contexts: Context[] = []
++afterEach(async () => { for (const ctx of contexts.splice(0)) await ctx.fiber.dispose() })
++async function fixture(late = false, titleFirst = false) {
++  const ctx = new Context(); contexts.push(ctx)
++  await ctx.plugin(SessionStore)
++  const early = late ? ctx.sessions.create(SessionId('s')) : undefined
++  if (early !== undefined) early.append('turn/start', { turn: 1 })
++  await ctx.plugin(SessionProjectionRegistry)
++  await ctx.plugin(ApprovalService)
++  const titleConfig = { fallbackMaxWords: 8, fallbackMaxBytes: 64, maxTitleBytes: 256 }
++  if (titleFirst) await ctx.plugin(SessionTitleService, titleConfig)
++  await ctx.plugin(UserQuestionService)
++  if (!titleFirst) await ctx.plugin(SessionTitleService, titleConfig)
++  const session = early ?? ctx.sessions.create(SessionId('s'))
++  if (!late) session.append('turn/start', { turn: 1 })
++  const agent = { id: session.id, session, status: 'running' } as Agent
++  ctx.provide('agents', { get: () => agent, roots: () => [agent] } as never)
++  ctx.provide('workspaceRegistry', { list: () => [{ id: 'w', sessionIds: [session.id] }] } as never)
++  const source = microInputHost(ctx, () => Promise.resolve(undefined))
++  return { ctx, session, agent, source }
++}
++
++it('bootstraps existing approval and observes settlement without an Agent status transition or history read', async () => {
++  const test = await fixture()
++  const started = Promise.withResolvers<undefined>()
++  let settle!: (outcome: ApprovalOutcome) => void
++  test.ctx.on('approval/request', () => new Promise<ApprovalOutcome>((resolve) => { settle = resolve; started.resolve(undefined) }))
++  const pending = test.ctx.approval.request({ agent: test.agent, toolName: 'synthetic' })
++  await started.promise
++  const snapshot = vi.spyOn(test.session, 'snapshotEvents').mockImplementation(() => { throw new Error('body traversal') })
++  const event = vi.spyOn(test.session, 'eventAt').mockImplementation(() => { throw new Error('body traversal') })
++  expect(test.source.read('s')?.row.pendingInput).toBe(1)
++  expect(test.source.read('cold')).toBeUndefined()
++  snapshot.mockRestore(); event.mockRestore()
++  const changes: number[] = []
++  const stop = test.source.observe(() => { changes.push(test.source.read('s')?.row.pendingInput ?? -1) })
++  settle('allowed-once')
++  await pending
++  expect(changes).toContain(0)
++  expect(test.source.read('s')?.row.running).toBe(true)
++  stop()
++})
++
++it('reports an unmaterialized loaded Session unavailable without traversing history', async () => {
++  const test = await fixture(true)
++  const snapshot = vi.spyOn(test.session, 'snapshotEvents').mockImplementation(() => { throw new Error('body traversal') })
++  const event = vi.spyOn(test.session, 'eventAt').mockImplementation(() => { throw new Error('body traversal') })
++  expect(test.source.read('s')).toBeUndefined()
++  expect(snapshot).not.toHaveBeenCalled()
++  expect(event).not.toHaveBeenCalled()
++  snapshot.mockRestore(); event.mockRestore()
++})
++
++it('optional bridge failure leaves the original Host and Session usable', async () => {
++  const test = await fixture()
++  const initial = test.ctx.fiber.state
++  expect(await startOptionalMicroInputBridge('/absent-config', test.source)).toBeUndefined()
++  expect(test.ctx.fiber.state).toBe(initial)
++  expect(test.ctx.fiber.state).not.toBe(FiberState.DISPOSED)
++  expect(test.ctx.sessions.get(test.session.id)).toBe(test.session)
++  expect(test.source.read('s')?.row.sessionId).toBe('s')
++})
++
++
++it.each([true, false])('observes complete projection cuts with title-first=%s', async (titleFirst) => {
++  const test = await fixture(false, titleFirst)
++  test.session.append('session/title', { title: 'Synthetic', messageSeqs: [], source: { kind: 'user' } })
++  const rows: { pendingInput: number; title: string }[] = []
++  const stop = test.source.observe(() => {
++    const row = test.source.read('s')?.row
++    if (row !== undefined) rows.push(row)
++  })
++  test.session.append('step/start', { turn: 1, step: 1 })
++  test.session.append('request/header', { reason: 'initial', header: {
++    config: { provider: 'synthetic', model: 'synthetic' }, tools: [{
++      name: 'ask_user_question', description: 'Synthetic',
++      parameters: { type: 'object', properties: { questions: { type: 'array' }, timeout: { type: 'integer' } } },
++    }],
++  } })
++  const callId = ToolCallId('synthetic-question')
++  test.session.append('tool/call', { turn: 1, step: 1, callId, name: 'ask_user_question',
++    arguments: JSON.stringify({ questions: [{ id: 'q', question: 'Synthetic' }] }),
++  })
++  test.session.append('tool/result', { turn: 1, step: 1,
++    message: createToolResultMessage({ callId, content: [{ type: 'text', text: 'cancelled' }], isError: true }),
++  }, { surfaceOp: 'append' })
++  expect(rows.map(row => row.pendingInput)).toContain(1)
++  expect(rows.at(-1)?.pendingInput).toBe(0)
++  expect(rows.every(row => row.title === 'Synthetic')).toBe(true)
++  stop()
++})
+diff --git a/apps/desktop-host/tests/micro-input.spec.ts b/apps/desktop-host/tests/micro-input.spec.ts
+new file mode 100644
+index 00000000..46fd5539
+--- /dev/null
++++ b/apps/desktop-host/tests/micro-input.spec.ts
+@@ -0,0 +1,132 @@
++import { randomUUID } from 'node:crypto'
++import { connect } from 'node:net'
++import { chmod, mkdtemp, rm } from 'node:fs/promises'
++import { join } from 'node:path'
++import { afterEach, expect, it } from 'vitest'
++import { startMicroInputBridge, startOptionalMicroInputBridge, type MicroInputRow, type MicroInputHost } from '../src/micro-input.ts'
++
++interface Reply {
++  status: string
++  cursor: number
++  rows: MicroInputRow[]
++  changes: { sequence: number; row: MicroInputRow }[]
++  unavailableSessionIds: string[]
++}
++const cleanup: (() => Promise<void>)[] = []
++afterEach(async () => { for (const stop of cleanup.splice(0).reverse()) await stop() })
++async function fixture() {
++  const directory = await mkdtemp(join(process.env.MI_DSH_TEST_ROOT ?? '/tmp', 'mi-dsh-'))
++  await chmod(directory, 0o700)
++  cleanup.push(() => rm(directory, { recursive: true, force: true }))
++  let reads = 0, navigations = 0, observations = 0
++  let identity = {}, row: MicroInputRow = { sessionId: 'a', workspaceId: 'w', title: '', active: true, running: true, pendingInput: 0 }
++  let changed: (id: string) => void = () => {}
++  let navigate: MicroInputHost['navigate'] = async id => id
++  const bridge = await startMicroInputBridge({ directory, sessionIds: ['a', 'cold'] }, {
++    read(id) { reads++; return id === 'a' ? { row, identity } : undefined },
++    observe(listener) { observations++; changed = listener; return () => { observations--; changed = () => {} } },
++    navigate: (id, signal) => { navigations++; return navigate(id, signal) },
++  })
++  cleanup.push(() => bridge.close())
++  let subscriptionId = randomUUID()
++  const request = async (op: string, extra: object = {}) => {
++    const body = { version: 1, id: randomUUID(), hostId: bridge.grant.hostId, generation: 1,
++      token: bridge.grant.token, subscriptionId, op, ...extra }
++    return await new Promise<Reply>((resolve, reject) => {
++      const socket = connect(bridge.grant.socketPath)
++      let data = ''
++      socket.on('connect', () => socket.write(`${JSON.stringify(body)}\n`))
++      socket.on('data', (chunk) => { data += chunk.toString() })
++      socket.on('end', () => { try { resolve(JSON.parse(data) as Reply) } catch (error) { reject(error instanceof Error ? error : new Error(String(error))) } })
++      socket.on('error', reject)
++    })
++  }
++  return { bridge, request, stats: () => ({ reads, navigations, observations }),
++    replace: () => { identity = {} },
++    pulse: (pendingInput: number) => { row = { ...row, pendingInput }; changed('a') },
++    navigate: (next: MicroInputHost['navigate']) => { navigate = next },
++    renew: () => { const old = subscriptionId; subscriptionId = randomUUID(); return old },
++  }
++}
++
++it('authenticates before any metadata read or subscription and refuses activating subscribe', async () => {
++  const test = await fixture()
++  expect((await test.request('subscribe', { token: 'invalid', activate: false })).status).toBe('denied')
++  expect((await test.request('subscribe', { activate: true })).status).toBe('denied')
++  expect(test.stats()).toEqual({ reads: 0, navigations: 0, observations: 0 })
++  const baseline = await test.request('subscribe', { activate: false })
++  expect(baseline.status).toBe('ok')
++  expect(baseline.rows).toHaveLength(1)
++  expect(baseline.unavailableSessionIds).toEqual(['cold'])
++  expect(test.stats().navigations).toBe(0)
++})
++
++it('retains pending-only pulses between polls while running remains unchanged', async () => {
++  const test = await fixture()
++  const first = await test.request('subscribe', { activate: false })
++  test.pulse(1); test.pulse(0)
++  const next = await test.request('read', { after: first.cursor })
++  expect(next.changes.map(item => item.row.pendingInput)).toEqual([1, 0])
++  expect(next.changes.every(item => item.row.running)).toBe(true)
++})
++
++it('rejects old subscription close and a late open after replacement', async () => {
++  const test = await fixture()
++  await test.request('subscribe', { activate: false })
++  let settle!: (id: string) => void
++  test.navigate(() => new Promise((resolve) => { settle = resolve }))
++  const opening = test.request('open', { sessionId: 'a', workspaceId: 'w' })
++  while (test.stats().navigations === 0) await new Promise(resolve => setTimeout(resolve, 1))
++  await test.request('close')
++  const old = test.renew()
++  await test.request('subscribe', { activate: false })
++  expect((await test.request('subscribe', { subscriptionId: old, activate: false })).status).toBe('stale')
++  expect((await test.request('close', { subscriptionId: old })).status).toBe('stale')
++  settle('a')
++  expect((await opening).status).toBe('stale')
++  expect(test.stats().observations).toBe(1)
++  expect((await test.request('read', { after: 0 })).status).toBe('ok')
++})
++
++it('requires selected-ID readback and the current workspace before confirmation', async () => {
++  const test = await fixture()
++  await test.request('subscribe', { activate: false })
++  expect((await test.request('open', { sessionId: 'a', workspaceId: 'other' })).status).toBe('stale')
++  expect(test.stats().navigations).toBe(0)
++  test.navigate(async () => 'other')
++  expect((await test.request('open', { sessionId: 'a', workspaceId: 'w' })).status).toBe('unconfirmed')
++  test.navigate(async () => 'a')
++  expect(await test.request('open', { sessionId: 'a', workspaceId: 'w' })).toMatchObject({ status: 'confirmed', selected: 'a' })
++})
++
++it('rejects same-ID owner replacement and explicitly reports journal overflow', async () => {
++  const test = await fixture()
++  const baseline = await test.request('subscribe', { activate: false })
++  for (let index = 0; index < 1025; index++) test.pulse(index % 2 + 1)
++  expect((await test.request('read', { after: baseline.cursor })).status).toBe('gap')
++  test.replace()
++  expect((await test.request('open', { sessionId: 'a', workspaceId: 'w' })).status).toBe('stale')
++})
++
++it('closing the bridge owns only its listener and endpoint', async () => {
++  const test = await fixture()
++  await test.request('subscribe', { activate: false })
++  await test.request('close')
++  expect(test.stats().observations).toBe(0)
++  expect((await test.request('read', { after: 0 })).status).toBe('denied')
++  expect((await test.request('subscribe', { activate: false })).rows).toHaveLength(1)
++})
++
++
++it('isolates optional bridge setup failure from its Host', async () => {
++  let reads = 0
++  const host: MicroInputHost = {
++    read: () => { reads++; return undefined },
++    observe: () => () => {},
++    navigate: () => Promise.resolve(undefined),
++  }
++  await expect(startOptionalMicroInputBridge('/missing-micro-input-config', host)).resolves.toBeUndefined()
++  expect(reads).toBe(0)
++  const next = await fixture()
++  expect((await next.request('subscribe', { activate: false })).status).toBe('ok')
++})
+diff --git a/apps/desktop-host/tsconfig.json b/apps/desktop-host/tsconfig.json
+index 31c64f17..d1e41389 100644
+--- a/apps/desktop-host/tsconfig.json
++++ b/apps/desktop-host/tsconfig.json
+@@ -8,14 +8,30 @@
+     "src"
+   ],
+   "references": [
+-    { "path": "../../vendor/cordis" },
+-    { "path": "../../packages/core/agent" },
+-    { "path": "../../packages/jobs/jobs" },
+-    { "path": "../../packages/schedule/schedule" },
+-    { "path": "../../packages/workspace/workspace" },
+-    { "path": "../../packages/skill/skill-office" },
+-    { "path": "../../packages/util/home-paths" },
+-    { "path": "../../packages/skill/tool-workspace-dependencies" },
++    {
++      "path": "../../vendor/cordis"
++    },
++    {
++      "path": "../../packages/core/agent"
++    },
++    {
++      "path": "../../packages/jobs/jobs"
++    },
++    {
++      "path": "../../packages/schedule/schedule"
++    },
++    {
++      "path": "../../packages/workspace/workspace"
++    },
++    {
++      "path": "../../packages/skill/skill-office"
++    },
++    {
++      "path": "../../packages/util/home-paths"
++    },
++    {
++      "path": "../../packages/skill/tool-workspace-dependencies"
++    },
+     {
+       "path": "../cli"
+     },
+@@ -30,6 +46,21 @@
+     },
+     {
+       "path": "../../packages/credentials/deepseek-account"
++    },
++    {
++      "path": "../../packages/core/session"
++    },
++    {
++      "path": "../../packages/session/session-projection"
++    },
++    {
++      "path": "../../packages/session/session-title"
++    },
++    {
++      "path": "../../packages/interaction/user-approval"
++    },
++    {
++      "path": "../../packages/interaction/user-questions"
+     }
+   ]
+ }
+diff --git a/apps/desktop/src/host-process.ts b/apps/desktop/src/host-process.ts
+index 948a88e6..31a8483d 100644
+--- a/apps/desktop/src/host-process.ts
++++ b/apps/desktop/src/host-process.ts
+@@ -177,6 +177,7 @@ export class DesktopHostProcess {
+     private readonly packageManager?: { readonly pnpm: string; readonly nodeBin: string },
+ 
+     private readonly onPlatformSession?: (session: PlatformSession | null) => void,
++    private readonly onMicroInputOpen?: (sessionId: string, expiresAt: number) => Promise<string | undefined>,
+   ) {}
+ 
+   /**
+@@ -204,6 +205,18 @@ export class DesktopHostProcess {
+     child.stderr?.on('data', (chunk: string) => { this.stderr = (this.stderr + chunk).slice(-MAX_HOST_DIAGNOSTIC_CHARS) })
+     child.stdout?.pipe(process.stdout)
+     child.on('message', (message: unknown) => {
++      if (typeof message === 'object' && message !== null && 'type' in message && message.type === 'micro-input-open') {
++        const request = message as Record<string, unknown>
++        if (typeof request.requestId !== 'string' || typeof request.sessionId !== 'string'
++          || typeof request.expiresAt !== 'number' || request.expiresAt < Date.now() || this.stopping) return
++        void this.onMicroInputOpen?.(request.sessionId, request.expiresAt).then((selected) => {
++          if (child.connected && !this.stopping) child.send({ type: 'micro-input-selected', requestId: request.requestId, selected })
++        }, () => {
++          if (child.connected && !this.stopping) child.send({ type: 'micro-input-selected', requestId: request.requestId })
++        })
++        return
++      }
++
+       if (!isDesktopHostEvent(message)) {
+         this.fail(new Error('dsh desktop host sent an invalid IPC event'))
+         child.kill('SIGTERM')
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index 2afdfd71..62608ba3 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -1,3 +1,4 @@
++import { randomUUID } from 'node:crypto'
+ import type { ProductEventMap, ProductEvent } from '@deepseek-ai/dsh-client-product-analytics/types'
+ import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
+ /** Electron shell: desktop project ownership, custom protocol, windows, and lifecycle. */
+@@ -440,6 +441,31 @@ async function main(): Promise<void> {
+     navigation = next
+     return next.promise
+   }
++  const microInputRequests = new Map<string, { window: BrowserWindow; sessionId: string; settle: (selected: string | undefined) => void }>()
++  ipcMain.on('dsh:micro-input:selected', (event, reply: unknown) => {
++    if (typeof reply !== 'object' || reply === null) return
++    const value = reply as Record<string, unknown>
++    if (typeof value.requestId !== 'string') return
++    const pending = microInputRequests.get(value.requestId)
++    if (pending === undefined || pending.window !== mainWindow || pending.window.isDestroyed()
++      || event.sender !== pending.window.webContents || event.senderFrame !== event.sender.mainFrame) return
++    pending.settle(value.selected === pending.sessionId ? pending.sessionId : undefined)
++  })
++  const microInputOpen = (sessionId: string, expiresAt: number): Promise<string | undefined> => new Promise((resolve) => {
++    const window = mainWindow
++    if (window === undefined || window.isDestroyed() || Date.now() >= expiresAt) { resolve(undefined); return }
++    const requestId = randomUUID()
++    const timer = setTimeout(() =>{  settle(undefined) }, Math.max(1, expiresAt - Date.now()))
++    const settle = (selected: string | undefined) => {
++      clearTimeout(timer); microInputRequests.delete(requestId)
++      if (selected === sessionId && window === mainWindow && !window.isDestroyed() && Date.now() < expiresAt) {
++        if (window.isMinimized()) window.restore()
++        window.show(); window.focus(); resolve(selected)
++      } else resolve(undefined)
++    }
++    microInputRequests.set(requestId, { window, sessionId, settle })
++    window.webContents.send('dsh:micro-input:open', { requestId, sessionId, expiresAt })
++  })
+   const platformView = new DesktopPlatformView(join(app.getAppPath(), 'lib', 'preload-platform-account.cjs'),
+     () => locale.id === 'zh-CN' ? 'zh_CN' : 'en_US', process.platform === 'win32' ? 'win32' : 'darwin')
+   const backend = new DesktopBackendController((onFailure) => {
+@@ -447,7 +473,7 @@ async function main(): Promise<void> {
+     const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject,
+       hostInspectPort, { ...hostEnvironment, DSH_CLIENT_VERSION: desktopClientVersion() }, onFailure,
+       primaryRuntime,
+-      resources, (next) => { platformView.setSession(next) })
++      resources, (next) => { platformView.setSession(next) }, microInputOpen)
+     return {
+       start: async () => {
+         const ready = await host.start()
+diff --git a/apps/desktop/src/preload-app.ts b/apps/desktop/src/preload-app.ts
+index f590b8bc..bd1116b5 100644
+--- a/apps/desktop/src/preload-app.ts
++++ b/apps/desktop/src/preload-app.ts
+@@ -105,3 +105,18 @@ if (location.protocol === `${SCHEME}:` && location.hostname === 'app') {
+     onChange: (locale: string) => { ipcRenderer.send(DESKTOP_IPC.localeChanged, locale) },
+   })
+ }
++
++if (location.protocol === `${SCHEME}:` && location.hostname === 'app' && process.isMainFrame) {
++  contextBridge.exposeInMainWorld('__DSH_MICRO_INPUT__', {
++    subscribe: (listener: (request: { sessionId: string; expiresAt: number }) => Promise<string | undefined>) => {
++      const receive = (_event: Electron.IpcRendererEvent, request: { requestId: string; sessionId: string; expiresAt: number }) => {
++        if (Date.now() >= request.expiresAt) return
++        void listener(request).then((selected) => {
++          ipcRenderer.send('dsh:micro-input:selected', { requestId: request.requestId, selected })
++        }, () => { ipcRenderer.send('dsh:micro-input:selected', { requestId: request.requestId }) })
++      }
++      ipcRenderer.on('dsh:micro-input:open', receive)
++      return () => { ipcRenderer.off('dsh:micro-input:open', receive) }
++    },
++  })
++}
+diff --git a/packages/client/ui-workspace/src/client/navigation.ts b/packages/client/ui-workspace/src/client/navigation.ts
+index 55e03054..eb1f6096 100644
+--- a/packages/client/ui-workspace/src/client/navigation.ts
++++ b/packages/client/ui-workspace/src/client/navigation.ts
+@@ -179,6 +179,10 @@ class UiWorkspaceService extends Service implements UiWorkspace {
+     private readonly notify: (toast: RowToast) => void,
+   ) {
+     super(ctx, 'uiWorkspace')
++    type MicroInputRequest = { sessionId: string; expiresAt: number }
++    type MicroInputBridge = { subscribe: (listener: (request: MicroInputRequest) => Promise<string | undefined>) => () => void }
++    const bridge = (globalThis as { __DSH_MICRO_INPUT__?: MicroInputBridge }).__DSH_MICRO_INPUT__
++    if (bridge !== undefined) ctx.effect(() => bridge.subscribe(request => this.openMicroInput(request)), 'micro input navigation')
+     ctx.effect(() => {
+       const stop = this.watchNavigation()
+       return () => {
+@@ -276,6 +280,21 @@ class UiWorkspaceService extends Service implements UiWorkspace {
+     }
+   }
+ 
++  async openMicroInput(request: { sessionId: string; expiresAt: number }): Promise<string | undefined> {
++    if (Date.now() >= request.expiresAt || this.lifetime.signal.aborted) return undefined
++    const catalog = this.sessions.list.getSnapshot()
++    const id = catalog.ids.find(item => item === request.sessionId)
++    const row = id === undefined ? undefined : catalog.byId[id]
++    if (row === undefined) return undefined
++    this.openSession(row.id)
++    const reference = this.mainReference
++    if (reference === undefined) return undefined
++    await reference.ready
++    this.lifetime.signal.throwIfAborted()
++    if (Date.now() >= request.expiresAt || this.mainReference !== reference) return undefined
++    return this.selection.getSnapshot().sessionId === request.sessionId ? request.sessionId : undefined
++  }
++
+   openSession(target: SessionTarget): void {
+     this.replaceMain(target, this.lifetime.signal, 'reveal')
+   }
+diff --git a/packages/client/ui-workspace/tests/workspaces-service.client.spec.ts b/packages/client/ui-workspace/tests/workspaces-service.client.spec.ts
+index 90d3e8e0..bb6f641a 100644
+--- a/packages/client/ui-workspace/tests/workspaces-service.client.spec.ts
++++ b/packages/client/ui-workspace/tests/workspaces-service.client.spec.ts
+@@ -1533,3 +1533,38 @@ describe('UiWorkspaceService', () => {
+     })
+   })
+ })
++
++
++describe('Micro Input exact same-window navigation', () => {
++  it('opens two same-name sessions and reads the actual selection', async () => {
++    const test = bench({ sessions: sessionState([
++      summary('a', { displayTitle: 'Same title' }), summary('b', { displayTitle: 'Same title' }),
++    ]) })
++    await expect(test.uiWorkspace.openMicroInput({ sessionId: 'b', expiresAt: Date.now() + 1000 })).resolves.toBe('b')
++    await expect(test.uiWorkspace.openMicroInput({ sessionId: 'a', expiresAt: Date.now() + 1000 })).resolves.toBe('a')
++    expect(test.sessions.retained.at(-1)?.reference.sessionId).toBe('a')
++    expect(test.sessions.create).not.toHaveBeenCalled()
++  })
++  it('rejects expiry and unknown IDs without retaining or creating', async () => {
++    const test = bench({ sessions: sessionState([summary('a')]) })
++    const before = test.sessions.retain.mock.calls.length
++    await expect(test.uiWorkspace.openMicroInput({ sessionId: 'a', expiresAt: 0 })).resolves.toBeUndefined()
++    await expect(test.uiWorkspace.openMicroInput({ sessionId: 'missing', expiresAt: Date.now() + 1000 })).resolves.toBeUndefined()
++    expect(test.sessions.retain.mock.calls).toHaveLength(before)
++    expect(test.sessions.create).not.toHaveBeenCalled()
++  })
++  it('does not confirm a request superseded while its reference becomes ready', async () => {
++    const test = bench({ sessions: sessionState([summary('a'), summary('b')]) })
++    const normal = test.sessions.retain.getMockImplementation()!
++    let release!: () => void
++    const waiting = new Promise<void>((resolve) => { release = resolve })
++    test.sessions.retain.mockImplementation((target, options) => {
++      const reference = normal(target, options)
++      return target === sid('a') ? { ...reference, ready: waiting.then(() => reference.binding) } : reference
++    })
++    const first = test.uiWorkspace.openMicroInput({ sessionId: 'a', expiresAt: Date.now() + 1000 })
++    await test.uiWorkspace.openMicroInput({ sessionId: 'b', expiresAt: Date.now() + 1000 })
++    release()
++    await expect(first).resolves.toBeUndefined()
++  })
++})
+diff --git a/packages/interaction/user-approval/src/index.ts b/packages/interaction/user-approval/src/index.ts
+index 9a14f04d..431ec701 100644
+--- a/packages/interaction/user-approval/src/index.ts
++++ b/packages/interaction/user-approval/src/index.ts
+@@ -148,6 +148,20 @@ export interface Config {
+  * changes to the model through the runtime-context snapshot and switch notices.
+  */
+ export class ApprovalService extends Service {
++  private readonly pending = new Map<Session, Set<ApprovalRequestId>>()
++  private readonly pendingListeners = new Set<(session: Session) => void>()
++
++  pendingCount(session: Session): number { return this.pending.get(session)?.size ?? 0 }
++  observePending(listener: (session: Session) => void): () => void {
++    this.pendingListeners.add(listener)
++    return () => { this.pendingListeners.delete(listener) }
++  }
++  private publishPending(session: Session): void {
++    for (const listener of this.pendingListeners) {
++      try { listener(session) } catch { /* Observers cannot alter approval settlement. */ }
++    }
++  }
++
+   static Config: z<Config> = z.object({
+     policy: z.union(['ask', 'never'] as const).default('ask'),
+   })
+@@ -222,15 +236,25 @@ export class ApprovalService extends Service {
+       )
+     }
+     const id = ApprovalRequestId(randomUUID())
+-    session.append('approval/asked', {
+-      id,
+-      toolName: req.toolName,
+-      ...req.callId !== undefined ? { callId: req.callId } : {},
+-      ...req.reason !== undefined ? { reason: req.reason } : {},
+-    })
+-    const outcome = await this.decide(req, session)
+-    session.append('approval/decided', { id, outcome })
+-    return outcome
++    const pending = this.pending.get(session) ?? new Set<ApprovalRequestId>()
++    pending.add(id)
++    this.pending.set(session, pending)
++    this.publishPending(session)
++    try {
++      session.append('approval/asked', {
++        id,
++        toolName: req.toolName,
++        ...req.callId !== undefined ? { callId: req.callId } : {},
++        ...req.reason !== undefined ? { reason: req.reason } : {},
++      })
++      const outcome = await this.decide(req, session)
++      session.append('approval/decided', { id, outcome })
++      return outcome
++    } finally {
++      pending.delete(id)
++      if (pending.size === 0) this.pending.delete(session)
++      this.publishPending(session)
++    }
+   }
+ 
+   /**
+diff --git a/packages/interaction/user-approval/tests/approval.spec.ts b/packages/interaction/user-approval/tests/approval.spec.ts
+index 0ec3b958..26520ee2 100644
+--- a/packages/interaction/user-approval/tests/approval.spec.ts
++++ b/packages/interaction/user-approval/tests/approval.spec.ts
+@@ -518,3 +518,23 @@ describe('approval policy (the approval/policy fold)', () => {
+     expect(await contextFor()).toBeUndefined()
+   })
+ })
++
++it('exposes an already pending approval without reading its request payload and publishes settlement', async () => {
++  const ctx = await mounted()
++  const { agent } = fakeAgent()
++  let settle!: (value: ApprovalOutcome) => void
++  const started = Promise.withResolvers<undefined>()
++  ctx.on('approval/request', () => new Promise<ApprovalOutcome>((resolve) => { settle = resolve; started.resolve(undefined) }))
++  const request = ctx.approval.request(requestOf(agent))
++  expect(ctx.approval.pendingCount(agent.session)).toBe(1)
++  const observed: number[] = []
++  const dispose = ctx.approval.observePending((session) => { observed.push(ctx.approval.pendingCount(session)) })
++  ctx.approval.observePending(() => { throw new Error('untrusted observer') })
++  await started.promise
++  settle('allowed-once')
++  await expect(request).resolves.toBe('allowed-once')
++  expect(observed).toEqual([0])
++  expect(ctx.approval.pendingCount(agent.session)).toBe(0)
++  dispose()
++  await ctx.fiber.dispose()
++})
+diff --git a/packages/interaction/user-questions/src/index.ts b/packages/interaction/user-questions/src/index.ts
+index 06cb67b8..2149bf56 100644
+--- a/packages/interaction/user-questions/src/index.ts
++++ b/packages/interaction/user-questions/src/index.ts
+@@ -77,6 +77,28 @@ type QueuedReply = { messageId: MessageId; claimedTurn?: number }
+ 
+ /** `ctx.userQuestions`: validation plus the scoped answerer waterfall. */
+ export class UserQuestionService extends TypertRemoteService {
++  private readonly foreground = new Map<Session, Set<AskUserQuestionRequest>>()
++  private readonly pendingListeners = new Set<(session: Session) => void>()
++
++  pendingCount(session: Session): number | undefined {
++    const projections = this.ctx.get('sessionProjections')
++    const state = projections?.cachedStateOf(session, 'userQuestions')
++    if (projections !== undefined && state === undefined) return undefined
++    const active = state?.questions.active ?? []
++    const foreground = this.foreground.get(session) ?? new Set<AskUserQuestionRequest>()
++    return active.length + [...foreground].filter(request =>
++      request.wait === undefined || !active.some(item => item.callId === request.wait?.callId)).length
++  }
++  observePending(listener: (session: Session) => void): () => void {
++    this.pendingListeners.add(listener)
++    return () => { this.pendingListeners.delete(listener) }
++  }
++  private publishPending(session: Session): void {
++    for (const listener of this.pendingListeners) {
++      try { listener(session) } catch { /* Observers cannot alter question settlement. */ }
++    }
++  }
++
+   static Config = z.object({})
+   private readonly waits = new Map<Agent, Map<ToolCallId, TimedQuestionWait>>()
+   private readonly queuedReplies = new WeakMap<Session, Map<ToolCallId, QueuedReply>>()
+@@ -319,6 +341,13 @@ export class UserQuestionService extends TypertRemoteService {
+       'no user-questions answerer accepted the request',
+       'NO_PROVIDER',
+     ))
++    const foreground = agent === undefined ? undefined
++      : this.foreground.get(agent.session) ?? new Set<AskUserQuestionRequest>()
++    if (agent !== undefined && foreground !== undefined) {
++      foreground.add(request)
++      this.foreground.set(agent.session, foreground)
++      this.publishPending(agent.session)
++    }
+     try {
+       return await (agent === undefined
+         ? this.ctx.waterfall('user-questions/request', request, noAnswerer)
+@@ -335,6 +364,12 @@ export class UserQuestionService extends TypertRemoteService {
+         throw abortedQuestion(error)
+       }
+       throw restored
++    } finally {
++      if (agent !== undefined && foreground !== undefined) {
++        foreground.delete(request)
++        if (foreground.size === 0) this.foreground.delete(agent.session)
++        this.publishPending(agent.session)
++      }
+     }
+   }
+ }
+diff --git a/packages/interaction/user-questions/tests/user-questions.spec.ts b/packages/interaction/user-questions/tests/user-questions.spec.ts
+index f0f74425..382a5b9e 100644
+--- a/packages/interaction/user-questions/tests/user-questions.spec.ts
++++ b/packages/interaction/user-questions/tests/user-questions.spec.ts
+@@ -901,3 +901,22 @@ describe('late replies', () => {
+     await ctx.fiber.dispose()
+   })
+ })
++
++it('reports a blocking legacy question before subscription and settles despite observer failure', async () => {
++  const ctx = new Context()
++  const agent = stubAgent('pending-existing')
++  ctx.provide('agents', { get: () => agent, roots: () => [agent] } as never)
++  await ctx.plugin(UserQuestionService)
++  let settle!: (value: AskUserQuestionAnswer) => void
++  ctx.on('user-questions/request', () => new Promise<AskUserQuestionAnswer>((resolve) => { settle = resolve }))
++  const pending = ctx.userQuestions.ask({ agent, questions: [{ id: 'x', question: 'Synthetic' }] })
++  expect(ctx.userQuestions.pendingCount(agent.session)).toBe(1)
++  const observed: number[] = []
++  const stop = ctx.userQuestions.observePending((session) => { observed.push(ctx.userQuestions.pendingCount(session)) })
++  ctx.userQuestions.observePending(() => { throw new Error('observer') })
++  settle({ answers: [] })
++  await expect(pending).resolves.toEqual({ answers: [] })
++  expect(observed).toEqual([0])
++  stop()
++  await ctx.fiber.dispose()
++})
+diff --git a/packages/session/session-projection/src/index.ts b/packages/session/session-projection/src/index.ts
+index ac6e6345..b915adf8 100644
+--- a/packages/session/session-projection/src/index.ts
++++ b/packages/session/session-projection/src/index.ts
+@@ -327,6 +327,16 @@ export class SessionProjectionRegistry extends Service {
+     return this.cellFor(registration, session).state as SessionProjectionStateMap[K]
+   }
+ 
++  /** Read one already-current state without folding any history; unknown stays absent. */
++  cachedStateOf<K extends keyof SessionProjectionStateMap>(
++    session: Session,
++    key: K,
++  ): SessionProjectionStateMap[K] | undefined {
++    const cell = this.registrations.get(key)?.cells.get(session)
++    if (cell === undefined || cell.observedSeq !== cursorBefore(session.seq)) return undefined
++    return cell.state as SessionProjectionStateMap[K]
++  }
++
+   /**
+    * One consistent cut over every registered client-visible unit for one session, read from
+    * the watermark cache (missing cells fold lazily over the in-memory log).
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index d6df9aae..3dd84028 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -802,12 +802,27 @@ importers:
+       '@deepseek-ai/dsh-schedule':
+         specifier: workspace:*
+         version: link:../../packages/schedule/schedule
++      '@deepseek-ai/dsh-session':
++        specifier: workspace:*
++        version: link:../../packages/core/session
++      '@deepseek-ai/dsh-session-projection':
++        specifier: workspace:*
++        version: link:../../packages/session/session-projection
++      '@deepseek-ai/dsh-session-title':
++        specifier: workspace:*
++        version: link:../../packages/session/session-title
+       '@deepseek-ai/dsh-skill-office':
+         specifier: workspace:*
+         version: link:../../packages/skill/skill-office
+       '@deepseek-ai/dsh-tool-workspace-dependencies':
+         specifier: workspace:*
+         version: link:../../packages/skill/tool-workspace-dependencies
++      '@deepseek-ai/dsh-user-approval':
++        specifier: workspace:*
++        version: link:../../packages/interaction/user-approval
++      '@deepseek-ai/dsh-user-questions':
++        specifier: workspace:*
++        version: link:../../packages/interaction/user-questions
+       '@deepseek-ai/dsh-workspace':
+         specifier: workspace:*
+         version: link:../../packages/workspace/workspace
+diff --git a/scripts/micro-input-fixture.ts b/scripts/micro-input-fixture.ts
+new file mode 100644
+index 00000000..471af1fb
+--- /dev/null
++++ b/scripts/micro-input-fixture.ts
+@@ -0,0 +1,101 @@
++import { createServer } from 'node:net'
++import { chmod, rm } from 'node:fs/promises'
++import { join } from 'node:path'
++import { Context, FiberState } from '@deepseek-ai/cordis'
++import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
++import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
++import SessionTitleService from '@deepseek-ai/dsh-session-title'
++import ApprovalService from '@deepseek-ai/dsh-user-approval'
++import UserQuestionService from '@deepseek-ai/dsh-user-questions'
++import type { Agent } from '@deepseek-ai/dsh-agent'
++import { microInputHost } from '../apps/desktop-host/src/micro-input-host.ts'
++import { startMicroInputBridge } from '../apps/desktop-host/src/micro-input.ts'
++
++const args = process.argv.slice(2)
++const directory = args[args.indexOf('--directory') + 1]
++const ttl = Number(args[args.indexOf('--ttl') + 1] ?? 120)
++if (!directory?.startsWith('/') || !Number.isSafeInteger(ttl) || ttl < 1 || ttl > 600) throw new Error('fixture directory/ttl required')
++const ctx = new Context()
++await ctx.plugin(SessionStore)
++await ctx.plugin(SessionProjectionRegistry)
++await ctx.plugin(SessionTitleService, { fallbackMaxWords: 8, fallbackMaxBytes: 64, maxTitleBytes: 256 })
++const agents = new Map<string, Agent>()
++ctx.provide('agents', { get: (id: string) => agents.get(id), roots: () => [...agents.values()] } as never)
++ctx.provide('workspaceRegistry', { list: () => [
++  { id: 'workspace-a', sessionIds: [SessionId('dsh-a')] },
++  { id: 'workspace-b', sessionIds: [SessionId('dsh-b')] },
++] } as never)
++await ctx.plugin(ApprovalService)
++await ctx.plugin(UserQuestionService)
++for (const id of ['dsh-a', 'dsh-b']) {
++  const session = ctx.sessions.create(SessionId(id))
++  session.append('session/title', { title: 'Same title', messageSeqs: [], source: { kind: 'user' } })
++  session.append('turn/start', { turn: 1 })
++  agents.set(id, { id: session.id, session, status: 'running', inbox: { nextStep: [], nextTurn: [] } } as unknown as Agent)
++}
++let metadataReads = 0, navigationCount = 0, activationCount = 0, selected: string | undefined
++const originalPrepare = ctx.sessions.prepare.bind(ctx.sessions)
++ctx.sessions.prepare = (...input) => { activationCount++; return originalPrepare(...input) }
++const identities = new Map<string, object>()
++const deleted = new Set<string>()
++const source = microInputHost(ctx, (id, signal) => {
++  signal.throwIfAborted(); navigationCount++; selected = id; return Promise.resolve(selected)
++})
++const bridge = await startMicroInputBridge({ directory, sessionIds: ['dsh-a', 'dsh-b', 'dsh-cold'] }, {
++  ...source,
++  read(id) {
++    metadataReads++
++    const value = deleted.has(id) ? undefined : source.read(id)
++    return value === undefined ? undefined : { ...value, identity: identities.get(id) ?? value.identity }
++  },
++})
++let bridgeStopped = false
++const stats = () => ({ metadataReads, navigationCount, activationCount,
++  hostStopped: ctx.fiber.state === FiberState.DISPOSED || ctx.fiber.state === FiberState.UNLOADING, bridgeStopped, selected,
++  sessionCount: ctx.sessions.list().length })
++const controlPath = join(directory, 'control.sock')
++const controls = createServer((socket) => {
++  socket.setTimeout(2000, () => socket.destroy())
++  let buffer = ''
++  socket.on('data', (data) => {
++    buffer += data.toString()
++    if (buffer.length > 65536) { socket.destroy(); return }
++    if (!buffer.includes('\n')) return
++    const request = JSON.parse(buffer.slice(0, buffer.indexOf('\n'))) as { op: string; sessionId?: string }
++    void (async () => {
++      if (request.op === 'pending-pulse') {
++        const agent = agents.get('dsh-a')
++        if (agent === undefined) throw new Error('fixture agent missing')
++        const answerApproval = ctx.on('approval/request', () => Promise.resolve('allowed-once'))
++        await ctx.approval.request({ agent, toolName: 'fixture' })
++        answerApproval()
++        const answerQuestion = ctx.on('user-questions/request', () => Promise.resolve({ answers: [] }))
++        await ctx.userQuestions.ask({ agent, questions: [{ id: 'fixture', question: 'Synthetic only' }] })
++        answerQuestion()
++      } else if (request.op === 'delete') {
++        const id = request.sessionId ?? 'dsh-a'
++        deleted.add(id)
++        agents.delete(id)
++      } else if (request.op === 'rotate') {
++        identities.set(request.sessionId ?? 'dsh-a', {})
++      } else if (request.op === 'stop-bridge') {
++        await bridge.close(); bridgeStopped = true
++      } else if (request.op !== 'stats') throw new Error('unknown control')
++      socket.end(`${JSON.stringify(stats())}\n`)
++    })().catch(() => socket.end('{"error":"fixture-control"}\n'))
++  })
++  socket.on('error', () => {})
++})
++await new Promise<void>(resolve => controls.listen(controlPath, resolve))
++await chmod(controlPath, 0o600)
++console.log(`GRANT_PATH=${bridge.grantPath}`)
++console.log(`CONTROL_PATH=${controlPath}`)
++let stopping: Promise<void> | undefined
++const stop = () => stopping ??= (async () => {
++  await bridge.close()
++  await new Promise<void>(resolve => controls.close(() =>{  resolve() }))
++  await rm(controlPath, { force: true })
++  await ctx.fiber.dispose()
++})()
++const timer = setTimeout(() => { void stop() }, ttl * 1000)
++for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => { clearTimeout(timer); void stop() })

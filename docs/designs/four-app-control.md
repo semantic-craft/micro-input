@@ -50,7 +50,8 @@ F、G、H、I 无互相依赖；默认先做 F 保护 Cindy，再选 G 获得首
 
 - 应用：DSH。依赖：无。责任票：[#32](https://github.com/semantic-craft/micro-input/issues/32)。
 - 结果：先核验 0.2.1-rc.5 接口，再在同 Host 读取状态并打开准确会话。
-- 实现入口：DSH SessionController、WebController、uiWorkspace.openSession；Micro Input 专用适配器。
+- 实现入口：固定 rc.5 的已有 Desktop Host Context、提问/审批生产者状态、uiWorkspace.openSession 与选中回读；Micro Input 专用适配器。rc.5 的 follow 是正文流，没有 activate 参数，H 的 subscribe(activate:false) 使用新增受限元数据桥。
+- 范围：只读显式授权且当前已加载的会话；冷会话或元数据尚未就绪的会话标为不可用，不自动加载或补读历史。pendingInput 表示等待用户提问/审批的数量，不表示排队消息；连续变化序号与 gap 拒绝保证短暂变化不被轮询吞掉。
 - 验收：activate=false 的订阅不启动后台会话；pendingInput 变化不漏；导航回读 ID；停止桥不停止 Host；无认证零读取。
 
 ### I · 验证 Antigravity 官方桌面扩展与状态事件

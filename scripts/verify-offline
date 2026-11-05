@@ -62,6 +62,21 @@ def verify_evidence(run, scenario, started, process_alive):
         if len(confirmed) != 2 or any(row.get("target") != "zcode" for row in rows):
             raise ValueError("ZCode exact navigation receipts missing")
         result.update(zcode_navigation="SYNTHETIC_PASS", native_app="NOT_RUN", receipt_count=len(rows), body_reads=0)
+    elif scenario == "dsh-navigation":
+        navigation = json.loads((evidence / "dsh-navigation.json").read_text())
+        expected = {"disabled_zero_reads", "same_name_exact_identity", "cold_target_unavailable",
+                    "pending_only_transitions_retained", "selected_id_readback", "wrong_selected_unconfirmed",
+                    "out_of_scope_zero_reads", "deleted_target_no_redirect", "host_generation_rejects_old_selection",
+                    "journal_gap_clears_targets", "bridge_subscription_closed"}
+        if (navigation.get("status") != "PASS" or set(navigation.get("checks", {})) != expected
+                or not all(value is True for value in navigation["checks"].values())
+                or navigation.get("native_app") != "NOT_RUN" or navigation.get("physical_key") != "NOT_RUN"):
+            raise ValueError("DSH navigation evidence incomplete or overclaimed")
+        rows = [json.loads(line) for line in (evidence / "audit.jsonl").read_text().splitlines()]
+        confirmed = [row for row in rows if row["action_type"] == "dsh_open" and row["outcome"] == "confirmed"]
+        if len(confirmed) != 2 or any(row.get("target") != "dsh" for row in rows):
+            raise ValueError("DSH exact navigation receipts missing")
+        result.update(dsh_navigation="SYNTHETIC_PASS", native_app="NOT_RUN", receipt_count=len(rows))
     elif scenario == "native-ownership":
         ownership = json.loads((evidence / "ownership.json").read_text())
         expected = {"native_blocks_wide_and_encoder", "released_wide_once_encoder_once",
@@ -125,7 +140,7 @@ def main():
         if not args.qa_only:
             subprocess.run(["scripts/check"], cwd=ROOT, env=env, check=True)
         subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, env=env, check=True)
-        for scenario in ("host-execution", "native-ownership", "zcode-navigation", "config-write", "lighting-control", "diagnostic-export"):
+        for scenario in ("host-execution", "native-ownership", "zcode-navigation", "dsh-navigation", "config-write", "lighting-control", "diagnostic-export"):
             started = int(time.time() * 1000)
             scenario_env = dict(env, MI_SYNTHETIC_SCENARIO=scenario)
             if scenario == "diagnostic-export":
