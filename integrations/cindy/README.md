@@ -2,7 +2,7 @@
 
 本目录保存针对 Cindy 固定源码的增量补丁。它包含两部分受限原生协调：
 1. **原生所有权桥（`cindy-ownership.sock`）**：协调 WorkLouder 输入、听写和灯光的所有权，不切换设备功能开关，不修改 keymap。
-2. **既有任务目录与导航确认桥（`cindy-grant.json` + `cindy.sock`）**：在 `worklouder-codex` 原生服务旁提供只读工作区授权范围（`scopes: [{ workspacePath }]`）内的既有活跃可见任务元数据，沿用 `cindy://session/<sessionId>` 深链派发导航，并通过渲染端路由提交回读（`WORKLOUDER_CODEX_NAVIGATION_COMMITTED_CHANNEL`）将 `delivered`（深链已接受但目标路由尚未提交）与 `confirmed`（目标路由已提交且窗口已聚焦、`selected == target`）严格分开。不访问任务正文、摘要或凭据，不放宽 Local Agent API 或插件 `cindy.tasks` 隔离。
+2. **既有任务目录、导航确认与原生任务动作桥（`cindy-grant.json` + `cindy.sock`）**：在 `worklouder-codex` 原生服务旁提供只读工作区授权范围（`scopes: [{ workspacePath }]`）内的既有活跃可见任务元数据（含 `runId`、`unread: true | false | null` 三态未读事实、`eventWatermark`、`queuedCount` 与脱敏 `pendingInteraction`），沿用 `cindy://session/<sessionId>` 深链派发导航，并通过渲染端路由提交回读（`WORKLOUDER_CODEX_NAVIGATION_COMMITTED_CHANNEL`）将 `delivered`（深链已接受但目标路由尚未提交）与 `confirmed`（目标路由已提交且窗口已聚焦、`selected == target`）严格分开；同时提供绑定授权工作区的 `create`、仅作用于当前已确认选中任务（`selected == target`）的目标 `send`（`started` / `steered` / `queued`）、绑定 `expectedRunId` 的精确 `stop`（过期/换轮次返回 `noop` `guard.stopTargetChanged`）、绑定 `(interactionId, interactionType)` 的 `resolve`（过期返回 `noop` `proto.alreadyResolved`、重复 `commandId` 幂等去重、阻断将 `question` 当作权限批准 `guard.questionCannotApproveAsPermission`）及 `query` 命令对账。不访问任务正文、摘要或凭据，不放宽 Local Agent API 或插件 `cindy.tasks` 隔离。
 
 Micro Input 的生产执行路径默认暂停。只有受限 Unix socket 的当前代回复明确确认 Cindy 已停止输入、听写和灯光，并声明 `fenced-release-v1`，才允许执行。未安装桥、失联、旧代回调和未确认的停止均保持暂停。
 

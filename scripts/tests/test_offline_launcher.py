@@ -315,6 +315,10 @@ class OfflineEvidenceTests(unittest.TestCase):
             "out_of_scope_zero_reads",
             "deleted_target_no_redirect",
             "account_or_generation_change_blocks_old_selection",
+            "stop_bound_to_run_and_stale_noop",
+            "resolve_bound_and_question_guard",
+            "workspace_create_and_target_prompt_steering",
+            "unread_tristate_and_pending_round",
         ]
         payload = dict(
             scenario="cindy-navigation",
@@ -329,12 +333,32 @@ class OfflineEvidenceTests(unittest.TestCase):
         path = self.evidence / "cindy-navigation.json"
         audit = self.evidence / "audit.jsonl"
         path.write_text(json.dumps(payload))
-        audit.write_text("\n".join(
-            json.dumps(dict(action_type="cindy_open", outcome=outcome, target="cindy"))
+        audit_rows = [
+            dict(action_type="cindy_open", outcome=outcome, target="cindy")
             for outcome in ("delivered", "confirmed", "confirmed", "unconfirmed", "stale", "stale", "confirmed")
-        ))
+        ] + [
+            dict(action_type="cindy_stop", outcome="stopped", target="cindy"),
+            dict(action_type="cindy_stop", outcome="noop", target="cindy"),
+            dict(action_type="cindy_stop", outcome="noop", target="cindy"),
+            dict(action_type="cindy_resolve", outcome="resolved", target="cindy"),
+            dict(action_type="cindy_resolve", outcome="interactionTypeMismatch", target="cindy"),
+            dict(action_type="cindy_resolve", outcome="noop", target="cindy"),
+            dict(action_type="cindy_resolve", outcome="noop", target="cindy"),
+            dict(action_type="cindy_create", outcome="confirmed", target="cindy"),
+            dict(action_type="cindy_send", outcome="started", target="cindy"),
+            dict(action_type="cindy_send", outcome="steered", target="cindy"),
+            dict(action_type="cindy_send", outcome="unknown", target="cindy"),
+            dict(action_type="cindy_send", outcome="unknown", target="cindy"),
+            dict(action_type="cindy_query", outcome="queued", target="cindy"),
+            dict(action_type="cindy_next_attention", outcome="confirmed", target="cindy"),
+            dict(action_type="cindy_next_attention", outcome="confirmed", target="cindy"),
+            dict(action_type="cindy_next_attention", outcome="confirmed", target="cindy"),
+            dict(action_type="cindy_next_attention", outcome="noop", target="cindy"),
+        ]
+        audit.write_text("\n".join(json.dumps(row) for row in audit_rows))
         verified = module.verify_evidence(self.run, "cindy-navigation", 99, lambda _: False)
         self.assertEqual(verified["cindy_navigation"], "SYNTHETIC_PASS")
+        self.assertEqual(verified["cindy_actions"], "SYNTHETIC_PASS")
         self.assertEqual(verified["unauthorized_metadata_reads"], 0)
         self.assertIs(verified["local_agent_api_relaxed"], False)
         for index in range(len(names)):
