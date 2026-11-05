@@ -197,6 +197,7 @@ extension MicroInput: Backend {}
     let actionExecutor: HostActionExecuting
     let zcodeSessions: ZCodeSessionController
     let dshSessions: DSHSessionController
+    let cindySessions: CindySessionController
     let antigravityStatus: AntigravityStatusController
     let t3Attention: T3AttentionController
     let nativeOwnership: NativeOwnershipController
@@ -299,6 +300,7 @@ extension MicroInput: Backend {}
             else if scenario == "radial-menu", !preparedHostExecutionScenario { preparedHostExecutionScenario = true; await prepareRadialMenuScenario() }
             else if scenario == "zcode-navigation", !preparedHostExecutionScenario { preparedHostExecutionScenario = true; await prepareZCodeNavigationScenario() }
             else if scenario == "dsh-navigation", !preparedHostExecutionScenario { preparedHostExecutionScenario = true; await prepareDSHNavigationScenario() }
+            else if scenario == "cindy-navigation", !preparedHostExecutionScenario { preparedHostExecutionScenario = true; await prepareCindyNavigationScenario() }
             else if scenario == "antigravity-status", !preparedHostExecutionScenario { preparedHostExecutionScenario = true; await prepareAntigravityStatusScenario() }
             else if scenario == "native-ownership", !preparedHostExecutionScenario { preparedHostExecutionScenario = true; await prepareNativeOwnershipScenario() }
             else if scenario == "lighting-control" { await runSyntheticLightingScenario() }
@@ -349,9 +351,18 @@ extension MicroInput: Backend {}
         status = draft.read_only ? "文档含未知数据 · 只读 · 原文件保留" : "本地草稿 · 修改自动保存 · 不写设备"
         if draft.loaded_format == 1 { status += " · 旧格式将在首次修改时转换并备份" }
     }
-    func setHostActiveProfile(_ profileId: String?) async {
+    func syncWorkbenchToActiveProfile() {
+        guard !browsingDeviceSnapshot, !editingDevice,
+              let activeId = hostActiveProfileId,
+              let index = snapshot?.profiles.firstIndex(where: { $0.id.text == activeId }) else { return }
+        if profileIndex != index {
+            selectProfile(index)
+        }
+    }
+    func setHostActiveProfile(_ profileId: String?, syncWorkbench: Bool = false) async {
         guard let id = profileId ?? hostProfiles.first(where: { $0.name == "Antigravity" })?.id.text else { return }
         await routingChange(["kind":"select", "profile_id":id])
+        if syncWorkbench { syncWorkbenchToActiveProfile() }
     }
     func setHostExecutionEnabled(_ enabled: Bool) async {
         await routingChange(["kind":"execution", "enabled":enabled])
@@ -386,6 +397,16 @@ extension MicroInput: Backend {}
         await installCodingAgentPresets()
         if untouched, let index = snapshot?.profiles.firstIndex(where: { $0.name == "Cindy" }) {
             selectProfile(index)
+        } else {
+            syncWorkbenchToActiveProfile()
+        }
+    }
+    func ensureDefaultAgentLinks() async {
+        guard let existingLinks = routing?.app_profile_links else { return }
+        for agent in DesktopAgent.all {
+            guard existingLinks[agent.bundleID] == nil,
+                  let profile = hostProfiles.first(where: { $0.name == agent.name }) else { continue }
+            await linkApp(agent.bundleID, profileID: profile.id.text)
         }
     }
     var canTryDesktopAction: Bool {
@@ -427,6 +448,9 @@ extension MicroInput: Backend {}
         let existingNames = Set(hostProfiles.map(\.name))
         if !presetNames.isSubset(of: existingNames), canEditDraft, !busy {
             await prepareDesktopProfiles()
+        }
+        if documentOverride == nil, (ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? "").isEmpty {
+            await ensureDefaultAgentLinks()
         }
         await startDiscovery()
         if devices.isEmpty { await refresh() }
@@ -951,13 +975,14 @@ extension MicroInput: Backend {}
     @Published var connectedID: String?
     @Published var stale = false
     @Published var busy = false
-    init(nativeOwnership: NativeOwnershipController? = nil, backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil, dictationDriver: (any DictationDriving)? = nil, t3Attention: T3AttentionController? = nil, zcodeSessions: ZCodeSessionController? = nil, dshSessions: DSHSessionController? = nil, antigravityStatus: AntigravityStatusController? = nil, radialPreferences: UserDefaults = .standard) {
+    init(nativeOwnership: NativeOwnershipController? = nil, backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil, dictationDriver: (any DictationDriving)? = nil, t3Attention: T3AttentionController? = nil, zcodeSessions: ZCodeSessionController? = nil, dshSessions: DSHSessionController? = nil, cindySessions: CindySessionController? = nil, antigravityStatus: AntigravityStatusController? = nil, radialPreferences: UserDefaults = .standard) {
         self.backend = backend
         self.nativeOwnership = nativeOwnership ?? NativeOwnershipController()
         self.radialPreferences = radialPreferences
         self.t3Attention = t3Attention ?? T3AttentionController()
         self.zcodeSessions = zcodeSessions ?? ZCodeSessionController()
         self.dshSessions = dshSessions ?? DSHSessionController()
+        self.cindySessions = cindySessions ?? CindySessionController()
         self.antigravityStatus = antigravityStatus ?? AntigravityStatusController()
         self.documentOverride = documentURL
         self.actionExecutor = actionExecutor ?? LiveHostActionExecutor()
@@ -1105,6 +1130,7 @@ extension MicroInput: Backend {}
         t3Attention.suspend()
         zcodeSessions.suspend()
         dshSessions.suspend()
+        cindySessions.suspend()
         antigravityStatus.suspend()
         discoveryGeneration += 1
         events?.invalidatePending()
@@ -1125,6 +1151,7 @@ extension MicroInput: Backend {}
         t3Attention.resume()
         zcodeSessions.resume()
         dshSessions.resume()
+        cindySessions.resume()
         antigravityStatus.resume()
         discoveryStatus = events == nil ? "USB 发现尚未开始" : "系统已唤醒 · 请明确选择设备并重新连接"
         if events != nil { await refresh() }
@@ -1144,6 +1171,7 @@ extension MicroInput: Backend {}
         await t3Attention.shutdown()
         await zcodeSessions.shutdown()
         await dshSessions.shutdown()
+        await cindySessions.shutdown()
         await antigravityStatus.shutdown()
         await backend.shutdown()
         await nativeOwnership.returnToNative()

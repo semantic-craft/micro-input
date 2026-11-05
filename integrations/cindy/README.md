@@ -1,6 +1,8 @@
-# Cindy 原生所有权桥
+# Cindy 原生所有权与任务导航桥
 
-本目录保存针对 Cindy 固定源码的增量补丁。它只协调 WorkLouder 输入、听写和灯光的所有权，不使用 Local Agent API，不访问任务正文，不切换设备功能开关，不修改 keymap。
+本目录保存针对 Cindy 固定源码的增量补丁。它包含两部分受限原生协调：
+1. **原生所有权桥（`cindy-ownership.sock`）**：协调 WorkLouder 输入、听写和灯光的所有权，不切换设备功能开关，不修改 keymap。
+2. **既有任务目录与导航确认桥（`cindy-grant.json` + `cindy.sock`）**：在 `worklouder-codex` 原生服务旁提供只读工作区授权范围（`scopes: [{ workspacePath }]`）内的既有活跃可见任务元数据，沿用 `cindy://session/<sessionId>` 深链派发导航，并通过渲染端路由提交回读（`WORKLOUDER_CODEX_NAVIGATION_COMMITTED_CHANNEL`）将 `delivered`（深链已接受但目标路由尚未提交）与 `confirmed`（目标路由已提交且窗口已聚焦、`selected == target`）严格分开。不访问任务正文、摘要或凭据，不放宽 Local Agent API 或插件 `cindy.tasks` 隔离。
 
 Micro Input 的生产执行路径默认暂停。只有受限 Unix socket 的当前代回复明确确认 Cindy 已停止输入、听写和灯光，并声明 `fenced-release-v1`，才允许执行。未安装桥、失联、旧代回调和未确认的停止均保持暂停。
 
@@ -60,7 +62,7 @@ Cindy 基础源码来自 `makecindy/cindy`，固定提交见 `BASE_SHA`。本目
 pnpm --filter desktop... install --frozen-lockfile --prefer-offline
 pnpm --filter mobile... install --frozen-lockfile --prefer-offline
 pnpm --filter desktop typecheck
-node --test scripts/test-micro-input-ownership.mjs
+./node_modules/.bin/tsx --test scripts/test-micro-input-ownership.mjs scripts/test-micro-input-navigation.mjs
 ```
 
 原生控制器、工作进程、滚动和渲染进程的针对性测试随补丁进入上游 `apps/desktop/src` 的现有测试目录，使用上游 desktop Vitest 配置。双端命令会比较当前源码 diff 与本目录补丁的精确字节，拒绝在别的补丁上签收。没有对当前安装版重新打包、签名或替换的记录时，安装状态仍为未验证。
