@@ -54,6 +54,8 @@ Slice I 与 Slice I2 已由 `scripts/verify-antigravity-installed-static` 在只
 
 现有 `zcode://workspace/open` 仅有工作区打开证据；没有建立稳定 session 深链。MCP Apps UI 插件也不是全局会话控制 SDK。推荐在原桌面 host 服务层增加最窄的显式本机桥，复用 v4；语音输入与语音回答控制尚未确认。
 
+Slice G 与 Slice K1 已在固定提交 `a9fe401eede6e6e5e01be9048679c206fe6f02d9` 的 ZCode 源码上接通受限 UDS 导航与受控执行桥（见 [ZCode 同实例导航与受控执行桥](../integrations/zcode/README.md)）：通过 `windowControllerService.readMicroInputIndex` 仅投影授权 `ZCodeScope` 内的地址、标题、`liveStatus` 与运行中 `executionId`（零正文与 interaction 载荷），通过 `sendMicroInputCommand` / `queryMicroInputCommand` 复用同实例 `zcodeAgent.sendConversationCommandV4` 与 `queryConversationCommandsV4` 执行 `createSession`、`sendText` 和带 `expectedForegroundExecutionId` 的 `stop`。两个会话严格限制为仅影响当前选中目标（`selected == target`）；运行中会话发送消息始终走 `sendText`（绝不误调 `createSession`），并按 `inputAccepted.delivery` 区分实时 steering（`guide` → `steered`）与普通排队（`queue` → `queued`）；迟到 `stop` 因 `expectedForegroundExecutionId` 不匹配返回 `noop`（`guard.stopTargetChanged`），不停止新 execution；重复 `commandId` 幂等返回 `duplicate: true`；超时或结果未知时客户端锁存原 `commandId` 并通过 `queryConversationCommandsV4` 对账，不换新 ID 重放。审批、提问回答与模型切换归后续 Slice L1。
+
 ## DeepSeek Harness 桌面版
 
 本机 `com.deepseek.dsh` 的版本为 `0.2.1-rc.5`。本轮改用对应官方 tag [dsh-v0.2.1-rc.5](https://github.com/deepseek-ai/deepseek-harness/tree/b830ec950faba0a46dda564be3e2d854afed94f1)，固定 SHA `b830ec950faba0a46dda564be3e2d854afed94f1`，MIT。此前调查的 `fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159` 为较新源码，不能作为安装版契约。

@@ -51,17 +51,17 @@ index 32879481..20f4fb46 100644
    # 基于领先 staging 很多的分支开工时，merge-base 之前的"新增"文件不应被追溯。
 diff --git a/docs/micro-input/bridge.md b/docs/micro-input/bridge.md
 new file mode 100644
-index 00000000..123afb34
+index 00000000..5ccf32a2
 --- /dev/null
 +++ b/docs/micro-input/bridge.md
 @@ -0,0 +1,23 @@
-+# Micro Input navigation bridge
++# Micro Input navigation and execution bridge
 +
 +The bridge is disabled unless `MI_ZCODE_BRIDGE_CONFIG` names a private JSON file containing explicit `scopes` and an optional private `directory`. It creates a fresh capability and generation for one window renderer. Additional windows never take over an occupied socket. Renderer replacement invalidates all outstanding requests.
 +
-+Requests are bounded NDJSON, authenticated before metadata access, and scoped by the complete workspace/source address. Only list and exact open are allowed. The scoped Controller list reuses its v4 source index; no conversation subscription, transcript read, text search or command execution is exposed. Responses project only address, title and live status.
++Requests are bounded NDJSON, authenticated before metadata or command access, and scoped by the complete workspace/source address. Only `list`, exact `open`, `create` (`createSession`), `send` (`sendText`), `stop` (`expectedForegroundExecutionId`), and `query` (`queryConversationCommandsV4`) are allowed. The scoped Controller list reuses its v4 source index and projects only address, title, live status, and active foreground execution ID; no conversation subscription, transcript read, or text search is exposed.
 +
-+Open rechecks the owner metadata, live attachment and exact existing workspace tab. It then selects and reads the same task in one synchronous renderer turn. Missing targets never create a workspace or choose another task. Successful readback means the renderer selected the address, not that an installed build or physical device was tested.
++Open and create recheck the owner metadata, live attachment and exact existing workspace tab, then select and read back the target task in one synchronous renderer turn. Send and stop require `selected == target` so two sessions only affect the selected one. Stop requires `expectedForegroundExecutionId` so a late stop returns `noop` (`guard.stopTargetChanged`) instead of stopping a newer execution. Commands are idempotent by `(sessionId, commandId)` and reconcile via `query` on timeout without replaying under a new ID. In-flight sending to a running session never creates a new session and reports `delivery` (`guide` -> `steered`, `queue` -> `queued`, `startNow` -> `started`) explicitly.
 +
 +```mermaid
 +sequenceDiagram
@@ -71,11 +71,11 @@ index 00000000..123afb34
 +  participant Host as Same Host Controller
 +  MI->>Main: capability + generation + exact scope
 +  Main->>Main: authenticate and authorize before forwarding
-+  Main->>UI: scoped request
-+  UI->>Host: scoped metadata index / getTaskMeta
-+  Host-->>UI: metadata
-+  UI->>UI: recheck attachment, select exact tab/task, read selection
-+  UI-->>Main: projected result
++  Main->>UI: scoped request (list / open / create / send / stop / query)
++  UI->>Host: scoped metadata index / getTaskMeta / v4 command
++  Host-->>UI: projected metadata / CommandAck
++  UI->>UI: recheck attachment, verify selected==target, read selection
++  UI-->>Main: projected result (confirmed / started / queued / steered / stopped / noop / unknown)
 +  Main-->>MI: generation-bound result
 +```
 diff --git a/packages/desktop/src/host/windowHostControllerProjection.ts b/packages/desktop/src/host/windowHostControllerProjection.ts
@@ -92,67 +92,307 @@ index 468f6bd9..75ad6f17 100644
        address: WindowHostTaskAddress,
        mutation: WindowHostControllerMutation,
 diff --git a/packages/desktop/src/host/windowHostControllerService.ts b/packages/desktop/src/host/windowHostControllerService.ts
-index 663386a1..c417680e 100644
+index 663386a1..f7476986 100644
 --- a/packages/desktop/src/host/windowHostControllerService.ts
 +++ b/packages/desktop/src/host/windowHostControllerService.ts
-@@ -153,6 +153,7 @@ export function createWindowHostControllerRuntime(options: {
+@@ -135,6 +135,38 @@ function liveStatusFromMeta(meta: ZCodeTaskMeta): WindowHostControllerTaskRow["l
+   return "idle";
+ }
+ 
++function projectMicroInputAck(
++  ack: import("@zcode/shared/zcode-protocol-v4").CommandAck,
++): import("@zcode/shared").MicroInputCommandAck {
++  const result =
++    ack.result?.type === "createSession"
++      ? {
++          type: "createSession" as const,
++          sessionId: ack.result.sessionId,
++          ...(ack.result.input
++            ? {
++                input: {
++                  delivery: ack.result.input.delivery,
++                  inputId: ack.result.input.inputId,
++                },
++              }
++            : {}),
++        }
++      : ack.result?.type === "inputAccepted"
++        ? {
++            type: "inputAccepted" as const,
++            delivery: ack.result.delivery,
++            inputId: ack.result.inputId,
++          }
++        : undefined;
++  return {
++    commandId: ack.commandId,
++    status: ack.status,
++    ...(ack.reasonCode ? { reasonCode: ack.reasonCode } : {}),
++    ...(result ? { result } : {}),
++  };
++}
++
+ /**
+  * WindowHostControllerRuntime 是 Local Host 内的聚合权威。它不持久化数据；每次在线查询都从
+  * 对应 source 的 tasks-index 重建投影，断连时只冻结最后一次成功的内存快照。
+@@ -153,6 +185,11 @@ export function createWindowHostControllerRuntime(options: {
  }) {
    const projection = createWindowHostControllerProjection({ createId: options.createId });
    const unreadSignals = new Emitter<WindowHostTaskUnreadSignal>();
 +  const microInputGenerations = new WeakMap<IZCodeTaskService, string>();
++  const microInputDrafts = new WeakMap<
++    IZCodeTaskService,
++    Map<string, { title: string; liveStatus: WindowHostControllerTaskRow["liveStatus"] }>
++  >();
    const registeredScopes = new Map<string, WindowHostControllerSourceScope>();
    const sourceAvailability = new Map<string, "online" | "offline">();
    const sourceTaskServices = new Map<string, IZCodeTaskService>();
-@@ -172,6 +173,8 @@ export function createWindowHostControllerRuntime(options: {
+@@ -172,6 +209,11 @@ export function createWindowHostControllerRuntime(options: {
  
    function forgetRegisteredSource(scope: WindowHostControllerSourceScope): void {
      const key = sourceKey(scope);
 +    const previousService = sourceTaskServices.get(key);
-+    if (previousService) microInputGenerations.delete(previousService);
++    if (previousService) {
++      microInputGenerations.delete(previousService);
++      microInputDrafts.delete(previousService);
++    }
      registeredScopes.delete(key);
      sourceAvailability.delete(key);
      sourceTaskServices.delete(key);
-@@ -414,6 +417,8 @@ export function createWindowHostControllerRuntime(options: {
+@@ -414,6 +456,11 @@ export function createWindowHostControllerRuntime(options: {
        );
      }
      if (resolved.sourceAvailability === "offline" && previousAvailability === "online") {
 +      const previousService = sourceTaskServices.get(key);
-+      if (previousService) microInputGenerations.delete(previousService);
++      if (previousService) {
++        microInputGenerations.delete(previousService);
++        microInputDrafts.delete(previousService);
++      }
        sourceSessionObservers.get(key)?.observer.dispose();
        sourceSessionObservers.delete(key);
        sourceSnapshotTaskServices.delete(key);
-@@ -828,6 +833,35 @@ export function createWindowHostControllerRuntime(options: {
+@@ -828,6 +875,226 @@ export function createWindowHostControllerRuntime(options: {
          }
          return deleted === true;
        },
 +      async hasMicroInputTask(params) {
-+        return (await this.getTaskMeta(params)) !== null;
++        const address = windowHostTaskAddressSchema.parse(params.address);
++        const resolved = options.resolveSource(address);
++        const taskService = resolved?.taskService;
++        if ((await this.getTaskMeta(params)) !== null) return true;
++        return taskService ? microInputDrafts.get(taskService)?.has(address.taskId) === true : false;
 +      },
 +      async readMicroInputIndex({ scope }) {
 +        const resolved = options.resolveSource(scope);
 +        const taskService = resolved?.taskService;
 +        const assertSource = () => {
 +          const current = options.resolveSource(scope);
-+          if (attachmentDisposed || !resolved || !taskService || !current ||
-+              current.taskService !== taskService || current.sourceAvailability !== "online" ||
-+              current.scope.workspacePath !== scope.workspacePath ||
-+              current.scope.workspaceIdentity !== scope.workspaceIdentity ||
-+              (current.scope.kind === "local" ? !!(scope.sourceServerId || scope.remoteSessionId) :
-+                current.scope.sourceServerId !== scope.sourceServerId || current.scope.remoteSessionId !== scope.remoteSessionId))
++          if (
++            attachmentDisposed ||
++            !resolved ||
++            !taskService ||
++            !current ||
++            current.taskService !== taskService ||
++            current.sourceAvailability !== "online" ||
++            current.scope.workspacePath !== scope.workspacePath ||
++            current.scope.workspaceIdentity !== scope.workspaceIdentity ||
++            (current.scope.kind === "local"
++              ? !!(scope.sourceServerId || scope.remoteSessionId)
++              : current.scope.sourceServerId !== scope.sourceServerId ||
++                current.scope.remoteSessionId !== scope.remoteSessionId)
++          )
 +            throw new Error("Micro Input source unavailable");
 +          return current;
 +        };
 +        assertSource();
 +        await refreshSource(resolved!, true);
 +        assertSource();
-+        if (!microInputGenerations.has(taskService!)) microInputGenerations.set(taskService!, options.createId());
++        if (!microInputGenerations.has(taskService!))
++          microInputGenerations.set(taskService!, options.createId());
++        const projected = projection
++          .getSourceTasks(resolved!.scope)
++          .filter(
++            (row) =>
++              row.address.workspacePath === scope.workspacePath &&
++              row.address.workspaceIdentity === scope.workspaceIdentity &&
++              row.address.sourceServerId === scope.sourceServerId &&
++              row.address.remoteSessionId === scope.remoteSessionId,
++          );
++        const drafts = microInputDrafts.get(taskService!);
++        const rowsByTaskId = new Map<string, import("@zcode/shared").MicroInputRow>();
++        for (const row of projected) {
++          drafts?.delete(row.address.taskId);
++          rowsByTaskId.set(row.address.taskId, {
++            address: row.address,
++            title: row.meta.title,
++            liveStatus: row.liveStatus,
++          });
++        }
++        if (drafts) {
++          for (const [taskId, draft] of drafts) {
++            if (!rowsByTaskId.has(taskId)) {
++              rowsByTaskId.set(taskId, {
++                address: { ...scope, taskId },
++                title: draft.title,
++                liveStatus: draft.liveStatus,
++              });
++            }
++          }
++        }
++        const rows = await Promise.all(
++          Array.from(rowsByTaskId.values()).map(async (row) => {
++            if (
++              row.liveStatus !== "running" ||
++              typeof taskService!.readBotTopicExecution !== "function"
++            )
++              return row;
++            const execution = await taskService!
++              .readBotTopicExecution({
++                taskId: row.address.taskId,
++                workspacePath: scope.workspacePath,
++                ...(scope.workspaceIdentity ? { workspaceIdentity: scope.workspaceIdentity } : {}),
++                ...(scope.remoteSessionId ? { remoteSessionId: scope.remoteSessionId } : {}),
++              })
++              .catch(() => undefined);
++            return execution?.executionId ? { ...row, executionId: execution.executionId } : row;
++          }),
++        );
++        assertSource();
 +        return {
 +          sourceGeneration: microInputGenerations.get(taskService!)!,
-+          rows: projection.getSourceTasks(resolved!.scope).filter((row) =>
-+            row.address.workspacePath === scope.workspacePath && row.address.workspaceIdentity === scope.workspaceIdentity &&
-+            row.address.sourceServerId === scope.sourceServerId && row.address.remoteSessionId === scope.remoteSessionId)
-+            .map((row) => ({ address: row.address, title: row.meta.title, liveStatus: row.liveStatus })),
++          rows,
 +        };
++      },
++      async sendMicroInputCommand({ scope, envelope }) {
++        const resolved = options.resolveSource(scope);
++        const taskService = resolved?.taskService;
++        const agentService = resolved?.agentService;
++        const assertSource = () => {
++          const current = options.resolveSource(scope);
++          if (
++            attachmentDisposed ||
++            !resolved ||
++            !taskService ||
++            !agentService ||
++            !current ||
++            current.taskService !== taskService ||
++            current.agentService !== agentService ||
++            current.sourceAvailability !== "online" ||
++            current.scope.workspacePath !== scope.workspacePath ||
++            current.scope.workspaceIdentity !== scope.workspaceIdentity ||
++            (current.scope.kind === "local"
++              ? !!(scope.sourceServerId || scope.remoteSessionId)
++              : current.scope.sourceServerId !== scope.sourceServerId ||
++                current.scope.remoteSessionId !== scope.remoteSessionId)
++          )
++            throw new Error("Micro Input source unavailable");
++          return current;
++        };
++        assertSource();
++        const workspaceId = scope.workspaceIdentity?.trim() || scope.workspacePath;
++        if (envelope.type === "createSession") {
++          if (envelope.sessionId !== null || envelope.payload.workspaceId !== workspaceId)
++            throw new Error("Micro Input createSession scope mismatch");
++        } else if (envelope.type === "sendText" || envelope.type === "stop") {
++          if (
++            !envelope.sessionId ||
++            !(await this.hasMicroInputTask({ address: { ...scope, taskId: envelope.sessionId } }))
++          )
++            throw new Error("Micro Input command target unavailable");
++          assertSource();
++        } else {
++          throw new Error("Unsupported Micro Input command");
++        }
++        const ack = await agentService!.sendConversationCommandV4({
++          workspacePath: scope.workspacePath,
++          ...(scope.workspaceIdentity ? { workspaceIdentity: scope.workspaceIdentity } : {}),
++          ...(resolved!.scope.kind === "remote" && resolved!.scope.remoteSessionId
++            ? { remoteSessionId: resolved!.scope.remoteSessionId }
++            : {}),
++          envelope,
++        });
++        assertSource();
++        if (
++          envelope.type === "createSession" &&
++          (ack.status === "accepted" || ack.status === "duplicate") &&
++          ack.result?.type === "createSession"
++        ) {
++          let drafts = microInputDrafts.get(taskService!);
++          if (!drafts) {
++            drafts = new Map();
++            microInputDrafts.set(taskService!, drafts);
++          }
++          drafts.set(ack.result.sessionId, {
++            title: "",
++            liveStatus: ack.result.input ? "running" : "idle",
++          });
++        }
++        return projectMicroInputAck(ack);
++      },
++      async queryMicroInputCommand({ scope, sessionId, commandId }) {
++        const resolved = options.resolveSource(scope);
++        const taskService = resolved?.taskService;
++        const agentService = resolved?.agentService;
++        const assertSource = () => {
++          const current = options.resolveSource(scope);
++          if (
++            attachmentDisposed ||
++            !resolved ||
++            !taskService ||
++            !agentService ||
++            !current ||
++            current.taskService !== taskService ||
++            current.agentService !== agentService ||
++            current.sourceAvailability !== "online" ||
++            current.scope.workspacePath !== scope.workspacePath ||
++            current.scope.workspaceIdentity !== scope.workspaceIdentity ||
++            (current.scope.kind === "local"
++              ? !!(scope.sourceServerId || scope.remoteSessionId)
++              : current.scope.sourceServerId !== scope.sourceServerId ||
++                current.scope.remoteSessionId !== scope.remoteSessionId)
++          )
++            throw new Error("Micro Input source unavailable");
++          return current;
++        };
++        assertSource();
++        const commands =
++          sessionId === null
++            ? [{ sessionId: null, commandId }]
++            : [
++                { sessionId, commandId },
++                { sessionId: null, commandId },
++              ];
++        const queried = await agentService!.queryConversationCommandsV4({
++          workspacePath: scope.workspacePath,
++          ...(scope.workspaceIdentity ? { workspaceIdentity: scope.workspaceIdentity } : {}),
++          ...(resolved!.scope.kind === "remote" && resolved!.scope.remoteSessionId
++            ? { remoteSessionId: resolved!.scope.remoteSessionId }
++            : {}),
++          commands,
++        });
++        assertSource();
++        const match = queried.results.find(
++          (entry) =>
++            entry.key.commandId === commandId &&
++            (entry.key.sessionId === sessionId || entry.key.sessionId === null) &&
++            entry.result !== "unknown",
++        );
++        if (!match || match.result === "unknown") return "unknown";
++        if (
++          sessionId === null &&
++          (match.result.status === "accepted" || match.result.status === "duplicate") &&
++          match.result.result?.type === "createSession"
++        ) {
++          let drafts = microInputDrafts.get(taskService!);
++          if (!drafts) {
++            drafts = new Map();
++            microInputDrafts.set(taskService!, drafts);
++          }
++          drafts.set(match.result.result.sessionId, {
++            title: "",
++            liveStatus: match.result.result.input ? "running" : "idle",
++          });
++        }
++        return projectMicroInputAck(match.result);
 +      },
        async mutateTask({ address, mutation }) {
          const resolved = options.resolveSource({
@@ -176,21 +416,22 @@ index c8d0c0fa..3e3ba938 100644
  
 diff --git a/packages/desktop/src/main/micro-input/CONTRACT.md b/packages/desktop/src/main/micro-input/CONTRACT.md
 new file mode 100644
-index 00000000..16c6cfb0
+index 00000000..7aac8585
 --- /dev/null
 +++ b/packages/desktop/src/main/micro-input/CONTRACT.md
 @@ -0,0 +1,3 @@
 +# Micro Input navigation
 +
-+Owns the private Unix socket and one renderer capability. It creates no task state. Explicit scoped configuration enables the bridge; default startup does nothing. Renderer replacement, cancellation and window closure revoke in-flight requests and remove socket/grant files. An occupied socket is never removed or taken over.
++Owns the private Unix socket and one renderer capability. Explicit scoped configuration enables the bridge; default startup does nothing. Renderer replacement, cancellation and window closure revoke in-flight requests and remove socket/grant files. An occupied socket is never removed or taken over. Window focus activates only when `open`, `create`, or reconciled `create` confirms the exact selected workspace/session address.
 diff --git a/packages/desktop/src/main/micro-input/confirmation.ts b/packages/desktop/src/main/micro-input/confirmation.ts
 new file mode 100644
-index 00000000..9bf12e4d
+index 00000000..9467e52a
 --- /dev/null
 +++ b/packages/desktop/src/main/micro-input/confirmation.ts
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,38 @@
 +import {
 +  sameMicroInputAddress,
++  sameMicroInputScope,
 +  type MicroInputRequest,
 +  type MicroInputResponse,
 +} from "@zcode/shared";
@@ -206,14 +447,18 @@ index 00000000..9bf12e4d
 +    focus(): void;
 +  },
 +): boolean {
++  const selectedMatches =
++    request.op === "open"
++      ? Boolean(request.target && sameMicroInputAddress(response.selected ?? null, request.target))
++      : request.op === "create" || (request.op === "query" && !request.target)
++        ? Boolean(response.selected && sameMicroInputScope(response.selected, request.scope))
++        : false;
 +  if (
 +    response.status !== "confirmed" ||
-+    request.op !== "open" ||
-+    !request.target ||
++    !selectedMatches ||
 +    response.id !== request.id ||
 +    response.instanceId !== request.instanceId ||
 +    response.generation !== request.generation ||
-+    !sameMicroInputAddress(response.selected ?? null, request.target) ||
 +    window.isDestroyed()
 +  )
 +    return false;
@@ -576,23 +821,37 @@ index 5a588863..0c74617f 100644
 +  },
 +});
 diff --git a/packages/services/src/window-controller/windowController.ts b/packages/services/src/window-controller/windowController.ts
-index 20eef3b5..d58b2a5c 100644
+index 20eef3b5..d8fb6ba6 100644
 --- a/packages/services/src/window-controller/windowController.ts
 +++ b/packages/services/src/window-controller/windowController.ts
-@@ -1,6 +1,6 @@
+@@ -1,6 +1,11 @@
  import type { Event } from "@zcode/rpc";
  import { ServiceChannels } from "@zcode/shared";
 -import type { ZCodeTaskMeta } from "@zcode/shared";
-+import type { MicroInputRow, ZCodeTaskMeta } from "@zcode/shared";
++import type {
++  MicroInputCommandAck,
++  MicroInputCommandEnvelope,
++  MicroInputRow,
++  ZCodeTaskMeta,
++} from "@zcode/shared";
  import type {
    ControllerResyncParams,
    ControllerResyncResult,
-@@ -60,6 +60,8 @@ export interface WindowHostTaskUnreadSignal {
+@@ -60,6 +65,17 @@ export interface WindowHostTaskUnreadSignal {
   * conversation/file/git/terminal 仍由 attachment 对应的 scoped facade 提供。
   */
  export interface IWindowControllerService {
 +  readMicroInputIndex(params: { scope: Omit<WindowHostTaskAddress, "taskId"> }): Promise<{ sourceGeneration: string; rows: MicroInputRow[] }>;
 +  hasMicroInputTask(params: { address: WindowHostTaskAddress }): Promise<boolean>;
++  sendMicroInputCommand(params: {
++    scope: Omit<WindowHostTaskAddress, "taskId">;
++    envelope: MicroInputCommandEnvelope;
++  }): Promise<MicroInputCommandAck>;
++  queryMicroInputCommand(params: {
++    scope: Omit<WindowHostTaskAddress, "taskId">;
++    sessionId: string | null;
++    commandId: string;
++  }): Promise<MicroInputCommandAck | "unknown">;
    deleteArchivedTask(params: { address: WindowHostTaskAddress }): Promise<boolean>;
    deleteArchivedTasks(params: {
      address: WindowHostTaskAddress;
@@ -607,13 +866,13 @@ index 00e277c0..52cb22c4 100644
 +export * from "./micro-input/contract.js";
 diff --git a/packages/shared/src/micro-input/CONTRACT.md b/packages/shared/src/micro-input/CONTRACT.md
 new file mode 100644
-index 00000000..9d8b8ba1
+index 00000000..11499a40
 --- /dev/null
 +++ b/packages/shared/src/micro-input/CONTRACT.md
 @@ -0,0 +1,3 @@
 +# Micro Input navigation
 +
-+Defines the bounded capability contract shared by the desktop bridge and renderer. Authorization precedes metadata access. Complete source/workspace addresses are compared exactly; empty or unknown fields are rejected. It exposes no transcript or execution API.
++Defines the bounded capability contract shared by the desktop bridge and renderer. Authorization precedes metadata or command access. Complete source/workspace addresses are compared exactly; empty or unknown fields are rejected. It exposes only scoped metadata index (`address`, `title`, `liveStatus`, `executionId`), exact selection (`open`), and idempotent v4 execution commands (`createSession`, `sendText`, `stop` with `expectedForegroundExecutionId`, and `query` command reconciliation) with zero transcript or search read.
 diff --git a/packages/shared/src/micro-input/contract.example.ts b/packages/shared/src/micro-input/contract.example.ts
 new file mode 100644
 index 00000000..4779de97
@@ -625,10 +884,10 @@ index 00000000..4779de97
 +  authorizeMicroInput(input, grant);
 diff --git a/packages/shared/src/micro-input/contract.ts b/packages/shared/src/micro-input/contract.ts
 new file mode 100644
-index 00000000..ec59dcad
+index 00000000..459b4e54
 --- /dev/null
 +++ b/packages/shared/src/micro-input/contract.ts
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,240 @@
 +import { z } from "zod";
 +
 +const identifier = z
@@ -636,6 +895,12 @@ index 00000000..ec59dcad
 +  .min(1)
 +  .max(4096)
 +  .refine((value) => value.trim() === value && !value.includes("\0"));
++const promptText = z
++  .string()
++  .min(1)
++  .max(32768)
++  .refine((value) => value.trim().length > 0 && !value.includes("\0"));
++const deliverySchema = z.enum(["startNow", "queue", "guide"]);
 +export const microInputScopeSchema = z
 +  .object({
 +    workspacePath: identifier,
@@ -652,14 +917,76 @@ index 00000000..ec59dcad
 +    token: identifier,
 +    instanceId: identifier,
 +    generation: z.number().int().positive().safe(),
-+    op: z.enum(["list", "open"]),
++    op: z.enum(["list", "open", "create", "send", "stop", "query"]),
 +    scope: microInputScopeSchema,
 +    target: microInputAddressSchema.optional(),
++    commandId: identifier.optional(),
++    clientId: identifier.optional(),
++    sessionId: identifier.optional(),
++    text: promptText.optional(),
++    requestedDelivery: deliverySchema.optional(),
++    executionId: identifier.optional(),
 +  })
 +  .strict()
-+  .refine((request) =>
-+    request.op === "open" ? request.target !== undefined : request.target === undefined,
-+  );
++  .refine((request) => {
++    switch (request.op) {
++      case "list":
++        return (
++          request.target === undefined &&
++          request.commandId === undefined &&
++          request.clientId === undefined &&
++          request.sessionId === undefined &&
++          request.text === undefined &&
++          request.requestedDelivery === undefined &&
++          request.executionId === undefined
++        );
++      case "open":
++        return (
++          request.target !== undefined &&
++          request.commandId === undefined &&
++          request.clientId === undefined &&
++          request.sessionId === undefined &&
++          request.text === undefined &&
++          request.requestedDelivery === undefined &&
++          request.executionId === undefined
++        );
++      case "create":
++        return (
++          request.target === undefined &&
++          request.commandId !== undefined &&
++          request.clientId !== undefined &&
++          request.requestedDelivery === undefined &&
++          request.executionId === undefined
++        );
++      case "send":
++        return (
++          request.target !== undefined &&
++          request.commandId !== undefined &&
++          request.clientId !== undefined &&
++          request.sessionId === undefined &&
++          request.text !== undefined &&
++          request.executionId === undefined
++        );
++      case "stop":
++        return (
++          request.target !== undefined &&
++          request.commandId !== undefined &&
++          request.clientId !== undefined &&
++          request.sessionId === undefined &&
++          request.text === undefined &&
++          request.requestedDelivery === undefined &&
++          request.executionId !== undefined
++        );
++      case "query":
++        return (
++          request.commandId !== undefined &&
++          request.sessionId === undefined &&
++          request.text === undefined &&
++          request.requestedDelivery === undefined &&
++          request.executionId === undefined
++        );
++    }
++  });
 +export const microInputGrantSchema = z
 +  .object({
 +    version: z.literal(1),
@@ -674,9 +1001,16 @@ index 00000000..ec59dcad
 +export type MicroInputAddress = z.infer<typeof microInputAddressSchema>;
 +export type MicroInputRequest = z.infer<typeof microInputRequestSchema>;
 +export type MicroInputGrant = z.infer<typeof microInputGrantSchema>;
++export type MicroInputDelivery = z.infer<typeof deliverySchema>;
 +export type MicroInputStatus =
 +  | "ok"
 +  | "confirmed"
++  | "started"
++  | "queued"
++  | "steered"
++  | "stopped"
++  | "noop"
++  | "unknown"
 +  | "denied"
 +  | "stale"
 +  | "unavailable"
@@ -685,6 +1019,7 @@ index 00000000..ec59dcad
 +  address: MicroInputAddress;
 +  title: string;
 +  liveStatus: string;
++  executionId?: string;
 +}
 +export interface MicroInputResponse {
 +  version: 1;
@@ -694,6 +1029,64 @@ index 00000000..ec59dcad
 +  status: MicroInputStatus;
 +  rows?: MicroInputRow[];
 +  selected?: MicroInputAddress | null;
++  commandId?: string;
++  duplicate?: boolean;
++  delivery?: MicroInputDelivery;
++  executionId?: string;
++  reasonCode?: string;
++}
++export type MicroInputCommandEnvelope =
++  | {
++      commandId: string;
++      clientId: string;
++      sessionId: null;
++      type: "createSession";
++      payload: {
++        workspaceId: string;
++        sessionId?: string;
++        firstInput?: { text: string };
++      };
++      issuedAt: number;
++    }
++  | {
++      commandId: string;
++      clientId: string;
++      sessionId: string;
++      type: "sendText";
++      payload: {
++        text: string;
++        requestedDelivery?: MicroInputDelivery;
++      };
++      issuedAt: number;
++    }
++  | {
++      commandId: string;
++      clientId: string;
++      sessionId: string;
++      type: "stop";
++      payload: {
++        expectedForegroundExecutionId: string;
++      };
++      issuedAt: number;
++    };
++export interface MicroInputCommandAck {
++  commandId: string;
++  status: "accepted" | "noop" | "duplicate" | "stale" | "rejected" | "failed";
++  reasonCode?: string;
++  result?:
++    | {
++        type: "createSession";
++        sessionId: string;
++        input?: {
++          delivery: MicroInputDelivery;
++          inputId: string;
++        };
++      }
++    | {
++        type: "inputAccepted";
++        delivery: MicroInputDelivery;
++        inputId: string;
++      };
 +}
 +export function sameMicroInputScope(a: MicroInputScope, b: MicroInputScope): boolean {
 +  return (
@@ -770,13 +1163,13 @@ index b1659106..b2abc7a2 100644
      workspaceMainView,
 diff --git a/packages/ui/src/app-shell/micro-input/CONTRACT.md b/packages/ui/src/app-shell/micro-input/CONTRACT.md
 new file mode 100644
-index 00000000..c2600806
+index 00000000..031c1e1d
 --- /dev/null
 +++ b/packages/ui/src/app-shell/micro-input/CONTRACT.md
 @@ -0,0 +1,3 @@
 +# Micro Input navigation
 +
-+Owns exact navigation admission within the existing window. It reads the scoped Host controller metadata and then selects an existing tab and task in one synchronous turn. Source generations are pinned on first list; later replacement stays stale until a new renderer registration. Selected addresses come from the actual tab/session stores. No fallback, transcript read, search or text command is permitted.
++Owns exact navigation and command admission within the existing window. It reads the scoped Host controller metadata, selects an existing or newly created task in one synchronous turn, and dispatches `createSession`, `sendText`, `stop` (`expectedForegroundExecutionId`), and `query` command reconciliation only after verifying `selected == target` and pinned source generation. No fallback, transcript read, or text search is permitted.
 diff --git a/packages/ui/src/app-shell/micro-input/contract.example.ts b/packages/ui/src/app-shell/micro-input/contract.example.ts
 new file mode 100644
 index 00000000..4d9c729f
@@ -812,15 +1205,17 @@ index 00000000..5a508d9e
 +} as const;
 diff --git a/packages/ui/src/app-shell/micro-input/navigation.ts b/packages/ui/src/app-shell/micro-input/navigation.ts
 new file mode 100644
-index 00000000..7252d2a0
+index 00000000..9335e2f1
 --- /dev/null
 +++ b/packages/ui/src/app-shell/micro-input/navigation.ts
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,331 @@
 +import {
 +  authorizeMicroInput,
 +  sameMicroInputAddress,
 +  sameMicroInputScope,
 +  type MicroInputAddress,
++  type MicroInputCommandAck,
++  type MicroInputCommandEnvelope,
 +  type MicroInputGrant,
 +  type MicroInputRequest,
 +  type MicroInputResponse,
@@ -836,6 +1231,15 @@ index 00000000..7252d2a0
 +  current: (scope: MicroInputScope) => (() => boolean) | null;
 +  select: (address: MicroInputAddress) => boolean;
 +  selected: (scope: MicroInputScope) => MicroInputAddress | null;
++  sendCommand?: (
++    scope: MicroInputScope,
++    envelope: MicroInputCommandEnvelope,
++  ) => Promise<MicroInputCommandAck>;
++  queryCommand?: (
++    scope: MicroInputScope,
++    sessionId: string | null,
++    commandId: string,
++  ) => Promise<MicroInputCommandAck | "unknown">;
 +}) {
 +  const sources = new Map<string, string>();
 +  let inFlight = false;
@@ -869,7 +1273,7 @@ index 00000000..7252d2a0
 +      request.scope.remoteSessionId,
 +    ]);
 +    const expected = sources.get(key);
-+    if (request.op === "open" && expected === undefined) return { ...base, status: "stale" };
++    if (request.op !== "list" && expected === undefined) return { ...base, status: "stale" };
 +    inFlight = true;
 +    try {
 +      const index = await ports.readIndex(request.scope);
@@ -880,6 +1284,21 @@ index 00000000..7252d2a0
 +        index.rows.some((row) => !sameMicroInputScope(row.address, request.scope))
 +      )
 +        return { ...base, status: "unavailable" };
++      const confirmTarget = async (
++        target: MicroInputAddress,
++        checkInitialIndex: boolean,
++      ): Promise<MicroInputAddress | "stale" | "unavailable" | "unconfirmed"> => {
++        if (checkInitialIndex && !index.rows.some((row) => sameMicroInputAddress(row.address, target)))
++          return "unavailable";
++        if (!(await ports.exists(target)) || !valid()) return "unavailable";
++        const finalIndex = await ports.readIndex(request.scope);
++        if (!valid() || finalIndex.sourceGeneration !== expected) return "stale";
++        if (!finalIndex.rows.some((row) => sameMicroInputAddress(row.address, target)))
++          return "unavailable";
++        if (!ports.select(target)) return "unavailable";
++        const selected = ports.selected(request.scope);
++        return sameMicroInputAddress(selected, target) && selected ? selected : "unconfirmed";
++      };
 +      if (request.op === "list") {
 +        sources.set(key, index.sourceGeneration);
 +        const selected = ports.selected(request.scope);
@@ -890,19 +1309,230 @@ index 00000000..7252d2a0
 +          selected: selected && sameMicroInputScope(selected, request.scope) ? selected : null,
 +        };
 +      }
-+      const target = request.target;
-+      if (!target || !index.rows.some((row) => sameMicroInputAddress(row.address, target)))
-+        return { ...base, status: "unavailable" };
-+      if (!(await ports.exists(target)) || !valid()) return { ...base, status: "unavailable" };
-+      const finalIndex = await ports.readIndex(request.scope);
-+      if (!valid() || finalIndex.sourceGeneration !== expected) return { ...base, status: "stale" };
-+      if (!finalIndex.rows.some((row) => sameMicroInputAddress(row.address, target)))
-+        return { ...base, status: "unavailable" };
-+      if (!ports.select(target)) return { ...base, status: "unavailable" };
-+      const selected = ports.selected(request.scope);
-+      return sameMicroInputAddress(selected, target)
-+        ? { ...base, status: "confirmed", selected }
-+        : { ...base, status: "unconfirmed" };
++      if (request.op === "open") {
++        const target = request.target!;
++        const outcome = await confirmTarget(target, true);
++        if (typeof outcome === "string") return { ...base, status: outcome };
++        return { ...base, status: "confirmed", selected: outcome };
++      }
++      if (request.op === "create") {
++        if (!ports.sendCommand) return { ...base, status: "unavailable" };
++        const workspaceId = request.scope.workspaceIdentity?.trim() || request.scope.workspacePath;
++        const ack = await ports.sendCommand(request.scope, {
++          commandId: request.commandId!,
++          clientId: request.clientId!,
++          sessionId: null,
++          type: "createSession",
++          payload: {
++            workspaceId,
++            ...(request.sessionId ? { sessionId: request.sessionId } : {}),
++            ...(request.text ? { firstInput: { text: request.text } } : {}),
++          },
++          issuedAt: Date.now(),
++        });
++        if (!valid()) return { ...base, status: "stale" };
++        if (
++          (ack.status !== "accepted" && ack.status !== "duplicate") ||
++          ack.result?.type !== "createSession"
++        ) {
++          return {
++            ...base,
++            status: "unconfirmed",
++            commandId: request.commandId,
++            ...(ack.reasonCode ? { reasonCode: ack.reasonCode } : {}),
++          };
++        }
++        const createdAddress: MicroInputAddress = {
++          ...request.scope,
++          taskId: ack.result.sessionId,
++        };
++        const outcome = await confirmTarget(createdAddress, false);
++        if (typeof outcome === "string")
++          return { ...base, status: outcome, commandId: request.commandId };
++        return {
++          ...base,
++          status: "confirmed",
++          selected: outcome,
++          commandId: request.commandId,
++          duplicate: ack.status === "duplicate",
++          ...(ack.result.input ? { delivery: ack.result.input.delivery } : {}),
++        };
++      }
++      if (request.op === "send") {
++        const target = request.target!;
++        if (!ports.sendCommand) return { ...base, status: "unavailable" };
++        if (!sameMicroInputAddress(ports.selected(request.scope), target))
++          return { ...base, status: "unconfirmed", commandId: request.commandId };
++        if (!index.rows.some((row) => sameMicroInputAddress(row.address, target)))
++          return { ...base, status: "unavailable" };
++        if (!(await ports.exists(target)) || !valid()) return { ...base, status: "unavailable" };
++        if (!sameMicroInputAddress(ports.selected(request.scope), target))
++          return { ...base, status: "unconfirmed", commandId: request.commandId };
++        const ack = await ports.sendCommand(request.scope, {
++          commandId: request.commandId!,
++          clientId: request.clientId!,
++          sessionId: target.taskId,
++          type: "sendText",
++          payload: {
++            text: request.text!,
++            ...(request.requestedDelivery ? { requestedDelivery: request.requestedDelivery } : {}),
++          },
++          issuedAt: Date.now(),
++        });
++        if (!valid()) return { ...base, status: "stale" };
++        if (
++          (ack.status !== "accepted" && ack.status !== "duplicate") ||
++          ack.result?.type !== "inputAccepted"
++        ) {
++          return {
++            ...base,
++            status: "unconfirmed",
++            commandId: request.commandId,
++            ...(ack.reasonCode ? { reasonCode: ack.reasonCode } : {}),
++          };
++        }
++        const delivery = ack.result.delivery;
++        const refreshed = await ports.readIndex(request.scope);
++        const executionId = refreshed.rows.find((row) =>
++          sameMicroInputAddress(row.address, target),
++        )?.executionId;
++        return {
++          ...base,
++          status: delivery === "guide" ? "steered" : delivery === "queue" ? "queued" : "started",
++          selected: target,
++          commandId: request.commandId,
++          duplicate: ack.status === "duplicate",
++          delivery,
++          ...(executionId ? { executionId } : {}),
++        };
++      }
++      if (request.op === "stop") {
++        const target = request.target!;
++        if (!ports.sendCommand) return { ...base, status: "unavailable" };
++        if (!sameMicroInputAddress(ports.selected(request.scope), target))
++          return { ...base, status: "unconfirmed", commandId: request.commandId };
++        if (!index.rows.some((row) => sameMicroInputAddress(row.address, target)))
++          return { ...base, status: "unavailable" };
++        if (!(await ports.exists(target)) || !valid()) return { ...base, status: "unavailable" };
++        if (!sameMicroInputAddress(ports.selected(request.scope), target))
++          return { ...base, status: "unconfirmed", commandId: request.commandId };
++        const ack = await ports.sendCommand(request.scope, {
++          commandId: request.commandId!,
++          clientId: request.clientId!,
++          sessionId: target.taskId,
++          type: "stop",
++          payload: {
++            expectedForegroundExecutionId: request.executionId!,
++          },
++          issuedAt: Date.now(),
++        });
++        if (!valid()) return { ...base, status: "stale" };
++        if (ack.status === "noop") {
++          return {
++            ...base,
++            status: "noop",
++            selected: target,
++            commandId: request.commandId,
++            executionId: request.executionId,
++            ...(ack.reasonCode ? { reasonCode: ack.reasonCode } : {}),
++          };
++        }
++        if (ack.status !== "accepted" && ack.status !== "duplicate") {
++          return {
++            ...base,
++            status: "unconfirmed",
++            commandId: request.commandId,
++            ...(ack.reasonCode ? { reasonCode: ack.reasonCode } : {}),
++          };
++        }
++        return {
++          ...base,
++          status: "stopped",
++          selected: target,
++          commandId: request.commandId,
++          duplicate: ack.status === "duplicate",
++          executionId: request.executionId,
++        };
++      }
++      if (!ports.queryCommand) return { ...base, status: "unavailable" };
++      const target = request.target ?? null;
++      const queried = await ports.queryCommand(
++        request.scope,
++        target?.taskId ?? null,
++        request.commandId!,
++      );
++      if (!valid()) return { ...base, status: "stale" };
++      if (queried === "unknown") {
++        return { ...base, status: "unknown", commandId: request.commandId };
++      }
++      if (queried.result?.type === "createSession") {
++        if (queried.status !== "accepted" && queried.status !== "duplicate") {
++          return {
++            ...base,
++            status: "unconfirmed",
++            commandId: request.commandId,
++            ...(queried.reasonCode ? { reasonCode: queried.reasonCode } : {}),
++          };
++        }
++        const createdAddress: MicroInputAddress = {
++          ...request.scope,
++          taskId: queried.result.sessionId,
++        };
++        const outcome = await confirmTarget(createdAddress, false);
++        if (typeof outcome === "string")
++          return { ...base, status: outcome, commandId: request.commandId };
++        return {
++          ...base,
++          status: "confirmed",
++          selected: outcome,
++          commandId: request.commandId,
++          duplicate: true,
++          ...(queried.result.input ? { delivery: queried.result.input.delivery } : {}),
++        };
++      }
++      if (queried.result?.type === "inputAccepted") {
++        if (queried.status !== "accepted" && queried.status !== "duplicate") {
++          return {
++            ...base,
++            status: "unconfirmed",
++            commandId: request.commandId,
++            ...(queried.reasonCode ? { reasonCode: queried.reasonCode } : {}),
++          };
++        }
++        const delivery = queried.result.delivery;
++        return {
++          ...base,
++          status: delivery === "guide" ? "steered" : delivery === "queue" ? "queued" : "started",
++          selected: target,
++          commandId: request.commandId,
++          duplicate: true,
++          delivery,
++        };
++      }
++      if (queried.status === "noop") {
++        return {
++          ...base,
++          status: "noop",
++          selected: target,
++          commandId: request.commandId,
++          ...(queried.reasonCode ? { reasonCode: queried.reasonCode } : {}),
++        };
++      }
++      if (queried.status === "accepted" || queried.status === "duplicate") {
++        return {
++          ...base,
++          status: "stopped",
++          selected: target,
++          commandId: request.commandId,
++          duplicate: true,
++        };
++      }
++      return {
++        ...base,
++        status: "unconfirmed",
++        commandId: request.commandId,
++        ...(queried.reasonCode ? { reasonCode: queried.reasonCode } : {}),
++      };
 +    } catch {
 +      return { ...base, status: "unavailable" };
 +    } finally {
@@ -994,10 +1624,10 @@ index 00000000..cdbc9f4d
 +}
 diff --git a/packages/ui/src/app-shell/micro-input/useNavigation.ts b/packages/ui/src/app-shell/micro-input/useNavigation.ts
 new file mode 100644
-index 00000000..a0422ba7
+index 00000000..3b18b868
 --- /dev/null
 +++ b/packages/ui/src/app-shell/micro-input/useNavigation.ts
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,23 @@
 +import { useEffect } from "react";
 +import { useBaseWorkspaceServices } from "@/hooks/useWorkspaceServices.js";
 +import { useTabStoreApi } from "@/store/TabStoreProvider.js";
@@ -1014,16 +1644,19 @@ index 00000000..a0422ba7
 +      ...createMicroInputSelection(tabs, onNavigate),
 +      readIndex: (scope) => controller.readMicroInputIndex({ scope }),
 +      exists: (address) => controller.hasMicroInputTask({ address }),
++      sendCommand: (scope, envelope) => controller.sendMicroInputCommand({ scope, envelope }),
++      queryCommand: (scope, sessionId, commandId) =>
++        controller.queryMicroInputCommand({ scope, sessionId, commandId }),
 +    });
 +    return window.microInputNavigation.listen(handler);
 +  }, [services, tabs, onNavigate]);
 +}
 diff --git a/scripts/micro-input-boundaries.ts b/scripts/micro-input-boundaries.ts
 new file mode 100644
-index 00000000..103293cc
+index 00000000..69d51c8d
 --- /dev/null
 +++ b/scripts/micro-input-boundaries.ts
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,120 @@
 +import assert from "node:assert/strict";
 +import { mkdir, readFile, rmdir } from "node:fs/promises";
 +import { resolve, join } from "node:path";
@@ -1097,6 +1730,35 @@ index 00000000..103293cc
 +assert.equal(focusConfirmedMicroInputWindow(request, response, window), true);
 +assert.deepEqual(effects, ["restore", "show", "focus"]);
 +effects.length = 0;
++const createRequest: MicroInputRequest = {
++  version: 1,
++  id: "2",
++  instanceId: "fixture",
++  generation: 1,
++  token: "fixture",
++  op: "create",
++  scope: { workspacePath: "/a" },
++  commandId: "cmd-create-1",
++  clientId: "mi-client",
++};
++assert.equal(
++  focusConfirmedMicroInputWindow(
++    createRequest,
++    { ...response, id: "2", selected: { workspacePath: "/a", taskId: "created-1" } },
++    window,
++  ),
++  true,
++);
++assert.deepEqual(effects, ["restore", "show", "focus"]);
++effects.length = 0;
++assert.equal(
++  focusConfirmedMicroInputWindow(
++    createRequest,
++    { ...response, id: "2", selected: { workspacePath: "/b", taskId: "created-1" } },
++    window,
++  ),
++  false,
++);
 +assert.equal(
 +  focusConfirmedMicroInputWindow(request, { ...response, generation: 2 }, window),
 +  false,
@@ -1117,10 +1779,10 @@ index 00000000..103293cc
 +console.log("socket ownership interleaving and exact confirmed window focus: PASS");
 diff --git a/scripts/micro-input-fixture.ts b/scripts/micro-input-fixture.ts
 new file mode 100644
-index 00000000..74a57a3f
+index 00000000..adf4f9eb
 --- /dev/null
 +++ b/scripts/micro-input-fixture.ts
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,385 @@
 +import { createServer } from "node:net";
 +import { chmod, mkdir, writeFile, unlink } from "node:fs/promises";
 +import { join, resolve } from "node:path";
@@ -1129,6 +1791,8 @@ index 00000000..74a57a3f
 +import { createMicroInputNavigation } from "../packages/ui/src/app-shell/micro-input/navigation.ts";
 +import {
 +  sameMicroInputScope,
++  type MicroInputCommandAck,
++  type MicroInputDelivery,
 +  type MicroInputRow,
 +} from "../packages/shared/src/micro-input/contract.ts";
 +
@@ -1155,6 +1819,24 @@ index 00000000..74a57a3f
 +let navigationCount = 0;
 +let deleteDuringOpen = false;
 +let rotateDuringOpen = false;
++let createCount = 0;
++let sendCount = 0;
++let stopCount = 0;
++let queryCount = 0;
++let delayNextCommandMs = 0;
++let holdNextCommandUnknown = false;
++const routingModeByTaskKey = new Map<string, "guide" | "queue">();
++const commandInbox = new Map<string, MicroInputCommandAck>();
++const heldUnknownCommands = new Map<string, MicroInputCommandAck>();
++const sentByTaskKey: Record<
++  string,
++  Array<{ commandId: string; textByteLen: number; delivery: MicroInputDelivery }>
++> = {};
++const stoppedByTaskKey: Record<string, string[]> = {};
++const commandIdsSeen: string[] = [];
++
++const taskKey = (workspacePath: string, taskId: string) => `${workspacePath}#${taskId}`;
++
 +const reset = () => {
 +  rows = scopes.map((scope) => ({
 +    address: { ...scope, taskId: "same-task-id" },
@@ -1168,6 +1850,18 @@ index 00000000..74a57a3f
 +  navigationCount = 0;
 +  deleteDuringOpen = false;
 +  rotateDuringOpen = false;
++  createCount = 0;
++  sendCount = 0;
++  stopCount = 0;
++  queryCount = 0;
++  delayNextCommandMs = 0;
++  holdNextCommandUnknown = false;
++  routingModeByTaskKey.clear();
++  commandInbox.clear();
++  heldUnknownCommands.clear();
++  for (const key of Object.keys(sentByTaskKey)) delete sentByTaskKey[key];
++  for (const key of Object.keys(stoppedByTaskKey)) delete stoppedByTaskKey[key];
++  commandIdsSeen.length = 0;
 +};
 +reset();
 +const selection = createMicroInputSelection(tabs, () => {
@@ -1195,6 +1889,149 @@ index 00000000..74a57a3f
 +  current: (scope) => {
 +    const current = selection.current(scope);
 +    return connected && current ? () => connected && current() : null;
++  },
++  sendCommand: async (scope, envelope) => {
++    if (!connected) throw new Error("offline");
++    commandIdsSeen.push(envelope.commandId);
++    const inboxKey = `${scope.workspacePath}:${envelope.sessionId ?? "null"}:${envelope.commandId}`;
++    const existing = commandInbox.get(inboxKey);
++    if (existing) {
++      return { ...existing, status: "duplicate" };
++    }
++    let ack: MicroInputCommandAck;
++    if (envelope.type === "createSession") {
++      createCount++;
++      const sessionId = envelope.payload.sessionId ?? `created-session-${createCount}`;
++      const liveStatus = envelope.payload.firstInput ? "running" : "idle";
++      const executionId = envelope.payload.firstInput ? `exec-create-${createCount}` : undefined;
++      if (
++        !rows.some(
++          (row) => sameMicroInputScope(row.address, scope) && row.address.taskId === sessionId,
++        )
++      ) {
++        rows.push({
++          address: { ...scope, taskId: sessionId },
++          title: `Created ${createCount}`,
++          liveStatus,
++          ...(executionId ? { executionId } : {}),
++        });
++      }
++      if (envelope.payload.firstInput) {
++        const key = taskKey(scope.workspacePath, sessionId);
++        sentByTaskKey[key] ??= [];
++        sentByTaskKey[key]!.push({
++          commandId: envelope.commandId,
++          textByteLen: Buffer.byteLength(envelope.payload.firstInput.text, "utf8"),
++          delivery: "startNow",
++        });
++      }
++      ack = {
++        commandId: envelope.commandId,
++        status: "accepted",
++        result: {
++          type: "createSession",
++          sessionId,
++          ...(envelope.payload.firstInput
++            ? { input: { delivery: "startNow", inputId: envelope.commandId } }
++            : {}),
++        },
++      };
++    } else if (envelope.type === "sendText") {
++      sendCount++;
++      const row = rows.find(
++        (candidate) =>
++          sameMicroInputScope(candidate.address, scope) &&
++          candidate.address.taskId === envelope.sessionId,
++      );
++      if (!row) {
++        return {
++          commandId: envelope.commandId,
++          status: "rejected",
++          reasonCode: "guard.sessionNotFound",
++        };
++      }
++      const key = taskKey(scope.workspacePath, envelope.sessionId);
++      const routingMode = routingModeByTaskKey.get(key) ?? "guide";
++      const requested = envelope.payload.requestedDelivery;
++      let delivery: MicroInputDelivery;
++      if (row.liveStatus === "running") {
++        if (requested === "guide" && routingMode === "guide") {
++          delivery = "guide";
++        } else if (requested === "startNow") {
++          delivery = "startNow";
++          row.executionId = `exec-preempt-${sendCount}`;
++        } else {
++          delivery = "queue";
++        }
++      } else {
++        delivery = "startNow";
++        row.liveStatus = "running";
++        row.executionId = row.executionId ?? `exec-turn-${sendCount}`;
++      }
++      sentByTaskKey[key] ??= [];
++      sentByTaskKey[key]!.push({
++        commandId: envelope.commandId,
++        textByteLen: Buffer.byteLength(envelope.payload.text, "utf8"),
++        delivery,
++      });
++      ack = {
++        commandId: envelope.commandId,
++        status: "accepted",
++        result: {
++          type: "inputAccepted",
++          delivery,
++          inputId: envelope.commandId,
++        },
++      };
++    } else {
++      stopCount++;
++      const row = rows.find(
++        (candidate) =>
++          sameMicroInputScope(candidate.address, scope) &&
++          candidate.address.taskId === envelope.sessionId,
++      );
++      if (
++        !row ||
++        row.liveStatus !== "running" ||
++        !row.executionId ||
++        row.executionId !== envelope.payload.expectedForegroundExecutionId
++      ) {
++        ack = {
++          commandId: envelope.commandId,
++          status: "noop",
++          reasonCode: "guard.stopTargetChanged",
++        };
++      } else {
++        const key = taskKey(scope.workspacePath, envelope.sessionId);
++        stoppedByTaskKey[key] ??= [];
++        stoppedByTaskKey[key]!.push(row.executionId);
++        row.liveStatus = "completed";
++        delete row.executionId;
++        ack = {
++          commandId: envelope.commandId,
++          status: "accepted",
++        };
++      }
++    }
++    if (holdNextCommandUnknown) {
++      holdNextCommandUnknown = false;
++      heldUnknownCommands.set(inboxKey, ack);
++    } else {
++      commandInbox.set(inboxKey, ack);
++    }
++    if (delayNextCommandMs > 0) {
++      const waitMs = delayNextCommandMs;
++      delayNextCommandMs = 0;
++      await new Promise((resolve) => setTimeout(resolve, waitMs));
++    }
++    return ack;
++  },
++  queryCommand: async (scope, sessionId, commandId) => {
++    if (!connected) throw new Error("offline");
++    queryCount++;
++    const inboxKey = `${scope.workspacePath}:${sessionId ?? "null"}:${commandId}`;
++    const nullKey = `${scope.workspacePath}:null:${commandId}`;
++    return commandInbox.get(inboxKey) ?? commandInbox.get(nullKey) ?? "unknown";
 +  },
 +});
 +const socket = await startMicroInputSocket({
@@ -1245,6 +2082,44 @@ index 00000000..74a57a3f
 +          case "rotate-during-open":
 +            rotateDuringOpen = true;
 +            break;
++          case "set-task-state": {
++            const workspacePath = command.workspacePath ?? scopes[0]!.workspacePath;
++            const taskId = command.taskId ?? "same-task-id";
++            const existing = rows.find(
++              (row) => row.address.workspacePath === workspacePath && row.address.taskId === taskId,
++            );
++            if (existing) {
++              if (typeof command.liveStatus === "string") existing.liveStatus = command.liveStatus;
++              if (typeof command.executionId === "string" && command.executionId.length > 0) {
++                existing.executionId = command.executionId;
++              } else if (command.executionId === null) {
++                delete existing.executionId;
++              }
++            } else {
++              rows.push({
++                address: { workspacePath, taskId },
++                title: command.title ?? taskId,
++                liveStatus: command.liveStatus ?? "idle",
++                ...(typeof command.executionId === "string" && command.executionId.length > 0
++                  ? { executionId: command.executionId }
++                  : {}),
++              });
++            }
++            if (command.routingMode === "guide" || command.routingMode === "queue") {
++              routingModeByTaskKey.set(taskKey(workspacePath, taskId), command.routingMode);
++            }
++            break;
++          }
++          case "delay-next-command":
++            delayNextCommandMs = Number(command.delayMs ?? 250);
++            holdNextCommandUnknown = Boolean(command.holdUnknown);
++            break;
++          case "settle-held-commands":
++            for (const [key, ack] of heldUnknownCommands) {
++              commandInbox.set(key, ack);
++            }
++            heldUnknownCommands.clear();
++            break;
 +          case "stats":
 +            break;
 +          default:
@@ -1258,6 +2133,14 @@ index 00000000..74a57a3f
 +            selected: selection.selected(scopes[0]!) ?? selection.selected(scopes[1]!),
 +            connected,
 +            sourceGeneration,
++            createCount,
++            sendCount,
++            stopCount,
++            queryCount,
++            sentByTaskKey,
++            stoppedByTaskKey,
++            commandIdsSeen,
++            rows,
 +          }) + "\n",
 +        );
 +      } catch {
@@ -1287,40 +2170,294 @@ index 00000000..74a57a3f
 +setTimeout(() => void close(), Math.min(600, Math.max(1, Number(values.ttl))) * 1000).unref();
 diff --git a/scripts/micro-input-host-boundary.mjs b/scripts/micro-input-host-boundary.mjs
 new file mode 100644
-index 00000000..f0609bb1
+index 00000000..e4b13ac8
 --- /dev/null
 +++ b/scripts/micro-input-host-boundary.mjs
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,287 @@
 +import assert from "node:assert/strict";
 +import { randomUUID } from "node:crypto";
 +import { createWindowHostControllerRuntime } from "../packages/desktop/src/host/windowHostControllerService.ts";
 +
 +const scope = { kind: "local", workspacePath: "/synthetic/workspace" };
-+const meta = {
-+  taskId: "task", workspacePath: scope.workspacePath, title: "Same task", status: "completed",
-+  createdAt: 1, updatedAt: 2, lastAssistantPreview: "PRIVATE_PREVIEW", lastError: { message: "PRIVATE_ERROR" },
-+};
++let status = "completed";
++let activeExecutionId = "exec-initial";
++const meta = () => ({
++  taskId: "task",
++  workspacePath: scope.workspacePath,
++  title: "Same task",
++  status,
++  createdAt: 1,
++  updatedAt: 2,
++  lastAssistantPreview: "PRIVATE_PREVIEW",
++  lastError: { message: "PRIVATE_ERROR" },
++});
 +let exists = true;
++const commandInbox = new Map();
++let createSessionCalls = 0;
++let sendTextCalls = 0;
++let stopCalls = 0;
++let routingMode = "guide";
++
 +const taskService = {
-+  listTasks: async () => exists ? [meta] : [],
++  listTasks: async () => (exists ? [meta()] : []),
 +  listPinnedTasks: async () => [],
 +  listArchivedTasks: async () => [],
-+  getTaskMeta: async () => exists ? meta : null,
++  getTaskMeta: async ({ taskId }) => (exists && taskId === "task" ? meta() : null),
++  readBotTopicExecution: async ({ taskId }) =>
++    exists && taskId === "task" && status === "running" && activeExecutionId
++      ? { executionId: activeExecutionId }
++      : undefined,
 +};
++const agentService = {
++  onDynamicSessionsIndexFrame: () => () => ({ dispose() {} }),
++  onAgentRuntimeRestarted: () => ({ dispose() {} }),
++  subscribeSessionsIndexV4: async () => ({
++    ack: { subscriptionId: "sub-1", mode: "snapshot", logEpoch: "epoch-1" },
++  }),
++  resyncSessionsIndexV4: async () => ({
++    ack: { subscriptionId: "sub-1", mode: "snapshot", logEpoch: "epoch-1" },
++  }),
++  unsubscribeSessionsIndexV4: async () => {},
++  sendConversationCommandV4: async ({ envelope }) => {
++    const key = `${envelope.sessionId ?? "null"}:${envelope.commandId}`;
++    if (commandInbox.has(key)) {
++      const cached = commandInbox.get(key);
++      return { ...cached, status: "duplicate" };
++    }
++    if (envelope.type === "createSession") {
++      createSessionCalls++;
++      const sessionId = envelope.payload.sessionId ?? `created-${createSessionCalls}`;
++      const ack = {
++        commandId: envelope.commandId,
++        sessionId: null,
++        status: "accepted",
++        result: {
++          type: "createSession",
++          sessionId,
++          ...(envelope.payload.firstInput
++            ? { input: { delivery: "startNow", inputId: envelope.commandId } }
++            : {}),
++        },
++      };
++      commandInbox.set(key, ack);
++      return ack;
++    }
++    if (envelope.type === "sendText") {
++      sendTextCalls++;
++      const requested = envelope.payload.requestedDelivery;
++      const delivery =
++        status === "running"
++          ? requested === "guide" && routingMode === "guide"
++            ? "guide"
++            : requested === "startNow"
++              ? "startNow"
++              : "queue"
++          : "startNow";
++      const ack = {
++        commandId: envelope.commandId,
++        sessionId: envelope.sessionId,
++        status: "accepted",
++        result: {
++          type: "inputAccepted",
++          delivery,
++          inputId: envelope.commandId,
++        },
++      };
++      commandInbox.set(key, ack);
++      return ack;
++    }
++    if (envelope.type === "stop") {
++      stopCalls++;
++      if (
++        status !== "running" ||
++        envelope.payload.expectedForegroundExecutionId !== activeExecutionId
++      ) {
++        const noopAck = {
++          commandId: envelope.commandId,
++          sessionId: envelope.sessionId,
++          status: "noop",
++          reasonCode: "guard.stopTargetChanged",
++        };
++        commandInbox.set(key, noopAck);
++        return noopAck;
++      }
++      status = "completed";
++      activeExecutionId = "";
++      const ack = {
++        commandId: envelope.commandId,
++        sessionId: envelope.sessionId,
++        status: "accepted",
++      };
++      commandInbox.set(key, ack);
++      return ack;
++    }
++    throw new Error("unexpected command");
++  },
++  queryConversationCommandsV4: async ({ commands }) => ({
++    results: commands.map(({ sessionId, commandId }) => {
++      const key = `${sessionId ?? "null"}:${commandId}`;
++      return {
++        key: { sessionId, commandId },
++        result: commandInbox.get(key) ?? "unknown",
++      };
++    }),
++  }),
++};
++
 +const controller = createWindowHostControllerRuntime({
 +  createId: randomUUID,
-+  readHostTaskList: async () => { throw new Error("unscoped read forbidden"); },
-+  resolveSource: (target) => target.workspacePath === scope.workspacePath
-+    ? { scope, taskService, sourceAvailability: "online" } : null,
++  readHostTaskList: async () => {
++    throw new Error("unscoped read forbidden");
++  },
++  resolveSource: (target) =>
++    target.workspacePath === scope.workspacePath
++      ? { scope, taskService, agentService, sourceAvailability: "online" }
++      : null,
 +});
 +try {
-+  const result = await controller.service.readMicroInputIndex({ scope: { workspacePath: scope.workspacePath } });
-+  assert.deepEqual(result.rows, [{ address: { workspacePath: scope.workspacePath, taskId: meta.taskId }, title: meta.title, liveStatus: "completed" }]);
++  const result = await controller.service.readMicroInputIndex({
++    scope: { workspacePath: scope.workspacePath },
++  });
++  assert.deepEqual(result.rows, [
++    {
++      address: { workspacePath: scope.workspacePath, taskId: "task" },
++      title: "Same task",
++      liveStatus: "completed",
++    },
++  ]);
 +  assert.equal(JSON.stringify(result).includes("PRIVATE"), false);
-+  const target = { address: { workspacePath: scope.workspacePath, taskId: meta.taskId } };
++
++  // Create draft session bound to workspace and read back new ID
++  const createAck = await controller.service.sendMicroInputCommand({
++    scope: { workspacePath: scope.workspacePath },
++    envelope: {
++      commandId: "cmd-create-1",
++      clientId: "mi-client",
++      sessionId: null,
++      type: "createSession",
++      payload: { workspaceId: scope.workspacePath, sessionId: "draft-1" },
++      issuedAt: 1,
++    },
++  });
++  assert.equal(createAck.status, "accepted");
++  assert.equal(createAck.result?.type, "createSession");
++  assert.equal(createAck.result?.sessionId, "draft-1");
++  assert.equal(
++    await controller.service.hasMicroInputTask({
++      address: { workspacePath: scope.workspacePath, taskId: "draft-1" },
++    }),
++    true,
++  );
++  // Duplicate create command does not create a second session
++  const duplicateCreateAck = await controller.service.sendMicroInputCommand({
++    scope: { workspacePath: scope.workspacePath },
++    envelope: {
++      commandId: "cmd-create-1",
++      clientId: "mi-client",
++      sessionId: null,
++      type: "createSession",
++      payload: { workspaceId: scope.workspacePath, sessionId: "draft-1" },
++      issuedAt: 1,
++    },
++  });
++  assert.equal(duplicateCreateAck.status, "duplicate");
++  assert.equal(createSessionCalls, 1);
++
++  // Running session projects executionId and distinguishes guide (steering) vs queue
++  status = "running";
++  activeExecutionId = "exec-run-2";
++  routingMode = "guide";
++  const steerAck = await controller.service.sendMicroInputCommand({
++    scope: { workspacePath: scope.workspacePath },
++    envelope: {
++      commandId: "cmd-steer-1",
++      clientId: "mi-client",
++      sessionId: "task",
++      type: "sendText",
++      payload: { text: "steer in flight", requestedDelivery: "guide" },
++      issuedAt: 2,
++    },
++  });
++  assert.equal(steerAck.status, "accepted");
++  assert.equal(steerAck.result?.type, "inputAccepted");
++  assert.equal(steerAck.result?.delivery, "guide");
++  assert.equal(createSessionCalls, 1);
++
++  // Queue fallback when guide is not admitted as steering
++  routingMode = "queue";
++  const queueAck = await controller.service.sendMicroInputCommand({
++    scope: { workspacePath: scope.workspacePath },
++    envelope: {
++      commandId: "cmd-queue-1",
++      clientId: "mi-client",
++      sessionId: "task",
++      type: "sendText",
++      payload: { text: "fallback to queue", requestedDelivery: "guide" },
++      issuedAt: 3,
++    },
++  });
++  assert.equal(queueAck.status, "accepted");
++  assert.equal(queueAck.result?.type, "inputAccepted");
++  assert.equal(queueAck.result?.delivery, "queue");
++
++  // Late stop with stale executionId returns noop without stopping activeExecutionId
++  const lateStopAck = await controller.service.sendMicroInputCommand({
++    scope: { workspacePath: scope.workspacePath },
++    envelope: {
++      commandId: "cmd-stop-stale",
++      clientId: "mi-client",
++      sessionId: "task",
++      type: "stop",
++      payload: { expectedForegroundExecutionId: "exec-old-1" },
++      issuedAt: 4,
++    },
++  });
++  assert.equal(lateStopAck.status, "noop");
++  assert.equal(lateStopAck.reasonCode, "guard.stopTargetChanged");
++  assert.equal(status, "running");
++
++  // Stop with current executionId stops the active execution
++  const validStopAck = await controller.service.sendMicroInputCommand({
++    scope: { workspacePath: scope.workspacePath },
++    envelope: {
++      commandId: "cmd-stop-current",
++      clientId: "mi-client",
++      sessionId: "task",
++      type: "stop",
++      payload: { expectedForegroundExecutionId: "exec-run-2" },
++      issuedAt: 5,
++    },
++  });
++  assert.equal(validStopAck.status, "accepted");
++  assert.equal(status, "completed");
++
++  // Query command reconciliation
++  assert.equal(
++    await controller.service.queryMicroInputCommand({
++      scope: { workspacePath: scope.workspacePath },
++      sessionId: "task",
++      commandId: "cmd-unseen",
++    }),
++    "unknown",
++  );
++  const reconciledSteer = await controller.service.queryMicroInputCommand({
++    scope: { workspacePath: scope.workspacePath },
++    sessionId: "task",
++    commandId: "cmd-steer-1",
++  });
++  assert.notEqual(reconciledSteer, "unknown");
++  if (reconciledSteer !== "unknown") {
++    assert.equal(reconciledSteer.result?.type, "inputAccepted");
++    if (reconciledSteer.result?.type === "inputAccepted") {
++      assert.equal(reconciledSteer.result.delivery, "guide");
++    }
++  }
++
++  const target = { address: { workspacePath: scope.workspacePath, taskId: "task" } };
 +  assert.equal(await controller.service.hasMicroInputTask(target), true);
 +  exists = false;
 +  assert.equal(await controller.service.hasMicroInputTask(target), false);
-+  assert.deepEqual((await controller.service.readMicroInputIndex({ scope: { workspacePath: scope.workspacePath } })).rows, []);
-+} finally { controller.dispose(); }
-+console.log("Host metadata projection and boolean existence boundary: PASS");
++} finally {
++  controller.dispose();
++}
++console.log("Host metadata projection, v4 command idempotency, steering and stop boundary: PASS");

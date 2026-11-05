@@ -89,11 +89,26 @@ def main():
                             "--filter", "ZCodePairedTests"], cwd=ROOT, env=swift_env, stdout=swift_log,
                            stderr=subprocess.STDOUT, timeout=90, check=True)
         swift = json.loads(swift_result.read_text())
-        if swift.get("status") != "PASS" or swift.get("confirmed_targets") != 2:
+        if (
+            swift.get("status") != "PASS"
+            or swift.get("confirmed_targets") != 2
+            or swift.get("controlled_execution") != "PASS"
+            or swift.get("steering_vs_queue") != "PASS"
+            or swift.get("late_stop_noop") != "PASS"
+            or swift.get("create_workspace_readback") != "PASS"
+            or swift.get("duplicate_dedup") != "PASS"
+        ):
             raise ValueError("Swift pair incomplete")
         after_swift = stats()
-        if after_swift["navigationCount"] != 2:
-            raise ValueError("native and Swift navigation counts differ")
+        if (
+            after_swift["navigationCount"] != 4
+            or after_swift.get("createCount") != 1
+            or after_swift.get("sendCount") != 3
+            or after_swift.get("stopCount") != 2
+            or after_swift.get("queryCount") != 1
+        ):
+            raise ValueError("native and Swift command/navigation counts differ")
+        exchange(control, {"op": "reset"})
         listed = exchange(grant["socketPath"], request())
         target = listed["rows"][0]["address"]
         before = stats()["navigationCount"]
@@ -122,6 +137,8 @@ def main():
             raise ValueError("disconnected peer navigated")
         result = dict(status="PASS", native_source_sha=base, patch_sha256=hashlib.sha256(actual).hexdigest(),
                       transport="real-unix-socket", confirmed_targets=2, unauthorized_metadata_reads=0,
+                      controlled_execution="PASS", steering_vs_queue="PASS", late_stop_noop="PASS",
+                      create_workspace_readback="PASS", duplicate_dedup="PASS",
                       deleted_target="REJECTED", deleted_during_open="REJECTED", replaced_source="REJECTED", old_generation="REJECTED", disconnected="REJECTED",
                       native_install="NOT_RUN", renderer_store="PASS", renderer_ui="NOT_RUN", physical_key="NOT_RUN", transcript_api="NOT_EXPOSED",
                       git_sha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),

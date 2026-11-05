@@ -89,10 +89,11 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Depends on**: F。责任票 #82。
 - **Evidence**: .scratch/qa-runs/1793857584441-83439/evidence/result.json
 
-### [ ] Slice K1: 向 ZCode 准确发送并停止指定执行
+### [x] Slice K1: 向 ZCode 准确发送并停止指定执行
 - **Outcome**: 接 createSession、sendText 和携带 execution ID 的 stop；运行中发送的 steering 语义单独确认。
 - **Done Predicate**: 两个会话只影响选中者；迟到 stop 不停止新 execution；重复命令不重复发送；超时结果未知时不换 ID 重放。 新建绑定工作区并回读新 ID；运行中插话不误建新会话，不把排队当 steering。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: G。责任票 #33。
+- **Evidence**: .scratch/qa-runs/1793862357974-42746/evidence/result.json
 
 ### [ ] Slice K2: 向 DSH 准确发送并停止当前轮次
 - **Outcome**: 接 create、prompt queue/steer、requestId 与 cancel。补同 Host 的预期 turn 核对，分别显示当前轮次和队列。
