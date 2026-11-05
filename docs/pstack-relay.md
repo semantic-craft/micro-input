@@ -113,10 +113,11 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Depends on**: K1。责任票 #33。
 - **Evidence**: .scratch/qa-runs/1793874716941-62949/evidence/result.json
 
-### [ ] Slice L2: 接 DSH 请求审批与思考档位
+### [x] Slice L2: 接 DSH 请求审批与思考档位
 - **Outcome**: 先证明当前桌面 approval 接线，再接 request 级回答和 selectModel。
 - **Done Predicate**: 取消/迟到答案零副作用；会话切换不改批其他请求；真实模型档位回读；无法证明接线时保留缺口。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: K2。责任票 #32。
+- **Evidence**: .scratch/qa-runs/1793881371629-18575/evidence/result.json
 
 ### [ ] Slice L3: 补 Antigravity 请求与模型控制缺口
 - **Outcome**: 逐能力用 REA 核实停止、审批、模型/思考入口，按能力分 PR；语音归 O1。

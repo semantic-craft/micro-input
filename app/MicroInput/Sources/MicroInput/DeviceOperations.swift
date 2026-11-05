@@ -138,7 +138,7 @@ extension Store {
             AuditLogWriter.append(receipt)
         } else if payload?.action_type == "agent_command", payload?.adapter == "dsh-desktop",
                   let cmd = payload?.command,
-                  ["create-session", "prompt-session", "cancel-session", "query-command"].contains(cmd) {
+                  ["create-session", "prompt-session", "cancel-session", "query-command", "resolve-interaction", "switch-model"].contains(cmd) {
             let result = await dshSessions.execute(dshCommand, admitted: { [weak self] in
                 guard let self else { return false }
                 return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
@@ -148,6 +148,8 @@ extension Store {
             case "create-session": actionType = "dsh_create"
             case "prompt-session": actionType = "dsh_prompt"
             case "cancel-session": actionType = "dsh_cancel"
+            case "resolve-interaction": actionType = "dsh_resolve"
+            case "switch-model": actionType = "dsh_switch_model"
             default: actionType = "dsh_query"
             }
             receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,

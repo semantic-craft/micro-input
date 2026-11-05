@@ -126,6 +126,12 @@ def verify_evidence(run, scenario, started, process_alive):
             "cancel_queue_remaining_not_all_stopped",
             "unprovable_turn_atomicity_refused",
             "create_workspace_bound_readback",
+            "resolve_approval_recorded",
+            "already_resolved_noop_zero_side_effect",
+            "interaction_type_mismatch_blocked",
+            "resolve_question_answered",
+            "select_model_readback_confirmed",
+            "unsupported_thought_level_locally_refused",
             "wrong_selected_unconfirmed",
             "out_of_scope_zero_reads",
             "deleted_target_no_redirect",
@@ -148,6 +154,16 @@ def verify_evidence(run, scenario, started, process_alive):
             row for row in rows if row["action_type"] == "dsh_cancel" and row["outcome"] == "cancelledQueueRemaining"
         ]
         denied_cancel = [row for row in rows if row["action_type"] == "dsh_cancel" and row["outcome"] == "denied"]
+        resolved = [row for row in rows if row["action_type"] == "dsh_resolve" and row["outcome"] == "resolved"]
+        resolve_mismatch = [
+            row for row in rows if row["action_type"] == "dsh_resolve" and row["outcome"] == "interactionTypeMismatch"
+        ]
+        model_switched = [
+            row for row in rows if row["action_type"] == "dsh_switch_model" and row["outcome"] == "modelSwitched"
+        ]
+        unsupported_thought = [
+            row for row in rows if row["action_type"] == "dsh_switch_model" and row["outcome"] == "unsupportedThought"
+        ]
         if (
             len(confirmed) < 2
             or len(created) != 1
@@ -156,12 +172,17 @@ def verify_evidence(run, scenario, started, process_alive):
             or len(noop) != 1
             or len(cancelled_queue_remaining) != 1
             or len(denied_cancel) != 1
+            or len(resolved) != 3
+            or len(resolve_mismatch) != 1
+            or len(model_switched) != 1
+            or len(unsupported_thought) != 1
             or any(row.get("target") != "dsh" or row.get("text_byte_len") is not None for row in rows)
         ):
             raise ValueError("DSH exact navigation/execution receipts missing")
         result.update(
             dsh_navigation="SYNTHETIC_PASS",
             dsh_execution="SYNTHETIC_PASS",
+            dsh_interactions_and_model="SYNTHETIC_PASS",
             body_reads=0,
             native_app="NOT_RUN",
             receipt_count=len(rows),

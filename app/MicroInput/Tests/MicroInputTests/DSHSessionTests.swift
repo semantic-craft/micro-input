@@ -4,7 +4,13 @@ import MicroInputCore
 @testable import MicroInput
 
 private func dshRow(_ id: String = "session-a", pending: UInt64 = 0, running: Bool = true,
-                    currentTurn: Int? = 1, queuedCount: Int = 0) -> DSHSessionRow {
+                    currentTurn: Int? = 1, queuedCount: Int = 0,
+                    pendingInteraction: DSHPendingInteraction? = nil,
+                    modelConfig: DSHModelConfig? = DSHModelConfig(provider: "deepseek", model: "deepseek-chat", thought: "medium"),
+                    supportedModels: [DSHModelOption] = [
+                        DSHModelOption(provider: "deepseek", model: "deepseek-chat", supportedThoughts: ["low", "medium", "high"]),
+                        DSHModelOption(provider: "deepseek", model: "deepseek-reasoner", supportedThoughts: ["none", "low", "high"])
+                    ]) -> DSHSessionRow {
     DSHSessionRow(
         sessionId: id,
         workspaceId: "workspace-\(id)",
@@ -13,7 +19,10 @@ private func dshRow(_ id: String = "session-a", pending: UInt64 = 0, running: Bo
         running: running,
         pendingInput: pending,
         currentTurn: currentTurn,
-        queuedCount: queuedCount
+        queuedCount: queuedCount,
+        pendingInteraction: pendingInteraction,
+        modelConfig: modelConfig,
+        supportedModels: supportedModels
     )
 }
 private func dshSnapshot(generation: UInt64 = 1, cursor: UInt64 = 0, changes: [DSHSessionChange] = [],
@@ -34,6 +43,8 @@ private actor DSHTestPeer: DSHSessionServing {
     var prompts: [DSHPromptIntent] = []
     var cancels: [DSHCancelIntent] = []
     var queries: [DSHQueryIntent] = []
+    var resolves: [DSHResolveIntent] = []
+    var switches: [DSHSwitchModelIntent] = []
     var heldConnect = false
     var connectWaiting: CheckedContinuation<Void, Never>?
     var held = false
@@ -132,6 +143,37 @@ private actor DSHTestPeer: DSHSessionServing {
             requestId: intent.requestId, delivery: nil, expectedTurn: nil,
             currentTurn: nil, queuedCount: nil, duplicate: false, reasonCode: "query.unknownRequest"
         )
+    }
+    func resolve(_ intent: DSHResolveIntent) async throws -> DSHCommandReply {
+        if let existing = settledCommands[intent.requestId] {
+            return duplicateReply(existing)
+        }
+        resolves.append(intent)
+        if let override = commandReplyOverride { return override }
+        let settled = DSHCommandReply(
+            hostId: value.hostId, generation: value.generation, status: "resolved",
+            sessionId: intent.sessionId, workspaceId: intent.workspaceId, selected: intent.sessionId,
+            requestId: intent.requestId, delivery: nil, expectedTurn: nil,
+            currentTurn: nil, queuedCount: nil, duplicate: false, reasonCode: nil
+        )
+        settledCommands[intent.requestId] = settled
+        return settled
+    }
+    func switchModel(_ intent: DSHSwitchModelIntent) async throws -> DSHCommandReply {
+        if let existing = settledCommands[intent.requestId] {
+            return duplicateReply(existing)
+        }
+        switches.append(intent)
+        if let override = commandReplyOverride { return override }
+        let settled = DSHCommandReply(
+            hostId: value.hostId, generation: value.generation, status: "modelSwitched",
+            sessionId: intent.sessionId, workspaceId: intent.workspaceId, selected: intent.sessionId,
+            requestId: intent.requestId, delivery: nil, expectedTurn: nil,
+            currentTurn: nil, queuedCount: nil, duplicate: false, reasonCode: nil,
+            modelConfig: DSHModelConfig(provider: intent.provider, model: intent.model, thought: intent.thought)
+        )
+        settledCommands[intent.requestId] = settled
+        return settled
     }
     private func duplicateReply(_ reply: DSHCommandReply) -> DSHCommandReply {
         DSHCommandReply(
@@ -486,6 +528,78 @@ final class DSHSessionTests: XCTestCase {
         XCTAssertNil(controller.pendingUnknownCommand)
         await peer.setCommandReplyOverride(nil)
         XCTAssertNotNil(controller.promptIntent(for: "session-a", mode: .queue, text: "second task", requestId: "req-second"))
+        await controller.shutdown()
+    }
+    func testResolveInteractionRejectsCrossSessionAndDeduplicates() async throws {
+        let peer = DSHTestPeer()
+        let controller = DSHSessionController(client: peer, pollNanoseconds: 60_000_000_000)
+        controller.setEnabled(true); await controller.refresh()
+        let selectionA = try XCTUnwrap(controller.selection(for: "session-a"))
+        _ = await controller.open(selectionA, admitted: { true })
+
+        // 1. Attempt to resolve on session-b while session-a is selected -> selectionMismatch
+        let cmdWrongSession = try XCTUnwrap(controller.resolveIntent(
+            for: "session-b",
+            interactionId: "act-1",
+            interactionType: .permission,
+            decision: .approve,
+            requestId: "req-res-wrong"
+        ))
+        let resultWrong = await controller.execute(cmdWrongSession, admitted: { true })
+        XCTAssertEqual(resultWrong, DSHCommandResult.unconfirmed(selected: "session-a", reasonCode: "guard.selectionMismatch"))
+
+        // 2. Resolve on session-a -> success
+        let cmdA = try XCTUnwrap(controller.resolveIntent(
+            for: "session-a",
+            interactionId: "act-1",
+            interactionType: .permission,
+            decision: .approve,
+            requestId: "req-res-1"
+        ))
+        let resultA = await controller.execute(cmdA, admitted: { true })
+        XCTAssertEqual(resultA, DSHCommandResult.resolved(sessionId: "session-a", requestId: "req-res-1", duplicate: false))
+
+        // 3. Duplicate resolve -> duplicate: true
+        let resultDup = await controller.execute(cmdA, admitted: { true })
+        XCTAssertEqual(resultDup, DSHCommandResult.resolved(sessionId: "session-a", requestId: "req-res-1", duplicate: true))
+
+        await controller.shutdown()
+    }
+    func testSwitchModelVerifiesThoughtRejectionAndReadback() async throws {
+        let peer = DSHTestPeer()
+        let controller = DSHSessionController(client: peer, pollNanoseconds: 60_000_000_000)
+        controller.setEnabled(true); await controller.refresh()
+        let selectionA = try XCTUnwrap(controller.selection(for: "session-a"))
+        _ = await controller.open(selectionA, admitted: { true })
+
+        // 1. Unsupported thought rejected locally
+        // deepseek-chat supports ["low", "medium", "high"], so "extreme" is rejected locally
+        let cmdRefused = try XCTUnwrap(controller.switchModelIntent(
+            for: "session-a",
+            provider: "deepseek",
+            model: "deepseek-chat",
+            thought: "extreme",
+            requestId: "req-sw-refused"
+        ))
+        let refusedResult = await controller.execute(cmdRefused, admitted: { true })
+        XCTAssertEqual(refusedResult, .unsupportedThought(reasonCode: "guard.unsupportedThoughtLevel"))
+
+        // 2. Valid model switch
+        let cmdValid = try XCTUnwrap(controller.switchModelIntent(
+            for: "session-a",
+            provider: "deepseek",
+            model: "deepseek-reasoner",
+            thought: "high",
+            requestId: "req-sw-valid"
+        ))
+        let validResult = await controller.execute(cmdValid, admitted: { true })
+        let expectedConfig = DSHModelConfig(provider: "deepseek", model: "deepseek-reasoner", thought: "high")
+        XCTAssertEqual(validResult, .modelSwitched(sessionId: "session-a", requestId: "req-sw-valid", modelConfig: expectedConfig, duplicate: false))
+
+        // 3. Local state readback updated
+        let rowA = try XCTUnwrap(controller.row(for: "session-a"))
+        XCTAssertEqual(rowA.modelConfig, expectedConfig)
+
         await controller.shutdown()
     }
 }

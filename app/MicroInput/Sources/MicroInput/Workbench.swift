@@ -40,8 +40,24 @@ struct Workbench: View {
                     Text(store.editingDevice ? "设备配置 · 编辑" : store.browsingDeviceSnapshot ? "设备配置 · 只读" : "AGENTS").font(.caption).foregroundStyle(.secondary)
                     if let snapshot = store.snapshot {
                         ForEach(visibleProfileIndices, id: \.self) { i in
-                            Button { store.selectProfile(i) } label: {
-                                HStack(spacing: 10) { AgentBadge(name: snapshot.profiles[i].name); Text(DesktopAgent.displayName(snapshot.profiles[i].name)).font(.system(size: 13, weight: .medium)).lineLimit(2).fixedSize(horizontal: false, vertical: true); Spacer(); if i == store.profileIndex { Image(systemName: "checkmark").font(.caption) } }.padding(.horizontal, 10).padding(.vertical, 7).background(i == store.profileIndex ? Color.accentColor.opacity(0.09) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                            let isActiveHost = !store.browsingDeviceSnapshot && !store.editingDevice && snapshot.profiles[i].id.text == store.hostActiveProfileId
+                            Button {
+                                store.selectProfile(i)
+                                if !store.browsingDeviceSnapshot, !store.editingDevice, DesktopAgent.named(snapshot.profiles[i].name) != nil {
+                                    Task { await store.setHostActiveProfile(snapshot.profiles[i].id.text) }
+                                }
+                            } label: {
+                                HStack(spacing: 10) {
+                                    AgentBadge(name: snapshot.profiles[i].name)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(DesktopAgent.displayName(snapshot.profiles[i].name)).font(.system(size: 13, weight: .medium)).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                                        if isActiveHost {
+                                            Text("正在控制").font(.system(size: 10)).foregroundStyle(.tint)
+                                        }
+                                    }
+                                    Spacer()
+                                    if i == store.profileIndex { Image(systemName: "checkmark").font(.caption) }
+                                }.padding(.horizontal, 10).padding(.vertical, 7).background(i == store.profileIndex ? Color.accentColor.opacity(0.09) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
                             }.buttonStyle(.plain).accessibilityLabel(DesktopAgent.displayName(snapshot.profiles[i].name))
                         }
                     }
@@ -104,6 +120,11 @@ struct Workbench: View {
                                 Text(agent.capabilities).font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
+                            if !LiveHostActionExecutor.isAccessibilityTrusted {
+                                Button("授权辅助功能…") {
+                                    LiveHostActionExecutor.openAccessibilitySettings()
+                                }
+                            }
                             Button("打开应用") { Task { await store.openDesktopAgent(agent) } }.disabled(!agent.installed)
                             Button(store.hostActiveProfileId == store.profile?.id.text ? "当前控制配置" : "启用此配置") {
                                 Task { await store.setHostActiveProfile(store.profile?.id.text) }

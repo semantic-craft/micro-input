@@ -9,6 +9,34 @@ struct UnixNativeOwnershipTransport: NativeOwnershipTransport {
     var responseLimit = 4096
     var timeout: Duration = .milliseconds(750)
 
+    init(
+        path: String = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/MicroInput/cindy-ownership.sock").path,
+        requestLimit: Int = 4096,
+        responseLimit: Int = 4096,
+        timeout: Duration = .milliseconds(750)
+    ) {
+        self.path = path
+        self.requestLimit = requestLimit
+        self.responseLimit = responseLimit
+        self.timeout = timeout
+    }
+
+    init(socketPath: String, timeoutMilliseconds: Int, requestLimit: Int = 65536, responseLimit: Int = 1_048_576) {
+        self.path = socketPath
+        self.requestLimit = requestLimit
+        self.responseLimit = responseLimit
+        self.timeout = .milliseconds(timeoutMilliseconds)
+    }
+
+    func exchangeLine(_ payload: Data) -> String? {
+        let trimmed = payload.last == 0x0A ? Data(payload.dropLast()) : payload
+        guard let data = try? Self.exchangeBlocking(trimmed, path: path, requestLimit: requestLimit, responseLimit: responseLimit, timeout: timeout) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
     func exchange(_ request: NativeOwnershipRequest) async throws -> NativeOwnershipReply {
         let data = try await exchangeJSON(JSONEncoder().encode(request))
         return try JSONDecoder().decode(NativeOwnershipReply.self, from: data)

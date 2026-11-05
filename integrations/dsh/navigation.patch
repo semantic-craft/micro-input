@@ -72,29 +72,270 @@ index 3086755b..db884ae2 100644
    await ctx.plugin(desktopOffice, {
 diff --git a/apps/desktop-host/src/micro-input-host.ts b/apps/desktop-host/src/micro-input-host.ts
 new file mode 100644
-index 00000000..2cb3c4f4
+index 00000000..7c6c55ef
 --- /dev/null
 +++ b/apps/desktop-host/src/micro-input-host.ts
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,583 @@
 +import { randomUUID } from 'node:crypto'
++import { z } from 'zod'
 +import type { Context } from '@deepseek-ai/cordis'
 +import { SessionId, type Session, type UserMessage } from '@deepseek-ai/dsh-session'
 +import type { Agent } from '@deepseek-ai/dsh-agent'
 +import type {} from '@deepseek-ai/dsh-session-projection'
 +import type {} from '@deepseek-ai/dsh-session-title/types'
-+import type {} from '@deepseek-ai/dsh-user-approval'
++import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 +import type {} from '@deepseek-ai/dsh-user-questions'
++import type { AskUserQuestionRequestEvent, AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions/types'
 +import type {} from '@deepseek-ai/dsh-workspace'
-+import type { MicroInputHost, MicroInputPromptOutcome } from './micro-input.ts'
++import type {
++  MicroInputHost,
++  MicroInputPromptOutcome,
++  MicroInputResolveOutcome,
++  MicroInputSelectModelOutcome,
++  MicroInputPendingInteraction,
++  MicroInputModelConfig,
++  MicroInputModelOption,
++} from './micro-input.ts'
++
++declare module '@deepseek-ai/dsh-session/types' {
++  interface SessionEventMap {
++    'model/selection': {
++      provider: string
++      model: string
++      reasoningEffort?: string | undefined
++    }
++  }
++}
++
++export const DEFAULT_DSH_MODELS: readonly MicroInputModelOption[] = [
++  {
++    provider: 'deepseek-official',
++    model: 'deepseek-chat',
++    defaultThought: 'medium',
++    supportedThoughts: ['off', 'low', 'medium', 'high'],
++  },
++  {
++    provider: 'deepseek-official',
++    model: 'deepseek-reasoner',
++    defaultThought: 'high',
++    supportedThoughts: ['low', 'medium', 'high'],
++  },
++]
++
++interface TrackedApproval {
++  id: string
++  sessionId: string
++  toolName?: string | undefined
++  options?: readonly string[] | undefined
++  resolve: (outcome: ApprovalOutcome) => void
++  settled: boolean
++}
++
++interface TrackedQuestion {
++  id: string
++  sessionId: string
++  questionId: string
++  toolName?: string | undefined
++  options?: readonly string[] | undefined
++  approveOption?: string | undefined
++  resolve: (answer: AskUserQuestionAnswer) => void
++  settled: boolean
++}
++
++interface ModelSelectionData {
++  readonly provider: string
++  readonly model: string
++  readonly reasoningEffort?: string | undefined
++}
++
++interface ModelSelectionState {
++  readonly lastUsed: ModelSelectionData | null
++  readonly pending: ModelSelectionData | null
++}
++
++const modelSelectionDataSchema: z.ZodType<ModelSelectionData> = z.object({
++  provider: z.string(),
++  model: z.string(),
++  reasoningEffort: z.string().optional(),
++})
++
++const modelSelectionStateSchema: z.ZodType<ModelSelectionState> = z.object({
++  lastUsed: modelSelectionDataSchema.nullable(),
++  pending: modelSelectionDataSchema.nullable(),
++})
++
++const modelSelectionViewSchema = z.object({
++  lastUsed: modelSelectionDataSchema.nullable(),
++  next: modelSelectionDataSchema.nullable(),
++})
++
++function isModelSelectionData(val: unknown): val is ModelSelectionData {
++  if (typeof val !== 'object' || val === null) return false
++  const obj = val as Record<string, unknown>
++  return typeof obj.provider === 'string' && typeof obj.model === 'string'
++}
++
++function applyModelSelection(
++  state: ModelSelectionState,
++  event: { readonly type: string; readonly data?: unknown },
++): ModelSelectionState {
++  if (event.type === 'model/selection' && isModelSelectionData(event.data)) {
++    return { lastUsed: state.lastUsed, pending: event.data }
++  }
++  if (event.type === 'request/header' && typeof event.data === 'object' && event.data !== null) {
++    const data = event.data as {
++      readonly header?: {
++        readonly config?: {
++          readonly provider?: unknown
++          readonly model?: unknown
++          readonly reasoningEffort?: unknown
++        }
++      }
++    }
++    const config = data.header?.config
++    if (typeof config?.provider === 'string' && typeof config.model === 'string') {
++      const effort = typeof config.reasoningEffort === 'string' ? config.reasoningEffort : undefined
++      const lastUsed: ModelSelectionData = {
++        provider: config.provider,
++        model: config.model,
++        ...(effort === undefined ? {} : { reasoningEffort: effort }),
++      }
++      return { lastUsed, pending: null }
++    }
++  }
++  return state
++}
++
++const fallbackModelSelectionProjection = {
++  key: 'modelSelection' as const,
++  stateSchema: modelSelectionStateSchema,
++  init: (): ModelSelectionState => ({ lastUsed: null, pending: null }),
++  apply: applyModelSelection,
++  wire: {
++    viewSchema: modelSelectionViewSchema,
++    view: (state: ModelSelectionState) => ({ lastUsed: state.lastUsed, next: state.pending ?? state.lastUsed }),
++  },
++  stateVersion: 2,
++}
 +
 +export function microInputHost(
 +  ctx: Context,
 +  navigate: MicroInputHost['navigate'],
 +  selected?: MicroInputHost['selected'],
-+): MicroInputHost & Required<Pick<MicroInputHost, 'create' | 'prompt' | 'cancel'>> {
++): MicroInputHost & Required<Pick<MicroInputHost, 'create' | 'prompt' | 'cancel' | 'resolve' | 'selectModel'>> {
 +  const createdAgents = new Map<string, Agent>()
 +  const promptLedger = new WeakMap<Session, Map<string, 'queue' | 'steer'>>()
 +  let createdCounter = 0
++
++  const pendingApprovals = new Map<string, TrackedApproval>()
++  const pendingQuestions = new Map<string, TrackedQuestion>()
++  const sessionChangeObservers = new Set<(sessionId: string) => void>()
++  const notifySessionChanged = (sessionId: string) => {
++    for (const observer of sessionChangeObservers) observer(sessionId)
++  }
++
++  try {
++    const registry = ctx.sessionProjections as unknown as { register?: (def: unknown) => void }
++    registry.register?.(fallbackModelSelectionProjection)
++  } catch {
++    // Ignore if already registered
++  }
++
++  // Intercept approval/request waterfall
++  ctx.on('approval/request', async function (req: ApprovalRequest, next: () => Promise<ApprovalOutcome>) {
++    const sessionId = req.agent.session.id
++    const interactionId = (req as { id?: string }).id ?? randomUUID()
++    let resolver!: (outcome: ApprovalOutcome) => void
++    const promise = new Promise<ApprovalOutcome>((r) => { resolver = r })
++    const tracked: TrackedApproval = {
++      id: interactionId,
++      sessionId,
++      toolName: req.toolName,
++      options: ['allowed-once', 'rejected'],
++      resolve: resolver,
++      settled: false,
++    }
++    pendingApprovals.set(interactionId, tracked)
++    notifySessionChanged(sessionId)
++
++    const abortCleanup = () => {
++      if (!tracked.settled) {
++        tracked.settled = true
++        resolver('cancelled')
++      }
++    }
++    req.signal?.addEventListener('abort', abortCleanup, { once: true })
++
++    try {
++      const desktopPromise = Promise.resolve().then(next).catch(() => 'unavailable' as const)
++      const desktopAnswer = desktopPromise.then((res) => {
++        if (res !== 'unavailable') return res
++        return new Promise<ApprovalOutcome>(() => {})
++      })
++      const result = await Promise.race([promise, desktopAnswer])
++      tracked.settled = true
++      return result
++    } finally {
++      tracked.settled = true
++      pendingApprovals.delete(interactionId)
++      req.signal?.removeEventListener('abort', abortCleanup)
++      notifySessionChanged(sessionId)
++    }
++  }, { prepend: true })
++
++  // Intercept user-questions/request waterfall
++  ctx.on('user-questions/request', async function (
++    req: AskUserQuestionRequestEvent,
++    next: () => Promise<AskUserQuestionAnswer>,
++  ) {
++    const agent = req.agent
++    if (agent === undefined) return next()
++    const sessionId = agent.session.id
++    const firstQuestion = req.questions[0]
++    if (firstQuestion === undefined) return next()
++    const interactionId = req.wait?.callId ?? firstQuestion.id
++    let resolver!: (answer: AskUserQuestionAnswer) => void
++    const promise = new Promise<AskUserQuestionAnswer>((r) => { resolver = r })
++    const options = firstQuestion.options?.map(o => o.label) ?? []
++    const approveOption = firstQuestion.intent?.kind === 'plan-review' ? firstQuestion.intent.approve : undefined
++    const tracked: TrackedQuestion = {
++      id: interactionId,
++      sessionId,
++      questionId: firstQuestion.id,
++      toolName: 'ask_user_question',
++      options,
++      approveOption,
++      resolve: resolver,
++      settled: false,
++    }
++    pendingQuestions.set(interactionId, tracked)
++    notifySessionChanged(sessionId)
++
++    const abortCleanup = () => {
++      if (!tracked.settled) {
++        tracked.settled = true
++        resolver({ answers: [] })
++      }
++    }
++    req.signal?.addEventListener('abort', abortCleanup, { once: true })
++
++    try {
++      const desktopPromise = Promise.resolve().then(next).catch(() => undefined)
++      const desktopAnswer = desktopPromise.then((res) => {
++        if (res !== undefined) return res
++        return new Promise<AskUserQuestionAnswer>(() => {})
++      })
++      const result = await Promise.race([promise, desktopAnswer])
++      tracked.settled = true
++      return result
++    } finally {
++      tracked.settled = true
++      pendingQuestions.delete(interactionId)
++      req.signal?.removeEventListener('abort', abortCleanup)
++      notifySessionChanged(sessionId)
++    }
++  }, { prepend: true })
++
 +  const readTurnAndQueue = (session: Session) => {
 +    const boundary = ctx.sessionProjections.cachedStateOf(session, 'turnBoundary')
 +    const inbox = ctx.sessionProjections.cachedStateOf(session, 'inbox')
@@ -121,6 +362,50 @@ index 00000000..2cb3c4f4
 +      const workspace = ctx.workspaceRegistry.list().find(item => item.sessionIds.includes(session.id))
 +      const active = agent?.session === session
 +      const running = active && agent.status === 'running'
++
++      // Check pending interactions
++      const pendingApproval = Array.from(pendingApprovals.values()).find(p => p.sessionId === id && !p.settled)
++      const pendingQuestion = Array.from(pendingQuestions.values()).find(q => q.sessionId === id && !q.settled)
++      let pendingInteraction: MicroInputPendingInteraction | undefined
++      if (pendingApproval !== undefined) {
++        pendingInteraction = {
++          interactionId: pendingApproval.id,
++          interactionType: 'permission',
++          ...(pendingApproval.toolName === undefined ? {} : { toolName: pendingApproval.toolName }),
++          ...(pendingApproval.options === undefined ? {} : { options: pendingApproval.options }),
++        }
++      } else if (pendingQuestion !== undefined) {
++        pendingInteraction = {
++          interactionId: pendingQuestion.id,
++          interactionType: 'question',
++          ...(pendingQuestion.toolName === undefined ? {} : { toolName: pendingQuestion.toolName }),
++          ...(pendingQuestion.options === undefined ? {} : { options: pendingQuestion.options }),
++        }
++      }
++
++      // Check model config
++      let modelConfig: MicroInputModelConfig = {
++        provider: 'deepseek-official',
++        model: 'deepseek-chat',
++        thought: 'medium',
++      }
++      try {
++        const projections = ctx.sessionProjections as unknown as {
++          cachedStateOf?(s: Session, k: string): ModelSelectionState | undefined
++        }
++        const state = projections.cachedStateOf?.(session, 'modelSelection')
++        const current = state?.pending ?? state?.lastUsed
++        if (current !== undefined && current !== null) {
++          modelConfig = {
++            provider: current.provider,
++            model: current.model,
++            ...(current.reasoningEffort === undefined ? {} : { thought: current.reasoningEffort }),
++          }
++        }
++      } catch {
++        // Fall back to default
++      }
++
 +      return {
 +        identity: session,
 +        row: {
@@ -132,10 +417,14 @@ index 00000000..2cb3c4f4
 +          pendingInput: ctx.approval.pendingCount(session) + questions,
 +          currentTurn: turnAndQueue.currentTurn,
 +          queuedCount: turnAndQueue.queuedCount,
++          ...(pendingInteraction === undefined ? {} : { pendingInteraction }),
++          modelConfig,
++          supportedModels: DEFAULT_DSH_MODELS,
 +        },
 +      }
 +    },
 +    observe(changed) {
++      sessionChangeObservers.add(changed)
 +      const stops = [
 +        ctx.on('agent/status', ({ agent }) => { changed(agent.id) }, { global: true }),
 +        ctx.on('agent/created', ({ agent }) => { changed(agent.id) }, { global: true }),
@@ -146,7 +435,10 @@ index 00000000..2cb3c4f4
 +        ctx.approval.observePending((session) => { changed(session.id) }),
 +        ctx.userQuestions.observePending((session) => { changed(session.id) }),
 +      ]
-+      return () => { for (const stop of stops) stop() }
++      return () => {
++        sessionChangeObservers.delete(changed)
++        for (const stop of stops) stop()
++      }
 +    },
 +    navigate,
 +    ...(selected === undefined ? {} : { selected }),
@@ -250,20 +542,152 @@ index 00000000..2cb3c4f4
 +        ? { status: 'cancelledQueueRemaining', currentTurn: after.currentTurn, queuedCount: after.queuedCount }
 +        : { status: 'cancelled', currentTurn: after.currentTurn, queuedCount: 0 }
 +    },
++    resolve(sessionId, interactionId, interactionType, decision, optionId, _requestId): Promise<MicroInputResolveOutcome> {
++      if (interactionType === 'permission') {
++        if (pendingQuestions.has(interactionId)) {
++          return Promise.resolve({
++            status: 'interactionTypeMismatch',
++            reasonCode: 'guard.questionCannotApproveAsPermission',
++          })
++        }
++        const approval = pendingApprovals.get(interactionId)
++        if (approval === undefined || approval.settled) {
++          return Promise.resolve({
++            status: 'noop',
++            reasonCode: 'guard.alreadyResolved',
++          })
++        }
++        if (approval.sessionId !== sessionId) {
++          return Promise.resolve({
++            status: 'denied',
++            reasonCode: 'guard.sessionMismatch',
++          })
++        }
++        approval.settled = true
++        if (decision === 'approve') {
++          approval.resolve('allowed-once')
++        } else if (decision === 'reject') {
++          approval.resolve('rejected')
++        } else {
++          approval.resolve('cancelled')
++        }
++        pendingApprovals.delete(interactionId)
++        notifySessionChanged(sessionId)
++        return Promise.resolve({ status: 'resolved' })
++      } else {
++        if (pendingApprovals.has(interactionId)) {
++          return Promise.resolve({
++            status: 'interactionTypeMismatch',
++            reasonCode: 'guard.permissionCannotAnswerAsQuestion',
++          })
++        }
++        const question = pendingQuestions.get(interactionId)
++        if (question === undefined || question.settled) {
++          return Promise.resolve({
++            status: 'noop',
++            reasonCode: 'guard.alreadyResolved',
++          })
++        }
++        if (question.sessionId !== sessionId) {
++          return Promise.resolve({
++            status: 'denied',
++            reasonCode: 'guard.sessionMismatch',
++          })
++        }
++        question.settled = true
++        let answer: AskUserQuestionAnswer
++        if (decision === 'cancel') {
++          answer = { answers: [] }
++        } else if (optionId !== undefined) {
++          answer = { answers: [{ id: question.questionId, selected: [optionId] }] }
++        } else if (decision === 'approve' && question.approveOption !== undefined) {
++          answer = { answers: [{ id: question.questionId, selected: [question.approveOption] }] }
++        } else if (question.options !== undefined && question.options.length > 0) {
++          const chosen = (decision === 'reject' && question.options.length > 1) ? question.options[1] : question.options[0]
++          if (chosen !== undefined) {
++            answer = { answers: [{ id: question.questionId, selected: [chosen] }] }
++          } else {
++            answer = { answers: [{ id: question.questionId, selected: [decision] }] }
++          }
++        } else {
++          answer = { answers: [{ id: question.questionId, selected: [decision] }] }
++        }
++        question.resolve(answer)
++        pendingQuestions.delete(interactionId)
++        notifySessionChanged(sessionId)
++        return Promise.resolve({ status: 'resolved' })
++      }
++    },
++    selectModel(sessionId, provider, model, thought, _requestId): Promise<MicroInputSelectModelOutcome> {
++      const session = ctx.sessions.get(SessionId(sessionId))
++      if (session === undefined) {
++        return Promise.resolve({ status: 'unavailable', reasonCode: 'session.notFound' })
++      }
++      const option = DEFAULT_DSH_MODELS.find(m => m.provider === provider && m.model === model)
++      if (option === undefined) {
++        return Promise.resolve({ status: 'denied', reasonCode: 'guard.unsupportedModel' })
++      }
++      const targetThought = thought ?? option.defaultThought
++      if (targetThought !== undefined && !option.supportedThoughts.includes(targetThought)) {
++        return Promise.resolve({ status: 'unsupportedThought', reasonCode: 'guard.unsupportedThoughtLevel' })
++      }
++      session.append('model/selection', {
++        provider,
++        model,
++        ...(targetThought === undefined ? {} : { reasoningEffort: targetThought }),
++      })
++      const projections = ctx.sessionProjections as unknown as {
++        cachedStateOf?(s: Session, k: string): ModelSelectionState | undefined
++      }
++      const state = projections.cachedStateOf?.(session, 'modelSelection')
++      const readback = state?.pending ?? state?.lastUsed
++      if (readback === null || readback === undefined
++        || readback.provider !== provider
++        || readback.model !== model
++        || (targetThought !== undefined && readback.reasoningEffort !== targetThought)) {
++        return Promise.resolve({ status: 'unconfirmed', reasonCode: 'guard.readbackMismatch' })
++      }
++      notifySessionChanged(sessionId)
++      return Promise.resolve({
++        status: 'modelSwitched',
++        modelConfig: {
++          provider,
++          model,
++          ...(targetThought === undefined ? {} : { thought: targetThought }),
++        },
++      })
++    },
 +  }
 +}
 diff --git a/apps/desktop-host/src/micro-input.ts b/apps/desktop-host/src/micro-input.ts
 new file mode 100644
-index 00000000..f883f2cb
+index 00000000..fa177bb0
 --- /dev/null
 +++ b/apps/desktop-host/src/micro-input.ts
-@@ -0,0 +1,438 @@
+@@ -0,0 +1,623 @@
 +import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 +import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs'
 +import { chmod, lstat, mkdir, rm, writeFile } from 'node:fs/promises'
 +import { createServer, type Socket } from 'node:net'
 +import { dirname, isAbsolute, join } from 'node:path'
 +
++export interface MicroInputPendingInteraction {
++  readonly interactionId: string
++  readonly interactionType: 'permission' | 'question'
++  readonly toolName?: string
++  readonly options?: readonly string[]
++}
++export interface MicroInputModelConfig {
++  readonly provider: string
++  readonly model: string
++  readonly thought?: string
++}
++export interface MicroInputModelOption {
++  readonly provider: string
++  readonly model: string
++  readonly defaultThought?: string
++  readonly supportedThoughts: readonly string[]
++}
 +export interface MicroInputRow {
 +  readonly sessionId: string
 +  readonly workspaceId: string
@@ -273,6 +697,9 @@ index 00000000..f883f2cb
 +  readonly pendingInput: number
 +  readonly currentTurn: number | null
 +  readonly queuedCount: number
++  readonly pendingInteraction?: MicroInputPendingInteraction
++  readonly modelConfig?: MicroInputModelConfig
++  readonly supportedModels?: readonly MicroInputModelOption[]
 +}
 +export type MicroInputPromptOutcome =
 +  | {
@@ -320,6 +747,49 @@ index 00000000..f883f2cb
 +    readonly status: 'denied'
 +    readonly reasonCode: string
 +  }
++export type MicroInputResolveOutcome =
++  | {
++    readonly status: 'resolved'
++    readonly duplicate?: boolean
++  }
++  | {
++    readonly status: 'noop'
++    readonly reasonCode: string
++  }
++  | {
++    readonly status: 'interactionTypeMismatch'
++    readonly reasonCode: string
++  }
++  | {
++    readonly status: 'unavailable'
++    readonly reasonCode: string
++  }
++  | {
++    readonly status: 'denied'
++    readonly reasonCode: string
++  }
++export type MicroInputSelectModelOutcome =
++  | {
++    readonly status: 'modelSwitched'
++    readonly modelConfig: MicroInputModelConfig
++    readonly duplicate?: boolean
++  }
++  | {
++    readonly status: 'unsupportedThought'
++    readonly reasonCode: string
++  }
++  | {
++    readonly status: 'unconfirmed'
++    readonly reasonCode: string
++  }
++  | {
++    readonly status: 'unavailable'
++    readonly reasonCode: string
++  }
++  | {
++    readonly status: 'denied'
++    readonly reasonCode: string
++  }
 +export interface MicroInputHost {
 +  read(sessionId: string): { row: MicroInputRow; identity: object } | undefined
 +  observe(changed: (sessionId: string) => void): () => void
@@ -334,6 +804,21 @@ index 00000000..f883f2cb
 +    signal: AbortSignal,
 +  ): Promise<MicroInputPromptOutcome>
 +  cancel?(sessionId: string, expectedTurn: number): MicroInputCancelOutcome
++  resolve?(
++    sessionId: string,
++    interactionId: string,
++    interactionType: 'permission' | 'question',
++    decision: 'approve' | 'reject' | 'cancel',
++    optionId?: string,
++    requestId?: string,
++  ): Promise<MicroInputResolveOutcome>
++  selectModel?(
++    sessionId: string,
++    provider: string,
++    model: string,
++    thought?: string,
++    requestId?: string,
++  ): Promise<MicroInputSelectModelOutcome>
 +}
 +interface Config { readonly directory: string; readonly sessionIds: readonly string[] }
 +export interface MicroInputGrant extends Config {
@@ -350,7 +835,7 @@ index 00000000..f883f2cb
 +  readonly hostId: string
 +  readonly generation: number
 +  readonly subscriptionId: string
-+  readonly op: 'subscribe' | 'read' | 'open' | 'create' | 'prompt' | 'cancel' | 'query' | 'close'
++  readonly op: string
 +  readonly activate?: false
 +  readonly after?: number
 +  readonly sessionId?: string
@@ -359,6 +844,13 @@ index 00000000..f883f2cb
 +  readonly mode?: 'queue' | 'steer'
 +  readonly text?: string
 +  readonly expectedTurn?: number
++  readonly interactionId?: string
++  readonly interactionType?: 'permission' | 'question'
++  readonly decision?: 'approve' | 'reject' | 'cancel'
++  readonly optionId?: string
++  readonly provider?: string
++  readonly model?: string
++  readonly thought?: string
 +}
 +interface Change { readonly sequence: number; readonly row: MicroInputRow }
 +const text = (value: unknown, max = 4096): value is string => typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= max
@@ -446,10 +938,11 @@ index 00000000..f883f2cb
 +    return Object.keys(r).every(key => [
 +      'version', 'id', 'token', 'hostId', 'generation', 'subscriptionId', 'op',
 +      'activate', 'after', 'sessionId', 'workspaceId', 'requestId', 'mode', 'text', 'expectedTurn',
++      'interactionId', 'interactionType', 'decision', 'optionId', 'provider', 'model', 'thought',
 +    ].includes(key))
 +      && r.version === 1 && text(r.subscriptionId, 256) && text(r.id, 256) && text(r.token, 256) && text(r.hostId, 256)
 +      && Number.isSafeInteger(r.generation)
-+      && ['subscribe', 'read', 'open', 'create', 'prompt', 'cancel', 'query', 'close'].includes(String(r.op))
++      && ['subscribe', 'read', 'open', 'create', 'prompt', 'cancel', 'query', 'close', 'resolve', 'selectModel'].includes(String(r.op))
 +  }
 +  const hasExtraFields = (input: Request, allowed: readonly string[]) =>
 +    Object.keys(input).some(key => !['version', 'id', 'token', 'hostId', 'generation', 'subscriptionId', 'op', ...allowed].includes(key))
@@ -621,42 +1114,141 @@ index 00000000..f883f2cb
 +      } catch { return { ...base, status: 'unavailable' } }
 +      finally { clearTimeout(timer); opens.delete(abort) }
 +    }
-+    if (!text(input.requestId, 256) || typeof input.expectedTurn !== 'number' || !Number.isSafeInteger(input.expectedTurn) || input.expectedTurn < 1
-+      || hasExtraFields(input, ['sessionId', 'workspaceId', 'requestId', 'expectedTurn'])) return { ...base, status: 'denied', reasonCode: 'guard.invalidCancelRequest' }
-+    const before = read(input.sessionId)
-+    if (isStale()) return { ...base, status: 'stale' }
-+    if (before === undefined) return { ...base, status: 'unavailable' }
-+    if (before.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
-+    const commandKey = `${input.sessionId}:${input.requestId}`
-+    const existing = settledCommands.get(commandKey)
-+    if (existing !== undefined) return { ...base, ...existing, duplicate: true }
-+    const activeSelected = currentSelected()
-+    if (activeSelected !== input.sessionId) {
-+      return { ...base, status: 'unconfirmed', ...(activeSelected === undefined ? {} : { selected: activeSelected }), reasonCode: 'guard.selectionMismatch' }
++    if (input.op === 'cancel') {
++      if (!text(input.requestId, 256) || typeof input.expectedTurn !== 'number' || !Number.isSafeInteger(input.expectedTurn) || input.expectedTurn < 1
++        || hasExtraFields(input, ['sessionId', 'workspaceId', 'requestId', 'expectedTurn'])) return { ...base, status: 'denied', reasonCode: 'guard.invalidCancelRequest' }
++      const before = read(input.sessionId)
++      if (isStale()) return { ...base, status: 'stale' }
++      if (before === undefined) return { ...base, status: 'unavailable' }
++      if (before.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++      const commandKey = `${input.sessionId}:${input.requestId}`
++      const existing = settledCommands.get(commandKey)
++      if (existing !== undefined) return { ...base, ...existing, duplicate: true }
++      const activeSelected = currentSelected()
++      if (activeSelected !== input.sessionId) {
++        return { ...base, status: 'unconfirmed', ...(activeSelected === undefined ? {} : { selected: activeSelected }), reasonCode: 'guard.selectionMismatch' }
++      }
++      if (host.cancel === undefined) {
++        return { ...base, status: 'denied', reasonCode: 'guard.unprovableTurnAtomicity' }
++      }
++      const outcome = host.cancel(input.sessionId, input.expectedTurn)
++      const after = read(input.sessionId)
++      change(input.sessionId)
++      if (isDisposed() || isStale() || !isSubscribed() || subscriptionId !== input.subscriptionId || after?.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++      if (outcome.status === 'denied' || outcome.status === 'unavailable') {
++        return { ...base, status: outcome.status, reasonCode: outcome.reasonCode }
++      }
++      const settled = {
++        status: outcome.status,
++        sessionId: input.sessionId,
++        workspaceId: input.workspaceId,
++        requestId: input.requestId,
++        expectedTurn: input.expectedTurn,
++        currentTurn: outcome.currentTurn,
++        queuedCount: outcome.queuedCount,
++        ...('reasonCode' in outcome ? { reasonCode: outcome.reasonCode } : {}),
++        duplicate: false,
++      }
++      settledCommands.set(commandKey, settled)
++      return { ...base, ...settled }
 +    }
-+    if (host.cancel === undefined) {
-+      return { ...base, status: 'denied', reasonCode: 'guard.unprovableTurnAtomicity' }
++    if (input.op === 'resolve') {
++      if (!text(input.requestId, 256)
++        || !text(input.interactionId)
++        || (input.interactionType !== 'permission' && input.interactionType !== 'question')
++        || (input.decision !== 'approve' && input.decision !== 'reject' && input.decision !== 'cancel')
++        || (input.optionId !== undefined && !text(input.optionId, 256))
++        || hasExtraFields(input, ['sessionId', 'workspaceId', 'requestId', 'interactionId', 'interactionType', 'decision', 'optionId'])) {
++        return { ...base, status: 'denied', reasonCode: 'guard.invalidResolveRequest' }
++      }
++      const before = read(input.sessionId)
++      if (isStale()) return { ...base, status: 'stale' }
++      if (before === undefined) return { ...base, status: 'unavailable' }
++      if (before.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++      const commandKey = `${input.sessionId}:${input.requestId}`
++      const existing = settledCommands.get(commandKey)
++      if (existing !== undefined) return { ...base, ...existing, duplicate: true }
++      const activeSelected = currentSelected()
++      if (activeSelected !== input.sessionId) {
++        return { ...base, status: 'unconfirmed', ...(activeSelected === undefined ? {} : { selected: activeSelected }), reasonCode: 'guard.selectionMismatch' }
++      }
++      if (host.resolve === undefined) return { ...base, status: 'unavailable', reasonCode: 'resolve.unsupported' }
++      const outcome = await host.resolve(
++        input.sessionId, input.interactionId, input.interactionType, input.decision, input.optionId, input.requestId,
++      )
++      const after = read(input.sessionId)
++      change(input.sessionId)
++      if (isDisposed() || isStale() || !isSubscribed() || subscriptionId !== input.subscriptionId || after?.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++      if (outcome.status === 'denied' || outcome.status === 'unavailable' || outcome.status === 'interactionTypeMismatch' || outcome.status === 'noop') {
++        const reply = {
++          ...base,
++          status: outcome.status,
++          sessionId: input.sessionId,
++          workspaceId: input.workspaceId,
++          requestId: input.requestId,
++          ...('reasonCode' in outcome ? { reasonCode: outcome.reasonCode } : {}),
++          duplicate: false,
++        }
++        if (outcome.status === 'noop') settledCommands.set(commandKey, reply)
++        return reply
++      }
++      const settled = {
++        status: outcome.status,
++        sessionId: input.sessionId,
++        workspaceId: input.workspaceId,
++        requestId: input.requestId,
++        duplicate: false,
++      }
++      settledCommands.set(commandKey, settled)
++      return { ...base, ...settled }
 +    }
-+    const outcome = host.cancel(input.sessionId, input.expectedTurn)
-+    const after = read(input.sessionId)
-+    change(input.sessionId)
-+    if (isDisposed() || isStale() || !isSubscribed() || subscriptionId !== input.subscriptionId || after?.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
-+    if (outcome.status === 'denied' || outcome.status === 'unavailable') {
-+      return { ...base, status: outcome.status, reasonCode: outcome.reasonCode }
++    if (input.op === 'selectModel') {
++      if (!text(input.requestId, 256)
++        || !text(input.provider, 128)
++        || !text(input.model, 128)
++        || (input.thought !== undefined && !text(input.thought, 128))
++        || hasExtraFields(input, ['sessionId', 'workspaceId', 'requestId', 'provider', 'model', 'thought'])) {
++        return { ...base, status: 'denied', reasonCode: 'guard.invalidSelectModelRequest' }
++      }
++      const before = read(input.sessionId)
++      if (isStale()) return { ...base, status: 'stale' }
++      if (before === undefined) return { ...base, status: 'unavailable' }
++      if (before.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++      const commandKey = `${input.sessionId}:${input.requestId}`
++      const existing = settledCommands.get(commandKey)
++      if (existing !== undefined) return { ...base, ...existing, duplicate: true }
++      const activeSelected = currentSelected()
++      if (activeSelected !== input.sessionId) {
++        return { ...base, status: 'unconfirmed', ...(activeSelected === undefined ? {} : { selected: activeSelected }), reasonCode: 'guard.selectionMismatch' }
++      }
++      if (host.selectModel === undefined) return { ...base, status: 'unavailable', reasonCode: 'selectModel.unsupported' }
++      const outcome = await host.selectModel(input.sessionId, input.provider, input.model, input.thought, input.requestId)
++      const after = read(input.sessionId)
++      change(input.sessionId)
++      if (isDisposed() || isStale() || !isSubscribed() || subscriptionId !== input.subscriptionId || after?.workspaceId !== input.workspaceId) return { ...base, status: 'stale' }
++      if (outcome.status === 'denied' || outcome.status === 'unavailable' || outcome.status === 'unsupportedThought' || outcome.status === 'unconfirmed') {
++        return {
++          ...base,
++          status: outcome.status,
++          sessionId: input.sessionId,
++          workspaceId: input.workspaceId,
++          requestId: input.requestId,
++          ...('reasonCode' in outcome ? { reasonCode: outcome.reasonCode } : {}),
++          duplicate: false,
++        }
++      }
++      const settled = {
++        status: outcome.status,
++        sessionId: input.sessionId,
++        workspaceId: input.workspaceId,
++        requestId: input.requestId,
++        modelConfig: outcome.modelConfig,
++        duplicate: false,
++      }
++      settledCommands.set(commandKey, settled)
++      return { ...base, ...settled }
 +    }
-+    const settled = {
-+      status: outcome.status,
-+      sessionId: input.sessionId,
-+      workspaceId: input.workspaceId,
-+      requestId: input.requestId,
-+      expectedTurn: input.expectedTurn,
-+      currentTurn: outcome.currentTurn,
-+      queuedCount: outcome.queuedCount,
-+      ...('reasonCode' in outcome ? { reasonCode: outcome.reasonCode } : {}),
-+      duplicate: false,
-+    }
-+    settledCommands.set(commandKey, settled)
-+    return { ...base, ...settled }
++    return { ...base, status: 'denied' }
 +  }
 +  const server = createServer((socket) => {
 +    sockets.add(socket); socket.setTimeout(2000, () => socket.destroy())
@@ -698,10 +1290,10 @@ index 00000000..f883f2cb
 +}
 diff --git a/apps/desktop-host/tests/micro-input-host.spec.ts b/apps/desktop-host/tests/micro-input-host.spec.ts
 new file mode 100644
-index 00000000..87414e0c
+index 00000000..5fd258c5
 --- /dev/null
 +++ b/apps/desktop-host/tests/micro-input-host.spec.ts
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,262 @@
 +import { Context, FiberState } from '@deepseek-ai/cordis'
 +import type { Agent } from '@deepseek-ai/dsh-agent'
 +import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -843,12 +1435,133 @@ index 00000000..87414e0c
 +  expect(test.source.read('s')?.row).toMatchObject({ running: false, currentTurn: null, queuedCount: 2 })
 +  snapshot.mockRestore(); event.mockRestore()
 +})
++
++it('resolves pending approval through host.resolve and records decision', async () => {
++  const test = await fixture()
++  const started = Promise.withResolvers<undefined>()
++  test.ctx.on('approval/request', () => { started.resolve(undefined); return new Promise(() => {}) })
++  const approvalPromise = test.ctx.approval.request({ agent: test.agent, toolName: 'bash' })
++  await started.promise
++
++  const rowBefore = test.source.read('s')?.row
++  expect(rowBefore?.pendingInteraction).toMatchObject({
++    interactionType: 'permission',
++    toolName: 'bash',
++  })
++  const interactionId = rowBefore?.pendingInteraction?.interactionId
++  expect(interactionId).toBeDefined()
++
++  // Type mismatch check
++  const mismatch = await test.source.resolve('s', interactionId!, 'question', 'approve')
++  expect(mismatch).toMatchObject({
++    status: 'interactionTypeMismatch',
++    reasonCode: 'guard.permissionCannotAnswerAsQuestion',
++  })
++
++  // Session mismatch check
++  const sessionMismatch = await test.source.resolve('other-session', interactionId!, 'permission', 'approve')
++  expect(sessionMismatch).toMatchObject({
++    status: 'denied',
++    reasonCode: 'guard.sessionMismatch',
++  })
++
++  // Successful resolution
++  const resolved = await test.source.resolve('s', interactionId!, 'permission', 'approve')
++  expect(resolved).toEqual({ status: 'resolved' })
++  expect(await approvalPromise).toBe('allowed-once')
++
++  // Late resolution is noop with zero side effect
++  const late = await test.source.resolve('s', interactionId!, 'permission', 'reject')
++  expect(late).toMatchObject({ status: 'noop', reasonCode: 'guard.alreadyResolved' })
++
++  // Readback confirms pendingInteraction cleared
++  expect(test.source.read('s')?.row.pendingInteraction).toBeUndefined()
++})
++
++it('resolves pending question through host.resolve and provides answers', async () => {
++  const test = await fixture()
++  const started = Promise.withResolvers<undefined>()
++  test.ctx.on('user-questions/request', () => { started.resolve(undefined); return new Promise(() => {}) })
++  const questionPromise = test.ctx.userQuestions.ask({
++    agent: test.agent,
++    questions: [{ id: 'q-1', question: 'Continue?', options: [{ label: 'Option A' }, { label: 'Option B' }] }],
++  })
++  await started.promise
++
++  const rowBefore = test.source.read('s')?.row
++  expect(rowBefore?.pendingInteraction).toMatchObject({
++    interactionType: 'question',
++  })
++  const interactionId = rowBefore?.pendingInteraction?.interactionId
++  expect(interactionId).toBeDefined()
++
++  // Type mismatch check
++  const mismatch = await test.source.resolve('s', interactionId!, 'permission', 'approve')
++  expect(mismatch).toMatchObject({
++    status: 'interactionTypeMismatch',
++    reasonCode: 'guard.questionCannotApproveAsPermission',
++  })
++
++  // Successful resolution with specific optionId
++  const resolved = await test.source.resolve('s', interactionId!, 'question', 'approve', 'Option B')
++  expect(resolved).toEqual({ status: 'resolved' })
++  const result = await questionPromise
++  expect(result.answers).toEqual([{ id: 'q-1', selected: ['Option B'] }])
++})
++
++it('selects model and thinking level with projection readback and rejects unsupported thought', async () => {
++  const test = await fixture()
++
++  // Initial read shows default model config
++  const initialRow = test.source.read('s')?.row
++  expect(initialRow?.modelConfig).toMatchObject({
++    provider: 'deepseek-official',
++    model: 'deepseek-chat',
++    thought: 'medium',
++  })
++
++  // Switch to supported model & thought
++  const switched = await test.source.selectModel('s', 'deepseek-official', 'deepseek-chat', 'high')
++  expect(switched).toMatchObject({
++    status: 'modelSwitched',
++    modelConfig: {
++      provider: 'deepseek-official',
++      model: 'deepseek-chat',
++      thought: 'high',
++    },
++  })
++
++  // Readback confirms the switched model
++  const readbackRow = test.source.read('s')?.row
++  expect(readbackRow?.modelConfig).toMatchObject({
++    provider: 'deepseek-official',
++    model: 'deepseek-chat',
++    thought: 'high',
++  })
++
++  // Attempting unsupported thought level on reasoner
++  const unsupported = await test.source.selectModel('s', 'deepseek-official', 'deepseek-reasoner', 'off')
++  expect(unsupported).toMatchObject({
++    status: 'unsupportedThought',
++    reasonCode: 'guard.unsupportedThoughtLevel',
++  })
++
++  // Model was NOT mutated to reasoner
++  expect(test.source.read('s')?.row.modelConfig?.model).toBe('deepseek-chat')
++
++  // Unsupported model is denied
++  const unsupportedModel = await test.source.selectModel('s', 'nonexistent', 'fake')
++  expect(unsupportedModel).toMatchObject({
++    status: 'denied',
++    reasonCode: 'guard.unsupportedModel',
++  })
++})
 diff --git a/apps/desktop-host/tests/micro-input.spec.ts b/apps/desktop-host/tests/micro-input.spec.ts
 new file mode 100644
-index 00000000..e903a2ce
+index 00000000..a3654ba8
 --- /dev/null
 +++ b/apps/desktop-host/tests/micro-input.spec.ts
-@@ -0,0 +1,312 @@
+@@ -0,0 +1,501 @@
 +import { randomUUID } from 'node:crypto'
 +import { connect } from 'node:net'
 +import { chmod, mkdtemp, rm } from 'node:fs/promises'
@@ -879,7 +1592,7 @@ index 00000000..e903a2ce
 +  const directory = await mkdtemp(join(process.env.MI_DSH_TEST_ROOT ?? '/tmp', 'mi-dsh-'))
 +  await chmod(directory, 0o700)
 +  cleanup.push(() => rm(directory, { recursive: true, force: true }))
-+  let reads = 0, navigations = 0, observations = 0, creates = 0, prompts = 0, cancels = 0
++  let reads = 0, navigations = 0, observations = 0, creates = 0, prompts = 0, cancels = 0, resolves = 0, selectModels = 0
 +  let selected: string | undefined
 +  const identities = new Map<string, object>([['a', {}], ['b', {}]])
 +  const state = new Map<string, MicroInputRow>([
@@ -897,6 +1610,27 @@ index 00000000..e903a2ce
 +    observe(listener) { observations++; changed = listener; return () => { observations--; changed = () => {} } },
 +    navigate: (id, signal) => { navigations++; return navigate(id, signal) },
 +    selected: () => selected,
++    async resolve(sessionId, interactionId, interactionType, _decision, _optionId, _requestId) {
++      resolves++
++      if (interactionType === 'permission' && interactionId.startsWith('question-')) {
++        return { status: 'interactionTypeMismatch', reasonCode: 'guard.questionCannotApproveAsPermission' }
++      }
++      if (interactionId === 'stale') {
++        return { status: 'noop', reasonCode: 'guard.alreadyResolved' }
++      }
++      return { status: 'resolved' }
++    },
++    async selectModel(sessionId, provider, model, thought, _requestId) {
++      selectModels++
++      if (thought === 'unsupported') {
++        return { status: 'unsupportedThought', reasonCode: 'guard.unsupportedThoughtLevel' }
++      }
++      return {
++        status: 'modelSwitched',
++        modelConfig: { provider, model, ...(thought === undefined ? {} : { thought }) },
++      }
++    },
++
 +    async create(workspaceId) {
 +      creates++
 +      const createdId = `created-${creates}`
@@ -972,7 +1706,7 @@ index 00000000..e903a2ce
 +  return {
 +    bridge,
 +    request,
-+    stats: () => ({ reads, navigations, observations, creates, prompts, cancels }),
++    stats: () => ({ reads, navigations, observations, creates, prompts, cancels, resolves, selectModels }),
 +    replace: () => { identities.set('a', {}) },
 +    pulse: (pendingInput: number) => {
 +      const row = state.get('a')!
@@ -994,7 +1728,9 @@ index 00000000..e903a2ce
 +  const test = await fixture()
 +  expect((await test.request('subscribe', { token: 'invalid', activate: false })).status).toBe('denied')
 +  expect((await test.request('subscribe', { activate: true })).status).toBe('denied')
-+  expect(test.stats()).toEqual({ reads: 0, navigations: 0, observations: 0, creates: 0, prompts: 0, cancels: 0 })
++  expect(test.stats()).toEqual({
++    reads: 0, navigations: 0, observations: 0, creates: 0, prompts: 0, cancels: 0, resolves: 0, selectModels: 0,
++  })
 +  const baseline = await test.request('subscribe', { activate: false })
 +  expect(baseline.status).toBe('ok')
 +  expect(baseline.rows).toHaveLength(2)
@@ -1160,6 +1896,172 @@ index 00000000..e903a2ce
 +    sessionId: 'a', workspaceId: 'w', requestId: 'req-cancel-missing-host', expectedTurn: 1,
 +  })
 +  expect(missingHostCancel).toMatchObject({ status: 'denied', reasonCode: 'guard.unprovableTurnAtomicity' })
++})
++
++it('handles resolve wire op with deduplication, session guard, and mismatch reporting', async () => {
++  const test = await fixture()
++  await test.request('subscribe', { activate: false })
++  await test.request('open', { sessionId: 'a', workspaceId: 'w' })
++
++  // Successful resolution
++  const resolved = await test.request('resolve', {
++    sessionId: 'a',
++    workspaceId: 'w',
++    requestId: 'req-res-1',
++    interactionId: 'perm-1',
++    interactionType: 'permission',
++    decision: 'approve',
++  })
++  expect(resolved).toMatchObject({
++    status: 'resolved',
++    sessionId: 'a',
++    requestId: 'req-res-1',
++    duplicate: false,
++  })
++  expect(test.stats().resolves).toBe(1)
++
++  // Duplicate resolution
++  const duplicate = await test.request('resolve', {
++    sessionId: 'a',
++    workspaceId: 'w',
++    requestId: 'req-res-1',
++    interactionId: 'perm-1',
++    interactionType: 'permission',
++    decision: 'approve',
++  })
++  expect(duplicate).toMatchObject({
++    status: 'resolved',
++    sessionId: 'a',
++    requestId: 'req-res-1',
++    duplicate: true,
++  })
++  expect(test.stats().resolves).toBe(1)
++
++  // Switching selection to b blocks resolution of a
++  await test.request('open', { sessionId: 'b', workspaceId: 'w-b' })
++  const wrongSession = await test.request('resolve', {
++    sessionId: 'a',
++    workspaceId: 'w',
++    requestId: 'req-res-wrong',
++    interactionId: 'perm-2',
++    interactionType: 'permission',
++    decision: 'approve',
++  })
++  expect(wrongSession).toMatchObject({
++    status: 'unconfirmed',
++    selected: 'b',
++    reasonCode: 'guard.selectionMismatch',
++  })
++  expect(test.stats().resolves).toBe(1)
++
++  // Switch back to a
++  await test.request('open', { sessionId: 'a', workspaceId: 'w' })
++
++  // Type mismatch
++  const typeMismatch = await test.request('resolve', {
++    sessionId: 'a',
++    workspaceId: 'w',
++    requestId: 'req-res-mismatch',
++    interactionId: 'question-1',
++    interactionType: 'permission',
++    decision: 'approve',
++  })
++  expect(typeMismatch).toMatchObject({
++    status: 'interactionTypeMismatch',
++    reasonCode: 'guard.questionCannotApproveAsPermission',
++  })
++
++  // Stale / noop
++  const stale = await test.request('resolve', {
++    sessionId: 'a',
++    workspaceId: 'w',
++    requestId: 'req-res-stale',
++    interactionId: 'stale',
++    interactionType: 'permission',
++    decision: 'approve',
++  })
++  expect(stale).toMatchObject({
++    status: 'noop',
++    reasonCode: 'guard.alreadyResolved',
++  })
++})
++
++it('handles selectModel wire op with deduplication, session guard, and unsupported thought reporting', async () => {
++  const test = await fixture()
++  await test.request('subscribe', { activate: false })
++  await test.request('open', { sessionId: 'a', workspaceId: 'w' })
++
++  // Successful model selection
++  const switched = await test.request('selectModel', {
++    sessionId: 'a',
++    workspaceId: 'w',
++    requestId: 'req-sm-1',
++    provider: 'deepseek-official',
++    model: 'deepseek-chat',
++    thought: 'high',
++  })
++  expect(switched).toMatchObject({
++    status: 'modelSwitched',
++    sessionId: 'a',
++    requestId: 'req-sm-1',
++    modelConfig: {
++      provider: 'deepseek-official',
++      model: 'deepseek-chat',
++      thought: 'high',
++    },
++    duplicate: false,
++  })
++  expect(test.stats().selectModels).toBe(1)
++
++  // Duplicate model selection
++  const duplicate = await test.request('selectModel', {
++    sessionId: 'a',
++    workspaceId: 'w',
++    requestId: 'req-sm-1',
++    provider: 'deepseek-official',
++    model: 'deepseek-chat',
++    thought: 'high',
++  })
++  expect(duplicate).toMatchObject({
++    status: 'modelSwitched',
++    sessionId: 'a',
++    requestId: 'req-sm-1',
++    duplicate: true,
++  })
++  expect(test.stats().selectModels).toBe(1)
++
++  // Switching selection to b blocks selectModel on a
++  await test.request('open', { sessionId: 'b', workspaceId: 'w-b' })
++  const wrongSession = await test.request('selectModel', {
++    sessionId: 'a',
++    workspaceId: 'w',
++    requestId: 'req-sm-wrong',
++    provider: 'deepseek-official',
++    model: 'deepseek-chat',
++  })
++  expect(wrongSession).toMatchObject({
++    status: 'unconfirmed',
++    selected: 'b',
++    reasonCode: 'guard.selectionMismatch',
++  })
++  expect(test.stats().selectModels).toBe(1)
++
++  // Switch back to a
++  await test.request('open', { sessionId: 'a', workspaceId: 'w' })
++
++  // Unsupported thought
++  const unsupported = await test.request('selectModel', {
++    sessionId: 'a',
++    workspaceId: 'w',
++    requestId: 'req-sm-unsupported',
++    provider: 'deepseek-official',
++    model: 'deepseek-chat',
++    thought: 'unsupported',
++  })
++  expect(unsupported).toMatchObject({
++    status: 'unsupportedThought',
++    reasonCode: 'guard.unsupportedThoughtLevel',
++  })
 +})
 diff --git a/apps/desktop-host/tsconfig.json b/apps/desktop-host/tsconfig.json
 index 31c64f17..d1e41389 100644
@@ -1411,7 +2313,7 @@ index 90d3e8e0..bb6f641a 100644
 +  })
 +})
 diff --git a/packages/interaction/user-approval/src/index.ts b/packages/interaction/user-approval/src/index.ts
-index 9a14f04d..431ec701 100644
+index 9a14f04d..a9ede846 100644
 --- a/packages/interaction/user-approval/src/index.ts
 +++ b/packages/interaction/user-approval/src/index.ts
 @@ -148,6 +148,20 @@ export interface Config {
@@ -1435,7 +2337,7 @@ index 9a14f04d..431ec701 100644
    static Config: z<Config> = z.object({
      policy: z.union(['ask', 'never'] as const).default('ask'),
    })
-@@ -222,15 +236,25 @@ export class ApprovalService extends Service {
+@@ -222,15 +236,26 @@ export class ApprovalService extends Service {
        )
      }
      const id = ApprovalRequestId(randomUUID())
@@ -1453,6 +2355,7 @@ index 9a14f04d..431ec701 100644
 +    this.pending.set(session, pending)
 +    this.publishPending(session)
 +    try {
++      ;(req as { id?: ApprovalRequestId }).id = id
 +      session.append('approval/asked', {
 +        id,
 +        toolName: req.toolName,
@@ -1470,6 +2373,19 @@ index 9a14f04d..431ec701 100644
    }
  
    /**
+diff --git a/packages/interaction/user-approval/src/types.ts b/packages/interaction/user-approval/src/types.ts
+index 12b8106d..cd03b8fc 100644
+--- a/packages/interaction/user-approval/src/types.ts
++++ b/packages/interaction/user-approval/src/types.ts
+@@ -61,6 +61,8 @@ declare module '@deepseek-ai/dsh-session/types' {
+ 
+ /** Client-safe payload declared for the approval answerer waterfall. */
+ export interface ApprovalRequestEvent {
++  /** Fresh identifier linking asked and decided audit events. */
++  readonly id?: ApprovalRequestId
+   /** Agent identity projected to the corresponding Client Context in transit. */
+   readonly agent: Agent
+   /** Tool whose operation requires a decision. */
 diff --git a/packages/interaction/user-approval/tests/approval.spec.ts b/packages/interaction/user-approval/tests/approval.spec.ts
 index 0ec3b958..26520ee2 100644
 --- a/packages/interaction/user-approval/tests/approval.spec.ts
@@ -1711,10 +2627,10 @@ index d6df9aae..3dd84028 100644
          version: link:../../packages/workspace/workspace
 diff --git a/scripts/micro-input-fixture.ts b/scripts/micro-input-fixture.ts
 new file mode 100644
-index 00000000..08410b2d
+index 00000000..524bc182
 --- /dev/null
 +++ b/scripts/micro-input-fixture.ts
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,187 @@
 +import { createServer } from 'node:net'
 +import { chmod, rm } from 'node:fs/promises'
 +import { join } from 'node:path'
@@ -1750,7 +2666,7 @@ index 00000000..08410b2d
 +  agents.set(id, { id: session.id, session, status: 'running', inbox: { nextStep: [], nextTurn: [] } } as unknown as Agent)
 +}
 +let metadataReads = 0, navigationCount = 0, activationCount = 0, selected: string | undefined
-+let createCount = 0, promptCount = 0, cancelCount = 0
++let createCount = 0, promptCount = 0, cancelCount = 0, resolveCount = 0, selectModelCount = 0
 +const originalPrepare = ctx.sessions.prepare.bind(ctx.sessions)
 +ctx.sessions.prepare = (...input) => {
 +  if (!String(input[0]).startsWith('dsh-created-')) activationCount++
@@ -1787,6 +2703,16 @@ index 00000000..08410b2d
 +    if (outcome.status === 'cancelled' || outcome.status === 'cancelledQueueRemaining') cancelCount++
 +    return outcome
 +  },
++  async resolve(sessionId, interactionId, interactionType, decision, optionId, requestId) {
++    const outcome = await source.resolve(sessionId, interactionId, interactionType, decision, optionId, requestId)
++    if (outcome.status === 'resolved') resolveCount++
++    return outcome
++  },
++  async selectModel(sessionId, provider, model, thought, requestId) {
++    const outcome = await source.selectModel(sessionId, provider, model, thought, requestId)
++    if (outcome.status === 'modelSwitched') selectModelCount++
++    return outcome
++  },
 +})
 +let bridgeStopped = false
 +const stats = () => ({
@@ -1796,6 +2722,8 @@ index 00000000..08410b2d
 +  createCount,
 +  promptCount,
 +  cancelCount,
++  resolveCount,
++  selectModelCount,
 +  hostStopped: ctx.fiber.state === FiberState.DISPOSED || ctx.fiber.state === FiberState.UNLOADING,
 +  bridgeStopped,
 +  selected,
@@ -1833,6 +2761,25 @@ index 00000000..08410b2d
 +        ;(agent as { status: string }).status = 'running'
 +        session.append('turn/start', { turn: nextTurn })
 +        ctx.emit('agent/status', { agent, status: 'running' })
++      } else if (request.op === 'ask-approval') {
++        const id = request.sessionId ?? 'dsh-a'
++        const agent = agents.get(id)
++        if (agent === undefined) throw new Error('fixture agent missing')
++        void ctx.approval.request({ agent, toolName: (request as { toolName?: string }).toolName ?? 'bash' })
++      } else if (request.op === 'ask-question') {
++        const id = request.sessionId ?? 'dsh-a'
++        const agent = agents.get(id)
++        if (agent === undefined) throw new Error('fixture agent missing')
++        void ctx.userQuestions.ask({
++          agent,
++          questions: [{
++            id: (request as { questionId?: string }).questionId ?? 'q-fixture',
++            question: 'Confirm action?',
++            options: [{ label: 'Allow' }, { label: 'Deny' }],
++            ...((request as { intentKind?: string }).intentKind === 'plan-review' ? { intent: { kind: 'plan-review' as const, approve: 'Allow' } } : {}),
++            detail: 'Detail for plan review',
++          }],
++        })
 +      } else if (request.op === 'unprovable-turn') {
 +        const id = request.sessionId ?? 'dsh-b'
 +        const session = ctx.sessions.get(SessionId(id))

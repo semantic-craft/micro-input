@@ -48,7 +48,7 @@ scripts/verify-cindy-paired --source /absolute/path/to/patched-cindy
 
 桥管理同一 Cindy 运行实例的全部 WorkLouder 输入与灯光，包含工作进程重建和设备重连。释放状态写入私有的所有权记录；Cindy 重启先恢复暂停，再通过当前代握手归还。进程间旧输入不能重新盖上新代标签。失联不自动解除暂停。崩溃遗留的 socket 不自动删除，因为并发清理可能产生两个所有者；该情况下桥保持 unknown。维护时必须先确认所有参与实例退出，再显式清理旧端点；不能边运行边删除端点或所有权记录。
 
-默认宽键、旋钮、普通任务槽导航、已停止的语音及滚动有排空回执。自定义 keyboard action 与 `composer.addFiles` / `composer.addPhotos` 没有可确认的异步完成 API；执行过这些动作时维持 unknown，直到对应渲染进程重建。仍在进行的手工全局录音也不会被握手擅自结束，确认结束后才能交接。恢复时若现有 keymap 不匹配，拒绝接管，不通过重写映射修复。
+默认宽键、旋钮、普通任务槽导航、已停止的语音及滚动有排空回执。自定义 keyboard action 与 `composer.addFiles` / `composer.addPhotos` 没有可确认的异步完成 API；执行过这些动作时维持 unknown，直到对应渲染进程重建。仍在进行的手工全局录音也不会被握手擅自结束，确认结束后才能交接。恢复时若现有 keymap 不匹配，拒绝接管，不通过重写映射修复。`workLouderCodexHostProcess` 读取或写回 `keymap.json` 时优先调用 `WLRPCApi` 的分块接口 `readFileChunked`（`fs.readbin`）与 `writeFileChunkedFromStr` / `writeFileChunked`（`fs.writebin`），并在 `unwrapWorkLouderKeymapText` 中解码 `Buffer` / `Uint8Array`，避免对约 7 KB 的 `keymap.json` 调用单包 `fs.read` / `fs.write` 触发固件 `json pool overflow` 导致宿主子进程循环崩溃重启。
 
 部署必须替换同一个 Cindy 运行实例。不同 userData 下的旧版 Cindy 不参与本协议；不能在旧版旁边启动一个桥或测试实例，就宣称所有原生消费者已释放。本目录及联测交付源码和软件证据；本轮没有替换用户的 Cindy 或完成实体验收。
 

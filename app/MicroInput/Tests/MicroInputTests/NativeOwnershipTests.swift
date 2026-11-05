@@ -197,4 +197,34 @@ import MicroInputCore
         XCTAssertTrue(requests.isEmpty)
     }
 
+    func testUnbridgedDesktopAllowsExecutionUntilBridgeAppearsAndProfileSyncsWorkbench() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("mi-unbridged-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let sockPath = tempDir.appendingPathComponent("cindy-ownership.sock").path
+        let docURL = tempDir.appendingPathComponent("workbench.json")
+
+        let ownership = NativeOwnershipController(transport: UnixNativeOwnershipTransport(path: sockPath), allowUnbridgedDesktop: true)
+        XCTAssertTrue(ownership.allowsExecution)
+        XCTAssertEqual(ownership.summary, "本地宿主控制就绪（Cindy 原生桥未启用）")
+        ownership.invalidate("routing changed")
+        XCTAssertTrue(ownership.allowsExecution, "Unbridged desktop mode must not block execution on routing invalidation")
+
+        let executor = RecordingHostActionExecutor()
+        let store = Store(nativeOwnership: ownership, backend: MicroInputCore.MicroInput(), documentURL: docURL, actionExecutor: executor)
+        await store.loadWorkbench()
+        await store.prepareDesktopProfiles()
+        await store.ensureDefaultAgentLinks()
+        XCTAssertGreaterThanOrEqual(store.routing?.app_profile_links.count ?? 0, DesktopAgent.all.count)
+
+        let agProfile = try XCTUnwrap(store.hostProfiles.first { $0.name == "Antigravity" })
+        await store.setHostActiveProfile(agProfile.id.text, syncWorkbench: true)
+        XCTAssertEqual(store.profile?.id.text, agProfile.id.text, "Selecting host active profile must sync Workbench profileIndex")
+
+        // Once the bridge path appears on disk, fenced ownership immediately takes effect.
+        FileManager.default.createFile(atPath: sockPath, contents: Data())
+        XCTAssertFalse(ownership.allowsExecution)
+        await store.shutdown()
+    }
+
 }

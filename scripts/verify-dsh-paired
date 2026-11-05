@@ -130,6 +130,8 @@ def main():
             or swift.get("created_session") != "dsh-created-1"
             or swift.get("prompt_modes_confirmed") != ["steer", "queue"]
             or swift.get("cancel_status") != "cancelledQueueRemaining"
+            or swift.get("model_switched") != "modelSwitched"
+            or swift.get("late_resolve_noop") != "noop"
         ):
             raise ValueError("Swift pair incomplete")
         after_swift = stats()
@@ -180,7 +182,69 @@ def main():
             or stats()["cancelCount"] != 1
         ):
             raise ValueError("unprovable turn atomicity was not refused")
+        unsupported_thought = exchange(
+            grant["socketPath"],
+            request(
+                "selectModel",
+                sessionId=remaining["sessionId"],
+                workspaceId=remaining["workspaceId"],
+                requestId="probe-unsupported-thought",
+                provider="deepseek-official",
+                model="deepseek-chat",
+                thought="extreme",
+            ),
+        )
+        if (
+            unsupported_thought.get("status") != "unsupportedThought"
+            or unsupported_thought.get("reasonCode") != "guard.unsupportedThoughtLevel"
+        ):
+            raise ValueError("unsupported thought level was not refused")
+        switched_model = exchange(
+            grant["socketPath"],
+            request(
+                "selectModel",
+                sessionId=remaining["sessionId"],
+                workspaceId=remaining["workspaceId"],
+                requestId="probe-switch-model",
+                provider="deepseek-official",
+                model="deepseek-reasoner",
+                thought="high",
+            ),
+        )
+        if (
+            switched_model.get("status") != "modelSwitched"
+            or switched_model.get("modelConfig", {}).get("thought") != "high"
+        ):
+            raise ValueError("valid model switch failed")
+        late_resolve = exchange(
+            grant["socketPath"],
+            request(
+                "resolve",
+                sessionId=remaining["sessionId"],
+                workspaceId=remaining["workspaceId"],
+                requestId="probe-late-resolve",
+                interactionId="nonexistent-interaction",
+                interactionType="permission",
+                decision="approve",
+            ),
+        )
+        if late_resolve.get("status") != "noop" or late_resolve.get("reasonCode") != "guard.alreadyResolved":
+            raise ValueError("late/stale resolve did not return noop")
         target = snapshot["rows"][0]
+        mismatch_resolve = exchange(
+            grant["socketPath"],
+            request(
+                "resolve",
+                sessionId=target["sessionId"],
+                workspaceId=target["workspaceId"],
+                requestId="probe-mismatch-resolve",
+                interactionId="nonexistent-interaction",
+                interactionType="permission",
+                decision="approve",
+            ),
+        )
+        if mismatch_resolve.get("status") != "unconfirmed" or mismatch_resolve.get("reasonCode") != "guard.selectionMismatch":
+            raise ValueError("cross-session resolve was not rejected")
         before = stats()["navigationCount"]
         exchange(control, {"op": "delete", "sessionId": target["sessionId"]})
         deleted = exchange(grant["socketPath"], request("open", sessionId=target["sessionId"], workspaceId=target["workspaceId"]))
@@ -197,6 +261,8 @@ def main():
             transport="real-unix-socket", confirmed_targets=2, created_sessions=1,
             prompt_modes_confirmed=["steer", "queue"], cancel_queue_remaining="CONFIRMED",
             stale_turn_stop="ZERO_CANCEL_NOOP", unprovable_turn_atomicity="REFUSED",
+            unsupported_thought_refused="REFUSED", model_switched="CONFIRMED",
+            late_resolve_noop="ZERO_SIDE_EFFECT_NOOP", cross_session_resolve="REJECTED",
             unauthorized_metadata_reads=0,
             cold_session_activations=0, pending_transitions=len(transitions), deleted_target="REJECTED",
             replaced_session="REJECTED", stale_close="REJECTED", competing_subscribe="REJECTED",

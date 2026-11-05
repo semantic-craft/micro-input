@@ -98,6 +98,27 @@ final class DSHPairedTests: XCTestCase {
               createdReadback.rows.contains(where: { $0.sessionId == createdId && $0.workspaceId == firstRow.workspaceId }) else {
             throw Failure.verification
         }
+        // Switch model on created session
+        let switchIntent = DSHSwitchModelIntent(
+            sessionId: createdId, workspaceId: firstRow.workspaceId,
+            requestId: "paired-switch-1", provider: "deepseek-official", model: "deepseek-reasoner", thought: "high",
+            hostId: snapshot.hostId, generation: snapshot.generation, localEpoch: 0
+        )
+        let switched = try await client.switchModel(switchIntent)
+        guard switched.status == "modelSwitched", switched.modelConfig?.thought == "high", !switched.duplicate else {
+            throw Failure.verification
+        }
+        // Resolve nonexistent/stale interaction on created session -> noop (zero side effect)
+        let resolveIntent = DSHResolveIntent(
+            sessionId: createdId, workspaceId: firstRow.workspaceId,
+            requestId: "paired-resolve-1", interactionId: "stale-int-1",
+            interactionType: .permission, decision: .approve, optionId: nil,
+            hostId: snapshot.hostId, generation: snapshot.generation, localEpoch: 0
+        )
+        let resolved = try await client.resolve(resolveIntent)
+        guard resolved.status == "noop", resolved.reasonCode == "guard.alreadyResolved" else {
+            throw Failure.verification
+        }
         await client.close()
         var closedDenied = false
         do { _ = try await client.read() } catch { closedDenied = true }
@@ -107,6 +128,8 @@ final class DSHPairedTests: XCTestCase {
             "status": "PASS", "transport": "real-unix-socket", "confirmed_targets": selected.count,
             "created_session": createdId, "prompt_modes_confirmed": ["steer", "queue"],
             "cancel_status": activeCancel.status,
+            "model_switched": switched.status,
+            "late_resolve_noop": resolved.status,
             "cold_targets_unavailable": snapshot.unavailableSessionIds.count,
             "native_install": "NOT_RUN", "renderer_ui": "NOT_RUN", "physical_key": "NOT_RUN",
         ], options: [.prettyPrinted, .sortedKeys])
