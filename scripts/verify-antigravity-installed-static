@@ -131,12 +131,77 @@ def verify_language_server_and_agentapi(ls_bin: Path) -> dict:
     proto_marker_map = {m.decode("ascii"): (m in raw_bytes) for m in required_proto_markers}
     if not all(proto_marker_map.values()):
         raise ValueError(f"language_server missing expected catalog/navigation/agentapi proto markers: {proto_marker_map}")
+
+    stop_proto_markers = (
+        b"/exa.language_server_pb.LanguageServerService/CancelCascadeInvocation",
+        b"CancelCascadeInvocationRequest",
+        b"CancelCascadeInvocationResponse",
+        b"CancelCascadeStepsRequest",
+        b'protobuf:"bytes,1,opt,name=cascade_id,json=cascadeId,proto3"',
+        b'protobuf:"varint,2,opt,name=kill_background_tasks,json=killBackgroundTasks,proto3"',
+        b'protobuf:"varint,3,opt,name=notify_parent,json=notifyParent,proto3,oneof"',
+        b"x-codeium-csrf-token",
+    )
+    stop_marker_map = {m.decode("ascii"): (m in raw_bytes) for m in stop_proto_markers}
+    if not all(stop_marker_map.values()):
+        raise ValueError(f"language_server missing expected stop proto schema markers: {stop_marker_map}")
+
+    approval_proto_markers = (
+        b"/exa.language_server_pb.LanguageServerService/HandleCascadeUserInteraction",
+        b"HandleCascadeUserInteractionRequest",
+        b"HandleCascadeUserInteractionResponse",
+        b"CascadeUserInteraction",
+        b"PermissionInteraction",
+        b"FilePermissionInteraction",
+        b"CascadeRunCommandInteraction",
+        b"AskQuestionInteraction",
+        b"ApprovalInteraction",
+        b'protobuf:"bytes,1,opt,name=trajectory_id,json=trajectoryId,proto3"',
+        b'protobuf:"varint,2,opt,name=step_index,json=stepIndex,proto3"',
+        b'protobuf:"bytes,5,opt,name=run_command,json=runCommand,proto3,oneof"',
+        b'protobuf:"bytes,19,opt,name=file_permission,json=filePermission,proto3,oneof"',
+        b'protobuf:"bytes,21,opt,name=permission,proto3,oneof"',
+        b'protobuf:"bytes,22,opt,name=ask_question,json=askQuestion,proto3,oneof"',
+        b'protobuf:"bytes,23,opt,name=approval_interaction,json=approvalInteraction,proto3,oneof"',
+        b'protobuf:"bytes,4,rep,name=selected_option_ids,json=selectedOptionIds,proto3"',
+    )
+    approval_marker_map = {m.decode("ascii"): (m in raw_bytes) for m in approval_proto_markers}
+    if not all(approval_marker_map.values()):
+        raise ValueError(f"language_server missing expected approval/interaction proto schema markers: {approval_marker_map}")
+
+    model_config_proto_markers = (
+        b"/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigs",
+        b"GetCascadeModelConfigsRequest",
+        b"GetCascadeModelConfigsResponse",
+        b"ClientModelConfig",
+        b"ModelOrAlias",
+        b"CascadeConfig",
+        b"CascadePlannerConfig",
+        b"CascadeConversationalPlannerConfig",
+        b"ThinkingLevel",
+        b"THINKING_LEVEL_LOW",
+        b"THINKING_LEVEL_MEDIUM",
+        b"THINKING_LEVEL_HIGH",
+        b'protobuf:"bytes,1,rep,name=client_model_configs,json=clientModelConfigs,proto3"',
+        b'protobuf:"bytes,2,opt,name=model_or_alias,json=modelOrAlias,proto3"',
+        b'protobuf:"bytes,1,opt,name=planner_config,json=plannerConfig,proto3"',
+        b'protobuf:"bytes,13,opt,name=requested_model,json=requestedModel,proto3"',
+        b'protobuf:"varint,19,opt,name=thinking_level,json=thinkingLevel,proto3"',
+        b'protobuf:"varint,9,rep,packed,name=supported_thinking_levels,json=supportedThinkingLevels,proto3,enum=google.gca.aicode.v1main.FetchConfigResponse_ThinkingConfig_ThinkingLevel"',
+    )
+    model_config_marker_map = {m.decode("ascii"): (m in raw_bytes) for m in model_config_proto_markers}
+    if not all(model_config_marker_map.values()):
+        raise ValueError(f"language_server missing expected model/thinking proto schema markers: {model_config_marker_map}")
+
     return {
         "language_server_sha256": ls_sha256,
         "build_cl": match.group(1),
         "agentapi_commands": commands,
         "agentapi_explicit_steer_flag": agentapi_explicit_steer_flag,
         "catalog_proto_markers": proto_marker_map,
+        "stop_proto_markers": stop_marker_map,
+        "approval_proto_markers": approval_marker_map,
+        "model_config_proto_markers": model_config_marker_map,
     }
 
 
@@ -231,7 +296,15 @@ def main():
         "sidecar_loopback_only": True,
         "sidecar_ui_messages": sidecar_info["ui_messages"],
         "catalog_proto_markers": ls_info["catalog_proto_markers"],
+        "stop_proto_markers": ls_info["stop_proto_markers"],
+        "approval_proto_markers": ls_info["approval_proto_markers"],
+        "model_config_proto_markers": ls_info["model_config_proto_markers"],
         "catalog_navigation_schema_verified": True,
+        "stop_schema_verified": True,
+        "approval_schema_verified": True,
+        "model_config_schema_verified": True,
+        "csrf_token_header_required": True,
+        "arbitrary_rpc_exposed": False,
         "existing_session_catalog_official": False,
         "exact_window_navigation_official": False,
         "stop_cancel_official_cli": False,
