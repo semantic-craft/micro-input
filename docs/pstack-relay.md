@@ -143,10 +143,11 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Depends on**: F；对应应用身份与动作片就绪。责任票 #84。
 - **Evidence**: .scratch/qa-runs/1793898484356-14497/evidence/result.json
 
-### [ ] Slice O2: 复刻官方 Input.app 受保护宿主层与多 Profile 切换让渡机制
+### [x] Slice O2: 复刻官方 Input.app 受保护宿主层与多 Profile 切换让渡机制
 - **Outcome**: 按 [官方受保护层与 Profile 切换规格](designs/official-codex-profile-model.md) 1:1 复刻 `Input 1.1.0` 的 `Mg1`（`KV_OAI_*`）受保护宿主层判定、四项界面与编辑硬隔离（锁定画布遮罩、自动收起改键面板、禁用静态灯光/导出/复制、跨层合并键跳过保护层），以及 `Cindy` / `Codex` 受保护 Profile 与 `Antigravity` / `ZCode` / `DSH` 工作台 Profile 之间的精简板载配置下发（`≤ 1 KB` 规避固件 4 KB 单包溢出）与 USB HID 通道让渡闭环。
 - **Done Predicate**: `cargo test --locked -p mi-model` 验证 `is_protected_oai_layer` 识别、四项编辑拒绝/跳过与 `< 1024` 字节精简宿主 `keymap.json` 生成及本地全量多 Profile/30 宏无损保留；`swift test --package-path app/MicroInput` 与 `scripts/verify-offline` 验证受保护层 UI 锁定、静态灯光禁用及 Profile 切换时的 HID 让渡/接管回执全量 `PASS`。
 - **Depends on**: F、N。设计见 `docs/designs/official-codex-profile-model.md`。责任票 #82、#84。
+- **Evidence**: .scratch/qa-runs/1793901523406-52021/evidence/result.json
 
 ### [ ] Slice O: 补齐四应用实体交互与状态反馈
 - **Outcome**: 逐应用接滚动/跳底、八向 Prompt/Stop、可选回弹与逐键/双区反馈，宽键沿用 O1 已验语音能力。
