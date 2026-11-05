@@ -45,27 +45,37 @@ protocol NativeOwnershipTransport: Sendable {
     private var expiryTask: Task<Void, Never>?
     private let transport: (any NativeOwnershipTransport)?
     private let isolated: Bool
+    private let allowUnbridgedDesktop: Bool
+    private var bridgeObserved = false
     var changed: (() -> Void)?
     var drain: (() async -> Bool)?
     private var desiredOwner = "native"
 
-    init(transport: (any NativeOwnershipTransport)? = UnixNativeOwnershipTransport()) {
+    init(transport: (any NativeOwnershipTransport)? = UnixNativeOwnershipTransport(), allowUnbridgedDesktop: Bool = false) {
         self.transport = transport
         self.isolated = false
+        self.allowUnbridgedDesktop = allowUnbridgedDesktop
     }
     // Explicit dependency for isolated tests; never selected by production environment flags.
     init(isolated: Bool) {
         precondition(isolated)
         self.transport = nil
         self.isolated = true
+        self.allowUnbridgedDesktop = false
+    }
+    private var isUnbridgedDesktopActive: Bool {
+        guard allowUnbridgedDesktop, !bridgeObserved, nativeIdentity == nil,
+              let unix = transport as? UnixNativeOwnershipTransport else { return false }
+        return !FileManager.default.fileExists(atPath: unix.path)
     }
     var allowsExecution: Bool {
-        if isolated { return true }
+        if isolated || isUnbridgedDesktopActive { return true }
         guard case .released = state, let expires else { return false }
         return ContinuousClock.now < expires
     }
     var summary: String {
         if isolated { return "隔离合成所有权" }
+        if isUnbridgedDesktopActive { return "本地宿主控制就绪（Cindy 原生桥未启用）" }
         switch state {
         case .unknown(let reason): return "原生所有权未知，按键、听写与灯光暂停 · \(reason)"
         case .native: return "Cindy 原生持有，Micro Input 按键、听写与灯光暂停"
@@ -78,7 +88,7 @@ protocol NativeOwnershipTransport: Sendable {
         invalidate("配置已切换，等待当前代回执")
     }
     func invalidate(_ reason: String) {
-        guard !isolated else { return }
+        guard !isolated, !isUnbridgedDesktopActive else { return }
         expiryTask?.cancel(); expiryTask = nil
         generation &+= 1
         pending = nil; requestStarted = nil; expires = nil
@@ -125,7 +135,7 @@ protocol NativeOwnershipTransport: Sendable {
         if case .released = next, let deadline = expires {
             let epoch = generation
             expiryTask = Task { @MainActor [weak self] in
-                do { try await Task.sleep(until: deadline, clock: .continuous) } catch { return }
+                do { try await Task.sleep(until: deadline, tolerance: .zero, clock: .continuous) } catch { return }
                 guard let self, self.generation == epoch, self.expires == deadline else { return }
                 self.invalidate("原生回执已过期")
             }
@@ -141,6 +151,14 @@ protocol NativeOwnershipTransport: Sendable {
         task = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
+                if self.isUnbridgedDesktopActive {
+                    do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+                    continue
+                }
+                if self.allowUnbridgedDesktop, !self.bridgeObserved {
+                    self.bridgeObserved = true
+                    self.invalidate("检测到 Cindy 原生所有权桥，等待确认")
+                }
                 let round = self.generation
                 let drained = self.allowsExecution ? false : (await self.drain?() ?? false)
                 guard !Task.isCancelled else { return }
@@ -156,7 +174,7 @@ protocol NativeOwnershipTransport: Sendable {
         }
     }
     func returnToNative() async {
-        guard let transport else { return }
+        guard let transport, !isUnbridgedDesktopActive else { stop(); return }
         stop()
         setDesiredOwner("native")
         guard await drain?() == true else { return }

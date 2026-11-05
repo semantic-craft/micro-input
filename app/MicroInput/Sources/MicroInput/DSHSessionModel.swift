@@ -1,5 +1,58 @@
 import Foundation
 
+struct DSHPendingInteraction: Codable, Equatable, Sendable {
+    let interactionId: String
+    let interactionType: DSHInteractionType
+    let toolName: String?
+    let options: [String]?
+
+    init(
+        interactionId: String,
+        interactionType: DSHInteractionType,
+        toolName: String? = nil,
+        options: [String]? = nil
+    ) {
+        self.interactionId = interactionId
+        self.interactionType = interactionType
+        self.toolName = toolName
+        self.options = options
+    }
+}
+
+enum DSHInteractionType: String, Codable, Sendable {
+    case permission, question
+}
+
+enum DSHInteractionDecision: String, Codable, Sendable {
+    case approve, reject, cancel
+}
+
+struct DSHModelConfig: Codable, Equatable, Sendable {
+    let provider: String
+    let model: String
+    let thought: String?
+
+    init(provider: String, model: String, thought: String? = nil) {
+        self.provider = provider
+        self.model = model
+        self.thought = thought
+    }
+}
+
+struct DSHModelOption: Codable, Equatable, Sendable {
+    let provider: String
+    let model: String
+    let defaultThought: String?
+    let supportedThoughts: [String]
+
+    init(provider: String, model: String, defaultThought: String? = nil, supportedThoughts: [String] = []) {
+        self.provider = provider
+        self.model = model
+        self.defaultThought = defaultThought
+        self.supportedThoughts = supportedThoughts
+    }
+}
+
 struct DSHSessionRow: Codable, Identifiable, Equatable, Sendable {
     let sessionId: String
     let workspaceId: String
@@ -9,6 +62,9 @@ struct DSHSessionRow: Codable, Identifiable, Equatable, Sendable {
     let pendingInput: UInt64
     let currentTurn: Int?
     let queuedCount: Int
+    let pendingInteraction: DSHPendingInteraction?
+    let modelConfig: DSHModelConfig?
+    let supportedModels: [DSHModelOption]?
 
     init(
         sessionId: String,
@@ -18,7 +74,10 @@ struct DSHSessionRow: Codable, Identifiable, Equatable, Sendable {
         running: Bool,
         pendingInput: UInt64,
         currentTurn: Int? = nil,
-        queuedCount: Int = 0
+        queuedCount: Int = 0,
+        pendingInteraction: DSHPendingInteraction? = nil,
+        modelConfig: DSHModelConfig? = nil,
+        supportedModels: [DSHModelOption]? = nil
     ) {
         self.sessionId = sessionId
         self.workspaceId = workspaceId
@@ -28,10 +87,14 @@ struct DSHSessionRow: Codable, Identifiable, Equatable, Sendable {
         self.pendingInput = pendingInput
         self.currentTurn = currentTurn
         self.queuedCount = queuedCount
+        self.pendingInteraction = pendingInteraction
+        self.modelConfig = modelConfig
+        self.supportedModels = supportedModels
     }
 
     private enum CodingKeys: String, CodingKey {
-        case sessionId, workspaceId, title, active, running, pendingInput, currentTurn, queuedCount
+        case sessionId, workspaceId, title, active, running, pendingInput, currentTurn, queuedCount,
+             pendingInteraction, modelConfig, supportedModels
     }
 
     init(from decoder: Decoder) throws {
@@ -44,6 +107,9 @@ struct DSHSessionRow: Codable, Identifiable, Equatable, Sendable {
         pendingInput = try container.decode(UInt64.self, forKey: .pendingInput)
         currentTurn = try container.decodeIfPresent(Int.self, forKey: .currentTurn)
         queuedCount = try container.decodeIfPresent(Int.self, forKey: .queuedCount) ?? 0
+        pendingInteraction = try container.decodeIfPresent(DSHPendingInteraction.self, forKey: .pendingInteraction)
+        modelConfig = try container.decodeIfPresent(DSHModelConfig.self, forKey: .modelConfig)
+        supportedModels = try container.decodeIfPresent([DSHModelOption].self, forKey: .supportedModels)
     }
 
     var id: String { sessionId }
@@ -64,7 +130,8 @@ struct DSHSessionRow: Codable, Identifiable, Equatable, Sendable {
     }
     var statusLabel: String {
         let base = pendingInput > 0 ? "等待回应（\(pendingInput)）" : running ? "运行中" : active ? "空闲" : "未激活"
-        return "\(base) · \(turnStatusLabel) · \(queueStatusLabel)"
+        let modelPart = modelConfig.map { " · \($0.model)\($0.thought.map { "（\($0)）" } ?? "")" } ?? ""
+        return "\(base) · \(turnStatusLabel) · \(queueStatusLabel)\(modelPart)"
     }
 }
 
@@ -173,11 +240,38 @@ struct DSHQueryIntent: Equatable, Sendable {
     let localEpoch: UInt64
 }
 
+struct DSHResolveIntent: Equatable, Sendable {
+    let sessionId: String
+    let workspaceId: String
+    let requestId: String
+    let interactionId: String
+    let interactionType: DSHInteractionType
+    let decision: DSHInteractionDecision
+    let optionId: String?
+    let hostId: String
+    let generation: UInt64
+    let localEpoch: UInt64
+}
+
+struct DSHSwitchModelIntent: Equatable, Sendable {
+    let sessionId: String
+    let workspaceId: String
+    let requestId: String
+    let provider: String
+    let model: String
+    let thought: String?
+    let hostId: String
+    let generation: UInt64
+    let localEpoch: UInt64
+}
+
 enum DSHQueuedCommand: Equatable, Sendable {
     case create(DSHCreateIntent)
     case prompt(DSHPromptIntent)
     case cancel(DSHCancelIntent)
     case query(DSHQueryIntent)
+    case resolve(DSHResolveIntent)
+    case switchModel(DSHSwitchModelIntent)
 
     var actionName: String {
         switch self {
@@ -185,6 +279,8 @@ enum DSHQueuedCommand: Equatable, Sendable {
         case .prompt: return "dsh_prompt"
         case .cancel: return "dsh_cancel"
         case .query: return "dsh_query"
+        case .resolve: return "dsh_resolve"
+        case .switchModel: return "dsh_switch_model"
         }
     }
 
@@ -194,6 +290,8 @@ enum DSHQueuedCommand: Equatable, Sendable {
         case .prompt(let intent): return intent.requestId
         case .cancel(let intent): return intent.requestId
         case .query(let intent): return intent.requestId
+        case .resolve(let intent): return intent.requestId
+        case .switchModel(let intent): return intent.requestId
         }
     }
 
@@ -203,6 +301,8 @@ enum DSHQueuedCommand: Equatable, Sendable {
         case .prompt(let intent): return intent.hostId
         case .cancel(let intent): return intent.hostId
         case .query(let intent): return intent.hostId
+        case .resolve(let intent): return intent.hostId
+        case .switchModel(let intent): return intent.hostId
         }
     }
 
@@ -212,6 +312,8 @@ enum DSHQueuedCommand: Equatable, Sendable {
         case .prompt(let intent): return intent.generation
         case .cancel(let intent): return intent.generation
         case .query(let intent): return intent.generation
+        case .resolve(let intent): return intent.generation
+        case .switchModel(let intent): return intent.generation
         }
     }
 
@@ -221,6 +323,8 @@ enum DSHQueuedCommand: Equatable, Sendable {
         case .prompt(let intent): return intent.localEpoch
         case .cancel(let intent): return intent.localEpoch
         case .query(let intent): return intent.localEpoch
+        case .resolve(let intent): return intent.localEpoch
+        case .switchModel(let intent): return intent.localEpoch
         }
     }
 }
@@ -239,6 +343,39 @@ struct DSHCommandReply: Equatable, Sendable {
     let queuedCount: Int?
     let duplicate: Bool
     let reasonCode: String?
+    let modelConfig: DSHModelConfig?
+
+    init(
+        hostId: String,
+        generation: UInt64,
+        status: String,
+        sessionId: String?,
+        workspaceId: String?,
+        selected: String?,
+        requestId: String,
+        delivery: DSHPromptMode?,
+        expectedTurn: Int?,
+        currentTurn: Int?,
+        queuedCount: Int?,
+        duplicate: Bool,
+        reasonCode: String?,
+        modelConfig: DSHModelConfig? = nil
+    ) {
+        self.hostId = hostId
+        self.generation = generation
+        self.status = status
+        self.sessionId = sessionId
+        self.workspaceId = workspaceId
+        self.selected = selected
+        self.requestId = requestId
+        self.delivery = delivery
+        self.expectedTurn = expectedTurn
+        self.currentTurn = currentTurn
+        self.queuedCount = queuedCount
+        self.duplicate = duplicate
+        self.reasonCode = reasonCode
+        self.modelConfig = modelConfig
+    }
 }
 
 enum DSHCommandResult: Equatable, Sendable {
@@ -253,6 +390,10 @@ enum DSHCommandResult: Equatable, Sendable {
     case stale
     case denied(reasonCode: String?)
     case unavailable
+    case resolved(sessionId: String, requestId: String, duplicate: Bool)
+    case interactionTypeMismatch(reasonCode: String)
+    case modelSwitched(sessionId: String, requestId: String, modelConfig: DSHModelConfig, duplicate: Bool)
+    case unsupportedThought(reasonCode: String)
 
     var rawValue: String {
         switch self {
@@ -267,6 +408,10 @@ enum DSHCommandResult: Equatable, Sendable {
         case .stale: return "stale"
         case .denied: return "denied"
         case .unavailable: return "unavailable"
+        case .resolved: return "resolved"
+        case .interactionTypeMismatch: return "interactionTypeMismatch"
+        case .modelSwitched: return "modelSwitched"
+        case .unsupportedThought: return "unsupportedThought"
         }
     }
 
@@ -297,6 +442,14 @@ enum DSHCommandResult: Equatable, Sendable {
             return "DSH 拒绝此命令\(reasonCode.map { "（\($0)）" } ?? "")"
         case .unavailable:
             return "DSH 桥不可用，未盲目重试"
+        case .resolved:
+            return "已答复 DSH 请求"
+        case .interactionTypeMismatch(let reasonCode):
+            return "交互类型不匹配（\(reasonCode)）"
+        case .modelSwitched(_, _, let config, _):
+            return "已切换模型至 \(config.model)\(config.thought.map { "（思考: \($0)）" } ?? "")"
+        case .unsupportedThought(let reasonCode):
+            return "不支持该思考档位（\(reasonCode)）"
         }
     }
 }
@@ -335,6 +488,8 @@ protocol DSHSessionServing: Sendable {
     func prompt(_ intent: DSHPromptIntent) async throws -> DSHCommandReply
     func cancel(_ intent: DSHCancelIntent) async throws -> DSHCommandReply
     func query(_ intent: DSHQueryIntent) async throws -> DSHCommandReply
+    func resolve(_ intent: DSHResolveIntent) async throws -> DSHCommandReply
+    func switchModel(_ intent: DSHSwitchModelIntent) async throws -> DSHCommandReply
     func close() async
 }
 
@@ -349,6 +504,12 @@ extension DSHSessionServing {
         throw DSHFailure.unavailable
     }
     func query(_ intent: DSHQueryIntent) async throws -> DSHCommandReply {
+        throw DSHFailure.unavailable
+    }
+    func resolve(_ intent: DSHResolveIntent) async throws -> DSHCommandReply {
+        throw DSHFailure.unavailable
+    }
+    func switchModel(_ intent: DSHSwitchModelIntent) async throws -> DSHCommandReply {
         throw DSHFailure.unavailable
     }
 }

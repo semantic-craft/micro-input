@@ -496,6 +496,18 @@ extension Store {
                                  binding: "menu-dsh-query", profile: profile, state: state,
                                  requiresEnabled: false, dshCommand: command)
     }
+    @discardableResult func resolveDSHSession(_ command: DSHQueuedCommand?) -> Bool {
+        guard let command, case .resolve = command, let state = routing, let profile = state.profile_id else { return false }
+        return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"dsh-desktop","command":"resolve-interaction"}"#,
+                                 binding: "menu-dsh-resolve", profile: profile, state: state,
+                                 requiresEnabled: false, dshCommand: command)
+    }
+    @discardableResult func switchModelDSHSession(_ command: DSHQueuedCommand?) -> Bool {
+        guard let command, case .switchModel = command, let state = routing, let profile = state.profile_id else { return false }
+        return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"dsh-desktop","command":"switch-model"}"#,
+                                 binding: "menu-dsh-model", profile: profile, state: state,
+                                 requiresEnabled: false, dshCommand: command)
+    }
     @discardableResult func openCindySession(_ selection: CindySelection) -> Bool {
         guard let state = routing, let profile = state.profile_id else { return false }
         return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"cindy","command":"open-session"}"#,

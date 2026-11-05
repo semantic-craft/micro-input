@@ -65,7 +65,10 @@ def main():
                               "create-workspace-bound-readback", "prompt-queue-and-steer-confirmed",
                               "request-id-deduplication", "cancel-queue-remaining-not-all-stopped",
                               "switch-session-no-misstop", "same-session-stale-stop-zero-cancel",
-                              "unprovable-turn-atomicity-refused"],
+                              "unprovable-turn-atomicity-refused",
+                              "resolve-approval-recorded", "resolve-question-answered",
+                              "interaction-type-mismatch-blocked", "already-resolved-noop-zero-side-effect",
+                              "select-model-readback-confirmed", "unsupported-thought-level-locally-refused"],
                       timestamp_ms=int(time.time() * 1000))
     if subprocess.check_output(diff_command, cwd=source) != patch:
         raise RuntimeError("native source changed during verification")

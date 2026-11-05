@@ -209,6 +209,44 @@ final class DSHSessionController: ObservableObject {
             localEpoch: epoch
         ))
     }
+    func row(for sessionId: String) -> DSHSessionRow? {
+        rows.first(where: { $0.sessionId == sessionId })
+    }
+    func resolveIntent(for sessionId: String, interactionId: String, interactionType: DSHInteractionType,
+                       decision: DSHInteractionDecision, optionId: String? = nil, requestId: String? = nil) -> DSHQueuedCommand? {
+        guard enabled, !suspended, state == .ready, let snapshot,
+              let row = rows.first(where: { $0.sessionId == sessionId }),
+              !interactionId.isEmpty else { return nil }
+        return .resolve(DSHResolveIntent(
+            sessionId: sessionId,
+            workspaceId: row.workspaceId,
+            requestId: makeRequestId(requestId),
+            interactionId: interactionId,
+            interactionType: interactionType,
+            decision: decision,
+            optionId: optionId,
+            hostId: snapshot.hostId,
+            generation: snapshot.generation,
+            localEpoch: epoch
+        ))
+    }
+    func switchModelIntent(for sessionId: String, provider: String, model: String, thought: String? = nil,
+                            requestId: String? = nil) -> DSHQueuedCommand? {
+        guard enabled, !suspended, state == .ready, let snapshot,
+              let row = rows.first(where: { $0.sessionId == sessionId }),
+              !provider.isEmpty, !model.isEmpty else { return nil }
+        return .switchModel(DSHSwitchModelIntent(
+            sessionId: sessionId,
+            workspaceId: row.workspaceId,
+            requestId: makeRequestId(requestId),
+            provider: provider,
+            model: model,
+            thought: thought,
+            hostId: snapshot.hostId,
+            generation: snapshot.generation,
+            localEpoch: epoch
+        ))
+    }
     func open(_ selection: DSHSelection?, admitted: @escaping @MainActor () -> Bool) async -> DSHOpenResult {
         guard let selection, openingEpoch == nil, refreshingEpoch == nil, let snapshot, enabled, !suspended, state == .ready,
               selection.localEpoch == epoch, selection.hostId == snapshot.hostId,
@@ -307,6 +345,35 @@ final class DSHSessionController: ObservableObject {
                 lastCommandResult = denied
                 return denied
             }
+        case .resolve(let intent):
+            guard selected == intent.sessionId else {
+                let mismatch = DSHCommandResult.unconfirmed(selected: selected, reasonCode: "guard.selectionMismatch")
+                lastCommandResult = mismatch
+                return mismatch
+            }
+            guard currentSnapshot.sessionIds.contains(intent.sessionId),
+                  rows.contains(where: { $0.sessionId == intent.sessionId && $0.workspaceId == intent.workspaceId }) else {
+                lastCommandResult = .stale
+                return .stale
+            }
+        case .switchModel(let intent):
+            guard selected == intent.sessionId else {
+                let mismatch = DSHCommandResult.unconfirmed(selected: selected, reasonCode: "guard.selectionMismatch")
+                lastCommandResult = mismatch
+                return mismatch
+            }
+            guard currentSnapshot.sessionIds.contains(intent.sessionId),
+                  let row = rows.first(where: { $0.sessionId == intent.sessionId && $0.workspaceId == intent.workspaceId }) else {
+                lastCommandResult = .stale
+                return .stale
+            }
+            if let targetOption = row.supportedModels?.first(where: { $0.model == intent.model && $0.provider == intent.provider }) {
+                if let thought = intent.thought, !targetOption.supportedThoughts.contains(thought) {
+                    let refused = DSHCommandResult.unsupportedThought(reasonCode: "guard.unsupportedThoughtLevel")
+                    lastCommandResult = refused
+                    return refused
+                }
+            }
         case .query:
             break
         }
@@ -321,6 +388,8 @@ final class DSHSessionController: ObservableObject {
             case .prompt(let intent): response = try await client.prompt(intent)
             case .cancel(let intent): response = try await client.cancel(intent)
             case .query(let intent): response = try await client.query(intent)
+            case .resolve(let intent): response = try await client.resolve(intent)
+            case .switchModel(let intent): response = try await client.switchModel(intent)
             }
             guard current(expected), admitted() else {
                 lastCommandResult = .stale
@@ -411,6 +480,18 @@ final class DSHSessionController: ObservableObject {
             return .denied(reasonCode: response.reasonCode)
         case "stale":
             return .stale
+        case "resolved":
+            guard let sessionId = response.sessionId else { return .unavailable }
+            clearPendingInteractionLocally(sessionId: sessionId)
+            return .resolved(sessionId: sessionId, requestId: response.requestId, duplicate: response.duplicate)
+        case "interactionTypeMismatch":
+            return .interactionTypeMismatch(reasonCode: response.reasonCode ?? "guard.interactionTypeMismatch")
+        case "modelSwitched":
+            guard let sessionId = response.sessionId, let config = response.modelConfig else { return .unavailable }
+            updateModelConfigLocally(sessionId: sessionId, modelConfig: config)
+            return .modelSwitched(sessionId: sessionId, requestId: response.requestId, modelConfig: config, duplicate: response.duplicate)
+        case "unsupportedThought":
+            return .unsupportedThought(reasonCode: response.reasonCode ?? "guard.unsupportedThoughtLevel")
         default:
             return .unavailable
         }
@@ -428,7 +509,10 @@ final class DSHSessionController: ObservableObject {
                 running: row.running,
                 pendingInput: row.pendingInput,
                 currentTurn: row.currentTurn,
-                queuedCount: row.queuedCount
+                queuedCount: row.queuedCount,
+                pendingInteraction: row.pendingInteraction,
+                modelConfig: row.modelConfig,
+                supportedModels: row.supportedModels
             )
         }
         if !updatedRows.contains(where: { $0.sessionId == sessionId }) {
@@ -467,7 +551,70 @@ final class DSHSessionController: ObservableObject {
                 running: running ?? row.running,
                 pendingInput: row.pendingInput,
                 currentTurn: currentTurn,
-                queuedCount: queuedCount
+                queuedCount: queuedCount,
+                pendingInteraction: row.pendingInteraction,
+                modelConfig: row.modelConfig,
+                supportedModels: row.supportedModels
+            )
+        }
+        rows = updatedRows
+        snapshot = DSHSessionSnapshot(
+            hostId: currentSnapshot.hostId,
+            generation: currentSnapshot.generation,
+            sessionIds: currentSnapshot.sessionIds,
+            cursor: currentSnapshot.cursor,
+            rows: updatedRows,
+            unavailableSessionIds: currentSnapshot.unavailableSessionIds,
+            changes: currentSnapshot.changes,
+            selected: currentSnapshot.selected
+        )
+    }
+    private func clearPendingInteractionLocally(sessionId: String) {
+        guard let currentSnapshot = snapshot else { return }
+        let updatedRows = rows.map { row -> DSHSessionRow in
+            guard row.sessionId == sessionId else { return row }
+            return DSHSessionRow(
+                sessionId: row.sessionId,
+                workspaceId: row.workspaceId,
+                title: row.title,
+                active: row.active,
+                running: row.running,
+                pendingInput: row.pendingInput,
+                currentTurn: row.currentTurn,
+                queuedCount: row.queuedCount,
+                pendingInteraction: nil,
+                modelConfig: row.modelConfig,
+                supportedModels: row.supportedModels
+            )
+        }
+        rows = updatedRows
+        snapshot = DSHSessionSnapshot(
+            hostId: currentSnapshot.hostId,
+            generation: currentSnapshot.generation,
+            sessionIds: currentSnapshot.sessionIds,
+            cursor: currentSnapshot.cursor,
+            rows: updatedRows,
+            unavailableSessionIds: currentSnapshot.unavailableSessionIds,
+            changes: currentSnapshot.changes,
+            selected: currentSnapshot.selected
+        )
+    }
+    private func updateModelConfigLocally(sessionId: String, modelConfig: DSHModelConfig) {
+        guard let currentSnapshot = snapshot else { return }
+        let updatedRows = rows.map { row -> DSHSessionRow in
+            guard row.sessionId == sessionId else { return row }
+            return DSHSessionRow(
+                sessionId: row.sessionId,
+                workspaceId: row.workspaceId,
+                title: row.title,
+                active: row.active,
+                running: row.running,
+                pendingInput: row.pendingInput,
+                currentTurn: row.currentTurn,
+                queuedCount: row.queuedCount,
+                pendingInteraction: row.pendingInteraction,
+                modelConfig: modelConfig,
+                supportedModels: row.supportedModels
             )
         }
         rows = updatedRows

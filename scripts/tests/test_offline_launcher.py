@@ -145,6 +145,12 @@ class OfflineEvidenceTests(unittest.TestCase):
             "cancel_queue_remaining_not_all_stopped",
             "unprovable_turn_atomicity_refused",
             "create_workspace_bound_readback",
+            "resolve_approval_recorded",
+            "already_resolved_noop_zero_side_effect",
+            "interaction_type_mismatch_blocked",
+            "resolve_question_answered",
+            "select_model_readback_confirmed",
+            "unsupported_thought_level_locally_refused",
             "wrong_selected_unconfirmed",
             "out_of_scope_zero_reads",
             "deleted_target_no_redirect",
@@ -170,6 +176,12 @@ class OfflineEvidenceTests(unittest.TestCase):
             dict(action_type="dsh_cancel", outcome="noop", target="dsh", text_byte_len=None),
             dict(action_type="dsh_cancel", outcome="cancelledQueueRemaining", target="dsh", text_byte_len=None),
             dict(action_type="dsh_cancel", outcome="denied", target="dsh", text_byte_len=None),
+            dict(action_type="dsh_resolve", outcome="resolved", target="dsh", text_byte_len=None),
+            dict(action_type="dsh_resolve", outcome="resolved", target="dsh", text_byte_len=None),
+            dict(action_type="dsh_resolve", outcome="interactionTypeMismatch", target="dsh", text_byte_len=None),
+            dict(action_type="dsh_resolve", outcome="resolved", target="dsh", text_byte_len=None),
+            dict(action_type="dsh_switch_model", outcome="modelSwitched", target="dsh", text_byte_len=None),
+            dict(action_type="dsh_switch_model", outcome="unsupportedThought", target="dsh", text_byte_len=None),
         ]
         audit.write_text("\n".join(json.dumps(r) for r in audit_rows))
         path.write_text(json.dumps(payload))

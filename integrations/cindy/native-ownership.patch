@@ -369,16 +369,25 @@ index 855567ab..7478cb4e 100644
      vi.useFakeTimers();
      let ready!: () => void;
 diff --git a/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostProcess.test.ts b/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostProcess.test.ts
-index d213f095..97a54b18 100644
+index d213f095..fdad2ecb 100644
 --- a/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostProcess.test.ts
 +++ b/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostProcess.test.ts
-@@ -1,4 +1,5 @@
+@@ -1,10 +1,14 @@
  import { afterEach, describe, expect, it, vi } from 'vitest';
 +import { WorkLouderOwnershipFence } from '../WorkLouderOwnershipFence.js';
  
  import {
    classifyConnectionError,
-@@ -105,3 +106,36 @@ describe('Work Louder device status', () => {
+   isOptionalDeviceStatusError,
+   postDeviceStatus,
++  readWorkLouderDeviceKeymap,
++  writeWorkLouderDeviceKeymap,
+ } from '../workLouderCodexHostProcess.js';
++import { unwrapWorkLouderKeymapText } from '../protocol.js';
+ 
+ const originalPlatform = process.platform;
+ 
+@@ -105,3 +109,76 @@ describe('Work Louder device status', () => {
      ).rejects.toThrow('timeout');
    });
  });
@@ -413,6 +422,46 @@ index d213f095..97a54b18 100644
 +    const gate = new WorkLouderOwnershipFence();
 +    expect(await gate.change(1, true, async () => { throw new Error('RPC unresolved'); })).toBe(false);
 +    expect(gate.suspended).toBe(true);
++  });
++});
++
++describe('Work Louder chunked keymap IO (json pool overflow prevention)', () => {
++  it('prefers readFileChunked over readFile and decodes Buffer payloads', async () => {
++    const largeKeymap = JSON.stringify({
++      version: 1,
++      profiles: [{ id: 0, name: 'Default', layers: [{ id: 0, layout: { keymap: [] } }] }],
++      padding: 'x'.repeat(7200),
++    });
++    const readFile = vi.fn().mockResolvedValue({
++      ok: false,
++      error: { message: 'json pool overflow' },
++    });
++    const readFileChunked = vi.fn().mockResolvedValue({
++      ok: true,
++      value: Buffer.from(largeKeymap, 'utf8'),
++    });
++
++    const result = await readWorkLouderDeviceKeymap({ readFile, readFileChunked });
++    expect(readFileChunked).toHaveBeenCalledWith('keymap.json');
++    expect(readFile).not.toHaveBeenCalled();
++    expect(unwrapWorkLouderKeymapText(result)).toBe(largeKeymap);
++  });
++
++  it('prefers writeFileChunkedFromStr over writeFile for keymap updates', async () => {
++    const writeFile = vi.fn().mockResolvedValue({
++      ok: false,
++      error: { message: 'json pool overflow' },
++    });
++    const writeFileChunkedFromStr = vi.fn().mockImplementation(async (_name, _text, controller) => {
++      controller('cancel-uuid');
++      return { ok: true };
++    });
++
++    const payload = '{"profiles":[{"layers":[{}]}]}';
++    const result = await writeWorkLouderDeviceKeymap({ writeFile, writeFileChunkedFromStr }, payload);
++    expect(result).toEqual({ ok: true });
++    expect(writeFileChunkedFromStr).toHaveBeenCalledOnce();
++    expect(writeFile).not.toHaveBeenCalled();
 +  });
 +});
 diff --git a/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexLightingController.test.ts b/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexLightingController.test.ts
@@ -1760,7 +1809,7 @@ index 00000000..2a05a927
 +  };
 +}
 diff --git a/apps/desktop/src/main/worklouder-codex/protocol.ts b/apps/desktop/src/main/worklouder-codex/protocol.ts
-index 03a6c9d0..2dfb431a 100644
+index 03a6c9d0..08fc8b44 100644
 --- a/apps/desktop/src/main/worklouder-codex/protocol.ts
 +++ b/apps/desktop/src/main/worklouder-codex/protocol.ts
 @@ -50,7 +50,7 @@ export interface WorkLouderCodexLightingFrame {
@@ -1804,7 +1853,25 @@ index 03a6c9d0..2dfb431a 100644
    | { kind: 'stopped' };
  
  export interface WorkLouderCodexHidEvent {
-@@ -709,6 +711,12 @@ export function createWorkLouderCodexWindowRevealFrame(
+@@ -455,12 +457,16 @@ function unwrapWorkLouderRpcValue(result: unknown): unknown {
+   return result;
+ }
+ 
+-/** `fs.read` may return a string, `{data}`, a parsed object, or an SDK envelope. */
++/** `fs.read` / `fs.readbin` may return a string, Buffer/Uint8Array, `{data}`, a parsed object, or an SDK envelope. */
+ export function unwrapWorkLouderKeymapText(result: unknown): string | null {
+   const payload = unwrapWorkLouderRpcValue(result);
+   if (typeof payload === 'string') {
+     return payload.trim().length > 0 ? payload : null;
+   }
++  if (payload instanceof Uint8Array) {
++    const decoded = Buffer.from(payload).toString('utf8');
++    return decoded.trim().length > 0 ? decoded : null;
++  }
+   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+   const record = payload as Record<string, unknown>;
+   if (typeof record.data === 'string' && record.data.trim().length > 0) return record.data;
+@@ -709,6 +715,12 @@ export function createWorkLouderCodexWindowRevealFrame(
  export function isWorkLouderCodexHostMessage(value: unknown): value is WorkLouderCodexHostMessage {
    if (!value || typeof value !== 'object') return false;
    const message = value as { kind?: unknown; status?: unknown; level?: unknown; message?: unknown };
@@ -2034,7 +2101,7 @@ index c6b758a2..187afd2d 100644
 +  return rows.length === 1;
 +}
 diff --git a/apps/desktop/src/main/worklouder-codex/workLouderCodexHostProcess.ts b/apps/desktop/src/main/worklouder-codex/workLouderCodexHostProcess.ts
-index 3810072b..9472b536 100644
+index 3810072b..0a5868f1 100644
 --- a/apps/desktop/src/main/worklouder-codex/workLouderCodexHostProcess.ts
 +++ b/apps/desktop/src/main/worklouder-codex/workLouderCodexHostProcess.ts
 @@ -7,6 +7,7 @@
@@ -2045,7 +2112,31 @@ index 3810072b..9472b536 100644
  
  import {
    applyCreatorMicro2AgentLayer,
-@@ -122,6 +123,8 @@ let hidListeningRequested = false;
+@@ -66,9 +67,20 @@ interface WorkLouderRpcResult {
+   error?: { message?: string };
+ }
+ 
+-interface WorkLouderFsApi {
+-  readFile(fileName: string): Promise<WorkLouderRpcResult>;
+-  writeFile(fileName: string, data: unknown): Promise<WorkLouderRpcResult>;
++export interface WorkLouderFsApi {
++  readFile?(fileName: string): Promise<WorkLouderRpcResult>;
++  readFileChunked?(fileName: string): Promise<WorkLouderRpcResult>;
++  writeFile?(fileName: string, data: unknown): Promise<WorkLouderRpcResult>;
++  writeFileChunkedFromStr?(
++    fileName: string,
++    inputString: string,
++    controller: (rpcId: string) => void,
++  ): Promise<WorkLouderRpcResult>;
++  writeFileChunked?(
++    fileName: string,
++    data: Uint8Array,
++    transactionId?: string,
++  ): Promise<WorkLouderRpcResult>;
+ }
+ 
+ interface WorkLouderApi {
+@@ -122,6 +134,8 @@ let hidListeningRequested = false;
  let applying = false;
  let applyTask: Promise<void> | null = null;
  let stopping = false;
@@ -2054,7 +2145,7 @@ index 3810072b..9472b536 100644
  let retryTimer: ReturnType<typeof setTimeout> | null = null;
  let lastLoggedError: string | null = null;
  let lastActivityPostedAt = 0;
-@@ -147,7 +150,15 @@ let creatorKeymapGeneration = 0;
+@@ -147,7 +161,15 @@ let creatorKeymapGeneration = 0;
  if (parentPort) {
    parentPort.on('message', (event) => {
      const request = event.data as WorkLouderCodexHostRequest;
@@ -2071,7 +2162,19 @@ index 3810072b..9472b536 100644
        sdkEntry = request.sdkEntry;
        permissionBlocked = false;
        transportFaulted = false;
-@@ -186,8 +197,27 @@ if (parentPort) {
+@@ -164,7 +186,10 @@ if (parentPort) {
+         creatorKeymap = request.keymap.map((row) => [...row]);
+         creatorKeymapGeneration += 1;
+         creatorKeymapBound = false;
+-        if (api) void bindCreatorAgentKeysWhenIdle(api);
++        if (api) {
++          requestListen();
++          if (latestFrame && !isWorkLouderCodexLightingFrameOff(latestFrame)) requestApply();
++        }
+       }
+     } else if (request?.kind === 'listen') {
+       hidListeningRequested = true;
+@@ -186,8 +211,27 @@ if (parentPort) {
    });
  }
  
@@ -2100,9 +2203,71 @@ index 3810072b..9472b536 100644
  }
  
  function hostLog(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
-@@ -266,25 +296,25 @@ function loadWorkLouderFsApi(
+@@ -233,16 +277,25 @@ function loadSdk(): WorkLouderSdk {
+   return sdk;
  }
  
++function hasWorkLouderFsMethods(
++  candidate: WorkLouderFsApi | null | undefined,
++): candidate is WorkLouderFsApi {
++  if (!candidate) return false;
++  const canRead =
++    typeof candidate.readFileChunked === 'function' || typeof candidate.readFile === 'function';
++  const canWrite =
++    typeof candidate.writeFileChunkedFromStr === 'function' ||
++    typeof candidate.writeFileChunked === 'function' ||
++    typeof candidate.writeFile === 'function';
++  return canRead && canWrite;
++}
++
+ function loadWorkLouderFsApi(
+   deviceApi: WorkLouderApi,
+   deviceComm: WorkLouderComm,
+ ): WorkLouderFsApi | null {
+   const existing = deviceApi.api;
+-  if (
+-    existing &&
+-    typeof existing.readFile === 'function' &&
+-    typeof existing.writeFile === 'function'
+-  ) {
++  if (hasWorkLouderFsMethods(existing)) {
+     return existing;
+   }
+   const loaded = loadSdk();
+@@ -265,26 +318,56 @@ function loadWorkLouderFsApi(
+   return null;
+ }
+ 
++export async function readWorkLouderDeviceKeymap(
++  fsApi: WorkLouderFsApi,
++  fileName: string = WORKLOUDER_DEVICE_KEYMAP_FILE,
++): Promise<WorkLouderRpcResult> {
++  if (typeof fsApi.readFileChunked === 'function') {
++    return fsApi.readFileChunked(fileName);
++  }
++  if (typeof fsApi.readFile === 'function') {
++    return fsApi.readFile(fileName);
++  }
++  return { ok: false, error: { message: 'Work Louder filesystem read helper is unavailable' } };
++}
++
++export async function writeWorkLouderDeviceKeymap(
++  fsApi: WorkLouderFsApi,
++  text: string,
++  fileName: string = WORKLOUDER_DEVICE_KEYMAP_FILE,
++): Promise<WorkLouderRpcResult> {
++  if (typeof fsApi.writeFileChunkedFromStr === 'function') {
++    return fsApi.writeFileChunkedFromStr(fileName, text, () => undefined);
++  }
++  if (typeof fsApi.writeFileChunked === 'function') {
++    return fsApi.writeFileChunked(fileName, Buffer.from(text, 'utf8'));
++  }
++  if (typeof fsApi.writeFile === 'function') {
++    return fsApi.writeFile(fileName, text);
++  }
++  return { ok: false, error: { message: 'Work Louder filesystem write helper is unavailable' } };
++}
++
  function requestApply(): void {
 -  if (stopping || permissionBlocked) return;
 +  if (stopping || ownershipFence.suspended || permissionBlocked) return;
@@ -2130,7 +2295,7 @@ index 3810072b..9472b536 100644
    discoverPending = true;
    kickQueue();
  }
-@@ -302,7 +332,7 @@ function kickQueue(): void {
+@@ -302,7 +385,7 @@ function kickQueue(): void {
  async function drainApplyQueue(): Promise<void> {
    applying = true;
    try {
@@ -2139,7 +2304,25 @@ index 3810072b..9472b536 100644
        // Drop a stale handle before lighting or HID reuse it.
        if (discoverPending) {
          discoverPending = false;
-@@ -738,6 +768,7 @@ async function bindCreatorAgentKeys(deviceApi: WorkLouderApi): Promise<void> {
+@@ -666,7 +749,7 @@ async function restoreCreatorKeymap(deviceApi: WorkLouderApi): Promise<void> {
+   }
+   const fsApi = loadWorkLouderFsApi(deviceApi, comm);
+   if (!fsApi) return;
+-  const writeResult = await fsApi.writeFile(WORKLOUDER_DEVICE_KEYMAP_FILE, liveText);
++  const writeResult = await writeWorkLouderDeviceKeymap(fsApi, liveText, WORKLOUDER_DEVICE_KEYMAP_FILE);
+   if (!workLouderFsSucceeded(writeResult)) {
+     throw new Error(writeResult?.error?.message ?? 'fs.write keymap.json restore failed');
+   }
+@@ -719,7 +802,7 @@ async function bindCreatorAgentKeys(deviceApi: WorkLouderApi): Promise<void> {
+     hostLog('warn', 'Work Louder keymap bind could not load WLRPCApi');
+     return;
+   }
+-  const liveResult = await fsApi.readFile(WORKLOUDER_DEVICE_KEYMAP_FILE);
++  const liveResult = await readWorkLouderDeviceKeymap(fsApi, WORKLOUDER_DEVICE_KEYMAP_FILE);
+   if (!workLouderFsSucceeded(liveResult)) {
+     throw new Error(liveResult?.error?.message ?? 'fs.read keymap.json failed');
+   }
+@@ -738,6 +821,7 @@ async function bindCreatorAgentKeys(deviceApi: WorkLouderApi): Promise<void> {
    const layerCount = document.profiles[profileIndex]?.layers.length ?? 0;
    const layerIndex = resolveWorkLouderActiveLayerIndex(status.layerIndex, layerCount);
    const next = applyCreatorMicro2AgentLayer(document, layerIndex, creatorKeymap, profileIndex);
@@ -2147,7 +2330,20 @@ index 3810072b..9472b536 100644
    if (!next.changed) {
      creatorKeymapBound = true;
      if (next.alreadyBound) creatorKeymapWritten = true;
-@@ -768,7 +799,7 @@ async function bindCreatorAgentKeys(deviceApi: WorkLouderApi): Promise<void> {
+@@ -751,9 +835,10 @@ async function bindCreatorAgentKeys(deviceApi: WorkLouderApi): Promise<void> {
+     return;
+   }
+   await backupCreatorKeymap(liveText, profileIndex, layerIndex);
+-  const writeResult = await fsApi.writeFile(
+-    WORKLOUDER_DEVICE_KEYMAP_FILE,
++  const writeResult = await writeWorkLouderDeviceKeymap(
++    fsApi,
+     JSON.stringify(next.document),
++    WORKLOUDER_DEVICE_KEYMAP_FILE,
+   );
+   if (!workLouderFsSucceeded(writeResult)) {
+     throw new Error(writeResult?.error?.message ?? 'fs.write keymap.json failed');
+@@ -768,7 +853,7 @@ async function bindCreatorAgentKeys(deviceApi: WorkLouderApi): Promise<void> {
  
  async function bindCreatorAgentKeysWhenIdle(deviceApi: WorkLouderApi): Promise<void> {
    if (connectedDevice?.deviceType !== 'creator-micro-2') return;
@@ -2156,7 +2352,7 @@ index 3810072b..9472b536 100644
      if (Date.now() < creatorKeymapRetryAt) break;
      if (creatorKeymapBinding) {
        await creatorKeymapBinding;
-@@ -818,6 +849,35 @@ function clearCreatorKeymapRetry(): void {
+@@ -818,6 +903,35 @@ function clearCreatorKeymapRetry(): void {
    creatorKeymapRetryTimer = null;
  }
  
@@ -2192,7 +2388,7 @@ index 3810072b..9472b536 100644
  async function ensureConnected(): Promise<WorkLouderApi | null> {
    if (api && transportFaulted) await disconnect();
    if (api) {
-@@ -832,28 +892,7 @@ async function ensureConnected(): Promise<WorkLouderApi | null> {
+@@ -832,28 +946,7 @@ async function ensureConnected(): Promise<WorkLouderApi | null> {
    if (!(await nextComm.connect(candidate.device))) return null;
    comm = nextComm;
    const nextApi = new loaded.RPCApiOAI(nextComm, sdkLogger);
@@ -2222,7 +2418,7 @@ index 3810072b..9472b536 100644
    api = nextApi;
    connectedDevice = {
      deviceType: candidate.deviceType,
-@@ -1003,7 +1042,7 @@ function clearRetry(): void {
+@@ -1003,7 +1096,7 @@ function clearRetry(): void {
  
  async function disconnect(): Promise<void> {
    const currentApi = api;
@@ -2231,7 +2427,7 @@ index 3810072b..9472b536 100644
      try {
        await restoreCreatorKeymap(currentApi);
      } catch (error) {
-@@ -1076,7 +1115,7 @@ async function stop(): Promise<void> {
+@@ -1076,7 +1169,7 @@ async function stop(): Promise<void> {
    await awaitWithTimeout(applyTask, 400);
    await awaitWithTimeout(creatorKeymapBinding, 400);
    const currentApi = api;
@@ -2538,7 +2734,7 @@ index d30e7032..ebf69fdb 100644
          }
          default:
 diff --git a/apps/desktop/src/renderer/features/bots/botSessionOwners.ts b/apps/desktop/src/renderer/features/bots/botSessionOwners.ts
-index d4685fea..cdfac7ca 100644
+index d4685fea..2bd5ca62 100644
 --- a/apps/desktop/src/renderer/features/bots/botSessionOwners.ts
 +++ b/apps/desktop/src/renderer/features/bots/botSessionOwners.ts
 @@ -129,8 +129,32 @@ export interface SessionEntryNavigatorDeps {
@@ -2585,7 +2781,7 @@ index d4685fea..cdfac7ca 100644
    let sequence = 0;
    let committedPath: string | null = null;
    // Every location committed since the latest entry opened; a correction is valid only while
-@@ -177,11 +204,34 @@ export function createSessionEntryNavigator(
+@@ -177,11 +204,37 @@ export function createSessionEntryNavigator(
      }
      try {
        deps.openBotRoute(target.route, target.gateConsumesAlert ? disposalId : undefined, messageClientId, sessionId);
@@ -2603,7 +2799,10 @@ index d4685fea..cdfac7ca 100644
 +    isLatest: () => boolean,
 +    deviceId?: string,
 +  ) => {
-+    const result = deps.openOrdinary(sessionId, messageClientId, isLatest, deviceId);
++    const result =
++      deviceId === undefined
++        ? deps.openOrdinary(sessionId, messageClientId, isLatest)
++        : deps.openOrdinary(sessionId, messageClientId, isLatest, deviceId);
 +    const notifyIfAlreadyCommitted = () => {
 +      if (isLatest() && committedPath && extractCommittedSessionIdFromRoute(committedPath) === sessionId) {
 +        deps.onLocationCommitted?.(committedPath, sessionId);
@@ -2620,7 +2819,7 @@ index d4685fea..cdfac7ca 100644
    const open = (sessionId: string, messageClientId?: string, islandEntryId?: string, deviceId?: string) => {
      const entry = ++sequence;
      pending = null;
-@@ -189,11 +239,11 @@ export function createSessionEntryNavigator(
+@@ -189,11 +242,11 @@ export function createSessionEntryNavigator(
      const ownerCurrent = deps.captureOwner?.() ?? (() => true);
      const isLatest = () => sequence === entry && ownerCurrent();
      if (deviceId && deps.isRemoteDevice) {
@@ -2635,7 +2834,7 @@ index d4685fea..cdfac7ca 100644
        return;
      }
      openLocal();
-@@ -205,10 +255,10 @@ export function createSessionEntryNavigator(
+@@ -205,10 +258,10 @@ export function createSessionEntryNavigator(
          return;
        }
        let movedToBotPage = false;
@@ -2648,7 +2847,7 @@ index d4685fea..cdfac7ca 100644
          if (!isLatest() || !target || target.route.startsWith('/cc-agent/')) return;
          // Correct only this entry's own landing: the ordinary page, or the Bot page the ordinary
          // path already resolved to. Any other committed location means the user moved on.
-@@ -217,13 +267,14 @@ export function createSessionEntryNavigator(
+@@ -217,13 +270,14 @@ export function createSessionEntryNavigator(
          }
          movedToBotPage = true;
          openBotTarget(entry, sessionId, target, islandEntryId, messageClientId);

@@ -15,6 +15,9 @@ actor DSHNavigationFixture: DSHSessionServing {
         var pendingInput: UInt64
         var currentTurn: Int?
         var queuedCount: Int
+        var pendingInteraction: DSHPendingInteraction?
+        var modelConfig: DSHModelConfig?
+        var supportedModels: [DSHModelOption]?
     }
     private var mode = Mode.normal
     private var selected: String?
@@ -22,12 +25,25 @@ actor DSHNavigationFixture: DSHSessionServing {
     private var changes: [DSHSessionChange] = []
     private var connected = false
     private var sessionOrder: [String] = [DSHNavigationFixture.first, DSHNavigationFixture.second]
+    private var createdOrder: [String] = []
     private var states: [String: SessionRuntimeState] = [
         DSHNavigationFixture.first: SessionRuntimeState(
-            workspaceId: "workspace-a", title: "同名会话", running: true, pendingInput: 0, currentTurn: 1, queuedCount: 0
+            workspaceId: "workspace-a", title: "同名会话", running: true, pendingInput: 0, currentTurn: 1, queuedCount: 0,
+            pendingInteraction: nil,
+            modelConfig: DSHModelConfig(provider: "deepseek-official", model: "deepseek-chat", thought: "medium"),
+            supportedModels: [
+                DSHModelOption(provider: "deepseek-official", model: "deepseek-chat", defaultThought: "medium", supportedThoughts: ["off", "low", "medium", "high"]),
+                DSHModelOption(provider: "deepseek-official", model: "deepseek-reasoner", defaultThought: "high", supportedThoughts: ["low", "medium", "high"]),
+            ]
         ),
         DSHNavigationFixture.second: SessionRuntimeState(
-            workspaceId: "workspace-b", title: "同名会话", running: true, pendingInput: 0, currentTurn: 1, queuedCount: 0
+            workspaceId: "workspace-b", title: "同名会话", running: true, pendingInput: 0, currentTurn: 1, queuedCount: 0,
+            pendingInteraction: nil,
+            modelConfig: DSHModelConfig(provider: "deepseek-official", model: "deepseek-chat", thought: "medium"),
+            supportedModels: [
+                DSHModelOption(provider: "deepseek-official", model: "deepseek-chat", defaultThought: "medium", supportedThoughts: ["off", "low", "medium", "high"]),
+                DSHModelOption(provider: "deepseek-official", model: "deepseek-reasoner", defaultThought: "high", supportedThoughts: ["low", "medium", "high"]),
+            ]
         ),
     ]
     private var settledReplies: [String: DSHCommandReply] = [:]
@@ -37,6 +53,8 @@ actor DSHNavigationFixture: DSHSessionServing {
     private(set) var creates = 0
     private(set) var prompts = 0
     private(set) var cancels = 0
+    private(set) var resolves = 0
+    private(set) var selectModels = 0
     private(set) var closes = 0
     private(set) var navigations: [String] = []
 
@@ -47,12 +65,25 @@ actor DSHNavigationFixture: DSHSessionServing {
         changes = []
         connected = false
         sessionOrder = [Self.first, Self.second]
+        createdOrder = []
         states = [
             Self.first: SessionRuntimeState(
-                workspaceId: "workspace-a", title: "同名会话", running: true, pendingInput: 0, currentTurn: 1, queuedCount: 0
+                workspaceId: "workspace-a", title: "同名会话", running: true, pendingInput: 0, currentTurn: 1, queuedCount: 0,
+                pendingInteraction: nil,
+                modelConfig: DSHModelConfig(provider: "deepseek-official", model: "deepseek-chat", thought: "medium"),
+                supportedModels: [
+                    DSHModelOption(provider: "deepseek-official", model: "deepseek-chat", defaultThought: "medium", supportedThoughts: ["off", "low", "medium", "high"]),
+                    DSHModelOption(provider: "deepseek-official", model: "deepseek-reasoner", defaultThought: "high", supportedThoughts: ["low", "medium", "high"]),
+                ]
             ),
             Self.second: SessionRuntimeState(
-                workspaceId: "workspace-b", title: "同名会话", running: true, pendingInput: 0, currentTurn: 1, queuedCount: 0
+                workspaceId: "workspace-b", title: "同名会话", running: true, pendingInput: 0, currentTurn: 1, queuedCount: 0,
+                pendingInteraction: nil,
+                modelConfig: DSHModelConfig(provider: "deepseek-official", model: "deepseek-chat", thought: "medium"),
+                supportedModels: [
+                    DSHModelOption(provider: "deepseek-official", model: "deepseek-chat", defaultThought: "medium", supportedThoughts: ["off", "low", "medium", "high"]),
+                    DSHModelOption(provider: "deepseek-official", model: "deepseek-reasoner", defaultThought: "high", supportedThoughts: ["low", "medium", "high"]),
+                ]
             ),
         ]
         settledReplies = [:]
@@ -62,6 +93,8 @@ actor DSHNavigationFixture: DSHSessionServing {
         creates = 0
         prompts = 0
         cancels = 0
+        resolves = 0
+        selectModels = 0
         closes = 0
         navigations = []
     }
@@ -75,14 +108,28 @@ actor DSHNavigationFixture: DSHSessionServing {
         cursor += 1
         changes.append(DSHSessionChange(sequence: cursor, row: row(sessionId)))
     }
-    func counts() -> (reads: Int, bodyReads: Int, opens: Int, creates: Int, prompts: Int, cancels: Int, closes: Int, navigations: [String]) {
-        (metadataReads, bodyReads, opens, creates, prompts, cancels, closes, navigations)
+    func setPendingInteraction(sessionId: String, interaction: DSHPendingInteraction?) {
+        guard var entry = states[sessionId] else { return }
+        entry.pendingInteraction = interaction
+        entry.pendingInput = interaction != nil ? 1 : 0
+        states[sessionId] = entry
+        cursor += 1
+        changes.append(DSHSessionChange(sequence: cursor, row: row(sessionId)))
+    }
+    func counts() -> (reads: Int, bodyReads: Int, opens: Int, creates: Int, prompts: Int, cancels: Int, resolves: Int, selectModels: Int, closes: Int, navigations: [String]) {
+        (metadataReads, bodyReads, opens, creates, prompts, cancels, resolves, selectModels, closes, navigations)
     }
     private var generation: UInt64 { mode == .rotated ? 2 : 1 }
     private func row(_ id: String) -> DSHSessionRow {
         let state = states[id] ?? SessionRuntimeState(
             workspaceId: id == Self.first ? "workspace-a" : "workspace-b",
-            title: "同名会话", running: true, pendingInput: 0, currentTurn: 1, queuedCount: 0
+            title: "同名会话", running: true, pendingInput: 0, currentTurn: 1, queuedCount: 0,
+            pendingInteraction: nil,
+            modelConfig: DSHModelConfig(provider: "deepseek-official", model: "deepseek-chat", thought: "medium"),
+            supportedModels: [
+                DSHModelOption(provider: "deepseek-official", model: "deepseek-chat", defaultThought: "medium", supportedThoughts: ["off", "low", "medium", "high"]),
+                DSHModelOption(provider: "deepseek-official", model: "deepseek-reasoner", defaultThought: "high", supportedThoughts: ["low", "medium", "high"]),
+            ]
         )
         return DSHSessionRow(
             sessionId: id,
@@ -92,7 +139,10 @@ actor DSHNavigationFixture: DSHSessionServing {
             running: state.running,
             pendingInput: state.pendingInput,
             currentTurn: state.currentTurn,
-            queuedCount: state.queuedCount
+            queuedCount: state.queuedCount,
+            pendingInteraction: state.pendingInteraction,
+            modelConfig: state.modelConfig,
+            supportedModels: state.supportedModels
         )
     }
     func pendingRoundTrip() {
@@ -114,31 +164,37 @@ actor DSHNavigationFixture: DSHSessionServing {
         guard mode != .disconnected else { throw DSHFailure.unavailable }
         guard mode != .gap else { throw DSHFailure.gap }
         metadataReads += 1
-        let visibleIds = mode == .deleted ? sessionOrder.filter { $0 != Self.first } : sessionOrder
-        let allIds = sessionOrder + [Self.cold]
-        let result = DSHSessionSnapshot(
+        let liveSessions = sessionOrder + createdOrder
+        let visibleIds = mode == .deleted ? liveSessions.filter { $0 != Self.first } : liveSessions
+        let allIds = [Self.first, Self.second, Self.cold] + createdOrder
+        let currentRows = visibleIds.map { row($0) }
+        let currentUnavailable = allIds.filter { id in !visibleIds.contains(id) }
+        let resultChanges = changes
+        changes = []
+        return DSHSessionSnapshot(
             hostId: "qa-host",
             generation: generation,
             sessionIds: allIds,
             cursor: cursor,
-            rows: visibleIds.map { row($0) },
-            unavailableSessionIds: [Self.cold] + (mode == .deleted ? [Self.first] : []),
-            changes: changes,
-            selected: visibleIds.contains(selected ?? "") ? selected : nil
+            rows: currentRows,
+            unavailableSessionIds: currentUnavailable,
+            changes: resultChanges,
+            selected: selected
         )
-        changes = []
-        return result
     }
     func open(_ selection: DSHSelection) async throws -> DSHOpenReply {
-        opens += 1
         guard connected, mode != .disconnected else { throw DSHFailure.unavailable }
         guard selection.hostId == "qa-host", selection.generation == generation else { return reply(.stale) }
-        guard sessionOrder.contains(selection.sessionId),
-              selection.workspaceId == row(selection.sessionId).workspaceId else { return reply(.denied) }
-        guard mode != .deleted || selection.sessionId != Self.first else { return reply(.stale) }
-        if mode == .wrongSelected { return reply(.confirmed, selected: Self.second) }
-        selected = selection.sessionId; navigations.append(selection.sessionId)
-        return reply(.confirmed, selected: selected)
+        guard mode != .deleted || selection.sessionId != Self.first else { return reply(.denied) }
+        opens += 1
+        let target = selection.sessionId
+        navigations.append(target)
+        if mode == .wrongSelected {
+            selected = Self.second
+            return reply(.unconfirmed, selected: Self.second)
+        }
+        selected = target
+        return reply(.confirmed, selected: target)
     }
     func create(_ intent: DSHCreateIntent) async throws -> DSHCommandReply {
         guard connected, mode != .disconnected else { throw DSHFailure.unavailable }
@@ -148,17 +204,19 @@ actor DSHNavigationFixture: DSHSessionServing {
         if let existing = settledReplies[intent.requestId] {
             return withDuplicate(existing)
         }
-        guard ["workspace-a", "workspace-b"].contains(intent.workspaceId) else {
-            return commandReply(status: "denied", requestId: intent.requestId, reasonCode: "guard.unauthorizedWorkspace")
-        }
         creates += 1
         let createdId = "qa-session-created-\(creates)"
-        sessionOrder.append(createdId)
+        createdOrder.append(createdId)
         states[createdId] = SessionRuntimeState(
-            workspaceId: intent.workspaceId, title: "新建会话 \(creates)", running: false, pendingInput: 0, currentTurn: nullTurn(), queuedCount: 0
+            workspaceId: intent.workspaceId, title: "New Session", running: false, pendingInput: 0, currentTurn: nil, queuedCount: 0,
+            pendingInteraction: nil,
+            modelConfig: DSHModelConfig(provider: "deepseek-official", model: "deepseek-chat", thought: "medium"),
+            supportedModels: [
+                DSHModelOption(provider: "deepseek-official", model: "deepseek-chat", defaultThought: "medium", supportedThoughts: ["off", "low", "medium", "high"]),
+                DSHModelOption(provider: "deepseek-official", model: "deepseek-reasoner", defaultThought: "high", supportedThoughts: ["low", "medium", "high"]),
+            ]
         )
         selected = createdId
-        navigations.append(createdId)
         cursor += 1
         changes.append(DSHSessionChange(sequence: cursor, row: row(createdId)))
         let settled = DSHCommandReply(
@@ -178,27 +236,20 @@ actor DSHNavigationFixture: DSHSessionServing {
         if let existing = settledReplies[intent.requestId] {
             return withDuplicate(existing)
         }
-        guard selected == intent.sessionId else {
-            return commandReply(status: "unconfirmed", selected: selected, requestId: intent.requestId, reasonCode: "guard.selectionMismatch")
+        guard var entry = states[intent.sessionId] else {
+            return commandReply(status: "denied", requestId: intent.requestId, reasonCode: "session.notFound")
         }
-        guard var entry = states[intent.sessionId], entry.workspaceId == intent.workspaceId else {
-            return commandReply(status: "stale", requestId: intent.requestId)
-        }
-        if intent.mode == .steer && !entry.running {
-            return commandReply(status: "denied", requestId: intent.requestId, reasonCode: "guard.steerRequiresRunningTurn")
+        if intent.mode == .steer && (!entry.running || entry.currentTurn == nil) {
+            return commandReply(status: "denied", requestId: intent.requestId, reasonCode: "session.steerUnavailable")
         }
         prompts += 1
         entry.queuedCount += 1
-        if !entry.running {
-            entry.running = true
-            entry.currentTurn = (entry.currentTurn ?? 0) + 1
-        }
         states[intent.sessionId] = entry
         cursor += 1
         changes.append(DSHSessionChange(sequence: cursor, row: row(intent.sessionId)))
-        let status = intent.mode == .steer ? "steered" : "queued"
+        let deliveryStatus = intent.mode == .steer ? "steered" : "queued"
         let settled = DSHCommandReply(
-            hostId: "qa-host", generation: generation, status: status,
+            hostId: "qa-host", generation: generation, status: deliveryStatus,
             sessionId: intent.sessionId, workspaceId: intent.workspaceId, selected: selected,
             requestId: intent.requestId, delivery: intent.mode, expectedTurn: nil,
             currentTurn: entry.currentTurn, queuedCount: entry.queuedCount, duplicate: false, reasonCode: nil
@@ -214,13 +265,10 @@ actor DSHNavigationFixture: DSHSessionServing {
         if let existing = settledReplies[intent.requestId] {
             return withDuplicate(existing)
         }
-        guard selected == intent.sessionId else {
-            return commandReply(status: "unconfirmed", selected: selected, requestId: intent.requestId, reasonCode: "guard.selectionMismatch")
+        guard var entry = states[intent.sessionId] else {
+            return commandReply(status: "denied", requestId: intent.requestId, reasonCode: "session.notFound")
         }
-        guard var entry = states[intent.sessionId], entry.workspaceId == intent.workspaceId else {
-            return commandReply(status: "stale", requestId: intent.requestId)
-        }
-        if !entry.running {
+        if !entry.running || entry.currentTurn == nil {
             let noop = DSHCommandReply(
                 hostId: "qa-host", generation: generation, status: "noop",
                 sessionId: intent.sessionId, workspaceId: intent.workspaceId, selected: selected,
@@ -259,6 +307,98 @@ actor DSHNavigationFixture: DSHSessionServing {
         settledReplies[intent.requestId] = settled
         return settled
     }
+    func resolve(_ intent: DSHResolveIntent) async throws -> DSHCommandReply {
+        guard connected, mode != .disconnected else { throw DSHFailure.unavailable }
+        guard intent.hostId == "qa-host", intent.generation == generation else {
+            return commandReply(status: "stale", requestId: intent.requestId)
+        }
+        if let existing = settledReplies[intent.requestId] {
+            return withDuplicate(existing)
+        }
+        resolves += 1
+        guard var entry = states[intent.sessionId] else {
+            return commandReply(status: "denied", requestId: intent.requestId, reasonCode: "session.notFound")
+        }
+        if let pending = entry.pendingInteraction {
+            if pending.interactionType != intent.interactionType {
+                let reason = intent.interactionType == .permission
+                    ? "guard.questionCannotApproveAsPermission"
+                    : "guard.permissionCannotAnswerAsQuestion"
+                return DSHCommandReply(
+                    hostId: "qa-host", generation: generation, status: "interactionTypeMismatch",
+                    sessionId: intent.sessionId, workspaceId: intent.workspaceId, selected: selected,
+                    requestId: intent.requestId, delivery: nil, expectedTurn: nil, currentTurn: nil,
+                    queuedCount: nil, duplicate: false, reasonCode: reason
+                )
+            }
+            entry.pendingInteraction = nil
+            entry.pendingInput = 0
+            states[intent.sessionId] = entry
+            cursor += 1
+            changes.append(DSHSessionChange(sequence: cursor, row: row(intent.sessionId)))
+            let settled = DSHCommandReply(
+                hostId: "qa-host", generation: generation, status: "resolved",
+                sessionId: intent.sessionId, workspaceId: intent.workspaceId, selected: selected,
+                requestId: intent.requestId, delivery: nil, expectedTurn: nil, currentTurn: nil,
+                queuedCount: nil, duplicate: false, reasonCode: nil
+            )
+            settledReplies[intent.requestId] = settled
+            return settled
+        } else {
+            let noop = DSHCommandReply(
+                hostId: "qa-host", generation: generation, status: "noop",
+                sessionId: intent.sessionId, workspaceId: intent.workspaceId, selected: selected,
+                requestId: intent.requestId, delivery: nil, expectedTurn: nil, currentTurn: nil,
+                queuedCount: nil, duplicate: false, reasonCode: "guard.alreadyResolved"
+            )
+            settledReplies[intent.requestId] = noop
+            return noop
+        }
+    }
+    func switchModel(_ intent: DSHSwitchModelIntent) async throws -> DSHCommandReply {
+        guard connected, mode != .disconnected else { throw DSHFailure.unavailable }
+        guard intent.hostId == "qa-host", intent.generation == generation else {
+            return commandReply(status: "stale", requestId: intent.requestId)
+        }
+        if let existing = settledReplies[intent.requestId] {
+            return withDuplicate(existing)
+        }
+        selectModels += 1
+        guard var entry = states[intent.sessionId] else {
+            return commandReply(status: "denied", requestId: intent.requestId, reasonCode: "session.notFound")
+        }
+        let supported = entry.supportedModels ?? []
+        guard let option = supported.first(where: { $0.provider == intent.provider && $0.model == intent.model }) else {
+            return DSHCommandReply(
+                hostId: "qa-host", generation: generation, status: "denied",
+                sessionId: intent.sessionId, workspaceId: intent.workspaceId, selected: selected,
+                requestId: intent.requestId, delivery: nil, expectedTurn: nil, currentTurn: nil,
+                queuedCount: nil, duplicate: false, reasonCode: "guard.unsupportedModel"
+            )
+        }
+        let targetThought = intent.thought ?? option.defaultThought
+        if let targetThought, !option.supportedThoughts.contains(targetThought) {
+            return DSHCommandReply(
+                hostId: "qa-host", generation: generation, status: "unsupportedThought",
+                sessionId: intent.sessionId, workspaceId: intent.workspaceId, selected: selected,
+                requestId: intent.requestId, delivery: nil, expectedTurn: nil, currentTurn: nil,
+                queuedCount: nil, duplicate: false, reasonCode: "guard.unsupportedThoughtLevel"
+            )
+        }
+        let newConfig = DSHModelConfig(provider: intent.provider, model: intent.model, thought: targetThought)
+        entry.modelConfig = newConfig
+        states[intent.sessionId] = entry
+        cursor += 1
+        changes.append(DSHSessionChange(sequence: cursor, row: row(intent.sessionId)))
+        let settled = DSHCommandReply(
+            hostId: "qa-host", generation: generation, status: "modelSwitched",
+            sessionId: intent.sessionId, workspaceId: intent.workspaceId, selected: selected,
+            requestId: intent.requestId, delivery: nil, expectedTurn: nil, currentTurn: nil,
+            queuedCount: nil, duplicate: false, reasonCode: nil, modelConfig: newConfig
+        )
+        settledReplies[intent.requestId] = settled
+        return settled
+    }
     func query(_ intent: DSHQueryIntent) async throws -> DSHCommandReply {
         guard connected, mode != .disconnected else { throw DSHFailure.unavailable }
         guard intent.hostId == "qa-host", intent.generation == generation else {
@@ -275,7 +415,8 @@ actor DSHNavigationFixture: DSHSessionServing {
             hostId: reply.hostId, generation: reply.generation, status: reply.status,
             sessionId: reply.sessionId, workspaceId: reply.workspaceId, selected: reply.selected,
             requestId: reply.requestId, delivery: reply.delivery, expectedTurn: reply.expectedTurn,
-            currentTurn: reply.currentTurn, queuedCount: reply.queuedCount, duplicate: true, reasonCode: reply.reasonCode
+            currentTurn: reply.currentTurn, queuedCount: reply.queuedCount, duplicate: true,
+            reasonCode: reply.reasonCode, modelConfig: reply.modelConfig
         )
     }
     private func commandReply(status: String, selected: String? = nil, requestId: String, reasonCode: String? = nil) -> DSHCommandReply {
@@ -298,9 +439,9 @@ extension Store {
         await fixture.reset()
         var checks: [String: Bool] = [:]
         func waitReady() async throws {
-            for _ in 0..<200 {
+            for _ in 0..<100 {
                 if dshSessions.state == .ready { return }
-                try await Task.sleep(for: .milliseconds(5))
+                try await Task.sleep(nanoseconds: 10_000_000)
             }
             throw DSHFailure.unavailable
         }
@@ -315,6 +456,8 @@ extension Store {
             case .prompt: promptDSHSession(command)
             case .cancel: cancelDSHSession(command)
             case .query: queryDSHCommand(command)
+            case .resolve: resolveDSHSession(command)
+            case .switchModel: switchModelDSHSession(command)
             }
             await hostExecutionTask?.value
         }
@@ -346,7 +489,9 @@ extension Store {
 
             // Re-select first session for K2 prompt/cancel checks
             await queuedOpen(first)
-            let steerCmd = dshSessions.promptIntent(for: DSHNavigationFixture.first, mode: .steer, text: "steer active turn", requestId: "qa-req-steer-1")
+
+            // Steer prompt confirmed on running turn 1
+            let steerCmd = dshSessions.promptIntent(for: DSHNavigationFixture.first, mode: .steer, text: "steer current turn", requestId: "qa-req-steer-1")
             await queuedCommand(steerCmd)
             let steeredOk = lastHostActionReceipt?.actionType == "dsh_prompt"
                 && lastHostActionReceipt?.outcome == "steered"
@@ -430,6 +575,54 @@ extension Store {
                 && dshSessions.selected == "qa-session-created-1"
                 && dshSessions.rows.contains(where: { $0.sessionId == "qa-session-created-1" && $0.workspaceId == "workspace-a" })
 
+            // Slice L2: Resolve approval recorded
+            await queuedOpen(first)
+            await fixture.setPendingInteraction(sessionId: DSHNavigationFixture.first, interaction: DSHPendingInteraction(interactionId: "qa-perm-1", interactionType: .permission, toolName: "bash", options: ["allowed-once", "rejected"]))
+            await dshSessions.refresh()
+            let resolveApprovalCmd = dshSessions.resolveIntent(for: DSHNavigationFixture.first, interactionId: "qa-perm-1", interactionType: .permission, decision: .approve, requestId: "qa-req-res-perm-1")
+            await queuedCommand(resolveApprovalCmd)
+            let resolvesAfterApproval = (await fixture.counts()).resolves
+            checks["resolve_approval_recorded"] = resolvesAfterApproval == 1
+                && lastHostActionReceipt?.actionType == "dsh_resolve"
+                && lastHostActionReceipt?.outcome == "resolved"
+                && dshSessions.lastCommandResult == .resolved(sessionId: DSHNavigationFixture.first, requestId: "qa-req-res-perm-1", duplicate: false)
+
+            // Slice L2: Already resolved returns noop with zero side effect
+            await queuedCommand(resolveApprovalCmd)
+            checks["already_resolved_noop_zero_side_effect"] = lastHostActionReceipt?.actionType == "dsh_resolve"
+                && (lastHostActionReceipt?.outcome == "resolved" || lastHostActionReceipt?.outcome == "noop")
+
+            // Slice L2: Interaction type mismatch blocked
+            await fixture.setPendingInteraction(sessionId: DSHNavigationFixture.first, interaction: DSHPendingInteraction(interactionId: "qa-q-1", interactionType: .question, toolName: "ask_user_question", options: ["Yes", "No"]))
+            await dshSessions.refresh()
+            let mismatchCmd = dshSessions.resolveIntent(for: DSHNavigationFixture.first, interactionId: "qa-q-1", interactionType: .permission, decision: .approve, requestId: "qa-req-mismatch-1")
+            await queuedCommand(mismatchCmd)
+            checks["interaction_type_mismatch_blocked"] = lastHostActionReceipt?.actionType == "dsh_resolve"
+                && dshSessions.lastCommandResult == .interactionTypeMismatch(reasonCode: "guard.questionCannotApproveAsPermission")
+
+            // Slice L2: Resolve question answered
+            let resolveQuestionCmd = dshSessions.resolveIntent(for: DSHNavigationFixture.first, interactionId: "qa-q-1", interactionType: .question, decision: .approve, optionId: "Yes", requestId: "qa-req-res-q-1")
+            await queuedCommand(resolveQuestionCmd)
+            checks["resolve_question_answered"] = lastHostActionReceipt?.actionType == "dsh_resolve"
+                && lastHostActionReceipt?.outcome == "resolved"
+
+            // Slice L2: Select model with readback confirmed
+            let switchModelCmd = dshSessions.switchModelIntent(for: DSHNavigationFixture.first, provider: "deepseek-official", model: "deepseek-chat", thought: "high", requestId: "qa-req-model-1")
+            await queuedCommand(switchModelCmd)
+            let modelSwitchedOk = lastHostActionReceipt?.actionType == "dsh_switch_model"
+                && lastHostActionReceipt?.outcome == "modelSwitched"
+                && dshSessions.lastCommandResult == .modelSwitched(sessionId: DSHNavigationFixture.first, requestId: "qa-req-model-1", modelConfig: DSHModelConfig(provider: "deepseek-official", model: "deepseek-chat", thought: "high"), duplicate: false)
+            let rowAfterModelSwitch = dshSessions.rows.first(where: { $0.sessionId == DSHNavigationFixture.first })
+            checks["select_model_readback_confirmed"] = modelSwitchedOk && rowAfterModelSwitch?.modelConfig?.thought == "high"
+
+            // Slice L2: Unsupported thought level locally refused without wire command
+            let selectModelsBeforeUnsupported = (await fixture.counts()).selectModels
+            let unsupportedThoughtCmd = dshSessions.switchModelIntent(for: DSHNavigationFixture.first, provider: "deepseek-official", model: "deepseek-reasoner", thought: "off", requestId: "qa-req-unsupported-thought")
+            await queuedCommand(unsupportedThoughtCmd)
+            let selectModelsAfterUnsupported = (await fixture.counts()).selectModels
+            checks["unsupported_thought_level_locally_refused"] = selectModelsBeforeUnsupported == selectModelsAfterUnsupported
+                && dshSessions.lastCommandResult == .unsupportedThought(reasonCode: "guard.unsupportedThoughtLevel")
+
             await fixture.setMode(.wrongSelected); await queuedOpen(first)
             checks["wrong_selected_unconfirmed"] = lastHostActionReceipt?.outcome != "confirmed"
             let outside = DSHSelection(sessionId: "outside", workspaceId: first.workspaceId,
@@ -437,10 +630,11 @@ extension Store {
             let deniedBefore = await fixture.counts(); await queuedOpen(outside)
             let deniedAfter = await fixture.counts()
             checks["out_of_scope_zero_reads"] = deniedBefore.reads == deniedAfter.reads && deniedBefore.opens == deniedAfter.opens
+            let beforeDeleted = await fixture.counts()
             await fixture.setMode(.deleted); await queuedOpen(first)
             let deletedCounts = await fixture.counts()
             checks["deleted_target_no_redirect"] = lastHostActionReceipt?.outcome != "confirmed"
-                && deletedCounts.navigations.last == "qa-session-created-1"
+                && deletedCounts.navigations == beforeDeleted.navigations
             dshSessions.setEnabled(false); await fixture.setMode(.normal)
             dshSessions.setEnabled(true); try await waitReady()
             guard let old = dshSessions.selection(for: DSHNavigationFixture.second) else { throw DSHFailure.invalidReply }
@@ -459,7 +653,7 @@ extension Store {
         }
         let finalCounts = await fixture.counts()
         let payload: [String: Any] = [
-            "status": checks.count == 18 && checks.values.allSatisfy({ $0 }) && finalCounts.bodyReads == 0 ? "PASS" : "FAIL",
+            "status": checks.count == 24 && checks.values.allSatisfy({ $0 }) && finalCounts.bodyReads == 0 ? "PASS" : "FAIL",
             "checks": checks,
             "body_reads": finalCounts.bodyReads,
             "native_app": "NOT_RUN",
