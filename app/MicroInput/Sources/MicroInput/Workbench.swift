@@ -91,7 +91,7 @@ struct Workbench: View {
                             Button("准备应用键位或灯光…") { Task { await store.previewApply() } }
                         }.padding(.top, 8).disabled(!store.canEditDraft || store.busy)
                     }.font(.caption)
-                    Button("RGB 灯光…") { store.showingLighting = true }.disabled(store.layer == nil || !store.canEditDraft)
+                    Button("RGB 灯光…") { store.showingLighting = true }.disabled(store.layer == nil || !store.canEditDraft || store.isProtectedLayerSelected)
                     Button("设备操作与恢复…") { store.showingDeviceOperations = true }
                     Text("切换配置不会应用到设备。").font(.caption).foregroundStyle(.secondary)
                     Spacer()
@@ -142,8 +142,9 @@ struct Workbench: View {
                                     }.pickerStyle(.segmented).labelsHidden()
                                     Menu("管理层") {
                                         Button("新建层") {promptName("新建层")}
+                                        Button("添加 ChatGPT 托管层") {Task {await store.createProtectedOaiLayer()}}
                                         Button("重命名层") {promptName("重命名层")}.disabled(store.layer == nil)
-                                        Button("复制层") {promptName("复制层")}.disabled(store.layer == nil)
+                                        Button("复制层") {promptName("复制层")}.disabled(store.layer == nil || store.isProtectedLayerSelected)
                                         Divider()
                                         Button("上移层") {Task {await store.moveLayer(by:-1)}}.disabled(store.layerIndex == 0 || store.layer == nil)
                                         Button("下移层") {Task {await store.moveLayer(by:1)}}.disabled(store.layerIndex+1 >= (store.profile?.layers.count ?? 0))
@@ -171,10 +172,33 @@ struct Workbench: View {
                                             Task { _ = await store.saveControlSettings(mode: "logical_sectors", sectors: "4") }
                                         }
                                         .font(.caption)
-                                        .disabled(!store.canEditDraft || store.busy || store.editingDevice)
+                                        .disabled(!store.canEditDraft || store.busy || store.editingDevice || store.isProtectedLayerSelected)
                                     }
                                     Text("CREATOR MICRO").font(.caption2).tracking(3).foregroundStyle(.secondary)
-                                }.padding(16).background(.background, in: RoundedRectangle(cornerRadius: 16)).overlay(RoundedRectangle(cornerRadius: 22).stroke(.quaternary)).shadow(color: .black.opacity(0.04), radius: 10, y: 4)
+                                }.padding(16).background(.background, in: RoundedRectangle(cornerRadius: 16))
+                                .overlay(RoundedRectangle(cornerRadius: 22).stroke(.quaternary))
+                                .overlay {
+                                    if store.isProtectedLayerSelected {
+                                        ZStack {
+                                            RoundedRectangle(cornerRadius: 16)
+                                                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.88))
+                                            VStack(spacing: 8) {
+                                                Image(systemName: "lock.fill")
+                                                    .font(.title2)
+                                                    .foregroundStyle(.secondary)
+                                                Text("当前为 Cindy / Codex 原生托管层\n按键与任务灯由对应客户端直接控制")
+                                                    .font(.callout.weight(.medium))
+                                                    .multilineTextAlignment(.center)
+                                                Text("To edit this layer please use ChatGPT app")
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            .padding(20)
+                                        }
+                                    }
+                                }
+                                .disabled(store.isProtectedLayerSelected)
+                                .shadow(color: .black.opacity(0.04), radius: 10, y: 4)
                                 Text("13 开关逻辑位置示意 · 实体宽键和方向待核对").font(.caption).foregroundStyle(.secondary)
                                 }
                             }.padding(24)
@@ -195,7 +219,7 @@ struct Workbench: View {
         .background {
             Button("前一个控件") { store.slot = max(0, store.slot - 1) }.keyboardShortcut("[", modifiers: [.command]).hidden()
             Button("后一个控件") { store.slot = min(max(0,bindings.count - 1), store.slot + 1) }.keyboardShortcut("]", modifiers: [.command]).hidden()
-            Button("更换所选动作") { if store.canEditDraft && store.layer != nil { choosing = true } }.keyboardShortcut("e", modifiers: [.command]).hidden()
+            Button("更换所选动作") { if store.canEditDraft && store.layer != nil && !store.isProtectedLayerSelected { choosing = true } }.keyboardShortcut("e", modifiers: [.command]).hidden()
             Button("查看差异") { reviewing = true }.keyboardShortcut("d", modifiers: [.command]).hidden()
             Button("撤销草稿") { Task { await store.undoDraft() } }.keyboardShortcut("z", modifiers: [.command]).hidden()
             Button("重做草稿") { Task { await store.undoDraft(redo: true) } }.keyboardShortcut("z", modifiers: [.command, .shift]).hidden()
@@ -313,56 +337,71 @@ struct Workbench: View {
         VStack(alignment: .leading, spacing: 22) {
             Text(title(store.slot)).font(.title3.bold())
             Text(store.layer?.name ?? "").font(.caption).foregroundStyle(.secondary)
-            if DesktopAgent.named(store.profile?.name ?? "") != nil, !store.browsingDeviceSnapshot {
-                Button("试运行此动作") { Task { await store.tryDesktopAction() } }.disabled(!store.canTryDesktopAction)
-                Text("需先启用此配置与按键控制；会操作真实目标应用。").font(.caption).foregroundStyle(.secondary)
-            }
-            if store.slot == 10 || store.slot == 11 {
-                Text("底部 2U 宽键覆盖开关 11 与 12（双轴合并触发，优先使用按键 11 绑定，未设时回退按键 12）。").font(.caption).foregroundStyle(.secondary)
-                if store.slot == 11, !store.browsingDeviceSnapshot {
-                    Button("切换到按键 11（2U 宽键主槽）") { store.slot = 10 }.font(.caption)
+            if store.isProtectedLayerSelected {
+                VStack(alignment: .leading, spacing: 14) {
+                    Label("受保护宿主层", systemImage: "lock.shield")
+                        .font(.headline)
+                    Text("当前层归外部 Agent（Cindy / Codex）专管，按键事件与任务灯光直接由客户端驱动，工作台不提供改键与静态灯光编辑。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Text("如需调整此层按键，请使用对应宿主应用。\nTo edit this layer please use ChatGPT app.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
-            }
-            if store.slot >= 16, let settings = store.currentControlSettings, !store.browsingDeviceSnapshot {
-                Text(settings.joystick_mode == "logical_sectors" && store.slot - 16 < Int(settings.active_sectors) ? "活动逻辑扇区 · 物理方向未核实" : "保留槽位 · 绑定未删除").font(.caption).foregroundStyle(.secondary)
-            }
-            if store.browsingDeviceSnapshot { Text("层颜色：\(store.layer?.displayColor ?? "未知（原值保留）")").font(.caption).foregroundStyle(.secondary) }
-            if !store.browsingDeviceSnapshot && !store.editingDevice {
-                if store.slot >= 13 {
-                    ControlSettingsEditor(store: store).id((store.layer?.id.text ?? "") + String(store.draft.revision))
-                    Divider()
-                } else {
-                    DisclosureGroup("旋钮与摇杆扇区设置") {
-                        ControlSettingsEditor(store: store).id((store.layer?.id.text ?? "") + String(store.draft.revision))
+                .padding(14)
+                .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
+            } else {
+                if DesktopAgent.named(store.profile?.name ?? "") != nil, !store.browsingDeviceSnapshot {
+                    Button("试运行此动作") { Task { await store.tryDesktopAction() } }.disabled(!store.canTryDesktopAction)
+                    Text("需先启用此配置与按键控制；会操作真实目标应用。").font(.caption).foregroundStyle(.secondary)
+                }
+                if store.slot == 10 || store.slot == 11 {
+                    Text("底部 2U 宽键覆盖开关 11 与 12（双轴合并触发，优先使用按键 11 绑定，未设时回退按键 12）。").font(.caption).foregroundStyle(.secondary)
+                    if store.slot == 11, !store.browsingDeviceSnapshot {
+                        Button("切换到按键 11（2U 宽键主槽）") { store.slot = 10 }.font(.caption)
                     }
                 }
-            }
-            Text("动作").foregroundStyle(.secondary)
-            Button { choosing = true } label: { HStack { Text(label(store.slot)).lineLimit(3); Spacer(); Text(store.browsingDeviceSnapshot ? "只读" : "更换").foregroundStyle(.blue) }.padding(14).frame(maxWidth: .infinity).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 9)) }.buttonStyle(.plain).disabled(!store.canEditDraft || store.layer == nil || (store.editingDevice && store.slot >= 13))
-            Button("已保存的普通宏（\(store.macros.count)）") { choosingMacro = true }.disabled(!store.canEditDraft || store.editingDevice)
-            Button("已保存的 Multi（\(store.multis.count)）") { choosingMulti = true }.disabled(!store.canEditDraft || store.editingDevice)
-            if let multi = store.selectedMulti {
-                Text("共享 Multi · \(multi.references.count) 个引用").font(.caption).foregroundStyle(.secondary)
-                Button("移除此控件的 Multi 引用") { Task { await store.bindMulti(nil) } }.disabled(store.busy || !store.canEditDraft)
-            }
-            if let macro = store.selectedMacro {
-                Text("共享宏 · \(macro.references.count) 个控件引用").font(.caption).foregroundStyle(.secondary)
-                Button("移除此控件的宏引用") { Task { await store.bindMacro(nil) } }.disabled(store.busy || !store.canEditDraft)
-            }
-            if let a = action(store.slot) {
-                Text(a.category).font(.caption).foregroundStyle(.secondary)
-                if let capability = store.actionCapabilities[store.slotKey] { ActionCapabilityView(capability: capability) }
-                ActionParameters(action: a, store: store, macroID: store.selectedMacro?.id, multiID: store.selectedMulti?.id).id(store.slotKey + String(store.draft.revision))
-                DisclosureGroup("高级参数原值") { Text(JSONValue.object(a.payload).text).font(.caption.monospaced()).textSelection(.enabled) }
-            }
-            else if bindings.indices.contains(store.slot) {
-                Text("原始绑定保留；未知值不会当成空绑定。").font(.caption).foregroundStyle(.secondary)
-                DisclosureGroup("原始值与引用") { ScrollView { Text(store.snapshot?.referenceDetail(bindings[store.slot]) ?? bindings[store.slot].text).font(.caption.monospaced()).textSelection(.enabled) }.frame(maxHeight: 160) }
-            }
-            if store.browsingDeviceSnapshot, let snapshot = store.snapshot, !snapshot.smartRecords.isEmpty {
-                DisclosureGroup("Smart Action 原始记录（只读）") {
-                    ForEach(snapshot.smartRecords, id: \.0) { key, value in
-                        DisclosureGroup(key) { Text(value.text).font(.caption.monospaced()).textSelection(.enabled) }
+                if store.slot >= 16, let settings = store.currentControlSettings, !store.browsingDeviceSnapshot {
+                    Text(settings.joystick_mode == "logical_sectors" && store.slot - 16 < Int(settings.active_sectors) ? "活动逻辑扇区 · 物理方向未核实" : "保留槽位 · 绑定未删除").font(.caption).foregroundStyle(.secondary)
+                }
+                if store.browsingDeviceSnapshot { Text("层颜色：\(store.layer?.displayColor ?? "未知（原值保留）")").font(.caption).foregroundStyle(.secondary) }
+                if !store.browsingDeviceSnapshot && !store.editingDevice {
+                    if store.slot >= 13 {
+                        ControlSettingsEditor(store: store).id((store.layer?.id.text ?? "") + String(store.draft.revision))
+                        Divider()
+                    } else {
+                        DisclosureGroup("旋钮与摇杆扇区设置") {
+                            ControlSettingsEditor(store: store).id((store.layer?.id.text ?? "") + String(store.draft.revision))
+                        }
+                    }
+                }
+                Text("动作").foregroundStyle(.secondary)
+                Button { choosing = true } label: { HStack { Text(label(store.slot)).lineLimit(3); Spacer(); Text(store.browsingDeviceSnapshot ? "只读" : "更换").foregroundStyle(.blue) }.padding(14).frame(maxWidth: .infinity).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 9)) }.buttonStyle(.plain).disabled(!store.canEditDraft || store.layer == nil || (store.editingDevice && store.slot >= 13))
+                Button("已保存的普通宏（\(store.macros.count)）") { choosingMacro = true }.disabled(!store.canEditDraft || store.editingDevice)
+                Button("已保存的 Multi（\(store.multis.count)）") { choosingMulti = true }.disabled(!store.canEditDraft || store.editingDevice)
+                if let multi = store.selectedMulti {
+                    Text("共享 Multi · \(multi.references.count) 个引用").font(.caption).foregroundStyle(.secondary)
+                    Button("移除此控件的 Multi 引用") { Task { await store.bindMulti(nil) } }.disabled(store.busy || !store.canEditDraft)
+                }
+                if let macro = store.selectedMacro {
+                    Text("共享宏 · \(macro.references.count) 个控件引用").font(.caption).foregroundStyle(.secondary)
+                    Button("移除此控件的宏引用") { Task { await store.bindMacro(nil) } }.disabled(store.busy || !store.canEditDraft)
+                }
+                if let a = action(store.slot) {
+                    Text(a.category).font(.caption).foregroundStyle(.secondary)
+                    if let capability = store.actionCapabilities[store.slotKey] { ActionCapabilityView(capability: capability) }
+                    ActionParameters(action: a, store: store, macroID: store.selectedMacro?.id, multiID: store.selectedMulti?.id).id(store.slotKey + String(store.draft.revision))
+                    DisclosureGroup("高级参数原值") { Text(JSONValue.object(a.payload).text).font(.caption.monospaced()).textSelection(.enabled) }
+                }
+                else if bindings.indices.contains(store.slot) {
+                    Text("原始绑定保留；未知值不会当成空绑定。").font(.caption).foregroundStyle(.secondary)
+                    DisclosureGroup("原始值与引用") { ScrollView { Text(store.snapshot?.referenceDetail(bindings[store.slot]) ?? bindings[store.slot].text).font(.caption.monospaced()).textSelection(.enabled) }.frame(maxHeight: 160) }
+                }
+                if store.browsingDeviceSnapshot, let snapshot = store.snapshot, !snapshot.smartRecords.isEmpty {
+                    DisclosureGroup("Smart Action 原始记录（只读）") {
+                        ForEach(snapshot.smartRecords, id: \.0) { key, value in
+                            DisclosureGroup(key) { Text(value.text).font(.caption.monospaced()).textSelection(.enabled) }
+                        }
                     }
                 }
             }

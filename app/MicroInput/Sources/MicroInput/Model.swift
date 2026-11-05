@@ -23,6 +23,16 @@ indirect enum JSONValue: Codable {
         guard case .object(let value) = self, let (kind, payload) = value.first else { return "Unknown · \(text)" }
         return "\(kind == "Unknown" ? "Unknown" : kind) · \(payload.text)"
     }
+    var hasProtectedOaiPrefix: Bool {
+        switch self {
+        case .string(let s): return s.hasPrefix("KV_OAI_")
+        case .object(let map):
+            if let payload = map["Basic"] ?? map["Unknown"] { return payload.hasProtectedOaiPrefix }
+            if case .string(let k) = map["k"] { return k.hasPrefix("KV_OAI_") }
+            return false
+        default: return false
+        }
+    }
 }
 struct DeviceFileVerification: Decodable { let name: String, size: UInt64, sha1: String }
 struct Snapshot: Decodable {
@@ -36,6 +46,7 @@ struct Profile: Decodable { let id: JSONValue, index: Int, name: String, layers:
 struct Layer: Decodable {
     let id: JSONValue, name: String, color: JSONValue, keys: [JSONValue], encoders: [JSONValue]
     let joystick: Joystick, lights: JSONValue
+    let is_protected: Bool?
 }
 struct Joystick: Decodable { let kind: JSONValue, sectors: [JSONValue] }
 extension Snapshot {
@@ -84,6 +95,18 @@ extension CatalogAction {
 }
 
 extension Layer {
+    var isProtectedOaiLayer: Bool {
+        if is_protected == true { return true }
+        if is_protected == false { return false }
+        if name == "ChatGPT" {
+            return keys.contains(where: \.hasProtectedOaiPrefix)
+                || encoders.contains(where: \.hasProtectedOaiPrefix)
+                || joystick.sectors.contains(where: \.hasProtectedOaiPrefix)
+        }
+        if encoders.contains(where: \.hasProtectedOaiPrefix) { return true }
+        if joystick.sectors.contains(where: \.hasProtectedOaiPrefix) { return true }
+        return false
+    }
     var displayColor: String? {
         let value: UInt64
         switch color {
@@ -140,6 +163,7 @@ struct DocumentView: Decodable {
     let host_active_profile_id: String?
     let host_execution_enabled: Bool?
     let command_execution_enabled: Bool?
+    let protected_layers: [String]?
 }
 struct ActionCapability: Decodable {
     let target: String, prerequisites: [String], host_required: Bool, execution_available: Bool

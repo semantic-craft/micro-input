@@ -276,6 +276,127 @@ pub fn demo() -> Result<DeviceConfig, ParseError> {
     c.source = Source::Demo;
     Ok(c)
 }
+
+pub const OFFICIAL_OAI_KEY_TOKENS: [&str; 13] = [
+    "KV_OAI_AG00",
+    "KV_OAI_AG01",
+    "KV_OAI_AG02",
+    "KV_OAI_AG03",
+    "KV_OAI_AG04",
+    "KV_OAI_AG05",
+    "KV_OAI_ACT06",
+    "KV_OAI_ACT07",
+    "KV_OAI_ACT08",
+    "KV_OAI_ACT09",
+    "KV_OAI_ACT10",
+    "KV_OAI_ACT11",
+    "KV_OAI_ACT12",
+];
+
+pub const OFFICIAL_OAI_ENCODER_TOKENS: [&str; 3] =
+    ["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"];
+
+pub(crate) fn binding_has_oai_prefix(binding: &Binding) -> bool {
+    match binding {
+        Binding::Basic(Token(s)) => s.starts_with("KV_OAI_"),
+        Binding::Unknown(Value::String(s)) => s.starts_with("KV_OAI_"),
+        Binding::Unknown(Value::Object(map)) => map
+            .get("k")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.starts_with("KV_OAI_")),
+        _ => false,
+    }
+}
+
+pub fn is_protected_oai_layer(layer: &Layer) -> bool {
+    layer.keys.iter().any(binding_has_oai_prefix)
+        || layer.encoders.iter().any(binding_has_oai_prefix)
+        || layer.joystick.sectors.iter().any(binding_has_oai_prefix)
+}
+
+pub fn official_chatgpt_layer(id: Value, name: &str) -> Layer {
+    Layer {
+        id,
+        name: if name.trim().is_empty() {
+            "ChatGPT".into()
+        } else {
+            name.trim().into()
+        },
+        color: Value::Number(0x00FFA6u64.into()),
+        keys: std::array::from_fn(|i| {
+            Binding::Unknown(Value::String(OFFICIAL_OAI_KEY_TOKENS[i].into()))
+        }),
+        encoders: std::array::from_fn(|i| {
+            Binding::Unknown(Value::String(OFFICIAL_OAI_ENCODER_TOKENS[i].into()))
+        }),
+        joystick: Joystick {
+            kind: Value::String("VENDOR".into()),
+            sectors: Vec::new(),
+        },
+        lights: Lights {
+            backlight: Value::Null,
+            underglow: Value::Null,
+        },
+    }
+}
+
+pub fn compile_compact_host_keymap(
+    doc: &document::LocalDocumentV2,
+    active_profile_id: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    doc.validate()?;
+    let profile_name = active_profile_id
+        .and_then(|pid| doc.editable.graph.profiles.get(pid))
+        .map(|p| p.name.as_str())
+        .filter(|name| !name.trim().is_empty() && name.len() <= 32)
+        .unwrap_or("ChatGPT");
+    let keymap_rows = serde_json::json!([
+        ["KV_OAI_AG00", "KV_OAI_AG01"],
+        ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"],
+        [
+            "KV_OAI_ACT06",
+            "KV_OAI_ACT07",
+            "KV_OAI_ACT08",
+            "KV_OAI_ACT09"
+        ],
+        ["KV_OAI_ACT10", "KV_OAI_ACT11", "KV_OAI_ACT12"]
+    ]);
+    let encoders = serde_json::json!(["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"]);
+    let payload = serde_json::json!({
+        "version": 1,
+        "activeProfileId": 0,
+        "profiles": [{
+            "id": "oai-host",
+            "name": profile_name,
+            "layers": [{
+                "id": "chatgpt",
+                "name": "ChatGPT",
+                "color": 0x00FFA6u64,
+                "lights": null,
+                "layout": {
+                    "base": keymap_rows,
+                    "keymap": keymap_rows,
+                    "encoders": encoders,
+                    "joystick": {
+                        "type": "VENDOR",
+                        "sectors": []
+                    }
+                }
+            }]
+        }],
+        "macros": [],
+        "multiActions": [],
+        "smartActions": []
+    });
+    let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+    if bytes.len() >= 1024 {
+        return Err(format!(
+            "紧凑板载 keymap.json 超出 1024 字节上限：{}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

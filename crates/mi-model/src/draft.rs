@@ -415,6 +415,24 @@ impl Draft {
     pub fn create_layer(&mut self, pid: &str, name: &str) -> Result<String, String> {
         self.mutate(|d| d.create_layer(pid, name))
     }
+    pub fn create_protected_oai_layer(&mut self, pid: &str, name: &str) -> Result<String, String> {
+        self.mutate(|d| d.create_protected_oai_layer(pid, name))
+    }
+    pub fn merge_keys_across_layers(
+        &mut self,
+        pid: &str,
+        primary_slot: u32,
+        secondary_slot: u32,
+        action: Option<Action>,
+    ) -> Result<Vec<String>, String> {
+        self.mutate(|d| d.merge_keys_across_layers(pid, primary_slot, secondary_slot, action))
+    }
+    pub fn compile_compact_host_keymap(
+        &self,
+        active_profile_id: Option<&str>,
+    ) -> Result<Vec<u8>, String> {
+        crate::compile_compact_host_keymap(&self.document, active_profile_id)
+    }
     pub fn duplicate_profile(&mut self, pid: &str, name: &str) -> Result<String, String> {
         self.mutate(|d| d.duplicate_profile(pid, name))
     }
@@ -453,6 +471,9 @@ impl Draft {
             let p = d.editable.graph.profiles.get(pid).ok_or("配置不存在")?;
             if !p.layer_order.iter().any(|id| id == lid) {
                 return Err("层不属于所选配置".into());
+            }
+            if d.is_protected_oai_layer(lid) {
+                return Err("受保护宿主层（ChatGPT / Codex / Cindy）不支持修改按键映射".into());
             }
             let l = d.editable.graph.layers.get_mut(lid).ok_or("层不存在")?;
             let binding = l
@@ -499,14 +520,19 @@ impl Draft {
         action_id: Option<&str>,
     ) -> Result<(), String> {
         self.mutate(|d| {
-            let graph = &mut d.editable.graph;
-            if !graph
+            if !d
+                .editable
+                .graph
                 .profiles
                 .get(profile_id)
                 .is_some_and(|p| p.layer_order.iter().any(|id| id == layer_id))
             {
                 return Err("层不属于配置".into());
             }
+            if d.is_protected_oai_layer(layer_id) {
+                return Err("受保护宿主层（ChatGPT / Codex / Cindy）不支持绑定动作".into());
+            }
+            let graph = &mut d.editable.graph;
             if let Some(id) = action_id {
                 graph.actions.get(id).ok_or("动作引用不存在")?.validate()?;
             }

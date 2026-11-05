@@ -285,6 +285,151 @@ impl LocalDocumentV2 {
         self.editable.graph.layers.insert(id.clone(), layer);
         Ok(id)
     }
+    pub fn create_protected_oai_layer(&mut self, pid: &str, name: &str) -> Result<String, String> {
+        let resolved_name = if name.trim().is_empty() {
+            "ChatGPT"
+        } else {
+            name.trim()
+        };
+        name_valid(resolved_name)?;
+        let p = self
+            .editable
+            .graph
+            .profiles
+            .get_mut(pid)
+            .ok_or("配置不存在")?;
+        let id = new_id();
+        let mut layer = LayerNode {
+            control_settings: None,
+            lighting: None,
+            name: resolved_name.into(),
+            control_order: vec![],
+            controls: BTreeMap::new(),
+        };
+        for (slot, token) in crate::OFFICIAL_OAI_KEY_TOKENS
+            .iter()
+            .chain(crate::OFFICIAL_OAI_ENCODER_TOKENS.iter())
+            .enumerate()
+        {
+            let bid = new_id();
+            layer.control_order.push(bid.clone());
+            layer.controls.insert(
+                bid,
+                BindingNode {
+                    logical_control: format!("logical-{slot}"),
+                    original: serde_json::to_value(Binding::Unknown(Value::String(
+                        (*token).into(),
+                    )))
+                    .map_err(|e| e.to_string())?,
+                    action_id: None,
+                },
+            );
+        }
+        p.layer_order.push(id.clone());
+        self.editable.graph.layers.insert(id.clone(), layer);
+        Ok(id)
+    }
+    pub fn is_protected_oai_layer(&self, lid: &str) -> bool {
+        let Some(layer) = self.editable.graph.layers.get(lid) else {
+            return false;
+        };
+        let mut has_oai_any = false;
+        let mut has_oai_encoder = false;
+        for b in layer.controls.values() {
+            let Ok(binding) = serde_json::from_value::<Binding>(b.original.clone()) else {
+                continue;
+            };
+            if crate::binding_has_oai_prefix(&binding) {
+                has_oai_any = true;
+                if matches!(
+                    b.logical_control.as_str(),
+                    "logical-13" | "logical-14" | "logical-15"
+                ) {
+                    has_oai_encoder = true;
+                }
+            }
+        }
+        if !has_oai_any {
+            return false;
+        }
+        if layer.name != "ChatGPT" && !has_oai_encoder {
+            let parent_profile_is_protected = self
+                .editable
+                .graph
+                .profiles
+                .values()
+                .find(|p| p.layer_order.iter().any(|id| id == lid))
+                .is_some_and(|p| {
+                    let lower = p.name.to_lowercase();
+                    lower == "cindy" || lower == "codex" || lower == "chatgpt"
+                });
+            if !parent_profile_is_protected {
+                return false;
+            }
+        }
+        true
+    }
+    pub fn protected_layer_ids(&self) -> Vec<String> {
+        self.editable
+            .graph
+            .layers
+            .keys()
+            .filter(|lid| self.is_protected_oai_layer(lid))
+            .cloned()
+            .collect()
+    }
+    pub fn merge_keys_across_layers(
+        &mut self,
+        pid: &str,
+        primary_slot: u32,
+        secondary_slot: u32,
+        action: Option<Action>,
+    ) -> Result<Vec<String>, String> {
+        if primary_slot >= 13 || secondary_slot >= 13 || primary_slot == secondary_slot {
+            return Err("跨层合并键索引必须在 0..13 范围内且互不相同".into());
+        }
+        if let Some(a) = &action {
+            a.validate()?;
+        }
+        let layer_ids = self
+            .editable
+            .graph
+            .profiles
+            .get(pid)
+            .ok_or("配置不存在")?
+            .layer_order
+            .clone();
+        let mut updated = Vec::new();
+        for lid in layer_ids {
+            if self.is_protected_oai_layer(&lid) {
+                continue;
+            }
+            let Some(layer) = self.editable.graph.layers.get_mut(&lid) else {
+                continue;
+            };
+            if let Some(secondary) = layer
+                .controls
+                .values_mut()
+                .find(|b| b.logical_control == format!("logical-{secondary_slot}"))
+            {
+                secondary.action_id = None;
+                secondary.original = json!("Empty");
+            }
+            if let Some(act) = &action {
+                let primary = layer
+                    .controls
+                    .values_mut()
+                    .find(|b| b.logical_control == format!("logical-{primary_slot}"))
+                    .ok_or("主合并槽位不存在")?;
+                let aid = new_id();
+                primary.action_id = Some(aid.clone());
+                self.editable.graph.actions.insert(aid, act.clone());
+            }
+            updated.push(lid);
+        }
+        self.remove_orphan_actions();
+        Ok(updated)
+    }
     fn copy_layer(
         &mut self,
         lid: &str,
@@ -381,6 +526,9 @@ impl LocalDocumentV2 {
             .any(|id| id == lid)
         {
             return Err("层不属于所选配置".into());
+        }
+        if self.is_protected_oai_layer(lid) {
+            return Err("受保护宿主层（ChatGPT / Codex / Cindy）不支持复制层".into());
         }
         let id = self.copy_layer(lid, name, &mut BTreeMap::new())?;
         self.editable
@@ -595,6 +743,10 @@ impl LocalDocumentV2 {
                 layer.keys = values[0..13].to_vec().try_into().unwrap();
                 layer.encoders = values[13..16].to_vec().try_into().unwrap();
                 layer.joystick.sectors = values[16..].to_vec();
+                if original.is_none() && crate::is_protected_oai_layer(&layer) {
+                    layer.color = json!(0x00FFA6u64);
+                    layer.joystick.kind = json!("VENDOR");
+                }
                 profile.layers.push(layer);
             }
             config.profiles.push(profile);

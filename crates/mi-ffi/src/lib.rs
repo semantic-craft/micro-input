@@ -65,6 +65,7 @@ fn document_response(
         "host_active_profile_id": store.host_active_profile_id(),
         "host_execution_enabled": store.host_execution_enabled(),
         "command_execution_enabled": store.command_execution_enabled(),
+        "protected_layers": draft.document.protected_layer_ids(),
         "host_routing": store.routing_state(),
     }))
     .map_err(failure)
@@ -520,6 +521,53 @@ impl MicroInput {
             })
             .map_err(failure)?;
         document_response(&store, Some((profile_id, Some(id))))
+    }
+    pub async fn create_protected_oai_layer(
+        &self,
+        profile_id: String,
+        name: String,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        let mut id = String::new();
+        store
+            .update(|d| {
+                id = d.create_protected_oai_layer(&profile_id, &name)?;
+                Ok(())
+            })
+            .map_err(failure)?;
+        document_response(&store, Some((profile_id, Some(id))))
+    }
+    pub async fn merge_keys_across_layers(
+        &self,
+        profile_id: String,
+        primary_slot: u32,
+        secondary_slot: u32,
+        action_json: Option<String>,
+    ) -> Result<String, BridgeError> {
+        let action: Option<mi_model::draft::Action> = match action_json {
+            Some(raw) => Some(serde_json::from_str(&raw).map_err(failure)?),
+            None => None,
+        };
+        let mut store = self.draft.lock().unwrap();
+        store
+            .update(|d| {
+                d.merge_keys_across_layers(&profile_id, primary_slot, secondary_slot, action)?;
+                Ok(())
+            })
+            .map_err(failure)?;
+        document_response(&store, None)
+    }
+    pub fn compile_compact_host_keymap(
+        &self,
+        profile_id: Option<String>,
+    ) -> Result<String, BridgeError> {
+        let store = self.draft.lock().unwrap();
+        let active_id = profile_id.or_else(|| store.host_active_profile_id());
+        let bytes = store
+            .draft
+            .compile_compact_host_keymap(active_id.as_deref())
+            .map_err(failure)?;
+        String::from_utf8(bytes).map_err(failure)
     }
     pub async fn rename_layer(
         &self,

@@ -63,7 +63,8 @@ class OfflineEvidenceTests(unittest.TestCase):
     def test_ownership_receipt_requires_each_check_and_never_claims_native(self):
         names = ["native_blocks_wide_and_encoder", "released_wide_once_encoder_once",
                  "profile_switch_rejects_old_release", "fresh_release_routes_current_profile",
-                 "lost_peer_blocks_input", "unknown_blocks_direct_action", "unknown_blocks_ptt_and_lighting"]
+                 "lost_peer_blocks_input", "unknown_blocks_direct_action", "unknown_blocks_ptt_and_lighting",
+                 "protected_oai_layer_locks_ui_and_lighting", "cindy_codex_to_workbench_handoff"]
         payload = dict(status="PASS", checks=dict.fromkeys(names, True), receipt_count=3,
                        native_app="NOT_RUN", physical_key="NOT_RUN", lighting_visual="NOT_RUN")
         path = self.evidence / "ownership.json"

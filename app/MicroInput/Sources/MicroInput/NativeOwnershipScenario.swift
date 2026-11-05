@@ -119,8 +119,62 @@ extension Store {
             startHeldDictation(adapter: "cindy", binding: "AG10", profile: antigravity.id.text)
             await beginLightingPreview()
             checks["unknown_blocks_ptt_and_lighting"] = !pushToTalk.isActive && lightingPreviewToken == nil
+
+            guard let cindy = hostProfiles.first(where: { $0.name == "Cindy" }),
+                  let codex = hostProfiles.first(where: { $0.name == "Codex" }),
+                  let zcode = hostProfiles.first(where: { $0.name == "ZCode" }),
+                  let dsh = hostProfiles.first(where: { $0.name == "DeepSeek Coder (DSH)" }),
+                  let codexIndex = snapshot?.profiles.firstIndex(where: { $0.id.text == codex.id.text }) else {
+                throw BridgeError.Failed(message: "protected or workbench profiles missing")
+            }
+            selectProfile(codexIndex)
+            let layersBefore = profile?.layers.count ?? 0
+            await createProtectedOaiLayer()
+            let protectedSelected = isProtectedLayerSelected && !canEditCurrentLayer && selectedBinding == nil
+            let saveRejected = !(await saveAction(action))
+            let settingsRejected = !(await saveControlSettings(mode: "logical_sectors", sectors: "4"))
+            await editLighting(zone: "backlight", field: "color", value: "#3377CC", allLayers: false)
+            await beginLightingPreview()
+            let lightingBlocked = lightingPreviewToken == nil && status.contains("受保护宿主层")
+            let exportLayerBlocked = (try? await presetText(scope: "layer")) == nil
+            let layerCountBeforeDup = profile?.layers.count ?? 0
+            await duplicateLayer(name: "ChatGPT Copy")
+            let duplicateBlocked = (profile?.layers.count ?? 0) == layerCountBeforeDup
+            let compactJSON = try compileCompactHostKeymap(profileId: codex.id.text)
+            let compactValid = compactJSON.utf8.count < 1024 && compactJSON.contains("KV_OAI_AG00") && compactJSON.contains("VENDOR")
+            checks["protected_oai_layer_locks_ui_and_lighting"] =
+                (profile?.layers.count ?? 0) == layersBefore + 1
+                && protectedSelected
+                && saveRejected
+                && settingsRejected
+                && lightingBlocked
+                && exportLayerBlocked
+                && duplicateBlocked
+                && compactValid
+
+            await setHostActiveProfile(cindy.id.text)
+            let cindyYieldsToNative = nativeOwnership.desiredOwner == "native" && !nativeOwnership.allowsExecution
+            await setHostActiveProfile(codex.id.text)
+            let codexYieldsToNative = nativeOwnership.desiredOwner == "native" && !nativeOwnership.allowsExecution
+            await setHostActiveProfile(zcode.id.text)
+            let zcodeRequestsTakeover = nativeOwnership.desiredOwner == "micro-input" && !nativeOwnership.allowsExecution
+            await setHostActiveProfile(dsh.id.text)
+            let dshRequestsTakeover = nativeOwnership.desiredOwner == "micro-input" && !nativeOwnership.allowsExecution
+            await setHostActiveProfile(antigravity.id.text)
+            let agRequestsTakeover = nativeOwnership.desiredOwner == "micro-input" && !nativeOwnership.allowsExecution
+            let reclaimReq = nativeOwnership.beginRequest(microDrained: true)
+            nativeOwnership.receive(reply(reclaimReq, state: "released"), for: reclaimReq)
+            let reclaimed = nativeOwnership.allowsExecution && executor.receipts.count == 3
+            nativeOwnership.invalidate("scenario complete")
+            checks["cindy_codex_to_workbench_handoff"] =
+                cindyYieldsToNative
+                && codexYieldsToNative
+                && zcodeRequestsTakeover
+                && dshRequestsTakeover
+                && agRequestsTakeover
+                && reclaimed
         } catch { status = readableError(error); checks["scenario_completed"] = false }
-        var payload: [String: Any] = ["status": checks.count == 7 && checks.values.allSatisfy({ $0 }) ? "PASS" : "FAIL",
+        var payload: [String: Any] = ["status": checks.count == 9 && checks.values.allSatisfy({ $0 }) ? "PASS" : "FAIL",
             "checks": checks, "receipt_count": executor.receipts.count,
             "native_app": "NOT_RUN", "physical_key": "NOT_RUN", "lighting_visual": "NOT_RUN"]
         if peerPath != nil {

@@ -364,7 +364,8 @@ def verify_evidence(run, scenario, started, process_alive):
         ownership = json.loads((evidence / "ownership.json").read_text())
         expected = {"native_blocks_wide_and_encoder", "released_wide_once_encoder_once",
                     "profile_switch_rejects_old_release", "fresh_release_routes_current_profile",
-                    "lost_peer_blocks_input", "unknown_blocks_direct_action", "unknown_blocks_ptt_and_lighting"}
+                    "lost_peer_blocks_input", "unknown_blocks_direct_action", "unknown_blocks_ptt_and_lighting",
+                    "protected_oai_layer_locks_ui_and_lighting", "cindy_codex_to_workbench_handoff"}
         if (ownership.get("status") != "PASS" or set(ownership.get("checks", {})) != expected
                 or not all(value is True for value in ownership["checks"].values())
                 or ownership.get("receipt_count") != 3 or ownership.get("native_app") != "NOT_RUN"

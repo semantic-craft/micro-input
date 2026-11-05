@@ -20,7 +20,7 @@ struct PresetMenu: View {
             Divider()
             Button("导出整个本地文档…") { exportScope = "document"; exportConfirm = true }
             Button("导出当前配置…") { exportScope = "profile"; exportConfirm = true }.disabled(store.profile == nil)
-            Button("导出当前层…") { exportScope = "layer"; exportConfirm = true }.disabled(store.layer == nil)
+            Button("导出当前层…") { exportScope = "layer"; exportConfirm = true }.disabled(store.layer == nil || store.isProtectedLayerSelected)
         }
         .disabled(!store.canEditDraft || store.busy)
         .sheet(item: $pending) { item in

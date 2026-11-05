@@ -49,7 +49,7 @@ protocol NativeOwnershipTransport: Sendable {
     private var bridgeObserved = false
     var changed: (() -> Void)?
     var drain: (() async -> Bool)?
-    private var desiredOwner = "native"
+    private(set) var desiredOwner = "native"
 
     init(transport: (any NativeOwnershipTransport)? = UnixNativeOwnershipTransport(), allowUnbridgedDesktop: Bool = false) {
         self.transport = transport

@@ -227,4 +227,69 @@ import MicroInputCore
         await store.shutdown()
     }
 
+    func testProtectedOaiLayerLocksUIAndCindyCodexProfileHandoff() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("mi-protected-oai-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let docURL = tempDir.appendingPathComponent("workbench.json")
+
+        let ownership = NativeOwnershipController(transport: nil)
+        let executor = RecordingHostActionExecutor()
+        let store = Store(nativeOwnership: ownership, backend: MicroInputCore.MicroInput(), documentURL: docURL, actionExecutor: executor)
+        await store.loadWorkbench()
+        await store.installCodingAgentPresets()
+
+        let cindy = try XCTUnwrap(store.hostProfiles.first { $0.name == "Cindy" })
+        let codex = try XCTUnwrap(store.hostProfiles.first { $0.name == "Codex" })
+        let antigravity = try XCTUnwrap(store.hostProfiles.first { $0.name == "Antigravity" })
+        let zcode = try XCTUnwrap(store.hostProfiles.first { $0.name == "ZCode" })
+        let dsh = try XCTUnwrap(store.hostProfiles.first { $0.name == "DeepSeek Coder (DSH)" })
+
+        let codexIdx = try XCTUnwrap(store.snapshot?.profiles.firstIndex { $0.id.text == codex.id.text })
+        store.selectProfile(codexIdx)
+        await store.createProtectedOaiLayer()
+
+        XCTAssertTrue(store.isProtectedLayerSelected)
+        XCTAssertFalse(store.canEditCurrentLayer)
+        XCTAssertNil(store.selectedBinding)
+
+        let searchAction = try XCTUnwrap(store.catalog.first { $0.id == "search" })
+        let saved = await store.saveAction(searchAction)
+        XCTAssertFalse(saved)
+        let settingsSaved = await store.saveControlSettings(mode: "logical_sectors", sectors: "4")
+        XCTAssertFalse(settingsSaved)
+
+        await store.editLighting(zone: "backlight", field: "color", value: "#00FFAA", allLayers: false)
+        await store.beginLightingPreview()
+        XCTAssertNil(store.lightingPreviewToken)
+        let exportedLayer = try? await store.presetText(scope: "layer")
+        XCTAssertNil(exportedLayer)
+
+        let compact = try store.compileCompactHostKeymap(profileId: codex.id.text)
+        XCTAssertLessThan(compact.utf8.count, 1024)
+        XCTAssertTrue(compact.contains("KV_OAI_AG00"))
+        XCTAssertTrue(compact.contains("VENDOR"))
+
+        await store.setHostActiveProfile(cindy.id.text)
+        XCTAssertEqual(ownership.desiredOwner, "native")
+        XCTAssertFalse(ownership.allowsExecution)
+
+        await store.setHostActiveProfile(codex.id.text)
+        XCTAssertEqual(ownership.desiredOwner, "native")
+        XCTAssertFalse(ownership.allowsExecution)
+
+        for workbenchProfile in [antigravity, zcode, dsh] {
+            await store.setHostActiveProfile(workbenchProfile.id.text)
+            XCTAssertEqual(ownership.desiredOwner, "micro-input")
+            XCTAssertFalse(ownership.allowsExecution)
+            release(ownership)
+            XCTAssertTrue(ownership.allowsExecution)
+        }
+
+        await store.setHostActiveProfile(cindy.id.text)
+        XCTAssertEqual(ownership.desiredOwner, "native")
+        XCTAssertFalse(ownership.allowsExecution)
+        await store.shutdown()
+    }
+
 }

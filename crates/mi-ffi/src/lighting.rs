@@ -21,6 +21,18 @@ fn edit(zone: &str, field: &str, value: &str) -> Result<(Zone, Edit), BridgeErro
 #[uniffi::export(async_runtime = "tokio")]
 impl MicroInput {
     pub fn layer_lighting(&self, layer_id: String) -> Result<String, BridgeError> {
+        if self
+            .draft
+            .lock()
+            .unwrap()
+            .draft
+            .document
+            .is_protected_oai_layer(&layer_id)
+        {
+            return Ok(
+                json!({"zones":{},"can_add":false,"protected":true,"raw":"null"}).to_string(),
+            );
+        }
         let preview = self
             .operations
             .lock()
@@ -45,6 +57,13 @@ impl MicroInput {
                 .lighting(&layer_id)
                 .map_err(failure)?,
         };
+        let is_protected = self
+            .draft
+            .lock()
+            .unwrap()
+            .draft
+            .document
+            .is_protected_oai_layer(&layer_id);
         let mut zones = serde_json::Map::new();
         for zone in [Zone::Backlight, Zone::Underglow] {
             let raw = lights.zone(zone);
@@ -62,15 +81,21 @@ impl MicroInput {
                         .map(|n| format!("{:.0}", n * 100.0)),
                 }
                 .unwrap_or_else(|| raw[field].to_string());
-                let editable = edit(zone.name(), field, &value)
-                    .is_ok_and(|(_, e)| lights.clone().edit(zone, e).is_ok());
+                let editable = !is_protected
+                    && edit(zone.name(), field, &value)
+                        .is_ok_and(|(_, e)| lights.clone().edit(zone, e).is_ok());
                 fields.insert(field.into(), json!({"value":value,"editable":editable}));
             }
             zones.insert(zone.name().into(), json!(fields));
         }
         Ok(
-            json!({"zones":zones,"can_add":self.draft.lock().unwrap().draft.document.can_add_lighting(&layer_id),"raw":serde_json::to_string(&lights).map_err(failure)?})
-                .to_string(),
+            json!({
+                "zones": zones,
+                "can_add": !is_protected && self.draft.lock().unwrap().draft.document.can_add_lighting(&layer_id),
+                "is_protected": is_protected,
+                "raw": serde_json::to_string(&lights).map_err(failure)?
+            })
+            .to_string(),
         )
     }
     pub fn add_layer_lighting(&self, layer_id: String) -> Result<String, BridgeError> {
@@ -107,6 +132,9 @@ impl MicroInput {
         let (lights, document_id, revision) = {
             let store = self.draft.lock().unwrap();
             let doc = &store.draft.document;
+            if doc.is_protected_oai_layer(&layer_id) {
+                return Err(failure("受保护宿主层不支持静态 RGB 灯光即时预览"));
+            }
             (
                 doc.lighting(&layer_id).map_err(failure)?,
                 doc.document_id.clone(),

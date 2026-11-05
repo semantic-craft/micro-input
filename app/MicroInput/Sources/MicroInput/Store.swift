@@ -73,6 +73,9 @@ protocol Backend {
     func deleteProfile(profileId: String) async throws -> String
     func moveProfile(profileId: String, toIndex: UInt32) async throws -> String
     func createLayer(profileId: String, name: String) async throws -> String
+    func createProtectedOaiLayer(profileId: String, name: String) async throws -> String
+    func mergeKeysAcrossLayers(profileId: String, primarySlot: UInt32, secondarySlot: UInt32, actionJson: String?) async throws -> String
+    func compileCompactHostKeymap(profileId: String?) throws -> String
     func renameLayer(layerId: String, name: String) async throws -> String
     func duplicateLayer(profileId: String, layerId: String, name: String) async throws -> String
     func deleteLayer(profileId: String, layerId: String) async throws -> String
@@ -167,6 +170,9 @@ extension Backend {
     func deleteProfile(profileId: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func moveProfile(profileId: String, toIndex: UInt32) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func createLayer(profileId: String, name: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
+    func createProtectedOaiLayer(profileId: String, name: String) async throws -> String { throw BridgeError.Failed(message: "受保护宿主层创建不可用") }
+    func mergeKeysAcrossLayers(profileId: String, primarySlot: UInt32, secondarySlot: UInt32, actionJson: String?) async throws -> String { throw BridgeError.Failed(message: "跨层合并键不可用") }
+    func compileCompactHostKeymap(profileId: String?) throws -> String { throw BridgeError.Failed(message: "紧凑板载配置生成不可用") }
     func renameLayer(layerId: String, name: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func duplicateLayer(profileId: String, layerId: String, name: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
     func deleteLayer(profileId: String, layerId: String) async throws -> String { throw BridgeError.Failed(message: "本地文档功能不可用") }
@@ -264,6 +270,7 @@ extension MicroInput: Backend {}
     var currentControlSettings: LocalControlSettings? { layer.flatMap { controlSettings[$0.id.text] } }
     @Published var slot = 0
     @Published var documentReady = false
+    @Published var protectedLayers: Set<String> = []
     @Published private(set) var browsingDeviceSnapshot = false
     @Published var editingDevice = false
     private var hostSnapshot: Snapshot?
@@ -271,6 +278,32 @@ extension MicroInput: Backend {}
     private var localSnapshot: Snapshot?
     private var localSelection: (profile: String?, layer: String?, slot: Int) = (nil, nil, 0)
     var canEditDraft: Bool { documentReady && !browsingDeviceSnapshot && !deviceOperationRunning }
+    func isProtectedLayer(_ candidate: Layer?) -> Bool {
+        guard let candidate else { return false }
+        if protectedLayers.contains(candidate.id.text) { return true }
+        if !documentReady { return candidate.isProtectedOaiLayer }
+        return false
+    }
+    func isProtectedHostProfile(_ profileId: String?) -> Bool {
+        guard let profileId, !profileId.isEmpty else { return false }
+        if let matched = hostProfiles.first(where: { $0.id.text == profileId }) {
+            if matched.layers.contains(where: { protectedLayers.contains($0.id.text) }) {
+                return true
+            }
+            let name = matched.name.lowercased()
+            if name.contains("codex") || name.contains("chatgpt") || name.contains("cindy") {
+                return true
+            }
+        }
+        let adapter = activeDesktopAgentAdapter(for: profileId)
+        if adapter == "cindy" || adapter == "codex" {
+            return true
+        }
+        let lower = profileId.lowercased()
+        return lower == "cindy" || lower == "codex"
+    }
+    var isProtectedLayerSelected: Bool { isProtectedLayer(layer) }
+    var canEditCurrentLayer: Bool { canEditDraft && !isProtectedLayerSelected }
     func showLocalDraft() {
         guard !busy, let localSnapshot else { return }
         snapshot = localSnapshot; browsingDeviceSnapshot = false; stale = false
@@ -344,6 +377,7 @@ extension MicroInput: Backend {}
         editingDevice = result.editing_device ?? false; hostSnapshot = result.host_config
         actionCapabilities = result.action_capabilities ?? [:]
         controlSettings = result.control_settings ?? [:]; controlSettingsError = nil
+        protectedLayers = Set(result.protected_layers ?? [])
         hostActiveProfileId = result.host_active_profile_id
         if let enabled = result.host_execution_enabled { hostExecutionEnabled = enabled }
         if let enabled = result.command_execution_enabled { commandExecutionEnabled = enabled }
@@ -351,6 +385,10 @@ extension MicroInput: Backend {}
         if connectedID != nil, hostInputTask == nil, !inputNeedsResume { startHostInputLoop(token: generation) }
         browsingDeviceSnapshot = false; stale = false; documentReady = !draft.read_only
         restoreSelection(profile: result.selection_hint?.profile_id ?? oldProfile, layer: result.selection_hint?.layer_id ?? oldLayer, fallbackProfile: pi, fallbackLayer: li)
+        if isProtectedLayerSelected {
+            selectedBinding = nil
+            if showingLighting { showingLighting = false; Task { await endLightingPreview() } }
+        }
         localSelection = (profile?.id.text, layer?.id.text, slot)
         status = draft.read_only ? "文档含未知数据 · 只读 · 原文件保留" : "本地草稿 · 修改自动保存 · 不写设备"
         if draft.loaded_format == 1 { status += " · 旧格式将在首次修改时转换并备份" }
@@ -535,12 +573,28 @@ extension MicroInput: Backend {}
     func deleteProfile() async {guard let id=profile?.id.text else {return}; await editDocument { [self] in try await backend.deleteProfile(profileId:id)} }
     func moveProfile(by offset: Int) async {guard let id=profile?.id.text, let count=snapshot?.profiles.count, (0..<count).contains(profileIndex+offset) else {return}; await editDocument { [self] in try await backend.moveProfile(profileId:id,toIndex:UInt32(profileIndex+offset))} }
     func createLayer(name: String) async {guard let id=profile?.id.text else {return}; await editDocument { [self] in try await backend.createLayer(profileId:id,name:name)} }
+    func createProtectedOaiLayer(name: String = "ChatGPT") async {guard let id=profile?.id.text else {return}; await editDocument { [self] in try await backend.createProtectedOaiLayer(profileId:id,name:name)} }
+    func mergeKeysAcrossLayers(primarySlot: UInt32, secondarySlot: UInt32, action: CatalogAction?) async {
+        guard let pid = profile?.id.text else { return }
+        let encoded = action.flatMap { try? String(decoding: JSONEncoder().encode($0), as: UTF8.self) }
+        await editDocument { [self] in try await backend.mergeKeysAcrossLayers(profileId: pid, primarySlot: primarySlot, secondarySlot: secondarySlot, actionJson: encoded) }
+    }
+    func compileCompactHostKeymap(profileId: String? = nil) throws -> String {
+        try backend.compileCompactHostKeymap(profileId: profileId ?? hostActiveProfileId)
+    }
     func renameLayer(name: String) async {guard let id=layer?.id.text else {return}; await editDocument { [self] in try await backend.renameLayer(layerId:id,name:name)} }
-    func duplicateLayer(name: String) async {guard let pid=profile?.id.text, let id=layer?.id.text else {return}; await editDocument { [self] in try await backend.duplicateLayer(profileId:pid,layerId:id,name:name)} }
+    func duplicateLayer(name: String) async {
+        guard !isProtectedLayerSelected else { status = "受保护宿主层（ChatGPT / Codex / Cindy）不支持复制层"; return }
+        guard let pid=profile?.id.text, let id=layer?.id.text else {return}
+        await editDocument { [self] in try await backend.duplicateLayer(profileId:pid,layerId:id,name:name)}
+    }
     func deleteLayer() async {guard let pid=profile?.id.text, let id=layer?.id.text else {return}; await editDocument { [self] in try await backend.deleteLayer(profileId:pid,layerId:id)} }
     func moveLayer(by offset: Int) async {guard let pid=profile?.id.text, let id=layer?.id.text, let count=profile?.layers.count, (0..<count).contains(layerIndex+offset) else {return}; await editDocument { [self] in try await backend.moveLayer(profileId:pid,layerId:id,toIndex:UInt32(layerIndex+offset))} }
     func presetText(scope: String) async throws -> String {
         guard canEditDraft, !busy else { throw BridgeError.Failed(message: "请先返回可编辑本地草稿") }
+        if scope == "layer", isProtectedLayerSelected {
+            throw BridgeError.Failed(message: "受保护宿主层（ChatGPT / Codex / Cindy）不支持导出")
+        }
         return try await backend.exportPreset(profileId: scope == "document" ? nil : profile?.id.text, layerId: scope == "layer" ? layer?.id.text : nil)
     }
     func inspectPreset(_ text: String) throws -> PresetSummary {
@@ -836,6 +890,10 @@ extension MicroInput: Backend {}
         await saveAction(action)
     }
     @discardableResult func saveAction(_ action: CatalogAction) async -> Bool {
+        guard !isProtectedLayerSelected else {
+            status = "当前为 Cindy / Codex 原生受保护层，不支持修改按键映射"
+            return false
+        }
         if action.payload["type"]?.text == "local_multi" { return await saveMulti(action) }
         if action.payload["type"]?.text == "local_macro" { return await saveMacro(action) }
         guard canEditDraft, !busy, let profile, let layer else { return false }
@@ -852,6 +910,10 @@ extension MicroInput: Backend {}
         } catch { status = readableError(error); return false }
     }
     @discardableResult func saveControlSettings(mode: String, sectors: String) async -> Bool {
+        guard !isProtectedLayerSelected else {
+            controlSettingsError = "受保护宿主层不支持修改摇杆或控件设置"
+            return false
+        }
         guard canEditDraft, !busy, let profile, let layer else { return false }
         guard let count = UInt32(sectors), count <= 32 else {
             controlSettingsError = "活动扇区数：请输入 0–32 的整数（本机编辑器限制，非设备容量）"
@@ -1001,8 +1063,14 @@ extension MicroInput: Backend {}
     }
     var profile: Profile? { guard let ps = snapshot?.profiles, ps.indices.contains(profileIndex) else { return nil }; return ps[profileIndex] }
     var layer: Layer? { guard let ls = profile?.layers, ls.indices.contains(layerIndex) else { return nil }; return ls[layerIndex] }
-    func selectProfile(_ index: Int) { controlSettingsError = nil; profileIndex = index; layerIndex = 0; slot = 0; selectedBinding = nil }
-    func selectLayer(_ index: Int) { controlSettingsError = nil; layerIndex = index; slot = 0; selectedBinding = nil }
+    func selectProfile(_ index: Int) {
+        controlSettingsError = nil; profileIndex = index; layerIndex = 0; slot = 0; selectedBinding = nil
+        if isProtectedLayerSelected, showingLighting { showingLighting = false; Task { await endLightingPreview() } }
+    }
+    func selectLayer(_ index: Int) {
+        controlSettingsError = nil; layerIndex = index; slot = 0; selectedBinding = nil
+        if isProtectedLayerSelected, showingLighting { showingLighting = false; Task { await endLightingPreview() } }
+    }
     func refresh() async {
         // R-D02: descriptors only, no permission preflight/request or device open.
         guard !systemSleeping, !stopped else { return }

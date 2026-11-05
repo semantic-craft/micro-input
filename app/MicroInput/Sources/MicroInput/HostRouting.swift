@@ -180,7 +180,7 @@ extension Store {
         hostExecutionEnabled = value.execution_enabled
         commandExecutionEnabled = value.command_execution_enabled
         routingValid = true
-        nativeOwnership.setDesiredOwner(activeDesktopAgentAdapter(for: value.profile_id ?? "") == "cindy" ? "native" : "micro-input")
+        nativeOwnership.setDesiredOwner(isProtectedHostProfile(value.profile_id) ? "native" : "micro-input")
     }
     func readInputBoundary() {
         cancelRadialMenu()

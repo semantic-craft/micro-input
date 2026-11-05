@@ -133,6 +133,9 @@ impl Lighting {
 }
 impl LocalDocumentV2 {
     pub fn can_add_lighting(&self, lid: &str) -> bool {
+        if self.is_protected_oai_layer(lid) {
+            return false;
+        }
         let Some(layer) = self.editable.graph.layers.get(lid) else {
             return false;
         };
@@ -187,6 +190,9 @@ impl LocalDocumentV2 {
 impl Draft {
     pub fn add_lighting(&mut self, lid: &str) -> Result<(), String> {
         self.mutate(|doc| {
+            if doc.is_protected_oai_layer(lid) {
+                return Err("受保护宿主层不支持添加或修改静态 RGB 灯光".into());
+            }
             if !doc.can_add_lighting(lid) {
                 return Err("只能为来源中缺少 lights 的层添加灯光；已有或未知结构保持原值".into());
             }
@@ -216,8 +222,15 @@ impl Draft {
             if !order.iter().any(|id| id == lid) {
                 return Err("层不属于所选配置".into());
             }
-            let targets = if all_layers {
-                order.clone()
+            if doc.is_protected_oai_layer(lid) {
+                return Err("受保护宿主层不支持添加或修改静态 RGB 灯光".into());
+            }
+            let targets: Vec<String> = if all_layers {
+                order
+                    .iter()
+                    .filter(|id| !doc.is_protected_oai_layer(id))
+                    .cloned()
+                    .collect()
             } else {
                 vec![lid.to_owned()]
             };
@@ -234,6 +247,9 @@ impl Draft {
     }
     pub fn reset_lighting(&mut self, lid: &str) -> Result<(), String> {
         self.mutate(|doc| {
+            if doc.is_protected_oai_layer(lid) {
+                return Err("受保护宿主层不支持重置静态 RGB 灯光".into());
+            }
             doc.editable
                 .graph
                 .layers

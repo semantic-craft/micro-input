@@ -71,11 +71,23 @@ pub fn export(draft: &Draft, pid: Option<&str>, lid: Option<&str>) -> Result<Str
             if !profile.layer_order.iter().any(|id| id == lid) {
                 return Err("层不属于所选配置".into());
             }
+            if doc.is_protected_oai_layer(lid) {
+                return Err("受保护宿主层（ChatGPT / Codex / Cindy）不支持导出".into());
+            }
             name = doc.editable.graph.layers[lid].name.clone();
             scope = "layer";
             [lid.to_owned()].into()
         } else {
-            profile.layer_order.iter().cloned().collect()
+            let non_protected: BTreeSet<_> = profile
+                .layer_order
+                .iter()
+                .filter(|id| !doc.is_protected_oai_layer(id))
+                .cloned()
+                .collect();
+            if non_protected.is_empty() {
+                return Err("仅含受保护宿主层的配置不支持导出".into());
+            }
+            non_protected
         };
         doc.editable.graph.profile_order.retain(|id| id == pid);
         doc.editable.graph.profiles.retain(|id, _| id == pid);

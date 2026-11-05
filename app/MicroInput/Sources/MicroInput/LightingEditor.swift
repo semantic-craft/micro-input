@@ -9,6 +9,7 @@ extension Store {
         return try? JSONDecoder().decode(LightingModel.self, from: Data(backend.layerLighting(layerId: id).utf8))
     }
     func editLighting(zone: String, field: String, value: String, allLayers: Bool) async {
+        guard !isProtectedLayerSelected else { status = "受保护宿主层不支持添加或修改静态 RGB 灯光"; return }
         guard canEditDraft, !busy, !deviceOperationRunning, let pid = profile?.id.text, let lid = layer?.id.text else { return }
         busy = true
         defer { busy = false }
@@ -20,6 +21,7 @@ extension Store {
         } catch { status = readableError(error) }
     }
     func beginLightingPreview() async {
+        guard !isProtectedLayerSelected else { lightingPreviewResult = "受保护宿主层不支持静态灯光预览"; return }
         guard nativeOwnership.allowsExecution, lightingPreviewToken == nil, !startingLightingPreview, !deviceOperationRunning, let lid = layer?.id.text else { return }
         startingLightingPreview = true
         lightingCleanupConfirmed = false
@@ -62,6 +64,7 @@ extension Store {
         }
     }
     func addLayerLighting() {
+        guard !isProtectedLayerSelected else { status = "受保护宿主层不支持添加或修改静态 RGB 灯光"; return }
         guard let lid = layer?.id.text else { return }
         do { try applyDocument(backend.addLayerLighting(layerId: lid)) }
         catch { status = readableError(error) }
