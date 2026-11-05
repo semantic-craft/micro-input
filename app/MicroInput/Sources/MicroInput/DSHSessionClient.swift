@@ -49,6 +49,10 @@ private struct DSHRequest: Encodable {
     let after: UInt64?
     let sessionId: String?
     let workspaceId: String?
+    let requestId: String?
+    let mode: String?
+    let text: String?
+    let expectedTurn: Int?
 }
 
 private struct DSHReply: Decodable {
@@ -63,11 +67,22 @@ private struct DSHReply: Decodable {
     let unavailableSessionIds: [String]?
     let changes: [DSHSessionChange]?
     let selected: String?
+    let sessionId: String?
+    let workspaceId: String?
+    let requestId: String?
+    let delivery: String?
+    let expectedTurn: Int?
+    let currentTurn: Int?
+    let queuedCount: Int?
+    let duplicate: Bool?
+    let reasonCode: String?
 }
 
 actor DSHSessionClient: DSHSessionServing {
     private let grantURL: URL
     private var grant: DSHGrant?
+    private var allowedSessionIds: [String] = []
+    private var allowedWorkspaceIds: Set<String> = []
     private var epoch: UInt64 = 0
     private var cursor: UInt64?
     private var subscriptionId: String?
@@ -80,20 +95,23 @@ actor DSHSessionClient: DSHSessionServing {
         await close()
         let current = try DSHGrant.load(grantURL)
         grant = current
+        allowedSessionIds = current.sessionIds
         subscriptionId = UUID().uuidString
         let expected = epoch
         let response = try await exchange(op: "subscribe", grant: current, expected: expected)
         let result = try snapshot(response, grant: current, after: nil)
+        allowedWorkspaceIds = Set(result.rows.map(\.workspaceId))
         cursor = result.cursor
         return result
     }
     func close() async {
         let previous = grant, previousSubscription = subscriptionId
-        epoch &+= 1; grant = nil; cursor = nil; subscriptionId = nil; readingEpoch = nil
+        epoch &+= 1; grant = nil; allowedSessionIds = []; allowedWorkspaceIds = []
+        cursor = nil; subscriptionId = nil; readingEpoch = nil
         guard let previous, let previousSubscription else { return }
         let request = DSHRequest(subscriptionId: previousSubscription, id: UUID().uuidString, token: previous.token, hostId: previous.hostId,
                                  generation: previous.generation, op: "close", activate: nil, after: nil,
-                                 sessionId: nil, workspaceId: nil)
+                                 sessionId: nil, workspaceId: nil, requestId: nil, mode: nil, text: nil, expectedTurn: nil)
         guard let data = try? JSONEncoder().encode(request) else { return }
         _ = try? await UnixNativeOwnershipTransport(path: previous.socketPath, requestLimit: 65536,
                                                     responseLimit: 1_048_576, timeout: .seconds(2)).exchangeJSON(data)
@@ -110,6 +128,7 @@ actor DSHSessionClient: DSHSessionServing {
         defer { if readingEpoch == expected { readingEpoch = nil } }
         let response = try await exchange(op: "read", after: after, grant: current, expected: expected)
         let result = try snapshot(response, grant: current, after: after)
+        allowedWorkspaceIds.formUnion(result.rows.map(\.workspaceId))
         cursor = result.cursor
         return result
     }
@@ -117,7 +136,7 @@ actor DSHSessionClient: DSHSessionServing {
         guard response.status == "ok", let cursor = response.cursor, let rows = response.rows,
               let unavailable = response.unavailableSessionIds, let changes = response.changes else { throw failure(response.status) }
         let result = DSHSessionSnapshot(hostId: grant.hostId, generation: grant.generation,
-            sessionIds: grant.sessionIds, cursor: cursor, rows: rows, unavailableSessionIds: unavailable,
+            sessionIds: allowedSessionIds, cursor: cursor, rows: rows, unavailableSessionIds: unavailable,
             changes: changes, selected: response.selected)
         try result.validate(after: after)
         return result
@@ -125,12 +144,94 @@ actor DSHSessionClient: DSHSessionServing {
     func open(_ selection: DSHSelection) async throws -> DSHOpenReply {
         let current = try currentGrant(), expected = epoch
         guard selection.hostId == current.hostId, selection.generation == current.generation else { throw DSHFailure.stale }
-        guard current.sessionIds.contains(selection.sessionId), selection.workspaceId.utf8.count <= 4096 else { throw DSHFailure.denied }
-        let response = try await exchange(op: "open", selection: selection, grant: current, expected: expected)
+        guard allowedSessionIds.contains(selection.sessionId), selection.workspaceId.utf8.count <= 4096 else { throw DSHFailure.denied }
+        let response = try await exchange(op: "open", sessionId: selection.sessionId, workspaceId: selection.workspaceId,
+                                          grant: current, expected: expected)
         guard let status = DSHOpenResult(rawValue: response.status), response.rows == nil,
               response.changes == nil, response.cursor == nil, response.unavailableSessionIds == nil,
               status == .confirmed || response.selected == nil else { throw DSHFailure.invalidReply }
         return DSHOpenReply(hostId: response.hostId, generation: response.generation, status: status, selected: response.selected)
+    }
+    func create(_ intent: DSHCreateIntent) async throws -> DSHCommandReply {
+        let current = try currentGrant(), expected = epoch
+        guard intent.hostId == current.hostId, intent.generation == current.generation else { throw DSHFailure.stale }
+        guard !intent.workspaceId.isEmpty, intent.workspaceId.utf8.count <= 4096,
+              allowedWorkspaceIds.contains(intent.workspaceId),
+              DSHSessionSnapshot.validID(intent.requestId) else { throw DSHFailure.denied }
+        let response = try await exchange(op: "create", workspaceId: intent.workspaceId, requestId: intent.requestId,
+                                          grant: current, expected: expected)
+        let reply = try commandReply(response, expectedRequestId: intent.requestId)
+        if reply.status == "confirmed" {
+            guard let createdId = reply.sessionId, DSHSessionSnapshot.validID(createdId),
+                  reply.selected == createdId, reply.workspaceId == intent.workspaceId else { throw DSHFailure.invalidReply }
+            if !allowedSessionIds.contains(createdId) { allowedSessionIds.append(createdId) }
+        }
+        return reply
+    }
+    func prompt(_ intent: DSHPromptIntent) async throws -> DSHCommandReply {
+        let current = try currentGrant(), expected = epoch
+        guard intent.hostId == current.hostId, intent.generation == current.generation else { throw DSHFailure.stale }
+        guard allowedSessionIds.contains(intent.sessionId), intent.workspaceId.utf8.count <= 4096,
+              DSHSessionSnapshot.validID(intent.requestId),
+              !intent.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              intent.text.utf8.count <= 16384 else { throw DSHFailure.denied }
+        let response = try await exchange(op: "prompt", sessionId: intent.sessionId, workspaceId: intent.workspaceId,
+                                          requestId: intent.requestId, mode: intent.mode.rawValue, text: intent.text,
+                                          grant: current, expected: expected)
+        return try commandReply(response, expectedRequestId: intent.requestId)
+    }
+    func cancel(_ intent: DSHCancelIntent) async throws -> DSHCommandReply {
+        let current = try currentGrant(), expected = epoch
+        guard intent.hostId == current.hostId, intent.generation == current.generation else { throw DSHFailure.stale }
+        guard allowedSessionIds.contains(intent.sessionId), intent.workspaceId.utf8.count <= 4096,
+              DSHSessionSnapshot.validID(intent.requestId), intent.expectedTurn >= 0 else { throw DSHFailure.denied }
+        let response = try await exchange(op: "cancel", sessionId: intent.sessionId, workspaceId: intent.workspaceId,
+                                          requestId: intent.requestId, expectedTurn: intent.expectedTurn,
+                                          grant: current, expected: expected)
+        return try commandReply(response, expectedRequestId: intent.requestId)
+    }
+    func query(_ intent: DSHQueryIntent) async throws -> DSHCommandReply {
+        let current = try currentGrant(), expected = epoch
+        guard intent.hostId == current.hostId, intent.generation == current.generation else { throw DSHFailure.stale }
+        guard DSHSessionSnapshot.validID(intent.requestId),
+              intent.sessionId == nil || allowedSessionIds.contains(intent.sessionId!) else { throw DSHFailure.denied }
+        let response = try await exchange(op: "query", sessionId: intent.sessionId, workspaceId: intent.workspaceId,
+                                          requestId: intent.requestId, grant: current, expected: expected)
+        let reply = try commandReply(response, expectedRequestId: intent.requestId)
+        if reply.status == "confirmed", let createdId = reply.sessionId, DSHSessionSnapshot.validID(createdId),
+           !allowedSessionIds.contains(createdId) {
+            allowedSessionIds.append(createdId)
+        }
+        return reply
+    }
+    private func commandReply(_ response: DSHReply, expectedRequestId: String) throws -> DSHCommandReply {
+        guard response.rows == nil, response.changes == nil, response.cursor == nil,
+              response.unavailableSessionIds == nil else { throw DSHFailure.invalidReply }
+        if let replyRequestId = response.requestId, replyRequestId != expectedRequestId {
+            throw DSHFailure.invalidReply
+        }
+        let deliveryMode: DSHPromptMode?
+        if let rawDelivery = response.delivery {
+            guard let parsed = DSHPromptMode(rawValue: rawDelivery) else { throw DSHFailure.invalidReply }
+            deliveryMode = parsed
+        } else {
+            deliveryMode = nil
+        }
+        return DSHCommandReply(
+            hostId: response.hostId,
+            generation: response.generation,
+            status: response.status,
+            sessionId: response.sessionId,
+            workspaceId: response.workspaceId,
+            selected: response.selected,
+            requestId: response.requestId ?? expectedRequestId,
+            delivery: deliveryMode,
+            expectedTurn: response.expectedTurn,
+            currentTurn: response.currentTurn,
+            queuedCount: response.queuedCount,
+            duplicate: response.duplicate ?? false,
+            reasonCode: response.reasonCode
+        )
     }
     private func failure(_ status: String) -> DSHFailure {
         switch status {
@@ -141,19 +242,26 @@ actor DSHSessionClient: DSHSessionServing {
         default: return .invalidReply
         }
     }
-    private func exchange(op: String, after: UInt64? = nil, selection: DSHSelection? = nil,
+    private func exchange(op: String, after: UInt64? = nil, sessionId: String? = nil, workspaceId: String? = nil,
+                          requestId: String? = nil, mode: String? = nil, text: String? = nil, expectedTurn: Int? = nil,
                           grant: DSHGrant, expected: UInt64) async throws -> DSHReply {
         guard expected == epoch, self.grant == grant, let subscription = subscriptionId, !Task.isCancelled else { throw DSHFailure.stale }
         let request = DSHRequest(subscriptionId: subscription, id: UUID().uuidString, token: grant.token, hostId: grant.hostId,
                                  generation: grant.generation, op: op, activate: op == "subscribe" ? false : nil,
-                                 after: after, sessionId: selection?.sessionId, workspaceId: selection?.workspaceId)
+                                 after: after, sessionId: sessionId, workspaceId: workspaceId,
+                                 requestId: requestId, mode: mode, text: text, expectedTurn: expectedTurn)
         let data = try await UnixNativeOwnershipTransport(path: grant.socketPath, requestLimit: 65536,
             responseLimit: 1_048_576, timeout: .seconds(2)).exchangeJSON(JSONEncoder().encode(request))
         guard expected == epoch, self.grant == grant, subscriptionId == subscription, !Task.isCancelled,
               try currentGrant() == grant else { throw DSHFailure.stale }
+        let allowedKeys: Set<String> = [
+            "version", "subscriptionId", "id", "hostId", "generation", "status", "cursor", "rows",
+            "unavailableSessionIds", "changes", "selected", "sessionId", "workspaceId", "requestId",
+            "delivery", "expectedTurn", "currentTurn", "queuedCount", "duplicate", "reasonCode"
+        ]
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys).isSubset(of: ["version", "subscriptionId", "id", "hostId", "generation", "status", "cursor", "rows", "unavailableSessionIds", "changes", "selected"]) else { throw DSHFailure.invalidReply }
-        let rowKeys: Set<String> = ["sessionId", "workspaceId", "title", "active", "running", "pendingInput"]
+              Set(object.keys).isSubset(of: allowedKeys) else { throw DSHFailure.invalidReply }
+        let rowKeys: Set<String> = ["sessionId", "workspaceId", "title", "active", "running", "pendingInput", "currentTurn", "queuedCount"]
         if let rows = object["rows"] as? [[String: Any]], !rows.allSatisfy({ Set($0.keys) == rowKeys }) { throw DSHFailure.invalidReply }
         if let changes = object["changes"] as? [[String: Any]] {
             guard changes.allSatisfy({ change in
@@ -164,8 +272,16 @@ actor DSHSessionClient: DSHSessionServing {
         let response = try JSONDecoder().decode(DSHReply.self, from: data)
         guard response.version == 1, response.id == request.id, response.subscriptionId == subscription else { throw DSHFailure.invalidReply }
         guard response.hostId == grant.hostId, response.generation == grant.generation else { throw DSHFailure.stale }
-        guard ["ok", "confirmed", "unconfirmed", "denied", "stale", "unavailable", "gap"].contains(response.status),
-              ["ok", "confirmed"].contains(response.status) || (response.rows == nil && response.changes == nil && response.selected == nil) else { throw DSHFailure.invalidReply }
+        let validStatuses: Set<String> = [
+            "ok", "confirmed", "queued", "steered", "cancelled", "cancelledQueueRemaining",
+            "noop", "unknown", "unconfirmed", "denied", "stale", "unavailable", "gap"
+        ]
+        guard validStatuses.contains(response.status) else { throw DSHFailure.invalidReply }
+        if response.status != "ok" {
+            guard response.rows == nil && response.changes == nil && response.cursor == nil && response.unavailableSessionIds == nil else {
+                throw DSHFailure.invalidReply
+            }
+        }
         return response
     }
 }

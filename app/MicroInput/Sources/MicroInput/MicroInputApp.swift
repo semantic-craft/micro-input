@@ -268,7 +268,16 @@ struct StatusPanel: View {
                 .toggleStyle(.switch).controlSize(.small)
             if store.radialMenu.enabled { Text(store.radialReadiness.label).font(.caption2).foregroundStyle(.secondary) }
             ZCodeSessionPanel(controller: store.zcodeSessions, open: { store.openZCodeSession($0) })
-            DSHSessionPanel(controller: store.dshSessions, open: { store.openDSHSession($0) })
+            DSHSessionPanel(
+                controller: store.dshSessions,
+                open: { store.openDSHSession($0) },
+                create: { wsId in
+                    if let cmd = store.dshSessions.createIntent(workspaceId: wsId) { store.createDSHSession(cmd) }
+                },
+                cancel: { sessionId in
+                    if let cmd = store.dshSessions.cancelIntent(for: sessionId) { store.cancelDSHSession(cmd) }
+                }
+            )
             CindySessionPanel(controller: store.cindySessions, open: { store.openCindySession($0) })
             AntigravityStatusPanel(controller: store.antigravityStatus, open: { store.openAntigravitySession($0) })
             T3AttentionPanel(controller: store.t3Attention, next: { store.openNextT3Attention() })
@@ -405,6 +414,8 @@ struct ZCodeSessionPanel: View {
 struct DSHSessionPanel: View {
     @ObservedObject var controller: DSHSessionController
     let open: (DSHSelection) -> Void
+    var create: ((String) -> Void)? = nil
+    var cancel: ((String) -> Void)? = nil
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Toggle("DSH 会话连接", isOn: Binding(get: { controller.enabled }, set: controller.setEnabled))
@@ -413,6 +424,18 @@ struct DSHSessionPanel: View {
             if controller.enabled {
                 if case .unavailable = controller.state {
                     Button("重连") { controller.setEnabled(true) }.font(.caption)
+                }
+                if controller.state == .ready, let create,
+                   let selectedWorkspace = controller.rows.first(where: { $0.sessionId == controller.selected })?.workspaceId
+                       ?? controller.rows.first?.workspaceId {
+                    HStack(spacing: 8) {
+                        Button("新建会话") { create(selectedWorkspace) }.font(.caption)
+                        if let selectedId = controller.selected,
+                           let cancel,
+                           controller.rows.first(where: { $0.sessionId == selectedId })?.running == true {
+                            Button("停止当前轮次") { cancel(selectedId) }.font(.caption)
+                        }
+                    }
                 }
                 ForEach(controller.rows) { row in
                     Button {
@@ -425,7 +448,15 @@ struct DSHSessionPanel: View {
                             }
                             Text(row.workspaceId.isEmpty ? "未分组" : row.workspaceId).font(.caption2)
                                 .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                            Text(row.statusLabel).font(.caption2).foregroundStyle(.secondary)
+                            HStack(spacing: 8) {
+                                Text(row.turnStatusLabel).font(.caption2).foregroundStyle(.secondary)
+                                    .accessibilityLabel("DSH当前轮次：\(row.turnStatusLabel)")
+                                Text(row.queueStatusLabel).font(.caption2).foregroundStyle(.secondary)
+                                    .accessibilityLabel("DSH队列：\(row.queueStatusLabel)")
+                            }
+                            if row.pendingInput > 0 {
+                                Text("待输入 \(row.pendingInput)").font(.caption2).foregroundStyle(.secondary)
+                            }
                         }
                     }.buttonStyle(.plain).disabled(controller.state != .ready)
                 }
@@ -435,6 +466,9 @@ struct DSHSessionPanel: View {
                 }
                 if let result = controller.lastResult {
                     Text(result.label).font(.caption).foregroundStyle(.secondary)
+                }
+                if let commandResult = controller.lastCommandResult {
+                    Text(commandResult.label).font(.caption).foregroundStyle(.secondary)
                 }
             }
         }

@@ -73,7 +73,7 @@ Slice G 与 Slice K1 已在固定提交 `a9fe401eede6e6e5e01be9048679c206fe6f02d
 
 [DSH 导航桥](../integrations/dsh/README.md) 默认关闭，只连接显式授权的 session ID。授权范围内尚未加载、当前元数据尚未就绪或已经消失的会话单列为不可用，不伪装为空闲，也不为了列举而加载或启动会话。订阅返回基线，后续按连续序号返回状态变化；即使同一次轮询前等待状态已经出现又消失，两个变化仍保留。日志缓冲耗尽返回 gap，客户端清空旧目标并要求重新连接。
 
-每次连接有独立 subscriptionId；旧订阅的迟到关闭不能清除新连接，已有订阅也不接受另一个 ID 的替换。旧连接尚未完成时先排空，再清理并重连；清理无法确认时拒绝接管，须重置桥恢复。停止桥只释放自己的观察器、订阅和端点，不停止 Host、Agent 或会话。H 不实现发送、取消当前轮次、审批动作或模型档位；这些仍属于 K2/L2。安装版原生窗口、已安装桥和实体控件的结果与源码配对验收分别记录。
+每次连接有独立 subscriptionId；旧订阅的迟到关闭不能清除新连接，已有订阅也不接受另一个 ID 的替换。旧连接尚未完成时先排空，再清理并重连；清理无法确认时拒绝接管，须重置桥恢复。停止桥只释放自己的观察器、订阅和端点，不停止 Host、Agent 或会话。Slice K2 已在同 Host 桥上接通 `create`（绑定授权 `workspaceId` 并回读 `selected == createdSessionId`）、`prompt`（区分 `steer` 与 `queue`）、`requestId` 幂等去重/`query` 对账与带同 Host 同步 `expectedTurn` 原子核对的 `cancel`（分别投影 `currentTurn` 与 `queuedCount`；`queuedCount > 0` 时返回 `cancelledQueueRemaining` 不报全部停止；切会话返回 `unconfirmed` 不误停；同会话旧 Stop 遇新轮次零取消 `noop`；无法证明轮次原子性时拒绝执行 `guard.unprovableTurnAtomicity`）。审批、提问回答与模型档位仍属于 L2。安装版原生窗口、已安装桥和实体控件的结果与源码配对验收分别记录。
 
 ## 本轮验证与后续入口
 
