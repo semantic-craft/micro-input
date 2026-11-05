@@ -76,8 +76,8 @@ def verify_asar(package: Path) -> dict:
 def verify_language_server_and_agentapi(ls_bin: Path) -> dict:
     if not ls_bin.is_file():
         raise ValueError(f"missing language_server binary: {ls_bin}")
-    with ls_bin.open("rb") as stream:
-        ls_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+    raw_bytes = ls_bin.read_bytes()
+    ls_sha256 = hashlib.sha256(raw_bytes).hexdigest()
     stamp_out = subprocess.check_output([str(ls_bin), "--stamp"], text=True, timeout=10)
     match = re.search(r"Built at CL:\s*(\d+)", stamp_out)
     if not match or match.group(1) != EXPECTED_LS_CL:
@@ -94,12 +94,33 @@ def verify_language_server_and_agentapi(ls_bin: Path) -> dict:
     send_msg_help = subprocess.check_output(
         [str(ls_bin), "agentapi", "send-message", "--help"], text=True, timeout=10
     )
-    if "--model=" not in new_conv_help or "<recipient_id>" not in send_msg_help:
+    meta_help = subprocess.check_output(
+        [str(ls_bin), "agentapi", "get-conversation-metadata", "--help"], text=True, timeout=10
+    )
+    if (
+        "--model=" not in new_conv_help
+        or "<recipient_id>" not in send_msg_help
+        or "<conversation_id>" not in meta_help
+    ):
         raise ValueError("agentapi subcommand help flags differ from expected contract")
+    required_proto_markers = (
+        b"GetConversationMetadataRequest",
+        b"GetConversationMetadataResponse",
+        b"GetAllCascadeTrajectories",
+        b"CascadeTrajectorySummary",
+        b"CortexTrajectoryMetadata",
+        b"CortexWorkspaceMetadata",
+        b"workspace_folder_absolute_uri",
+        b"x-codeium-csrf-token",
+    )
+    proto_marker_map = {m.decode("ascii"): (m in raw_bytes) for m in required_proto_markers}
+    if not all(proto_marker_map.values()):
+        raise ValueError(f"language_server missing expected catalog/navigation proto markers: {proto_marker_map}")
     return {
         "language_server_sha256": ls_sha256,
         "build_cl": match.group(1),
         "agentapi_commands": commands,
+        "catalog_proto_markers": proto_marker_map,
     }
 
 
@@ -119,13 +140,17 @@ def verify_sidecar_sdk(sdk_dir: Path) -> dict:
         "ANTIGRAVITY_LS_ADDRESS",
         "ANTIGRAVITY_CSRF_TOKEN",
         "ANTIGRAVITY_SIDECAR_WEB_PORT",
+        "ANTIGRAVITY_SIDECAR_UI_TOKEN",
         "ANTIGRAVITY_PROJECT_ID",
+        "x-sidecar-token",
         "/_sidecar/send-message",
         "/_sidecar/new-conversation",
         "/_sidecar/get-conversation-metadata",
     )
     required_preload = (
         "X-Sidecar-Token",
+        "conversationMetadata",
+        "workspaceUris",
         "toggle-conversation",
         "workspace-change",
     )
@@ -141,6 +166,10 @@ def verify_sidecar_sdk(sdk_dir: Path) -> dict:
             "/_sidecar/get-conversation-metadata",
             "/_sidecar/new-conversation",
             "/_sidecar/send-message",
+        ],
+        "ui_messages": [
+            "workspace-change",
+            "toggle-conversation",
         ],
     }
 
@@ -180,6 +209,9 @@ def main():
         "transcript_path_redacted": True,
         "agentapi_commands": ls_info["agentapi_commands"],
         "sidecar_loopback_only": True,
+        "sidecar_ui_messages": sidecar_info["ui_messages"],
+        "catalog_proto_markers": ls_info["catalog_proto_markers"],
+        "catalog_navigation_schema_verified": True,
         "existing_session_catalog_official": False,
         "exact_window_navigation_official": False,
         "stop_cancel_official_cli": False,
@@ -197,6 +229,7 @@ def main():
         "capabilities": capabilities,
         "files": asar_info["files"],
         "transcript_reads": 0,
+        "token_reads": 0,
         "runtime": "NOT_RUN",
         "physical_key": "NOT_RUN",
     }

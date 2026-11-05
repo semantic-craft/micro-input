@@ -69,6 +69,8 @@ private struct AntigravityRequest: Encodable {
     let op: String
     let activate: Bool?
     let after: UInt64?
+    let schemaVersion: String?
+    let target: AntigravitySessionKey?
 }
 
 private struct AntigravityReply: Decodable {
@@ -82,10 +84,13 @@ private struct AntigravityReply: Decodable {
     let cursor: UInt64?
     let rows: [AntigravitySessionRow]?
     let changes: [AntigravityEventChange]?
+    let selected: AntigravitySessionKey?
     let transcriptReads: UInt64?
+    let tokenReads: UInt64?
 }
 
 actor AntigravityStatusClient: AntigravityStatusServing {
+    private static let catalogNavSchemaVersion = "antigravity-catalog-nav-v1"
     private let grantURL: URL
     private var grant: AntigravityGrant?
     private var epoch: UInt64 = 0
@@ -127,7 +132,9 @@ actor AntigravityStatusClient: AntigravityStatusServing {
             generation: previous.generation,
             op: "close",
             activate: nil,
-            after: nil
+            after: nil,
+            schemaVersion: nil,
+            target: nil
         )
         guard let data = try? JSONEncoder().encode(request) else { return }
         _ = try? await UnixNativeOwnershipTransport(
@@ -156,6 +163,51 @@ actor AntigravityStatusClient: AntigravityStatusServing {
         return result
     }
 
+    func open(_ target: AntigravitySessionKey) async throws -> AntigravityOpenReply {
+        guard AntigravityStatusSnapshot.validID(target.conversationId, limit: 256),
+              AntigravityStatusSnapshot.validID(target.workspacePath, limit: 4096) else {
+            throw AntigravityFailure.denied
+        }
+        let current = try currentGrant()
+        guard current.capabilities.supportsCatalogNavigation,
+              current.allowedWorkspaces.contains(target.workspacePath) else {
+            throw AntigravityFailure.denied
+        }
+        let expected = epoch
+        let response = try await exchange(
+            op: "open",
+            schemaVersion: Self.catalogNavSchemaVersion,
+            target: target,
+            grant: current,
+            expected: expected
+        )
+        let transcriptReads = response.transcriptReads ?? 0
+        let tokenReads = response.tokenReads ?? 0
+        guard transcriptReads == 0, tokenReads == 0 else {
+            throw AntigravityFailure.invalidReply
+        }
+        if response.status == "ok" || response.status == "unconfirmed" {
+            if let selected = response.selected {
+                guard AntigravityStatusSnapshot.validID(selected.conversationId, limit: 256),
+                      AntigravityStatusSnapshot.validID(selected.workspacePath, limit: 4096),
+                      current.allowedWorkspaces.contains(selected.workspacePath) else {
+                    throw AntigravityFailure.invalidReply
+                }
+            } else if response.status == "ok" {
+                throw AntigravityFailure.invalidReply
+            }
+            return AntigravityOpenReply(
+                instanceId: current.instanceId,
+                generation: current.generation,
+                status: response.status,
+                selected: response.selected,
+                transcriptReads: transcriptReads,
+                tokenReads: tokenReads
+            )
+        }
+        throw failure(response.status)
+    }
+
     private func snapshot(_ response: AntigravityReply, grant: AntigravityGrant, after: UInt64?) throws -> AntigravityStatusSnapshot {
         guard response.status == "ok",
               let capabilities = response.capabilities,
@@ -176,7 +228,9 @@ actor AntigravityStatusClient: AntigravityStatusServing {
             cursor: cursor,
             rows: rows,
             changes: changes,
-            transcriptReads: transcriptReads
+            selected: response.selected,
+            transcriptReads: transcriptReads,
+            tokenReads: response.tokenReads ?? 0
         )
         try result.validate(after: after)
         return result
@@ -194,7 +248,8 @@ actor AntigravityStatusClient: AntigravityStatusServing {
 
     private static let allowedTopKeys: Set<String> = [
         "version", "subscriptionId", "id", "instanceId", "generation",
-        "status", "capabilities", "cursor", "rows", "changes", "transcriptReads"
+        "status", "capabilities", "cursor", "rows", "changes", "selected",
+        "transcriptReads", "tokenReads"
     ]
     private static let requiredRowKeys: Set<String> = [
         "conversationId", "workspacePath", "modelName", "phase",
@@ -202,7 +257,7 @@ actor AntigravityStatusClient: AntigravityStatusServing {
         "fullyIdle", "transitionCount"
     ]
     private static let allowedRowKeys: Set<String> = requiredRowKeys.union([
-        "lastToolName", "terminationReason"
+        "title", "projectId", "lastToolName", "terminationReason"
     ])
 
     private static func validRowObject(_ row: [String: Any]) -> Bool {
@@ -210,7 +265,20 @@ actor AntigravityStatusClient: AntigravityStatusServing {
         return requiredRowKeys.isSubset(of: keys) && keys.isSubset(of: allowedRowKeys)
     }
 
-    private func exchange(op: String, after: UInt64? = nil, grant: AntigravityGrant, expected: UInt64) async throws -> AntigravityReply {
+    private static func validSelectedObject(_ raw: Any) -> Bool {
+        if raw is NSNull { return true }
+        guard let dict = raw as? [String: Any] else { return false }
+        return Set(dict.keys) == ["conversationId", "workspacePath"]
+    }
+
+    private func exchange(
+        op: String,
+        after: UInt64? = nil,
+        schemaVersion: String? = nil,
+        target: AntigravitySessionKey? = nil,
+        grant: AntigravityGrant,
+        expected: UInt64
+    ) async throws -> AntigravityReply {
         guard expected == epoch, self.grant == grant, let subscription = subscriptionId, !Task.isCancelled else {
             throw AntigravityFailure.stale
         }
@@ -222,7 +290,9 @@ actor AntigravityStatusClient: AntigravityStatusServing {
             generation: grant.generation,
             op: op,
             activate: op == "subscribe" ? false : nil,
-            after: after
+            after: after,
+            schemaVersion: schemaVersion,
+            target: target
         )
         let data = try await UnixNativeOwnershipTransport(
             path: grant.socketPath,
@@ -236,6 +306,9 @@ actor AntigravityStatusClient: AntigravityStatusServing {
         }
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(object.keys).isSubset(of: Self.allowedTopKeys) else {
+            throw AntigravityFailure.invalidReply
+        }
+        if let rawSelected = object["selected"], !Self.validSelectedObject(rawSelected) {
             throw AntigravityFailure.invalidReply
         }
         if let rows = object["rows"] as? [[String: Any]],
@@ -261,7 +334,10 @@ actor AntigravityStatusClient: AntigravityStatusServing {
               response.generation == grant.generation else {
             throw AntigravityFailure.stale
         }
-        guard ["ok", "denied", "stale", "unavailable", "gap"].contains(response.status),
+        let allowedStatuses = op == "open"
+            ? ["ok", "unconfirmed", "denied", "stale", "unavailable"]
+            : ["ok", "denied", "stale", "unavailable", "gap"]
+        guard allowedStatuses.contains(response.status),
               response.status == "ok" || (response.rows == nil && response.changes == nil && response.cursor == nil) else {
             throw AntigravityFailure.invalidReply
         }

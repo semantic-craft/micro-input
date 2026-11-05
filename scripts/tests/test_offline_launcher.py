@@ -134,14 +134,20 @@ class OfflineEvidenceTests(unittest.TestCase):
         names = [
             "version_and_capabilities_recorded",
             "disabled_zero_reads",
+            "existing_two_sessions_catalog_and_selected_readback_confirmed",
+            "same_name_cross_workspace_no_collision",
+            "wrong_selected_readback_unconfirmed",
             "two_sessions_isolated",
             "duplicate_events_deduplicated",
             "stop_fully_idle_false_not_completed",
             "stop_fully_idle_true_completed",
+            "deleted_target_no_redirect",
+            "missing_schema_or_auth_fails_closed",
             "stream_disconnect_marks_stale",
             "generation_change_marks_stale",
             "journal_gap_marks_unavailable",
             "zero_transcript_reads",
+            "zero_token_reads",
             "bridge_subscription_closed",
         ]
         payload = dict(
@@ -149,15 +155,23 @@ class OfflineEvidenceTests(unittest.TestCase):
             installed_version="2.29.0",
             language_server_cl="1013060670",
             transcript_reads=0,
+            token_reads=0,
             checks=dict.fromkeys(names, True),
             native_app="NOT_RUN",
             physical_key="NOT_RUN",
         )
         path = self.evidence / "antigravity-status.json"
+        audit = self.evidence / "audit.jsonl"
         path.write_text(json.dumps(payload))
+        audit.write_text("\n".join(
+            json.dumps(dict(action_type="antigravity_open", outcome=outcome, target="antigravity"))
+            for outcome in ("confirmed", "confirmed", "confirmed", "unconfirmed", "unconfirmed", "denied")
+        ))
         verified = module.verify_evidence(self.run, "antigravity-status", 99, lambda _: False)
         self.assertEqual(verified["antigravity_status"], "SYNTHETIC_PASS")
+        self.assertEqual(verified["antigravity_navigation"], "SYNTHETIC_PASS")
         self.assertEqual(verified["transcript_reads"], 0)
+        self.assertEqual(verified["token_reads"], 0)
         for name in names:
             payload["checks"][name] = False
             path.write_text(json.dumps(payload))
@@ -168,6 +182,7 @@ class OfflineEvidenceTests(unittest.TestCase):
             ("installed_version", "2.28.0"),
             ("language_server_cl", "0"),
             ("transcript_reads", 1),
+            ("token_reads", 1),
             ("native_app", "PASS"),
             ("physical_key", "PASS"),
         ]:
@@ -177,3 +192,6 @@ class OfflineEvidenceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 module.verify_evidence(self.run, "antigravity-status", 99, lambda _: False)
             payload[field] = prior
+        audit.write_text(json.dumps(dict(action_type="antigravity_open", outcome="confirmed", target="antigravity")))
+        with self.assertRaises(ValueError):
+            module.verify_evidence(self.run, "antigravity-status", 99, lambda _: False)

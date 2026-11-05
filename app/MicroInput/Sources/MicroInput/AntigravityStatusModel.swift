@@ -11,6 +11,62 @@ struct AntigravityCapabilities: Codable, Equatable, Sendable {
     let supportsTargetFocus: Bool
     let supportsStopTurn: Bool
     let supportsApprovalGate: Bool
+    let schemaVerified: Bool
+
+    init(
+        bundleId: String,
+        installedVersion: String,
+        languageServerCl: String,
+        agentapiCommands: [String],
+        sidecarSdkVersion: String,
+        hookEvents: [String],
+        supportsSessionCatalog: Bool,
+        supportsTargetFocus: Bool,
+        supportsStopTurn: Bool,
+        supportsApprovalGate: Bool,
+        schemaVerified: Bool = true
+    ) {
+        self.bundleId = bundleId
+        self.installedVersion = installedVersion
+        self.languageServerCl = languageServerCl
+        self.agentapiCommands = agentapiCommands
+        self.sidecarSdkVersion = sidecarSdkVersion
+        self.hookEvents = hookEvents
+        self.supportsSessionCatalog = supportsSessionCatalog
+        self.supportsTargetFocus = supportsTargetFocus
+        self.supportsStopTurn = supportsStopTurn
+        self.supportsApprovalGate = supportsApprovalGate
+        self.schemaVerified = schemaVerified
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case bundleId
+        case installedVersion
+        case languageServerCl
+        case agentapiCommands
+        case sidecarSdkVersion
+        case hookEvents
+        case supportsSessionCatalog
+        case supportsTargetFocus
+        case supportsStopTurn
+        case supportsApprovalGate
+        case schemaVerified
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        bundleId = try c.decode(String.self, forKey: .bundleId)
+        installedVersion = try c.decode(String.self, forKey: .installedVersion)
+        languageServerCl = try c.decode(String.self, forKey: .languageServerCl)
+        agentapiCommands = try c.decode([String].self, forKey: .agentapiCommands)
+        sidecarSdkVersion = try c.decode(String.self, forKey: .sidecarSdkVersion)
+        hookEvents = try c.decode([String].self, forKey: .hookEvents)
+        supportsSessionCatalog = try c.decode(Bool.self, forKey: .supportsSessionCatalog)
+        supportsTargetFocus = try c.decode(Bool.self, forKey: .supportsTargetFocus)
+        supportsStopTurn = try c.decode(Bool.self, forKey: .supportsStopTurn)
+        supportsApprovalGate = try c.decode(Bool.self, forKey: .supportsApprovalGate)
+        schemaVerified = try c.decodeIfPresent(Bool.self, forKey: .schemaVerified) ?? true
+    }
 
     static let installed2_29_0 = AntigravityCapabilities(
         bundleId: "com.google.antigravity",
@@ -19,10 +75,11 @@ struct AntigravityCapabilities: Codable, Equatable, Sendable {
         agentapiCommands: ["get-conversation-metadata", "new-conversation", "send-message"],
         sidecarSdkVersion: "1.0.0",
         hookEvents: ["SessionStart", "PreInvocation", "PostInvocation", "PreToolUse", "PostToolUse", "Stop"],
-        supportsSessionCatalog: false,
-        supportsTargetFocus: false,
+        supportsSessionCatalog: true,
+        supportsTargetFocus: true,
         supportsStopTurn: false,
-        supportsApprovalGate: false
+        supportsApprovalGate: false,
+        schemaVerified: true
     )
 
     var valid: Bool {
@@ -32,8 +89,12 @@ struct AntigravityCapabilities: Codable, Equatable, Sendable {
             && agentapiCommands == ["get-conversation-metadata", "new-conversation", "send-message"]
             && !sidecarSdkVersion.isEmpty && sidecarSdkVersion.utf8.count <= 64
             && hookEvents == ["SessionStart", "PreInvocation", "PostInvocation", "PreToolUse", "PostToolUse", "Stop"]
-            && !supportsSessionCatalog && !supportsTargetFocus
             && !supportsStopTurn && !supportsApprovalGate
+            && (!supportsSessionCatalog && !supportsTargetFocus || schemaVerified)
+    }
+
+    var supportsCatalogNavigation: Bool {
+        valid && schemaVerified && supportsSessionCatalog && supportsTargetFocus
     }
 }
 
@@ -94,6 +155,40 @@ struct AntigravityHookEvent: Codable, Equatable, Sendable {
     let hasError: Bool
     let fullyIdle: Bool?
     let eventId: String?
+    let title: String?
+    let projectId: String?
+
+    init(
+        conversationId: String,
+        workspacePath: String,
+        eventType: AntigravityHookEventType,
+        modelName: String,
+        invocationNum: UInt64?,
+        stepIdx: UInt64?,
+        executionNum: UInt64?,
+        toolName: String?,
+        terminationReason: String?,
+        hasError: Bool,
+        fullyIdle: Bool?,
+        eventId: String?,
+        title: String? = nil,
+        projectId: String? = nil
+    ) {
+        self.conversationId = conversationId
+        self.workspacePath = workspacePath
+        self.eventType = eventType
+        self.modelName = modelName
+        self.invocationNum = invocationNum
+        self.stepIdx = stepIdx
+        self.executionNum = executionNum
+        self.toolName = toolName
+        self.terminationReason = terminationReason
+        self.hasError = hasError
+        self.fullyIdle = fullyIdle
+        self.eventId = eventId
+        self.title = title
+        self.projectId = projectId
+    }
 
     var sessionKey: AntigravitySessionKey {
         AntigravitySessionKey(conversationId: conversationId, workspacePath: workspacePath)
@@ -121,6 +216,8 @@ struct AntigravityHookEvent: Codable, Equatable, Sendable {
 struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
     let conversationId: String
     let workspacePath: String
+    let title: String
+    let projectId: String
     let modelName: String
     let phase: AntigravitySessionPhase
     let lastEventType: AntigravityHookEventType
@@ -132,6 +229,75 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
     let fullyIdle: Bool
     let transitionCount: UInt64
 
+    init(
+        conversationId: String,
+        workspacePath: String,
+        title: String? = nil,
+        projectId: String = "",
+        modelName: String,
+        phase: AntigravitySessionPhase,
+        lastEventType: AntigravityHookEventType,
+        invocationNum: UInt64,
+        stepIdx: UInt64,
+        executionNum: UInt64,
+        lastToolName: String?,
+        terminationReason: String?,
+        fullyIdle: Bool,
+        transitionCount: UInt64
+    ) {
+        self.conversationId = conversationId
+        self.workspacePath = workspacePath
+        self.title = (title?.isEmpty == false) ? title! : conversationId
+        self.projectId = projectId
+        self.modelName = modelName
+        self.phase = phase
+        self.lastEventType = lastEventType
+        self.invocationNum = invocationNum
+        self.stepIdx = stepIdx
+        self.executionNum = executionNum
+        self.lastToolName = lastToolName
+        self.terminationReason = terminationReason
+        self.fullyIdle = fullyIdle
+        self.transitionCount = transitionCount
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case conversationId
+        case workspacePath
+        case title
+        case projectId
+        case modelName
+        case phase
+        case lastEventType
+        case invocationNum
+        case stepIdx
+        case executionNum
+        case lastToolName
+        case terminationReason
+        case fullyIdle
+        case transitionCount
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let conv = try c.decode(String.self, forKey: .conversationId)
+        conversationId = conv
+        workspacePath = try c.decode(String.self, forKey: .workspacePath)
+        let decodedTitle = try c.decodeIfPresent(String.self, forKey: .title)
+        title = (decodedTitle?.isEmpty == false) ? decodedTitle! : conv
+        projectId = try c.decodeIfPresent(String.self, forKey: .projectId) ?? ""
+        modelName = try c.decode(String.self, forKey: .modelName)
+        phase = try c.decode(AntigravitySessionPhase.self, forKey: .phase)
+        lastEventType = try c.decode(AntigravityHookEventType.self, forKey: .lastEventType)
+        invocationNum = try c.decode(UInt64.self, forKey: .invocationNum)
+        stepIdx = try c.decode(UInt64.self, forKey: .stepIdx)
+        executionNum = try c.decode(UInt64.self, forKey: .executionNum)
+        lastToolName = try c.decodeIfPresent(String.self, forKey: .lastToolName)
+        terminationReason = try c.decodeIfPresent(String.self, forKey: .terminationReason)
+        fullyIdle = try c.decode(Bool.self, forKey: .fullyIdle)
+        transitionCount = try c.decode(UInt64.self, forKey: .transitionCount)
+    }
+
     var key: AntigravitySessionKey {
         AntigravitySessionKey(conversationId: conversationId, workspacePath: workspacePath)
     }
@@ -141,6 +307,8 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
     var valid: Bool {
         AntigravityStatusSnapshot.validID(conversationId, limit: 256)
             && AntigravityStatusSnapshot.validID(workspacePath, limit: 4096)
+            && AntigravityStatusSnapshot.validID(title, limit: 512)
+            && projectId.utf8.count <= 256
             && modelName.utf8.count <= 256
             && invocationNum <= 1_000_000_000
             && stepIdx <= 1_000_000_000
@@ -160,6 +328,8 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
     }
 
     static func reduce(prior: AntigravitySessionRow?, event: AntigravityHookEvent) -> AntigravitySessionRow {
+        let title = (event.title?.isEmpty == false) ? event.title! : (prior?.title ?? event.conversationId)
+        let projectId = (event.projectId?.isEmpty == false) ? event.projectId! : (prior?.projectId ?? "")
         let model = event.modelName.isEmpty ? (prior?.modelName ?? "") : event.modelName
         let inv = event.invocationNum ?? prior?.invocationNum ?? 0
         let step = event.stepIdx ?? prior?.stepIdx ?? 0
@@ -216,6 +386,8 @@ struct AntigravitySessionRow: Codable, Identifiable, Equatable, Sendable {
         return AntigravitySessionRow(
             conversationId: event.conversationId,
             workspacePath: event.workspacePath,
+            title: title,
+            projectId: projectId,
             modelName: model,
             phase: phase,
             lastEventType: event.eventType,
@@ -244,7 +416,33 @@ struct AntigravityStatusSnapshot: Equatable, Sendable {
     let cursor: UInt64
     let rows: [AntigravitySessionRow]
     let changes: [AntigravityEventChange]
+    let selected: AntigravitySessionKey?
     let transcriptReads: UInt64
+    let tokenReads: UInt64
+
+    init(
+        instanceId: String,
+        generation: UInt64,
+        allowedWorkspaces: [String],
+        capabilities: AntigravityCapabilities,
+        cursor: UInt64,
+        rows: [AntigravitySessionRow],
+        changes: [AntigravityEventChange],
+        selected: AntigravitySessionKey? = nil,
+        transcriptReads: UInt64,
+        tokenReads: UInt64 = 0
+    ) {
+        self.instanceId = instanceId
+        self.generation = generation
+        self.allowedWorkspaces = allowedWorkspaces
+        self.capabilities = capabilities
+        self.cursor = cursor
+        self.rows = rows
+        self.changes = changes
+        self.selected = selected
+        self.transcriptReads = transcriptReads
+        self.tokenReads = tokenReads
+    }
 
     static func validID(_ value: String, limit: Int = 4096) -> Bool {
         !value.isEmpty && value.utf8.count <= limit
@@ -259,8 +457,10 @@ struct AntigravityStatusSnapshot: Equatable, Sendable {
               allowedWorkspaces.allSatisfy({ Self.validID($0, limit: 4096) }),
               capabilities.valid,
               transcriptReads == 0,
+              tokenReads == 0,
               rows.count == rowKeys.count,
               rows.allSatisfy({ $0.valid && workspaceScope.contains($0.workspacePath) }),
+              selected == nil || rowKeys.contains(selected!),
               changes.count <= 1024,
               changes.allSatisfy({
                   Self.validID($0.eventKey, limit: 1024)
@@ -280,6 +480,52 @@ struct AntigravityStatusSnapshot: Equatable, Sendable {
             }
         } else if !changes.isEmpty {
             throw AntigravityFailure.invalidReply
+        }
+    }
+}
+
+struct AntigravitySelection: Equatable, Sendable {
+    let key: AntigravitySessionKey
+    let instanceId: String
+    let generation: UInt64
+    let localEpoch: UInt64
+}
+
+struct AntigravityOpenReply: Equatable, Sendable {
+    let instanceId: String
+    let generation: UInt64
+    let status: String
+    let selected: AntigravitySessionKey?
+    let transcriptReads: UInt64
+    let tokenReads: UInt64
+
+    init(
+        instanceId: String,
+        generation: UInt64,
+        status: String = "ok",
+        selected: AntigravitySessionKey?,
+        transcriptReads: UInt64 = 0,
+        tokenReads: UInt64 = 0
+    ) {
+        self.instanceId = instanceId
+        self.generation = generation
+        self.status = status
+        self.selected = selected
+        self.transcriptReads = transcriptReads
+        self.tokenReads = tokenReads
+    }
+}
+
+enum AntigravityOpenResult: String, Equatable, Sendable {
+    case confirmed, unconfirmed, stale, denied, unavailable
+
+    var label: String {
+        switch self {
+        case .confirmed: return "已聚焦并读回确认 Antigravity 会话"
+        case .unconfirmed: return "已发送聚焦请求，但 Antigravity 选中读回未确认"
+        case .stale: return "目标 Antigravity 会话已过期，未发送跳转"
+        case .denied: return "Antigravity 拒绝会话聚焦或缺少合法 Schema/鉴权"
+        case .unavailable: return "Antigravity 状态桥不可达，无法跳转"
         }
     }
 }
@@ -315,5 +561,12 @@ enum AntigravityConnectionState: Equatable {
 protocol AntigravityStatusServing: Sendable {
     func connect() async throws -> AntigravityStatusSnapshot
     func read() async throws -> AntigravityStatusSnapshot
+    func open(_ target: AntigravitySessionKey) async throws -> AntigravityOpenReply
     func close() async
+}
+
+extension AntigravityStatusServing {
+    func open(_ target: AntigravitySessionKey) async throws -> AntigravityOpenReply {
+        throw AntigravityFailure.denied
+    }
 }

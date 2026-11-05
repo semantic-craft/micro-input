@@ -74,6 +74,7 @@ struct PendingHostAction {
     let done: (() -> Void)?
     var zcodeSelection: ZCodeSelection? = nil
     var dshSelection: DSHSelection? = nil
+    var antigravitySelection: AntigravitySelection? = nil
     var t3Selection: T3Selection? = nil
     var radialIntent: RadialIntent? = nil
 }
@@ -276,7 +277,7 @@ extension Store {
               let data = try? JSONEncoder().encode(resolved.action) else { return nil }
         return (String(decoding: data, as: UTF8.self), resolved.profile_id, state)
     }
-    @discardableResult func enqueueHostAction(json: String, binding: String, profile: String, state: HostRoutingState, deviceSession: UInt64? = nil, deviceIngress: UInt64? = nil, requiresEnabled: Bool = true, radialIntent: RadialIntent? = nil, zcodeSelection: ZCodeSelection? = nil, dshSelection: DSHSelection? = nil, done: (() -> Void)? = nil) -> Bool {
+    @discardableResult func enqueueHostAction(json: String, binding: String, profile: String, state: HostRoutingState, deviceSession: UInt64? = nil, deviceIngress: UInt64? = nil, requiresEnabled: Bool = true, radialIntent: RadialIntent? = nil, zcodeSelection: ZCodeSelection? = nil, dshSelection: DSHSelection? = nil, antigravitySelection: AntigravitySelection? = nil, done: (() -> Void)? = nil) -> Bool {
         guard dispatchOpen, !requiresEnabled || hostExecutionEnabled else { status = "正在切换或输入已暂停，请稍后重试"; done?(); return false }
         let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(json.utf8))
         if radialIntent == nil,
@@ -344,7 +345,7 @@ extension Store {
         let selection: T3Selection?
         if case .t3(let frozen) = radialIntent { selection = frozen }
         else { selection = payload?.adapter == "t3" && payload?.command == "next-attention" ? t3Attention.selectNext() : nil }
-        pendingHostActions.append(PendingHostAction(json: json, binding: binding, profile: profile, state: state, deviceSession: deviceSession, deviceIngress: deviceIngress, admitted: .now, requiresEnabled: requiresEnabled, done: done, zcodeSelection: zcodeSelection, dshSelection: dshSelection, t3Selection: selection, radialIntent: radialIntent))
+        pendingHostActions.append(PendingHostAction(json: json, binding: binding, profile: profile, state: state, deviceSession: deviceSession, deviceIngress: deviceIngress, admitted: .now, requiresEnabled: requiresEnabled, done: done, zcodeSelection: zcodeSelection, dshSelection: dshSelection, antigravitySelection: antigravitySelection, t3Selection: selection, radialIntent: radialIntent))
         guard hostExecutionTask == nil else { return true }
         let executionGeneration = hostExecutionGeneration
         hostExecutionTask = Task { @MainActor [self] in
@@ -395,7 +396,7 @@ extension Store {
                         showRadialCheatSheet(entry)
                         continue
                     }
-                    _ = await executeHostAction(actionJSON: entry.json, bindingId: entry.binding, profileId: entry.profile, t3Selection: entry.t3Selection, zcodeSelection: entry.zcodeSelection, dshSelection: entry.dshSelection, stillAdmitted: { [weak self] in
+                    _ = await executeHostAction(actionJSON: entry.json, bindingId: entry.binding, profileId: entry.profile, t3Selection: entry.t3Selection, zcodeSelection: entry.zcodeSelection, dshSelection: entry.dshSelection, antigravitySelection: entry.antigravitySelection, stillAdmitted: { [weak self] in
                         self?.admitAfterDictationCleanup(entry, executionGeneration: executionGeneration, checkAge: false) == true
                     })
                 }
@@ -427,6 +428,12 @@ extension Store {
         return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"dsh-desktop","command":"open-session"}"#,
                                  binding: "menu-dsh-session", profile: profile, state: state,
                                  requiresEnabled: false, dshSelection: selection)
+    }
+    @discardableResult func openAntigravitySession(_ selection: AntigravitySelection) -> Bool {
+        guard let state = routing, let profile = state.profile_id else { return false }
+        return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"antigravity","command":"open-session"}"#,
+                                 binding: "menu-antigravity-session", profile: profile, state: state,
+                                 requiresEnabled: false, antigravitySelection: selection)
     }
     func openNextT3Attention() {
         guard let state = routing, let profile = state.profile_id else { return }
