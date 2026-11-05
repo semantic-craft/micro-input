@@ -137,10 +137,11 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Depends on**: G、H、I2、J；写动作按 K/L/M 能力就绪。责任票 #84。
 - **Evidence**: .scratch/qa-runs/1793895420106-11007/evidence/result.json
 
-### [ ] Slice O1: 逐应用补齐听写和语音回复控制
+### [x] Slice O1: 逐应用补齐听写和语音回复控制
 - **Outcome**: Cindy 复用原生语音；其余逐款确认并接入按住听写、释放停止、提交前停止，以及独立的语音回复开关。缺少原生能力的开源应用按其语音服务增量实现。
 - **Done Predicate**: 四应用分别确认开始/停止和目标绑定；听写转写与发送分开；开启/关闭语音回复须回读真实模式并验证输出。模型/接口不支持时保持该应用未完成，不以禁用或听写成功代替。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: F；对应应用身份与动作片就绪。责任票 #84。
+- **Evidence**: .scratch/qa-runs/1793898484356-14497/evidence/result.json
 
 ### [ ] Slice O2: 复刻官方 Input.app 受保护宿主层与多 Profile 切换让渡机制
 - **Outcome**: 按 [官方受保护层与 Profile 切换规格](designs/official-codex-profile-model.md) 1:1 复刻 `Input 1.1.0` 的 `Mg1`（`KV_OAI_*`）受保护宿主层判定、四项界面与编辑硬隔离（锁定画布遮罩、自动收起改键面板、禁用静态灯光/导出/复制、跨层合并键跳过保护层），以及 `Cindy` / `Codex` 受保护 Profile 与 `Antigravity` / `ZCode` / `DSH` 工作台 Profile 之间的精简板载配置下发（`≤ 1 KB` 规避固件 4 KB 单包溢出）与 USB HID 通道让渡闭环。
