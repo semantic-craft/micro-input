@@ -13,12 +13,16 @@ final class AntigravityStatusController: ObservableObject {
     @Published private(set) var transcriptReads: UInt64 = 0
     @Published private(set) var tokenReads: UInt64 = 0
     @Published private(set) var lastResult: AntigravityOpenResult?
+    @Published private(set) var lastCommandResult: AntigravityCommandResult?
+    @Published private(set) var lastCommandReply: AntigravityCommandReply?
+    @Published private(set) var pendingUnknownCommand: AntigravityQueuedCommand?
 
     private let client: any AntigravityStatusServing
     private let pollNanoseconds: UInt64
     private var snapshot: AntigravityStatusSnapshot?
     private var epoch: UInt64 = 0
     private var sequence: UInt64 = 0
+    private var nextRequestSequence: UInt64 = 0
     private var openingEpoch: UInt64?
     private var refreshingEpoch: UInt64?
     private var suspended = false
@@ -126,6 +130,389 @@ final class AntigravityStatusController: ObservableObject {
         }
     }
 
+    private func makeRequestId(_ explicit: String?) -> String {
+        if let explicit, !explicit.isEmpty { return explicit }
+        nextRequestSequence &+= 1
+        return "ag-req-\(epoch)-\(nextRequestSequence)"
+    }
+
+    func createIntent(
+        workspacePath: String,
+        projectId: String? = nil,
+        prompt: String,
+        title: String? = nil,
+        modelName: String? = nil,
+        conversationId: String? = nil,
+        requestId: String? = nil
+    ) -> AntigravityQueuedCommand? {
+        guard enabled, !suspended, state == .ready, let snapshot else { return nil }
+        if let pending = pendingUnknownCommand, requestId != pending.operation.requestId {
+            lastCommandResult = .unknown
+            return nil
+        }
+        let resolvedProjectId = (projectId?.isEmpty == false)
+            ? projectId!
+            : (rows.first(where: { $0.workspacePath == workspacePath && !$0.projectId.isEmpty })?.projectId ?? "")
+        let intent = AntigravityCreateIntent(
+            requestId: makeRequestId(requestId),
+            workspacePath: workspacePath,
+            projectId: resolvedProjectId,
+            prompt: prompt,
+            title: title,
+            modelName: modelName,
+            conversationId: conversationId
+        )
+        guard intent.valid else { return nil }
+        return AntigravityQueuedCommand(
+            operation: .create(intent),
+            instanceId: snapshot.instanceId,
+            generation: snapshot.generation,
+            localEpoch: epoch
+        )
+    }
+
+    func sendIntent(
+        for target: AntigravitySessionKey,
+        projectId: String? = nil,
+        message: String,
+        deliveryMode: AntigravityDeliveryMode = .auto,
+        requestId: String? = nil
+    ) -> AntigravityQueuedCommand? {
+        guard enabled, !suspended, state == .ready, let snapshot else { return nil }
+        if let pending = pendingUnknownCommand, requestId != pending.operation.requestId {
+            lastCommandResult = .unknown
+            return nil
+        }
+        let resolvedProjectId = (projectId?.isEmpty == false)
+            ? projectId
+            : rows.first(where: { $0.key == target && !$0.projectId.isEmpty })?.projectId
+        let intent = AntigravitySendIntent(
+            requestId: makeRequestId(requestId),
+            target: target,
+            projectId: resolvedProjectId,
+            message: message,
+            deliveryMode: deliveryMode
+        )
+        guard intent.valid else { return nil }
+        return AntigravityQueuedCommand(
+            operation: .send(intent),
+            instanceId: snapshot.instanceId,
+            generation: snapshot.generation,
+            localEpoch: epoch
+        )
+    }
+
+    func queryIntent(
+        requestId: String? = nil,
+        expectedOp: String? = nil,
+        target: AntigravitySessionKey? = nil,
+        projectId: String? = nil
+    ) -> AntigravityQueuedCommand? {
+        guard enabled, !suspended, state == .ready, let snapshot else { return nil }
+        let resolvedRequestId = (requestId?.isEmpty == false)
+            ? requestId!
+            : (pendingUnknownCommand?.operation.requestId ?? "")
+        guard !resolvedRequestId.isEmpty else { return nil }
+        let intent = AntigravityQueryIntent(
+            requestId: resolvedRequestId,
+            expectedOp: expectedOp ?? pendingUnknownCommand?.operation.opName,
+            conversationId: target?.conversationId,
+            workspacePath: target?.workspacePath,
+            projectId: projectId
+        )
+        guard intent.valid else { return nil }
+        return AntigravityQueuedCommand(
+            operation: .query(intent),
+            instanceId: snapshot.instanceId,
+            generation: snapshot.generation,
+            localEpoch: epoch
+        )
+    }
+
+    func execute(_ command: AntigravityQueuedCommand?, admitted: @escaping @MainActor () -> Bool) async -> AntigravityCommandResult {
+        guard let command else {
+            let fallback = lastCommandResult ?? .stale
+            lastCommandResult = fallback
+            return fallback
+        }
+        guard openingEpoch == nil, refreshingEpoch == nil, let currentSnapshot = snapshot,
+              enabled, !suspended, state == .ready,
+              command.localEpoch == epoch,
+              command.instanceId == currentSnapshot.instanceId,
+              command.generation == currentSnapshot.generation,
+              admitted() else {
+            lastCommandResult = .stale
+            return .stale
+        }
+        let expected = epoch
+
+        if let pending = pendingUnknownCommand, pending.operation.requestId != command.operation.requestId {
+            lastCommandResult = .unknown
+            return .unknown
+        }
+
+        let effectiveOperation: AntigravityCommandOperation
+        if let pending = pendingUnknownCommand,
+           pending.operation.requestId == command.operation.requestId,
+           command.operation.opName != "query" {
+            effectiveOperation = .query(AntigravityQueryIntent(
+                requestId: pending.operation.requestId,
+                expectedOp: pending.operation.opName
+            ))
+        } else {
+            effectiveOperation = command.operation
+        }
+
+        switch effectiveOperation {
+        case .create(let intent):
+            guard currentSnapshot.capabilities.supportsCreateConversation,
+                  currentSnapshot.allowedWorkspaces.contains(intent.workspacePath),
+                  intent.valid else {
+                await fail(AntigravityFailure.denied, epoch: expected)
+                guard current(expected) else { return .denied }
+                lastCommandResult = .denied
+                return .denied
+            }
+            if let existingBoundProject = rows.first(where: { $0.workspacePath == intent.workspacePath && !$0.projectId.isEmpty })?.projectId,
+               existingBoundProject != intent.projectId {
+                lastCommandReply = AntigravityCommandReply(
+                    instanceId: currentSnapshot.instanceId,
+                    generation: currentSnapshot.generation,
+                    status: "unconfirmed",
+                    commandOp: "create",
+                    requestId: intent.requestId,
+                    conversationId: "",
+                    workspacePath: intent.workspacePath,
+                    projectId: intent.projectId,
+                    delivery: .none,
+                    inFlightSteering: false,
+                    reasonCode: "guard.projectIdMismatch",
+                    duplicate: false,
+                    reconciled: false,
+                    cursor: cursor,
+                    rows: rows,
+                    selected: selected
+                )
+                lastCommandResult = .unconfirmed
+                return .unconfirmed
+            }
+        case .send(let intent):
+            guard currentSnapshot.capabilities.supportsSendMessage,
+                  currentSnapshot.allowedWorkspaces.contains(intent.target.workspacePath),
+                  intent.valid else {
+                await fail(AntigravityFailure.denied, epoch: expected)
+                guard current(expected) else { return .denied }
+                lastCommandResult = .denied
+                return .denied
+            }
+            guard let targetRow = rows.first(where: { $0.key == intent.target }) else {
+                lastCommandReply = AntigravityCommandReply(
+                    instanceId: currentSnapshot.instanceId,
+                    generation: currentSnapshot.generation,
+                    status: "unconfirmed",
+                    commandOp: "send",
+                    requestId: intent.requestId,
+                    conversationId: intent.target.conversationId,
+                    workspacePath: intent.target.workspacePath,
+                    projectId: intent.projectId ?? "",
+                    delivery: .none,
+                    inFlightSteering: false,
+                    reasonCode: "guard.targetNotFound",
+                    duplicate: false,
+                    reconciled: false,
+                    cursor: cursor,
+                    rows: rows,
+                    selected: selected
+                )
+                lastCommandResult = .unconfirmed
+                return .unconfirmed
+            }
+            guard selected == intent.target else {
+                lastCommandReply = AntigravityCommandReply(
+                    instanceId: currentSnapshot.instanceId,
+                    generation: currentSnapshot.generation,
+                    status: "unconfirmed",
+                    commandOp: "send",
+                    requestId: intent.requestId,
+                    conversationId: intent.target.conversationId,
+                    workspacePath: intent.target.workspacePath,
+                    projectId: targetRow.projectId,
+                    delivery: .none,
+                    inFlightSteering: false,
+                    reasonCode: "guard.selectionMismatch",
+                    duplicate: false,
+                    reconciled: false,
+                    cursor: cursor,
+                    rows: rows,
+                    selected: selected
+                )
+                lastCommandResult = .unconfirmed
+                return .unconfirmed
+            }
+        case .query(let intent):
+            guard currentSnapshot.capabilities.schemaVerified, intent.valid else {
+                await fail(AntigravityFailure.denied, epoch: expected)
+                guard current(expected) else { return .denied }
+                lastCommandResult = .denied
+                return .denied
+            }
+        }
+
+        openingEpoch = expected
+        sequence &+= 1
+        defer { if openingEpoch == expected { openingEpoch = nil } }
+
+        do {
+            let response: AntigravityCommandReply
+            switch effectiveOperation {
+            case .create(let intent):
+                response = try await client.create(intent)
+            case .send(let intent):
+                response = try await client.send(intent)
+            case .query(let intent):
+                response = try await client.query(intent)
+            }
+            guard current(expected), admitted() else {
+                lastCommandResult = .stale
+                return .stale
+            }
+            guard response.instanceId == command.instanceId,
+                  response.generation == command.generation,
+                  response.transcriptReads == 0,
+                  response.tokenReads == 0 else {
+                await fail(AntigravityFailure.stale, epoch: expected)
+                guard current(expected) else { return .stale }
+                lastCommandResult = .stale
+                return .stale
+            }
+
+            let updatedSnapshot = AntigravityStatusSnapshot(
+                instanceId: currentSnapshot.instanceId,
+                generation: currentSnapshot.generation,
+                allowedWorkspaces: currentSnapshot.allowedWorkspaces,
+                capabilities: currentSnapshot.capabilities,
+                cursor: response.cursor,
+                rows: response.rows,
+                changes: [],
+                selected: response.selected,
+                transcriptReads: response.transcriptReads,
+                tokenReads: response.tokenReads
+            )
+            snapshot = updatedSnapshot
+            rows = response.rows
+            selected = response.selected
+            cursor = response.cursor
+            transcriptReads = response.transcriptReads
+            tokenReads = response.tokenReads
+            lastCommandReply = response
+
+            let mapped = mapCommandReply(response)
+            if mapped == .unknown {
+                if pendingUnknownCommand == nil {
+                    pendingUnknownCommand = command
+                }
+            } else if pendingUnknownCommand?.operation.requestId == response.requestId {
+                pendingUnknownCommand = nil
+            }
+            lastCommandResult = mapped
+            return mapped
+        } catch {
+            if let failure = error as? AntigravityFailure, failure == .transportTimeout {
+                guard current(expected) else { return .stale }
+                if pendingUnknownCommand == nil {
+                    pendingUnknownCommand = command
+                }
+                lastCommandReply = AntigravityCommandReply(
+                    instanceId: currentSnapshot.instanceId,
+                    generation: currentSnapshot.generation,
+                    status: "unknown",
+                    commandOp: command.operation.opName,
+                    requestId: command.operation.requestId,
+                    conversationId: "",
+                    workspacePath: "",
+                    projectId: "",
+                    delivery: .none,
+                    inFlightSteering: false,
+                    reasonCode: "transport.timeout",
+                    duplicate: false,
+                    reconciled: false,
+                    cursor: cursor,
+                    rows: rows,
+                    selected: selected
+                )
+                lastCommandResult = .unknown
+                return .unknown
+            }
+            await fail(error, epoch: expected)
+            guard current(expected) else { return .stale }
+            let result: AntigravityCommandResult = error as? AntigravityFailure == .denied
+                ? .denied
+                : error as? AntigravityFailure == .stale
+                ? .stale
+                : .unavailable
+            lastCommandResult = result
+            return result
+        }
+    }
+
+    private func mapCommandReply(_ response: AntigravityCommandReply) -> AntigravityCommandResult {
+        switch response.status {
+        case "created":
+            let createdKey = AntigravitySessionKey(
+                conversationId: response.conversationId,
+                workspacePath: response.workspacePath
+            )
+            guard !response.conversationId.isEmpty,
+                  !response.workspacePath.isEmpty,
+                  !response.projectId.isEmpty,
+                  response.selected == createdKey,
+                  response.rows.contains(where: { $0.key == createdKey && $0.projectId == response.projectId }) else {
+                return .unconfirmed
+            }
+            return .created
+        case "started":
+            let targetKey = AntigravitySessionKey(
+                conversationId: response.conversationId,
+                workspacePath: response.workspacePath
+            )
+            guard response.delivery == .started,
+                  !response.inFlightSteering,
+                  response.selected == targetKey,
+                  response.rows.contains(where: { $0.key == targetKey }) else {
+                return .unconfirmed
+            }
+            return .started
+        case "queued":
+            let targetKey = AntigravitySessionKey(
+                conversationId: response.conversationId,
+                workspacePath: response.workspacePath
+            )
+            guard response.delivery == .nextInvocation,
+                  !response.inFlightSteering,
+                  response.selected == targetKey,
+                  response.rows.contains(where: { $0.key == targetKey }) else {
+                return .unconfirmed
+            }
+            return .queued
+        case "steered":
+            let targetKey = AntigravitySessionKey(
+                conversationId: response.conversationId,
+                workspacePath: response.workspacePath
+            )
+            guard response.delivery == .steered,
+                  response.inFlightSteering,
+                  response.selected == targetKey,
+                  response.rows.contains(where: { $0.key == targetKey }) else {
+                return .unconfirmed
+            }
+            return .steered
+        case "unknown":
+            return .unknown
+        default:
+            return .unconfirmed
+        }
+    }
+
     private func invalidate() {
         epoch &+= 1
         sequence &+= 1
@@ -145,6 +532,9 @@ final class AntigravityStatusController: ObservableObject {
         transcriptReads = 0
         tokenReads = 0
         lastResult = nil
+        lastCommandResult = nil
+        lastCommandReply = nil
+        pendingUnknownCommand = nil
         state = .disabled
         let previous = closing
         closing = Task { [client] in
@@ -218,6 +608,9 @@ final class AntigravityStatusController: ObservableObject {
         transcriptReads = 0
         tokenReads = 0
         lastResult = nil
+        lastCommandResult = nil
+        lastCommandReply = nil
+        pendingUnknownCommand = nil
         state = .unavailable(error as? AntigravityFailure ?? .unavailable)
         polling?.cancel()
         polling = nil

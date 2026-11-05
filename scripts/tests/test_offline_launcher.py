@@ -190,6 +190,11 @@ class OfflineEvidenceTests(unittest.TestCase):
             "duplicate_events_deduplicated",
             "stop_fully_idle_false_not_completed",
             "stop_fully_idle_true_completed",
+            "create_binds_project_id_and_confirms_selected",
+            "two_sessions_send_only_modifies_target",
+            "running_session_send_steering_verified_separately",
+            "missing_or_deleted_target_send_zero_redirect",
+            "timeout_unknown_reconciles_without_resend",
             "deleted_target_no_redirect",
             "missing_schema_or_auth_fails_closed",
             "stream_disconnect_marks_stale",
@@ -212,13 +217,24 @@ class OfflineEvidenceTests(unittest.TestCase):
         path = self.evidence / "antigravity-status.json"
         audit = self.evidence / "audit.jsonl"
         path.write_text(json.dumps(payload))
-        audit.write_text("\n".join(
-            json.dumps(dict(action_type="antigravity_open", outcome=outcome, target="antigravity"))
-            for outcome in ("confirmed", "confirmed", "confirmed", "unconfirmed", "unconfirmed", "denied")
-        ))
+        audit_rows = [
+            *(dict(action_type="antigravity_open", outcome=outcome, target="antigravity")
+              for outcome in ("confirmed", "confirmed", "confirmed", "unconfirmed", "unconfirmed", "denied")),
+            dict(action_type="antigravity_create", outcome="unconfirmed", target="antigravity"),
+            dict(action_type="antigravity_create", outcome="created", target="antigravity"),
+            dict(action_type="antigravity_send", outcome="unconfirmed", target="antigravity"),
+            dict(action_type="antigravity_send", outcome="started", target="antigravity"),
+            dict(action_type="antigravity_send", outcome="queued", target="antigravity"),
+            dict(action_type="antigravity_send", outcome="steered", target="antigravity"),
+            dict(action_type="antigravity_send", outcome="unknown", target="antigravity"),
+            dict(action_type="antigravity_query", outcome="queued", target="antigravity"),
+            dict(action_type="antigravity_send", outcome="unconfirmed", target="antigravity"),
+        ]
+        audit.write_text("\n".join(json.dumps(r) for r in audit_rows))
         verified = module.verify_evidence(self.run, "antigravity-status", 99, lambda _: False)
         self.assertEqual(verified["antigravity_status"], "SYNTHETIC_PASS")
         self.assertEqual(verified["antigravity_navigation"], "SYNTHETIC_PASS")
+        self.assertEqual(verified["antigravity_agentapi"], "SYNTHETIC_PASS")
         self.assertEqual(verified["transcript_reads"], 0)
         self.assertEqual(verified["token_reads"], 0)
         for name in names:

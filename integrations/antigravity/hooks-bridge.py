@@ -42,6 +42,8 @@ VALID_PHASES = (
 )
 
 CATALOG_NAV_SCHEMA_VERSION = "antigravity-catalog-nav-v1"
+AGENTAPI_COMMAND_SCHEMA_VERSION = "antigravity-agentapi-v1"
+VALID_DELIVERY_MODES = ("auto", "steer", "queue")
 
 DEFAULT_CAPABILITIES = {
     "bundleId": "com.google.antigravity",
@@ -363,6 +365,18 @@ class BridgeDaemon:
         self.token_reads = 0
         self.open_requests = 0
         self.open_confirmed = 0
+        self.create_requests = 0
+        self.create_confirmed = 0
+        self.send_requests = 0
+        self.send_confirmed = 0
+        self.query_requests = 0
+        self.duplicate_commands_dropped = 0
+        self.created_seq = 0
+        self.workspace_projects = {}
+        self.command_ledger = {}
+        self.in_flight_steer_enabled = False
+        self.unknown_next_command = False
+        self.timeout_next_command_ms = 0
         self.close_count = 0
         self.running = True
 
@@ -397,6 +411,8 @@ class BridgeDaemon:
             ws_path = row["workspacePath"]
             if ws_path not in self.allowed_workspaces:
                 raise ValueError(f"workspacePath not allowed: {ws_path}")
+            if row.get("projectId"):
+                self.workspace_projects.setdefault(ws_path, row["projectId"])
             session_key = (conv_id, ws_path)
             self.rows[session_key] = row
             self.cursor += 1
@@ -431,6 +447,67 @@ class BridgeDaemon:
 
     def sorted_rows(self):
         return [self.rows[k] for k in sorted(self.rows.keys())]
+
+    def command_reply(
+        self,
+        req,
+        ledger_entry,
+        status_override=None,
+        reason_override=None,
+        duplicate=False,
+        reconciled=False,
+    ):
+        status = status_override if status_override is not None else ledger_entry["status"]
+        reason_code = reason_override if reason_override is not None else ledger_entry["reasonCode"]
+        reply = self.base_reply(req, status)
+        reply.update(
+            commandOp=ledger_entry["op"],
+            requestId=ledger_entry["requestId"],
+            conversationId=ledger_entry["conversationId"],
+            workspacePath=ledger_entry["workspacePath"],
+            projectId=ledger_entry["projectId"],
+            delivery=ledger_entry["delivery"],
+            inFlightSteering=bool(ledger_entry["inFlightSteering"]),
+            reasonCode=reason_code,
+            duplicate=bool(duplicate),
+            reconciled=bool(reconciled),
+            cursor=self.cursor,
+            rows=self.sorted_rows(),
+            selected=self.selected_payload(),
+            transcriptReads=self.transcript_reads,
+            tokenReads=self.token_reads,
+        )
+        return reply
+
+    def base_command_unconfirmed(
+        self,
+        req,
+        request_id,
+        command_op,
+        conv_id,
+        ws_path,
+        project_id,
+        reason_code,
+    ):
+        reply = self.base_reply(req, "unconfirmed")
+        reply.update(
+            commandOp=command_op,
+            requestId=request_id,
+            conversationId=conv_id,
+            workspacePath=ws_path,
+            projectId=project_id,
+            delivery="none",
+            inFlightSteering=False,
+            reasonCode=reason_code,
+            duplicate=False,
+            reconciled=False,
+            cursor=self.cursor,
+            rows=self.sorted_rows(),
+            selected=self.selected_payload(),
+            transcriptReads=self.transcript_reads,
+            tokenReads=self.token_reads,
+        )
+        return reply
 
     def handle_main_request(self, req):
         if not isinstance(req, dict) or contains_forbidden_keys(req):
@@ -623,6 +700,368 @@ class BridgeDaemon:
             )
             return reply
 
+        if op == "create":
+            if self.subscription_id is None or self.subscription_id != sub_id:
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if (
+                not self.schema_verified
+                or "new-conversation" not in self.capabilities.get("agentapiCommands", [])
+                or req.get("schemaVersion") != AGENTAPI_COMMAND_SCHEMA_VERSION
+            ):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if not self.is_stream_healthy():
+                return self.base_reply(req, "stale")
+            intent = req.get("intent")
+            if not isinstance(intent, dict) or contains_forbidden_keys(intent):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            request_id = intent.get("requestId")
+            ws_path = normalize_workspace_uri(intent.get("workspacePath"))
+            project_id = intent.get("projectId")
+            prompt_text = intent.get("prompt")
+            if (
+                not valid_id(request_id, 256)
+                or not valid_id(ws_path, 4096)
+                or ws_path not in self.allowed_workspaces
+                or not valid_id(project_id, 256)
+                or not valid_id(prompt_text, 32768)
+            ):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            del prompt_text
+            self.create_requests += 1
+            self.metadata_reads += 1
+            existing = self.command_ledger.get(request_id)
+            if existing is not None:
+                if (
+                    existing["op"] != "create"
+                    or existing["workspacePath"] != ws_path
+                    or existing["projectId"] != project_id
+                ):
+                    return self.base_command_unconfirmed(
+                        req,
+                        request_id=request_id,
+                        command_op="create",
+                        conv_id="",
+                        ws_path=ws_path,
+                        project_id=project_id,
+                        reason_code="guard.requestIdConflict",
+                    )
+                self.duplicate_commands_dropped += 1
+                return self.command_reply(req, existing, duplicate=True, reconciled=False)
+
+            bound_project = self.workspace_projects.get(ws_path)
+            if bound_project is None:
+                for (r_conv, r_ws), r_row in self.rows.items():
+                    if r_ws == ws_path and r_row.get("projectId"):
+                        bound_project = r_row["projectId"]
+                        break
+            if bound_project is not None and bound_project != project_id:
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="create",
+                    conv_id="",
+                    ws_path=ws_path,
+                    project_id=project_id,
+                    reason_code="guard.projectIdMismatch",
+                )
+
+            self.workspace_projects[ws_path] = project_id
+            self.created_seq += 1
+            requested_conv_id = intent.get("conversationId")
+            if valid_id(requested_conv_id, 256) and (requested_conv_id, ws_path) not in self.rows:
+                conv_id = requested_conv_id
+            else:
+                conv_id = f"conv-created-{self.created_seq}"
+            raw_title = intent.get("title")
+            resolved_title = raw_title if valid_id(raw_title, 512) else f"Conversation {self.created_seq}"
+            raw_model = intent.get("modelName")
+            resolved_model = raw_model if valid_id(raw_model, 256) else "flash"
+            row = {
+                "conversationId": conv_id,
+                "workspacePath": ws_path,
+                "title": resolved_title,
+                "projectId": project_id,
+                "modelName": resolved_model,
+                "phase": "running",
+                "lastEventType": "PreInvocation",
+                "invocationNum": 1,
+                "stepIdx": 0,
+                "executionNum": 1,
+                "lastToolName": None,
+                "terminationReason": None,
+                "fullyIdle": False,
+                "transitionCount": 1,
+            }
+            target_key = (conv_id, ws_path)
+            self.rows[target_key] = row
+            self.cursor += 1
+            ev_key = f"{conv_id}:{ws_path}:create:{request_id}"
+            self.seen_keys.setdefault(target_key, set()).add(ev_key)
+            self.changes.append({
+                "sequence": self.cursor,
+                "eventKey": ev_key,
+                "row": row,
+            })
+            if len(self.changes) > 1024:
+                self.changes = self.changes[-1024:]
+                self.min_cursor = self.changes[0]["sequence"] - 1
+
+            readback_key = self.select_override if self.select_override is not None else target_key
+            if readback_key in self.rows:
+                self.selected = readback_key
+            if readback_key == target_key and self.selected == target_key:
+                self.create_confirmed += 1
+                status = "created"
+                reason_code = "agentapi.newConversationConfirmed"
+            else:
+                status = "unconfirmed"
+                reason_code = "guard.selectionReadbackMismatch"
+
+            ledger_entry = {
+                "op": "create",
+                "requestId": request_id,
+                "status": status,
+                "conversationId": conv_id,
+                "workspacePath": ws_path,
+                "projectId": project_id,
+                "delivery": "started" if status == "created" else "none",
+                "inFlightSteering": False,
+                "reasonCode": reason_code,
+            }
+            self.command_ledger[request_id] = ledger_entry
+            self.last_heartbeat = time.monotonic()
+            if self.timeout_next_command_ms > 0:
+                sleep_s = self.timeout_next_command_ms / 1000.0
+                self.timeout_next_command_ms = 0
+                self.unknown_next_command = False
+                time.sleep(sleep_s)
+            elif self.unknown_next_command:
+                self.unknown_next_command = False
+                return self.command_reply(
+                    req,
+                    ledger_entry,
+                    status_override="unknown",
+                    reason_override="bridge.deliveryUnconfirmed",
+                    duplicate=False,
+                    reconciled=False,
+                )
+            return self.command_reply(req, ledger_entry, duplicate=False, reconciled=False)
+
+        if op == "send":
+            if self.subscription_id is None or self.subscription_id != sub_id:
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if (
+                not self.schema_verified
+                or "send-message" not in self.capabilities.get("agentapiCommands", [])
+                or req.get("schemaVersion") != AGENTAPI_COMMAND_SCHEMA_VERSION
+            ):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if not self.is_stream_healthy():
+                return self.base_reply(req, "stale")
+            intent = req.get("intent")
+            if not isinstance(intent, dict) or contains_forbidden_keys(intent):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            request_id = intent.get("requestId")
+            target = intent.get("target")
+            if not isinstance(target, dict) or contains_forbidden_keys(target):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            conv_id = target.get("conversationId")
+            ws_path = normalize_workspace_uri(target.get("workspacePath"))
+            message_text = intent.get("message")
+            delivery_mode = intent.get("deliveryMode") or "auto"
+            project_id = intent.get("projectId") or ""
+            if (
+                not valid_id(request_id, 256)
+                or not valid_id(conv_id, 256)
+                or not valid_id(ws_path, 4096)
+                or ws_path not in self.allowed_workspaces
+                or not valid_id(message_text, 32768)
+                or delivery_mode not in VALID_DELIVERY_MODES
+                or not isinstance(project_id, str)
+                or len(project_id.encode("utf-8")) > 256
+            ):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            del message_text
+            self.send_requests += 1
+            self.metadata_reads += 1
+
+            existing = self.command_ledger.get(request_id)
+            if existing is not None:
+                if (
+                    existing["op"] != "send"
+                    or existing["conversationId"] != conv_id
+                    or existing["workspacePath"] != ws_path
+                ):
+                    return self.base_command_unconfirmed(
+                        req,
+                        request_id=request_id,
+                        command_op="send",
+                        conv_id=conv_id,
+                        ws_path=ws_path,
+                        project_id=project_id,
+                        reason_code="guard.requestIdConflict",
+                    )
+                self.duplicate_commands_dropped += 1
+                return self.command_reply(req, existing, duplicate=True, reconciled=False)
+
+            target_key = (conv_id, ws_path)
+            if target_key not in self.rows:
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="send",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id=project_id,
+                    reason_code="guard.targetNotFound",
+                )
+            prior = self.rows[target_key]
+            row_project_id = prior.get("projectId") or ""
+            if self.selected != target_key:
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="send",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id=row_project_id,
+                    reason_code="guard.selectionMismatch",
+                )
+            if project_id and row_project_id and project_id != row_project_id:
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op="send",
+                    conv_id=conv_id,
+                    ws_path=ws_path,
+                    project_id=row_project_id,
+                    reason_code="guard.projectIdMismatch",
+                )
+
+            resolved_project = row_project_id or project_id
+            in_flight = prior["phase"] in ("running", "runningTool", "backgroundActive")
+            updated_row = dict(prior)
+            if resolved_project:
+                updated_row["projectId"] = resolved_project
+            if not in_flight:
+                updated_row["phase"] = "running"
+                updated_row["lastEventType"] = "PreInvocation"
+                updated_row["invocationNum"] = prior["invocationNum"] + 1
+                updated_row["executionNum"] = prior["executionNum"] + 1
+                updated_row["terminationReason"] = None
+                updated_row["fullyIdle"] = False
+                updated_row["transitionCount"] = prior["transitionCount"] + 1
+                status = "started"
+                delivery = "started"
+                in_flight_steering = False
+                reason_code = "agentapi.sendMessageStarted"
+            elif self.in_flight_steer_enabled and delivery_mode == "steer":
+                if updated_row["phase"] == "backgroundActive":
+                    updated_row["phase"] = "running"
+                updated_row["stepIdx"] = prior["stepIdx"] + 1
+                updated_row["fullyIdle"] = False
+                updated_row["transitionCount"] = prior["transitionCount"] + 1
+                status = "steered"
+                delivery = "steered"
+                in_flight_steering = True
+                reason_code = "agentapi.sendMessageSteered"
+            else:
+                updated_row["fullyIdle"] = False
+                updated_row["transitionCount"] = prior["transitionCount"] + 1
+                status = "queued"
+                delivery = "nextInvocation"
+                in_flight_steering = False
+                reason_code = (
+                    "agentapi.steerUnsupportedQueuedNextInvocation"
+                    if delivery_mode == "steer"
+                    else "agentapi.sendMessageQueuedNextInvocation"
+                )
+
+            self.rows[target_key] = updated_row
+            self.cursor += 1
+            ev_key = f"{conv_id}:{ws_path}:send:{request_id}"
+            self.seen_keys.setdefault(target_key, set()).add(ev_key)
+            self.changes.append({
+                "sequence": self.cursor,
+                "eventKey": ev_key,
+                "row": updated_row,
+            })
+            if len(self.changes) > 1024:
+                self.changes = self.changes[-1024:]
+                self.min_cursor = self.changes[0]["sequence"] - 1
+
+            self.send_confirmed += 1
+            ledger_entry = {
+                "op": "send",
+                "requestId": request_id,
+                "status": status,
+                "conversationId": conv_id,
+                "workspacePath": ws_path,
+                "projectId": resolved_project,
+                "delivery": delivery,
+                "inFlightSteering": in_flight_steering,
+                "reasonCode": reason_code,
+            }
+            self.command_ledger[request_id] = ledger_entry
+            self.last_heartbeat = time.monotonic()
+            if self.timeout_next_command_ms > 0:
+                sleep_s = self.timeout_next_command_ms / 1000.0
+                self.timeout_next_command_ms = 0
+                self.unknown_next_command = False
+                time.sleep(sleep_s)
+            elif self.unknown_next_command:
+                self.unknown_next_command = False
+                return self.command_reply(
+                    req,
+                    ledger_entry,
+                    status_override="unknown",
+                    reason_override="bridge.deliveryUnconfirmed",
+                    duplicate=False,
+                    reconciled=False,
+                )
+            return self.command_reply(req, ledger_entry, duplicate=False, reconciled=False)
+
+        if op == "query":
+            if self.subscription_id is None or self.subscription_id != sub_id:
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if not self.schema_verified or req.get("schemaVersion") != AGENTAPI_COMMAND_SCHEMA_VERSION:
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if not self.is_stream_healthy():
+                return self.base_reply(req, "stale")
+            intent = req.get("intent")
+            if not isinstance(intent, dict) or contains_forbidden_keys(intent):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            request_id = intent.get("requestId")
+            if not valid_id(request_id, 256):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            self.query_requests += 1
+            self.metadata_reads += 1
+            existing = self.command_ledger.get(request_id)
+            if existing is None:
+                return self.base_command_unconfirmed(
+                    req,
+                    request_id=request_id,
+                    command_op=intent.get("expectedOp") if valid_id(intent.get("expectedOp"), 32) else "query",
+                    conv_id=intent.get("conversationId") if valid_id(intent.get("conversationId"), 256) else "",
+                    ws_path=normalize_workspace_uri(intent.get("workspacePath")) or "",
+                    project_id=intent.get("projectId") if isinstance(intent.get("projectId"), str) else "",
+                    reason_code="query.requestNotFound",
+                )
+            return self.command_reply(req, existing, duplicate=True, reconciled=True)
+
         if op == "close":
             if self.subscription_id is None or self.subscription_id != sub_id:
                 self.unauthorized_rejections += 1
@@ -647,6 +1086,13 @@ class BridgeDaemon:
                 "tokenReads": self.token_reads,
                 "openRequests": self.open_requests,
                 "openConfirmed": self.open_confirmed,
+                "createRequests": self.create_requests,
+                "createConfirmed": self.create_confirmed,
+                "sendRequests": self.send_requests,
+                "sendConfirmed": self.send_confirmed,
+                "queryRequests": self.query_requests,
+                "duplicateCommandsDropped": self.duplicate_commands_dropped,
+                "inFlightSteerEnabled": self.in_flight_steer_enabled,
                 "selected": self.selected_payload(),
                 "schemaVerified": self.schema_verified,
                 "closeCount": self.close_count,
@@ -655,6 +1101,16 @@ class BridgeDaemon:
                 "streamHealthy": self.is_stream_healthy(),
                 "generation": self.generation,
             }
+        if op == "unknown-next-command":
+            self.unknown_next_command = bool(req.get("enabled", True))
+            return {"status": "ok", "unknownNextCommand": self.unknown_next_command}
+        if op == "timeout-next-command":
+            sleep_ms = req.get("sleepMs", 350)
+            self.timeout_next_command_ms = int(sleep_ms) if isinstance(sleep_ms, (int, float)) and sleep_ms > 0 else 0
+            return {"status": "ok", "timeoutNextCommandMs": self.timeout_next_command_ms}
+        if op == "set-in-flight-steer":
+            self.in_flight_steer_enabled = bool(req.get("enabled", True))
+            return {"status": "ok", "inFlightSteerEnabled": self.in_flight_steer_enabled}
         if op == "seed-catalog":
             try:
                 seeded = self.seed_catalog_entries(req.get("entries", []), initial_selected=req.get("selected"))

@@ -10,8 +10,12 @@
    - Bundle ID：`com.google.antigravity`，版本 `2.29.0`
    - `Contents/Resources/app.asar` SHA-256：`290e1b7a1caa430a0c5367c7b433e8d284e2ca5d0b305e91e5ce8ec926f43283`
    - `Contents/Resources/bin/language_server` SHA-256：`fb6e0fc3a1e091e773a3e91ce3e5a4dc93a5f0d30bf305a1ddd70008a2a26a74`（`Built at CL: 1013060670`）
-2. **`agentapi` CLI**：
+2. **`agentapi` CLI 与创建/发送契约（Slice K3）**：
    - 仅暴露 3 个官方子命令：`get-conversation-metadata <conversation_id>`、`new-conversation [--model=...] [--title=...] [--profile=...] <prompt>`、`send-message [--title=...] <recipient_id> <content>`。
+   - **创建绑定 `projectId`**：`sidecar_sdk/index.mjs` 的 `startConversation` 通过环境变量 `ANTIGRAVITY_PROJECT_ID` 将 `agentapi new-conversation` 绑定到工作区 `projectId`（记录 `NewConversationEvent`）；若请求 `projectId` 与工作区绑定不一致则返回 `unconfirmed`（`guard.projectIdMismatch`），零新建会话。
+   - **发送绑定 `conversationId` 与运行中消息投递语义**：`sendMessage` 调用 `agentapi send-message [--title=...] <conversationId> <content>`（`SendAgentMessageRequest` / `SendMessageEvent`）。官方 `agentapi` CLI 不提供显式 `--steer` 或 `--delivery-strategy` 标志（`agentapi_explicit_steer_flag == false`），`language_server` 内部采用 `MessageDeliveryStrategy`（`MESSAGE_DELIVERY_STRATEGY_NEXT_INVOCATION` / `MESSAGE_DELIVERY_STRATEGY_WHEN_IDLE`）。因此：
+     - 目标会话处于 `idle` / `completed` / `failed` / `canceled` 时，发送返回 `started`（`delivery == "started"`，`inFlightSteering == false`）；
+     - 目标会话处于运行中（`running` / `runningTool` / `backgroundActive`）时，默认按官方 `agentapi` 契约归入下一轮调用排队 `queued`（`delivery == "nextInvocation"`，`inFlightSteering == false`，绝不误新建会话，也不虚报同步抢占 `steered`）；仅当桥显式开启运行中 steering 模式时才确认 `steered`（`delivery == "steered"`，`inFlightSteering == true`），两类语义单独验证。
    - **CLI 限制**：独立 CLI 不提供既有会话全量枚举、窗口聚焦、停止当前轮次（`supportsStopTurn = false`）或审批放行（`supportsApprovalGate = false`）。
 3. **Official Sidecars (`sidecar_sdk` `1.0.0`) 与只读 REA 会话目录/聚焦契约**：
    - 官方 Sidecar 仅绑定 `127.0.0.1`，要求宿主注入 `ANTIGRAVITY_LS_ADDRESS`、`ANTIGRAVITY_CSRF_TOKEN`、`ANTIGRAVITY_SIDECAR_WEB_PORT` 及 `X-Sidecar-Token`（`ANTIGRAVITY_SIDECAR_UI_TOKEN`），暴露 `/_sidecar/get-conversation-metadata`、`/_sidecar/new-conversation`、`/_sidecar/send-message`。
@@ -27,6 +31,7 @@
 - **两阶段边界剥离（零读取 `transcriptPath` 与 Token）**：`hooks-bridge.py catalog` 与 `hooks-bridge.py emit` 从 `stdin` 读取原始 JSON 后，立即在内存中丢弃 `transcriptPath`、`artifactDirectoryPath`、`lastUserInput`、`toolCall.args`、`csrfToken`、`oauthToken`、`sidecarUiToken` 与 `apiKey`，绝不读取用户 Token、Cookie、状态库或 `transcriptPath` 文件（`transcriptReads == 0`、`tokenReads == 0`）。
 - **复合主键与同名跨工作区隔离**：会话身份固定为 `AntigravitySessionKey(conversationId, workspacePath)`，并校验 `workspacePath` 属于 `allowedWorkspaces`；两个不同工作区下的同名会话（相同 `title` / `summary`）互不覆盖、互不串台。
 - **精确聚焦与 UI 选中回读确认**：`open` 请求必须携带 `schemaVersion: "antigravity-catalog-nav-v1"` 与完整目标 `(conversationId, workspacePath)`；仅当回读的 `selected` 与请求目标 `(conversationId, workspacePath)` 完全一致时才返回 `.confirmed`（写入 `antigravity_open` `confirmed` 审计回执）；若 UI 选中回读不一致或目标已删除，返回 `.unconfirmed`，绝不重定向到同名跨工作区会话。
+- **`agentapi` 创建/发送目标门控与超时对账不重发（Slice K3）**：`create`、`send`、`query` 请求必须携带 `schemaVersion: "antigravity-agentapi-v1"` 与 `requestId`；提示词与消息正文在桥接层校验后立即在内存丢弃，绝不落盘、绝不回显，审计日志 `audit.jsonl` 保持 `text_byte_len == nil`。`send` 强制要求 `selected == target`（两会话仅修改当前选中目标）；不存在或已删除目标返回 `.unconfirmed`（`guard.targetNotFound`），零重定向、零新建会话；超时或 `unknown` 回执锁定原 `requestId` 并通过 `query` 对账，绝不盲目重发。
 - **缺 Schema 或合法认证失败关闭**：当 `schemaVerified == false`、`schemaVersion` 不匹配、缺少合法 capability token / `subscriptionId`、工作区越权或 `instanceId` / `generation` 不一致时，立即失败关闭（`.denied` / `.stale`），零状态污染。
 - **重复事件去重与 `Stop(fullyIdle=false)` 语义**：重复 Hook 事件不推进 `cursor`、不递增 `transitionCount`；`Stop(fullyIdle=false)` 归入 `backgroundActive`（`后台仍在运行`），仅 `fullyIdle == true` 且 `terminationReason == "NO_TOOL_CALL"` 才归入 `completed`。
 - **断流标 `stale`**：Hook 流断开、心跳超时或实例换代时，桥返回 `status: "stale"`，客户端清空旧会话行并标记过期。

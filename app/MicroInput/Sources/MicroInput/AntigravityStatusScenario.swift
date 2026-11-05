@@ -23,6 +23,17 @@ actor AntigravityStatusFixture: AntigravityStatusServing {
     private(set) var tokenReads = 0
     private(set) var openRequests = 0
     private(set) var openConfirmed = 0
+    private(set) var createRequests = 0
+    private(set) var createConfirmed = 0
+    private(set) var sendRequests = 0
+    private(set) var sendConfirmed = 0
+    private(set) var queryRequests = 0
+    private(set) var duplicateCommandsDropped = 0
+    private var createdSeq = 0
+    private var workspaceProjects: [String: String] = [:]
+    private var commandLedger: [String: AntigravityCommandReply] = [:]
+    private var unknownNextCommand = false
+    private var inFlightSteerEnabled = false
     private(set) var closes = 0
 
     func reset() {
@@ -39,10 +50,23 @@ actor AntigravityStatusFixture: AntigravityStatusServing {
         tokenReads = 0
         openRequests = 0
         openConfirmed = 0
+        createRequests = 0
+        createConfirmed = 0
+        sendRequests = 0
+        sendConfirmed = 0
+        queryRequests = 0
+        duplicateCommandsDropped = 0
+        createdSeq = 0
+        workspaceProjects = [:]
+        commandLedger = [:]
+        unknownNextCommand = false
+        inFlightSteerEnabled = false
         closes = 0
     }
 
     func setMode(_ value: Mode) { mode = value }
+    func setUnknownNextCommand(_ enabled: Bool) { unknownNextCommand = enabled }
+    func setInFlightSteerEnabled(_ enabled: Bool) { inFlightSteerEnabled = enabled }
 
     func deleteSession(_ key: AntigravitySessionKey) {
         rows.removeValue(forKey: key)
@@ -51,6 +75,10 @@ actor AntigravityStatusFixture: AntigravityStatusServing {
 
     func counts() -> (reads: Int, duplicates: Int, transcriptReads: Int, tokenReads: Int, openRequests: Int, openConfirmed: Int, closes: Int, cursor: UInt64) {
         (metadataReads, duplicateEventsDropped, transcriptReads, tokenReads, openRequests, openConfirmed, closes, cursor)
+    }
+
+    func commandCounts() -> (creates: Int, createsConfirmed: Int, sends: Int, sendsConfirmed: Int, queries: Int, duplicates: Int) {
+        (createRequests, createConfirmed, sendRequests, sendConfirmed, queryRequests, duplicateCommandsDropped)
     }
 
     private var generation: UInt64 { mode == .rotated ? 2 : 1 }
@@ -89,6 +117,9 @@ actor AntigravityStatusFixture: AntigravityStatusServing {
         seen.insert(eventKey)
         seenKeys[sessionKey] = seen
         let updated = AntigravitySessionRow.reduce(prior: prior, event: event)
+        if !updated.projectId.isEmpty && workspaceProjects[event.workspacePath] == nil {
+            workspaceProjects[event.workspacePath] = updated.projectId
+        }
         rows[sessionKey] = updated
         cursor += 1
         pendingChanges.append(AntigravityEventChange(sequence: cursor, eventKey: eventKey, row: updated))
@@ -170,6 +201,392 @@ actor AntigravityStatusFixture: AntigravityStatusServing {
             transcriptReads: UInt64(transcriptReads),
             tokenReads: UInt64(tokenReads)
         )
+    }
+
+    private func sortedRows() -> [AntigravitySessionRow] {
+        rows.keys.sorted().compactMap { rows[$0] }
+    }
+
+    private func validSelected() -> AntigravitySessionKey? {
+        selected.flatMap { rows[$0] != nil ? $0 : nil }
+    }
+
+    private func makeCommandReply(
+        from entry: AntigravityCommandReply,
+        statusOverride: String? = nil,
+        reasonOverride: String? = nil,
+        duplicate: Bool = false,
+        reconciled: Bool = false
+    ) -> AntigravityCommandReply {
+        AntigravityCommandReply(
+            instanceId: "qa-antigravity-instance",
+            generation: generation,
+            status: statusOverride ?? entry.status,
+            commandOp: entry.commandOp,
+            requestId: entry.requestId,
+            conversationId: entry.conversationId,
+            workspacePath: entry.workspacePath,
+            projectId: entry.projectId,
+            delivery: entry.delivery,
+            inFlightSteering: entry.inFlightSteering,
+            reasonCode: reasonOverride ?? entry.reasonCode,
+            duplicate: duplicate,
+            reconciled: reconciled,
+            cursor: cursor,
+            rows: sortedRows(),
+            selected: validSelected(),
+            transcriptReads: UInt64(transcriptReads),
+            tokenReads: UInt64(tokenReads)
+        )
+    }
+
+    private func makeUnconfirmedReply(
+        commandOp: String,
+        requestId: String,
+        conversationId: String,
+        workspacePath: String,
+        projectId: String,
+        reasonCode: String
+    ) -> AntigravityCommandReply {
+        AntigravityCommandReply(
+            instanceId: "qa-antigravity-instance",
+            generation: generation,
+            status: "unconfirmed",
+            commandOp: commandOp,
+            requestId: requestId,
+            conversationId: conversationId,
+            workspacePath: workspacePath,
+            projectId: projectId,
+            delivery: .none,
+            inFlightSteering: false,
+            reasonCode: reasonCode,
+            duplicate: false,
+            reconciled: false,
+            cursor: cursor,
+            rows: sortedRows(),
+            selected: validSelected(),
+            transcriptReads: UInt64(transcriptReads),
+            tokenReads: UInt64(tokenReads)
+        )
+    }
+
+    func create(_ intent: AntigravityCreateIntent) async throws -> AntigravityCommandReply {
+        guard connected else { throw AntigravityFailure.denied }
+        guard mode != .missingSchema, activeCapabilities.supportsCreateConversation else {
+            throw AntigravityFailure.denied
+        }
+        guard mode != .stale else { throw AntigravityFailure.stale }
+        guard intent.valid, [Self.workspaceA, Self.workspaceB].contains(intent.workspacePath) else {
+            throw AntigravityFailure.denied
+        }
+        createRequests += 1
+        metadataReads += 1
+
+        if let existing = commandLedger[intent.requestId] {
+            guard existing.commandOp == "create",
+                  existing.workspacePath == intent.workspacePath,
+                  existing.projectId == intent.projectId else {
+                return makeUnconfirmedReply(
+                    commandOp: "create",
+                    requestId: intent.requestId,
+                    conversationId: "",
+                    workspacePath: intent.workspacePath,
+                    projectId: intent.projectId,
+                    reasonCode: "guard.requestIdConflict"
+                )
+            }
+            duplicateCommandsDropped += 1
+            return makeCommandReply(from: existing, duplicate: true, reconciled: false)
+        }
+
+        if let boundProject = workspaceProjects[intent.workspacePath], boundProject != intent.projectId {
+            return makeUnconfirmedReply(
+                commandOp: "create",
+                requestId: intent.requestId,
+                conversationId: "",
+                workspacePath: intent.workspacePath,
+                projectId: intent.projectId,
+                reasonCode: "guard.projectIdMismatch"
+            )
+        }
+
+        workspaceProjects[intent.workspacePath] = intent.projectId
+        createdSeq += 1
+        let convId: String
+        if let requested = intent.conversationId, !requested.isEmpty,
+           rows[AntigravitySessionKey(conversationId: requested, workspacePath: intent.workspacePath)] == nil {
+            convId = requested
+        } else {
+            convId = "conv-created-\(createdSeq)"
+        }
+        let targetKey = AntigravitySessionKey(conversationId: convId, workspacePath: intent.workspacePath)
+        let newRow = AntigravitySessionRow(
+            conversationId: convId,
+            workspacePath: intent.workspacePath,
+            title: intent.title ?? "Conversation \(createdSeq)",
+            projectId: intent.projectId,
+            modelName: intent.modelName ?? "flash",
+            phase: .running,
+            lastEventType: .preInvocation,
+            invocationNum: 1,
+            stepIdx: 0,
+            executionNum: 1,
+            lastToolName: nil,
+            terminationReason: nil,
+            fullyIdle: false,
+            transitionCount: 1
+        )
+        rows[targetKey] = newRow
+        cursor += 1
+        let evKey = "\(convId):\(intent.workspacePath):create:\(intent.requestId)"
+        seenKeys[targetKey, default: []].insert(evKey)
+        pendingChanges.append(AntigravityEventChange(sequence: cursor, eventKey: evKey, row: newRow))
+
+        let status: String
+        let reasonCode: String
+        if mode == .wrongSelected {
+            let wrongKey = targetKey == Self.sessionA ? Self.sessionB : Self.sessionA
+            if rows[wrongKey] != nil { selected = wrongKey }
+            status = "unconfirmed"
+            reasonCode = "guard.selectionReadbackMismatch"
+        } else {
+            selected = targetKey
+            createConfirmed += 1
+            status = "created"
+            reasonCode = "agentapi.newConversationConfirmed"
+        }
+
+        let settled = AntigravityCommandReply(
+            instanceId: "qa-antigravity-instance",
+            generation: generation,
+            status: status,
+            commandOp: "create",
+            requestId: intent.requestId,
+            conversationId: convId,
+            workspacePath: intent.workspacePath,
+            projectId: intent.projectId,
+            delivery: status == "created" ? .started : .none,
+            inFlightSteering: false,
+            reasonCode: reasonCode,
+            duplicate: false,
+            reconciled: false,
+            cursor: cursor,
+            rows: sortedRows(),
+            selected: validSelected(),
+            transcriptReads: UInt64(transcriptReads),
+            tokenReads: UInt64(tokenReads)
+        )
+        commandLedger[intent.requestId] = settled
+        if unknownNextCommand {
+            unknownNextCommand = false
+            return makeCommandReply(
+                from: settled,
+                statusOverride: "unknown",
+                reasonOverride: "bridge.deliveryUnconfirmed",
+                duplicate: false,
+                reconciled: false
+            )
+        }
+        return settled
+    }
+
+    func send(_ intent: AntigravitySendIntent) async throws -> AntigravityCommandReply {
+        guard connected else { throw AntigravityFailure.denied }
+        guard mode != .missingSchema, activeCapabilities.supportsSendMessage else {
+            throw AntigravityFailure.denied
+        }
+        guard mode != .stale else { throw AntigravityFailure.stale }
+        guard intent.valid, [Self.workspaceA, Self.workspaceB].contains(intent.target.workspacePath) else {
+            throw AntigravityFailure.denied
+        }
+        sendRequests += 1
+        metadataReads += 1
+
+        if let existing = commandLedger[intent.requestId] {
+            guard existing.commandOp == "send",
+                  existing.conversationId == intent.target.conversationId,
+                  existing.workspacePath == intent.target.workspacePath else {
+                return makeUnconfirmedReply(
+                    commandOp: "send",
+                    requestId: intent.requestId,
+                    conversationId: intent.target.conversationId,
+                    workspacePath: intent.target.workspacePath,
+                    projectId: intent.projectId ?? "",
+                    reasonCode: "guard.requestIdConflict"
+                )
+            }
+            duplicateCommandsDropped += 1
+            return makeCommandReply(from: existing, duplicate: true, reconciled: false)
+        }
+
+        guard let prior = rows[intent.target] else {
+            return makeUnconfirmedReply(
+                commandOp: "send",
+                requestId: intent.requestId,
+                conversationId: intent.target.conversationId,
+                workspacePath: intent.target.workspacePath,
+                projectId: intent.projectId ?? "",
+                reasonCode: "guard.targetNotFound"
+            )
+        }
+        guard selected == intent.target else {
+            return makeUnconfirmedReply(
+                commandOp: "send",
+                requestId: intent.requestId,
+                conversationId: intent.target.conversationId,
+                workspacePath: intent.target.workspacePath,
+                projectId: prior.projectId,
+                reasonCode: "guard.selectionMismatch"
+            )
+        }
+        if let reqProj = intent.projectId, !reqProj.isEmpty, !prior.projectId.isEmpty, reqProj != prior.projectId {
+            return makeUnconfirmedReply(
+                commandOp: "send",
+                requestId: intent.requestId,
+                conversationId: intent.target.conversationId,
+                workspacePath: intent.target.workspacePath,
+                projectId: prior.projectId,
+                reasonCode: "guard.projectIdMismatch"
+            )
+        }
+
+        let resolvedProject = !prior.projectId.isEmpty ? prior.projectId : (intent.projectId ?? "")
+        let inFlight = [.running, .runningTool, .backgroundActive].contains(prior.phase)
+        let updatedRow: AntigravitySessionRow
+        let status: String
+        let delivery: AntigravityDeliveryOutcome
+        let inFlightSteering: Bool
+        let reasonCode: String
+
+        if !inFlight {
+            updatedRow = AntigravitySessionRow(
+                conversationId: prior.conversationId,
+                workspacePath: prior.workspacePath,
+                title: prior.title,
+                projectId: resolvedProject,
+                modelName: prior.modelName,
+                phase: .running,
+                lastEventType: .preInvocation,
+                invocationNum: prior.invocationNum + 1,
+                stepIdx: prior.stepIdx,
+                executionNum: prior.executionNum + 1,
+                lastToolName: prior.lastToolName,
+                terminationReason: nil,
+                fullyIdle: false,
+                transitionCount: prior.transitionCount + 1
+            )
+            status = "started"
+            delivery = .started
+            inFlightSteering = false
+            reasonCode = "agentapi.sendMessageStarted"
+        } else if inFlightSteerEnabled && intent.deliveryMode == .steer {
+            updatedRow = AntigravitySessionRow(
+                conversationId: prior.conversationId,
+                workspacePath: prior.workspacePath,
+                title: prior.title,
+                projectId: resolvedProject,
+                modelName: prior.modelName,
+                phase: prior.phase == .backgroundActive ? .running : prior.phase,
+                lastEventType: prior.lastEventType,
+                invocationNum: prior.invocationNum,
+                stepIdx: prior.stepIdx + 1,
+                executionNum: prior.executionNum,
+                lastToolName: prior.lastToolName,
+                terminationReason: prior.terminationReason,
+                fullyIdle: false,
+                transitionCount: prior.transitionCount + 1
+            )
+            status = "steered"
+            delivery = .steered
+            inFlightSteering = true
+            reasonCode = "agentapi.sendMessageSteered"
+        } else {
+            updatedRow = AntigravitySessionRow(
+                conversationId: prior.conversationId,
+                workspacePath: prior.workspacePath,
+                title: prior.title,
+                projectId: resolvedProject,
+                modelName: prior.modelName,
+                phase: prior.phase,
+                lastEventType: prior.lastEventType,
+                invocationNum: prior.invocationNum,
+                stepIdx: prior.stepIdx,
+                executionNum: prior.executionNum,
+                lastToolName: prior.lastToolName,
+                terminationReason: prior.terminationReason,
+                fullyIdle: false,
+                transitionCount: prior.transitionCount + 1
+            )
+            status = "queued"
+            delivery = .nextInvocation
+            inFlightSteering = false
+            reasonCode = intent.deliveryMode == .steer
+                ? "agentapi.steerUnsupportedQueuedNextInvocation"
+                : "agentapi.sendMessageQueuedNextInvocation"
+        }
+
+        rows[intent.target] = updatedRow
+        cursor += 1
+        let evKey = "\(intent.target.conversationId):\(intent.target.workspacePath):send:\(intent.requestId)"
+        seenKeys[intent.target, default: []].insert(evKey)
+        pendingChanges.append(AntigravityEventChange(sequence: cursor, eventKey: evKey, row: updatedRow))
+        sendConfirmed += 1
+
+        let settled = AntigravityCommandReply(
+            instanceId: "qa-antigravity-instance",
+            generation: generation,
+            status: status,
+            commandOp: "send",
+            requestId: intent.requestId,
+            conversationId: intent.target.conversationId,
+            workspacePath: intent.target.workspacePath,
+            projectId: resolvedProject,
+            delivery: delivery,
+            inFlightSteering: inFlightSteering,
+            reasonCode: reasonCode,
+            duplicate: false,
+            reconciled: false,
+            cursor: cursor,
+            rows: sortedRows(),
+            selected: validSelected(),
+            transcriptReads: UInt64(transcriptReads),
+            tokenReads: UInt64(tokenReads)
+        )
+        commandLedger[intent.requestId] = settled
+        if unknownNextCommand {
+            unknownNextCommand = false
+            return makeCommandReply(
+                from: settled,
+                statusOverride: "unknown",
+                reasonOverride: "bridge.deliveryUnconfirmed",
+                duplicate: false,
+                reconciled: false
+            )
+        }
+        return settled
+    }
+
+    func query(_ intent: AntigravityQueryIntent) async throws -> AntigravityCommandReply {
+        guard connected else { throw AntigravityFailure.denied }
+        guard mode != .missingSchema, activeCapabilities.schemaVerified else {
+            throw AntigravityFailure.denied
+        }
+        guard mode != .stale else { throw AntigravityFailure.stale }
+        guard intent.valid else { throw AntigravityFailure.denied }
+        queryRequests += 1
+        metadataReads += 1
+
+        guard let existing = commandLedger[intent.requestId] else {
+            return makeUnconfirmedReply(
+                commandOp: intent.expectedOp ?? "query",
+                requestId: intent.requestId,
+                conversationId: intent.conversationId ?? "",
+                workspacePath: intent.workspacePath ?? "",
+                projectId: intent.projectId ?? "",
+                reasonCode: "query.requestNotFound"
+            )
+        }
+        return makeCommandReply(from: existing, duplicate: true, reconciled: true)
     }
 
     func close() async {
@@ -374,6 +791,191 @@ extension Store {
                 _ = openAntigravitySession(selConfirmA)
                 await hostExecutionTask?.value
             }
+
+            let createdKey = AntigravitySessionKey(
+                conversationId: "conv-alpha-created",
+                workspacePath: AntigravityStatusFixture.workspaceA
+            )
+            let mismatchCreateCmd = antigravityStatus.createIntent(
+                workspacePath: AntigravityStatusFixture.workspaceA,
+                projectId: "proj-wrong",
+                prompt: "Should be blocked by projectId binding",
+                title: "Wrong Project",
+                conversationId: "conv-alpha-wrong",
+                requestId: "req-create-wrong-proj"
+            )
+            _ = createAntigravityConversation(mismatchCreateCmd)
+            await hostExecutionTask?.value
+            let projectMismatchBlocked = antigravityStatus.lastCommandResult == .unconfirmed
+                && antigravityStatus.lastCommandReply?.reasonCode == "guard.projectIdMismatch"
+                && antigravityStatus.row(for: AntigravitySessionKey(conversationId: "conv-alpha-wrong", workspacePath: AntigravityStatusFixture.workspaceA)) == nil
+
+            let createCmd = antigravityStatus.createIntent(
+                workspacePath: AntigravityStatusFixture.workspaceA,
+                projectId: "proj-alpha",
+                prompt: "Create new conversation bound to proj-alpha",
+                title: "Alpha Created Conversation",
+                modelName: "gemini-2.5-flash",
+                conversationId: createdKey.conversationId,
+                requestId: "req-create-alpha-1"
+            )
+            _ = createAntigravityConversation(createCmd)
+            await hostExecutionTask?.value
+            let createdRow = antigravityStatus.row(for: createdKey)
+            checks["create_binds_project_id_and_confirms_selected"] = projectMismatchBlocked
+                && antigravityStatus.lastCommandResult == .created
+                && antigravityStatus.selected == createdKey
+                && createdRow?.projectId == "proj-alpha"
+                && createdRow?.title == "Alpha Created Conversation"
+                && createdRow?.phase == .running
+                && lastHostActionReceipt?.actionType == "antigravity_create"
+                && lastHostActionReceipt?.outcome == "created"
+                && lastHostActionReceipt?.textByteLen == nil
+
+            if let selBackToA = antigravityStatus.selection(for: AntigravityStatusFixture.sessionA) {
+                _ = openAntigravitySession(selBackToA)
+                await hostExecutionTask?.value
+            }
+            let bBeforeSend = antigravityStatus.row(for: AntigravityStatusFixture.sessionB)
+            let createdBeforeSend = antigravityStatus.row(for: createdKey)
+            let unselectedSendCmd = antigravityStatus.sendIntent(
+                for: AntigravityStatusFixture.sessionB,
+                projectId: "proj-beta",
+                message: "Must not touch unselected session B",
+                deliveryMode: .auto,
+                requestId: "req-send-unselected-b"
+            )
+            _ = sendAntigravityMessage(unselectedSendCmd)
+            await hostExecutionTask?.value
+            let unselectedSendBlocked = antigravityStatus.lastCommandResult == .unconfirmed
+                && antigravityStatus.lastCommandReply?.reasonCode == "guard.selectionMismatch"
+                && antigravityStatus.row(for: AntigravityStatusFixture.sessionB) == bBeforeSend
+                && antigravityStatus.row(for: AntigravityStatusFixture.sessionA)?.transitionCount == 4
+
+            let sendIdleACmd = antigravityStatus.sendIntent(
+                for: AntigravityStatusFixture.sessionA,
+                projectId: "proj-alpha",
+                message: "Resume session A from completed state",
+                deliveryMode: .auto,
+                requestId: "req-send-alpha-idle-1"
+            )
+            _ = sendAntigravityMessage(sendIdleACmd)
+            await hostExecutionTask?.value
+            let aAfterSend = antigravityStatus.row(for: AntigravityStatusFixture.sessionA)
+            let bAfterSend = antigravityStatus.row(for: AntigravityStatusFixture.sessionB)
+            let createdAfterSend = antigravityStatus.row(for: createdKey)
+            checks["two_sessions_send_only_modifies_target"] = unselectedSendBlocked
+                && antigravityStatus.lastCommandResult == .started
+                && antigravityStatus.lastCommandReply?.delivery == .started
+                && antigravityStatus.lastCommandReply?.inFlightSteering == false
+                && aAfterSend?.phase == .running
+                && aAfterSend?.invocationNum == 2
+                && aAfterSend?.transitionCount == 5
+                && bAfterSend == bBeforeSend
+                && createdAfterSend == createdBeforeSend
+                && lastHostActionReceipt?.actionType == "antigravity_send"
+                && lastHostActionReceipt?.outcome == "started"
+                && lastHostActionReceipt?.textByteLen == nil
+
+            let rowCountBeforeRunningSend = antigravityStatus.rows.count
+            let runningDefaultSteerCmd = antigravityStatus.sendIntent(
+                for: AntigravityStatusFixture.sessionA,
+                projectId: "proj-alpha",
+                message: "In-flight message under official agentapi contract",
+                deliveryMode: .steer,
+                requestId: "req-send-alpha-running-default"
+            )
+            _ = sendAntigravityMessage(runningDefaultSteerCmd)
+            await hostExecutionTask?.value
+            let defaultQueuedConfirmed = antigravityStatus.lastCommandResult == .queued
+                && antigravityStatus.lastCommandReply?.delivery == .nextInvocation
+                && antigravityStatus.lastCommandReply?.inFlightSteering == false
+                && antigravityStatus.lastCommandReply?.reasonCode == "agentapi.steerUnsupportedQueuedNextInvocation"
+                && antigravityStatus.rows.count == rowCountBeforeRunningSend
+                && antigravityStatus.row(for: AntigravityStatusFixture.sessionA)?.transitionCount == 6
+                && lastHostActionReceipt?.actionType == "antigravity_send"
+                && lastHostActionReceipt?.outcome == "queued"
+
+            await fixture.setInFlightSteerEnabled(true)
+            let runningSteerEnabledCmd = antigravityStatus.sendIntent(
+                for: AntigravityStatusFixture.sessionA,
+                projectId: "proj-alpha",
+                message: "In-flight message with steering enabled",
+                deliveryMode: .steer,
+                requestId: "req-send-alpha-running-steered"
+            )
+            _ = sendAntigravityMessage(runningSteerEnabledCmd)
+            await hostExecutionTask?.value
+            await fixture.setInFlightSteerEnabled(false)
+            let explicitSteerConfirmed = antigravityStatus.lastCommandResult == .steered
+                && antigravityStatus.lastCommandReply?.delivery == .steered
+                && antigravityStatus.lastCommandReply?.inFlightSteering == true
+                && antigravityStatus.lastCommandReply?.reasonCode == "agentapi.sendMessageSteered"
+                && antigravityStatus.rows.count == rowCountBeforeRunningSend
+                && antigravityStatus.row(for: AntigravityStatusFixture.sessionA)?.stepIdx == 3
+                && antigravityStatus.row(for: AntigravityStatusFixture.sessionA)?.transitionCount == 7
+                && lastHostActionReceipt?.actionType == "antigravity_send"
+                && lastHostActionReceipt?.outcome == "steered"
+            checks["running_session_send_steering_verified_separately"] = defaultQueuedConfirmed && explicitSteerConfirmed
+
+            await fixture.setUnknownNextCommand(true)
+            let timeoutSendCmd = antigravityStatus.sendIntent(
+                for: AntigravityStatusFixture.sessionA,
+                projectId: "proj-alpha",
+                message: "Message whose response is initially unknown",
+                deliveryMode: .queue,
+                requestId: "req-send-timeout-1"
+            )
+            _ = sendAntigravityMessage(timeoutSendCmd)
+            await hostExecutionTask?.value
+            let cmdCountsAfterTimeout = await fixture.commandCounts()
+            let unknownLatched = antigravityStatus.lastCommandResult == .unknown
+                && antigravityStatus.pendingUnknownCommand?.operation.requestId == "req-send-timeout-1"
+                && lastHostActionReceipt?.actionType == "antigravity_send"
+                && lastHostActionReceipt?.outcome == "unknown"
+            let blockedNewSendWhileUnknown = antigravityStatus.sendIntent(
+                for: AntigravityStatusFixture.sessionA,
+                projectId: "proj-alpha",
+                message: "Must not issue new request while unknown is latched",
+                deliveryMode: .queue,
+                requestId: "req-send-blocked-2"
+            )
+            let queryReconcileCmd = antigravityStatus.queryIntent(requestId: "req-send-timeout-1")
+            _ = queryAntigravityCommand(queryReconcileCmd)
+            await hostExecutionTask?.value
+            let cmdCountsAfterReconcile = await fixture.commandCounts()
+            checks["timeout_unknown_reconciles_without_resend"] = unknownLatched
+                && blockedNewSendWhileUnknown == nil
+                && antigravityStatus.lastCommandResult == .queued
+                && antigravityStatus.lastCommandReply?.reconciled == true
+                && antigravityStatus.lastCommandReply?.duplicate == true
+                && antigravityStatus.pendingUnknownCommand == nil
+                && cmdCountsAfterReconcile.sends == cmdCountsAfterTimeout.sends
+                && cmdCountsAfterReconcile.queries == 1
+                && lastHostActionReceipt?.actionType == "antigravity_query"
+                && lastHostActionReceipt?.outcome == "queued"
+
+            let missingTargetKey = AntigravitySessionKey(
+                conversationId: "conv-does-not-exist",
+                workspacePath: AntigravityStatusFixture.workspaceA
+            )
+            let missingSendCmd = antigravityStatus.sendIntent(
+                for: missingTargetKey,
+                projectId: "proj-alpha",
+                message: "Should not redirect to session A or create a session",
+                deliveryMode: .auto,
+                requestId: "req-send-missing-target"
+            )
+            let aBeforeMissingSend = antigravityStatus.row(for: AntigravityStatusFixture.sessionA)
+            let rowCountBeforeMissingSend = antigravityStatus.rows.count
+            _ = sendAntigravityMessage(missingSendCmd)
+            await hostExecutionTask?.value
+            let missingSendZeroRedirect = antigravityStatus.lastCommandResult == .unconfirmed
+                && antigravityStatus.lastCommandReply?.reasonCode == "guard.targetNotFound"
+                && antigravityStatus.selected == AntigravityStatusFixture.sessionA
+                && antigravityStatus.row(for: AntigravityStatusFixture.sessionA) == aBeforeMissingSend
+                && antigravityStatus.rows.count == rowCountBeforeMissingSend
+
             let staleDeletedSelection = antigravityStatus.selection(for: AntigravityStatusFixture.sessionB)
             await fixture.deleteSession(AntigravityStatusFixture.sessionB)
             if let staleDeletedSelection {
@@ -383,6 +985,8 @@ extension Store {
             checks["deleted_target_no_redirect"] = antigravityStatus.lastResult == .unconfirmed
                 && antigravityStatus.selected == AntigravityStatusFixture.sessionA
                 && lastHostActionReceipt?.outcome == "unconfirmed"
+            checks["missing_or_deleted_target_send_zero_redirect"] = missingSendZeroRedirect
+                && checks["deleted_target_no_redirect"] == true
 
             if let selBeforeMissingSchema = antigravityStatus.selection(for: AntigravityStatusFixture.sessionA) {
                 await fixture.setMode(.missingSchema)
@@ -433,14 +1037,21 @@ extension Store {
         }
 
         let finalCounts = await fixture.counts()
+        let finalCmdCounts = await fixture.commandCounts()
         let payload: [String: Any] = [
-            "status": checks.count == 17 && checks.values.allSatisfy({ $0 }) ? "PASS" : "FAIL",
+            "status": checks.count == 22 && checks.values.allSatisfy({ $0 }) ? "PASS" : "FAIL",
             "installed_version": AntigravityCapabilities.installed2_29_0.installedVersion,
             "language_server_cl": AntigravityCapabilities.installed2_29_0.languageServerCl,
             "transcript_reads": finalCounts.transcriptReads,
             "token_reads": finalCounts.tokenReads,
             "open_requests": finalCounts.openRequests,
             "open_confirmed": finalCounts.openConfirmed,
+            "create_requests": finalCmdCounts.creates,
+            "create_confirmed": finalCmdCounts.createsConfirmed,
+            "send_requests": finalCmdCounts.sends,
+            "send_confirmed": finalCmdCounts.sendsConfirmed,
+            "query_requests": finalCmdCounts.queries,
+            "duplicate_commands_dropped": finalCmdCounts.duplicates,
             "checks": checks,
             "native_app": "NOT_RUN",
             "physical_key": "NOT_RUN",
@@ -450,6 +1061,7 @@ extension Store {
             let dir = URL(fileURLWithPath: audit).deletingLastPathComponent()
             try? data.write(to: dir.appendingPathComponent("antigravity-status.json"))
             try? data.write(to: dir.appendingPathComponent("antigravity-navigation.json"))
+            try? data.write(to: dir.appendingPathComponent("antigravity-agentapi.json"))
         }
     }
 }

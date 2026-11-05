@@ -59,6 +59,23 @@ struct AntigravityGrant: Codable, Equatable, Sendable {
     }
 }
 
+private enum AntigravityWireIntent: Encodable {
+    case create(AntigravityCreateIntent)
+    case send(AntigravitySendIntent)
+    case query(AntigravityQueryIntent)
+
+    func encode(to encoder: Encoder) throws {
+        switch self {
+        case .create(let value):
+            try value.encode(to: encoder)
+        case .send(let value):
+            try value.encode(to: encoder)
+        case .query(let value):
+            try value.encode(to: encoder)
+        }
+    }
+}
+
 private struct AntigravityRequest: Encodable {
     let version = 1
     let subscriptionId: String
@@ -71,6 +88,7 @@ private struct AntigravityRequest: Encodable {
     let after: UInt64?
     let schemaVersion: String?
     let target: AntigravitySessionKey?
+    let intent: AntigravityWireIntent?
 }
 
 private struct AntigravityReply: Decodable {
@@ -87,20 +105,36 @@ private struct AntigravityReply: Decodable {
     let selected: AntigravitySessionKey?
     let transcriptReads: UInt64?
     let tokenReads: UInt64?
+    let commandOp: String?
+    let requestId: String?
+    let conversationId: String?
+    let workspacePath: String?
+    let projectId: String?
+    let delivery: AntigravityDeliveryOutcome?
+    let inFlightSteering: Bool?
+    let reasonCode: String?
+    let duplicate: Bool?
+    let reconciled: Bool?
 }
 
 actor AntigravityStatusClient: AntigravityStatusServing {
     private static let catalogNavSchemaVersion = "antigravity-catalog-nav-v1"
+    private static let agentapiCommandSchemaVersion = "antigravity-agentapi-v1"
     private let grantURL: URL
+    private let commandTimeout: Duration
     private var grant: AntigravityGrant?
     private var epoch: UInt64 = 0
     private var cursor: UInt64?
     private var subscriptionId: String?
     private var readingEpoch: UInt64?
 
-    init(grantURL: URL = FileManager.default.homeDirectoryForCurrentUser
-         .appendingPathComponent("Library/Application Support/MicroInput/antigravity-grant.json")) {
+    init(
+        grantURL: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/MicroInput/antigravity-grant.json"),
+        commandTimeout: Duration = .seconds(2)
+    ) {
         self.grantURL = grantURL
+        self.commandTimeout = commandTimeout
     }
 
     func connect() async throws -> AntigravityStatusSnapshot {
@@ -134,7 +168,8 @@ actor AntigravityStatusClient: AntigravityStatusServing {
             activate: nil,
             after: nil,
             schemaVersion: nil,
-            target: nil
+            target: nil,
+            intent: nil
         )
         guard let data = try? JSONEncoder().encode(request) else { return }
         _ = try? await UnixNativeOwnershipTransport(
@@ -208,6 +243,145 @@ actor AntigravityStatusClient: AntigravityStatusServing {
         throw failure(response.status)
     }
 
+    func create(_ intent: AntigravityCreateIntent) async throws -> AntigravityCommandReply {
+        guard intent.valid else { throw AntigravityFailure.denied }
+        let current = try currentGrant()
+        guard current.capabilities.supportsCreateConversation,
+              current.allowedWorkspaces.contains(intent.workspacePath) else {
+            throw AntigravityFailure.denied
+        }
+        let expected = epoch
+        let response = try await exchange(
+            op: "create",
+            schemaVersion: Self.agentapiCommandSchemaVersion,
+            intent: .create(intent),
+            grant: current,
+            expected: expected
+        )
+        let reply = try commandReply(response, grant: current, expectedRequestId: intent.requestId)
+        cursor = reply.cursor
+        return reply
+    }
+
+    func send(_ intent: AntigravitySendIntent) async throws -> AntigravityCommandReply {
+        guard intent.valid else { throw AntigravityFailure.denied }
+        let current = try currentGrant()
+        guard current.capabilities.supportsSendMessage,
+              current.allowedWorkspaces.contains(intent.target.workspacePath) else {
+            throw AntigravityFailure.denied
+        }
+        let expected = epoch
+        let response = try await exchange(
+            op: "send",
+            schemaVersion: Self.agentapiCommandSchemaVersion,
+            intent: .send(intent),
+            grant: current,
+            expected: expected
+        )
+        let reply = try commandReply(response, grant: current, expectedRequestId: intent.requestId)
+        cursor = reply.cursor
+        return reply
+    }
+
+    func query(_ intent: AntigravityQueryIntent) async throws -> AntigravityCommandReply {
+        guard intent.valid else { throw AntigravityFailure.denied }
+        let current = try currentGrant()
+        guard current.capabilities.schemaVerified else {
+            throw AntigravityFailure.denied
+        }
+        if let workspacePath = intent.workspacePath, !workspacePath.isEmpty {
+            guard current.allowedWorkspaces.contains(workspacePath) else {
+                throw AntigravityFailure.denied
+            }
+        }
+        let expected = epoch
+        let response = try await exchange(
+            op: "query",
+            schemaVersion: Self.agentapiCommandSchemaVersion,
+            intent: .query(intent),
+            grant: current,
+            expected: expected
+        )
+        let reply = try commandReply(response, grant: current, expectedRequestId: intent.requestId)
+        cursor = reply.cursor
+        return reply
+    }
+
+    private func commandReply(
+        _ response: AntigravityReply,
+        grant: AntigravityGrant,
+        expectedRequestId: String
+    ) throws -> AntigravityCommandReply {
+        let allowedCommandStatuses: Set<String> = [
+            "created", "started", "queued", "steered", "unconfirmed", "unknown"
+        ]
+        guard allowedCommandStatuses.contains(response.status) else {
+            throw failure(response.status)
+        }
+        let transcriptReads = response.transcriptReads ?? 0
+        let tokenReads = response.tokenReads ?? 0
+        guard transcriptReads == 0,
+              tokenReads == 0,
+              let commandOp = response.commandOp,
+              ["create", "send", "query"].contains(commandOp),
+              let requestId = response.requestId,
+              requestId == expectedRequestId,
+              let conversationId = response.conversationId,
+              conversationId.utf8.count <= 256,
+              let workspacePath = response.workspacePath,
+              workspacePath.utf8.count <= 4096,
+              workspacePath.isEmpty || grant.allowedWorkspaces.contains(workspacePath),
+              let projectId = response.projectId,
+              projectId.utf8.count <= 256,
+              let delivery = response.delivery,
+              let inFlightSteering = response.inFlightSteering,
+              let reasonCode = response.reasonCode,
+              AntigravityStatusSnapshot.validID(reasonCode, limit: 256),
+              let duplicate = response.duplicate,
+              let reconciled = response.reconciled,
+              let replyCursor = response.cursor,
+              let rows = response.rows else {
+            throw AntigravityFailure.invalidReply
+        }
+        let workspaceScope = Set(grant.allowedWorkspaces)
+        let rowKeys = Set(rows.map(\.key))
+        guard rows.count == rowKeys.count,
+              rows.allSatisfy({ $0.valid && workspaceScope.contains($0.workspacePath) }),
+              response.selected == nil || rowKeys.contains(response.selected!) else {
+            throw AntigravityFailure.invalidReply
+        }
+        if response.status == "created" {
+            let createdKey = AntigravitySessionKey(conversationId: conversationId, workspacePath: workspacePath)
+            guard !conversationId.isEmpty,
+                  !workspacePath.isEmpty,
+                  !projectId.isEmpty,
+                  rowKeys.contains(createdKey),
+                  response.selected == createdKey else {
+                throw AntigravityFailure.invalidReply
+            }
+        }
+        return AntigravityCommandReply(
+            instanceId: grant.instanceId,
+            generation: grant.generation,
+            status: response.status,
+            commandOp: commandOp,
+            requestId: requestId,
+            conversationId: conversationId,
+            workspacePath: workspacePath,
+            projectId: projectId,
+            delivery: delivery,
+            inFlightSteering: inFlightSteering,
+            reasonCode: reasonCode,
+            duplicate: duplicate,
+            reconciled: reconciled,
+            cursor: replyCursor,
+            rows: rows,
+            selected: response.selected,
+            transcriptReads: transcriptReads,
+            tokenReads: tokenReads
+        )
+    }
+
     private func snapshot(_ response: AntigravityReply, grant: AntigravityGrant, after: UInt64?) throws -> AntigravityStatusSnapshot {
         guard response.status == "ok",
               let capabilities = response.capabilities,
@@ -249,7 +423,9 @@ actor AntigravityStatusClient: AntigravityStatusServing {
     private static let allowedTopKeys: Set<String> = [
         "version", "subscriptionId", "id", "instanceId", "generation",
         "status", "capabilities", "cursor", "rows", "changes", "selected",
-        "transcriptReads", "tokenReads"
+        "transcriptReads", "tokenReads", "commandOp", "requestId",
+        "conversationId", "workspacePath", "projectId", "delivery",
+        "inFlightSteering", "reasonCode", "duplicate", "reconciled"
     ]
     private static let requiredRowKeys: Set<String> = [
         "conversationId", "workspacePath", "modelName", "phase",
@@ -276,6 +452,7 @@ actor AntigravityStatusClient: AntigravityStatusServing {
         after: UInt64? = nil,
         schemaVersion: String? = nil,
         target: AntigravitySessionKey? = nil,
+        intent: AntigravityWireIntent? = nil,
         grant: AntigravityGrant,
         expected: UInt64
     ) async throws -> AntigravityReply {
@@ -292,14 +469,26 @@ actor AntigravityStatusClient: AntigravityStatusServing {
             activate: op == "subscribe" ? false : nil,
             after: after,
             schemaVersion: schemaVersion,
-            target: target
+            target: target,
+            intent: intent
         )
-        let data = try await UnixNativeOwnershipTransport(
-            path: grant.socketPath,
-            requestLimit: 65536,
-            responseLimit: 1_048_576,
-            timeout: .seconds(2)
-        ).exchangeJSON(JSONEncoder().encode(request))
+        let isCommandOp = ["create", "send", "query"].contains(op)
+        let timeout = isCommandOp ? commandTimeout : .seconds(2)
+        let startedAt = ContinuousClock.now
+        let data: Data
+        do {
+            data = try await UnixNativeOwnershipTransport(
+                path: grant.socketPath,
+                requestLimit: 65536,
+                responseLimit: 1_048_576,
+                timeout: timeout
+            ).exchangeJSON(JSONEncoder().encode(request))
+        } catch {
+            if isCommandOp, ContinuousClock.now - startedAt >= timeout {
+                throw AntigravityFailure.transportTimeout
+            }
+            throw error
+        }
         guard expected == epoch, self.grant == grant, subscriptionId == subscription, !Task.isCancelled,
               try currentGrant() == grant else {
             throw AntigravityFailure.stale
@@ -333,6 +522,16 @@ actor AntigravityStatusClient: AntigravityStatusServing {
         guard response.instanceId == grant.instanceId,
               response.generation == grant.generation else {
             throw AntigravityFailure.stale
+        }
+        if isCommandOp {
+            let allowedCommandStatuses: Set<String> = [
+                "created", "started", "queued", "steered", "unconfirmed",
+                "unknown", "denied", "stale", "unavailable"
+            ]
+            guard allowedCommandStatuses.contains(response.status) else {
+                throw AntigravityFailure.invalidReply
+            }
+            return response
         }
         let allowedStatuses = op == "open"
             ? ["ok", "unconfirmed", "denied", "stale", "unavailable"]

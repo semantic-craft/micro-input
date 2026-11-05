@@ -96,6 +96,14 @@ struct AntigravityCapabilities: Codable, Equatable, Sendable {
     var supportsCatalogNavigation: Bool {
         valid && schemaVerified && supportsSessionCatalog && supportsTargetFocus
     }
+
+    var supportsCreateConversation: Bool {
+        valid && schemaVerified && agentapiCommands.contains("new-conversation")
+    }
+
+    var supportsSendMessage: Bool {
+        valid && schemaVerified && agentapiCommands.contains("send-message")
+    }
 }
 
 struct AntigravitySessionKey: Codable, Hashable, Comparable, Sendable {
@@ -530,8 +538,235 @@ enum AntigravityOpenResult: String, Equatable, Sendable {
     }
 }
 
+enum AntigravityDeliveryMode: String, Codable, Equatable, Sendable {
+    case auto
+    case steer
+    case queue
+}
+
+enum AntigravityDeliveryOutcome: String, Codable, Equatable, Sendable {
+    case started
+    case nextInvocation
+    case steered
+    case none
+}
+
+struct AntigravityCreateIntent: Codable, Equatable, Sendable {
+    let requestId: String
+    let workspacePath: String
+    let projectId: String
+    let prompt: String
+    let title: String?
+    let modelName: String?
+    let conversationId: String?
+
+    init(
+        requestId: String = UUID().uuidString,
+        workspacePath: String,
+        projectId: String,
+        prompt: String,
+        title: String? = nil,
+        modelName: String? = nil,
+        conversationId: String? = nil
+    ) {
+        self.requestId = requestId
+        self.workspacePath = workspacePath
+        self.projectId = projectId
+        self.prompt = prompt
+        self.title = title
+        self.modelName = modelName
+        self.conversationId = conversationId
+    }
+
+    var valid: Bool {
+        AntigravityStatusSnapshot.validID(requestId, limit: 256)
+            && AntigravityStatusSnapshot.validID(workspacePath, limit: 4096)
+            && AntigravityStatusSnapshot.validID(projectId, limit: 256)
+            && AntigravityStatusSnapshot.validID(prompt, limit: 32768)
+            && (title == nil || AntigravityStatusSnapshot.validID(title!, limit: 512))
+            && (modelName == nil || AntigravityStatusSnapshot.validID(modelName!, limit: 256))
+            && (conversationId == nil || AntigravityStatusSnapshot.validID(conversationId!, limit: 256))
+    }
+}
+
+struct AntigravitySendIntent: Codable, Equatable, Sendable {
+    let requestId: String
+    let target: AntigravitySessionKey
+    let projectId: String?
+    let message: String
+    let deliveryMode: AntigravityDeliveryMode
+
+    init(
+        requestId: String = UUID().uuidString,
+        target: AntigravitySessionKey,
+        projectId: String? = nil,
+        message: String,
+        deliveryMode: AntigravityDeliveryMode = .auto
+    ) {
+        self.requestId = requestId
+        self.target = target
+        self.projectId = projectId
+        self.message = message
+        self.deliveryMode = deliveryMode
+    }
+
+    var valid: Bool {
+        AntigravityStatusSnapshot.validID(requestId, limit: 256)
+            && AntigravityStatusSnapshot.validID(target.conversationId, limit: 256)
+            && AntigravityStatusSnapshot.validID(target.workspacePath, limit: 4096)
+            && (projectId == nil || AntigravityStatusSnapshot.validID(projectId!, limit: 256))
+            && AntigravityStatusSnapshot.validID(message, limit: 32768)
+    }
+}
+
+struct AntigravityQueryIntent: Codable, Equatable, Sendable {
+    let requestId: String
+    let expectedOp: String?
+    let conversationId: String?
+    let workspacePath: String?
+    let projectId: String?
+
+    init(
+        requestId: String,
+        expectedOp: String? = nil,
+        conversationId: String? = nil,
+        workspacePath: String? = nil,
+        projectId: String? = nil
+    ) {
+        self.requestId = requestId
+        self.expectedOp = expectedOp
+        self.conversationId = conversationId
+        self.workspacePath = workspacePath
+        self.projectId = projectId
+    }
+
+    var valid: Bool {
+        AntigravityStatusSnapshot.validID(requestId, limit: 256)
+            && (expectedOp == nil || AntigravityStatusSnapshot.validID(expectedOp!, limit: 32))
+            && (conversationId == nil || AntigravityStatusSnapshot.validID(conversationId!, limit: 256))
+            && (workspacePath == nil || AntigravityStatusSnapshot.validID(workspacePath!, limit: 4096))
+            && (projectId == nil || projectId!.utf8.count <= 256)
+    }
+}
+
+enum AntigravityCommandOperation: Equatable, Sendable {
+    case create(AntigravityCreateIntent)
+    case send(AntigravitySendIntent)
+    case query(AntigravityQueryIntent)
+
+    var requestId: String {
+        switch self {
+        case .create(let intent): return intent.requestId
+        case .send(let intent): return intent.requestId
+        case .query(let intent): return intent.requestId
+        }
+    }
+
+    var opName: String {
+        switch self {
+        case .create: return "create"
+        case .send: return "send"
+        case .query: return "query"
+        }
+    }
+}
+
+struct AntigravityQueuedCommand: Equatable, Sendable {
+    let operation: AntigravityCommandOperation
+    let instanceId: String
+    let generation: UInt64
+    let localEpoch: UInt64
+}
+
+struct AntigravityCommandReply: Equatable, Sendable {
+    let instanceId: String
+    let generation: UInt64
+    let status: String
+    let commandOp: String
+    let requestId: String
+    let conversationId: String
+    let workspacePath: String
+    let projectId: String
+    let delivery: AntigravityDeliveryOutcome
+    let inFlightSteering: Bool
+    let reasonCode: String
+    let duplicate: Bool
+    let reconciled: Bool
+    let cursor: UInt64
+    let rows: [AntigravitySessionRow]
+    let selected: AntigravitySessionKey?
+    let transcriptReads: UInt64
+    let tokenReads: UInt64
+
+    init(
+        instanceId: String,
+        generation: UInt64,
+        status: String,
+        commandOp: String,
+        requestId: String,
+        conversationId: String,
+        workspacePath: String,
+        projectId: String,
+        delivery: AntigravityDeliveryOutcome,
+        inFlightSteering: Bool = false,
+        reasonCode: String,
+        duplicate: Bool = false,
+        reconciled: Bool = false,
+        cursor: UInt64,
+        rows: [AntigravitySessionRow],
+        selected: AntigravitySessionKey?,
+        transcriptReads: UInt64 = 0,
+        tokenReads: UInt64 = 0
+    ) {
+        self.instanceId = instanceId
+        self.generation = generation
+        self.status = status
+        self.commandOp = commandOp
+        self.requestId = requestId
+        self.conversationId = conversationId
+        self.workspacePath = workspacePath
+        self.projectId = projectId
+        self.delivery = delivery
+        self.inFlightSteering = inFlightSteering
+        self.reasonCode = reasonCode
+        self.duplicate = duplicate
+        self.reconciled = reconciled
+        self.cursor = cursor
+        self.rows = rows
+        self.selected = selected
+        self.transcriptReads = transcriptReads
+        self.tokenReads = tokenReads
+    }
+}
+
+enum AntigravityCommandResult: String, Equatable, Sendable {
+    case created
+    case started
+    case queued
+    case steered
+    case unconfirmed
+    case unknown
+    case stale
+    case denied
+    case unavailable
+
+    var label: String {
+        switch self {
+        case .created: return "已通过 agentapi 创建并确认 Antigravity 会话"
+        case .started: return "已向 Antigravity 会话发送消息并开始执行"
+        case .queued: return "Antigravity 会话运行中，消息已排入下一轮调用（nextInvocation）"
+        case .steered: return "已向运行中的 Antigravity 会话注入 steering 消息"
+        case .unconfirmed: return "Antigravity 命令未确认或被安全守卫拦截"
+        case .unknown: return "Antigravity 命令响应超时，已锁定 requestId 待查询对账"
+        case .stale: return "Antigravity 会话快照已过期，未发送命令"
+        case .denied: return "Antigravity 拒绝此命令或缺少合法 Schema/鉴权"
+        case .unavailable: return "Antigravity 状态桥不可达，无法执行命令"
+        }
+    }
+}
+
 enum AntigravityFailure: Error, Equatable, Sendable {
-    case grant, denied, stale, unavailable, invalidReply, gap
+    case grant, denied, stale, unavailable, invalidReply, gap, transportTimeout
 
     var label: String {
         switch self {
@@ -541,6 +776,7 @@ enum AntigravityFailure: Error, Equatable, Sendable {
         case .unavailable: return "Antigravity 状态桥连接中断"
         case .invalidReply: return "Antigravity 状态回执无法核对"
         case .gap: return "Antigravity 事件日志存在缺口，请重连"
+        case .transportTimeout: return "Antigravity 命令传输超时"
         }
     }
 }
@@ -562,11 +798,26 @@ protocol AntigravityStatusServing: Sendable {
     func connect() async throws -> AntigravityStatusSnapshot
     func read() async throws -> AntigravityStatusSnapshot
     func open(_ target: AntigravitySessionKey) async throws -> AntigravityOpenReply
+    func create(_ intent: AntigravityCreateIntent) async throws -> AntigravityCommandReply
+    func send(_ intent: AntigravitySendIntent) async throws -> AntigravityCommandReply
+    func query(_ intent: AntigravityQueryIntent) async throws -> AntigravityCommandReply
     func close() async
 }
 
 extension AntigravityStatusServing {
     func open(_ target: AntigravitySessionKey) async throws -> AntigravityOpenReply {
+        throw AntigravityFailure.denied
+    }
+
+    func create(_ intent: AntigravityCreateIntent) async throws -> AntigravityCommandReply {
+        throw AntigravityFailure.denied
+    }
+
+    func send(_ intent: AntigravitySendIntent) async throws -> AntigravityCommandReply {
+        throw AntigravityFailure.denied
+    }
+
+    func query(_ intent: AntigravityQueryIntent) async throws -> AntigravityCommandReply {
         throw AntigravityFailure.denied
     }
 }

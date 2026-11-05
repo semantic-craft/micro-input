@@ -101,10 +101,11 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Depends on**: H。责任票 #32。
 - **Evidence**: .scratch/qa-runs/1793867145490-44990/evidence/result.json
 
-### [ ] Slice K3: 用 Antigravity agentapi 创建和发送
+### [x] Slice K3: 用 Antigravity agentapi 创建和发送
 - **Outcome**: 创建绑定 projectId，发送绑定 conversationId，取得结果确认。
 - **Done Predicate**: 两个测试会话只改目标；不存在目标零重定向；超时不重发；运行中消息是否 steering 单独验证。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: I、I2。责任票 #83。
+- **Evidence**: .scratch/qa-runs/1793871576128-81269/evidence/result.json
 
 ### [ ] Slice L1: 接 ZCode 请求审批与思考档位
 - **Outcome**: 按 interactionId/type 处理批准拒绝、问题和计划，复用 switchModelConfig。

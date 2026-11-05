@@ -575,4 +575,245 @@ final class AntigravityStatusTests: XCTestCase {
             XCTAssertEqual(error as? AntigravityFailure, .invalidReply)
         }
     }
+
+    func testCreateBindsProjectIdAndSendBindsConversationIdOnlyModifyingTargetAndZeroRedirectOnMissing() async throws {
+        let fixture = AntigravityStatusFixture()
+        let controller = AntigravityStatusController(client: fixture, pollNanoseconds: 60_000_000_000)
+
+        try await fixture.ingest(AntigravityHookEvent(
+            conversationId: AntigravityStatusFixture.sessionA.conversationId,
+            workspacePath: AntigravityStatusFixture.sessionA.workspacePath,
+            eventType: .sessionStart,
+            modelName: "gemini-2.5-pro",
+            invocationNum: 0,
+            stepIdx: 0,
+            executionNum: 0,
+            toolName: nil,
+            terminationReason: nil,
+            hasError: false,
+            fullyIdle: true,
+            eventId: nil,
+            title: "Alpha Session",
+            projectId: "proj-alpha"
+        ))
+        try await fixture.ingest(AntigravityHookEvent(
+            conversationId: AntigravityStatusFixture.sessionB.conversationId,
+            workspacePath: AntigravityStatusFixture.sessionB.workspacePath,
+            eventType: .sessionStart,
+            modelName: "gemini-2.5-flash",
+            invocationNum: 0,
+            stepIdx: 0,
+            executionNum: 0,
+            toolName: nil,
+            terminationReason: nil,
+            hasError: false,
+            fullyIdle: true,
+            eventId: nil,
+            title: "Beta Session",
+            projectId: "proj-beta"
+        ))
+
+        controller.setEnabled(true)
+        for _ in 0..<200 {
+            if controller.state == .ready { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(controller.state, .ready)
+
+        // Mismatched projectId on workspaceA must be rejected as .unconfirmed without creating a session
+        let wrongCreate = try XCTUnwrap(controller.createIntent(
+            workspacePath: AntigravityStatusFixture.workspaceA,
+            projectId: "proj-beta",
+            prompt: "Wrong project binding",
+            title: "Should Fail",
+            conversationId: "conv-wrong-proj",
+            requestId: "req-wrong-proj"
+        ))
+        let wrongCreateRes = await controller.execute(wrongCreate, admitted: { true })
+        XCTAssertEqual(wrongCreateRes, .unconfirmed)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "guard.projectIdMismatch")
+        XCTAssertEqual(controller.rows.count, 2)
+
+        // Valid create bound to proj-alpha creates and selects the new conversation
+        let createdKey = AntigravitySessionKey(
+            conversationId: "conv-alpha-2",
+            workspacePath: AntigravityStatusFixture.workspaceA
+        )
+        let createCmd = try XCTUnwrap(controller.createIntent(
+            workspacePath: AntigravityStatusFixture.workspaceA,
+            projectId: "proj-alpha",
+            prompt: "Create conversation bound to proj-alpha",
+            title: "Alpha Created",
+            modelName: "gemini-2.5-flash",
+            conversationId: createdKey.conversationId,
+            requestId: "req-create-alpha-2"
+        ))
+        let createRes = await controller.execute(createCmd, admitted: { true })
+        XCTAssertEqual(createRes, .created)
+        XCTAssertEqual(controller.selected, createdKey)
+        XCTAssertEqual(controller.row(for: createdKey)?.projectId, "proj-alpha")
+        XCTAssertEqual(controller.row(for: createdKey)?.phase, .running)
+        XCTAssertEqual(controller.rows.count, 3)
+
+        // Select session A and verify sending to unselected session B returns .unconfirmed and touches neither A nor B
+        _ = await controller.open(try XCTUnwrap(controller.selection(for: AntigravityStatusFixture.sessionA)), admitted: { true })
+        XCTAssertEqual(controller.selected, AntigravityStatusFixture.sessionA)
+        let beforeA = try XCTUnwrap(controller.row(for: AntigravityStatusFixture.sessionA))
+        let beforeB = try XCTUnwrap(controller.row(for: AntigravityStatusFixture.sessionB))
+
+        let sendUnselectedB = try XCTUnwrap(controller.sendIntent(
+            for: AntigravityStatusFixture.sessionB,
+            projectId: "proj-beta",
+            message: "Must not modify B when A is selected",
+            deliveryMode: .auto,
+            requestId: "req-send-unselected-b"
+        ))
+        let unselectedRes = await controller.execute(sendUnselectedB, admitted: { true })
+        XCTAssertEqual(unselectedRes, .unconfirmed)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "guard.selectionMismatch")
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA), beforeA)
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionB), beforeB)
+
+        // Sending to selected session A modifies only session A; session B and createdKey remain untouched
+        let beforeCreated = try XCTUnwrap(controller.row(for: createdKey))
+        let sendSelectedA = try XCTUnwrap(controller.sendIntent(
+            for: AntigravityStatusFixture.sessionA,
+            projectId: "proj-alpha",
+            message: "Start session A",
+            deliveryMode: .auto,
+            requestId: "req-send-selected-a"
+        ))
+        let sendARes = await controller.execute(sendSelectedA, admitted: { true })
+        XCTAssertEqual(sendARes, .started)
+        XCTAssertEqual(controller.lastCommandReply?.delivery, .started)
+        XCTAssertEqual(controller.lastCommandReply?.inFlightSteering, false)
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.phase, .running)
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.invocationNum, 1)
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.transitionCount, 2)
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionB), beforeB)
+        XCTAssertEqual(controller.row(for: createdKey), beforeCreated)
+
+        // Sending to non-existent target returns .unconfirmed with zero redirect and zero new session
+        let afterASend = try XCTUnwrap(controller.row(for: AntigravityStatusFixture.sessionA))
+        let missingKey = AntigravitySessionKey(
+            conversationId: "conv-nonexistent",
+            workspacePath: AntigravityStatusFixture.workspaceA
+        )
+        let sendMissing = try XCTUnwrap(controller.sendIntent(
+            for: missingKey,
+            projectId: "proj-alpha",
+            message: "Missing target must not redirect",
+            deliveryMode: .auto,
+            requestId: "req-send-missing"
+        ))
+        let missingRes = await controller.execute(sendMissing, admitted: { true })
+        XCTAssertEqual(missingRes, .unconfirmed)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "guard.targetNotFound")
+        XCTAssertEqual(controller.selected, AntigravityStatusFixture.sessionA)
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA), afterASend)
+        XCTAssertEqual(controller.rows.count, 3)
+
+        await controller.shutdown()
+    }
+
+    func testRunningSessionSteeringVsNextInvocationQueueingAndTimeoutReconcileWithoutResend() async throws {
+        let fixture = AntigravityStatusFixture()
+        let controller = AntigravityStatusController(client: fixture, pollNanoseconds: 60_000_000_000)
+
+        try await fixture.ingest(AntigravityHookEvent(
+            conversationId: AntigravityStatusFixture.sessionA.conversationId,
+            workspacePath: AntigravityStatusFixture.sessionA.workspacePath,
+            eventType: .preInvocation,
+            modelName: "gemini-2.5-pro",
+            invocationNum: 1,
+            stepIdx: 1,
+            executionNum: 1,
+            toolName: nil,
+            terminationReason: nil,
+            hasError: false,
+            fullyIdle: false,
+            eventId: nil,
+            title: "Running Session A",
+            projectId: "proj-alpha"
+        ))
+
+        controller.setEnabled(true)
+        for _ in 0..<200 {
+            if controller.state == .ready { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        _ = await controller.open(try XCTUnwrap(controller.selection(for: AntigravityStatusFixture.sessionA)), admitted: { true })
+        XCTAssertEqual(controller.selected, AntigravityStatusFixture.sessionA)
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.phase, .running)
+
+        // 1. Default official agentapi send-message on a running session queues for nextInvocation (no CLI --steer flag)
+        let steerAttemptDefault = try XCTUnwrap(controller.sendIntent(
+            for: AntigravityStatusFixture.sessionA,
+            projectId: "proj-alpha",
+            message: "Follow-up while running",
+            deliveryMode: .steer,
+            requestId: "req-running-default-1"
+        ))
+        let resDefault = await controller.execute(steerAttemptDefault, admitted: { true })
+        XCTAssertEqual(resDefault, .queued)
+        XCTAssertEqual(controller.lastCommandReply?.delivery, .nextInvocation)
+        XCTAssertEqual(controller.lastCommandReply?.inFlightSteering, false)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "agentapi.steerUnsupportedQueuedNextInvocation")
+        XCTAssertEqual(controller.rows.count, 1)
+
+        // 2. When in-flight steering is enabled on the bridge, deliveryMode == .steer is confirmed as .steered
+        await fixture.setInFlightSteerEnabled(true)
+        let steerEnabledCmd = try XCTUnwrap(controller.sendIntent(
+            for: AntigravityStatusFixture.sessionA,
+            projectId: "proj-alpha",
+            message: "Steer active step",
+            deliveryMode: .steer,
+            requestId: "req-running-steered-2"
+        ))
+        let resSteered = await controller.execute(steerEnabledCmd, admitted: { true })
+        XCTAssertEqual(resSteered, .steered)
+        XCTAssertEqual(controller.lastCommandReply?.delivery, .steered)
+        XCTAssertEqual(controller.lastCommandReply?.inFlightSteering, true)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "agentapi.sendMessageSteered")
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.stepIdx, 2)
+        await fixture.setInFlightSteerEnabled(false)
+
+        // 3. Timeout / unknown outcome latches requestId, blocks new requests, and reconciles via query without resending
+        await fixture.setUnknownNextCommand(true)
+        let timeoutCmd = try XCTUnwrap(controller.sendIntent(
+            for: AntigravityStatusFixture.sessionA,
+            projectId: "proj-alpha",
+            message: "Timed out send",
+            deliveryMode: .queue,
+            requestId: "req-timeout-3"
+        ))
+        let resUnknown = await controller.execute(timeoutCmd, admitted: { true })
+        XCTAssertEqual(resUnknown, .unknown)
+        XCTAssertEqual(controller.pendingUnknownCommand?.operation.requestId, "req-timeout-3")
+        let countsAfterTimeout = await fixture.commandCounts()
+        XCTAssertEqual(countsAfterTimeout.sends, 3)
+
+        // New send with different requestId is blocked while unknown is latched
+        XCTAssertNil(controller.sendIntent(
+            for: AntigravityStatusFixture.sessionA,
+            projectId: "proj-alpha",
+            message: "Must be blocked",
+            deliveryMode: .queue,
+            requestId: "req-blocked-4"
+        ))
+        XCTAssertEqual(controller.lastCommandResult, .unknown)
+
+        // Reconciling via query uses the same requestId without incrementing sends
+        let queryCmd = try XCTUnwrap(controller.queryIntent(requestId: "req-timeout-3"))
+        let resReconciled = await controller.execute(queryCmd, admitted: { true })
+        XCTAssertEqual(resReconciled, .queued)
+        XCTAssertEqual(controller.lastCommandReply?.reconciled, true)
+        XCTAssertEqual(controller.lastCommandReply?.duplicate, true)
+        XCTAssertNil(controller.pendingUnknownCommand)
+        let countsAfterReconcile = await fixture.commandCounts()
+        XCTAssertEqual(countsAfterReconcile.sends, 3)
+        XCTAssertEqual(countsAfterReconcile.queries, 1)
+
+        await controller.shutdown()
+    }
 }

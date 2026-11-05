@@ -208,6 +208,11 @@ def verify_evidence(run, scenario, started, process_alive):
             "duplicate_events_deduplicated",
             "stop_fully_idle_false_not_completed",
             "stop_fully_idle_true_completed",
+            "create_binds_project_id_and_confirms_selected",
+            "two_sessions_send_only_modifies_target",
+            "running_session_send_steering_verified_separately",
+            "missing_or_deleted_target_send_zero_redirect",
+            "timeout_unknown_reconciles_without_resend",
             "deleted_target_no_redirect",
             "missing_schema_or_auth_fails_closed",
             "stream_disconnect_marks_stale",
@@ -228,21 +233,38 @@ def verify_evidence(run, scenario, started, process_alive):
             or status_doc.get("native_app") != "NOT_RUN"
             or status_doc.get("physical_key") != "NOT_RUN"
         ):
-            raise ValueError("Antigravity status/navigation evidence incomplete or overclaimed")
+            raise ValueError("Antigravity status/navigation/agentapi evidence incomplete or overclaimed")
         rows = [json.loads(line) for line in (evidence / "audit.jsonl").read_text().splitlines()]
         confirmed = [row for row in rows if row["action_type"] == "antigravity_open" and row["outcome"] == "confirmed"]
         unconfirmed = [row for row in rows if row["action_type"] == "antigravity_open" and row["outcome"] == "unconfirmed"]
         denied = [row for row in rows if row["action_type"] == "antigravity_open" and row["outcome"] == "denied"]
+        created_ok = [row for row in rows if row["action_type"] == "antigravity_create" and row["outcome"] == "created"]
+        created_unconfirmed = [row for row in rows if row["action_type"] == "antigravity_create" and row["outcome"] == "unconfirmed"]
+        send_started = [row for row in rows if row["action_type"] == "antigravity_send" and row["outcome"] == "started"]
+        send_queued = [row for row in rows if row["action_type"] == "antigravity_send" and row["outcome"] == "queued"]
+        send_steered = [row for row in rows if row["action_type"] == "antigravity_send" and row["outcome"] == "steered"]
+        send_unconfirmed = [row for row in rows if row["action_type"] == "antigravity_send" and row["outcome"] == "unconfirmed"]
+        send_unknown = [row for row in rows if row["action_type"] == "antigravity_send" and row["outcome"] == "unknown"]
+        query_reconciled = [row for row in rows if row["action_type"] == "antigravity_query" and row["outcome"] == "queued"]
         if (
             len(confirmed) < 2
             or len(unconfirmed) != 2
             or len(denied) != 1
-            or any(row.get("target") != "antigravity" for row in rows)
+            or len(created_ok) != 1
+            or len(created_unconfirmed) != 1
+            or len(send_started) != 1
+            or len(send_queued) != 1
+            or len(send_steered) != 1
+            or len(send_unconfirmed) != 2
+            or len(send_unknown) != 1
+            or len(query_reconciled) != 1
+            or any(row.get("target") != "antigravity" or row.get("text_byte_len") is not None for row in rows)
         ):
-            raise ValueError("Antigravity exact navigation receipts missing or unexpected")
+            raise ValueError("Antigravity exact navigation/agentapi receipts missing or unexpected")
         result.update(
             antigravity_status="SYNTHETIC_PASS",
             antigravity_navigation="SYNTHETIC_PASS",
+            antigravity_agentapi="SYNTHETIC_PASS",
             installed_version="2.29.0",
             language_server_cl="1013060670",
             transcript_reads=0,
