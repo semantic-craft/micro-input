@@ -6,12 +6,23 @@ import MicroInputCore
 
 private let zcodeA = ZCodeTaskAddress(workspacePath: "/workspace/a", workspaceIdentity: "a", taskId: "same-id")
 private let zcodeB = ZCodeTaskAddress(workspacePath: "/workspace/b", workspaceIdentity: "b", taskId: "same-id")
+private let defaultZCodeTestModelConfig = ZCodeModelConfig(
+    provider: "glm",
+    model: "glm-5.1",
+    thought: "medium",
+    supportedThoughts: ["off", "low", "medium", "high"],
+    availableModels: [
+        ZCodeModelOption(provider: "glm", model: "glm-5.1", defaultThought: "medium", supportedThoughts: ["off", "low", "medium", "high"]),
+        ZCodeModelOption(provider: "zhipu", model: "glm-4-flash", defaultThought: "off", supportedThoughts: ["off"])
+    ]
+)
+
 private func zcodeSnapshot(rows: [ZCodeTaskAddress] = [zcodeA, zcodeB], generation: UInt64 = 1,
                            selected: ZCodeTaskAddress? = nil,
                            liveStatus: String = "idle",
                            executionId: String? = nil) -> ZCodeSessionSnapshot {
     ZCodeSessionSnapshot(instanceId: "instance-a", generation: generation, scopes: [zcodeA.scope, zcodeB.scope],
-                         rows: rows.map { ZCodeTaskRow(address: $0, title: "Same name", liveStatus: liveStatus, executionId: executionId) }, selected: selected)
+                         rows: rows.map { ZCodeTaskRow(address: $0, title: "Same name", liveStatus: liveStatus, executionId: executionId, modelConfig: defaultZCodeTestModelConfig) }, selected: selected)
 }
 
 private actor ZCodeTestPeer: ZCodeSessionServing {
@@ -20,6 +31,9 @@ private actor ZCodeTestPeer: ZCodeSessionServing {
         let selected: ZCodeTaskAddress?
         let delivery: ZCodeDelivery?
         let executionId: String?
+        let interactionId: String?
+        let interactionType: ZCodeInteractionType?
+        let modelConfig: ZCodeModelConfig?
         let reasonCode: String?
     }
     var value = zcodeSnapshot()
@@ -31,6 +45,8 @@ private actor ZCodeTestPeer: ZCodeSessionServing {
     var creates: [ZCodeCreateIntent] = []
     var sends: [ZCodeSendIntent] = []
     var stops: [ZCodeStopIntent] = []
+    var resolves: [ZCodeResolveIntent] = []
+    var switchModels: [ZCodeSwitchModelIntent] = []
     var queries: [ZCodeQueryIntent] = []
     var commandIdsSeen: [String] = []
     var settledCommands: [String: SettledCommand] = [:]
@@ -38,7 +54,10 @@ private actor ZCodeTestPeer: ZCodeSessionServing {
     var forceQueueForGuide = false
     var timeoutNextCommand = false
     var holdUnknownOnQuery = false
+    var corruptNextModelReadback = false
     var activeExecutionByAddress: [ZCodeTaskAddress: String] = [:]
+    var pendingInteractionByAddress: [ZCodeTaskAddress: ZCodePendingInteraction] = [:]
+    var modelConfigByAddress: [ZCodeTaskAddress: ZCodeModelConfig] = [:]
     var held = false
     var waiting: CheckedContinuation<Void, Never>?
     func connect() async throws -> ZCodeSessionSnapshot { connections += 1; return value }
@@ -82,7 +101,7 @@ private actor ZCodeTestPeer: ZCodeSessionServing {
         let newRow = ZCodeTaskRow(address: created, title: "New Session", liveStatus: hasText ? "running" : "idle", executionId: execId)
         value = ZCodeSessionSnapshot(instanceId: value.instanceId, generation: value.generation,
                                      scopes: value.scopes, rows: value.rows + [newRow], selected: created)
-        let entry = SettledCommand(status: .confirmed, selected: created, delivery: hasText ? .startNow : nil, executionId: execId, reasonCode: nil)
+        let entry = SettledCommand(status: .confirmed, selected: created, delivery: hasText ? .startNow : nil, executionId: execId, interactionId: nil, interactionType: nil, modelConfig: nil, reasonCode: nil)
         if timeoutNextCommand {
             timeoutNextCommand = false
             if holdUnknownOnQuery { heldCommands[key] = entry } else { settledCommands[key] = entry }
@@ -103,7 +122,8 @@ private actor ZCodeTestPeer: ZCodeSessionServing {
                                      status: settled.status, selected: settled.selected,
                                      commandId: intent.commandId, duplicate: true,
                                      delivery: settled.delivery, executionId: settled.executionId,
-                                     reasonCode: settled.reasonCode)
+                                     interactionId: settled.interactionId, interactionType: settled.interactionType,
+                                     modelConfig: settled.modelConfig, reasonCode: settled.reasonCode)
         }
         sends.append(intent)
         let row = value.rows.first(where: { $0.address == address })
@@ -122,7 +142,7 @@ private actor ZCodeTestPeer: ZCodeSessionServing {
             status = .queued
         }
         let execId = activeExecutionByAddress[address]
-        let entry = SettledCommand(status: status, selected: address, delivery: delivery, executionId: execId, reasonCode: nil)
+        let entry = SettledCommand(status: status, selected: address, delivery: delivery, executionId: execId, interactionId: nil, interactionType: nil, modelConfig: nil, reasonCode: nil)
         if timeoutNextCommand {
             timeoutNextCommand = false
             if holdUnknownOnQuery { heldCommands[key] = entry } else { settledCommands[key] = entry }
@@ -143,23 +163,86 @@ private actor ZCodeTestPeer: ZCodeSessionServing {
                                      status: settled.status, selected: settled.selected,
                                      commandId: intent.commandId, duplicate: true,
                                      delivery: settled.delivery, executionId: settled.executionId,
-                                     reasonCode: settled.reasonCode)
+                                     interactionId: settled.interactionId, interactionType: settled.interactionType,
+                                     modelConfig: settled.modelConfig, reasonCode: settled.reasonCode)
         }
         stops.append(intent)
         let currentExec = activeExecutionByAddress[address]
         if currentExec == nil || currentExec != intent.expectedExecutionId {
-            let entry = SettledCommand(status: .noop, selected: address, delivery: nil, executionId: currentExec, reasonCode: "guard.stopTargetChanged")
+            let entry = SettledCommand(status: .noop, selected: address, delivery: nil, executionId: currentExec, interactionId: nil, interactionType: nil, modelConfig: nil, reasonCode: "guard.stopTargetChanged")
             settledCommands[key] = entry
             return ZCodeCommandReply(instanceId: value.instanceId, generation: value.generation,
                                      status: .noop, selected: address, commandId: intent.commandId,
                                      duplicate: false, executionId: currentExec, reasonCode: "guard.stopTargetChanged")
         }
         activeExecutionByAddress.removeValue(forKey: address)
-        let entry = SettledCommand(status: .stopped, selected: address, delivery: nil, executionId: intent.expectedExecutionId, reasonCode: nil)
+        let entry = SettledCommand(status: .stopped, selected: address, delivery: nil, executionId: intent.expectedExecutionId, interactionId: nil, interactionType: nil, modelConfig: nil, reasonCode: nil)
         settledCommands[key] = entry
         return ZCodeCommandReply(instanceId: value.instanceId, generation: value.generation,
                                  status: .stopped, selected: address, commandId: intent.commandId,
                                  duplicate: false, executionId: intent.expectedExecutionId)
+    }
+    func resolve(_ intent: ZCodeResolveIntent) async throws -> ZCodeCommandReply {
+        if failed { throw ZCodeFailure.unavailable }
+        let address = intent.selection.address
+        let key = "\(address.taskId)::\(intent.commandId)"
+        commandIdsSeen.append(intent.commandId)
+        if let settled = settledCommands[key] {
+            return ZCodeCommandReply(instanceId: value.instanceId, generation: value.generation,
+                                     status: settled.status, selected: settled.selected,
+                                     commandId: intent.commandId, duplicate: true,
+                                     interactionId: settled.interactionId, interactionType: settled.interactionType,
+                                     reasonCode: settled.reasonCode)
+        }
+        guard let pending = pendingInteractionByAddress[address], pending.interactionId == intent.interactionId else {
+            let entry = SettledCommand(status: .noop, selected: address, delivery: nil, executionId: nil, interactionId: intent.interactionId, interactionType: intent.interactionType, modelConfig: nil, reasonCode: "proto.alreadyResolved")
+            settledCommands[key] = entry
+            return ZCodeCommandReply(instanceId: value.instanceId, generation: value.generation,
+                                     status: .noop, selected: address, commandId: intent.commandId,
+                                     duplicate: false, interactionId: intent.interactionId, interactionType: intent.interactionType,
+                                     reasonCode: "proto.alreadyResolved")
+        }
+        guard pending.interactionType == intent.interactionType,
+              !(intent.interactionType == .question && (intent.decision == .approve || intent.decision == .allowAlways || intent.optionId == "allowOnce" || intent.optionId == "allowAlways")) else {
+            return ZCodeCommandReply(instanceId: value.instanceId, generation: value.generation,
+                                     status: .interactionTypeMismatch, selected: address, commandId: intent.commandId,
+                                     interactionId: intent.interactionId, interactionType: intent.interactionType,
+                                     reasonCode: "guard.questionCannotApproveAsPermission")
+        }
+        resolves.append(intent)
+        pendingInteractionByAddress.removeValue(forKey: address)
+        syncRowState(address)
+        let entry = SettledCommand(status: .resolved, selected: address, delivery: nil, executionId: nil, interactionId: intent.interactionId, interactionType: intent.interactionType, modelConfig: nil, reasonCode: nil)
+        settledCommands[key] = entry
+        return ZCodeCommandReply(instanceId: value.instanceId, generation: value.generation,
+                                 status: .resolved, selected: address, commandId: intent.commandId,
+                                 duplicate: false, interactionId: intent.interactionId, interactionType: intent.interactionType)
+    }
+    func switchModel(_ intent: ZCodeSwitchModelIntent) async throws -> ZCodeCommandReply {
+        if failed { throw ZCodeFailure.unavailable }
+        let address = intent.selection.address
+        let currentConfig = modelConfigByAddress[address] ?? defaultZCodeTestModelConfig
+        guard currentConfig.supportsThought(intent.thought, provider: intent.provider, model: intent.model) else {
+            return ZCodeCommandReply(instanceId: value.instanceId, generation: value.generation,
+                                     status: .unsupportedThought, selected: address, commandId: intent.commandId,
+                                     modelConfig: currentConfig, reasonCode: "guard.unsupportedThoughtLevel")
+        }
+        switchModels.append(intent)
+        if corruptNextModelReadback {
+            corruptNextModelReadback = false
+            return ZCodeCommandReply(instanceId: value.instanceId, generation: value.generation,
+                                     status: .modelSwitched, selected: address, commandId: intent.commandId,
+                                     modelConfig: ZCodeModelConfig(provider: intent.provider, model: intent.model, thought: "mismatched-\(intent.thought)", supportedThoughts: currentConfig.supportedThoughts, availableModels: currentConfig.availableModels))
+        }
+        let targetSupported = currentConfig.availableModels?.first(where: { $0.provider == intent.provider && $0.model == intent.model })?.supportedThoughts ?? currentConfig.supportedThoughts
+        let updated = ZCodeModelConfig(provider: intent.provider, model: intent.model, thought: intent.thought, supportedThoughts: targetSupported, availableModels: currentConfig.availableModels)
+        modelConfigByAddress[address] = updated
+        syncRowState(address)
+        let key = "\(address.taskId)::\(intent.commandId)"
+        settledCommands[key] = SettledCommand(status: .modelSwitched, selected: address, delivery: nil, executionId: nil, interactionId: nil, interactionType: nil, modelConfig: updated, reasonCode: nil)
+        return ZCodeCommandReply(instanceId: value.instanceId, generation: value.generation,
+                                 status: .modelSwitched, selected: address, commandId: intent.commandId,
+                                 duplicate: false, modelConfig: updated)
     }
     func query(_ intent: ZCodeQueryIntent) async throws -> ZCodeCommandReply {
         if failed { throw ZCodeFailure.unavailable }
@@ -178,24 +261,42 @@ private actor ZCodeTestPeer: ZCodeSessionServing {
                                  status: settled.status, selected: settled.selected,
                                  commandId: intent.commandId, duplicate: true,
                                  delivery: settled.delivery, executionId: settled.executionId,
-                                 reasonCode: settled.reasonCode)
+                                 interactionId: settled.interactionId, interactionType: settled.interactionType,
+                                 modelConfig: settled.modelConfig, reasonCode: settled.reasonCode)
     }
     func close() async {}
     func setValue(_ value: ZCodeSessionSnapshot) { self.value = value }
     func setReply(_ reply: ZCodeOpenReply?) { self.reply = reply }
     func setFailed() { failed = true }
-    func setActiveExecution(_ address: ZCodeTaskAddress, executionId: String?) {
-        if let executionId { activeExecutionByAddress[address] = executionId }
-        else { activeExecutionByAddress.removeValue(forKey: address) }
+    private func syncRowState(_ address: ZCodeTaskAddress) {
         let updatedRows = value.rows.map { row -> ZCodeTaskRow in
             guard row.address == address else { return row }
-            return ZCodeTaskRow(address: row.address, title: row.title,
-                                liveStatus: executionId == nil ? "idle" : "running",
-                                executionId: executionId)
+            let pending = pendingInteractionByAddress[address]
+            let execId = activeExecutionByAddress[address]
+            let liveStatus = pending != nil ? "waiting" : (execId != nil ? "running" : "idle")
+            return ZCodeTaskRow(
+                address: row.address,
+                title: row.title,
+                liveStatus: liveStatus,
+                executionId: execId,
+                pendingInteraction: pending,
+                modelConfig: modelConfigByAddress[address] ?? row.modelConfig ?? defaultZCodeTestModelConfig
+            )
         }
         value = ZCodeSessionSnapshot(instanceId: value.instanceId, generation: value.generation,
                                      scopes: value.scopes, rows: updatedRows, selected: value.selected)
     }
+    func setActiveExecution(_ address: ZCodeTaskAddress, executionId: String?) {
+        if let executionId { activeExecutionByAddress[address] = executionId }
+        else { activeExecutionByAddress.removeValue(forKey: address) }
+        syncRowState(address)
+    }
+    func setPendingInteraction(_ address: ZCodeTaskAddress, interaction: ZCodePendingInteraction?) {
+        if let interaction { pendingInteractionByAddress[address] = interaction }
+        else { pendingInteractionByAddress.removeValue(forKey: address) }
+        syncRowState(address)
+    }
+    func setCorruptNextModelReadback(_ flag: Bool) { corruptNextModelReadback = flag }
     func setForceQueueForGuide(_ flag: Bool) { forceQueueForGuide = flag }
     func configureTimeoutNextCommand(holdUnknown: Bool) {
         timeoutNextCommand = true
@@ -210,8 +311,8 @@ private actor ZCodeTestPeer: ZCodeSessionServing {
     func release() { held = false; waiting?.resume(); waiting = nil }
     func hasWaiter() -> Bool { waiting != nil }
     func counts() -> (Int, Int, Int) { (connections, reads, opens.count) }
-    func commandStats() -> (creates: Int, sends: Int, stops: Int, queries: Int, commandIds: [String], activeB: String?) {
-        (creates.count, sends.count, stops.count, queries.count, commandIdsSeen, activeExecutionByAddress[zcodeB])
+    func commandStats() -> (creates: Int, sends: Int, stops: Int, resolves: Int, switchModels: Int, queries: Int, commandIds: [String], activeB: String?) {
+        (creates.count, sends.count, stops.count, resolves.count, switchModels.count, queries.count, commandIdsSeen, activeExecutionByAddress[zcodeB])
     }
     func opened() -> [ZCodeTaskAddress] { opens }
 }
@@ -486,6 +587,185 @@ final class ZCodeSessionTests: XCTestCase {
         let stats = await peer.commandStats()
         XCTAssertEqual(stats.sends, 1)
         XCTAssertFalse(stats.commandIds.contains("cmd-rotated-should-not-use"))
+        await controller.shutdown()
+    }
+    func testInteractionResolutionRejectsQuestionAsPermissionAndDeduplicatesExpiredAndDuplicateRequests() async throws {
+        let peer = ZCodeTestPeer()
+        let controller = ZCodeSessionController(client: peer, pollNanoseconds: 60_000_000_000)
+        controller.setEnabled(true); await controller.refresh()
+        let selectionB = try XCTUnwrap(controller.selection(for: zcodeB))
+        _ = await controller.open(selectionB, admitted: { true })
+
+        await peer.setPendingInteraction(
+            zcodeB,
+            interaction: ZCodePendingInteraction(
+                interactionId: "int-q-1",
+                interactionType: .question,
+                toolName: "AskUserQuestion",
+                options: ["Option A", "Option B"]
+            )
+        )
+        await controller.refresh()
+
+        let misapproveAsPerm = try XCTUnwrap(controller.resolveIntent(
+            for: zcodeB,
+            interactionId: "int-q-1",
+            interactionType: .permission,
+            decision: .approve,
+            commandId: "cmd-misapprove-1",
+            clientId: "client-1"
+        ))
+        let misapprove1 = await controller.resolve(misapproveAsPerm, admitted: { true })
+        XCTAssertEqual(misapprove1, .interactionTypeMismatch)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "guard.questionCannotApproveAsPermission")
+
+        let misapproveWithAllowOnce = try XCTUnwrap(controller.resolveIntent(
+            for: zcodeB,
+            interactionId: "int-q-1",
+            interactionType: .question,
+            decision: .approve,
+            optionId: "allowOnce",
+            commandId: "cmd-misapprove-2",
+            clientId: "client-1"
+        ))
+        let misapprove2 = await controller.resolve(misapproveWithAllowOnce, admitted: { true })
+        XCTAssertEqual(misapprove2, .interactionTypeMismatch)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "guard.questionCannotApproveAsPermission")
+        let statsAfterMisapprovals = await peer.commandStats()
+        XCTAssertEqual(statsAfterMisapprovals.resolves, 0)
+
+        let validQuestion = try XCTUnwrap(controller.resolveIntent(
+            for: zcodeB,
+            interactionId: "int-q-1",
+            interactionType: .question,
+            decision: .accept,
+            optionId: "Option A",
+            commandId: "cmd-answer-q1",
+            clientId: "client-1"
+        ))
+        let validQuestionResult = await controller.resolve(validQuestion, admitted: { true })
+        XCTAssertEqual(validQuestionResult, .resolved)
+        XCTAssertNil(controller.rows.first(where: { $0.address == zcodeB })?.pendingInteraction)
+
+        // Duplicate commandId returns resolved with duplicate == true and zero extra peer resolves
+        let dupQuestionResult = await controller.resolve(validQuestion, admitted: { true })
+        XCTAssertEqual(dupQuestionResult, .resolved)
+        XCTAssertEqual(controller.lastCommandReply?.duplicate, true)
+
+        // Expired interactionId returns noop with proto.alreadyResolved and zero extra peer resolves
+        await peer.setPendingInteraction(
+            zcodeB,
+            interaction: ZCodePendingInteraction(
+                interactionId: "int-perm-2",
+                interactionType: .permission,
+                toolName: "Bash",
+                options: ["allowOnce", "allowAlways", "deny"]
+            )
+        )
+        await controller.refresh()
+        let expiredPerm = try XCTUnwrap(controller.resolveIntent(
+            for: zcodeB,
+            interactionId: "int-perm-expired",
+            interactionType: .permission,
+            decision: .approve,
+            commandId: "cmd-expired-perm",
+            clientId: "client-1"
+        ))
+        let expiredResult = await controller.resolve(expiredPerm, admitted: { true })
+        XCTAssertEqual(expiredResult, .noop)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "proto.alreadyResolved")
+
+        // Valid permission approval and plan approval succeed
+        let validPerm = try XCTUnwrap(controller.resolveIntent(
+            for: zcodeB,
+            interactionId: "int-perm-2",
+            interactionType: .permission,
+            decision: .approve,
+            commandId: "cmd-valid-perm2",
+            clientId: "client-1"
+        ))
+        let permResult = await controller.resolve(validPerm, admitted: { true })
+        XCTAssertEqual(permResult, .resolved)
+
+        await peer.setPendingInteraction(
+            zcodeB,
+            interaction: ZCodePendingInteraction(
+                interactionId: "int-plan-1",
+                interactionType: .plan,
+                toolName: "ExitPlanMode"
+            )
+        )
+        await controller.refresh()
+        let validPlan = try XCTUnwrap(controller.resolveIntent(
+            for: zcodeB,
+            interactionId: "int-plan-1",
+            interactionType: .plan,
+            decision: .approve,
+            commandId: "cmd-valid-plan1",
+            clientId: "client-1"
+        ))
+        let planResult = await controller.resolve(validPlan, admitted: { true })
+        XCTAssertEqual(planResult, .resolved)
+
+        let finalStats = await peer.commandStats()
+        XCTAssertEqual(finalStats.resolves, 3)
+        await controller.shutdown()
+    }
+    func testModelSwitchRejectsUnsupportedThoughtWithoutSendingAndVerifiesReadback() async throws {
+        let peer = ZCodeTestPeer()
+        let controller = ZCodeSessionController(client: peer, pollNanoseconds: 60_000_000_000)
+        controller.setEnabled(true); await controller.refresh()
+        let selectionB = try XCTUnwrap(controller.selection(for: zcodeB))
+        _ = await controller.open(selectionB, admitted: { true })
+
+        // Unsupported thought level is rejected locally with zero wire calls
+        let unsupportedIntent = try XCTUnwrap(controller.switchModelIntent(
+            for: zcodeB,
+            provider: "glm",
+            model: "glm-5.1",
+            thought: "xhigh",
+            commandId: "cmd-switch-unsupported",
+            clientId: "client-1"
+        ))
+        let unsupportedResult = await controller.switchModel(unsupportedIntent, admitted: { true })
+        XCTAssertEqual(unsupportedResult, .unsupportedThought)
+        XCTAssertEqual(controller.lastCommandReply?.reasonCode, "guard.unsupportedThoughtLevel")
+        let statsAfterUnsupported = await peer.commandStats()
+        XCTAssertEqual(statsAfterUnsupported.switchModels, 0)
+
+        // Supported thought level switches and verifies readback
+        let validIntent = try XCTUnwrap(controller.switchModelIntent(
+            for: zcodeB,
+            provider: "glm",
+            model: "glm-5.1",
+            thought: "high",
+            commandId: "cmd-switch-high",
+            clientId: "client-1"
+        ))
+        let validResult = await controller.switchModel(validIntent, admitted: { true })
+        XCTAssertEqual(validResult, .modelSwitched)
+        let rowAfterValid = try XCTUnwrap(controller.rows.first(where: { $0.address == zcodeB }))
+        XCTAssertEqual(rowAfterValid.modelConfig?.provider, "glm")
+        XCTAssertEqual(rowAfterValid.modelConfig?.model, "glm-5.1")
+        XCTAssertEqual(rowAfterValid.modelConfig?.thought, "high")
+
+        // Mismatched readback returns unconfirmed and does not overwrite confirmed row modelConfig
+        await peer.setCorruptNextModelReadback(true)
+        let corruptIntent = try XCTUnwrap(controller.switchModelIntent(
+            for: zcodeB,
+            provider: "glm",
+            model: "glm-5.1",
+            thought: "low",
+            commandId: "cmd-switch-corrupt",
+            clientId: "client-1"
+        ))
+        let corruptResult = await controller.switchModel(corruptIntent, admitted: { true })
+        XCTAssertEqual(corruptResult, .unconfirmed)
+        let rowAfterCorrupt = try XCTUnwrap(controller.rows.first(where: { $0.address == zcodeB }))
+        XCTAssertEqual(rowAfterCorrupt.modelConfig?.thought, "high")
+
+        let finalStats = await peer.commandStats()
+        XCTAssertEqual(finalStats.switchModels, 2)
         await controller.shutdown()
     }
 }

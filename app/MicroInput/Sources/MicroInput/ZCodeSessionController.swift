@@ -20,6 +20,7 @@ final class ZCodeSessionController: ObservableObject {
     @Published private(set) var lastCommandResult: ZCodeCommandResult?
     @Published private(set) var lastCommandReply: ZCodeCommandReply?
     @Published private(set) var pendingCommands: [String: LatchedCommand] = [:]
+    private var resolvedCommands: [String: (address: ZCodeTaskAddress, interactionId: String, interactionType: ZCodeInteractionType)] = [:]
     private let client: any ZCodeSessionServing
     private let pollNanoseconds: UInt64
     private var snapshot: ZCodeSessionSnapshot?
@@ -49,7 +50,7 @@ final class ZCodeSessionController: ObservableObject {
         connecting?.cancel(); connecting = nil
         polling?.cancel(); polling = nil
         snapshot = nil; rows = []; selected = nil; lastResult = nil
-        lastCommandResult = nil; lastCommandReply = nil; pendingCommands.removeAll()
+        lastCommandResult = nil; lastCommandReply = nil; pendingCommands.removeAll(); resolvedCommands.removeAll()
         state = .disabled
         let previous = closing
         closing = Task { [client] in await previous?.value; await client.close() }
@@ -89,7 +90,7 @@ final class ZCodeSessionController: ObservableObject {
     private func fail(_ error: Error, epoch expected: UInt64) async {
         guard current(expected) else { return }
         rows = []; selected = nil; snapshot = nil; lastResult = nil
-        pendingCommands.removeAll()
+        pendingCommands.removeAll(); resolvedCommands.removeAll()
         state = .unavailable(error as? ZCodeFailure ?? .unavailable)
         polling?.cancel(); polling = nil
         let previous = closing
@@ -204,6 +205,61 @@ final class ZCodeSessionController: ObservableObject {
             expectedExecutionId: executionId
         )
     }
+    func resolveIntent(
+        for address: ZCodeTaskAddress? = nil,
+        interactionId: String? = nil,
+        interactionType: ZCodeInteractionType? = nil,
+        decision: ZCodeInteractionDecision,
+        optionId: String? = nil,
+        commandId: String = UUID().uuidString,
+        clientId: String = "micro-input"
+    ) -> ZCodeResolveIntent? {
+        let target = address ?? selected
+        guard let target, let selection = selection(for: target),
+              let row = rows.first(where: { $0.address == target }),
+              !commandId.isEmpty, !clientId.isEmpty else { return nil }
+        let latched = latchedCommand(forAddress: target)
+        let resolvedInteractionId = interactionId ?? row.pendingInteraction?.interactionId
+        let resolvedInteractionType = interactionType ?? row.pendingInteraction?.interactionType
+        guard let resolvedInteractionId, !resolvedInteractionId.isEmpty,
+              let resolvedInteractionType else { return nil }
+        return ZCodeResolveIntent(
+            selection: selection,
+            commandId: latched?.commandId ?? commandId,
+            clientId: latched?.clientId ?? clientId,
+            interactionId: resolvedInteractionId,
+            interactionType: resolvedInteractionType,
+            decision: decision,
+            optionId: optionId
+        )
+    }
+    func switchModelIntent(
+        for address: ZCodeTaskAddress? = nil,
+        provider: String? = nil,
+        model: String? = nil,
+        thought: String,
+        commandId: String = UUID().uuidString,
+        clientId: String = "micro-input"
+    ) -> ZCodeSwitchModelIntent? {
+        let target = address ?? selected
+        guard let target, let selection = selection(for: target),
+              let row = rows.first(where: { $0.address == target }),
+              !commandId.isEmpty, !clientId.isEmpty,
+              !thought.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let latched = latchedCommand(forAddress: target)
+        let resolvedProvider = provider ?? row.modelConfig?.provider
+        let resolvedModel = model ?? row.modelConfig?.model
+        guard let resolvedProvider, !resolvedProvider.isEmpty,
+              let resolvedModel, !resolvedModel.isEmpty else { return nil }
+        return ZCodeSwitchModelIntent(
+            selection: selection,
+            commandId: latched?.commandId ?? commandId,
+            clientId: latched?.clientId ?? clientId,
+            provider: resolvedProvider,
+            model: resolvedModel,
+            thought: thought
+        )
+    }
     func queryIntent(forScope scope: ZCodeScope, target: ZCodeTaskAddress? = nil, commandId: String? = nil) -> ZCodeQueryIntent? {
         guard enabled, !suspended, state == .ready, let snapshot,
               scope.valid, snapshot.scopes.contains(scope) else { return nil }
@@ -260,6 +316,8 @@ final class ZCodeSessionController: ObservableObject {
         case .create(let intent): return await create(intent, admitted: admitted)
         case .send(let intent): return await send(intent, admitted: admitted)
         case .stop(let intent): return await stop(intent, admitted: admitted)
+        case .resolve(let intent): return await resolve(intent, admitted: admitted)
+        case .switchModel(let intent): return await switchModel(intent, admitted: admitted)
         case .query(let intent): return await query(intent, admitted: admitted)
         }
     }
@@ -496,6 +554,286 @@ final class ZCodeSessionController: ObservableObject {
             return await failCommand(error, epoch: expected)
         }
     }
+    func resolve(_ intent: ZCodeResolveIntent?, admitted: @escaping @MainActor () -> Bool) async -> ZCodeCommandResult {
+        guard let intent, !opening, let snapshot, enabled, !suspended, state == .ready,
+              intent.selection.localEpoch == epoch, intent.selection.instanceId == snapshot.instanceId,
+              intent.selection.generation == snapshot.generation,
+              snapshot.scopes.contains(intent.selection.address.scope),
+              let row = rows.first(where: { $0.address == intent.selection.address }),
+              !intent.commandId.isEmpty, !intent.clientId.isEmpty,
+              !intent.interactionId.isEmpty, admitted() else { return .stale }
+        guard selected == intent.selection.address else {
+            let reply = ZCodeCommandReply(
+                instanceId: intent.selection.instanceId,
+                generation: intent.selection.generation,
+                status: .unconfirmed,
+                selected: selected,
+                commandId: intent.commandId
+            )
+            lastCommandReply = reply
+            lastCommandResult = .unconfirmed
+            return .unconfirmed
+        }
+        let latchKey = sessionLatchKey(intent.selection.address)
+        if let latched = pendingCommands[latchKey] {
+            let reconcileIntent = ZCodeQueryIntent(
+                scope: intent.selection.address.scope,
+                target: intent.selection.address,
+                commandId: latched.commandId,
+                instanceId: intent.selection.instanceId,
+                generation: intent.selection.generation,
+                localEpoch: intent.selection.localEpoch
+            )
+            return await query(reconcileIntent, admitted: admitted)
+        }
+        if intent.interactionType == .question && (intent.decision == .approve || intent.decision == .allowAlways || intent.optionId == "allowOnce" || intent.optionId == "allowAlways") {
+            let reply = ZCodeCommandReply(
+                instanceId: intent.selection.instanceId,
+                generation: intent.selection.generation,
+                status: .interactionTypeMismatch,
+                selected: selected,
+                commandId: intent.commandId,
+                interactionId: intent.interactionId,
+                interactionType: intent.interactionType,
+                reasonCode: "guard.questionCannotApproveAsPermission"
+            )
+            lastCommandReply = reply
+            lastCommandResult = .interactionTypeMismatch
+            return .interactionTypeMismatch
+        }
+        if let prior = resolvedCommands[intent.commandId], prior.address == intent.selection.address {
+            let reply = ZCodeCommandReply(
+                instanceId: intent.selection.instanceId,
+                generation: intent.selection.generation,
+                status: .resolved,
+                selected: selected,
+                commandId: intent.commandId,
+                duplicate: true,
+                interactionId: prior.interactionId,
+                interactionType: prior.interactionType,
+                reasonCode: "proto.duplicateCommandId"
+            )
+            lastCommandReply = reply
+            lastCommandResult = .resolved
+            return .resolved
+        }
+        guard let pending = row.pendingInteraction, pending.interactionId == intent.interactionId else {
+            let reply = ZCodeCommandReply(
+                instanceId: intent.selection.instanceId,
+                generation: intent.selection.generation,
+                status: .noop,
+                selected: selected,
+                commandId: intent.commandId,
+                interactionId: intent.interactionId,
+                interactionType: intent.interactionType,
+                reasonCode: "proto.alreadyResolved"
+            )
+            lastCommandReply = reply
+            lastCommandResult = .noop
+            return .noop
+        }
+        guard pending.interactionType == intent.interactionType else {
+            let reason = (pending.interactionType == .question && intent.interactionType == .permission)
+                ? "guard.questionCannotApproveAsPermission"
+                : "guard.interactionTypeMismatch"
+            let reply = ZCodeCommandReply(
+                instanceId: intent.selection.instanceId,
+                generation: intent.selection.generation,
+                status: .interactionTypeMismatch,
+                selected: selected,
+                commandId: intent.commandId,
+                interactionId: intent.interactionId,
+                interactionType: intent.interactionType,
+                reasonCode: reason
+            )
+            lastCommandReply = reply
+            lastCommandResult = .interactionTypeMismatch
+            return .interactionTypeMismatch
+        }
+        opening = true
+        sequence &+= 1
+        let expected = epoch
+        let latched = LatchedCommand(
+            scope: intent.selection.address.scope,
+            target: intent.selection.address,
+            commandId: intent.commandId,
+            clientId: intent.clientId,
+            sessionId: intent.selection.address.taskId,
+            expectedExecutionId: nil
+        )
+        defer { opening = false }
+        do {
+            let response = try await client.resolve(intent)
+            guard current(expected), admitted() else { return .stale }
+            let result = await handleCommandResponse(
+                response,
+                expectedEpoch: expected,
+                expectedInstanceId: intent.selection.instanceId,
+                expectedGeneration: intent.selection.generation,
+                expectedScope: intent.selection.address.scope,
+                expectedTarget: intent.selection.address,
+                isCreate: false,
+                firstInputText: nil,
+                latchKey: latchKey,
+                latched: latched
+            )
+            if result == .resolved {
+                resolvedCommands[intent.commandId] = (
+                    address: intent.selection.address,
+                    interactionId: intent.interactionId,
+                    interactionType: intent.interactionType
+                )
+            }
+            return result
+        } catch ZCodeFailure.transportTimeout {
+            guard current(expected), admitted() else { return .stale }
+            pendingCommands[latchKey] = latched
+            return await reconcileAfterTimeout(
+                latchKey: latchKey,
+                latched: latched,
+                expectedEpoch: expected,
+                expectedInstanceId: intent.selection.instanceId,
+                expectedGeneration: intent.selection.generation,
+                isCreate: false,
+                firstInputText: nil,
+                admitted: admitted
+            )
+        } catch {
+            return await failCommand(error, epoch: expected)
+        }
+    }
+    func switchModel(_ intent: ZCodeSwitchModelIntent?, admitted: @escaping @MainActor () -> Bool) async -> ZCodeCommandResult {
+        guard let intent, !opening, let snapshot, enabled, !suspended, state == .ready,
+              intent.selection.localEpoch == epoch, intent.selection.instanceId == snapshot.instanceId,
+              intent.selection.generation == snapshot.generation,
+              snapshot.scopes.contains(intent.selection.address.scope),
+              let row = rows.first(where: { $0.address == intent.selection.address }),
+              !intent.commandId.isEmpty, !intent.clientId.isEmpty,
+              !intent.provider.isEmpty, !intent.model.isEmpty, !intent.thought.isEmpty,
+              admitted() else { return .stale }
+        guard selected == intent.selection.address else {
+            let reply = ZCodeCommandReply(
+                instanceId: intent.selection.instanceId,
+                generation: intent.selection.generation,
+                status: .unconfirmed,
+                selected: selected,
+                commandId: intent.commandId
+            )
+            lastCommandReply = reply
+            lastCommandResult = .unconfirmed
+            return .unconfirmed
+        }
+        let latchKey = sessionLatchKey(intent.selection.address)
+        if let latched = pendingCommands[latchKey] {
+            let reconcileIntent = ZCodeQueryIntent(
+                scope: intent.selection.address.scope,
+                target: intent.selection.address,
+                commandId: latched.commandId,
+                instanceId: intent.selection.instanceId,
+                generation: intent.selection.generation,
+                localEpoch: intent.selection.localEpoch
+            )
+            return await query(reconcileIntent, admitted: admitted)
+        }
+        if let modelConfig = row.modelConfig,
+           !modelConfig.supportsThought(intent.thought, provider: intent.provider, model: intent.model) {
+            let reply = ZCodeCommandReply(
+                instanceId: intent.selection.instanceId,
+                generation: intent.selection.generation,
+                status: .unsupportedThought,
+                selected: selected,
+                commandId: intent.commandId,
+                modelConfig: modelConfig,
+                reasonCode: "guard.unsupportedThoughtLevel"
+            )
+            lastCommandReply = reply
+            lastCommandResult = .unsupportedThought
+            return .unsupportedThought
+        }
+        opening = true
+        sequence &+= 1
+        let expected = epoch
+        let latched = LatchedCommand(
+            scope: intent.selection.address.scope,
+            target: intent.selection.address,
+            commandId: intent.commandId,
+            clientId: intent.clientId,
+            sessionId: intent.selection.address.taskId,
+            expectedExecutionId: nil
+        )
+        defer { opening = false }
+        do {
+            var response = try await client.switchModel(intent)
+            guard current(expected), admitted() else { return .stale }
+            if response.status == .modelSwitched || response.status == .confirmed {
+                guard let readback = response.modelConfig,
+                      readback.valid,
+                      readback.provider == intent.provider,
+                      readback.model == intent.model,
+                      readback.thought == intent.thought else {
+                    response = ZCodeCommandReply(
+                        instanceId: response.instanceId,
+                        generation: response.generation,
+                        status: .unconfirmed,
+                        selected: response.selected,
+                        commandId: response.commandId ?? intent.commandId,
+                        duplicate: response.duplicate,
+                        modelConfig: response.modelConfig,
+                        reasonCode: response.reasonCode ?? "guard.modelConfigReadbackMismatch"
+                    )
+                    return await handleCommandResponse(
+                        response,
+                        expectedEpoch: expected,
+                        expectedInstanceId: intent.selection.instanceId,
+                        expectedGeneration: intent.selection.generation,
+                        expectedScope: intent.selection.address.scope,
+                        expectedTarget: intent.selection.address,
+                        isCreate: false,
+                        firstInputText: nil,
+                        latchKey: latchKey,
+                        latched: latched
+                    )
+                }
+                response = ZCodeCommandReply(
+                    instanceId: response.instanceId,
+                    generation: response.generation,
+                    status: .modelSwitched,
+                    selected: response.selected,
+                    commandId: response.commandId ?? intent.commandId,
+                    duplicate: response.duplicate,
+                    modelConfig: readback,
+                    reasonCode: response.reasonCode
+                )
+            }
+            return await handleCommandResponse(
+                response,
+                expectedEpoch: expected,
+                expectedInstanceId: intent.selection.instanceId,
+                expectedGeneration: intent.selection.generation,
+                expectedScope: intent.selection.address.scope,
+                expectedTarget: intent.selection.address,
+                isCreate: false,
+                firstInputText: nil,
+                latchKey: latchKey,
+                latched: latched
+            )
+        } catch ZCodeFailure.transportTimeout {
+            guard current(expected), admitted() else { return .stale }
+            pendingCommands[latchKey] = latched
+            return await reconcileAfterTimeout(
+                latchKey: latchKey,
+                latched: latched,
+                expectedEpoch: expected,
+                expectedInstanceId: intent.selection.instanceId,
+                expectedGeneration: intent.selection.generation,
+                isCreate: false,
+                firstInputText: nil,
+                admitted: admitted
+            )
+        } catch {
+            return await failCommand(error, epoch: expected)
+        }
+    }
     func query(_ intent: ZCodeQueryIntent?, admitted: @escaping @MainActor () -> Bool) async -> ZCodeCommandResult {
         guard let intent, !opening, let snapshot, enabled, !suspended, state == .ready,
               intent.localEpoch == epoch, intent.instanceId == snapshot.instanceId,
@@ -663,7 +1001,7 @@ final class ZCodeSessionController: ObservableObject {
                     )
                 )
             }
-        } else if [.started, .queued, .steered, .stopped, .noop].contains(resolvedStatus),
+        } else if [.started, .queued, .steered, .stopped, .resolved, .modelSwitched, .noop].contains(resolvedStatus),
                   let expectedTarget {
             if let returnedSelected = response.selected, returnedSelected != expectedTarget {
                 resolvedStatus = .unconfirmed
@@ -677,14 +1015,36 @@ final class ZCodeSessionController: ObservableObject {
                             address: existing.address,
                             title: existing.title,
                             liveStatus: "running",
-                            executionId: response.executionId ?? existing.executionId
+                            executionId: response.executionId ?? existing.executionId,
+                            pendingInteraction: existing.pendingInteraction,
+                            modelConfig: existing.modelConfig
                         )
                     case .stopped:
                         rows[idx] = ZCodeTaskRow(
                             address: existing.address,
                             title: existing.title,
                             liveStatus: "idle",
-                            executionId: nil
+                            executionId: nil,
+                            pendingInteraction: existing.pendingInteraction,
+                            modelConfig: existing.modelConfig
+                        )
+                    case .resolved:
+                        rows[idx] = ZCodeTaskRow(
+                            address: existing.address,
+                            title: existing.title,
+                            liveStatus: existing.liveStatus == "waiting" ? "running" : existing.liveStatus,
+                            executionId: existing.executionId,
+                            pendingInteraction: nil,
+                            modelConfig: existing.modelConfig
+                        )
+                    case .modelSwitched:
+                        rows[idx] = ZCodeTaskRow(
+                            address: existing.address,
+                            title: existing.title,
+                            liveStatus: existing.liveStatus,
+                            executionId: existing.executionId,
+                            pendingInteraction: existing.pendingInteraction,
+                            modelConfig: response.modelConfig ?? existing.modelConfig
                         )
                     default:
                         break
@@ -717,6 +1077,9 @@ final class ZCodeSessionController: ObservableObject {
             duplicate: response.duplicate,
             delivery: response.delivery,
             executionId: response.executionId,
+            interactionId: response.interactionId,
+            interactionType: response.interactionType,
+            modelConfig: response.modelConfig,
             reasonCode: response.reasonCode
         )
         lastCommandReply = finalReply

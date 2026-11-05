@@ -12,16 +12,32 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
         let selected: ZCodeTaskAddress?
         let delivery: ZCodeDelivery?
         let executionId: String?
+        let interactionId: String?
+        let interactionType: ZCodeInteractionType?
+        let modelConfig: ZCodeModelConfig?
         let reasonCode: String?
     }
+    private static let defaultModelConfig = ZCodeModelConfig(
+        provider: "glm",
+        model: "glm-5.1",
+        thought: "medium",
+        supportedThoughts: ["off", "low", "medium", "high"],
+        availableModels: [
+            ZCodeModelOption(provider: "glm", model: "glm-5.1", defaultThought: "medium", supportedThoughts: ["off", "low", "medium", "high"]),
+            ZCodeModelOption(provider: "zhipu", model: "glm-4-flash", defaultThought: "off", supportedThoughts: ["off"])
+        ]
+    )
     private var mode = Mode.normal
     private var selected: ZCodeTaskAddress?
     private var dynamicRows: [ZCodeTaskRow] = []
     private var liveStatusByAddress: [ZCodeTaskAddress: String] = [:]
     private var executionByAddress: [ZCodeTaskAddress: String] = [:]
+    private var pendingInteractionByAddress: [ZCodeTaskAddress: ZCodePendingInteraction] = [:]
+    private var modelConfigByAddress: [ZCodeTaskAddress: ZCodeModelConfig] = [:]
     private var forceQueueForGuide = false
     private var timeoutNextSend = false
     private var holdReconcileUnknown = false
+    private var corruptNextModelReadback = false
     private var settledByKey: [String: SettledEntry] = [:]
     private var heldByKey: [String: SettledEntry] = [:]
     private(set) var metadataReads = 0
@@ -29,10 +45,13 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
     private(set) var creates = 0
     private(set) var sends = 0
     private(set) var stops = 0
+    private(set) var resolves = 0
+    private(set) var switchModels = 0
     private(set) var queries = 0
     private(set) var navigations: [ZCodeTaskAddress] = []
     private(set) var sentByAddress: [ZCodeTaskAddress: [String]] = [:]
     private(set) var stoppedExecutions: [String] = []
+    private(set) var resolvedInteractions: [String] = []
     private(set) var commandIdsSeen: [String] = []
     private var generation: UInt64 { mode == .rotated ? 2 : 1 }
 
@@ -43,9 +62,12 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
         dynamicRows.removeAll()
         liveStatusByAddress.removeAll()
         executionByAddress.removeAll()
+        pendingInteractionByAddress.removeAll()
+        modelConfigByAddress.removeAll()
         forceQueueForGuide = false
         timeoutNextSend = false
         holdReconcileUnknown = false
+        corruptNextModelReadback = false
         settledByKey.removeAll()
         heldByKey.removeAll()
         metadataReads = 0
@@ -53,10 +75,13 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
         creates = 0
         sends = 0
         stops = 0
+        resolves = 0
+        switchModels = 0
         queries = 0
         navigations.removeAll()
         sentByAddress.removeAll()
         stoppedExecutions.removeAll()
+        resolvedInteractions.removeAll()
         commandIdsSeen.removeAll()
     }
     func configureRunning(_ address: ZCodeTaskAddress, executionId: String?) {
@@ -67,6 +92,15 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
             executionByAddress.removeValue(forKey: address)
         }
     }
+    func configureInteraction(_ address: ZCodeTaskAddress, interaction: ZCodePendingInteraction?) {
+        if let interaction {
+            pendingInteractionByAddress[address] = interaction
+            liveStatusByAddress[address] = "waiting"
+        } else {
+            pendingInteractionByAddress.removeValue(forKey: address)
+        }
+    }
+    func setCorruptNextModelReadback(_ value: Bool) { corruptNextModelReadback = value }
     func setForceQueueForGuide(_ value: Bool) { forceQueueForGuide = value }
     func setTimeoutNextSend(_ value: Bool, holdUnknown: Bool) {
         timeoutNextSend = value
@@ -85,10 +119,13 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
         creates: Int,
         sends: Int,
         stops: Int,
+        resolves: Int,
+        switchModels: Int,
         queries: Int,
         navigations: [ZCodeTaskAddress],
         sentByAddress: [ZCodeTaskAddress: [String]],
         stoppedExecutions: [String],
+        resolvedInteractions: [String],
         commandIdsSeen: [String],
         activeExecutionForSecond: String?
     ) {
@@ -98,10 +135,13 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
             creates,
             sends,
             stops,
+            resolves,
+            switchModels,
             queries,
             navigations,
             sentByAddress,
             stoppedExecutions,
+            resolvedInteractions,
             commandIdsSeen,
             executionByAddress[Self.second]
         )
@@ -116,7 +156,9 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
                 address: addr,
                 title: "同名任务",
                 liveStatus: liveStatusByAddress[addr] ?? "idle",
-                executionId: executionByAddress[addr]
+                executionId: executionByAddress[addr],
+                pendingInteraction: pendingInteractionByAddress[addr],
+                modelConfig: modelConfigByAddress[addr] ?? Self.defaultModelConfig
             )
         }
         for extra in dynamicRows where !allRows.contains(where: { $0.address == extra.address }) {
@@ -125,7 +167,9 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
                     address: extra.address,
                     title: extra.title,
                     liveStatus: liveStatusByAddress[extra.address] ?? extra.liveStatus,
-                    executionId: executionByAddress[extra.address] ?? extra.executionId
+                    executionId: executionByAddress[extra.address] ?? extra.executionId,
+                    pendingInteraction: pendingInteractionByAddress[extra.address],
+                    modelConfig: modelConfigByAddress[extra.address] ?? Self.defaultModelConfig
                 )
             )
         }
@@ -190,7 +234,7 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
         dynamicRows.append(ZCodeTaskRow(address: created, title: "新建任务", liveStatus: running ? "running" : "idle", executionId: execId))
         selected = created
         navigations.append(created)
-        let entry = SettledEntry(status: .confirmed, selected: created, delivery: running ? .startNow : nil, executionId: execId, reasonCode: nil)
+        let entry = SettledEntry(status: .confirmed, selected: created, delivery: running ? .startNow : nil, executionId: execId, interactionId: nil, interactionType: nil, modelConfig: nil, reasonCode: nil)
         settledByKey[key] = entry
         return ZCodeCommandReply(
             instanceId: "qa-zcode-instance",
@@ -224,6 +268,9 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
                 duplicate: true,
                 delivery: existing.delivery,
                 executionId: existing.executionId,
+                interactionId: existing.interactionId,
+                interactionType: existing.interactionType,
+                modelConfig: existing.modelConfig,
                 reasonCode: existing.reasonCode
             )
         }
@@ -247,7 +294,7 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
             status = .queued
         }
         let execId = executionByAddress[address]
-        let entry = SettledEntry(status: status, selected: address, delivery: delivery, executionId: execId, reasonCode: nil)
+        let entry = SettledEntry(status: status, selected: address, delivery: delivery, executionId: execId, interactionId: nil, interactionType: nil, modelConfig: nil, reasonCode: nil)
         if timeoutNextSend {
             timeoutNextSend = false
             if holdReconcileUnknown {
@@ -290,6 +337,9 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
                 duplicate: true,
                 delivery: existing.delivery,
                 executionId: existing.executionId,
+                interactionId: existing.interactionId,
+                interactionType: existing.interactionType,
+                modelConfig: existing.modelConfig,
                 reasonCode: existing.reasonCode
             )
         }
@@ -302,6 +352,9 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
                 selected: address,
                 delivery: nil,
                 executionId: activeExec,
+                interactionId: nil,
+                interactionType: nil,
+                modelConfig: nil,
                 reasonCode: "guard.stopTargetChanged"
             )
             settledByKey[key] = entry
@@ -319,7 +372,7 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
         stoppedExecutions.append(intent.expectedExecutionId)
         liveStatusByAddress[address] = "idle"
         executionByAddress.removeValue(forKey: address)
-        let entry = SettledEntry(status: .stopped, selected: address, delivery: nil, executionId: intent.expectedExecutionId, reasonCode: nil)
+        let entry = SettledEntry(status: .stopped, selected: address, delivery: nil, executionId: intent.expectedExecutionId, interactionId: nil, interactionType: nil, modelConfig: nil, reasonCode: nil)
         settledByKey[key] = entry
         return ZCodeCommandReply(
             instanceId: "qa-zcode-instance",
@@ -329,6 +382,164 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
             commandId: intent.commandId,
             duplicate: false,
             executionId: intent.expectedExecutionId
+        )
+    }
+    func resolve(_ intent: ZCodeResolveIntent) async throws -> ZCodeCommandReply {
+        guard mode != .disconnected else { throw ZCodeFailure.unavailable }
+        guard intent.selection.instanceId == "qa-zcode-instance", intent.selection.generation == generation else {
+            return commandReply(.stale, commandId: intent.commandId)
+        }
+        let address = intent.selection.address
+        guard selected == address else {
+            return commandReply(.unconfirmed, selected: selected, commandId: intent.commandId)
+        }
+        let key = "\(address.taskId)::\(intent.commandId)"
+        commandIdsSeen.append(intent.commandId)
+        if let existing = settledByKey[key] {
+            return ZCodeCommandReply(
+                instanceId: "qa-zcode-instance",
+                generation: generation,
+                status: existing.status,
+                selected: existing.selected,
+                commandId: intent.commandId,
+                duplicate: true,
+                interactionId: existing.interactionId,
+                interactionType: existing.interactionType,
+                reasonCode: existing.reasonCode
+            )
+        }
+        guard let pending = pendingInteractionByAddress[address], pending.interactionId == intent.interactionId else {
+            let entry = SettledEntry(
+                status: .noop,
+                selected: address,
+                delivery: nil,
+                executionId: nil,
+                interactionId: intent.interactionId,
+                interactionType: intent.interactionType,
+                modelConfig: nil,
+                reasonCode: "proto.alreadyResolved"
+            )
+            settledByKey[key] = entry
+            return ZCodeCommandReply(
+                instanceId: "qa-zcode-instance",
+                generation: generation,
+                status: .noop,
+                selected: address,
+                commandId: intent.commandId,
+                duplicate: false,
+                interactionId: intent.interactionId,
+                interactionType: intent.interactionType,
+                reasonCode: "proto.alreadyResolved"
+            )
+        }
+        guard pending.interactionType == intent.interactionType,
+              !(intent.interactionType == .question && (intent.decision == .approve || intent.decision == .allowAlways || intent.optionId == "allowOnce" || intent.optionId == "allowAlways")) else {
+            let reason = (pending.interactionType == .question) ? "guard.questionCannotApproveAsPermission" : "guard.interactionTypeMismatch"
+            return ZCodeCommandReply(
+                instanceId: "qa-zcode-instance",
+                generation: generation,
+                status: .interactionTypeMismatch,
+                selected: address,
+                commandId: intent.commandId,
+                interactionId: intent.interactionId,
+                interactionType: intent.interactionType,
+                reasonCode: reason
+            )
+        }
+        resolves += 1
+        resolvedInteractions.append(intent.interactionId)
+        pendingInteractionByAddress.removeValue(forKey: address)
+        liveStatusByAddress[address] = "running"
+        let entry = SettledEntry(
+            status: .resolved,
+            selected: address,
+            delivery: nil,
+            executionId: nil,
+            interactionId: intent.interactionId,
+            interactionType: intent.interactionType,
+            modelConfig: nil,
+            reasonCode: nil
+        )
+        settledByKey[key] = entry
+        return ZCodeCommandReply(
+            instanceId: "qa-zcode-instance",
+            generation: generation,
+            status: .resolved,
+            selected: address,
+            commandId: intent.commandId,
+            duplicate: false,
+            interactionId: intent.interactionId,
+            interactionType: intent.interactionType
+        )
+    }
+    func switchModel(_ intent: ZCodeSwitchModelIntent) async throws -> ZCodeCommandReply {
+        guard mode != .disconnected else { throw ZCodeFailure.unavailable }
+        guard intent.selection.instanceId == "qa-zcode-instance", intent.selection.generation == generation else {
+            return commandReply(.stale, commandId: intent.commandId)
+        }
+        let address = intent.selection.address
+        guard selected == address else {
+            return commandReply(.unconfirmed, selected: selected, commandId: intent.commandId)
+        }
+        let currentConfig = modelConfigByAddress[address] ?? Self.defaultModelConfig
+        guard currentConfig.supportsThought(intent.thought, provider: intent.provider, model: intent.model) else {
+            return ZCodeCommandReply(
+                instanceId: "qa-zcode-instance",
+                generation: generation,
+                status: .unsupportedThought,
+                selected: address,
+                commandId: intent.commandId,
+                modelConfig: currentConfig,
+                reasonCode: "guard.unsupportedThoughtLevel"
+            )
+        }
+        switchModels += 1
+        if corruptNextModelReadback {
+            corruptNextModelReadback = false
+            return ZCodeCommandReply(
+                instanceId: "qa-zcode-instance",
+                generation: generation,
+                status: .modelSwitched,
+                selected: address,
+                commandId: intent.commandId,
+                modelConfig: ZCodeModelConfig(
+                    provider: intent.provider,
+                    model: intent.model,
+                    thought: "mismatched-\(intent.thought)",
+                    supportedThoughts: currentConfig.supportedThoughts,
+                    availableModels: currentConfig.availableModels
+                )
+            )
+        }
+        let targetSupported = currentConfig.availableModels?.first(where: { $0.provider == intent.provider && $0.model == intent.model })?.supportedThoughts ?? currentConfig.supportedThoughts
+        let updated = ZCodeModelConfig(
+            provider: intent.provider,
+            model: intent.model,
+            thought: intent.thought,
+            supportedThoughts: targetSupported,
+            availableModels: currentConfig.availableModels
+        )
+        modelConfigByAddress[address] = updated
+        let key = "\(address.taskId)::\(intent.commandId)"
+        let entry = SettledEntry(
+            status: .modelSwitched,
+            selected: address,
+            delivery: nil,
+            executionId: nil,
+            interactionId: nil,
+            interactionType: nil,
+            modelConfig: updated,
+            reasonCode: nil
+        )
+        settledByKey[key] = entry
+        return ZCodeCommandReply(
+            instanceId: "qa-zcode-instance",
+            generation: generation,
+            status: .modelSwitched,
+            selected: address,
+            commandId: intent.commandId,
+            duplicate: false,
+            modelConfig: updated
         )
     }
     func query(_ intent: ZCodeQueryIntent) async throws -> ZCodeCommandReply {
@@ -366,6 +577,9 @@ actor ZCodeNavigationFixture: ZCodeSessionServing {
             duplicate: true,
             delivery: existing.delivery,
             executionId: existing.executionId,
+            interactionId: existing.interactionId,
+            interactionType: existing.interactionType,
+            modelConfig: existing.modelConfig,
             reasonCode: existing.reasonCode
         )
     }
@@ -404,6 +618,14 @@ extension Store {
         }
         func queuedStop(_ intent: ZCodeStopIntent) async {
             stopZCodeSession(intent)
+            await hostExecutionTask?.value
+        }
+        func queuedResolve(_ intent: ZCodeResolveIntent) async {
+            resolveZCodeInteraction(intent)
+            await hostExecutionTask?.value
+        }
+        func queuedSwitchModel(_ intent: ZCodeSwitchModelIntent) async {
+            switchZCodeModel(intent)
             await hostExecutionTask?.value
         }
         func queuedQuery(_ intent: ZCodeQueryIntent) async {
@@ -570,6 +792,179 @@ extension Store {
                 && zcodeSessions.rows.contains(where: { $0.address == expectedCreatedAddress })
                 && afterCreate.creates == 1
 
+            // Reset to second selected for Slice L1 interaction & model switching checks
+            await queuedOpen(second)
+
+            // 7. Question is never approved as permission; valid question answer succeeds
+            await fixture.configureInteraction(
+                second.address,
+                interaction: ZCodePendingInteraction(
+                    interactionId: "int-q-1",
+                    interactionType: .question,
+                    toolName: "AskUserQuestion",
+                    options: ["Option A", "Option B"]
+                )
+            )
+            await zcodeSessions.refresh()
+            guard let misapproveQuestionAsPerm = zcodeSessions.resolveIntent(
+                for: second.address,
+                interactionId: "int-q-1",
+                interactionType: .permission,
+                decision: .approve,
+                commandId: "cmd-misapprove-q1",
+                clientId: "qa-client"
+            ),
+            let misapproveQuestionWithAllowOnce = zcodeSessions.resolveIntent(
+                for: second.address,
+                interactionId: "int-q-1",
+                interactionType: .question,
+                decision: .approve,
+                optionId: "allowOnce",
+                commandId: "cmd-misapprove-q2",
+                clientId: "qa-client"
+            ),
+            let validQuestionAnswer = zcodeSessions.resolveIntent(
+                for: second.address,
+                interactionId: "int-q-1",
+                interactionType: .question,
+                decision: .accept,
+                optionId: "Option A",
+                commandId: "cmd-answer-q1",
+                clientId: "qa-client"
+            ) else { throw ZCodeFailure.invalidReply }
+            await queuedResolve(misapproveQuestionAsPerm)
+            let misapproveOutcome1 = lastHostActionReceipt?.outcome
+            let misapproveReason1 = zcodeSessions.lastCommandReply?.reasonCode
+            await queuedResolve(misapproveQuestionWithAllowOnce)
+            let misapproveOutcome2 = lastHostActionReceipt?.outcome
+            let misapproveReason2 = zcodeSessions.lastCommandReply?.reasonCode
+            let afterMisapprovals = await fixture.counts()
+            await queuedResolve(validQuestionAnswer)
+            let validQuestionOutcome = lastHostActionReceipt?.outcome
+            let afterValidQuestion = await fixture.counts()
+            checks["question_never_approved_as_permission"] = misapproveOutcome1 == "interactionTypeMismatch"
+                && misapproveReason1 == "guard.questionCannotApproveAsPermission"
+                && misapproveOutcome2 == "interactionTypeMismatch"
+                && misapproveReason2 == "guard.questionCannotApproveAsPermission"
+                && afterMisapprovals.resolves == 0
+                && validQuestionOutcome == "resolved"
+                && afterValidQuestion.resolves == 1
+
+            // 8. Expired / duplicate interaction requests produce zero mis-approvals; permission & plan resolve cleanly
+            await fixture.configureInteraction(
+                second.address,
+                interaction: ZCodePendingInteraction(
+                    interactionId: "int-perm-2",
+                    interactionType: .permission,
+                    toolName: "Bash",
+                    options: ["allowOnce", "allowAlways", "deny"]
+                )
+            )
+            await zcodeSessions.refresh()
+            guard let expiredPermIntent = zcodeSessions.resolveIntent(
+                for: second.address,
+                interactionId: "int-perm-old",
+                interactionType: .permission,
+                decision: .approve,
+                commandId: "cmd-expired-perm",
+                clientId: "qa-client"
+            ),
+            let validPermIntent = zcodeSessions.resolveIntent(
+                for: second.address,
+                interactionId: "int-perm-2",
+                interactionType: .permission,
+                decision: .approve,
+                commandId: "cmd-approve-perm2",
+                clientId: "qa-client"
+            ) else { throw ZCodeFailure.invalidReply }
+            await queuedResolve(expiredPermIntent)
+            let expiredOutcome = lastHostActionReceipt?.outcome
+            let expiredReason = zcodeSessions.lastCommandReply?.reasonCode
+            await queuedResolve(validQuestionAnswer)
+            let dupOutcome = lastHostActionReceipt?.outcome
+            let dupFlag = zcodeSessions.lastCommandReply?.duplicate
+            await queuedResolve(validPermIntent)
+            let permOutcome = lastHostActionReceipt?.outcome
+            await fixture.configureInteraction(
+                second.address,
+                interaction: ZCodePendingInteraction(
+                    interactionId: "int-plan-1",
+                    interactionType: .plan,
+                    toolName: "ExitPlanMode"
+                )
+            )
+            await zcodeSessions.refresh()
+            guard let validPlanIntent = zcodeSessions.resolveIntent(
+                for: second.address,
+                interactionId: "int-plan-1",
+                interactionType: .plan,
+                decision: .approve,
+                commandId: "cmd-approve-plan1",
+                clientId: "qa-client"
+            ) else { throw ZCodeFailure.invalidReply }
+            await queuedResolve(validPlanIntent)
+            let planOutcome = lastHostActionReceipt?.outcome
+            let afterInteractions = await fixture.counts()
+            checks["expired_and_duplicate_interaction_zero_misapproval"] = expiredOutcome == "noop"
+                && expiredReason == "proto.alreadyResolved"
+                && dupOutcome == "resolved"
+                && dupFlag == true
+                && permOutcome == "resolved"
+                && planOutcome == "resolved"
+                && afterInteractions.resolves == 3
+                && afterInteractions.resolvedInteractions == ["int-q-1", "int-perm-2", "int-plan-1"]
+
+            // 9. Unsupported thought level is not sent; model & thought readback matches
+            guard let unsupportedSwitch = zcodeSessions.switchModelIntent(
+                for: second.address,
+                provider: "glm",
+                model: "glm-5.1",
+                thought: "xhigh",
+                commandId: "cmd-switch-unsupported",
+                clientId: "qa-client"
+            ),
+            let validSwitch = zcodeSessions.switchModelIntent(
+                for: second.address,
+                provider: "glm",
+                model: "glm-5.1",
+                thought: "high",
+                commandId: "cmd-switch-high",
+                clientId: "qa-client"
+            ),
+            let corruptedSwitch = zcodeSessions.switchModelIntent(
+                for: second.address,
+                provider: "glm",
+                model: "glm-5.1",
+                thought: "low",
+                commandId: "cmd-switch-corrupted",
+                clientId: "qa-client"
+            ) else { throw ZCodeFailure.invalidReply }
+            await queuedSwitchModel(unsupportedSwitch)
+            let unsupportedOutcome = lastHostActionReceipt?.outcome
+            let unsupportedReason = zcodeSessions.lastCommandReply?.reasonCode
+            let afterUnsupportedSwitch = await fixture.counts()
+            checks["unsupported_thought_not_sent"] = unsupportedOutcome == "unsupportedThought"
+                && unsupportedReason == "guard.unsupportedThoughtLevel"
+                && afterUnsupportedSwitch.switchModels == 0
+
+            await queuedSwitchModel(validSwitch)
+            let validSwitchOutcome = lastHostActionReceipt?.outcome
+            let switchedRowConfig = zcodeSessions.rows.first(where: { $0.address == second.address })?.modelConfig
+            await fixture.setCorruptNextModelReadback(true)
+            await queuedSwitchModel(corruptedSwitch)
+            let corruptedOutcome = lastHostActionReceipt?.outcome
+            let corruptedReason = zcodeSessions.lastCommandReply?.reasonCode
+            let preservedRowConfig = zcodeSessions.rows.first(where: { $0.address == second.address })?.modelConfig
+            let afterModelSwitches = await fixture.counts()
+            checks["model_and_thought_readback_consistent"] = validSwitchOutcome == "modelSwitched"
+                && switchedRowConfig?.provider == "glm"
+                && switchedRowConfig?.model == "glm-5.1"
+                && switchedRowConfig?.thought == "high"
+                && corruptedOutcome == "unconfirmed"
+                && corruptedReason == "guard.modelConfigReadbackMismatch"
+                && preservedRowConfig?.thought == "high"
+                && afterModelSwitches.switchModels == 2
+
             // Reset to second selected for remaining navigation boundary checks
             await queuedOpen(second)
             let navBaseline = await fixture.counts()
@@ -610,7 +1005,7 @@ extension Store {
         } catch {
             checks["scenario_completed"] = false
         }
-        let payload: [String: Any] = ["status": checks.count == 14 && checks.values.allSatisfy({ $0 }) ? "PASS" : "FAIL",
+        let payload: [String: Any] = ["status": checks.count == 18 && checks.values.allSatisfy({ $0 }) ? "PASS" : "FAIL",
             "checks": checks, "body_reads": 0, "native_app": "NOT_RUN", "physical_key": "NOT_RUN"]
         if let audit = ProcessInfo.processInfo.environment["MI_HOST_AUDIT_LOG"],
            let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .prettyPrinted]) {

@@ -1,6 +1,6 @@
 # ZCode 同实例导航与受控执行桥
 
-`navigation.patch` 基于 `BASE_SHA` 中的 ZCode 3.17.2 源码。它在原桌面窗口中接入受限 UDS 桥，读取同一个 Host 的 scoped v4 索引，沿真实 tab/session store 选择目标并回读，并复用同实例 `zcodeAgent.sendConversationCommandV4` / `queryConversationCommandsV4` 执行受控的 `createSession`、`sendText` 与带 `expectedForegroundExecutionId` 的 `stop`。没有启动另一套 ZCode runtime，没有读取用户的数据库或凭据。
+`navigation.patch` 基于 `BASE_SHA` 中的 ZCode 3.17.2 源码。它在原桌面窗口中接入受限 UDS 桥，读取同一个 Host 的 scoped v4 索引，沿真实 tab/session store 选择目标并回读，并复用同实例 `zcodeAgent.sendConversationCommandV4` / `queryConversationCommandsV4` 执行受控的 `createSession`、`sendText`、带 `expectedForegroundExecutionId` 的 `stop`、按 `(interactionId, interactionType)` 绑定的 `resolveInteraction` 与带 `supportedThoughts` 门禁及回读校验的 `switchModelConfig`。没有启动另一套 ZCode runtime，没有读取用户的数据库或凭据。
 
 默认关闭。显式启用时，`MI_ZCODE_BRIDGE_CONFIG` 指向当前用户拥有、0600 的 JSON 文件，例如以下合成范围。
 
@@ -10,13 +10,19 @@
 
 只允许精确列出的范围，不支持通配符。远程范围须完整填写 `workspaceIdentity`、`sourceServerId` 和 `remoteSessionId`，并匹配当前已打开的工作区。桥不会自动打开新工作区或回退到本地。配置可加绝对 `directory`；默认 `~/Library/Application Support/MicroInput`，目录必须属于当前用户且为 0700。桥在其中生成新随机 capability 的 `zcode-grant.json`（0600）和 `zcode.sock`（0600）；Micro Input 只有显式连接后才读取 grant。
 
-请求固定为版本 1，`generation` 为正安全整数。支持 `list`、`open`、`create`、`send`、`stop` 与 `query`。认证、范围、schema、代次门禁先于元数据调用。响应只投影地址、标题、liveStatus 与运行中前台 `executionId`，不包含正文、摘要、搜索片段或 interaction payload。导航在完整目标身份核对后进行；`confirmed` 要求真实 store 的选中地址与请求一致，随后只显示、恢复并聚焦所属原窗口。
+请求固定为版本 1，`generation` 为正安全整数。支持 `list`、`open`、`create`、`send`、`stop`、`resolve`、`switchModel` 与 `query`。认证、范围、schema、代次门禁先于元数据调用。响应只投影地址、标题、`liveStatus`、运行中前台 `executionId`、脱敏待处理交互元数据 `pendingInteraction`（仅含 `interactionId`、`interactionType`、工具名与选项标识，不含命令参数或自由文本正文）与模型配置 `modelConfig`（`provider`、`model`、`thought`、`supportedThoughts`、`availableModels`），不包含会话消息正文或搜索片段。导航在完整目标身份核对后进行；`confirmed` 要求真实 store 的选中地址与请求一致，随后只显示、恢复并聚焦所属原窗口。
 
-受控执行契约（Slice K1）：
-- **仅影响选中会话**：`send` 与 `stop` 要求请求目标与当前选中地址（`ports.selected(scope)`）完全一致，否则返回 `unconfirmed` 且不触发底层命令。
+受控执行契约（Slice K1 + Slice L1）：
+- **仅影响选中会话**：`send`、`stop`、`resolve` 与 `switchModel` 要求请求目标与当前选中地址（`ports.selected(scope)`）完全一致，否则返回 `unconfirmed` 且不触发底层命令。
 - **工作区绑定新建与新 ID 回读**：`create` 绑定授权 `scope` 调用 v4 `createSession`，将新建会话同步选中并回读确认 `selected == createdAddress` 后返回 `confirmed`。
 - **运行中发送与 steering / 排队区分**：目标会话处于 `running` 时发送消息走 `sendText`（绝不误建新会话），并按 v4 `inputAccepted.delivery` 将实时 steering（`"guide"` → `"steered"`）与等待队列（`"queue"` → `"queued"`）严格分开，绝不将仅排队入队误报为实时 steering。
 - **按 execution ID 停止与迟到 stop 保护**：`stop` 必须携带非空 `executionId`（映射为 `expectedForegroundExecutionId`）；若目标会话当前前台 execution 已结束或切换为新 ID，返回 `noop`（`reasonCode: "guard.stopTargetChanged"`），绝不停止新 execution。
+- **按 interactionId 与类型处理请求审批、问题与计划（Slice L1）**：`resolve` 同时绑定 `interactionId` 与 `interactionType`（`"permission" | "question" | "plan"`）：
+  - **过期/重复请求零误批**：当目标交互已处理或 `interactionId` 不匹配当前待处理交互时返回 `noop`（`reasonCode: "proto.alreadyResolved"`），不发送底层审批；相同 `commandId` 幂等返回 `resolved`（`duplicate: true`），不重复提交。
+  - **问题不当权限批准**：`AskUserQuestion`（`interactionType: "question"`）与工具权限审批（`"permission"`）及计划确认（`ExitPlanMode` → `"plan"`）严格隔离；任何将 `"question"` 当作 `"permission"` 批准或传入 `allowOnce` / `allowAlways` 的请求在发送前直接拒绝（`guard.questionCannotApproveAsPermission`），零次触发底层 `resolveInteraction`。
+- **模型与思考档位切换及回读一致（Slice L1）**：`switchModel` 复用 v4 `switchModelConfig`（携带 CAS `baseRevision`）：
+  - **模型无该档位不发送**：发送前核对目标 `(provider, model)` 的 `supportedThoughts`；若不支持请求的 `thought` 档位，立即返回 `guard.unsupportedThoughtLevel`，零次发送 `switchModelConfig`。
+  - **回读模型和档位一致**：`switchModelConfig` 接受后重新回读目标会话 `modelConfig`，仅当回读的 `(provider, model, thought)` 与请求完全一致时才确认（Swift 侧映射为 `.modelSwitched`）；回读不一致返回 `unconfirmed`（`guard.modelConfigReadbackMismatch`）。
 - **命令幂等去重与未知结果对账**：相同 `(sessionId, commandId)` 幂等返回 `duplicate: true`，不重复发送或重复新建；命令超时或结果未知时，客户端保持原 `commandId` 锁存并通过 `query`（`queryConversationCommandsV4`）对账，绝不换新 `commandId` 重放。
 
 首次成功列举固定每个 scope 的 source generation。同一个 taskService 换代、断连恢复或 renderer 替换不能继续使用旧选择；source 换代后本授权保持 stale，需要重新启用桥或重载该窗口来获得新 grant。失联、任务删除、工作区关闭或模型切换期间均拒绝导航与执行。socket 所有者使用独占目录锁，活跃或遗留锁均不自动接管。

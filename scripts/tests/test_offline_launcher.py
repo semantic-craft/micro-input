@@ -83,6 +83,10 @@ class OfflineEvidenceTests(unittest.TestCase):
         names = ["same_name_two_workspaces", "selected_readback_matches",
                  "selected_only_isolation", "duplicate_command_dedup", "inflight_steering_vs_queue",
                  "late_stop_noop", "timeout_same_id_no_replay", "create_workspace_readback",
+                 "question_never_approved_as_permission",
+                 "expired_and_duplicate_interaction_zero_misapproval",
+                 "unsupported_thought_not_sent",
+                 "model_and_thought_readback_consistent",
                  "wrong_selected_unconfirmed",
                  "deleted_target_no_redirect", "generation_change_blocks_old_selection",
                  "disconnect_clears_targets", "disabled_zero_reads", "out_of_scope_zero_reads"]
@@ -99,6 +103,15 @@ class OfflineEvidenceTests(unittest.TestCase):
             dict(action_type="zcode_send", outcome="unknown", target="zcode", text_byte_len=None),
             dict(action_type="zcode_stop", outcome="noop", target="zcode", text_byte_len=None),
             dict(action_type="zcode_stop", outcome="stopped", target="zcode", text_byte_len=None),
+            dict(action_type="zcode_resolve", outcome="interactionTypeMismatch", target="zcode", text_byte_len=None),
+            dict(action_type="zcode_resolve", outcome="interactionTypeMismatch", target="zcode", text_byte_len=None),
+            dict(action_type="zcode_resolve", outcome="resolved", target="zcode", text_byte_len=None),
+            dict(action_type="zcode_resolve", outcome="noop", target="zcode", text_byte_len=None),
+            dict(action_type="zcode_resolve", outcome="resolved", target="zcode", text_byte_len=None),
+            dict(action_type="zcode_resolve", outcome="resolved", target="zcode", text_byte_len=None),
+            dict(action_type="zcode_resolve", outcome="resolved", target="zcode", text_byte_len=None),
+            dict(action_type="zcode_switch_model", outcome="unsupportedThought", target="zcode", text_byte_len=None),
+            dict(action_type="zcode_switch_model", outcome="modelSwitched", target="zcode", text_byte_len=None),
         ]
         audit.write_text("\n".join(json.dumps(r) for r in audit_rows))
         path.write_text(json.dumps(payload))
