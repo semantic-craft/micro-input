@@ -112,13 +112,15 @@ final class AntigravityStatusTests: XCTestCase {
     func testVersionAndCapabilityPartitionRecorded() {
         let caps = AntigravityCapabilities.installed2_29_0
         XCTAssertTrue(caps.valid)
+        XCTAssertTrue(caps.supportsCatalogNavigation)
         XCTAssertEqual(caps.bundleId, "com.google.antigravity")
         XCTAssertEqual(caps.installedVersion, "2.29.0")
         XCTAssertEqual(caps.languageServerCl, "1013060670")
         XCTAssertEqual(caps.agentapiCommands, ["get-conversation-metadata", "new-conversation", "send-message"])
         XCTAssertEqual(caps.hookEvents, ["SessionStart", "PreInvocation", "PostInvocation", "PreToolUse", "PostToolUse", "Stop"])
-        XCTAssertFalse(caps.supportsSessionCatalog)
-        XCTAssertFalse(caps.supportsTargetFocus)
+        XCTAssertTrue(caps.supportsSessionCatalog)
+        XCTAssertTrue(caps.supportsTargetFocus)
+        XCTAssertTrue(caps.schemaVerified)
         XCTAssertFalse(caps.supportsStopTurn)
         XCTAssertFalse(caps.supportsApprovalGate)
 
@@ -130,11 +132,28 @@ final class AntigravityStatusTests: XCTestCase {
             sidecarSdkVersion: caps.sidecarSdkVersion,
             hookEvents: caps.hookEvents,
             supportsSessionCatalog: true,
-            supportsTargetFocus: false,
-            supportsStopTurn: false,
-            supportsApprovalGate: false
+            supportsTargetFocus: true,
+            supportsStopTurn: true,
+            supportsApprovalGate: false,
+            schemaVerified: true
         )
         XCTAssertFalse(overclaimed.valid)
+
+        let unverifiedSchema = AntigravityCapabilities(
+            bundleId: caps.bundleId,
+            installedVersion: caps.installedVersion,
+            languageServerCl: caps.languageServerCl,
+            agentapiCommands: caps.agentapiCommands,
+            sidecarSdkVersion: caps.sidecarSdkVersion,
+            hookEvents: caps.hookEvents,
+            supportsSessionCatalog: true,
+            supportsTargetFocus: true,
+            supportsStopTurn: false,
+            supportsApprovalGate: false,
+            schemaVerified: false
+        )
+        XCTAssertFalse(unverifiedSchema.valid)
+        XCTAssertFalse(unverifiedSchema.supportsCatalogNavigation)
     }
 
     func testTwoSessionsNeverCrossAndDuplicatesAreDeduplicated() async throws {
@@ -419,5 +438,141 @@ final class AntigravityStatusTests: XCTestCase {
         let link = folder.appendingPathComponent("link.json")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: file)
         XCTAssertThrowsError(try AntigravityGrant.load(link))
+    }
+
+    func testExistingCatalogAndExactNavigationConfirmSelectedReadbackAndIsolateSameNameAcrossWorkspaces() async throws {
+        let fixture = AntigravityStatusFixture()
+        let controller = AntigravityStatusController(client: fixture, pollNanoseconds: 60_000_000_000)
+
+        try await fixture.ingest(AntigravityHookEvent(
+            conversationId: AntigravityStatusFixture.sessionA.conversationId,
+            workspacePath: AntigravityStatusFixture.sessionA.workspacePath,
+            eventType: .sessionStart,
+            modelName: "gemini-2.5-pro",
+            invocationNum: 0,
+            stepIdx: 0,
+            executionNum: 0,
+            toolName: nil,
+            terminationReason: nil,
+            hasError: false,
+            fullyIdle: true,
+            eventId: nil,
+            title: "Shared Task Name",
+            projectId: "proj-alpha"
+        ))
+        try await fixture.ingest(AntigravityHookEvent(
+            conversationId: AntigravityStatusFixture.sessionB.conversationId,
+            workspacePath: AntigravityStatusFixture.sessionB.workspacePath,
+            eventType: .sessionStart,
+            modelName: "gemini-2.5-flash",
+            invocationNum: 0,
+            stepIdx: 0,
+            executionNum: 0,
+            toolName: nil,
+            terminationReason: nil,
+            hasError: false,
+            fullyIdle: true,
+            eventId: nil,
+            title: "Shared Task Name",
+            projectId: "proj-beta"
+        ))
+
+        controller.setEnabled(true)
+        for _ in 0..<200 {
+            if controller.state == .ready { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(controller.state, .ready)
+        XCTAssertEqual(controller.rows.count, 2)
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionA)?.title, "Shared Task Name")
+        XCTAssertEqual(controller.row(for: AntigravityStatusFixture.sessionB)?.title, "Shared Task Name")
+
+        let selA = try XCTUnwrap(controller.selection(for: AntigravityStatusFixture.sessionA))
+        let resA = await controller.open(selA, admitted: { true })
+        XCTAssertEqual(resA, .confirmed)
+        XCTAssertEqual(controller.selected, AntigravityStatusFixture.sessionA)
+        XCTAssertEqual(controller.lastResult, .confirmed)
+
+        let selB = try XCTUnwrap(controller.selection(for: AntigravityStatusFixture.sessionB))
+        let resB = await controller.open(selB, admitted: { true })
+        XCTAssertEqual(resB, .confirmed)
+        XCTAssertEqual(controller.selected, AntigravityStatusFixture.sessionB)
+        XCTAssertEqual(controller.lastResult, .confirmed)
+
+        await fixture.setMode(.wrongSelected)
+        let selWrong = try XCTUnwrap(controller.selection(for: AntigravityStatusFixture.sessionA))
+        let resWrong = await controller.open(selWrong, admitted: { true })
+        XCTAssertEqual(resWrong, .unconfirmed)
+        XCTAssertEqual(controller.lastResult, .unconfirmed)
+        await fixture.setMode(.normal)
+
+        _ = await controller.open(try XCTUnwrap(controller.selection(for: AntigravityStatusFixture.sessionA)), admitted: { true })
+        XCTAssertEqual(controller.selected, AntigravityStatusFixture.sessionA)
+
+        let staleDeletedB = try XCTUnwrap(controller.selection(for: AntigravityStatusFixture.sessionB))
+        await fixture.deleteSession(AntigravityStatusFixture.sessionB)
+        let resDeleted = await controller.open(staleDeletedB, admitted: { true })
+        XCTAssertEqual(resDeleted, .unconfirmed)
+        XCTAssertEqual(controller.selected, AntigravityStatusFixture.sessionA)
+
+        let selBeforeMissingSchema = try XCTUnwrap(controller.selection(for: AntigravityStatusFixture.sessionA))
+        await fixture.setMode(.missingSchema)
+        let resDenied = await controller.open(selBeforeMissingSchema, admitted: { true })
+        XCTAssertEqual(resDenied, .denied)
+        XCTAssertEqual(controller.state, .unavailable(.denied))
+
+        let counts = await fixture.counts()
+        XCTAssertEqual(counts.transcriptReads, 0)
+        XCTAssertEqual(counts.tokenReads, 0)
+        await controller.shutdown()
+    }
+
+    func testSnapshotValidationRejectsTokenReadsAndInvalidSelected() {
+        let validKey = AntigravitySessionKey(conversationId: "conv-a", workspacePath: "/ws/a")
+        let validSelected = AntigravityStatusSnapshot(
+            instanceId: "ag-instance-1",
+            generation: 1,
+            allowedWorkspaces: ["/ws/a", "/ws/b"],
+            capabilities: .installed2_29_0,
+            cursor: 0,
+            rows: [agRow()],
+            changes: [],
+            selected: validKey,
+            transcriptReads: 0,
+            tokenReads: 0
+        )
+        XCTAssertNoThrow(try validSelected.validate())
+
+        let nonZeroTokenReads = AntigravityStatusSnapshot(
+            instanceId: "ag-instance-1",
+            generation: 1,
+            allowedWorkspaces: ["/ws/a", "/ws/b"],
+            capabilities: .installed2_29_0,
+            cursor: 0,
+            rows: [agRow()],
+            changes: [],
+            selected: validKey,
+            transcriptReads: 0,
+            tokenReads: 1
+        )
+        XCTAssertThrowsError(try nonZeroTokenReads.validate()) { error in
+            XCTAssertEqual(error as? AntigravityFailure, .invalidReply)
+        }
+
+        let unknownSelected = AntigravityStatusSnapshot(
+            instanceId: "ag-instance-1",
+            generation: 1,
+            allowedWorkspaces: ["/ws/a", "/ws/b"],
+            capabilities: .installed2_29_0,
+            cursor: 0,
+            rows: [agRow()],
+            changes: [],
+            selected: AntigravitySessionKey(conversationId: "conv-missing", workspacePath: "/ws/a"),
+            transcriptReads: 0,
+            tokenReads: 0
+        )
+        XCTAssertThrowsError(try unknownSelected.validate()) { error in
+            XCTAssertEqual(error as? AntigravityFailure, .invalidReply)
+        }
     }
 }

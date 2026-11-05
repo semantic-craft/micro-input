@@ -25,7 +25,23 @@ FORBIDDEN_WIRE_KEYS = {
     "artifactDirectoryPath",
     "lastUserInput",
     "args",
+    "csrfToken",
+    "oauthToken",
+    "sidecarUiToken",
+    "apiKey",
 }
+
+VALID_PHASES = (
+    "idle",
+    "running",
+    "runningTool",
+    "backgroundActive",
+    "completed",
+    "failed",
+    "canceled",
+)
+
+CATALOG_NAV_SCHEMA_VERSION = "antigravity-catalog-nav-v1"
 
 DEFAULT_CAPABILITIES = {
     "bundleId": "com.google.antigravity",
@@ -38,10 +54,11 @@ DEFAULT_CAPABILITIES = {
     ],
     "sidecarSdkVersion": "1.0.0",
     "hookEvents": list(VALID_EVENTS),
-    "supportsSessionCatalog": False,
-    "supportsTargetFocus": False,
+    "supportsSessionCatalog": True,
+    "supportsTargetFocus": True,
     "supportsStopTurn": False,
     "supportsApprovalGate": False,
+    "schemaVerified": True,
 }
 
 
@@ -87,6 +104,8 @@ def reduce_row(prior, event):
     conversation_id = event["conversationId"]
     workspace_path = event["workspacePath"]
     event_type = event["eventType"]
+    title = event.get("title") or (prior.get("title") if prior else None) or conversation_id
+    project_id = event.get("projectId") if isinstance(event.get("projectId"), str) else (prior.get("projectId") if prior else "")
     model_name = event.get("modelName") or (prior["modelName"] if prior else "")
     inv = event.get("invocationNum")
     if not (isinstance(inv, int) and not isinstance(inv, bool)):
@@ -149,6 +168,8 @@ def reduce_row(prior, event):
     return {
         "conversationId": conversation_id,
         "workspacePath": workspace_path,
+        "title": title,
+        "projectId": project_id,
         "modelName": model_name,
         "phase": phase,
         "lastEventType": event_type,
@@ -159,6 +180,74 @@ def reduce_row(prior, event):
         "terminationReason": term_out,
         "fullyIdle": idle_out,
         "transitionCount": transitions,
+    }
+
+
+def normalize_workspace_uri(raw_value):
+    if not isinstance(raw_value, str):
+        return None
+    if raw_value.startswith("file://"):
+        return raw_value[len("file://") :]
+    return raw_value
+
+
+def sanitize_catalog_entry(raw_entry):
+    if not isinstance(raw_entry, dict):
+        raise ValueError("catalog entry must be a JSON object")
+    conversation_id = raw_entry.get("conversationId") or raw_entry.get("cascadeId") or raw_entry.get("trajectoryId")
+    if not valid_id(conversation_id, 256):
+        raise ValueError("missing or invalid conversationId in catalog entry")
+    workspace_path = normalize_workspace_uri(raw_entry.get("workspacePath"))
+    if not valid_id(workspace_path, 4096):
+        workspaces = raw_entry.get("workspacePaths") or raw_entry.get("workspaceUris")
+        if isinstance(workspaces, list) and workspaces:
+            workspace_path = normalize_workspace_uri(workspaces[0])
+        elif isinstance(raw_entry.get("workspaces"), list) and raw_entry["workspaces"]:
+            first_ws = raw_entry["workspaces"][0]
+            if isinstance(first_ws, dict):
+                workspace_path = normalize_workspace_uri(first_ws.get("workspaceFolderAbsoluteUri"))
+    if not valid_id(workspace_path, 4096):
+        raise ValueError("missing or invalid workspacePath in catalog entry")
+
+    raw_title = raw_entry.get("title") or raw_entry.get("summary")
+    if not valid_id(raw_title, 512):
+        annotations = raw_entry.get("annotations")
+        if isinstance(annotations, dict) and valid_id(annotations.get("title"), 512):
+            raw_title = annotations["title"]
+        else:
+            raw_title = conversation_id
+
+    raw_project = raw_entry.get("projectId") or ""
+    if not isinstance(raw_project, str) or len(raw_project.encode("utf-8")) > 256:
+        raw_project = ""
+
+    raw_model = raw_entry.get("modelName") if valid_id(raw_entry.get("modelName"), 256) else ""
+    phase = raw_entry.get("phase") if raw_entry.get("phase") in VALID_PHASES else "idle"
+    last_event = raw_entry.get("lastEventType") if raw_entry.get("lastEventType") in VALID_EVENTS else "SessionStart"
+    fully_idle = raw_entry.get("fullyIdle")
+    if not isinstance(fully_idle, bool):
+        fully_idle = phase in ("idle", "completed")
+
+    inv = raw_entry.get("invocationNum")
+    step = raw_entry.get("stepIdx") if "stepIdx" in raw_entry else raw_entry.get("stepCount")
+    exec_num = raw_entry.get("executionNum")
+    transitions = raw_entry.get("transitionCount")
+
+    return {
+        "conversationId": conversation_id,
+        "workspacePath": workspace_path,
+        "title": raw_title,
+        "projectId": raw_project,
+        "modelName": raw_model,
+        "phase": phase,
+        "lastEventType": last_event,
+        "invocationNum": inv if isinstance(inv, int) and not isinstance(inv, bool) and inv >= 0 else 0,
+        "stepIdx": step if isinstance(step, int) and not isinstance(step, bool) and step >= 0 else 0,
+        "executionNum": exec_num if isinstance(exec_num, int) and not isinstance(exec_num, bool) and exec_num >= 0 else 0,
+        "lastToolName": raw_entry.get("lastToolName") if valid_id(raw_entry.get("lastToolName"), 256) else None,
+        "terminationReason": raw_entry.get("terminationReason") if valid_id(raw_entry.get("terminationReason"), 128) else None,
+        "fullyIdle": fully_idle,
+        "transitionCount": transitions if isinstance(transitions, int) and not isinstance(transitions, bool) and transitions >= 1 else 1,
     }
 
 
@@ -192,6 +281,10 @@ def sanitize_hook_stdin(raw_payload, event_type):
         "modelName": raw_payload.get("modelName") if valid_id(raw_payload.get("modelName"), 256) else "",
         "hasError": bool(raw_payload.get("error")),
     }
+    if valid_id(raw_payload.get("title"), 512):
+        sanitized["title"] = raw_payload["title"]
+    if isinstance(raw_payload.get("projectId"), str) and len(raw_payload["projectId"].encode("utf-8")) <= 256:
+        sanitized["projectId"] = raw_payload["projectId"]
     for int_key in ("invocationNum", "stepIdx", "executionNum"):
         val = raw_payload.get(int_key)
         if isinstance(val, int) and not isinstance(val, bool) and 0 <= val <= 1_000_000_000:
@@ -236,7 +329,7 @@ def contains_forbidden_keys(obj):
 
 
 class BridgeDaemon:
-    def __init__(self, directory, instance_id, generation, workspaces, ttl, heartbeat_ttl):
+    def __init__(self, directory, instance_id, generation, workspaces, ttl, heartbeat_ttl, schema_verified=True):
         self.directory = Path(directory).resolve()
         self.instance_id = instance_id
         self.generation = generation
@@ -244,7 +337,11 @@ class BridgeDaemon:
         self.ttl = ttl
         self.heartbeat_ttl = heartbeat_ttl
         self.token = secrets.token_hex(32)
+        self.schema_verified = bool(schema_verified)
         self.capabilities = dict(DEFAULT_CAPABILITIES)
+        self.capabilities["schemaVerified"] = self.schema_verified
+        self.capabilities["supportsSessionCatalog"] = self.schema_verified
+        self.capabilities["supportsTargetFocus"] = self.schema_verified
 
         self.subscription_id = None
         self.cursor = 0
@@ -252,6 +349,8 @@ class BridgeDaemon:
         self.rows = {}
         self.seen_keys = {}
         self.changes = []
+        self.selected = None
+        self.select_override = None
         self.stream_healthy = True
         self.forced_gap = False
         self.last_heartbeat = time.monotonic()
@@ -261,6 +360,9 @@ class BridgeDaemon:
         self.duplicate_events_dropped = 0
         self.unauthorized_rejections = 0
         self.transcript_reads = 0
+        self.token_reads = 0
+        self.open_requests = 0
+        self.open_confirmed = 0
         self.close_count = 0
         self.running = True
 
@@ -270,6 +372,52 @@ class BridgeDaemon:
         if self.heartbeat_ttl is not None and (time.monotonic() - self.last_heartbeat) > self.heartbeat_ttl:
             return False
         return True
+
+    def selected_payload(self):
+        if self.selected is not None and self.selected in self.rows:
+            return {
+                "conversationId": self.selected[0],
+                "workspacePath": self.selected[1],
+            }
+        return None
+
+    def set_schema_verified(self, verified):
+        self.schema_verified = bool(verified)
+        self.capabilities["schemaVerified"] = self.schema_verified
+        self.capabilities["supportsSessionCatalog"] = self.schema_verified
+        self.capabilities["supportsTargetFocus"] = self.schema_verified
+
+    def seed_catalog_entries(self, raw_entries, initial_selected=None):
+        if not isinstance(raw_entries, list):
+            raise ValueError("catalog entries must be a list")
+        seeded = 0
+        for raw in raw_entries:
+            row = sanitize_catalog_entry(raw)
+            conv_id = row["conversationId"]
+            ws_path = row["workspacePath"]
+            if ws_path not in self.allowed_workspaces:
+                raise ValueError(f"workspacePath not allowed: {ws_path}")
+            session_key = (conv_id, ws_path)
+            self.rows[session_key] = row
+            self.cursor += 1
+            ev_key = f"{conv_id}:{ws_path}:catalog:{self.cursor}"
+            self.seen_keys.setdefault(session_key, set()).add(ev_key)
+            self.changes.append({
+                "sequence": self.cursor,
+                "eventKey": ev_key,
+                "row": row,
+            })
+            seeded += 1
+        if len(self.changes) > 1024:
+            self.changes = self.changes[-1024:]
+            self.min_cursor = self.changes[0]["sequence"] - 1
+        if isinstance(initial_selected, dict):
+            sel_conv = initial_selected.get("conversationId")
+            sel_ws = initial_selected.get("workspacePath")
+            if (sel_conv, sel_ws) in self.rows:
+                self.selected = (sel_conv, sel_ws)
+        self.last_heartbeat = time.monotonic()
+        return seeded
 
     def base_reply(self, req, status):
         return {
@@ -339,6 +487,26 @@ class BridgeDaemon:
             reply["cursor"] = self.cursor
             return reply
 
+        if op == "seed-catalog":
+            if (
+                not self.schema_verified
+                or req.get("schemaVersion") != CATALOG_NAV_SCHEMA_VERSION
+            ):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            entries = req.get("entries")
+            if not isinstance(entries, list) or contains_forbidden_keys(entries):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            try:
+                seeded = self.seed_catalog_entries(entries, initial_selected=req.get("selected"))
+            except ValueError:
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            reply = self.base_reply(req, "ok")
+            reply.update(cursor=self.cursor, seeded=seeded)
+            return reply
+
         sub_id = req.get("subscriptionId")
         req_id = req.get("id")
         if not valid_id(sub_id, 256) or not valid_id(req_id, 256):
@@ -347,6 +515,9 @@ class BridgeDaemon:
 
         if op == "subscribe":
             if req.get("activate") is not False:
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if not self.schema_verified:
                 self.unauthorized_rejections += 1
                 return self.base_reply(req, "denied")
             if self.subscription_id is not None and self.subscription_id != sub_id:
@@ -363,12 +534,17 @@ class BridgeDaemon:
                 cursor=self.cursor,
                 rows=self.sorted_rows(),
                 changes=[],
+                selected=self.selected_payload(),
                 transcriptReads=self.transcript_reads,
+                tokenReads=self.token_reads,
             )
             return reply
 
         if op == "read":
             if self.subscription_id is None or self.subscription_id != sub_id:
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if not self.schema_verified:
                 self.unauthorized_rejections += 1
                 return self.base_reply(req, "denied")
             if not self.is_stream_healthy():
@@ -388,7 +564,62 @@ class BridgeDaemon:
                 cursor=self.cursor,
                 rows=self.sorted_rows(),
                 changes=delta,
+                selected=self.selected_payload(),
                 transcriptReads=self.transcript_reads,
+                tokenReads=self.token_reads,
+            )
+            return reply
+
+        if op == "open":
+            if self.subscription_id is None or self.subscription_id != sub_id:
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if (
+                not self.schema_verified
+                or not self.capabilities.get("supportsSessionCatalog")
+                or not self.capabilities.get("supportsTargetFocus")
+                or req.get("schemaVersion") != CATALOG_NAV_SCHEMA_VERSION
+            ):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            if not self.is_stream_healthy():
+                return self.base_reply(req, "stale")
+            target = req.get("target")
+            if not isinstance(target, dict) or contains_forbidden_keys(target):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            conv_id = target.get("conversationId")
+            ws_path = target.get("workspacePath")
+            if (
+                not valid_id(conv_id, 256)
+                or not valid_id(ws_path, 4096)
+                or ws_path not in self.allowed_workspaces
+            ):
+                self.unauthorized_rejections += 1
+                return self.base_reply(req, "denied")
+            self.open_requests += 1
+            self.metadata_reads += 1
+            target_key = (conv_id, ws_path)
+            if target_key not in self.rows:
+                reply = self.base_reply(req, "unconfirmed")
+                reply.update(
+                    selected=self.selected_payload(),
+                    transcriptReads=self.transcript_reads,
+                    tokenReads=self.token_reads,
+                )
+                return reply
+            readback_key = self.select_override if self.select_override is not None else target_key
+            if readback_key in self.rows:
+                self.selected = readback_key
+            if readback_key == target_key and self.selected == target_key:
+                self.open_confirmed += 1
+                reply = self.base_reply(req, "ok")
+            else:
+                reply = self.base_reply(req, "unconfirmed")
+            reply.update(
+                selected=self.selected_payload(),
+                transcriptReads=self.transcript_reads,
+                tokenReads=self.token_reads,
             )
             return reply
 
@@ -413,12 +644,46 @@ class BridgeDaemon:
                 "duplicateEventsDropped": self.duplicate_events_dropped,
                 "unauthorizedRejections": self.unauthorized_rejections,
                 "transcriptReads": self.transcript_reads,
+                "tokenReads": self.token_reads,
+                "openRequests": self.open_requests,
+                "openConfirmed": self.open_confirmed,
+                "selected": self.selected_payload(),
+                "schemaVerified": self.schema_verified,
                 "closeCount": self.close_count,
                 "cursor": self.cursor,
                 "sessionCount": len(self.rows),
                 "streamHealthy": self.is_stream_healthy(),
                 "generation": self.generation,
             }
+        if op == "seed-catalog":
+            try:
+                seeded = self.seed_catalog_entries(req.get("entries", []), initial_selected=req.get("selected"))
+                return {"status": "ok", "seeded": seeded, "cursor": self.cursor}
+            except Exception as exc:
+                return {"status": "error", "message": str(exc)}
+        if op == "select-override":
+            target = req.get("target")
+            if isinstance(target, dict) and valid_id(target.get("conversationId"), 256) and valid_id(target.get("workspacePath"), 4096):
+                self.select_override = (target["conversationId"], target["workspacePath"])
+            else:
+                self.select_override = ("__unselected__", "")
+            return {"status": "ok", "selectOverride": list(self.select_override)}
+        if op == "clear-select-override":
+            self.select_override = None
+            return {"status": "ok", "selectOverride": None}
+        if op == "delete-session":
+            conv_id = req.get("conversationId")
+            ws_path = req.get("workspacePath")
+            key = (conv_id, ws_path)
+            removed = self.rows.pop(key, None) is not None
+            if self.selected == key:
+                self.selected = None
+            if removed:
+                self.cursor += 1
+            return {"status": "ok", "removed": removed, "cursor": self.cursor}
+        if op == "set-schema-verified":
+            self.set_schema_verified(bool(req.get("verified", True)))
+            return {"status": "ok", "schemaVerified": self.schema_verified}
         if op == "disconnect":
             self.stream_healthy = False
             return {"status": "ok", "streamHealthy": False}
@@ -468,7 +733,13 @@ def serve_command(args):
         workspaces=args.workspace,
         ttl=args.ttl,
         heartbeat_ttl=args.heartbeat_ttl,
+        schema_verified=not args.disable_catalog_schema,
     )
+    if args.catalog_file:
+        raw_catalog = json.loads(Path(args.catalog_file).read_text(encoding="utf-8"))
+        entries = raw_catalog.get("entries", raw_catalog) if isinstance(raw_catalog, dict) else raw_catalog
+        selected = raw_catalog.get("selected") if isinstance(raw_catalog, dict) else None
+        daemon.seed_catalog_entries(entries, initial_selected=selected)
 
     main_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     ctrl_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -583,6 +854,38 @@ def emit_command(args):
         sys.exit(1)
 
 
+def catalog_command(args):
+    raw_text = sys.stdin.read()
+    raw_payload = json.loads(raw_text) if raw_text.strip() else {}
+    raw_entries = raw_payload.get("entries", raw_payload) if isinstance(raw_payload, dict) else raw_payload
+    if not isinstance(raw_entries, list):
+        raise ValueError("catalog stdin payload must be a JSON array or object with 'entries'")
+    sanitized_entries = [sanitize_catalog_entry(item) for item in raw_entries]
+    request = {
+        "version": 1,
+        "subscriptionId": "catalog-seeder",
+        "id": str(uuid.uuid4()),
+        "token": args.token,
+        "instanceId": args.instance_id,
+        "generation": args.generation,
+        "op": "seed-catalog",
+        "schemaVersion": CATALOG_NAV_SCHEMA_VERSION,
+        "entries": sanitized_entries,
+    }
+    if isinstance(raw_payload, dict) and isinstance(raw_payload.get("selected"), dict):
+        request["selected"] = {
+            "conversationId": raw_payload["selected"].get("conversationId", ""),
+            "workspacePath": normalize_workspace_uri(raw_payload["selected"].get("workspacePath", "")) or "",
+        }
+    reply = send_uds_json(args.socket, request)
+    if args.receipt_file:
+        Path(args.receipt_file).write_text(json.dumps(reply, indent=2) + "\n", encoding="utf-8")
+    sys.stdout.write(json.dumps(reply) + "\n")
+    sys.stdout.flush()
+    if args.strict and reply.get("status") != "ok":
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -594,6 +897,8 @@ def main():
     serve.add_argument("--workspace", action="append", required=True, help="Allowed workspace path (repeatable)")
     serve.add_argument("--ttl", type=float, default=120.0, help="Daemon lifetime limit in seconds")
     serve.add_argument("--heartbeat-ttl", type=float, default=None, help="Optional stream heartbeat expiry in seconds")
+    serve.add_argument("--catalog-file", default=None, help="Optional pre-existing session catalog JSON file")
+    serve.add_argument("--disable-catalog-schema", action="store_true", help="Fail-closed test flag for missing schema")
 
     emit = sub.add_parser("emit", help="Sanitize one official Antigravity hook stdin payload and forward metadata")
     emit.add_argument("--socket", required=True, help="Path to antigravity.sock")
@@ -604,11 +909,21 @@ def main():
     emit.add_argument("--receipt-file", default=None, help="Optional file to record daemon reply")
     emit.add_argument("--strict", action="store_true", help="Exit non-zero if bridge rejects the event")
 
+    catalog = sub.add_parser("catalog", help="Sanitize and seed existing Antigravity conversation catalog entries")
+    catalog.add_argument("--socket", required=True, help="Path to antigravity.sock")
+    catalog.add_argument("--token", required=True, help="Capability token")
+    catalog.add_argument("--instance-id", default="antigravity-local", help="Antigravity instance identifier")
+    catalog.add_argument("--generation", type=int, default=1, help="Bridge generation (> 0)")
+    catalog.add_argument("--receipt-file", default=None, help="Optional file to record daemon reply")
+    catalog.add_argument("--strict", action="store_true", help="Exit non-zero if bridge rejects the catalog")
+
     args = parser.parse_args()
     if args.cmd == "serve":
         serve_command(args)
-    else:
+    elif args.cmd == "emit":
         emit_command(args)
+    else:
+        catalog_command(args)
 
 
 if __name__ == "__main__":

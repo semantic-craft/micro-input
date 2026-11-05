@@ -77,10 +77,11 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Evidence**: .scratch/qa-runs/1793851247890-30095/evidence/result.json
 - **Verification scope**: 软件片通过全量离线门禁及八个隔离应用场景；安装版 2.29.0（language_server CL 1013060670）只读静态核对、7 项合成/生产双 ABI Swift 单元测试及真实 UDS 双端联测（.scratch/ag-07a1bcc7/result.json）通过。验证两会话隔离、重复事件去重、Stop(fullyIdle=false) 归入 backgroundActive、断流/心跳超时/换代标 stale、0000 权限金丝雀 transcriptPath 零读取。安装版桌面 GUI、既有会话目录与实体按键均为 NOT_RUN。见 [Antigravity 状态桥](../integrations/antigravity/README.md)。
 
-### [ ] Slice I2: 核验 Antigravity 既有会话目录与精确导航
+### [x] Slice I2: 核验 Antigravity 既有会话目录与精确导航
 - **Outcome**: 先用官方可用入口，缺少时用 REA 验证会话元数据、工作区与聚焦协议，仅限只读和测试导航。
 - **Done Predicate**: 两个既有测试会话目录身份与 UI 选中回读一致；同名跨工作区不混；缺 schema/合法认证就失败关闭；不读取 token 或绕过鉴权。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: I。责任票 #83。
+- **Evidence**: .scratch/qa-runs/1793854250379-53064/evidence/result.json
 
 ### [ ] Slice J: 补 Cindy 既有任务目录和导航确认
 - **Outcome**: 在原生服务旁加受限元数据桥，沿用 session 深链并回读目标。

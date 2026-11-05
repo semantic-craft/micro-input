@@ -82,14 +82,20 @@ def verify_evidence(run, scenario, started, process_alive):
         expected = {
             "version_and_capabilities_recorded",
             "disabled_zero_reads",
+            "existing_two_sessions_catalog_and_selected_readback_confirmed",
+            "same_name_cross_workspace_no_collision",
+            "wrong_selected_readback_unconfirmed",
             "two_sessions_isolated",
             "duplicate_events_deduplicated",
             "stop_fully_idle_false_not_completed",
             "stop_fully_idle_true_completed",
+            "deleted_target_no_redirect",
+            "missing_schema_or_auth_fails_closed",
             "stream_disconnect_marks_stale",
             "generation_change_marks_stale",
             "journal_gap_marks_unavailable",
             "zero_transcript_reads",
+            "zero_token_reads",
             "bridge_subscription_closed",
         }
         if (
@@ -97,17 +103,32 @@ def verify_evidence(run, scenario, started, process_alive):
             or status_doc.get("installed_version") != "2.29.0"
             or status_doc.get("language_server_cl") != "1013060670"
             or status_doc.get("transcript_reads") != 0
+            or status_doc.get("token_reads") != 0
             or set(status_doc.get("checks", {})) != expected
             or not all(value is True for value in status_doc["checks"].values())
             or status_doc.get("native_app") != "NOT_RUN"
             or status_doc.get("physical_key") != "NOT_RUN"
         ):
-            raise ValueError("Antigravity status evidence incomplete or overclaimed")
+            raise ValueError("Antigravity status/navigation evidence incomplete or overclaimed")
+        rows = [json.loads(line) for line in (evidence / "audit.jsonl").read_text().splitlines()]
+        confirmed = [row for row in rows if row["action_type"] == "antigravity_open" and row["outcome"] == "confirmed"]
+        unconfirmed = [row for row in rows if row["action_type"] == "antigravity_open" and row["outcome"] == "unconfirmed"]
+        denied = [row for row in rows if row["action_type"] == "antigravity_open" and row["outcome"] == "denied"]
+        if (
+            len(confirmed) < 2
+            or len(unconfirmed) != 2
+            or len(denied) != 1
+            or any(row.get("target") != "antigravity" for row in rows)
+        ):
+            raise ValueError("Antigravity exact navigation receipts missing or unexpected")
         result.update(
             antigravity_status="SYNTHETIC_PASS",
+            antigravity_navigation="SYNTHETIC_PASS",
             installed_version="2.29.0",
             language_server_cl="1013060670",
             transcript_reads=0,
+            token_reads=0,
+            receipt_count=len(rows),
             native_app="NOT_RUN",
         )
     elif scenario == "native-ownership":

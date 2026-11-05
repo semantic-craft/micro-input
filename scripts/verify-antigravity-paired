@@ -56,6 +56,10 @@ def main():
     canary_transcript.write_text('{"secret":"never-read-me"}\n', encoding="utf-8")
     os.chmod(canary_transcript, 0o000)
 
+    canary_token = run / "canary-token.json"
+    canary_token.write_text('{"csrfToken":"never-read-token","oauthToken":"secret"}\n', encoding="utf-8")
+    os.chmod(canary_token, 0o000)
+
     bridge_script = ROOT / "integrations/antigravity/hooks-bridge.py"
     grant_path = run / "antigravity-grant.json"
     control_path = run / "control.sock"
@@ -176,6 +180,71 @@ def main():
         forbidden_req["transcriptPath"] = str(canary_transcript)
         assert_zero_read_rejection(forbidden_req, ("denied",))
 
+        forbidden_token_req = request(activate=False)
+        forbidden_token_req["csrfToken"] = str(canary_token)
+        assert_zero_read_rejection(forbidden_token_req, ("denied",))
+
+        def emit_catalog(entries_payload, strict=True):
+            receipt_path = run / f"catalog-{uuid.uuid4().hex[:8]}.json"
+            cmd = [
+                sys.executable,
+                str(bridge_script),
+                "catalog",
+                "--socket",
+                grant["socketPath"],
+                "--token",
+                grant["token"],
+                "--instance-id",
+                grant["instanceId"],
+                "--generation",
+                str(grant["generation"]),
+                "--receipt-file",
+                str(receipt_path),
+            ]
+            if strict:
+                cmd.append("--strict")
+            subprocess.run(
+                cmd,
+                input=json.dumps(entries_payload),
+                text=True,
+                capture_output=True,
+                cwd=ROOT,
+                env=env,
+                check=True,
+            )
+            return json.loads(receipt_path.read_text(encoding="utf-8"))
+
+        catalog_seed_reply = emit_catalog(
+            {
+                "entries": [
+                    {
+                        "conversationId": "conv-alpha",
+                        "workspaceUris": [f"file://{ws_alpha}"],
+                        "summary": "Shared Investigation",
+                        "projectId": "proj-alpha",
+                        "modelName": "gemini-2.5-pro",
+                        "phase": "idle",
+                        "lastEventType": "SessionStart",
+                        "transcriptPath": str(canary_transcript),
+                        "csrfToken": str(canary_token),
+                    },
+                    {
+                        "conversationId": "conv-beta",
+                        "workspaceUris": [f"file://{ws_beta}"],
+                        "summary": "Shared Investigation",
+                        "projectId": "proj-beta",
+                        "modelName": "gemini-2.5-flash",
+                        "phase": "idle",
+                        "lastEventType": "SessionStart",
+                        "transcriptPath": str(canary_transcript),
+                        "csrfToken": str(canary_token),
+                    },
+                ]
+            }
+        )
+        if catalog_seed_reply.get("status") != "ok" or catalog_seed_reply.get("seeded") != 2:
+            raise ValueError(f"catalog seed failed: {catalog_seed_reply}")
+
         unauth_ws = emit_hook(
             "SessionStart",
             {
@@ -189,32 +258,6 @@ def main():
         if unauth_ws.get("status") != "denied":
             raise ValueError("unauthorized workspace was not denied")
 
-        emit_hook(
-            "SessionStart",
-            {
-                "conversationId": "conv-alpha",
-                "workspacePaths": [ws_alpha],
-                "transcriptPath": str(canary_transcript),
-                "artifactDirectoryPath": str(run / "artifacts-a"),
-                "modelName": "gemini-2.5-pro",
-                "invocationNum": 0,
-                "stepIdx": 0,
-                "executionNum": 0,
-            },
-        )
-        emit_hook(
-            "SessionStart",
-            {
-                "conversationId": "conv-beta",
-                "workspacePaths": [ws_beta],
-                "transcriptPath": str(canary_transcript),
-                "artifactDirectoryPath": str(run / "artifacts-b"),
-                "modelName": "gemini-2.5-flash",
-                "invocationNum": 0,
-                "stepIdx": 0,
-                "executionNum": 0,
-            },
-        )
         tool_payload = {
             "conversationId": "conv-alpha",
             "workspacePaths": [ws_alpha],
@@ -256,9 +299,29 @@ def main():
         )
 
         snapshot = exchange(grant["socketPath"], request(activate=False))
-        if snapshot.get("status") != "ok" or len(snapshot.get("rows", [])) != 2 or snapshot.get("transcriptReads") != 0:
+        if (
+            snapshot.get("status") != "ok"
+            or len(snapshot.get("rows", [])) != 2
+            or snapshot.get("transcriptReads") != 0
+            or snapshot.get("tokenReads") != 0
+        ):
             raise ValueError(f"unexpected subscribe snapshot: {snapshot}")
         active_sub = subscription_id
+
+        bad_schema_open = request(
+            "open",
+            schemaVersion="missing-or-wrong-schema",
+            target={"conversationId": "conv-alpha", "workspacePath": ws_alpha},
+        )
+        assert_zero_read_rejection(bad_schema_open, ("denied",))
+
+        unauth_ws_open = request(
+            "open",
+            schemaVersion="antigravity-catalog-nav-v1",
+            target={"conversationId": "conv-alpha", "workspacePath": "/unauthorized/workspace"},
+        )
+        assert_zero_read_rejection(unauth_ws_open, ("denied",))
+
         contender = request(activate=False)
         assert_zero_read_rejection(contender, ("denied",))
         subscription_id = active_sub
@@ -295,11 +358,80 @@ def main():
         swift = json.loads(swift_result.read_text(encoding="utf-8"))
         if (
             swift.get("status") != "PASS"
+            or not swift.get("same_title_isolated")
+            or not swift.get("open_a_confirmed")
+            or not swift.get("open_b_confirmed")
             or swift.get("session_a_phase") != "backgroundActive"
             or swift.get("session_b_phase") != "completed"
             or swift.get("transcript_reads") != 0
+            or swift.get("token_reads") != 0
         ):
             raise ValueError(f"Swift paired verification failed: {swift}")
+
+        re_sub = exchange(grant["socketPath"], request(activate=False))
+        if re_sub.get("status") != "ok":
+            raise ValueError(f"post-Swift subscribe failed: {re_sub}")
+
+        exchange(
+            control_path,
+            {
+                "op": "select-override",
+                "target": {"conversationId": "conv-beta", "workspacePath": ws_beta},
+            },
+        )
+        wrong_open = exchange(
+            grant["socketPath"],
+            request(
+                "open",
+                schemaVersion="antigravity-catalog-nav-v1",
+                target={"conversationId": "conv-alpha", "workspacePath": ws_alpha},
+            ),
+        )
+        if wrong_open.get("status") != "unconfirmed":
+            raise ValueError(f"wrong UI selected readback did not return unconfirmed: {wrong_open}")
+        exchange(control_path, {"op": "clear-select-override"})
+
+        confirm_alpha = exchange(
+            grant["socketPath"],
+            request(
+                "open",
+                schemaVersion="antigravity-catalog-nav-v1",
+                target={"conversationId": "conv-alpha", "workspacePath": ws_alpha},
+            ),
+        )
+        if confirm_alpha.get("status") != "ok":
+            raise ValueError(f"confirm alpha failed: {confirm_alpha}")
+
+        exchange(
+            control_path,
+            {"op": "delete-session", "conversationId": "conv-beta", "workspacePath": ws_beta},
+        )
+        deleted_open = exchange(
+            grant["socketPath"],
+            request(
+                "open",
+                schemaVersion="antigravity-catalog-nav-v1",
+                target={"conversationId": "conv-beta", "workspacePath": ws_beta},
+            ),
+        )
+        if (
+            deleted_open.get("status") != "unconfirmed"
+            or deleted_open.get("selected") != {"conversationId": "conv-alpha", "workspacePath": ws_alpha}
+        ):
+            raise ValueError(f"deleted target redirected or failed unexpectedly: {deleted_open}")
+
+        exchange(control_path, {"op": "set-schema-verified", "verified": False})
+        assert_zero_read_rejection(
+            request(
+                "open",
+                schemaVersion="antigravity-catalog-nav-v1",
+                target={"conversationId": "conv-alpha", "workspacePath": ws_alpha},
+            ),
+            ("denied",),
+        )
+        exchange(control_path, {"op": "set-schema-verified", "verified": True})
+        if exchange(grant["socketPath"], request("close")).get("status") != "ok":
+            raise ValueError("failed to close navigation probe subscription")
 
         exchange(control_path, {"op": "disconnect"})
         disconnected_reply = exchange(grant["socketPath"], request(activate=False))
@@ -333,9 +465,11 @@ def main():
         final_stats = stats()
         if (
             final_stats["transcriptReads"] != 0
+            or final_stats["tokenReads"] != 0
+            or final_stats["openConfirmed"] != 3
             or final_stats["duplicateEventsDropped"] != 2
-            or final_stats["ingestedEvents"] != 5
-            or final_stats["sessionCount"] != 2
+            or final_stats["ingestedEvents"] != 3
+            or final_stats["sessionCount"] != 1
         ):
             raise ValueError(f"unexpected final bridge stats: {final_stats}")
 
@@ -346,6 +480,11 @@ def main():
             bridge_sha256=hashlib.sha256(bridge_script.read_bytes()).hexdigest(),
             transport="real-unix-socket",
             sessions_verified=2,
+            same_title_cross_workspace_isolated=True,
+            open_confirmed_count=final_stats["openConfirmed"],
+            wrong_selected_readback="UNCONFIRMED_VERIFIED",
+            deleted_target_no_redirect="VERIFIED",
+            missing_schema_fail_closed="DENIED_VERIFIED",
             duplicate_events_dropped=final_stats["duplicateEventsDropped"],
             stop_fully_idle_false_phase=swift["session_a_phase"],
             stop_fully_idle_true_phase=swift["session_b_phase"],
@@ -353,7 +492,9 @@ def main():
             generation_rotate="STALE_CONFIRMED",
             journal_gap="GAP_CONFIRMED",
             transcript_reads=0,
+            token_reads=0,
             canary_transcript_mode="0000_UNTOUCHED",
+            canary_token_mode="0000_UNTOUCHED",
             native_install="NOT_RUN",
             renderer_ui="NOT_RUN",
             physical_key="NOT_RUN",
@@ -367,11 +508,12 @@ def main():
         )
         raise
     finally:
-        try:
-            os.chmod(canary_transcript, 0o600)
-            canary_transcript.unlink()
-        except FileNotFoundError:
-            pass
+        for canary in (canary_transcript, canary_token):
+            try:
+                os.chmod(canary, 0o600)
+                canary.unlink()
+            except FileNotFoundError:
+                pass
         if process is not None and process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
             try:

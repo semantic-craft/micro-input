@@ -259,7 +259,7 @@ struct StatusPanel: View {
             if store.radialMenu.enabled { Text(store.radialReadiness.label).font(.caption2).foregroundStyle(.secondary) }
             ZCodeSessionPanel(controller: store.zcodeSessions, open: { store.openZCodeSession($0) })
             DSHSessionPanel(controller: store.dshSessions, open: { store.openDSHSession($0) })
-            AntigravityStatusPanel(controller: store.antigravityStatus)
+            AntigravityStatusPanel(controller: store.antigravityStatus, open: { store.openAntigravitySession($0) })
             T3AttentionPanel(controller: store.t3Attention, next: { store.openNextT3Attention() })
             Divider()
             Toggle("自动跟随前台应用", isOn: Binding(get: { store.routing?.auto_follow_enabled ?? false }, set: { value in Task { await store.setAutoFollow(value) } })).toggleStyle(.switch).controlSize(.small)
@@ -432,6 +432,7 @@ struct DSHSessionPanel: View {
 
 struct AntigravityStatusPanel: View {
     @ObservedObject var controller: AntigravityStatusController
+    let open: (AntigravitySelection) -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Toggle("Antigravity 状态连接", isOn: Binding(get: { controller.enabled }, set: controller.setEnabled))
@@ -446,12 +447,24 @@ struct AntigravityStatusPanel: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 ForEach(controller.rows) { row in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(row.conversationId).lineLimit(1)
-                        Text(row.workspacePath).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                            .truncationMode(.middle)
-                        Text(row.statusLabel).font(.caption2).foregroundStyle(.secondary)
-                    }
+                    Button {
+                        if let selection = controller.selection(for: row.key) { open(selection) }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Text(row.title.isEmpty ? row.conversationId : row.title).lineLimit(1)
+                                if controller.selected == row.key {
+                                    Image(systemName: "checkmark").accessibilityLabel("已选中")
+                                }
+                            }
+                            Text(row.workspacePath).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                .truncationMode(.middle).help(row.workspacePath)
+                            Text("\(row.conversationId) · \(row.statusLabel)").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }.buttonStyle(.plain).disabled(controller.state != .ready)
+                }
+                if let result = controller.lastResult {
+                    Text(result.label).font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
