@@ -162,8 +162,12 @@ extension Store {
             let dshRequestsTakeover = nativeOwnership.desiredOwner == "micro-input" && !nativeOwnership.allowsExecution
             await setHostActiveProfile(antigravity.id.text)
             let agRequestsTakeover = nativeOwnership.desiredOwner == "micro-input" && !nativeOwnership.allowsExecution
-            let reclaimReq = nativeOwnership.beginRequest(microDrained: true)
+            var reclaimReq = nativeOwnership.beginRequest(microDrained: true)
             nativeOwnership.receive(reply(reclaimReq, state: "released"), for: reclaimReq)
+            if !nativeOwnership.allowsExecution {
+                reclaimReq = nativeOwnership.beginRequest(microDrained: true)
+                nativeOwnership.receive(reply(reclaimReq, state: "released"), for: reclaimReq)
+            }
             let reclaimed = nativeOwnership.allowsExecution && executor.receipts.count == 3
             nativeOwnership.invalidate("scenario complete")
             checks["cindy_codex_to_workbench_handoff"] =

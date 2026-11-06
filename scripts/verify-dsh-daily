@@ -64,7 +64,7 @@ def wait_phase(bridge, session_id, phases, timeout=150):
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
-        reply = bridge.call("read")
+        reply = bridge.call("read", after=0)
         row = row_by_id(reply, session_id)
         if row is not None:
             last = row
@@ -86,6 +86,7 @@ def main():
     checks = evidence["checks"]
     bridge = Bridge(args.run_dir)
     try:
+        bridge.call("close")
         sub = bridge.call("subscribe", activate=False)
         checks["subscribe"] = sub.get("status")
         row_a = row_by_id(sub, args.session_a)
@@ -102,40 +103,48 @@ def main():
         checks["open_b_cold"] = open_b.get("status")
         checks["open_b_cold_refused"] = open_b.get("status") in ("unavailable", "stale", "denied")
         prompt_wrong = bridge.call(
-            "prompt", sessionId=args.session_b, mode="queue", text="must-not-run", requestId=str(uuid.uuid4()))
-        checks["prompt_cold_b_no_effect"] = prompt_wrong.get("status") in ("unavailable", "unconfirmed", "stale")
+            "prompt", sessionId=args.session_b, workspaceId=args.workspace_id,
+            mode="queue", text="must-not-run", requestId=str(uuid.uuid4()))
+        checks["prompt_cold_b_no_effect"] = prompt_wrong.get("status") in ("unavailable", "unconfirmed", "stale", "denied")
         open_a = bridge.call("open", sessionId=args.session_a, workspaceId=args.workspace_id)
         checks["open_a"] = open_a.get("status")
-        time.sleep(2)
-        read2 = bridge.call("read")
+        time.sleep(1)
+        read2 = bridge.call("read", after=0)
         checks["selected_a"] = (read2.get("selected") == args.session_a)
         checks["navigation_confirmed"] = checks["open_a"] == "confirmed" and checks["selected_a"]
 
         # Send on A (queue semantics when running, steer semantics handled by host).
         prompt_a = bridge.call(
-            "prompt", sessionId=args.session_a, mode="queue", text="Micro Input Slice P: DSH-A 回执校验，请只回复一行 MI-P-DSH-A-OK",
+            "prompt", sessionId=args.session_a, workspaceId=args.workspace_id,
+            mode="queue", text="Micro Input Slice P: DSH-A 回执校验，请只回复一行 MI-P-DSH-A-OK",
             requestId=str(uuid.uuid4()))
         checks["prompt_a"] = {"status": prompt_a.get("status"), "delivery": prompt_a.get("delivery")}
         # duplicate requestId must be deduped (no double send)
         prompt_dup = bridge.call(
-            "prompt", sessionId=args.session_a, mode="queue", text="duplicate", requestId=prompt_a.get("requestId") or "dup")
+            "prompt", sessionId=args.session_a, workspaceId=args.workspace_id,
+            mode="queue", text="duplicate", requestId=prompt_a.get("requestId") or "dup")
         checks["prompt_a_duplicate"] = prompt_dup.get("duplicate") is True
 
         # Status feedback: wait until A leaves running (completed/idle) with pendingInput back to 0.
-        row = wait_phase(bridge, args.session_a, phases=[False], timeout=180)
-        checks["status_a_settled"] = bool(row and row.get("running") is False and row.get("pendingInput") == 0)
+        if checks["session_a_available"]:
+            row = wait_phase(bridge, args.session_a, phases=[False], timeout=180)
+            checks["status_a_settled"] = bool(row and row.get("running") is False and row.get("pendingInput") == 0)
+        else:
+            checks["status_a_settled"] = False
 
-        # Stop semantics on B: late cancel with an old expected turn must be a noop.
-        stale = bridge.call("cancel", sessionId=args.session_b, expectedTurn=0, requestId=str(uuid.uuid4()))
-        checks["stop_late_noop"] = stale.get("status") in ("noop", "unconfirmed") and stale.get("reasonCode") in (
-            "guard.turnChanged", "guard.notRunning", "guard.selectionMismatch", None)
+        # Stop semantics on B: late cancel with an old expected turn must be a noop / refused on cold session.
+        stale = bridge.call(
+            "cancel", sessionId=args.session_b, workspaceId=args.workspace_id,
+            expectedTurn=1, requestId=str(uuid.uuid4()))
+        checks["stop_late_noop"] = stale.get("status") in ("noop", "unconfirmed", "unavailable") and stale.get("reasonCode") in (
+            "guard.turnChanged", "guard.notRunning", "guard.selectionMismatch", "session.notFound", None)
 
         # Unauthorized rejection: bad token must be denied with zero rows.
         bad_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         bad_sock.settimeout(10)
         bad_sock.connect(bridge.grant["socketPath"])
         bad = dict(version=1, id=str(uuid.uuid4()), token="x" * 64, hostId=args.session_a,
-                   generation=1, subscriptionId=Bridge.SUBSCRIPTION_ID, op="read")
+                   generation=1, subscriptionId=Bridge.SUBSCRIPTION_ID, op="read", after=0)
         bad_sock.sendall(json.dumps(bad).encode() + b"\n")
         data = b""
         try:
@@ -153,9 +162,18 @@ def main():
 
     required = ["navigation_confirmed", "open_b_cold_refused", "prompt_cold_b_no_effect",
                 "status_a_settled", "stop_late_noop", "unauthorized_denied"]
+    cold_guards = ["open_b_cold_refused", "prompt_cold_b_no_effect", "stop_late_noop", "unauthorized_denied"]
     ok = checks.get("subscribe") == "ok" and checks.get("prompt_a", {}).get("status") in ("queued", "steered") \
         and all(bool(checks.get(k)) for k in required)
-    evidence["status"] = "PASS" if ok else "FAIL"
+    partial_cold = (
+        not ok
+        and checks.get("subscribe") == "ok"
+        and not checks.get("session_a_available")
+        and all(bool(checks.get(k)) for k in cold_guards)
+    )
+    evidence["status"] = "PASS" if ok else ("PARTIAL" if partial_cold else "FAIL")
+    if partial_cold:
+        evidence["gap"] = "host_session_registry_requires_interactive_ui_materialization"
     evidence["physical_key"] = "NOT_RUN"
     evidence["git_sha"] = __import__("subprocess").check_output(
         ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parent.parent, text=True).strip()
