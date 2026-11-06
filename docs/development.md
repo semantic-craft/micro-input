@@ -102,17 +102,6 @@ RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和
 
 原生配置链（E-108）：`ConfigWriter::native` 与合成路径共用计划/记录/恢复；`native_plan_bound_writer_applies_and_restores_but_rejects_another_connection` 离线覆盖真实分支和连接nonce隔离，`multiframe_request_uses_one_transport_batch` 防止长请求回退到逐报告锁竞争。普通RPC出口继续只读。实机最小配置应用与原字节恢复的私有材料在 `.scratch/input-study/hardware-live/`；默认门禁不重跑设备变更。GUI/宿主回归仍使用 `MI_AUTO_HOST_READY=0 scripts/verify-offline`。
 
-## T3 Code 待处理会话
-
-菜单中的「T3 Code 只读连接」每次启动默认关闭。开启后读取本机 T3 Code v0.1.6 的 schema 2 shell，显示待回应、访客请求、失败未读、计划待查看、完成未读。前两类优先，同类按等待时间排列。子会话审批与 side chat 请求先汇总到父会话，非阻塞问题、休眠唤醒与原生状态判定保持一致。动作库的「下一个需要我」可绑定到宿主逻辑槽位，不自动改动预设或设备映射。
-
-`T3AttentionClient` 通过正规 CLI 签发 `orchestration:read`、5 分钟 TTL 会话。它只接受数字 loopback HTTP origin，拒绝重定向，使用无 cookie、凭据和缓存持久化的 ephemeral session。凭据只驻客户端内存；进程输出、HTTP 响应均有上限。关闭、睡眠、退出和连接失败撤销会话，到期前串行撤销并续签。CLI 发现顺序为 `MI_T3_BIN`、用户 `.local/bin/t3`、Homebrew 和 `/usr/local/bin/t3`。`T3CODE_HOME` 覆盖默认 `~/.t3`。
-
-打开动作经现有宿主队列、PTT 清理和 Rust lease。目标在入队时冻结，打开前刷新并核对环境、会话、事件、连接代次及宿主身份。轮询与打开合并正在进行的 HTTP 请求；请求序号区分本地迟到响应与服务器 sequence 倒退。原生打开最多等待 5 秒，迟到回调不能重复完成。成功只报告 `delivered`，不会用 visit 水位推断精确打开。审计只记录固定类别，不记录会话标题、会话 ID、正文、凭据或深链。标题仅用于内存中的菜单显示，实体状态灯仍未接通。
-
-离线行为与真实 UniFFI 回归使用 `swift test --package-path app/MicroInput --filter T3Attention`，先用对应后端运行 `scripts/build`。只有显式设置 `MI_T3_READONLY_PROBE=1` 才执行当前已安装 T3 的只读签发、读取、撤销测试；它不打开、创建、发送、审批或停止会话。原生验收见 [T3 会话配方](../skills/verify-micro-input/features/t3-attention.md)。安装版依据为 `2359643` 的 `threadShell.ts`、`models.ts`、`threadSettled.ts` 和 shell 契约；Input 研究 IA-10/16 约束宿主生命周期和身份门禁，不提供 T3 或设备灯光能力证明。
-
-
 ## 径向菜单
 
 `RadialMenuState` 持有启用、等待回中、选择和确认后等待回中的状态。`RadialMenuRouting` 将冻结的菜单意图送入现有宿主队列及 lease，确认时重验同一会话和路由。原始角度/距离由 `mi-session` 验证，通过 UniFFI 的 `RadialPositionInfo` 传递；连续位置资格独立于按键边沿。没有新硬件订阅或通用 RPC。

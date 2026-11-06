@@ -80,14 +80,12 @@ struct PendingHostAction {
     var cindyCommand: CindyQueuedCommand? = nil
     var antigravitySelection: AntigravitySelection? = nil
     var antigravityCommand: AntigravityQueuedCommand? = nil
-    var t3Selection: T3Selection? = nil
     var radialIntent: RadialIntent? = nil
 }
 
 enum KeypadNavigationPlace: Equatable, Hashable, Codable {
     case app(bundleID: String)
     case session(adapter: String, session: String)
-    case t3Thread(environmentID: String, threadID: String)
     case antigravity(conversationId: String, workspacePath: String)
     case cindy(workspacePath: String, sessionId: String)
     case zcode(sourceServer: String, remoteSession: String, workspace: String, taskId: String)
@@ -97,7 +95,6 @@ enum KeypadNavigationPlace: Equatable, Hashable, Codable {
         switch self {
         case .app(let bundleID): return bundleID
         case .session(let adapter, let session): return "\(adapter):\(session)"
-        case .t3Thread: return "t3"
         case .antigravity(let conv, let ws): return "antigravity:\(conv)@\(ws)"
         case .cindy(let ws, let sess): return "cindy:\(sess)@\(ws)"
         case .zcode(let src, let rem, let ws, let tid): return "zcode:\(src):\(rem):\(ws):\(tid)"
@@ -267,6 +264,7 @@ extension Store {
         } catch is CancellationError { } catch { status = readableError(error) }
     }
     func foregroundChanged(bundleID: String?) {
+        refreshAccessibilityTrust()
         if let target = pushToTalk.targetBundle, bundleID != target { pushToTalk.cancel() }
         guard !systemSleeping, !stopped, let bundleID, bundleID != Bundle.main.bundleIdentifier else { return }
         externalBundleID = bundleID; observationSequence += 1
@@ -346,7 +344,6 @@ extension Store {
                         admitted: .now,
                         requiresEnabled: requiresEnabled,
                         done: combinedDone,
-                        t3Selection: last.t3Selection,
                         radialIntent: nil
                     )
                     return true
@@ -358,10 +355,7 @@ extension Store {
             status = "输入过快，已丢弃积压；当前动作结束后恢复"
             done?(); return false
         }
-        let selection: T3Selection?
-        if case .t3(let frozen) = radialIntent { selection = frozen }
-        else { selection = payload?.adapter == "t3" && payload?.command == "next-attention" ? t3Attention.selectNext() : nil }
-        pendingHostActions.append(PendingHostAction(json: json, binding: binding, profile: profile, state: state, deviceSession: deviceSession, deviceIngress: deviceIngress, admitted: .now, requiresEnabled: requiresEnabled, done: done, zcodeSelection: zcodeSelection, zcodeCommand: zcodeCommand, dshSelection: dshSelection, dshCommand: dshCommand, cindySelection: cindySelection, cindyCommand: cindyCommand, antigravitySelection: antigravitySelection, antigravityCommand: antigravityCommand, t3Selection: selection, radialIntent: radialIntent))
+        pendingHostActions.append(PendingHostAction(json: json, binding: binding, profile: profile, state: state, deviceSession: deviceSession, deviceIngress: deviceIngress, admitted: .now, requiresEnabled: requiresEnabled, done: done, zcodeSelection: zcodeSelection, zcodeCommand: zcodeCommand, dshSelection: dshSelection, dshCommand: dshCommand, cindySelection: cindySelection, cindyCommand: cindyCommand, antigravitySelection: antigravitySelection, antigravityCommand: antigravityCommand, radialIntent: radialIntent))
         guard hostExecutionTask == nil else { return true }
         let executionGeneration = hostExecutionGeneration
         hostExecutionTask = Task { @MainActor [self] in
@@ -412,7 +406,7 @@ extension Store {
                         showRadialCheatSheet(entry)
                         continue
                     }
-                    _ = await executeHostAction(actionJSON: entry.json, bindingId: entry.binding, profileId: entry.profile, t3Selection: entry.t3Selection, zcodeSelection: entry.zcodeSelection, zcodeCommand: entry.zcodeCommand, dshSelection: entry.dshSelection, dshCommand: entry.dshCommand, cindySelection: entry.cindySelection, cindyCommand: entry.cindyCommand, antigravitySelection: entry.antigravitySelection, antigravityCommand: entry.antigravityCommand, stillAdmitted: { [weak self] in
+                    _ = await executeHostAction(actionJSON: entry.json, bindingId: entry.binding, profileId: entry.profile, zcodeSelection: entry.zcodeSelection, zcodeCommand: entry.zcodeCommand, dshSelection: entry.dshSelection, dshCommand: entry.dshCommand, cindySelection: entry.cindySelection, cindyCommand: entry.cindyCommand, antigravitySelection: entry.antigravitySelection, antigravityCommand: entry.antigravityCommand, stillAdmitted: { [weak self] in
                         self?.admitAfterDictationCleanup(entry, executionGeneration: executionGeneration, checkAge: false) == true
                     })
                 }
@@ -580,11 +574,6 @@ extension Store {
                                  binding: "menu-antigravity-model", profile: profile, state: state,
                                  requiresEnabled: false, antigravityCommand: command)
     }
-    func openNextT3Attention() {
-        guard let state = routing, let profile = state.profile_id else { return }
-        enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"t3","command":"next-attention"}"#,
-                          binding: "menu-t3-attention", profile: profile, state: state, requiresEnabled: false)
-    }
     @discardableResult func executeFourAppSlot(_ index: Int) -> Bool {
         guard let state = routing, let profile = state.profile_id else { return false }
         return enqueueHostAction(json: #"{"action_type":"agent_command","adapter":"host","command":"slot-open:\#(index)"}"#,
@@ -629,8 +618,6 @@ extension Store {
             return NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil
         case .session(let adapter, let session):
             return !adapter.isEmpty && !session.isEmpty && session != "unselected"
-        case .t3Thread(let environmentID, let threadID):
-            return t3Attention.canNavigate(to: T3ThreadIdentity(environmentID: environmentID, threadID: threadID))
         case .antigravity(let conversationId, let workspacePath):
             return antigravityStatus.selection(for: AntigravitySessionKey(conversationId: conversationId, workspacePath: workspacePath)) != nil
         case .cindy(let workspacePath, let sessionId):

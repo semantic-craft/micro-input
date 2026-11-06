@@ -294,6 +294,12 @@ mod tests {
                     .unwrap_or_else(|| panic!("missing {b} in {profile_name}"))
             };
 
+            if matches!(profile_name.as_str(), "Cindy" | "Codex") {
+                assert_eq!(by_id("AG00")["available"], false);
+                assert_eq!(by_id("AG00")["label"], "不可用 / 未配置");
+                continue;
+            }
+
             assert_eq!(by_id("AG00")["available"], true);
             assert!(by_id("AG00")["label"]
                 .as_str()
@@ -315,17 +321,14 @@ mod tests {
                 assert_eq!(by_id("AG13")["label"], "向上滚动对话");
                 assert_eq!(by_id("AG14")["label"], "向下滚动对话");
                 assert_eq!(by_id("ENC_CLK")["label"], "跳到底部并聚焦输入");
-                if profile_name == "Codex" {
-                    assert_eq!(by_id("AG04")["label"], "选择模型 (control+shift M)");
-                    assert_eq!(by_id("AG05")["label"], "调整思考力度 (control+shift M)");
-                    assert_eq!(by_id("AG07")["label"], "打开内置浏览器 (command T)");
-                    assert_eq!(by_id("AG08")["label"], "打开终端面板 (control `)");
-                }
             }
         }
 
-        // Verify built-in prompt templates, navigation, T3, submit, and custom text payload redaction
-        let ag_pid = &ids[0];
+        // Verify built-in prompt templates, navigation, submit, and custom text payload redaction
+        let ag_pid = ids
+            .iter()
+            .find(|pid| store.draft.document.editable.graph.profiles[*pid].name == "Antigravity")
+            .unwrap();
         let lid = store.draft.document.editable.graph.profiles[ag_pid].layer_order[0].clone();
         let catalog = crate::draft::actions();
         let find_cat = |id: &str| catalog.iter().find(|a| a.id == id).unwrap().clone();
@@ -343,7 +346,7 @@ mod tests {
                 &json!(ag_pid),
                 &json!(lid),
                 18,
-                find_cat("t3-next-attention"),
+                find_cat("navigate-forward"),
             )
             .unwrap();
         store
@@ -382,7 +385,7 @@ mod tests {
         };
         assert_eq!(label_of("AG15"), "粘贴文本 · Continue");
         assert_eq!(label_of("AG16"), "后退到上一个打开目标");
-        assert_eq!(label_of("AG17"), "下一个需要我");
+        assert_eq!(label_of("AG17"), "前进到下一个打开目标");
         assert_eq!(label_of("AG12"), "停止听写并提交");
         assert_eq!(label_of("AG09"), "粘贴文本");
     }

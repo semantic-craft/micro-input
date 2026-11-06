@@ -15,10 +15,6 @@ pub enum NavigationPlace {
         adapter: String,
         session: String,
     },
-    T3Thread {
-        environment_id: String,
-        thread_id: String,
-    },
     Antigravity {
         conversation_id: String,
         workspace_path: String,
@@ -51,13 +47,6 @@ impl NavigationPlace {
         Self::Session {
             adapter: adapter.into(),
             session: session.into(),
-        }
-    }
-
-    pub fn t3_thread(environment_id: impl Into<String>, thread_id: impl Into<String>) -> Self {
-        Self::T3Thread {
-            environment_id: environment_id.into(),
-            thread_id: thread_id.into(),
         }
     }
 
@@ -108,10 +97,6 @@ impl NavigationPlace {
         match self {
             Self::App { bundle_id } => bundle_id.clone(),
             Self::Session { adapter, session } => format!("{adapter}:{session}"),
-            Self::T3Thread {
-                environment_id,
-                thread_id,
-            } => format!("t3:{environment_id}/{thread_id}"),
             Self::Antigravity {
                 conversation_id,
                 workspace_path,
@@ -327,7 +312,7 @@ mod tests {
     fn skips_unavailable_places_in_both_directions_without_corrupting_cursor() {
         let mut history = NavigationHistory::new();
         let herdr = NavigationPlace::app("dev.herdr.app");
-        let stale_thread = NavigationPlace::t3_thread("env-1", "thread-stale");
+        let stale_thread = NavigationPlace::session("herdr", "session-stale");
         let codex = NavigationPlace::app("com.openai.codex");
 
         history.visit(herdr.clone());

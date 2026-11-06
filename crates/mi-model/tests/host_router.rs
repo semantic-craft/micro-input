@@ -547,9 +547,28 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
         .profiles
         .iter()
         .any(|p| p.name.contains("演示") || p.name.contains("示例")));
+    for name in ["Cindy", "Codex"] {
+        let pid = draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == name)
+            .unwrap()
+            .0
+            .clone();
+        let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+        assert!(
+            draft.document.is_protected_oai_layer(&lid),
+            "{name} default layer must be a protected KV_OAI_* layer"
+        );
+        assert!(
+            resolve_host_action(&draft.document, Some(&pid), "AG00", true).is_none(),
+            "{name} is controlled natively by its client app, not Micro Input host actions"
+        );
+    }
     for (name, bundle) in [
-        ("Cindy", "com.xd.cindy"),
-        ("Codex", "com.openai.codex"),
         ("千问办公", "cn.qwenwork.desktop.mac"),
         ("ZCode", "dev.zcode.app"),
         ("Qoder CN", "com.qodercn.app"),
@@ -579,8 +598,6 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
     for (name, adapter) in [
         ("Antigravity", "antigravity"),
         ("千问办公", "qwenwork"),
-        ("Cindy", "cindy"),
-        ("Codex", "codex"),
         ("ZCode", "zcode"),
         ("DeepSeek Coder (DSH)", "dsh-desktop"),
         ("Qoder CN", "qoder-cn"),
@@ -683,8 +700,8 @@ fn joystick_prompt_slots_and_submit_control_route_to_target_agent_without_auto_e
     for (profile_name, expected_adapter, expected_bundle) in [
         ("Antigravity", "antigravity", "com.google.antigravity"),
         ("千问办公", "qwenwork", "cn.qwenwork.desktop.mac"),
-        ("Cindy", "cindy", "com.xd.cindy"),
-        ("Codex", "codex", "com.openai.codex"),
+        ("ZCode", "zcode", "dev.zcode.app"),
+        ("DeepSeek Coder (DSH)", "dsh-desktop", "com.deepseek.dsh"),
     ] {
         let pid = draft
             .document
