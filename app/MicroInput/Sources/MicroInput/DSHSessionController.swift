@@ -154,7 +154,7 @@ final class DSHSessionController: ObservableObject {
     }
     func createIntent(workspaceId: String, requestId: String? = nil) -> DSHQueuedCommand? {
         guard enabled, !suspended, state == .ready, pendingUnknownCommand == nil, let snapshot,
-              !workspaceId.isEmpty, rows.contains(where: { $0.workspaceId == workspaceId }) else { return nil }
+              !workspaceId.isEmpty, (rows.isEmpty || rows.contains(where: { $0.workspaceId == workspaceId })) else { return nil }
         return .create(DSHCreateIntent(
             workspaceId: workspaceId,
             requestId: makeRequestId(requestId),

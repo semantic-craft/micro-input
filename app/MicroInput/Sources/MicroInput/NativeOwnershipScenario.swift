@@ -124,13 +124,14 @@ extension Store {
                   let codex = hostProfiles.first(where: { $0.name == "Codex" }),
                   let zcode = hostProfiles.first(where: { $0.name == "ZCode" }),
                   let dsh = hostProfiles.first(where: { $0.name == "DeepSeek Coder (DSH)" }),
+                  let cindyIndex = snapshot?.profiles.firstIndex(where: { $0.id.text == cindy.id.text }),
                   let codexIndex = snapshot?.profiles.firstIndex(where: { $0.id.text == codex.id.text }) else {
                 throw BridgeError.Failed(message: "protected or workbench profiles missing")
             }
+            selectProfile(cindyIndex)
+            let cindyProtected = isProtectedLayerSelected && !canEditCurrentLayer && selectedBinding == nil
             selectProfile(codexIndex)
-            let layersBefore = profile?.layers.count ?? 0
-            await createProtectedOaiLayer()
-            let protectedSelected = isProtectedLayerSelected && !canEditCurrentLayer && selectedBinding == nil
+            let protectedSelected = cindyProtected && isProtectedLayerSelected && !canEditCurrentLayer && selectedBinding == nil
             let saveRejected = !(await saveAction(action))
             let settingsRejected = !(await saveControlSettings(mode: "logical_sectors", sectors: "4"))
             await editLighting(zone: "backlight", field: "color", value: "#3377CC", allLayers: false)
@@ -143,8 +144,7 @@ extension Store {
             let compactJSON = try compileCompactHostKeymap(profileId: codex.id.text)
             let compactValid = compactJSON.utf8.count < 1024 && compactJSON.contains("KV_OAI_AG00") && compactJSON.contains("VENDOR")
             checks["protected_oai_layer_locks_ui_and_lighting"] =
-                (profile?.layers.count ?? 0) == layersBefore + 1
-                && protectedSelected
+                protectedSelected
                 && saveRejected
                 && settingsRejected
                 && lightingBlocked

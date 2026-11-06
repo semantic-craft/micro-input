@@ -369,6 +369,26 @@ enum AuditLogWriter {
         }
     }
 
+    static func resetAndOpenAccessibilitySettings() {
+        let lsreg = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+        if FileManager.default.isExecutableFile(atPath: lsreg),
+           Bundle.main.bundlePath == "/Applications/Micro Input.app" {
+            let clean = Process()
+            clean.executableURL = URL(fileURLWithPath: lsreg)
+            clean.arguments = ["-f", Bundle.main.bundlePath]
+            try? clean.run()
+            clean.waitUntilExit()
+        }
+        if let bundleId = Bundle.main.bundleIdentifier, !bundleId.isEmpty {
+            let reset = Process()
+            reset.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            reset.arguments = ["reset", "Accessibility", bundleId]
+            try? reset.run()
+            reset.waitUntilExit()
+        }
+        openAccessibilitySettings()
+    }
+
     init(auditLogPath: String? = nil) {
         self.auditLogPath = auditLogPath
     }

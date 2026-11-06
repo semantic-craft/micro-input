@@ -257,12 +257,10 @@ fn compact_host_keymap_stays_under_1024_bytes_while_preserving_all_profiles_and_
         .map(|(id, _)| id.clone())
         .unwrap();
 
-    let cindy_protected_lid = draft
-        .create_protected_oai_layer(&cindy_pid, "ChatGPT")
-        .unwrap();
-    let codex_protected_lid = draft
-        .create_protected_oai_layer(&codex_pid, "ChatGPT")
-        .unwrap();
+    let cindy_protected_lid =
+        draft.document.editable.graph.profiles[&cindy_pid].layer_order[0].clone();
+    let codex_protected_lid =
+        draft.document.editable.graph.profiles[&codex_pid].layer_order[0].clone();
     assert!(draft.document.is_protected_oai_layer(&cindy_protected_lid));
     assert!(draft.document.is_protected_oai_layer(&codex_protected_lid));
 

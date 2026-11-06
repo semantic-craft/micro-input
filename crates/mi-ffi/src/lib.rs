@@ -940,6 +940,24 @@ impl MicroInput {
         });
         document_response(&store, selection)
     }
+    pub async fn install_four_app_cockpit_preset(
+        &self,
+        profile_id: String,
+    ) -> Result<String, BridgeError> {
+        let mut store = self.draft.lock().unwrap();
+        if store.editing_device() {
+            return document_response(&store, None);
+        }
+        let mut target = (String::new(), None);
+        store
+            .update(|d| {
+                let (pid, lid) = mi_model::preset::install_four_app_cockpit_preset(d, &profile_id)?;
+                target = (pid, Some(lid));
+                Ok(())
+            })
+            .map_err(failure)?;
+        document_response(&store, Some(target))
+    }
 }
 impl MicroInput {
     fn invalidate(&self) -> (u64, Option<(String, Arc<DeviceSession>)>) {

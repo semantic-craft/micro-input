@@ -367,15 +367,33 @@ impl DeviceSession {
         self.exchange_authorized(q, method, encoded, None).await
     }
     // Only the plan-owning writer reaches this typed, fixed-path entry.
-    async fn exchange_keymap(
+    async fn exchange_keymap_with_tx(
         &self,
         q: &mut Queue,
         candidate: &[u8],
         offset: usize,
+        tx: Option<u32>,
     ) -> Result<Value, SessionError> {
-        let encoded = mi_proto::mutation::keymap_chunk(candidate, offset, q.next_id)?;
+        let encoded = mi_proto::mutation::keymap_chunk_with_tx(candidate, offset, tx, q.next_id)?;
         self.exchange_authorized(q, "fs.writebin", encoded, Some("fs.writebin"))
             .await
+    }
+    async fn exchange_tx_begin(&self, q: &mut Queue) -> Result<u32, SessionError> {
+        let expected_id = q.next_id;
+        let encoded = mi_proto::mutation::tx_begin_candidate(expected_id)?;
+        let reply = self
+            .exchange_authorized(q, "fs.txbegin", encoded, Some("fs.txbegin"))
+            .await?;
+        Ok(mi_proto::mutation::extract_tx_id(&reply, expected_id)?)
+    }
+    async fn exchange_tx_commit(&self, q: &mut Queue, tx: u32) -> Result<Value, SessionError> {
+        let expected_id = q.next_id;
+        let encoded = mi_proto::mutation::tx_commit_candidate(tx, expected_id)?;
+        let reply = self
+            .exchange_authorized(q, "fs.txcommit", encoded, Some("fs.txcommit"))
+            .await?;
+        mi_proto::mutation::validate_mutation_response_candidate(&reply, expected_id)?;
+        Ok(reply)
     }
     async fn exchange_lighting(
         &self,
@@ -387,6 +405,32 @@ impl DeviceSession {
         let id = q.next_id;
         let result = self
             .exchange_authorized(q, "lights.preview", encoded, Some("lights.preview"))
+            .await?;
+        mi_proto::mutation::validate_mutation_response_candidate(&result, id)?;
+        Ok(result)
+    }
+    pub async fn send_oai_thstatus(
+        &self,
+        entries: &[mi_proto::lighting_candidate::OaiKeyStatusEntry],
+    ) -> Result<Value, SessionError> {
+        let mut q = self.queue.lock().await;
+        let id = q.next_id;
+        let encoded = mi_proto::lighting_candidate::encode_oai_thstatus_candidate(entries, id)?;
+        let result = self
+            .exchange_authorized(&mut q, "v.oai.thstatus", encoded, Some("v.oai.thstatus"))
+            .await?;
+        mi_proto::mutation::validate_mutation_response_candidate(&result, id)?;
+        Ok(result)
+    }
+    pub async fn send_oai_rgbcfg(
+        &self,
+        lights: &mi_proto::lighting_candidate::LightingPreviewCandidate,
+    ) -> Result<Value, SessionError> {
+        let mut q = self.queue.lock().await;
+        let id = q.next_id;
+        let encoded = mi_proto::lighting_candidate::encode_oai_rgbcfg_candidate(lights, id)?;
+        let result = self
+            .exchange_authorized(&mut q, "v.oai.rgbcfg", encoded, Some("v.oai.rgbcfg"))
             .await?;
         mi_proto::mutation::validate_mutation_response_candidate(&result, id)?;
         Ok(result)
@@ -422,7 +466,15 @@ impl DeviceSession {
             }
         };
         let native_mutation = mutation == Some(method)
-            && matches!(method, "fs.writebin" | "lights.preview")
+            && matches!(
+                method,
+                "fs.writebin"
+                    | "fs.txbegin"
+                    | "fs.txcommit"
+                    | "lights.preview"
+                    | "v.oai.thstatus"
+                    | "v.oai.rgbcfg"
+            )
             && self.link.backend() == mi_transport::LinkBackend::MacHidapi267Numbered;
         if !synthetic && !native_mutation {
             let request: Value = serde_json::from_slice(&encoded)

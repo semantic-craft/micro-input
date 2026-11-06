@@ -10,9 +10,16 @@ extension Store {
         radialPreferences.set(enabled, forKey: "radialMenuEnabled")
         readInputBoundary()
         radialMenu.setEnabled(enabled)
+        radialOverlay.onEscape = { [weak self] in self?.cancelRadialMenu() }
         radialOverlay.hide()
     }
     func cancelRadialMenu() { radialMenu.cancel(); radialOverlay.hide() }
+    @discardableResult
+    func handleRadialKeyDown(keyCode: UInt16) -> Bool {
+        guard keyCode == 53, radialMenu.session != nil else { return false }
+        cancelRadialMenu()
+        return true
+    }
     private static let radialSlotConfigsPreferencesKey = "radialMenuSlotConfigs"
 
     func radialSlotConfigs() -> [RadialSlotConfig]? {
@@ -44,7 +51,7 @@ extension Store {
     }
     private func defaultRadialSlotConfigs() -> [RadialSlotConfig] {
         var configs: [RadialSlotConfig] = [
-            .t3(),
+            .navigateBack(),
             .cheatSheet()
         ]
         for adapter in ["cindy", "codex", "qwenwork", "zcode", "antigravity", "dsh-desktop"] {
@@ -57,19 +64,13 @@ extension Store {
     }
     private func resolveRadialSlot(_ config: RadialSlotConfig, hasProfile: Bool) -> RadialSlot {
         switch config.kind {
-        case .t3:
-            let selection = t3Attention.selectNext()
-            let title = selection.flatMap { selected in t3Attention.items.first(where: { $0.event == selected.event })?.title }
-            return RadialSlot(
-                label: title.map { "需要我 · \($0)" } ?? config.label,
-                intent: selection.map(RadialIntent.t3),
-                unavailableReason: selection == nil ? "没有新鲜待处理目标" : nil
-            )
         case .cheatSheet:
             return RadialSlot(
                 label: config.label,
                 intent: hasProfile ? .cheatSheet : nil,
-                unavailableReason: hasProfile ? nil : "当前配置不可用"
+                unavailableReason: hasProfile ? nil : "当前配置不可用",
+                symbol: config.symbol,
+                colorHex: config.colorHex
             )
         case .openApp:
             let bundle = config.bundleID ?? ""
@@ -77,47 +78,59 @@ extension Store {
             return RadialSlot(
                 label: config.label,
                 intent: installed ? .openApp(bundle) : nil,
-                unavailableReason: installed ? nil : "应用未安装"
+                unavailableReason: installed ? nil : "应用未安装",
+                symbol: config.symbol,
+                colorHex: config.colorHex
             )
         case .prompt:
             let sanitized = RecordingHostActionExecutor.stripTrailingNewlines(config.text ?? "")
             guard !sanitized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return RadialSlot(label: config.label, intent: nil, unavailableReason: "未设置指令文本")
+                return RadialSlot(label: config.label, intent: nil, unavailableReason: "未设置指令文本", symbol: config.symbol, colorHex: config.colorHex)
             }
             let adapter = config.adapter ?? activeDesktopAgentAdapter()
             let available = adapter != nil || hasProfile
             return RadialSlot(
                 label: config.label,
                 intent: available ? .prompt(text: sanitized, adapter: adapter, submit: config.submit) : nil,
-                unavailableReason: available ? nil : "没有可用的目标配置"
+                unavailableReason: available ? nil : "没有可用的目标配置",
+                symbol: config.symbol,
+                colorHex: config.colorHex
             )
         case .submit:
             let adapter = config.adapter ?? activeDesktopAgentAdapter()
             return RadialSlot(
                 label: config.label,
                 intent: adapter != nil ? .submit(adapter: adapter) : nil,
-                unavailableReason: adapter != nil ? nil : "当前配置不是桌面 Agent"
+                unavailableReason: adapter != nil ? nil : "当前配置不是桌面 Agent",
+                symbol: config.symbol,
+                colorHex: config.colorHex
             )
         case .stop:
             let adapter = config.adapter ?? activeDesktopAgentAdapter()
             return RadialSlot(
                 label: config.label,
                 intent: adapter != nil ? .stop(adapter: adapter) : nil,
-                unavailableReason: adapter != nil ? nil : "当前配置不是桌面 Agent"
+                unavailableReason: adapter != nil ? nil : "当前配置不是桌面 Agent",
+                symbol: config.symbol,
+                colorHex: config.colorHex
             )
         case .navigateBack:
             let canBack = navigationHistory.canGoBack(available: { [weak self] place in self?.isNavigationPlaceAvailable(place) == true })
             return RadialSlot(
                 label: config.label,
                 intent: canBack ? .navigateBack : nil,
-                unavailableReason: canBack ? nil : "没有可后退的打开历史"
+                unavailableReason: canBack ? nil : "没有可后退的打开历史",
+                symbol: config.symbol,
+                colorHex: config.colorHex
             )
         case .navigateForward:
             let canForward = navigationHistory.canGoForward(available: { [weak self] place in self?.isNavigationPlaceAvailable(place) == true })
             return RadialSlot(
                 label: config.label,
                 intent: canForward ? .navigateForward : nil,
-                unavailableReason: canForward ? nil : "没有可前进的打开历史"
+                unavailableReason: canForward ? nil : "没有可前进的打开历史",
+                symbol: config.symbol,
+                colorHex: config.colorHex
             )
         }
     }
@@ -175,7 +188,6 @@ extension Store {
         case .openApp(let bundle):
             guard let data = try? JSONSerialization.data(withJSONObject: ["action_type": "open_app", "bundle_id": bundle]) else { return }
             json = String(decoding: data, as: UTF8.self)
-        case .t3: json = #"{"action_type":"agent_command","adapter":"t3","command":"next-attention"}"#
         case .cheatSheet: json = "{}"
         case .prompt(let text, let adapter, let submit):
             let resolvedAdapter = adapter ?? activeDesktopAgentAdapter(for: profile)

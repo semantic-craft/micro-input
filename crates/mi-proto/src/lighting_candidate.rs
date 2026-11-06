@@ -82,6 +82,98 @@ pub fn encode_lighting_preview_candidate(
     .map_err(|error| ProtoError::Invalid(error.to_string()))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OaiKeyStatusEntry {
+    pub k: String,
+    pub c: u32,
+}
+
+impl OaiKeyStatusEntry {
+    fn validate(&self) -> Result<(), ProtoError> {
+        let valid_key = matches!(
+            self.k.as_str(),
+            "AG00"
+                | "AG01"
+                | "AG02"
+                | "AG03"
+                | "AG04"
+                | "AG05"
+                | "AG06"
+                | "AG07"
+                | "AG08"
+                | "AG09"
+                | "AG10"
+                | "AG11"
+                | "AG12"
+                | "ENC_CLK"
+                | "ENC_CC"
+                | "ENC_CW"
+        );
+        if !valid_key || self.c > 0xff_ffff {
+            return Err(ProtoError::Invalid(
+                "v.oai.thstatus key or color exceeds firmware v0.6.3 policy".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn encode_oai_thstatus_candidate(
+    entries: &[OaiKeyStatusEntry],
+    id: u16,
+) -> Result<Vec<u8>, ProtoError> {
+    if id >= 999 {
+        return Err(ProtoError::Invalid("id must be < 999".into()));
+    }
+    if entries.is_empty() || entries.len() > 16 {
+        return Err(ProtoError::Invalid(
+            "v.oai.thstatus requires between 1 and 16 key entries".into(),
+        ));
+    }
+    for entry in entries {
+        entry.validate()?;
+    }
+    #[derive(Serialize)]
+    struct Params<'a> {
+        s: &'a [OaiKeyStatusEntry],
+    }
+    #[derive(Serialize)]
+    struct Request<'a> {
+        id: u16,
+        method: &'static str,
+        params: Params<'a>,
+    }
+    serde_json::to_vec(&Request {
+        id,
+        method: "v.oai.thstatus",
+        params: Params { s: entries },
+    })
+    .map_err(|error| ProtoError::Invalid(error.to_string()))
+}
+
+pub fn encode_oai_rgbcfg_candidate(
+    params: &LightingPreviewCandidate,
+    id: u16,
+) -> Result<Vec<u8>, ProtoError> {
+    if id >= 999 {
+        return Err(ProtoError::Invalid("id must be < 999".into()));
+    }
+    params.backlight.validate()?;
+    params.underglow.validate()?;
+    #[derive(Serialize)]
+    struct Request<'a> {
+        id: u16,
+        method: &'static str,
+        params: &'a LightingPreviewCandidate,
+    }
+    serde_json::to_vec(&Request {
+        id,
+        method: "v.oai.rgbcfg",
+        params,
+    })
+    .map_err(|error| ProtoError::Invalid(error.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +304,67 @@ mod tests {
         )
         .unwrap();
         assert!(validate_read_only(&borrowed_method).is_err());
+    }
+
+    #[test]
+    fn oai_thstatus_and_rgbcfg_candidates_encode_firmware_v063_envelope() {
+        let entries = vec![
+            OaiKeyStatusEntry {
+                k: "AG00".into(),
+                c: 0xFFB800,
+            },
+            OaiKeyStatusEntry {
+                k: "AG07".into(),
+                c: 0x00FF66,
+            },
+            OaiKeyStatusEntry {
+                k: "AG12".into(),
+                c: 0x0066FF,
+            },
+        ];
+        let th_bytes = encode_oai_thstatus_candidate(&entries, 12).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&th_bytes).unwrap(),
+            json!({
+                "id": 12,
+                "method": "v.oai.thstatus",
+                "params": {
+                    "s": [
+                        {"k": "AG00", "c": 0xFFB800},
+                        {"k": "AG07", "c": 0x00FF66},
+                        {"k": "AG12", "c": 0x0066FF}
+                    ]
+                }
+            })
+        );
+
+        let rgb = LightingPreviewCandidate {
+            backlight: LightingZoneCandidate {
+                effect: Some("breath".into()),
+                brightness: Some(0.95),
+                speed: Some(0.75),
+                magic: Some(0.50),
+                color: Some(0xFFB800),
+            },
+            underglow: LightingZoneCandidate {
+                effect: Some("breath".into()),
+                brightness: Some(0.95),
+                speed: Some(0.75),
+                magic: Some(0.50),
+                color: Some(0xFFB800),
+            },
+        };
+        let rgb_bytes = encode_oai_rgbcfg_candidate(&rgb, 13).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&rgb_bytes).unwrap(),
+            json!({
+                "id": 13,
+                "method": "v.oai.rgbcfg",
+                "params": {
+                    "backlight": {"effect": "breath", "brightness": 0.95, "speed": 0.75, "magic": 0.5, "color": 0xFFB800},
+                    "underglow": {"effect": "breath", "brightness": 0.95, "speed": 0.75, "magic": 0.5, "color": 0xFFB800}
+                }
+            })
+        );
     }
 }

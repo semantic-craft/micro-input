@@ -144,6 +144,12 @@ final class ZCodeSessionController: ObservableObject {
     func latchedCommand(forAddress address: ZCodeTaskAddress) -> LatchedCommand? {
         pendingCommands[sessionLatchKey(address)]
     }
+    var defaultScope: ZCodeScope? {
+        if let selected, let row = rows.first(where: { $0.address == selected }) {
+            return row.address.scope
+        }
+        return rows.first?.address.scope ?? snapshot?.scopes.first
+    }
     func createIntent(
         for scope: ZCodeScope,
         commandId: String = UUID().uuidString,

@@ -52,14 +52,12 @@ final class RadialMenuStateTests: XCTestCase {
         state.update(position(0, 0), makeSession: { nil })
         XCTAssertNil(state.confirm()); XCTAssertNil(state.session)
     }
-    func testFrozenT3IdentitySurvivesChangedCandidateAndCancelNeedsCenter() {
-        let event = T3AttentionEvent(identity: T3ThreadIdentity(environmentID: "env", threadID: "a"), reason: .request, eventID: "r-a")
-        let selected = T3Selection(event: event, generation: 3)
+    func testFrozenSessionSurvivesSectorChangeAndCancelNeedsCenter() {
         var state = RadialMenuState(); state.setEnabled(true)
         state.update(position(0, 0), makeSession: { nil })
-        state.update(position(0), makeSession: { radialSession(intent: .t3(selected)) })
+        state.update(position(0), makeSession: { radialSession(intent: .openApp("first")) })
         state.update(position(0.125), makeSession: { radialSession(intent: .openApp("different")) })
-        XCTAssertEqual(state.confirm()?.1, .t3(selected))
+        XCTAssertEqual(state.confirm()?.1, .openApp("first"))
         state.cancel(); state.update(position(0), makeSession: { radialSession() })
         XCTAssertNil(state.session)
     }
@@ -116,13 +114,15 @@ final class RadialMenuStateTests: XCTestCase {
             for _ in 0..<count { let event = try await radialNext(stream); _ = store.consumeHostInput(event) }
         }
     }
-    func fixture(t3: T3AttentionController? = nil, dictation: (any DictationDriving)? = nil, executor override: (any HostActionExecuting)? = nil) async throws -> Fixture {
+    func fixture(dictation: (any DictationDriving)? = nil, executor override: (any HostActionExecuting)? = nil) async throws -> Fixture {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let suite = "radial-tests-\(UUID().uuidString)", executor = RecordingHostActionExecutor()
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         let core = MicroInputCore.MicroInput.syntheticRadialDevice()
-        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: directory.appendingPathComponent("workbench.json"), actionExecutor: override ?? executor, dictationDriver: dictation, t3Attention: t3, radialPreferences: preferences)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: directory.appendingPathComponent("workbench.json"), actionExecutor: override ?? executor, dictationDriver: dictation, radialPreferences: preferences)
         await store.loadWorkbench(); await store.installCodingAgentPresets(); await store.setHostExecutionEnabled(true)
+        let qwen = try XCTUnwrap(store.hostProfiles.first { $0.name == "千问办公" })
+        await store.setHostActiveProfile(qwen.id.text)
         try await core.setSyntheticDiscovery(state: .reconnectedDevice)
         await store.refresh(); await store.connect("synthetic-reconnected-interface-0"); await store.readIdentity(); await store.readDeviceConfig(); store.showLocalDraft()
         let old = store.hostInputTask; old?.cancel(); await old?.value; store.hostInputTask = nil
@@ -310,26 +310,7 @@ final class RadialMenuStateTests: XCTestCase {
         XCTAssertEqual(f.store.lastHostActionReceipt?.actionType, "cheat_sheet")
         await f.close()
     }
-    func testDisplayedT3AIsNeverReplacedWithFreshBAtConfirmation() async throws {
-        let reader = try RadialT3Reader(id: "a", sequence: 1)
-        var opened: [URL] = []
-        let controller = T3AttentionController(client: reader, pollNanoseconds: 1_000_000, opener: { opened.append($0); return true })
-        controller.setEnabled(true)
-        for _ in 0..<100 where controller.state != .ready { try await Task.sleep(for: .milliseconds(1)) }
-        let f = try await fixture(t3: controller); f.store.setRadialMenuEnabled(true)
-        try await f.feed(.radialCenter); try await f.feed(.radialEast)
-        let intent = try XCTUnwrap(f.store.radialMenu.session?.intent)
-        guard case .t3(let selected) = intent else { return XCTFail("missing T3 intent") }
-        XCTAssertEqual(selected.event.identity.threadID, "a")
-        reader.value = try RadialT3Reader.snapshot(id: "b", sequence: 2)
-        for _ in 0..<100 where controller.items.first?.event.identity.threadID != "b" { try await Task.sleep(for: .milliseconds(1)) }
-        XCTAssertEqual(controller.items.first?.event.identity.threadID, "b")
-        try await f.feed(.encoderClick, count: 2); await f.store.hostExecutionTask?.value
-        XCTAssertTrue(opened.isEmpty)
-        XCTAssertEqual(f.store.lastHostActionReceipt?.outcome, "stale")
-        await f.close()
-    }
-    func testDisabledT3ConfirmationDoesNotRunEncoderBinding() async throws {
+    func testDisabledSlotConfirmationDoesNotRunEncoderBinding() async throws {
         let f = try await fixture(); f.store.setRadialMenuEnabled(true)
         try await f.feed(.radialCenter); try await f.feed(.radialEast)
         XCTAssertNil(f.store.radialMenu.session?.intent)
@@ -466,21 +447,6 @@ final class RadialMenuStateTests: XCTestCase {
         XCTAssertTrue(explicitSubmitReceipt.detail.contains("auto_submit=true"))
 
         await f.close()
-    }
-}
-@MainActor private final class RadialT3Reader: T3Reading {
-    var value: T3ReadSnapshot
-    init(id: String, sequence: Int) throws { value = try Self.snapshot(id: id, sequence: sequence) }
-    func connect() async throws -> T3ReadSnapshot { value }
-    func read() async throws -> T3ReadSnapshot { value }
-    func close() async -> Bool { true }
-    static func snapshot(id: String, sequence: Int) throws -> T3ReadSnapshot {
-        let thread: [String: Any] = ["id": id, "title": "Synthetic target", "status": "waiting", "updatedAt": "2026-11-04T00:00:00Z",
-            "interactionMode": "default", "lineage": [:], "latestRunId": NSNull(), "latestRunCompletedAt": NSNull(),
-            "activeRunId": NSNull(), "activityRunStatus": NSNull(), "pendingRuntimeRequest": ["id": "request-" + id, "kind": "user_input", "createdAt": "2026-11-04T00:00:00Z"],
-            "hasActionableProposedPlan": false, "archivedAt": NSNull(), "deletedAt": NSNull(), "lastVisitedAt": NSNull()]
-        let data = try JSONSerialization.data(withJSONObject: ["schemaVersion": 2, "snapshotSequence": sequence, "threads": [thread]])
-        return T3ReadSnapshot(environmentID: "synthetic-env", shell: try T3Shell.decode(data))
     }
 }
 @MainActor private final class RadialDictationDriver: DictationDriving, DictationRecording {

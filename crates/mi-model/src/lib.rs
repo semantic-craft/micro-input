@@ -168,10 +168,21 @@ pub fn parse_config(bytes: &[u8]) -> Result<DeviceConfig, ParseError> {
                 .flat_map(|r| r.as_array().into_iter().flatten())
                 .map(binding)
                 .collect();
-            let enc: Vec<_> = array(&l["layout"], "encoders")?
-                .iter()
-                .map(binding)
-                .collect();
+            let raw_encoders = array(&l["layout"], "encoders")?;
+            let enc: Vec<_> = if raw_encoders.len() == 1
+                && raw_encoders[0]
+                    .as_array()
+                    .is_some_and(|inner| inner.len() == 3)
+            {
+                raw_encoders[0]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(binding)
+                    .collect()
+            } else {
+                raw_encoders.iter().map(binding).collect()
+            };
             let sectors = array(&l["layout"]["joystick"], "sectors")?
                 .iter()
                 .map(binding)
@@ -293,6 +304,22 @@ pub const OFFICIAL_OAI_KEY_TOKENS: [&str; 13] = [
     "KV_OAI_ACT12",
 ];
 
+pub const ALL_AG_OAI_KEY_TOKENS: [&str; 13] = [
+    "KV_OAI_AG00",
+    "KV_OAI_AG01",
+    "KV_OAI_AG02",
+    "KV_OAI_AG03",
+    "KV_OAI_AG04",
+    "KV_OAI_AG05",
+    "KV_OAI_AG06",
+    "KV_OAI_AG07",
+    "KV_OAI_AG08",
+    "KV_OAI_AG09",
+    "KV_OAI_AG10",
+    "KV_OAI_AG11",
+    "KV_OAI_AG12",
+];
+
 pub const OFFICIAL_OAI_ENCODER_TOKENS: [&str; 3] =
     ["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"];
 
@@ -361,7 +388,7 @@ pub fn compile_compact_host_keymap(
         ],
         ["KV_OAI_ACT10", "KV_OAI_ACT11", "KV_OAI_ACT12"]
     ]);
-    let encoders = serde_json::json!(["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"]);
+    let encoders = serde_json::json!([["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"]]);
     let payload = serde_json::json!({
         "version": 1,
         "activeProfileId": 0,
@@ -392,6 +419,61 @@ pub fn compile_compact_host_keymap(
     if bytes.len() >= 1024 {
         return Err(format!(
             "紧凑板载 keymap.json 超出 1024 字节上限：{}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Compiles an all-AG (`KV_OAI_AG00`..`KV_OAI_AG12`) compact host keymap so all 13
+/// physical keys accept per-key `v.oai.thstatus` RGB feedback on firmware v0.6.3.
+pub fn compile_all_ag_host_keymap(
+    doc: &document::LocalDocumentV2,
+    active_profile_id: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    doc.validate()?;
+    let profile_name = active_profile_id
+        .and_then(|pid| doc.editable.graph.profiles.get(pid))
+        .map(|p| p.name.as_str())
+        .filter(|name| !name.trim().is_empty() && name.len() <= 32)
+        .unwrap_or("ChatGPT");
+    let keymap_rows = serde_json::json!([
+        ["KV_OAI_AG00", "KV_OAI_AG01"],
+        ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"],
+        ["KV_OAI_AG06", "KV_OAI_AG07", "KV_OAI_AG08", "KV_OAI_AG09"],
+        ["KV_OAI_AG10", "KV_OAI_AG11", "KV_OAI_AG12"]
+    ]);
+    let encoders = serde_json::json!([["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"]]);
+    let payload = serde_json::json!({
+        "version": 1,
+        "activeProfileId": 0,
+        "profiles": [{
+            "id": "oai-host",
+            "name": profile_name,
+            "layers": [{
+                "id": "chatgpt",
+                "name": "ChatGPT",
+                "color": 0x00FFA6u64,
+                "lights": null,
+                "layout": {
+                    "base": keymap_rows,
+                    "keymap": keymap_rows,
+                    "encoders": encoders,
+                    "joystick": {
+                        "type": "VENDOR",
+                        "sectors": []
+                    }
+                }
+            }]
+        }],
+        "macros": [],
+        "multiActions": [],
+        "smartActions": []
+    });
+    let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+    if bytes.len() >= 1024 {
+        return Err(format!(
+            "紧凑全 AG 板载 keymap.json 超出 1024 字节上限：{}",
             bytes.len()
         ));
     }

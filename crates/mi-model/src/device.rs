@@ -4,8 +4,8 @@ use super::*;
 
 fn device_binding(v: &Value) -> Binding {
     match v.as_str() {
-        Some("KC_A" | "KC_B" | "KC_ENTER" | "KC_ESC" | "KC_SPACE" | "KC_TAB") => {
-            Binding::Basic(Token(v.as_str().unwrap().into()))
+        Some(s) if crate::draft::DEVICE_KEY_TOKENS.binary_search(&s).is_ok() => {
+            Binding::Basic(Token(s.into()))
         }
         _ if v.is_null() => Binding::Empty,
         _ => Binding::Unknown(v.clone()),
@@ -78,6 +78,12 @@ pub fn parse_device_files(keymap: &[u8], smart: Option<&[u8]>) -> Result<DeviceC
                 .collect();
             let encoders = match l["layout"].get("encoders").and_then(Value::as_array) {
                 Some(a) if a.len() == 3 => std::array::from_fn(|i| device_binding(&a[i])),
+                Some(a)
+                    if a.len() == 1 && a[0].as_array().is_some_and(|inner| inner.len() == 3) =>
+                {
+                    let inner = a[0].as_array().unwrap();
+                    std::array::from_fn(|i| device_binding(&inner[i]))
+                }
                 _ => {
                     warnings.push(format!("Profile {index} Layer {li} 旋钮槽缺失或形状未知"));
                     std::array::from_fn(|_| Binding::Unknown(Value::Null))

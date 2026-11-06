@@ -284,6 +284,78 @@ final class FourAppLightingController: ObservableObject {
         return result
     }
 
+    /// Derives full 14-control per-key feedback (`AG00..AG12` + `ENC_CLK`) for `v.oai.thstatus` hardware LED dispatch.
+    func deriveFullKeypadFeedback(
+        slots: [FourAppSlot],
+        dictationActive: Bool,
+        activePhase: FourAppAgentPhase,
+        hasAttention: Bool
+    ) -> [PerKeyLightingFeedback] {
+        var entries = derivePerKeyFeedback(slots: slots, dictationActive: dictationActive)
+        let baseByKey = Dictionary(uniqueKeysWithValues: entries.map { ($0.bindingId, $0) })
+        entries.removeAll()
+        for keyId in ["AG00", "AG01", "AG02", "AG03", "AG04", "AG05"] {
+            if let existing = baseByKey[keyId] {
+                entries.append(existing)
+            }
+        }
+        entries.append(PerKeyLightingFeedback(
+            bindingId: "AG06",
+            color: hasAttention ? "#FFB800" : "#334455",
+            phase: hasAttention ? .awaitingInput : .idle,
+            label: "全局待办跳转"
+        ))
+        let approvalReady = activePhase == .awaitingInput || hasAttention
+        entries.append(PerKeyLightingFeedback(
+            bindingId: "AG07",
+            color: approvalReady ? "#00FF66" : "#224433",
+            phase: approvalReady ? .awaitingInput : .idle,
+            label: "审批通过"
+        ))
+        entries.append(PerKeyLightingFeedback(
+            bindingId: "AG08",
+            color: approvalReady ? "#FF3B30" : "#442222",
+            phase: approvalReady ? .awaitingInput : .idle,
+            label: "审批拒绝"
+        ))
+        let running = activePhase == .thinking
+        entries.append(PerKeyLightingFeedback(
+            bindingId: "AG09",
+            color: running ? "#FF3B30" : "#00AAFF",
+            phase: running ? .thinking : .idle,
+            label: running ? "停止生成" : "新建会话"
+        ))
+        let wideColor = dictationActive ? "#FF00FF" : "#00CCAA"
+        entries.append(PerKeyLightingFeedback(
+            bindingId: "AG10",
+            color: wideColor,
+            phase: dictationActive ? .thinking : .idle,
+            label: dictationActive ? "听写中 (2U 左)" : "按住说话 (2U 左)"
+        ))
+        entries.append(PerKeyLightingFeedback(
+            bindingId: "AG11",
+            color: wideColor,
+            phase: dictationActive ? .thinking : .idle,
+            label: dictationActive ? "听写中 (2U 右)" : "按住说话 (2U 右)"
+        ))
+        entries.append(PerKeyLightingFeedback(
+            bindingId: "AG12",
+            color: "#0066FF",
+            phase: activePhase,
+            label: "停止听写并提交"
+        ))
+        entries.append(PerKeyLightingFeedback(
+            bindingId: "ENC_CLK",
+            color: "#FFFFFF",
+            phase: .idle,
+            label: "旋钮确认/跳底"
+        ))
+        return entries
+    }
+
+    @Published private(set) var fullKeypadFeedback: [PerKeyLightingFeedback] = []
+    @Published private(set) var lastHardwareSyncJSON: String?
+
     /// Update lighting with single-sender invariant checks.
     func updateFeedback(in store: Store) async -> UpdateResult {
         // Invariant 1: Native ownership must not be active
@@ -326,6 +398,39 @@ final class FourAppLightingController: ObservableObject {
             slots: store.fourAppSlots.slots,
             dictationActive: dictationActive
         )
+        let hasAttention = store.highestPriorityFourAppTarget() != nil
+        let fullKeys = deriveFullKeypadFeedback(
+            slots: store.fourAppSlots.slots,
+            dictationActive: dictationActive,
+            activePhase: phase,
+            hasAttention: hasAttention
+        )
+        self.fullKeypadFeedback = fullKeys
+
+        let payloadObject: [String: Any] = [
+            "backlight": [
+                "effect": dualZone.backlightEffect,
+                "color": dualZone.backlightColor,
+                "brightness": dualZone.backlightBrightness,
+                "speed": dualZone.backlightSpeed,
+                "magic": 0.5
+            ],
+            "underglow": [
+                "effect": dualZone.underglowEffect,
+                "color": dualZone.underglowColor,
+                "brightness": dualZone.underglowBrightness,
+                "speed": dualZone.underglowSpeed,
+                "magic": 0.5
+            ],
+            "per_key": fullKeys.map { ["k": $0.bindingId, "color": $0.color] }
+        ]
+        if let payloadData = try? JSONSerialization.data(withJSONObject: payloadObject),
+           let payloadString = String(data: payloadData, encoding: .utf8) {
+            self.lastHardwareSyncJSON = payloadString
+            if store.connectedID != nil {
+                _ = try? await store.backend.syncFourAppHardwareLighting(payloadJson: payloadString)
+            }
+        }
 
         if let token = store.lightingPreviewToken {
             do {

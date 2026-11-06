@@ -330,17 +330,23 @@ impl LocalDocumentV2 {
         Ok(id)
     }
     pub fn is_protected_oai_layer(&self, lid: &str) -> bool {
+        if self.editable.source_refs.contains_key(lid) {
+            return false;
+        }
         let Some(layer) = self.editable.graph.layers.get(lid) else {
             return false;
         };
-        let mut has_oai_any = false;
+        if layer.lighting.is_some() {
+            return false;
+        }
+        let mut oai_count = 0usize;
         let mut has_oai_encoder = false;
         for b in layer.controls.values() {
             let Ok(binding) = serde_json::from_value::<Binding>(b.original.clone()) else {
                 continue;
             };
             if crate::binding_has_oai_prefix(&binding) {
-                has_oai_any = true;
+                oai_count += 1;
                 if matches!(
                     b.logical_control.as_str(),
                     "logical-13" | "logical-14" | "logical-15"
@@ -349,25 +355,7 @@ impl LocalDocumentV2 {
                 }
             }
         }
-        if !has_oai_any {
-            return false;
-        }
-        if layer.name != "ChatGPT" && !has_oai_encoder {
-            let parent_profile_is_protected = self
-                .editable
-                .graph
-                .profiles
-                .values()
-                .find(|p| p.layer_order.iter().any(|id| id == lid))
-                .is_some_and(|p| {
-                    let lower = p.name.to_lowercase();
-                    lower == "cindy" || lower == "codex" || lower == "chatgpt"
-                });
-            if !parent_profile_is_protected {
-                return false;
-            }
-        }
-        true
+        has_oai_encoder || oai_count >= 2
     }
     pub fn protected_layer_ids(&self) -> Vec<String> {
         self.editable

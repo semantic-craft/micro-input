@@ -52,7 +52,7 @@ extension Store {
     }
 
     @discardableResult
-    func executeHostAction(actionJSON: String, bindingId: String, profileId: String, t3Selection: T3Selection? = nil, zcodeSelection: ZCodeSelection? = nil, zcodeCommand: ZCodeQueuedCommand? = nil, dshSelection: DSHSelection? = nil, dshCommand: DSHQueuedCommand? = nil, cindySelection: CindySelection? = nil, cindyCommand: CindyQueuedCommand? = nil, antigravitySelection: AntigravitySelection? = nil, antigravityCommand: AntigravityQueuedCommand? = nil, stillAdmitted: (() -> Bool)? = nil) async -> HostActionReceipt? {
+    func executeHostAction(actionJSON: String, bindingId: String, profileId: String, zcodeSelection: ZCodeSelection? = nil, zcodeCommand: ZCodeQueuedCommand? = nil, dshSelection: DSHSelection? = nil, dshCommand: DSHQueuedCommand? = nil, cindySelection: CindySelection? = nil, cindyCommand: CindyQueuedCommand? = nil, antigravitySelection: AntigravitySelection? = nil, antigravityCommand: AntigravityQueuedCommand? = nil, stillAdmitted: (() -> Bool)? = nil) async -> HostActionReceipt? {
         guard nativeOwnership.allowsExecution, !hostOperationPaused, let lease = try? backend.beginHostExecution() else { return nil }
         let epoch = hostRouteEpoch
         inFlightHostActions += 1
@@ -64,7 +64,7 @@ extension Store {
            decoded.action_type == "agent_command",
            decoded.adapter == "host",
            let cmd = decoded.command,
-           (cmd == "submit" || cmd == "focus-input" || cmd.hasPrefix("prompt:") || cmd.hasPrefix("submit-prompt:")),
+           (cmd == "submit" || cmd == "focus-input" || cmd == "approve" || cmd == "deny" || cmd == "new-or-stop" || cmd == "stop" || cmd.hasPrefix("prompt:") || cmd.hasPrefix("submit-prompt:")),
            let resolvedAdapter = activeDesktopAgentAdapter(for: profileId) {
             let rewritten = ResolvedHostActionPayload(
                 action_type: decoded.action_type,
@@ -92,7 +92,7 @@ extension Store {
            let command = payload?.command,
            ["back", "navigate-back", "forward", "navigate-forward"].contains(command),
            let adapter = payload?.adapter,
-           ["navigation", "host", "cindy", "zcode", "qwenwork", "codex", "antigravity", "dsh-desktop", "qoder-cn", "herdr", "t3"].contains(adapter) {
+           ["navigation", "host", "cindy", "zcode", "qwenwork", "codex", "antigravity", "dsh-desktop", "qoder-cn", "herdr"].contains(adapter) {
             let isBack = command == "back" || command == "navigate-back"
             let destination = isBack
                 ? navigationHistory.back(available: { [weak self] place in self?.isNavigationPlaceAvailable(place) == true })
@@ -261,18 +261,6 @@ extension Store {
                 bindingId: bindingId, actionType: actionType, target: "antigravity", textByteLen: nil,
                 outcome: result.rawValue, detail: result.label)
             AuditLogWriter.append(receipt)
-        } else if payload?.action_type == "agent_command", payload?.adapter == "t3", payload?.command == "next-attention" {
-            let result = await t3Attention.open(t3Selection, admitted: { [weak self] in
-                guard let self else { return false }
-                return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
-            })
-            if result == .delivered, let identity = t3Selection?.event.identity {
-                navigationHistory.visit(.t3Thread(environmentID: identity.environmentID, threadID: identity.threadID))
-            }
-            receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
-                bindingId: bindingId, actionType: "t3_next_attention", target: "t3", textByteLen: nil,
-                outcome: result.rawValue, detail: result.label)
-            AuditLogWriter.append(receipt)
         } else if payload?.action_type == "agent_command",
                   let cmd = payload?.command,
                   cmd.hasPrefix("slot-open:") {
@@ -347,6 +335,16 @@ extension Store {
                   cmd == "stop" {
             let adapter = payload?.adapter ?? activeDesktopAgentAdapter(for: profileId) ?? ""
             receipt = await executeAgentStop(adapter: adapter, profileId: profileId, bindingId: bindingId, stillAdmitted: stillAdmitted)
+        } else if payload?.action_type == "agent_command",
+                  let cmd = payload?.command,
+                  (cmd == "approve" || cmd == "deny") {
+            let adapter = payload?.adapter ?? activeDesktopAgentAdapter(for: profileId) ?? ""
+            receipt = await executeAgentApproveOrDeny(adapter: adapter, approve: cmd == "approve", profileId: profileId, bindingId: bindingId, stillAdmitted: stillAdmitted)
+        } else if payload?.action_type == "agent_command",
+                  let cmd = payload?.command,
+                  cmd == "new-or-stop" {
+            let adapter = payload?.adapter ?? activeDesktopAgentAdapter(for: profileId) ?? ""
+            receipt = await executeAgentNewOrStop(adapter: adapter, profileId: profileId, bindingId: bindingId, stillAdmitted: stillAdmitted)
         } else {
             receipt = await actionExecutor.execute(actionJSON: effectiveJSON, bindingId: bindingId, profileId: profileId)
             if receipt.succeeded, let payload {
@@ -465,6 +463,249 @@ extension Store {
         return receipt
     }
 
+    func executeAgentApproveOrDeny(
+        adapter: String,
+        approve: Bool,
+        profileId: String,
+        bindingId: String,
+        stillAdmitted: (() -> Bool)? = nil
+    ) async -> HostActionReceipt {
+        let epoch = hostRouteEpoch
+        let checkAdmitted: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? true)
+        }
+        let effectiveAdapter: String = {
+            if ["antigravity", "cindy", "zcode", "dsh-desktop", "dsh"].contains(adapter) {
+                return adapter
+            }
+            if let highest = highestPriorityFourAppTarget() {
+                switch highest.place {
+                case .antigravity: return "antigravity"
+                case .cindy: return "cindy"
+                case .zcode: return "zcode"
+                case .dsh: return "dsh-desktop"
+                default: break
+                }
+            }
+            return activeDesktopAgentAdapter(for: profileId) ?? "antigravity"
+        }()
+        let outcome: String
+        let detail: String
+        switch effectiveAdapter {
+        case "antigravity":
+            let targetRow = antigravityStatus.selected.flatMap { sel in
+                antigravityStatus.rows.first(where: { $0.key == sel && $0.pendingInteraction != nil })
+            } ?? antigravityStatus.rows.first(where: { $0.pendingInteraction != nil })
+            if let row = targetRow, let pending = row.pendingInteraction {
+                let decision: AntigravityInteractionDecision = approve
+                    ? (pending.interactionType == .question && !pending.optionIds.isEmpty ? .answer : .allow)
+                    : (pending.interactionType == .question ? .cancel : .deny)
+                let selectedOpts = (decision == .answer) ? [pending.optionIds.first ?? ""].filter { !$0.isEmpty } : []
+                if let cmd = antigravityStatus.resolveIntent(
+                    for: row.key,
+                    interactionId: pending.interactionId,
+                    interactionType: pending.interactionType,
+                    decision: decision,
+                    selectedOptionIds: selectedOpts
+                ) {
+                    let rep = await antigravityStatus.execute(cmd, admitted: checkAdmitted)
+                    outcome = rep.rawValue
+                    detail = "antigravity_\(approve ? "approve" : "deny"): \(row.conversationId) (\(rep.label))"
+                } else {
+                    outcome = "noop"
+                    detail = "guard.noPendingInteraction: 当前会话无待审批请求"
+                }
+            } else {
+                outcome = "noop"
+                detail = "guard.noPendingInteraction: 当前会话无待审批请求"
+            }
+        case "cindy":
+            let targetRow = cindySessions.selected.flatMap { sel in
+                cindySessions.rows.first(where: { $0.address == sel && $0.pendingInteraction != nil })
+            } ?? cindySessions.rows.first(where: { $0.pendingInteraction != nil })
+            if let row = targetRow, let pending = row.pendingInteraction {
+                let isQuestion = pending.interactionType == .question
+                let isPlan = pending.interactionType == .plan
+                let decision: CindyInteractionDecision = approve
+                    ? ((isQuestion || isPlan) ? .accept : .approve)
+                    : (isQuestion ? .cancel : .reject)
+                let optionId = isQuestion ? pending.options?.first : nil
+                let rep = await cindySessions.resolve(
+                    address: row.address,
+                    interactionId: pending.interactionId,
+                    interactionType: pending.interactionType,
+                    decision: decision,
+                    optionId: optionId,
+                    admitted: checkAdmitted
+                )
+                outcome = rep.status.rawValue
+                detail = "cindy_\(approve ? "approve" : "deny"): \(row.address.sessionId) (\(rep.status.label))"
+            } else {
+                outcome = "noop"
+                detail = "guard.noPendingInteraction: 当前会话无待审批请求"
+            }
+        case "zcode":
+            let targetRow = zcodeSessions.selected.flatMap { sel in
+                zcodeSessions.rows.first(where: { $0.address == sel && $0.pendingInteraction != nil })
+            } ?? zcodeSessions.rows.first(where: { $0.pendingInteraction != nil })
+            if let row = targetRow, let pending = row.pendingInteraction {
+                let isQuestion = pending.interactionType == .question
+                let isPlan = pending.interactionType == .plan
+                let decision: ZCodeInteractionDecision = approve
+                    ? ((isQuestion || isPlan) ? .accept : .approve)
+                    : (isQuestion ? .cancel : .reject)
+                let optionId = isQuestion ? pending.options?.first : nil
+                if let intent = zcodeSessions.resolveIntent(
+                    for: row.address,
+                    interactionId: pending.interactionId,
+                    interactionType: pending.interactionType,
+                    decision: decision,
+                    optionId: optionId
+                ) {
+                    let rep = await zcodeSessions.resolve(intent, admitted: checkAdmitted)
+                    outcome = rep.rawValue
+                    detail = "zcode_\(approve ? "approve" : "deny"): \(row.address.taskId) (\(rep.label))"
+                } else {
+                    outcome = "noop"
+                    detail = "guard.noPendingInteraction: 当前会话无待审批请求"
+                }
+            } else {
+                outcome = "noop"
+                detail = "guard.noPendingInteraction: 当前会话无待审批请求"
+            }
+        case "dsh-desktop", "dsh":
+            let targetRow = dshSessions.selected.flatMap { sel in
+                dshSessions.rows.first(where: { $0.sessionId == sel && $0.pendingInteraction != nil })
+            } ?? dshSessions.rows.first(where: { $0.pendingInteraction != nil })
+            if let row = targetRow, let pending = row.pendingInteraction {
+                let isQuestion = pending.interactionType == .question
+                let decision: DSHInteractionDecision = approve ? .approve : (isQuestion ? .cancel : .reject)
+                let optionId = isQuestion ? pending.options?.first : nil
+                if let cmd = dshSessions.resolveIntent(
+                    for: row.sessionId,
+                    interactionId: pending.interactionId,
+                    interactionType: pending.interactionType,
+                    decision: decision,
+                    optionId: optionId
+                ) {
+                    let rep = await dshSessions.execute(cmd, admitted: checkAdmitted)
+                    outcome = rep.rawValue
+                    detail = "dsh_\(approve ? "approve" : "deny"): \(row.sessionId) (\(rep.label))"
+                } else {
+                    outcome = "noop"
+                    detail = "guard.noPendingInteraction: 当前会话无待审批请求"
+                }
+            } else {
+                outcome = "noop"
+                detail = "guard.noPendingInteraction: 当前会话无待审批请求"
+            }
+        default:
+            outcome = "noop"
+            detail = "未支持的审批适配器: \(effectiveAdapter)"
+        }
+        let receipt = HostActionReceipt(
+            timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+            profileId: profileId,
+            bindingId: bindingId,
+            actionType: "\(effectiveAdapter)_\(approve ? "approve" : "deny")",
+            target: effectiveAdapter,
+            textByteLen: nil,
+            outcome: outcome,
+            detail: detail
+        )
+        AuditLogWriter.append(receipt)
+        return receipt
+    }
+
+    func executeAgentNewOrStop(
+        adapter: String,
+        profileId: String,
+        bindingId: String,
+        stillAdmitted: (() -> Bool)? = nil
+    ) async -> HostActionReceipt {
+        let effectiveAdapter = ["antigravity", "cindy", "zcode", "dsh-desktop", "dsh"].contains(adapter)
+            ? adapter
+            : (activeDesktopAgentAdapter(for: profileId) ?? "antigravity")
+        let phase = fourAppLighting.deriveState(for: effectiveAdapter, in: self)
+        if phase == .thinking {
+            return await executeAgentStop(adapter: effectiveAdapter, profileId: profileId, bindingId: bindingId, stillAdmitted: stillAdmitted)
+        }
+        let epoch = hostRouteEpoch
+        let checkAdmitted: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? true)
+        }
+        let outcome: String
+        let detail: String
+        switch effectiveAdapter {
+        case "antigravity":
+            let workspacePath = antigravityStatus.selected?.workspacePath
+                ?? antigravityStatus.rows.first?.workspacePath
+                ?? FileManager.default.currentDirectoryPath
+            let projectId = antigravityStatus.rows.first(where: { $0.workspacePath == workspacePath && !$0.projectId.isEmpty })?.projectId
+                ?? "default-project"
+            if let cmd = antigravityStatus.createIntent(
+                workspacePath: workspacePath,
+                projectId: projectId,
+                prompt: "New session"
+            ) {
+                let rep = await antigravityStatus.execute(cmd, admitted: checkAdmitted)
+                outcome = rep.rawValue
+                detail = "antigravity_create: \(workspacePath) (\(rep.label))"
+            } else {
+                outcome = "noop"
+                detail = "guard.createUnavailable: Antigravity 尚未就绪或无可用工作区"
+            }
+        case "cindy":
+            if let scope = cindySessions.scopes.first {
+                let rep = await cindySessions.create(scope: scope, text: nil, admitted: checkAdmitted)
+                outcome = rep.status.rawValue
+                detail = "cindy_create: \(scope.workspacePath) (\(rep.status.label))"
+            } else {
+                outcome = "noop"
+                detail = "guard.createUnavailable: Cindy 尚未就绪或无授权工作区"
+            }
+        case "zcode":
+            if let scope = zcodeSessions.defaultScope,
+               let intent = zcodeSessions.createIntent(for: scope) {
+                let rep = await zcodeSessions.create(intent, admitted: checkAdmitted)
+                outcome = rep.rawValue
+                detail = "zcode_create: \(scope.workspacePath) (\(rep.label))"
+            } else {
+                outcome = "noop"
+                detail = "guard.createUnavailable: ZCode 尚未就绪或无授权工作区"
+            }
+        case "dsh-desktop", "dsh":
+            let workspaceId = dshSessions.selected.flatMap { sel in
+                dshSessions.rows.first(where: { $0.sessionId == sel })?.workspaceId
+            } ?? dshSessions.rows.first?.workspaceId ?? "default-workspace"
+            if let cmd = dshSessions.createIntent(workspaceId: workspaceId) {
+                let rep = await dshSessions.execute(cmd, admitted: checkAdmitted)
+                outcome = rep.rawValue
+                detail = "dsh_create: \(workspaceId) (\(rep.label))"
+            } else {
+                outcome = "noop"
+                detail = "guard.createUnavailable: DSH 尚未就绪或无可用工作区"
+            }
+        default:
+            outcome = "noop"
+            detail = "未支持的新建会话适配器: \(effectiveAdapter)"
+        }
+        let receipt = HostActionReceipt(
+            timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+            profileId: profileId,
+            bindingId: bindingId,
+            actionType: "\(effectiveAdapter)_create",
+            target: effectiveAdapter,
+            textByteLen: nil,
+            outcome: outcome,
+            detail: detail
+        )
+        AuditLogWriter.append(receipt)
+        return receipt
+    }
+
     private func replayNavigationPlace(
         _ destination: KeypadNavigationPlace?,
         isBack: Bool,
@@ -499,24 +740,6 @@ extension Store {
                let replayJSON = String(data: data, encoding: .utf8) {
                 return await actionExecutor.execute(actionJSON: replayJSON, bindingId: bindingId, profileId: profileId)
             }
-        case .t3Thread(let environmentID, let threadID):
-            let identity = T3ThreadIdentity(environmentID: environmentID, threadID: threadID)
-            let delivered = await t3Attention.navigate(to: identity, admitted: { [weak self] in
-                guard let self else { return false }
-                return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? true)
-            })
-            let receipt = HostActionReceipt(
-                timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
-                profileId: profileId,
-                bindingId: bindingId,
-                actionType: actionType,
-                target: "t3",
-                textByteLen: nil,
-                outcome: delivered ? "delivered" : "failed",
-                detail: delivered ? (isBack ? "已后退到 T3 会话" : "已前进到 T3 会话") : "T3 历史目标不可达"
-            )
-            AuditLogWriter.append(receipt)
-            return receipt
         case .antigravity(let conversationId, let workspacePath):
             let key = AntigravitySessionKey(conversationId: conversationId, workspacePath: workspacePath)
             let result: AntigravityOpenResult
@@ -742,6 +965,7 @@ extension Store {
         guard let core = backend as? MicroInputCore.MicroInput else { return }
         do {
             await installCodingAgentPresets()
+            await setHostActiveProfile(hostProfiles.first(where: { $0.name == "Antigravity" })?.id.text)
             await setHostExecutionEnabled(true)
             let hostID = draft.document_id
             let hostBytes = try Data(contentsOf: documentURL)

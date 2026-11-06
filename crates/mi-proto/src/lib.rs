@@ -126,6 +126,12 @@ impl RpcCodec for JsonCodec {
                 "fs.list",
                 "fs.readbin",
                 "fs.writebin",
+                "fs.txbegin",
+                "fs.txcommit",
+                "fs.list_txs",
+                "lights.preview",
+                "v.oai.thstatus",
+                "v.oai.rgbcfg",
             ]
             .contains(&method.as_str())
                 || v.get("params").is_some()

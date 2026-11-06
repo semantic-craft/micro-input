@@ -1290,6 +1290,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         }
     }
     for (profile_name, assignments) in specs {
+        let is_native_oai_profile = matches!(profile_name, "Cindy" | "Codex");
         let existing_id = work
             .document
             .editable
@@ -1300,6 +1301,13 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             .map(|(id, _)| id.clone());
         let pid = if let Some(pid) = existing_id {
             let p = &work.document.editable.graph.profiles[&pid];
+            if is_native_oai_profile
+                && p.layer_order.len() == 1
+                && work.document.is_protected_oai_layer(&p.layer_order[0])
+            {
+                created_ids.push(pid);
+                continue;
+            }
             let can_upgrade = p.layer_order.len() == 1
                 && legacy_specs
                     .iter()
@@ -1374,6 +1382,46 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             work.create_profile(profile_name)?
         };
         let lid = work.document.editable.graph.profiles[&pid].layer_order[0].clone();
+        if is_native_oai_profile {
+            work.mutate(|doc| {
+                let layer = doc
+                    .editable
+                    .graph
+                    .layers
+                    .get_mut(&lid)
+                    .ok_or_else(|| "层不存在".to_owned())?;
+                layer.name = "ChatGPT".into();
+                layer.lighting = None;
+                layer.control_settings = None;
+                let old_control_ids = std::mem::take(&mut layer.control_order);
+                for cid in old_control_ids {
+                    doc.editable.source_refs.remove(&cid);
+                }
+                layer.controls.clear();
+                for (slot, token) in crate::OFFICIAL_OAI_KEY_TOKENS
+                    .iter()
+                    .chain(crate::OFFICIAL_OAI_ENCODER_TOKENS.iter())
+                    .enumerate()
+                {
+                    let bid = crate::document::new_id();
+                    layer.control_order.push(bid.clone());
+                    layer.controls.insert(
+                        bid,
+                        crate::document::BindingNode {
+                            logical_control: format!("logical-{slot}"),
+                            original: serde_json::to_value(crate::Binding::Unknown(Value::String(
+                                (*token).into(),
+                            )))
+                            .map_err(|e| e.to_string())?,
+                            action_id: None,
+                        },
+                    );
+                }
+                Ok(())
+            })?;
+            created_ids.push(pid);
+            continue;
+        }
         work.set_control_settings(
             &pid,
             &lid,
@@ -1397,6 +1445,266 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     draft.mutate(|doc| {
         doc.editable = work.document.editable;
         Ok(created_ids)
+    })
+}
+
+pub fn install_four_app_cockpit_preset(
+    draft: &mut Draft,
+    profile_id: &str,
+) -> Result<(String, String), String> {
+    let mut work = draft.clone();
+    let pid = if profile_id.trim().is_empty() {
+        work.document
+            .editable
+            .graph
+            .profile_order
+            .first()
+            .cloned()
+            .ok_or_else(|| "不存在可用的 Profile".to_owned())?
+    } else if work
+        .document
+        .editable
+        .graph
+        .profiles
+        .contains_key(profile_id)
+    {
+        profile_id.to_owned()
+    } else {
+        return Err("指定的 Profile 不存在".into());
+    };
+    let profile_name = work.document.editable.graph.profiles[&pid].name.clone();
+    let adapter = match profile_name.as_str() {
+        "Antigravity" => "antigravity",
+        "DeepSeek Coder (DSH)" => "dsh-desktop",
+        "ZCode" => "zcode",
+        "Cindy" => "cindy",
+        "Codex" => "codex",
+        "千问办公" => "qwenwork",
+        "Qoder" => "qoder-cn",
+        _ => "antigravity",
+    };
+    let existing_layer = work.document.editable.graph.profiles[&pid]
+        .layer_order
+        .iter()
+        .find(|lid| {
+            work.document
+                .editable
+                .graph
+                .layers
+                .get(*lid)
+                .is_some_and(|l| l.name == "四应用总控")
+        })
+        .cloned();
+    let lid = match existing_layer {
+        Some(lid) => lid,
+        None => {
+            let first_lid = work.document.editable.graph.profiles[&pid].layer_order[0].clone();
+            if work.document.is_protected_oai_layer(&first_lid) {
+                work.create_layer(&pid, "四应用总控")?
+            } else {
+                first_lid
+            }
+        }
+    };
+    work.set_control_settings(
+        &pid,
+        &lid,
+        crate::control_settings::ControlSettings {
+            joystick_mode: "logical_sectors".into(),
+            active_sectors: 4,
+        },
+    )?;
+    let assignments = [
+        (
+            0u32,
+            "cockpit-slot-0",
+            "四应用槽位 1 · AG00",
+            "四应用总控",
+            "直跳或长按绑定第 1 个跨应用活跃会话槽位",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:0".into(),
+            },
+        ),
+        (
+            1,
+            "cockpit-slot-1",
+            "四应用槽位 2 · AG01",
+            "四应用总控",
+            "直跳或长按绑定第 2 个跨应用活跃会话槽位",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:1".into(),
+            },
+        ),
+        (
+            2,
+            "cockpit-slot-2",
+            "四应用槽位 3 · AG02",
+            "四应用总控",
+            "直跳或长按绑定第 3 个跨应用活跃会话槽位",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:2".into(),
+            },
+        ),
+        (
+            3,
+            "cockpit-slot-3",
+            "四应用槽位 4 · AG03",
+            "四应用总控",
+            "直跳或长按绑定第 4 个跨应用活跃会话槽位",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:3".into(),
+            },
+        ),
+        (
+            4,
+            "cockpit-slot-4",
+            "四应用槽位 5 · AG04",
+            "四应用总控",
+            "直跳或长按绑定第 5 个跨应用活跃会话槽位",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:4".into(),
+            },
+        ),
+        (
+            5,
+            "cockpit-slot-5",
+            "四应用槽位 6 · AG05",
+            "四应用总控",
+            "直跳或长按绑定第 6 个跨应用活跃会话槽位",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "slot-open:5".into(),
+            },
+        ),
+        (
+            6,
+            "cockpit-attention",
+            "四应用全局待办跳转 · AG06",
+            "四应用总控",
+            "一键切到最高优先级待关注会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: "four-app-attention".into(),
+            },
+        ),
+        (
+            7,
+            "cockpit-approve",
+            "审批通过 · AG07",
+            "四应用总控",
+            "批准当前或最高优先级待决交互请求",
+            ActionKind::AgentCommand {
+                adapter: "host".into(),
+                command: "approve".into(),
+            },
+        ),
+        (
+            8,
+            "cockpit-deny",
+            "审批拒绝 · AG08",
+            "四应用总控",
+            "拒绝当前或最高优先级待决交互请求",
+            ActionKind::AgentCommand {
+                adapter: "host".into(),
+                command: "deny".into(),
+            },
+        ),
+        (
+            9,
+            "cockpit-new-or-stop",
+            "新建或停止会话 · AG09",
+            "四应用总控",
+            "运行中则停止当前生成，空闲或冷启动则新建会话",
+            ActionKind::AgentCommand {
+                adapter: "host".into(),
+                command: "new-or-stop".into(),
+            },
+        ),
+        (
+            10,
+            "cockpit-ptt-left",
+            "按住语音 · AG10 (2U 左)",
+            "四应用总控",
+            "2U 宽键按住说话，松开自动停止听写",
+            ActionKind::AgentCommand {
+                adapter: adapter.into(),
+                command: "push-to-talk".into(),
+            },
+        ),
+        (
+            11,
+            "cockpit-ptt-right",
+            "按住语音 · AG11 (2U 右)",
+            "四应用总控",
+            "2U 宽键按住说话，松开自动停止听写",
+            ActionKind::AgentCommand {
+                adapter: adapter.into(),
+                command: "push-to-talk".into(),
+            },
+        ),
+        (
+            12,
+            "cockpit-submit",
+            "停止听写并提交 · AG12",
+            "四应用总控",
+            "先停活跃听写再聚焦输入区回车提交",
+            ActionKind::AgentCommand {
+                adapter: "host".into(),
+                command: "submit".into(),
+            },
+        ),
+        (
+            13,
+            "cockpit-dial-ccw",
+            "旋钮逆时针 · 向上滚屏",
+            "四应用总控",
+            "平滑向上滚动当前对话消息区",
+            ActionKind::AgentCommand {
+                adapter: adapter.into(),
+                command: "scroll-up".into(),
+            },
+        ),
+        (
+            14,
+            "cockpit-dial-cw",
+            "旋钮顺时针 · 向下滚屏",
+            "四应用总控",
+            "平滑向下滚动当前对话消息区",
+            ActionKind::AgentCommand {
+                adapter: adapter.into(),
+                command: "scroll-down".into(),
+            },
+        ),
+        (
+            15,
+            "cockpit-dial-click",
+            "旋钮按压 · 跳到底部",
+            "四应用总控",
+            "一键跳回当前对话流最底部",
+            ActionKind::AgentCommand {
+                adapter: adapter.into(),
+                command: "scroll-to-bottom".into(),
+            },
+        ),
+    ];
+    for (slot, id, name, category, detail, kind) in assignments {
+        let action = crate::draft::Action {
+            id: id.into(),
+            name: name.into(),
+            category: category.into(),
+            detail: detail.into(),
+            payload: serde_json::to_value(kind).map_err(|e| e.to_string())?,
+        };
+        work.assign(&json!(pid), &json!(lid), slot, action)?;
+    }
+    draft.mutate(|doc| {
+        doc.editable = work.document.editable;
+        Ok((pid, lid))
     })
 }
 
@@ -1497,9 +1805,27 @@ mod agent_migration_tests {
         let ids = install_agent_starter_profiles(&mut draft).unwrap();
         assert_eq!(ids.len(), 8);
 
-        // Downgrade Antigravity and Cindy to pre-Slice-B 9-slot push-to-talk state (remove slots 13, 14, 15),
-        // and customize Codex by adding a joystick prompt slot (slot 16 -> prompt-continue).
-        for profile_name in ["Antigravity", "Cindy"] {
+        for native_name in ["Cindy", "Codex"] {
+            let pid = draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, p)| p.name == native_name)
+                .unwrap()
+                .0
+                .clone();
+            let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+            assert!(
+                draft.document.is_protected_oai_layer(&lid),
+                "{native_name} default layer must be a protected KV_OAI_* layer"
+            );
+        }
+
+        // Downgrade Antigravity and 千问办公 to pre-Slice-B 9-slot push-to-talk state (remove slots 13, 14, 15),
+        // and customize ZCode by adding a joystick prompt slot (slot 16 -> prompt-continue).
+        for profile_name in ["Antigravity", "千问办公"] {
             let pid = draft
                 .document
                 .editable
@@ -1533,25 +1859,25 @@ mod agent_migration_tests {
                 .unwrap();
         }
 
-        let codex_pid = draft
+        let zcode_pid = draft
             .document
             .editable
             .graph
             .profiles
             .iter()
-            .find(|(_, p)| p.name == "Codex")
+            .find(|(_, p)| p.name == "ZCode")
             .unwrap()
             .0
             .clone();
-        let codex_lid = draft.document.editable.graph.profiles[&codex_pid].layer_order[0].clone();
+        let zcode_lid = draft.document.editable.graph.profiles[&zcode_pid].layer_order[0].clone();
         let prompt_continue = crate::draft::actions()
             .into_iter()
             .find(|a| a.id == "prompt-continue")
             .unwrap();
         draft
-            .assign(&json!(codex_pid), &json!(codex_lid), 16, prompt_continue)
+            .assign(&json!(zcode_pid), &json!(zcode_lid), 16, prompt_continue)
             .unwrap();
-        let codex_before = draft.document.editable.graph.layers[&codex_lid].clone();
+        let zcode_before = draft.document.editable.graph.layers[&zcode_lid].clone();
 
         let upgraded_ids = install_agent_starter_profiles(&mut draft).unwrap();
         assert_eq!(
@@ -1559,7 +1885,7 @@ mod agent_migration_tests {
             "Profile UUIDs must be preserved on upgrade"
         );
 
-        for profile_name in ["Antigravity", "Cindy"] {
+        for profile_name in ["Antigravity", "千问办公"] {
             let pid = draft
                 .document
                 .editable
@@ -1588,8 +1914,8 @@ mod agent_migration_tests {
         }
 
         assert!(
-            draft.document.editable.graph.layers[&codex_lid] == codex_before,
-            "User-customized Codex profile (with joystick prompt) must remain untouched"
+            draft.document.editable.graph.layers[&zcode_lid] == zcode_before,
+            "User-customized ZCode profile (with joystick prompt) must remain untouched"
         );
     }
 }

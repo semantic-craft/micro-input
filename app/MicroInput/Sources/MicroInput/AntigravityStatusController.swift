@@ -40,10 +40,31 @@ final class AntigravityStatusController: ObservableObject {
     private var connecting: Task<Void, Never>?
     private var polling: Task<Void, Never>?
     private var closing: Task<Void, Never>?
+    private var liveBridgeProcess: Process?
 
     init(client: any AntigravityStatusServing = AntigravityStatusClient(), pollNanoseconds: UInt64 = 2_000_000_000) {
         self.client = client
         self.pollNanoseconds = pollNanoseconds
+    }
+
+    func ensureLiveBridgeProcessIfAvailable() {
+        guard liveBridgeProcess?.isRunning != true else { return }
+        let fm = FileManager.default
+        let candidateScripts = [
+            URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent("integrations/antigravity/live-bridge.py").path,
+            fm.homeDirectoryForCurrentUser.appendingPathComponent("Projects/micro-input/integrations/antigravity/live-bridge.py").path
+        ]
+        guard let scriptPath = candidateScripts.first(where: { fm.isExecutableFile(atPath: $0) || fm.fileExists(atPath: $0) }) else {
+            return
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        proc.arguments = [scriptPath]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        if (try? proc.run()) != nil {
+            liveBridgeProcess = proc
+        }
     }
 
     func setEnabled(_ value: Bool) {

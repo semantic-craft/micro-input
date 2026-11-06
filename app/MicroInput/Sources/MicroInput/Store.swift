@@ -96,6 +96,8 @@ protocol Backend {
     func checkPassthroughHealth() -> String
     func resolveInputAction(bindingId: String, isPressed: Bool) -> String?
     func installCodingAgentPresets() async throws -> String
+    func installFourAppCockpitPreset(profileId: String) async throws -> String
+    func syncFourAppHardwareLighting(payloadJson: String) async throws -> String
 }
 extension Backend {
     func layerLighting(layerId: String) throws -> String { throw BridgeError.Failed(message: "灯光不可用") }
@@ -148,6 +150,8 @@ extension Backend {
     func checkPassthroughHealth() -> String { #"{"status":"disconnected"}"# }
     func resolveInputAction(bindingId: String, isPressed: Bool) -> String? { nil }
     func installCodingAgentPresets() async throws -> String { throw BridgeError.Failed(message: "Coding Agent 预设不可用") }
+    func installFourAppCockpitPreset(profileId: String) async throws -> String { throw BridgeError.Failed(message: "四应用总控预设不可用") }
+    func syncFourAppHardwareLighting(payloadJson: String) async throws -> String { #"{"synced":false}"# }
     func readIdentity() async throws -> IdentityInfo { throw BridgeError.Failed(message: "身份读取不可用") }
     func openDocument(path: String) async throws -> String { throw BridgeError.Failed(message: "本地文档不可用") }
     func actionCatalog() async throws -> String { throw BridgeError.Failed(message: "动作目录不可用") }
@@ -205,7 +209,6 @@ extension MicroInput: Backend {}
     let dshSessions: DSHSessionController
     let cindySessions: CindySessionController
     let antigravityStatus: AntigravityStatusController
-    let t3Attention: T3AttentionController
     let nativeOwnership: NativeOwnershipController
     let pushToTalk: PushToTalkController
     @Published var dictationNeedsAttention = false
@@ -231,6 +234,10 @@ extension MicroInput: Backend {}
     @Published var commandExecutionEnabled = false
     @Published var passThroughHealth: PassThroughHealthView = .disconnected
     @Published var lastHostActionReceipt: HostActionReceipt?
+    var accessibilityTrustChecker: () -> Bool = { LiveHostActionExecutor.isAccessibilityTrusted }
+    var accessibilityPollNanoseconds: UInt64 = 1_000_000_000
+    @Published private(set) var accessibilityTrusted: Bool = LiveHostActionExecutor.isAccessibilityTrusted
+    var accessibilityMonitorTask: Task<Void, Never>?
     var navigationHistory = KeypadNavigationHistory()
     var navigationPlaceAvailable: ((KeypadNavigationPlace) -> Bool)?
     @Published var fourAppSlots = FourAppSlotTable()
@@ -287,21 +294,11 @@ extension MicroInput: Backend {}
     }
     func isProtectedHostProfile(_ profileId: String?) -> Bool {
         guard let profileId, !profileId.isEmpty else { return false }
-        if let matched = hostProfiles.first(where: { $0.id.text == profileId }) {
-            if matched.layers.contains(where: { protectedLayers.contains($0.id.text) }) {
-                return true
-            }
-            let name = matched.name.lowercased()
-            if name.contains("codex") || name.contains("chatgpt") || name.contains("cindy") {
-                return true
-            }
-        }
-        let adapter = activeDesktopAgentAdapter(for: profileId)
-        if adapter == "cindy" || adapter == "codex" {
-            return true
-        }
         let lower = profileId.lowercased()
-        return lower == "cindy" || lower == "codex"
+        guard let matched = hostProfiles.first(where: { $0.id.text == profileId || $0.name.lowercased() == lower }) else {
+            return false
+        }
+        return matched.layers.contains(where: { isProtectedLayer($0) })
     }
     var isProtectedLayerSelected: Bool { isProtectedLayer(layer) }
     var canEditCurrentLayer: Bool { canEditDraft && !isProtectedLayerSelected }
@@ -457,8 +454,53 @@ extension MicroInput: Backend {}
             await linkApp(agent.bundleID, profileID: profile.id.text)
         }
     }
+    func applyFourAppCockpitPreset(profileId: String? = nil) async {
+        guard canEditDraft, !busy else { return }
+        let targetId = profileId ?? profile?.id.text ?? hostActiveProfileId ?? ""
+        busy = true; defer { busy = false }
+        do {
+            try await changeDocument(fresh: false) { [self] in
+                try await backend.installFourAppCockpitPreset(profileId: targetId)
+            }
+            status = "已装载四应用总控 16 键位预设（AG00..05 槽位 / 审批 / 停止 / 按住说话 / 提交 / 滚轮）"
+        } catch {
+            status = readableError(error)
+        }
+    }
+    func ensureFourAppSupervisionAtLaunch() async {
+        let fm = FileManager.default
+        let supportDir = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/MicroInput", isDirectory: true)
+        let agGrant = supportDir.appendingPathComponent("antigravity-grant.json")
+        let dshGrant = supportDir.appendingPathComponent("dsh-grant.json")
+        let zcodeGrant = supportDir.appendingPathComponent("zcode-grant.json")
+        let cindyGrant = supportDir.appendingPathComponent("cindy-grant.json")
+        let agDaemonDir = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gemini/antigravity/daemon", isDirectory: true)
+        let hasAgHub: Bool = {
+            guard let items = try? fm.contentsOfDirectory(atPath: agDaemonDir.path) else { return false }
+            return items.contains { $0.hasPrefix("hub_") && $0.hasSuffix(".json") }
+        }()
+        if !antigravityStatus.enabled, fm.fileExists(atPath: agGrant.path) || hasAgHub {
+            if !fm.fileExists(atPath: agGrant.path), hasAgHub {
+                antigravityStatus.ensureLiveBridgeProcessIfAvailable()
+            }
+            antigravityStatus.setEnabled(true)
+        }
+        if !dshSessions.enabled, fm.fileExists(atPath: dshGrant.path) {
+            dshSessions.setEnabled(true)
+        }
+        if !zcodeSessions.enabled, fm.fileExists(atPath: zcodeGrant.path) {
+            zcodeSessions.setEnabled(true)
+        }
+        if !cindySessions.enabled, fm.fileExists(atPath: cindyGrant.path) {
+            cindySessions.setEnabled(true)
+        }
+        fourAppSlots.syncRecent(from: self)
+        _ = await fourAppLighting.updateFeedback(in: self)
+    }
     var canTryDesktopAction: Bool {
-        guard nativeOwnership.allowsExecution, !hostOperationPaused, DesktopAgent.named(profile?.name ?? "") != nil, !browsingDeviceSnapshot,
+        guard !isProtectedLayerSelected, nativeOwnership.allowsExecution, !hostOperationPaused, DesktopAgent.named(profile?.name ?? "") != nil, !browsingDeviceSnapshot,
               profile?.id.text == hostActiveProfileId, hostExecutionEnabled, (0...19).contains(slot) else { return false }
         let binding = Self.desktopBindings[slot]
         return !busy && backend.resolveInputAction(bindingId: binding, isPressed: true) != nil
@@ -497,6 +539,7 @@ extension MicroInput: Backend {}
         }
         if documentOverride == nil, (ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? "").isEmpty {
             await ensureDefaultAgentLinks()
+            await ensureFourAppSupervisionAtLaunch()
         }
         await startDiscovery()
         if devices.isEmpty { await refresh() }
@@ -530,10 +573,46 @@ extension MicroInput: Backend {}
                 target: identity?.version ?? "unknown",
                 textByteLen: nil,
                 outcome: ownershipReady ? "executed" : "blocked",
-                detail: "ownership_confirmed=\(ownershipReady) passthrough=ready presets=\(hostProfiles.count) ax_trusted=\(LiveHostActionExecutor.isAccessibilityTrusted)"
+                detail: "ownership_confirmed=\(ownershipReady) passthrough=ready presets=\(hostProfiles.count) ax_trusted=\(refreshAccessibilityTrust())"
             )
             AuditLogWriter.append(receipt)
         }
+    }
+    @discardableResult func refreshAccessibilityTrust() -> Bool {
+        let trusted = accessibilityTrustChecker()
+        if accessibilityTrusted != trusted {
+            accessibilityTrusted = trusted
+        }
+        if !trusted {
+            startAccessibilityTrustMonitorIfNeeded()
+        } else {
+            accessibilityMonitorTask?.cancel()
+            accessibilityMonitorTask = nil
+        }
+        return trusted
+    }
+    func startAccessibilityTrustMonitorIfNeeded() {
+        guard !accessibilityTrusted, !systemSleeping, !stopped, accessibilityMonitorTask == nil else { return }
+        let interval = accessibilityPollNanoseconds
+        guard interval > 0 else { return }
+        accessibilityMonitorTask = Task { @MainActor [weak self] in
+            defer { self?.accessibilityMonitorTask = nil }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: interval)
+                guard !Task.isCancelled, let self, !self.systemSleeping, !self.stopped else { break }
+                if self.refreshAccessibilityTrust() {
+                    break
+                }
+            }
+        }
+    }
+    func requestAccessibilityAuthorization() {
+        LiveHostActionExecutor.openAccessibilitySettings()
+        _ = refreshAccessibilityTrust()
+    }
+    func resetAndRequestAccessibilityAuthorization() {
+        LiveHostActionExecutor.resetAndOpenAccessibilitySettings()
+        _ = refreshAccessibilityTrust()
     }
     func refreshPassthroughHealth() {
         let raw = backend.checkPassthroughHealth()
@@ -729,7 +808,7 @@ extension MicroInput: Backend {}
     }
     private func preparePushToTalkScenario(live: Bool) async {
         preparedHostExecutionScenario = true
-        let adapter = live ? ProcessInfo.processInfo.environment["MI_LIVE_DICTATION_ADAPTER"] : "cindy"
+        let adapter = live ? ProcessInfo.processInfo.environment["MI_LIVE_DICTATION_ADAPTER"] : "qwenwork"
         guard let adapter, ["cindy", "codex", "qwenwork"].contains(adapter),
               let core = backend as? MicroInputCore.MicroInput else { return }
         await installCodingAgentPresets(); await setHostExecutionEnabled(true)
@@ -773,7 +852,8 @@ extension MicroInput: Backend {}
         try? await Task.sleep(nanoseconds: 50_000_000)
         // Real app actions through the HID decoder and normal executor; no send/approval actions.
         for agent in DesktopAgent.all {
-            guard let id = hostProfiles.first(where: { $0.name == agent.name })?.id.text else { continue }
+            guard let id = hostProfiles.first(where: { $0.name == agent.name })?.id.text,
+                  !isProtectedHostProfile(id) else { continue }
             await setHostActiveProfile(id)
             let bindings = ["Antigravity", "DeepSeek Coder (DSH)"].contains(agent.name)
                 ? ["AG00", "AG01", "AG02", "AG03"] : ["AG00"]
@@ -800,8 +880,10 @@ extension MicroInput: Backend {}
         try? await Task.sleep(nanoseconds: 80_000_000)
         navigateForward()
         try? await Task.sleep(nanoseconds: 80_000_000)
-        if profileIndex != 0 { selectProfile(0) }
-        await setHostActiveProfile(hostProfiles.first?.id.text)
+        guard let agIndex = snapshot?.profiles.firstIndex(where: { $0.name == "Antigravity" }),
+              let agId = snapshot?.profiles[agIndex].id.text else { return }
+        if profileIndex != agIndex { selectProfile(agIndex) }
+        await setHostActiveProfile(agId)
         slot = 16
         guard let promptTemplate = catalog.first(where: { $0.id == "prompt-continue" }) else { return }
         await saveAction(promptTemplate)
@@ -1045,11 +1127,10 @@ extension MicroInput: Backend {}
     @Published var connectedID: String?
     @Published var stale = false
     @Published var busy = false
-    init(nativeOwnership: NativeOwnershipController? = nil, backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil, dictationDriver: (any DictationDriving)? = nil, t3Attention: T3AttentionController? = nil, zcodeSessions: ZCodeSessionController? = nil, dshSessions: DSHSessionController? = nil, cindySessions: CindySessionController? = nil, antigravityStatus: AntigravityStatusController? = nil, radialPreferences: UserDefaults = .standard) {
+    init(nativeOwnership: NativeOwnershipController? = nil, backend: Backend, documentURL: URL? = nil, actionExecutor: HostActionExecuting? = nil, dictationDriver: (any DictationDriving)? = nil, zcodeSessions: ZCodeSessionController? = nil, dshSessions: DSHSessionController? = nil, cindySessions: CindySessionController? = nil, antigravityStatus: AntigravityStatusController? = nil, radialPreferences: UserDefaults = .standard) {
         self.backend = backend
         self.nativeOwnership = nativeOwnership ?? NativeOwnershipController()
         self.radialPreferences = radialPreferences
-        self.t3Attention = t3Attention ?? T3AttentionController()
         self.zcodeSessions = zcodeSessions ?? ZCodeSessionController()
         self.dshSessions = dshSessions ?? DSHSessionController()
         self.cindySessions = cindySessions ?? CindySessionController()
@@ -1208,8 +1289,9 @@ extension MicroInput: Backend {}
         hostRouteEpoch += 1
         invalidateHostWork()
         systemSleeping = true
+        accessibilityMonitorTask?.cancel()
+        accessibilityMonitorTask = nil
         nativeOwnership.stop()
-        t3Attention.suspend()
         zcodeSessions.suspend()
         dshSessions.suspend()
         cindySessions.suspend()
@@ -1230,7 +1312,6 @@ extension MicroInput: Backend {}
         events?.invalidatePending()
         systemSleeping = false
         nativeOwnership.start()
-        t3Attention.resume()
         zcodeSessions.resume()
         dshSessions.resume()
         cindySessions.resume()
@@ -1245,13 +1326,14 @@ extension MicroInput: Backend {}
         cancelActiveDeviceOperation()
         let cancelledExecution = invalidateHostWork()
         stopped = true; lifecycleGeneration += 1; discoveryGeneration += 1
+        accessibilityMonitorTask?.cancel()
+        accessibilityMonitorTask = nil
         events?.invalidatePending()
         retireConnection("应用正在退出")
         await sleepDisconnect?.value
         sleepDisconnect = nil
         await cancelledExecution?.value
         await pushToTalk.waitUntilStopped()
-        await t3Attention.shutdown()
         await zcodeSessions.shutdown()
         await dshSessions.shutdown()
         await cindySessions.shutdown()

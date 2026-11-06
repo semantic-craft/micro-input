@@ -561,4 +561,82 @@ final class FourAppInteractionTests: XCTestCase {
             XCTAssertTrue(focusedAdapters.contains(adapter))
         }
     }
+
+    // MARK: - 9. Hysteresis 0.75 Snap-Back, Escape Interception & Full 14-Key Hardware Lighting
+
+    func testRadialMenuHysteresisRequires075PerimeterAnd250msSnapBackAndEscapeDismiss() {
+        var state = RadialMenuState()
+        state.setEnabled(true)
+        state.setConfirmMode(.springBack)
+
+        let makeSession: () -> RadialMenuSession? = {
+            let slots = RadialSlotConfig.fourAppEngineeringSlots.map { cfg -> RadialSlot in
+                RadialSlot(label: cfg.label, intent: .stop(adapter: "antigravity"), unavailableReason: nil, symbol: cfg.symbol, colorHex: cfg.colorHex)
+            }
+            return self.radialSession(slots: slots)
+        }
+
+        let t0 = Date()
+        // 1. Center first
+        _ = state.update(position(0, 0), now: t0, makeSession: makeSession)
+
+        // 2. Deflect only to 0.60 (>= 0.50 openDistance, < 0.75 selectDistance): menu opens, not armed at perimeter
+        _ = state.update(position(0.0, 0.60), now: t0.addingTimeInterval(0.05), makeSession: makeSession)
+        XCTAssertNotNil(state.session)
+        XCTAssertFalse(state.armedAtPerimeter)
+        let shallowReturn = state.update(position(0, 0), now: t0.addingTimeInterval(0.10), makeSession: makeSession)
+        XCTAssertNil(shallowReturn, "Deflection below 0.75 perimeter must not confirm on snap-back")
+
+        // 3. Deflect to 0.85 (>= 0.75 perimeter), pass through 0.60 at t+0.15, reach center at t+0.30 (150ms <= 250ms since leaving perimeter) -> confirms!
+        _ = state.update(position(0.0, 0.85), now: t0.addingTimeInterval(0.12), makeSession: makeSession)
+        XCTAssertTrue(state.armedAtPerimeter)
+        _ = state.update(position(0.0, 0.60), now: t0.addingTimeInterval(0.15), makeSession: makeSession)
+        let fastSnap = state.update(position(0.0, 0.10), now: t0.addingTimeInterval(0.30), makeSession: makeSession)
+        XCTAssertEqual(fastSnap?.1, .stop(adapter: "antigravity"))
+
+        // 4. Reset to idle, deflect to 0.85, exit perimeter to 0.60 at t+1.05, linger 300ms (> 250ms) until t+1.35 -> cancels!
+        _ = state.update(position(0, 0), now: t0.addingTimeInterval(1.00), makeSession: makeSession)
+        _ = state.update(position(0.0, 0.85), now: t0.addingTimeInterval(1.02), makeSession: makeSession)
+        _ = state.update(position(0.0, 0.60), now: t0.addingTimeInterval(1.05), makeSession: makeSession)
+        let lingeredReturn = state.update(position(0.0, 0.10), now: t0.addingTimeInterval(1.36), makeSession: makeSession)
+        XCTAssertNil(lingeredReturn, "Lingering >250ms after exiting 0.75 perimeter must cancel snap-back")
+    }
+
+    func testFullKeypadFeedbackAndCockpitActions() async {
+        let (store, _) = makeStore(ownershipState: "released")
+        await store.prepareDesktopProfiles()
+        await store.applyFourAppCockpitPreset()
+
+        // Verify 14-key full keypad feedback (AG00..AG12 + ENC_CLK)
+        let slots = store.fourAppSlots.slots
+        let fullKeys = store.fourAppLighting.deriveFullKeypadFeedback(
+            slots: slots,
+            dictationActive: true,
+            activePhase: .awaitingInput,
+            hasAttention: true
+        )
+        XCTAssertEqual(fullKeys.count, 14)
+        XCTAssertEqual(fullKeys.first(where: { $0.bindingId == "AG07" })?.color, "#00FF66")
+        XCTAssertEqual(fullKeys.first(where: { $0.bindingId == "AG08" })?.color, "#FF3B30")
+        XCTAssertEqual(fullKeys.first(where: { $0.bindingId == "AG10" })?.color, "#FF00FF")
+        XCTAssertEqual(fullKeys.first(where: { $0.bindingId == "AG11" })?.color, "#FF00FF")
+        XCTAssertEqual(fullKeys.first(where: { $0.bindingId == "AG12" })?.color, "#0066FF")
+
+        _ = await store.fourAppLighting.updateFeedback(in: store)
+        XCTAssertNotNil(store.fourAppLighting.lastHardwareSyncJSON)
+
+        // Verify approve / deny / new-or-stop host routing
+        let approveReceipt = await store.executeHostAction(
+            actionJSON: #"{"action_type":"agent_command","adapter":"host","command":"approve"}"#,
+            bindingId: "AG07",
+            profileId: store.hostActiveProfileId ?? ""
+        )
+        XCTAssertNotNil(approveReceipt)
+        let newOrStopReceipt = await store.executeHostAction(
+            actionJSON: #"{"action_type":"agent_command","adapter":"host","command":"new-or-stop"}"#,
+            bindingId: "AG09",
+            profileId: store.hostActiveProfileId ?? ""
+        )
+        XCTAssertNotNil(newOrStopReceipt)
+    }
 }

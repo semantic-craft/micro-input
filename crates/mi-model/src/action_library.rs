@@ -115,20 +115,6 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                 )
             }
             Ok(ActionKind::AgentCommand { adapter, command })
-                if adapter == "t3" && command == "next-attention" =>
-            {
-                prerequisites
-                    .push("需要已安装的 T3 Code、显式开启只读连接及新鲜的待处理目标".into());
-                (
-                    "T3 Code / 下一个需要我".into(),
-                    true,
-                    true,
-                    "",
-                    "T3 Code v0.1.6 只读 shell 与身份深链",
-                    "交付打开请求与目标访问确认分别报告；不发送或批准会话内容",
-                )
-            }
-            Ok(ActionKind::AgentCommand { adapter, command })
                 if matches!(
                     command.as_str(),
                     "back" | "navigate-back" | "forward" | "navigate-forward"
@@ -144,7 +130,6 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                         | "dsh-desktop"
                         | "qoder-cn"
                         | "herdr"
-                        | "t3"
                 ) =>
             {
                 prerequisites.push("需要 Mac 宿主常驻及至少一条小键盘打开历史".into());
@@ -187,6 +172,43 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                         "保存只改变本地草稿；没有执行结果",
                     )
                 }
+            }
+            Ok(ActionKind::AgentCommand { adapter, command })
+                if matches!(
+                    adapter.as_str(),
+                    "four-app"
+                        | "host"
+                        | "cindy"
+                        | "zcode"
+                        | "qwenwork"
+                        | "codex"
+                        | "antigravity"
+                        | "dsh-desktop"
+                        | "qoder-cn"
+                ) && (command.starts_with("slot-open:")
+                    || matches!(
+                        command.as_str(),
+                        "four-app-attention"
+                            | "approve"
+                            | "deny"
+                            | "new-or-stop"
+                            | "stop"
+                            | "next-workspace"
+                            | "previous-workspace"
+                    )) =>
+            {
+                prerequisites.push(
+                    "需要 Mac 宿主常驻及对应四应用（Antigravity / DSH / ZCode / Cindy）会话桥或辅助功能权限"
+                        .into(),
+                );
+                (
+                    format!("{adapter} / {command}"),
+                    true,
+                    true,
+                    "",
+                    "Mac 宿主四应用总控路由器（FourAppSlots / 会话审批 / 停止与冷会话物化）",
+                    "宿主激活对应 Profile 时按键可直达跨应用槽位、审批、停止或新建会话",
+                )
             }
             Ok(ActionKind::AgentCommand { adapter, command })
                 if matches!(

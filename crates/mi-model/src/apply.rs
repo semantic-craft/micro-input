@@ -121,15 +121,41 @@ fn splice(
     let p = unique(array(field(&object(root)?, "profiles")?)?, pid)?;
     let l = unique(array(field(&object(p)?, "layers")?)?, lid)?;
     let layout = object(field(&object(l)?, "layout")?)?;
-    let rows = array(field(&layout, "keymap")?)?;
-    let raw = rows
-        .into_iter()
-        .map(array)
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .nth(slot)
-        .ok_or("普通键逻辑槽不存在")?;
+    let raw = if slot < 13 {
+        let rows = array(field(&layout, "keymap")?)?;
+        rows.into_iter()
+            .map(array)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .nth(slot)
+            .ok_or("普通键逻辑槽不存在")?
+    } else if slot < 16 {
+        let enc_index = slot - 13;
+        let encoders = array(field(&layout, "encoders")?)?;
+        if encoders.len() == 3 {
+            encoders[enc_index]
+        } else if encoders.len() == 1 {
+            let inner = array(encoders[0])?;
+            if inner.len() != 3 {
+                return Err("旋钮二维槽位长度不为 3".into());
+            }
+            inner[enc_index]
+        } else {
+            return Err("旋钮槽位结构不支持".into());
+        }
+    } else {
+        let sector_index = slot - 16;
+        let joystick = object(field(&layout, "joystick")?)?;
+        let sectors = array(field(&joystick, "sectors")?)?;
+        let sector = object(
+            sectors
+                .get(sector_index)
+                .copied()
+                .ok_or("摇杆扇区逻辑槽不存在")?,
+        )?;
+        field(&sector, "k")?
+    };
     let value = raw.get().as_bytes();
     let start = (value.as_ptr() as usize)
         .checked_sub(input.as_ptr() as usize)
@@ -216,8 +242,7 @@ impl Pending {
                 .logical_control
                 .strip_prefix("logical-")
                 .and_then(|s| s.parse::<usize>().ok())
-                .filter(|s| *s < 13)
-                .ok_or("只支持普通键，不支持旋钮或摇杆")?;
+                .ok_or("逻辑控件槽编号无效")?;
             let action = &doc.editable.graph.actions[&aid];
             action.validate()?;
             let ActionKind::DeviceKey { token } =
@@ -243,7 +268,17 @@ impl Pending {
                 .iter()
                 .find(|l| l.id == *lid)
                 .ok_or("来源层不存在")?;
-            let before = match &l.keys[slot] {
+            let current_binding = if slot < 13 {
+                &l.keys[slot]
+            } else if slot < 16 {
+                &l.encoders[slot - 13]
+            } else {
+                l.joystick
+                    .sectors
+                    .get(slot - 16)
+                    .ok_or("摇杆扇区逻辑槽不存在")?
+            };
+            let before = match current_binding {
                 crate::Binding::Basic(t) => t.0.clone(),
                 crate::Binding::Empty => "空绑定".into(),
                 crate::Binding::Unknown(Value::String(t)) if known_passthrough(l, slot, t) => {
@@ -254,8 +289,15 @@ impl Pending {
             if before == token {
                 continue;
             }
+            let change_kind = if slot < 13 {
+                "key"
+            } else if slot < 16 {
+                "encoder"
+            } else {
+                "joystick_sector"
+            };
             planned = splice(&planned, pid, lid, slot, &token)?;
-            changes.push(json!({"kind":"key","profile":pid,"layer":lid,"control":binding.logical_control,"before":before,"after":token}));
+            changes.push(json!({"kind":change_kind,"profile":pid,"layer":lid,"control":binding.logical_control,"before":before,"after":token}));
         }
         let key_count = changes.len();
         let (lighting_patches, lighting_changes) = Self::lighting_patches(doc, &planned)?;
@@ -578,6 +620,15 @@ fn known_passthrough(layer: &crate::Layer, slot: usize, token: &str) -> bool {
     let Some(binding) = token.strip_prefix("KV_OAI_") else {
         return false;
     };
+    if matches!(slot, 13..=15) {
+        let expected = match slot {
+            13 => "ENC_CC",
+            14 => "ENC_CW",
+            15 => "ENC_CLK",
+            _ => unreachable!(),
+        };
+        return binding == expected;
+    }
     let logical = if matches!(binding, "AG11" | "ACT11") {
         Some("logical-11")
     } else {

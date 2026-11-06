@@ -243,4 +243,86 @@ impl MicroInput {
         }
         Ok(result.to_string())
     }
+    pub async fn sync_four_app_hardware_lighting(
+        &self,
+        payload_json: String,
+    ) -> Result<String, BridgeError> {
+        let parsed: serde_json::Value = serde_json::from_str(&payload_json).map_err(failure)?;
+        let parse_zone = |zone_val: &serde_json::Value| {
+            let effect = zone_val["effect"].as_str().map(str::to_owned);
+            let color = zone_val["color"]
+                .as_str()
+                .and_then(|hex| mi_model::lighting::color_from_hex(hex).ok())
+                .or_else(|| {
+                    zone_val["color"]
+                        .as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                });
+            let brightness = zone_val["brightness"].as_f64();
+            let speed = zone_val["speed"].as_f64();
+            let magic = zone_val["magic"].as_f64();
+            mi_proto::lighting_candidate::LightingZoneCandidate {
+                effect,
+                brightness,
+                speed,
+                magic,
+                color,
+            }
+        };
+        let rgb = mi_proto::lighting_candidate::LightingPreviewCandidate {
+            backlight: parse_zone(&parsed["backlight"]),
+            underglow: parse_zone(&parsed["underglow"]),
+        };
+        let mut entries = Vec::new();
+        if let Some(items) = parsed["per_key"].as_array() {
+            for item in items {
+                let Some(k) = item["k"]
+                    .as_str()
+                    .or_else(|| item["binding_id"].as_str())
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                let c = item["c"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .or_else(|| {
+                        item["color"]
+                            .as_str()
+                            .and_then(|hex| mi_model::lighting::color_from_hex(hex).ok())
+                    })
+                    .unwrap_or(0);
+                entries.push(mi_proto::lighting_candidate::OaiKeyStatusEntry { k, c });
+            }
+        }
+        if !self.write_capable() {
+            return Ok(json!({
+                "synced": false,
+                "reason": "write_incapable_or_offline",
+                "keys": entries.len()
+            })
+            .to_string());
+        }
+        let Ok(session) = self.current() else {
+            return Ok(json!({
+                "synced": false,
+                "reason": "no_active_session",
+                "keys": entries.len()
+            })
+            .to_string());
+        };
+        let rgb_ok = session.send_oai_rgbcfg(&rgb).await.is_ok();
+        let th_ok = if entries.is_empty() {
+            false
+        } else {
+            session.send_oai_thstatus(&entries).await.is_ok()
+        };
+        Ok(json!({
+            "synced": rgb_ok || th_ok,
+            "rgbcfg": rgb_ok,
+            "thstatus": th_ok,
+            "keys": entries.len()
+        })
+        .to_string())
+    }
 }

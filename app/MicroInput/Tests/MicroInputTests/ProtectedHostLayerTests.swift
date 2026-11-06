@@ -101,10 +101,26 @@ import MicroInputCore
         XCTAssertFalse(store.isProtectedHostProfile("herdr"))
 
         guard let cindy = store.hostProfiles.first(where: { $0.name == "Cindy" }),
-              let ag = store.hostProfiles.first(where: { $0.name == "Antigravity" }) else {
+              let codex = store.hostProfiles.first(where: { $0.name == "Codex" }),
+              let ag = store.hostProfiles.first(where: { $0.name == "Antigravity" }),
+              let cindyIdx = store.snapshot?.profiles.firstIndex(where: { $0.id.text == cindy.id.text }),
+              let codexIdx = store.snapshot?.profiles.firstIndex(where: { $0.id.text == codex.id.text }),
+              let agIdx = store.snapshot?.profiles.firstIndex(where: { $0.id.text == ag.id.text }) else {
             XCTFail("Agent profiles missing")
             return
         }
+
+        store.selectProfile(cindyIdx)
+        XCTAssertTrue(store.isProtectedLayerSelected)
+        XCTAssertFalse(store.canEditCurrentLayer)
+
+        store.selectProfile(codexIdx)
+        XCTAssertTrue(store.isProtectedLayerSelected)
+        XCTAssertFalse(store.canEditCurrentLayer)
+
+        store.selectProfile(agIdx)
+        XCTAssertFalse(store.isProtectedLayerSelected)
+        XCTAssertTrue(store.canEditCurrentLayer)
 
         await store.setHostActiveProfile(cindy.id.text)
         XCTAssertEqual(store.hostActiveProfileId, cindy.id.text)

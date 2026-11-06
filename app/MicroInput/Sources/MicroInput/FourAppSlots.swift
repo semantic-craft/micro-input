@@ -647,3 +647,16 @@ final class FourAppAttentionRound: ObservableObject {
         return receipt
     }
 }
+
+extension Store {
+    func highestPriorityFourAppTarget() -> FourAppAttentionCandidate? {
+        fourAppAttention.collectCandidates(from: self)
+            .filter(\.isEligible)
+            .min { lhs, rhs in
+                if lhs.priorityRank != rhs.priorityRank {
+                    return lhs.priorityRank < rhs.priorityRank
+                }
+                return lhs.title < rhs.title
+            }
+    }
+}

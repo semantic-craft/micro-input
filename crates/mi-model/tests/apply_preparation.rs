@@ -297,3 +297,119 @@ fn device_workspace_keeps_host_document_routing_and_undo_separate() {
         "Device work in progress"
     );
 }
+
+#[test]
+fn firmware_v063_304_tokens_2d_encoders_and_joystick_sector_splicing_work_end_to_end() {
+    assert_eq!(mi_model::draft::FIRMWARE_V063_TOKENS.len(), 304);
+    assert!(mi_model::draft::FIRMWARE_V063_TOKENS
+        .windows(2)
+        .all(|w| w[0] < w[1]));
+    assert!(mi_model::draft::DEVICE_KEY_TOKENS
+        .windows(2)
+        .all(|w| w[0] < w[1]));
+    assert!(mi_model::draft::is_valid_firmware_v063_token("KC_ENT"));
+    assert!(mi_model::draft::is_valid_firmware_v063_token("KC_SPC"));
+    assert_eq!(
+        mi_model::draft::canonical_firmware_token("KC_ENTER"),
+        "KC_ENT"
+    );
+    assert_eq!(
+        mi_model::draft::canonical_firmware_token("KC_SPACE"),
+        "KC_SPC"
+    );
+
+    let raw_2d = r#"{"version":1,"activeProfileId":0,"profiles":[{"id":"p","name":"P","layers":[{"id":7,"name":"L","color":65446,"lights":null,"layout":{"keymap":[["KC_A","KC_B"],[null,null,null,null],[null,null,null,null],[null,null,"KC_SPC"]],"encoders":[["KC_VOLU","KC_VOLD","KC_MPLY"]],"joystick":{"type":"KEY","sectors":[{"k":"KC_UP"},{"k":"KC_DOWN"}]}}}]}]}"#;
+    let config = mi_model::parse_device_files(raw_2d.as_bytes(), None).unwrap();
+    assert!(
+        !config
+            .warnings
+            .iter()
+            .any(|w| w.contains("旋钮") || w.contains("摇杆")),
+        "{:?}",
+        config.warnings
+    );
+    assert_eq!(
+        config.profiles[0].layers[0].encoders[0],
+        mi_model::Binding::Basic(mi_model::Token("KC_VOLU".into()))
+    );
+    assert_eq!(
+        config.profiles[0].layers[0].joystick.sectors[0],
+        mi_model::Binding::Basic(mi_model::Token("KC_UP".into()))
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workbench.json");
+    let baseline = json!({
+        "device_identity":{"confidence":"observed-interface","interface":"synthetic","session_id":4},
+        "firmware":"0.6.3",
+        "keymap":{"state":"present","size":raw_2d.len(),"sha1":format!("{:x}",sha1::Sha1::digest(raw_2d.as_bytes())),"bytes":raw_2d.as_bytes()},
+        "smart_actions":{"state":"missing"},
+        "active_indices":{"profile":0,"layer":0}
+    });
+    let doc = mi_model::document::LocalDocumentV2::from_config(
+        &config,
+        Some(baseline.clone()),
+        "device-snapshot",
+    )
+    .unwrap();
+    std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+    let mut store = DocumentStore::default();
+    store.open(path).unwrap();
+    let p = store.draft.document.editable.graph.profile_order[0].clone();
+    let l = store.draft.document.editable.graph.profiles[&p].layer_order[0].clone();
+
+    // Assign encoder click (slot 15) -> KC_MUTE and joystick sector 0 (slot 16) -> KC_ENT
+    store
+        .update(|d| {
+            d.assign(
+                &json!(p),
+                &json!(l),
+                15,
+                Action {
+                    id: "enc-mute".into(),
+                    name: "旋钮静音".into(),
+                    category: "设备按键".into(),
+                    detail: "2D 旋钮按下".into(),
+                    payload: json!({"type":"device_key","token":"KC_MUTE"}),
+                },
+            )?;
+            d.assign(
+                &json!(p),
+                &json!(l),
+                16,
+                Action {
+                    id: "joy-ent".into(),
+                    name: "摇杆回车".into(),
+                    category: "设备按键".into(),
+                    detail: "摇杆扇区".into(),
+                    payload: json!({"type":"device_key","token":"KC_ENT"}),
+                },
+            )
+        })
+        .unwrap();
+
+    let preview = store.preview_apply(&baseline).unwrap();
+    assert_eq!(preview.changes.len(), 2);
+    store
+        .prepare_apply_backup(&preview.token, &baseline)
+        .unwrap();
+    let candidate = store
+        .take_prepared_candidate(&preview.token, &baseline)
+        .unwrap();
+    let re_parsed = mi_model::parse_device_files(candidate.candidate(), None).unwrap();
+    assert_eq!(
+        re_parsed.profiles[0].layers[0].encoders[2],
+        mi_model::Binding::Basic(mi_model::Token("KC_MUTE".into()))
+    );
+    assert_eq!(
+        re_parsed.profiles[0].layers[0].joystick.sectors[0],
+        mi_model::Binding::Basic(mi_model::Token("KC_ENT".into()))
+    );
+
+    let all_ag = store.draft.compile_all_ag_host_keymap(Some(&p)).unwrap();
+    let all_ag_parsed = mi_model::parse_device_files(&all_ag, None).unwrap();
+    assert_eq!(
+        all_ag_parsed.profiles[0].layers[0].keys[12],
+        mi_model::Binding::Unknown(json!("KV_OAI_AG12"))
+    );
+}
