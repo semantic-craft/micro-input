@@ -149,10 +149,11 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Depends on**: F、N。设计见 `docs/designs/official-codex-profile-model.md`。责任票 #82、#84。
 - **Evidence**: .scratch/qa-runs/1793901523406-52021/evidence/result.json
 
-### [ ] Slice O: 补齐四应用实体交互与状态反馈
+### [x] Slice O: 补齐四应用实体交互与状态反馈
 - **Outcome**: 逐应用接滚动/跳底、八向 Prompt/Stop、可选回弹与逐键/双区反馈，宽键沿用 O1 已验语音能力。
 - **Done Predicate**: 每应用独立证明功能：取消零动作、听写先停后交、真实状态对应 HUD 和灯光；唯一灯光发送者，切层/退出释放明确；语音缺口单列子片，不能以 disabled 签收。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: F、N、O1；对应动作能力就绪。责任票 #84。
+- **Evidence**: .scratch/qa-runs/1793928647656-13555/evidence/result.json
 
 ### [ ] Slice P: 完成四应用安装与日常验收
 - **Outcome**: 最终构建在四应用中完成相同任务脚本，记录软件/安装/实体三层证据。
