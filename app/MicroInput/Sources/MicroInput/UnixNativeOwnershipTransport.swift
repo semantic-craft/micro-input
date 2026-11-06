@@ -1,6 +1,11 @@
 import Foundation
 import Darwin
 
+struct PersistedNativeOwnershipFence: Decodable {
+    let clientInstance: UUID
+    let generation: UInt64
+}
+
 struct UnixNativeOwnershipTransport: NativeOwnershipTransport {
     var path = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/MicroInput/cindy-ownership.sock").path
@@ -8,6 +13,21 @@ struct UnixNativeOwnershipTransport: NativeOwnershipTransport {
     var requestLimit = 4096
     var responseLimit = 4096
     var timeout: Duration = .milliseconds(750)
+
+    func readPersistedFence() -> PersistedNativeOwnershipFence? {
+        let fencePath = path + ".fence"
+        var metadata = stat()
+        guard lstat(fencePath, &metadata) == 0,
+              metadata.st_uid == getuid(),
+              metadata.st_mode & S_IFMT == S_IFREG,
+              metadata.st_mode & 0o077 == 0,
+              metadata.st_size >= 0,
+              metadata.st_size <= 4096,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: fencePath)) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(PersistedNativeOwnershipFence.self, from: data)
+    }
 
     init(
         path: String = FileManager.default.homeDirectoryForCurrentUser

@@ -35,8 +35,8 @@ protocol NativeOwnershipTransport: Sendable {
         case released(UUID, UInt64)
     }
     private(set) var state: State = .unknown("尚未取得 Cindy 原生所有权回执")
-    private(set) var generation: UInt64 = 0
-    private let clientInstance = UUID()
+    private(set) var generation: UInt64
+    private let clientInstance: UUID
     private var pending: NativeOwnershipRequest?
     private var requestStarted: ContinuousClock.Instant?
     private var expires: ContinuousClock.Instant?
@@ -55,6 +55,13 @@ protocol NativeOwnershipTransport: Sendable {
         self.transport = transport
         self.isolated = false
         self.allowUnbridgedDesktop = allowUnbridgedDesktop
+        if let unix = transport as? UnixNativeOwnershipTransport, let fence = unix.readPersistedFence() {
+            self.clientInstance = fence.clientInstance
+            self.generation = fence.generation &+ 1
+        } else {
+            self.clientInstance = UUID()
+            self.generation = 0
+        }
     }
     // Explicit dependency for isolated tests; never selected by production environment flags.
     init(isolated: Bool) {
@@ -62,6 +69,8 @@ protocol NativeOwnershipTransport: Sendable {
         self.transport = nil
         self.isolated = true
         self.allowUnbridgedDesktop = false
+        self.clientInstance = UUID()
+        self.generation = 0
     }
     private var isUnbridgedDesktopActive: Bool {
         guard allowUnbridgedDesktop, !bridgeObserved, nativeIdentity == nil,

@@ -292,4 +292,21 @@ import MicroInputCore
         await store.shutdown()
     }
 
+    func testRestartedControllerResumesPersistedFenceIdentityAndGeneration() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("mi-fence-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let sockPath = tempDir.appendingPathComponent("cindy-ownership.sock").path
+        let fencePath = sockPath + ".fence"
+        let persistedClient = UUID()
+        let fenceJSON = #"{"clientInstance":"\#(persistedClient.uuidString)","generation":13}"#
+        FileManager.default.createFile(atPath: fencePath, contents: Data(fenceJSON.utf8), attributes: [.posixPermissions: 0o600])
+
+        let restarted = NativeOwnershipController(transport: UnixNativeOwnershipTransport(path: sockPath), allowUnbridgedDesktop: true)
+        restarted.setDesiredOwner("micro-input")
+        let req = restarted.beginRequest(microDrained: true)
+        XCTAssertEqual(req.clientInstance, persistedClient, "Restarted Micro Input must resume its own persisted fence clientInstance instead of colliding as different_client")
+        XCTAssertGreaterThan(req.generation, 13, "Restarted Micro Input must advance generation past persisted fence")
+    }
+
 }
