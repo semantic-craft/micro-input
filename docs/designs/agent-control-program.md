@@ -15,10 +15,10 @@
 
 ## 交付顺序与完成条件
 
-1. 按住说话。复用输入合并与听写状态回读；默认松开停止、不发送。目标在开始时锁定。开始失败、重复边沿、释放早于开始完成、切 Profile、断连、睡眠、退出不得误启动录音或停止其他目标。先行为回归，再项目 check 和隔离原生验收。
+1. 按住说话。落地模块见 [PushToTalk.swift](../../app/MicroInput/Sources/MicroInput/PushToTalk.swift)。复用输入合并与听写状态回读；默认松开停止、不发送。目标在开始时锁定。开始失败、重复边沿、释放早于开始完成、切 Profile、断连、睡眠、退出不得误启动录音或停止其他目标。先行为回归，再项目 check 和隔离原生验收。
 2. T3 Code 待处理会话。先核实实际安装版本和支持接口。读取状态元数据，固定会话身份，优先当前待回应，同类选择等待较久且本轮尚未交付打开请求的事件，通过稳定环境与会话身份打开。系统接受深链只记为 delivered，不能用访问水位变化冒充目标确认。不实现自动批准或发送提示词。旧快照、断连、目标消失不得误开其他目标。未读事实不可由完成状态猜测。
 3. 状态灯。以 v.oai.thstatus / v.oai.rgbcfg 为候选证据。先核实当前层、运行状态读取与恢复。现有 lights.preview 的停止发送不等于恢复。恢复证据不足不发新灯光写入，记录独立阻塞，不阻塞会话导航。
-4. 径向菜单。复用当前宿主路由与目标，非激活窗口，选择/取消状态机。保留现有 v.oai.rad 的已验证角度与距离，选择八方向菜单；旋钮按下确认，摇杆回中取消，不使用未经验证的回弹速度。菜单默认关闭，既有四向动作保留。物理手感与斜向命中仍待验。先纯状态机与隔离UI，再实体输入；无映射写入。
+4. 径向菜单。落地模块见状态机 [RadialMenuState.swift](../../app/MicroInput/Sources/MicroInput/RadialMenuState.swift)、全屏悬浮面板 [RadialMenuOverlay.swift](../../app/MicroInput/Sources/MicroInput/RadialMenuOverlay.swift) 与路由执行 [RadialMenuRouting.swift](../../app/MicroInput/Sources/MicroInput/RadialMenuRouting.swift)。复用当前宿主路由与目标，非激活窗口，选择/取消状态机。保留现有 v.oai.rad 的已验证角度与距离，选择八方向菜单；支持旋钮按下确认与弹性回弹确认（`.springBack`），摇杆回中取消。菜单默认关闭，既有四向动作保留。物理手感与斜向命中仍待验。先纯状态机与隔离UI，再实体输入；无映射写入。
 5. MCP/CLI 服务出口。暂缓，只有实际消费者需求时接入。
 
 ## 协调规则
@@ -40,11 +40,11 @@
 按住说话责任票为 [#71](https://github.com/semantic-craft/micro-input/issues/71)，T3 Code 为 [#72](https://github.com/semantic-craft/micro-input/issues/72)。灯光继续使用 #24，径向菜单继续使用 #35。
 
 本轮本地决策链在项目 `.scratch/agent-control-program/decisions.tsv`。只读调查与分层验收证据位于同目录及其 `evidence/` 子目录，未上传原始日志。
-按住说话 PR #74 已合并。最终源码 a683a857 的完整检查与 20 项定向回归通过，千问原生启停通过，Cindy 有此前版本的原生证据。Codex 原生操作被 CUA 拒绝，未绕过；实体键、语音转写、内部会话身份与安装版验收仍保留在 #71。
+按住说话 PR #74 已合并（核心模块 [PushToTalk.swift](../../app/MicroInput/Sources/MicroInput/PushToTalk.swift)）。最终源码 a683a857 的完整检查与 20 项定向回归通过，千问原生启停通过，Cindy 有此前版本的原生证据。Codex 原生操作被 CUA 拒绝，未绕过；实体键、语音转写、内部会话身份与安装版验收仍保留在 #71。
 
 T3 Code 只读导航 PR #76 已合并至 6e2e155。最终源码 45271283 的完整检查与独立复审通过，真实客户端读取 63 个会话、待处理 0 并撤销成功。隔离生产应用的菜单默认关闭、开启后就绪、空队列禁用导航及关闭均已通过原生 AX 交互验证。精确会话打开、真实待办转换、弹出菜单视觉布局与安装版仍待验。
 
-径向菜单 PR #77 已合并至 4be36ce，固定八槽使用 T3 导航、速查和六个应用打开意图。默认关闭，旋钮确认、回中取消，冻结目标不重选。最终源码 1f1b758 已整合宏 PR #75，并修复取消旧任务抢取新队列及取消溢出代不能恢复的问题；完整检查、五项集成回归和同版本原生合成审计通过。八槽画面来自 375e19c，AX 标签来自 65c6272，后续视图文件未变，不能把这些记作最终源码的新截图。
+径向菜单 PR #77 已合并至 4be36ce（核心模块 [RadialMenuState.swift](../../app/MicroInput/Sources/MicroInput/RadialMenuState.swift)、[RadialMenuOverlay.swift](../../app/MicroInput/Sources/MicroInput/RadialMenuOverlay.swift) 与 [RadialMenuRouting.swift](../../app/MicroInput/Sources/MicroInput/RadialMenuRouting.swift)），固定八槽使用 T3 导航、速查和六个应用打开意图。默认关闭，旋钮确认、回中取消，冻结目标不重选。最终源码 1f1b758 已整合宏 PR #75，并修复取消旧任务抢取新队列及取消溢出代不能恢复的问题；完整检查、五项集成回归和同版本原生合成审计通过。八槽画面来自 375e19c，AX 标签来自 65c6272，后续视图文件未变，不能把这些记作最终源码的新截图。
 
 运行时状态灯因缺少原态读回与恢复方法保持阻断。本轮灯光调查是源码证据，尚未重读当前固件和活动层。任何研究报告都不代表硬件已通过验收。
 

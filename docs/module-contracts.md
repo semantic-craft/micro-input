@@ -11,6 +11,21 @@
 | `mi-ffi` | 高层操作状态、完成结果、来源与错误 | 给 Swift 暴露任意 RPC 或研究脚本执行口 | IA-01 |
 | SwiftUI Store/Workbench | 浏览、编辑、差异、明确提交状态 | 选择 Profile 就隐式启动设备写入 | IA-13、14 |
 
+## 核心源码模块索引
+
+| 模块能力 | 核心源文件 | 说明 |
+| --- | --- | --- |
+| 输入流与按键解析 | [input.rs](../crates/mi-session/src/input.rs) | `CandidateInputDecoder` 与 `VerifiedInputDecoder`、`WideKeyMerger` 宽键合并 |
+| 配置写入与分块传输 | [config_write.rs](../crates/mi-session/src/config_write.rs) | `ConfigWriter` 与 `SyntheticWriter` 写入链路 |
+| 灯光即时预览 | [lighting_preview.rs](../crates/mi-session/src/lighting_preview.rs) | 原生 `Preview::begin_native` 与合成 `Preview::begin` |
+| 宿主动作与透传路由 | [host_router.rs](../crates/mi-model/src/host_router.rs) | `check_passthrough_health`、`resolve_host_action` 纯函数路由 |
+| 偏好与关联存储 | [routing.rs](../crates/mi-model/src/storage/routing.rs) | 宿主自动跟随与前台关联持久化 |
+| 变更候选生成 | [apply.rs](../crates/mi-model/src/apply.rs) | 多键与两区灯光统一候选变更 `UnifiedChanges` |
+| 持久操作与恢复记录 | [operation_record.rs](../crates/mi-model/src/operation_record.rs) | 失败安全与原子落盘操作记录 |
+| FFI 宿主路由桥 | [host_routing.rs](../crates/mi-ffi/src/host_routing.rs) | UniFFI 高层宿主状态与输入消费 |
+| FFI 设备操作桥 | [device_operations.rs](../crates/mi-ffi/src/device_operations.rs) | UniFFI 准备/应用/恢复状态机 |
+| FFI 灯光操作桥 | [lighting.rs](../crates/mi-ffi/src/lighting.rs) | UniFFI 两区灯光编辑与受保护层保护 |
+
 ## 最小行为契约
 
 - **读取**：完整性失败不发布新快照；保留旧快照但标识过期。当前只读出口继续保持。
@@ -33,7 +48,7 @@
 | Framer.encode/feed/clear | JSON 字节 → Reports；输入报告 → Lines | 持有分帧缓冲，clear 清除残留 | 跨帧、跨行、未知通道、断连后不拼接旧内容 |
 | DeviceSchema | 请求构造及 Value → FileMeta/ReadChunk/DeviceConfig | 版本和数据约束属于 schema；协议不支持返回 Unverified | 未验证组合零发送；大小/摘要/分块变化拒绝发布 |
 | DeviceSession | 高层读取及连接操作 → 身份/快照/通知 | pending、reader、generation、snapshot 属于 session；Timeout/Disconnected/Config/Protocol/Transport 分开；取消不得污染新会话 | 迟到响应、取消、断连、同设备重开、旧快照保留 |
-| InputDecoder / InputMonitor | HostNotification → 可选逻辑事件；订阅 → InputEvent | 当前生产 decoder 仍不解释物理按键；流缺口清理按住状态并停止 | 未知通知不执行；物理映射验证前 action_eligible 不升级 |
+| InputDecoder / InputMonitor（[input.rs](../crates/mi-session/src/input.rs)） | HostNotification → 可选逻辑事件；订阅 → InputEvent | 当前生产 decoder 仍不解释物理按键；流缺口清理按住状态并停止 | 未知通知不执行；物理映射验证前 action_eligible 不升级 |
 | MicroInput / Swift Store | 高层命令 → DTO 与界面状态 | 桥接隐藏通用 RPC；草稿、设备快照和当前活动状态分别维护 | Navigation、SessionLifecycle、InputMonitor 的真实桥接测试 |
 
 新通知的静态字段结构可以进入研究 contract；尚未确认来源与物理语义时，不进入 InputDecoder 的可执行输出。写入与宿主执行尚无本轮授权新增的产品接口，不能填造 API 签名来掩盖未决行为。
@@ -51,7 +66,7 @@
 
 `mi-model::lighting` 保存Layer目标并复用mutate/undo；`apply`在精确基线下生成单键或灯光候选，副本成功后才允许取得一次PreparedCandidate。此对象不携带生产发送权限。`mi-proto::mutation`仅编码限定keymap块；原Method/公开request的只读守卫不变。
 
-`mi-session::config_write::SyntheticWriter`只在synthetic-backend编译，构造时拒绝原生/未知backend，复用私有会话队列和唯一reader。显式合成文件按实际字节生成摘要，响应采用官方客户端通用成功包络候选（不限定result载荷），模拟响应不冒充固件事实；写后逐字节比较并保全smart_actions，失败/取消后不自动重试。它是离线验证工具，已接入持久操作记录和失败恢复；高层 FFI 已复用此工具，只有专用合成构造器开放；不能作为生产写入能力。只读快照复用抽出的原始文件校验；解析失败仍不发布快照。
+`mi-session::config_write::SyntheticWriter`（[config_write.rs](../crates/mi-session/src/config_write.rs)）只在synthetic-backend编译，构造时拒绝原生/未知backend，复用私有会话队列和唯一reader。显式合成文件按实际字节生成摘要，响应采用官方客户端通用成功包络候选（不限定result载荷），模拟响应不冒充固件事实；写后逐字节比较并保全smart_actions，失败/取消后不自动重试。它是离线验证工具，已接入持久操作记录和失败恢复；高层 FFI 已复用此工具，只有专用合成构造器开放；不能作为生产写入能力。只读快照复用抽出的原始文件校验；解析失败仍不发布快照。
 
 
 ## S3 离线持久记录与恢复
@@ -76,14 +91,14 @@ Swift 的所有宿主执行入口统一经过执行 lease；暂停新入口并�
 
 `mi-ffi::lighting` 复用 `Draft::edit_lighting` 的校验与原子保存。颜色转换、百分比刻度和每项参数的可编辑性由 Rust 返回，Swift 不重新判断效果规则。预览目标存在独立会话中，文档修订保持不变；正常编辑不自动启动预览。
 
-`mi-session::lighting_preview::Preview::begin` 只在 synthetic-backend 编译并拒绝非合成连接；使用明确标记的 `synthetic.lights.read/set` 测试协议，而非臆造官方预览 ACK/目标绑定规则。可变合成文件另存运行态和活动目标；目标及最后一次已确认运行态同时匹配的原子 set 才改变运行态，文件保持原字节。原生 `begin_native` 按文末契约单独发送，不复用这些合成消息。
+`mi-session::lighting_preview::Preview::begin`（[lighting_preview.rs](../crates/mi-session/src/lighting_preview.rs)）只在 synthetic-backend 编译并拒绝非合成连接；使用明确标记的 `synthetic.lights.read/set` 测试协议，而非臆造官方预览 ACK/目标绑定规则。可变合成文件另存运行态和活动目标；目标及最后一次已确认运行态同时匹配的原子 set 才改变运行态，文件保持原字节。原生 `begin_native` 按文末契约单独发送，不复用这些合成消息。
 
 一个有界任务持有同一会话队列和唯一 reader，watch 槽只保留最新待发状态，80 ms 合并更新；不会取消已在途交换。队列持有期内其他读取不消耗 ID，更新始终为结束恢复和独立运行态读回保留两个 ID，30 秒自动结束。结束先停更新，再恢复、读回；切层或同层外部改色均拒绝覆盖更新和恢复，失败/断连为 Unknown 且断开旧会话，不自动重连/重试。配置操作与预览互斥，未知恢复结果保持关闭。合成运行态成功不证明真实灯光视觉效果。
 ## S5 宿主跟随与输入边界
 
 - `storage::routing` 在工作台偏好文件中原子保存选择、手动保持、自动开关和 bundle ID 关联；严格解析保留，失败不发布新 revision。
 - `mi-session` 唯一 reader 在广播前分配 ingress sequence，消费者的 sequence 只作诊断。摇杆回中/离中状态即使没有动作边沿也向上交付。
-- `host_routing` FFI 只提供状态、带预期身份的事务、输入原子解析及无需 RPC 的水位。设备会话与文档身份互不替代。
+- `host_router` 纯函数（[host_router.rs](../crates/mi-model/src/host_router.rs)）与 `host_routing` FFI（[host_routing.rs](../crates/mi-ffi/src/host_routing.rs)）提供状态、带预期身份的事务、输入原子解析及无需 RPC 的水位。设备会话与文档身份互不替代。
 - Swift `HostRouting` 为全部宿主/文档变更设置同一派发门禁，读取不中断；FIFO 至多 32 项、单执行任务、1 秒有效期。正在执行的动作保留原归属并完成清理，等待项失效后不重放。
 - `HostOverlay` 只读 Rust 的实际首层投影；非激活面板不执行动作。`WorkspaceSleepObserver` 在应用生命周期监听前台和睡眠，关闭主窗口不终止观察。
 

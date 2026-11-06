@@ -13,11 +13,11 @@
   - `R`：`dist/assets/device_config_data-D1iqtQNe.js`（SHA-256 `b3ee40ec883df9a7c8c8744433847abe585b5cd1d1d01c1063295abe2eb23329`）
   - `M`：`dist-electron/main/index.js`（SHA-256 `ab2eaf1fe9c8ae91bdc3a09bedcfd1b491af55179b0bc162403c1c16`）
   - `K`：`node_modules/@worklouder/wl-device-kit/dist/index.js`（SHA-256 `a07dc5d90bade50f06cf94aeff79c60c305a491fceade7c4db987ffe55636876`）
-- 本机实测与对照材料：
-  - [connected-ui-inventory.md](../../.scratch/input-study/out/connected-ui-inventory.md)
-  - [layer-lighting-joystick-followup.md](../../.scratch/input-study/out/layer-lighting-joystick-followup.md)
-  - 本机三 Profile 备份样本：[keymap.json](../../.scratch/input-study/probe-c-41bd49a0-6cc8-b699-c74a-884d6e77e4a6/keymap.json)（SHA-256 `90f916f5880e5e3f9f7e6425855406b7321d68b909d740433c8389535dfccb78`，`7,421` 字节）
-  - Cindy 原生接管实现：[workLouderCodexHostProcess.ts](../../.scratch/cindy-ownership/cindy/apps/desktop/src/main/worklouder-codex/workLouderCodexHostProcess.ts) 与上游问题单 [makecindy/cindy#9058](https://github.com/makecindy/cindy/issues/9058)
+- 落地实现与源码验证：
+  - 受保护 OAI 层门禁与模型测试：[protected_oai_layer.rs](../../crates/mi-model/tests/protected_oai_layer.rs)
+  - 受保护层判定与灯光守卫：[lighting.rs](../../crates/mi-model/src/lighting.rs) 与 FFI 接口 [lighting.rs](../../crates/mi-ffi/src/lighting.rs)
+  - 原生所有权与通道让渡控制器：[NativeOwnership.swift](../../app/MicroInput/Sources/MicroInput/NativeOwnership.swift)
+  - Cindy 原生接管补丁与上游问题单：[native-ownership.patch](../../integrations/cindy/native-ownership.patch) 与上游工单 [makecindy/cindy#9058](https://github.com/makecindy/cindy/issues/9058)
 
 ---
 

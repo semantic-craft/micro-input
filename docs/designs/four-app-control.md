@@ -24,6 +24,24 @@ Micro Input 继续拥有键盘协议、宿主路由和工作台。应用适配�
 
 这只是待实现的契约，不先生成一套空框架。第一款真实适配器跑通后提取共同部分。现有 Rust/Swift 两份历史状态机须确定单一运行所有者。四应用之外的配置不删除，也不扩充为本轮工作。
 
+### 落地实现与源码索引
+
+四应用控制已在 `app/MicroInput` 与 `crates/mi-model` 完整落地，核心模块如下：
+- **四应用会话控制器与状态适配器**：
+  - Cindy 状态与任务会话控制器：[CindySessionController.swift](../../app/MicroInput/Sources/MicroInput/CindySessionController.swift)（及其客户端 [CindySessionClient.swift](../../app/MicroInput/Sources/MicroInput/CindySessionClient.swift) 与原生所有权桥 [NativeOwnership.swift](../../app/MicroInput/Sources/MicroInput/NativeOwnership.swift)）
+  - ZCode UDS v4 会话控制器：[ZCodeSessionController.swift](../../app/MicroInput/Sources/MicroInput/ZCodeSessionController.swift)（及其客户端 [ZCodeSessionClient.swift](../../app/MicroInput/Sources/MicroInput/ZCodeSessionClient.swift)）
+  - DeepSeek Harness UDS 会话控制器：[DSHSessionController.swift](../../app/MicroInput/Sources/MicroInput/DSHSessionController.swift)（及其客户端 [DSHSessionClient.swift](../../app/MicroInput/Sources/MicroInput/DSHSessionClient.swift)）
+  - Antigravity 状态与 Sidecar 控制器：[AntigravityStatusController.swift](../../app/MicroInput/Sources/MicroInput/AntigravityStatusController.swift)（及其客户端 [AntigravityStatusClient.swift](../../app/MicroInput/Sources/MicroInput/AntigravityStatusClient.swift)）
+- **四应用共享交互、语音与灯光模块**：
+  - 稳定槽位与 19 键四应用动作绑定：[FourAppSlots.swift](../../app/MicroInput/Sources/MicroInput/FourAppSlots.swift)
+  - 四应用按住听写与语音回复管理器：[FourAppVoice.swift](../../app/MicroInput/Sources/MicroInput/FourAppVoice.swift)
+  - 双区四应用运行态灯光控制器：[FourAppLightingController.swift](../../app/MicroInput/Sources/MicroInput/FourAppLightingController.swift)
+- **Rust 领域模型与路由逻辑（`crates/mi-model`）**：
+  - 待办轮次与交互优先级模型：[attention_round.rs](../../crates/mi-model/src/attention_round.rs)
+  - 四应用 19 槽位映射表生成：[slot_table.rs](../../crates/mi-model/src/slot_table.rs)
+  - 语音状态机与回复模式：[voice_control.rs](../../crates/mi-model/src/voice_control.rs)
+  - 工作区与历史会话导航：[workspace_nav.rs](../../crates/mi-model/src/workspace_nav.rs)
+
 ## 工单与来源
 
 总入口为 [#81](https://github.com/semantic-craft/micro-input/issues/81)，继续属于 #44 的完整产品范围。Cindy 使用 [#82](https://github.com/semantic-craft/micro-input/issues/82)，Antigravity 使用 [#83](https://github.com/semantic-craft/micro-input/issues/83)，ZCode 与 DSH 复用 [#33](https://github.com/semantic-craft/micro-input/issues/33)、[#32](https://github.com/semantic-craft/micro-input/issues/32)，共享交互用 [#84](https://github.com/semantic-craft/micro-input/issues/84)，实体灯光与径向验收仍关联 #24/#35。工单记录状态，本页维护执行细节；接力仅指向下一片。
@@ -128,14 +146,14 @@ F、G、H、I 无互相依赖；默认先做 F 保护 Cindy，再选 G 获得首
 
 - 应用：共享。依赖：G、H、I2、J；写动作按 K/L/M 能力就绪。责任票：[#84](https://github.com/semantic-craft/micro-input/issues/84)。
 - 结果：共享稳定目标选择、六槽固定/最近、项目/工作区导航、历史和本轮不重复的待办轮询。
-- 实现入口：mi-model 目标/选择模型；HostRouting、DeviceOperations；四适配器。
+- 实现入口：mi-model 目标/选择模型（[attention_round.rs](../../crates/mi-model/src/attention_round.rs)、[slot_table.rs](../../crates/mi-model/src/slot_table.rs)、[workspace_nav.rs](../../crates/mi-model/src/workspace_nav.rs)）；HostRouting、DeviceOperations 与四应用稳定槽位（[FourAppSlots.swift](../../app/MicroInput/Sources/MicroInput/FourAppSlots.swift)）；四适配器。
 - 验收：四应用相同名称/不同实例不混淆；新事件重新入队；未知未读不推断；历史回到准确会话；Cindy 原生槽位可复用且不双消费。
 
 ### O1 · 逐应用补齐听写和语音回复控制
 
 - 应用：共享。依赖：F；对应应用身份与动作片就绪。责任票：[#84](https://github.com/semantic-craft/micro-input/issues/84)。
 - 结果：Cindy 复用原生语音；其余逐款确认并接入按住听写、释放停止、提交前停止，以及独立的语音回复开关。缺少原生能力的开源应用按其语音服务增量实现。
-- 实现入口：四应用语音服务/实际接口；Micro Input PushToTalk；Antigravity 未公开部分按 REA 证据。
+- 实现入口：四应用语音服务/实际接口；[FourAppVoice.swift](../../app/MicroInput/Sources/MicroInput/FourAppVoice.swift) 与 [voice_control.rs](../../crates/mi-model/src/voice_control.rs)；Micro Input PushToTalk；Antigravity 未公开部分按 REA 证据。
 - 验收：四应用分别确认开始/停止和目标绑定；听写转写与发送分开；开启/关闭语音回复须回读真实模式并验证输出。模型/接口不支持时保持该应用未完成，不以禁用或听写成功代替。
 
 ### O2 · 复刻官方 Input.app 受保护宿主层与多 Profile 切换让渡机制
@@ -149,7 +167,7 @@ F、G、H、I 无互相依赖；默认先做 F 保护 Cindy，再选 G 获得首
 
 - 应用：共享。依赖：F、N、O1；对应动作能力就绪。责任票：[#84](https://github.com/semantic-craft/micro-input/issues/84)。
 - 结果：逐应用接滚动/跳底、八向 Prompt/Stop、可选回弹与逐键/双区反馈，宽键沿用 O1 已验语音能力。
-- 实现入口：PushToTalk、RadialMenuState/Routing、灯光服务；Cindy 原生路径。
+- 实现入口：PushToTalk、RadialMenuState/Routing、[FourAppLightingController.swift](../../app/MicroInput/Sources/MicroInput/FourAppLightingController.swift)；Cindy 原生路径。
 - 验收：每应用独立证明功能：取消零动作、听写先停后交、真实状态对应 HUD 和灯光；唯一灯光发送者，切层/退出释放明确；语音缺口单列子片，不能以 disabled 签收。
 
 ### P · 完成四应用安装与日常验收
