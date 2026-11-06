@@ -10,14 +10,14 @@ struct DesktopAgent: Identifiable {
     var id: String { name }
     var installed: Bool { NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil }
     static let all: [DesktopAgent] = [
-        .init(name: "Cindy", bundleID: "com.xd.cindy", symbol: "sparkles", capabilities: "打开应用 · 搜索任务 · 聚焦输入 · 旋钮滚动/跳底"),
-        .init(name: "Codex", bundleID: "com.openai.codex", symbol: "terminal", capabilities: "打开应用 · 搜索 · 聚焦输入 · 旋钮滚动/跳底"),
-        .init(name: "千问办公", bundleID: "cn.qwenwork.desktop.mac", symbol: "text.bubble", capabilities: "打开应用 · 新任务 · 搜索 · 聚焦输入 · 旋钮滚动/跳底"),
-        .init(name: "ZCode", bundleID: "dev.zcode.app", symbol: "chevron.left.forwardslash.chevron.right", capabilities: "打开应用 · 新任务 · 搜索 · 聚焦输入 · 旋钮滚动/跳底"),
-        .init(name: "Antigravity", bundleID: "com.google.antigravity", symbol: "sparkles", capabilities: "打开应用 · 新会话 · 搜索 · 聚焦输入 · 旋钮滚动/跳底"),
-        .init(name: "DeepSeek Coder (DSH)", bundleID: "com.deepseek.dsh", symbol: "terminal", capabilities: "打开应用 · 新会话 · 搜索 · 聚焦输入 · 旋钮滚动/跳底"),
-        .init(name: "Qoder CN", bundleID: "com.qodercn.app", symbol: "q.circle", capabilities: "打开应用 · 新任务 · 搜索 · 聚焦输入 · 旋钮滚动/跳底"),
-        .init(name: "Herdr", bundleID: "dev.herdr.app", symbol: "rectangle.split.2x2", capabilities: "Space · Tab · 分屏 · 面板导航")
+        .init(name: "Cindy", bundleID: "com.xd.cindy", symbol: "sparkles", capabilities: "打开应用、搜索任务、定位输入框、旋钮滚动对话"),
+        .init(name: "Codex", bundleID: "com.openai.codex", symbol: "terminal", capabilities: "打开应用、搜索、定位输入框、旋钮滚动对话"),
+        .init(name: "千问办公", bundleID: "cn.qwenwork.desktop.mac", symbol: "text.bubble", capabilities: "打开应用、新建任务、搜索、定位输入框、旋钮滚动对话"),
+        .init(name: "ZCode", bundleID: "dev.zcode.app", symbol: "chevron.left.forwardslash.chevron.right", capabilities: "打开应用、新建任务、搜索、定位输入框、旋钮滚动对话"),
+        .init(name: "Antigravity", bundleID: "com.google.antigravity", symbol: "sparkles", capabilities: "打开应用、新建对话、搜索、定位输入框、旋钮滚动对话"),
+        .init(name: "DeepSeek Coder (DSH)", bundleID: "com.deepseek.dsh", symbol: "terminal", capabilities: "打开应用、新建对话、搜索、定位输入框、旋钮滚动对话"),
+        .init(name: "Qoder CN", bundleID: "com.qodercn.app", symbol: "q.circle", capabilities: "打开应用、新建任务、搜索、定位输入框、旋钮滚动对话"),
+        .init(name: "Herdr", bundleID: "dev.herdr.app", symbol: "rectangle.split.2x2", capabilities: "工作区切换、标签页、分屏与面板导航")
     ]
     // Stored profile names remain stable so existing mappings and favorites survive.
     static func displayName(_ name: String) -> String {

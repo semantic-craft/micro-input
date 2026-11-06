@@ -40,7 +40,7 @@ import MicroInputCore
                 Button("标准窗口") { NSApp.keyWindow?.setContentSize(NSSize(width: 1180, height: 730)) }
                 Divider()
                 Text("⌘[ / ⌘] 选择前后控件")
-                Text("⌘E 搜索动作 · ⌘D 差异 · ⌘Z 撤销")
+                Text("⌘E 分配动作，⌘D 查看修改，⌘Z 撤销")
             }
         }
 
@@ -108,6 +108,7 @@ struct WorkbenchHost: View {
     @objc func show() {
         guard let button = item.button else { return }
         if popover.isShown { popover.performClose(nil); return }
+        _ = store.refreshAccessibilityTrust()
         let front = NSWorkspace.shared.frontmostApplication
         if front?.bundleIdentifier != Bundle.main.bundleIdentifier { previousApp = front }
         NSApp.activate(ignoringOtherApps: true)
@@ -191,7 +192,7 @@ struct StatusPanel: View {
     }
     private var summary: String {
         if !store.hostExecutionEnabled { return "按键控制已暂停" }
-        if !LiveHostActionExecutor.isAccessibilityTrusted { return "需要辅助功能权限" }
+        if !store.accessibilityTrusted { return "需要辅助功能权限" }
         return store.connectedID == nil ? "设备未连接" : store.passThroughHealth.label
     }
     var body: some View {
@@ -208,19 +209,22 @@ struct StatusPanel: View {
             Toggle("命令执行同意", isOn: Binding(get: { store.commandExecutionEnabled }, set: { value in Task { await store.setCommandExecutionEnabled(value) } }))
                 .toggleStyle(.switch).controlSize(.small).font(.caption)
                 .help("默认关闭。开启后，配置过的 shell_command 才会路由执行")
-            if !LiveHostActionExecutor.isAccessibilityTrusted {
+            if !store.accessibilityTrusted {
                 HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text("未获辅助功能权限，按键与听写被拦截").font(.caption).foregroundStyle(.orange)
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(UITheme.caution)
+                    Text("辅助功能未就绪，按键与按住说话暂不可用").font(UITheme.Typography.caption).foregroundStyle(UITheme.caution)
                     Spacer()
-                    Button("授权…") {
-                        LiveHostActionExecutor.openAccessibilitySettings()
-                    }.font(.caption)
+                    Button("开启…") {
+                        store.requestAccessibilityAuthorization()
+                    }.font(UITheme.Typography.captionMedium)
+                    Button("重置…") {
+                        store.resetAndRequestAccessibilityAuthorization()
+                    }.font(UITheme.Typography.caption).help("若系统设置中已打开开关仍提示未授权，点击重置旧签名登记并重新授权")
                 }
             }
             if store.dictationNeedsAttention {
-                Text("原听写停止未确认，请检查原应用").font(.caption).foregroundStyle(.orange)
-                Button("复核原听写已停止") { Task { await store.verifyDictationStopped() } }
+                Text("上次语音输入停止状态待确认").font(UITheme.Typography.caption).foregroundStyle(UITheme.caution)
+                Button("重新检查麦克风状态") { Task { await store.verifyDictationStopped() } }
             }
             // Intrinsic, non-scrolling rows: a maxHeight-only ScrollView can collapse
             // inside NSHostingController's initial popover size negotiation.
@@ -235,16 +239,16 @@ struct StatusPanel: View {
                 }
             }.fixedSize(horizontal: false, vertical: true)
             HStack {
-                Menu("其他配置") {
+                Menu("其他方案") {
                     ForEach(otherProfiles, id: \.id.text) { p in
                         Button { Task { await store.setHostActiveProfile(p.id.text, syncWorkbench: true) } } label: {
                             if store.hostActiveProfileId == p.id.text { Label(DesktopAgent.displayName(p.name), systemImage: "checkmark") }
                             else { Text(DesktopAgent.displayName(p.name)) }
                         }.disabled(store.busy)
                     }
-                    if otherProfiles.isEmpty { Text("没有其他配置") }
+                    if otherProfiles.isEmpty { Text("没有其他方案") }
                     Divider()
-                    Menu("调整常用配置") {
+                    Menu("调整常用排列") {
                         ForEach(0..<4, id: \.self) { index in
                             Menu(["左上", "右上", "左下", "右下"][index]) {
                                 ForEach(menuProfiles, id: \.id.text) { profile in
@@ -259,45 +263,48 @@ struct StatusPanel: View {
                         Divider()
                         Button("恢复默认排列") { favoriteIDsJSON = "[]" }
                     }
-                }.menuStyle(.borderlessButton).fixedSize().font(.system(size: 11))
+                }.menuStyle(.borderlessButton).fixedSize().font(UITheme.Typography.captionMedium)
                 Spacer()
-                Button("编辑按键…") { owner.showWindow() }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
+                Button("打开设置窗口…") { owner.showWindow() }.buttonStyle(.plain).font(UITheme.Typography.captionMedium).foregroundStyle(UITheme.accent)
             }
             Divider()
-            Toggle("摇杆径向菜单", isOn: Binding(get: { store.radialMenu.enabled }, set: store.setRadialMenuEnabled))
-                .toggleStyle(.switch).controlSize(.small)
-            if store.radialMenu.enabled { Text(store.radialReadiness.label).font(.caption2).foregroundStyle(.secondary) }
-            ZCodeSessionPanel(controller: store.zcodeSessions, open: { store.openZCodeSession($0) })
-            DSHSessionPanel(
-                controller: store.dshSessions,
-                open: { store.openDSHSession($0) },
-                create: { wsId in
-                    if let cmd = store.dshSessions.createIntent(workspaceId: wsId) { store.createDSHSession(cmd) }
-                },
-                cancel: { sessionId in
-                    if let cmd = store.dshSessions.cancelIntent(for: sessionId) { store.cancelDSHSession(cmd) }
-                }
-            )
-            CindySessionPanel(controller: store.cindySessions, open: { store.openCindySession($0) })
-            AntigravityStatusPanel(controller: store.antigravityStatus, open: { store.openAntigravitySession($0) })
-            T3AttentionPanel(controller: store.t3Attention, next: { store.openNextT3Attention() })
+            Toggle("摇杆八向轮盘菜单", isOn: Binding(get: { store.radialMenu.enabled }, set: store.setRadialMenuEnabled))
+                .toggleStyle(.switch).controlSize(.small).font(UITheme.Typography.body)
+            if store.radialMenu.enabled { Text(store.radialReadiness.label).font(UITheme.Typography.caption).foregroundStyle(UITheme.textSecondary) }
+            DisclosureGroup("应用会话直连") {
+                VStack(alignment: .leading, spacing: 8) {
+                    ZCodeSessionPanel(controller: store.zcodeSessions, open: { store.openZCodeSession($0) })
+                    DSHSessionPanel(
+                        controller: store.dshSessions,
+                        open: { store.openDSHSession($0) },
+                        create: { wsId in
+                            if let cmd = store.dshSessions.createIntent(workspaceId: wsId) { store.createDSHSession(cmd) }
+                        },
+                        cancel: { sessionId in
+                            if let cmd = store.dshSessions.cancelIntent(for: sessionId) { store.cancelDSHSession(cmd) }
+                        }
+                    )
+                    CindySessionPanel(controller: store.cindySessions, open: { store.openCindySession($0) })
+                    AntigravityStatusPanel(controller: store.antigravityStatus, open: { store.openAntigravitySession($0) })
+                }.padding(.top, 6)
+            }.font(UITheme.Typography.captionMedium)
             Divider()
-            Toggle("自动跟随前台应用", isOn: Binding(get: { store.routing?.auto_follow_enabled ?? false }, set: { value in Task { await store.setAutoFollow(value); if value, store.routing?.manual_override == true { await store.resumeFollowing() } } })).toggleStyle(.switch).controlSize(.small)
+            Toggle("切换到软件时自动启用", isOn: Binding(get: { store.routing?.auto_follow_enabled ?? false }, set: { value in Task { await store.setAutoFollow(value); if value, store.routing?.manual_override == true { await store.resumeFollowing() } } })).toggleStyle(.switch).controlSize(.small).font(UITheme.Typography.body)
             HStack {
-                Text(store.routingMode).font(.caption).foregroundStyle(.secondary)
+                Text(store.routingMode).font(UITheme.Typography.caption).foregroundStyle(UITheme.textSecondary)
                 Spacer()
-                if store.routing?.manual_override == true { Button("恢复跟随") { Task { await store.resumeFollowing() } }.font(.caption) }
+                if store.routing?.manual_override == true { Button("恢复自动跟随") { Task { await store.resumeFollowing() } }.font(UITheme.Typography.captionMedium) }
             }
             HStack {
-                Button("应用关联…") { owner.editAppLinks() }
+                Button("软件与方案关联…") { owner.editAppLinks() }
                 Spacer()
                 Button("按键速查") { owner.toggleCheatSheet() }
-            }.font(.caption)
-            if store.inputNeedsResume { Button("恢复输入") { store.resumeInput() } }
+            }.font(UITheme.Typography.captionMedium)
+            if store.inputNeedsResume { Button("恢复按键监听") { store.resumeInput() } }
             Divider()
             HStack(spacing: 8) {
-                Circle().fill(store.connectedID == nil ? Color.secondary : Color.green).frame(width: 5, height: 5)
-                Text(store.connectedID == nil ? "设备未连接" : "Creator Micro 2 已连接").font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                Circle().fill(store.connectedID == nil ? UITheme.textMuted : UITheme.accent).frame(width: 6, height: 6)
+                Text(store.connectedID == nil ? "键盘未连接" : "Creator Micro 2 已就绪").font(UITheme.Typography.caption).foregroundStyle(UITheme.textSecondary).lineLimit(1)
                 Spacer(minLength: 4)
                 Menu {
                     Text(summary)
@@ -306,17 +313,22 @@ struct StatusPanel: View {
                         Text("最近动作：\(receipt.detail)")
                     }
                     Divider()
-                    Button(store.connectedID == nil ? "连接设备" : "检查连接") {
+                    Button(store.connectedID == nil ? "连接键盘" : "重新检查连接") {
                         Task { await store.autoSetupHostExecutionIfNeeded() }
                     }.disabled(store.busy)
-                    Button("设置辅助功能权限…") { LiveHostActionExecutor.openAccessibilitySettings() }
+                    Button("设置辅助功能权限…") { store.requestAccessibilityAuthorization() }
+                    if !store.accessibilityTrusted {
+                        Button("重置辅助功能签名登记…") { store.resetAndRequestAccessibilityAuthorization() }
+                    }
                     Divider()
                     Button("退出 Micro Input") { owner.quitApp() }
-                } label: { Image(systemName: "ellipsis.circle").font(.system(size: 13)) }
+                } label: { Image(systemName: "ellipsis.circle").font(UITheme.Typography.body) }
                     .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("连接详情")
             }
-        }.padding(16).frame(width: 352).fixedSize(horizontal: false, vertical: true)
-            .tint(.accentColor)
+        }.padding(14).frame(width: 348).fixedSize(horizontal: false, vertical: true)
+            .background(UITheme.surface)
+            .tint(UITheme.accent)
+            .accentColor(UITheme.accent)
     }
     private func favoriteButton(at index: Int) -> some View {
         let profile = favorites.indices.contains(index) ? favorites[index] : nil
@@ -329,51 +341,21 @@ struct StatusPanel: View {
             Task { await store.setHostActiveProfile(profile.id.text, syncWorkbench: true) }
         } label: {
             HStack(spacing: 8) {
-                AgentBadge(name: name, size: 28)
+                AgentBadge(name: name, size: 26)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.system(size: 12, weight: .medium)).lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                    Text(selected ? "正在控制" : (agent?.installed == false ? "未安装" : "切换配置"))
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text(title).font(UITheme.Typography.bodyMedium).foregroundStyle(UITheme.textPrimary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                    Text(selected ? "使用中" : (agent?.installed == false ? "未安装" : "点击启用"))
+                        .font(UITheme.Typography.caption).foregroundStyle(selected ? UITheme.accent : UITheme.textSecondary)
                 }
                 Spacer(minLength: 0)
-                Image(systemName: "checkmark").font(.caption.weight(.semibold))
-                    .foregroundStyle(.tint).opacity(selected ? 1 : 0)
-            }.padding(.horizontal, 10).frame(maxWidth: .infinity).frame(height: 64)
-                .contentShape(RoundedRectangle(cornerRadius: 9))
-                .background(selected ? Color.accentColor.opacity(0.08) : Color(nsColor: .controlBackgroundColor).opacity(0.65), in: RoundedRectangle(cornerRadius: 9))
-                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(selected ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.06)))
+                Image(systemName: "checkmark").font(UITheme.Typography.captionMedium)
+                    .foregroundStyle(UITheme.accent).opacity(selected ? 1 : 0)
+            }.padding(.horizontal, 10).frame(maxWidth: .infinity).frame(height: 62)
+                .contentShape(RoundedRectangle(cornerRadius: UITheme.Radius.itemInner))
+                .background(selected ? UITheme.accentSoft : UITheme.subtleSurface, in: RoundedRectangle(cornerRadius: UITheme.Radius.itemInner))
+                .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.itemInner).strokeBorder(selected ? UITheme.accentBorder : UITheme.border))
         }.buttonStyle(.plain).disabled(store.busy || profile == nil)
-            .accessibilityLabel("控制 \(title)\(selected ? "，当前配置" : "")")
-    }
-}
-
-struct T3AttentionPanel: View {
-    @ObservedObject var controller: T3AttentionController
-    let next: () -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Toggle("T3 Code 只读连接", isOn: Binding(get: { controller.enabled }, set: controller.setEnabled))
-                .toggleStyle(.switch).controlSize(.small)
-            Text(controller.state.label).font(.caption).foregroundStyle(.secondary)
-            if controller.enabled {
-                HStack {
-                    Button("下一个需要我 (\(controller.items.count))", action: next)
-                        .disabled(controller.state != .ready || controller.items.isEmpty)
-                    Spacer()
-                    if case .unavailable = controller.state {
-                        Button("重连") { controller.setEnabled(true) }
-                    }
-                }.font(.caption)
-                ForEach(Array(controller.items.prefix(3))) { item in
-                    Text("\(item.event.reason.label) · \(item.title)")
-                        .font(.caption).lineLimit(1).help(item.firstObserved ? "等待时间从首次观察计起" : "按事件等待时间排序")
-                }
-                if let result = controller.lastResult {
-                    Text(result.label).font(.caption).foregroundStyle(.secondary)
-                }
-                Text("实体状态灯尚未接通").font(.caption2).foregroundStyle(.secondary)
-            }
-        }
+            .accessibilityLabel("启用 \(title)\(selected ? "，当前方案" : "")")
     }
 }
 

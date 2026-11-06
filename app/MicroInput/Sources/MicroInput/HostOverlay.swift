@@ -33,7 +33,18 @@ final class PassiveHostPanel: NSPanel {
     func showNotice(name: String, mode: String) {
         dismissal?.cancel()
         guard !sheetVisible else { refresh(); return }
-        present(VStack(alignment: .leading, spacing: 5) { Text(name).font(.headline); Text(mode).font(.caption).foregroundStyle(.secondary) }.padding(16).frame(maxWidth: .infinity, alignment: .leading).background(.regularMaterial).clipShape(RoundedRectangle(cornerRadius: 14)), size: NSSize(width: 280, height: 78), acceptsMouse: false)
+        present(
+            VStack(alignment: .leading, spacing: 4) {
+                Text(name).font(UITheme.Typography.heading).foregroundStyle(UITheme.textPrimary)
+                Text(mode).font(UITheme.Typography.caption).foregroundStyle(UITheme.textSecondary)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(UITheme.surface, in: RoundedRectangle(cornerRadius: UITheme.Radius.panelOuter))
+            .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.panelOuter).strokeBorder(UITheme.strongBorder, lineWidth: 1)),
+            size: NSSize(width: 280, height: 76),
+            acceptsMouse: false
+        )
         dismissal = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(1500)) } catch { return }
             self?.panel?.orderOut(nil)
@@ -54,10 +65,17 @@ struct HostCheatSheet: View {
     let close: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack { Text("按键速查").font(.headline); Spacer(); Button(action: close) { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).accessibilityLabel("关闭按键速查") }
-            Text(store.routing?.profile_name ?? "Profile 不可用").font(.title3)
-            Text("\(store.routingMode) · \(store.hostExecutionEnabled ? "按键控制开启" : "按键控制暂停") · 首层映射").font(.caption).foregroundStyle(.secondary)
-            Text(store.nativeOwnership.summary).font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Text("按键速查").font(UITheme.Typography.heading)
+                Spacer()
+                Button(action: close) { Image(systemName: "xmark.circle.fill").foregroundStyle(UITheme.textSecondary) }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("关闭按键速查")
+            }
+            Text(store.routing?.profile_name ?? "未选择方案").font(UITheme.Typography.title)
+            Text("\(store.routingMode)，\(store.hostExecutionEnabled ? "按键控制已启用" : "按键控制已暂停")")
+                .font(UITheme.Typography.caption)
+                .foregroundStyle(UITheme.textSecondary)
             if let adapter = store.activeDesktopAgentAdapter() {
                 TargetAgentStatusCard(store: store, adapter: adapter)
             }
@@ -65,17 +83,25 @@ struct HostCheatSheet: View {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                     ForEach(store.routing?.keys ?? []) { key in
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(controlName(key)).font(.caption2).foregroundStyle(.secondary)
-                            Text(key.label).font(.caption).lineLimit(2).foregroundStyle(key.available ? .primary : .secondary)
-                        }.frame(maxWidth: .infinity, minHeight: 38, alignment: .leading).padding(7).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                            Text(controlName(key)).font(UITheme.Typography.caption).foregroundStyle(UITheme.textMuted)
+                            Text(key.label).font(UITheme.Typography.bodyMedium).lineLimit(2).foregroundStyle(key.available ? UITheme.textPrimary : UITheme.textSecondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
+                        .padding(8)
+                        .background(UITheme.subtleSurface, in: RoundedRectangle(cornerRadius: UITheme.Radius.itemInner))
+                        .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.itemInner).strokeBorder(UITheme.border, lineWidth: 1))
                     }
                 }
             }
-        }.padding(16).frame(maxWidth: .infinity, maxHeight: .infinity).background(.regularMaterial).clipShape(RoundedRectangle(cornerRadius: 14))
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(UITheme.surface, in: RoundedRectangle(cornerRadius: UITheme.Radius.panelOuter))
+        .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.panelOuter).strokeBorder(UITheme.strongBorder, lineWidth: 1))
     }
     private func controlName(_ key: HostKey) -> String {
-        let names = ["AG10":"宽键（合并）", "AG12":"底行右键", "AG13":"旋钮逆时针", "AG14":"旋钮顺时针", "ENC_CLK":"编码器按下", "AG15":"摇杆 ↑", "AG16":"摇杆 ←", "AG17":"摇杆 ↓", "AG18":"摇杆 →"]
-        let keys = ["AG00":"第 1 行 · 左", "AG01":"第 1 行 · 右", "AG02":"第 2 行 · 1", "AG03":"第 2 行 · 2", "AG04":"第 2 行 · 3", "AG05":"第 2 行 · 4", "AG06":"第 3 行 · 1", "AG07":"第 3 行 · 2", "AG08":"第 3 行 · 3", "AG09":"第 3 行 · 4"]
+        let names = ["AG10":"底部宽键（2U）", "AG12":"底行右键", "AG13":"旋钮左旋", "AG14":"旋钮右旋", "ENC_CLK":"旋钮按下", "AG15":"摇杆（上）", "AG16":"摇杆（左）", "AG17":"摇杆（下）", "AG18":"摇杆（右）"]
+        let keys = ["AG00":"左上键", "AG01":"右上键", "AG02":"按键 03", "AG03":"按键 04", "AG04":"按键 05", "AG05":"按键 06", "AG06":"按键 07", "AG07":"按键 08", "AG08":"按键 09", "AG09":"按键 10"]
         return names[key.binding_id] ?? keys[key.binding_id] ?? key.control
     }
 }
@@ -93,60 +119,37 @@ struct TargetAgentStatusCard: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(DesktopAgent.forAdapter(adapter)?.name ?? adapter)
-                    .font(.subheadline.bold())
+                    .font(UITheme.Typography.bodySemibold)
                 Spacer()
                 Label(phase.label, systemImage: phase.symbol)
-                    .font(.caption2)
+                    .font(UITheme.Typography.captionMedium)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(phaseColor(phase).opacity(0.15))
-                    .foregroundStyle(phaseColor(phase))
-                    .clipShape(Capsule())
+                    .background(UITheme.accentSoft, in: RoundedRectangle(cornerRadius: 4))
+                    .foregroundStyle(UITheme.accent)
             }
 
             HStack(spacing: 12) {
                 HStack(spacing: 4) {
                     Image(systemName: isRecording ? "waveform.circle.fill" : "mic.fill")
-                        .foregroundStyle(isRecording ? Color.purple : Color.secondary)
-                    Text(isRecording ? "听写录音中" : (voiceMode.isSupported ? (voiceMode.isEnabled ? "语音回复开启" : "语音回复关闭") : "语音回复不支持"))
-                        .font(.caption2)
-                        .foregroundStyle(voiceMode.isSupported ? Color.secondary : Color.orange)
+                        .foregroundStyle(isRecording ? UITheme.accent : UITheme.textSecondary)
+                    Text(isRecording ? "语音输入中" : (voiceMode.isSupported ? (voiceMode.isEnabled ? "语音播报已开启" : "语音播报已关闭") : "暂不支持语音播报"))
+                        .font(UITheme.Typography.caption)
+                        .foregroundStyle(UITheme.textSecondary)
                 }
 
                 HStack(spacing: 4) {
                     Image(systemName: confirmMode == .springBack ? "arrow.uturn.backward.circle" : "button.programmable")
-                    Text(confirmMode == .springBack ? "快速回弹确认" : "旋钮按下确认")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            if let dual = store.fourAppLighting.dualZoneFeedback {
-                HStack(spacing: 8) {
-                    Text("灯光反馈:").font(.caption2).foregroundStyle(.secondary)
-                    HStack(spacing: 4) {
-                        Circle().fill(Color(hexColor: dual.backlightColor)).frame(width: 8, height: 8)
-                        Text("背光: \(dual.backlightEffect)").font(.caption2)
-                    }
-                    HStack(spacing: 4) {
-                        Circle().fill(Color(hexColor: dual.underglowColor)).frame(width: 8, height: 8)
-                        Text("底灯").font(.caption2)
-                    }
+                        .foregroundStyle(UITheme.textSecondary)
+                    Text(confirmMode == .springBack ? "摇杆回弹确认" : "旋钮按下确认")
+                        .font(UITheme.Typography.caption)
+                        .foregroundStyle(UITheme.textSecondary)
                 }
             }
         }
         .padding(8)
-        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private func phaseColor(_ phase: FourAppAgentPhase) -> Color {
-        switch phase {
-        case .idle: return .green
-        case .thinking: return .blue
-        case .awaitingInput: return .orange
-        case .error: return .red
-        case .backgroundActive: return .purple
-        }
+        .background(UITheme.subtleSurface, in: RoundedRectangle(cornerRadius: UITheme.Radius.itemInner))
+        .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.itemInner).strokeBorder(UITheme.border, lineWidth: 1))
     }
 }
 

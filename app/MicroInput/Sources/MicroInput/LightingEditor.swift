@@ -132,41 +132,129 @@ struct LightingEditor: View {
     private let effects = ["off", "solid", "snake", "rainbow", "breath", "gradient"]
     func reload() { model = store.lightingModel(); color = model?.zones[zone]?["color"]?.value ?? "" }
     func save(_ field: String, _ value: String) { Task { await store.editLighting(zone: zone, field: field, value: value, allLayers: allLayers); reload() } }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack { Text("RGB 灯光").font(.title2); Spacer(); Button("结束预览并关闭") { Task { await store.endLightingPreview(); store.showingLighting = false } } }
-            Text("本地编辑保存到当前层。即时预览显示在当前连接设备，不切换设备层、不写配置文件；结束不会自动恢复原灯光。").fixedSize(horizontal: false, vertical: true)
-            Picker("灯区", selection: $zone) { Text("Backlight · 按键背光").tag("backlight"); Text("Underglow · 底部灯光").tag("underglow") }.pickerStyle(.segmented).onChange(of: zone) { _,_ in reload() }
-            if model?.can_add == true {
-                Text("当前层没有灯光设置。添加后可编辑，并与按键一同审阅应用。")
-                Button("添加灯光设置") { store.addLayerLighting(); reload() }.disabled(store.lightingPreviewToken != nil || store.busy)
-            } else if let fields = model?.zones[zone] {
-                Picker("灯效", selection: Binding(get: { model?.zones[zone]?["effect"]?.value ?? "unknown" }, set: { model?.zones[zone]?["effect"]?.value = $0; save("effect", $0) })) {
-                    ForEach(effects, id: \.self) { Text($0.capitalized).tag($0) }
-                    if !effects.contains(fields["effect"]?.value ?? "") { Text("未知原值（保留）").tag(fields["effect"]?.value ?? "unknown") }
-                }.disabled(fields["effect"]?.editable != true || store.busy)
-                HStack { Text("RGB"); TextField("#RRGGBB", text: $color).textFieldStyle(.roundedBorder); Button(store.lightingPreviewToken == nil ? "保存颜色" : "预览颜色") { save("color", color) } }.disabled(fields["color"]?.editable != true || store.busy)
-                ForEach(["brightness", "speed", "magic"], id: \.self) { field in
-                    HStack {
-                        Text(field == "brightness" ? "亮度" : field == "speed" ? "速度" : "Magic").frame(width: 60, alignment: .leading)
-                        Slider(value: Binding(get: { Double(model?.zones[zone]?[field]?.value ?? "") ?? 0 }, set: { model?.zones[zone]?[field]?.value = String(Int($0.rounded())); if store.lightingPreviewToken != nil { save(field, String(Int($0.rounded()))) } }), in: 0...100, step: 1, onEditingChanged: { editing in if !editing && store.lightingPreviewToken == nil { save(field, model?.zones[zone]?[field]?.value ?? "") } }).accessibilityLabel(field)
-                        Text(fields[field]?.value ?? "未知").frame(width: 40)
-                    }.disabled(fields[field]?.editable != true || store.busy)
+    private func sliderBinding(for field: String) -> Binding<Double> {
+        Binding(
+            get: { Double(model?.zones[zone]?[field]?.value ?? "") ?? 0 },
+            set: { newValue in
+                let formatted = String(Int(newValue.rounded()))
+                model?.zones[zone]?[field]?.value = formatted
+                if store.lightingPreviewToken != nil {
+                    save(field, formatted)
                 }
-                Toggle("应用到当前配置的所有层", isOn: $allLayers).disabled(store.lightingPreviewToken != nil)
-                if allLayers { Text("受影响层：\(store.profile?.layers.map(\.name).joined(separator: "、") ?? "")").font(.caption) }
-                Text("禁用参数保留原值。0–100 为编辑器刻度，Magic 含义未作额外推断。").font(.caption)
-            } else { Text("灯光来源缺失或未知；保留原值，不创建默认配置。") }
+            }
+        )
+    }
+
+    private func sliderValueLabel(for field: String, fields: [String: LightingField]) -> String {
+        guard let raw = fields[field]?.value else { return "未知" }
+        return field == "magic" ? raw : "\(raw)%"
+    }
+
+    @ViewBuilder
+    private func sliderRow(for field: String, fields: [String: LightingField]) -> some View {
+        let label = field == "brightness" ? "亮度" : field == "speed" ? "速度" : "参数值"
+        let isEditable = fields[field]?.editable == true
+        HStack {
+            Text(label)
+                .font(UITheme.Typography.body)
+                .frame(width: 64, alignment: .leading)
+            Slider(
+                value: sliderBinding(for: field),
+                in: 0...100,
+                step: 1,
+                onEditingChanged: { editing in
+                    if !editing && store.lightingPreviewToken == nil {
+                        save(field, model?.zones[zone]?[field]?.value ?? "")
+                    }
+                }
+            )
+            .accessibilityLabel(field)
+            Text(sliderValueLabel(for: field, fields: fields))
+                .font(UITheme.Typography.mono)
+                .frame(width: 48, alignment: .trailing)
+        }
+        .disabled(!isEditable || store.busy)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("键盘背光与氛围灯").font(UITheme.Typography.title)
+                Spacer()
+                Button("完成") { Task { await store.endLightingPreview(); store.showingLighting = false } }
+            }
+            Picker("灯区", selection: $zone) {
+                Text("按键背光").tag("backlight")
+                Text("底部氛围灯").tag("underglow")
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: zone) { _, _ in reload() }
+
+            if model?.can_add == true {
+                Text("当前图层尚未启用灯光配置。")
+                    .font(UITheme.Typography.body)
+                    .foregroundStyle(UITheme.textSecondary)
+                Button("启用图层灯光") { store.addLayerLighting(); reload() }
+                    .disabled(store.lightingPreviewToken != nil || store.busy)
+            } else if let fields = model?.zones[zone] {
+                Picker("灯效模式", selection: Binding(get: { model?.zones[zone]?["effect"]?.value ?? "unknown" }, set: { model?.zones[zone]?["effect"]?.value = $0; save("effect", $0) })) {
+                    ForEach(effects, id: \.self) { Text($0.capitalized).tag($0) }
+                    if !effects.contains(fields["effect"]?.value ?? "") { Text("保留原值").tag(fields["effect"]?.value ?? "unknown") }
+                }
+                .font(UITheme.Typography.body)
+                .disabled(fields["effect"]?.editable != true || store.busy)
+
+                HStack(spacing: 10) {
+                    Text("色值（#RRGGBB）").font(UITheme.Typography.body)
+                    TextField("#RRGGBB", text: $color)
+                        .textFieldStyle(.roundedBorder)
+                        .font(UITheme.Typography.mono)
+                        .frame(width: 120)
+                    Button(store.lightingPreviewToken == nil ? "应用颜色" : "预览颜色") { save("color", color) }
+                        .font(UITheme.Typography.body)
+                }
+                .disabled(fields["color"]?.editable != true || store.busy)
+
+                ForEach(["brightness", "speed", "magic"], id: \.self) { field in
+                    sliderRow(for: field, fields: fields)
+                }
+                Toggle("同时应用到当前方案的所有图层", isOn: $allLayers)
+                    .font(UITheme.Typography.body)
+                    .disabled(store.lightingPreviewToken != nil)
+                if allLayers {
+                    Text("将同步更新：\(store.profile?.layers.map(\.name).joined(separator: "、") ?? "")")
+                        .font(UITheme.Typography.caption)
+                        .foregroundStyle(UITheme.textSecondary)
+                }
+            } else {
+                Text("当前图层保留原始硬件灯光数据。")
+                    .font(UITheme.Typography.body)
+                    .foregroundStyle(UITheme.textSecondary)
+            }
             Divider()
             HStack {
-                Button("审阅配置应用…") { Task { await store.endLightingPreview(); store.showingLighting = false; await store.previewApply() } }.disabled(store.lightingPreviewToken != nil || store.deviceOperationRunning)
-                Button("开始即时预览") { Task { allLayers = false; await store.beginLightingPreview(); reload() } }.disabled(!store.operationCapabilities.preview || store.lightingPreviewToken != nil || store.startingLightingPreview || model?.can_add == true)
-                Button("保存预览到草稿") { Task { await store.saveLightingPreview(); reload() } }.disabled(store.lightingPreviewToken == nil || store.busy)
-                Button("结束预览") { Task { await store.endLightingPreview(); reload() } }.disabled(store.lightingPreviewToken == nil)
+                Button("同步到键盘…") { Task { await store.endLightingPreview(); store.showingLighting = false; await store.previewApply() } }
+                    .disabled(store.lightingPreviewToken != nil || store.deviceOperationRunning)
+                Button("在键盘上实时预览（30 秒）") { Task { allLayers = false; await store.beginLightingPreview(); reload() } }
+                    .disabled(!store.operationCapabilities.preview || store.lightingPreviewToken != nil || store.startingLightingPreview || model?.can_add == true)
+                Button("保留预览结果") { Task { await store.saveLightingPreview(); reload() } }
+                    .disabled(store.lightingPreviewToken == nil || store.busy)
+                Button("停止预览") { Task { await store.endLightingPreview(); reload() } }
+                    .disabled(store.lightingPreviewToken == nil)
             }
-            Text(store.lightingPreviewResult).font(.caption).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-            Text(store.status).font(.caption)
-            DisclosureGroup("原始灯光值") { Text(model?.raw ?? "未知").font(.caption.monospaced()).textSelection(.enabled) }
-        }.padding(24).frame(width: 680).onAppear { store.refreshOperationCapabilities(); reload() }.task(id: store.lightingPreviewToken) { await store.observeLightingPreview() }
+            .font(UITheme.Typography.body)
+            if !store.lightingPreviewResult.isEmpty {
+                Text(store.lightingPreviewResult)
+                    .font(UITheme.Typography.caption)
+                    .foregroundStyle(UITheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(24)
+        .frame(width: 620)
+        .background(UITheme.surface)
+        .tint(UITheme.accent)
+        .onAppear { store.refreshOperationCapabilities(); reload() }
+        .task(id: store.lightingPreviewToken) { await store.observeLightingPreview() }
     }
 }
