@@ -38,6 +38,12 @@ def main():
     patch = ROOT / "integrations/dsh/navigation.patch"
     if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip() != base:
         raise ValueError("wrong native base")
+    patch_targets = [
+        line[6:] for line in patch.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.startswith("+++ b/") and (source / line[6:]).exists()
+    ]
+    if patch_targets:
+        subprocess.run(["git", "add", "-N", "--", *patch_targets], cwd=source, check=True)
     actual = subprocess.check_output(["git", "diff", "--binary", "--no-ext-diff", "--no-color",
         "--src-prefix=a/", "--dst-prefix=b/", "HEAD"], cwd=source)
     if actual != patch.read_bytes():

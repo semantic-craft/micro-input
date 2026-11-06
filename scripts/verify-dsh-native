@@ -23,9 +23,16 @@ def main():
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     expected = (ROOT / "integrations/dsh/BASE_SHA").read_text().strip()
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    patch_file = ROOT / "integrations/dsh/navigation.patch"
+    patch_targets = [
+        line[6:] for line in patch_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.startswith("+++ b/") and (source / line[6:]).exists()
+    ]
+    if patch_targets:
+        subprocess.run(["git", "add", "-N", "--", *patch_targets], cwd=source, check=True)
     diff_command = ["git", "diff", "--no-ext-diff", "--no-color", "--binary", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"]
     patch = subprocess.check_output(diff_command, cwd=source)
-    if sha != expected or patch != (ROOT / "integrations/dsh/navigation.patch").read_bytes():
+    if sha != expected or patch != patch_file.read_bytes():
         raise RuntimeError("source does not match pinned base and packaged patch")
     tests = ["apps/desktop-host/tests/micro-input.spec.ts", "apps/desktop-host/tests/micro-input-host.spec.ts",
              "packages/interaction/user-approval/tests/approval.spec.ts",

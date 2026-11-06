@@ -25,4 +25,59 @@ for package, behavior in [
 ffi = '\n'.join(p.read_text() for p in (root / 'crates/mi-ffi/src').rglob('*.rs'))
 assert not re.search(r'pub async fn (?:request|rpc|send_report)\b', ffi), 'raw RPC exposed through UniFFI'
 subprocess.run(['cargo', 'test', '--locked', '-p', 'mi-session', '--features', 'synthetic-backend', 'synthetic_writer_rejects_native_backend_even_when_feature_is_built'], cwd=root, check=True)
+
+# R-C01: forbid hardcoded host home paths outside synthetic placeholders (/Users/example, /Users/test, /Users/private).
+home_pattern = re.compile(r'/Users/(?!(?:example|test|private|Shared)(?:/|["\'\s),]|$))[A-Za-z0-9._-]+')
+tracked = subprocess.check_output(['git', 'ls-files'], cwd=root, text=True).splitlines()
+home_violations = []
+for rel in tracked:
+    if rel == 'lessons.md':
+        continue
+    path = root / rel
+    if not path.is_file():
+        continue
+    try:
+        text = path.read_text(encoding='utf-8')
+    except UnicodeDecodeError:
+        continue
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if home_pattern.search(line):
+            home_violations.append(f'{rel}:{lineno}: {line.strip()}')
+assert not home_violations, (
+    'Hardcoded user home path found; resolve via Path.home(), os.environ, or config discovery instead:\n  '
+    + '\n  '.join(home_violations)
+)
+
+# R-C02: integration patches must include all new bridge/fixture files (never drop untracked files via bare `git diff HEAD`).
+required_patch_files = {
+    'integrations/cindy/native-ownership.patch': [
+        'apps/desktop/src/main/worklouder-codex/WorkLouderOwnershipFence.ts',
+        'apps/desktop/src/main/worklouder-codex/microInputNavigation.ts',
+        'apps/desktop/src/main/worklouder-codex/microInputOwnership.ts',
+        'apps/desktop/src/renderer/lib/workLouderCodexOwnership.ts',
+        'scripts/micro-input-navigation-fixture.ts',
+        'scripts/micro-input-ownership-fixture.ts',
+    ],
+    'integrations/dsh/navigation.patch': [
+        'apps/desktop-host/src/micro-input-host.ts',
+        'apps/desktop-host/src/micro-input.ts',
+        'scripts/micro-input-fixture.ts',
+    ],
+    'integrations/zcode/navigation.patch': [
+        'packages/desktop/src/main/micro-input/socket.ts',
+        'scripts/micro-input-fixture.ts',
+    ],
+}
+missing_patch_entries = []
+for patch_rel, expected_files in required_patch_files.items():
+    patch_text = (root / patch_rel).read_text(encoding='utf-8', errors='replace')
+    present = set(re.findall(r'^\+\+\+ b/(.+)$', patch_text, re.MULTILINE))
+    for req in expected_files:
+        if req not in present:
+            missing_patch_entries.append(f'{patch_rel} missing {req}')
+assert not missing_patch_entries, (
+    'Integration patch is missing new files (run `git add -N .` in the target checkout before `git diff HEAD`):\n  '
+    + '\n  '.join(missing_patch_entries)
+)
+
 print('UNKNOWN inventory and read-only/no-send boundaries: PASS')

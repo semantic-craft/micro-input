@@ -272,6 +272,33 @@ index 3c003eea3c..3a4c9523c0 100644
      return brightnessAdjusted;
    }
  
+diff --git a/apps/desktop/src/main/worklouder-codex/WorkLouderOwnershipFence.ts b/apps/desktop/src/main/worklouder-codex/WorkLouderOwnershipFence.ts
+new file mode 100644
+index 0000000000..722d63f19a
+--- /dev/null
++++ b/apps/desktop/src/main/worklouder-codex/WorkLouderOwnershipFence.ts
+@@ -0,0 +1,21 @@
++export class WorkLouderOwnershipFence {
++  suspended = false;
++  generation = 0;
++
++  wrapInput<T>(consume: (value: T) => void): (value: T) => void {
++    const generation = this.generation;
++    return (value) => {
++      if (!this.suspended && generation === this.generation) consume(value);
++    };
++  }
++
++  async change(generation: number, suspended: boolean, drain: () => Promise<void>): Promise<boolean> {
++    if (!Number.isSafeInteger(generation) || generation < this.generation) return false;
++    this.generation = generation;
++    this.suspended = suspended;
++    try {
++      if (suspended) await drain();
++    } catch { return false; }
++    return this.generation === generation && this.suspended === suspended;
++  }
++}
 diff --git a/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostClient.test.ts b/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostClient.test.ts
 index 855567ab47..7478cb4ea2 100644
 --- a/apps/desktop/src/main/worklouder-codex/__tests__/WorkLouderCodexHostClient.test.ts
@@ -994,6 +1021,1550 @@ index e3d28fa40f..f5050ba63d 100644
    if (systemFrontmostInput.handle(action)) return;
    log.debug('Codex Micro action skipped because no ready Cindy window can receive it', {
      type: action.type,
+diff --git a/apps/desktop/src/main/worklouder-codex/microInputNavigation.ts b/apps/desktop/src/main/worklouder-codex/microInputNavigation.ts
+new file mode 100644
+index 0000000000..6896abe82a
+--- /dev/null
++++ b/apps/desktop/src/main/worklouder-codex/microInputNavigation.ts
+@@ -0,0 +1,1303 @@
++import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
++import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
++import { chmod, lstat, mkdir, open, rename, rmdir, unlink } from 'node:fs/promises';
++import net from 'node:net';
++import path from 'node:path';
++import { z } from 'zod';
++import { buildSessionDeepLink, parseDeepLink } from '../deepLink.js';
++
++const identifier = z
++  .string()
++  .min(1)
++  .max(4096)
++  .refine((value) => value.trim() === value && !value.includes('\0'));
++
++export const cindyMicroInputScopeSchema = z.strictObject({
++  workspacePath: identifier,
++});
++
++export const cindyMicroInputAddressSchema = cindyMicroInputScopeSchema.extend({
++  sessionId: identifier,
++});
++
++export const cindyMicroInputTaskPhaseSchema = z.enum([
++  'idle',
++  'running',
++  'needs-interaction',
++  'completed',
++  'error',
++]);
++
++export const cindyMicroInputInteractionTypeSchema = z.enum([
++  'permission',
++  'question',
++  'plan',
++]);
++
++export const cindyMicroInputInteractionDecisionSchema = z.enum([
++  'approve',
++  'allowForSession',
++  'reject',
++  'accept',
++  'cancel',
++]);
++
++export const cindyMicroInputDeliveryModeSchema = z.enum([
++  'auto',
++  'steer',
++  'queue',
++]);
++
++export const cindyMicroInputPendingInteractionSchema = z.strictObject({
++  interactionId: identifier,
++  interactionType: cindyMicroInputInteractionTypeSchema,
++  toolName: identifier.optional().nullable(),
++  options: z.array(identifier).max(64).optional().nullable(),
++});
++
++export const cindyMicroInputRowSchema = z.strictObject({
++  address: cindyMicroInputAddressSchema,
++  title: z.string().max(4096),
++  phase: cindyMicroInputTaskPhaseSchema,
++  attention: z.boolean(),
++  pinned: z.boolean(),
++  runId: identifier.optional().nullable(),
++  unread: z.boolean().nullable().optional(),
++  eventWatermark: z.number().int().nonnegative().safe().optional(),
++  queuedCount: z.number().int().nonnegative().safe().optional(),
++  pendingInteraction: cindyMicroInputPendingInteractionSchema.optional().nullable(),
++});
++
++export const cindyMicroInputGrantSchema = z.strictObject({
++  version: z.literal(1),
++  socketPath: identifier,
++  token: identifier,
++  instanceId: identifier,
++  generation: z.number().int().positive().safe(),
++  ownerEpoch: identifier,
++  scopes: z.array(cindyMicroInputScopeSchema).min(1).max(64),
++});
++
++const promptText = z
++  .string()
++  .min(1)
++  .max(16384)
++  .refine((value) => value.trim().length > 0 && !value.includes('\0'));
++
++export const cindyMicroInputRequestSchema = z
++  .strictObject({
++    version: z.literal(1),
++    id: identifier,
++    token: identifier,
++    instanceId: identifier,
++    generation: z.number().int().positive().safe(),
++    ownerEpoch: identifier,
++    op: z.enum(['list', 'open', 'create', 'send', 'stop', 'resolve', 'query']),
++    scope: cindyMicroInputScopeSchema,
++    target: cindyMicroInputAddressSchema.optional(),
++    commandId: identifier.optional(),
++    text: promptText.optional(),
++    deliveryMode: cindyMicroInputDeliveryModeSchema.optional(),
++    expectedRunId: identifier.optional(),
++    interactionId: identifier.optional(),
++    interactionType: cindyMicroInputInteractionTypeSchema.optional(),
++    decision: cindyMicroInputInteractionDecisionSchema.optional(),
++    optionId: identifier.optional(),
++  })
++  .refine((request) => {
++    switch (request.op) {
++      case 'list':
++        return (
++          request.target === undefined &&
++          request.commandId === undefined &&
++          request.text === undefined &&
++          request.deliveryMode === undefined &&
++          request.expectedRunId === undefined &&
++          request.interactionId === undefined &&
++          request.interactionType === undefined &&
++          request.decision === undefined &&
++          request.optionId === undefined
++        );
++      case 'open':
++        return request.target !== undefined;
++      case 'create':
++        return request.commandId !== undefined && request.target === undefined;
++      case 'send':
++        return (
++          request.commandId !== undefined &&
++          request.target !== undefined &&
++          request.text !== undefined
++        );
++      case 'stop':
++        return (
++          request.commandId !== undefined &&
++          request.target !== undefined &&
++          request.expectedRunId !== undefined
++        );
++      case 'resolve':
++        return (
++          request.commandId !== undefined &&
++          request.target !== undefined &&
++          request.interactionId !== undefined &&
++          request.interactionType !== undefined &&
++          request.decision !== undefined
++        );
++      case 'query':
++        return request.commandId !== undefined;
++    }
++  });
++
++const cindyMicroInputConfigSchema = z.strictObject({
++  scopes: z.array(cindyMicroInputScopeSchema).min(1).max(64),
++  directory: z.string().optional(),
++});
++
++export type CindyMicroInputScope = z.infer<typeof cindyMicroInputScopeSchema>;
++export type CindyMicroInputAddress = z.infer<typeof cindyMicroInputAddressSchema>;
++export type CindyMicroInputTaskPhase = z.infer<typeof cindyMicroInputTaskPhaseSchema>;
++export type CindyMicroInputInteractionType = z.infer<typeof cindyMicroInputInteractionTypeSchema>;
++export type CindyMicroInputInteractionDecision = z.infer<
++  typeof cindyMicroInputInteractionDecisionSchema
++>;
++export type CindyMicroInputDeliveryMode = z.infer<typeof cindyMicroInputDeliveryModeSchema>;
++export type CindyMicroInputPendingInteraction = z.infer<
++  typeof cindyMicroInputPendingInteractionSchema
++>;
++export type CindyMicroInputRow = z.infer<typeof cindyMicroInputRowSchema>;
++export type CindyMicroInputGrant = z.infer<typeof cindyMicroInputGrantSchema>;
++export type CindyMicroInputRequest = z.infer<typeof cindyMicroInputRequestSchema>;
++export type CindyMicroInputConfig = z.infer<typeof cindyMicroInputConfigSchema>;
++export type CindyMicroInputStatus =
++  | 'ok'
++  | 'delivered'
++  | 'confirmed'
++  | 'started'
++  | 'steered'
++  | 'queued'
++  | 'stopped'
++  | 'resolved'
++  | 'noop'
++  | 'interactionTypeMismatch'
++  | 'denied'
++  | 'stale'
++  | 'unavailable'
++  | 'unconfirmed';
++
++export interface CindyMicroInputResponse {
++  version: 1;
++  id: string;
++  instanceId: string;
++  generation: number;
++  ownerEpoch: string;
++  status: CindyMicroInputStatus;
++  commandId?: string;
++  duplicate?: boolean;
++  rows?: CindyMicroInputRow[];
++  delivered?: CindyMicroInputAddress | null;
++  selected?: CindyMicroInputAddress | null;
++  deepLink?: string | null;
++  delivery?: CindyMicroInputDeliveryMode | null;
++  runId?: string | null;
++  queuedCount?: number;
++  interactionId?: string | null;
++  interactionType?: CindyMicroInputInteractionType | null;
++  reasonCode?: string | null;
++}
++
++export type CindyMicroInputDeliveryOutcome =
++  | { status: 'delivered' }
++  | { status: 'confirmed'; selected: CindyMicroInputAddress }
++  | { status: 'unconfirmed'; selected?: CindyMicroInputAddress | null }
++  | { status: 'unavailable' }
++  | { status: 'stale' };
++
++export type CindyMicroInputCreateOutcome =
++  | {
++      status: 'confirmed';
++      created: CindyMicroInputAddress;
++      selected: CindyMicroInputAddress;
++      runId?: string | null;
++    }
++  | { status: 'delivered'; created: CindyMicroInputAddress; runId?: string | null }
++  | {
++      status: 'unconfirmed';
++      created?: CindyMicroInputAddress | null;
++      selected?: CindyMicroInputAddress | null;
++    }
++  | { status: 'unavailable'; reasonCode?: string }
++  | { status: 'stale'; reasonCode?: string };
++
++export type CindyMicroInputSendOutcome =
++  | { status: 'started'; delivery: 'auto'; runId: string; queuedCount?: number }
++  | { status: 'steered'; delivery: 'steer'; runId: string; queuedCount?: number }
++  | { status: 'queued'; delivery: 'queue'; runId?: string | null; queuedCount: number }
++  | { status: 'denied'; reasonCode: string }
++  | { status: 'noop'; reasonCode: string }
++  | { status: 'unavailable'; reasonCode?: string }
++  | { status: 'stale'; reasonCode?: string };
++
++export type CindyMicroInputStopOutcome =
++  | { status: 'stopped'; runId: string }
++  | { status: 'noop'; reasonCode: string }
++  | { status: 'unavailable'; reasonCode?: string }
++  | { status: 'stale'; reasonCode?: string };
++
++export type CindyMicroInputResolveOutcome =
++  | {
++      status: 'resolved';
++      interactionId: string;
++      interactionType: CindyMicroInputInteractionType;
++    }
++  | { status: 'noop'; reasonCode: string }
++  | { status: 'interactionTypeMismatch'; reasonCode: string }
++  | { status: 'denied'; reasonCode: string }
++  | { status: 'unavailable'; reasonCode?: string }
++  | { status: 'stale'; reasonCode?: string };
++
++export function sameCindyMicroInputScope(
++  a: CindyMicroInputScope,
++  b: CindyMicroInputScope,
++): boolean {
++  return a.workspacePath === b.workspacePath;
++}
++
++export function sameCindyMicroInputAddress(
++  a: CindyMicroInputAddress | null | undefined,
++  b: CindyMicroInputAddress,
++): boolean {
++  return Boolean(a && sameCindyMicroInputScope(a, b) && a.sessionId === b.sessionId);
++}
++
++export function hashCindyOwnerScopeKey(rawScopeKey: string | null): string | null {
++  if (!rawScopeKey || rawScopeKey.startsWith('signed-out:') || rawScopeKey.includes(':none:')) {
++    return null;
++  }
++  return `owner-${createHash('sha256').update(rawScopeKey).digest('hex').slice(0, 24)}`;
++}
++
++export function buildVerifiedCindySessionDeepLink(sessionId: string): string | null {
++  if (!sessionId || sessionId.trim() !== sessionId || sessionId.includes('\0')) return null;
++  const deepLink = buildSessionDeepLink(sessionId);
++  const parsed = parseDeepLink(deepLink);
++  if (
++    !parsed ||
++    parsed.type !== 'session' ||
++    parsed.id !== sessionId ||
++    parsed.deviceId !== undefined ||
++    parsed.messageClientId !== undefined ||
++    parsed.islandEntryId !== undefined
++  ) {
++    return null;
++  }
++  return deepLink;
++}
++
++export function authorizeCindyMicroInput(
++  raw: unknown,
++  grant: CindyMicroInputGrant,
++): CindyMicroInputRequest | null {
++  const parsed = cindyMicroInputRequestSchema.safeParse(raw);
++  if (!parsed.success) return null;
++  const request = parsed.data;
++  const providedToken = Buffer.from(request.token, 'utf8');
++  const expectedToken = Buffer.from(grant.token, 'utf8');
++  if (
++    providedToken.length !== expectedToken.length ||
++    !timingSafeEqual(providedToken, expectedToken) ||
++    !grant.scopes.some((scope) => sameCindyMicroInputScope(scope, request.scope)) ||
++    (request.target && !sameCindyMicroInputScope(request.target, request.scope))
++  ) {
++    return null;
++  }
++  return request;
++}
++
++export function focusConfirmedCindyMicroInputWindow(
++  request: CindyMicroInputRequest,
++  response: CindyMicroInputResponse,
++  window: {
++    isDestroyed(): boolean;
++    isMinimized(): boolean;
++    restore(): void;
++    show(): void;
++    focus(): void;
++  },
++): boolean {
++  if (
++    response.status !== 'confirmed' ||
++    request.op !== 'open' ||
++    !request.target ||
++    response.id !== request.id ||
++    response.instanceId !== request.instanceId ||
++    response.generation !== request.generation ||
++    response.ownerEpoch !== request.ownerEpoch ||
++    !sameCindyMicroInputAddress(response.selected ?? null, request.target) ||
++    !sameCindyMicroInputAddress(response.delivered ?? null, request.target) ||
++    window.isDestroyed()
++  ) {
++    return false;
++  }
++  if (window.isMinimized()) window.restore();
++  window.show();
++  window.focus();
++  return true;
++}
++
++export function readCindyMicroInputNavigationConfig(configPath: string): CindyMicroInputConfig {
++  if (!path.isAbsolute(configPath)) throw new Error('invalid_cindy_bridge_config_path');
++  const fd = openSync(configPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
++  try {
++    const info = fstatSync(fd);
++    if (
++      !info.isFile() ||
++      info.uid !== process.getuid?.() ||
++      (info.mode & 0o077) !== 0 ||
++      info.size > 65536
++    ) {
++      throw new Error('untrusted_cindy_bridge_config');
++    }
++    return cindyMicroInputConfigSchema.parse(JSON.parse(readFileSync(fd, 'utf8')));
++  } finally {
++    closeSync(fd);
++  }
++}
++
++export function createCindyMicroInputNavigation(ports: {
++  currentOwnerEpoch: () => string | null;
++  readIndex: (
++    scope: CindyMicroInputScope,
++  ) => Promise<{
++    ownerEpoch: string | null;
++    sourceGeneration: string;
++    rows: CindyMicroInputRow[];
++  }>;
++  exists: (address: CindyMicroInputAddress) => Promise<boolean>;
++  selected: (scope: CindyMicroInputScope) => CindyMicroInputAddress | null;
++  deliverSessionDeepLink: (
++    target: CindyMicroInputAddress,
++    deepLink: string,
++  ) => Promise<CindyMicroInputDeliveryOutcome>;
++  focusWindow?: () => boolean;
++  createTask?: (
++    scope: CindyMicroInputScope,
++    input: { commandId: string; text?: string },
++  ) => Promise<CindyMicroInputCreateOutcome>;
++  sendTask?: (
++    target: CindyMicroInputAddress,
++    input: { commandId: string; text: string; deliveryMode: CindyMicroInputDeliveryMode },
++  ) => Promise<CindyMicroInputSendOutcome>;
++  stopTask?: (
++    target: CindyMicroInputAddress,
++    input: { commandId: string; expectedRunId: string },
++  ) => Promise<CindyMicroInputStopOutcome>;
++  resolveTask?: (
++    target: CindyMicroInputAddress,
++    input: {
++      commandId: string;
++      interactionId: string;
++      interactionType: CindyMicroInputInteractionType;
++      decision: CindyMicroInputInteractionDecision;
++      optionId?: string;
++    },
++  ) => Promise<CindyMicroInputResolveOutcome>;
++}) {
++  const sources = new Map<string, { ownerEpoch: string; sourceGeneration: string }>();
++  const completedCommands = new Map<string, CindyMicroInputResponse>();
++  let inFlight = false;
++  return async (
++    raw: unknown,
++    grant: CindyMicroInputGrant,
++    isCurrent: () => boolean = () => true,
++  ): Promise<CindyMicroInputResponse> => {
++    const fallbackId =
++      raw && typeof raw === 'object' && 'id' in raw && typeof raw.id === 'string' && raw.id.length <= 256
++        ? raw.id
++        : 'invalid';
++    const request = authorizeCindyMicroInput(raw, grant);
++    const base = {
++      version: 1 as const,
++      id: request?.id ?? fallbackId,
++      instanceId: grant.instanceId,
++      generation: grant.generation,
++      ownerEpoch: grant.ownerEpoch,
++    };
++    if (!request) return { ...base, status: 'denied' };
++    const liveOwner = ports.currentOwnerEpoch();
++    if (
++      !isCurrent() ||
++      request.instanceId !== grant.instanceId ||
++      request.generation !== grant.generation ||
++      !liveOwner ||
++      liveOwner !== grant.ownerEpoch ||
++      request.ownerEpoch !== grant.ownerEpoch
++    ) {
++      sources.clear();
++      completedCommands.clear();
++      return {
++        ...base,
++        ...(request.commandId ? { commandId: request.commandId } : {}),
++        ownerEpoch: liveOwner ?? grant.ownerEpoch,
++        status: 'stale',
++      };
++    }
++    if (inFlight) {
++      return {
++        ...base,
++        ...(request.commandId ? { commandId: request.commandId } : {}),
++        status: 'unavailable',
++      };
++    }
++    const key = request.scope.workspacePath;
++    const commandKey = request.commandId ? `${key}::${request.commandId}` : null;
++    if (commandKey) {
++      const recorded = completedCommands.get(commandKey);
++      if (
++        recorded &&
++        recorded.ownerEpoch === liveOwner &&
++        recorded.instanceId === grant.instanceId &&
++        recorded.generation === grant.generation
++      ) {
++        return {
++          ...recorded,
++          id: request.id,
++          duplicate: true,
++        };
++      }
++      if (request.op === 'query') {
++        const expectedForQuery = sources.get(key);
++        if (!expectedForQuery || expectedForQuery.ownerEpoch !== liveOwner) {
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        return {
++          ...base,
++          commandId: request.commandId,
++          status: 'noop',
++          reasonCode: 'query.notFound',
++        };
++      }
++    }
++    if (
++      request.op === 'resolve' &&
++      request.interactionType === 'question' &&
++      (request.decision === 'approve' || request.decision === 'allowForSession') &&
++      !request.optionId
++    ) {
++      return {
++        ...base,
++        commandId: request.commandId,
++        interactionId: request.interactionId ?? null,
++        interactionType: request.interactionType,
++        status: 'interactionTypeMismatch',
++        reasonCode: 'guard.questionCannotApproveAsPermission',
++      };
++    }
++    const expected = sources.get(key);
++    if (request.op !== 'list' && (!expected || expected.ownerEpoch !== liveOwner)) {
++      return {
++        ...base,
++        ...(request.commandId ? { commandId: request.commandId } : {}),
++        status: 'stale',
++      };
++    }
++    inFlight = true;
++    try {
++      const index = await ports.readIndex(request.scope);
++      if (
++        !isCurrent() ||
++        !index.ownerEpoch ||
++        index.ownerEpoch !== grant.ownerEpoch ||
++        ports.currentOwnerEpoch() !== grant.ownerEpoch
++      ) {
++        sources.clear();
++        completedCommands.clear();
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId } : {}),
++          status: 'stale',
++        };
++      }
++      if (
++        request.op !== 'list' &&
++        expected !== undefined &&
++        (expected.ownerEpoch !== index.ownerEpoch ||
++          expected.sourceGeneration !== index.sourceGeneration)
++      ) {
++        sources.delete(key);
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId } : {}),
++          status: 'stale',
++        };
++      }
++      const seenIds = new Set<string>();
++      if (
++        index.rows.length > 4096 ||
++        index.rows.some((row) => {
++          if (!sameCindyMicroInputScope(row.address, request.scope)) return true;
++          if (seenIds.has(row.address.sessionId)) return true;
++          seenIds.add(row.address.sessionId);
++          return false;
++        })
++      ) {
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId } : {}),
++          status: 'unavailable',
++        };
++      }
++      if (request.op === 'list') {
++        sources.set(key, {
++          ownerEpoch: index.ownerEpoch,
++          sourceGeneration: index.sourceGeneration,
++        });
++        const selected = ports.selected(request.scope);
++        return {
++          ...base,
++          status: 'ok',
++          rows: index.rows,
++          selected: selected && sameCindyMicroInputScope(selected, request.scope) ? selected : null,
++        };
++      }
++      if (request.op === 'create') {
++        if (!ports.createTask) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: 'bridge.createUnsupported',
++          };
++        }
++        const createdOutcome = await ports.createTask(request.scope, {
++          commandId: request.commandId!,
++          text: request.text,
++        });
++        if (!isCurrent() || ports.currentOwnerEpoch() !== grant.ownerEpoch) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        if (createdOutcome.status === 'stale') {
++          sources.clear();
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'stale',
++            reasonCode: createdOutcome.reasonCode ?? null,
++          };
++        }
++        if (createdOutcome.status === 'unavailable') {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: createdOutcome.reasonCode ?? null,
++          };
++        }
++        const postIndex = await ports.readIndex(request.scope);
++        if (
++          !isCurrent() ||
++          postIndex.ownerEpoch !== grant.ownerEpoch ||
++          ports.currentOwnerEpoch() !== grant.ownerEpoch
++        ) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        sources.set(key, {
++          ownerEpoch: postIndex.ownerEpoch,
++          sourceGeneration: postIndex.sourceGeneration,
++        });
++        if (createdOutcome.status === 'unconfirmed') {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unconfirmed',
++            delivered: createdOutcome.created ?? null,
++            selected: null,
++          };
++        }
++        const createdAddress = createdOutcome.created;
++        if (
++          !sameCindyMicroInputScope(createdAddress, request.scope) ||
++          !postIndex.rows.some((row) => sameCindyMicroInputAddress(row.address, createdAddress))
++        ) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: 'guard.createdTargetMissing',
++          };
++        }
++        const deepLink = buildVerifiedCindySessionDeepLink(createdAddress.sessionId);
++        if (createdOutcome.status === 'delivered') {
++          const reply: CindyMicroInputResponse = {
++            ...base,
++            commandId: request.commandId,
++            status: 'delivered',
++            delivered: createdAddress,
++            selected: null,
++            deepLink,
++            runId: createdOutcome.runId ?? null,
++          };
++          if (commandKey) completedCommands.set(commandKey, reply);
++          return reply;
++        }
++        const selected = ports.selected(request.scope) ?? createdOutcome.selected;
++        if (!sameCindyMicroInputAddress(selected, createdAddress)) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unconfirmed',
++            delivered: createdAddress,
++            selected: null,
++            deepLink,
++            reasonCode: 'guard.selectionNotCommitted',
++          };
++        }
++        const reply: CindyMicroInputResponse = {
++          ...base,
++          commandId: request.commandId,
++          status: 'confirmed',
++          delivered: createdAddress,
++          selected: createdAddress,
++          deepLink,
++          runId: createdOutcome.runId ?? null,
++        };
++        if (commandKey) completedCommands.set(commandKey, reply);
++        return reply;
++      }
++      const target = request.target;
++      if (!target || !index.rows.some((row) => sameCindyMicroInputAddress(row.address, target))) {
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId, reasonCode: 'guard.targetMissing' } : {}),
++          status: 'unavailable',
++        };
++      }
++      const stillExists = await ports.exists(target);
++      if (!isCurrent() || ports.currentOwnerEpoch() !== grant.ownerEpoch) {
++        sources.clear();
++        completedCommands.clear();
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId } : {}),
++          status: 'stale',
++        };
++      }
++      if (!stillExists) {
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId, reasonCode: 'guard.targetMissing' } : {}),
++          status: 'unavailable',
++        };
++      }
++      const finalIndex = await ports.readIndex(request.scope);
++      if (
++        !isCurrent() ||
++        finalIndex.ownerEpoch !== grant.ownerEpoch ||
++        finalIndex.sourceGeneration !== expected!.sourceGeneration ||
++        ports.currentOwnerEpoch() !== grant.ownerEpoch
++      ) {
++        sources.clear();
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId } : {}),
++          status: 'stale',
++        };
++      }
++      const finalRow = finalIndex.rows.find((row) => sameCindyMicroInputAddress(row.address, target));
++      if (!finalRow) {
++        return {
++          ...base,
++          ...(request.commandId ? { commandId: request.commandId, reasonCode: 'guard.targetMissing' } : {}),
++          status: 'unavailable',
++        };
++      }
++      if (request.op === 'open') {
++        const deepLink = buildVerifiedCindySessionDeepLink(target.sessionId);
++        if (!deepLink) return { ...base, status: 'unavailable' };
++        const delivery = await ports.deliverSessionDeepLink(target, deepLink);
++        if (!isCurrent() || ports.currentOwnerEpoch() !== grant.ownerEpoch) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, status: 'stale' };
++        }
++        if (delivery.status === 'stale') {
++          sources.clear();
++          return { ...base, status: 'stale' };
++        }
++        if (delivery.status === 'unavailable') {
++          return { ...base, status: 'unavailable' };
++        }
++        const postIndex = await ports.readIndex(request.scope);
++        if (
++          !isCurrent() ||
++          postIndex.ownerEpoch !== grant.ownerEpoch ||
++          postIndex.sourceGeneration !== expected!.sourceGeneration ||
++          ports.currentOwnerEpoch() !== grant.ownerEpoch
++        ) {
++          sources.clear();
++          return { ...base, status: 'stale' };
++        }
++        if (!postIndex.rows.some((row) => sameCindyMicroInputAddress(row.address, target))) {
++          return { ...base, status: 'unavailable' };
++        }
++        if (delivery.status === 'delivered') {
++          return {
++            ...base,
++            status: 'delivered',
++            delivered: target,
++            selected: null,
++            deepLink,
++          };
++        }
++        if (delivery.status === 'unconfirmed') {
++          return {
++            ...base,
++            status: 'unconfirmed',
++            delivered: target,
++            selected: null,
++            deepLink,
++          };
++        }
++        const selected = ports.selected(request.scope) ?? delivery.selected;
++        if (!sameCindyMicroInputAddress(selected, target)) {
++          return {
++            ...base,
++            status: 'unconfirmed',
++            delivered: target,
++            selected: null,
++            deepLink,
++          };
++        }
++        if (ports.focusWindow && !ports.focusWindow()) {
++          return {
++            ...base,
++            status: 'unconfirmed',
++            delivered: target,
++            selected: null,
++            deepLink,
++          };
++        }
++        return {
++          ...base,
++          status: 'confirmed',
++          delivered: target,
++          selected: target,
++          deepLink,
++        };
++      }
++      const currentSelected = ports.selected(request.scope);
++      if (!sameCindyMicroInputAddress(currentSelected, target)) {
++        return {
++          ...base,
++          commandId: request.commandId,
++          selected:
++            currentSelected && sameCindyMicroInputScope(currentSelected, request.scope)
++              ? currentSelected
++              : null,
++          status: 'unconfirmed',
++          reasonCode: 'guard.selectionNotCommitted',
++        };
++      }
++      if (request.op === 'stop') {
++        if (
++          finalRow.phase !== 'running' ||
++          !finalRow.runId ||
++          finalRow.runId !== request.expectedRunId
++        ) {
++          const reply: CindyMicroInputResponse = {
++            ...base,
++            commandId: request.commandId,
++            selected: target,
++            runId: finalRow.runId ?? null,
++            status: 'noop',
++            reasonCode:
++              finalRow.phase !== 'running' ? 'guard.notRunning' : 'guard.stopTargetChanged',
++          };
++          if (commandKey) completedCommands.set(commandKey, reply);
++          return reply;
++        }
++        if (!ports.stopTask) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: 'bridge.stopUnsupported',
++          };
++        }
++        const stopOutcome = await ports.stopTask(target, {
++          commandId: request.commandId!,
++          expectedRunId: request.expectedRunId!,
++        });
++        if (!isCurrent() || ports.currentOwnerEpoch() !== grant.ownerEpoch) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        if (stopOutcome.status === 'stale') {
++          sources.clear();
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'stale',
++            reasonCode: stopOutcome.reasonCode ?? null,
++          };
++        }
++        if (stopOutcome.status === 'unavailable') {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: stopOutcome.reasonCode ?? null,
++          };
++        }
++        const postIndex = await ports.readIndex(request.scope);
++        if (
++          !isCurrent() ||
++          postIndex.ownerEpoch !== grant.ownerEpoch ||
++          ports.currentOwnerEpoch() !== grant.ownerEpoch
++        ) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        sources.set(key, {
++          ownerEpoch: postIndex.ownerEpoch,
++          sourceGeneration: postIndex.sourceGeneration,
++        });
++        const reply: CindyMicroInputResponse =
++          stopOutcome.status === 'stopped'
++            ? {
++                ...base,
++                commandId: request.commandId,
++                selected: target,
++                runId: stopOutcome.runId,
++                status: 'stopped',
++              }
++            : {
++                ...base,
++                commandId: request.commandId,
++                selected: target,
++                runId: finalRow.runId,
++                status: 'noop',
++                reasonCode: stopOutcome.reasonCode,
++              };
++        if (commandKey) completedCommands.set(commandKey, reply);
++        return reply;
++      }
++      if (request.op === 'resolve') {
++        const pending = finalRow.pendingInteraction;
++        if (!pending || pending.interactionId !== request.interactionId) {
++          const reply: CindyMicroInputResponse = {
++            ...base,
++            commandId: request.commandId,
++            selected: target,
++            interactionId: request.interactionId ?? null,
++            interactionType: request.interactionType ?? null,
++            status: 'noop',
++            reasonCode: 'guard.interactionAlreadyResolved',
++          };
++          if (commandKey) completedCommands.set(commandKey, reply);
++          return reply;
++        }
++        if (pending.interactionType !== request.interactionType) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            selected: target,
++            interactionId: pending.interactionId,
++            interactionType: pending.interactionType,
++            status: 'interactionTypeMismatch',
++            reasonCode: 'guard.interactionTypeMismatch',
++          };
++        }
++        if (request.interactionType === 'question') {
++          if (request.decision === 'accept') {
++            if (
++              !request.optionId ||
++              (pending.options &&
++                pending.options.length > 0 &&
++                !pending.options.includes(request.optionId))
++            ) {
++              return {
++                ...base,
++                commandId: request.commandId,
++                selected: target,
++                interactionId: pending.interactionId,
++                interactionType: pending.interactionType,
++                status: 'interactionTypeMismatch',
++                reasonCode: 'guard.questionOptionInvalid',
++              };
++            }
++          } else if (request.decision !== 'cancel' && request.decision !== 'reject') {
++            return {
++              ...base,
++              commandId: request.commandId,
++              selected: target,
++              interactionId: pending.interactionId,
++              interactionType: pending.interactionType,
++              status: 'interactionTypeMismatch',
++              reasonCode: 'guard.questionCannotApproveAsPermission',
++            };
++          }
++        } else if (request.interactionType === 'permission') {
++          if (
++            (request.decision !== 'approve' &&
++              request.decision !== 'allowForSession' &&
++              request.decision !== 'reject') ||
++            request.optionId !== undefined
++          ) {
++            return {
++              ...base,
++              commandId: request.commandId,
++              selected: target,
++              interactionId: pending.interactionId,
++              interactionType: pending.interactionType,
++              status: 'interactionTypeMismatch',
++              reasonCode: 'guard.permissionDecisionInvalid',
++            };
++          }
++        }
++        if (!ports.resolveTask) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: 'bridge.resolveUnsupported',
++          };
++        }
++        const resolveOutcome = await ports.resolveTask(target, {
++          commandId: request.commandId!,
++          interactionId: request.interactionId!,
++          interactionType: request.interactionType!,
++          decision: request.decision!,
++          optionId: request.optionId,
++        });
++        if (!isCurrent() || ports.currentOwnerEpoch() !== grant.ownerEpoch) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        if (resolveOutcome.status === 'stale') {
++          sources.clear();
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'stale',
++            reasonCode: resolveOutcome.reasonCode ?? null,
++          };
++        }
++        if (resolveOutcome.status === 'unavailable') {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: resolveOutcome.reasonCode ?? null,
++          };
++        }
++        if (
++          resolveOutcome.status === 'interactionTypeMismatch' ||
++          resolveOutcome.status === 'denied'
++        ) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            selected: target,
++            interactionId: request.interactionId ?? null,
++            interactionType: request.interactionType ?? null,
++            status: resolveOutcome.status,
++            reasonCode: resolveOutcome.reasonCode,
++          };
++        }
++        const postIndex = await ports.readIndex(request.scope);
++        if (
++          !isCurrent() ||
++          postIndex.ownerEpoch !== grant.ownerEpoch ||
++          ports.currentOwnerEpoch() !== grant.ownerEpoch
++        ) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        sources.set(key, {
++          ownerEpoch: postIndex.ownerEpoch,
++          sourceGeneration: postIndex.sourceGeneration,
++        });
++        const reply: CindyMicroInputResponse =
++          resolveOutcome.status === 'resolved'
++            ? {
++                ...base,
++                commandId: request.commandId,
++                selected: target,
++                interactionId: resolveOutcome.interactionId,
++                interactionType: resolveOutcome.interactionType,
++                status: 'resolved',
++              }
++            : {
++                ...base,
++                commandId: request.commandId,
++                selected: target,
++                interactionId: request.interactionId ?? null,
++                interactionType: request.interactionType ?? null,
++                status: 'noop',
++                reasonCode: resolveOutcome.reasonCode,
++              };
++        if (commandKey) completedCommands.set(commandKey, reply);
++        return reply;
++      }
++      if (request.op === 'send') {
++        const deliveryMode = request.deliveryMode ?? 'auto';
++        if (deliveryMode === 'steer' && finalRow.phase !== 'running') {
++          return {
++            ...base,
++            commandId: request.commandId,
++            selected: target,
++            status: 'denied',
++            reasonCode: 'guard.steerRequiresRunningTurn',
++          };
++        }
++        if (!ports.sendTask) {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: 'bridge.sendUnsupported',
++          };
++        }
++        const sendOutcome = await ports.sendTask(target, {
++          commandId: request.commandId!,
++          text: request.text!,
++          deliveryMode,
++        });
++        if (!isCurrent() || ports.currentOwnerEpoch() !== grant.ownerEpoch) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        if (sendOutcome.status === 'stale') {
++          sources.clear();
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'stale',
++            reasonCode: sendOutcome.reasonCode ?? null,
++          };
++        }
++        if (sendOutcome.status === 'unavailable') {
++          return {
++            ...base,
++            commandId: request.commandId,
++            status: 'unavailable',
++            reasonCode: sendOutcome.reasonCode ?? null,
++          };
++        }
++        if (sendOutcome.status === 'denied') {
++          return {
++            ...base,
++            commandId: request.commandId,
++            selected: target,
++            status: 'denied',
++            reasonCode: sendOutcome.reasonCode,
++          };
++        }
++        const postIndex = await ports.readIndex(request.scope);
++        if (
++          !isCurrent() ||
++          postIndex.ownerEpoch !== grant.ownerEpoch ||
++          ports.currentOwnerEpoch() !== grant.ownerEpoch
++        ) {
++          sources.clear();
++          completedCommands.clear();
++          return { ...base, commandId: request.commandId, status: 'stale' };
++        }
++        sources.set(key, {
++          ownerEpoch: postIndex.ownerEpoch,
++          sourceGeneration: postIndex.sourceGeneration,
++        });
++        const reply: CindyMicroInputResponse =
++          sendOutcome.status === 'noop'
++            ? {
++                ...base,
++                commandId: request.commandId,
++                selected: target,
++                status: 'noop',
++                reasonCode: sendOutcome.reasonCode,
++              }
++            : {
++                ...base,
++                commandId: request.commandId,
++                selected: target,
++                status: sendOutcome.status,
++                delivery: sendOutcome.delivery,
++                runId: sendOutcome.runId ?? null,
++                queuedCount: sendOutcome.queuedCount ?? 0,
++              };
++        if (commandKey) completedCommands.set(commandKey, reply);
++        return reply;
++      }
++      return { ...base, status: 'denied' };
++    } catch {
++      return { ...base, status: 'unavailable' };
++    } finally {
++      inFlight = false;
++    }
++  };
++}
++
++export async function startCindyMicroInputNavigationBridge(options: {
++  directory: string;
++  scopes: CindyMicroInputScope[];
++  ownerEpoch: string;
++  dispatch: (
++    raw: unknown,
++    grant: CindyMicroInputGrant,
++    signal: AbortSignal,
++  ) => Promise<CindyMicroInputResponse>;
++}) {
++  await mkdir(options.directory, { recursive: true, mode: 0o700 });
++  const directoryStat = await lstat(options.directory);
++  if (
++    !directoryStat.isDirectory() ||
++    directoryStat.isSymbolicLink() ||
++    directoryStat.uid !== process.getuid?.() ||
++    (directoryStat.mode & 0o077) !== 0
++  ) {
++    throw new Error('private_cindy_bridge_directory_required');
++  }
++  const grant: CindyMicroInputGrant = {
++    version: 1,
++    socketPath: path.join(options.directory, 'cindy.sock'),
++    token: randomBytes(32).toString('hex'),
++    instanceId: randomUUID(),
++    generation: 1,
++    ownerEpoch: options.ownerEpoch,
++    scopes: options.scopes,
++  };
++  if (Buffer.byteLength(grant.socketPath) >= 104) {
++    throw new Error('cindy_bridge_socket_path_too_long');
++  }
++  const ownerPath = path.join(options.directory, '.cindy-owner');
++  await mkdir(ownerPath, { mode: 0o700 });
++  const clients = new Set<net.Socket>();
++  let disposed = false;
++  const grantPath = path.join(options.directory, 'cindy-grant.json');
++  const writeGrantFile = async () => {
++    const temporary = path.join(options.directory, `.cindy-grant-${randomUUID()}`);
++    const file = await open(temporary, 'wx', 0o600);
++    try {
++      await file.writeFile(JSON.stringify(grant));
++    } finally {
++      await file.close();
++    }
++    await rename(temporary, grantPath);
++  };
++  const server = net.createServer((socket) => {
++    if (disposed || clients.size >= 8) {
++      socket.destroy();
++      return;
++    }
++    clients.add(socket);
++    const abort = new AbortController();
++    let buffer = Buffer.alloc(0);
++    let accepted = false;
++    socket.setTimeout(2_000, () => socket.destroy());
++    socket.on('error', () => {});
++    socket.once('close', () => {
++      clients.delete(socket);
++      abort.abort();
++    });
++    socket.on('data', (data) => {
++      if (accepted) {
++        socket.destroy();
++        return;
++      }
++      buffer = Buffer.concat([buffer, typeof data === 'string' ? Buffer.from(data) : data]);
++      if (buffer.length > 65_536) {
++        socket.destroy();
++        return;
++      }
++      const end = buffer.indexOf(10);
++      if (end < 0) return;
++      accepted = true;
++      if (end !== buffer.length - 1) {
++        socket.destroy();
++        return;
++      }
++      let raw: unknown;
++      try {
++        raw = JSON.parse(buffer.subarray(0, end).toString('utf8'));
++      } catch {
++        socket.destroy();
++        return;
++      }
++      void (async () => {
++        const fallback = (status: CindyMicroInputStatus): CindyMicroInputResponse => ({
++          version: 1,
++          id:
++            raw && typeof raw === 'object' && 'id' in raw && typeof raw.id === 'string'
++              ? raw.id
++              : 'invalid',
++          instanceId: grant.instanceId,
++          generation: grant.generation,
++          ownerEpoch: grant.ownerEpoch,
++          status,
++        });
++        let result = fallback('denied');
++        if (!disposed) {
++          try {
++            result = await options.dispatch(raw, grant, abort.signal);
++          } catch {
++            result = fallback('unavailable');
++          }
++        }
++        if (disposed || abort.signal.aborted) return;
++        const output = `${JSON.stringify(result)}\n`;
++        if (Buffer.byteLength(output) > 1_048_576) {
++          socket.end(`${JSON.stringify(fallback('unavailable'))}\n`);
++        } else {
++          socket.end(output);
++        }
++      })();
++    });
++  });
++  try {
++    await new Promise<void>((resolve, reject) => {
++      server.once('error', reject);
++      server.listen(grant.socketPath, () => {
++        server.removeListener('error', reject);
++        resolve();
++      });
++    });
++  } catch (error) {
++    await rmdir(ownerPath);
++    throw error;
++  }
++  server.on('error', () => {});
++  try {
++    await chmod(grant.socketPath, 0o600);
++    await writeGrantFile();
++  } catch (error) {
++    await new Promise<void>((resolve) => server.close(() => resolve()));
++    await rmdir(ownerPath);
++    throw error;
++  }
++  return {
++    grant,
++    grantPath,
++    async rotateGrant(next: { ownerEpoch?: string; bumpGeneration?: boolean }) {
++      if (disposed) return;
++      if (next.ownerEpoch) grant.ownerEpoch = next.ownerEpoch;
++      if (next.bumpGeneration !== false) grant.generation += 1;
++      await writeGrantFile();
++    },
++    async dispose() {
++      if (disposed) return;
++      disposed = true;
++      for (const client of clients) client.destroy();
++      await unlink(grantPath).catch(() => {});
++      await new Promise<void>((resolve) => server.close(() => resolve()));
++      await rmdir(ownerPath).catch(() => {});
++    },
++  };
++}
+diff --git a/apps/desktop/src/main/worklouder-codex/microInputOwnership.ts b/apps/desktop/src/main/worklouder-codex/microInputOwnership.ts
+new file mode 100644
+index 0000000000..2a05a92702
+--- /dev/null
++++ b/apps/desktop/src/main/worklouder-codex/microInputOwnership.ts
+@@ -0,0 +1,229 @@
++import { randomUUID } from 'node:crypto';
++import { chmod, lstat, mkdir } from 'node:fs/promises';
++import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
++import net from 'node:net';
++import path from 'node:path';
++import { z } from 'zod';
++
++const requestSchema = z.strictObject({
++  version: z.literal(1),
++  requestId: z.uuid(),
++  clientInstance: z.uuid(),
++  generation: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
++  desiredOwner: z.enum(['native', 'micro-input']),
++  microDrained: z.boolean(),
++});
++
++export type MicroInputOwnershipRequest = z.infer<typeof requestSchema>;
++
++const fenceSchema = z.strictObject({ clientInstance: z.uuid(), generation: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) });
++type Fence = z.infer<typeof fenceSchema>;
++type Drain = { inputDrained: boolean; pttDrained: boolean; lightingDrained: boolean };
++export type OwnershipHooks = {
++  quiesce(generation: number): Promise<Drain>;
++  resume(generation: number): Promise<boolean>;
++  stillFenced?(): boolean;
++};
++
++export function readMicroInputOwnershipFence(socketPath: string): Fence | 'unknown' | null {
++  try {
++    const filename = `${socketPath}.fence`;
++    const metadata = lstatSync(filename);
++    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== process.getuid?.()
++      || (metadata.mode & 0o077) !== 0 || metadata.size > 4096) return 'unknown';
++    return fenceSchema.parse(JSON.parse(readFileSync(filename, 'utf8')));
++  } catch (error) {
++    return error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT' ? null : 'unknown';
++  }
++}
++
++function persistFence(socketPath: string, fence: Fence | null): void {
++  const filename = `${socketPath}.fence`;
++  if (fence) {
++    const temporary = `${filename}.${randomUUID()}`;
++    const fd = openSync(temporary, 'wx', 0o600);
++    try { writeFileSync(fd, JSON.stringify(fence)); fsyncSync(fd); } finally { closeSync(fd); }
++    renameSync(temporary, filename);
++  } else {
++    unlinkSync(filename);
++  }
++  const directory = openSync(path.dirname(filename), 'r');
++  try { fsyncSync(directory); } finally { closeSync(directory); }
++}
++
++export function createMicroInputOwnershipCoordinator(socketPath: string, readNativeActive: () => boolean, hooks: OwnershipHooks) {
++  const nativeInstance = randomUUID();
++  let nativeGeneration = 0;
++  let fence = readMicroInputOwnershipFence(socketPath);
++  let verifiedFence = false;
++  const newest = new Map<string, number>();
++  const returned = new Map<string, number>();
++  if (fence && fence !== 'unknown') newest.set(fence.clientInstance, fence.generation);
++  let queue = Promise.resolve();
++  return (request: MicroInputOwnershipRequest) => {
++    newest.set(request.clientInstance, Math.max(newest.get(request.clientInstance) ?? 0, request.generation));
++    const current = () => request.generation === newest.get(request.clientInstance);
++    const result = queue.then(async () => {
++      let state: 'native' | 'released' | 'unknown' = 'unknown';
++      let reason = 'native_state_unconfirmed';
++      let drain: Drain = { inputDrained: false, pttDrained: false, lightingDrained: false };
++      if (!current()) reason = 'stale_generation';
++      else if (fence === 'unknown') reason = 'persistent_fence_unreadable';
++      else if (fence && fence.clientInstance !== request.clientInstance) reason = 'different_client';
++      else if (request.desiredOwner === 'micro-input') {
++        if (request.generation <= (returned.get(request.clientInstance) ?? -1)) reason = 'returned_generation';
++        else if (verifiedFence && hooks.stillFenced?.() !== true) {
++          verifiedFence = false;
++          reason = 'native_fence_lost';
++        } else if (fence && verifiedFence) {
++          // Renewal does not transfer ownership or restart native/PTT work.
++          if (fence.generation !== request.generation) {
++            fence = { clientInstance: request.clientInstance, generation: request.generation };
++            persistFence(socketPath, fence);
++          }
++          state = 'released'; reason = 'native_drained_and_fenced';
++          drain = { inputDrained: true, pttDrained: true, lightingDrained: true };
++        } else {
++          fence = { clientInstance: request.clientInstance, generation: request.generation };
++          persistFence(socketPath, fence);
++          drain = await hooks.quiesce(++nativeGeneration);
++          verifiedFence = current() && Object.values(drain).every(Boolean);
++          if (verifiedFence) { state = 'released'; reason = 'native_drained_and_fenced'; }
++          else reason = current() ? 'native_drain_unconfirmed' : 'stale_generation';
++        }
++      } else if (fence) {
++        if (!request.microDrained) reason = 'micro_drain_unconfirmed';
++        else {
++          verifiedFence = false;
++          const resumed = await hooks.resume(++nativeGeneration);
++          if (resumed && current()) {
++            persistFence(socketPath, null);
++            fence = null;
++            returned.set(request.clientInstance, request.generation);
++            state = readNativeActive() ? 'native' : 'unknown';
++            reason = state === 'native' ? 'native_active' : 'native_state_unconfirmed';
++          } else reason = 'native_resume_unconfirmed';
++        }
++      } else if (readNativeActive()) { state = 'native'; reason = 'native_active'; }
++      return { version: 1, requestId: request.requestId, clientInstance: request.clientInstance,
++        generation: request.generation, nativeInstance, nativeGeneration, state, reason, ...drain,
++        capabilities: ['fenced-release-v1'] };
++    });
++    queue = result.then(() => undefined, () => undefined);
++    return result;
++  };
++}
++
++// This observer cannot grant release: renderer gestures and utility RPCs have no drain ACK yet.
++export function createMicroInputOwnershipObserver(readNativeActive: () => boolean) {
++  const nativeInstance = randomUUID();
++  let lastNativeActive: boolean | undefined;
++  let nativeGeneration = 0;
++  return (request: MicroInputOwnershipRequest) => {
++    const active = readNativeActive();
++    if (active !== lastNativeActive) {
++      lastNativeActive = active;
++      nativeGeneration += 1;
++    }
++    const releaseRequested = request.desiredOwner === 'micro-input';
++    return {
++      version: request.version,
++      requestId: request.requestId,
++      clientInstance: request.clientInstance,
++      generation: request.generation,
++      nativeInstance,
++      nativeGeneration,
++      state: active && !releaseRequested ? 'native' : 'unknown',
++      reason: releaseRequested ? 'release_drain_unavailable' : active ? 'native_active' : 'native_state_unconfirmed',
++      inputDrained: false,
++      pttDrained: false,
++      lightingDrained: false,
++      capabilities: [],
++    };
++  };
++}
++
++export async function startMicroInputOwnershipBridge(options: {
++  socketPath: string;
++  readNativeActive: () => boolean;
++  hooks?: OwnershipHooks;
++}): Promise<{ close(): Promise<void> }> {
++  const directory = path.dirname(options.socketPath);
++  await mkdir(directory, { recursive: true, mode: 0o700 });
++  const parent = await lstat(directory);
++  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== process.getuid?.() || (parent.mode & 0o022) !== 0) {
++    throw new Error('ownership_endpoint_directory_untrusted');
++  }
++  await chmod(directory, 0o700);
++  const existing = await lstat(options.socketPath).catch((error: unknown) => {
++    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return null;
++    throw error;
++  });
++  if (existing) {
++    if (!existing.isSocket() || existing.uid !== process.getuid?.() || (existing.mode & 0o077) !== 0) {
++      throw new Error('ownership_endpoint_untrusted');
++    }
++    throw Object.assign(new Error('ownership_endpoint_in_use_or_unconfirmed'), { code: 'EADDRINUSE' });
++  }
++  const respond = options.hooks
++    ? createMicroInputOwnershipCoordinator(options.socketPath, options.readNativeActive, options.hooks)
++    : createMicroInputOwnershipObserver(options.readNativeActive);
++  const connections = new Set<net.Socket>();
++  let accepting = false;
++  const server = net.createServer((socket) => {
++    if (!accepting || connections.size >= 8) {
++      socket.destroy();
++      return;
++    }
++    connections.add(socket);
++    const deadline = setTimeout(() => socket.destroy(), 1_000);
++    deadline.unref();
++    socket.once('close', () => { clearTimeout(deadline); connections.delete(socket); });
++    socket.on('error', () => socket.destroy());
++    let bytes = Buffer.alloc(0);
++    let answered = false;
++    socket.on('data', async (chunk) => {
++      if (answered) { socket.destroy(); return; }
++      const received = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
++      if (bytes.length + received.length > 4_096) { socket.destroy(); return; }
++      bytes = Buffer.concat([bytes, received]);
++      const newline = bytes.indexOf(10);
++      if (newline === -1) return;
++      answered = true;
++      if (newline !== bytes.length - 1) { socket.destroy(); return; }
++      try {
++        const request = requestSchema.parse(JSON.parse(bytes.subarray(0, newline).toString('utf8')));
++        socket.end(`${JSON.stringify(await respond(request))}\n`);
++      } catch {
++        socket.destroy();
++      }
++    });
++  });
++  await new Promise<void>((resolve, reject) => {
++    server.once('error', reject);
++    server.listen(options.socketPath, () => {
++      server.off('error', reject);
++      resolve();
++    });
++  });
++  server.on('error', () => {
++    accepting = false;
++    for (const socket of connections) socket.destroy();
++  });
++  try {
++    await chmod(options.socketPath, 0o600);
++    accepting = true;
++  } catch (error) {
++    server.close();
++    throw error;
++  }
++  let closed: Promise<void> | undefined;
++  return {
++    close() {
++      accepting = false;
++      for (const socket of connections) socket.destroy();
++      closed ??= new Promise<void>((resolve) => server.close(() => resolve()));
++      return closed;
++    },
++  };
++}
 diff --git a/apps/desktop/src/main/worklouder-codex/protocol.ts b/apps/desktop/src/main/worklouder-codex/protocol.ts
 index 03a6c9d0b1..08fc8b44c3 100644
 --- a/apps/desktop/src/main/worklouder-codex/protocol.ts
@@ -1685,6 +3256,26 @@ index 1b45c2f510..b99278a099 100644
        ipcRenderer.on(WORKLOUDER_CODEX_ACTION_CHANNEL, listener);
        return () => ipcRenderer.removeListener(WORKLOUDER_CODEX_ACTION_CHANNEL, listener);
      },
+diff --git a/apps/desktop/src/renderer/App.tsx b/apps/desktop/src/renderer/App.tsx
+index d297d9d684..3894363377 100644
+--- a/apps/desktop/src/renderer/App.tsx
++++ b/apps/desktop/src/renderer/App.tsx
+@@ -52,6 +52,7 @@ import { installProviderUpstreamErrorToastListener } from '@/lib/providerUpstrea
+ import { installAutoPermissionFallbackToastListener } from '@/lib/autoPermissionFallbackToast';
+ import { agentKindToVendor } from '@/components/sidebar/VendorIcon';
+ import { installCcMgrUpgradeListener } from '@/state/ccMgrUpgradeStore';
++import { ensureWorkLouderOwnershipBridge } from '@/lib/workLouderCodexActions';
+ import {
+   preloadLocalCatalogSnapshot,
+   refreshLocalCatalogSnapshot,
+@@ -436,6 +437,7 @@ export function App() {
+   // 启动时拉一次 pending snapshot, 写进 ccMgrUpgradeStore。没挂这个 listener 的话
+   // main 探到版本差异 broadcast 了也没人接, banner 永不显示。详见 ccMgrUpgradeStore.ts。
+   useEffect(() => {
++    ensureWorkLouderOwnershipBridge();
+     return installCcMgrUpgradeListener();
+   }, []);
+ 
 diff --git a/apps/desktop/src/renderer/components/layout/MainLayout.tsx b/apps/desktop/src/renderer/components/layout/MainLayout.tsx
 index 72a3c5e5b4..4728835738 100644
 --- a/apps/desktop/src/renderer/components/layout/MainLayout.tsx
@@ -2184,6 +3775,111 @@ index dff563bd63..8b37e3d476 100644
 +    expect(older).not.toHaveBeenCalled();
 +  });
  });
+diff --git a/apps/desktop/src/renderer/lib/__tests__/workLouderCodexOwnership.test.ts b/apps/desktop/src/renderer/lib/__tests__/workLouderCodexOwnership.test.ts
+new file mode 100644
+index 0000000000..69634a7155
+--- /dev/null
++++ b/apps/desktop/src/renderer/lib/__tests__/workLouderCodexOwnership.test.ts
+@@ -0,0 +1,99 @@
++import { describe, expect, it, vi } from 'vitest';
++import { createPassiveHardwareVoiceOwner, createWorkLouderRendererOwnership } from '../workLouderCodexOwnership';
++
++// Unit tier: release ACK must await actual renderer work and microphone cleanup.
++// Existing action-bus tests do not exercise ownership changes across async callbacks.
++describe('Work Louder renderer ownership', () => {
++  it('starts fenced, rejects stale events, and ignores old ownership state', async () => {
++    const ownership = createWorkLouderRendererOwnership();
++    expect(ownership.admitted(0)).toBe(false);
++    await ownership.setState({ generation: 2, enabled: true });
++    expect(ownership.admitted(2)).toBe(true);
++    expect(ownership.admitted(1)).toBe(false);
++    await ownership.setState({ generation: 1, enabled: false });
++    expect(ownership.admitted(2)).toBe(true);
++  });
++
++  it('waits for an already admitted asynchronous business action before input drain ACK', async () => {
++    const ownership = createWorkLouderRendererOwnership();
++    await ownership.setState({ generation: 1, enabled: true });
++    let finish!: () => void;
++    ownership.track(new Promise<void>((resolve) => { finish = resolve; }));
++    let acknowledged = false;
++    const draining = ownership.setState({ generation: 2, enabled: false }).then((result) => { acknowledged = true; return result; });
++    await Promise.resolve();
++    expect(ownership.admitted(1)).toBe(false);
++    expect(acknowledged).toBe(false);
++    finish();
++    expect(await draining).toEqual({ inputDrained: true, pttDrained: true });
++  });
++
++  it('unconfirmed voice cleanup prevents release even after the component unmounts', async () => {
++    const ownership = createWorkLouderRendererOwnership();
++    await ownership.setState({ generation: 1, enabled: true });
++    const voice = { quiesce: vi.fn(async () => false), resume: vi.fn() };
++    const unregister = ownership.registerVoice(voice);
++    unregister();
++    const result = await ownership.setState({ generation: 2, enabled: false });
++    expect(result.pttDrained).toBe(false);
++    expect(result.inputDrained).toBe(true);
++  });
++
++  it('a late quiesce reply cannot acknowledge a new generation', async () => {
++    const ownership = createWorkLouderRendererOwnership();
++    await ownership.setState({ generation: 1, enabled: true });
++    let finish!: (value: boolean) => void;
++    ownership.registerVoice({ quiesce: () => new Promise<boolean>((resolve) => { finish = resolve; }), resume: () => undefined });
++    const old = ownership.setState({ generation: 2, enabled: false });
++    await ownership.setState({ generation: 3, enabled: true });
++    finish(true);
++    expect(await old).toEqual({ inputDrained: false, pttDrained: false });
++    expect(ownership.admitted(3)).toBe(true);
++  });
++
++  it('opaque keyboard or picker callbacks with no completion receipt keep input release unconfirmed', async () => {
++    const ownership = createWorkLouderRendererOwnership();
++    await ownership.setState({ generation: 1, enabled: true });
++    ownership.markUnconfirmedInput();
++    expect(await ownership.setState({ generation: 2, enabled: false })).toEqual({ inputDrained: false, pttDrained: true });
++  });
++});
++
++
++describe('global voice ownership drain', () => {
++  it('does not stop or paste active recording, and confirms a later real idle state', async () => {
++    let idle = false;
++    const voice = createPassiveHardwareVoiceOwner(() => idle, () => undefined);
++    voice.resume();
++    expect(await voice.quiesce()).toBe(false);
++    idle = true;
++    expect(await voice.quiesce()).toBe(true);
++  });
++
++  it('waits for original start, stop, and background paste operations', async () => {
++    const ownership = createWorkLouderRendererOwnership();
++    await ownership.setState({ generation: 1, enabled: true });
++    let idle = false;
++    const voice = createPassiveHardwareVoiceOwner(() => idle, operation => { ownership.track(operation); });
++    ownership.registerVoice(voice);
++    let finish!: () => void;
++    voice.track(new Promise<void>(resolve => { finish = resolve; }));
++    let replied = false;
++    const draining = ownership.setState({ generation: 2, enabled: false }).then(result => { replied = true; return result; });
++    await Promise.resolve();
++    expect(replied).toBe(false);
++    idle = true;
++    finish();
++    expect(await draining).toEqual({ inputDrained: true, pttDrained: true });
++  });
++
++  it('rejects a drain if new work remains after its original snapshot', async () => {
++    const voice = createPassiveHardwareVoiceOwner(() => true, () => undefined);
++    const draining = voice.quiesce();
++    let finish!: () => void;
++    voice.track(new Promise<void>(resolve => { finish = resolve; }));
++    expect(await draining).toBe(false);
++    finish();
++    expect(await voice.quiesce()).toBe(true);
++  });
++});
 diff --git a/apps/desktop/src/renderer/lib/__tests__/workLouderCodexVoiceGesture.test.ts b/apps/desktop/src/renderer/lib/__tests__/workLouderCodexVoiceGesture.test.ts
 index 755c910f8b..aba8115060 100644
 --- a/apps/desktop/src/renderer/lib/__tests__/workLouderCodexVoiceGesture.test.ts
@@ -2275,6 +3971,85 @@ index 755c910f8b..aba8115060 100644
 +    expect(stop).not.toHaveBeenCalled();
 +  });
  });
+diff --git a/apps/desktop/src/renderer/lib/__tests__/workLouderNavigationDrain.test.ts b/apps/desktop/src/renderer/lib/__tests__/workLouderNavigationDrain.test.ts
+new file mode 100644
+index 0000000000..d696362afb
+--- /dev/null
++++ b/apps/desktop/src/renderer/lib/__tests__/workLouderNavigationDrain.test.ts
+@@ -0,0 +1,73 @@
++import { describe, expect, it } from 'vitest';
++import { createSessionEntryNavigator, type BotSessionEntryTarget } from '../../features/bots/botSessionOwners';
++import { createWorkLouderRendererOwnership } from '../workLouderCodexOwnership';
++
++// Unit tier: task-slot deep links must finish their real asynchronous routing before handoff.
++describe('native task navigation ownership drain', () => {
++  it('waits for ordinary navigation and the original bot correction lookup', async () => {
++    const ownership = createWorkLouderRendererOwnership();
++    let finishRoute!: () => void;
++    let finishLookup!: (target: BotSessionEntryTarget | null) => void;
++    const navigate = createSessionEntryNavigator({
++      trackPending: operation => { ownership.track(operation); },
++      readKnownBotRoute: () => null,
++      resolveBotRoute: () => new Promise(resolve => { finishLookup = resolve; }),
++      openOrdinary: () => new Promise<void>(resolve => { finishRoute = resolve; }),
++      openBotRoute: () => undefined,
++      consumeAlert: () => undefined,
++    });
++    navigate('native-slot');
++    let replied = false;
++    const draining = ownership.setState({ generation: 1, enabled: false }).then(result => { replied = true; return result; });
++    finishRoute();
++    await Promise.resolve();
++    expect(replied).toBe(false);
++    finishLookup(null);
++    expect(await draining).toEqual({ inputDrained: true, pttDrained: true });
++  });
++
++  it('waits through remote-device resolution and its later ordinary route promise', async () => {
++    const ownership = createWorkLouderRendererOwnership();
++    let finishDevice!: (remote: boolean) => void;
++    let finishRoute!: () => void;
++    const navigate = createSessionEntryNavigator({
++      trackPending: operation => { ownership.track(operation); },
++      isRemoteDevice: () => new Promise(resolve => { finishDevice = resolve; }),
++      readKnownBotRoute: () => null,
++      resolveBotRoute: async () => null,
++      openOrdinary: () => new Promise<void>(resolve => { finishRoute = resolve; }),
++      openBotRoute: () => undefined,
++      consumeAlert: () => undefined,
++    });
++    navigate('native-slot', undefined, undefined, 'remote-device');
++    let replied = false;
++    const draining = ownership.setState({ generation: 1, enabled: false }).then(result => { replied = true; return result; });
++    finishDevice(true);
++    await Promise.resolve();
++    expect(replied).toBe(false);
++    finishRoute();
++    expect(await draining).toEqual({ inputDrained: true, pttDrained: true });
++  });
++
++  it('reports committed session routes both on router location changes and when re-opening an already committed route', async () => {
++    const committed: Array<{ path: string; sessionId: string | null }> = [];
++    const navigate = createSessionEntryNavigator({
++      onLocationCommitted: (path, sessionId) => { committed.push({ path, sessionId }); },
++      readKnownBotRoute: () => null,
++      resolveBotRoute: async () => null,
++      openOrdinary: () => Promise.resolve(),
++      openBotRoute: () => undefined,
++      consumeAlert: () => undefined,
++    });
++    navigate.locationCommitted('/cc-agent/sess-alpha?tab=1');
++    expect(committed).toEqual([{ path: '/cc-agent/sess-alpha?tab=1', sessionId: 'sess-alpha' }]);
++    navigate('sess-alpha');
++    await Promise.resolve();
++    expect(committed).toEqual([
++      { path: '/cc-agent/sess-alpha?tab=1', sessionId: 'sess-alpha' },
++      { path: '/cc-agent/sess-alpha?tab=1', sessionId: 'sess-alpha' },
++    ]);
++    navigate.locationCommitted('/settings');
++    expect(committed[2]).toEqual({ path: '/settings', sessionId: null });
++  });
++});
 diff --git a/apps/desktop/src/renderer/lib/inputDeviceActions.ts b/apps/desktop/src/renderer/lib/inputDeviceActions.ts
 index 8ab70f2edd..8bf335114c 100644
 --- a/apps/desktop/src/renderer/lib/inputDeviceActions.ts
@@ -2409,6 +4184,79 @@ index aa4049b96a..13a133a0bb 100644
        }) ?? null,
    );
  }
+diff --git a/apps/desktop/src/renderer/lib/workLouderCodexOwnership.ts b/apps/desktop/src/renderer/lib/workLouderCodexOwnership.ts
+new file mode 100644
+index 0000000000..ebd256057b
+--- /dev/null
++++ b/apps/desktop/src/renderer/lib/workLouderCodexOwnership.ts
+@@ -0,0 +1,67 @@
++export type HardwareVoiceOwner = { quiesce(): Promise<boolean>; resume(): void };
++
++export function createWorkLouderRendererOwnership() {
++  let enabled = false;
++  let generation = -1;
++  let unconfirmedInput = false;
++  const pending = new Set<Promise<unknown>>();
++  const voices = new Set<HardwareVoiceOwner>();
++  let voiceGeneration = 0;
++  function track<T>(operation: Promise<T>): Promise<T> {
++    pending.add(operation);
++    void operation.then(() => pending.delete(operation), () => pending.delete(operation));
++    return operation;
++  }
++  return {
++    admitted: (expected: number) => enabled && generation === expected,
++    track,
++    markUnconfirmedInput() { unconfirmedInput = true; },
++    registerVoice(voice: HardwareVoiceOwner) {
++      voices.add(voice);
++      voiceGeneration += 1;
++      if (!enabled) void voice.quiesce();
++      else voice.resume();
++      return () => {
++        void voice.quiesce().then((stopped) => { if (stopped && voices.delete(voice)) voiceGeneration += 1; });
++      };
++    },
++    async setState(next: { generation: number; enabled: boolean }): Promise<{ pttDrained: boolean; inputDrained: boolean }> {
++      if (next.generation < generation) return { pttDrained: false, inputDrained: false };
++      generation = next.generation;
++      enabled = next.enabled;
++      if (enabled) {
++        for (const voice of voices) voice.resume();
++        return { pttDrained: false, inputDrained: false };
++      }
++      const checkedVoices = voiceGeneration;
++      const stopped = await Promise.all([...voices].map((voice) => voice.quiesce().catch(() => false)));
++      await Promise.allSettled([...pending]);
++      const current = generation === next.generation && !enabled;
++      return { pttDrained: current && voiceGeneration === checkedVoices && stopped.every(Boolean), inputDrained: current && pending.size === 0 && !unconfirmedInput };
++    },
++  };
++}
++
++export const workLouderRendererOwnership = createWorkLouderRendererOwnership();
++
++export function createPassiveHardwareVoiceOwner(
++  readIdle: () => boolean,
++  trackPending: (operation: Promise<unknown>) => void,
++) {
++  let enabled = false;
++  const pending = new Set<Promise<unknown>>();
++  return {
++    track<T>(operation: Promise<T>): Promise<T> {
++      pending.add(operation);
++      trackPending(operation);
++      void operation.then(() => pending.delete(operation), () => pending.delete(operation));
++      return operation;
++    },
++    async quiesce(): Promise<boolean> {
++      enabled = false;
++      await Promise.allSettled([...pending]);
++      return !enabled && pending.size === 0 && readIdle();
++    },
++    resume() { enabled = true; },
++  };
++}
 diff --git a/apps/desktop/src/renderer/lib/workLouderCodexVoiceGesture.ts b/apps/desktop/src/renderer/lib/workLouderCodexVoiceGesture.ts
 index 6220a0678a..5e50d89dac 100644
 --- a/apps/desktop/src/renderer/lib/workLouderCodexVoiceGesture.ts
@@ -2796,3 +4644,1728 @@ index 4808234043..fd95b85fef 100644
  export const WORKLOUDER_CODEX_PREVIEW_INPUT_CHANNEL = 'worklouder-codex:preview-input';
  
  export const WORKLOUDER_CODEX_AGENT_SLOT_COUNT = 6;
+diff --git a/scripts/micro-input-navigation-fixture.ts b/scripts/micro-input-navigation-fixture.ts
+new file mode 100644
+index 0000000000..aa03c9f43f
+--- /dev/null
++++ b/scripts/micro-input-navigation-fixture.ts
+@@ -0,0 +1,435 @@
++import { randomUUID } from 'node:crypto';
++import { chmod, mkdir, writeFile } from 'node:fs/promises';
++import net from 'node:net';
++import path from 'node:path';
++import { parseArgs } from 'node:util';
++import {
++  createCindyMicroInputNavigation,
++  hashCindyOwnerScopeKey,
++  startCindyMicroInputNavigationBridge,
++  type CindyMicroInputRow,
++} from '../apps/desktop/src/main/worklouder-codex/microInputNavigation.js';
++
++async function main() {
++  const { values } = parseArgs({
++    options: {
++      directory: { type: 'string' },
++      evidence: { type: 'string' },
++      timeout: { type: 'string', default: '90' },
++    },
++  });
++  if (!values.directory || !values.evidence) {
++    throw new Error('--directory and --evidence required');
++  }
++  const directory = path.resolve(values.directory);
++  const evidencePath = path.resolve(values.evidence);
++  const controlPath = path.join(directory, 'cindy.control');
++  const ttl = Number(values.timeout);
++  if (
++    !Number.isFinite(ttl) ||
++    ttl < 1 ||
++    ttl > 300 ||
++    Buffer.byteLength(controlPath) >= 104
++  ) {
++    throw new Error('invalid fixture limits');
++  }
++
++  let ownerScope = 'cindy-account:owner-1';
++  let sourceGeneration = '1';
++  let activeSessionId: string | null = 'cindy-alpha-1';
++  let deliveryMode: 'confirmed' | 'delivered' | 'unconfirmed' = 'confirmed';
++  let metadataReads = 0;
++  let unauthorizedMetadataReads = 0;
++  let createCounter = 0;
++  let runCounter = 10;
++  const deepLinkLog: Array<{
++    sessionId: string;
++    workspacePath: string;
++    deepLink: string;
++    mode: string;
++  }> = [];
++  const actionLog: Array<{
++    op: string;
++    commandId: string;
++    sessionId?: string;
++    workspacePath: string;
++    detail?: string;
++  }> = [];
++
++  const tasks = new Map<string, CindyMicroInputRow>([
++    [
++      '/Users/test/CindyAlpha::cindy-alpha-1',
++      {
++        address: { workspacePath: '/Users/test/CindyAlpha', sessionId: 'cindy-alpha-1' },
++        title: 'Duplicate Task Title',
++        phase: 'running',
++        attention: false,
++        pinned: true,
++        runId: 'run-cindy-alpha-1',
++        unread: false,
++        eventWatermark: 10,
++        queuedCount: 0,
++        pendingInteraction: null,
++      },
++    ],
++    [
++      '/Users/test/CindyAlpha::cindy-alpha-2',
++      {
++        address: { workspacePath: '/Users/test/CindyAlpha', sessionId: 'cindy-alpha-2' },
++        title: 'Duplicate Task Title',
++        phase: 'needs-interaction',
++        attention: true,
++        pinned: false,
++        runId: 'run-cindy-alpha-2',
++        unread: false,
++        eventWatermark: 20,
++        queuedCount: 0,
++        pendingInteraction: {
++          interactionId: 'perm-cindy-alpha-2',
++          interactionType: 'permission',
++          toolName: 'bash',
++          options: null,
++        },
++      },
++    ],
++    [
++      '/Users/test/CindyBeta::cindy-beta-1',
++      {
++        address: { workspacePath: '/Users/test/CindyBeta', sessionId: 'cindy-beta-1' },
++        title: 'Duplicate Task Title',
++        phase: 'idle',
++        attention: false,
++        pinned: false,
++        runId: null,
++        unread: null,
++        eventWatermark: 5,
++        queuedCount: 0,
++        pendingInteraction: null,
++      },
++    ],
++    [
++      '/Users/test/CindySecret::cindy-secret-1',
++      {
++        address: { workspacePath: '/Users/test/CindySecret', sessionId: 'cindy-secret-1' },
++        title: 'Out Of Scope Task',
++        phase: 'error',
++        attention: true,
++        pinned: true,
++        runId: null,
++        unread: true,
++        eventWatermark: 99,
++        queuedCount: 0,
++        pendingInteraction: null,
++      },
++    ],
++  ]);
++
++  const scopes = [
++    { workspacePath: '/Users/test/CindyAlpha' },
++    { workspacePath: '/Users/test/CindyBeta' },
++  ];
++
++  await mkdir(directory, { recursive: true, mode: 0o700 });
++  await chmod(directory, 0o700);
++  await mkdir(path.dirname(evidencePath), { recursive: true, mode: 0o700 });
++
++  const dispatch = createCindyMicroInputNavigation({
++    currentOwnerEpoch: () => hashCindyOwnerScopeKey(ownerScope),
++    readIndex: async (scope) => {
++      metadataReads += 1;
++      if (!scopes.some((s) => s.workspacePath === scope.workspacePath)) {
++        unauthorizedMetadataReads += 1;
++      }
++      return {
++        ownerEpoch: hashCindyOwnerScopeKey(ownerScope),
++        sourceGeneration,
++        rows: [...tasks.values()].filter(
++          (row) => row.address.workspacePath === scope.workspacePath,
++        ),
++      };
++    },
++    exists: async (address) => tasks.has(`${address.workspacePath}::${address.sessionId}`),
++    selected: (scope) => {
++      if (!activeSessionId) return null;
++      const key = `${scope.workspacePath}::${activeSessionId}`;
++      return tasks.has(key)
++        ? { workspacePath: scope.workspacePath, sessionId: activeSessionId }
++        : null;
++    },
++    deliverSessionDeepLink: async (target, deepLink) => {
++      deepLinkLog.push({
++        sessionId: target.sessionId,
++        workspacePath: target.workspacePath,
++        deepLink,
++        mode: deliveryMode,
++      });
++      if (deliveryMode === 'confirmed') {
++        activeSessionId = target.sessionId;
++        return { status: 'confirmed' as const, selected: target };
++      }
++      if (deliveryMode === 'delivered') {
++        return { status: 'delivered' as const };
++      }
++      return { status: 'unconfirmed' as const, selected: null };
++    },
++    focusWindow: () => true,
++    createTask: async (scope, input) => {
++      createCounter += 1;
++      const sessionId = `cindy-created-${createCounter}`;
++      const created = { workspacePath: scope.workspacePath, sessionId };
++      const runId = input.text ? `run-created-${createCounter}` : null;
++      tasks.set(`${created.workspacePath}::${created.sessionId}`, {
++        address: created,
++        title: 'Duplicate Task Title',
++        phase: input.text ? 'running' : 'idle',
++        attention: false,
++        pinned: false,
++        runId,
++        unread: false,
++        eventWatermark: 100 + createCounter,
++        queuedCount: 0,
++        pendingInteraction: null,
++      });
++      actionLog.push({
++        op: 'create',
++        commandId: input.commandId,
++        sessionId: created.sessionId,
++        workspacePath: scope.workspacePath,
++      });
++      activeSessionId = created.sessionId;
++      return { status: 'confirmed' as const, created, selected: created, runId };
++    },
++    sendTask: async (target, input) => {
++      const key = `${target.workspacePath}::${target.sessionId}`;
++      const row = tasks.get(key);
++      if (!row) return { status: 'unavailable' as const, reasonCode: 'guard.targetMissing' };
++      actionLog.push({
++        op: 'send',
++        commandId: input.commandId,
++        sessionId: target.sessionId,
++        workspacePath: target.workspacePath,
++        detail: input.deliveryMode,
++      });
++      if (row.phase !== 'running') {
++        runCounter += 1;
++        const nextRunId = `run-started-${runCounter}`;
++        row.phase = 'running';
++        row.runId = nextRunId;
++        row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++        return {
++          status: 'started' as const,
++          delivery: 'auto' as const,
++          runId: nextRunId,
++          queuedCount: row.queuedCount ?? 0,
++        };
++      }
++      if (input.deliveryMode === 'steer') {
++        row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++        return {
++          status: 'steered' as const,
++          delivery: 'steer' as const,
++          runId: row.runId ?? 'run-active',
++          queuedCount: row.queuedCount ?? 0,
++        };
++      }
++      row.queuedCount = (row.queuedCount ?? 0) + 1;
++      row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++      return {
++        status: 'queued' as const,
++        delivery: 'queue' as const,
++        runId: row.runId ?? null,
++        queuedCount: row.queuedCount,
++      };
++    },
++    stopTask: async (target, input) => {
++      const key = `${target.workspacePath}::${target.sessionId}`;
++      const row = tasks.get(key);
++      if (!row) return { status: 'unavailable' as const, reasonCode: 'guard.targetMissing' };
++      if (row.phase !== 'running' || row.runId !== input.expectedRunId) {
++        return { status: 'noop' as const, reasonCode: 'guard.stopTargetChanged' };
++      }
++      const stoppedRunId = row.runId;
++      row.phase = 'idle';
++      row.runId = null;
++      row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++      actionLog.push({
++        op: 'stop',
++        commandId: input.commandId,
++        sessionId: target.sessionId,
++        workspacePath: target.workspacePath,
++        detail: stoppedRunId,
++      });
++      return { status: 'stopped' as const, runId: stoppedRunId };
++    },
++    resolveTask: async (target, input) => {
++      const key = `${target.workspacePath}::${target.sessionId}`;
++      const row = tasks.get(key);
++      if (!row) return { status: 'unavailable' as const, reasonCode: 'guard.targetMissing' };
++      if (!row.pendingInteraction || row.pendingInteraction.interactionId !== input.interactionId) {
++        return { status: 'noop' as const, reasonCode: 'guard.interactionAlreadyResolved' };
++      }
++      const resolvedId = row.pendingInteraction.interactionId;
++      const resolvedType = row.pendingInteraction.interactionType;
++      row.pendingInteraction = null;
++      row.phase = input.decision === 'reject' || input.decision === 'cancel' ? 'idle' : 'running';
++      row.attention = false;
++      row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++      actionLog.push({
++        op: 'resolve',
++        commandId: input.commandId,
++        sessionId: target.sessionId,
++        workspacePath: target.workspacePath,
++        detail: `${resolvedType}:${resolvedId}:${input.decision}`,
++      });
++      return {
++        status: 'resolved' as const,
++        interactionId: resolvedId,
++        interactionType: resolvedType,
++      };
++    },
++  });
++
++  const bridge = await startCindyMicroInputNavigationBridge({
++    directory,
++    scopes,
++    ownerEpoch: hashCindyOwnerScopeKey(ownerScope)!,
++    dispatch: (raw, grant, signal) => dispatch(raw, grant, () => !signal.aborted),
++  });
++
++  async function writeReceipt() {
++    await writeFile(
++      evidencePath,
++      `${JSON.stringify(
++        {
++          native_source: 'CindyMicroInputNavigationBridge',
++          transport: 'real-unix-socket',
++          local_agent_api_relaxed: false,
++          plugin_tasks_api_relaxed: false,
++          metadata_reads: metadataReads,
++          unauthorized_metadata_reads: unauthorizedMetadataReads,
++          deep_link_dispatches: deepLinkLog,
++          action_dispatches: actionLog,
++          native_install: 'NOT_RUN',
++          physical: 'NOT_RUN',
++        },
++        null,
++        2,
++      )}\n`,
++      { mode: 0o600 },
++    );
++  }
++
++  await writeReceipt();
++
++  const sockets = new Set<net.Socket>();
++  const control = net.createServer((socket) => {
++    sockets.add(socket);
++    socket.once('close', () => sockets.delete(socket));
++    const timer = setTimeout(() => socket.destroy(), 1_000);
++    timer.unref();
++    socket.once('close', () => clearTimeout(timer));
++    socket.on('error', () => socket.destroy());
++    let data = '';
++    let handled = false;
++    socket.on('data', async (chunk) => {
++      if (handled) return;
++      data += chunk.toString('utf8');
++      if (Buffer.byteLength(data) > 4_096) {
++        socket.destroy();
++        return;
++      }
++      if (!data.endsWith('\n')) return;
++      handled = true;
++      try {
++        const cmd = JSON.parse(data) as {
++          cmd?: string;
++          mode?: 'confirmed' | 'delivered' | 'unconfirmed';
++          workspacePath?: string;
++          sessionId?: string;
++          ownerScope?: string;
++          sourceGeneration?: string;
++        };
++        if (cmd.cmd === 'set-mode' && cmd.mode) {
++          deliveryMode = cmd.mode;
++          await writeReceipt();
++          socket.end(`${JSON.stringify({ ok: true, mode: deliveryMode })}\n`);
++          return;
++        }
++        if (cmd.cmd === 'remove-task' && cmd.workspacePath && cmd.sessionId) {
++          tasks.delete(`${cmd.workspacePath}::${cmd.sessionId}`);
++          if (activeSessionId === cmd.sessionId) activeSessionId = null;
++          await writeReceipt();
++          socket.end(`${JSON.stringify({ ok: true, sourceGeneration })}\n`);
++          return;
++        }
++        if (cmd.cmd === 'rotate-account') {
++          ownerScope = cmd.ownerScope ?? `cindy-account:${randomUUID()}`;
++          sourceGeneration = cmd.sourceGeneration ?? String(Number(sourceGeneration) + 1);
++          activeSessionId = null;
++          const nextOwnerEpoch = hashCindyOwnerScopeKey(ownerScope)!;
++          await bridge.rotateGrant({ ownerEpoch: nextOwnerEpoch, bumpGeneration: true });
++          await writeReceipt();
++          socket.end(
++            `${JSON.stringify({
++              ok: true,
++              generation: bridge.grant.generation,
++              ownerEpoch: nextOwnerEpoch,
++              sourceGeneration,
++            })}\n`,
++          );
++          return;
++        }
++        if (cmd.cmd === 'status') {
++          await writeReceipt();
++          socket.end(
++            `${JSON.stringify({
++              ok: true,
++              metadataReads,
++              unauthorizedMetadataReads,
++              deepLinkDispatches: deepLinkLog.length,
++            })}\n`,
++          );
++          return;
++        }
++        socket.destroy();
++      } catch {
++        socket.destroy();
++      }
++    });
++  });
++
++  await new Promise<void>((resolve, reject) => {
++    control.once('error', reject);
++    control.listen(controlPath, resolve);
++  });
++  await chmod(controlPath, 0o600);
++  console.log(
++    JSON.stringify({
++      ready: true,
++      directory,
++      socket: bridge.grant.socketPath,
++      grant: bridge.grantPath,
++      control: controlPath,
++      evidence: evidencePath,
++    }),
++  );
++
++  let closing = false;
++  async function close() {
++    if (closing) return;
++    closing = true;
++    clearTimeout(deadline);
++    for (const socket of sockets) socket.destroy();
++    await bridge.dispose();
++    await new Promise<void>((resolve) => control.close(() => resolve()));
++    await writeReceipt();
++  }
++  const deadline = setTimeout(() => void close(), ttl * 1000);
++  process.once('SIGTERM', () => void close());
++  process.once('SIGINT', () => void close());
++}
++
++void main().catch((error: unknown) => {
++  console.error(error);
++  process.exitCode = 1;
++});
+diff --git a/scripts/micro-input-ownership-fixture.ts b/scripts/micro-input-ownership-fixture.ts
+new file mode 100644
+index 0000000000..6d916fa5ed
+--- /dev/null
++++ b/scripts/micro-input-ownership-fixture.ts
+@@ -0,0 +1,96 @@
++import { writeFile, mkdir, chmod } from 'node:fs/promises';
++import net from 'node:net';
++import path from 'node:path';
++import { parseArgs } from 'node:util';
++import { startMicroInputOwnershipBridge } from '../apps/desktop/src/main/worklouder-codex/microInputOwnership.js';
++import { WorkLouderCodexLightingController } from '../apps/desktop/src/main/worklouder-codex/WorkLouderCodexLightingController.js';
++import { createWorkLouderCodexDefaultSettings } from '../apps/desktop/src/shared/workLouderCodex.js';
++import type { WorkLouderCodexHidEvent } from '../apps/desktop/src/main/worklouder-codex/protocol.js';
++
++async function main() {
++const { values } = parseArgs({ options: { socket: { type: 'string' }, evidence: { type: 'string' }, timeout: { type: 'string', default: '90' } } });
++if (!values.socket || !values.evidence) throw new Error('--socket and --evidence required');
++const socketPath = path.resolve(values.socket);
++const evidence = path.resolve(values.evidence);
++const ttl = Number(values.timeout);
++if (!Number.isFinite(ttl) || ttl < 1 || ttl > 300 || Buffer.byteLength(`${socketPath}.control`) >= 104) throw new Error('invalid fixture limits');
++let hid: ((event: WorkLouderCodexHidEvent) => void) | null = null;
++let count = 0;
++let suspended = false;
++let disconnected = false;
++const rows: Array<Record<string, unknown>> = [];
++const events = new Map<string, Record<string, unknown>>();
++const sink = { update() {}, setAgentKeyPressHandler() {}, setDeviceActivityHandler() {}, setConnectionStatusHandler() {},
++  setHidInputHandler(handler: typeof hid) { hid = handler; }, async dispose() {} };
++const controller = new WorkLouderCodexLightingController(sink, () => { count++; }, undefined, (action) => {
++  if ((action.type === 'voice' && action.phase === 'press') || action.type === 'command') count++;
++});
++const settings = createWorkLouderCodexDefaultSettings();
++settings.layout.encoderMode = 'conversation-scroll';
++controller.applySettings(settings);
++await controller.resumeTaskSlots();
++await mkdir(path.dirname(evidence), { recursive: true, mode: 0o700 });
++const bridge = await startMicroInputOwnershipBridge({ socketPath, readNativeActive: () => !suspended,
++  hooks: { stillFenced: () => suspended,
++    async quiesce() { suspended = true; controller.setOwnershipSuspended(true); return { inputDrained: true, pttDrained: true, lightingDrained: true }; },
++    async resume() { await controller.resumeOwnership(); suspended = false; return true; },
++  } });
++async function receipt() {
++  await writeFile(evidence, JSON.stringify({ native_source: 'WorkLouderCodexLightingController', transport: 'real-unix-socket',
++    backend: 'synthetic-sink', native_install: 'NOT_RUN', physical: 'NOT_RUN', events: rows }, null, 2) + '\n', { mode: 0o600 });
++}
++const sockets = new Set<net.Socket>();
++const control = net.createServer((socket) => {
++  sockets.add(socket); socket.once('close', () => sockets.delete(socket));
++  const timeout = setTimeout(() => socket.destroy(), 1000); timeout.unref();
++  socket.once('close', () => clearTimeout(timeout)); socket.on('error', () => socket.destroy());
++  let data = ''; let handled = false;
++  socket.on('data', async (chunk) => {
++    if (handled) return;
++    data += chunk.toString('utf8');
++    if (Buffer.byteLength(data) > 4096) { socket.destroy(); return; }
++    if (!data.endsWith('\n')) return;
++    handled = true;
++    try {
++      const value: unknown = JSON.parse(data);
++      if (!value || typeof value !== 'object') throw new Error('invalid command');
++      if ('cmd' in value && value.cmd === 'disconnect') {
++        await bridge.close(); disconnected = true;
++        socket.end(JSON.stringify({ disconnected: true, nativeFenced: suspended }) + '\n'); return;
++      }
++      if ('cmd' in value && value.cmd === 'status') {
++        socket.end(JSON.stringify({ nativeFenced: suspended, disconnected }) + '\n'); return;
++      }
++      if (!('eventId' in value) || typeof value.eventId !== 'string' || value.eventId.length > 128
++        || !('control' in value) || (value.control !== 'wide' && value.control !== 'encoder')) throw new Error('invalid event');
++      const prior = events.get(value.eventId);
++      if (prior) { socket.end(JSON.stringify(prior) + '\n'); return; }
++      const before = count;
++      if (value.control === 'wide') {
++        hid?.({ key: 'ACT10', act: 1 }); hid?.({ key: 'ACT11', act: 1 });
++        hid?.({ key: 'ACT10', act: 0 }); hid?.({ key: 'ACT11', act: 0 });
++      } else hid?.({ key: 'ENC_CW', act: 2 });
++      const row = { eventId: value.eventId, control: value.control, nativeBusinessActions: count - before,
++        state: suspended ? 'released' : 'native', disconnected };
++      rows.push(row); events.set(value.eventId, row); await receipt();
++      socket.end(JSON.stringify(row) + '\n');
++    } catch { socket.destroy(); }
++  });
++});
++await new Promise<void>((resolve, reject) => { control.once('error', reject); control.listen(`${socketPath}.control`, resolve); });
++await chmod(`${socketPath}.control`, 0o600);
++console.log(JSON.stringify({ ready: true, socket: socketPath, control: `${socketPath}.control`, evidence }));
++let closing = false;
++async function close() {
++  if (closing) return; closing = true;
++  clearTimeout(deadline);
++  for (const socket of sockets) socket.destroy();
++  await bridge.close();
++  await new Promise<void>((resolve) => control.close(() => resolve()));
++  await controller.dispose(); await receipt();
++}
++const deadline = setTimeout(() => void close(), ttl * 1000);
++process.once('SIGTERM', () => void close()); process.once('SIGINT', () => void close());
++
++}
++void main().catch((error: unknown) => { console.error(error); process.exitCode = 1; });
+diff --git a/scripts/test-micro-input-navigation.mjs b/scripts/test-micro-input-navigation.mjs
+new file mode 100644
+index 0000000000..949ca8ad99
+--- /dev/null
++++ b/scripts/test-micro-input-navigation.mjs
+@@ -0,0 +1,967 @@
++// Integration tier: verifies Cindy's restricted metadata & session deep-link bridge over real UDS.
++import assert from 'node:assert/strict';
++import { randomUUID } from 'node:crypto';
++import { chmod, lstat, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
++import net from 'node:net';
++import path from 'node:path';
++import { test } from 'node:test';
++import {
++  buildVerifiedCindySessionDeepLink,
++  cindyMicroInputGrantSchema,
++  createCindyMicroInputNavigation,
++  hashCindyOwnerScopeKey,
++  startCindyMicroInputNavigationBridge,
++} from '../apps/desktop/src/main/worklouder-codex/microInputNavigation.ts';
++
++const testRoot = path.resolve(process.env.MI_NAVIGATION_TEST_ROOT ?? '../socket-tests');
++await mkdir(testRoot, { recursive: true, mode: 0o700 });
++
++async function exchange(socketPath, payload) {
++  return await new Promise((resolve, reject) => {
++    const socket = net.createConnection(socketPath);
++    let bytes = '';
++    socket.setEncoding('utf8');
++    socket.on('connect', () =>
++      socket.write(typeof payload === 'string' ? payload : `${JSON.stringify(payload)}\n`),
++    );
++    socket.on('data', (chunk) => {
++      bytes += chunk;
++    });
++    socket.once('end', () => resolve(bytes ? JSON.parse(bytes) : null));
++    socket.once('error', reject);
++    socket.once('close', () => {
++      if (!bytes) resolve(null);
++    });
++  });
++}
++
++async function readGrant(grantPath) {
++  return cindyMicroInputGrantSchema.parse(JSON.parse(await readFile(grantPath, 'utf8')));
++}
++
++async function createBridgeFixture(t, options = {}) {
++  const dir = await mkdtemp(path.join(testRoot, 'nav-'));
++  await chmod(dir, 0o700);
++  let ownerScope = 'account:user-alpha';
++  let sourceGeneration = '1';
++  let activeSessionId = 'sess-alpha-1';
++  let deliveryMode = 'confirmed';
++  let metadataReads = 0;
++  let createCounter = 0;
++  let runCounter = 10;
++  const deepLinkDispatches = [];
++  const createDispatches = [];
++  const sendDispatches = [];
++  const stopDispatches = [];
++  const resolveDispatches = [];
++  const tasks = new Map(
++    (
++      options.initialTasks ?? [
++        {
++          address: { workspacePath: '/Users/test/Alpha', sessionId: 'sess-alpha-1' },
++          title: 'Shared Incident Triage',
++          phase: 'running',
++          attention: false,
++          pinned: true,
++          runId: 'run-alpha-1',
++          unread: false,
++          eventWatermark: 10,
++          queuedCount: 0,
++          pendingInteraction: null,
++        },
++        {
++          address: { workspacePath: '/Users/test/Alpha', sessionId: 'sess-alpha-2' },
++          title: 'Shared Incident Triage',
++          phase: 'needs-interaction',
++          attention: true,
++          pinned: false,
++          runId: 'run-alpha-2',
++          unread: false,
++          eventWatermark: 20,
++          queuedCount: 0,
++          pendingInteraction: {
++            interactionId: 'perm-alpha-2',
++            interactionType: 'permission',
++            toolName: 'bash',
++            options: null,
++          },
++        },
++        {
++          address: { workspacePath: '/Users/test/Beta', sessionId: 'sess-beta-1' },
++          title: 'Shared Incident Triage',
++          phase: 'idle',
++          attention: false,
++          pinned: false,
++          runId: null,
++          unread: null,
++          eventWatermark: 5,
++          queuedCount: 0,
++          pendingInteraction: null,
++        },
++        {
++          address: { workspacePath: '/Users/test/Secret', sessionId: 'sess-secret-1' },
++          title: 'Out Of Scope Task',
++          phase: 'error',
++          attention: true,
++          pinned: true,
++          runId: null,
++          unread: true,
++          eventWatermark: 99,
++          queuedCount: 0,
++          pendingInteraction: null,
++        },
++      ]
++    ).map((row) => [`${row.address.workspacePath}::${row.address.sessionId}`, row]),
++  );
++
++  const scopes = options.scopes ?? [
++    { workspacePath: '/Users/test/Alpha' },
++    { workspacePath: '/Users/test/Beta' },
++  ];
++
++  const dispatch = createCindyMicroInputNavigation({
++    currentOwnerEpoch: () => hashCindyOwnerScopeKey(ownerScope),
++    readIndex: async (scope) => {
++      metadataReads += 1;
++      const rows = [...tasks.values()].filter(
++        (row) => row.address.workspacePath === scope.workspacePath,
++      );
++      return {
++        ownerEpoch: hashCindyOwnerScopeKey(ownerScope),
++        sourceGeneration,
++        rows,
++      };
++    },
++    exists: async (address) => tasks.has(`${address.workspacePath}::${address.sessionId}`),
++    selected: (scope) => {
++      if (!activeSessionId) return null;
++      const key = `${scope.workspacePath}::${activeSessionId}`;
++      return tasks.has(key) ? { workspacePath: scope.workspacePath, sessionId: activeSessionId } : null;
++    },
++    deliverSessionDeepLink: async (target, deepLink) => {
++      deepLinkDispatches.push({ target, deepLink, mode: deliveryMode });
++      if (deliveryMode === 'confirmed') {
++        activeSessionId = target.sessionId;
++        return { status: 'confirmed', selected: target };
++      }
++      if (deliveryMode === 'delivered') {
++        return { status: 'delivered' };
++      }
++      return { status: 'unconfirmed', selected: null };
++    },
++    focusWindow: () => true,
++    createTask: async (scope, input) => {
++      createCounter += 1;
++      const sessionId = `sess-created-${createCounter}`;
++      const created = { workspacePath: scope.workspacePath, sessionId };
++      const runId = input.text ? `run-created-${createCounter}` : null;
++      const row = {
++        address: created,
++        title: input.text ? input.text.slice(0, 48) : `New Task ${createCounter}`,
++        phase: input.text ? 'running' : 'idle',
++        attention: false,
++        pinned: false,
++        runId,
++        unread: false,
++        eventWatermark: 100 + createCounter,
++        queuedCount: 0,
++        pendingInteraction: null,
++      };
++      tasks.set(`${created.workspacePath}::${created.sessionId}`, row);
++      sourceGeneration = String(Number(sourceGeneration) + 1);
++      createDispatches.push({ scope, input, created });
++      if (deliveryMode === 'confirmed') {
++        activeSessionId = created.sessionId;
++        return { status: 'confirmed', created, selected: created, runId };
++      }
++      if (deliveryMode === 'delivered') {
++        return { status: 'delivered', created, runId };
++      }
++      return { status: 'unconfirmed', created, selected: null };
++    },
++    sendTask: async (target, input) => {
++      const key = `${target.workspacePath}::${target.sessionId}`;
++      const row = tasks.get(key);
++      if (!row) return { status: 'unavailable', reasonCode: 'guard.targetMissing' };
++      sendDispatches.push({ target, input });
++      sourceGeneration = String(Number(sourceGeneration) + 1);
++      if (row.phase !== 'running') {
++        runCounter += 1;
++        const nextRunId = `run-started-${runCounter}`;
++        row.phase = 'running';
++        row.runId = nextRunId;
++        row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++        return { status: 'started', delivery: 'auto', runId: nextRunId, queuedCount: row.queuedCount ?? 0 };
++      }
++      if (input.deliveryMode === 'steer') {
++        row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++        return { status: 'steered', delivery: 'steer', runId: row.runId, queuedCount: row.queuedCount ?? 0 };
++      }
++      row.queuedCount = (row.queuedCount ?? 0) + 1;
++      row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++      return { status: 'queued', delivery: 'queue', runId: row.runId, queuedCount: row.queuedCount };
++    },
++    stopTask: async (target, input) => {
++      const key = `${target.workspacePath}::${target.sessionId}`;
++      const row = tasks.get(key);
++      if (!row) return { status: 'unavailable', reasonCode: 'guard.targetMissing' };
++      if (row.phase !== 'running' || row.runId !== input.expectedRunId) {
++        return { status: 'noop', reasonCode: 'guard.stopTargetChanged' };
++      }
++      stopDispatches.push({ target, input });
++      const stoppedRunId = row.runId;
++      row.phase = 'idle';
++      row.runId = null;
++      row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++      sourceGeneration = String(Number(sourceGeneration) + 1);
++      return { status: 'stopped', runId: stoppedRunId };
++    },
++    resolveTask: async (target, input) => {
++      const key = `${target.workspacePath}::${target.sessionId}`;
++      const row = tasks.get(key);
++      if (!row) return { status: 'unavailable', reasonCode: 'guard.targetMissing' };
++      if (!row.pendingInteraction || row.pendingInteraction.interactionId !== input.interactionId) {
++        return { status: 'noop', reasonCode: 'guard.interactionAlreadyResolved' };
++      }
++      resolveDispatches.push({ target, input });
++      const resolvedId = row.pendingInteraction.interactionId;
++      const resolvedType = row.pendingInteraction.interactionType;
++      row.pendingInteraction = null;
++      row.phase = input.decision === 'reject' || input.decision === 'cancel' ? 'idle' : 'running';
++      row.attention = false;
++      row.eventWatermark = (row.eventWatermark ?? 0) + 1;
++      sourceGeneration = String(Number(sourceGeneration) + 1);
++      return { status: 'resolved', interactionId: resolvedId, interactionType: resolvedType };
++    },
++  });
++
++  const bridge = await startCindyMicroInputNavigationBridge({
++    directory: dir,
++    scopes,
++    ownerEpoch: hashCindyOwnerScopeKey(ownerScope),
++    dispatch: (raw, grant, signal) => dispatch(raw, grant, () => !signal.aborted),
++  });
++
++  t.after(async () => {
++    await bridge.dispose();
++    await rm(dir, { recursive: true, force: true });
++  });
++
++  return {
++    dir,
++    socketPath: bridge.grant.socketPath,
++    grantPath: bridge.grantPath,
++    bridge,
++    tasks,
++    getMetadataReads: () => metadataReads,
++    getDeepLinkDispatches: () => deepLinkDispatches,
++    getCreateDispatches: () => createDispatches,
++    getSendDispatches: () => sendDispatches,
++    getStopDispatches: () => stopDispatches,
++    getResolveDispatches: () => resolveDispatches,
++    setActiveSessionId: (next) => {
++      activeSessionId = next;
++    },
++    setDeliveryMode: (mode) => {
++      deliveryMode = mode;
++    },
++    advanceSourceGeneration: (next) => {
++      sourceGeneration = String(next);
++    },
++    rotateAccount: async (nextOwnerScope, nextSourceGeneration) => {
++      ownerScope = nextOwnerScope;
++      sourceGeneration = String(nextSourceGeneration);
++      await bridge.rotateGrant({
++        ownerEpoch: hashCindyOwnerScopeKey(nextOwnerScope),
++        bumpGeneration: true,
++      });
++    },
++  };
++}
++
++test('lists only explicitly authorized workspaces and never leaks out-of-scope tasks', async (t) => {
++  const fx = await createBridgeFixture(t);
++  const grant = await readGrant(fx.grantPath);
++  assert.equal((await lstat(fx.socketPath)).mode & 0o777, 0o600);
++  assert.equal((await lstat(fx.grantPath)).mode & 0o777, 0o600);
++
++  const listed = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'list',
++    scope: { workspacePath: '/Users/test/Alpha' },
++  });
++
++  assert.equal(listed.status, 'ok');
++  assert.equal(listed.rows.length, 2);
++  assert.deepEqual(
++    listed.rows.map((r) => r.address),
++    [
++      { workspacePath: '/Users/test/Alpha', sessionId: 'sess-alpha-1' },
++      { workspacePath: '/Users/test/Alpha', sessionId: 'sess-alpha-2' },
++    ],
++  );
++  assert.deepEqual(listed.selected, {
++    workspacePath: '/Users/test/Alpha',
++    sessionId: 'sess-alpha-1',
++  });
++  assert.equal(fx.getMetadataReads(), 1);
++});
++
++test('distinguishes same-title tasks and never falls back to a sibling when the target is removed', async (t) => {
++  const fx = await createBridgeFixture(t);
++  const grant = await readGrant(fx.grantPath);
++  const scopeAlpha = { workspacePath: '/Users/test/Alpha' };
++
++  const listed = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'list',
++    scope: scopeAlpha,
++  });
++  assert.equal(listed.status, 'ok');
++
++  const targetAlpha2 = { workspacePath: '/Users/test/Alpha', sessionId: 'sess-alpha-2' };
++  const opened = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'open',
++    scope: scopeAlpha,
++    target: targetAlpha2,
++  });
++  assert.equal(opened.status, 'confirmed');
++  assert.deepEqual(opened.delivered, targetAlpha2);
++  assert.deepEqual(opened.selected, targetAlpha2);
++  assert.equal(opened.deepLink, 'cindy://session/sess-alpha-2');
++
++  // Remove targetAlpha2 while leaving same-title sess-alpha-1 and sess-beta-1 intact.
++  fx.tasks.delete('/Users/test/Alpha::sess-alpha-2');
++  const missing = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'open',
++    scope: scopeAlpha,
++    target: targetAlpha2,
++  });
++  assert.equal(missing.status, 'unavailable');
++  assert.equal(missing.delivered, undefined);
++  assert.equal(missing.selected, undefined);
++});
++
++test('separates delivered (deep link accepted, route commit pending) from confirmed and unconfirmed', async (t) => {
++  const fx = await createBridgeFixture(t);
++  const grant = await readGrant(fx.grantPath);
++  const scopeAlpha = { workspacePath: '/Users/test/Alpha' };
++
++  await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'list',
++    scope: scopeAlpha,
++  });
++  const target = { workspacePath: '/Users/test/Alpha', sessionId: 'sess-alpha-2' };
++
++  fx.setDeliveryMode('delivered');
++  const delivered = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'open',
++    scope: scopeAlpha,
++    target,
++  });
++  assert.equal(delivered.status, 'delivered');
++  assert.deepEqual(delivered.delivered, target);
++  assert.equal(delivered.selected, null);
++  assert.equal(delivered.deepLink, 'cindy://session/sess-alpha-2');
++
++  fx.setDeliveryMode('unconfirmed');
++  const unconfirmed = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'open',
++    scope: scopeAlpha,
++    target,
++  });
++  assert.equal(unconfirmed.status, 'unconfirmed');
++  assert.deepEqual(unconfirmed.delivered, target);
++  assert.equal(unconfirmed.selected, null);
++
++  fx.setDeliveryMode('confirmed');
++  const confirmed = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'open',
++    scope: scopeAlpha,
++    target,
++  });
++  assert.equal(confirmed.status, 'confirmed');
++  assert.deepEqual(confirmed.delivered, target);
++  assert.deepEqual(confirmed.selected, target);
++});
++
++test('invalidates old catalog epochs on sourceGeneration and account/owner rotation', async (t) => {
++  const fx = await createBridgeFixture(t);
++  const grant = await readGrant(fx.grantPath);
++  const scopeAlpha = { workspacePath: '/Users/test/Alpha' };
++  await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'list',
++    scope: scopeAlpha,
++  });
++  const target = { workspacePath: '/Users/test/Alpha', sessionId: 'sess-alpha-1' };
++
++  fx.advanceSourceGeneration(2);
++  const staleSource = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'open',
++    scope: scopeAlpha,
++    target,
++  });
++  assert.equal(staleSource.status, 'stale');
++
++  await fx.rotateAccount('account:user-beta', 10);
++  const staleOwnerAttempt = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'open',
++    scope: scopeAlpha,
++    target,
++  });
++  assert.equal(staleOwnerAttempt.status, 'stale');
++});
++
++test('unauthorized, out-of-scope, and malformed requests perform zero metadata reads', async (t) => {
++  const fx = await createBridgeFixture(t);
++  const grant = await readGrant(fx.grantPath);
++  const beforeReads = fx.getMetadataReads();
++
++  const badToken = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: 'wrong-token-value-123456',
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'list',
++    scope: { workspacePath: '/Users/test/Alpha' },
++  });
++  assert.equal(badToken.status, 'denied');
++
++  const outOfScope = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'list',
++    scope: { workspacePath: '/Users/test/Secret' },
++  });
++  assert.equal(outOfScope.status, 'denied');
++
++  const malformed = await exchange(fx.socketPath, {
++    version: 1,
++    id: 'req-malformed',
++    op: 'list',
++  });
++  assert.equal(malformed.status, 'denied');
++
++  assert.equal(fx.getMetadataReads(), beforeReads);
++});
++
++test('buildVerifiedCindySessionDeepLink round-trips through Cindy deep-link parser', () => {
++  assert.equal(
++    buildVerifiedCindySessionDeepLink('sess-alpha-1'),
++    'cindy://session/sess-alpha-1',
++  );
++  assert.equal(buildVerifiedCindySessionDeepLink(''), null);
++});
++
++test('binds stop to (target, expectedRunId) and selected == target, returning noop on stale runId with zero abort calls', async (t) => {
++  const fx = await createBridgeFixture(t);
++  const grant = await readGrant(fx.grantPath);
++  const scopeAlpha = { workspacePath: '/Users/test/Alpha' };
++  const targetAlpha1 = { workspacePath: '/Users/test/Alpha', sessionId: 'sess-alpha-1' };
++  const targetAlpha2 = { workspacePath: '/Users/test/Alpha', sessionId: 'sess-alpha-2' };
++
++  await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'list',
++    scope: scopeAlpha,
++  });
++
++  // Attempting to stop unselected targetAlpha2 must fail with unconfirmed and zero stop calls.
++  const unselectedStop = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'stop',
++    scope: scopeAlpha,
++    target: targetAlpha2,
++    commandId: 'cmd-stop-unselected',
++    expectedRunId: 'run-alpha-2',
++  });
++  assert.equal(unselectedStop.status, 'unconfirmed');
++  assert.equal(unselectedStop.reasonCode, 'guard.selectionNotCommitted');
++  assert.equal(fx.getStopDispatches().length, 0);
++
++  // Mismatched expectedRunId on selected targetAlpha1 must return noop with zero stop calls.
++  const mismatchedStop = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'stop',
++    scope: scopeAlpha,
++    target: targetAlpha1,
++    commandId: 'cmd-stop-mismatch',
++    expectedRunId: 'run-old-turn-0',
++  });
++  assert.equal(mismatchedStop.status, 'noop');
++  assert.equal(mismatchedStop.reasonCode, 'guard.stopTargetChanged');
++  assert.equal(fx.getStopDispatches().length, 0);
++
++  // Matching expectedRunId stops the run and advances sourceGeneration.
++  const stopped = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'stop',
++    scope: scopeAlpha,
++    target: targetAlpha1,
++    commandId: 'cmd-stop-valid',
++    expectedRunId: 'run-alpha-1',
++  });
++  assert.equal(stopped.status, 'stopped');
++  assert.equal(stopped.runId, 'run-alpha-1');
++  assert.equal(fx.getStopDispatches().length, 1);
++
++  // Re-sending the same commandId is idempotent and does not invoke stopTask a second time.
++  const duplicateStop = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'stop',
++    scope: scopeAlpha,
++    target: targetAlpha1,
++    commandId: 'cmd-stop-valid',
++    expectedRunId: 'run-alpha-1',
++  });
++  assert.equal(duplicateStop.status, 'stopped');
++  assert.equal(duplicateStop.duplicate, true);
++  assert.equal(fx.getStopDispatches().length, 1);
++
++  // New stop command after run is already idle returns noop (guard.notRunning).
++  const stopAfterIdle = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'stop',
++    scope: scopeAlpha,
++    target: targetAlpha1,
++    commandId: 'cmd-stop-after-idle',
++    expectedRunId: 'run-alpha-1',
++  });
++  assert.equal(stopAfterIdle.status, 'noop');
++  assert.equal(stopAfterIdle.reasonCode, 'guard.notRunning');
++  assert.equal(fx.getStopDispatches().length, 1);
++});
++
++test('binds resolve to (target, interactionId, interactionType) and rejects approving a question as permission', async (t) => {
++  const fx = await createBridgeFixture(t);
++  const grant = await readGrant(fx.grantPath);
++  const scopeAlpha = { workspacePath: '/Users/test/Alpha' };
++  const targetAlpha2 = { workspacePath: '/Users/test/Alpha', sessionId: 'sess-alpha-2' };
++
++  await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'list',
++    scope: scopeAlpha,
++  });
++
++  // Select targetAlpha2 first.
++  const opened = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'open',
++    scope: scopeAlpha,
++    target: targetAlpha2,
++  });
++  assert.equal(opened.status, 'confirmed');
++
++  // Approving a question as a permission is rejected before any resolver executes.
++  const questionAsPerm = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'resolve',
++    scope: scopeAlpha,
++    target: targetAlpha2,
++    commandId: 'cmd-resolve-q-as-perm',
++    interactionId: 'perm-alpha-2',
++    interactionType: 'question',
++    decision: 'approve',
++  });
++  assert.equal(questionAsPerm.status, 'interactionTypeMismatch');
++  assert.equal(questionAsPerm.reasonCode, 'guard.questionCannotApproveAsPermission');
++  assert.equal(fx.getResolveDispatches().length, 0);
++
++  // Resolving with a mismatched/expired interactionId returns noop with zero resolver calls.
++  const expiredResolve = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'resolve',
++    scope: scopeAlpha,
++    target: targetAlpha2,
++    commandId: 'cmd-resolve-expired',
++    interactionId: 'perm-expired-0',
++    interactionType: 'permission',
++    decision: 'approve',
++  });
++  assert.equal(expiredResolve.status, 'noop');
++  assert.equal(expiredResolve.reasonCode, 'guard.interactionAlreadyResolved');
++  assert.equal(fx.getResolveDispatches().length, 0);
++
++  // Resolving with the exact interactionId and interactionType succeeds once.
++  const resolved = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'resolve',
++    scope: scopeAlpha,
++    target: targetAlpha2,
++    commandId: 'cmd-resolve-valid',
++    interactionId: 'perm-alpha-2',
++    interactionType: 'permission',
++    decision: 'approve',
++  });
++  assert.equal(resolved.status, 'resolved');
++  assert.equal(resolved.interactionId, 'perm-alpha-2');
++  assert.equal(resolved.interactionType, 'permission');
++  assert.equal(fx.getResolveDispatches().length, 1);
++
++  // A new commandId trying to resolve the now-cleared interactionId returns noop.
++  const secondResolve = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'resolve',
++    scope: scopeAlpha,
++    target: targetAlpha2,
++    commandId: 'cmd-resolve-second',
++    interactionId: 'perm-alpha-2',
++    interactionType: 'permission',
++    decision: 'approve',
++  });
++  assert.equal(secondResolve.status, 'noop');
++  assert.equal(secondResolve.reasonCode, 'guard.interactionAlreadyResolved');
++  assert.equal(fx.getResolveDispatches().length, 1);
++});
++
++test('supports workspace-bound create, target-bound send (started/steered/queued), and query reconciliation', async (t) => {
++  const fx = await createBridgeFixture(t);
++  const grant = await readGrant(fx.grantPath);
++  const scopeBeta = { workspacePath: '/Users/test/Beta' };
++  const targetBeta1 = { workspacePath: '/Users/test/Beta', sessionId: 'sess-beta-1' };
++
++  await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'list',
++    scope: scopeBeta,
++  });
++
++  // Select targetBeta1 first.
++  const opened = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'open',
++    scope: scopeBeta,
++    target: targetBeta1,
++  });
++  assert.equal(opened.status, 'confirmed');
++
++  // Steer on idle session is rejected with denied (guard.steerRequiresRunningTurn).
++  const steerOnIdle = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'send',
++    scope: scopeBeta,
++    target: targetBeta1,
++    commandId: 'cmd-steer-idle',
++    text: 'Try steering idle session',
++    deliveryMode: 'steer',
++  });
++  assert.equal(steerOnIdle.status, 'denied');
++  assert.equal(steerOnIdle.reasonCode, 'guard.steerRequiresRunningTurn');
++  assert.equal(fx.getSendDispatches().length, 0);
++
++  // Send on idle session starts a turn.
++  const started = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'send',
++    scope: scopeBeta,
++    target: targetBeta1,
++    commandId: 'cmd-send-start',
++    text: 'Start investigating Beta',
++    deliveryMode: 'auto',
++  });
++  assert.equal(started.status, 'started');
++  assert.equal(started.delivery, 'auto');
++  assert.ok(started.runId);
++  assert.equal(fx.getSendDispatches().length, 1);
++
++  // Querying the completed commandId reconciles the exact outcome with duplicate: true.
++  const queried = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'query',
++    scope: scopeBeta,
++    target: targetBeta1,
++    commandId: 'cmd-send-start',
++  });
++  assert.equal(queried.status, 'started');
++  assert.equal(queried.duplicate, true);
++  assert.equal(queried.runId, started.runId);
++
++  // Steer on running session steers the active turn.
++  const steered = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'send',
++    scope: scopeBeta,
++    target: targetBeta1,
++    commandId: 'cmd-send-steer',
++    text: 'Focus on the root cause first',
++    deliveryMode: 'steer',
++  });
++  assert.equal(steered.status, 'steered');
++  assert.equal(steered.delivery, 'steer');
++  assert.equal(steered.runId, started.runId);
++
++  // Queue on running session queues a follow-up.
++  const queued = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'send',
++    scope: scopeBeta,
++    target: targetBeta1,
++    commandId: 'cmd-send-queue',
++    text: 'Run tests after the fix',
++    deliveryMode: 'queue',
++  });
++  assert.equal(queued.status, 'queued');
++  assert.equal(queued.delivery, 'queue');
++  assert.equal(queued.queuedCount, 1);
++
++  // Create a new task in Beta workspace and confirm selected == created.
++  const created = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'create',
++    scope: scopeBeta,
++    commandId: 'cmd-create-beta-2',
++    text: 'Fresh task in Beta',
++  });
++  assert.equal(created.status, 'confirmed');
++  assert.deepEqual(created.delivered, {
++    workspacePath: '/Users/test/Beta',
++    sessionId: 'sess-created-1',
++  });
++  assert.deepEqual(created.selected, created.delivered);
++  assert.equal(fx.getCreateDispatches().length, 1);
++
++  // Deleting the target and attempting send returns unavailable without creating or redirecting.
++  fx.tasks.delete('/Users/test/Beta::sess-created-1');
++  const sendDeleted = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'send',
++    scope: scopeBeta,
++    target: { workspacePath: '/Users/test/Beta', sessionId: 'sess-created-1' },
++    commandId: 'cmd-send-deleted',
++    text: 'Must not create or redirect',
++    deliveryMode: 'auto',
++  });
++  assert.equal(sendDeleted.status, 'unavailable');
++  assert.equal(fx.getCreateDispatches().length, 1);
++  assert.equal(fx.getSendDispatches().length, 3);
++});
++
++test('preserves native unread tri-state (true, false, null) without fabricating unread from completed phase', async (t) => {
++  const fx = await createBridgeFixture(t, {
++    initialTasks: [
++      {
++        address: { workspacePath: '/Users/test/Alpha', sessionId: 'sess-completed-read' },
++        title: 'Completed Already Read',
++        phase: 'completed',
++        attention: false,
++        pinned: false,
++        unread: false,
++        eventWatermark: 10,
++      },
++      {
++        address: { workspacePath: '/Users/test/Alpha', sessionId: 'sess-completed-unknown' },
++        title: 'Completed Without Unread Source',
++        phase: 'completed',
++        attention: false,
++        pinned: false,
++        unread: null,
++        eventWatermark: 11,
++      },
++      {
++        address: { workspacePath: '/Users/test/Alpha', sessionId: 'sess-completed-unread' },
++        title: 'Completed With Unread Attention',
++        phase: 'completed',
++        attention: true,
++        pinned: false,
++        unread: true,
++        eventWatermark: 12,
++      },
++    ],
++  });
++  const grant = await readGrant(fx.grantPath);
++  const listed = await exchange(fx.socketPath, {
++    version: 1,
++    id: randomUUID(),
++    token: grant.token,
++    instanceId: grant.instanceId,
++    generation: grant.generation,
++    ownerEpoch: grant.ownerEpoch,
++    op: 'list',
++    scope: { workspacePath: '/Users/test/Alpha' },
++  });
++  assert.equal(listed.status, 'ok');
++  assert.deepEqual(
++    listed.rows.map((r) => ({ id: r.address.sessionId, phase: r.phase, unread: r.unread, attention: r.attention })),
++    [
++      { id: 'sess-completed-read', phase: 'completed', unread: false, attention: false },
++      { id: 'sess-completed-unknown', phase: 'completed', unread: null, attention: false },
++      { id: 'sess-completed-unread', phase: 'completed', unread: true, attention: true },
++    ],
++  );
++});
+diff --git a/scripts/test-micro-input-ownership.mjs b/scripts/test-micro-input-ownership.mjs
+new file mode 100644
+index 0000000000..f179e9c1ba
+--- /dev/null
++++ b/scripts/test-micro-input-ownership.mjs
+@@ -0,0 +1,203 @@
++// Integration tier: the production UDS endpoint must never turn a missing drain ACK into release.
++// Existing controller unit tests do not cover this new cross-process protocol boundary.
++import assert from 'node:assert/strict';
++import { randomUUID } from 'node:crypto';
++import { chmod, lstat, mkdir, mkdtemp, rm } from 'node:fs/promises';
++import net from 'node:net';
++import { spawn } from 'node:child_process';
++import { once } from 'node:events';
++import path from 'node:path';
++import { test } from 'node:test';
++import { createMicroInputOwnershipCoordinator, readMicroInputOwnershipFence, startMicroInputOwnershipBridge } from '../apps/desktop/src/main/worklouder-codex/microInputOwnership.ts';
++
++const testRoot = path.resolve(process.env.MI_OWNERSHIP_TEST_ROOT ?? '../socket-tests');
++await mkdir(testRoot, { recursive: true, mode: 0o700 });
++const request = (overrides = {}) => ({ version: 1, requestId: randomUUID(), clientInstance: randomUUID(),
++  generation: 1, desiredOwner: 'native', microDrained: true, ...overrides });
++
++async function exchange(socketPath, value) {
++  return await new Promise((resolve, reject) => {
++    const socket = net.createConnection(socketPath);
++    let bytes = '';
++    socket.setEncoding('utf8');
++    socket.on('connect', () => socket.write(typeof value === 'string' ? value : `${JSON.stringify(value)}\n`));
++    socket.on('data', (data) => { bytes += data; });
++    socket.once('end', () => resolve(bytes ? JSON.parse(bytes) : null));
++    socket.once('error', reject);
++    socket.once('close', () => { if (!bytes) resolve(null); });
++  });
++}
++
++async function fixture(t, readNativeActive = () => true, hooks = undefined) {
++  const dir = await mkdtemp(path.join(testRoot, 'run-'));
++  const socketPath = path.join(dir, 'owner.sock');
++  const server = await startMicroInputOwnershipBridge({ socketPath, readNativeActive, hooks });
++  t.after(async () => { await server.close(); await rm(dir, { recursive: true, force: true }); });
++  return { socketPath, server };
++}
++
++test('active native handshake echoes request identity and updates generation from real reader state', async (t) => {
++  let active = true;
++  const { socketPath } = await fixture(t, () => active);
++  const q = request();
++  const first = await exchange(socketPath, q);
++  assert.equal(first.state, 'native');
++  for (const key of ['version', 'requestId', 'clientInstance', 'generation']) assert.equal(first[key], q[key]);
++  active = false;
++  const second = await exchange(socketPath, request());
++  assert.equal(second.state, 'unknown');
++  assert.equal(second.nativeInstance, first.nativeInstance);
++  assert.ok(second.nativeGeneration > first.nativeGeneration);
++  assert.equal(second.reason, 'native_state_unconfirmed');
++  assert.equal((await lstat(socketPath)).mode & 0o777, 0o600);
++});
++
++test('release request never claims drained or releases; duplicate requests remain harmless', async (t) => {
++  const { socketPath } = await fixture(t);
++  const q = request({ desiredOwner: 'micro-input' });
++  for (let i = 0; i < 2; i++) {
++    const result = await exchange(socketPath, q);
++    assert.equal(result.state, 'unknown');
++    assert.equal(result.reason, 'release_drain_unavailable');
++    assert.deepEqual(result.capabilities, []);
++    for (const key of ['inputDrained', 'pttDrained', 'lightingDrained']) assert.equal(result[key], false);
++  }
++});
++
++test('malformed, oversized, multiplexed and unknown-version requests never read native state', async (t) => {
++  let reads = 0;
++  const { socketPath } = await fixture(t, () => { reads++; return true; });
++  for (const q of [request({ version: 2 }), request({ generation: -1 }), request({ generation: 1.5 }),
++    request({ clientInstance: 'not-a-uuid' }), request({ unrecognized: true }), 'x'.repeat(4_097),
++    `${JSON.stringify(request())}\n${JSON.stringify(request())}\n`]) {
++    assert.equal(await exchange(socketPath, q), null);
++  }
++  assert.equal(reads, 0);
++});
++
++test('second bridge cannot replace a live endpoint; close removes endpoint and restart changes identity', async (t) => {
++  const { socketPath, server } = await fixture(t);
++  const first = await exchange(socketPath, request());
++  await assert.rejects(startMicroInputOwnershipBridge({ socketPath, readNativeActive: () => false }), { code: 'EADDRINUSE' });
++  assert.equal((await exchange(socketPath, request())).nativeInstance, first.nativeInstance);
++  await server.close();
++  await assert.rejects(lstat(socketPath), { code: 'ENOENT' });
++  const second = await startMicroInputOwnershipBridge({ socketPath, readNativeActive: () => true });
++  t.after(() => second.close());
++  assert.notEqual((await exchange(socketPath, request())).nativeInstance, first.nativeInstance);
++});
++
++test('untrusted writable endpoint directory is rejected before opening socket', async (t) => {
++  const dir = await mkdtemp(path.join(testRoot, 'untrusted-'));
++  t.after(() => rm(dir, { recursive: true, force: true }));
++  await chmod(dir, 0o777);
++  await assert.rejects(startMicroInputOwnershipBridge({ socketPath: path.join(dir, 'owner.sock'), readNativeActive: () => true }),
++    /ownership_endpoint_directory_untrusted/);
++});
++
++
++test('only completed native drains grant release; owner fence survives restart and blocks foreign takeover', async (t) => {
++  let nativeActive = true;
++  let resumed = 0;
++  const hooks = { quiesce: async () => { nativeActive = false; return { inputDrained: true, pttDrained: true, lightingDrained: true }; },
++    resume: async () => { resumed++; nativeActive = true; return true; } };
++  const { socketPath, server } = await fixture(t, () => nativeActive, hooks);
++  const q = request({ desiredOwner: 'micro-input' });
++  const released = await exchange(socketPath, q);
++  assert.equal(released.state, 'released');
++  assert.deepEqual(released.capabilities, ['fenced-release-v1']);
++  assert.deepEqual(readMicroInputOwnershipFence(socketPath), { clientInstance: q.clientInstance, generation: q.generation });
++  assert.equal((await lstat(`${socketPath}.fence`)).mode & 0o777, 0o600);
++  const unconfirmed = await exchange(socketPath, { ...q, requestId: randomUUID(), desiredOwner: 'native', microDrained: false, generation: 2 });
++  assert.equal(unconfirmed.state, 'unknown'); assert.equal(resumed, 0);
++  await server.close();
++  const restarted = await startMicroInputOwnershipBridge({ socketPath, readNativeActive: () => nativeActive, hooks });
++  t.after(() => restarted.close());
++  const foreign = await exchange(socketPath, request({ desiredOwner: 'native', generation: 3 }));
++  assert.equal(foreign.state, 'unknown'); assert.equal(resumed, 0);
++  const native = await exchange(socketPath, { ...q, requestId: randomUUID(), desiredOwner: 'native', microDrained: true, generation: 3 });
++  assert.equal(native.state, 'native'); assert.equal(resumed, 1);
++  assert.equal(readMicroInputOwnershipFence(socketPath), null);
++});
++
++test('a late native drain cannot release a newer client generation and failed drain keeps fence', async (t) => {
++  const dir = await mkdtemp(path.join(testRoot, 'race-'));
++  t.after(() => rm(dir, { recursive: true, force: true }));
++  const socketPath = path.join(dir, 'owner.sock');
++  let finish; let entered;
++  const started = new Promise((resolve) => { entered = resolve; });
++  const handler = createMicroInputOwnershipCoordinator(socketPath, () => false, {
++    quiesce: () => { entered(); return new Promise((resolve) => { finish = resolve; }); },
++    resume: async () => true,
++  });
++  const q = request({ desiredOwner: 'micro-input' });
++  const old = handler(q); await started;
++  const newer = handler({ ...q, desiredOwner: 'native', generation: 2, microDrained: false });
++  finish({ inputDrained: true, pttDrained: true, lightingDrained: true });
++  assert.equal((await old).state, 'unknown');
++  assert.equal((await newer).reason, 'micro_drain_unconfirmed');
++  assert.notEqual(readMicroInputOwnershipFence(socketPath), null);
++});
++
++test('owned existing 0755 directory is tightened before exposing the endpoint', async (t) => {
++  const dir = await mkdtemp(path.join(testRoot, 'permissions-'));
++  await chmod(dir, 0o755);
++  const server = await startMicroInputOwnershipBridge({ socketPath: path.join(dir, 'owner.sock'), readNativeActive: () => false });
++  t.after(async () => { await server.close(); await rm(dir, { recursive: true, force: true }); });
++  assert.equal((await lstat(dir)).mode & 0o777, 0o700);
++});
++
++test('release renewal preserves generation and does not restart drains or reject a later client after return', async (t) => {
++  const dir = await mkdtemp(path.join(testRoot, 'renew-'));
++  t.after(() => rm(dir, { recursive: true, force: true }));
++  let drains = 0;
++  let fenced = false;
++  const handler = createMicroInputOwnershipCoordinator(path.join(dir, 'owner.sock'), () => !fenced, {
++    quiesce: async () => { drains++; fenced = true; return { inputDrained: true, pttDrained: true, lightingDrained: true }; },
++    resume: async () => { fenced = false; return true; },
++    stillFenced: () => fenced,
++  });
++  const q = request({ desiredOwner: 'micro-input' });
++  const first = await handler(q);
++  const renewed = await handler({ ...q, requestId: randomUUID(), microDrained: false });
++  assert.equal(renewed.state, 'released');
++  assert.equal(renewed.nativeGeneration, first.nativeGeneration); assert.equal(drains, 1);
++  assert.equal((await handler({ ...q, generation: 2, desiredOwner: 'native' })).state, 'native');
++  assert.equal((await handler(q)).state, 'unknown');
++  const next = await handler(request({ desiredOwner: 'micro-input' }));
++  assert.equal(next.state, 'released'); assert.equal(drains, 2);
++});
++
++
++test('a crashed owned socket remains unknown and keeps its persistent owner fence', async (t) => {
++  const dir = await mkdtemp(path.join(testRoot, 'crash-'));
++  t.after(() => rm(dir, { recursive: true, force: true }));
++  const socketPath = path.join(dir, 'owner.sock');
++  const fenceHandler = createMicroInputOwnershipCoordinator(socketPath, () => false, {
++    quiesce: async () => ({ inputDrained: true, pttDrained: true, lightingDrained: true }),
++    resume: async () => false,
++  });
++  const owner = request({ desiredOwner: 'micro-input' });
++  assert.equal((await fenceHandler(owner)).state, 'released');
++  const originalFence = readMicroInputOwnershipFence(socketPath);
++  const child = spawn(process.execPath, ['-e', `const net=require('net'),fs=require('fs');const s=net.createServer();s.listen(process.argv[1],()=>{fs.chmodSync(process.argv[1],0o600);process.stdout.write('ready')});setTimeout(()=>process.exit(),5000)`, socketPath], { stdio: ['ignore', 'pipe', 'pipe'] });
++  t.after(() => child.kill('SIGKILL'));
++  await once(child.stdout, 'data');
++  const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited;
++  assert.equal((await lstat(socketPath)).isSocket(), true);
++  await assert.rejects(startMicroInputOwnershipBridge({ socketPath, readNativeActive: () => false }), { code: 'EADDRINUSE' });
++  assert.equal((await lstat(socketPath)).isSocket(), true);
++  assert.deepEqual(readMicroInputOwnershipFence(socketPath), originalFence);
++});
++
++
++test('concurrent bridge starts never create two active owners', async (t) => {
++  const dir = await mkdtemp(path.join(testRoot, 'leaders-'));
++  t.after(() => rm(dir, { recursive: true, force: true }));
++  const socketPath = path.join(dir, 'owner.sock');
++  const starts = await Promise.allSettled(Array.from({ length: 8 }, () => startMicroInputOwnershipBridge({ socketPath, readNativeActive: () => true })));
++  const active = starts.filter((result) => result.status === 'fulfilled');
++  for (const result of active) t.after(() => result.value.close());
++  assert.equal(active.length, 1);
++  assert.equal((await exchange(socketPath, request())).state, 'native');
++});

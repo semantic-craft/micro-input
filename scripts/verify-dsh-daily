@@ -16,8 +16,6 @@ import socket
 import time
 import uuid
 
-WS_HOME = "/Users/xianweizhang"
-
 
 class Bridge:
     """The DSH bridge serves one request per connection; the subscription id
