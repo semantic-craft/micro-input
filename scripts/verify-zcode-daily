@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Slice P daily-acceptance driver: two real ZCode sessions through the
+patched full-window dev desktop bridge (navigate / send / stop / resolve /
+status), including late-stop noop and unauthorized-rejection guards.
+
+Usage:
+  scripts/verify-zcode-daily --run-dir <dir> [--result <path>]
+"""
+import argparse
+import json
+from pathlib import Path
+import socket
+import subprocess
+import time
+import uuid
+
+PROMPT_A = "你是 Micro Input Slice P 验收会话 A。请只回复一行：MI-P-ZCODE-A-OK"
+PROMPT_B = "你是 Micro Input Slice P 验收会话 B。请先运行命令 `sleep 60`，再回复 MI-P-ZCODE-B-DONE"
+
+
+class Bridge:
+    def __init__(self, run_dir: Path):
+        self.grant = json.loads((run_dir / "zcode-grant.json").read_text())
+        self.scope = self.grant["scopes"][0]
+
+    def call(self, op, **extra):
+        req = dict(
+            version=1,
+            id=str(uuid.uuid4()),
+            token=self.grant["token"],
+            instanceId=self.grant["instanceId"],
+            generation=self.grant["generation"],
+            op=op,
+            scope=self.scope,
+            **extra,
+        )
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(120)
+            sock.connect(self.grant["socketPath"])
+            sock.sendall(json.dumps(req).encode() + b"\n")
+            data = b""
+            while b"\n" not in data:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    raise RuntimeError("bridge closed connection")
+                data += chunk
+        return json.loads(data.split(b"\n", 1)[0])
+
+
+def row_by_id(reply, task_id):
+    for row in reply.get("rows") or []:
+        addr = row.get("address") or {}
+        if addr.get("taskId") == task_id:
+            return row
+    return None
+
+
+def wait_row(bridge, task_id, pred, timeout=240):
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        reply = bridge.call("list")
+        row = row_by_id(reply, task_id)
+        if row is not None:
+            last = row
+            if pred(row):
+                return row
+        time.sleep(3)
+    return last
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--result", default=None, type=Path)
+    args = parser.parse_args()
+    checks = {}
+    bridge = Bridge(args.run_dir)
+
+    create_a = bridge.call("create", commandId="mi-p-a-" + uuid.uuid4().hex[:8], clientId="micro-input-driver", text=PROMPT_A)
+    checks["create_a"] = create_a.get("status")
+    addr_a = (create_a.get("selected") or {}).get("taskId") if create_a.get("status") == "confirmed" else None
+    create_b = bridge.call("create", commandId="mi-p-b-" + uuid.uuid4().hex[:8], clientId="micro-input-driver", text=PROMPT_B)
+    checks["create_b"] = create_b.get("status")
+    addr_b = (create_b.get("selected") or {}).get("taskId") if create_b.get("status") == "confirmed" else None
+
+    # navigation: open A then B, both must read back selected exactly
+    if addr_a and addr_b:
+        open_a = bridge.call("open", target={"workspacePath": bridge.scope["workspacePath"], "taskId": addr_a})
+        checks["open_a"] = open_a.get("status")
+        open_b = bridge.call("open", target={"workspacePath": bridge.scope["workspacePath"], "taskId": addr_b})
+        checks["open_b"] = open_b.get("status")
+        checks["navigation_confirmed"] = open_a.get("status") == "confirmed" and open_b.get("status") == "confirmed"
+    else:
+        checks["navigation_confirmed"] = False
+
+    # send on B: long-running command session, then stop with its execution id
+    target_b = {"workspacePath": bridge.scope["workspacePath"], "taskId": addr_b} if addr_b else None
+    if target_b:
+        send_b = bridge.call("send", target=target_b, commandId="mi-p-send-b-" + uuid.uuid4().hex[:8],
+                             clientId="micro-input-driver", text=PROMPT_B)
+        checks["send_b"] = {"status": send_b.get("status"), "delivery": send_b.get("delivery")}
+        dup_b = bridge.call("send", target=target_b, commandId=send_b.get("commandId") or "dup",
+                            clientId="micro-input-driver", text="dup")
+        checks["send_b_duplicate"] = dup_b.get("duplicate") is True
+
+        row_b = wait_row(bridge, addr_b, lambda r: r.get("liveStatus") == "running" or (r.get("executionId")), timeout=240)
+        checks["status_b_running_seen"] = bool(row_b and (row_b.get("liveStatus") == "running" or row_b.get("executionId")))
+        exec_id = (row_b or {}).get("executionId")
+        if exec_id:
+            stop_b = bridge.call("stop", target=target_b, commandId="mi-p-stop-b-" + uuid.uuid4().hex[:8],
+                                 clientId="micro-input-driver", executionId=exec_id)
+            checks["stop_b"] = stop_b.get("status")
+            # late stop with the same (now finished) execution id must be a noop
+            late = bridge.call("stop", target=target_b, commandId="mi-p-stop-late-" + uuid.uuid4().hex[:8],
+                               clientId="micro-input-driver", executionId=exec_id)
+            checks["stop_late_noop"] = late.get("status") == "noop" and late.get("reasonCode") == "guard.stopTargetChanged"
+        else:
+            checks["stop_b"] = "no-execution-id"
+            checks["stop_late_noop"] = False
+
+        # resolve guard: re-select B, then approving a fabricated interaction id
+        # must be a noop / refused with zero misapproval.
+        bridge.call("open", target=target_b)
+        time.sleep(1)
+        resolve_stale = bridge.call("resolve", target=target_b, commandId="mi-p-res-stale-" + uuid.uuid4().hex[:8],
+                                    clientId="micro-input-driver",
+                                    interactionId="stale-0000", interactionType="permission", decision="approve")
+        checks["resolve_stale_reply"] = {"status": resolve_stale.get("status"), "reasonCode": resolve_stale.get("reasonCode")}
+        checks["resolve_stale_noop"] = resolve_stale.get("status") in ("noop", "unavailable", "unconfirmed")
+
+    # status feedback: session A settles back to idle after its reply
+    if addr_a:
+        row_a = wait_row(bridge, addr_a, lambda r: r.get("liveStatus") in ("idle", "completed"), timeout=300)
+        checks["status_a_settled"] = bool(row_a and row_a.get("liveStatus") in ("idle", "completed"))
+
+    # unauthorized rejection with a bad token
+    bad_req = dict(version=1, id=str(uuid.uuid4()), token="x" * 64, instanceId=bridge.grant["instanceId"],
+                   generation=bridge.grant["generation"], op="list", scope=bridge.scope)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(10)
+        sock.connect(bridge.grant["socketPath"])
+        sock.sendall(json.dumps(bad_req).encode() + b"\n")
+        data = b""
+        while b"\n" not in data:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    bad_reply = json.loads(data.split(b"\n", 1)[0]) if data else {}
+    checks["unauthorized_denied"] = bad_reply.get("status") in ("denied", "stale") and not bad_reply.get("rows")
+
+    evidence = {"app": "zcode", "layer": "installed-dev-window", "checks": checks,
+                "session_a": addr_a, "session_b": addr_b,
+                "physical_key": "NOT_RUN",
+                "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"],
+                                                   cwd=Path(__file__).resolve().parent.parent, text=True).strip()}
+    ok = (checks.get("create_a") == "confirmed" and checks.get("create_b") == "confirmed"
+          and checks.get("navigation_confirmed")
+          and checks.get("send_b", {}).get("status") in ("confirmed", "sent", "queued", "steered")
+          and checks.get("send_b_duplicate")
+          and checks.get("status_b_running_seen")
+          and checks.get("stop_b") == "stopped"
+          and checks.get("stop_late_noop")
+          and checks.get("resolve_stale_noop")
+          and checks.get("status_a_settled")
+          and checks.get("unauthorized_denied"))
+    evidence["status"] = "PASS" if ok else "FAIL"
+    out = args.result or (args.run_dir / "result.json")
+    out.write_text(json.dumps(evidence, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(json.dumps(evidence, indent=2, ensure_ascii=False))
+    raise SystemExit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    main()
