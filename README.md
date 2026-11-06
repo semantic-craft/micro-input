@@ -20,7 +20,7 @@ scripts/run --verify   # 独立QA标识/文档，10分钟自动退出并回收�
 
 系统睡眠通知会立即使旧会话和待完成结果失效，取消请求并关闭输入订阅，保留本地草稿及会话内撤销历史；旧快照标为过期。唤醒等待旧会话关闭，只在用户此前已开启 USB 发现时刷新描述符；设备选择清空，连接、身份和配置仍须明确重新操作。观察者随应用退出注销。此路径已通过合成通知与真实 UniFFI 回归，真实睡眠/唤醒、锁屏/解锁、读取中物理拔插及原映射行为仍待验收，见[E-096](docs/spec/EVIDENCE.md)。
 
-输入监视支持候选绑定观察（`subscribe_input`）与已核实宿主路由流（`subscribe_verified_input`）：在固件 0.6.3 硬件透传层（`AG00–AG18`）就绪时，`VerifiedInputDecoder` 按实机核验映射第 0 行按键（左键 `AG00` → `logical-0`，右键 `AG01` → `logical-1`）与摇杆 4 扇区偏移（`AG15–AG18` → `logical-16–logical-19`），并由 `WideKeyMerger` 将底部 2U 宽键双微动（`AG10` + `AG11`）按位掩码合并为单次触发。菜单栏与工作台支持启用 Mac 宿主动作执行、安装八套桌面 Agent 预设（Cindy、Codex、千问办公、ZCode、Antigravity、DSH、Qoder CN、Herdr App）及零 Flash 写入切换 `host_active_profile_id`，详见[宿主动作执行与 Coding Agent 预设架构](docs/designs/host-execution-and-agent-presets.md)与 [E-098](docs/spec/EVIDENCE.md)。
+输入监视支持候选绑定观察（`subscribe_input`）与已核实宿主路由流（`subscribe_verified_input`）：在固件 0.6.3 硬件透传层（`AG00–AG18`）就绪时，`VerifiedInputDecoder` 按实机核验映射第 0 行按键（左键 `AG00` → `logical-0`，右键 `AG01` → `logical-1`）与摇杆 4 扇区偏移（`AG15–AG18` → `logical-16–logical-19`），并由 `WideKeyMerger` 将底部 2U 宽键双微动（`AG10` + `AG11`）按位掩码合并为单次触发。菜单栏与工作台支持启用 Mac 宿主动作执行、安装七套桌面 Agent 预设（Cindy、Codex、千问办公、ZCode、Antigravity、DSH、Herdr App）及零 Flash 写入切换 `host_active_profile_id`，详见[宿主动作执行与 Coding Agent 预设架构](docs/designs/host-execution-and-agent-presets.md)与 [E-098](docs/spec/EVIDENCE.md)。
 
 旋钮三个逻辑槽位可独立分配本地动作；摇杆可选择保留来源模式或编辑本地逻辑扇区。减少活动扇区或切换模式不会删除旧槽位及绑定，未知物理方向继续标识；0–32 是本机编辑器限制，不是设备容量。保存、撤销/重做和重开沿用本地文档服务。见[控件编辑契约](docs/implementation-plan.md#t10-本地控件编辑契约)。
 
@@ -98,7 +98,7 @@ Slice K2 已接通桌面版 DSH 受控会话新建（`create`，绑定工作区�
 
 ### 桌面 Agent 常用控制
 
-七个对话型 Agent 共用位置：01 打开、02 聚焦输入、03 搜索、04 新任务（应用提供时）、05 模型菜单、06 思考力度入口、07 听写、08 内置浏览器、09 终端面板。操作绑定应用标识，通过当前窗口原生控件或已核对快捷键执行；未提供的功能会返回明确提示。模型和力度键打开菜单供用户选择，不自动更改模型。Qoder CN 与千问办公当前没有单独的力度入口；千问办公“标准／高级”属于模型档位。听写必须确认录音状态变化才记录成功，且不发送消息。
+六个对话型 Agent 共用位置：01 打开、02 聚焦输入、03 搜索、04 新任务（应用提供时）、05 模型菜单、06 思考力度入口、07 听写、08 内置浏览器、09 终端面板。操作绑定应用标识，通过当前窗口原生控件或已核对快捷键执行；未提供的功能会返回明确提示。模型和力度键打开菜单供用户选择，不自动更改模型。千问办公当前没有单独的力度入口；千问办公“标准／高级”属于模型档位。听写必须确认录音状态变化才记录成功，且不发送消息。
 
 Herdr Profile 面向 `dev.herdr.app` 桌面 App：01 打开、02 Space/Tab 选择器、03 命令搜索、04 新 Space、05 新 Tab、06/07 右/下分屏、08/09 前后 Space、10/11 前后 Tab、13 面板缩放；旋钮按压切换侧栏，摇杆四向移动面板焦点。新 Space、Tab、分屏会创建终端。依据本机 `~/.config/herdr-app/keys.json` 与 [Herdr App 官方说明](https://herdr.dev/)；用户重绑 Herdr 快捷键后需同步修改 Profile。它与 Herdr TUI 的会话和 CLI 不通用。
 
@@ -114,7 +114,7 @@ H0/H1 独立验收执行器已接线：`scripts/hardware-acceptance` 默认只�
 
 ## 按住说话
 
-重新安装常用 Agent 预设后，未修改的 Cindy、Codex、千问办公、Antigravity 和 Qoder CN 预设将听写键升级为“按住说话 · 松开停止”。按键按下时确认原应用的录音状态，松开时只停止本次启动的听写，不自动发送。原有用户自定义动作不会被预设升级覆盖；`dictation` 仍表示点击切换，`push-to-talk` 表示实体按住手势。工作台“试运行”保留点击切换行为。
+重新安装常用 Agent 预设后，未修改的 Cindy、Codex、千问办公、ZCode、Antigravity 和 DSH 预设将听写键升级为“按住说话 · 松开停止”。按键按下时确认原应用的录音状态，松开时只停止本次启动的听写，不自动发送。原有用户自定义动作不会被预设升级覆盖；`dictation` 仍表示点击切换，`push-to-talk` 表示实体按住手势。工作台“试运行”保留点击切换行为。
 
 宽键复用已验证输入流的合并结果，最后一个微动开关释放才结束手势。切换配置、修改草稿、暂停输入、输入流缺口、队列溢出、切到其他应用、断连、睡眠和退出都会结束当前手势。最长按住时间为 120 秒；开始和停止各有 8 秒等待上限。超时不代表原应用没有执行操作，迟到启动仍只清理原目标。
 

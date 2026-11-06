@@ -16,7 +16,6 @@ struct DesktopAgent: Identifiable {
         .init(name: "ZCode", bundleID: "dev.zcode.app", symbol: "chevron.left.forwardslash.chevron.right", capabilities: "打开应用、新建任务、搜索、定位输入框、旋钮滚动对话"),
         .init(name: "Antigravity", bundleID: "com.google.antigravity", symbol: "sparkles", capabilities: "打开应用、新建对话、搜索、定位输入框、旋钮滚动对话"),
         .init(name: "DeepSeek Coder (DSH)", bundleID: "com.deepseek.dsh", symbol: "terminal", capabilities: "打开应用、新建对话、搜索、定位输入框、旋钮滚动对话"),
-        .init(name: "Qoder CN", bundleID: "com.qodercn.app", symbol: "q.circle", capabilities: "打开应用、新建任务、搜索、定位输入框、旋钮滚动对话"),
         .init(name: "Herdr", bundleID: "dev.herdr.app", symbol: "rectangle.split.2x2", capabilities: "工作区切换、标签页、分屏与面板导航")
     ]
     // Stored profile names remain stable so existing mappings and favorites survive.
@@ -37,7 +36,6 @@ struct DesktopAgent: Identifiable {
         case "ZCode": return "zcode"
         case "Antigravity": return "antigravity"
         case "DeepSeek Coder (DSH)", "DSH", "DeepSeek Harness", "Deepseek Harness": return "dsh-desktop"
-        case "Qoder CN": return "qoder-cn"
         default: return nil
         }
     }
@@ -50,7 +48,7 @@ struct DesktopAgent: Identifiable {
 // Restrict AX actions to one focused window in an allowlisted app. Never pick the
 // first of multiple editors, send text, or invoke approval controls.
 @MainActor enum DesktopAgentControls {
-    static let bundles = ["codex": "com.openai.codex", "cindy": "com.xd.cindy", "qwenwork": "cn.qwenwork.desktop.mac", "zcode": "dev.zcode.app", "antigravity": "com.google.antigravity", "dsh-desktop": "com.deepseek.dsh", "dsh": "com.deepseek.dsh", "qoder-cn": "com.qodercn.app"]
+    static let bundles = ["codex": "com.openai.codex", "cindy": "com.xd.cindy", "qwenwork": "cn.qwenwork.desktop.mac", "zcode": "dev.zcode.app", "antigravity": "com.google.antigravity", "dsh-desktop": "com.deepseek.dsh", "dsh": "com.deepseek.dsh"]
     static func attribute(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, key as CFString, &value) == .success else { return nil }
@@ -59,7 +57,7 @@ struct DesktopAgent: Identifiable {
     static func perform(adapter: String, command: String, revealTools: Bool = true) async -> (Bool, String) {
         guard let bundle = bundles[adapter], ["focus-input", "search", "new-chat", "model", "effort", "dictation", "browser", "terminal", "reveal-tools", "voice-reply", "toggle-voice-reply"].contains(command),
               !(adapter == "qwenwork" && command == "search"),
-              command != "new-chat" || ["antigravity", "dsh-desktop", "qoder-cn"].contains(adapter) else { return (false, "未接入的应用操作") }
+              command != "new-chat" || ["antigravity", "dsh-desktop"].contains(adapter) else { return (false, "未接入的应用操作") }
         guard AXIsProcessTrusted() else { return (false, "需要辅助功能权限") }
         guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == bundle else {
             return (false, "目标应用不在前台，未执行")
@@ -94,13 +92,12 @@ struct DesktopAgent: Identifiable {
             // keeps long chats from exhausting the bounded scan.
             if labels.contains(where: { ["Conversation turns", "Agent response", "User message"].contains($0) }) { continue }
             if command == "terminal" && labels.contains("关闭终端面板") { terminalAlreadyOpen = true }
-            let desktopSearch = command == "search" && ((adapter == "qoder-cn" && role == kAXButtonRole && labels.contains("搜索 ⌘+G")) || (adapter == "antigravity" && role == kAXButtonRole && labels.contains("Search Conversations"))
+            let desktopSearch = command == "search" && ((adapter == "antigravity" && role == kAXButtonRole && labels.contains("Search Conversations"))
                 || (adapter == "dsh-desktop" && role == kAXTextFieldRole && labels.contains("搜索会话名称")))
             let desktopNew = command == "new-chat" && role == kAXButtonRole &&
                 ((adapter == "antigravity" && labels.contains("New Conversation")) || (adapter == "dsh-desktop" && labels.contains("新建会话")))
-            let qoderNew = command == "new-chat" && adapter == "qoder-cn" && role == "AXLink" && labels.contains("新的任务 ⌘+N")
             let extra = extraControl(adapter: adapter, command: command, role: role, labels: labels)
-            if enabled && (desktopSearch || desktopNew || qoderNew || extra) { matches.append(element) }
+            if enabled && (desktopSearch || desktopNew || extra) { matches.append(element) }
             else if enabled && ((command == "focus-input" && (role == kAXTextAreaRole || (adapter == "codex" && role == kAXTextFieldRole && (title == "Work with Codex" || description == "Work with Codex"))))
                 || (command == "search" && role == kAXButtonRole && (title == "搜索" || description == "搜索" || (adapter == "codex" && (title == "Search" || description == "Search")))))
                 || (enabled && command == "search" && adapter == "cindy" && role == kAXTextFieldRole && [title, description, placeholder].contains("搜索标题或内容…")) {
@@ -164,7 +161,6 @@ struct DesktopAgent: Identifiable {
             case "antigravity": return prefix("Select model, current:")
             case "dsh-desktop": return prefix("选择模型，当前")
             case "cindy": return prefix("选择模型。当前：")
-            case "qoder-cn": return command == "model" && exact(["模型"])
             case "zcode": return labels.contains { $0.range(of: #"^(GLM|GPT|Claude|Gemini|DeepSeek|Qwen|Kimi|MiniMax)[- .]"#, options: .regularExpression) != nil }
             case "qwenwork": return command == "model" && (exact(["标准", "高级"]) || prefix("Qwen3.8-"))
             case "codex": return prefix("Select model") || prefix("Choose model") || prefix("选择模型") || prefix("Model selector")
@@ -175,7 +171,7 @@ struct DesktopAgent: Identifiable {
             switch adapter {
             case "antigravity": return exact(["Record voice memo", "Stop recording"])
             case "qwenwork": return prefix("语音输入（") || prefix("停止录音")
-            case "cindy", "qoder-cn": return exact(["开始语音输入", "停止语音输入", "结束语音输入"])
+            case "cindy": return exact(["开始语音输入", "停止语音输入", "结束语音输入"])
             case "zcode": return exact(["开始语音输入", "停止语音输入", "Voice Input", "Stop Voice Input"])
             case "dsh-desktop": return exact(["开始听写", "停止听写", "Voice Dictation", "Stop Dictation"])
             case "codex": return exact(["Dictate", "Stop dictation", "听写", "停止听写"])
@@ -211,13 +207,13 @@ struct DesktopAgent: Identifiable {
 
     static func stopActiveDictationIfNeeded(adapter: String) async -> (Bool, String) {
         guard let bundle = bundles[adapter] else { return (false, "unknown_agent_adapter:\(adapter)") }
-        guard ["antigravity", "qwenwork", "cindy", "codex", "qoder-cn", "zcode", "dsh-desktop"].contains(adapter) else {
+        guard ["antigravity", "qwenwork", "cindy", "codex", "zcode", "dsh-desktop"].contains(adapter) else {
             return (true, "dictation_not_applicable:\(adapter)")
         }
-        guard AXIsProcessTrusted() else { return (false, "需要辅助功能权限") }
         guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == bundle else {
             return (true, "dictation_inactive:\(adapter)")
         }
+        guard AXIsProcessTrusted() else { return (false, "需要辅助功能权限") }
         let root = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(root, 0.3)
         var focusedWindow: AXUIElement?

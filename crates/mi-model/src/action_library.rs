@@ -128,7 +128,6 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                         | "codex"
                         | "antigravity"
                         | "dsh-desktop"
-                        | "qoder-cn"
                         | "herdr"
                 ) =>
             {
@@ -184,7 +183,6 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                         | "codex"
                         | "antigravity"
                         | "dsh-desktop"
-                        | "qoder-cn"
                 ) && (command.starts_with("slot-open:")
                     || matches!(
                         command.as_str(),
@@ -220,7 +218,6 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                         | "codex"
                         | "antigravity"
                         | "dsh-desktop"
-                        | "qoder-cn"
                 ) && (command == "submit"
                     || command
                         .strip_prefix("prompt:")
@@ -250,13 +247,7 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
             Ok(ActionKind::AgentCommand { adapter, command }) => {
                 let desktop = matches!(
                     adapter.as_str(),
-                    "cindy"
-                        | "zcode"
-                        | "qwenwork"
-                        | "codex"
-                        | "antigravity"
-                        | "dsh-desktop"
-                        | "qoder-cn"
+                    "cindy" | "zcode" | "qwenwork" | "codex" | "antigravity" | "dsh-desktop"
                 ) && (matches!(
                     command.as_str(),
                     "model"
@@ -272,13 +263,7 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                 ) || (command == "push-to-talk"
                     && matches!(
                         adapter.as_str(),
-                        "cindy"
-                            | "codex"
-                            | "qwenwork"
-                            | "antigravity"
-                            | "qoder-cn"
-                            | "zcode"
-                            | "dsh-desktop"
+                        "cindy" | "codex" | "qwenwork" | "antigravity" | "zcode" | "dsh-desktop"
                     ))
                     || (matches!(command.as_str(), "voice-reply" | "toggle-voice-reply")
                         && matches!(
@@ -287,14 +272,13 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                                 | "codex"
                                 | "qwenwork"
                                 | "antigravity"
-                                | "qoder-cn"
                                 | "zcode"
                                 | "dsh-desktop"
                         ))
                     || command == "focus-input"
                     || (command == "search" && adapter != "qwenwork")
                     || (command == "new-chat"
-                        && matches!(adapter.as_str(), "antigravity" | "dsh-desktop" | "qoder-cn")));
+                        && matches!(adapter.as_str(), "antigravity" | "dsh-desktop")));
                 let verified = matches!(adapter.as_str(), "herdr") || desktop;
                 if verified {
                     prerequisites.push(if desktop {

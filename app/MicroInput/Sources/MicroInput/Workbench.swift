@@ -1299,6 +1299,27 @@ struct ActionParameters: View {
                         .font(UITheme.Typography.mono)
                 }
                 if type == "shortcut" {
+                    HStack(spacing: 8) {
+                        Button("选择目标应用…") {
+                            let panel = NSOpenPanel()
+                            panel.allowedContentTypes = [.applicationBundle]
+                            panel.canChooseDirectories = false
+                            panel.allowsMultipleSelection = false
+                            panel.directoryURL = URL(fileURLWithPath: "/Applications")
+                            panel.begin { result in
+                                if result == .OK, let url = panel.url, let bundleID = Bundle(url: url)?.bundleIdentifier {
+                                    action.payload["target"] = .string(bundleID)
+                                }
+                            }
+                        }
+                        .font(UITheme.Typography.caption)
+                        if (action.payload["target"]?.text ?? "frontmost-editor") != "frontmost-editor" {
+                            Button("恢复为当前前台应用") {
+                                action.payload["target"] = .string("frontmost-editor")
+                            }
+                            .font(UITheme.Typography.caption)
+                        }
+                    }
                     HStack(spacing: 10) {
                         ForEach([("command", "⌘ Cmd"), ("shift", "⇧ Shift"), ("option", "⌥ Opt"), ("control", "⌃ Ctrl")], id: \.0) { modifier, label in
                             Toggle(label, isOn: Binding(get: { modifiers.contains(modifier) }, set: { enabled in

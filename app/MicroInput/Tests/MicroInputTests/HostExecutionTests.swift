@@ -411,7 +411,6 @@ final class HostExecutionTests: XCTestCase {
     @MainActor func testDesktopControlsRejectContentAndUnavailableReasoningModes() {
         XCTAssertFalse(DesktopAgentControls.extraControl(adapter: "dsh-desktop", command: "model", role: "AXStaticText", labels: ["选择模型，当前 DeepSeek"]))
         XCTAssertTrue(DesktopAgentControls.extraControl(adapter: "dsh-desktop", command: "effort", role: "AXPopUpButton", labels: ["选择模型，当前 DeepSeek，推理等级 High"]))
-        XCTAssertFalse(DesktopAgentControls.extraControl(adapter: "qoder-cn", command: "effort", role: "AXPopUpButton", labels: ["模型"]))
         XCTAssertTrue(DesktopAgentControls.extraControl(adapter: "qwenwork", command: "model", role: "AXPopUpButton", labels: ["高级"]))
         XCTAssertFalse(DesktopAgentControls.extraControl(adapter: "qwenwork", command: "effort", role: "AXPopUpButton", labels: ["高级"]))
         XCTAssertFalse(DesktopAgentControls.extraControl(adapter: "zcode", command: "model", role: "AXButton", labels: ["Ran code about GLM-5.3"]))
@@ -726,7 +725,7 @@ final class HostExecutionTests: XCTestCase {
         let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: url, actionExecutor: executor)
         await store.loadWorkbench()
         await store.prepareHostExecutionScenario()
-        XCTAssertEqual(executor.receipts.count, 22, "Receipts: \(executor.receipts.map(\.detail)) status=\(store.status) profile=\(store.profile?.name ?? "nil") active=\(store.hostActiveProfileId ?? "nil")")
+        XCTAssertEqual(executor.receipts.count, 21, "Receipts: \(executor.receipts.map(\.detail)) status=\(store.status) profile=\(store.profile?.name ?? "nil") active=\(store.hostActiveProfileId ?? "nil")")
         let details = Set(executor.receipts.map(\.detail))
         let bindings = Set(executor.receipts.map(\.bindingId))
         XCTAssertTrue(bindings.contains("menu-navigate-back"))

@@ -161,14 +161,27 @@ final class FourAppVoiceManager: ObservableObject {
 
     /// Enforce stopping active dictation before any submit operation.
     func stopBeforeSubmit(app: String, store: Store) async -> (Bool, String) {
-        if case .recording(let recApp, let session, _) = dictationState {
-            if recApp == app {
-                store.pushToTalk.cancel()
-                await store.pushToTalk.waitUntilStopped()
+        if case .recording(let recApp, let session, _) = dictationState, recApp == app {
+            let isCindyNative: Bool = {
+                if case .native = store.nativeOwnership.state { return true }
+                return false
+            }()
+            if app == "cindy" && isCindyNative {
                 dictationState = .stopped(app: app, session: session)
-                let stopped = await DesktopAgentControls.stopActiveDictationIfNeeded(adapter: app)
-                return (stopped.0, "提交前已先停止活跃听写")
+                return (true, "提交前已先停止活跃听写")
             }
+            store.pushToTalk.cancel()
+            await store.pushToTalk.waitUntilStopped()
+            let pttStopped = await store.pushToTalk.verifyStopped()
+            dictationState = .stopped(app: app, session: session)
+            if store.pushToTalk.simulated {
+                return (pttStopped, pttStopped ? "提交前已先停止活跃听写" : "原听写停止未确认")
+            }
+            let stopped = await DesktopAgentControls.stopActiveDictationIfNeeded(adapter: app)
+            return (pttStopped && stopped.0, "提交前已先停止活跃听写")
+        }
+        if store.pushToTalk.simulated {
+            return (true, "dictation_inactive:\(app)")
         }
         let stopped = await DesktopAgentControls.stopActiveDictationIfNeeded(adapter: app)
         return stopped

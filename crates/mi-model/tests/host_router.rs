@@ -182,7 +182,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     assert_eq!(draft.revision, 0);
     assert_eq!(draft.config.profiles.len(), 2);
     let created = install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(created.len(), 8);
+    assert_eq!(created.len(), 7);
     assert_eq!(
         draft.revision, 1,
         "install_agent_starter_profiles must commit as a single atomic revision"
@@ -191,10 +191,10 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     assert_eq!(
         draft.config.profiles.len(),
         2,
-        "single undo must revert all 8 starter profiles"
+        "single undo must revert all 7 starter profiles"
     );
     draft.undo(true).unwrap();
-    assert_eq!(draft.config.profiles.len(), 8);
+    assert_eq!(draft.config.profiles.len(), 7);
 
     let ag_pid = &created[0];
     let herdr_pid = &created[1];
@@ -541,7 +541,7 @@ fn host_preferences_persist_active_profile_and_execution_enabled() {
 fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
     let mut draft = Draft::default();
     let ids = install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(draft.config.profiles.len(), 8);
+    assert_eq!(draft.config.profiles.len(), 7);
     assert!(!draft
         .config
         .profiles
@@ -571,7 +571,6 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
     for (name, bundle) in [
         ("千问办公", "cn.qwenwork.desktop.mac"),
         ("ZCode", "dev.zcode.app"),
-        ("Qoder CN", "com.qodercn.app"),
     ] {
         let pid = draft
             .document
@@ -600,7 +599,6 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
         ("千问办公", "qwenwork"),
         ("ZCode", "zcode"),
         ("DeepSeek Coder (DSH)", "dsh-desktop"),
-        ("Qoder CN", "qoder-cn"),
     ] {
         let pid = draft
             .document
@@ -652,7 +650,7 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
         edited.document.editable.graph.profiles[&pid].name,
         "My existing mapping"
     );
-    assert_eq!(edited.config.profiles.len(), 9);
+    assert_eq!(edited.config.profiles.len(), 8);
 }
 
 #[test]
@@ -779,4 +777,91 @@ fn joystick_prompt_slots_and_submit_control_route_to_target_agent_without_auto_e
             })
         );
     }
+}
+
+#[test]
+fn custom_app_profile_routes_open_app_targeted_shortcut_and_paste_text_to_bundle_id() {
+    let mut draft = Draft::default();
+    let custom_pid = draft.create_profile("Safari Workspace").unwrap();
+    let custom_lid = draft.document.editable.graph.profiles[&custom_pid].layer_order[0].clone();
+
+    draft
+        .assign(
+            &json!(custom_pid),
+            &json!(custom_lid),
+            0,
+            Action {
+                id: "custom-open-safari".into(),
+                name: "打开 Safari".into(),
+                category: "应用".into(),
+                detail: "com.apple.Safari".into(),
+                payload: serde_json::to_value(ActionKind::OpenApp {
+                    bundle_id: "com.apple.Safari".into(),
+                })
+                .unwrap(),
+            },
+        )
+        .unwrap();
+    draft
+        .assign(
+            &json!(custom_pid),
+            &json!(custom_lid),
+            1,
+            Action {
+                id: "custom-safari-tab".into(),
+                name: "新建标签页".into(),
+                category: "快捷键".into(),
+                detail: "com.apple.Safari".into(),
+                payload: serde_json::to_value(ActionKind::Shortcut {
+                    key: "t".into(),
+                    modifiers: vec!["command".into()],
+                    target: "com.apple.Safari".into(),
+                })
+                .unwrap(),
+            },
+        )
+        .unwrap();
+    draft
+        .assign(
+            &json!(custom_pid),
+            &json!(custom_lid),
+            2,
+            Action {
+                id: "custom-safari-snippet".into(),
+                name: "粘贴地址".into(),
+                category: "文本".into(),
+                detail: "通用文本".into(),
+                payload: serde_json::to_value(ActionKind::Text {
+                    text: "https://developer.apple.com".into(),
+                })
+                .unwrap(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        resolve_host_action(&draft.document, Some(&custom_pid), "AG00", true),
+        Some(ResolvedHostAction::OpenApp {
+            bundle_id: "com.apple.Safari".into(),
+        })
+    );
+    assert_eq!(
+        resolve_host_action(&draft.document, Some(&custom_pid), "AG01", true),
+        Some(ResolvedHostAction::Shortcut {
+            key: "t".into(),
+            key_code: 0x11,
+            modifiers: vec!["command".into()],
+            target_bundle_id: Some("com.apple.Safari".into()),
+        })
+    );
+    assert_eq!(
+        resolve_host_action(&draft.document, Some(&custom_pid), "AG02", true),
+        Some(ResolvedHostAction::PasteText {
+            text: "https://developer.apple.com".into(),
+            target_bundle_id: Some("com.apple.Safari".into()),
+            adapter: None,
+            no_newline: true,
+            submit: false,
+        })
+    );
 }
