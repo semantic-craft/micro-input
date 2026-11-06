@@ -237,6 +237,7 @@ extension MicroInput: Backend {}
     @Published var workspaceNavigator = FourAppWorkspaceNavigator()
     var fourAppAttention = FourAppAttentionRound()
     @Published var fourAppVoice = FourAppVoiceManager()
+    @Published var fourAppLighting = FourAppLightingController()
     var hostInputTask: Task<Void, Never>?
     @Published var draft = DraftState()
     @Published var macros: [MacroSummary] = []
@@ -1058,6 +1059,12 @@ extension MicroInput: Backend {}
         #else
         self.pushToTalk = PushToTalkController(driver: dictationDriver ?? AXDictationDriver())
         #endif
+        if actionExecutor == nil, let live = self.actionExecutor as? LiveHostActionExecutor {
+            live.activeDictationStopper = { [weak self] adapter in
+                guard let self else { return (true, "store_unavailable") }
+                return await self.fourAppVoice.stopBeforeSubmit(app: adapter, store: self)
+            }
+        }
         self.radialMenu.setEnabled(radialPreferences.bool(forKey: "radialMenuEnabled"))
         configureNativeOwnership()
     }
@@ -1230,6 +1237,7 @@ extension MicroInput: Backend {}
     }
     func shutdown() async {
         nativeOwnership.stop()
+        await fourAppLighting.release(in: self)
         await endLightingPreview()
         cancelActiveDeviceOperation()
         let cancelledExecution = invalidateHostWork()

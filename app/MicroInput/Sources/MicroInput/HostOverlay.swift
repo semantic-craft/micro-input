@@ -58,6 +58,9 @@ struct HostCheatSheet: View {
             Text(store.routing?.profile_name ?? "Profile 不可用").font(.title3)
             Text("\(store.routingMode) · \(store.hostExecutionEnabled ? "按键控制开启" : "按键控制暂停") · 首层映射").font(.caption).foregroundStyle(.secondary)
             Text(store.nativeOwnership.summary).font(.caption).foregroundStyle(.secondary)
+            if let adapter = store.activeDesktopAgentAdapter() {
+                TargetAgentStatusCard(store: store, adapter: adapter)
+            }
             ScrollView {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                     ForEach(store.routing?.keys ?? []) { key in
@@ -74,6 +77,92 @@ struct HostCheatSheet: View {
         let names = ["AG10":"宽键（合并）", "AG12":"底行右键", "AG13":"旋钮逆时针", "AG14":"旋钮顺时针", "ENC_CLK":"编码器按下", "AG15":"摇杆 ↑", "AG16":"摇杆 ←", "AG17":"摇杆 ↓", "AG18":"摇杆 →"]
         let keys = ["AG00":"第 1 行 · 左", "AG01":"第 1 行 · 右", "AG02":"第 2 行 · 1", "AG03":"第 2 行 · 2", "AG04":"第 2 行 · 3", "AG05":"第 2 行 · 4", "AG06":"第 3 行 · 1", "AG07":"第 3 行 · 2", "AG08":"第 3 行 · 3", "AG09":"第 3 行 · 4"]
         return names[key.binding_id] ?? keys[key.binding_id] ?? key.control
+    }
+}
+
+struct TargetAgentStatusCard: View {
+    @ObservedObject var store: Store
+    let adapter: String
+
+    var body: some View {
+        let phase = store.fourAppLighting.deriveState(for: adapter, in: store)
+        let voiceMode = store.fourAppVoice.getVoiceReplyMode(app: adapter, store: store)
+        let isRecording = store.fourAppVoice.dictationState.isRecording || store.pushToTalk.isActive
+        let confirmMode = store.radialMenu.confirmMode
+
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(DesktopAgent.forAdapter(adapter)?.name ?? adapter)
+                    .font(.subheadline.bold())
+                Spacer()
+                Label(phase.label, systemImage: phase.symbol)
+                    .font(.caption2)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(phaseColor(phase).opacity(0.15))
+                    .foregroundStyle(phaseColor(phase))
+                    .clipShape(Capsule())
+            }
+
+            HStack(spacing: 12) {
+                HStack(spacing: 4) {
+                    Image(systemName: isRecording ? "waveform.circle.fill" : "mic.fill")
+                        .foregroundStyle(isRecording ? Color.purple : Color.secondary)
+                    Text(isRecording ? "听写录音中" : (voiceMode.isSupported ? (voiceMode.isEnabled ? "语音回复开启" : "语音回复关闭") : "语音回复不支持"))
+                        .font(.caption2)
+                        .foregroundStyle(voiceMode.isSupported ? Color.secondary : Color.orange)
+                }
+
+                HStack(spacing: 4) {
+                    Image(systemName: confirmMode == .springBack ? "arrow.uturn.backward.circle" : "button.programmable")
+                    Text(confirmMode == .springBack ? "快速回弹确认" : "旋钮按下确认")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let dual = store.fourAppLighting.dualZoneFeedback {
+                HStack(spacing: 8) {
+                    Text("灯光反馈:").font(.caption2).foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        Circle().fill(Color(hexColor: dual.backlightColor)).frame(width: 8, height: 8)
+                        Text("背光: \(dual.backlightEffect)").font(.caption2)
+                    }
+                    HStack(spacing: 4) {
+                        Circle().fill(Color(hexColor: dual.underglowColor)).frame(width: 8, height: 8)
+                        Text("底灯").font(.caption2)
+                    }
+                }
+            }
+        }
+        .padding(8)
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func phaseColor(_ phase: FourAppAgentPhase) -> Color {
+        switch phase {
+        case .idle: return .green
+        case .thinking: return .blue
+        case .awaitingInput: return .orange
+        case .error: return .red
+        case .backgroundActive: return .purple
+        }
+    }
+}
+
+private extension Color {
+    init(hexColor: String) {
+        let clean = hexColor.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: clean).scanHexInt64(&int)
+        let r, g, b: UInt64
+        switch clean.count {
+        case 6:
+            (r, g, b) = ((int >> 16) & 0xFF, (int >> 8) & 0xFF, int & 0xFF)
+        default:
+            (r, g, b) = (255, 255, 255)
+        }
+        self.init(.sRGB, red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255, opacity: 1)
     }
 }
 struct AppProfileLinksView: View {

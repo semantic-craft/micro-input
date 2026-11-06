@@ -342,6 +342,11 @@ extension Store {
                 detail: detail
             )
             AuditLogWriter.append(receipt)
+        } else if payload?.action_type == "agent_command",
+                  let cmd = payload?.command,
+                  cmd == "stop" {
+            let adapter = payload?.adapter ?? activeDesktopAgentAdapter(for: profileId) ?? ""
+            receipt = await executeAgentStop(adapter: adapter, profileId: profileId, bindingId: bindingId, stillAdmitted: stillAdmitted)
         } else {
             receipt = await actionExecutor.execute(actionJSON: effectiveJSON, bindingId: bindingId, profileId: profileId)
             if receipt.succeeded, let payload {
@@ -384,6 +389,80 @@ extension Store {
         default:
             break
         }
+    }
+
+    func executeAgentStop(adapter: String, profileId: String, bindingId: String, stillAdmitted: (() -> Bool)? = nil) async -> HostActionReceipt {
+        let epoch = hostRouteEpoch
+        let checkAdmitted: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? true)
+        }
+        let outcome: String
+        let detail: String
+        switch adapter {
+        case "antigravity":
+            if let selected = antigravityStatus.selected,
+               let row = antigravityStatus.rows.first(where: { $0.key == selected }),
+               (row.phase == .running || row.phase == .runningTool || row.phase == .backgroundActive),
+               let cmd = antigravityStatus.stopIntent(for: selected, expectedInvocationNum: row.invocationNum, expectedExecutionNum: row.executionNum) {
+                let rep = await antigravityStatus.execute(cmd, admitted: checkAdmitted)
+                outcome = rep.rawValue
+                detail = "antigravity_stop: \(row.conversationId) (\(rep.label))"
+            } else {
+                outcome = "noop"
+                detail = "guard.stopTargetChanged: 当前会话未在运行或无目标"
+            }
+        case "cindy":
+            if let selected = cindySessions.selected,
+               let row = cindySessions.rows.first(where: { $0.address == selected }),
+               row.phase == "running", let runId = row.runId {
+                let reply = await cindySessions.stop(address: selected, expectedRunId: runId, admitted: checkAdmitted)
+                outcome = reply.status.rawValue
+                detail = "cindy_stop: \(selected.sessionId) (\(reply.status.label))"
+            } else {
+                outcome = "noop"
+                detail = "guard.stopTargetChanged: 当前会话未在运行或无目标"
+            }
+        case "zcode":
+            if let selected = zcodeSessions.selected,
+               let row = zcodeSessions.rows.first(where: { $0.address == selected }),
+               (row.liveStatus == "busy" || row.liveStatus == "generating" || row.liveStatus == "running"),
+               let intent = zcodeSessions.stopIntent(for: selected, expectedExecutionId: row.executionId) {
+                let rep = await zcodeSessions.stop(intent, admitted: checkAdmitted)
+                outcome = rep.rawValue
+                detail = "zcode_stop: \(selected.taskId) (\(rep.label))"
+            } else {
+                outcome = "noop"
+                detail = "guard.stopTargetChanged: 当前会话未在运行或无目标"
+            }
+        case "dsh-desktop", "dsh":
+            if let selected = dshSessions.selected,
+               let row = dshSessions.rows.first(where: { $0.sessionId == selected }),
+               row.running,
+               let cmd = dshSessions.cancelIntent(for: selected, expectedTurnOverride: row.currentTurn) {
+                let rep = await dshSessions.execute(cmd, admitted: checkAdmitted)
+                outcome = rep.rawValue
+                detail = "dsh_cancel: \(selected) (\(rep.label))"
+            } else {
+                outcome = "noop"
+                detail = "guard.stopTargetChanged: 当前会话未在运行或无目标"
+            }
+        default:
+            outcome = "noop"
+            detail = "未支持的停止适配器: \(adapter)"
+        }
+        let receipt = HostActionReceipt(
+            timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+            profileId: profileId,
+            bindingId: bindingId,
+            actionType: "\(adapter)_stop",
+            target: adapter,
+            textByteLen: nil,
+            outcome: outcome,
+            detail: detail
+        )
+        AuditLogWriter.append(receipt)
+        return receipt
     }
 
     private func replayNavigationPlace(

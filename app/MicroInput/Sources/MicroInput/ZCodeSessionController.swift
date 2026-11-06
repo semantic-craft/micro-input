@@ -26,6 +26,13 @@ final class ZCodeSessionController: ObservableObject {
         voiceReplyEnabled = enabled
         return (true, enabled ? "已开启 ZCode 语音回复服务" : "已关闭 ZCode 语音回复服务")
     }
+
+    #if DEBUG
+    func setSnapshotForTesting(rows: [ZCodeTaskRow], selected: ZCodeTaskAddress?) {
+        self.rows = rows
+        self.selected = selected
+    }
+    #endif
     private var resolvedCommands: [String: (address: ZCodeTaskAddress, interactionId: String, interactionType: ZCodeInteractionType)] = [:]
     private let client: any ZCodeSessionServing
     private let pollNanoseconds: UInt64

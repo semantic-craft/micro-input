@@ -50,7 +50,7 @@ struct DesktopAgent: Identifiable {
 // Restrict AX actions to one focused window in an allowlisted app. Never pick the
 // first of multiple editors, send text, or invoke approval controls.
 @MainActor enum DesktopAgentControls {
-    static let bundles = ["codex": "com.openai.codex", "cindy": "com.xd.cindy", "qwenwork": "cn.qwenwork.desktop.mac", "zcode": "dev.zcode.app", "antigravity": "com.google.antigravity", "dsh-desktop": "com.deepseek.dsh", "qoder-cn": "com.qodercn.app"]
+    static let bundles = ["codex": "com.openai.codex", "cindy": "com.xd.cindy", "qwenwork": "cn.qwenwork.desktop.mac", "zcode": "dev.zcode.app", "antigravity": "com.google.antigravity", "dsh-desktop": "com.deepseek.dsh", "dsh": "com.deepseek.dsh", "qoder-cn": "com.qodercn.app"]
     static func attribute(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, key as CFString, &value) == .success else { return nil }

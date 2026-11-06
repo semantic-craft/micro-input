@@ -20,6 +20,13 @@ final class DSHSessionController: ObservableObject {
         voiceReplyEnabled = enabled
         return (true, enabled ? "已开启 DSH 语音回复服务" : "已关闭 DSH 语音回复服务")
     }
+
+    #if DEBUG
+    func setSnapshotForTesting(rows: [DSHSessionRow], selected: String?) {
+        self.rows = rows
+        self.selected = selected
+    }
+    #endif
     private let client: any DSHSessionServing
     private let pollNanoseconds: UInt64
     private var snapshot: DSHSessionSnapshot?

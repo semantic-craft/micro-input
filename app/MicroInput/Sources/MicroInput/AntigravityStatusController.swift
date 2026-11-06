@@ -21,6 +21,13 @@ final class AntigravityStatusController: ObservableObject {
         return (false, "Antigravity 2.29.0 language_server does not expose speech generation or voice reply mode")
     }
 
+    #if DEBUG
+    func setSnapshotForTesting(rows: [AntigravitySessionRow], selected: AntigravitySessionKey?) {
+        self.rows = rows
+        self.selected = selected
+    }
+    #endif
+
     private let client: any AntigravityStatusServing
     private let pollNanoseconds: UInt64
     private var snapshot: AntigravityStatusSnapshot?

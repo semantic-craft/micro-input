@@ -23,6 +23,13 @@ final class CindySessionController: ObservableObject {
         return (true, enabled ? "已开启 Cindy 原生语音对话回复" : "已关闭 Cindy 原生语音对话回复")
     }
 
+    #if DEBUG
+    func setSnapshotForTesting(rows: [CindyTaskRow], selected: CindyTaskAddress?) {
+        self.rows = rows
+        self.selected = selected
+    }
+    #endif
+
     var onOpenConfirmed: ((CindyTaskRow) -> Void)?
     var onCommandCompleted: ((CindyCommandReply, CindyTaskRow?) -> Void)?
 

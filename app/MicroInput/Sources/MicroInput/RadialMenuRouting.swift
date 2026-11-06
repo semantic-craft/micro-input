@@ -39,6 +39,9 @@ extension Store {
     func applyPaseoRadialPreset() {
         setRadialSlotConfigs(RadialSlotConfig.paseoEngineeringSlots)
     }
+    func applyFourAppRadialPreset() {
+        setRadialSlotConfigs(RadialSlotConfig.fourAppEngineeringSlots)
+    }
     private func defaultRadialSlotConfigs() -> [RadialSlotConfig] {
         var configs: [RadialSlotConfig] = [
             .t3(),
@@ -95,6 +98,13 @@ extension Store {
                 intent: adapter != nil ? .submit(adapter: adapter) : nil,
                 unavailableReason: adapter != nil ? nil : "当前配置不是桌面 Agent"
             )
+        case .stop:
+            let adapter = config.adapter ?? activeDesktopAgentAdapter()
+            return RadialSlot(
+                label: config.label,
+                intent: adapter != nil ? .stop(adapter: adapter) : nil,
+                unavailableReason: adapter != nil ? nil : "当前配置不是桌面 Agent"
+            )
         case .navigateBack:
             let canBack = navigationHistory.canGoBack(available: { [weak self] place in self?.isNavigationPlaceAvailable(place) == true })
             return RadialSlot(
@@ -133,8 +143,12 @@ extension Store {
         if let position {
             guard admission.radial else { cancelRadialMenu(); return true }
             let session = RadialMenuSession(inputSession: event.sessionId, routing: route, slots: radialMenu.session == nil ? radialSlots() : [], selected: nil)
-            radialMenu.update(position, makeSession: { session.slots.count == 8 ? session : nil })
-            radialOverlay.render(radialMenu.session)
+            if let (confirmedSession, intent) = radialMenu.update(position, makeSession: { session.slots.count == 8 ? session : nil }) {
+                radialOverlay.hide()
+                enqueueRadialIntent(intent, session: confirmedSession, ingress: event.ingressSequence)
+            } else {
+                radialOverlay.render(radialMenu.session)
+            }
             return true
         }
         if event.bindingId == "ENC_CLK", radialMenu.capturesConfirm {
@@ -186,6 +200,16 @@ extension Store {
             )
             guard let data = try? JSONEncoder().encode(payload) else { return }
             json = String(decoding: data, as: UTF8.self)
+        case .stop(let adapter):
+            let resolvedAdapter = adapter ?? activeDesktopAgentAdapter(for: profile) ?? "host"
+            let payload = ResolvedHostActionPayload(
+                action_type: "agent_command",
+                target_bundle_id: DesktopAgentControls.bundles[resolvedAdapter],
+                adapter: resolvedAdapter,
+                command: "stop"
+            )
+            guard let data = try? JSONEncoder().encode(payload) else { return }
+            json = String(decoding: data, as: UTF8.self)
         case .navigateBack:
             json = #"{"action_type":"agent_command","adapter":"navigation","command":"back"}"#
         case .navigateForward:
@@ -193,6 +217,20 @@ extension Store {
         }
         enqueueHostAction(json: json, binding: "radial-menu", profile: profile, state: session.routing,
                           deviceSession: session.inputSession, deviceIngress: ingress, radialIntent: intent)
+    }
+
+    var radialConfirmMode: RadialMenuState.ConfirmMode {
+        get {
+            guard let raw = radialPreferences.string(forKey: "radialConfirmMode"),
+                  let mode = RadialMenuState.ConfirmMode(rawValue: raw) else {
+                return radialMenu.confirmMode
+            }
+            return mode
+        }
+        set {
+            radialPreferences.set(newValue.rawValue, forKey: "radialConfirmMode")
+            radialMenu.setConfirmMode(newValue)
+        }
     }
     func showRadialCheatSheet(_ entry: PendingHostAction) {
         guard let lease = try? backend.beginHostExecution() else { return }
