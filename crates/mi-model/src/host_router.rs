@@ -40,7 +40,6 @@ pub fn desktop_agent_for_profile_name(name: &str) -> Option<(&'static str, &'sta
         "Codex" => Some(("codex", "com.openai.codex")),
         "ZCode" => Some(("zcode", "dev.zcode.app")),
         "DeepSeek Coder (DSH)" | "DSH" => Some(("dsh-desktop", "com.deepseek.dsh")),
-        "Qoder CN" => Some(("qoder-cn", "com.qodercn.app")),
         _ => None,
     }
 }

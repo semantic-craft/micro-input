@@ -973,7 +973,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         ("Codex", "codex", "com.openai.codex"),
         ("千问办公", "qwenwork", "cn.qwenwork.desktop.mac"),
         ("ZCode", "zcode", "dev.zcode.app"),
-        ("Qoder CN", "qoder-cn", "com.qodercn.app"),
     ] {
         let mut assignments = vec![(
             0,
@@ -998,7 +997,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 },
             ));
         }
-        if ["cindy", "zcode", "codex", "qoder-cn"].contains(&adapter) {
+        if ["cindy", "zcode", "codex"].contains(&adapter) {
             assignments.push((
                 2,
                 "desktop-search",
@@ -1008,19 +1007,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 ActionKind::AgentCommand {
                     adapter: adapter.into(),
                     command: "search".into(),
-                },
-            ));
-        }
-        if adapter == "qoder-cn" {
-            assignments.push((
-                3,
-                "desktop-new",
-                "新建任务",
-                "Agent",
-                bundle,
-                ActionKind::AgentCommand {
-                    adapter: adapter.into(),
-                    command: "new-chat".into(),
                 },
             ));
         }
@@ -1064,7 +1050,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             "ZCode" => "zcode",
             "Antigravity" => "antigravity",
             "DeepSeek Coder (DSH)" => "dsh-desktop",
-            "Qoder CN" => "qoder-cn",
             _ => continue,
         };
         for (slot, id, label, command) in [
@@ -1112,12 +1097,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     legacy_specs.extend(
         specs
             .iter()
-            .filter(|(name, _)| {
-                matches!(
-                    *name,
-                    "Cindy" | "Codex" | "千问办公" | "Antigravity" | "Qoder CN"
-                )
-            })
+            .filter(|(name, _)| matches!(*name, "Cindy" | "Codex" | "千问办公" | "Antigravity"))
             .cloned(),
     );
     for (_, assignments) in &mut specs {
@@ -1126,13 +1106,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 if command == "dictation"
                     && matches!(
                         adapter.as_str(),
-                        "cindy"
-                            | "codex"
-                            | "qwenwork"
-                            | "antigravity"
-                            | "qoder-cn"
-                            | "zcode"
-                            | "dsh-desktop"
+                        "cindy" | "codex" | "qwenwork" | "antigravity" | "zcode" | "dsh-desktop"
                     )
                 {
                     *command = "push-to-talk".into();
@@ -1153,7 +1127,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                         | "ZCode"
                         | "Antigravity"
                         | "DeepSeek Coder (DSH)"
-                        | "Qoder CN"
                 )
             })
             .cloned(),
@@ -1166,7 +1139,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             "ZCode" => "zcode",
             "Antigravity" => "antigravity",
             "DeepSeek Coder (DSH)" => "dsh-desktop",
-            "Qoder CN" => "qoder-cn",
             _ => continue,
         };
         for (slot, id, label, command) in [
@@ -1480,7 +1452,6 @@ pub fn install_four_app_cockpit_preset(
         "Cindy" => "cindy",
         "Codex" => "codex",
         "千问办公" => "qwenwork",
-        "Qoder" => "qoder-cn",
         _ => "antigravity",
     };
     let existing_layer = work.document.editable.graph.profiles[&pid]
@@ -1803,7 +1774,7 @@ mod agent_migration_tests {
     fn upgrades_pre_dial_conversational_presets_while_preserving_customized_profiles() {
         let mut draft = Draft::default();
         let ids = install_agent_starter_profiles(&mut draft).unwrap();
-        assert_eq!(ids.len(), 8);
+        assert_eq!(ids.len(), 7);
 
         for native_name in ["Cindy", "Codex"] {
             let pid = draft

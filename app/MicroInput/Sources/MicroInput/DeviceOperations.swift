@@ -92,7 +92,7 @@ extension Store {
            let command = payload?.command,
            ["back", "navigate-back", "forward", "navigate-forward"].contains(command),
            let adapter = payload?.adapter,
-           ["navigation", "host", "cindy", "zcode", "qwenwork", "codex", "antigravity", "dsh-desktop", "qoder-cn", "herdr"].contains(adapter) {
+           ["navigation", "host", "cindy", "zcode", "qwenwork", "codex", "antigravity", "dsh-desktop", "herdr"].contains(adapter) {
             let isBack = command == "back" || command == "navigate-back"
             let destination = isBack
                 ? navigationHistory.back(available: { [weak self] place in self?.isNavigationPlaceAvailable(place) == true })
