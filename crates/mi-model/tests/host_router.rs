@@ -778,3 +778,90 @@ fn joystick_prompt_slots_and_submit_control_route_to_target_agent_without_auto_e
         );
     }
 }
+
+#[test]
+fn custom_app_profile_routes_open_app_targeted_shortcut_and_paste_text_to_bundle_id() {
+    let mut draft = Draft::default();
+    let custom_pid = draft.create_profile("Safari Workspace").unwrap();
+    let custom_lid = draft.document.editable.graph.profiles[&custom_pid].layer_order[0].clone();
+
+    draft
+        .assign(
+            &json!(custom_pid),
+            &json!(custom_lid),
+            0,
+            Action {
+                id: "custom-open-safari".into(),
+                name: "打开 Safari".into(),
+                category: "应用".into(),
+                detail: "com.apple.Safari".into(),
+                payload: serde_json::to_value(ActionKind::OpenApp {
+                    bundle_id: "com.apple.Safari".into(),
+                })
+                .unwrap(),
+            },
+        )
+        .unwrap();
+    draft
+        .assign(
+            &json!(custom_pid),
+            &json!(custom_lid),
+            1,
+            Action {
+                id: "custom-safari-tab".into(),
+                name: "新建标签页".into(),
+                category: "快捷键".into(),
+                detail: "com.apple.Safari".into(),
+                payload: serde_json::to_value(ActionKind::Shortcut {
+                    key: "t".into(),
+                    modifiers: vec!["command".into()],
+                    target: "com.apple.Safari".into(),
+                })
+                .unwrap(),
+            },
+        )
+        .unwrap();
+    draft
+        .assign(
+            &json!(custom_pid),
+            &json!(custom_lid),
+            2,
+            Action {
+                id: "custom-safari-snippet".into(),
+                name: "粘贴地址".into(),
+                category: "文本".into(),
+                detail: "通用文本".into(),
+                payload: serde_json::to_value(ActionKind::Text {
+                    text: "https://developer.apple.com".into(),
+                })
+                .unwrap(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        resolve_host_action(&draft.document, Some(&custom_pid), "AG00", true),
+        Some(ResolvedHostAction::OpenApp {
+            bundle_id: "com.apple.Safari".into(),
+        })
+    );
+    assert_eq!(
+        resolve_host_action(&draft.document, Some(&custom_pid), "AG01", true),
+        Some(ResolvedHostAction::Shortcut {
+            key: "t".into(),
+            key_code: 0x11,
+            modifiers: vec!["command".into()],
+            target_bundle_id: Some("com.apple.Safari".into()),
+        })
+    );
+    assert_eq!(
+        resolve_host_action(&draft.document, Some(&custom_pid), "AG02", true),
+        Some(ResolvedHostAction::PasteText {
+            text: "https://developer.apple.com".into(),
+            target_bundle_id: Some("com.apple.Safari".into()),
+            adapter: None,
+            no_newline: true,
+            submit: false,
+        })
+    );
+}

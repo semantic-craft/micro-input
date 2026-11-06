@@ -404,9 +404,33 @@ pub fn macos_virtual_key_code(key: &str) -> Option<u16> {
     }
 }
 
+fn profile_open_app_bundle_id(doc: &LocalDocumentV2, profile_id: &str) -> Option<String> {
+    let profile = doc.editable.graph.profiles.get(profile_id)?;
+    let lid = profile.layer_order.first()?;
+    let layer = doc.editable.graph.layers.get(lid)?;
+    for cid in &layer.control_order {
+        let Some(action_id) = layer.controls.get(cid).and_then(|b| b.action_id.as_ref()) else {
+            continue;
+        };
+        let Some(action) = doc.editable.graph.actions.get(action_id) else {
+            continue;
+        };
+        if let Ok(ActionKind::OpenApp { bundle_id }) =
+            serde_json::from_value(action.payload.clone())
+        {
+            let trimmed = bundle_id.trim();
+            if !trimmed.is_empty() && trimmed.contains('.') {
+                return Some(trimmed.to_owned());
+            }
+        }
+    }
+    None
+}
+
 fn convert_action(
     action: &Action,
     profile_name: Option<&str>,
+    fallback_bundle_id: Option<&str>,
     command_execution_enabled: bool,
 ) -> Option<ResolvedHostAction> {
     let kind: ActionKind = serde_json::from_value(action.payload.clone()).ok()?;
@@ -438,7 +462,7 @@ fn convert_action(
             let (adapter, target_bundle_id) = profile_name
                 .and_then(desktop_agent_for_profile_name)
                 .map(|(a, b)| (Some(a.to_owned()), Some(b.to_owned())))
-                .unwrap_or((None, None));
+                .unwrap_or_else(|| (None, fallback_bundle_id.map(str::to_owned)));
             Some(ResolvedHostAction::PasteText {
                 text,
                 target_bundle_id,
@@ -569,7 +593,13 @@ pub fn resolve_host_action_with_command_consent(
     })?;
 
     let action = doc.editable.graph.actions.get(action_id)?;
-    convert_action(action, Some(&profile.name), command_execution_enabled)
+    let fallback_bundle = profile_open_app_bundle_id(doc, pid);
+    convert_action(
+        action,
+        Some(&profile.name),
+        fallback_bundle.as_deref(),
+        command_execution_enabled,
+    )
 }
 
 pub fn resolve_host_action(
