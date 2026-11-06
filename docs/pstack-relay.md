@@ -159,3 +159,4 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Outcome**: 最终构建在四应用中完成相同任务脚本，记录软件/安装/实体三层证据。
 - **Done Predicate**: clean commit 全量机器验收通过；每应用两会话完成导航/发送/停止/审批/状态反馈；升级/断连恢复与原映射保留；未完成项不关闭总票。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: F 至 O 的全部任务，含 I2、K1–K3、L1–L3、O1。责任票 #84。
+- **Verification scope**: 软件层 verify-offline 全量 PASS（两轮）。安装层 ZCode 补丁版完整窗口两会话任务脚本 PASS（create 双 confirmed、导航双向 confirmed、queue 发送+去重、executionId 真实停止、迟到 stop noop、过期 resolve 零误批、running→idle 回读、未授权 denied）；Antigravity 安装版 2.29.0 经 agentapi + LS Connect-JSON live 桥两会话 PASS（含 CancelCascadeInvocation 真实停止与 question-as-permission 拒绝，零 transcript/token 读取）；DSH 与 Cindy 为部分通过——补丁版均已部署（Cindy 自 0.1.126 回退至钉住源并修复桥仅随 HID 注册的部署缺陷，双桥开机自启实证；DSH 冷会话 fail-closed 与订阅粘性实证），但两会话活轮任务脚本分别受限于 host 会话注册表仅经交互客户端物化、渲染端工作区目录同步，保持开放。日常版 `/Applications/Micro Input.app` 已更新至最终构建；workbench 原映射零改动、全程零设备写入。实体层 USB 设备未连接，全部 NOT_RUN；#84 按未完成项不关闭约定保持开放。
