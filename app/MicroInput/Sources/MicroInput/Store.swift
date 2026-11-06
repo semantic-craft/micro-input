@@ -309,12 +309,16 @@ extension MicroInput: Backend {}
         status = "本地草稿 · 修改自动保存 · 不写设备"
     }
     private var documentOverride: URL?
+    nonisolated static func defaultDocumentDirectoryURL(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        if let directory = environment["MI_DOCUMENT_DIR"], !directory.isEmpty {
+            return URL(fileURLWithPath: directory, isDirectory: true)
+        }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MicroInput", isDirectory: true)
+    }
     var documentURL: URL {
         if let documentOverride { return documentOverride }
-        if let directory = ProcessInfo.processInfo.environment["MI_DOCUMENT_DIR"] {
-            return URL(fileURLWithPath: directory).appendingPathComponent("workbench.json")
-        }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("MicroInput/workbench.json")
+        return Self.defaultDocumentDirectoryURL().appendingPathComponent("workbench.json")
     }
     var autoHostReady = ProcessInfo.processInfo.environment["MI_AUTO_HOST_READY"] == "1"
     private var autoSetupInFlight = false

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Launch this checkout; --verify uses an isolated QA app with preserved evidence."""
+import argparse
 import fcntl
 import json
 import os
@@ -24,13 +25,55 @@ def _validate_qa_dir(path: pathlib.Path) -> pathlib.Path:
     return resolved
 
 
-def _parse_timeout(argv: list[str], default: int) -> int:
-    for index, arg in enumerate(argv):
-        if arg == '--timeout' and index + 1 < len(argv):
-            return max(1, int(argv[index + 1]))
-        if arg.startswith('--timeout='):
-            return max(1, int(arg.split('=', 1)[1]))
-    return default
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog='scripts/run', description=__doc__, allow_abbrev=False)
+    parser.add_argument('--verify', action='store_true', help='Launch isolated QA app bundle in .scratch/qa-runs')
+    parser.add_argument('--unique-bundle-id', action='store_true', help='Assign unique bundle ID for concurrent QA runs')
+    parser.add_argument('--timeout', type=int, default=None, help='Execution timeout in seconds (defaults to 600 with --verify)')
+    parser.add_argument('--list', action='store_true', help='List running checkout/QA MicroInput instances and exit')
+    parser.add_argument('--kill', action='store_true', help='Terminate running checkout/QA MicroInput instances and exit')
+    args = parser.parse_args(argv)
+    if (args.list or args.kill) and (args.verify or args.unique_bundle_id or args.timeout is not None):
+        parser.error('--list and --kill cannot be combined with launch flags')
+    if args.list and args.kill:
+        parser.error('--list and --kill are mutually exclusive')
+    if args.unique_bundle_id and not args.verify:
+        parser.error('--unique-bundle-id requires --verify')
+    return args
+
+
+def _find_managed_processes(root: pathlib.Path) -> list[tuple[int, str]]:
+    target_prefix = str((root / 'target/MicroInput.app').resolve())
+    qa_prefix = str((root / '.scratch/qa-runs').resolve())
+    raw_target_prefix = str(root / 'target/MicroInput.app')
+    raw_qa_prefix = str(root / '.scratch/qa-runs')
+    out = subprocess.check_output(['ps', '-ax', '-o', 'pid=,command='], text=True)
+    matches: list[tuple[int, str]] = []
+    self_pid = os.getpid()
+    for line in out.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if pid == self_pid:
+            continue
+        cmd = parts[1]
+        if any(cmd.startswith(prefix) for prefix in (target_prefix, qa_prefix, raw_target_prefix, raw_qa_prefix)):
+            matches.append((pid, cmd))
+    return matches
+
+
+def _default_document_dir() -> pathlib.Path:
+    override = os.environ.get('MI_DOCUMENT_DIR')
+    if override:
+        return pathlib.Path(override)
+    return pathlib.Path.home() / 'Library/Application Support/MicroInput'
 
 
 def _write_json(path: pathlib.Path, payload: dict) -> None:
@@ -41,15 +84,33 @@ def _write_json(path: pathlib.Path, payload: dict) -> None:
 
 
 def main() -> int:
+    args = _parse_args(sys.argv[1:])
     root = pathlib.Path(__file__).resolve().parent.parent
+
+    if args.list:
+        for pid, cmd in _find_managed_processes(root):
+            print(f'{pid}\t{cmd}', flush=True)
+        return 0
+
+    if args.kill:
+        for pid, _cmd in _find_managed_processes(root):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+            print(f'Terminated {pid}', flush=True)
+        return 0
+
     source_app = root / 'target/MicroInput.app'
     if not (source_app / 'Contents/MacOS/MicroInput').exists():
         raise SystemExit('Run scripts/build first')
 
-    verify = '--verify' in sys.argv
-    unique_bundle = '--unique-bundle-id' in sys.argv
-    timeout_s = _parse_timeout(sys.argv[1:], 600) if verify else None
+    verify = args.verify
+    unique_bundle = args.unique_bundle_id
+    timeout_s = max(1, args.timeout) if args.timeout is not None else (600 if verify else None)
     run_env = os.environ.copy()
+    for polluted_key in ('__CFBundleIdentifier', 'XPC_SERVICE_NAME'):
+        run_env.pop(polluted_key, None)
     app = source_app
     run_dir = None
     evidence_dir = None
@@ -57,6 +118,24 @@ def main() -> int:
     bundle_id = None
     lock_handle = None
     launcher_record = {}
+
+    if not verify:
+        doc_dir = _default_document_dir()
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        instance_lock_path = doc_dir / 'instance.lock'
+        instance_fd = os.open(instance_lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(instance_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(instance_fd, fcntl.LOCK_UN)
+        except BlockingIOError:
+            print(
+                f'Another Micro Input instance already holds {instance_lock_path}; '
+                'use --verify for isolated QA or quit the running app first.',
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        finally:
+            os.close(instance_fd)
 
     if verify:
         qa_root = root / '.scratch/qa-runs'

@@ -98,4 +98,19 @@ assert 'store.pushToTalk.waitForStartOutcome()' in voice_src, (
     'FourAppVoiceManager.startDictation must await store.pushToTalk.waitForStartOutcome() before setting dictationState = .recording'
 )
 
+# R-C05: scripts/run must use strict argparse (supporting --list/--kill without spawning and stripping __CFBundleIdentifier),
+# and MicroInputApp.init() must acquire DocumentInstanceLock before creating StatusMenu so duplicate menu bar icons cannot occur.
+run_src = (root / 'scripts/run').read_text(encoding='utf-8')
+assert 'argparse.ArgumentParser' in run_src and '__CFBundleIdentifier' in run_src and "'--verify' in sys.argv" not in run_src, (
+    'R-C05 violation in scripts/run: use argparse.ArgumentParser(allow_abbrev=False) with --list/--kill and strip __CFBundleIdentifier '
+    'instead of ad-hoc sys.argv substring checks that spawn duplicate MicroInput instances on unknown flags'
+)
+app_src = (root / 'app/MicroInput/Sources/MicroInput/MicroInputApp.swift').read_text(encoding='utf-8')
+lock_pos = app_src.find('DocumentInstanceLock.acquire(')
+menu_pos = app_src.find('statusMenu = StatusMenu(')
+assert lock_pos != -1 and menu_pos != -1 and lock_pos < menu_pos, (
+    'R-C05 violation in app/MicroInput/Sources/MicroInput/MicroInputApp.swift: '
+    'MicroInputApp.init() must acquire DocumentInstanceLock.acquire(directory:) before creating StatusMenu(store:)'
+)
+
 print('UNKNOWN inventory and read-only/no-send boundaries: PASS')

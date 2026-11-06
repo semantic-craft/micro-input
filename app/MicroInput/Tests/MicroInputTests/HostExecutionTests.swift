@@ -1201,6 +1201,27 @@ final class HostExecutionTests: XCTestCase {
                        "prepareDesktopProfiles must not re-mutate document or clobber host ready status when all DesktopAgent presets already exist")
         await store.shutdown()
     }
+
+    func testDocumentInstanceLockRejectsDuplicateOwnerUntilReleased() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mi-instance-lock-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let resolvedOverride = Store.defaultDocumentDirectoryURL(environment: ["MI_DOCUMENT_DIR": dir.path])
+        XCTAssertEqual(resolvedOverride.standardizedFileURL.path, dir.standardizedFileURL.path)
+
+        XCTAssertNil(DocumentInstanceLock.ownerPID(directory: dir))
+        let first = try XCTUnwrap(DocumentInstanceLock.acquire(directory: dir, pid: 4242))
+        XCTAssertEqual(DocumentInstanceLock.ownerPID(directory: dir), 4242)
+        XCTAssertNil(DocumentInstanceLock.acquire(directory: dir, pid: 9999),
+                     "Second MicroInput instance against the same document directory must be rejected before creating a second StatusMenu")
+
+        first.release()
+        XCTAssertNil(DocumentInstanceLock.ownerPID(directory: dir))
+        let second = DocumentInstanceLock.acquire(directory: dir, pid: 9999)
+        XCTAssertNotNil(second, "Releasing the lock must allow a subsequent instance to acquire it")
+        XCTAssertEqual(DocumentInstanceLock.ownerPID(directory: dir), 9999)
+        second?.release()
+    }
 }
 
 @MainActor private final class InMemoryPasteboard: PasteboardAccessing {

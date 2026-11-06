@@ -1,12 +1,84 @@
 // R-P03/R-H11: offline first-round workbench; no discovery, permission request or device open on launch.
 import SwiftUI
+import Darwin
 import MicroInputCore
+
+final class DocumentInstanceLock {
+    let lockURL: URL
+    private var fd: Int32
+
+    private init(lockURL: URL, fd: Int32) {
+        self.lockURL = lockURL
+        self.fd = fd
+    }
+
+    static func acquire(directory: URL, pid: Int32 = ProcessInfo.processInfo.processIdentifier) -> DocumentInstanceLock? {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let lockURL = directory.appendingPathComponent("instance.lock")
+        let fd = Darwin.open(lockURL.path, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR)
+        guard fd >= 0 else { return nil }
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            Darwin.close(fd)
+            return nil
+        }
+        _ = Darwin.ftruncate(fd, 0)
+        _ = Darwin.lseek(fd, 0, SEEK_SET)
+        let payload = "\(pid)\n"
+        payload.withCString { ptr in
+            _ = Darwin.write(fd, ptr, strlen(ptr))
+        }
+        _ = Darwin.fsync(fd)
+        return DocumentInstanceLock(lockURL: lockURL, fd: fd)
+    }
+
+    static func ownerPID(directory: URL) -> Int32? {
+        let lockURL = directory.appendingPathComponent("instance.lock")
+        let fd = Darwin.open(lockURL.path, O_RDONLY)
+        guard fd >= 0 else { return nil }
+        defer { Darwin.close(fd) }
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+            _ = flock(fd, LOCK_UN)
+            return nil
+        }
+        guard let text = try? String(contentsOf: lockURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+              let pid = Int32(text) else { return -1 }
+        return pid
+    }
+
+    func release() {
+        guard fd >= 0 else { return }
+        _ = flock(fd, LOCK_UN)
+        Darwin.close(fd)
+        fd = -1
+    }
+
+    deinit {
+        release()
+    }
+}
+
 @main struct MicroInputApp: App {
     @NSApplicationDelegateAdaptor(AppLifetime.self) private var lifetime
     @StateObject private var store: Store
+    private let instanceLock: DocumentInstanceLock
     private let statusMenu: StatusMenu
     init() {
         PerformanceProbe.start()
+        let docDir = Store.defaultDocumentDirectoryURL()
+        guard let acquiredLock = DocumentInstanceLock.acquire(directory: docDir) else {
+            if let holderPID = DocumentInstanceLock.ownerPID(directory: docDir),
+               holderPID > 0,
+               let running = NSRunningApplication(processIdentifier: holderPID) {
+                running.activate(options: [])
+            } else if let bundleID = Bundle.main.bundleIdentifier {
+                NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+                    .first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated })?
+                    .activate(options: [])
+            }
+            fputs("MicroInput instance already holds \(docDir.appendingPathComponent("instance.lock").path); exiting duplicate instance.\n", stderr)
+            Darwin.exit(0)
+        }
+        self.instanceLock = acquiredLock
         let scenario = ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? ""
         #if MI_SYNTHETIC_BACKEND
         let core = scenario == "radial-menu" ? MicroInput.syntheticRadialDevice() : ["config-write", "lighting-control"].contains(scenario) ? MicroInput.syntheticConfigWriter() : ["reconnect", "reconnect-transient", "apply-preparation", "host-execution", "zcode-navigation", "dsh-navigation", "cindy-navigation", "antigravity-status", "native-ownership", "diagnostic-export", "push-to-talk", "push-to-talk-live"].contains(scenario) ? MicroInput.syntheticDiscovery() : MicroInput()

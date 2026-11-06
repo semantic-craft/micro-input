@@ -203,6 +203,96 @@ class RunVerifyLauncherTests(unittest.TestCase):
         launcher_json = json.loads((run_dirs[0] / 'evidence/launcher.json').read_text(encoding='utf-8'))
         self.assertTrue(launcher_json['app_bundle_removed'])
 
+    def test_rejects_unknown_flags_without_spawning_app(self):
+        root = self._prepare_checkout()
+        script = root / 'scripts/run'
+        for bad_args in (['--unknown-flag'], ['--verify', '--bogus'], ['positional']):
+            stderr = io.StringIO()
+            with patch.object(sys, 'argv', [str(script), *bad_args]), \
+                    patch('subprocess.Popen') as popen, \
+                    contextlib.redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as result:
+                    runpy.run_path(str(script), run_name='__main__')
+                self.assertEqual(result.exception.code, 2)
+                popen.assert_not_called()
+
+    def test_list_and_kill_manage_checkout_and_qa_without_spawning_or_killing_installed_app(self):
+        root = self._prepare_checkout()
+        script = root / 'scripts/run'
+        ps_output = (
+            f"  78893 /Applications/Micro Input.app/Contents/MacOS/MicroInput\n"
+            f"  78877 {root / 'target/MicroInput.app/Contents/MacOS/MicroInput'}\n"
+            f"  78901 {root / '.scratch/qa-runs/123-456/Micro Input QA.app/Contents/MacOS/MicroInput'}\n"
+        )
+        stdout = io.StringIO()
+        with patch.object(sys, 'argv', [str(script), '--list']), \
+                patch('subprocess.check_output', return_value=ps_output), \
+                patch('subprocess.Popen') as popen, \
+                contextlib.redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 0)
+            popen.assert_not_called()
+        listed = stdout.getvalue()
+        self.assertIn('78877', listed)
+        self.assertIn('78901', listed)
+        self.assertNotIn('78893', listed)
+
+        killed = []
+        with patch.object(sys, 'argv', [str(script), '--kill']), \
+                patch('subprocess.check_output', return_value=ps_output), \
+                patch('os.kill', side_effect=lambda pid, sig: killed.append((pid, sig))), \
+                patch('subprocess.Popen') as popen, \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 0)
+            popen.assert_not_called()
+        killed_pids = {pid for pid, _ in killed}
+        self.assertEqual(killed_pids, {78877, 78901})
+        self.assertNotIn(78893, killed_pids)
+
+    def test_strips_polluted_bundle_env_and_refuses_duplicate_non_verify_instance(self):
+        root = self._prepare_checkout()
+        script = root / 'scripts/run'
+        fake_home = root / 'fake_home'
+        doc_dir = fake_home / 'Library/Application Support/MicroInput'
+        doc_dir.mkdir(parents=True)
+        lock_file = (doc_dir / 'instance.lock').open('w', encoding='utf-8')
+        self.addCleanup(lock_file.close)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        stderr = io.StringIO()
+        with patch.object(sys, 'argv', [str(script)]), \
+                patch('pathlib.Path.home', return_value=fake_home), \
+                patch.dict(os.environ, {'__CFBundleIdentifier': 'com.google.antigravity'}, clear=False), \
+                patch('subprocess.Popen') as popen, \
+                contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 2)
+            self.assertIn('instance.lock', stderr.getvalue())
+            popen.assert_not_called()
+
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        child = FakeVerifyChild([0])
+        captured_env = {}
+
+        def fake_spawn(command, **kwargs):
+            captured_env.update(kwargs.get('env', {}))
+            return child
+
+        with patch.object(sys, 'argv', [str(script)]), \
+                patch('pathlib.Path.home', return_value=fake_home), \
+                patch.dict(os.environ, {'__CFBundleIdentifier': 'com.google.antigravity', 'XPC_SERVICE_NAME': '0'}, clear=False), \
+                patch('subprocess.Popen', side_effect=fake_spawn) as popen:
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 0)
+            self.assertEqual(popen.call_count, 1)
+        self.assertNotIn('__CFBundleIdentifier', captured_env)
+        self.assertNotIn('XPC_SERVICE_NAME', captured_env)
+
 
 if __name__ == '__main__':
     unittest.main()
