@@ -1139,6 +1139,28 @@ final class HostExecutionTests: XCTestCase {
 
         await store.shutdown()
     }
+
+    @MainActor func testPrepareDesktopProfilesDoesNotClobberReadyStatusWhenPresetsExist() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mi-idempotent-presets-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = Store(
+            nativeOwnership: NativeOwnershipController(isolated: true),
+            backend: MicroInputCore.MicroInput(),
+            documentURL: dir.appendingPathComponent("workbench.json"),
+            actionExecutor: RecordingHostActionExecutor()
+        )
+        await store.loadWorkbench()
+        await store.prepareDesktopProfiles()
+        XCTAssertTrue(store.hasAllDesktopAgentPresets)
+
+        store.status = "USB 透传层已就绪 · 宿主接管已开启（Antigravity）· 不写设备"
+        await store.prepareDesktopProfiles()
+        XCTAssertEqual(store.status, "USB 透传层已就绪 · 宿主接管已开启（Antigravity）· 不写设备",
+                       "prepareDesktopProfiles must not re-mutate document or clobber host ready status when all DesktopAgent presets already exist")
+        await store.shutdown()
+    }
 }
 
 @MainActor private final class InMemoryPasteboard: PasteboardAccessing {

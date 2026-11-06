@@ -434,10 +434,15 @@ extension MicroInput: Backend {}
             return a < b
         }.map(\.element)
     }
+    var hasAllDesktopAgentPresets: Bool {
+        Set(DesktopAgent.all.map(\.name)).isSubset(of: Set(hostProfiles.map(\.name)))
+    }
     func prepareDesktopProfiles() async {
         guard canEditDraft, !busy else { return }
         let untouched = snapshot?.source == "Demo" && draft.revision == 0 && draft.edits.isEmpty && draft.structure_changes.isEmpty
-        await installCodingAgentPresets()
+        if !hasAllDesktopAgentPresets {
+            await installCodingAgentPresets()
+        }
         if untouched, let index = snapshot?.profiles.firstIndex(where: { $0.name == "Cindy" }) {
             selectProfile(index)
         } else {
@@ -487,9 +492,7 @@ extension MicroInput: Backend {}
         defer { autoSetupInFlight = false }
         if browsingDeviceSnapshot { showLocalDraft() }
         if editingDevice { return }
-        let presetNames = Set(DesktopAgent.all.map(\.name) + ["Antigravity", "Herdr", "DeepSeek Coder (DSH)"])
-        let existingNames = Set(hostProfiles.map(\.name))
-        if !presetNames.isSubset(of: existingNames), canEditDraft, !busy {
+        if !hasAllDesktopAgentPresets, canEditDraft, !busy {
             await prepareDesktopProfiles()
         }
         if documentOverride == nil, (ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? "").isEmpty {
