@@ -112,7 +112,7 @@ extension PushToTalkTests {
         let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: dir.appendingPathComponent("draft.json"),
             actionExecutor: RecordingHostActionExecutor(), dictationDriver: driver)
         await store.loadWorkbench(); await store.installCodingAgentPresets()
-        let profile = try XCTUnwrap(store.hostProfiles.first { $0.name == "Cindy" })
+        let profile = try XCTUnwrap(store.hostProfiles.first { $0.name == "千问办公" })
         await store.setHostActiveProfile(profile.id.text); await store.setHostExecutionEnabled(true)
         store.inputBoundary.advance(InputWatermark(session_id: 1, ingress_sequence: 0))
         return (store, driver, dir)
@@ -186,7 +186,7 @@ extension PushToTalkTests {
         let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: dir.appendingPathComponent("draft.json"),
             actionExecutor: RecordingHostActionExecutor(), dictationDriver: driver)
         await store.loadWorkbench(); await store.installCodingAgentPresets()
-        let index = try XCTUnwrap(store.snapshot?.profiles.firstIndex { $0.name == "Cindy" })
+        let index = try XCTUnwrap(store.snapshot?.profiles.firstIndex { $0.name == "千问办公" })
         store.selectProfile(index); store.slot = 10
         let saved = await store.saveAction(CatalogAction(id: "wide-talk", name: "按住说话", category: "Agent", detail: "test",
             payload: ["type": .string("agent_command"), "adapter": .string("cindy"), "command": .string("push-to-talk")]))

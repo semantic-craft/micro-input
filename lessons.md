@@ -224,3 +224,16 @@
 - 起因：DSH `stateOf(session, key)` 会先生成全部已注册投影，缺缓存时遍历内存历史。桥没有调用 transcript API，仍不足以证明没有读取正文。
 - 修复：增加只读取当前缓存的 `cachedStateOf`，缓存不存在或水位不符时返回未知。待回应计数由生产者和当前缓存提供；桥不主动补历史。状态观察在同一事件的投影全部更新后同步读取，保留连续变化。
 - 验证点：`scripts/verify-dsh-native` 包含未生成缓存会话的历史读取陷阱、连接前已存在的审批，以及连续待回应变化回归。安装版与实体结果单列。Seen 1x（2026-11-05）。
+
+## 辅助功能授权需清理旧 cdhash 登记并响应式刷新
+
+- 起因：早期 ad-hoc 签名首次写入 TCC 时记录了固定 `cdhash`，后续切到 `Apple Development` 签名后，在系统设置中只拨动开关不会更新 `TCC.db` 的 `csreq`（`tccd` 报 `SecStaticCodeCheckValidity status: -67050`）；同时 `/Applications/MicroInput.app` 与 `target/MicroInput.app` 多副本争夺同 bundle ID，且界面直接读静态 `AXIsProcessTrusted()` 未随授权变化刷新。
+- 修复：清理重复应用包并在 `scripts/build` 构建后注销 `target/MicroInput.app` 的 LaunchServices 登记；通过 `tccutil reset Accessibility craft.semantic.micro-input.dev` 重置旧 `cdhash` 使 `tccd` 改按 `Apple Development` 证书 requirement 登记；`Store` 发布 `@Published var accessibilityTrusted` 并在未授权时轮询、切回前台及打开菜单栏时刷新，同时提供一键「重置授权」入口。
+- 验证点：`HostExecutionTests.testAccessibilityTrustRefreshesReactivelyOnMonitorAndForegroundChange` 及 `tccd` 日志核对 `CodeReq` 为 `Apple Development` 证书规则。Seen 1x（2026-11-06）。
+
+## 原生所有权围栏重启续接与集成补丁未跟踪文件门禁
+
+- 标签：#macOS #验收 #自动化
+- 起因与后果：一是 `NativeOwnershipController` 每次启动生成随机内存 `clientInstance = UUID()`，而 `cindy-ownership.sock.fence` 跨进程保留旧 `clientInstance`，导致 `Micro Input.app` 重启后被 `different_client` 锁死；同时 Cindy 仅在 `MainLayout` 和 `VoiceInputOverlay` 注册所有权排空桥，停留在 `#/login` 或带预热 `#/sidebar-window` 时 `quiesceOwnershipRenderers` 恒超时返回 `native_drain_unconfirmed`。二是 `9393bf5` 在未 `git add -N` 新文件的工作树上用 `git diff HEAD` 覆盖 `integrations/{cindy,dsh}/*.patch`，静默删掉新增桥接与夹具脚本；三是 `Workbench.task` 启动时无条件重跑 `prepareDesktopProfiles()` 覆盖了 `USB 透传层已就绪` 状态栏。
+- 修复与证据：`UnixNativeOwnershipTransport.readPersistedFence()` 在控制器初始化时恢复本机 `0600` `.fence` 的 `clientInstance` 并推进 `generation &+ 1`；`NativeOwnershipController.isUnbridgedDesktopActive` 移除 `!bridgeObserved` 与 `nativeIdentity == nil` 粘滞门禁，在 `cindy-ownership.sock` 消失时自动清空旧桥接状态并恢复本地桌面控制，重新出现时立即重新围栏；Cindy `App.tsx` 顶层挂载 `ensureWorkLouderOwnershipBridge()`；`Store.prepareDesktopProfiles()` 以 `hasAllDesktopAgentPresets` 幂等守卫；`FourAppVoiceManager.startDictation` 必须等待 `PushToTalkController.waitForStartOutcome()` 确认启动后才进入 `.recording`；`scripts/verify-{cindy,dsh,zcode}-*` 自动 `git add -N` 补丁目标，`scripts/check-boundaries.py` 增加 `R-C01`–`R-C04` 静态门禁。
+- 验证点：`NativeOwnershipTests.testRestartedControllerResumesPersistedFenceIdentityAndGeneration`、`NativeOwnershipTests.testUnbridgedDesktopRecoversWhenBridgeSocketDisappearsAndRefencesOnReappear`、`FourAppVoiceTests.testStartDictationFailsClosedWhenOwnershipBlockedOrDriverRejects`、`HostExecutionTests.testPrepareDesktopProfilesDoesNotClobberReadyStatusWhenPresetsExist` 与 `python3 scripts/check-boundaries.py`。Seen 3x（2026-11-06）。

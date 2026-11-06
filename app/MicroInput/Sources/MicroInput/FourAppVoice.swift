@@ -45,7 +45,6 @@ extension KeypadNavigationPlace {
         case .dsh: return "dsh-desktop"
         case .app(let bundle): return bundle
         case .session(let adapter, _): return adapter
-        case .t3Thread: return "t3"
         }
     }
 
@@ -57,7 +56,6 @@ extension KeypadNavigationPlace {
         case .dsh(let sess, let ws, _): return "\(sess)@\(ws)"
         case .app(let bundle): return bundle
         case .session(let adapter, let sess): return "\(adapter):\(sess)"
-        case .t3Thread(let env, let thread): return "\(env)#\(thread)"
         }
     }
 }
@@ -115,10 +113,17 @@ final class FourAppVoiceManager: ObservableObject {
             return (false, "听写已在进行中: \(currentApp) [\(currentSession.displayLabel)]")
         }
 
-        // Dispatch hold dictation via Micro Input PushToTalk
+        // Dispatch hold dictation via Micro Input PushToTalk and await start confirmation
+        guard store.dispatchOpen, store.hostExecutionEnabled, store.pushToTalk.cleanupConfirmed, !store.pushToTalk.isActive else {
+            return (false, "宿主所有权或听写清理门禁未就绪，未启动听写")
+        }
         store.startHeldDictation(adapter: app, binding: binding, profile: profile)
+        let (confirmed, detail) = await store.pushToTalk.waitForStartOutcome()
+        guard confirmed else {
+            return (false, detail)
+        }
         dictationState = .recording(app: app, session: session, startedAt: Date())
-        return (true, "已确认听写启动；松开停止，不自动发送")
+        return (true, detail)
     }
 
     /// Stop dictation on key release.

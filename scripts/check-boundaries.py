@@ -80,4 +80,22 @@ assert not missing_patch_entries, (
     + '\n  '.join(missing_patch_entries)
 )
 
+# R-C03: NativeOwnershipController.isUnbridgedDesktopActive must derive solely from current socket presence,
+# never from sticky session latches (bridgeObserved / nativeIdentity) that permanently lock out desktop control after Cindy exits.
+ownership_src = (root / 'app/MicroInput/Sources/MicroInput/NativeOwnership.swift').read_text(encoding='utf-8')
+unbridged_match = re.search(r'private var isUnbridgedDesktopActive:\s*Bool\s*\{([^}]+)\}', ownership_src)
+assert unbridged_match, 'NativeOwnershipController.isUnbridgedDesktopActive definition missing in NativeOwnership.swift'
+unbridged_body = unbridged_match.group(1)
+assert 'bridgeObserved' not in unbridged_body and 'nativeIdentity' not in unbridged_body, (
+    'R-C03 violation in app/MicroInput/Sources/MicroInput/NativeOwnership.swift: '
+    'NativeOwnershipController.isUnbridgedDesktopActive must not gate fallback on sticky bridgeObserved or nativeIdentity state'
+)
+
+# R-C04: FourAppVoiceManager.startDictation must await PushToTalkController.waitForStartOutcome() before entering .recording state.
+voice_src = (root / 'app/MicroInput/Sources/MicroInput/FourAppVoice.swift').read_text(encoding='utf-8')
+assert 'store.pushToTalk.waitForStartOutcome()' in voice_src, (
+    'R-C04 violation in app/MicroInput/Sources/MicroInput/FourAppVoice.swift: '
+    'FourAppVoiceManager.startDictation must await store.pushToTalk.waitForStartOutcome() before setting dictationState = .recording'
+)
+
 print('UNKNOWN inventory and read-only/no-send boundaries: PASS')

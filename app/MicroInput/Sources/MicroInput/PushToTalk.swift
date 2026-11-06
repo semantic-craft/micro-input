@@ -39,6 +39,8 @@ extension DictationDriving { var simulated: Bool { false } }
     private var gesture: Gesture?
     private var task: Task<Void, Never>?
     private var unresolved: (any DictationRecording)?
+    private var startOutcome: (Bool, String)?
+    private var startWaiters: [CheckedContinuation<(Bool, String), Never>] = []
     var cleanupConfirmed: Bool { unresolved == nil && !pendingStart }
     var isActive: Bool { task != nil }
     var simulated: Bool { driver.simulated }
@@ -47,16 +49,43 @@ extension DictationDriving { var simulated: Bool { false } }
     init(driver: any DictationDriving, maximumHold: UInt64 = 120_000_000_000, operationTimeout: UInt64 = 8_000_000_000) {
         self.driver = driver; self.maximumHold = maximumHold; self.operationTimeout = operationTimeout
     }
+    private func finishStartOutcome(_ succeeded: Bool, _ detail: String) {
+        let outcome = (succeeded, detail)
+        startOutcome = outcome
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        for waiter in waiters { waiter.resume(returning: outcome) }
+    }
+    func waitForStartOutcome() async -> (Bool, String) {
+        if let outcome = startOutcome { return outcome }
+        guard task != nil else {
+            return (false, cleanupConfirmed ? "宿主执行或所有权门禁未就绪，未启动听写" : "上次听写停止尚未确认，已阻止启动")
+        }
+        return await withCheckedContinuation { continuation in
+            if let outcome = startOutcome {
+                continuation.resume(returning: outcome)
+            } else {
+                startWaiters.append(continuation)
+            }
+        }
+    }
     @discardableResult
     func press(binding: String, adapter: String, ingress: UInt64 = 0, report: @escaping (String, Bool, String) -> Void, finished: @escaping () -> Void) -> Bool {
         guard task == nil, cleanupConfirmed else { return false }
+        startOutcome = nil
         let held = Gesture(binding: binding, adapter: adapter, ingress: ingress)
         gesture = held
         task = Task { @MainActor [self] in
             let expiry = Task { @MainActor in
                 do { try await Task.sleep(nanoseconds: maximumHold); held.end("达到最长按住时限") } catch { }
             }
-            defer { expiry.cancel(); gesture = nil; task = nil; finished() }
+            defer {
+                expiry.cancel()
+                if startOutcome == nil {
+                    finishStartOutcome(false, "听写启动已取消")
+                }
+                gesture = nil; task = nil; finished()
+            }
             let recording: any DictationRecording
             let result = await bounded(timeout: operationTimeout, operation: {
                 await self.driver.start(adapter: adapter, isHeld: { !held.released })
@@ -72,16 +101,22 @@ extension DictationDriving { var simulated: Bool { false } }
                 report("dictation_cleanup", self.cleanupConfirmed, self.cleanupConfirmed ? "迟到启动已清理；未发送消息" : "迟到启动的停止仍未确认")
             })
             guard let result else {
-                report("dictation_start", false, "听写启动超时；原目标状态待确认，已阻止后续听写和设备写入")
+                let timeoutDetail = "听写启动超时；原目标状态待确认，已阻止后续听写和设备写入"
+                finishStartOutcome(false, timeoutDetail)
+                report("dictation_start", false, timeoutDetail)
                 return
             }
             switch result {
             case .blocked(let detail):
+                finishStartOutcome(false, detail)
                 report("dictation_start", false, detail); return
             case .uncertain(let session, let detail):
+                finishStartOutcome(false, detail)
                 report("dictation_start", false, detail); recording = session; held.end()
             case .started(let session):
-                recording = session; report("dictation_start", true, "已确认听写启动；松开停止，不自动发送")
+                let startedDetail = "已确认听写启动；松开停止，不自动发送"
+                finishStartOutcome(true, startedDetail)
+                recording = session; report("dictation_start", true, startedDetail)
             }
             if !held.released {
                 await withCheckedContinuation { held.release = $0 }

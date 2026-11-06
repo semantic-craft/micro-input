@@ -40,3 +40,5 @@
 | 桌面 Agent 预设完整度唯一真源为 `Store.hasAllDesktopAgentPresets`（派生自 `DesktopAgent.all`），`prepareDesktopProfiles()` 幂等且不覆盖就绪状态 | `HostExecutionTests.testPrepareDesktopProfilesDoesNotClobberReadyStatusWhenPresetsExist` |
 | 生产出口只读门禁、物理分帧隔离与 `UNKNOWN-*` 清单对齐 | `scripts/check-boundaries.py` + `mi-proto` / `mi-session` 边界测试 |
 | 构建 `target/MicroInput.app` 后注销临时包 LaunchServices 登记，防止与 `/Applications/Micro Input.app` 争夺同 bundle ID | `scripts/build` + `HostExecutionTests.testAccessibilityTrustRefreshesReactivelyOnMonitorAndForegroundChange` |
+| `NativeOwnershipController.isUnbridgedDesktopActive` 仅以当前 `cindy-ownership.sock` 是否存在为唯一真源，严禁以粘滞 `bridgeObserved` / `nativeIdentity` 锁死 Cindy 退出后的本地桌面控制 | `scripts/check-boundaries.py`（`R-C03`）+ `NativeOwnershipTests.testUnbridgedDesktopRecoversWhenBridgeSocketDisappearsAndRefencesOnReappear` |
+| `FourAppVoiceManager.startDictation` 必须先检查 `dispatchOpen` 并等待 `PushToTalkController.waitForStartOutcome()` 确认启动成功后才可进入 `.recording`，严禁未确认即报告成功 | `scripts/check-boundaries.py`（`R-C04`）+ `FourAppVoiceTests.testStartDictationFailsClosedWhenOwnershipBlockedOrDriverRejects` |

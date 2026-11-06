@@ -25,3 +25,7 @@ if [[ -z "$sign_id" ]]; then
   sign_id="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -n 1 || true)"
 fi
 codesign --force --sign "${sign_id:--}" "$bundle"
+lsreg="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -d "/Applications/Micro Input.app" && -x "$lsreg" ]]; then
+  "$lsreg" -u "$PWD/$bundle" >/dev/null 2>&1 || true
+fi

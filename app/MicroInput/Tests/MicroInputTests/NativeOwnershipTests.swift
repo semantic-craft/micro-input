@@ -309,4 +309,38 @@ import MicroInputCore
         XCTAssertGreaterThan(req.generation, 13, "Restarted Micro Input must advance generation past persisted fence")
     }
 
+    func testUnbridgedDesktopRecoversWhenBridgeSocketDisappearsAndRefencesOnReappear() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("mi-unbridged-recover-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let sockPath = tempDir.appendingPathComponent("cindy-ownership.sock").path
+
+        let ownership = NativeOwnershipController(transport: UnixNativeOwnershipTransport(path: sockPath), allowUnbridgedDesktop: true)
+        ownership.setDesiredOwner("micro-input")
+        ownership.drain = { true }
+        XCTAssertTrue(ownership.allowsExecution)
+
+        // Simulate Cindy bridge appearing on disk and exchanging a handshake (setting bridgeObserved and nativeIdentity).
+        FileManager.default.createFile(atPath: sockPath, contents: Data())
+        ownership.start()
+        try await Task.sleep(for: .milliseconds(100))
+        let req = ownership.beginRequest(microDrained: true)
+        ownership.receive(reply(req, state: "released"), for: req)
+        XCTAssertTrue(ownership.allowsExecution)
+
+        // Simulate Cindy exiting and removing cindy-ownership.sock; subsequent exchange fails or socket vanishes.
+        try FileManager.default.removeItem(atPath: sockPath)
+        let failedReq = ownership.beginRequest(microDrained: false)
+        ownership.failed(failedReq)
+        try await Task.sleep(for: .milliseconds(600))
+
+        XCTAssertTrue(ownership.allowsExecution, "Once cindy-ownership.sock is removed after Cindy exits, unbridged desktop execution must automatically recover instead of locking out forever")
+        XCTAssertEqual(ownership.summary, "本地宿主控制就绪（Cindy 原生桥未启用）")
+
+        // When Cindy launches again and recreates cindy-ownership.sock, fenced ownership must immediately take effect again.
+        FileManager.default.createFile(atPath: sockPath, contents: Data())
+        XCTAssertFalse(ownership.allowsExecution, "Recreating cindy-ownership.sock must immediately re-fence execution until a new release receipt arrives")
+        ownership.stop()
+    }
+
 }

@@ -271,4 +271,67 @@ final class FourAppVoiceTests: XCTestCase {
         XCTAssertEqual(agReceipt?.outcome, "unsupported")
         XCTAssertTrue(agReceipt?.detail.contains("模型/接口不支持语音回复，保持未完成缺口") == true)
     }
+
+    @MainActor
+    private final class RejectingVoiceDictationDriver: DictationDriving {
+        var mode: String
+        var simulated: Bool { true }
+        init(mode: String) { self.mode = mode }
+        func start(adapter: String, isHeld: @escaping () -> Bool) async -> DictationStart {
+            if mode == "blocked" {
+                return .blocked("当前窗口没有唯一可确认的听写控件")
+            }
+            return .uncertain(TestVoiceRecording(), "听写启动状态未确认，正在清理原目标")
+        }
+    }
+
+    func testStartDictationFailsClosedWhenOwnershipBlockedOrDriverRejects() async {
+        let agSession = KeypadNavigationPlace.antigravity(conversationId: "ag-conv-1", workspacePath: "/ws/ag")
+
+        // 1. When NativeOwnershipController is unknown (dispatchOpen == false), startDictation must reject and remain .idle.
+        let unconfirmedOwnership = NativeOwnershipController(transport: nil)
+        let blockedStore = Store(
+            nativeOwnership: unconfirmedOwnership,
+            backend: MicroInputCore.MicroInput(),
+            dictationDriver: TestVoiceDictationDriver()
+        )
+        blockedStore.routingValid = true
+        blockedStore.hostExecutionEnabled = true
+        let (startedWhileBlocked, blockedDetail) = await blockedStore.fourAppVoice.startDictation(
+            app: "antigravity",
+            session: agSession,
+            binding: "AG06",
+            profile: "fixture",
+            store: blockedStore
+        )
+        XCTAssertFalse(startedWhileBlocked, "startDictation must not claim success when nativeOwnership blocks dispatchOpen")
+        XCTAssertFalse(blockedStore.fourAppVoice.dictationState.isRecording)
+        XCTAssertFalse(blockedDetail.contains("已确认听写启动"))
+
+        // 2. When DictationDriving.start returns .blocked, startDictation must return false and remain .idle.
+        let (rejectedStore, _) = makeStore(ownershipState: "released", driver: RejectingVoiceDictationDriver(mode: "blocked"))
+        let (startedWhenDriverBlocked, driverBlockedDetail) = await rejectedStore.fourAppVoice.startDictation(
+            app: "antigravity",
+            session: agSession,
+            binding: "AG06",
+            profile: "fixture",
+            store: rejectedStore
+        )
+        XCTAssertFalse(startedWhenDriverBlocked, "startDictation must fail closed when underlying driver returns .blocked")
+        XCTAssertFalse(rejectedStore.fourAppVoice.dictationState.isRecording)
+        XCTAssertTrue(driverBlockedDetail.contains("当前窗口没有唯一可确认的听写控件"))
+
+        // 3. When DictationDriving.start returns .uncertain, startDictation must return false and remain .idle.
+        let (uncertainStore, _) = makeStore(ownershipState: "released", driver: RejectingVoiceDictationDriver(mode: "uncertain"))
+        let (startedWhenUncertain, uncertainDetail) = await uncertainStore.fourAppVoice.startDictation(
+            app: "antigravity",
+            session: agSession,
+            binding: "AG06",
+            profile: "fixture",
+            store: uncertainStore
+        )
+        XCTAssertFalse(startedWhenUncertain, "startDictation must fail closed when underlying driver returns .uncertain")
+        XCTAssertFalse(uncertainStore.fourAppVoice.dictationState.isRecording)
+        XCTAssertTrue(uncertainDetail.contains("听写启动状态未确认"))
+    }
 }

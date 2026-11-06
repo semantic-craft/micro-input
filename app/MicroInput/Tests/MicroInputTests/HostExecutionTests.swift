@@ -41,7 +41,7 @@ final class HostExecutionTests: XCTestCase {
         let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url)
         await store.loadWorkbench()
         await store.installCodingAgentPresets()
-        let profile = try XCTUnwrap(store.hostProfiles.first { $0.name == "Cindy" })
+        let profile = try XCTUnwrap(store.hostProfiles.first { $0.name == "Antigravity" })
         let profileIndex = try XCTUnwrap(store.snapshot?.profiles.firstIndex { $0.id.text == profile.id.text })
         store.selectProfile(profileIndex)
         await store.setHostActiveProfile(profile.id.text)
@@ -112,7 +112,7 @@ final class HostExecutionTests: XCTestCase {
         )
         await store.loadWorkbench()
         await store.installCodingAgentPresets()
-        let profile = try XCTUnwrap(store.hostProfiles.first { $0.name == "Cindy" })
+        let profile = try XCTUnwrap(store.hostProfiles.first { $0.name == "Antigravity" })
         let profileIndex = try XCTUnwrap(store.snapshot?.profiles.firstIndex { $0.id.text == profile.id.text })
         store.selectProfile(profileIndex)
         await store.setHostActiveProfile(profile.id.text)
@@ -225,6 +225,12 @@ final class HostExecutionTests: XCTestCase {
             let index = try XCTUnwrap(store.snapshot?.profiles.firstIndex { $0.name == agent.name })
             store.selectProfile(index)
             await store.setHostActiveProfile(store.profile?.id.text)
+            if ["Cindy", "Codex"].contains(agent.name) {
+                XCTAssertTrue(store.isProtectedLayerSelected)
+                XCTAssertFalse(store.canTryDesktopAction)
+                await store.tryDesktopAction()
+                continue
+            }
             await store.tryDesktopAction()
             XCTAssertEqual(executor.receipts.last?.target, agent.bundleID)
             store.slot = 14
@@ -569,8 +575,8 @@ final class HostExecutionTests: XCTestCase {
         XCTAssertEqual(executor.receipts[1].target, "antigravity")
         XCTAssertEqual(executor.receipts[1].detail, "antigravity/focus-input")
 
-        // 4. Dial clockwise/counterclockwise/click and held-dial fast scroll on Antigravity, Qianwen, Cindy, Codex
-        for (agentName, adapter) in [("Antigravity", "antigravity"), ("千问办公", "qwenwork"), ("Cindy", "cindy"), ("Codex", "codex")] {
+        // 4. Dial clockwise/counterclockwise/click and held-dial fast scroll on Antigravity, Qianwen, ZCode, DSH
+        for (agentName, adapter) in [("Antigravity", "antigravity"), ("千问办公", "qwenwork"), ("ZCode", "zcode"), ("DeepSeek Coder (DSH)", "dsh-desktop")] {
             let pid = try XCTUnwrap(store.hostProfiles.first(where: { $0.name == agentName })?.id.text)
             await store.setHostActiveProfile(pid)
             let startIndex = executor.receipts.count
@@ -720,7 +726,7 @@ final class HostExecutionTests: XCTestCase {
         let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: url, actionExecutor: executor)
         await store.loadWorkbench()
         await store.prepareHostExecutionScenario()
-        XCTAssertEqual(executor.receipts.count, 24, "Receipts: \(executor.receipts.map(\.detail)) status=\(store.status) profile=\(store.profile?.name ?? "nil") active=\(store.hostActiveProfileId ?? "nil")")
+        XCTAssertEqual(executor.receipts.count, 22, "Receipts: \(executor.receipts.map(\.detail)) status=\(store.status) profile=\(store.profile?.name ?? "nil") active=\(store.hostActiveProfileId ?? "nil")")
         let details = Set(executor.receipts.map(\.detail))
         let bindings = Set(executor.receipts.map(\.bindingId))
         XCTAssertTrue(bindings.contains("menu-navigate-back"))
@@ -925,8 +931,8 @@ final class HostExecutionTests: XCTestCase {
         let targetAgents: [(name: String, adapter: String, bundleID: String)] = [
             ("Antigravity", "antigravity", "com.google.antigravity"),
             ("千问办公", "qwenwork", "cn.qwenwork.desktop.mac"),
-            ("Cindy", "cindy", "com.xd.cindy"),
-            ("Codex", "codex", "com.openai.codex")
+            ("ZCode", "zcode", "dev.zcode.app"),
+            ("DeepSeek Coder (DSH)", "dsh-desktop", "com.deepseek.dsh")
         ]
 
         let promptIDs = ["prompt-continue", "prompt-test", "prompt-review", "prompt-summary"]
@@ -1138,6 +1144,40 @@ final class HostExecutionTests: XCTestCase {
         XCTAssertTrue(callLog.isEmpty, "Executor must not run when Push-to-Talk cleanup is unconfirmed")
 
         await store.shutdown()
+    }
+
+    @MainActor func testAccessibilityTrustRefreshesReactivelyOnMonitorAndForegroundChange() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        var trusted = false
+        let store = Store(
+            nativeOwnership: NativeOwnershipController(isolated: true),
+            backend: MicroInputCore.MicroInput(),
+            documentURL: dir.appendingPathComponent("workbench.json"),
+            actionExecutor: RecordingHostActionExecutor()
+        )
+        store.accessibilityTrustChecker = { trusted }
+        store.accessibilityPollNanoseconds = 10_000_000 // 10ms
+
+        XCTAssertFalse(store.refreshAccessibilityTrust())
+        XCTAssertFalse(store.accessibilityTrusted)
+        XCTAssertNotNil(store.accessibilityMonitorTask, "Untrusted state must start background trust monitor")
+
+        trusted = true
+        for _ in 0..<20 where !store.accessibilityTrusted {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(store.accessibilityTrusted, "Store must publish accessibilityTrusted=true once TCC grants permission")
+        XCTAssertNil(store.accessibilityMonitorTask, "Monitor must stop once permission is granted")
+
+        trusted = false
+        store.foregroundChanged(bundleID: Bundle.main.bundleIdentifier)
+        XCTAssertFalse(store.accessibilityTrusted, "Foreground change to app itself must refresh accessibilityTrusted")
+
+        await store.shutdown()
+        XCTAssertNil(store.accessibilityMonitorTask)
     }
 
     @MainActor func testPrepareDesktopProfilesDoesNotClobberReadyStatusWhenPresetsExist() async throws {

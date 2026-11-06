@@ -73,7 +73,7 @@ protocol NativeOwnershipTransport: Sendable {
         self.generation = 0
     }
     private var isUnbridgedDesktopActive: Bool {
-        guard allowUnbridgedDesktop, !bridgeObserved, nativeIdentity == nil,
+        guard allowUnbridgedDesktop,
               let unix = transport as? UnixNativeOwnershipTransport else { return false }
         return !FileManager.default.fileExists(atPath: unix.path)
     }
@@ -161,6 +161,14 @@ protocol NativeOwnershipTransport: Sendable {
             while !Task.isCancelled {
                 guard let self else { return }
                 if self.isUnbridgedDesktopActive {
+                    if self.bridgeObserved || self.nativeIdentity != nil {
+                        self.bridgeObserved = false
+                        self.nativeIdentity = nil
+                        self.expiryTask?.cancel(); self.expiryTask = nil
+                        self.pending = nil; self.requestStarted = nil; self.expires = nil
+                        self.state = .unknown("Cindy 原生桥已退出，恢复本地宿主控制")
+                        self.changed?()
+                    }
                     do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
                     continue
                 }
