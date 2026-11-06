@@ -245,14 +245,14 @@ fn eight_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
             "AG13",
             mi_model::host_router::ResolvedHostAction::AgentCommand {
                 adapter: "antigravity".into(),
-                command: "scroll-up".into(),
+                command: "prev-conversation".into(),
             },
         ),
         (
             "ENC_CLK",
             mi_model::host_router::ResolvedHostAction::AgentCommand {
                 adapter: "antigravity".into(),
-                command: "scroll-to-bottom".into(),
+                command: "search".into(),
             },
         ),
         (

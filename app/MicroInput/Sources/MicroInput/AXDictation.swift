@@ -131,7 +131,7 @@ import ApplicationServices
         }
     }
     static func labels(_ element: AXUIElement) -> [String] {
-        [kAXTitleAttribute, kAXDescriptionAttribute].compactMap { DesktopAgentControls.attribute(element, $0) as? String }
+        [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute].compactMap { DesktopAgentControls.attribute(element, $0) as? String }
     }
     var targetIsOriginal: Bool { access.originalControl() }
     private func stoppedState() -> Bool {

@@ -738,6 +738,11 @@ pub fn actions() -> Vec<Action> {
         ("agent-stop", "停止当前生成 · Stop", "四应用总控", "立即中止当前会话生成流", json!({"type":"agent_command","adapter":"host","command":"stop"})),
         ("next-workspace", "下一工作区 · Next Workspace", "四应用总控", "切换到下一个活跃工作区会话", json!({"type":"agent_command","adapter":"four-app","command":"next-workspace"})),
         ("previous-workspace", "上一工作区 · Previous Workspace", "四应用总控", "切换到上一个活跃工作区会话", json!({"type":"agent_command","adapter":"four-app","command":"previous-workspace"})),
+        ("ag-live-voice", "Antigravity · Gemini Live 实时语音", "Agent", "启动或结束 Antigravity Live 实时语音对话并确认状态", json!({"type":"agent_command","adapter":"antigravity","command":"live-voice"})),
+        ("ag-prev-conversation", "Antigravity · 上一会话（侧栏轮转）", "Agent", "在左侧栏会话列表中向上切换一条会话（Alt+Up）", json!({"type":"agent_command","adapter":"antigravity","command":"prev-conversation"})),
+        ("ag-next-conversation", "Antigravity · 下一会话（侧栏轮转）", "Agent", "在左侧栏会话列表中向下切换一条会话（Alt+Down）", json!({"type":"agent_command","adapter":"antigravity","command":"next-conversation"})),
+        ("ag-project", "Antigravity · 选项目 / 新建项目", "Agent", "切换侧栏项目或打开新项目目录（Cmd+;）", json!({"type":"agent_command","adapter":"antigravity","command":"project"})),
+        ("ag-split-right", "Antigravity · 快速向右分栏", "Agent", "将当前会话向右分栏（Cmd+D）", json!({"type":"agent_command","adapter":"antigravity","command":"split-right"})),
     ].into_iter().map(|(id,name,category,detail,payload)| Action {id:id.into(),name:name.into(),category:category.into(),detail:detail.into(),payload}).collect()
 }
 

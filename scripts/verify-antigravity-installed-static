@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 import argparse
 import hashlib
+import io
 import json
 from pathlib import Path
 import plistlib
 import re
 import struct
 import subprocess
+import zipfile
 
 
-EXPECTED_ASAR_SHA256 = "290e1b7a1caa430a0c5367c7b433e8d284e2ca5d0b305e91e5ce8ec926f43283"
+EXPECTED_ASAR_SHA256S = {
+    "290e1b7a1caa430a0c5367c7b433e8d284e2ca5d0b305e91e5ce8ec926f43283",
+    "e9b001be46c289d60e0f783e48cf5ab51fa017c71d6e1c066d59457a92eb613f",
+}
 EXPECTED_LS_CL = "1013060670"
 
 ASAR_MODULES = {
@@ -24,7 +29,7 @@ ASAR_MODULES = {
 def verify_asar(package: Path) -> dict:
     with package.open("rb") as stream:
         asar_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
-    if asar_sha256 != EXPECTED_ASAR_SHA256:
+    if asar_sha256 not in EXPECTED_ASAR_SHA256S:
         raise ValueError(f"unexpected app.asar sha256: {asar_sha256}")
     with package.open("rb") as stream:
         size_pickle, header_size, payload_size, json_size = struct.unpack("<4I", stream.read(16))
@@ -193,6 +198,8 @@ def verify_language_server_and_agentapi(ls_bin: Path) -> dict:
     if not all(model_config_marker_map.values()):
         raise ValueError(f"language_server missing expected model/thinking proto schema markers: {model_config_marker_map}")
 
+    jetbox_web = verify_embedded_jetbox_web(raw_bytes)
+
     return {
         "language_server_sha256": ls_sha256,
         "build_cl": match.group(1),
@@ -202,7 +209,62 @@ def verify_language_server_and_agentapi(ls_bin: Path) -> dict:
         "stop_proto_markers": stop_marker_map,
         "approval_proto_markers": approval_marker_map,
         "model_config_proto_markers": model_config_marker_map,
+        "jetbox_web": jetbox_web,
     }
+
+
+def verify_embedded_jetbox_web(raw_bytes: bytes) -> dict:
+    eocd_sig = b"PK\x05\x06"
+    eocd_pos = raw_bytes.rfind(eocd_sig)
+    while eocd_pos != -1:
+        eocd = raw_bytes[eocd_pos : eocd_pos + 22]
+        if len(eocd) >= 22:
+            _, _, _, _, _, cd_size, cd_offset, _ = struct.unpack("<4sHHHHIIH", eocd[:22])
+            zip_start = eocd_pos - cd_size - cd_offset
+            if 0 <= zip_start < eocd_pos and raw_bytes[zip_start : zip_start + 4] == b"PK\x03\x04":
+                zip_bytes = raw_bytes[zip_start : eocd_pos + 22]
+                with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+                    names = set(archive.namelist())
+                    if {"main.js", "audio_processor.js"}.issubset(names):
+                        main_js = archive.read("main.js").decode("utf-8")
+                        audio_js = archive.read("audio_processor.js").decode("utf-8")
+                        required_main_markers = (
+                            "conversation.selectPrevious",
+                            "conversation.selectNext",
+                            "openConvoPicker",
+                            "openNewConversation",
+                            "toggleVoiceRecording",
+                            "startVoiceRecording",
+                            "stopVoiceRecording",
+                            "Record Audio",
+                            "Stop Recording",
+                            "voice-start-button",
+                            "voice-end-button",
+                            "Start Live Chat",
+                            "End Live chat",
+                            "/voice/ws",
+                            "jetski-voice-proto",
+                            "toggleModelSelector",
+                            "toggleProjectSelector",
+                            "openWorkspaceSelector",
+                            "toggleAuxPane",
+                            "toggleBottomPane",
+                            "splitConvoHorizontal",
+                            "focusInput",
+                        )
+                        marker_map = {m: (m in main_js) for m in required_main_markers}
+                        if not all(marker_map.values()):
+                            raise ValueError(f"embedded jetbox_web main.js missing markers: {marker_map}")
+                        if "AudioStreamingProcessor" not in audio_js:
+                            raise ValueError("embedded jetbox_web audio_processor.js missing AudioStreamingProcessor")
+                        return {
+                            "zip_sha256": hashlib.sha256(zip_bytes).hexdigest(),
+                            "main_js_sha256": hashlib.sha256(main_js.encode("utf-8")).hexdigest(),
+                            "audio_processor_js_sha256": hashlib.sha256(audio_js.encode("utf-8")).hexdigest(),
+                            "markers": marker_map,
+                        }
+        eocd_pos = raw_bytes.rfind(eocd_sig, 0, eocd_pos)
+    raise ValueError("embedded jetbox_web archive not found in language_server")
 
 
 def verify_sidecar_sdk(sdk_dir: Path) -> dict:

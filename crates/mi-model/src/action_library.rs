@@ -278,7 +278,16 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                     || command == "focus-input"
                     || (command == "search" && adapter != "qwenwork")
                     || (command == "new-chat"
-                        && matches!(adapter.as_str(), "antigravity" | "dsh-desktop")));
+                        && matches!(adapter.as_str(), "antigravity" | "dsh-desktop"))
+                    || (adapter == "antigravity"
+                        && matches!(
+                            command.as_str(),
+                            "live-voice"
+                                | "prev-conversation"
+                                | "next-conversation"
+                                | "project"
+                                | "split-right"
+                        )));
                 let verified = matches!(adapter.as_str(), "herdr") || desktop;
                 if verified {
                     prerequisites.push(if desktop {

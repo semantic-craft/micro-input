@@ -436,7 +436,25 @@ extension MicroInput: Backend {}
         }.map(\.element)
     }
     var hasAllDesktopAgentPresets: Bool {
-        Set(DesktopAgent.all.map(\.name)).isSubset(of: Set(hostProfiles.map(\.name)))
+        guard Set(DesktopAgent.all.map(\.name)).isSubset(of: Set(hostProfiles.map(\.name))) else {
+            return false
+        }
+        if let ag = hostProfiles.first(where: { $0.name == "Antigravity" }),
+           let lid = ag.layers.first?.id {
+            let slot6Key = "[\"\(ag.id.text)\",\"\(lid.text)\",\"logical-6\"]"
+            let slot10Key = "[\"\(ag.id.text)\",\"\(lid.text)\",\"logical-10\"]"
+            if draft.edits[slot6Key]?.id == "desktop-dictation" && draft.edits[slot10Key] == nil {
+                return false
+            }
+        }
+        if let qoder = hostProfiles.first(where: { $0.name == "Qoder CN" }),
+           let lid = qoder.layers.first?.id {
+            let slot0Key = "[\"\(qoder.id.text)\",\"\(lid.text)\",\"logical-0\"]"
+            if draft.edits[slot0Key]?.id == "desktop-open" && draft.edits[slot0Key]?.detail == "com.qodercn.app" {
+                return false
+            }
+        }
+        return true
     }
     func prepareDesktopProfiles() async {
         guard canEditDraft, !busy else { return }

@@ -218,27 +218,61 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
             command: "focus-input".into()
         }
     );
-    for pid in [ag_pid, dsh_pid] {
-        for binding in ["AG10", "AG15"] {
-            assert!(resolve_host_action(&draft.document, Some(pid), binding, true).is_none());
-        }
+    for (binding, command) in [
+        ("AG02", "new-chat"),
+        ("AG03", "project"),
+        ("AG04", "model"),
+        ("AG06", "live-voice"),
+        ("AG07", "browser"),
+        ("AG08", "terminal"),
+        ("AG09", "split-right"),
+        ("AG10", "push-to-talk"),
+        ("AG11", "push-to-talk"),
+        ("AG12", "submit"),
+        ("AG13", "prev-conversation"),
+        ("ENC_CC", "prev-conversation"),
+        ("AG14", "next-conversation"),
+        ("ENC_CW", "next-conversation"),
+        ("ENC_CLK", "search"),
+        ("AG15", "scroll-up"),
+        ("AG17", "scroll-down"),
+    ] {
+        assert_eq!(
+            resolve_host_action(&draft.document, Some(ag_pid), binding, true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: command.into(),
+            }),
+            "Antigravity {binding} must resolve to {command}"
+        );
     }
-    for (pid, adapter) in [(ag_pid, "antigravity"), (dsh_pid, "dsh-desktop")] {
-        for (binding, command) in [
-            ("AG13", "scroll-up"),
-            ("ENC_CC", "scroll-up"),
-            ("AG14", "scroll-down"),
-            ("ENC_CW", "scroll-down"),
-            ("ENC_CLK", "scroll-to-bottom"),
-        ] {
-            assert_eq!(
-                resolve_host_action(&draft.document, Some(pid), binding, true),
-                Some(ResolvedHostAction::AgentCommand {
-                    adapter: adapter.into(),
-                    command: command.into(),
-                })
-            );
-        }
+    for binding in ["AG05", "AG16", "AG18"] {
+        assert!(
+            matches!(
+                resolve_host_action(&draft.document, Some(ag_pid), binding, true),
+                Some(ResolvedHostAction::Shortcut { target_bundle_id: Some(ref target), .. })
+                    if target == "com.google.antigravity"
+            ),
+            "Antigravity {binding} must resolve to com.google.antigravity shortcut"
+        );
+    }
+    for binding in ["AG10", "AG15"] {
+        assert!(resolve_host_action(&draft.document, Some(dsh_pid), binding, true).is_none());
+    }
+    for (binding, command) in [
+        ("AG13", "scroll-up"),
+        ("ENC_CC", "scroll-up"),
+        ("AG14", "scroll-down"),
+        ("ENC_CW", "scroll-down"),
+        ("ENC_CLK", "scroll-to-bottom"),
+    ] {
+        assert_eq!(
+            resolve_host_action(&draft.document, Some(dsh_pid), binding, true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "dsh-desktop".into(),
+                command: command.into(),
+            })
+        );
     }
     assert_eq!(
         resolve_host_action(&draft.document, Some(herdr_pid), "AG00", true).unwrap(),
@@ -610,13 +644,24 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
             .unwrap()
             .0
             .clone();
-        for (binding, expected_cmd) in [
-            ("AG13", "scroll-up"),
-            ("ENC_CC", "scroll-up"),
-            ("AG14", "scroll-down"),
-            ("ENC_CW", "scroll-down"),
-            ("ENC_CLK", "scroll-to-bottom"),
-        ] {
+        let dial_expectations = if adapter == "antigravity" {
+            [
+                ("AG13", "prev-conversation"),
+                ("ENC_CC", "prev-conversation"),
+                ("AG14", "next-conversation"),
+                ("ENC_CW", "next-conversation"),
+                ("ENC_CLK", "search"),
+            ]
+        } else {
+            [
+                ("AG13", "scroll-up"),
+                ("ENC_CC", "scroll-up"),
+                ("AG14", "scroll-down"),
+                ("ENC_CW", "scroll-down"),
+                ("ENC_CLK", "scroll-to-bottom"),
+            ]
+        };
+        for (binding, expected_cmd) in dial_expectations {
             assert_eq!(
                 resolve_host_action(&draft.document, Some(&pid), binding, true),
                 Some(ResolvedHostAction::AgentCommand {

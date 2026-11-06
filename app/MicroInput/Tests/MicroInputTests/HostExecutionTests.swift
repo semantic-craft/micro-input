@@ -236,7 +236,7 @@ final class HostExecutionTests: XCTestCase {
             store.slot = 14
             XCTAssertEqual(store.canTryDesktopAction, agent.name != "Herdr")
             store.slot = agent.name == "Herdr" ? 13 : 10
-            XCTAssertFalse(store.canTryDesktopAction)
+            XCTAssertEqual(store.canTryDesktopAction, agent.name == "Antigravity")
         }
         let reopened = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: url, actionExecutor: executor)
         await reopened.loadWorkbench()
@@ -250,6 +250,25 @@ final class HostExecutionTests: XCTestCase {
         XCTAssertTrue(DesktopAgentControls.dictationState(labels: ["停止录音（Right ⌘）"], recording: true))
         XCTAssertTrue(DesktopAgentControls.dictationState(labels: ["语音输入（Right ⌘）"], recording: false))
         XCTAssertFalse(DesktopAgentControls.dictationState(labels: ["语音输入（Right ⌘）"], recording: true))
+    }
+
+    @MainActor func testAntigravityDictationLiveVoiceAndProjectControlsRecognizeAllStates() {
+        XCTAssertTrue(DesktopAgentControls.extraControl(adapter: "antigravity", command: "dictation", role: "AXButton", labels: ["Record Audio"]))
+        XCTAssertTrue(DesktopAgentControls.extraControl(adapter: "antigravity", command: "dictation", role: "AXButton", labels: ["Stop Recording"]))
+        XCTAssertTrue(DesktopAgentControls.extraControl(adapter: "antigravity", command: "dictation", role: "AXButton", labels: ["Recording"]))
+        XCTAssertTrue(DesktopAgentControls.dictationState(labels: ["Record Audio"], recording: false))
+        XCTAssertTrue(DesktopAgentControls.dictationState(labels: ["Stop Recording"], recording: true))
+        XCTAssertTrue(DesktopAgentControls.dictationState(labels: ["Recording"], recording: true))
+
+        XCTAssertTrue(DesktopAgentControls.extraControl(adapter: "antigravity", command: "live-voice", role: "AXButton", labels: ["Start Live Chat"]))
+        XCTAssertTrue(DesktopAgentControls.extraControl(adapter: "antigravity", command: "live-voice", role: "AXButton", labels: ["End Live chat"]))
+        XCTAssertTrue(DesktopAgentControls.liveVoiceState(labels: ["Start Live Chat"], active: false))
+        XCTAssertTrue(DesktopAgentControls.liveVoiceState(labels: ["Start Voice mode"], active: false))
+        XCTAssertTrue(DesktopAgentControls.liveVoiceState(labels: ["End Live chat"], active: true))
+        XCTAssertTrue(DesktopAgentControls.liveVoiceState(labels: ["Live chat, 0:12"], active: true))
+        XCTAssertFalse(DesktopAgentControls.liveVoiceState(labels: ["Start Live Chat"], active: true))
+
+        XCTAssertTrue(DesktopAgentControls.extraControl(adapter: "antigravity", command: "project", role: "AXButton", labels: ["Select project"]))
     }
 
     @MainActor func testDialScrollRequestMathCoalescingAndWindowTargeting() async throws {
@@ -593,12 +612,18 @@ final class HostExecutionTests: XCTestCase {
             for _ in 0..<25 where executor.receipts.count - startIndex < 4 {
                 try await Task.sleep(nanoseconds: 20_000_000)
             }
-            XCTAssertEqual(Array(executor.receipts.dropFirst(startIndex)).map(\.detail), [
+            let expectedDetails = adapter == "antigravity" ? [
+                "antigravity/prev-conversation",
+                "antigravity/next-conversation",
+                "antigravity/search",
+                "antigravity/next-conversation"
+            ] : [
                 "\(adapter)/scroll-up",
                 "\(adapter)/scroll-down",
                 "\(adapter)/scroll-to-bottom",
                 "\(adapter)/scroll-down-fast"
-            ])
+            ]
+            XCTAssertEqual(Array(executor.receipts.dropFirst(startIndex)).map(\.detail), expectedDetails)
         }
 
         await store.shutdown()

@@ -97,6 +97,9 @@ impl DocumentStore {
                                 | "desktop-effort"
                                 | "desktop-browser"
                                 | "desktop-terminal"
+                                | "desktop-workspace"
+                                | "desktop-nav-back"
+                                | "desktop-nav-forward"
                         )
                     }) {
                         format!("{} ({combo})", a.name)
@@ -119,6 +122,11 @@ impl DocumentStore {
                     "focus-input" => "聚焦输入框", "search" => "搜索会话", "new-chat" => "新建会话",
                     "model" => "选择模型", "effort" => "思考力度", "dictation" => "听写 / 语音输入",
                     "push-to-talk" => "按住说话",
+                    "live-voice" => "Gemini Live 实时语音",
+                    "project" => "选项目 / 新建项目",
+                    "split-right" => "快速向右分栏",
+                    "prev-conversation" => "上一会话（侧栏轮转）",
+                    "next-conversation" => "下一会话（侧栏轮转）",
                     "voice-reply" | "toggle-voice-reply" => "切换语音回复",
                     "browser" => "打开内置浏览器", "terminal" => "打开终端面板",
                     "scroll-up" => "向上滚动对话", "scroll-down" => "向下滚动对话",
@@ -316,6 +324,25 @@ mod tests {
                     by_id("AG18")["label"],
                     "聚焦右方面板 (command+option Right)"
                 );
+            } else if profile_name == "Antigravity" {
+                assert_eq!(by_id("AG01")["label"], "聚焦输入框");
+                assert_eq!(by_id("AG02")["label"], "新建会话");
+                assert_eq!(by_id("AG03")["label"], "选项目 / 新建项目");
+                assert_eq!(by_id("AG04")["label"], "选择模型");
+                assert_eq!(by_id("AG05")["label"], "项目工作区快切 (command+shift K)");
+                assert_eq!(by_id("AG06")["label"], "Gemini Live 实时语音");
+                assert_eq!(by_id("AG07")["label"], "打开内置浏览器");
+                assert_eq!(by_id("AG08")["label"], "打开终端面板");
+                assert_eq!(by_id("AG09")["label"], "快速向右分栏");
+                assert_eq!(by_id("AG10")["label"], "按住说话");
+                assert_eq!(by_id("AG12")["label"], "停止听写并提交");
+                assert_eq!(by_id("AG13")["label"], "上一会话（侧栏轮转）");
+                assert_eq!(by_id("AG14")["label"], "下一会话（侧栏轮转）");
+                assert_eq!(by_id("ENC_CLK")["label"], "搜索会话");
+                assert_eq!(by_id("AG15")["label"], "向上滚动对话");
+                assert_eq!(by_id("AG16")["label"], "历史后退 (command [)");
+                assert_eq!(by_id("AG17")["label"], "向下滚动对话");
+                assert_eq!(by_id("AG18")["label"], "历史前进 (command ])");
             } else {
                 assert_eq!(by_id("AG01")["label"], "聚焦输入框");
                 assert_eq!(by_id("AG13")["label"], "向上滚动对话");

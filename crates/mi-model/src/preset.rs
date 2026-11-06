@@ -1164,6 +1164,242 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             ));
         }
     }
+    legacy_specs.extend(
+        specs
+            .iter()
+            .filter(|(name, _)| *name == "Antigravity")
+            .cloned(),
+    );
+    let antigravity = &mut specs
+        .iter_mut()
+        .find(|(name, _)| *name == "Antigravity")
+        .unwrap()
+        .1;
+    antigravity.clear();
+    antigravity.extend([
+        (
+            0,
+            "desktop-open",
+            "打开 / 聚焦应用",
+            "应用",
+            "com.google.antigravity",
+            ActionKind::OpenApp {
+                bundle_id: "com.google.antigravity".into(),
+            },
+        ),
+        (
+            1,
+            "desktop-input",
+            "聚焦当前输入框",
+            "Agent",
+            "com.google.antigravity",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "focus-input".into(),
+            },
+        ),
+        (
+            2,
+            "desktop-new",
+            "新建会话",
+            "Agent",
+            "com.google.antigravity",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "new-chat".into(),
+            },
+        ),
+        (
+            3,
+            "desktop-project",
+            "选项目 / 新建项目",
+            "Agent",
+            "切换侧栏项目或打开新项目目录（Cmd+;）",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "project".into(),
+            },
+        ),
+        (
+            4,
+            "desktop-model",
+            "选择模型",
+            "Agent",
+            "打开模型与思考档位选择器（Cmd+/ 或原生控件）",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "model".into(),
+            },
+        ),
+        (
+            5,
+            "desktop-workspace",
+            "项目工作区快切",
+            "快捷键",
+            "com.google.antigravity",
+            ActionKind::Shortcut {
+                key: "K".into(),
+                modifiers: vec!["command".into(), "shift".into()],
+                target: "com.google.antigravity".into(),
+            },
+        ),
+        (
+            6,
+            "desktop-live-voice",
+            "Gemini Live 实时语音",
+            "Agent",
+            "启动或结束 Antigravity Live 实时语音对话并确认状态",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "live-voice".into(),
+            },
+        ),
+        (
+            7,
+            "desktop-browser",
+            "打开内置浏览器",
+            "Agent",
+            "切换右侧内置浏览器与预览面板（Cmd+Shift+B 或原生控件）",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "browser".into(),
+            },
+        ),
+        (
+            8,
+            "desktop-terminal",
+            "打开终端面板",
+            "Agent",
+            "切换底部终端面板（Cmd+J 或原生控件）",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "terminal".into(),
+            },
+        ),
+        (
+            9,
+            "desktop-split",
+            "快速向右分栏",
+            "Agent",
+            "将当前会话向右分栏（Cmd+D）",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "split-right".into(),
+            },
+        ),
+        (
+            10,
+            "desktop-dictation",
+            "按住说话 · 松开停止",
+            "Agent",
+            "2U 宽键按住启动听写（Record Audio / Ctrl+M），松开自动停止",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "push-to-talk".into(),
+            },
+        ),
+        (
+            11,
+            "desktop-dictation-r",
+            "按住说话 · 松开停止",
+            "Agent",
+            "2U 宽键按住启动听写（Record Audio / Ctrl+M），松开自动停止",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "push-to-talk".into(),
+            },
+        ),
+        (
+            12,
+            "desktop-submit",
+            "发送消息（先停听写）",
+            "提交控制",
+            "若听写激活则先停并确认停止，再聚焦输入区回车提交",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "submit".into(),
+            },
+        ),
+        (
+            13,
+            "desktop-prev-chat",
+            "上一会话（侧栏轮转）",
+            "Agent",
+            "在左侧栏会话列表中向上切换一条会话（Alt+Up）",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "prev-conversation".into(),
+            },
+        ),
+        (
+            14,
+            "desktop-next-chat",
+            "下一会话（侧栏轮转）",
+            "Agent",
+            "在左侧栏会话列表中向下切换一条会话（Alt+Down）",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "next-conversation".into(),
+            },
+        ),
+        (
+            15,
+            "desktop-search",
+            "搜索会话",
+            "Agent",
+            "打开会话搜索面板（Search Conversations / Cmd+K）",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "search".into(),
+            },
+        ),
+        (
+            16,
+            "desktop-scroll-up",
+            "向上滚动对话",
+            "Agent",
+            "目标应用的原生对话滚动与输入框定位；不抢占非目标窗口焦点",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "scroll-up".into(),
+            },
+        ),
+        (
+            17,
+            "desktop-nav-back",
+            "历史后退",
+            "快捷键",
+            "com.google.antigravity",
+            ActionKind::Shortcut {
+                key: "[".into(),
+                modifiers: vec!["command".into()],
+                target: "com.google.antigravity".into(),
+            },
+        ),
+        (
+            18,
+            "desktop-scroll-down",
+            "向下滚动对话",
+            "Agent",
+            "目标应用的原生对话滚动与输入框定位；不抢占非目标窗口焦点",
+            ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "scroll-down".into(),
+            },
+        ),
+        (
+            19,
+            "desktop-nav-forward",
+            "历史前进",
+            "快捷键",
+            "com.google.antigravity",
+            ActionKind::Shortcut {
+                key: "]".into(),
+                modifiers: vec!["command".into()],
+                target: "com.google.antigravity".into(),
+            },
+        ),
+    ]);
     let herdr = &mut specs
         .iter_mut()
         .find(|(name, _)| *name == "Herdr")
@@ -1260,6 +1496,40 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 work.delete_profile(&pid)?;
             }
         }
+    }
+    let retired_qoder_ids: Vec<String> = work
+        .document
+        .editable
+        .graph
+        .profiles
+        .iter()
+        .filter_map(|(pid, p)| {
+            if p.name != "Qoder CN" || p.layer_order.len() != 1 {
+                return None;
+            }
+            let layer = work.document.editable.graph.layers.get(&p.layer_order[0])?;
+            let all_qoder = layer
+                .controls
+                .values()
+                .filter_map(|b| b.action_id.as_ref())
+                .all(|aid| {
+                    work.document
+                        .editable
+                        .graph
+                        .actions
+                        .get(aid)
+                        .is_some_and(|a| {
+                            a.payload.get("bundle_id").and_then(Value::as_str)
+                                == Some("com.qodercn.app")
+                                || a.payload.get("adapter").and_then(Value::as_str)
+                                    == Some("qoder-cn")
+                        })
+                });
+            all_qoder.then(|| pid.clone())
+        })
+        .collect();
+    for pid in retired_qoder_ids {
+        work.delete_profile(&pid)?;
     }
     for (profile_name, assignments) in specs {
         let is_native_oai_profile = matches!(profile_name, "Cindy" | "Codex");
@@ -1750,7 +2020,7 @@ mod agent_migration_tests {
                 if customized {
                     legacy_agent_specs()[0].1.len()
                 } else {
-                    12
+                    20
                 }
             );
             if customized {
@@ -1794,9 +2064,9 @@ mod agent_migration_tests {
             );
         }
 
-        // Downgrade Antigravity and 千问办公 to pre-Slice-B 9-slot push-to-talk state (remove slots 13, 14, 15),
+        // Downgrade DeepSeek Coder (DSH) and 千问办公 to pre-Slice-B 9-slot push-to-talk state (remove slots 13, 14, 15),
         // and customize ZCode by adding a joystick prompt slot (slot 16 -> prompt-continue).
-        for profile_name in ["Antigravity", "千问办公"] {
+        for profile_name in ["DeepSeek Coder (DSH)", "千问办公"] {
             let pid = draft
                 .document
                 .editable
@@ -1856,7 +2126,7 @@ mod agent_migration_tests {
             "Profile UUIDs must be preserved on upgrade"
         );
 
-        for profile_name in ["Antigravity", "千问办公"] {
+        for profile_name in ["Antigravity", "DeepSeek Coder (DSH)", "千问办公"] {
             let pid = draft
                 .document
                 .editable
@@ -1870,7 +2140,7 @@ mod agent_migration_tests {
             assert!(
                 crate::host_router::resolve_host_action(&draft.document, Some(&pid), "AG13", true)
                     .is_some(),
-                "{profile_name} AG13 dial scroll must be restored by lossless upgrade"
+                "{profile_name} AG13 dial action must be present after lossless upgrade"
             );
             assert!(
                 crate::host_router::resolve_host_action(
@@ -1880,7 +2150,7 @@ mod agent_migration_tests {
                     true
                 )
                 .is_some(),
-                "{profile_name} ENC_CLK jump-to-bottom must be restored by lossless upgrade"
+                "{profile_name} ENC_CLK action must be present after lossless upgrade"
             );
         }
 
