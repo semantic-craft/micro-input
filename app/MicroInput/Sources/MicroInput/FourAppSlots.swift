@@ -783,7 +783,8 @@ extension Store {
 
         if !(actionExecutor is RecordingHostActionExecutor),
            ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == nil {
-            let (ok, axDetail) = DesktopAgentControls.stepAntigravitySidebarFilteredRow(filter: filter, next: next)
+            let activeAdapter = activeDesktopAgentAdapter(for: profileId) ?? "antigravity"
+            let (ok, axDetail) = DesktopAgentControls.stepSidebarFilteredRow(adapter: activeAdapter, filter: filter, next: next)
             if ok {
                 status = axDetail
                 let receipt = HostActionReceipt(
@@ -791,7 +792,7 @@ extension Store {
                     profileId: profileId,
                     bindingId: bindingId,
                     actionType: "antigravity_cycle_\(filter.rawValue)",
-                    target: "antigravity",
+                    target: activeAdapter,
                     textByteLen: nil,
                     outcome: "confirmed",
                     detail: axDetail

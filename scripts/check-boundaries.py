@@ -48,36 +48,11 @@ assert not home_violations, (
     + '\n  '.join(home_violations)
 )
 
-# R-C02: integration patches must include all new bridge/fixture files (never drop untracked files via bare `git diff HEAD`).
-required_patch_files = {
-    'integrations/cindy/native-ownership.patch': [
-        'apps/desktop/src/main/worklouder-codex/WorkLouderOwnershipFence.ts',
-        'apps/desktop/src/main/worklouder-codex/microInputNavigation.ts',
-        'apps/desktop/src/main/worklouder-codex/microInputOwnership.ts',
-        'apps/desktop/src/renderer/lib/workLouderCodexOwnership.ts',
-        'scripts/micro-input-navigation-fixture.ts',
-        'scripts/micro-input-ownership-fixture.ts',
-    ],
-    'integrations/dsh/navigation.patch': [
-        'apps/desktop-host/src/micro-input-host.ts',
-        'apps/desktop-host/src/micro-input.ts',
-        'scripts/micro-input-fixture.ts',
-    ],
-    'integrations/zcode/navigation.patch': [
-        'packages/desktop/src/main/micro-input/socket.ts',
-        'scripts/micro-input-fixture.ts',
-    ],
-}
-missing_patch_entries = []
-for patch_rel, expected_files in required_patch_files.items():
-    patch_text = (root / patch_rel).read_text(encoding='utf-8', errors='replace')
-    present = set(re.findall(r'^\+\+\+ b/(.+)$', patch_text, re.MULTILINE))
-    for req in expected_files:
-        if req not in present:
-            missing_patch_entries.append(f'{patch_rel} missing {req}')
-assert not missing_patch_entries, (
-    'Integration patch is missing new files (run `git add -N .` in the target checkout before `git diff HEAD`):\n  '
-    + '\n  '.join(missing_patch_entries)
+# R-C02: zero-patch REA adaptation to external agent apps (no third-party .patch files in integrations/).
+residual_patches = sorted(str(p.relative_to(root)) for p in (root / 'integrations').rglob('*.patch'))
+assert not residual_patches, (
+    'R-C02 violation: external agent apps must be adapted directly from Micro Input without third-party .patch files:\n  '
+    + '\n  '.join(residual_patches)
 )
 
 # R-C03: NativeOwnershipController.isUnbridgedDesktopActive must derive solely from current socket presence,

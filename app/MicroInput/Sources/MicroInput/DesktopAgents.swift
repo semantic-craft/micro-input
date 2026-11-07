@@ -3,20 +3,23 @@ import ApplicationServices
 import SwiftUI
 
 struct DesktopAgent: Identifiable {
+    static let otherAppsWildcardBundleID = "*"
     let name: String
     let bundleID: String
     let symbol: String
     let capabilities: String
     var id: String { name }
-    var installed: Bool { NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil }
+    var isGeneralFallback: Bool { bundleID == Self.otherAppsWildcardBundleID }
+    var installed: Bool { isGeneralFallback || NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil }
     static let all: [DesktopAgent] = [
-        .init(name: "Cindy", bundleID: "com.xd.cindy", symbol: "sparkles", capabilities: "打开应用、搜索任务、定位输入框、旋钮滚动对话"),
+        .init(name: "Cindy", bundleID: "com.xd.cindy", symbol: "sparkles", capabilities: "打开应用、左旋钮项目切换、右摇杆会话滚动、蓝点/Working 状态筛选、新建与搜索任务"),
         .init(name: "Codex", bundleID: "com.openai.codex", symbol: "terminal", capabilities: "打开应用、搜索、定位输入框、旋钮滚动对话"),
         .init(name: "千问办公", bundleID: "cn.qwenwork.desktop.mac", symbol: "text.bubble", capabilities: "打开应用、新建任务、搜索、定位输入框、旋钮滚动对话"),
-        .init(name: "ZCode", bundleID: "dev.zcode.app", symbol: "chevron.left.forwardslash.chevron.right", capabilities: "打开应用、新建任务、搜索、定位输入框、旋钮滚动对话"),
-        .init(name: "Antigravity", bundleID: "com.google.antigravity", symbol: "sparkles", capabilities: "打开应用、左旋钮会话导航、点按切换听写（Ctrl+M）、Live 实时语音、选模型/项目、浏览器/终端/分栏"),
-        .init(name: "DeepSeek Coder (DSH)", bundleID: "com.deepseek.dsh", symbol: "terminal", capabilities: "打开应用、新建对话、搜索、定位输入框、旋钮滚动对话"),
-        .init(name: "Herdr", bundleID: "dev.herdr.app", symbol: "rectangle.split.2x2", capabilities: "工作区切换、标签页、分屏与面板导航")
+        .init(name: "ZCode", bundleID: "dev.zcode.app", symbol: "chevron.left.forwardslash.chevron.right", capabilities: "打开应用、左旋钮项目切换、右摇杆会话滚动、蓝点/Working 状态筛选、模型/思考档位/终端快捷键"),
+        .init(name: "Antigravity", bundleID: "com.google.antigravity", symbol: "sparkles", capabilities: "打开应用、左旋钮项目切换、右摇杆会话滚动、蓝点/Working 状态筛选、点按切换听写（Ctrl+M）、Live 实时语音"),
+        .init(name: "DeepSeek Coder (DSH)", bundleID: "com.deepseek.dsh", symbol: "terminal", capabilities: "打开应用、左旋钮项目切换、右摇杆会话滚动、状态点位筛选、新建会话/工作区/终端/浏览器快捷键"),
+        .init(name: "Herdr", bundleID: "dev.herdr.app", symbol: "rectangle.split.2x2", capabilities: "工作区切换、标签页、分屏与面板导航"),
+        .init(name: "其他软件", bundleID: otherAppsWildcardBundleID, symbol: "keyboard", capabilities: "日常通用快捷键映射、底部语音键触发苹果 🌐 Fn（听写 / 回响语音输入）")
     ]
     // Stored profile names remain stable so existing mappings and favorites survive.
     static func displayName(_ name: String) -> String {
@@ -379,33 +382,167 @@ struct DesktopAgent: Identifiable {
         }
     }
 
-    static func stepAntigravitySidebarFilteredRow(filter: AntigravitySessionFilter, next: Bool) -> (Bool, String) {
-        guard AXIsProcessTrusted(),
-              let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.google.antigravity").first else {
-            return (false, "Antigravity 未运行或缺少辅助功能权限")
+    static func performProjectStep(adapter: String, window: AXUIElement, app: NSRunningApplication, next: Bool) -> (Bool, String) {
+        if adapter == "antigravity" {
+            return performAntigravityProjectStep(window: window, app: app, next: next)
         }
-        let root = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(root, 0.3)
-        guard let window = (attribute(root, kAXFocusedWindowAttribute) as! AXUIElement?)
-            ?? (attribute(root, kAXWindowsAttribute) as? [AXUIElement])?.first else {
-            return (false, "未找到 Antigravity 窗口")
-        }
-        struct RowCandidate {
-            let link: AXUIElement
+        struct ProjectEntry {
+            let element: AXUIElement
             let title: String
             let y: CGFloat
-            let isWorking: Bool
-            let isUnreadCompleted: Bool
+            let order: Int
         }
         var pending = [window]
-        var rows: [RowCandidate] = []
+        var projects: [ProjectEntry] = []
+        var visited = 0
+        let deadline = Date().addingTimeInterval(0.9)
+        while let element = pending.popLast(), visited < 1800, Date() < deadline {
+            visited += 1
+            let role = attribute(element, kAXRoleAttribute) as? String ?? ""
+            let title = attribute(element, kAXTitleAttribute) as? String ?? ""
+            let desc = attribute(element, kAXDescriptionAttribute) as? String ?? ""
+            let domClasses = attribute(element, "AXDOMClassList") as? [String] ?? []
+            let pos = elementPosition(element)
+            let x = pos?.x ?? 0
+            if x < 320 {
+                if adapter == "zcode", domClasses.contains("group/project-row") {
+                    let rowTitle = (title.isEmpty ? desc : title).trimmingCharacters(in: .whitespacesAndNewlines)
+                    projects.append(ProjectEntry(element: element, title: rowTitle.isEmpty ? "工作区" : rowTitle, y: pos?.y ?? CGFloat(visited), order: visited))
+                } else if (adapter == "dsh-desktop" || adapter == "dsh"), (role == kAXRowRole || role == "AXOutlineRow" || role == kAXGroupRole || role == kAXButtonRole) {
+                    let label = (title.isEmpty ? desc : title).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if label.contains("工作区“") || label.contains("Actions for workspace") || label.contains("在“") || label.contains("New session in") {
+                        projects.append(ProjectEntry(element: element, title: label, y: pos?.y ?? CGFloat(visited), order: visited))
+                    }
+                } else if adapter == "cindy", role == kAXButtonRole, !domClasses.contains("rounded-full") {
+                    let sz = elementSize(element)
+                    if isSidebarProjectButton(role: role, title: title, x: pos?.x, width: sz?.width) {
+                        projects.append(ProjectEntry(element: element, title: title.trimmingCharacters(in: .whitespacesAndNewlines), y: pos?.y ?? CGFloat(visited), order: visited))
+                    }
+                }
+            }
+            if let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] {
+                pending.append(contentsOf: children)
+            }
+        }
+        let sorted = projects.sorted {
+            if abs($0.y - $1.y) > 2 { return $0.y < $1.y }
+            return $0.order < $1.order
+        }
+        guard !sorted.isEmpty else {
+            return (false, "未在左侧栏找到项目列表")
+        }
+        let currentIndex = lastAntigravityProjectTitle.flatMap { last in sorted.firstIndex(where: { $0.title == last }) }
+        let targetIndex: Int
+        if let currentIndex {
+            targetIndex = next ? ((currentIndex + 1) % sorted.count) : ((currentIndex - 1 + sorted.count) % sorted.count)
+        } else {
+            targetIndex = 0
+        }
+        let target = sorted[targetIndex]
+        if AXUIElementPerformAction(target.element, kAXPressAction as CFString) == .success {
+            lastAntigravityProjectTitle = target.title
+            return (true, "已切换到侧栏\(next ? "下一" : "上一")项目（\(target.title)）")
+        }
+        return (false, "侧栏项目按钮未能响应操作")
+    }
+
+    static func performConversationStep(adapter: String, window: AXUIElement, app: NSRunningApplication, next: Bool) -> (Bool, String) {
+        if adapter == "antigravity" {
+            return performAntigravityConversationStep(window: window, app: app, next: next)
+        }
+        if adapter == "zcode", let spec = nativeShortcutSpec(adapter: adapter, command: next ? "next-conversation" : "prev-conversation") {
+            guard shortcutPoster(spec.keyCode, spec.flags) else {
+                return (false, "\(next ? "下一" : "上一")会话快捷键（\(spec.label)）合成失败")
+            }
+            return (true, "已切换到\(next ? "下一" : "上一")会话（\(spec.label)）；未发送消息")
+        }
+        let rows = scanSidebarFilteredRows(adapter: adapter, window: window)
+        if !rows.isEmpty, NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier {
+            let sorted = rows.sorted { $0.y < $1.y }
+            let currentIndex = lastAntigravityConversationTitle.flatMap { last in sorted.firstIndex(where: { $0.title == last }) }
+            let targetIndex: Int
+            if let currentIndex {
+                targetIndex = next ? ((currentIndex + 1) % sorted.count) : ((currentIndex - 1 + sorted.count) % sorted.count)
+            } else {
+                targetIndex = next ? 0 : (sorted.count - 1)
+            }
+            let target = sorted[targetIndex]
+            if AXUIElementPerformAction(target.link, kAXPressAction as CFString) == .success {
+                lastAntigravityConversationTitle = target.title
+                return (true, "已切换到侧栏\(next ? "下一" : "上一")会话（\(target.title)）；未发送消息")
+            }
+        }
+        if next {
+            guard shortcutPoster(0x7D, .maskAlternate) else { return (false, "下一会话快捷键事件合成失败") }
+            return (true, "已切换到侧栏下一会话（Alt+Down）；未发送消息")
+        } else {
+            guard shortcutPoster(0x7E, .maskAlternate) else { return (false, "上一会话快捷键事件合成失败") }
+            return (true, "已切换到侧栏上一会话（Alt+Up）；未发送消息")
+        }
+    }
+
+    struct SidebarRowCandidate {
+        let link: AXUIElement
+        let title: String
+        let y: CGFloat
+        let isWorking: Bool
+        let isUnreadCompleted: Bool
+    }
+
+    static func classifyDSHStatusLabels(_ labels: [String]) -> (isWorking: Bool, isUnreadCompleted: Bool) {
+        var isWorking = false
+        var isUnreadCompleted = false
+        for raw in labels {
+            let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text == "进行中" || text == "Running" || text.contains("子智能体运行中") || text.contains("subagents running") {
+                isWorking = true
+            }
+            if text == "已完成" || text == "Completed"
+                || text == "等待审批" || text == "计划待审" || text == "等待回答" || text == "待审批" || text == "待回答"
+                || text == "Waiting for approval" || text == "Plan review" || text == "Waiting for answer" {
+                isUnreadCompleted = true
+            }
+        }
+        return (isWorking, isUnreadCompleted)
+    }
+
+    static func classifyZCodeDOMClasses(_ classSets: [[String]]) -> (isWorking: Bool, isUnreadCompleted: Bool) {
+        var isWorking = false
+        var isUnreadCompleted = false
+        for classes in classSets {
+            if classes.contains("animate-spin") { isWorking = true }
+            if classes.contains("bg-icon-blue") { isUnreadCompleted = true }
+        }
+        return (isWorking, isUnreadCompleted)
+    }
+
+    static func classifyCindyStatusLabels(_ labels: [String]) -> (isWorking: Bool, isUnreadCompleted: Bool) {
+        var isWorking = false
+        var isUnreadCompleted = false
+        for raw in labels {
+            let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text.contains("运行中") || text == "Running" {
+                isWorking = true
+            }
+            if text.contains("已完成") || text.contains("Completed")
+                || text.contains("等待回复") || text.contains("Awaiting your input")
+                || text.contains("出错") || text.contains("Failed") {
+                isUnreadCompleted = true
+            }
+        }
+        return (isWorking, isUnreadCompleted)
+    }
+
+    private static func scanSidebarFilteredRows(adapter: String, window: AXUIElement) -> [SidebarRowCandidate] {
+        var pending = [window]
+        var rows: [SidebarRowCandidate] = []
         var visited = 0
         let deadline = Date().addingTimeInterval(0.9)
         while let element = pending.popLast(), visited < 1800, Date() < deadline {
             visited += 1
             let role = attribute(element, kAXRoleAttribute) as? String ?? ""
             let domClasses = attribute(element, "AXDOMClassList") as? [String] ?? []
-            if role == kAXGroupRole && domClasses.contains("agy-sidebar-row") {
+            if adapter == "antigravity", role == kAXGroupRole && domClasses.contains("agy-sidebar-row") {
                 var rowLink: AXUIElement?
                 var rowTitle = ""
                 var hasStopButton = false
@@ -439,14 +576,125 @@ struct DesktopAgent: Identifiable {
                 if let link = rowLink, !rowTitle.isEmpty, rowTitle != "See all" {
                     let y = elementPosition(link)?.y ?? CGFloat(visited)
                     let isUnread = !hasStopButton && hasArchiveButton && !hasTimeText
-                    rows.append(RowCandidate(link: link, title: rowTitle, y: y, isWorking: hasStopButton, isUnreadCompleted: isUnread))
+                    rows.append(SidebarRowCandidate(link: link, title: rowTitle, y: y, isWorking: hasStopButton, isUnreadCompleted: isUnread))
                 }
                 continue
+            } else if adapter == "zcode", domClasses.contains("group/task-item") {
+                let pos = elementPosition(element)
+                if (pos?.x ?? 0) < 320 {
+                    var classSets: [[String]] = [domClasses]
+                    var texts: [String] = []
+                    var subQueue = (attribute(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+                    while let sub = subQueue.popLast() {
+                        let sClasses = attribute(sub, "AXDOMClassList") as? [String] ?? []
+                        if !sClasses.isEmpty { classSets.append(sClasses) }
+                        let sRole = attribute(sub, kAXRoleAttribute) as? String ?? ""
+                        if sRole == kAXStaticTextRole {
+                            let sVal = (attribute(sub, kAXValueAttribute) as? String)
+                                ?? (attribute(sub, kAXTitleAttribute) as? String) ?? ""
+                            let trimmed = sVal.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmed.isEmpty { texts.append(trimmed) }
+                        }
+                        if let sChildren = attribute(sub, kAXChildrenAttribute) as? [AXUIElement] {
+                            subQueue.append(contentsOf: sChildren)
+                        }
+                    }
+                    let rowTitle = texts.first ?? (attribute(element, kAXTitleAttribute) as? String ?? "ZCode 会话")
+                    let status = classifyZCodeDOMClasses(classSets)
+                    rows.append(SidebarRowCandidate(link: element, title: rowTitle, y: pos?.y ?? CGFloat(visited), isWorking: status.isWorking, isUnreadCompleted: status.isUnreadCompleted))
+                    continue
+                }
+            } else if adapter == "cindy", role == kAXButtonRole, domClasses.contains("rounded-full"), domClasses.contains("h-8") {
+                let pos = elementPosition(element)
+                if (pos?.x ?? 0) < 320 {
+                    var labels: [String] = []
+                    var texts: [String] = []
+                    var subQueue = (attribute(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+                    while let sub = subQueue.popLast() {
+                        let sRole = attribute(sub, kAXRoleAttribute) as? String ?? ""
+                        let sTitle = attribute(sub, kAXTitleAttribute) as? String ?? ""
+                        let sDesc = attribute(sub, kAXDescriptionAttribute) as? String ?? ""
+                        let sVal = attribute(sub, kAXValueAttribute) as? String ?? ""
+                        for item in [sTitle, sDesc, sVal] where !item.isEmpty {
+                            labels.append(item)
+                        }
+                        if sRole == kAXStaticTextRole {
+                            let trimmed = (sVal.isEmpty ? sTitle : sVal).trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmed.isEmpty { texts.append(trimmed) }
+                        }
+                        if let sChildren = attribute(sub, kAXChildrenAttribute) as? [AXUIElement] {
+                            subQueue.append(contentsOf: sChildren)
+                        }
+                    }
+                    let rowTitle = texts.first ?? (attribute(element, kAXTitleAttribute) as? String ?? "Cindy 会话")
+                    let status = classifyCindyStatusLabels(labels)
+                    rows.append(SidebarRowCandidate(link: element, title: rowTitle, y: pos?.y ?? CGFloat(visited), isWorking: status.isWorking, isUnreadCompleted: status.isUnreadCompleted))
+                    continue
+                }
+            } else if (adapter == "dsh-desktop" || adapter == "dsh"), (role == kAXRowRole || role == "AXOutlineRow" || role == kAXGroupRole) {
+                let pos = elementPosition(element)
+                if (pos?.x ?? 0) < 320 {
+                    var isSessionRow = false
+                    var sessionName = ""
+                    var labels: [String] = []
+                    var subQueue = (attribute(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+                    while let sub = subQueue.popLast() {
+                        let sRole = attribute(sub, kAXRoleAttribute) as? String ?? ""
+                        let sTitle = attribute(sub, kAXTitleAttribute) as? String ?? ""
+                        let sDesc = attribute(sub, kAXDescriptionAttribute) as? String ?? ""
+                        let sVal = attribute(sub, kAXValueAttribute) as? String ?? ""
+                        for item in [sTitle, sDesc, sVal] where !item.isEmpty {
+                            labels.append(item)
+                            if item.hasPrefix("会话“"), let endRange = item.range(of: "”的操作") {
+                                isSessionRow = true
+                                let startIdx = item.index(item.startIndex, offsetBy: 3)
+                                sessionName = String(item[startIdx..<endRange.lowerBound])
+                            } else if item.hasPrefix("Actions for session “"), let endRange = item.range(of: "”") {
+                                isSessionRow = true
+                                let startIdx = item.index(item.startIndex, offsetBy: "Actions for session “".count)
+                                sessionName = String(item[startIdx..<endRange.lowerBound])
+                            }
+                        }
+                        if sRole == kAXStaticTextRole, sessionName.isEmpty {
+                            let trimmed = (sVal.isEmpty ? sTitle : sVal).trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmed.isEmpty { sessionName = trimmed }
+                        }
+                        if let sChildren = attribute(sub, kAXChildrenAttribute) as? [AXUIElement] {
+                            subQueue.append(contentsOf: sChildren)
+                        }
+                    }
+                    if isSessionRow {
+                        let status = classifyDSHStatusLabels(labels)
+                        rows.append(SidebarRowCandidate(link: element, title: sessionName.isEmpty ? "DSH 会话" : sessionName, y: pos?.y ?? CGFloat(visited), isWorking: status.isWorking, isUnreadCompleted: status.isUnreadCompleted))
+                        continue
+                    }
+                }
             }
             if let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] {
                 pending.append(contentsOf: children)
             }
         }
+        return rows
+    }
+
+    static func stepAntigravitySidebarFilteredRow(filter: AntigravitySessionFilter, next: Bool) -> (Bool, String) {
+        stepSidebarFilteredRow(adapter: "antigravity", filter: filter, next: next)
+    }
+
+    static func stepSidebarFilteredRow(adapter: String, filter: AntigravitySessionFilter, next: Bool) -> (Bool, String) {
+        let canonical = adapter == "dsh" ? "dsh-desktop" : adapter
+        guard let bundle = bundles[canonical],
+              AXIsProcessTrusted(),
+              let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else {
+            return (false, "\(canonical) 未运行或缺少辅助功能权限")
+        }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(root, 0.3)
+        guard let window = (attribute(root, kAXFocusedWindowAttribute) as! AXUIElement?)
+            ?? (attribute(root, kAXWindowsAttribute) as? [AXUIElement])?.first else {
+            return (false, "未找到 \(canonical) 窗口")
+        }
+        let rows = scanSidebarFilteredRows(adapter: canonical, window: window)
         let filtered = rows.filter { item in
             switch filter {
             case .working: return item.isWorking
@@ -473,15 +721,20 @@ struct DesktopAgent: Identifiable {
     }
 
     static func perform(adapter: String, command: String, revealTools: Bool = true) async -> (Bool, String) {
-        if adapter == "antigravity", let (filter, next) = AntigravitySessionFilter.from(command: command) {
-            return stepAntigravitySidebarFilteredRow(filter: filter, next: next)
+        let canonicalAdapter = adapter == "dsh" ? "dsh-desktop" : adapter
+        if ["antigravity", "dsh-desktop", "zcode", "cindy"].contains(canonicalAdapter),
+           let (filter, next) = AntigravitySessionFilter.from(command: command) {
+            return stepSidebarFilteredRow(adapter: canonicalAdapter, filter: filter, next: next)
         }
-        let antigravityOnly = ["live-voice", "prev-conversation", "next-conversation", "prev-project", "next-project", "project", "split-right", "submit"]
-        guard let bundle = bundles[adapter],
+        let antigravityOnly = ["live-voice", "split-right"]
+        let fourAppAdapters = ["antigravity", "dsh-desktop", "zcode", "cindy"]
+        let fourAppNavCommands = ["prev-conversation", "next-conversation", "prev-project", "next-project", "project", "submit"]
+        guard let bundle = bundles[canonicalAdapter],
               ["focus-input", "search", "new-chat", "model", "effort", "dictation", "browser", "terminal", "reveal-tools", "voice-reply", "toggle-voice-reply", "live-voice", "prev-conversation", "next-conversation", "prev-project", "next-project", "project", "split-right", "submit"].contains(command),
-              !(adapter == "qwenwork" && command == "search"),
-              (!antigravityOnly.contains(command) || adapter == "antigravity"),
-              command != "new-chat" || ["antigravity", "dsh-desktop"].contains(adapter) else { return (false, "未接入的应用操作") }
+              !(canonicalAdapter == "qwenwork" && command == "search"),
+              (!antigravityOnly.contains(command) || canonicalAdapter == "antigravity"),
+              (!fourAppNavCommands.contains(command) || fourAppAdapters.contains(canonicalAdapter)),
+              command != "new-chat" || ["antigravity", "dsh-desktop", "zcode", "cindy", "qwenwork"].contains(canonicalAdapter) else { return (false, "未接入的应用操作") }
         guard AXIsProcessTrusted() else { return (false, "需要辅助功能权限") }
         guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == bundle else {
             return (false, "目标应用不在前台，未执行")
@@ -500,17 +753,17 @@ struct DesktopAgent: Identifiable {
             try? await Task.sleep(nanoseconds: 25_000_000)
         }
         guard let window = focusedWindow else { return (false, "目标应用没有唯一可访问的当前窗口") }
-        if adapter == "antigravity" {
+        if fourAppAdapters.contains(canonicalAdapter) {
             switch command {
             case "prev-conversation":
-                return performAntigravityConversationStep(window: window, app: app, next: false)
+                return performConversationStep(adapter: canonicalAdapter, window: window, app: app, next: false)
             case "next-conversation":
-                return performAntigravityConversationStep(window: window, app: app, next: true)
+                return performConversationStep(adapter: canonicalAdapter, window: window, app: app, next: true)
             case "prev-project":
-                return performAntigravityProjectStep(window: window, app: app, next: false)
+                return performProjectStep(adapter: canonicalAdapter, window: window, app: app, next: false)
             case "next-project":
-                return performAntigravityProjectStep(window: window, app: app, next: true)
-            case "split-right":
+                return performProjectStep(adapter: canonicalAdapter, window: window, app: app, next: true)
+            case "split-right" where canonicalAdapter == "antigravity":
                 guard shortcutPoster(0x02, .maskCommand) else { return (false, "向右分栏快捷键事件合成失败") }
                 return (true, "已触发向右分栏（Cmd+D）；未发送消息")
             default:
@@ -534,28 +787,28 @@ struct DesktopAgent: Identifiable {
             // keeps long chats from exhausting the bounded scan.
             if labels.contains(where: { ["Conversation turns", "Agent response", "User message"].contains($0) }) { continue }
             if command == "terminal" && labels.contains("关闭终端面板") { terminalAlreadyOpen = true }
-            let desktopSearch = command == "search" && ((adapter == "antigravity" && role == kAXButtonRole && labels.contains("Search Conversations"))
-                || (adapter == "dsh-desktop" && role == kAXTextFieldRole && labels.contains("搜索会话名称")))
+            let desktopSearch = command == "search" && ((canonicalAdapter == "antigravity" && role == kAXButtonRole && labels.contains("Search Conversations"))
+                || (canonicalAdapter == "dsh-desktop" && role == kAXTextFieldRole && labels.contains("搜索会话名称")))
             let desktopNew = command == "new-chat" && role == kAXButtonRole &&
-                ((adapter == "antigravity" && labels.contains("New Conversation")) || (adapter == "dsh-desktop" && labels.contains("新建会话")))
-            if enabled && command == "new-chat" && adapter == "antigravity" && role == "AXLink" && labels.contains("New Conversation") {
+                ((canonicalAdapter == "antigravity" && labels.contains("New Conversation")) || (canonicalAdapter == "dsh-desktop" && labels.contains("新建会话")))
+            if enabled && command == "new-chat" && canonicalAdapter == "antigravity" && role == "AXLink" && labels.contains("New Conversation") {
                 fallbackNewChatLinks.append(element)
             }
-            let extra = extraControl(adapter: adapter, command: command, role: role, labels: labels)
+            let extra = extraControl(adapter: canonicalAdapter, command: command, role: role, labels: labels)
             if enabled && (desktopSearch || desktopNew || extra) { matches.append(element) }
-            else if enabled && ((command == "focus-input" && (role == kAXTextAreaRole || (adapter == "codex" && role == kAXTextFieldRole && (title == "Work with Codex" || description == "Work with Codex"))))
-                || (command == "search" && role == kAXButtonRole && (title == "搜索" || description == "搜索" || (adapter == "codex" && (title == "Search" || description == "Search")))))
-                || (enabled && command == "search" && adapter == "cindy" && role == kAXTextFieldRole && [title, description, placeholder].contains("搜索标题或内容…")) {
+            else if enabled && ((command == "focus-input" && (role == kAXTextAreaRole || (canonicalAdapter == "codex" && role == kAXTextFieldRole && (title == "Work with Codex" || description == "Work with Codex"))))
+                || (command == "search" && role == kAXButtonRole && (title == "搜索" || description == "搜索" || (canonicalAdapter == "codex" && (title == "Search" || description == "Search")))))
+                || (enabled && command == "search" && canonicalAdapter == "cindy" && role == kAXTextFieldRole && [title, description, placeholder].contains("搜索标题或内容…")) {
                 matches.append(element)
             }
             if let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] { pending.append(contentsOf: children) }
         }
         guard pending.isEmpty, Date() < deadline else { return (false, "界面检查超时，未操作") }
         if terminalAlreadyOpen { return (true, "终端面板已打开") }
-        if matches.isEmpty, command == "new-chat", adapter == "antigravity", fallbackNewChatLinks.count == 1 {
+        if matches.isEmpty, command == "new-chat", canonicalAdapter == "antigravity", fallbackNewChatLinks.count == 1 {
             matches = fallbackNewChatLinks
         }
-        if adapter == "antigravity", command == "project", matches.count > 1 {
+        if canonicalAdapter == "antigravity", command == "project", matches.count > 1 {
             let selectorMatches = matches.filter { candidate in
                 let candidateLabels = [kAXTitleAttribute, kAXDescriptionAttribute, kAXPlaceholderValueAttribute, kAXHelpAttribute]
                     .compactMap { attribute(candidate, $0) as? String }
@@ -568,14 +821,14 @@ struct DesktopAgent: Identifiable {
             }
         }
         if matches.isEmpty, revealTools, ["browser", "terminal"].contains(command) {
-            let revealed = await perform(adapter: adapter, command: "reveal-tools", revealTools: false)
+            let revealed = await perform(adapter: canonicalAdapter, command: "reveal-tools", revealTools: false)
             if revealed.0 {
                 try? await Task.sleep(nanoseconds: 150_000_000)
-                return await perform(adapter: adapter, command: command, revealTools: false)
+                return await perform(adapter: canonicalAdapter, command: command, revealTools: false)
             }
         }
-        if adapter == "antigravity", matches.count != 1 {
-            if let fallback = await performAntigravityShortcutFallback(command: command, app: app, root: root, textAreas: matches) {
+        if fourAppAdapters.contains(canonicalAdapter), matches.count != 1 {
+            if let fallback = await performShortcutFallback(adapter: canonicalAdapter, command: command, app: app, root: root, textAreas: matches) {
                 return fallback
             }
         }
@@ -650,7 +903,76 @@ struct DesktopAgent: Identifiable {
         return (true, "原生控件已接受操作（\(command)）；未发送消息")
     }
 
-    private static func performAntigravityShortcutFallback(
+    static func nativeShortcutSpec(adapter: String, command: String) -> (keyCode: CGKeyCode, flags: CGEventFlags, label: String)? {
+        let canonical = adapter == "dsh" ? "dsh-desktop" : adapter
+        switch (canonical, command) {
+        // Antigravity
+        case ("antigravity", "focus-input"):
+            return (0x25, .maskCommand, "Cmd+L")
+        case ("antigravity", "search"):
+            return (0x28, .maskCommand, "Cmd+K")
+        case ("antigravity", "new-chat"):
+            return (0x2D, .maskCommand, "Cmd+N")
+        case ("antigravity", "model"), ("antigravity", "effort"):
+            return (0x2C, .maskCommand, "Cmd+/")
+        case ("antigravity", "project"):
+            return (0x29, .maskCommand, "Cmd+;")
+        case ("antigravity", "browser"):
+            return (0x0B, [.maskCommand, .maskShift], "Cmd+Shift+B")
+        case ("antigravity", "terminal"):
+            return (0x26, .maskCommand, "Cmd+J")
+        case ("antigravity", "dictation"):
+            return (0x2E, .maskControl, "Ctrl+M")
+
+        // DeepSeek Harness (packages/client/ui-workspace/src/client/shortcuts.ts)
+        case ("dsh-desktop", "new-chat"):
+            return (0x2D, .maskCommand, "Cmd+N")
+        case ("dsh-desktop", "search"):
+            return (0x28, .maskCommand, "Cmd+K")
+        case ("dsh-desktop", "project"):
+            return (0x1F, .maskCommand, "Cmd+O")
+        case ("dsh-desktop", "terminal"):
+            return (0x32, .maskControl, "Ctrl+`")
+        case ("dsh-desktop", "browser"):
+            return (0x11, .maskCommand, "Cmd+T")
+
+        // ZCode (packages/shared/src/shortcutCommands.ts)
+        case ("zcode", "new-chat"):
+            return (0x2D, .maskCommand, "Cmd+N")
+        case ("zcode", "search"):
+            return (0x28, .maskCommand, "Cmd+K")
+        case ("zcode", "project"):
+            return (0x1F, .maskCommand, "Cmd+O")
+        case ("zcode", "prev-conversation"):
+            return (0x21, [.maskCommand, .maskShift], "Cmd+Shift+[")
+        case ("zcode", "next-conversation"):
+            return (0x1E, [.maskCommand, .maskShift], "Cmd+Shift+]")
+        case ("zcode", "model"):
+            return (0x2E, .maskControl, "Ctrl+M")
+        case ("zcode", "effort"):
+            return (0x11, .maskControl, "Ctrl+T")
+        case ("zcode", "terminal"):
+            return (0x26, .maskCommand, "Cmd+J")
+        case ("zcode", "browser"), ("zcode", "reveal-tools"):
+            return (0x0B, [.maskCommand, .maskAlternate], "Cmd+Option+B")
+
+        // Cindy (apps/desktop/src/shared/appShortcuts.ts)
+        case ("cindy", "new-chat"):
+            return (0x2D, .maskCommand, "Cmd+N")
+        case ("cindy", "search"):
+            return (0x03, .maskCommand, "Cmd+F")
+        case ("cindy", "effort"):
+            return (0x30, .maskShift, "Shift+Tab")
+        case ("cindy", "terminal"):
+            return (0x32, .maskControl, "Ctrl+`")
+
+        default:
+            return nil
+        }
+    }
+
+    private static func performShortcutFallback(
+        adapter: String,
         command: String,
         app: NSRunningApplication,
         root: AXUIElement,
@@ -659,44 +981,24 @@ struct DesktopAgent: Identifiable {
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {
             return (false, "焦点已变化，未操作")
         }
-        switch command {
-        case "focus-input":
-            guard shortcutPoster(0x25, .maskCommand) else { return (false, "聚焦输入框快捷键（Cmd+L）合成失败") }
-            if !textAreas.isEmpty {
-                _ = await confirmFocus({
-                    textAreas.contains { attribute($0, kAXFocusedAttribute) as? Bool == true }
-                })
-            }
-            return (true, "已通过快捷键（Cmd+L）聚焦输入框；未输入或发送文本")
-        case "search":
-            guard shortcutPoster(0x28, .maskCommand) else { return (false, "搜索会话快捷键（Cmd+K）合成失败") }
-            return (true, "已通过快捷键（Cmd+K）打开会话搜索；未发送消息")
-        case "new-chat":
-            guard shortcutPoster(0x2D, .maskCommand) else { return (false, "新建会话快捷键（Cmd+N）合成失败") }
-            return (true, "已通过快捷键（Cmd+N）新建会话；未发送消息")
-        case "model", "effort":
-            guard shortcutPoster(0x2C, .maskCommand) else { return (false, "选择模型快捷键（Cmd+/）合成失败") }
-            return (true, "已通过快捷键（Cmd+/）打开模型选择器；未发送消息")
-        case "project":
-            guard shortcutPoster(0x29, .maskCommand) else { return (false, "项目选择器快捷键（Cmd+;）合成失败") }
-            return (true, "已通过快捷键（Cmd+;）打开项目选择器；未发送消息")
-        case "browser":
-            guard shortcutPoster(0x0B, [.maskCommand, .maskShift]) else { return (false, "内置浏览器快捷键（Cmd+Shift+B）合成失败") }
-            return (true, "已通过快捷键（Cmd+Shift+B）切换内置浏览器面板；未发送消息")
-        case "terminal":
-            guard shortcutPoster(0x26, .maskCommand) else { return (false, "终端面板快捷键（Cmd+J）合成失败") }
-            return (true, "已通过快捷键（Cmd+J）切换终端面板；未发送消息")
-        case "dictation":
-            guard shortcutPoster(0x2E, .maskControl) else { return (false, "语音输入快捷键（Ctrl+M）合成失败") }
-            return (true, "已通过快捷键（Ctrl+M）切换语音输入；再次按键停止")
-        case "submit":
-            let focused = await perform(adapter: "antigravity", command: "focus-input", revealTools: false)
+        if command == "submit" {
+            let focused = await perform(adapter: adapter, command: "focus-input", revealTools: false)
             guard focused.0 else { return (false, "提交前未能聚焦输入框（\(focused.1)）") }
             guard shortcutPoster(0x24, []) else { return (false, "回车发送快捷键（Return）合成失败") }
             return (true, "已通过回车（Return）发送消息")
-        default:
+        }
+        guard let spec = nativeShortcutSpec(adapter: adapter, command: command) else {
             return nil
         }
+        guard shortcutPoster(spec.keyCode, spec.flags) else {
+            return (false, "快捷键（\(spec.label)）合成失败")
+        }
+        if command == "focus-input", !textAreas.isEmpty {
+            _ = await confirmFocus({
+                textAreas.contains { attribute($0, kAXFocusedAttribute) as? Bool == true }
+            })
+        }
+        return (true, "已通过快捷键（\(spec.label)）执行 \(command)；未发送消息")
     }
 
     static func extraControl(adapter: String, command: String, role: String, labels: [String]) -> Bool {
@@ -926,16 +1228,16 @@ struct DesktopAgent: Identifiable {
                 return (false, "滚动事件合成失败")
             }
             if request.region == .sidebar,
-               adapter == "antigravity",
+               ["antigravity", "dsh-desktop", "dsh", "zcode", "cindy"].contains(adapter),
                ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == nil,
                let app = NSRunningApplication(processIdentifier: pid) {
                 let root = AXUIElementCreateApplication(pid)
                 AXUIElementSetMessagingTimeout(root, 0.25)
                 if let val = attribute(root, kAXFocusedWindowAttribute), CFGetTypeID(val) == AXUIElementGetTypeID() {
                     let axWin = unsafeBitCast(val, to: AXUIElement.self)
-                    _ = performAntigravityProjectStep(window: axWin, app: app, next: lines > 0)
+                    _ = performProjectStep(adapter: adapter, window: axWin, app: app, next: lines > 0)
                 } else if let wins = attribute(root, kAXWindowsAttribute) as? [AXUIElement], let axWin = wins.first {
-                    _ = performAntigravityProjectStep(window: axWin, app: app, next: lines > 0)
+                    _ = performProjectStep(adapter: adapter, window: axWin, app: app, next: lines > 0)
                 }
             }
             return (true, "\(adapter)/\(request.canonicalCommand) (lines=\(lines) window=\(window.windowNumber))")

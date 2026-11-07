@@ -35,8 +35,8 @@
 | 规则 | 强制门禁 / 检查点 |
 | --- | --- |
 | 严禁硬编码用户家目录（`/Users/<name>`），只允许 `Path.home()` / 环境变量 / 配置发现 | `scripts/check-boundaries.py`（`R-C01`，随 `scripts/check` 执行） |
-| 集成补丁（`integrations/*/*.patch`）导出或校验前须 `git add -N` 新文件，不得遗漏新增模块与夹具脚本 | `scripts/check-boundaries.py`（`R-C02`）+ `scripts/verify-{cindy,dsh,zcode}-*` 自动 `git add -N` |
-| `Micro Input` 重启后须沿用已持久化的 `.fence` `clientInstance` 并递增 `generation`，Cindy 顶层 `App.tsx` 须挂载所有权排空桥 | `NativeOwnershipTests.testRestartedControllerResumesPersistedFenceIdentityAndGeneration` + `integrations/cindy/native-ownership.patch` |
+| 严禁向外部 Agent 维护侵入式补丁（`integrations/*/*.patch`），必须基于其开源代码与可观测行为在 `Micro Input` 侧直接适配 | `scripts/check-boundaries.py`（`R-C02`，随 `scripts/check` 执行） |
+| `Micro Input` 重启后须沿用已持久化的 `.fence` `clientInstance` 并递增 `generation` | `NativeOwnershipTests.testRestartedControllerResumesPersistedFenceIdentityAndGeneration` |
 | 桌面 Agent 预设完整度唯一真源为 `Store.hasAllDesktopAgentPresets`（派生自 `DesktopAgent.all`），`prepareDesktopProfiles()` 幂等且不覆盖就绪状态 | `HostExecutionTests.testPrepareDesktopProfilesDoesNotClobberReadyStatusWhenPresetsExist` |
 | 生产出口只读门禁、物理分帧隔离与 `UNKNOWN-*` 清单对齐 | `scripts/check-boundaries.py` + `mi-proto` / `mi-session` 边界测试 |
 | 构建 `target/MicroInput.app` 后注销临时包 LaunchServices 登记，且 `MicroInputApp.init()` 必须在创建 `StatusMenu` 前获取 `<documentDir>/instance.lock` 排他锁、`scripts/run` 必须使用严格 `argparse`（支持 `--list`/`--kill` 并剥离继承的 `__CFBundleIdentifier`），杜绝与 `/Applications/Micro Input.app` 双开产生双菜单栏图标 | `scripts/build` + `scripts/check-boundaries.py`（`R-C05`）+ `scripts/tests/test_run_verify_launcher.py` + `HostExecutionTests.testDocumentInstanceLockRejectsDuplicateOwnerUntilReleased` |

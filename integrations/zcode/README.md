@@ -1,47 +1,23 @@
-# ZCode 同实例导航与受控执行桥
+# ZCode 零补丁原生适配说明
 
-`navigation.patch` 基于 `BASE_SHA` 中的 ZCode 3.17.2 源码。它在原桌面窗口中接入受限 UDS 桥，读取同一个 Host 的 scoped v4 索引，沿真实 tab/session store 选择目标并回读，并复用同实例 `zcodeAgent.sendConversationCommandV4` / `queryConversationCommandsV4` 执行受控的 `createSession`、`sendText`、带 `expectedForegroundExecutionId` 的 `stop`、按 `(interactionId, interactionType)` 绑定的 `resolveInteraction` 与带 `supportedThoughts` 门禁及回读校验的 `switchModelConfig`。没有启动另一套 ZCode runtime，没有读取用户的数据库或凭据。
+Micro Input 直接依据 ZCode（`dev.zcode.app`，`zcode`）开源代码与 macOS Accessibility 树进行适配，不再向 ZCode 维护或注入任何第三方 `.patch` 补丁。
 
-默认关闭。显式启用时，`MI_ZCODE_BRIDGE_CONFIG` 指向当前用户拥有、0600 的 JSON 文件，例如以下合成范围。
+## 开源行为契约与键位对齐
 
-```json
-{"scopes":[{"workspacePath":"/synthetic/workspace-a"},{"workspacePath":"/synthetic/workspace-b"}]}
-```
-
-只允许精确列出的范围，不支持通配符。远程范围须完整填写 `workspaceIdentity`、`sourceServerId` 和 `remoteSessionId`，并匹配当前已打开的工作区。桥不会自动打开新工作区或回退到本地。配置可加绝对 `directory`；默认 `~/Library/Application Support/MicroInput`，目录必须属于当前用户且为 0700。桥在其中生成新随机 capability 的 `zcode-grant.json`（0600）和 `zcode.sock`（0600）；Micro Input 只有显式连接后才读取 grant。
-
-请求固定为版本 1，`generation` 为正安全整数。支持 `list`、`open`、`create`、`send`、`stop`、`resolve`、`switchModel` 与 `query`。认证、范围、schema、代次门禁先于元数据调用。响应只投影地址、标题、`liveStatus`、运行中前台 `executionId`、脱敏待处理交互元数据 `pendingInteraction`（仅含 `interactionId`、`interactionType`、工具名与选项标识，不含命令参数或自由文本正文）与模型配置 `modelConfig`（`provider`、`model`、`thought`、`supportedThoughts`、`availableModels`），不包含会话消息正文或搜索片段。导航在完整目标身份核对后进行；`confirmed` 要求真实 store 的选中地址与请求一致，随后只显示、恢复并聚焦所属原窗口。
-
-受控执行契约（Slice K1 + Slice L1）：
-- **仅影响选中会话**：`send`、`stop`、`resolve` 与 `switchModel` 要求请求目标与当前选中地址（`ports.selected(scope)`）完全一致，否则返回 `unconfirmed` 且不触发底层命令。
-- **工作区绑定新建与新 ID 回读**：`create` 绑定授权 `scope` 调用 v4 `createSession`，将新建会话同步选中并回读确认 `selected == createdAddress` 后返回 `confirmed`。
-- **运行中发送与 steering / 排队区分**：目标会话处于 `running` 时发送消息走 `sendText`（绝不误建新会话），并按 v4 `inputAccepted.delivery` 将实时 steering（`"guide"` → `"steered"`）与等待队列（`"queue"` → `"queued"`）严格分开，绝不将仅排队入队误报为实时 steering。
-- **按 execution ID 停止与迟到 stop 保护**：`stop` 必须携带非空 `executionId`（映射为 `expectedForegroundExecutionId`）；若目标会话当前前台 execution 已结束或切换为新 ID，返回 `noop`（`reasonCode: "guard.stopTargetChanged"`），绝不停止新 execution。
-- **按 interactionId 与类型处理请求审批、问题与计划（Slice L1）**：`resolve` 同时绑定 `interactionId` 与 `interactionType`（`"permission" | "question" | "plan"`）：
-  - **过期/重复请求零误批**：当目标交互已处理或 `interactionId` 不匹配当前待处理交互时返回 `noop`（`reasonCode: "proto.alreadyResolved"`），不发送底层审批；相同 `commandId` 幂等返回 `resolved`（`duplicate: true`），不重复提交。
-  - **问题不当权限批准**：`AskUserQuestion`（`interactionType: "question"`）与工具权限审批（`"permission"`）及计划确认（`ExitPlanMode` → `"plan"`）严格隔离；任何将 `"question"` 当作 `"permission"` 批准或传入 `allowOnce` / `allowAlways` 的请求在发送前直接拒绝（`guard.questionCannotApproveAsPermission`），零次触发底层 `resolveInteraction`。
-- **模型与思考档位切换及回读一致（Slice L1）**：`switchModel` 复用 v4 `switchModelConfig`（携带 CAS `baseRevision`）：
-  - **模型无该档位不发送**：发送前核对目标 `(provider, model)` 的 `supportedThoughts`；若不支持请求的 `thought` 档位，立即返回 `guard.unsupportedThoughtLevel`，零次发送 `switchModelConfig`。
-  - **回读模型和档位一致**：`switchModelConfig` 接受后重新回读目标会话 `modelConfig`，仅当回读的 `(provider, model, thought)` 与请求完全一致时才确认（Swift 侧映射为 `.modelSwitched`）；回读不一致返回 `unconfirmed`（`guard.modelConfigReadbackMismatch`）。
-- **命令幂等去重与未知结果对账**：相同 `(sessionId, commandId)` 幂等返回 `duplicate: true`，不重复发送或重复新建；命令超时或结果未知时，客户端保持原 `commandId` 锁存并通过 `query`（`queryConversationCommandsV4`）对账，绝不换新 `commandId` 重放。
-
-首次成功列举固定每个 scope 的 source generation。同一个 taskService 换代、断连恢复或 renderer 替换不能继续使用旧选择；source 换代后本授权保持 stale，需要重新启用桥或重载该窗口来获得新 grant。失联、任务删除、工作区关闭或模型切换期间均拒绝导航与执行。socket 所有者使用独占目录锁，活跃或遗留锁均不自动接管。
-
-## 应用与验证
-
-在干净的固定源码 checkout 中运行 `git apply /absolute/path/to/integrations/zcode/navigation.patch`，然后 `pnpm install --ignore-scripts --frozen-lockfile`。源码检查为 `pnpm typecheck`、`pnpm lint` 和 `node scripts/architecture/architecture-check.mjs check --changed`。
-
-Micro Input 仓库中的 `scripts/verify-zcode-native --source <patched-checkout>` 运行真实 UDS 的隔离合成 owner，使用生产导航与执行适配器及真实 `createTabStore`、`useZCodeSessionStore`。测试覆盖跨工作区同名且同 ID、选中回读、双会话仅影响选中者、新建会话工作区绑定与新 ID 回读、运行中 `guide` steering 与 `queue` 排队区分、迟到 `stop`（旧 `executionId`）返回 `noop` 不停新执行、重复 `commandId` 幂等去重、超时/未知结果同 ID `query` 对账、越权零元数据读取、删除与换代竞争、断连，以及 socket 所有权交错、仅确认目标所属窗口聚焦。fixture TTL 上限十分钟，脚本始终回收自己启动的进程并核对 grant/socket 清理。
-
-`pnpm exec tsx --tsconfig packages/ui/tsconfig.json scripts/micro-input-fixture.ts --directory <private-short-path> --ttl 120` 可供 Swift 配对验收。只输出 `GRANT_PATH` 与 `CONTROL_PATH`；控制 socket 支持 `stats`、`delete`、`rotate`、`replace-source`、`disconnect`、`reset`、`delete-during-open`、`rotate-during-open`、`set-task-state`、`delay-next-command`、`settle-held-commands`。全部会话和标题均为自编夹具。
-
-源码配对、真实 renderer store 适配器与进程间协议证据分别保留。隔离测试没有渲染完整 Electron 窗口，没有安装该 ZCode 补丁，没有实体控件验收，不能据此标记安装版或实体通过。
-
-
-Swift 客户端双端验收在 Micro Input 仓库运行：
-
-```sh
-scripts/verify-zcode-paired --source /absolute/path/to/patched-zcode
-```
-
-该入口核对源码提交和补丁字节，构建合成 Micro Input，启动有时限的原生夹具，通过真实 Swift 客户端交叉打开两个工作区并验证受控 `create` / `send`（含 `guide` vs `queue`） / `stop`（含迟到 `executionId` `noop`） / `query` 幂等对账，再检查越权、删除、换代与断连拒绝。结束时清理夹具、grant 和端点，恢复生产构建但不启动应用。`--skip-build` 仅用于已构建合成 ABI 的连续验证，调用者负责后续恢复生产构建。
+1. **原生快捷键（`packages/shared/src/shortcutCommands.ts`）**：
+   - 新建任务（`new-chat` / `newTask`）：`Cmd+N`
+   - 命令中心/搜索（`search` / `openCommandCenter`）：`Cmd+K`
+   - 打开工作区/项目（`project` / `openWorkspace`）：`Cmd+O`
+   - 上一会话（`prev-conversation` / `previousConversation`）：`Cmd+Shift+[`
+   - 下一会话（`next-conversation` / `nextConversation`）：`Cmd+Shift+]`
+   - 模型菜单（`model` / `openModelMenu`）：`Ctrl+M`
+   - 切换思考档位（`effort` / `cycleThoughtLevel`）：`Ctrl+T`
+   - 切换终端（`terminal` / `toggleTerminal`）：`Cmd+J`
+   - 切换侧栏面板（`browser` / `reveal-tools` / `toggleSidePane`）：`Cmd+Option+B`
+   - 发送消息（`submit` / `composerSend`）：聚焦输入框后按 `Return`
+2. **侧边栏项目与会话识别（`ProjectNodeContent.tsx` & `TaskListItem.tsx`）**：
+   - 项目行：`AXDOMClassList` 含 `group/project-row` 的节点及其切换按钮。
+   - 会话/任务行：`AXDOMClassList` 含 `group/task-item`（当前选中项含 `bg-selected`）。
+   - 状态指示：
+     - Working（运行中）：子节点 `AXDOMClassList` 含 `animate-spin`。
+     - Completed（已完成蓝点）：子节点 `AXDOMClassList` 含 `bg-icon-blue`。

@@ -657,8 +657,8 @@ extension Store {
             guard let self else { return false }
             return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? true)
         }
-        let outcome: String
-        let detail: String
+        var outcome: String
+        var detail: String
         switch effectiveAdapter {
         case "antigravity":
             let workspacePath = antigravityStatus.selected?.workspacePath
@@ -712,6 +712,16 @@ extension Store {
         default:
             outcome = "noop"
             detail = "未支持的新建会话适配器: \(effectiveAdapter)"
+        }
+        if outcome == "noop",
+           !(actionExecutor is RecordingHostActionExecutor),
+           ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == nil,
+           ["antigravity", "cindy", "zcode", "dsh-desktop", "dsh"].contains(effectiveAdapter) {
+            let (ok, uiDetail) = await DesktopAgentControls.perform(adapter: effectiveAdapter, command: "new-chat", revealTools: false)
+            if ok {
+                outcome = "confirmed"
+                detail = "\(effectiveAdapter)_create_ui: \(uiDetail)"
+            }
         }
         let receipt = HostActionReceipt(
             timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
