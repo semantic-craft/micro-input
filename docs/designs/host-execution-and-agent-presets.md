@@ -271,7 +271,7 @@
 
 *   项目总体规格与证据：[`../spec/SPEC.md`](../spec/SPEC.md)、[`../spec/EVIDENCE.md`](../spec/EVIDENCE.md)、[`../implementation-plan.md`](../implementation-plan.md)
 *   原厂 `Input 1.1.0` 架构与协议分析：[`../input-architecture.md`](../input-architecture.md)、[`../protocol-readonly.md`](../protocol-readonly.md)、[`../protocol-candidates.md`](../protocol-candidates.md)
-*   开源社区参考实现：[`../reference-repositories.md`](../reference-repositories.md)（重点参考 `schacon/micro-manager`、`thefotes/Dispatch`、`camwilso/openboard`、`deepdishgary/CM2-herdr`、`A1mAssist/codex-micro-adapter`）
+*   开源社区参考实现：重点参考 `schacon/micro-manager`、`thefotes/Dispatch`、`camwilso/openboard`、`deepdishgary/CM2-herdr`、`A1mAssist/codex-micro-adapter`。
 *   历史协议重建设计文档：[`./input-protocol-reconstruction.md`](./input-protocol-reconstruction.md)
 
 ## Future Improvements

@@ -21,8 +21,8 @@ MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=zcode-navigation scripts/run --verify
 
 合成场景的 `native_app` 和 `physical_key` 固定为 `NOT_RUN`。它证明 Micro Input 的队列、生命周期与确认逻辑，不证明安装版 ZCode 已具备桥。
 
-## 原生源码与双端检查
+## 原生适配说明
 
-原生补丁、固定上游版本、授权配置和重跑命令见 [ZCode 桥](../../../integrations/zcode/README.md)。只有真实 UDS 双端运行才能证明 Swift 客户端与原生协议相容。源码夹具、实际 Electron 渲染层、日常安装版及实体按键分别记录，不互相替代。
+零侵入直接适配架构与快捷键/AX 导航说明见 [ZCode 原生适配说明](../../../integrations/zcode/README.md)。
 
 本片已完成精确导航（Slice G）、受控新建/发送/停止及 steering 确认（Slice K1）与按 `interactionId/type` 处理审批拒绝/问题/计划及 `switchModelConfig` 思考档位切换（Slice L1）；带完整工作区身份的前进/后退归 N。

@@ -2,7 +2,7 @@
 
 让 Creator Micro 2 深度控制 Antigravity、Cindy、ZCode、桌面 DeepSeek Harness，达到参考项目控制 Paseo 的能力。Paseo 不作为目标应用。Cindy 原生集成保留，只补缺口。现有 Codex、千问、Herdr 等 Profile 保留用户配置，但不计入本轮验收。
 
-本轮已完成源码、官方接口和安装元数据的只读核查，尚未实现新桥或执行目标应用动作。事实与固定版本统一见[接口证据](../four-app-interfaces.md)。[Paseo 对照](paseo-coverage.md)只用于查漏，不再决定必须复制的模块。
+本轮已完成源码、官方接口和安装元数据的只读核查。事实与固定版本统一见[接口证据](../four-app-interfaces.md)。Paseo 只用于查漏，不再决定必须复制的模块。
 
 ## 执行与验收规则
 
@@ -158,7 +158,7 @@ F、G、H、I 无互相依赖；默认先做 F 保护 Cindy，再选 G 获得首
 
 ### O2 · 复刻官方 Input.app 受保护宿主层与多 Profile 切换让渡机制
 
-- 应用：Cindy / Codex 与四应用切换协调。依赖：F、N。设计详稿：[official-codex-profile-model.md](official-codex-profile-model.md)。责任票：[#82](https://github.com/semantic-craft/micro-input/issues/82)、[#84](https://github.com/semantic-craft/micro-input/issues/84)。
+- 应用：Cindy / Codex 与四应用切换协调。依赖：F、N。实现入口：[`CodexKeycapCatalog.swift`](../../app/MicroInput/Sources/MicroInput/CodexKeycapCatalog.swift)。责任票：[#82](https://github.com/semantic-craft/micro-input/issues/82)、[#84](https://github.com/semantic-craft/micro-input/issues/84)。
 - 结果：复刻官方 `Input 1.1.0` 的 `Mg1`（`KV_OAI_*`）受保护宿主层判定、四项界面与编辑硬隔离（键盘画布锁定遮罩、收起改键抽屉、禁用静态灯光/导出/复制、跨层合并键跳过保护层），以及切换至 `Cindy` / `Codex` Profile 时的精简板载 `keymap.json`（`< 1 KB`）与 USB HID 通道让渡闭环。
 - 实现入口：`crates/mi-model`（受保护层判定、编辑守卫、精简宿主载荷生成）；`app/MicroInput`（受保护层遮罩、Profile 切换时的 `drainForNativeOwnership` 与 HID 让渡/恢复）。
 - 验收：`mi-model` 与 Swift 单测覆盖受保护层识别、四项隔离与精简配置往返；`scripts/verify-offline` 全量 `PASS`。

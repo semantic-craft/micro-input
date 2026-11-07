@@ -32,12 +32,6 @@ MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=cindy-navigation scripts/run --verify
 - `workspace_create_and_target_prompt_steering`：工作区新建任务回读确认 `selected`，目标 Prompt 仅作用于当前已确认选中任务并区分运行中 `steered` / `queued` 与空闲 `started`，未知传输结果通过 `query` 对账恢复不重发；
 - `unread_tristate_and_pending_round`：未读状态严格区分 `true | false | null`（不从 `completed` 伪造未读），待办轮次按 `needs-interaction > unread > error` 推进且同水位不重复访问，水位更新后立即重新入轮。
 
-## 原生源码与双端检查
+## 原生适配说明
 
-原生补丁、固定上游版本和双端联测命令见 [Cindy 原生所有权与任务导航桥](../../../integrations/cindy/README.md)：
-
-```sh
-scripts/verify-cindy-paired --source /absolute/path/to/patched-cindy
-```
-
-真实 UDS 双端运行同时验证原生所有权握手与 `cindy.sock` 任务目录/深链导航确认（`paired_navigation_source = "PASS"`）。合成场景与源码联测的 `native_app` / `native_install` 与 `physical_key` 固定为 `NOT_RUN`。
+零侵入直接适配架构与所有权围栏契约见 [Cindy 原生适配说明](../../../integrations/cindy/README.md)。合成场景的 `native_app` / `native_install` 与 `physical_key` 固定为 `NOT_RUN`。

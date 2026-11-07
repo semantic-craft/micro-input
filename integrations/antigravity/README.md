@@ -1,10 +1,10 @@
 # Antigravity 官方桌面扩展契约、既有会话目录与状态导航桥
 
-本目录记录安装版 `/Applications/Antigravity.app`（`com.google.antigravity` `2.29.0`，`language_server` `Built at CL: 1013060670`）只读静态与 REA 协议核对结果，并提供在隔离测试工作区接收既有会话目录、执行精确会话聚焦回读确认与接收官方 Lifecycle Hooks 元数据事件的 Unix 域套接字桥 `hooks-bridge.py`。
+本目录记录安装版 `/Applications/Antigravity.app`（`com.google.antigravity` `2.29.0`，`language_server` `Built at CL: 1013060670`）只读静态与 REA 协议核对结果，并提供实时连接 Antigravity `language_server` 与会话目录的 Unix 域套接字桥 [`live-bridge.py`](live-bridge.py)。
 
 ## 安装版官方接口、只读 REA 契约与能力分区
 
-`scripts/verify-antigravity-installed-static` 在只读模式下核对安装版包体、ASAR 头部文件完整性哈希、`language_server --stamp`、只读 protobuf 符号契约、`agentapi --help` 与 `~/.gemini/antigravity/lib/node_modules/sidecar_sdk`：
+对安装版包体、ASAR 头部文件完整性哈希、`language_server --stamp`、只读 protobuf 符号契约、`agentapi --help` 与 `~/.gemini/antigravity/lib/node_modules/sidecar_sdk` 的只读核对结论如下：
 
 1. **包体与核心二进制**：
    - Bundle ID：`com.google.antigravity`，版本 `2.29.0`
@@ -33,7 +33,7 @@
 
 ## 状态与导航桥不变量及隐私边界
 
-- **两阶段边界剥离（零读取 `transcriptPath` 与 Token）**：`hooks-bridge.py catalog` 与 `hooks-bridge.py emit` 从 `stdin` 读取原始 JSON 后，立即在内存中丢弃 `transcriptPath`、`artifactDirectoryPath`、`lastUserInput`、`toolCall.args`、`csrfToken`、`oauthToken`、`sidecarUiToken` 与 `apiKey`，绝不读取用户 Token、Cookie、状态库或 `transcriptPath` 文件（`transcriptReads == 0`、`tokenReads == 0`）。
+- **两阶段边界剥离（零读取 `transcriptPath` 与 Token）**：`live-bridge.py` 仅转发会话摘要、工作区路径、运行状态与未读水位，绝不读取或落盘用户 Token、Cookie、状态库或 `transcriptPath` 正文（`transcriptReads == 0`、`tokenReads == 0`）。
 - **复合主键与同名跨工作区隔离**：会话身份固定为 `AntigravitySessionKey(conversationId, workspacePath)`，并校验 `workspacePath` 属于 `allowedWorkspaces`；两个不同工作区下的同名会话（相同 `title` / `summary`）互不覆盖、互不串台。
 - **精确聚焦与 UI 选中回读确认**：`open` 请求必须携带 `schemaVersion: "antigravity-catalog-nav-v1"` 与完整目标 `(conversationId, workspacePath)`；仅当回读的 `selected` 与请求目标 `(conversationId, workspacePath)` 完全一致时才返回 `.confirmed`（写入 `antigravity_open` `confirmed` 审计回执）；若 UI 选中回读不一致或目标已删除，返回 `.unconfirmed`，绝不重定向到同名跨工作区会话。
 - **`agentapi` 创建/发送目标门控与超时对账不重发（Slice K3）**：`create`、`send`、`query` 请求必须携带 `schemaVersion: "antigravity-agentapi-v1"` 与 `requestId`；提示词与消息正文在桥接层校验后立即在内存丢弃，绝不落盘、绝不回显，审计日志 `audit.jsonl` 保持 `text_byte_len == nil`。`send` 强制要求 `selected == target`（两会话仅修改当前选中目标）；不存在或已删除目标返回 `.unconfirmed`（`guard.targetNotFound`），零重定向、零新建会话；超时或 `unknown` 回执锁定原 `requestId` 并通过 `query` 对账，绝不盲目重发。
@@ -44,6 +44,5 @@
 ## 验证入口
 
 ```sh
-scripts/verify-antigravity-installed-static --output .scratch/antigravity-status/installed-static.json
-scripts/verify-antigravity-paired
+MI_AUTO_HOST_READY=0 scripts/verify-offline
 ```

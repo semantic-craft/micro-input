@@ -72,7 +72,7 @@
 
 ## 新增统一索引
 
-以下来源都是本项目的自撰行为说明或本轮用户决定；未复制厂商实现。协议细节的唯一维护位置是 [只读协议](../protocol-readonly.md)，本页只作范围索引。参考仓库完整名单和许可边界见 [参考仓库](../reference-repositories.md)。
+以下来源都是本项目的自撰行为说明或本轮用户决定；未复制厂商实现。协议细节的唯一维护位置是 [只读协议](../protocol-readonly.md)，本页只作范围索引。
 
 | ID | 级别 / 来源 | 结论及限制 | 规则 |
 | --- | --- | --- | --- |
@@ -92,7 +92,7 @@
 | E-062 | SYNTHETIC，[protocol-vectors.json](../protocol-vectors.json) | 61/62/122/123边界、Unicode、合成readbin/Base64/SHA-1；由行为说明生成，非设备抓包、非厂商模块输出。 | R-N04, R-D04, R-D08 |
 | E-063 | IMPLEMENTATION，[PR #8](https://github.com/semantic-craft/micro-input/pull/8)，e5811a5 | 五Rust模块、UniFFI、SwiftUI合成浏览与测试的候选；真实Framer/schema仍阻断。43ac6eb一次open记录、767379d权限状态差异不能证明稳定授权。12 Rust单测+1 compile-fail、6 Swift测试是该候选的既有验收记录，本轮未重跑。 | R-A02, R-N04, R-H02 |
 | E-064 | SEEN，本轮Git/GitHub核对 | 主分支基线9e78e8a合并PR #9；PR #7/#8 CLOSED且mergedAt=null。旧代码未进main；不重开旧PR，不因此关闭 #1–#6。 | R-X02 |
-| E-065 | REFERENCE，[参考仓库](../reference-repositories.md) | Dispatch、cm2-probe、creator-micro-kit、micro-manager、OpenBoard及其他条目提供设计线索；每仓型号、版本、许可分别核查。未核实Herdr/DSH/ZCode/QwenWork动作API。156仓检索记录不是156个已验证适配器，索引finalize未完成。 | R-K01, R-K02 |
+| E-065 | REFERENCE | Dispatch、cm2-probe、creator-micro-kit、micro-manager、OpenBoard及其他条目提供设计线索；每仓型号、版本、许可分别核查。未核实Herdr/DSH/ZCode/QwenWork动作API。156仓检索记录不是156个已验证适配器，索引finalize未完成。 | R-K01, R-K02 |
 | E-066 | IMPLEMENTATION，[PR #7评审](https://github.com/semantic-craft/micro-input/pull/7) 主题；准确入口为PR审查页 | 评审指出探针前置条件循环：未知framing时不能先盲发查询来验证framing。先有可靠规格/行为摘要或获准被动观察，再做离线验证和获准实机查询。 | R-D04, R-N01 |
 
 ## 冲突裁决与已缩小的未知

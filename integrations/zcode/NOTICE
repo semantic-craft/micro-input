@@ -1,5 +1,0 @@
-ZCode navigation bridge integration
-Based on zai-org/ZCode commit a9fe401eede6e6e5e01be9048679c206fe6f02d9.
-ZCode is distributed under the Apache License, Version 2.0 (see LICENSE).
-This patch adds a scoped local Micro Input metadata/navigation bridge.
-It is not an upstream release or evidence that the installed ZCode includes the bridge.

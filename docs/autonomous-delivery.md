@@ -2,9 +2,7 @@
 
 本项目以 [#44](https://github.com/semantic-craft/micro-input/issues/44) 作为五项交付范围的唯一工单入口。每次接续先核对 `main`、现有 PR、工单、安装版和验收证据，再领取下一项可执行工作。工单关闭、源码合并、安装和真人验收分别登记。
 
-2026-11-05 当前优先目标是 [四应用深度控制](designs/four-app-control.md)，来源和接口见[四应用接口](four-app-interfaces.md)。Paseo 只作能力参照，不新增其适配器或等量 MCP/CLI 出口。既有其他 Profile 保留，但不列入本轮四应用验收。
-
-2026-11-04 新增的按住说话、T3 Code 会话导航、状态灯核查与径向菜单执行范围见 [Agent 控制交付计划](designs/agent-control-program.md)。该计划不替代本页完整产品范围，设备写入仍遵守各自证据与授权。
+2026-11-05 当前优先目标是 [四应用深度控制](designs/four-app-control.md)，来源和接口见[四应用接口](four-app-interfaces.md)。Paseo 只作能力参照，不新增其适配器或等量 MCP/CLI 出口。既有其他 Profile 保留，但不列入本轮四应用验收。设备写入仍遵守各自证据与授权。
 
 ## 五项都要完成
 

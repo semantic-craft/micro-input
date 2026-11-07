@@ -20,7 +20,7 @@ scripts/run --verify   # 独立QA标识/文档，10分钟自动退出并回收�
 
 系统睡眠通知会立即使旧会话和待完成结果失效，取消请求并关闭输入订阅，保留本地草稿及会话内撤销历史；旧快照标为过期。唤醒等待旧会话关闭，只在用户此前已开启 USB 发现时刷新描述符；设备选择清空，连接、身份和配置仍须明确重新操作。观察者随应用退出注销。此路径已通过合成通知与真实 UniFFI 回归，真实睡眠/唤醒、锁屏/解锁、读取中物理拔插及原映射行为仍待验收，见[E-096](docs/spec/EVIDENCE.md)。
 
-输入监视支持候选绑定观察（`subscribe_input`）与已核实宿主路由流（`subscribe_verified_input`）：在固件 0.6.3 硬件透传层（`AG00–AG18`）就绪时，`VerifiedInputDecoder` 按实机核验映射第 0 行按键（左键 `AG00` → `logical-0`，右键 `AG01` → `logical-1`）与摇杆 4 扇区偏移（`AG15–AG18` → `logical-16–logical-19`）；底行左中微动（`AG10` + `AG11`）支持在主机偏好（`bottom_row_layout`）中全局切换**拆成两个按键（`split`，1U + 1U 默认）**与**合并为 2U 宽键（`merged`，双微动按位掩码合并为单次触发）**。菜单栏与工作台支持启用 Mac 宿主动作执行、安装七套桌面 Agent 预设（Cindy、Codex、千问办公、ZCode、Antigravity、DSH、Herdr App）及零 Flash 写入切换 `host_active_profile_id`，详见[宿主动作执行与 Coding Agent 预设架构](docs/designs/host-execution-and-agent-presets.md)与 [E-098](docs/spec/EVIDENCE.md)。
+输入监视支持候选绑定观察（`subscribe_input`）与已核实宿主路由流（`subscribe_verified_input`）：在固件 0.6.3 硬件透传层（`AG00–AG18`）就绪时，`VerifiedInputDecoder` 按实机核验映射第 0 行按键（左键 `AG00` → `logical-0`，右键 `AG01` → `logical-1`）与摇杆 4 扇区偏移（`AG15–AG18` → `logical-16–logical-19`）；底行左中微动（`AG10` + `AG11`）支持在主机偏好（`bottom_row_layout`）中全局切换**拆成两个按键（`split`，1U + 1U 默认）**与**合并为 2U 宽键（`merged`，双微动按位掩码合并为单次触发）**。菜单栏与单屏工作台支持启用 Mac 宿主动作执行、内置四款桌面 Agent 预设（Antigravity、Cindy、DeepSeek Harness、ZCode）与非 Agent 通用兜底预设（「其他软件」，通配 `bundleID = "*"`，底排中间麦克风键 `AG11` 预置为苹果 Magic Keyboard 原生 `Fn` 🌐 语音键 `0x3F`，其余键位支持内联自由录制任意快捷键）及零 Flash 写入切换 `host_active_profile_id`，详见[宿主动作执行与 Coding Agent 预设架构](docs/designs/host-execution-and-agent-presets.md)与 [E-098](docs/spec/EVIDENCE.md)。
 
 旋钮三个逻辑槽位可独立分配本地动作；摇杆可选择保留来源模式或编辑本地逻辑扇区。减少活动扇区或切换模式不会删除旧槽位及绑定，未知物理方向继续标识；0–32 是本机编辑器限制，不是设备容量。保存、撤销/重做和重开沿用本地文档服务。见[控件编辑契约](docs/implementation-plan.md#t10-本地控件编辑契约)。
 
@@ -84,9 +84,7 @@ T05已补取消、会话终止通知及退出时等待资源释放；当前设�
 
 ## 下一步
 
-Slice K2 已接通桌面版 DSH 受控会话新建（`create`，绑定工作区并回读新 ID）、提示发送（`prompt`，分别确认 `steer` 与 `queue`）、`requestId` 幂等去重/`query` 对账，以及带同 Host `expectedTurn` 原子核对的 `cancel`（分别显示当前轮次与队列；取消后队列非空时返回 `cancelledQueueRemaining` 而不报全部停止；切会话不误停；同会话旧 Stop 遇新轮次零取消 `noop`；无法证明轮次原子性时拒绝发送），并通过全量离线、固定源码桥测试及真实 UDS 双端验收；下一片为 K3，向 Cindy 已选任务发送消息、新建并停止运行。各应用桥能力与重跑入口见 [ZCode 桥](integrations/zcode/README.md)、[Cindy 桥](integrations/cindy/README.md)、[Antigravity 状态桥](integrations/antigravity/README.md) 与 [DSH 桥](integrations/dsh/README.md)。日常 GUI 与实体按键结果仍单列未验收。
-
-2026-11-05 当前目标限定为 Antigravity、Cindy、ZCode、桌面版 DeepSeek Harness 的深度控制，Paseo 只作能力参照。先查明四应用接口并保留 Cindy 原生集成，再逐片实现准确会话控制与状态反馈。见[接口证据](docs/four-app-interfaces.md)、[实施任务](docs/designs/four-app-control.md)与[下一片](docs/pstack-relay.md)。
+2026-11-07 当前版本（`v0.2.0`）已完成 PStack 全景 23/23 切片交付：四款桌面 Agent（Antigravity、Cindy、DeepSeek Harness、ZCode）全部采用零补丁原生直接适配（详见 [Antigravity 状态桥](integrations/antigravity/README.md)、[Cindy 适配说明](integrations/cindy/README.md)、[DSH 适配说明](integrations/dsh/README.md)、[ZCode 适配说明](integrations/zcode/README.md)），并配备非 Agent 软件通用快捷键预设「其他软件」（含 Apple 原生 `Fn` 🌐 语音键 `0x3F`）、Scheme A 单屏工作台、固件 0.6.3 双区智能状态灯效（Working 海洋蓝 + 待阅完成翡翠绿）与左旋钮滚项目 / 右摇杆滚对话。全景切片记录见 [docs/pstack-relay.md](docs/pstack-relay.md)。
 
 五项持续交付范围及领取下一片的规则见[持续交付入口](docs/autonomous-delivery.md)。PR #64 已接通原生 `lights.preview` 离线路径；真实颜色、停止后的设备表现和多客户端竞争仍待实机验收。后续同时推进常用设备键与层、宏与 Multi 执行、独立日用及交互便利性，不以本段“下一步”缩小 #44 的完整范围。
 

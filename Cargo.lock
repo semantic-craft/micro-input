@@ -557,7 +557,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mi-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mi-model",
  "mi-proto",
@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "mi-model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "mi-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "serde",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "mi-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "mi-transport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64",
