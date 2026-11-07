@@ -342,6 +342,27 @@ final class FourAppInteractionTests: XCTestCase {
         )
         store.antigravityStatus.setSnapshotForTesting(rows: [waitingRow], selected: key)
         XCTAssertEqual(controller.deriveState(for: "antigravity", in: store), .awaitingInput)
+
+        let completedRow = AntigravitySessionRow(
+            conversationId: key.conversationId,
+            workspacePath: key.workspacePath,
+            title: "AG Session",
+            projectId: "p1",
+            modelName: "gemini-pro",
+            thinkingLevel: "high",
+            phase: .completed,
+            lastEventType: .stop,
+            invocationNum: 1,
+            stepIdx: 2,
+            executionNum: 1,
+            lastToolName: nil,
+            terminationReason: "NO_TOOL_CALL",
+            fullyIdle: true,
+            transitionCount: 3,
+            pendingInteraction: nil
+        )
+        store.antigravityStatus.setSnapshotForTesting(rows: [completedRow], selected: nil)
+        XCTAssertEqual(controller.deriveState(for: "antigravity", in: store), .completed)
     }
 
     func testDeriveStateForZCode() {
@@ -411,6 +432,13 @@ final class FourAppInteractionTests: XCTestCase {
         let dzThinking = controller.deriveDualZoneFeedback(phase: .thinking, dictationActive: false, nativeOwnershipActive: false)
         XCTAssertEqual(dzThinking.backlightColor, "#0088FF")
 
+        // Completed: emerald green breathing glow on both backlight and underglow
+        let dzCompleted = controller.deriveDualZoneFeedback(phase: .completed, dictationActive: false, nativeOwnershipActive: false)
+        XCTAssertEqual(dzCompleted.backlightColor, "#00FF66")
+        XCTAssertEqual(dzCompleted.backlightEffect, "breath")
+        XCTAssertEqual(dzCompleted.underglowColor, "#00FF66")
+        XCTAssertEqual(dzCompleted.underglowEffect, "breath")
+
         // Dictation active: purple underglow
         let dzDictation = controller.deriveDualZoneFeedback(phase: .idle, dictationActive: true, nativeOwnershipActive: false)
         XCTAssertEqual(dzDictation.underglowColor, "#8800FF")
@@ -427,7 +455,7 @@ final class FourAppInteractionTests: XCTestCase {
             FourAppSlot(slotIndex: 0, isPinned: false, place: .cindy(workspacePath: "/ws", sessionId: "s1"), title: "Task 1", app: "cindy", status: "running"),
             FourAppSlot(slotIndex: 1, isPinned: false, place: .cindy(workspacePath: "/ws", sessionId: "s2"), title: "Task 2", app: "cindy", status: "waiting"),
             FourAppSlot(slotIndex: 2, isPinned: false, place: nil, title: "", app: "cindy", status: "idle"),
-            FourAppSlot(slotIndex: 3, isPinned: false, place: nil, title: "", app: "cindy", status: "idle"),
+            FourAppSlot(slotIndex: 3, isPinned: false, place: .antigravity(conversationId: "c1", workspacePath: "/ws"), title: "AG Done", app: "antigravity", status: "completed"),
             FourAppSlot(slotIndex: 4, isPinned: false, place: nil, title: "", app: "cindy", status: "idle"),
             FourAppSlot(slotIndex: 5, isPinned: false, place: nil, title: "", app: "cindy", status: "idle")
         ]
@@ -440,6 +468,9 @@ final class FourAppInteractionTests: XCTestCase {
         XCTAssertEqual(pk[1].phase, .awaitingInput)
         XCTAssertEqual(pk[2].bindingId, "AG02")
         XCTAssertEqual(pk[2].color, "#222222") // empty slot
+        XCTAssertEqual(pk[3].bindingId, "AG03")
+        XCTAssertEqual(pk[3].phase, .completed)
+        XCTAssertEqual(pk[3].color, "#00FF66")
 
         // Wide key (AG10)
         let wideKey = pk.first(where: { $0.bindingId == "AG10" })
@@ -638,5 +669,171 @@ final class FourAppInteractionTests: XCTestCase {
             profileId: store.hostActiveProfileId ?? ""
         )
         XCTAssertNotNil(newOrStopReceipt)
+    }
+
+    func testSelectiveAttentionOnlyLightingAndAcknowledgeTurnOff() async {
+        let (store, _) = makeStore(ownershipState: "released")
+        let keyDone = AntigravitySessionKey(conversationId: "conv-done", workspacePath: "/ws/alpha")
+        let keyRunning = AntigravitySessionKey(conversationId: "conv-run", workspacePath: "/ws/beta")
+        let rowDone = AntigravitySessionRow(
+            conversationId: keyDone.conversationId,
+            workspacePath: keyDone.workspacePath,
+            title: "Completed Task",
+            projectId: "p1",
+            modelName: "gemini-pro",
+            thinkingLevel: "high",
+            phase: .completed,
+            lastEventType: .stop,
+            invocationNum: 1,
+            stepIdx: 5,
+            executionNum: 1,
+            lastToolName: nil,
+            terminationReason: "NO_TOOL_CALL",
+            fullyIdle: true,
+            transitionCount: 10,
+            pendingInteraction: nil
+        )
+        let rowRunning = AntigravitySessionRow(
+            conversationId: keyRunning.conversationId,
+            workspacePath: keyRunning.workspacePath,
+            title: "Running Task",
+            projectId: "p2",
+            modelName: "gemini-pro",
+            thinkingLevel: "high",
+            phase: .running,
+            lastEventType: .preInvocation,
+            invocationNum: 1,
+            stepIdx: 2,
+            executionNum: 1,
+            lastToolName: nil,
+            terminationReason: nil,
+            fullyIdle: false,
+            transitionCount: 20,
+            pendingInteraction: nil
+        )
+        store.antigravityStatus.setSnapshotForTesting(rows: [rowRunning, rowDone], selected: nil)
+        store.fourAppSlots.syncRecent(from: store)
+
+        // By default, onlyGlowOnAttentionOrCompleted is true:
+        // Slot 0 (running) must be #000000 (off), while Slot 1 (completed) must be #00FF66 (glowing green)!
+        XCTAssertTrue(store.fourAppLighting.onlyGlowOnAttentionOrCompleted)
+        _ = await store.fourAppLighting.updateFeedback(in: store)
+        let keysBefore = store.fourAppLighting.fullKeypadFeedback
+        XCTAssertEqual(keysBefore.first(where: { $0.bindingId == "AG00" })?.color, "#000000")
+        XCTAssertEqual(keysBefore.first(where: { $0.bindingId == "AG01" })?.color, "#00FF66")
+        XCTAssertEqual(keysBefore.first(where: { $0.bindingId == "AG02" })?.color, "#000000")
+        XCTAssertEqual(keysBefore.first(where: { $0.bindingId == "AG07" })?.color, "#000000")
+        XCTAssertEqual(store.fourAppLighting.dualZoneFeedback?.backlightEffect, "off")
+        XCTAssertEqual(store.fourAppLighting.dualZoneFeedback?.underglowColor, "#00FF66")
+
+        // Once the user clicks/presses the glowing key to jump to that completed session, its reminder glow turns off!
+        let donePlace = KeypadNavigationPlace.antigravity(conversationId: keyDone.conversationId, workspacePath: keyDone.workspacePath)
+        store.fourAppLighting.acknowledgeSlot(place: donePlace, in: store)
+        _ = await store.fourAppLighting.updateFeedback(in: store)
+        let keysAfter = store.fourAppLighting.fullKeypadFeedback
+        XCTAssertEqual(keysAfter.first(where: { $0.bindingId == "AG01" })?.color, "#000000")
+        XCTAssertEqual(store.fourAppLighting.dualZoneFeedback?.underglowEffect, "off")
+    }
+
+    func testSidebarProjectScrollAndButtonFiltering() {
+        let upReq = DialScrollRequest.from(command: "sidebar-scroll-up")
+        let downReq = DialScrollRequest.from(command: "sidebar-scroll-down")
+        XCTAssertEqual(upReq?.region, .sidebar)
+        XCTAssertEqual(downReq?.region, .sidebar)
+        XCTAssertEqual(upReq?.canonicalCommand, "sidebar-scroll-up")
+        XCTAssertEqual(downReq?.canonicalCommand, "sidebar-scroll-down")
+
+        let win = DialScrollWindow(windowNumber: 42, bounds: CGRect(x: 100, y: 50, width: 1200, height: 800))
+        let chatPt = win.scrollPoint(fromTop: 0.4, region: .conversation)
+        let sidePt = win.scrollPoint(fromTop: 0.5, region: .sidebar)
+        XCTAssertEqual(chatPt.x, 700)
+        XCTAssertEqual(sidePt.x, 240) // bounds.minX (100) + 140
+
+        XCTAssertTrue(DesktopAgentControls.isSidebarProjectButton(role: kAXButtonRole, title: "micro-input", x: 9, width: 263))
+        XCTAssertFalse(DesktopAgentControls.isSidebarProjectButton(role: kAXButtonRole, title: "Projects", x: 9, width: 263))
+        XCTAssertFalse(DesktopAgentControls.isSidebarProjectButton(role: kAXButtonRole, title: "Archive conversation", x: 243, width: 22))
+    }
+
+    func testWorkingAndBlueDotSessionObservationAndKnobCycle() async throws {
+        let (store, _) = try makeStore()
+        XCTAssertEqual(AntigravitySessionFilter.from(command: "cycle-working-next")?.filter, .working)
+        XCTAssertEqual(AntigravitySessionFilter.from(command: "cycle-working-prev")?.next, false)
+        XCTAssertEqual(AntigravitySessionFilter.from(command: "cycle-completed-next")?.filter, .completed)
+        XCTAssertEqual(AntigravitySessionFilter.from(command: "cycle-attention-next")?.filter, .attention)
+
+        let rowWorking = AntigravitySessionRow(
+            conversationId: "conv-working-1",
+            workspacePath: "/tmp/ws-mi",
+            title: "UI界面选项解析与评估",
+            projectId: "p1",
+            modelName: "gemini-pro",
+            thinkingLevel: "high",
+            phase: .running,
+            lastEventType: .preInvocation,
+            invocationNum: 1,
+            stepIdx: 4,
+            executionNum: 1,
+            lastToolName: nil,
+            terminationReason: nil,
+            fullyIdle: false,
+            transitionCount: 30,
+            pendingInteraction: nil
+        )
+        let rowBlueDot = AntigravitySessionRow(
+            conversationId: "conv-bluedot-2",
+            workspacePath: "/tmp/ws-koe",
+            title: "录音豆连接与同声传译功能实现",
+            projectId: "p2",
+            modelName: "gemini-pro",
+            thinkingLevel: "high",
+            phase: .completed,
+            lastEventType: .stop,
+            invocationNum: 1,
+            stepIdx: 8,
+            executionNum: 1,
+            lastToolName: nil,
+            terminationReason: "NO_TOOL_CALL",
+            fullyIdle: true,
+            transitionCount: 20,
+            pendingInteraction: nil
+        )
+        let rowReadIdle = AntigravitySessionRow(
+            conversationId: "conv-read-3",
+            workspacePath: "/tmp/ws-koe",
+            title: "准备桌面与手机端验收",
+            projectId: "p2",
+            modelName: "gemini-pro",
+            thinkingLevel: "high",
+            phase: .idle,
+            lastEventType: .sessionStart,
+            invocationNum: 1,
+            stepIdx: 6,
+            executionNum: 1,
+            lastToolName: nil,
+            terminationReason: nil,
+            fullyIdle: true,
+            transitionCount: 50,
+            pendingInteraction: nil
+        )
+        store.antigravityStatus.setSnapshotForTesting(rows: [rowReadIdle, rowWorking, rowBlueDot], selected: nil)
+        store.fourAppSlots.syncRecent(from: store)
+
+        // Active (running + completed) sessions must be prioritized into slots 0 and 1 ahead of idle sessions
+        XCTAssertEqual(store.fourAppSlots.slots[0].title, "UI界面选项解析与评估")
+        XCTAssertEqual(store.fourAppSlots.slots[1].title, "录音豆连接与同声传译功能实现")
+        XCTAssertEqual(store.fourAppSlots.slots[2].title, "准备桌面与手机端验收")
+
+        // When glowOnWorkingSessions is enabled, Slot 0 (Working ::) glows blue (#0088FF), Slot 1 (Blue-Dot 🔵) glows green (#00FF66), and Slot 2 (Read) stays dark (#000000)
+        await store.fourAppLighting.setGlowOnWorkingSessions(true, in: store)
+        let keys = store.fourAppLighting.fullKeypadFeedback
+        XCTAssertEqual(keys.first(where: { $0.bindingId == "AG00" })?.color, "#0088FF")
+        XCTAssertEqual(keys.first(where: { $0.bindingId == "AG01" })?.color, "#00FF66")
+        XCTAssertEqual(keys.first(where: { $0.bindingId == "AG02" })?.color, "#000000")
+
+        // Cycling .working only selects the Working session; cycling .completed only selects the Blue-Dot session
+        let rWork = await store.cycleFilteredAntigravitySession(filter: .working, next: true, profileId: "default", bindingId: "ENC_CW")
+        XCTAssertTrue(rWork.detail.contains("conv-working-1"))
+        let rDone = await store.cycleFilteredAntigravitySession(filter: .completed, next: true, profileId: "default", bindingId: "ENC_CW")
+        XCTAssertTrue(rDone.detail.contains("conv-bluedot-2"))
     }
 }

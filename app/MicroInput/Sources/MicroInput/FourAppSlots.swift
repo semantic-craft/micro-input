@@ -131,8 +131,19 @@ final class FourAppSlotTable: ObservableObject {
             ))
         }
 
-        // Sort candidates by updatedAt descending
-        candidates.sort { $0.updatedAt > $1.updatedAt }
+        // Prioritize active (running / completed / needs-interaction / error) sessions ahead of idle sessions,
+        // and sort by updatedAt descending within each tier.
+        let isActiveStatus: (String) -> Bool = { status in
+            !["idle", "canceled", ""].contains(status)
+        }
+        candidates.sort { lhs, rhs in
+            let lActive = isActiveStatus(lhs.status)
+            let rActive = isActiveStatus(rhs.status)
+            if lActive != rActive {
+                return lActive
+            }
+            return lhs.updatedAt > rhs.updatedAt
+        }
 
         let pinnedTargets = Set(slots.filter(\.isPinned).compactMap(\.place))
         var available = candidates.filter { !pinnedTargets.contains($0.place) }.makeIterator()
@@ -211,6 +222,13 @@ final class FourAppSlotTable: ObservableObject {
                 let rep = await store.antigravityStatus.open(selection, admitted: checkAdmitted)
                 outcome = rep.rawValue
                 detail = "antigravity: \(conv)@\(ws)"
+                if rep == .confirmed,
+                   !(store.actionExecutor is RecordingHostActionExecutor),
+                   ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == nil {
+                    _ = await DesktopAgentControls.selectAntigravityConversation(title: slot.title, workspacePath: ws)
+                    store.fourAppLighting.acknowledgeSlot(place: place, in: store)
+                    _ = await store.fourAppLighting.updateFeedback(in: store)
+                }
             } else {
                 outcome = "unconfirmed"
                 detail = "antigravity session not found"
@@ -595,6 +613,13 @@ final class FourAppAttentionRound: ObservableObject {
                 let rep = await store.antigravityStatus.open(sel, admitted: checkAdmitted)
                 outcome = rep.rawValue
                 detail = "antigravity_attention: \(conv)@\(ws)"
+                if rep == .confirmed,
+                   !(store.actionExecutor is RecordingHostActionExecutor),
+                   ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == nil {
+                    _ = await DesktopAgentControls.selectAntigravityConversation(title: target.title, workspacePath: ws)
+                    store.fourAppLighting.acknowledgeSlot(place: target.place, in: store)
+                    _ = await store.fourAppLighting.updateFeedback(in: store)
+                }
             } else {
                 outcome = "unconfirmed"
                 detail = "antigravity session not found"
@@ -658,5 +683,175 @@ extension Store {
                 }
                 return lhs.title < rhs.title
             }
+    }
+
+    func jumpToFourAppSlot(_ index: Int) async {
+        guard fourAppSlots.slots.indices.contains(index),
+              let entry = fourAppSlots.getSlot(index),
+              let place = entry.place else {
+            return
+        }
+        let pid = profile?.id.text ?? hostActiveProfileId ?? "default"
+        let bid = "AG0\(index)"
+        _ = await fourAppSlots.executeSlot(index, in: self, profileId: pid, bindingId: bid)
+        if case .antigravity(_, let ws) = place,
+           !(actionExecutor is RecordingHostActionExecutor),
+           ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == nil {
+            _ = await DesktopAgentControls.selectAntigravityConversation(title: entry.title, workspacePath: ws)
+        }
+        fourAppLighting.acknowledgeSlot(place: place, in: self)
+        _ = await fourAppLighting.updateFeedback(in: self)
+        status = "已跳转到会话：\(entry.title.isEmpty ? "会话 \(index + 1)" : entry.title)"
+    }
+
+    private static var lastFilteredSessionKey: AntigravitySessionKey?
+
+    func cycleFilteredAntigravitySession(
+        filter: AntigravitySessionFilter,
+        next: Bool,
+        profileId: String,
+        bindingId: String,
+        stillAdmitted: (() -> Bool)? = nil
+    ) async -> HostActionReceipt {
+        let epoch = hostRouteEpoch
+        let checkAdmitted: @MainActor () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? true)
+        }
+        let matchingRows = antigravityStatus.rows
+            .filter { filter.matches(row: $0) }
+            .sorted { lhs, rhs in
+                if lhs.transitionCount != rhs.transitionCount {
+                    return lhs.transitionCount > rhs.transitionCount
+                }
+                return lhs.conversationId < rhs.conversationId
+            }
+
+        if !matchingRows.isEmpty {
+            let currentKey = antigravityStatus.selected ?? Self.lastFilteredSessionKey
+            let targetIndex: Int
+            if let currentKey, let idx = matchingRows.firstIndex(where: { $0.key == currentKey }) {
+                if next {
+                    targetIndex = (idx + 1) % matchingRows.count
+                } else {
+                    targetIndex = (idx - 1 + matchingRows.count) % matchingRows.count
+                }
+            } else {
+                targetIndex = next ? 0 : (matchingRows.count - 1)
+            }
+            let targetRow = matchingRows[targetIndex]
+            Self.lastFilteredSessionKey = targetRow.key
+            let place = KeypadNavigationPlace.antigravity(
+                conversationId: targetRow.conversationId,
+                workspacePath: targetRow.workspacePath
+            )
+            var outcome = "confirmed"
+            if let sel = antigravityStatus.selection(for: targetRow.key) {
+                let rep = await antigravityStatus.open(sel, admitted: checkAdmitted)
+                outcome = rep.rawValue
+            }
+            if outcome == "confirmed" {
+                navigationHistory.visit(place)
+                if !(actionExecutor is RecordingHostActionExecutor),
+                   ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == nil {
+                    _ = await DesktopAgentControls.selectAntigravityConversation(
+                        title: targetRow.title,
+                        workspacePath: targetRow.workspacePath
+                    )
+                }
+                if targetRow.phase == .completed {
+                    fourAppLighting.acknowledgeSlot(place: place, in: self)
+                }
+                _ = await fourAppLighting.updateFeedback(in: self)
+                let badge = (targetRow.phase == .running || targetRow.phase == .runningTool) ? ":: Working" : "🔵 已完成"
+                status = "已切换到\(filter.label)（\(badge)）：\(targetRow.title)"
+            }
+            let detail = "antigravity_cycle_\(filter.rawValue): \(targetRow.conversationId)@\(targetRow.workspacePath)"
+            let receipt = HostActionReceipt(
+                timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                profileId: profileId,
+                bindingId: bindingId,
+                actionType: "antigravity_cycle_\(filter.rawValue)",
+                target: "antigravity",
+                textByteLen: nil,
+                outcome: outcome,
+                detail: detail
+            )
+            AuditLogWriter.append(receipt)
+            return receipt
+        }
+
+        if !(actionExecutor is RecordingHostActionExecutor),
+           ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == nil {
+            let (ok, axDetail) = DesktopAgentControls.stepAntigravitySidebarFilteredRow(filter: filter, next: next)
+            if ok {
+                status = axDetail
+                let receipt = HostActionReceipt(
+                    timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                    profileId: profileId,
+                    bindingId: bindingId,
+                    actionType: "antigravity_cycle_\(filter.rawValue)",
+                    target: "antigravity",
+                    textByteLen: nil,
+                    outcome: "confirmed",
+                    detail: axDetail
+                )
+                AuditLogWriter.append(receipt)
+                return receipt
+            }
+        }
+
+        status = "当前没有\(filter.label)"
+        let receipt = HostActionReceipt(
+            timestampMs: UInt64(Date().timeIntervalSince1970 * 1000),
+            profileId: profileId,
+            bindingId: bindingId,
+            actionType: "antigravity_cycle_\(filter.rawValue)",
+            target: "antigravity",
+            textByteLen: nil,
+            outcome: "noop",
+            detail: "empty.\(filter.rawValue)"
+        )
+        AuditLogWriter.append(receipt)
+        return receipt
+    }
+}
+
+enum AntigravitySessionFilter: String, Sendable {
+    case working = "working"
+    case completed = "completed"
+    case attention = "attention"
+
+    static func from(command: String) -> (filter: AntigravitySessionFilter, next: Bool)? {
+        switch command {
+        case "cycle-working-prev": return (.working, false)
+        case "cycle-working-next": return (.working, true)
+        case "cycle-completed-prev": return (.completed, false)
+        case "cycle-completed-next": return (.completed, true)
+        case "cycle-attention-prev": return (.attention, false)
+        case "cycle-attention-next": return (.attention, true)
+        default: return nil
+        }
+    }
+
+    func matches(row: AntigravitySessionRow) -> Bool {
+        let isWorking = row.phase == .running || row.phase == .runningTool || row.phase == .backgroundActive || row.pendingInteraction != nil
+        let isCompleted = row.phase == .completed
+        switch self {
+        case .working:
+            return isWorking
+        case .completed:
+            return isCompleted
+        case .attention:
+            return isWorking || isCompleted || row.phase == .failed
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .working: return "Working 会话"
+        case .completed: return "蓝点已完成会话"
+        case .attention: return "Working 或蓝点会话"
+        }
     }
 }

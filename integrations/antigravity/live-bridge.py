@@ -21,6 +21,7 @@ Never reads transcriptPath or tokens; prompt/content only pass through to the
 spawned agentapi process and are dropped from memory and logs.
 """
 import argparse
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -132,17 +133,32 @@ class LiveHub:
         self.version = version
 
     def rpc(self, method, body, timeout=10):
-        request = urllib.request.Request(
-            f"{self.address}/{LS_SERVICE}/{method}",
-            data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json", "x-codeium-csrf-token": self.csrf},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return json.loads(response.read() or b"{}")
-        except urllib.error.HTTPError as error:
-            detail = error.read()[:200].decode("utf-8", "replace")
-            raise RuntimeError(f"antigravity_rpc_{method}_{error.code}:{detail}") from None
+        for attempt in range(2):
+            request = urllib.request.Request(
+                f"{self.address}/{LS_SERVICE}/{method}",
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json", "x-codeium-csrf-token": self.csrf},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    return json.loads(response.read() or b"{}")
+            except urllib.error.HTTPError as error:
+                if attempt == 0:
+                    try:
+                        self.refresh()
+                        continue
+                    except Exception:
+                        pass
+                detail = error.read()[:200].decode("utf-8", "replace")
+                raise RuntimeError(f"antigravity_rpc_{method}_{error.code}:{detail}") from None
+            except urllib.error.URLError as error:
+                if attempt == 0:
+                    try:
+                        self.refresh()
+                        continue
+                    except Exception:
+                        pass
+                raise RuntimeError(f"antigravity_rpc_{method}_urlerror:{error}") from None
 
     def agentapi(self, args, cwd, timeout=120):
         env = dict(
@@ -163,9 +179,10 @@ class LiveHub:
 
 
 class LiveBridge:
-    def __init__(self, hub, directory, workspaces, ttl):
+    def __init__(self, hub, directory, workspaces, ttl, allow_all_local_workspaces=False):
         self.hub = hub
         self.directory = directory
+        self.allow_all_local_workspaces = allow_all_local_workspaces
         self.allowed_workspaces = set(workspaces)
         self.ttl = ttl
         self.deadline = time.monotonic() + ttl
@@ -176,9 +193,11 @@ class LiveBridge:
         self.grant_path = directory / "antigravity-grant.json"
         self.subscription_id = None
         self.selected = None
+        self.explicit_selection = False
         self.cursor = 0
         self.changes = []
         self.rows = {}
+        self.trajectory_ids = {}
         self.seen_keys = {}
         self.command_ledger = {}
         self.created_workspace = {}
@@ -189,6 +208,72 @@ class LiveBridge:
         self.last_event_at = time.monotonic()
         self.stop = False
         self.server = None
+        if self.allow_all_local_workspaces:
+            self.discover_local_workspaces()
+
+    def selected_payload(self):
+        if isinstance(self.selected, tuple) and len(self.selected) == 2:
+            return {"conversationId": self.selected[0], "workspacePath": self.selected[1]}
+        if isinstance(self.selected, dict):
+            return self.selected
+        return None
+
+    def discover_local_workspaces(self):
+        projects_dir = Path.home() / "Projects"
+        if projects_dir.is_dir():
+            for child in projects_dir.iterdir():
+                if child.is_dir():
+                    self.allowed_workspaces.add(normalize_workspace(str(child)))
+        try:
+            reply = self.hub.rpc("GetAllCascadeTrajectories", {"metadata": {}})
+            summaries = reply.get("trajectorySummaries") or {}
+            for summary in summaries.values():
+                if not isinstance(summary, dict):
+                    continue
+                for w in (summary.get("workspaces") or []):
+                    if isinstance(w, dict):
+                        p = normalize_workspace(w.get("workspaceFolderAbsolutePath") or w.get("workspaceFolderAbsoluteUri") or "")
+                        if p:
+                            self.allowed_workspaces.add(p)
+        except Exception:
+            pass
+        if not self.allowed_workspaces:
+            self.allowed_workspaces.add(normalize_workspace(str(Path.cwd())))
+
+    @staticmethod
+    def parse_transition_count(summary, prior):
+        raw_tc = summary.get("transitionCount")
+        if isinstance(raw_tc, int) and 0 < raw_tc <= 1_000_000_000:
+            return raw_tc
+        ts = summary.get("lastModifiedTime") or summary.get("createdTime") or ""
+        if isinstance(ts, str) and ts:
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                rel = int(dt.timestamp()) - 1_700_000_000
+                if 0 < rel <= 999_999_999:
+                    return rel
+            except ValueError:
+                pass
+        step_count = int(summary.get("stepCount") or summary.get("stepIdx") or 0)
+        return max(1, min(999_999_999, (prior.get("transitionCount", 0) if prior else 0) or step_count or 1))
+
+    @staticmethod
+    def is_unread_completed(summary, prior):
+        raw_term = str(summary.get("terminationReason") or summary.get("latestExecutorTerminationReason") or "")
+        was_running = bool(prior and prior.get("phase") in ("running", "runningTool"))
+        if not (raw_term.endswith("NO_TOOL_CALL") or raw_term == "COMPLETED" or was_running):
+            return False
+        annotations = summary.get("annotations") if isinstance(summary.get("annotations"), dict) else {}
+        view_ts = str(annotations.get("lastUserViewTime") or "")
+        mod_ts = str(summary.get("lastModifiedTime") or "")
+        if view_ts and mod_ts:
+            try:
+                view_dt = datetime.fromisoformat(view_ts.replace("Z", "+00:00"))
+                mod_dt = datetime.fromisoformat(mod_ts.replace("Z", "+00:00"))
+                return (mod_dt - view_dt).total_seconds() > 0.5
+            except ValueError:
+                pass
+        return True
 
     # ---------------- catalog ----------------
     def refresh_catalog(self):
@@ -206,27 +291,73 @@ class LiveBridge:
             if not paths:
                 continue
             conversation_id = key
+            ws_path = paths[0]
+            prior = self.rows.get((conversation_id, ws_path))
             trajectory_id = summary.get("trajectoryId") or ""
-            phase = STATUS_FIELD_MAP.get(str(summary.get("status", "")), "idle")
+            raw_status = str(summary.get("status", ""))
+            phase = STATUS_FIELD_MAP.get(raw_status, "idle")
+            step_count = int(summary.get("stepCount") or summary.get("stepIdx") or 0)
+            if phase == "idle" and self.is_unread_completed(summary, prior):
+                phase = "completed"
+                term_reason = "NO_TOOL_CALL"
+                last_event_type = "Stop"
+                fully_idle = True
+            elif phase == "failed":
+                term_reason = "ERROR"
+                last_event_type = "Stop"
+                fully_idle = True
+            elif phase == "canceled":
+                term_reason = "USER_CANCELED"
+                last_event_type = "Stop"
+                fully_idle = True
+            elif phase == "runningTool":
+                term_reason = None
+                last_event_type = "PreToolUse"
+                fully_idle = False
+            elif phase == "running":
+                term_reason = None
+                last_event_type = "PreInvocation"
+                fully_idle = False
+            else:
+                term_reason = None
+                last_event_type = "SessionStart"
+                fully_idle = True
+
+            annotations = summary.get("annotations") if isinstance(summary.get("annotations"), dict) else {}
+            meta = summary.get("trajectoryMetadata") if isinstance(summary.get("trajectoryMetadata"), dict) else {}
+            if meta.get("parentConversationId") or meta.get("subagentSpec") or int(meta.get("nestingDepth") or 0) > 0:
+                continue
+            if self.allow_all_local_workspaces and not summary.get("summary") and not annotations.get("title") and not summary.get("lastUserInputTime"):
+                continue
+            title = (summary.get("summary") or annotations.get("title") or conversation_id)[:512]
+            project_id = str(summary.get("projectId") or meta.get("projectId") or "")[:256]
+            self.trajectory_ids[(conversation_id, ws_path)] = trajectory_id
             row = {
                 "conversationId": conversation_id,
-                "workspacePath": paths[0],
-                "title": (summary.get("summary") or conversation_id)[:512],
-                "projectId": "",
-                "trajectoryId": trajectory_id,
+                "workspacePath": ws_path,
+                "title": title,
+                "projectId": project_id,
+                "modelName": str(summary.get("modelName") or "gemini-2.5-pro")[:256],
+                "thinkingLevel": "high",
                 "phase": phase,
-                "lastEventType": "Catalog",
-                "invocationNum": int(summary.get("invocationNum") or 0),
-                "stepIdx": int(summary.get("stepIdx") or 0),
+                "lastEventType": last_event_type,
+                "invocationNum": max(1, int(summary.get("invocationNum") or 1)),
+                "stepIdx": max(0, min(1_000_000_000, step_count)),
                 "executionNum": 1,
                 "lastToolName": None,
-                "terminationReason": summary.get("terminationReason"),
-                "fullyIdle": phase in ("idle", "completed", "failed", "canceled"),
-                "transitionCount": int(summary.get("transitionCount") or 0),
-                "pendingInteraction": self.pending_interactions.get((conversation_id, paths[0])),
+                "terminationReason": term_reason,
+                "fullyIdle": fully_idle,
+                "transitionCount": self.parse_transition_count(summary, prior),
+                "pendingInteraction": self.pending_interactions.get((conversation_id, ws_path)),
                 "availableModels": [],
             }
             self.upsert_row(row)
+        if self.rows and (not self.explicit_selection or self.selected not in self.rows):
+            top_recent = sorted(self.rows.values(), key=lambda r: r.get("transitionCount", 0), reverse=True)[:6]
+            pending_rows = [r for r in top_recent if r.get("pendingInteraction") is not None]
+            completed_rows = [r for r in top_recent if r.get("phase") == "completed"]
+            best_row = (pending_rows or completed_rows or top_recent)[0]
+            self.selected = (best_row["conversationId"], best_row["workspacePath"])
 
     def upsert_row(self, row):
         key = (row["conversationId"], row["workspacePath"])
@@ -301,7 +432,7 @@ class LiveBridge:
         return self.base_reply(req, "denied")
 
     def op_subscribe(self, req):
-        if req.get("schemaVersion") != CATALOG_NAV_SCHEMA_VERSION or req.get("activate") is not False:
+        if req.get("schemaVersion") not in (None, CATALOG_NAV_SCHEMA_VERSION) or req.get("activate") is not False:
             self.unauthorized_rejections += 1
             return self.base_reply(req, "denied")
         self.subscription_id = req.get("subscriptionId")
@@ -315,8 +446,8 @@ class LiveBridge:
             "capabilities": CAPABILITIES,
             "cursor": self.cursor,
             "rows": [self.rows[key] for key in sorted(self.rows)],
-            "changes": list(self.changes),
-            "selected": self.selected,
+            "changes": [],
+            "selected": self.selected_payload(),
             "transcriptReads": self.transcript_reads,
             "tokenReads": self.token_reads,
         })
@@ -333,10 +464,11 @@ class LiveBridge:
         changes = [c for c in self.changes if not isinstance(after, int) or c["sequence"] > after]
         reply = self.base_reply(req, "ok")
         reply.update({
+            "capabilities": CAPABILITIES,
             "cursor": self.cursor,
             "rows": [self.rows[key] for key in sorted(self.rows)],
             "changes": changes,
-            "selected": self.selected,
+            "selected": self.selected_payload(),
             "transcriptReads": self.transcript_reads,
             "tokenReads": self.token_reads,
         })
@@ -350,7 +482,13 @@ class LiveBridge:
         target = req.get("target") or {}
         row, key = self.row_for(target)
         if row is None:
-            return self.base_reply(req, "unconfirmed")
+            reply = self.base_reply(req, "unconfirmed")
+            reply.update({
+                "selected": self.selected_payload(),
+                "transcriptReads": self.transcript_reads,
+                "tokenReads": self.token_reads,
+            })
+            return reply
         if normalize_workspace(target.get("workspacePath")) not in self.allowed_workspaces:
             self.unauthorized_rejections += 1
             return self.base_reply(req, "denied")
@@ -360,11 +498,22 @@ class LiveBridge:
         except RuntimeError:
             found = False
         if not found:
-            return self.base_reply(req, "unconfirmed")
+            reply = self.base_reply(req, "unconfirmed")
+            reply.update({
+                "selected": self.selected_payload(),
+                "transcriptReads": self.transcript_reads,
+                "tokenReads": self.token_reads,
+            })
+            return reply
         subprocess.run(["open", "-a", "Antigravity"], check=False, timeout=10)
         self.selected = key
-        reply = self.base_reply(req, "confirmed")
-        reply["selected"] = self.selected
+        self.explicit_selection = True
+        reply = self.base_reply(req, "ok")
+        reply.update({
+            "selected": self.selected_payload(),
+            "transcriptReads": self.transcript_reads,
+            "tokenReads": self.token_reads,
+        })
         return reply
 
     def command_reply(self, req, entry, duplicate=False):
@@ -376,9 +525,15 @@ class LiveBridge:
             "workspacePath": entry.get("workspacePath") or "",
             "projectId": entry.get("projectId") or "",
             "duplicate": duplicate,
-            "reasonCode": entry.get("reasonCode"),
-            "delivery": entry.get("delivery"),
+            "reconciled": entry.get("reconciled", False),
+            "reasonCode": entry.get("reasonCode") or "ok",
+            "delivery": entry.get("delivery") or "none",
             "inFlightSteering": entry.get("inFlightSteering", False),
+            "cursor": self.cursor,
+            "rows": [self.rows[key] for key in sorted(self.rows)],
+            "selected": self.selected_payload(),
+            "transcriptReads": self.transcript_reads,
+            "tokenReads": self.token_reads,
         })
         return reply
 
@@ -426,7 +581,8 @@ class LiveBridge:
             "workspacePath": ws_path,
             "title": title,
             "projectId": intent.get("projectId") or "",
-            "trajectoryId": "",
+            "modelName": model or "gemini-2.5-pro",
+            "thinkingLevel": "high",
             "phase": "running",
             "lastEventType": "SessionStart",
             "invocationNum": 1,
@@ -441,6 +597,7 @@ class LiveBridge:
         }
         self.upsert_row(row)
         self.selected = (conversation, ws_path)
+        self.explicit_selection = True
         entry = {"op": "create", "requestId": request_id, "status": "created",
                  "conversationId": conversation, "workspacePath": ws_path,
                  "reasonCode": "agentapi.newConversationConfirmed"}
@@ -613,7 +770,7 @@ class LiveBridge:
                  "permission": "permission", "approval": "approvalInteraction",
                  "question": "askQuestion"}[interaction_type]
         interaction = {
-            "trajectoryId": pending.get("trajectoryId") or row.get("trajectoryId") or "",
+            "trajectoryId": pending.get("trajectoryId") or self.trajectory_ids.get((row["conversationId"], row["workspacePath"])) or "",
             "stepIndex": int(pending.get("stepIdx") or row.get("stepIdx") or 0),
             "selectedOptionIds": options,
             field: {"decision": decision if decision != "answer" else "allow"},
@@ -654,9 +811,10 @@ class LiveBridge:
         key = (conversation_id, paths[0])
         prior = self.rows.get(key) or {
             "conversationId": conversation_id, "workspacePath": paths[0], "title": conversation_id,
-            "projectId": "", "trajectoryId": "", "phase": "idle", "lastEventType": event_type,
+            "projectId": "", "modelName": "gemini-2.5-pro", "thinkingLevel": "high",
+            "phase": "idle", "lastEventType": event_type,
             "invocationNum": 0, "stepIdx": 0, "executionNum": 0, "lastToolName": None,
-            "terminationReason": None, "fullyIdle": True, "transitionCount": 0,
+            "terminationReason": None, "fullyIdle": True, "transitionCount": 1,
             "pendingInteraction": None, "availableModels": [],
         }
         row = dict(prior)
@@ -793,7 +951,8 @@ def main():
     sub = parser.add_subparsers(dest="cmd", required=True)
     serve = sub.add_parser("serve", help="Run the live Antigravity UDS bridge")
     serve.add_argument("--directory", required=True)
-    serve.add_argument("--workspace", action="append", required=True)
+    serve.add_argument("--workspace", action="append", default=[])
+    serve.add_argument("--allow-all-local-workspaces", action="store_true")
     serve.add_argument("--ttl", type=float, default=3600.0)
     emit = sub.add_parser("emit", help="Forward one official hook event")
     emit.add_argument("--socket", required=True)
@@ -805,11 +964,19 @@ def main():
     if args.cmd == "emit":
         emit_command(args)
         return
+    if not args.workspace and not args.allow_all_local_workspaces:
+        parser.error("serve requires --workspace or --allow-all-local-workspaces")
     directory = Path(args.directory).resolve()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(directory, 0o700)
     hub = LiveHub()
-    bridge = LiveBridge(hub, directory, [normalize_workspace(w) for w in args.workspace], args.ttl)
+    bridge = LiveBridge(
+        hub,
+        directory,
+        [normalize_workspace(w) for w in args.workspace],
+        args.ttl,
+        allow_all_local_workspaces=args.allow_all_local_workspaces,
+    )
 
     def shutdown(_sig, _frame):
         bridge.stop = True

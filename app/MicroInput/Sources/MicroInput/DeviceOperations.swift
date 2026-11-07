@@ -232,10 +232,21 @@ extension Store {
                 return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
             })
             if result == .confirmed, let selected = antigravitySelection {
-                navigationHistory.visit(.antigravity(
+                let place = KeypadNavigationPlace.antigravity(
                     conversationId: selected.key.conversationId,
                     workspacePath: selected.key.workspacePath
-                ))
+                )
+                navigationHistory.visit(place)
+                if !(actionExecutor is RecordingHostActionExecutor),
+                   ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == nil {
+                    let rowTitle = antigravityStatus.row(for: selected.key)?.title ?? ""
+                    _ = await DesktopAgentControls.selectAntigravityConversation(
+                        title: rowTitle,
+                        workspacePath: selected.key.workspacePath
+                    )
+                    fourAppLighting.acknowledgeSlot(place: place, in: self)
+                    _ = await fourAppLighting.updateFeedback(in: self)
+                }
             }
             receipt = HostActionReceipt(timestampMs: UInt64(Date().timeIntervalSince1970 * 1000), profileId: profileId,
                 bindingId: bindingId, actionType: "antigravity_open", target: "antigravity", textByteLen: nil,
@@ -275,6 +286,16 @@ extension Store {
                     guard let self else { return false }
                     return epoch == self.hostRouteEpoch && self.dispatchOpen && (stillAdmitted?() ?? false)
                 }
+            )
+        } else if payload?.action_type == "agent_command",
+                  let cmd = payload?.command,
+                  let (filter, next) = AntigravitySessionFilter.from(command: cmd) {
+            receipt = await cycleFilteredAntigravitySession(
+                filter: filter,
+                next: next,
+                profileId: profileId,
+                bindingId: bindingId,
+                stillAdmitted: stillAdmitted
             )
         } else if payload?.action_type == "agent_command",
                   let cmd = payload?.command,

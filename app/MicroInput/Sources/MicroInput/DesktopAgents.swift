@@ -14,7 +14,7 @@ struct DesktopAgent: Identifiable {
         .init(name: "Codex", bundleID: "com.openai.codex", symbol: "terminal", capabilities: "打开应用、搜索、定位输入框、旋钮滚动对话"),
         .init(name: "千问办公", bundleID: "cn.qwenwork.desktop.mac", symbol: "text.bubble", capabilities: "打开应用、新建任务、搜索、定位输入框、旋钮滚动对话"),
         .init(name: "ZCode", bundleID: "dev.zcode.app", symbol: "chevron.left.forwardslash.chevron.right", capabilities: "打开应用、新建任务、搜索、定位输入框、旋钮滚动对话"),
-        .init(name: "Antigravity", bundleID: "com.google.antigravity", symbol: "sparkles", capabilities: "打开应用、左旋钮会话导航、按住听写、Live 实时语音、选模型/项目、浏览器/终端/分栏"),
+        .init(name: "Antigravity", bundleID: "com.google.antigravity", symbol: "sparkles", capabilities: "打开应用、左旋钮会话导航、点按切换听写（Ctrl+M）、Live 实时语音、选模型/项目、浏览器/终端/分栏"),
         .init(name: "DeepSeek Coder (DSH)", bundleID: "com.deepseek.dsh", symbol: "terminal", capabilities: "打开应用、新建对话、搜索、定位输入框、旋钮滚动对话"),
         .init(name: "Herdr", bundleID: "dev.herdr.app", symbol: "rectangle.split.2x2", capabilities: "工作区切换、标签页、分屏与面板导航")
     ]
@@ -67,10 +67,418 @@ struct DesktopAgent: Identifiable {
         return true
     }
 
+    static var lastAntigravityConversationTitle: String?
+    static var lastAntigravityProjectTitle: String?
+
+    static func isSidebarConversationLink(role: String, labels: [String], x: CGFloat?) -> Bool {
+        guard role == "AXLink" else { return false }
+        if let x, x >= 360 { return false }
+        let trimmed = labels.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard let primary = trimmed.first else { return false }
+        let excludedExact: Set<String> = [
+            "New Conversation", "Customizations", "New Conversation in Project",
+            "Projects", "Conversations"
+        ]
+        if excludedExact.contains(primary) { return false }
+        if trimmed.contains(where: { $0.contains("Opens external link") || $0.hasPrefix("http://") || $0.hasPrefix("https://") }) {
+            return false
+        }
+        return true
+    }
+
+    static func isSidebarProjectButton(role: String, title: String, x: CGFloat?, width: CGFloat?) -> Bool {
+        guard role == kAXButtonRole else { return false }
+        if let x, x >= 280 { return false }
+        if let width, width < 140 { return false }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let excluded: Set<String> = [
+            "Projects", "Conversations", "Automations", "Settings",
+            "New Conversation", "Customizations", "Search Conversations",
+            "Collapse Sidebar", "Expand Sidebar", "Archive conversation",
+            "Pin conversation", "Stop execution", "New Conversation in Project"
+        ]
+        return !excluded.contains(trimmed)
+    }
+
+    private static func elementPosition(_ element: AXUIElement) -> CGPoint? {
+        guard let raw = attribute(element, kAXPositionAttribute),
+              CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+        let axVal = unsafeBitCast(raw, to: AXValue.self)
+        var point = CGPoint.zero
+        guard AXValueGetValue(axVal, .cgPoint, &point) else { return nil }
+        return point
+    }
+
+    private static func elementSize(_ element: AXUIElement) -> CGSize? {
+        guard let raw = attribute(element, kAXSizeAttribute),
+              CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+        let axVal = unsafeBitCast(raw, to: AXValue.self)
+        var size = CGSize.zero
+        guard AXValueGetValue(axVal, .cgSize, &size) else { return nil }
+        return size
+    }
+
+    static func selectAntigravityConversation(title: String, workspacePath: String) async -> (Bool, String) {
+        guard let bundle = bundles["antigravity"], AXIsProcessTrusted() else {
+            return (false, "需要辅助功能权限")
+        }
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier != bundle {
+            if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first(where: { !$0.isTerminated }) {
+                _ = app.activate(options: [.activateIgnoringOtherApps])
+            } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) {
+                let config = NSWorkspace.OpenConfiguration()
+                config.activates = true
+                _ = try? await NSWorkspace.shared.openApplication(at: url, configuration: config)
+            }
+            for _ in 0..<20 {
+                if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundle { break }
+                try? await Task.sleep(nanoseconds: 25_000_000)
+            }
+        }
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first(where: { !$0.isTerminated }) else {
+            return (false, "Antigravity 未运行")
+        }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(root, 0.35)
+        var focusedWindow: AXUIElement?
+        for _ in 0..<16 {
+            if let value = attribute(root, kAXFocusedWindowAttribute), CFGetTypeID(value) == AXUIElementGetTypeID() {
+                focusedWindow = unsafeBitCast(value, to: AXUIElement.self); break
+            }
+            if let windows = attribute(root, kAXWindowsAttribute) as? [AXUIElement], !windows.isEmpty {
+                focusedWindow = windows[0]; break
+            }
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        guard let window = focusedWindow else {
+            return (false, "未找到 Antigravity 窗口")
+        }
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let projectName = URL(fileURLWithPath: workspacePath).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        func scanSidebar() -> (links: [(element: AXUIElement, title: String, y: CGFloat)], projects: [(element: AXUIElement, title: String, y: CGFloat)]) {
+            var pending = [window]
+            var links: [(element: AXUIElement, title: String, y: CGFloat)] = []
+            var projects: [(element: AXUIElement, title: String, y: CGFloat)] = []
+            var visited = 0
+            let deadline = Date().addingTimeInterval(0.8)
+            while let element = pending.popLast(), visited < 1800, Date() < deadline {
+                visited += 1
+                let role = attribute(element, kAXRoleAttribute) as? String ?? ""
+                let t = attribute(element, kAXTitleAttribute) as? String ?? ""
+                let desc = attribute(element, kAXDescriptionAttribute) as? String ?? ""
+                let labels = [t, desc]
+                if labels.contains(where: { ["Conversation turns", "Agent response", "User message"].contains($0) }) { continue }
+                if role == "AXLink" {
+                    let pos = elementPosition(element)
+                    if isSidebarConversationLink(role: role, labels: labels, x: pos?.x),
+                       let primary = labels.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }).first(where: { !$0.isEmpty }) {
+                        links.append((element, primary, pos?.y ?? CGFloat(visited)))
+                    }
+                } else if role == kAXButtonRole {
+                    let pos = elementPosition(element)
+                    let sz = elementSize(element)
+                    if isSidebarProjectButton(role: role, title: t, x: pos?.x, width: sz?.width) {
+                        projects.append((element, t.trimmingCharacters(in: .whitespacesAndNewlines), pos?.y ?? CGFloat(visited)))
+                    }
+                }
+                if let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] {
+                    pending.append(contentsOf: children)
+                }
+            }
+            return (links.sorted { $0.y < $1.y }, projects.sorted { $0.y < $1.y })
+        }
+
+        func findMatchingLink(in links: [(element: AXUIElement, title: String, y: CGFloat)]) -> (element: AXUIElement, title: String, y: CGFloat)? {
+            guard !cleanTitle.isEmpty else { return nil }
+            if let exact = links.first(where: { $0.title.caseInsensitiveCompare(cleanTitle) == .orderedSame }) {
+                return exact
+            }
+            if cleanTitle.count >= 3,
+               let partial = links.first(where: { $0.title.localizedCaseInsensitiveContains(cleanTitle) || cleanTitle.localizedCaseInsensitiveContains($0.title) }) {
+                return partial
+            }
+            return nil
+        }
+
+        let initial = scanSidebar()
+        if let matched = findMatchingLink(in: initial.links) {
+            if AXUIElementPerformAction(matched.element, kAXPressAction as CFString) == .success {
+                lastAntigravityConversationTitle = matched.title
+                if !projectName.isEmpty { lastAntigravityProjectTitle = projectName }
+                return (true, "已跳转到会话：\(matched.title)")
+            }
+        }
+
+        // If the conversation's project is collapsed in the sidebar, expand the project first and then click the conversation link.
+        if !projectName.isEmpty,
+           let proj = initial.projects.first(where: { $0.title.caseInsensitiveCompare(projectName) == .orderedSame }) {
+            _ = AXUIElementPerformAction(proj.element, kAXPressAction as CFString)
+            lastAntigravityProjectTitle = proj.title
+            try? await Task.sleep(nanoseconds: 140_000_000)
+            let afterExpand = scanSidebar()
+            if let matched = findMatchingLink(in: afterExpand.links) {
+                if AXUIElementPerformAction(matched.element, kAXPressAction as CFString) == .success {
+                    lastAntigravityConversationTitle = matched.title
+                    return (true, "已展开项目 \(proj.title) 并跳转到会话：\(matched.title)")
+                }
+            }
+            // Even if the specific conversation title wasn't matched, if any link appeared under this project, open the first one under it.
+            if let firstUnderProj = afterExpand.links.first(where: { $0.y > proj.y && $0.y < proj.y + 220 }) {
+                if AXUIElementPerformAction(firstUnderProj.element, kAXPressAction as CFString) == .success {
+                    lastAntigravityConversationTitle = firstUnderProj.title
+                    return (true, "已展开项目 \(proj.title) 并打开会话：\(firstUnderProj.title)")
+                }
+            }
+            return (true, "已定位到项目：\(proj.title)")
+        }
+
+        return (true, "已唤起 Antigravity 窗口")
+    }
+
+    static func performAntigravityProjectStep(window: AXUIElement, app: NSRunningApplication, next: Bool) -> (Bool, String) {
+        struct ProjectEntry {
+            let element: AXUIElement
+            let title: String
+            let y: CGFloat
+            let order: Int
+        }
+        var pending = [window]
+        var projects: [ProjectEntry] = []
+        var linkYs: [CGFloat] = []
+        var visited = 0
+        let deadline = Date().addingTimeInterval(0.9)
+        while let element = pending.popLast(), visited < 1800, Date() < deadline {
+            visited += 1
+            let role = attribute(element, kAXRoleAttribute) as? String ?? ""
+            let title = attribute(element, kAXTitleAttribute) as? String ?? ""
+            let desc = attribute(element, kAXDescriptionAttribute) as? String ?? ""
+            let labels = [title, desc]
+            if labels.contains(where: { ["Conversation turns", "Agent response", "User message"].contains($0) }) { continue }
+            if role == kAXButtonRole {
+                let pos = elementPosition(element)
+                let sz = elementSize(element)
+                if isSidebarProjectButton(role: role, title: title, x: pos?.x, width: sz?.width) {
+                    projects.append(ProjectEntry(element: element, title: title.trimmingCharacters(in: .whitespacesAndNewlines), y: pos?.y ?? CGFloat(visited), order: visited))
+                }
+            } else if role == "AXLink" {
+                let pos = elementPosition(element)
+                if isSidebarConversationLink(role: role, labels: labels, x: pos?.x), let y = pos?.y {
+                    linkYs.append(y)
+                }
+            }
+            if let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] {
+                pending.append(contentsOf: children)
+            }
+        }
+        let sorted = projects.sorted {
+            if abs($0.y - $1.y) > 2 { return $0.y < $1.y }
+            return $0.order < $1.order
+        }
+        var deduped: [ProjectEntry] = []
+        for item in sorted {
+            if let last = deduped.last, last.title == item.title && abs(last.y - item.y) <= 4 { continue }
+            deduped.append(item)
+        }
+        guard !deduped.isEmpty else {
+            return (false, "未在左侧栏找到项目列表")
+        }
+        // Determine current project index from lastAntigravityProjectTitle or whichever project currently has expanded conversation links below it
+        let expandedIndex: Int? = (0..<deduped.count).first { idx in
+            let minY = deduped[idx].y
+            let maxY = (idx + 1 < deduped.count) ? deduped[idx + 1].y : (minY + 260)
+            return linkYs.contains { $0 > minY && $0 < maxY }
+        }
+        let currentIndex = lastAntigravityProjectTitle.flatMap { last in deduped.firstIndex(where: { $0.title == last }) }
+            ?? expandedIndex
+        let targetIndex: Int
+        if let currentIndex {
+            targetIndex = next ? min(deduped.count - 1, currentIndex + 1) : max(0, currentIndex - 1)
+        } else {
+            targetIndex = 0
+        }
+        let target = deduped[targetIndex]
+        if AXUIElementPerformAction(target.element, kAXPressAction as CFString) == .success {
+            lastAntigravityProjectTitle = target.title
+            return (true, "已切换到侧栏\(next ? "下一" : "上一")项目（\(target.title)）")
+        }
+        return (false, "侧栏项目按钮未能响应操作")
+    }
+
+    private static func performAntigravityConversationStep(window: AXUIElement, app: NSRunningApplication, next: Bool) -> (Bool, String) {
+        struct LinkEntry {
+            let element: AXUIElement
+            let title: String
+            let x: CGFloat
+            let y: CGFloat
+            let order: Int
+        }
+        var pending = [window]
+        var entries: [LinkEntry] = []
+        var visited = 0
+        let deadline = Date().addingTimeInterval(1.0)
+        while let element = pending.popLast(), visited < 1800, Date() < deadline {
+            visited += 1
+            let role = attribute(element, kAXRoleAttribute) as? String ?? ""
+            let title = attribute(element, kAXTitleAttribute) as? String ?? ""
+            let description = attribute(element, kAXDescriptionAttribute) as? String ?? ""
+            let placeholder = attribute(element, kAXPlaceholderValueAttribute) as? String ?? ""
+            let help = attribute(element, kAXHelpAttribute) as? String ?? ""
+            let enabled = attribute(element, kAXEnabledAttribute) as? Bool ?? true
+            let labels = [title, description, placeholder, help]
+            if labels.contains(where: { ["Conversation turns", "Agent response", "User message"].contains($0) }) { continue }
+            let pos = role == "AXLink" ? elementPosition(element) : nil
+            if enabled, isSidebarConversationLink(role: role, labels: labels, x: pos?.x),
+               let primary = labels.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }).first(where: { !$0.isEmpty }) {
+                entries.append(LinkEntry(element: element, title: primary, x: pos?.x ?? 0, y: pos?.y ?? CGFloat(visited), order: visited))
+            }
+            if let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] {
+                pending.append(contentsOf: children)
+            }
+        }
+        let sorted = entries.sorted {
+            if abs($0.y - $1.y) > 2 { return $0.y < $1.y }
+            if abs($0.x - $1.x) > 2 { return $0.x < $1.x }
+            return $0.order < $1.order
+        }
+        var deduped: [LinkEntry] = []
+        for item in sorted {
+            if let last = deduped.last, last.title == item.title && abs(last.y - item.y) <= 4 { continue }
+            deduped.append(item)
+        }
+        if !deduped.isEmpty, NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier {
+            let windowTitle = attribute(window, kAXTitleAttribute) as? String ?? ""
+            let activeWindowPrefix: String? = {
+                if let range = windowTitle.range(of: " - Antigravity") {
+                    let prefix = String(windowTitle[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    return prefix.isEmpty || prefix == "New Conversation" ? nil : prefix
+                }
+                return nil
+            }()
+            let currentIndex = activeWindowPrefix.flatMap { active in deduped.firstIndex(where: { $0.title == active }) }
+                ?? lastAntigravityConversationTitle.flatMap { last in deduped.firstIndex(where: { $0.title == last }) }
+            let targetIndex: Int
+            if let currentIndex {
+                targetIndex = next ? min(deduped.count - 1, currentIndex + 1) : max(0, currentIndex - 1)
+            } else {
+                targetIndex = 0
+            }
+            let target = deduped[targetIndex]
+            if AXUIElementPerformAction(target.element, kAXPressAction as CFString) == .success {
+                lastAntigravityConversationTitle = target.title
+                return (true, "已切换到侧栏\(next ? "下一" : "上一")会话（\(target.title)）；未发送消息")
+            }
+        }
+        if next {
+            guard shortcutPoster(0x7D, .maskAlternate) else { return (false, "下一会话快捷键事件合成失败") }
+            return (true, "已切换到侧栏下一会话（Alt+Down）；未发送消息")
+        } else {
+            guard shortcutPoster(0x7E, .maskAlternate) else { return (false, "上一会话快捷键事件合成失败") }
+            return (true, "已切换到侧栏上一会话（Alt+Up）；未发送消息")
+        }
+    }
+
+    static func stepAntigravitySidebarFilteredRow(filter: AntigravitySessionFilter, next: Bool) -> (Bool, String) {
+        guard AXIsProcessTrusted(),
+              let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.google.antigravity").first else {
+            return (false, "Antigravity 未运行或缺少辅助功能权限")
+        }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(root, 0.3)
+        guard let window = (attribute(root, kAXFocusedWindowAttribute) as! AXUIElement?)
+            ?? (attribute(root, kAXWindowsAttribute) as? [AXUIElement])?.first else {
+            return (false, "未找到 Antigravity 窗口")
+        }
+        struct RowCandidate {
+            let link: AXUIElement
+            let title: String
+            let y: CGFloat
+            let isWorking: Bool
+            let isUnreadCompleted: Bool
+        }
+        var pending = [window]
+        var rows: [RowCandidate] = []
+        var visited = 0
+        let deadline = Date().addingTimeInterval(0.9)
+        while let element = pending.popLast(), visited < 1800, Date() < deadline {
+            visited += 1
+            let role = attribute(element, kAXRoleAttribute) as? String ?? ""
+            let domClasses = attribute(element, "AXDOMClassList") as? [String] ?? []
+            if role == kAXGroupRole && domClasses.contains("agy-sidebar-row") {
+                var rowLink: AXUIElement?
+                var rowTitle = ""
+                var hasStopButton = false
+                var hasArchiveButton = false
+                var hasTimeText = false
+                var subQueue = (attribute(element, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+                while let sub = subQueue.popLast() {
+                    let sRole = attribute(sub, kAXRoleAttribute) as? String ?? ""
+                    let sTitle = attribute(sub, kAXTitleAttribute) as? String ?? ""
+                    let sDesc = attribute(sub, kAXDescriptionAttribute) as? String ?? ""
+                    let sVal = attribute(sub, kAXValueAttribute) as? String ?? ""
+                    if sRole == "AXLink" {
+                        rowLink = sub
+                        rowTitle = (sDesc.isEmpty ? sTitle : sDesc).trimmingCharacters(in: .whitespacesAndNewlines)
+                    } else if sRole == kAXButtonRole {
+                        if sDesc == "Stop execution" || sTitle == "Stop execution" {
+                            hasStopButton = true
+                        } else if sDesc == "Archive conversation" || sTitle == "Archive conversation" {
+                            hasArchiveButton = true
+                        }
+                    } else if sRole == kAXStaticTextRole {
+                        let txt = (sVal.isEmpty ? (sTitle.isEmpty ? sDesc : sTitle) : sVal).trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !txt.isEmpty && txt != rowTitle {
+                            hasTimeText = true
+                        }
+                    }
+                    if let sChildren = attribute(sub, kAXChildrenAttribute) as? [AXUIElement] {
+                        subQueue.append(contentsOf: sChildren)
+                    }
+                }
+                if let link = rowLink, !rowTitle.isEmpty, rowTitle != "See all" {
+                    let y = elementPosition(link)?.y ?? CGFloat(visited)
+                    let isUnread = !hasStopButton && hasArchiveButton && !hasTimeText
+                    rows.append(RowCandidate(link: link, title: rowTitle, y: y, isWorking: hasStopButton, isUnreadCompleted: isUnread))
+                }
+                continue
+            }
+            if let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] {
+                pending.append(contentsOf: children)
+            }
+        }
+        let filtered = rows.filter { item in
+            switch filter {
+            case .working: return item.isWorking
+            case .completed: return item.isUnreadCompleted
+            case .attention: return item.isWorking || item.isUnreadCompleted
+            }
+        }.sorted { $0.y < $1.y }
+        guard !filtered.isEmpty else {
+            return (false, "侧栏未找到\(filter.label)")
+        }
+        let currentIndex = lastAntigravityConversationTitle.flatMap { last in filtered.firstIndex(where: { $0.title == last }) }
+        let targetIndex: Int
+        if let currentIndex {
+            targetIndex = next ? ((currentIndex + 1) % filtered.count) : ((currentIndex - 1 + filtered.count) % filtered.count)
+        } else {
+            targetIndex = next ? 0 : (filtered.count - 1)
+        }
+        let target = filtered[targetIndex]
+        if AXUIElementPerformAction(target.link, kAXPressAction as CFString) == .success {
+            lastAntigravityConversationTitle = target.title
+            return (true, "已切换到\(filter.label)（\(target.title)）")
+        }
+        return (false, "无法点击侧栏会话（\(target.title)）")
+    }
+
     static func perform(adapter: String, command: String, revealTools: Bool = true) async -> (Bool, String) {
-        let antigravityOnly = ["live-voice", "prev-conversation", "next-conversation", "project", "split-right"]
+        if adapter == "antigravity", let (filter, next) = AntigravitySessionFilter.from(command: command) {
+            return stepAntigravitySidebarFilteredRow(filter: filter, next: next)
+        }
+        let antigravityOnly = ["live-voice", "prev-conversation", "next-conversation", "prev-project", "next-project", "project", "split-right", "submit"]
         guard let bundle = bundles[adapter],
-              ["focus-input", "search", "new-chat", "model", "effort", "dictation", "browser", "terminal", "reveal-tools", "voice-reply", "toggle-voice-reply", "live-voice", "prev-conversation", "next-conversation", "project", "split-right"].contains(command),
+              ["focus-input", "search", "new-chat", "model", "effort", "dictation", "browser", "terminal", "reveal-tools", "voice-reply", "toggle-voice-reply", "live-voice", "prev-conversation", "next-conversation", "prev-project", "next-project", "project", "split-right", "submit"].contains(command),
               !(adapter == "qwenwork" && command == "search"),
               (!antigravityOnly.contains(command) || adapter == "antigravity"),
               command != "new-chat" || ["antigravity", "dsh-desktop"].contains(adapter) else { return (false, "未接入的应用操作") }
@@ -95,11 +503,13 @@ struct DesktopAgent: Identifiable {
         if adapter == "antigravity" {
             switch command {
             case "prev-conversation":
-                guard shortcutPoster(0x7E, .maskAlternate) else { return (false, "上一会话快捷键事件合成失败") }
-                return (true, "已切换到侧栏上一会话（Alt+Up）；未发送消息")
+                return performAntigravityConversationStep(window: window, app: app, next: false)
             case "next-conversation":
-                guard shortcutPoster(0x7D, .maskAlternate) else { return (false, "下一会话快捷键事件合成失败") }
-                return (true, "已切换到侧栏下一会话（Alt+Down）；未发送消息")
+                return performAntigravityConversationStep(window: window, app: app, next: true)
+            case "prev-project":
+                return performAntigravityProjectStep(window: window, app: app, next: false)
+            case "next-project":
+                return performAntigravityProjectStep(window: window, app: app, next: true)
             case "split-right":
                 guard shortcutPoster(0x02, .maskCommand) else { return (false, "向右分栏快捷键事件合成失败") }
                 return (true, "已触发向右分栏（Cmd+D）；未发送消息")
@@ -107,7 +517,7 @@ struct DesktopAgent: Identifiable {
                 break
             }
         }
-        var pending = [window], matches: [AXUIElement] = []
+        var pending = [window], matches: [AXUIElement] = [], fallbackNewChatLinks: [AXUIElement] = []
         var visited = 0
         var terminalAlreadyOpen = false
         let deadline = Date().addingTimeInterval(1.5)
@@ -128,6 +538,9 @@ struct DesktopAgent: Identifiable {
                 || (adapter == "dsh-desktop" && role == kAXTextFieldRole && labels.contains("搜索会话名称")))
             let desktopNew = command == "new-chat" && role == kAXButtonRole &&
                 ((adapter == "antigravity" && labels.contains("New Conversation")) || (adapter == "dsh-desktop" && labels.contains("新建会话")))
+            if enabled && command == "new-chat" && adapter == "antigravity" && role == "AXLink" && labels.contains("New Conversation") {
+                fallbackNewChatLinks.append(element)
+            }
             let extra = extraControl(adapter: adapter, command: command, role: role, labels: labels)
             if enabled && (desktopSearch || desktopNew || extra) { matches.append(element) }
             else if enabled && ((command == "focus-input" && (role == kAXTextAreaRole || (adapter == "codex" && role == kAXTextFieldRole && (title == "Work with Codex" || description == "Work with Codex"))))
@@ -139,6 +552,21 @@ struct DesktopAgent: Identifiable {
         }
         guard pending.isEmpty, Date() < deadline else { return (false, "界面检查超时，未操作") }
         if terminalAlreadyOpen { return (true, "终端面板已打开") }
+        if matches.isEmpty, command == "new-chat", adapter == "antigravity", fallbackNewChatLinks.count == 1 {
+            matches = fallbackNewChatLinks
+        }
+        if adapter == "antigravity", command == "project", matches.count > 1 {
+            let selectorMatches = matches.filter { candidate in
+                let candidateLabels = [kAXTitleAttribute, kAXDescriptionAttribute, kAXPlaceholderValueAttribute, kAXHelpAttribute]
+                    .compactMap { attribute(candidate, $0) as? String }
+                return candidateLabels.contains {
+                    $0.hasPrefix("Select project") || ["Select project", "Switch project", "Toggle Project Selector"].contains($0)
+                }
+            }
+            if selectorMatches.count == 1 {
+                matches = selectorMatches
+            }
+        }
         if matches.isEmpty, revealTools, ["browser", "terminal"].contains(command) {
             let revealed = await perform(adapter: adapter, command: "reveal-tools", revealTools: false)
             if revealed.0 {
@@ -171,11 +599,22 @@ struct DesktopAgent: Identifiable {
             }) { return (true, "已确认输入框焦点；未输入或发送文本") }
             return (false, "输入框未确认获得焦点")
         }
-        guard error == .success else { return (false, "目标应用拒绝辅助功能操作") }
+        if error != .success {
+            if adapter == "antigravity", command == "dictation", shortcutPoster(0x2E, .maskControl) {
+                // Fall through to confirm dictation state after Ctrl+M fallback
+            } else {
+                return (false, "目标应用拒绝辅助功能操作")
+            }
+        }
         if command == "dictation" {
             let recordingDeadline = Date().addingTimeInterval(3)
-            for _ in 0..<25 where Date() < recordingDeadline {
+            var sentCtrlMFallback = (error != .success)
+            for step in 0..<25 where Date() < recordingDeadline {
                 try? await Task.sleep(nanoseconds: 100_000_000)
+                let directLabels = [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute].compactMap { attribute(target, $0) as? String }
+                if dictationState(labels: directLabels, recording: !wasStoppingDictation) {
+                    return (true, wasStoppingDictation ? "已确认听写停止；未发送消息" : "已确认听写启动；再次按键停止")
+                }
                 var queue = [window], count = 0
                 while let e = queue.popLast(), count < 1800, Date() < recordingDeadline {
                     count += 1
@@ -183,6 +622,10 @@ struct DesktopAgent: Identifiable {
                     if labels.contains(where: { ["Conversation turns", "Agent response", "User message"].contains($0) }) { continue }
                     if dictationState(labels: labels, recording: !wasStoppingDictation) { return (true, wasStoppingDictation ? "已确认听写停止；未发送消息" : "已确认听写启动；再次按键停止") }
                     if let children = attribute(e, kAXChildrenAttribute) as? [AXUIElement] { queue.append(contentsOf: children) }
+                }
+                if adapter == "antigravity", step == 3, !sentCtrlMFallback {
+                    sentCtrlMFallback = true
+                    _ = shortcutPoster(0x2E, .maskControl)
                 }
             }
             return (false, "已触发听写入口，但应用未确认录音状态；请检查应用语音设置")
@@ -243,6 +686,14 @@ struct DesktopAgent: Identifiable {
         case "terminal":
             guard shortcutPoster(0x26, .maskCommand) else { return (false, "终端面板快捷键（Cmd+J）合成失败") }
             return (true, "已通过快捷键（Cmd+J）切换终端面板；未发送消息")
+        case "dictation":
+            guard shortcutPoster(0x2E, .maskControl) else { return (false, "语音输入快捷键（Ctrl+M）合成失败") }
+            return (true, "已通过快捷键（Ctrl+M）切换语音输入；再次按键停止")
+        case "submit":
+            let focused = await perform(adapter: "antigravity", command: "focus-input", revealTools: false)
+            guard focused.0 else { return (false, "提交前未能聚焦输入框（\(focused.1)）") }
+            guard shortcutPoster(0x24, []) else { return (false, "回车发送快捷键（Return）合成失败") }
+            return (true, "已通过回车（Return）发送消息")
         default:
             return nil
         }
@@ -266,7 +717,10 @@ struct DesktopAgent: Identifiable {
             }
         }
         if command == "project" && adapter == "antigravity" {
-            return prefix("Select project") || exact(["Select project", "Switch project", "Projects", "Toggle Project Selector"])
+            return prefix("Select project") || exact(["Select project", "Switch project", "Toggle Project Selector", "Create New Project"])
+        }
+        if command == "submit" && adapter == "antigravity" {
+            return exact(["Send", "Send message", "Submit", "发送"])
         }
         if command == "dictation" {
             switch adapter {
@@ -457,7 +911,7 @@ struct DesktopAgent: Identifiable {
         guard let window = scrollWindowFinder(pid) else {
             return (false, "目标应用没有可滚动的可见窗口，未滚动且不改变当前窗口焦点")
         }
-        let targetPoint = window.scrollPoint(fromTop: request.fromTop)
+        let targetPoint = window.scrollPoint(fromTop: request.fromTop, region: request.region)
         let savedLocation = scrollMouseLocation()
         scrollMouseWarper(targetPoint)
         defer {
@@ -470,6 +924,19 @@ struct DesktopAgent: Identifiable {
             let delta = DialScrollRequest.wheelDelta(lines: lines)
             guard scrollWheelPoster(delta, window.windowNumber) else {
                 return (false, "滚动事件合成失败")
+            }
+            if request.region == .sidebar,
+               adapter == "antigravity",
+               ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] == nil,
+               let app = NSRunningApplication(processIdentifier: pid) {
+                let root = AXUIElementCreateApplication(pid)
+                AXUIElementSetMessagingTimeout(root, 0.25)
+                if let val = attribute(root, kAXFocusedWindowAttribute), CFGetTypeID(val) == AXUIElementGetTypeID() {
+                    let axWin = unsafeBitCast(val, to: AXUIElement.self)
+                    _ = performAntigravityProjectStep(window: axWin, app: app, next: lines > 0)
+                } else if let wins = attribute(root, kAXWindowsAttribute) as? [AXUIElement], let axWin = wins.first {
+                    _ = performAntigravityProjectStep(window: axWin, app: app, next: lines > 0)
+                }
             }
             return (true, "\(adapter)/\(request.canonicalCommand) (lines=\(lines) window=\(window.windowNumber))")
         case .bottom:
@@ -543,12 +1010,19 @@ struct DialScrollRequest: Equatable, Sendable {
         case bottom
     }
 
+    enum Region: Equatable, Sendable {
+        case conversation
+        case sidebar
+    }
+
     let mode: Mode
     let fromTop: Double
+    let region: Region
 
-    init(mode: Mode, fromTop: Double = Self.defaultFromTop) {
+    init(mode: Mode, fromTop: Double = Self.defaultFromTop, region: Region = .conversation) {
         self.mode = mode
         self.fromTop = max(0.15, min(0.85, fromTop))
+        self.region = region
     }
 
     static func wheelDelta(lines: Int) -> Int32 {
@@ -566,6 +1040,10 @@ struct DialScrollRequest: Equatable, Sendable {
             return DialScrollRequest(mode: .lines(-fastLines))
         case "scroll-down-fast":
             return DialScrollRequest(mode: .lines(fastLines))
+        case "sidebar-scroll-up":
+            return DialScrollRequest(mode: .lines(dialHeld ? -fastLines : -standardLines), fromTop: 0.5, region: .sidebar)
+        case "sidebar-scroll-down":
+            return DialScrollRequest(mode: .lines(dialHeld ? fastLines : standardLines), fromTop: 0.5, region: .sidebar)
         case "scroll-to-bottom", "jump-to-bottom":
             return DialScrollRequest(mode: .bottom)
         default:
@@ -585,6 +1063,9 @@ struct DialScrollRequest: Equatable, Sendable {
             return "scroll-to-bottom"
         case .lines(let rawLines):
             let lines = max(-Self.maximumLines, min(Self.maximumLines, rawLines))
+            if region == .sidebar {
+                return lines < 0 ? "sidebar-scroll-up" : "sidebar-scroll-down"
+            }
             switch lines {
             case -Self.standardLines: return "scroll-up"
             case Self.standardLines: return "scroll-down"
@@ -596,13 +1077,14 @@ struct DialScrollRequest: Equatable, Sendable {
     }
 
     func coalesced(with incoming: DialScrollRequest) -> DialScrollRequest? {
-        guard case .lines(let current) = mode,
+        guard region == incoming.region,
+              case .lines(let current) = mode,
               case .lines(let delta) = incoming.mode else {
             return nil
         }
         let sum = current + delta
         let resolved = sum == 0 ? (delta >= 0 ? Self.standardLines : -Self.standardLines) : max(-Self.maximumLines, min(Self.maximumLines, sum))
-        return DialScrollRequest(mode: .lines(resolved), fromTop: incoming.fromTop)
+        return DialScrollRequest(mode: .lines(resolved), fromTop: incoming.fromTop, region: region)
     }
 }
 
@@ -610,9 +1092,15 @@ struct DialScrollWindow: Equatable, Sendable {
     let windowNumber: Int
     let bounds: CGRect
 
-    func scrollPoint(fromTop: Double = DialScrollRequest.defaultFromTop) -> CGPoint {
+    func scrollPoint(fromTop: Double = DialScrollRequest.defaultFromTop, region: DialScrollRequest.Region = .conversation) -> CGPoint {
         let ratio = max(0.15, min(0.85, fromTop))
-        return CGPoint(x: bounds.midX, y: bounds.minY + bounds.height * ratio)
+        switch region {
+        case .conversation:
+            return CGPoint(x: bounds.midX, y: bounds.minY + bounds.height * ratio)
+        case .sidebar:
+            let sidebarX = bounds.minX + min(140, max(80, bounds.width * 0.12))
+            return CGPoint(x: sidebarX, y: bounds.minY + bounds.height * ratio)
+        }
     }
 
     static func frontmost(in windowList: [[String: Any]], processID: pid_t) -> DialScrollWindow? {

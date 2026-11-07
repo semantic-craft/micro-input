@@ -321,6 +321,7 @@ extension MicroInput: Backend {}
         return Self.defaultDocumentDirectoryURL().appendingPathComponent("workbench.json")
     }
     var autoHostReady = ProcessInfo.processInfo.environment["MI_AUTO_HOST_READY"] == "1"
+    var userManuallyDisconnected = false
     private var autoSetupInFlight = false
     func loadWorkbench() async {
         do {
@@ -407,6 +408,8 @@ extension MicroInput: Backend {}
         guard let id = profileId ?? hostProfiles.first(where: { $0.name == "Antigravity" })?.id.text else { return }
         await routingChange(["kind":"select", "profile_id":id])
         if syncWorkbench { syncWorkbenchToActiveProfile() }
+        fourAppSlots.syncRecent(from: self)
+        _ = await fourAppLighting.updateFeedback(in: self)
     }
     func setHostExecutionEnabled(_ enabled: Bool) async {
         await routingChange(["kind":"execution", "enabled":enabled])
@@ -443,7 +446,14 @@ extension MicroInput: Backend {}
            let lid = ag.layers.first?.id {
             let slot6Key = "[\"\(ag.id.text)\",\"\(lid.text)\",\"logical-6\"]"
             let slot10Key = "[\"\(ag.id.text)\",\"\(lid.text)\",\"logical-10\"]"
+            let slot11Key = "[\"\(ag.id.text)\",\"\(lid.text)\",\"logical-11\"]"
             if draft.edits[slot6Key]?.id == "desktop-dictation" && draft.edits[slot10Key] == nil {
+                return false
+            }
+            if draft.edits[slot10Key]?.id != "desktop-input"
+                || draft.edits[slot10Key]?.payload["command"]?.text != "focus-input"
+                || draft.edits[slot11Key]?.id != "desktop-dictation"
+                || draft.edits[slot11Key]?.payload["command"]?.text != "push-to-talk" {
                 return false
             }
         }
@@ -455,6 +465,22 @@ extension MicroInput: Backend {}
             }
         }
         return true
+    }
+    var isBottomRowSplit: Bool {
+        (routing?.bottom_row_layout ?? "split") != "merged"
+    }
+    func setBottomRowSplit(_ split: Bool) async {
+        if pushToTalk.isActive || fourAppVoice.dictationState.isRecording {
+            pushToTalk.cancel()
+            await pushToTalk.waitUntilStopped()
+            if fourAppVoice.dictationState.isRecording {
+                _ = await fourAppVoice.stopBeforeSubmit(app: activeDesktopAgentAdapter() ?? "antigravity", store: self)
+            }
+        }
+        await routingChange(["kind": "bottom_row_layout", "layout": split ? "split" : "merged"])
+        if !split && slot == 11 {
+            slot = 10
+        }
     }
     func prepareDesktopProfiles() async {
         guard canEditDraft, !busy else { return }
@@ -503,8 +529,9 @@ extension MicroInput: Backend {}
             guard let items = try? fm.contentsOfDirectory(atPath: agDaemonDir.path) else { return false }
             return items.contains { $0.hasPrefix("hub_") && $0.hasSuffix(".json") }
         }()
-        if !antigravityStatus.enabled, fm.fileExists(atPath: agGrant.path) || hasAgHub {
-            if !fm.fileExists(atPath: agGrant.path), hasAgHub {
+        if (!antigravityStatus.enabled || antigravityStatus.state != .ready),
+           fm.fileExists(atPath: agGrant.path) || hasAgHub {
+            if hasAgHub {
                 antigravityStatus.ensureLiveBridgeProcessIfAvailable()
             }
             antigravityStatus.setEnabled(true)
@@ -520,6 +547,13 @@ extension MicroInput: Backend {}
         }
         fourAppSlots.syncRecent(from: self)
         _ = await fourAppLighting.updateFeedback(in: self)
+    }
+    func syncFourAppSupervisionState() {
+        fourAppSlots.syncRecent(from: self)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            _ = await self.fourAppLighting.updateFeedback(in: self)
+        }
     }
     var canTryDesktopAction: Bool {
         guard !isProtectedLayerSelected, nativeOwnership.allowsExecution, !hostOperationPaused, DesktopAgent.named(profile?.name ?? "") != nil, !browsingDeviceSnapshot,
@@ -552,6 +586,7 @@ extension MicroInput: Backend {}
     }
     func autoSetupHostExecutionIfNeeded() async {
         guard !autoSetupInFlight, !systemSleeping, !stopped else { return }
+        userManuallyDisconnected = false
         autoSetupInFlight = true
         defer { autoSetupInFlight = false }
         if browsingDeviceSnapshot { showLocalDraft() }
@@ -582,6 +617,8 @@ extension MicroInput: Backend {}
                     showLocalDraft()
                 }
             }
+            fourAppSlots.syncRecent(from: self)
+            _ = await fourAppLighting.updateFeedback(in: self)
         }
         if passThroughHealth == .ready, hostExecutionEnabled {
             let activeName = hostProfiles.first(where: { $0.id.text == hostActiveProfileId })?.name ?? "默认"
@@ -895,13 +932,19 @@ extension MicroInput: Backend {}
                 for (binding, pressed) in [("AG10", true), ("AG11", true), ("AG10", false), ("AG11", false), ("AG15", true), ("AG15", false)] {
                     try? await core.emitSyntheticBindingEvent(bindingId: binding, pressed: pressed)
                 }
-                try? await Task.sleep(nanoseconds: 80_000_000)
+                for _ in 0..<100 where lastHostActionReceipt?.bindingId != "AG15" || hostExecutionTask != nil || !pendingHostActions.isEmpty {
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
             }
         }
         navigateBack()
-        try? await Task.sleep(nanoseconds: 80_000_000)
+        for _ in 0..<100 where lastHostActionReceipt?.bindingId != "menu-navigate-back" || hostExecutionTask != nil || !pendingHostActions.isEmpty {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         navigateForward()
-        try? await Task.sleep(nanoseconds: 80_000_000)
+        for _ in 0..<100 where lastHostActionReceipt?.bindingId != "menu-navigate-forward" || hostExecutionTask != nil || !pendingHostActions.isEmpty {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         guard let agIndex = snapshot?.profiles.firstIndex(where: { $0.name == "Antigravity" }),
               let agId = snapshot?.profiles[agIndex].id.text else { return }
         if profileIndex != agIndex { selectProfile(agIndex) }
@@ -1172,6 +1215,9 @@ extension MicroInput: Backend {}
             }
         }
         self.radialMenu.setEnabled(radialPreferences.bool(forKey: "radialMenuEnabled"))
+        self.antigravityStatus.onSnapshotUpdated = { [weak self] in
+            self?.syncFourAppSupervisionState()
+        }
         configureNativeOwnership()
     }
     var profile: Profile? { guard let ps = snapshot?.profiles, ps.indices.contains(profileIndex) else { return nil }; return ps[profileIndex] }
@@ -1205,6 +1251,15 @@ extension MicroInput: Backend {}
             discoveryStatus = values.isEmpty ? "无 USB 候选设备" : "发现 \(values.count) 个 USB 候选 · 请选择设备"
         }
         if let id = pendingID ?? connectedID, !values.contains(where: { $0.id == id }) { retireConnection("设备已断开") }
+        if autoHostReady, hostExecutionEnabled, !userManuallyDisconnected, connectedID == nil, pendingID == nil, !autoSetupInFlight, !editingDevice {
+            let usbCandidates = values.filter { $0.transport == "Usb" }
+            let verifiedUSB = usbCandidates.filter(\.verifiedModel)
+            if usbCandidates.count == 1, verifiedUSB.count == 1 {
+                Task { @MainActor [weak self] in
+                    await self?.autoSetupHostExecutionIfNeeded()
+                }
+            }
+        }
     }
     func loadDemo() async {
         guard !busy else { return }; busy = true; defer { busy = false }
@@ -1215,6 +1270,7 @@ extension MicroInput: Backend {}
     }
     func connect(_ id: String) async {
         guard !busy, !systemSleeping, !stopped else { return }
+        userManuallyDisconnected = false
         generation += 1; let token = generation
         busy = true; defer { if token == generation { busy = false } }
         connectionWatcher?.cancel()
@@ -1234,6 +1290,16 @@ extension MicroInput: Backend {}
                 let reason = await backend.waitForDisconnect()
                 guard !Task.isCancelled, !reason.isEmpty, let self, token == self.generation else { return }
                 self.retireConnection(reason)
+                if self.autoHostReady, self.hostExecutionEnabled, !self.userManuallyDisconnected {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    guard !Task.isCancelled, !self.systemSleeping, !self.stopped,
+                          self.connectedID == nil, self.pendingID == nil,
+                          self.hostExecutionEnabled, !self.userManuallyDisconnected else { return }
+                    await self.refresh()
+                    if self.connectedID == nil, self.pendingID == nil {
+                        await self.autoSetupHostExecutionIfNeeded()
+                    }
+                }
             }
         } catch {
             guard token == generation else { return }
@@ -1301,7 +1367,7 @@ extension MicroInput: Backend {}
         passThroughHealth = .disconnected
         stale = snapshot != nil; status = reason
     }
-    func suspend() async { retireConnection("会话已断开"); await pushToTalk.waitUntilStopped(); await backend.disconnect() }
+    func suspend() async { userManuallyDisconnected = true; retireConnection("会话已断开"); await pushToTalk.waitUntilStopped(); await backend.disconnect() }
     // Retire synchronously in the notification callback, before asynchronous close/join.
     func systemWillSleep() {
         guard !stopped else { return }
@@ -1340,6 +1406,9 @@ extension MicroInput: Backend {}
         antigravityStatus.resume()
         discoveryStatus = events == nil ? "USB 发现尚未开始" : "系统已唤醒 · 请明确选择设备并重新连接"
         if events != nil { await refresh() }
+        if autoHostReady, hostExecutionEnabled, !userManuallyDisconnected, connectedID == nil, pendingID == nil {
+            await autoSetupHostExecutionIfNeeded()
+        }
     }
     func shutdown() async {
         nativeOwnership.stop()

@@ -16,6 +16,7 @@ final class AntigravityStatusController: ObservableObject {
     @Published private(set) var lastCommandResult: AntigravityCommandResult?
     @Published private(set) var lastCommandReply: AntigravityCommandReply?
     @Published private(set) var pendingUnknownCommand: AntigravityQueuedCommand?
+    var onSnapshotUpdated: (() -> Void)?
 
     func setVoiceReply(enabled: Bool) async -> (Bool, String) {
         return (false, "Antigravity 2.29.0 language_server does not expose speech generation or voice reply mode")
@@ -47,23 +48,77 @@ final class AntigravityStatusController: ObservableObject {
         self.pollNanoseconds = pollNanoseconds
     }
 
+    private static func isUnixSocketAcceptingConnections(at path: String) -> Bool {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let utf8 = Array(path.utf8CString)
+        let maxLen = MemoryLayout.size(ofValue: addr.sun_path)
+        guard utf8.count <= maxLen else { return false }
+        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+            ptr.withMemoryRebound(to: CChar.self, capacity: utf8.count) { dst in
+                for (i, ch) in utf8.enumerated() {
+                    dst[i] = ch
+                }
+            }
+        }
+        let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let rc = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.connect(fd, sa, len)
+            }
+        }
+        return rc == 0
+    }
+
     func ensureLiveBridgeProcessIfAvailable() {
-        guard liveBridgeProcess?.isRunning != true else { return }
         let fm = FileManager.default
-        let candidateScripts = [
-            URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent("integrations/antigravity/live-bridge.py").path,
+        let supportDir = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/MicroInput", isDirectory: true)
+        let grantFile = supportDir.appendingPathComponent("antigravity-grant.json")
+        let socketFile = supportDir.appendingPathComponent("antigravity.sock")
+        if fm.fileExists(atPath: grantFile.path),
+           fm.fileExists(atPath: socketFile.path),
+           Self.isUnixSocketAcceptingConnections(at: socketFile.path) {
+            return
+        }
+        var candidateScripts: [String] = []
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("live-bridge.py").path {
+            candidateScripts.append(bundled)
+        }
+        candidateScripts.append(
+            URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent("integrations/antigravity/live-bridge.py").path
+        )
+        candidateScripts.append(
             fm.homeDirectoryForCurrentUser.appendingPathComponent("Projects/micro-input/integrations/antigravity/live-bridge.py").path
-        ]
+        )
         guard let scriptPath = candidateScripts.first(where: { fm.isExecutableFile(atPath: $0) || fm.fileExists(atPath: $0) }) else {
             return
         }
+        try? fm.createDirectory(at: supportDir, withIntermediateDirectories: true)
+        try? fm.removeItem(at: grantFile)
+        try? fm.removeItem(at: socketFile)
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        proc.arguments = [scriptPath]
+        proc.arguments = [
+            scriptPath,
+            "serve",
+            "--directory", supportDir.path,
+            "--allow-all-local-workspaces",
+            "--ttl", "86400"
+        ]
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
         if (try? proc.run()) != nil {
             liveBridgeProcess = proc
+            for _ in 0..<60 {
+                if fm.fileExists(atPath: grantFile.path) && fm.fileExists(atPath: socketFile.path) {
+                    break
+                }
+                usleep(50_000)
+            }
         }
     }
 
@@ -994,6 +1049,7 @@ final class AntigravityStatusController: ObservableObject {
         transcriptReads = value.transcriptReads
         tokenReads = value.tokenReads
         state = .ready
+        onSnapshotUpdated?()
     }
 
     private func fail(_ error: Error, epoch expected: UInt64) async {
