@@ -94,7 +94,7 @@ final class DocumentInstanceLock {
         _store = StateObject(wrappedValue: store)
         statusMenu = StatusMenu(store: store)
     }
-    @State private var appearance = "system"
+    @AppStorage("appAppearanceMode") private var appearance = "system"
     var body: some Scene {
         Window("Micro Input", id: "main") { WorkbenchHost(store: store, statusMenu: statusMenu).onAppear { lifetime.store = store }.preferredColorScheme(appearance == "system" ? nil : appearance == "dark" ? .dark : .light) }.defaultSize(width: 1180, height: 730)
         .windowResizability(.contentMinSize)
@@ -115,7 +115,10 @@ final class DocumentInstanceLock {
                 Text("⌘E 分配动作，⌘D 查看修改，⌘Z 撤销")
             }
         }
-
+        Settings {
+            MicroInputSettingsView(store: store, appearance: $appearance)
+                .preferredColorScheme(appearance == "system" ? nil : appearance == "dark" ? .dark : .light)
+        }
     }
 }
 
@@ -166,7 +169,6 @@ struct WorkbenchHost: View {
     var open: (() -> Void)?
     private let popover = NSPopover()
     private var previousApp: NSRunningApplication?
-    private var linksWindow: NSWindow?
     init(store: Store) {
         self.store = store
         super.init()
@@ -192,16 +194,6 @@ struct WorkbenchHost: View {
         if NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier,
            let previousApp, !previousApp.isTerminated { previousApp.activate(options: []) }
         store.overlay.toggleSheet()
-    }
-    func editAppLinks() {
-        popover.performClose(nil)
-        if linksWindow == nil {
-            let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            window.title = "应用与 Profile"; window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: AppProfileLinksView(store: store, close: { [weak window] in window?.close() })); window.center()
-            linksWindow = window
-        }
-        NSApp.activate(ignoringOtherApps: true); linksWindow?.makeKeyAndOrderFront(nil)
     }
     @objc func showWindow() { popover.performClose(nil); store.syncWorkbenchToActiveProfile(); open?() }
     @objc func quitApp() { NSApp.terminate(nil) }
@@ -343,32 +335,27 @@ struct StatusPanel: View {
             Toggle("摇杆八向轮盘菜单", isOn: Binding(get: { store.radialMenu.enabled }, set: store.setRadialMenuEnabled))
                 .toggleStyle(.switch).controlSize(.small).font(UITheme.Typography.body)
             if store.radialMenu.enabled { Text(store.radialReadiness.label).font(UITheme.Typography.caption).foregroundStyle(UITheme.textSecondary) }
-            DisclosureGroup("应用会话直连") {
-                VStack(alignment: .leading, spacing: 8) {
-                    ZCodeSessionPanel(controller: store.zcodeSessions, open: { store.openZCodeSession($0) })
-                    DSHSessionPanel(
-                        controller: store.dshSessions,
-                        open: { store.openDSHSession($0) },
-                        create: { wsId in
-                            if let cmd = store.dshSessions.createIntent(workspaceId: wsId) { store.createDSHSession(cmd) }
-                        },
-                        cancel: { sessionId in
-                            if let cmd = store.dshSessions.cancelIntent(for: sessionId) { store.cancelDSHSession(cmd) }
-                        }
-                    )
-                    CindySessionPanel(controller: store.cindySessions, open: { store.openCindySession($0) })
-                    AntigravityStatusPanel(controller: store.antigravityStatus, open: { store.openAntigravitySession($0) })
-                }.padding(.top, 6)
-            }.font(UITheme.Typography.captionMedium)
             Divider()
-            Toggle("切换到软件时自动启用", isOn: Binding(get: { store.routing?.auto_follow_enabled ?? false }, set: { value in Task { await store.setAutoFollow(value); if value, store.routing?.manual_override == true { await store.resumeFollowing() } } })).toggleStyle(.switch).controlSize(.small).font(UITheme.Typography.body)
+            Toggle(
+                AutoSwitchState.toggleTitle,
+                isOn: Binding(
+                    get: { store.autoSwitchState.isEnabled },
+                    set: { value in Task { await store.setAutoFollow(value) } }
+                )
+            )
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .font(UITheme.Typography.body)
             HStack {
                 Text(store.routingMode).font(UITheme.Typography.caption).foregroundStyle(UITheme.textSecondary)
                 Spacer()
-                if store.routing?.manual_override == true { Button("恢复自动跟随") { Task { await store.resumeFollowing() } }.font(UITheme.Typography.captionMedium) }
+                if let buttonTitle = store.autoSwitchState.actionButtonTitle {
+                    Button(buttonTitle) {
+                        Task { await store.performAutoSwitchAction() }
+                    }.font(UITheme.Typography.captionMedium)
+                }
             }
             HStack {
-                Button("软件与方案关联…") { owner.editAppLinks() }
                 Spacer()
                 Button("按键速查") { owner.toggleCheatSheet() }
             }.font(UITheme.Typography.captionMedium)
@@ -428,183 +415,5 @@ struct StatusPanel: View {
                 .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.itemInner).strokeBorder(selected ? UITheme.accentBorder : UITheme.border))
         }.buttonStyle(.plain).disabled(store.busy || profile == nil)
             .accessibilityLabel("启用 \(title)\(selected ? "，当前方案" : "")")
-    }
-}
-
-struct ZCodeSessionPanel: View {
-    @ObservedObject var controller: ZCodeSessionController
-    let open: (ZCodeSelection) -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Toggle("ZCode 会话连接", isOn: Binding(get: { controller.enabled }, set: controller.setEnabled))
-                .toggleStyle(.switch).controlSize(.small)
-            Text(controller.state.label).font(.caption).foregroundStyle(.secondary)
-            if controller.enabled {
-                if case .unavailable = controller.state {
-                    Button("重连") { controller.setEnabled(true) }.font(.caption)
-                }
-                ForEach(controller.rows) { row in
-                    Button {
-                        if let selection = controller.selection(for: row.address) { open(selection) }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text(row.title.isEmpty ? "未命名会话" : row.title).lineLimit(1)
-                                if controller.selected == row.address { Image(systemName: "checkmark").accessibilityLabel("已选中") }
-                            }
-                            Text(row.address.workspacePath).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                                .truncationMode(.middle).help(row.address.workspacePath)
-                        }
-                    }.buttonStyle(.plain).disabled(controller.state != .ready)
-                }
-                if let result = controller.lastResult {
-                    Text(result.label).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-}
-
-struct DSHSessionPanel: View {
-    @ObservedObject var controller: DSHSessionController
-    let open: (DSHSelection) -> Void
-    var create: ((String) -> Void)? = nil
-    var cancel: ((String) -> Void)? = nil
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Toggle("DSH 会话连接", isOn: Binding(get: { controller.enabled }, set: controller.setEnabled))
-                .toggleStyle(.switch).controlSize(.small)
-            Text(controller.state.label).font(.caption).foregroundStyle(.secondary)
-            if controller.enabled {
-                if case .unavailable = controller.state {
-                    Button("重连") { controller.setEnabled(true) }.font(.caption)
-                }
-                if controller.state == .ready, let create,
-                   let selectedWorkspace = controller.rows.first(where: { $0.sessionId == controller.selected })?.workspaceId
-                       ?? controller.rows.first?.workspaceId {
-                    HStack(spacing: 8) {
-                        Button("新建会话") { create(selectedWorkspace) }.font(.caption)
-                        if let selectedId = controller.selected,
-                           let cancel,
-                           controller.rows.first(where: { $0.sessionId == selectedId })?.running == true {
-                            Button("停止当前轮次") { cancel(selectedId) }.font(.caption)
-                        }
-                    }
-                }
-                ForEach(controller.rows) { row in
-                    Button {
-                        if let selection = controller.selection(for: row.sessionId) { open(selection) }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text(row.title.isEmpty ? "未命名会话" : row.title).lineLimit(1)
-                                if controller.selected == row.sessionId { Image(systemName: "checkmark").accessibilityLabel("已选中") }
-                            }
-                            Text(row.workspaceId.isEmpty ? "未分组" : row.workspaceId).font(.caption2)
-                                .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                            HStack(spacing: 8) {
-                                Text(row.turnStatusLabel).font(.caption2).foregroundStyle(.secondary)
-                                    .accessibilityLabel("DSH当前轮次：\(row.turnStatusLabel)")
-                                Text(row.queueStatusLabel).font(.caption2).foregroundStyle(.secondary)
-                                    .accessibilityLabel("DSH队列：\(row.queueStatusLabel)")
-                            }
-                            if row.pendingInput > 0 {
-                                Text("待输入 \(row.pendingInput)").font(.caption2).foregroundStyle(.secondary)
-                            }
-                        }
-                    }.buttonStyle(.plain).disabled(controller.state != .ready)
-                }
-                if !controller.unavailableSessionIds.isEmpty {
-                    Text("另有 \(controller.unavailableSessionIds.count) 个授权会话当前不可用，状态未知")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                if let result = controller.lastResult {
-                    Text(result.label).font(.caption).foregroundStyle(.secondary)
-                }
-                if let commandResult = controller.lastCommandResult {
-                    Text(commandResult.label).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-}
-
-struct AntigravityStatusPanel: View {
-    @ObservedObject var controller: AntigravityStatusController
-    let open: (AntigravitySelection) -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Toggle("Antigravity 状态连接", isOn: Binding(get: { controller.enabled }, set: controller.setEnabled))
-                .toggleStyle(.switch).controlSize(.small)
-            Text(controller.state.label).font(.caption).foregroundStyle(.secondary)
-            if controller.enabled {
-                if case .unavailable = controller.state {
-                    Button("重连") { controller.setEnabled(true) }.font(.caption)
-                }
-                if let caps = controller.capabilities {
-                    Text("版本 \(caps.installedVersion) · CL \(caps.languageServerCl)")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-                ForEach(controller.rows) { row in
-                    Button {
-                        if let selection = controller.selection(for: row.key) { open(selection) }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text(row.title.isEmpty ? row.conversationId : row.title).lineLimit(1)
-                                if controller.selected == row.key {
-                                    Image(systemName: "checkmark").accessibilityLabel("已选中")
-                                }
-                            }
-                            Text(row.workspacePath).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                                .truncationMode(.middle).help(row.workspacePath)
-                            Text("\(row.conversationId) · \(row.statusLabel)").font(.caption2).foregroundStyle(.secondary)
-                        }
-                    }.buttonStyle(.plain).disabled(controller.state != .ready)
-                }
-                if let result = controller.lastResult {
-                    Text(result.label).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-}
-
-struct CindySessionPanel: View {
-    @ObservedObject var controller: CindySessionController
-    let open: (CindySelection) -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Toggle("Cindy 任务连接", isOn: Binding(get: { controller.enabled }, set: controller.setEnabled))
-                .toggleStyle(.switch).controlSize(.small)
-            Text(controller.state.label).font(.caption).foregroundStyle(.secondary)
-            if controller.enabled {
-                if case .unavailable = controller.state {
-                    Button("重连") { controller.setEnabled(true) }.font(.caption)
-                }
-                ForEach(controller.rows) { row in
-                    Button {
-                        if let selection = controller.selection(for: row.address) { open(selection) }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text(row.title.isEmpty ? "未命名任务" : row.title).lineLimit(1)
-                                if controller.selected == row.address {
-                                    Image(systemName: "checkmark").accessibilityLabel("已确认")
-                                } else if controller.delivered == row.address {
-                                    Image(systemName: "arrow.up.right").accessibilityLabel("已投递")
-                                }
-                            }
-                            Text(row.address.workspacePath).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                                .truncationMode(.middle).help(row.address.workspacePath)
-                            Text("\(row.address.sessionId) · \(row.phase)").font(.caption2).foregroundStyle(.secondary)
-                        }
-                    }.buttonStyle(.plain).disabled(controller.state != .ready)
-                }
-                if let result = controller.lastResult {
-                    Text(result.label).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-        }
     }
 }

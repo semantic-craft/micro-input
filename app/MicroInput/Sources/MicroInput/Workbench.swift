@@ -1,4 +1,5 @@
 // R-P03/R-E01/R-E02/R-K01: selected workbench; all edits flow through UniFFI.
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -9,6 +10,7 @@ struct Workbench: View {
     @State private var choosingMacro = false
     @State private var choosingMulti = false
     @State private var showingDiagnosticExport = false
+    @State private var showingSettings = false
     @State private var showDiagnostics = false
     @State private var showOtherProfiles = false
     @State private var naming = false
@@ -19,6 +21,8 @@ struct Workbench: View {
     @State private var inspectorSearch = ""
     @State private var inspectorCategory = "全部"
     @State private var inspectorFavoritesOnly = false
+    @AppStorage("appAppearanceMode") private var appearance = "system"
+    @ObservedObject private var visualPrefs = KeycapVisualPreferences.shared
 
     var changeCount: Int { store.draft.edits.count + store.draft.structure_changes.count }
 
@@ -40,9 +44,9 @@ struct Workbench: View {
         case 0: return "左上键（按键 01）"
         case 1: return "右上键（按键 02）"
         case 2..<10: return String(format: "按键 %02d", slot + 1)
-        case 10: return "底部宽键（2U）"
-        case 11: return "底部宽键副轴（开关 12）"
-        case 12: return "底行右键（按键 13）"
+        case 10: return store.isBottomRowSplit ? "底行左键（开关 11）" : "底部宽键（2U，开关 11+12）"
+        case 11: return store.isBottomRowSplit ? "底行中键（开关 12）" : "底部宽键右开关（与开关 11 同键）"
+        case 12: return "底行右键（开关 13）"
         case 13: return "旋钮左旋"
         case 14: return "旋钮右旋"
         case 15: return "旋钮按下"
@@ -61,8 +65,9 @@ struct Workbench: View {
         case 0: return "左上键"
         case 1: return "右上键"
         case 2..<10: return String(format: "按键 %02d", slot + 1)
-        case 10, 11: return "底部宽键（2U）"
-        case 12: return "底行右键"
+        case 10: return store.isBottomRowSplit ? "按键 11" : "底部宽键"
+        case 11: return store.isBottomRowSplit ? "按键 12" : "宽键右轴"
+        case 12: return "按键 13"
         case 13: return "旋钮左旋"
         case 14: return "旋钮右旋"
         case 15: return "旋钮按下"
@@ -89,6 +94,15 @@ struct Workbench: View {
         return raw.replacingOccurrences(of: " · ", with: "，")
     }
 
+    private var isHeaderStatusReady: Bool {
+        !store.editingDevice
+            && !store.browsingDeviceSnapshot
+            && store.connectedID != nil
+            && store.hostExecutionEnabled
+            && store.accessibilityTrusted
+            && store.nativeOwnership.allowsExecution
+    }
+
     private var headerStatusText: String {
         if store.editingDevice {
             return "键盘硬件配置编辑模式"
@@ -96,14 +110,20 @@ struct Workbench: View {
         if store.browsingDeviceSnapshot {
             return "正在查看键盘快照（只读）"
         }
+        if store.connectedID == nil {
+            return "键盘未连接"
+        }
         if !store.hostExecutionEnabled {
             return "按键控制已暂停"
         }
         if !store.accessibilityTrusted {
             return "需要开启辅助功能权限"
         }
-        if store.routing?.auto_follow_enabled == true {
-            return "Creator Micro 2 已就绪，自动跟随前台软件"
+        if !store.nativeOwnership.allowsExecution {
+            return store.nativeOwnership.summary.replacingOccurrences(of: " · ", with: "，")
+        }
+        if store.autoSwitchState.isEnabled {
+            return "Creator Micro 2 已就绪，\(store.routingMode)"
         }
         return "Creator Micro 2 已就绪"
     }
@@ -116,10 +136,14 @@ struct Workbench: View {
             HStack(spacing: 0) {
                 leftSidebar
                 Rectangle().fill(UITheme.border).frame(width: 1)
-                centerStage
-                if !store.isProtectedLayerSelected {
-                    Rectangle().fill(UITheme.border).frame(width: 1)
-                    rightInspector
+                if !store.editingDevice && !store.browsingDeviceSnapshot {
+                    agentFocusedStage
+                } else {
+                    centerStage
+                    if !store.isProtectedLayerSelected {
+                        Rectangle().fill(UITheme.border).frame(width: 1)
+                        rightInspector
+                    }
                 }
             }
 
@@ -157,6 +181,22 @@ struct Workbench: View {
             }
         }
         .sheet(isPresented: $choosing) { actionSheet }
+        .sheet(isPresented: $showingSettings) {
+            MicroInputSettingsView(
+                store: store,
+                appearance: $appearance,
+                showDiagnostics: $showDiagnostics,
+                onOpenDiagnosticExport: {
+                    showingSettings = false
+                    showingDiagnosticExport = true
+                },
+                onOpenDiffReview: {
+                    showingSettings = false
+                    reviewing = true
+                },
+                close: { showingSettings = false }
+            )
+        }
         .sheet(isPresented: $choosingMulti) { MultiLibraryView(store: store) }
         .sheet(isPresented: $choosingMacro) { MacroLibraryView(store: store) }
         .sheet(isPresented: $reviewing) { diffSheet }
@@ -195,33 +235,44 @@ struct Workbench: View {
         }
     }
 
-    // MARK: - Top Status Bar
     private var topStatusBar: some View {
-        HStack(spacing: 14) {
+        let ready = isHeaderStatusReady
+        return HStack(spacing: 14) {
             HStack(spacing: 8) {
                 Circle()
-                    .fill(store.hostExecutionEnabled && store.accessibilityTrusted ? UITheme.accent : UITheme.caution)
+                    .fill(ready ? UITheme.accent : UITheme.caution)
                     .frame(width: 7, height: 7)
                 Text(headerStatusText)
                     .font(UITheme.Typography.captionMedium)
-                    .foregroundStyle(store.hostExecutionEnabled && store.accessibilityTrusted ? UITheme.accent : UITheme.caution)
+                    .foregroundStyle(ready ? UITheme.accent : UITheme.caution)
+                    .lineLimit(1)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(
-                (store.hostExecutionEnabled && store.accessibilityTrusted ? UITheme.accentSoft : UITheme.cautionSoft),
+                (ready ? UITheme.accentSoft : UITheme.cautionSoft),
                 in: RoundedRectangle(cornerRadius: UITheme.Radius.segmentedInner)
             )
+
+            if store.connectedID == nil {
+                Button("连接键盘") {
+                    Task { await store.autoSetupHostExecutionIfNeeded() }
+                }
+                .controlSize(.small)
+                .disabled(store.busy)
+            }
+
+            if store.editingDevice {
+                Button("返回日常软件方案") {
+                    Task { await store.returnToHostDocument() }
+                }
+                .controlSize(.small)
+                .disabled(store.busy || store.deviceOperationRunning)
+            }
 
             Spacer()
 
             Toggle("按键控制", isOn: Binding(get: { store.hostExecutionEnabled }, set: { value in Task { await store.setHostExecutionEnabled(value) } }))
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .font(UITheme.Typography.body)
-                .fixedSize()
-
-            Toggle("运行终端命令", isOn: Binding(get: { store.commandExecutionEnabled }, set: { value in Task { await store.setCommandExecutionEnabled(value) } }))
                 .toggleStyle(.switch)
                 .controlSize(.small)
                 .font(UITheme.Typography.body)
@@ -243,34 +294,11 @@ struct Workbench: View {
                 .disabled(!store.canEditDraft || !store.draft.can_redo || store.busy)
             }
 
-            if changeCount > 0 {
-                Button("\(changeCount) 项修改") { reviewing = true }
-                    .font(UITheme.Typography.captionMedium)
-                    .disabled(store.browsingDeviceSnapshot)
-            }
-
-            Button("背光配色") { store.showingLighting = true }
-                .font(UITheme.Typography.body)
-                .disabled(store.layer == nil || !store.canEditDraft || store.isProtectedLayerSelected)
-
-            Menu("硬件与备份") {
-                if store.editingDevice {
-                    Button("从当前键盘新建草稿…") { Task { await store.editDeviceConfiguration() } }.disabled(store.busy || store.deviceOperationRunning)
-                    Button("读取并对比现有草稿…") { Task { await store.readDeviceConfig(); await store.compareSnapshot(); store.showLocalDraft() } }.disabled(store.busy || store.deviceOperationRunning)
-                    Button("返回日常软件方案") { Task { await store.returnToHostDocument() } }.disabled(store.busy || store.deviceOperationRunning)
-                    Button("同步到键盘…") { Task { await store.previewApply() } }.disabled(store.busy || store.deviceOperationRunning)
-                } else {
-                    Button("读取并编辑键盘硬件配置…") { Task { await store.editDeviceConfiguration() } }.disabled(store.busy || store.deviceOperationRunning)
-                    Button("继续上次的键盘硬件草稿") { Task { await store.resumeDeviceEditing() } }.disabled(store.busy)
-                    Button("同步按键与灯光到键盘…") { Task { await store.previewApply() } }.disabled(!store.canEditDraft || store.busy)
-                }
-                Divider()
-                Button("硬件写入与恢复记录…") { store.showingDeviceOperations = true }
-                Button(showDiagnostics ? "收起连接与诊断面板" : "展开连接与诊断面板") { showDiagnostics.toggle() }
-                Button("导出故障诊断报告…") { showingDiagnosticExport = true }
+            Button("设置…") {
+                showingSettings = true
             }
             .font(UITheme.Typography.body)
-            .fixedSize()
+            .controlSize(.small)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
@@ -336,14 +364,11 @@ struct Workbench: View {
             Rectangle().fill(UITheme.border).frame(height: 1)
 
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("切换软件时自动启用", isOn: Binding(
-                    get: { store.routing?.auto_follow_enabled ?? false },
+                Toggle(AutoSwitchState.toggleTitle, isOn: Binding(
+                    get: { store.autoSwitchState.isEnabled },
                     set: { value in
                         Task {
                             await store.setAutoFollow(value)
-                            if value, store.routing?.manual_override == true {
-                                await store.resumeFollowing()
-                            }
                         }
                     }
                 ))
@@ -382,8 +407,42 @@ struct Workbench: View {
             }
         }
         .padding(12)
-        .frame(width: 236)
+        .frame(width: 244)
         .background(UITheme.subtleSurface)
+    }
+
+    private var agentFocusedStage: some View {
+        let agentKind = AgentProfileKind.from(profileName: store.profile?.name)
+
+        return Group {
+            if store.layer == nil {
+                VStack(spacing: 12) {
+                    Text(store.profile == nil ? "暂无配置方案" : "当前方案暂无图层")
+                        .font(UITheme.Typography.heading)
+                    Button(store.profile == nil ? "新建配置" : "新建层") {
+                        promptName(store.profile == nil ? "新建配置" : "新建层")
+                    }
+                    .disabled(!store.canEditDraft || store.busy)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(UITheme.pageBackground)
+            } else {
+                CreatorMicroStageView(
+                    store: store,
+                    agentKind: agentKind,
+                    actionForSlot: { action($0) },
+                    labelForSlot: { label($0) },
+                    titleForSlot: { title($0) },
+                    onOpenFullActionLibrary: {
+                        choosing = true
+                    },
+                    onOpenMacroLibrary: {
+                        choosingMacro = true
+                    }
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Center Stage (1:1 Physical Keyboard Canvas)
@@ -511,9 +570,14 @@ struct Workbench: View {
                             }
                         }
 
-                        // Bottom Row: 2U Merged Wide Key (slots 10 & 11) + Bottom-Right Key (slot 12)
+                        // Bottom Row: Split (slot 10 + slot 11) or Merged 2U Wide Key + Bottom-Right Key (slot 12)
                         HStack(spacing: 8) {
-                            widePhysicalKeycap
+                            if store.isBottomRowSplit {
+                                physicalKeycap(slot: 10)
+                                physicalKeycap(slot: 11)
+                            } else {
+                                widePhysicalKeycap
+                            }
                             physicalKeycap(slot: 12)
                         }
                     }
@@ -779,18 +843,75 @@ struct Workbench: View {
                 }
 
                 if store.slot == 10 || store.slot == 11 {
-                    HStack {
-                        Text("双轴合并触发（覆盖开关 11 与 12）")
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("底行左中键硬件布局（全局）")
+                            .font(UITheme.Typography.captionMedium)
+                            .foregroundStyle(UITheme.textPrimary)
+                        Text("跟随实体键盘键帽：拆成两颗 1U 按键（开关 11 + 开关 12），或合并为一颗 2U 宽键。")
                             .font(UITheme.Typography.caption)
                             .foregroundStyle(UITheme.textSecondary)
-                        Spacer()
-                        Button(store.slot == 11 ? "切回主槽 11" : "查看副轴 12") {
-                            store.slot = store.slot == 11 ? 10 : 11
+                        HStack(spacing: 6) {
+                            Button {
+                                Task { await store.setBottomRowSplit(true) }
+                            } label: {
+                                Text("拆成两个按键 (1U + 1U)")
+                                    .font(UITheme.Typography.captionMedium)
+                                    .foregroundStyle(store.isBottomRowSplit ? UITheme.accent : UITheme.textPrimary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 6)
+                                    .background(
+                                        store.isBottomRowSplit ? UITheme.accentSoft : UITheme.surface,
+                                        in: RoundedRectangle(cornerRadius: UITheme.Radius.segmentedInner)
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: UITheme.Radius.segmentedInner)
+                                            .strokeBorder(store.isBottomRowSplit ? UITheme.accent : UITheme.border, lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(store.busy)
+
+                            Button {
+                                Task { await store.setBottomRowSplit(false) }
+                            } label: {
+                                Text("合并为 2U 宽键")
+                                    .font(UITheme.Typography.captionMedium)
+                                    .foregroundStyle(!store.isBottomRowSplit ? UITheme.accent : UITheme.textPrimary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 6)
+                                    .background(
+                                        !store.isBottomRowSplit ? UITheme.accentSoft : UITheme.surface,
+                                        in: RoundedRectangle(cornerRadius: UITheme.Radius.segmentedInner)
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: UITheme.Radius.segmentedInner)
+                                            .strokeBorder(!store.isBottomRowSplit ? UITheme.accent : UITheme.border, lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(store.busy)
                         }
-                        .font(UITheme.Typography.captionMedium)
-                        .buttonStyle(.plain)
-                        .foregroundStyle(UITheme.accent)
+                        if !store.isBottomRowSplit {
+                            HStack {
+                                Text("双轴合并触发（覆盖开关 11 与 12）")
+                                    .font(UITheme.Typography.caption)
+                                    .foregroundStyle(UITheme.textSecondary)
+                                Spacer()
+                                Button(store.slot == 11 ? "切回主槽 11" : "查看副轴 12") {
+                                    store.slot = store.slot == 11 ? 10 : 11
+                                }
+                                .font(UITheme.Typography.captionMedium)
+                                .buttonStyle(.plain)
+                                .foregroundStyle(UITheme.accent)
+                            }
+                        }
                     }
+                    .padding(10)
+                    .background(UITheme.surface, in: RoundedRectangle(cornerRadius: UITheme.Radius.itemInner))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: UITheme.Radius.itemInner)
+                            .strokeBorder(UITheme.border, lineWidth: 1)
+                    )
                 }
 
                 // Inline Action Picker (Direct 1-Click Assignment)
@@ -928,8 +1049,13 @@ struct Workbench: View {
 
     // MARK: - Bottom Footer Bar
     private var bottomFooterBar: some View {
-        HStack {
-            Text(store.status.replacingOccurrences(of: " · ", with: "，"))
+        let cleanedStatus = store.status
+            .replacingOccurrences(of: " · ", with: "，")
+            .replacingOccurrences(of: "·", with: "，")
+            .replacingOccurrences(of: " (", with: "（")
+            .replacingOccurrences(of: ")", with: "）")
+        return HStack {
+            Text(cleanedStatus)
                 .font(UITheme.Typography.caption)
                 .foregroundStyle(UITheme.textSecondary)
                 .lineLimit(1)
@@ -1095,11 +1221,7 @@ struct ActionLibrarySheet: View {
     @FocusState private var searchFocused: Bool
 
     func choose(_ action: CatalogAction) {
-        if action.payload["type"]?.text == "shortcut" {
-            Task { if await store.saveAction(action) { close() } }
-        } else {
-            candidate = action
-        }
+        candidate = action
     }
 
     var body: some View {
@@ -1299,6 +1421,10 @@ struct ActionParameters: View {
                         .font(UITheme.Typography.mono)
                 }
                 if type == "shortcut" {
+                    ShortcutRecorder(
+                        action: $action,
+                        isDisabled: !store.canEditDraft || store.busy
+                    )
                     HStack(spacing: 8) {
                         Button("选择目标应用…") {
                             let panel = NSOpenPanel()
@@ -1348,6 +1474,223 @@ struct ActionParameters: View {
     }
 }
 
+enum ShortcutCaptureOutcome: Equatable {
+    case recorded(ShortcutChord)
+    case cancelled
+    case ignored
+}
+
+struct ShortcutChord: Equatable {
+    var key: String
+    var modifiers: [String]
+
+    private static let modifierOrder = ["command", "shift", "option", "control"]
+
+    static let keyCodeToToken: [UInt16: String] = [
+        0x00: "a", 0x01: "s", 0x02: "d", 0x03: "f", 0x04: "h", 0x05: "g",
+        0x06: "z", 0x07: "x", 0x08: "c", 0x09: "v", 0x0B: "b", 0x0C: "q",
+        0x0D: "w", 0x0E: "e", 0x0F: "r", 0x10: "y", 0x11: "t", 0x12: "1",
+        0x13: "2", 0x14: "3", 0x15: "4", 0x16: "6", 0x17: "5", 0x18: "equal",
+        0x19: "9", 0x1A: "7", 0x1B: "minus", 0x1C: "8", 0x1D: "0",
+        0x1E: "right_bracket", 0x1F: "o", 0x20: "u", 0x21: "left_bracket",
+        0x22: "i", 0x23: "p", 0x24: "return", 0x25: "l", 0x26: "j",
+        0x27: "quote", 0x28: "k", 0x29: "semicolon", 0x2A: "backslash",
+        0x2B: "comma", 0x2C: "slash", 0x2D: "n", 0x2E: "m", 0x2F: "period",
+        0x30: "tab", 0x31: "space", 0x32: "grave", 0x33: "delete",
+        0x35: "escape", 0x60: "f5", 0x61: "f6", 0x62: "f7", 0x63: "f3",
+        0x64: "f8", 0x65: "f9", 0x67: "f11", 0x6D: "f10", 0x6F: "f12",
+        0x73: "home", 0x74: "page_up", 0x75: "forward_delete", 0x76: "f4",
+        0x77: "end", 0x78: "f2", 0x79: "page_down", 0x7A: "f1",
+        0x7B: "left", 0x7C: "right", 0x7D: "down", 0x7E: "up",
+    ]
+
+    init(key: String, modifiers: [String]) {
+        self.key = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let active = Set(modifiers.map { $0.lowercased() })
+        self.modifiers = Self.modifierOrder.filter { active.contains($0) }
+    }
+
+    init?(payload: [String: JSONValue]) {
+        let rawKey = (payload["key"]?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawKey.isEmpty else { return nil }
+        let mods: [String]
+        if case .array(let values) = payload["modifiers"] {
+            mods = values.map(\.text)
+        } else {
+            mods = []
+        }
+        self.init(key: rawKey, modifiers: mods)
+    }
+
+    static func from(event: NSEvent) -> ShortcutCaptureOutcome {
+        from(keyCode: event.keyCode, modifierFlags: event.modifierFlags)
+    }
+
+    static func from(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> ShortcutCaptureOutcome {
+        let flags = modifierFlags.intersection(.deviceIndependentFlagsMask)
+        var mods: [String] = []
+        if flags.contains(.command) { mods.append("command") }
+        if flags.contains(.shift) { mods.append("shift") }
+        if flags.contains(.option) { mods.append("option") }
+        if flags.contains(.control) { mods.append("control") }
+
+        if keyCode == 0x35 && mods.isEmpty {
+            return .cancelled
+        }
+        guard let token = keyCodeToToken[keyCode] else {
+            return .ignored
+        }
+        return .recorded(ShortcutChord(key: token, modifiers: mods))
+    }
+
+    var displayLabel: String {
+        let orderedSymbols: [(String, String)] = [
+            ("control", "⌃"),
+            ("option", "⌥"),
+            ("shift", "⇧"),
+            ("command", "⌘"),
+        ]
+        let symbols = orderedSymbols.compactMap { mod, symbol in
+            modifiers.contains(mod) ? symbol : nil
+        }.joined()
+        return symbols + Self.displayKeyName(key)
+    }
+
+    private static func displayKeyName(_ key: String) -> String {
+        switch key.lowercased() {
+        case "space": return "Space"
+        case "return", "enter": return "↩"
+        case "tab": return "⇥"
+        case "delete", "backspace": return "⌫"
+        case "forward_delete", "forwarddelete": return "⌦"
+        case "escape", "esc": return "⎋"
+        case "up": return "↑"
+        case "down": return "↓"
+        case "left": return "←"
+        case "right": return "→"
+        case "home": return "Home"
+        case "end": return "End"
+        case "page_up", "pageup": return "PgUp"
+        case "page_down", "pagedown": return "PgDn"
+        case "minus": return "-"
+        case "equal": return "="
+        case "left_bracket", "leftbracket": return "["
+        case "right_bracket", "rightbracket": return "]"
+        case "backslash": return "\\"
+        case "semicolon": return ";"
+        case "quote": return "'"
+        case "comma": return ","
+        case "period": return "."
+        case "slash": return "/"
+        case "grave", "backtick": return "`"
+        default: return key.uppercased()
+        }
+    }
+
+    func apply(to action: inout CatalogAction) {
+        let previousDefaultName = ShortcutChord(payload: action.payload).map { "快捷键 \($0.displayLabel)" }
+        action.payload["key"] = .string(key)
+        action.payload["modifiers"] = .array(modifiers.map { .string($0) })
+        let trimmedName = action.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedName.isEmpty || trimmedName == "快捷键" || trimmedName == previousDefaultName {
+            action.name = "快捷键 \(displayLabel)"
+        }
+    }
+}
+
+struct ShortcutRecorder: View {
+    @Binding var action: CatalogAction
+    var isDisabled: Bool = false
+    @State private var isRecording = false
+    @State private var eventMonitor: Any?
+
+    private var currentChord: ShortcutChord? {
+        ShortcutChord(payload: action.payload)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Button {
+                    if isRecording {
+                        stopRecording()
+                    } else {
+                        startRecording()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: isRecording ? "record.circle.fill" : "keyboard")
+                            .foregroundStyle(isRecording ? UITheme.accent : UITheme.textSecondary)
+                        Text(isRecording ? "请直接按下组合键（Esc 取消）…" : (currentChord?.displayLabel ?? "未设置"))
+                            .font(UITheme.Typography.bodyMedium)
+                            .foregroundStyle(isRecording ? UITheme.accent : UITheme.textPrimary)
+                        Spacer()
+                        Text(isRecording ? "取消录制" : "录制快捷键")
+                            .font(UITheme.Typography.captionMedium)
+                            .foregroundStyle(UITheme.accent)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(
+                        isRecording ? UITheme.accentSoft : UITheme.subtleSurface,
+                        in: RoundedRectangle(cornerRadius: UITheme.Radius.itemInner)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: UITheme.Radius.itemInner)
+                            .strokeBorder(isRecording ? UITheme.accent : UITheme.border, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(isDisabled)
+                .accessibilityLabel(isRecording ? "正在录制快捷键，按 Esc 取消" : "录制快捷键，当前为 \(currentChord?.displayLabel ?? "未设置")")
+
+                if currentChord != nil && !isRecording {
+                    Button {
+                        action.payload["key"] = .string("")
+                        action.payload["modifiers"] = .array([])
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(UITheme.textMuted)
+                    }
+                    .buttonStyle(.plain)
+                    .help("清除快捷键")
+                    .accessibilityLabel("清除快捷键")
+                    .disabled(isDisabled)
+                }
+            }
+        }
+        .onDisappear {
+            stopRecording()
+        }
+    }
+
+    private func startRecording() {
+        stopRecording()
+        isRecording = true
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { event in
+            switch ShortcutChord.from(event: event) {
+            case .cancelled:
+                stopRecording()
+                return nil
+            case .ignored:
+                return nil
+            case .recorded(let chord):
+                chord.apply(to: &action)
+                stopRecording()
+                return nil
+            }
+        }
+    }
+
+    private func stopRecording() {
+        if let eventMonitor {
+            NSEvent.removeMonitor(eventMonitor)
+            self.eventMonitor = nil
+        }
+        isRecording = false
+    }
+}
+
 struct ActionCapabilityView: View {
     let capability: ActionCapability
     var body: some View {
@@ -1360,5 +1703,224 @@ struct ActionCapabilityView: View {
                 .foregroundStyle(UITheme.textSecondary)
                 .textSelection(.enabled)
         }
+    }
+}
+
+struct MicroInputSettingsView: View {
+    @ObservedObject var store: Store
+    @Binding var appearance: String
+    var showDiagnostics: Binding<Bool>? = nil
+    var onOpenDiagnosticExport: (() -> Void)? = nil
+    var onOpenDiffReview: (() -> Void)? = nil
+    var close: (() -> Void)? = nil
+
+    @ObservedObject private var visualPrefs = KeycapVisualPreferences.shared
+    @State private var localShowingDiagnosticExport = false
+    @State private var localShowingDiffReview = false
+
+    private var changeCount: Int {
+        store.draft.edits.count + store.draft.structure_changes.count
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let close {
+                HStack {
+                    Text("设置")
+                        .font(UITheme.Typography.title)
+                        .foregroundStyle(UITheme.textPrimary)
+                    Spacer()
+                    Button("完成") { close() }
+                        .keyboardShortcut(.defaultAction)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                Rectangle().fill(UITheme.border).frame(height: 1)
+            }
+
+            TabView {
+                generalSettingsTab
+                    .tabItem { Label("通用", systemImage: "gearshape") }
+
+                lightingSettingsTab
+                    .tabItem { Label("灯光", systemImage: "lightbulb") }
+
+                hardwareSettingsTab
+                    .tabItem { Label("硬件与诊断", systemImage: "keyboard") }
+            }
+            .padding(20)
+        }
+        .frame(width: 520, height: close != nil ? 420 : 380)
+        .background(UITheme.surface)
+        .sheet(isPresented: $localShowingDiagnosticExport) {
+            DiagnosticsExportView(store: store, close: { localShowingDiagnosticExport = false })
+        }
+        .sheet(isPresented: $localShowingDiffReview) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("未同步硬件改动（\(changeCount) 项）")
+                    .font(UITheme.Typography.title)
+                ScrollView {
+                    ForEach(Array(store.draft.structure_changes.enumerated()), id: \.offset) { _, change in
+                        Text(change)
+                            .font(UITheme.Typography.body)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 4)
+                    }
+                    ForEach(store.draft.edits.keys.sorted(), id: \.self) { key in
+                        if let action = store.draft.edits[key] {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(action.name)
+                                    .font(UITheme.Typography.bodySemibold)
+                                Text(store.parameterSummary(action))
+                                    .font(UITheme.Typography.caption)
+                                    .foregroundStyle(UITheme.textSecondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+                HStack {
+                    Spacer()
+                    Button("完成") { localShowingDiffReview = false }
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(24)
+            .frame(width: 480, height: 340)
+            .background(UITheme.surface)
+        }
+    }
+
+    private var generalSettingsTab: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("启用按键控制")
+                    .font(UITheme.Typography.bodyMedium)
+                Spacer()
+                Toggle("启用按键控制", isOn: Binding(
+                    get: { store.hostExecutionEnabled },
+                    set: { value in Task { await store.setHostExecutionEnabled(value) } }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+            }
+
+            HStack {
+                Text("按键时自动唤起窗口")
+                    .font(UITheme.Typography.bodyMedium)
+                Spacer()
+                Toggle("按键时自动唤起窗口", isOn: $visualPrefs.singleTapFocusWindow)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("允许执行终端命令")
+                        .font(UITheme.Typography.bodyMedium)
+                    Text("开启后，绑定为终端命令的按键才会在本机执行")
+                        .font(UITheme.Typography.caption)
+                        .foregroundStyle(UITheme.textSecondary)
+                }
+                Spacer()
+                Toggle("允许执行终端命令", isOn: Binding(
+                    get: { store.commandExecutionEnabled },
+                    set: { value in Task { await store.setCommandExecutionEnabled(value) } }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+            }
+
+            HStack {
+                Text("窗口外观")
+                    .font(UITheme.Typography.bodyMedium)
+                Spacer()
+                Picker("窗口外观", selection: $appearance) {
+                    Text("跟随系统").tag("system")
+                    Text("浅色").tag("light")
+                    Text("深色").tag("dark")
+                }
+                .labelsHidden()
+                .frame(width: 140)
+            }
+
+            Spacer()
+        }
+        .padding(.vertical, 8)
+    }
+
+    private var lightingSettingsTab: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SimpleLightingControlCard(
+                store: store,
+                lighting: store.fourAppLighting,
+                showAdvancedButton: !(store.layer == nil || !store.canEditDraft || store.isProtectedLayerSelected),
+                onOpenAdvancedLighting: {
+                    close?()
+                    store.showingLighting = true
+                }
+            )
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var hardwareSettingsTab: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Button("读取并编辑键盘硬件配置…") {
+                    close?()
+                    Task { await store.editDeviceConfiguration() }
+                }
+                .disabled(store.busy || store.deviceOperationRunning)
+
+                Button("同步按键与灯光到键盘…") {
+                    close?()
+                    Task { await store.previewApply() }
+                }
+                .disabled(!store.canEditDraft || store.busy)
+            }
+
+            HStack(spacing: 10) {
+                Button("硬件写入与恢复记录…") {
+                    close?()
+                    store.showingDeviceOperations = true
+                }
+
+                Button("查看未同步硬件改动 (\(changeCount) 项)…") {
+                    if let onOpenDiffReview {
+                        onOpenDiffReview()
+                    } else {
+                        localShowingDiffReview = true
+                    }
+                }
+                .disabled(store.browsingDeviceSnapshot || changeCount == 0)
+            }
+
+            HStack(spacing: 10) {
+                if let showDiagnostics {
+                    Button(showDiagnostics.wrappedValue ? "收起连接与诊断面板" : "展开连接与诊断面板") {
+                        showDiagnostics.wrappedValue.toggle()
+                        close?()
+                    }
+                } else {
+                    Button("展开/收起连接与诊断面板") {
+                        close?()
+                    }
+                }
+
+                Button("导出故障诊断报告…") {
+                    if let onOpenDiagnosticExport {
+                        onOpenDiagnosticExport()
+                    } else {
+                        localShowingDiagnosticExport = true
+                    }
+                }
+            }
+
+            Spacer()
+        }
+        .padding(.vertical, 8)
     }
 }
