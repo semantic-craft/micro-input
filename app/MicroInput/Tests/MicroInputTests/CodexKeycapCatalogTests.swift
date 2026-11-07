@@ -241,6 +241,23 @@ final class CodexKeycapCatalogTests: XCTestCase {
         )
 
         let availableStageWidth: CGFloat = 1020 - 244 - 1
+        let availableBoardWidth: CGFloat = availableStageWidth - 332 - 1
+        let board = CreatorMicroBoardView(
+            store: store,
+            lighting: store.fourAppLighting,
+            agentKind: .antigravity,
+            actionForSlot: { _ in nil },
+            labelForSlot: { "槽位 \($0)" },
+            titleForSlot: { "按键 \($0)" }
+        )
+        let idealBoardWidth = NSHostingController(rootView: board.fixedSize(horizontal: true, vertical: false))
+            .sizeThatFits(in: NSSize(width: 2000, height: 620)).width
+        XCTAssertLessThanOrEqual(
+            idealBoardWidth,
+            availableBoardWidth,
+            "CreatorMicroBoardView ideal untruncated width (\(idealBoardWidth)pt) exceeds available board column width (\(availableBoardWidth)pt) at 1020pt window width"
+        )
+
         for testSlot in [0, 6, 10, 13, 16] {
             store.slot = testSlot
             let stage = CreatorMicroStageView(

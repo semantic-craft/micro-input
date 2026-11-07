@@ -131,7 +131,7 @@ struct CreatorMicroStageView: View {
                     onOpenFullActionLibrary: onOpenFullActionLibrary,
                     onOpenMacroLibrary: onOpenMacroLibrary
                 )
-                .frame(width: 380)
+                .frame(width: 332)
                 .frame(maxHeight: .infinity)
                 .background(UITheme.surface)
             }
@@ -271,7 +271,7 @@ struct CreatorMicroBoardView: View {
 
             Spacer(minLength: 8)
         }
-        .padding(20)
+        .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: store.profile?.id.text) {
             guard agentKind == .antigravity,
@@ -334,23 +334,21 @@ struct CreatorMicroBoardView: View {
                 Toggle("显示键帽文字", isOn: $prefs.showKeycapSublabels)
                     .toggleStyle(.checkbox)
                     .font(UITheme.Typography.caption)
-                    .fixedSize()
 
                 Toggle("点击发光键直接跳转会话", isOn: $prefs.singleTapFocusWindow)
                     .toggleStyle(.checkbox)
                     .font(UITheme.Typography.caption)
-                    .fixedSize()
             }
 
             if agentKind.supportsLiveSessionSlots {
                 let glowingSlots = lighting.glowingAttentionSlots(in: store)
                 let activeWorkingSlots = lighting.workingSlots(in: store)
-                if !glowingSlots.isEmpty || !activeWorkingSlots.isEmpty {
-                    HStack(spacing: 8) {
+                if !glowingSlots.isEmpty {
+                    HStack(spacing: 6) {
                         ForEach(glowingSlots.prefix(2)) { gSlot in
                             let isAwaiting = gSlot.status != "completed"
                             let badgeColor = isAwaiting ? UITheme.caution : Color(red: 0.08, green: 0.78, blue: 0.42)
-                            let shortName = gSlot.title.isEmpty ? "会话 \(gSlot.slotIndex + 1)" : String(gSlot.title.prefix(12))
+                            let shortName = gSlot.title.isEmpty ? "会话 \(gSlot.slotIndex + 1)" : String(gSlot.title.prefix(8))
                             Button {
                                 store.slot = gSlot.slotIndex
                                 Task { await store.jumpToFourAppSlot(gSlot.slotIndex) }
@@ -359,12 +357,12 @@ struct CreatorMicroBoardView: View {
                                     Circle()
                                         .fill(badgeColor)
                                         .frame(width: 7, height: 7)
-                                    Text("键 \(gSlot.slotIndex + 1)「\(shortName)」\(isAwaiting ? "待回应" : "🔵 已完事")，点击跳转")
+                                    Text("键 \(gSlot.slotIndex + 1)「\(shortName)」\(isAwaiting ? "待回应" : "已完成")")
                                         .font(UITheme.Typography.captionMedium)
                                         .foregroundStyle(UITheme.textPrimary)
                                         .lineLimit(1)
                                 }
-                                .padding(.horizontal, 10)
+                                .padding(.horizontal, 8)
                                 .padding(.vertical, 4)
                                 .background(badgeColor.opacity(0.14), in: Capsule())
                                 .overlay(Capsule().strokeBorder(badgeColor.opacity(0.65), lineWidth: 1))
@@ -372,8 +370,18 @@ struct CreatorMicroBoardView: View {
                             .buttonStyle(.plain)
                         }
 
+                        Button("已读熄灯") {
+                            Task { await lighting.acknowledgeAllCompleted(in: store) }
+                        }
+                        .font(UITheme.Typography.caption)
+                        .controlSize(.mini)
+                    }
+                }
+
+                if !activeWorkingSlots.isEmpty {
+                    HStack(spacing: 6) {
                         ForEach(activeWorkingSlots.prefix(2)) { wSlot in
-                            let shortName = wSlot.title.isEmpty ? "会话 \(wSlot.slotIndex + 1)" : String(wSlot.title.prefix(12))
+                            let shortName = wSlot.title.isEmpty ? "会话 \(wSlot.slotIndex + 1)" : String(wSlot.title.prefix(8))
                             Button {
                                 store.slot = wSlot.slotIndex
                                 Task { await store.jumpToFourAppSlot(wSlot.slotIndex) }
@@ -382,25 +390,17 @@ struct CreatorMicroBoardView: View {
                                     Text("::")
                                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                                         .foregroundStyle(UITheme.accent)
-                                    Text("键 \(wSlot.slotIndex + 1)「\(shortName)」Working 中，点击观察")
+                                    Text("键 \(wSlot.slotIndex + 1)「\(shortName)」Working")
                                         .font(UITheme.Typography.captionMedium)
                                         .foregroundStyle(UITheme.textPrimary)
                                         .lineLimit(1)
                                 }
-                                .padding(.horizontal, 10)
+                                .padding(.horizontal, 8)
                                 .padding(.vertical, 4)
                                 .background(UITheme.accent.opacity(0.14), in: Capsule())
                                 .overlay(Capsule().strokeBorder(UITheme.accent.opacity(0.65), lineWidth: 1))
                             }
                             .buttonStyle(.plain)
-                        }
-
-                        if !glowingSlots.isEmpty {
-                            Button("已读熄灯") {
-                                Task { await lighting.acknowledgeAllCompleted(in: store) }
-                            }
-                            .font(UITheme.Typography.caption)
-                            .controlSize(.mini)
                         }
                     }
                 }
@@ -415,11 +415,10 @@ struct CreatorMicroBoardView: View {
                         Text(boardLightingStatusLabel)
                             .font(UITheme.Typography.caption)
                             .foregroundStyle(UITheme.textPrimary)
-                            .fixedSize()
+                            .lineLimit(1)
                         Text("调整灯光")
                             .font(UITheme.Typography.captionMedium)
                             .foregroundStyle(UITheme.accent)
-                            .fixedSize()
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
@@ -436,54 +435,55 @@ struct CreatorMicroBoardView: View {
             }
 
             if !store.isProtectedLayerSelected {
-                HStack(spacing: 10) {
-                    if agentKind.supportsLiveSessionSlots {
-                        Button("上方 6 键设为会话键") {
-                            Task {
-                                for s in 0..<6 {
-                                    prefs.clearRoleOverride(for: profileId, slot: s)
-                                    store.slot = s
-                                    _ = await store.saveAction(CodexKeycapCatalog.makeSlotOpenAction(slotIndex: s))
+                VStack(spacing: 6) {
+                    HStack(spacing: 8) {
+                        if agentKind.supportsLiveSessionSlots {
+                            Button("上方 6 键设为会话键") {
+                                Task {
+                                    for s in 0..<6 {
+                                        prefs.clearRoleOverride(for: profileId, slot: s)
+                                        store.slot = s
+                                        _ = await store.saveAction(CodexKeycapCatalog.makeSlotOpenAction(slotIndex: s))
+                                    }
                                 }
                             }
+                            .font(UITheme.Typography.captionMedium)
+                            .controlSize(.small)
+                            .disabled(store.busy || !store.canEditDraft)
+                        }
+
+                        Button("恢复默认布局") {
+                            prefs.resetProfile(profileId)
+                            Task { await store.installCodingAgentPresets() }
                         }
                         .font(UITheme.Typography.captionMedium)
                         .controlSize(.small)
-                        .fixedSize()
-                        .disabled(store.busy || !store.canEditDraft)
+                        .disabled(store.busy || !store.canEditDraft || store.editingDevice)
                     }
 
                     if agentKind == .antigravity {
-                        Button("左旋钮切 Working/蓝点 + 右摇杆滚对话") {
-                            Task { await applyWorkingAndCompletedKnobPreset() }
-                        }
-                        .font(UITheme.Typography.captionMedium)
-                        .controlSize(.small)
-                        .fixedSize()
-                        .disabled(store.busy || !store.canEditDraft)
+                        HStack(spacing: 8) {
+                            Button("左旋钮切 Working/蓝点 + 右摇杆滚对话") {
+                                Task { await applyWorkingAndCompletedKnobPreset() }
+                            }
+                            .font(UITheme.Typography.captionMedium)
+                            .controlSize(.small)
+                            .disabled(store.busy || !store.canEditDraft)
 
-                        Button("左旋钮滚项目 + 右摇杆滚对话") {
-                            Task { await applyDualScrollAndProjectNavigationPreset() }
+                            Button("左旋钮滚项目 + 右摇杆滚对话") {
+                                Task { await applyDualScrollAndProjectNavigationPreset() }
+                            }
+                            .font(UITheme.Typography.captionMedium)
+                            .controlSize(.small)
+                            .disabled(store.busy || !store.canEditDraft)
                         }
-                        .font(UITheme.Typography.captionMedium)
-                        .controlSize(.small)
-                        .fixedSize()
-                        .disabled(store.busy || !store.canEditDraft)
                     }
-
-                    Button("恢复默认布局") {
-                        prefs.resetProfile(profileId)
-                        Task { await store.installCodingAgentPresets() }
-                    }
-                    .font(UITheme.Typography.captionMedium)
-                    .controlSize(.small)
-                    .fixedSize()
-                    .disabled(store.busy || !store.canEditDraft || store.editingDevice)
                 }
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 12)
         .padding(.vertical, 8)
+        .frame(maxWidth: 400)
         .background(UITheme.surface, in: RoundedRectangle(cornerRadius: UITheme.Radius.panelOuter))
         .overlay(
             RoundedRectangle(cornerRadius: UITheme.Radius.panelOuter)
@@ -532,9 +532,9 @@ struct CreatorMicroBoardView: View {
         let workingCount = lighting.workingSlots(in: store).count
         if lighting.onlyGlowOnAttentionOrCompleted {
             if glowingCount > 0 || (lighting.glowOnWorkingSessions && workingCount > 0) {
-                return "状态提醒：\(glowingCount) 个蓝点已完成 · \(workingCount) 个 Working 运行中，点击发光键或用滚轮即可跳转"
+                return "状态提醒：\(glowingCount) 个蓝点已完成 · \(workingCount) 个 Working 运行中"
             }
-            return "状态提醒：蓝点完成亮绿光 · Working 运行中亮蓝光 · 已读会话保持熄灯"
+            return "状态提醒：蓝点完成亮绿光 · Working 运行中亮蓝光"
         }
         switch store.fourAppLighting.activePhase {
         case .completed:
@@ -1129,16 +1129,18 @@ struct CreatorMicroInlineInspectorView: View {
                                 Task { await applyEncoderPreset(mode: "ag-working-cycle") }
                             }
                             .controlSize(.small)
+                        }
+                        HStack(spacing: 6) {
                             Button("滚轮切蓝点已完成") {
                                 Task { await applyEncoderPreset(mode: "ag-completed-cycle") }
                             }
                             .controlSize(.small)
-                        }
-                        HStack(spacing: 6) {
                             Button("在项目中滚动") {
                                 Task { await applyEncoderPreset(mode: "ag-project-scroll") }
                             }
                             .controlSize(.small)
+                        }
+                        HStack(spacing: 6) {
                             Button("在打开的会话中滚动") {
                                 Task { await applyEncoderPreset(mode: "scroll") }
                             }
@@ -1183,16 +1185,18 @@ struct CreatorMicroInlineInspectorView: View {
                         .font(UITheme.Typography.captionMedium)
                         .foregroundStyle(UITheme.textSecondary)
 
-                    HStack(spacing: 6) {
-                        Button("上下滚项目 + 左右切会话") {
-                            Task { await applyJoystickPreset(mode: "ag-project-scroll") }
-                        }
-                        .controlSize(.small)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Button("上下滚项目 + 左右切会话") {
+                                Task { await applyJoystickPreset(mode: "ag-project-scroll") }
+                            }
+                            .controlSize(.small)
 
-                        Button("上下切项目 + 左右切会话") {
-                            Task { await applyJoystickPreset(mode: "ag-project-step") }
+                            Button("上下切项目 + 左右切会话") {
+                                Task { await applyJoystickPreset(mode: "ag-project-step") }
+                            }
+                            .controlSize(.small)
                         }
-                        .controlSize(.small)
 
                         Button("上下滚对话") {
                             Task { await applyJoystickPreset(mode: "ag-chat-scroll") }
