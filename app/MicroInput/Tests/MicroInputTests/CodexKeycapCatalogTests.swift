@@ -1,4 +1,7 @@
+import AppKit
+import SwiftUI
 import XCTest
+import MicroInputCore
 @testable import MicroInput
 
 @MainActor
@@ -193,5 +196,69 @@ final class CodexKeycapCatalogTests: XCTestCase {
 
         let herdrSplit = CodexKeycapCatalog.defaultAction(for: .split, agent: .herdr, slot: 5)
         XCTAssertEqual(herdrSplit.name, "向右分屏")
+    }
+
+    func testWorkbenchFitsWithinMinimum1020WidthWithoutHorizontalOverflow() async {
+        let store = Store(
+            nativeOwnership: NativeOwnershipController(isolated: true),
+            backend: MicroInputCore.MicroInput(),
+            actionExecutor: RecordingHostActionExecutor()
+        )
+        await store.loadWorkbench()
+        await store.installCodingAgentPresets()
+
+        if let agIndex = store.snapshot?.profiles.firstIndex(where: { AgentProfileKind.from(profileName: $0.name) == .antigravity }) {
+            store.selectProfile(agIndex)
+        }
+
+        store.fourAppSlots.pinSlot(
+            index: 0,
+            place: .antigravity(conversationId: "conv-1", workspacePath: "/tmp/ws-1"),
+            title: "录音豆连接与多应用导航测试",
+            app: "antigravity",
+            status: "running"
+        )
+        store.fourAppSlots.pinSlot(
+            index: 1,
+            place: .antigravity(conversationId: "conv-2", workspacePath: "/tmp/ws-2"),
+            title: "Chinese UI Layout Audit",
+            app: "antigravity",
+            status: "running"
+        )
+        store.fourAppSlots.pinSlot(
+            index: 2,
+            place: .antigravity(conversationId: "conv-3", workspacePath: "/tmp/ws-3"),
+            title: "Mac OS Agent Automation",
+            app: "antigravity",
+            status: "completed"
+        )
+        store.fourAppSlots.pinSlot(
+            index: 3,
+            place: .antigravity(conversationId: "conv-4", workspacePath: "/tmp/ws-4"),
+            title: "Multi-Agent Relay Workflow",
+            app: "antigravity",
+            status: "completed"
+        )
+
+        let availableStageWidth: CGFloat = 1020 - 244 - 1
+        for testSlot in [0, 6, 10, 13, 16] {
+            store.slot = testSlot
+            let stage = CreatorMicroStageView(
+                store: store,
+                agentKind: .antigravity,
+                actionForSlot: { _ in nil },
+                labelForSlot: { "槽位 \($0)" },
+                titleForSlot: { "按键 \($0)" },
+                onOpenFullActionLibrary: {},
+                onOpenMacroLibrary: {}
+            )
+            let controller = NSHostingController(rootView: stage)
+            let minimumStageWidth = controller.sizeThatFits(in: NSSize(width: 0, height: 620)).width
+            XCTAssertLessThanOrEqual(
+                minimumStageWidth,
+                availableStageWidth,
+                "CreatorMicroStageView minimum width (\(minimumStageWidth)pt) at slot \(testSlot) exceeds available stage width (\(availableStageWidth)pt) inside a 1020pt Workbench window"
+            )
+        }
     }
 }
