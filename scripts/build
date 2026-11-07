@@ -7,6 +7,7 @@ if [[ "${1:-}" == "--synthetic" ]]; then features=(--features synthetic-backend)
 cargo build --locked -p mi-model --bin mi
 cargo build --locked -p mi-ffi "${features[@]}"
 mkdir -p target/swift-bindings app/MicroInput/Sources/MicroInputCore app/MicroInput/Sources/MicroInputCoreFFI
+touch target/.metadata_never_index app/MicroInput/.build/.metadata_never_index 2>/dev/null || true
 cargo run --locked -p mi-ffi "${features[@]}" --bin uniffi-bindgen -- generate --library target/debug/libmi_ffi.dylib --language swift --config crates/mi-ffi/uniffi.toml --out-dir target/swift-bindings
 cp target/swift-bindings/MicroInputCore.swift app/MicroInput/Sources/MicroInputCore/
 cp target/swift-bindings/MicroInputCoreFFI.h app/MicroInput/Sources/MicroInputCoreFFI/

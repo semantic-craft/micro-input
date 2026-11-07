@@ -1,6 +1,24 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+CHECK_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/micro-input-check.XXXXXX")"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+cleanup_check() {
+  if [[ -d "$PWD/target/MicroInput.app" && -x "$LSREGISTER" ]]; then
+    "$LSREGISTER" -u "$PWD/target/MicroInput.app" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$PWD/target/MicroInput.app" "$CHECK_TMPDIR"
+  python3 -c '
+import pathlib, subprocess
+darwin_tmp = pathlib.Path(subprocess.check_output(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], text=True).strip())
+for d in darwin_tmp.glob("TemporaryDirectory.*"):
+    if d.is_dir() and not d.is_symlink() and [p.name for p in d.iterdir()] in ([], [".keep-directory"]):
+        for p in d.iterdir(): p.unlink(missing_ok=True)
+        d.rmdir()
+' 2>/dev/null || true
+}
+trap cleanup_check EXIT
+export TMPDIR="$CHECK_TMPDIR"
 python3 -B -m unittest discover -s scripts/tests -p 'test_*launcher.py'
 cargo fmt --all -- --check
 cargo test --locked --workspace --all-features

@@ -116,7 +116,7 @@ final class RadialMenuStateTests: XCTestCase {
     }
     func fixture(dictation: (any DictationDriving)? = nil, executor override: (any HostActionExecuting)? = nil) async throws -> Fixture {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let suite = "radial-tests-\(UUID().uuidString)", executor = RecordingHostActionExecutor()
+        let suite = directory.appendingPathComponent("radial-preferences").path, executor = RecordingHostActionExecutor()
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         let core = MicroInputCore.MicroInput.syntheticRadialDevice()
         let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core, documentURL: directory.appendingPathComponent("workbench.json"), actionExecutor: override ?? executor, dictationDriver: dictation, radialPreferences: preferences)
