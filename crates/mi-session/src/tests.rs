@@ -1220,3 +1220,75 @@ async fn radial_positions_preserve_continuous_motion_without_upgrading_candidate
     }
     session.shutdown().await;
 }
+
+#[tokio::test]
+async fn verified_input_split_mode_emits_ag10_and_ag11_independently_and_toggles_dynamically() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (session, link, _rx) = setup(500);
+    let merge_flag = Arc::new(AtomicBool::new(false));
+    let mut monitor = session.subscribe_verified_input_with_merge_flag(Arc::clone(&merge_flag));
+
+    for raw in [
+        json!({"m":"v.oai.hid","p":{"k":"AG10","act":1}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG11","act":1}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG10","act":0}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG11","act":0}}),
+        json!({"m":"v.oai.rad","p":{"a":0.25,"d":0.8}}),
+    ] {
+        link.inject.send(raw.to_string().into_bytes()).unwrap();
+    }
+
+    let p10 = monitor.next().await.unwrap();
+    assert_eq!(p10.kind, InputEventKind::Pressed);
+    assert_eq!(p10.binding_id.as_deref(), Some("AG10"));
+    assert_eq!(p10.logical_switch.as_deref(), Some("logical-10"));
+    assert_eq!(p10.physical_control.as_deref(), Some("row3-col0-left"));
+    assert_eq!(p10.keycap_group.as_deref(), Some("key-r3c0"));
+    assert_eq!(p10.action_role.as_deref(), Some("momentary_key"));
+
+    let p11 = monitor.next().await.unwrap();
+    assert_eq!(p11.kind, InputEventKind::Pressed);
+    assert_eq!(p11.binding_id.as_deref(), Some("AG11"));
+    assert_eq!(p11.logical_switch.as_deref(), Some("logical-11"));
+    assert_eq!(p11.physical_control.as_deref(), Some("row3-col1-middle"));
+    assert_eq!(p11.keycap_group.as_deref(), Some("key-r3c1"));
+    assert_eq!(p11.action_role.as_deref(), Some("momentary_key"));
+
+    let r10 = monitor.next().await.unwrap();
+    assert_eq!(r10.kind, InputEventKind::Released);
+    assert_eq!(r10.binding_id.as_deref(), Some("AG10"));
+    assert_eq!(r10.logical_switch.as_deref(), Some("logical-10"));
+
+    let r11 = monitor.next().await.unwrap();
+    assert_eq!(r11.kind, InputEventKind::Released);
+    assert_eq!(r11.binding_id.as_deref(), Some("AG11"));
+    assert_eq!(r11.logical_switch.as_deref(), Some("logical-11"));
+
+    let rad = monitor.next().await.unwrap();
+    assert!(rad.radial_position.is_some());
+
+    merge_flag.store(true, Ordering::SeqCst);
+    for raw in [
+        json!({"m":"v.oai.hid","p":{"k":"AG11","act":1}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG10","act":1}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG11","act":0}}),
+        json!({"m":"v.oai.hid","p":{"k":"AG10","act":0}}),
+    ] {
+        link.inject.send(raw.to_string().into_bytes()).unwrap();
+    }
+
+    let merged_press = monitor.next().await.unwrap();
+    assert_eq!(merged_press.kind, InputEventKind::Pressed);
+    assert_eq!(merged_press.binding_id.as_deref(), Some("AG10"));
+    assert_eq!(
+        merged_press.physical_control.as_deref(),
+        Some("row3-wide-2u")
+    );
+    assert_eq!(merged_press.keycap_group.as_deref(), Some("wide-bottom-2u"));
+
+    let merged_release = monitor.next().await.unwrap();
+    assert_eq!(merged_release.kind, InputEventKind::Released);
+    assert_eq!(merged_release.binding_id.as_deref(), Some("AG10"));
+
+    session.shutdown().await;
+}

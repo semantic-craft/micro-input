@@ -62,7 +62,9 @@ impl MicroInput {
     pub async fn subscribe_verified_input(&self) -> Result<Arc<InputSubscription>, BridgeError> {
         let session = self.current().map_err(failure)?;
         Ok(Arc::new(InputSubscription {
-            monitor: Mutex::new(session.subscribe_verified_input()),
+            monitor: Mutex::new(
+                session.subscribe_verified_input_with_merge_flag(Arc::clone(&self.merge_wide_key)),
+            ),
             closed: AtomicBool::new(false),
             changed: Notify::new(),
         }))

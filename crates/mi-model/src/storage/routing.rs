@@ -36,6 +36,9 @@ pub enum RoutingOperation {
     Follow {
         bundle_id: String,
     },
+    BottomRowLayout {
+        layout: crate::host_router::BottomRowLayout,
+    },
 }
 impl DocumentStore {
     pub fn host_revision(&self) -> u64 {
@@ -44,40 +47,66 @@ impl DocumentStore {
         }
         self.host_state_revision
     }
+    pub fn resolve_host_input(
+        &self,
+        binding_id: &str,
+        is_pressed: bool,
+    ) -> Option<crate::host_router::ResolvedHostAction> {
+        let host = self.host_store();
+        crate::host_router::resolve_host_action_with_layout(
+            &host.draft.document,
+            host.preferences.value.host_active_profile_id.as_deref(),
+            binding_id,
+            is_pressed,
+            host.preferences.value.command_execution_enabled,
+            host.preferences.value.bottom_row_layout,
+        )
+    }
     pub fn routing_state(&self) -> Value {
         if let Some(host) = &self.host {
             return host.routing_state();
         }
         let p = &self.preferences.value;
+        let layout = p.bottom_row_layout;
         let graph = &self.draft.document.editable.graph;
         let profile = p
             .host_active_profile_id
             .as_ref()
             .and_then(|id| graph.profiles.get(id));
-        let bindings = [
+        let split_bindings = [
+            "AG00", "AG01", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10",
+            "AG11", "AG12", "AG13", "AG14", "ENC_CLK", "AG15", "AG16", "AG17", "AG18",
+        ];
+        let merged_bindings = [
             "AG00", "AG01", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10",
             "AG12", "AG13", "AG14", "ENC_CLK", "AG15", "AG16", "AG17", "AG18",
         ];
+        let bindings: &[&str] = if layout.is_split() {
+            &split_bindings
+        } else {
+            &merged_bindings
+        };
         let keys: Vec<Value> = bindings.iter().map(|binding| {
             use crate::host_router::ResolvedHostAction::*;
-            let action = crate::host_router::resolve_host_action_with_command_consent(&self.draft.document, p.host_active_profile_id.as_deref(), binding, true, p.command_execution_enabled);
+            let action = crate::host_router::resolve_host_action_with_layout(
+                &self.draft.document,
+                p.host_active_profile_id.as_deref(),
+                binding,
+                true,
+                p.command_execution_enabled,
+                layout,
+            );
             let bound_action = profile
                 .and_then(|prof| prof.layer_order.first())
                 .and_then(|lid| graph.layers.get(lid))
                 .and_then(|layer| {
                     let slot = crate::host_router::binding_to_logical_slot(binding)?;
-                    let find_id = |s: &str| {
-                        layer
-                            .controls
-                            .values()
-                            .find(|b| b.logical_control == s)
-                            .and_then(|b| b.action_id.as_ref())
-                    };
-                    let aid = find_id(slot).or_else(|| match slot {
-                        "logical-10" => find_id("logical-11"),
-                        "logical-11" => find_id("logical-10"),
-                        _ => None,
-                    })?;
+                    let aid = crate::host_router::resolve_layer_slot_action_id(
+                        &self.draft.document,
+                        layer,
+                        slot,
+                        layout,
+                    )?;
                     graph.actions.get(aid)
                 });
             let label = match &action {
@@ -132,6 +161,16 @@ impl DocumentStore {
                     "scroll-up" => "向上滚动对话", "scroll-down" => "向下滚动对话",
                     "scroll-up-fast" => "快速向上滚动", "scroll-down-fast" => "快速向下滚动",
                     "scroll-to-bottom" => "跳到底部并聚焦输入",
+                    "sidebar-scroll-up" => "在项目中向上滚动",
+                    "sidebar-scroll-down" => "在项目中向下滚动",
+                    "prev-project" => "上一项目",
+                    "next-project" => "下一项目",
+                    "cycle-working-prev" => "上一个 Working 会话",
+                    "cycle-working-next" => "下一个 Working 会话",
+                    "cycle-completed-prev" => "上一个蓝点已完成会话",
+                    "cycle-completed-next" => "下一个蓝点已完成会话",
+                    "cycle-attention-prev" => "上一个 Working 或蓝点会话",
+                    "cycle-attention-next" => "下一个 Working 或蓝点会话",
                     "back" | "navigate-back" => "后退到上一个打开目标",
                     "forward" | "navigate-forward" => "前进到下一个打开目标",
                     "next-attention" => "下一个需要我",
@@ -144,7 +183,7 @@ impl DocumentStore {
                 Some(MacroSequence{events}) => format!("本地宏 · {} 步", events.len()),
                 None => "不可用 / 未配置".into(),
             };
-            let spec = crate::host_router::verified_physical_mapping(binding).unwrap();
+            let spec = crate::host_router::verified_physical_mapping_for_layout(binding, layout).unwrap();
             json!({"binding_id":binding,"control":spec.physical_control,"label":label,"available":action.is_some()})
         }).collect();
         json!({"document_id":self.draft.document_id,"document_revision":self.draft.revision,
@@ -152,6 +191,7 @@ impl DocumentStore {
             "profile_name":profile.map(|p| &p.name),"execution_enabled":p.host_execution_enabled,
             "command_execution_enabled":p.command_execution_enabled,
             "auto_follow_enabled":p.auto_follow_enabled,"manual_override":p.manual_override,
+            "bottom_row_layout":layout,
             "app_profile_links":p.app_profile_links,"keys":keys})
     }
     pub fn update_routing(&mut self, request: RoutingRequest) -> Result<(), String> {
@@ -203,6 +243,9 @@ impl DocumentStore {
                         next.host_active_profile_id = Some(id.clone());
                     }
                 }
+            }
+            RoutingOperation::BottomRowLayout { layout } => {
+                next.bottom_row_layout = layout;
             }
         }
         if next != self.preferences.value {
@@ -292,8 +335,8 @@ mod tests {
             let keys = state["keys"].as_array().unwrap();
             assert_eq!(
                 keys.len(),
-                19,
-                "{profile_name} cheat sheet must expose 19 verified controls"
+                20,
+                "{profile_name} cheat sheet must expose 20 verified controls in default split mode"
             );
 
             let by_id = |b: &str| -> &Value {
@@ -334,7 +377,8 @@ mod tests {
                 assert_eq!(by_id("AG07")["label"], "打开内置浏览器");
                 assert_eq!(by_id("AG08")["label"], "打开终端面板");
                 assert_eq!(by_id("AG09")["label"], "快速向右分栏");
-                assert_eq!(by_id("AG10")["label"], "按住说话");
+                assert_eq!(by_id("AG10")["label"], "聚焦输入框");
+                assert_eq!(by_id("AG11")["label"], "按住说话");
                 assert_eq!(by_id("AG12")["label"], "停止听写并提交");
                 assert_eq!(by_id("AG13")["label"], "上一会话（侧栏轮转）");
                 assert_eq!(by_id("AG14")["label"], "下一会话（侧栏轮转）");

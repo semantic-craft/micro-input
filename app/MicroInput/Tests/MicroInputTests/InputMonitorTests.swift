@@ -145,6 +145,7 @@ extension InputMonitorTests {
         let core = MicroInputCore.MicroInput.syntheticDiscovery()
         try await core.setSyntheticDiscovery(state: .twoDevices)
         let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: core)
+        await store.setBottomRowSplit(false)
         store.selectDevice("synthetic-interface-0")
         await store.connect("synthetic-interface-0")
         await store.readIdentity()

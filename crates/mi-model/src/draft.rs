@@ -742,6 +742,16 @@ pub fn actions() -> Vec<Action> {
         ("ag-prev-conversation", "Antigravity · 上一会话（侧栏轮转）", "Agent", "在左侧栏会话列表中向上切换一条会话（Alt+Up）", json!({"type":"agent_command","adapter":"antigravity","command":"prev-conversation"})),
         ("ag-next-conversation", "Antigravity · 下一会话（侧栏轮转）", "Agent", "在左侧栏会话列表中向下切换一条会话（Alt+Down）", json!({"type":"agent_command","adapter":"antigravity","command":"next-conversation"})),
         ("ag-project", "Antigravity · 选项目 / 新建项目", "Agent", "切换侧栏项目或打开新项目目录（Cmd+;）", json!({"type":"agent_command","adapter":"antigravity","command":"project"})),
+        ("ag-sidebar-scroll-up", "在项目中向上滚动", "Agent", "在左侧项目与会话栏向上滚动并切换项目", json!({"type":"agent_command","adapter":"antigravity","command":"sidebar-scroll-up"})),
+        ("ag-sidebar-scroll-down", "在项目中向下滚动", "Agent", "在左侧项目与会话栏向下滚动并切换项目", json!({"type":"agent_command","adapter":"antigravity","command":"sidebar-scroll-down"})),
+        ("ag-prev-project", "切换到上一项目", "Agent", "在左侧项目列表中向上切换一个项目", json!({"type":"agent_command","adapter":"antigravity","command":"prev-project"})),
+        ("ag-next-project", "切换到下一项目", "Agent", "在左侧项目列表中向下切换一个项目", json!({"type":"agent_command","adapter":"antigravity","command":"next-project"})),
+        ("ag-cycle-working-prev", "上一个 Working 会话", "Agent", "轮询切换到上一个 Working 运行中的会话（::）", json!({"type":"agent_command","adapter":"antigravity","command":"cycle-working-prev"})),
+        ("ag-cycle-working-next", "下一个 Working 会话", "Agent", "轮询切换到下一个 Working 运行中的会话（::）", json!({"type":"agent_command","adapter":"antigravity","command":"cycle-working-next"})),
+        ("ag-cycle-completed-prev", "上一个蓝点已完成会话", "Agent", "轮询切换到上一个蓝点已完事待看的会话（🔵）", json!({"type":"agent_command","adapter":"antigravity","command":"cycle-completed-prev"})),
+        ("ag-cycle-completed-next", "下一个蓝点已完成会话", "Agent", "轮询切换到下一个蓝点已完事待看的会话（🔵）", json!({"type":"agent_command","adapter":"antigravity","command":"cycle-completed-next"})),
+        ("ag-cycle-attention-prev", "上一个 Working 或蓝点会话", "Agent", "轮询切换到上一个 Working 运行中或蓝点已完成的会话", json!({"type":"agent_command","adapter":"antigravity","command":"cycle-attention-prev"})),
+        ("ag-cycle-attention-next", "下一个 Working 或蓝点会话", "Agent", "轮询切换到下一个 Working 运行中或蓝点已完成的会话", json!({"type":"agent_command","adapter":"antigravity","command":"cycle-attention-next"})),
         ("ag-split-right", "Antigravity · 快速向右分栏", "Agent", "将当前会话向右分栏（Cmd+D）", json!({"type":"agent_command","adapter":"antigravity","command":"split-right"})),
     ].into_iter().map(|(id,name,category,detail,payload)| Action {id:id.into(),name:name.into(),category:category.into(),detail:detail.into(),payload}).collect()
 }

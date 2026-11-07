@@ -315,3 +315,80 @@ fn eight_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
         .is_some());
     }
 }
+
+#[test]
+fn antigravity_legacy_bottom_row_dictation_upgrades_to_focus_input_and_push_to_talk() {
+    let mut d = Draft::default();
+    let ids = preset::install_agent_starter_profiles(&mut d).unwrap();
+    let ag_pid = ids
+        .iter()
+        .find(|pid| d.document.editable.graph.profiles[*pid].name == "Antigravity")
+        .unwrap()
+        .clone();
+    let ag_lid = d.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
+
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        10,
+        mi_model::draft::Action {
+            id: "desktop-dictation".into(),
+            name: "按住说话 · 松开停止".into(),
+            category: "Agent".into(),
+            detail: "2U 宽键按住启动听写".into(),
+            payload: json!({"type":"agent_command","adapter":"antigravity","command":"push-to-talk"}),
+        },
+    )
+    .unwrap();
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        11,
+        mi_model::draft::Action {
+            id: "desktop-dictation-r".into(),
+            name: "按住说话 · 松开停止".into(),
+            category: "Agent".into(),
+            detail: "2U 宽键按住启动听写".into(),
+            payload: json!({"type":"agent_command","adapter":"antigravity","command":"push-to-talk"}),
+        },
+    )
+    .unwrap();
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        9,
+        mi_model::draft::Action {
+            id: "custom-user-key".into(),
+            name: "用户自定义键".into(),
+            category: "文本".into(),
+            detail: "保留".into(),
+            payload: json!({"type":"text","text":"keep-me"}),
+        },
+    )
+    .unwrap();
+
+    preset::install_agent_starter_profiles(&mut d).unwrap();
+
+    let layer = &d.document.editable.graph.layers[&ag_lid];
+    let action_for = |slot: &str| {
+        let aid = layer
+            .controls
+            .values()
+            .find(|b| b.logical_control == slot)
+            .and_then(|b| b.action_id.as_ref())
+            .unwrap();
+        &d.document.editable.graph.actions[aid]
+    };
+    let a10 = action_for("logical-10");
+    assert_eq!(a10.id, "desktop-input");
+    assert_eq!(a10.name, "聚焦当前输入框");
+    assert_eq!(a10.payload["command"], "focus-input");
+
+    let a11 = action_for("logical-11");
+    assert_eq!(a11.id, "desktop-dictation");
+    assert_eq!(a11.name, "按住说话 · 松开停止");
+    assert_eq!(a11.payload["command"], "push-to-talk");
+
+    let a9 = action_for("logical-9");
+    assert_eq!(a9.id, "custom-user-key");
+}

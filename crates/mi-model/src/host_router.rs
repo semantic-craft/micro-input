@@ -174,6 +174,31 @@ pub fn check_passthrough_health(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BottomRowLayout {
+    #[default]
+    Split,
+    Merged,
+}
+
+impl BottomRowLayout {
+    pub fn is_merged(self) -> bool {
+        matches!(self, Self::Merged)
+    }
+
+    pub fn is_split(self) -> bool {
+        matches!(self, Self::Split)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Split => "split",
+            Self::Merged => "merged",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalControlSpec {
     pub binding_id: &'static str,
@@ -183,7 +208,10 @@ pub struct PhysicalControlSpec {
     pub action_role: &'static str,
 }
 
-pub fn verified_physical_mapping(binding_id: &str) -> Option<PhysicalControlSpec> {
+pub fn verified_physical_mapping_for_layout(
+    binding_id: &str,
+    layout: BottomRowLayout,
+) -> Option<PhysicalControlSpec> {
     let spec = match binding_id {
         "AG00" => PhysicalControlSpec {
             binding_id: "AG00",
@@ -255,6 +283,20 @@ pub fn verified_physical_mapping(binding_id: &str) -> Option<PhysicalControlSpec
             keycap_group: "key-r2c3",
             action_role: "momentary_key",
         },
+        "AG10" | "ACT10" if layout.is_split() => PhysicalControlSpec {
+            binding_id: "AG10",
+            logical_switch: "logical-10",
+            physical_control: "row3-col0-left",
+            keycap_group: "key-r3c0",
+            action_role: "momentary_key",
+        },
+        "AG11" | "ACT11" if layout.is_split() => PhysicalControlSpec {
+            binding_id: "AG11",
+            logical_switch: "logical-11",
+            physical_control: "row3-col1-middle",
+            keycap_group: "key-r3c1",
+            action_role: "momentary_key",
+        },
         "AG10" | "AG11" | "ACT10" | "ACT11" => PhysicalControlSpec {
             binding_id: "AG10",
             logical_switch: "logical-10",
@@ -323,6 +365,10 @@ pub fn verified_physical_mapping(binding_id: &str) -> Option<PhysicalControlSpec
     Some(spec)
 }
 
+pub fn verified_physical_mapping(binding_id: &str) -> Option<PhysicalControlSpec> {
+    verified_physical_mapping_for_layout(binding_id, BottomRowLayout::Merged)
+}
+
 pub fn binding_to_logical_slot(binding_id: &str) -> Option<&'static str> {
     match binding_id {
         "AG11" | "ACT11" => Some("logical-11"),
@@ -361,10 +407,10 @@ pub fn macos_virtual_key_code(key: &str) -> Option<u16> {
         "minus" | "-" => Some(0x1B),
         "8" => Some(0x1C),
         "0" => Some(0x1D),
-        "rightbracket" | "]" => Some(0x1E),
+        "rightbracket" | "right_bracket" | "]" => Some(0x1E),
         "o" => Some(0x1F),
         "u" => Some(0x20),
-        "leftbracket" | "[" => Some(0x21),
+        "leftbracket" | "left_bracket" | "[" => Some(0x21),
         "i" => Some(0x22),
         "p" => Some(0x23),
         "return" | "enter" => Some(0x24),
@@ -396,6 +442,11 @@ pub fn macos_virtual_key_code(key: &str) -> Option<u16> {
         "f10" => Some(0x6D),
         "f11" => Some(0x67),
         "f12" => Some(0x6F),
+        "home" => Some(0x73),
+        "page_up" | "pageup" => Some(0x74),
+        "forward_delete" | "forwarddelete" => Some(0x75),
+        "end" => Some(0x77),
+        "page_down" | "pagedown" => Some(0x79),
         "left" => Some(0x7B),
         "right" => Some(0x7C),
         "down" => Some(0x7D),
@@ -547,16 +598,73 @@ fn convert_action(
     }
 }
 
-pub fn resolve_host_action_with_command_consent(
+pub(crate) fn resolve_layer_slot_action_id<'a>(
+    doc: &'a LocalDocumentV2,
+    layer: &'a crate::document::LayerNode,
+    primary_slot: &str,
+    layout: BottomRowLayout,
+) -> Option<&'a String> {
+    let find_action_id = |slot: &str| -> Option<&'a String> {
+        layer
+            .controls
+            .values()
+            .find(|b| b.logical_control == slot)
+            .and_then(|b| b.action_id.as_ref())
+    };
+    if layout.is_split() {
+        return find_action_id(primary_slot);
+    }
+    if matches!(primary_slot, "logical-10" | "logical-11") {
+        let a10 = find_action_id("logical-10");
+        let a11 = find_action_id("logical-11");
+        let is_focus_input = |aid: &String| -> bool {
+            doc.editable
+                .graph
+                .actions
+                .get(aid)
+                .and_then(|a| serde_json::from_value::<ActionKind>(a.payload.clone()).ok())
+                .is_some_and(|k| {
+                    matches!(k, ActionKind::AgentCommand { command, .. } if command == "focus-input")
+                })
+        };
+        let is_voice_hold = |aid: &String| -> bool {
+            doc.editable
+                .graph
+                .actions
+                .get(aid)
+                .and_then(|a| serde_json::from_value::<ActionKind>(a.payload.clone()).ok())
+                .is_some_and(|k| {
+                    matches!(
+                        k,
+                        ActionKind::AgentCommand { command, .. }
+                            if command == "push-to-talk" || command == "dictation"
+                    )
+                })
+        };
+        if a10.is_some_and(is_focus_input) && a11.is_some_and(is_voice_hold) {
+            return a11;
+        }
+        return find_action_id(primary_slot).or_else(|| match primary_slot {
+            "logical-10" => a11,
+            "logical-11" => a10,
+            _ => None,
+        });
+    }
+    find_action_id(primary_slot)
+}
+
+pub fn resolve_host_action_with_layout(
     doc: &LocalDocumentV2,
     host_active_profile_id: Option<&str>,
     binding_id: &str,
     is_pressed: bool,
     command_execution_enabled: bool,
+    layout: BottomRowLayout,
 ) -> Option<ResolvedHostAction> {
     if !is_pressed {
         return None;
     }
+    let _physical = verified_physical_mapping_for_layout(binding_id, layout)?;
     let pid = host_active_profile_id?;
     let profile = doc.editable.graph.profiles.get(pid)?;
     let lid = profile.layer_order.first()?;
@@ -578,20 +686,7 @@ pub fn resolve_host_action_with_command_consent(
         }
     }
 
-    let find_action_id = |slot: &str| -> Option<&String> {
-        layer
-            .controls
-            .values()
-            .find(|b| b.logical_control == slot)
-            .and_then(|b| b.action_id.as_ref())
-    };
-
-    let action_id = find_action_id(primary_slot).or_else(|| match primary_slot {
-        "logical-10" => find_action_id("logical-11"),
-        "logical-11" => find_action_id("logical-10"),
-        _ => None,
-    })?;
-
+    let action_id = resolve_layer_slot_action_id(doc, layer, primary_slot, layout)?;
     let action = doc.editable.graph.actions.get(action_id)?;
     let fallback_bundle = profile_open_app_bundle_id(doc, pid);
     convert_action(
@@ -599,6 +694,23 @@ pub fn resolve_host_action_with_command_consent(
         Some(&profile.name),
         fallback_bundle.as_deref(),
         command_execution_enabled,
+    )
+}
+
+pub fn resolve_host_action_with_command_consent(
+    doc: &LocalDocumentV2,
+    host_active_profile_id: Option<&str>,
+    binding_id: &str,
+    is_pressed: bool,
+    command_execution_enabled: bool,
+) -> Option<ResolvedHostAction> {
+    resolve_host_action_with_layout(
+        doc,
+        host_active_profile_id,
+        binding_id,
+        is_pressed,
+        command_execution_enabled,
+        BottomRowLayout::Merged,
     )
 }
 

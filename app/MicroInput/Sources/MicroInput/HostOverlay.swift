@@ -100,7 +100,7 @@ struct HostCheatSheet: View {
         .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.panelOuter).strokeBorder(UITheme.strongBorder, lineWidth: 1))
     }
     private func controlName(_ key: HostKey) -> String {
-        let names = ["AG10":"底部宽键（2U）", "AG12":"底行右键", "AG13":"旋钮左旋", "AG14":"旋钮右旋", "ENC_CLK":"旋钮按下", "AG15":"摇杆（上）", "AG16":"摇杆（左）", "AG17":"摇杆（下）", "AG18":"摇杆（右）"]
+        let names = ["AG10": store.isBottomRowSplit ? "底行左键" : "底部宽键（2U）", "AG11":"底行中键", "AG12":"底行右键", "AG13":"旋钮左旋", "AG14":"旋钮右旋", "ENC_CLK":"旋钮按下", "AG15":"摇杆（上）", "AG16":"摇杆（左）", "AG17":"摇杆（下）", "AG18":"摇杆（右）"]
         let keys = ["AG00":"左上键", "AG01":"右上键", "AG02":"按键 03", "AG03":"按键 04", "AG04":"按键 05", "AG05":"按键 06", "AG06":"按键 07", "AG07":"按键 08", "AG08":"按键 09", "AG09":"按键 10"]
         return names[key.binding_id] ?? keys[key.binding_id] ?? key.control
     }
@@ -166,40 +166,5 @@ private extension Color {
             (r, g, b) = (255, 255, 255)
         }
         self.init(.sRGB, red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255, opacity: 1)
-    }
-}
-struct AppProfileLinksView: View {
-    @ObservedObject var store: Store
-    let close: () -> Void
-    @State private var bundleID = ""
-    @State private var profileID = ""
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack { Text("应用与 Profile").font(.title2); Spacer(); Button("完成", action: close).keyboardShortcut(.cancelAction) }
-            Text("未关联的应用保留当前配置。手动选择后保持不变，直到恢复跟随。").font(.callout).foregroundStyle(.secondary)
-            HStack {
-                Button("选择应用…") {
-                    let picker = NSOpenPanel(); picker.canChooseDirectories = false; picker.allowedContentTypes = [.applicationBundle]
-                    picker.directoryURL = URL(fileURLWithPath: "/Applications")
-                    if picker.runModal() == .OK, let url = picker.url, let id = Bundle(url: url)?.bundleIdentifier { bundleID = id }
-                }
-                Text(bundleID.isEmpty ? "尚未选择应用" : bundleID).lineLimit(1)
-            }
-            Picker("Profile", selection: $profileID) {
-                Text("请选择").tag("")
-                ForEach(store.hostProfiles, id: \.id.text) { Text($0.name).tag($0.id.text) }
-            }
-            Button("保存关联") { Task { await store.linkApp(bundleID, profileID: profileID) } }.disabled(bundleID.isEmpty || profileID.isEmpty)
-            Divider()
-            List((store.routing?.app_profile_links ?? [:]).keys.sorted(), id: \.self) { app in
-                HStack {
-                    VStack(alignment: .leading) {
-                        Text(app)
-                        Text(store.hostProfiles.first(where: { $0.id.text == store.routing?.app_profile_links[app] })?.name ?? "Profile 已不存在").foregroundStyle(.secondary)
-                    }
-                    Spacer(); Button("移除") { Task { await store.unlinkApp(app) } }
-                }
-            }
-        }.padding(20).frame(width: 480, height: 430)
     }
 }

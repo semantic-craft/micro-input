@@ -5,9 +5,13 @@ import XCTest
     func testRealUnixPeerEchoesFreshHandshakeAndDoesNotGrantRelease() async throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let scratch = root.appendingPathComponent(".scratch")
+        let candidateScratch = root.appendingPathComponent(".scratch")
+        let socketName = "own-\(UUID().uuidString.prefix(8)).sock"
+        let scratch = candidateScratch.appendingPathComponent(socketName).path.utf8.count < 100
+            ? candidateScratch
+            : FileManager.default.temporaryDirectory
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
-        let socket = scratch.appendingPathComponent("own-\(UUID().uuidString.prefix(8)).sock")
+        let socket = scratch.appendingPathComponent(socketName)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = ["-c", #"""

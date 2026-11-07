@@ -260,6 +260,16 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                         | "scroll-up-fast"
                         | "scroll-down-fast"
                         | "scroll-to-bottom"
+                        | "sidebar-scroll-up"
+                        | "sidebar-scroll-down"
+                        | "prev-project"
+                        | "next-project"
+                        | "cycle-working-prev"
+                        | "cycle-working-next"
+                        | "cycle-completed-prev"
+                        | "cycle-completed-next"
+                        | "cycle-attention-prev"
+                        | "cycle-attention-next"
                 ) || (command == "push-to-talk"
                     && matches!(
                         adapter.as_str(),

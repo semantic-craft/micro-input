@@ -1400,6 +1400,28 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             },
         ),
     ]);
+    legacy_specs.push(("Antigravity", antigravity.clone()));
+    for (slot, id, label, category, detail, kind) in antigravity.iter_mut() {
+        if *slot == 10 {
+            *id = "desktop-input";
+            *label = "聚焦当前输入框";
+            *category = "Agent";
+            *detail = "com.google.antigravity";
+            *kind = ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "focus-input".into(),
+            };
+        } else if *slot == 11 {
+            *id = "desktop-dictation";
+            *label = "按住说话 · 松开停止";
+            *category = "Agent";
+            *detail = "按住启动听写（Record Audio / Ctrl+M），松开自动停止";
+            *kind = ActionKind::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "push-to-talk".into(),
+            };
+        }
+    }
     let herdr = &mut specs
         .iter_mut()
         .find(|(name, _)| *name == "Herdr")
@@ -1585,6 +1607,64 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                             })
                     });
             if !can_upgrade {
+                if profile_name == "Antigravity" && !p.layer_order.is_empty() {
+                    let lid = p.layer_order[0].clone();
+                    let slot_aid = |doc: &LocalDocumentV2, slot: &str| -> Option<String> {
+                        doc.editable.graph.layers[&lid]
+                            .controls
+                            .values()
+                            .find(|b| b.logical_control == slot)
+                            .and_then(|b| b.action_id.clone())
+                    };
+                    let aid10 = slot_aid(&work.document, "logical-10");
+                    let aid11 = slot_aid(&work.document, "logical-11");
+                    let is_legacy_dictation = |aid: &Option<String>, expected_id: &str| -> bool {
+                        aid.as_ref()
+                            .and_then(|id| work.document.editable.graph.actions.get(id))
+                            .is_some_and(|a| {
+                                a.id == expected_id
+                                    && matches!(
+                                        a.payload.get("command").and_then(Value::as_str),
+                                        Some("push-to-talk" | "dictation")
+                                    )
+                            })
+                    };
+                    if is_legacy_dictation(&aid10, "desktop-dictation")
+                        && is_legacy_dictation(&aid11, "desktop-dictation-r")
+                    {
+                        work.mutate(|doc| {
+                            if let Some(id10) = &aid10 {
+                                if let Some(a10) = doc.editable.graph.actions.get_mut(id10) {
+                                    a10.id = "desktop-input".into();
+                                    a10.name = "聚焦当前输入框".into();
+                                    a10.category = "Agent".into();
+                                    a10.detail = "com.google.antigravity".into();
+                                    a10.payload = serde_json::to_value(ActionKind::AgentCommand {
+                                        adapter: "antigravity".into(),
+                                        command: "focus-input".into(),
+                                    })
+                                    .map_err(|e| e.to_string())?;
+                                }
+                            }
+                            if let Some(id11) = &aid11 {
+                                if let Some(a11) = doc.editable.graph.actions.get_mut(id11) {
+                                    a11.id = "desktop-dictation".into();
+                                    a11.name = "按住说话 · 松开停止".into();
+                                    a11.category = "Agent".into();
+                                    a11.detail =
+                                        "按住启动听写（Record Audio / Ctrl+M），松开自动停止"
+                                            .into();
+                                    a11.payload = serde_json::to_value(ActionKind::AgentCommand {
+                                        adapter: "antigravity".into(),
+                                        command: "push-to-talk".into(),
+                                    })
+                                    .map_err(|e| e.to_string())?;
+                                }
+                            }
+                            Ok(())
+                        })?;
+                    }
+                }
                 created_ids.push(pid);
                 continue;
             }

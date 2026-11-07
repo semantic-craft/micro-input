@@ -273,6 +273,17 @@ impl MicroInput {
             backlight: parse_zone(&parsed["backlight"]),
             underglow: parse_zone(&parsed["underglow"]),
         };
+        let default_key_b = rgb
+            .backlight
+            .brightness
+            .filter(|b| *b > 0.0)
+            .unwrap_or(0.85);
+        let default_key_e = match rgb.backlight.effect.as_deref() {
+            Some("breath") => 4,
+            Some("shallow_breath") => 6,
+            _ => 4,
+        };
+        let default_key_s = rgb.backlight.speed.filter(|s| *s > 0.0).unwrap_or(0.65);
         let mut entries = Vec::new();
         if let Some(items) = parsed["per_key"].as_array() {
             for item in items {
@@ -292,7 +303,34 @@ impl MicroInput {
                             .and_then(|hex| mi_model::lighting::color_from_hex(hex).ok())
                     })
                     .unwrap_or(0);
-                entries.push(mi_proto::lighting_candidate::OaiKeyStatusEntry { k, c });
+                let b = if c == 0 {
+                    0.0
+                } else {
+                    item["b"]
+                        .as_f64()
+                        .or_else(|| item["brightness"].as_f64())
+                        .filter(|v| *v > 0.0)
+                        .unwrap_or(default_key_b)
+                };
+                let e = if c == 0 {
+                    0
+                } else {
+                    item["e"]
+                        .as_u64()
+                        .and_then(|n| u8::try_from(n).ok())
+                        .unwrap_or(default_key_e)
+                };
+                let s = if c == 0 {
+                    0.0
+                } else {
+                    item["s"]
+                        .as_f64()
+                        .or_else(|| item["speed"].as_f64())
+                        .unwrap_or(default_key_s)
+                };
+                entries.push(
+                    mi_proto::lighting_candidate::OaiKeyStatusEntry::with_style(k, c, b, e, s),
+                );
             }
         }
         if !self.write_capable() {
@@ -311,6 +349,7 @@ impl MicroInput {
             })
             .to_string());
         };
+        let preview_ok = session.send_lights_preview(&rgb).await.is_ok();
         let rgb_ok = session.send_oai_rgbcfg(&rgb).await.is_ok();
         let th_ok = if entries.is_empty() {
             false
@@ -318,7 +357,8 @@ impl MicroInput {
             session.send_oai_thstatus(&entries).await.is_ok()
         };
         Ok(json!({
-            "synced": rgb_ok || th_ok,
+            "synced": preview_ok || rgb_ok || th_ok,
+            "preview": preview_ok,
             "rgbcfg": rgb_ok,
             "thstatus": th_ok,
             "keys": entries.len()

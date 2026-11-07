@@ -569,21 +569,19 @@ final class HostExecutionTests: XCTestCase {
         try await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: true)
         try await core.emitSyntheticBindingEvent(bindingId: "AG01", pressed: false)
 
-        // 2. WideKeyMerger: AG10 press + AG11 press + AG10 release + AG11 release -> exactly 1 Cmd+Return action
+        // 2. Default Split bottom row: AG10 -> logical-10 (antigravity/focus-input)
         try await core.emitSyntheticBindingEvent(bindingId: "AG10", pressed: true)
-        try await core.emitSyntheticBindingEvent(bindingId: "AG11", pressed: true)
         try await core.emitSyntheticBindingEvent(bindingId: "AG10", pressed: false)
-        try await core.emitSyntheticBindingEvent(bindingId: "AG11", pressed: false)
 
         // 3. Joystick sector: AG15 -> logical-16 (Cmd+Opt+Up)
         try await core.emitSyntheticBindingEvent(bindingId: "AG15", pressed: true)
         try await core.emitSyntheticBindingEvent(bindingId: "AG15", pressed: false)
 
-        for _ in 0..<25 where executor.receipts.count < 2 {
+        for _ in 0..<25 where executor.receipts.count < 4 {
             try await Task.sleep(nanoseconds: 20_000_000)
         }
 
-        XCTAssertEqual(executor.receipts.count, 2)
+        XCTAssertEqual(executor.receipts.count, 4)
         XCTAssertEqual(executor.receipts[0].bindingId, "AG00")
         XCTAssertEqual(executor.receipts[0].actionType, "open_app")
         XCTAssertEqual(executor.receipts[0].target, "com.google.antigravity")
@@ -592,6 +590,16 @@ final class HostExecutionTests: XCTestCase {
         XCTAssertEqual(executor.receipts[1].actionType, "agent_command")
         XCTAssertEqual(executor.receipts[1].target, "antigravity")
         XCTAssertEqual(executor.receipts[1].detail, "antigravity/focus-input")
+
+        XCTAssertEqual(executor.receipts[2].bindingId, "AG10")
+        XCTAssertEqual(executor.receipts[2].actionType, "agent_command")
+        XCTAssertEqual(executor.receipts[2].target, "antigravity")
+        XCTAssertEqual(executor.receipts[2].detail, "antigravity/focus-input")
+
+        XCTAssertEqual(executor.receipts[3].bindingId, "AG15")
+        XCTAssertEqual(executor.receipts[3].actionType, "agent_command")
+        XCTAssertEqual(executor.receipts[3].target, "antigravity")
+        XCTAssertEqual(executor.receipts[3].detail, "antigravity/scroll-up")
 
         // 4. Dial clockwise/counterclockwise/click and held-dial fast scroll on Antigravity, Qianwen, ZCode, DSH
         for (agentName, adapter) in [("Antigravity", "antigravity"), ("千问办公", "qwenwork"), ("ZCode", "zcode"), ("DeepSeek Coder (DSH)", "dsh-desktop")] {
@@ -1245,6 +1253,77 @@ final class HostExecutionTests: XCTestCase {
         XCTAssertNotNil(second, "Releasing the lock must allow a subsequent instance to acquire it")
         XCTAssertEqual(DocumentInstanceLock.ownerPID(directory: dir), 9999)
         second?.release()
+    }
+
+    @MainActor func testAntigravityControlAdaptationExcludesSidebarProjectsCollapseAndRecognizesConversationLinks() {
+        XCTAssertFalse(
+            DesktopAgentControls.extraControl(
+                adapter: "antigravity",
+                command: "project",
+                role: kAXButtonRole,
+                labels: ["Projects"]
+            ),
+            "Antigravity project command must never match the sidebar 'Projects' collapse toggle button"
+        )
+        XCTAssertTrue(
+            DesktopAgentControls.extraControl(
+                adapter: "antigravity",
+                command: "project",
+                role: kAXPopUpButtonRole,
+                labels: ["Select project, current: micro-input"]
+            )
+        )
+        XCTAssertTrue(
+            DesktopAgentControls.extraControl(
+                adapter: "antigravity",
+                command: "project",
+                role: kAXPopUpButtonRole,
+                labels: ["Create New Project"]
+            )
+        )
+        XCTAssertTrue(
+            DesktopAgentControls.extraControl(
+                adapter: "antigravity",
+                command: "model",
+                role: kAXPopUpButtonRole,
+                labels: ["Select model, current: Gemini 3.1 Pro (High)"]
+            )
+        )
+        XCTAssertTrue(
+            DesktopAgentControls.isSidebarConversationLink(
+                role: "AXLink",
+                labels: ["Anti-Gravity 按键无响应原因排查"],
+                x: 16
+            )
+        )
+        XCTAssertFalse(
+            DesktopAgentControls.isSidebarConversationLink(
+                role: "AXLink",
+                labels: ["New Conversation"],
+                x: 16
+            )
+        )
+        XCTAssertFalse(
+            DesktopAgentControls.isSidebarConversationLink(
+                role: "AXLink",
+                labels: ["Customizations"],
+                x: 16
+            )
+        )
+        XCTAssertFalse(
+            DesktopAgentControls.isSidebarConversationLink(
+                role: "AXLink",
+                labels: ["New Conversation in Project"],
+                x: 30
+            )
+        )
+        XCTAssertFalse(
+            DesktopAgentControls.isSidebarConversationLink(
+                role: "AXLink",
+                labels: ["Store.swift", "Opens external link"],
+                x: 420
+            )
+        )
     }
 }
 

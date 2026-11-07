@@ -504,8 +504,13 @@ impl MicroInput {
             serde_json::to_vec(&raw).unwrap(),
             None,
         ));
+        let store = mi_model::storage::DocumentStore::default();
+        let merge_wide_key = Arc::new(std::sync::atomic::AtomicBool::new(
+            store.bottom_row_layout().is_merged(),
+        ));
         Arc::new(Self {
-            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            draft: Mutex::new(store),
+            merge_wide_key,
             transport: Arc::new(transport),
             state: Mutex::new(ConnectionState {
                 synthetic_write_enabled: true,

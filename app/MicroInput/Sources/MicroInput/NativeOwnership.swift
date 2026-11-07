@@ -36,7 +36,7 @@ protocol NativeOwnershipTransport: Sendable {
     }
     private(set) var state: State = .unknown("尚未取得 Cindy 原生所有权回执")
     private(set) var generation: UInt64
-    private let clientInstance: UUID
+    private(set) var clientInstance: UUID
     private var pending: NativeOwnershipRequest?
     private var requestStarted: ContinuousClock.Instant?
     private var expires: ContinuousClock.Instant?
@@ -71,6 +71,14 @@ protocol NativeOwnershipTransport: Sendable {
         self.allowUnbridgedDesktop = false
         self.clientInstance = UUID()
         self.generation = 0
+    }
+    private func syncPersistedFenceIfNeeded() {
+        guard let unix = transport as? UnixNativeOwnershipTransport,
+              let fence = unix.readPersistedFence() else { return }
+        clientInstance = fence.clientInstance
+        if generation <= fence.generation {
+            generation = fence.generation &+ 1
+        }
     }
     private var isUnbridgedDesktopActive: Bool {
         guard allowUnbridgedDesktop,
@@ -113,7 +121,8 @@ protocol NativeOwnershipTransport: Sendable {
     func receive(_ reply: NativeOwnershipReply, for request: NativeOwnershipRequest) {
         guard pending == request, generation == request.generation else { return }
         pending = nil
-        guard let started = requestStarted, started.duration(to: .now) < .seconds(1),
+        let maxLatency: Duration = allowUnbridgedDesktop ? .seconds(2) : .seconds(1)
+        guard let started = requestStarted, started.duration(to: .now) < maxLatency,
               reply.version == 1, reply.requestId == request.requestId,
               reply.clientInstance == clientInstance, reply.generation == generation else {
             invalidate("握手身份或代次未确认"); return
@@ -127,6 +136,11 @@ protocol NativeOwnershipTransport: Sendable {
             invalidate("Cindy 实例已更换，等待重新确认"); return
         }
         nativeIdentity = (reply.nativeInstance, reply.nativeGeneration)
+        if reply.state == "unknown",
+           ["stale_generation", "returned_generation", "different_client"].contains(reply.reason) {
+            syncPersistedFenceIfNeeded()
+            invalidate("握手代次已同步，等待重新确认"); return
+        }
         let next: State
         switch reply.state {
         case "native": next = .native(reply.nativeInstance, reply.nativeGeneration)
@@ -137,9 +151,15 @@ protocol NativeOwnershipTransport: Sendable {
                 invalidate("原生释放未完整确认"); return
             }
             next = .released(reply.nativeInstance, reply.nativeGeneration)
+        case "unknown" where allowUnbridgedDesktop
+            && request.desiredOwner == "micro-input"
+            && reply.capabilities?.contains("fenced-release-v1") == true
+            && reply.lightingDrained
+            && reply.reason == "native_drain_unconfirmed":
+            next = .released(reply.nativeInstance, reply.nativeGeneration)
         default: next = .unknown("Cindy 未确认释放")
         }
-        expires = started.advanced(by: .seconds(1))
+        expires = allowUnbridgedDesktop ? ContinuousClock.now.advanced(by: .seconds(2)) : started.advanced(by: .seconds(1))
         expiryTask?.cancel()
         if case .released = next, let deadline = expires {
             let epoch = generation
@@ -149,7 +169,16 @@ protocol NativeOwnershipTransport: Sendable {
                 self.invalidate("原生回执已过期")
             }
         }
-        if next != state { state = next; changed?() }
+        let isSameInstanceRenewal: Bool = {
+            if case .released(let prevInstance, _) = state, case .released(let nextInstance, _) = next {
+                return prevInstance == nextInstance
+            }
+            return false
+        }()
+        if next != state {
+            state = next
+            if !isSameInstanceRenewal { changed?() }
+        }
     }
     func failed(_ request: NativeOwnershipRequest) {
         guard pending == request, generation == request.generation else { return }
@@ -174,6 +203,7 @@ protocol NativeOwnershipTransport: Sendable {
                 }
                 if self.allowUnbridgedDesktop, !self.bridgeObserved {
                     self.bridgeObserved = true
+                    self.syncPersistedFenceIfNeeded()
                     self.invalidate("检测到 Cindy 原生所有权桥，等待确认")
                 }
                 let round = self.generation

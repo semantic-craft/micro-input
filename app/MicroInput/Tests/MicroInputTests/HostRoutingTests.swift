@@ -108,7 +108,45 @@ import MicroInputCore
         XCTAssertEqual(store.hostActiveProfileId,id)
         XCTAssertNil(store.routing?.profile_name)
         XCTAssertTrue(try XCTUnwrap(store.routing).keys.allSatisfy { !$0.available })
+        XCTAssertTrue(store.isBottomRowSplit)
+        XCTAssertEqual(store.routing?.keys.filter { $0.binding_id == "AG10" || $0.binding_id == "AG11" }.count,2)
+        await store.setBottomRowSplit(false)
+        XCTAssertFalse(store.isBottomRowSplit)
         XCTAssertEqual(store.routing?.keys.filter { $0.binding_id == "AG10" || $0.binding_id == "AG11" }.count,1)
+        await store.shutdown()
+    }
+    func testBottomRowSplitDefaultAndMergeToggleWithAntigravityBottomRowPreset() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mi-split-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let store = Store(nativeOwnership: NativeOwnershipController(isolated: true), backend: MicroInputCore.MicroInput(), documentURL: dir.appendingPathComponent("workbench.json"), actionExecutor: RecordingHostActionExecutor())
+        await store.loadWorkbench()
+        await store.installCodingAgentPresets()
+        XCTAssertTrue(store.hasAllDesktopAgentPresets)
+        XCTAssertTrue(store.isBottomRowSplit)
+        XCTAssertEqual(store.routing?.bottom_row_layout, "split")
+
+        let ag = try XCTUnwrap(store.hostProfiles.first(where: { $0.name == "Antigravity" }))
+        let lid = try XCTUnwrap(ag.layers.first?.id.text)
+        let s10 = store.draft.edits["[\"\(ag.id.text)\",\"\(lid)\",\"logical-10\"]"]
+        let s11 = store.draft.edits["[\"\(ag.id.text)\",\"\(lid)\",\"logical-11\"]"]
+        let s12 = store.draft.edits["[\"\(ag.id.text)\",\"\(lid)\",\"logical-12\"]"]
+        XCTAssertEqual(s10?.id, "desktop-input")
+        XCTAssertEqual(s10?.payload["command"]?.text, "focus-input")
+        XCTAssertEqual(s11?.id, "desktop-dictation")
+        XCTAssertEqual(s11?.payload["command"]?.text, "push-to-talk")
+        XCTAssertEqual(s12?.id, "desktop-submit")
+        XCTAssertEqual(s12?.payload["command"]?.text, "submit")
+
+        store.slot = 11
+        await store.setBottomRowSplit(false)
+        XCTAssertFalse(store.isBottomRowSplit)
+        XCTAssertEqual(store.routing?.bottom_row_layout, "merged")
+        XCTAssertEqual(store.slot, 10)
+
+        await store.setBottomRowSplit(true)
+        XCTAssertTrue(store.isBottomRowSplit)
+        XCTAssertEqual(store.routing?.bottom_row_layout, "split")
         await store.shutdown()
     }
     func testOneExecutorOverflowAndMutationDiscardPendingActions() async throws {
@@ -159,7 +197,7 @@ import MicroInputCore
         let (store, _, dir) = try await fixture()
         defer { try? FileManager.default.removeItem(at: dir) }
         let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        store.overlay.showNotice(name:"S5 native notice",mode:"自动跟随")
+        store.overlay.showNotice(name:"S5 native notice",mode:"自动切换中")
         let notice = try XCTUnwrap(NSApp.windows.first { $0 is PassiveHostPanel && $0.isVisible })
         XCTAssertFalse(notice.isKeyWindow)
         XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier,frontmost)
@@ -207,6 +245,84 @@ import MicroInputCore
         XCTAssertEqual(executor.started, ["old", "replacement"])
         XCTAssertNil(store.hostExecutionTask)
         await store.shutdown()
+    }
+
+    func testAutoSwitchStateTransitionsAndPauseResume() async throws {
+        let (store, _, dir) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        await store.setAutoFollow(true)
+        XCTAssertEqual(store.autoSwitchState, .active)
+        XCTAssertEqual(store.routingMode, "自动切换中")
+        XCTAssertEqual(store.autoSwitchState.actionButtonTitle, "暂停自动切换")
+
+        await store.performAutoSwitchAction()
+        XCTAssertEqual(store.autoSwitchState, .paused)
+        XCTAssertEqual(store.routingMode, "已暂停自动切换")
+        XCTAssertEqual(store.autoSwitchState.actionButtonTitle, "恢复自动切换")
+
+        await store.performAutoSwitchAction()
+        XCTAssertEqual(store.autoSwitchState, .active)
+        XCTAssertEqual(store.routingMode, "自动切换中")
+
+        await store.pauseFollowing()
+        XCTAssertEqual(store.autoSwitchState, .paused)
+
+        await store.setAutoFollow(false)
+        XCTAssertEqual(store.autoSwitchState, .disabled)
+        XCTAssertEqual(store.routingMode, "自动切换已关闭")
+        XCTAssertNil(store.autoSwitchState.actionButtonTitle)
+
+        await store.setAutoFollow(true)
+        XCTAssertEqual(store.autoSwitchState, .active)
+        XCTAssertEqual(store.routingMode, "自动切换中")
+        await store.shutdown()
+    }
+
+    func testShortcutChordCaptureAndApply() {
+        XCTAssertEqual(
+            ShortcutChord.from(keyCode: 0x35, modifierFlags: []),
+            .cancelled
+        )
+        XCTAssertEqual(
+            ShortcutChord.from(keyCode: 0x35, modifierFlags: [.command]),
+            .recorded(ShortcutChord(key: "escape", modifiers: ["command"]))
+        )
+        XCTAssertEqual(
+            ShortcutChord.from(keyCode: 0xFF, modifierFlags: [.command]),
+            .ignored
+        )
+
+        let outcome = ShortcutChord.from(keyCode: 0x21, modifierFlags: [.command, .shift])
+        guard case .recorded(let chord) = outcome else {
+            return XCTFail("Expected recorded chord for Cmd+Shift+[")
+        }
+        XCTAssertEqual(chord.key, "left_bracket")
+        XCTAssertEqual(chord.modifiers, ["command", "shift"])
+        XCTAssertEqual(chord.displayLabel, "⇧⌘[")
+
+        var action = CatalogAction(
+            id: "test-shortcut",
+            name: "快捷键",
+            category: "快捷键",
+            detail: "测试",
+            payload: [
+                "type": .string("shortcut"),
+                "key": .string("p"),
+                "modifiers": .array([.string("command")]),
+                "target": .string("frontmost-editor"),
+            ]
+        )
+        chord.apply(to: &action)
+        XCTAssertEqual(action.payload["key"]?.text, "left_bracket")
+        XCTAssertEqual(action.name, "快捷键 ⇧⌘[")
+
+        var customNamed = action
+        customNamed.name = "切换到左侧标签"
+        let nextChord = ShortcutChord(key: "right_bracket", modifiers: ["command", "shift"])
+        nextChord.apply(to: &customNamed)
+        XCTAssertEqual(customNamed.payload["key"]?.text, "right_bracket")
+        XCTAssertEqual(customNamed.name, "切换到左侧标签")
     }
 }
 

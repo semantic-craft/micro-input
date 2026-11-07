@@ -207,5 +207,39 @@ final class WorkspaceLifecycleTests: XCTestCase {
         XCTAssertEqual(store.connectedID, "synthetic-interface-0")
         await store.shutdown()
     }
+
+    @MainActor func testAutoHostReadyReconnectsAfterWakeAndRespectsManualDisconnect() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let core = MicroInputCore.MicroInput.syntheticDiscovery()
+        try await core.setSyntheticDiscovery(state: .reconnectedDevice)
+        try await core.setSyntheticConfig(scenario: 1)
+
+        let store = Store(
+            nativeOwnership: NativeOwnershipController(isolated: true),
+            backend: core,
+            documentURL: directory.appendingPathComponent("workbench.json")
+        )
+        store.autoHostReady = true
+        await store.loadWorkbench()
+        await store.setHostExecutionEnabled(true)
+        await store.autoSetupHostExecutionIfNeeded()
+        XCTAssertEqual(store.connectedID, "synthetic-reconnected-interface-0")
+
+        store.systemWillSleep()
+        XCTAssertNil(store.connectedID)
+        await store.systemDidWake()
+        XCTAssertEqual(store.connectedID, "synthetic-reconnected-interface-0",
+                       "When autoHostReady is enabled, waking from sleep with a single verified USB candidate must automatically reconnect")
+
+        await store.suspend()
+        XCTAssertNil(store.connectedID)
+        XCTAssertTrue(store.userManuallyDisconnected)
+        await store.refresh()
+        XCTAssertNil(store.connectedID, "Explicit manual disconnect must not auto-reconnect until user requests connection")
+        await store.shutdown()
+    }
 }
 #endif

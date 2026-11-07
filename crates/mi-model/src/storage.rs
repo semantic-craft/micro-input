@@ -304,6 +304,12 @@ impl DocumentStore {
         }
         self.preferences.value.command_execution_enabled
     }
+    pub fn bottom_row_layout(&self) -> crate::host_router::BottomRowLayout {
+        if let Some(host) = &self.host {
+            return host.bottom_row_layout();
+        }
+        self.preferences.value.bottom_row_layout
+    }
     pub fn set_host_active_profile(&mut self, profile_id: Option<String>) -> Result<(), String> {
         if let Some(host) = &mut self.host {
             return host.set_host_active_profile(profile_id);
@@ -603,6 +609,8 @@ struct HostPreferences {
     #[serde(default)]
     manual_override: bool,
     #[serde(default)]
+    bottom_row_layout: crate::host_router::BottomRowLayout,
+    #[serde(default)]
     app_profile_links: std::collections::BTreeMap<String, String>,
 }
 impl Default for HostPreferences {
@@ -615,6 +623,7 @@ impl Default for HostPreferences {
             command_execution_enabled: false,
             auto_follow_enabled: false,
             manual_override: false,
+            bottom_row_layout: crate::host_router::BottomRowLayout::Split,
             app_profile_links: Default::default(),
         }
     }

@@ -133,7 +133,67 @@ async fn verified_input_subscription_merges_wide_key_and_resolves_host_actions()
     assert_eq!(resolved["action_type"], "open_app");
     assert_eq!(resolved["bundle_id"], "com.google.antigravity");
 
-    // WideKeyMerger across FFI: AG10 press -> 1 Pressed; AG11 press -> suppressed; AG10 release -> suppressed; AG11 release -> 1 Released
+    // Default Split layout: AG10 and AG11 emit distinct events and resolve to focus-input and push-to-talk
+    core.emit_synthetic_binding_event("AG10".into(), true)
+        .await
+        .unwrap();
+    core.emit_synthetic_binding_event("AG11".into(), true)
+        .await
+        .unwrap();
+    core.emit_synthetic_binding_event("AG10".into(), false)
+        .await
+        .unwrap();
+    core.emit_synthetic_binding_event("AG11".into(), false)
+        .await
+        .unwrap();
+
+    let split_p10 = sub.next_event().await.unwrap();
+    assert_eq!(split_p10.kind, mi_ffi::InputKind::Pressed);
+    assert_eq!(split_p10.binding_id.as_deref(), Some("AG10"));
+    assert_eq!(
+        split_p10.physical_control.as_deref(),
+        Some("row3-col0-left")
+    );
+    let act10: serde_json::Value =
+        serde_json::from_str(&core.resolve_input_action("AG10".into(), true).unwrap()).unwrap();
+    assert_eq!(act10["command"], "focus-input");
+
+    let split_p11 = sub.next_event().await.unwrap();
+    assert_eq!(split_p11.kind, mi_ffi::InputKind::Pressed);
+    assert_eq!(split_p11.binding_id.as_deref(), Some("AG11"));
+    assert_eq!(
+        split_p11.physical_control.as_deref(),
+        Some("row3-col1-middle")
+    );
+    let act11: serde_json::Value =
+        serde_json::from_str(&core.resolve_input_action("AG11".into(), true).unwrap()).unwrap();
+    assert_eq!(act11["command"], "push-to-talk");
+
+    let split_r10 = sub.next_event().await.unwrap();
+    assert_eq!(split_r10.kind, mi_ffi::InputKind::Released);
+    assert_eq!(split_r10.binding_id.as_deref(), Some("AG10"));
+    let split_r11 = sub.next_event().await.unwrap();
+    assert_eq!(split_r11.kind, mi_ffi::InputKind::Released);
+    assert_eq!(split_r11.binding_id.as_deref(), Some("AG11"));
+
+    // Switch to Merged layout via update_host_routing: WideKeyMerger coalesces AG10 + AG11
+    let routing_state: serde_json::Value =
+        serde_json::from_str(&core.host_routing_state()).unwrap();
+    core.update_host_routing(
+        serde_json::json!({
+            "document_id": routing_state["document_id"],
+            "document_revision": routing_state["document_revision"],
+            "host_state_revision": routing_state["host_state_revision"],
+            "operation": {
+                "kind": "bottom_row_layout",
+                "layout": "merged"
+            }
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+
     core.emit_synthetic_binding_event("AG10".into(), true)
         .await
         .unwrap();

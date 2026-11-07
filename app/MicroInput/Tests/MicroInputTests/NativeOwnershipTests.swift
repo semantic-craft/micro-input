@@ -343,4 +343,57 @@ import MicroInputCore
         ownership.stop()
     }
 
+    func testUnbridgedDesktopAcceptsHardwareFencedReleaseWhenRendererDrainTimesOutAndRenewalsDoNotCancelWork() {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("mi-hw-fenced-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let sockPath = tempDir.appendingPathComponent("cindy-ownership.sock").path
+        FileManager.default.createFile(atPath: sockPath, contents: Data())
+
+        let ownership = NativeOwnershipController(transport: UnixNativeOwnershipTransport(path: sockPath), allowUnbridgedDesktop: true)
+        ownership.setDesiredOwner("micro-input")
+        var changes = 0
+        ownership.changed = { changes += 1 }
+        changes = 0
+
+        let firstReq = ownership.beginRequest(microDrained: true)
+        let firstReply = NativeOwnershipReply(
+            version: 1,
+            requestId: firstReq.requestId,
+            clientInstance: firstReq.clientInstance,
+            generation: firstReq.generation,
+            nativeInstance: native,
+            nativeGeneration: 546,
+            state: "unknown",
+            reason: "native_drain_unconfirmed",
+            inputDrained: false,
+            pttDrained: false,
+            lightingDrained: true,
+            capabilities: ["fenced-release-v1"]
+        )
+        ownership.receive(firstReply, for: firstReq)
+        XCTAssertTrue(ownership.allowsExecution, "Desktop mode must allow execution when Cindy main-process HID is fenced (lightingDrained == true) even if an unmounted background renderer window timed out native_drain_unconfirmed")
+        XCTAssertEqual(changes, 1)
+
+        // Subsequent renewal with incremented nativeGeneration must not re-fire changed() and cancel active PTT/host actions.
+        let secondReq = ownership.beginRequest(microDrained: false)
+        let secondReply = NativeOwnershipReply(
+            version: 1,
+            requestId: secondReq.requestId,
+            clientInstance: secondReq.clientInstance,
+            generation: secondReq.generation,
+            nativeInstance: native,
+            nativeGeneration: 547,
+            state: "unknown",
+            reason: "native_drain_unconfirmed",
+            inputDrained: false,
+            pttDrained: false,
+            lightingDrained: true,
+            capabilities: ["fenced-release-v1"]
+        )
+        ownership.receive(secondReply, for: secondReq)
+        XCTAssertTrue(ownership.allowsExecution)
+        XCTAssertEqual(changes, 1, "Same-instance renewal with advancing nativeGeneration must not fire changed() or cancel in-flight actions")
+    }
+
 }

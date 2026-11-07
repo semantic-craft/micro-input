@@ -182,6 +182,7 @@ impl Drop for ConnectAttempt<'_> {
 #[derive(uniffi::Object)]
 pub struct MicroInput {
     draft: Mutex<mi_model::storage::DocumentStore>,
+    pub(crate) merge_wide_key: Arc<std::sync::atomic::AtomicBool>,
     transport: Arc<dyn HidTransport>,
     state: Mutex<ConnectionState>,
     operations: Mutex<device_operations::Operations>,
@@ -192,8 +193,13 @@ pub struct MicroInput {
 impl MicroInput {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
+        let store = mi_model::storage::DocumentStore::default();
+        let merge_wide_key = Arc::new(std::sync::atomic::AtomicBool::new(
+            store.bottom_row_layout().is_merged(),
+        ));
         Arc::new(Self {
-            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            draft: Mutex::new(store),
+            merge_wide_key,
             transport: Arc::new(MacTransport::new()),
             state: Mutex::new(ConnectionState::default()),
             operations: Mutex::new(device_operations::Operations::default()),
@@ -241,9 +247,13 @@ impl MicroInput {
             .map_err(failure)
     }
     pub async fn open_document(&self, path: String) -> Result<String, BridgeError> {
-        let mut store = self.draft.lock().unwrap();
-        store.open(path.into()).map_err(failure)?;
-        document_response(&store, None)
+        let response = {
+            let mut store = self.draft.lock().unwrap();
+            store.open(path.into()).map_err(failure)?;
+            document_response(&store, None)
+        };
+        self.sync_bottom_row_layout();
+        response
     }
     pub async fn inspect_agent_proposal(&self, text: String) -> Result<String, BridgeError> {
         let preview = self
@@ -889,14 +899,7 @@ impl MicroInput {
         if !store.host_execution_enabled() {
             return None;
         }
-        let active_pid = store.host_active_profile_id();
-        let resolved = mi_model::host_router::resolve_host_action_with_command_consent(
-            &store.draft.document,
-            active_pid.as_deref(),
-            &binding_id,
-            is_pressed,
-            store.command_execution_enabled(),
-        )?;
+        let resolved = store.resolve_host_input(&binding_id, is_pressed)?;
         serde_json::to_string(&resolved).ok()
     }
     pub async fn install_coding_agent_presets(&self) -> Result<String, BridgeError> {
@@ -960,6 +963,11 @@ impl MicroInput {
     }
 }
 impl MicroInput {
+    pub(crate) fn sync_bottom_row_layout(&self) {
+        let merged = self.draft.lock().unwrap().bottom_row_layout().is_merged();
+        self.merge_wide_key
+            .store(merged, std::sync::atomic::Ordering::SeqCst);
+    }
     fn invalidate(&self) -> (u64, Option<(String, Arc<DeviceSession>)>) {
         self.operations.lock().unwrap().preview = None;
         let mut state = self.state.lock().unwrap();
@@ -1066,6 +1074,7 @@ mod tests {
         let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let core = Arc::new(MicroInput {
             draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            merge_wide_key: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             transport: Arc::new(SlowDiscoveryTransport {
                 entered: entered.clone(),
                 release: release.clone(),
@@ -1127,6 +1136,7 @@ mod tests {
         });
         let core = Arc::new(MicroInput {
             draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            merge_wide_key: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             transport: transport.clone(),
             state: Mutex::new(ConnectionState::default()),
             operations: Mutex::new(device_operations::Operations::default()),
@@ -1170,6 +1180,7 @@ mod tests {
     async fn nonexclusive_open_failure_is_unconfirmed_and_manual_retry_is_available() {
         let core = MicroInput {
             draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            merge_wide_key: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             transport: Arc::new(UnavailableTransport),
             state: Mutex::new(ConnectionState::default()),
             operations: Mutex::new(device_operations::Operations::default()),
@@ -1201,6 +1212,7 @@ mod tests {
         let (link, _) = MockLink::new();
         let core = Arc::new(MicroInput {
             draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            merge_wide_key: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             transport: Arc::new(DelayedTransport {
                 entered: entered.clone(),
                 release: release.clone(),
@@ -1228,6 +1240,7 @@ mod tests {
         let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let core = Arc::new(MicroInput {
             draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            merge_wide_key: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             transport: Arc::new(DelayedTransport {
                 entered: entered.clone(),
                 release: release.clone(),
@@ -1258,8 +1271,13 @@ mod tests {
 impl MicroInput {
     #[uniffi::constructor]
     pub fn synthetic_discovery() -> Arc<Self> {
+        let store = mi_model::storage::DocumentStore::default();
+        let merge_wide_key = Arc::new(std::sync::atomic::AtomicBool::new(
+            store.bottom_row_layout().is_merged(),
+        ));
         Arc::new(Self {
-            draft: Mutex::new(mi_model::storage::DocumentStore::default()),
+            draft: Mutex::new(store),
+            merge_wide_key,
             transport: Arc::new(mi_transport::SyntheticDiscovery::default()),
             state: Mutex::new(ConnectionState::default()),
             operations: Mutex::new(device_operations::Operations::default()),

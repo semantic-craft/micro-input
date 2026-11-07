@@ -7,8 +7,56 @@ struct HostRoutingState: Decodable {
     let profile_id: String?, profile_name: String?
     let execution_enabled: Bool, auto_follow_enabled: Bool, manual_override: Bool
     let command_execution_enabled: Bool
+    var bottom_row_layout: String? = nil
     let app_profile_links: [String: String]
     let keys: [HostKey]
+}
+
+enum AutoSwitchState: Equatable {
+    case unloaded
+    case disabled
+    case active
+    case paused
+
+    static let toggleTitle = "随前台软件自动切换方案"
+
+    init(routing: HostRoutingState?) {
+        guard let routing else {
+            self = .unloaded
+            return
+        }
+        if !routing.auto_follow_enabled {
+            self = .disabled
+        } else if routing.manual_override {
+            self = .paused
+        } else {
+            self = .active
+        }
+    }
+
+    var isEnabled: Bool {
+        switch self {
+        case .active, .paused: return true
+        case .unloaded, .disabled: return false
+        }
+    }
+
+    var statusLabel: String {
+        switch self {
+        case .unloaded: return "配置尚未载入"
+        case .disabled: return "自动切换已关闭"
+        case .active: return "自动切换中"
+        case .paused: return "已暂停自动切换"
+        }
+    }
+
+    var actionButtonTitle: String? {
+        switch self {
+        case .active: return "暂停自动切换"
+        case .paused: return "恢复自动切换"
+        case .unloaded, .disabled: return nil
+        }
+    }
 }
 struct HostKey: Decodable, Identifiable {
     let binding_id: String, control: String, label: String, available: Bool
@@ -163,10 +211,11 @@ struct KeypadNavigationHistory: Equatable {
 }
 
 extension Store {
+    var autoSwitchState: AutoSwitchState {
+        AutoSwitchState(routing: routing)
+    }
     var routingMode: String {
-        guard let routing else { return "配置尚未载入" }
-        if routing.manual_override { return "手动保持" }
-        return routing.auto_follow_enabled ? "自动跟随" : "自动跟随已关闭"
+        autoSwitchState.statusLabel
     }
     var dispatchOpen: Bool { nativeOwnership.allowsExecution && !hostOperationPaused && !mutationDraining && routingValid && !systemSleeping && !stopped && !overflowDraining }
     func refreshRouting() throws {
@@ -280,8 +329,24 @@ extension Store {
     func reevaluateForeground() {
         foregroundChanged(bundleID: externalBundleID ?? NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
     }
-    func setAutoFollow(_ enabled: Bool) async { await routingChange(["kind":"enable", "enabled":enabled]) }
+    func setAutoFollow(_ enabled: Bool) async {
+        await routingChange(["kind":"enable", "enabled":enabled])
+        if enabled, routing?.manual_override == true {
+            await resumeFollowing()
+        }
+    }
     func resumeFollowing() async { await routingChange(["kind":"resume"]) }
+    func pauseFollowing() async { await setHostActiveProfile(hostActiveProfileId) }
+    func performAutoSwitchAction() async {
+        switch autoSwitchState {
+        case .active:
+            await pauseFollowing()
+        case .paused:
+            await resumeFollowing()
+        case .unloaded, .disabled:
+            break
+        }
+    }
     func linkApp(_ bundleID: String, profileID: String) async { await routingChange(["kind":"upsert", "bundle_id":bundleID, "profile_id":profileID]) }
     func unlinkApp(_ bundleID: String) async { await routingChange(["kind":"remove", "bundle_id":bundleID]) }
     func resolveHostAction(_ binding: String) -> (String, String, HostRoutingState)? {

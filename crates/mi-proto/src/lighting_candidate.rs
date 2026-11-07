@@ -34,7 +34,7 @@ impl LightingZoneCandidate {
         if self.effect.as_deref().is_some_and(|effect| {
             !matches!(
                 effect,
-                "off" | "solid" | "snake" | "rainbow" | "breath" | "gradient"
+                "off" | "solid" | "snake" | "rainbow" | "breath" | "gradient" | "shallow_breath"
             )
         }) || [self.brightness, self.speed, self.magic]
             .into_iter()
@@ -82,34 +82,84 @@ pub fn encode_lighting_preview_candidate(
     .map_err(|error| ProtoError::Invalid(error.to_string()))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OaiKeyStatusEntry {
     pub k: String,
     pub c: u32,
+    #[serde(default = "default_key_brightness")]
+    pub b: f64,
+    #[serde(default = "default_key_effect")]
+    pub e: u8,
+    #[serde(default = "default_key_speed")]
+    pub s: f64,
+}
+
+fn default_key_brightness() -> f64 {
+    0.85
+}
+
+fn default_key_effect() -> u8 {
+    1
+}
+
+fn default_key_speed() -> f64 {
+    0.5
 }
 
 impl OaiKeyStatusEntry {
+    pub fn new(k: impl Into<String>, c: u32) -> Self {
+        let b = if c == 0 { 0.0 } else { 0.85 };
+        let e = if c == 0 { 0 } else { 1 };
+        Self {
+            k: k.into(),
+            c,
+            b,
+            e,
+            s: 0.5,
+        }
+    }
+
+    pub fn with_style(k: impl Into<String>, c: u32, b: f64, e: u8, s: f64) -> Self {
+        Self {
+            k: k.into(),
+            c,
+            b,
+            e,
+            s,
+        }
+    }
+
+    pub fn firmware_key_id(&self) -> Option<u8> {
+        match self.k.as_str() {
+            "AG00" => Some(0),
+            "AG01" => Some(1),
+            "AG02" => Some(2),
+            "AG03" => Some(3),
+            "AG04" => Some(4),
+            "AG05" => Some(5),
+            "AG06" => Some(6),
+            "AG07" => Some(7),
+            "AG08" => Some(8),
+            "AG09" => Some(9),
+            "AG10" => Some(10),
+            "AG11" => Some(11),
+            "AG12" => Some(12),
+            "ENC_CLK" => Some(13),
+            "ENC_CC" => Some(14),
+            "ENC_CW" => Some(15),
+            _ => None,
+        }
+    }
+
     fn validate(&self) -> Result<(), ProtoError> {
-        let valid_key = matches!(
-            self.k.as_str(),
-            "AG00"
-                | "AG01"
-                | "AG02"
-                | "AG03"
-                | "AG04"
-                | "AG05"
-                | "AG06"
-                | "AG07"
-                | "AG08"
-                | "AG09"
-                | "AG10"
-                | "AG11"
-                | "AG12"
-                | "ENC_CLK"
-                | "ENC_CC"
-                | "ENC_CW"
-        );
-        if !valid_key || self.c > 0xff_ffff {
+        if self.firmware_key_id().is_none()
+            || self.c > 0xff_ffff
+            || !self.b.is_finite()
+            || !(0.0..=1.0).contains(&self.b)
+            || self.e > 6
+            || !self.s.is_finite()
+            || !(0.0..=1.0).contains(&self.s)
+        {
             return Err(ProtoError::Invalid(
                 "v.oai.thstatus key or color exceeds firmware v0.6.3 policy".into(),
             ));
@@ -130,25 +180,59 @@ pub fn encode_oai_thstatus_candidate(
             "v.oai.thstatus requires between 1 and 16 key entries".into(),
         ));
     }
+    #[derive(Serialize)]
+    struct WireEntry<'a> {
+        id: u8,
+        k: &'a str,
+        c: u32,
+        b: f64,
+        e: u8,
+        s: f64,
+        sk: bool,
+        sa: bool,
+    }
+    let mut wire_entries = Vec::with_capacity(entries.len());
     for entry in entries {
         entry.validate()?;
-    }
-    #[derive(Serialize)]
-    struct Params<'a> {
-        s: &'a [OaiKeyStatusEntry],
+        let key_id = entry.firmware_key_id().ok_or_else(|| {
+            ProtoError::Invalid("v.oai.thstatus key exceeds firmware v0.6.3 policy".into())
+        })?;
+        wire_entries.push(WireEntry {
+            id: key_id,
+            k: &entry.k,
+            c: entry.c,
+            b: entry.b,
+            e: entry.e,
+            s: entry.s,
+            sk: false,
+            sa: false,
+        });
     }
     #[derive(Serialize)]
     struct Request<'a> {
         id: u16,
         method: &'static str,
-        params: Params<'a>,
+        params: Vec<WireEntry<'a>>,
     }
     serde_json::to_vec(&Request {
         id,
         method: "v.oai.thstatus",
-        params: Params { s: entries },
+        params: wire_entries,
     })
     .map_err(|error| ProtoError::Invalid(error.to_string()))
+}
+
+fn firmware_effect_index(effect: Option<&str>) -> u8 {
+    match effect {
+        Some("off") => 0,
+        Some("solid") | None => 1,
+        Some("snake") => 2,
+        Some("rainbow") => 3,
+        Some("breath") => 4,
+        Some("gradient") => 5,
+        Some("shallow_breath") => 6,
+        _ => 1,
+    }
 }
 
 pub fn encode_oai_rgbcfg_candidate(
@@ -161,15 +245,42 @@ pub fn encode_oai_rgbcfg_candidate(
     params.backlight.validate()?;
     params.underglow.validate()?;
     #[derive(Serialize)]
-    struct Request<'a> {
+    struct WireZone {
+        e: u8,
+        b: f64,
+        s: f64,
+        m: f64,
+        c: u32,
+    }
+    impl WireZone {
+        fn from_candidate(z: &LightingZoneCandidate) -> Self {
+            Self {
+                e: firmware_effect_index(z.effect.as_deref()),
+                b: z.brightness.unwrap_or(0.75),
+                s: z.speed.unwrap_or(0.5),
+                m: z.magic.unwrap_or(0.5),
+                c: z.color.unwrap_or(0),
+            }
+        }
+    }
+    #[derive(Serialize)]
+    struct WireParams {
+        keys: WireZone,
+        ambient: WireZone,
+    }
+    #[derive(Serialize)]
+    struct Request {
         id: u16,
         method: &'static str,
-        params: &'a LightingPreviewCandidate,
+        params: WireParams,
     }
     serde_json::to_vec(&Request {
         id,
         method: "v.oai.rgbcfg",
-        params,
+        params: WireParams {
+            keys: WireZone::from_candidate(&params.backlight),
+            ambient: WireZone::from_candidate(&params.underglow),
+        },
     })
     .map_err(|error| ProtoError::Invalid(error.to_string()))
 }
@@ -309,18 +420,9 @@ mod tests {
     #[test]
     fn oai_thstatus_and_rgbcfg_candidates_encode_firmware_v063_envelope() {
         let entries = vec![
-            OaiKeyStatusEntry {
-                k: "AG00".into(),
-                c: 0xFFB800,
-            },
-            OaiKeyStatusEntry {
-                k: "AG07".into(),
-                c: 0x00FF66,
-            },
-            OaiKeyStatusEntry {
-                k: "AG12".into(),
-                c: 0x0066FF,
-            },
+            OaiKeyStatusEntry::new("AG00", 0xFFB800),
+            OaiKeyStatusEntry::new("AG07", 0x00FF66),
+            OaiKeyStatusEntry::new("AG12", 0x0066FF),
         ];
         let th_bytes = encode_oai_thstatus_candidate(&entries, 12).unwrap();
         assert_eq!(
@@ -328,13 +430,11 @@ mod tests {
             json!({
                 "id": 12,
                 "method": "v.oai.thstatus",
-                "params": {
-                    "s": [
-                        {"k": "AG00", "c": 0xFFB800},
-                        {"k": "AG07", "c": 0x00FF66},
-                        {"k": "AG12", "c": 0x0066FF}
-                    ]
-                }
+                "params": [
+                    {"id": 0, "k": "AG00", "c": 0xFFB800, "b": 0.85, "e": 1, "s": 0.5, "sk": false, "sa": false},
+                    {"id": 7, "k": "AG07", "c": 0x00FF66, "b": 0.85, "e": 1, "s": 0.5, "sk": false, "sa": false},
+                    {"id": 12, "k": "AG12", "c": 0x0066FF, "b": 0.85, "e": 1, "s": 0.5, "sk": false, "sa": false}
+                ]
             })
         );
 
@@ -361,8 +461,8 @@ mod tests {
                 "id": 13,
                 "method": "v.oai.rgbcfg",
                 "params": {
-                    "backlight": {"effect": "breath", "brightness": 0.95, "speed": 0.75, "magic": 0.5, "color": 0xFFB800},
-                    "underglow": {"effect": "breath", "brightness": 0.95, "speed": 0.75, "magic": 0.5, "color": 0xFFB800}
+                    "keys": {"e": 4, "b": 0.95, "s": 0.75, "m": 0.5, "c": 0xFFB800},
+                    "ambient": {"e": 4, "b": 0.95, "s": 0.75, "m": 0.5, "c": 0xFFB800}
                 }
             })
         );

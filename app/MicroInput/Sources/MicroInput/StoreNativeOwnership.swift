@@ -14,6 +14,12 @@ extension Store {
                           !self.nativeOwnership.allowsExecution else { return }
                     await self.endLightingPreview()
                 }
+            } else {
+                Task { @MainActor [weak self] in
+                    guard let self, self.nativeOwnership.allowsExecution else { return }
+                    self.fourAppSlots.syncRecent(from: self)
+                    _ = await self.fourAppLighting.updateFeedback(in: self)
+                }
             }
         }
         nativeOwnership.drain = { [weak self] in

@@ -3,7 +3,10 @@ use crate::DeviceSession;
 use mi_proto::HostNotification;
 use std::{
     collections::BTreeSet,
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::broadcast;
@@ -18,7 +21,10 @@ pub enum InputEventKind {
     InputStreamGap,
 }
 
-pub use mi_model::host_router::{verified_physical_mapping, PhysicalControlSpec};
+pub use mi_model::host_router::{
+    verified_physical_mapping, verified_physical_mapping_for_layout, BottomRowLayout,
+    PhysicalControlSpec,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RadialPosition {
@@ -253,13 +259,22 @@ pub struct InputMonitor {
     pressed: BTreeSet<String>,
     active_wide_switches: BTreeSet<String>,
     active_radial_sector: Option<String>,
-    merge_wide_key: bool,
+    verified_radial: bool,
+    merge_wide_key: Arc<AtomicBool>,
+    was_merging_wide_key: bool,
 }
 impl DeviceSession {
     pub fn subscribe_input(self: &Arc<Self>) -> InputMonitor {
         self.subscribe_input_with_decoder(Box::new(CandidateInputDecoder))
     }
     pub fn subscribe_verified_input(self: &Arc<Self>) -> InputMonitor {
+        self.subscribe_verified_input_with_merge_flag(Arc::new(AtomicBool::new(true)))
+    }
+    pub fn subscribe_verified_input_with_merge_flag(
+        self: &Arc<Self>,
+        merge_wide_key: Arc<AtomicBool>,
+    ) -> InputMonitor {
+        let was_merging_wide_key = merge_wide_key.load(Ordering::SeqCst);
         InputMonitor {
             session: self.clone(),
             receiver: self.notifications(),
@@ -269,7 +284,9 @@ impl DeviceSession {
             pressed: BTreeSet::new(),
             active_wide_switches: BTreeSet::new(),
             active_radial_sector: None,
-            merge_wide_key: true,
+            verified_radial: true,
+            merge_wide_key,
+            was_merging_wide_key,
         }
     }
     pub fn subscribe_input_with_decoder(
@@ -285,7 +302,9 @@ impl DeviceSession {
             pressed: BTreeSet::new(),
             active_wide_switches: BTreeSet::new(),
             active_radial_sector: None,
-            merge_wide_key: false,
+            verified_radial: false,
+            merge_wide_key: Arc::new(AtomicBool::new(false)),
+            was_merging_wide_key: false,
         }
     }
 }
@@ -373,9 +392,26 @@ impl InputMonitor {
                     ingress_sequence = received.ingress_sequence;
                     let notification = received.notification;
                     let is_radial = is_radial_notification(&notification);
-                    if self.merge_wide_key {
+                    if self.verified_radial {
                         radial_position = parse_radial_position(&notification);
                     }
+                    let merge_wide = self.merge_wide_key.load(Ordering::SeqCst);
+                    if merge_wide != self.was_merging_wide_key {
+                        self.active_wide_switches.clear();
+                        self.was_merging_wide_key = merge_wide;
+                    }
+                    let layout = if merge_wide {
+                        BottomRowLayout::Merged
+                    } else {
+                        BottomRowLayout::Split
+                    };
+                    let map_physical = |id: &str| -> Option<PhysicalControlSpec> {
+                        if self.verified_radial {
+                            verified_physical_mapping_for_layout(id, layout)
+                        } else {
+                            verified_physical_mapping(id)
+                        }
+                    };
                     let decoded = self.decoder.decode(&notification);
                     if is_radial {
                         radial_center = match &decoded {
@@ -394,7 +430,7 @@ impl InputMonitor {
                                 ));
                             }
                             if let Some(prev) = self.active_radial_sector.replace(sector.clone()) {
-                                if let Some(prev_spec) = verified_physical_mapping(&prev) {
+                                if let Some(prev_spec) = map_physical(&prev) {
                                     self.pressed.remove(prev_spec.logical_switch);
                                 } else {
                                     self.pressed.remove(&prev);
@@ -426,13 +462,17 @@ impl InputMonitor {
                     self.sequence += 1;
                     match normalized {
                         Some((InputEventKind::Pressed, raw_id)) => {
-                            if self.merge_wide_key && matches!(raw_id.as_str(), "AG10" | "AG11") {
+                            if merge_wide && matches!(raw_id.as_str(), "AG10" | "AG11") {
                                 let was_empty = self.active_wide_switches.is_empty();
                                 self.active_wide_switches.insert(raw_id);
                                 if !was_empty {
                                     continue;
                                 }
-                                let spec = verified_physical_mapping("AG10").unwrap();
+                                let spec = verified_physical_mapping_for_layout(
+                                    "AG10",
+                                    BottomRowLayout::Merged,
+                                )
+                                .unwrap();
                                 self.pressed.insert(spec.logical_switch.to_owned());
                                 (
                                     InputEventKind::Pressed,
@@ -444,7 +484,7 @@ impl InputMonitor {
                                     0,
                                     true,
                                 )
-                            } else if let Some(spec) = verified_physical_mapping(&raw_id) {
+                            } else if let Some(spec) = map_physical(&raw_id) {
                                 if spec.action_role != "encoder_step" {
                                     if !self.pressed.insert(spec.logical_switch.to_owned()) {
                                         continue;
@@ -475,12 +515,16 @@ impl InputMonitor {
                             }
                         }
                         Some((InputEventKind::Released, raw_id)) => {
-                            if self.merge_wide_key && matches!(raw_id.as_str(), "AG10" | "AG11") {
+                            if merge_wide && matches!(raw_id.as_str(), "AG10" | "AG11") {
                                 let removed = self.active_wide_switches.remove(&raw_id);
                                 if !removed || !self.active_wide_switches.is_empty() {
                                     continue;
                                 }
-                                let spec = verified_physical_mapping("AG10").unwrap();
+                                let spec = verified_physical_mapping_for_layout(
+                                    "AG10",
+                                    BottomRowLayout::Merged,
+                                )
+                                .unwrap();
                                 self.pressed.remove(spec.logical_switch);
                                 (
                                     InputEventKind::Released,
@@ -492,7 +536,7 @@ impl InputMonitor {
                                     0,
                                     true,
                                 )
-                            } else if let Some(spec) = verified_physical_mapping(&raw_id) {
+                            } else if let Some(spec) = map_physical(&raw_id) {
                                 self.pressed.remove(spec.logical_switch);
                                 (
                                     InputEventKind::Released,

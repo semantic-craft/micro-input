@@ -191,6 +191,7 @@ extension PushToTalkTests {
         let saved = await store.saveAction(CatalogAction(id: "wide-talk", name: "按住说话", category: "Agent", detail: "test",
             payload: ["type": .string("agent_command"), "adapter": .string("cindy"), "command": .string("push-to-talk")]))
         XCTAssertTrue(saved, store.status)
+        await store.setBottomRowSplit(false)
         await store.setHostActiveProfile(store.profile?.id.text); await store.setHostExecutionEnabled(true)
         try await core.setSyntheticDiscovery(state: .reconnectedDevice); try await core.setSyntheticConfig(scenario: 1)
         await store.refresh(); store.selectDevice("synthetic-reconnected-interface-0")

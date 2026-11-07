@@ -12,7 +12,7 @@ struct UnixNativeOwnershipTransport: NativeOwnershipTransport {
 
     var requestLimit = 4096
     var responseLimit = 4096
-    var timeout: Duration = .milliseconds(750)
+    var timeout: Duration = .milliseconds(950)
 
     func readPersistedFence() -> PersistedNativeOwnershipFence? {
         let fencePath = path + ".fence"
@@ -34,7 +34,7 @@ struct UnixNativeOwnershipTransport: NativeOwnershipTransport {
             .appendingPathComponent("Library/Application Support/MicroInput/cindy-ownership.sock").path,
         requestLimit: Int = 4096,
         responseLimit: Int = 4096,
-        timeout: Duration = .milliseconds(750)
+        timeout: Duration = .milliseconds(950)
     ) {
         self.path = path
         self.requestLimit = requestLimit

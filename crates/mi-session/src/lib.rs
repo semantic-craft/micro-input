@@ -409,6 +409,13 @@ impl DeviceSession {
         mi_proto::mutation::validate_mutation_response_candidate(&result, id)?;
         Ok(result)
     }
+    pub async fn send_lights_preview(
+        &self,
+        lights: &mi_proto::lighting_candidate::LightingPreviewCandidate,
+    ) -> Result<Value, SessionError> {
+        let mut q = self.queue.lock().await;
+        self.exchange_lighting(&mut q, lights).await
+    }
     pub async fn send_oai_thstatus(
         &self,
         entries: &[mi_proto::lighting_candidate::OaiKeyStatusEntry],

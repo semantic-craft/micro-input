@@ -910,3 +910,191 @@ fn custom_app_profile_routes_open_app_targeted_shortcut_and_paste_text_to_bundle
         })
     );
 }
+
+#[test]
+fn bottom_row_split_and_merge_layout_routing_and_persistence() {
+    use mi_model::{
+        resolve_host_action_with_layout, verified_physical_mapping_for_layout, BottomRowLayout,
+    };
+
+    let dir = std::env::temp_dir().join(format!("mi-bottom-row-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let doc_path = dir.join("workbench.json");
+
+    let mut store = mi_model::storage::DocumentStore::default();
+    store.open(doc_path.clone()).unwrap();
+    let ids = mi_model::preset::install_agent_starter_profiles(&mut store.draft).unwrap();
+    let ag_pid = ids
+        .iter()
+        .find(|pid| store.draft.document.editable.graph.profiles[*pid].name == "Antigravity")
+        .unwrap()
+        .clone();
+    let herdr_pid = ids
+        .iter()
+        .find(|pid| store.draft.document.editable.graph.profiles[*pid].name == "Herdr")
+        .unwrap()
+        .clone();
+
+    assert_eq!(store.bottom_row_layout(), BottomRowLayout::Split);
+    store.set_host_active_profile(Some(ag_pid.clone())).unwrap();
+
+    let ag10_split = verified_physical_mapping_for_layout("AG10", BottomRowLayout::Split).unwrap();
+    assert_eq!(ag10_split.binding_id, "AG10");
+    assert_eq!(ag10_split.logical_switch, "logical-10");
+    assert_eq!(ag10_split.physical_control, "row3-col0-left");
+    assert_eq!(ag10_split.keycap_group, "key-r3c0");
+    assert_eq!(ag10_split.action_role, "momentary_key");
+
+    let ag11_split = verified_physical_mapping_for_layout("AG11", BottomRowLayout::Split).unwrap();
+    assert_eq!(ag11_split.binding_id, "AG11");
+    assert_eq!(ag11_split.logical_switch, "logical-11");
+    assert_eq!(ag11_split.physical_control, "row3-col1-middle");
+    assert_eq!(ag11_split.keycap_group, "key-r3c1");
+    assert_eq!(ag11_split.action_role, "momentary_key");
+
+    let ag11_merged =
+        verified_physical_mapping_for_layout("AG11", BottomRowLayout::Merged).unwrap();
+    assert_eq!(ag11_merged.binding_id, "AG10");
+    assert_eq!(ag11_merged.logical_switch, "logical-10");
+    assert_eq!(ag11_merged.physical_control, "row3-wide-2u");
+    assert_eq!(ag11_merged.keycap_group, "wide-bottom-2u");
+    assert_eq!(ag11_merged.action_role, "wide_momentary_key");
+
+    assert_eq!(
+        store.resolve_host_input("AG10", true),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "focus-input".into(),
+        })
+    );
+    assert_eq!(
+        store.resolve_host_input("AG11", true),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "push-to-talk".into(),
+        })
+    );
+    assert_eq!(
+        store.resolve_host_input("AG12", true),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "submit".into(),
+        })
+    );
+
+    assert!(resolve_host_action_with_layout(
+        &store.draft.document,
+        Some(&herdr_pid),
+        "AG10",
+        true,
+        false,
+        BottomRowLayout::Split
+    )
+    .is_some());
+    assert!(resolve_host_action_with_layout(
+        &store.draft.document,
+        Some(&herdr_pid),
+        "AG11",
+        true,
+        false,
+        BottomRowLayout::Split
+    )
+    .is_none());
+
+    let state_split = store.routing_state();
+    assert_eq!(state_split["bottom_row_layout"], "split");
+    assert_eq!(state_split["keys"].as_array().unwrap().len(), 20);
+
+    let req: mi_model::storage::routing::RoutingRequest = serde_json::from_value(json!({
+        "document_id": store.draft.document_id,
+        "document_revision": store.draft.revision,
+        "host_state_revision": store.host_revision(),
+        "operation": {
+            "kind": "bottom_row_layout",
+            "layout": "merged"
+        }
+    }))
+    .unwrap();
+    store.update_routing(req).unwrap();
+    assert_eq!(store.bottom_row_layout(), BottomRowLayout::Merged);
+
+    let state_merged = store.routing_state();
+    assert_eq!(state_merged["bottom_row_layout"], "merged");
+    assert_eq!(state_merged["keys"].as_array().unwrap().len(), 19);
+    assert_eq!(
+        store.resolve_host_input("AG10", true),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "push-to-talk".into(),
+        })
+    );
+    assert_eq!(
+        store.resolve_host_input("AG11", true),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "push-to-talk".into(),
+        })
+    );
+    assert!(resolve_host_action_with_layout(
+        &store.draft.document,
+        Some(&herdr_pid),
+        "AG11",
+        true,
+        false,
+        BottomRowLayout::Merged
+    )
+    .is_some());
+
+    let mut reopened = mi_model::storage::DocumentStore::default();
+    reopened.open(doc_path).unwrap();
+    assert_eq!(reopened.bottom_row_layout(), BottomRowLayout::Merged);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn canonical_recorded_shortcut_keys_resolve_through_host_router() {
+    let mut draft = Draft::default();
+    let pid = draft.document.editable.graph.profile_order[0].clone();
+    let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+
+    for (key, expected_code) in [
+        ("left_bracket", 0x21),
+        ("right_bracket", 0x1E),
+        ("home", 0x73),
+        ("page_up", 0x74),
+        ("forward_delete", 0x75),
+        ("end", 0x77),
+        ("page_down", 0x79),
+    ] {
+        draft
+            .assign(
+                &json!(pid),
+                &json!(lid),
+                0,
+                Action {
+                    id: format!("recorded-{key}"),
+                    name: format!("Recorded {key}"),
+                    category: "快捷键".into(),
+                    detail: "test".into(),
+                    payload: serde_json::to_value(ActionKind::Shortcut {
+                        key: key.into(),
+                        modifiers: vec!["command".into()],
+                        target: "frontmost-editor".into(),
+                    })
+                    .unwrap(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            resolve_host_action(&draft.document, Some(&pid), "AG00", true),
+            Some(ResolvedHostAction::Shortcut {
+                key: key.into(),
+                key_code: expected_code,
+                modifiers: vec!["command".into()],
+                target_bundle_id: None,
+            })
+        );
+    }
+}

@@ -536,6 +536,9 @@ pub mod preset;
 pub mod apply;
 
 pub mod host_router;
+pub use host_router::{
+    resolve_host_action_with_layout, verified_physical_mapping_for_layout, BottomRowLayout,
+};
 
 pub mod lighting;
 
