@@ -120,6 +120,7 @@ impl DocumentStore {
                         matches!(
                             a.id.as_str(),
                             "herdr-desktop"
+                                | "apple-fn-key"
                                 | "desktop-search"
                                 | "desktop-new"
                                 | "desktop-model"
@@ -238,6 +239,7 @@ impl DocumentStore {
                     if let Some(id) = next
                         .app_profile_links
                         .get(&bundle_id)
+                        .or_else(|| next.app_profile_links.get("*"))
                         .filter(|id| valid(id))
                     {
                         next.host_active_profile_id = Some(id.clone());
@@ -325,7 +327,7 @@ mod tests {
     fn cheat_sheet_hud_displays_all_8_agent_presets_dial_joystick_and_redacts_custom_text() {
         let mut store = DocumentStore::default();
         let ids = crate::preset::install_agent_starter_profiles(&mut store.draft).unwrap();
-        assert_eq!(ids.len(), 7);
+        assert_eq!(ids.len(), 8);
 
         for pid in &ids {
             let sel = request(&store, json!({"kind":"select","profile_id":pid}));
@@ -348,6 +350,13 @@ mod tests {
             if matches!(profile_name.as_str(), "Cindy" | "Codex") {
                 assert_eq!(by_id("AG00")["available"], false);
                 assert_eq!(by_id("AG00")["label"], "不可用 / 未配置");
+                continue;
+            }
+            if profile_name == "其他软件" {
+                assert_eq!(by_id("AG00")["available"], false);
+                assert_eq!(by_id("AG00")["label"], "不可用 / 未配置");
+                assert_eq!(by_id("AG11")["available"], true);
+                assert_eq!(by_id("AG11")["label"], "苹果 Fn 键（语音输入） (fn)");
                 continue;
             }
 

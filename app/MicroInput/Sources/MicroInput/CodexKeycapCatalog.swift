@@ -791,7 +791,7 @@ enum AgentProfileKind: String {
         case .herdr:
             return "终端工作区全动作键模式，直控标签、分栏与面板焦点"
         case .custom:
-            return "自定义软件控制方案"
+            return "其他软件与通用快捷键映射（默认底排麦克风键触发苹果 Fn 语音输入）"
         }
     }
 }
@@ -818,12 +818,15 @@ enum CodexKeycapCatalog {
             let type = action.payload["type"]?.text ?? ""
             let name = action.name.lowercased()
 
+            if action.id == "apple-fn-key" || key == "fn" || key == "globe" || key == "apple_fn" || key == "fn_globe" {
+                return .mic
+            }
             if type == "open_app" { return .apps }
             if cmd.hasPrefix("slot-open:") { return .nav }
             if cmd == "four-app-attention" { return .nav }
             if cmd == "approve" || cmd == "approve-current" || name.contains("批准") || name.contains("同意") { return .approve }
             if cmd == "deny" || cmd == "deny-current" || cmd == "new-or-stop" || name.contains("拒绝") || name.contains("停止") { return .decline }
-            if cmd == "push-to-talk" || cmd == "dictation" || name.contains("听写") || name.contains("说话") { return .mic }
+            if cmd == "push-to-talk" || cmd == "dictation" || name.contains("听写") || name.contains("说话") || name.contains("语音输入") { return .mic }
             if cmd == "live-voice" || name.contains("live") || name.contains("实时语音") { return .party }
             if cmd == "toggle-voice-reply" || name.contains("语音回复") { return .play }
             if cmd == "submit" || cmd == "focus-input" || name.contains("发送") || name.contains("输入框") { return .codex }
@@ -842,9 +845,12 @@ enum CodexKeycapCatalog {
             if cmd == "clear" || name.contains("清空") || name.contains("删除") { return .delete }
             if name.contains("放大") || name.contains("缩放") { return .play }
             if name.contains("上一") || name.contains("下一") { return .time }
+            if type == "shortcut" { return .magic }
         }
 
         switch agent {
+        case .custom:
+            return .blank
         case .herdr:
             let defaults: [Int: CodexKeycapId] = [
                 0: .apps, 1: .nav, 2: .magic, 3: .new, 4: .term, 5: .split,
@@ -920,6 +926,17 @@ enum CodexKeycapCatalog {
                 "modifiers": .array(modifiers.map { .string($0) }),
                 "target": .string(target)
             ]
+        )
+    }
+
+    static func makeAppleFnAction() -> CatalogAction {
+        makeShortcutAction(
+            id: "apple-fn-key",
+            name: "苹果 Fn 键（语音输入）",
+            detail: "发送 Apple Magic Keyboard 专属 Fn / 地球仪硬件修饰事件（0x3F + 0x00800000），支持按住说话与点按切换语音输入",
+            key: "fn",
+            modifiers: [],
+            target: "frontmost-editor"
         )
     }
 
@@ -1063,7 +1080,7 @@ enum CodexKeycapCatalog {
                 ])
             ]
 
-        case .codex, .custom:
+        case .codex:
             return [
                 AgentActionGroup(id: "codex-core", title: "会话、模型与语音", items: [
                     .init(id: "codex-open", title: "打开或聚焦 Codex", subtitle: "拉起 OpenAI Codex 窗口", keycap: .openai, action: makeOpenAppAction(bundleId: "com.openai.codex", appName: "Codex")),
@@ -1073,6 +1090,31 @@ enum CodexKeycapCatalog {
                     .init(id: "codex-ptt", title: "按住说话，松开停止", subtitle: "按住进行语音听写", keycap: .mic, action: makeAgentAction(id: "desktop-dictation", name: "按住说话，松开停止", detail: "com.openai.codex", adapter: "codex", command: "push-to-talk")),
                     .init(id: "codex-browser", title: "新建标签页或浏览器", subtitle: "打开新标签页", keycap: .apps, action: makeShortcutAction(id: "desktop-browser", name: "打开内置浏览器", detail: "com.openai.codex", key: "T", modifiers: ["command"], target: "com.openai.codex")),
                     .init(id: "codex-term", title: "切换终端面板", subtitle: "打开或收起终端", keycap: .term, action: makeShortcutAction(id: "desktop-terminal", name: "打开终端面板", detail: "com.openai.codex", key: "`", modifiers: ["control"], target: "com.openai.codex"))
+                ])
+            ]
+
+        case .custom:
+            return [
+                AgentActionGroup(id: "general-voice", title: "语音与苹果专属键", items: [
+                    .init(
+                        id: "general-apple-fn",
+                        title: "苹果 Fn 键（语音输入）",
+                        subtitle: "发送 Apple Magic Keyboard 专属 Fn / 🌐 键事件（按住说话或点按切换语音输入）",
+                        keycap: .mic,
+                        action: makeAppleFnAction()
+                    )
+                ]),
+                AgentActionGroup(id: "general-shortcuts", title: "日常高频快捷键（发送给当前前台软件）", items: [
+                    .init(id: "gen-copy", title: "复制 (⌘C)", subtitle: "向当前前台软件发送 Command+C", keycap: .magic, action: makeShortcutAction(id: "general-copy", name: "快捷键 ⌘C", detail: "复制当前选中内容", key: "c", modifiers: ["command"], target: "frontmost-editor")),
+                    .init(id: "gen-paste", title: "粘贴 (⌘V)", subtitle: "向当前前台软件发送 Command+V", keycap: .upload, action: makeShortcutAction(id: "general-paste", name: "快捷键 ⌘V", detail: "粘贴剪贴板内容", key: "v", modifiers: ["command"], target: "frontmost-editor")),
+                    .init(id: "gen-undo", title: "撤销 (⌘Z)", subtitle: "向当前前台软件发送 Command+Z", keycap: .time, action: makeShortcutAction(id: "general-undo", name: "快捷键 ⌘Z", detail: "撤销上一步操作", key: "z", modifiers: ["command"], target: "frontmost-editor")),
+                    .init(id: "gen-redo", title: "重做 (⇧⌘Z)", subtitle: "向当前前台软件发送 Shift+Command+Z", keycap: .branchAlt, action: makeShortcutAction(id: "general-redo", name: "快捷键 ⇧⌘Z", detail: "重做上一步操作", key: "z", modifiers: ["command", "shift"], target: "frontmost-editor")),
+                    .init(id: "gen-save", title: "保存 (⌘S)", subtitle: "向当前前台软件发送 Command+S", keycap: .download, action: makeShortcutAction(id: "general-save", name: "快捷键 ⌘S", detail: "保存当前文档", key: "s", modifiers: ["command"], target: "frontmost-editor")),
+                    .init(id: "gen-find", title: "查找 (⌘F)", subtitle: "向当前前台软件发送 Command+F", keycap: .nav, action: makeShortcutAction(id: "general-find", name: "快捷键 ⌘F", detail: "在当前页面或文档中查找", key: "f", modifiers: ["command"], target: "frontmost-editor")),
+                    .init(id: "gen-new-tab", title: "新建标签页 (⌘T)", subtitle: "向当前前台软件发送 Command+T", keycap: .new, action: makeShortcutAction(id: "general-new-tab", name: "快捷键 ⌘T", detail: "新建标签页", key: "t", modifiers: ["command"], target: "frontmost-editor")),
+                    .init(id: "gen-close-tab", title: "关闭标签页 / 窗口 (⌘W)", subtitle: "向当前前台软件发送 Command+W", keycap: .delete, action: makeShortcutAction(id: "general-close-tab", name: "快捷键 ⌘W", detail: "关闭当前标签页或窗口", key: "w", modifiers: ["command"], target: "frontmost-editor")),
+                    .init(id: "gen-return", title: "回车确认 / 发送 (↩)", subtitle: "向当前前台软件发送 Return 键", keycap: .codex, action: makeShortcutAction(id: "general-return", name: "快捷键 ↩", detail: "发送回车键", key: "return", modifiers: [], target: "frontmost-editor")),
+                    .init(id: "gen-escape", title: "取消 / 关闭弹窗 (⎋ Esc)", subtitle: "向当前前台软件发送 Escape 键", keycap: .decline, action: makeShortcutAction(id: "general-escape", name: "快捷键 ⎋", detail: "发送 Esc 键", key: "escape", modifiers: [], target: "frontmost-editor"))
                 ])
             ]
         }

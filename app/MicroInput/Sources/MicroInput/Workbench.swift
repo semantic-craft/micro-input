@@ -227,6 +227,7 @@ struct Workbench: View {
             }
             if (ProcessInfo.processInfo.environment["MI_SYNTHETIC_SCENARIO"] ?? "").isEmpty {
                 await store.prepareDesktopProfiles()
+                await store.ensureDefaultAgentLinks()
             }
             await store.searchActions(query: inspectorSearch, category: inspectorCategory, favoritesOnly: inspectorFavoritesOnly)
         }
@@ -515,11 +516,13 @@ struct Workbench: View {
                                 .foregroundStyle(UITheme.textSecondary)
                         }
                         Spacer()
-                        Button("打开 \(DesktopAgent.displayName(agent.name))") {
-                            Task { await store.openDesktopAgent(agent) }
+                        if !agent.isGeneralFallback {
+                            Button("打开 \(DesktopAgent.displayName(agent.name))") {
+                                Task { await store.openDesktopAgent(agent) }
+                            }
+                            .font(UITheme.Typography.captionMedium)
+                            .disabled(!agent.installed)
                         }
-                        .font(UITheme.Typography.captionMedium)
-                        .disabled(!agent.installed)
 
                         if store.hostActiveProfileId != store.profile?.id.text {
                             Button("启用此方案") {
@@ -1497,7 +1500,7 @@ struct ShortcutChord: Equatable {
         0x27: "quote", 0x28: "k", 0x29: "semicolon", 0x2A: "backslash",
         0x2B: "comma", 0x2C: "slash", 0x2D: "n", 0x2E: "m", 0x2F: "period",
         0x30: "tab", 0x31: "space", 0x32: "grave", 0x33: "delete",
-        0x35: "escape", 0x60: "f5", 0x61: "f6", 0x62: "f7", 0x63: "f3",
+        0x35: "escape", 0x3F: "fn", 0x60: "f5", 0x61: "f6", 0x62: "f7", 0x63: "f3",
         0x64: "f8", 0x65: "f9", 0x67: "f11", 0x6D: "f10", 0x6F: "f12",
         0x73: "home", 0x74: "page_up", 0x75: "forward_delete", 0x76: "f4",
         0x77: "end", 0x78: "f2", 0x79: "page_down", 0x7A: "f1",
@@ -1523,7 +1526,13 @@ struct ShortcutChord: Equatable {
     }
 
     static func from(event: NSEvent) -> ShortcutCaptureOutcome {
-        from(keyCode: event.keyCode, modifierFlags: event.modifierFlags)
+        if event.type == .flagsChanged {
+            guard event.keyCode == 0x3F, event.modifierFlags.contains(.function) else {
+                return .ignored
+            }
+            return from(keyCode: event.keyCode, modifierFlags: event.modifierFlags)
+        }
+        return from(keyCode: event.keyCode, modifierFlags: event.modifierFlags)
     }
 
     static func from(keyCode: UInt16, modifierFlags: NSEvent.ModifierFlags) -> ShortcutCaptureOutcome {
@@ -1558,6 +1567,7 @@ struct ShortcutChord: Equatable {
 
     private static func displayKeyName(_ key: String) -> String {
         switch key.lowercased() {
+        case "fn", "globe", "apple_fn", "fn_globe": return "🌐 Fn"
         case "space": return "Space"
         case "return", "enter": return "↩"
         case "tab": return "⇥"
@@ -1601,6 +1611,7 @@ struct ShortcutChord: Equatable {
 struct ShortcutRecorder: View {
     @Binding var action: CatalogAction
     var isDisabled: Bool = false
+    var onCommit: ((CatalogAction) -> Void)? = nil
     @State private var isRecording = false
     @State private var eventMonitor: Any?
 
@@ -1667,16 +1678,19 @@ struct ShortcutRecorder: View {
     private func startRecording() {
         stopRecording()
         isRecording = true
-        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { event in
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
             switch ShortcutChord.from(event: event) {
             case .cancelled:
                 stopRecording()
                 return nil
             case .ignored:
-                return nil
+                return event.type == .flagsChanged ? event : nil
             case .recorded(let chord):
-                chord.apply(to: &action)
+                var updated = action
+                chord.apply(to: &updated)
+                action = updated
                 stopRecording()
+                onCommit?(updated)
                 return nil
             }
         }

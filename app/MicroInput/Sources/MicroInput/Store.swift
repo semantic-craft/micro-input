@@ -910,7 +910,7 @@ extension MicroInput: Backend {}
         // Wait briefly for hostInputLoop subscription to attach
         try? await Task.sleep(nanoseconds: 50_000_000)
         // Real app actions through the HID decoder and normal executor; no send/approval actions.
-        for agent in DesktopAgent.all {
+        for agent in DesktopAgent.all where !agent.isGeneralFallback {
             guard let id = hostProfiles.first(where: { $0.name == agent.name })?.id.text,
                   !isProtectedHostProfile(id) else { continue }
             await setHostActiveProfile(id)
@@ -1057,6 +1057,23 @@ extension MicroInput: Backend {}
             let s = UInt32(slot)
             try await changeDocument(fresh: false) { [self] in try await backend.assignAction(profileId: p, layerId: l, slot: s, actionJson: a) }
             status = "草稿已保存到本机 · 不执行动作 · 不写设备"
+            return true
+        } catch { status = readableError(error); return false }
+    }
+    @discardableResult func clearSlot() async -> Bool {
+        guard !isProtectedLayerSelected else {
+            status = "当前为 Cindy / Codex 原生受保护层，不支持修改按键映射"
+            return false
+        }
+        guard canEditDraft, !busy, let profile, let layer else { return false }
+        busy = true; defer { busy = false }
+        do {
+            let encoder = JSONEncoder()
+            let p = String(decoding: try encoder.encode(profile.id), as: UTF8.self)
+            let l = String(decoding: try encoder.encode(layer.id), as: UTF8.self)
+            let s = UInt32(slot)
+            try await changeDocument(fresh: false) { [self] in try await backend.assignAction(profileId: p, layerId: l, slot: s, actionJson: "null") }
+            status = "已清空当前按键映射 · 不写设备"
             return true
         } catch { status = readableError(error); return false }
     }

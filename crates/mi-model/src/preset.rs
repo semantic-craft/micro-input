@@ -1469,6 +1469,21 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             },
         ));
     }
+    specs.push((
+        "其他软件",
+        vec![(
+            11,
+            "apple-fn-key",
+            "苹果 Fn 键（语音输入）",
+            "快捷键",
+            "frontmost-editor",
+            ActionKind::Shortcut {
+                key: "fn".into(),
+                modifiers: vec![],
+                target: "frontmost-editor".into(),
+            },
+        )],
+    ));
 
     let mut work = draft.clone();
     // Retire only unchanged source profiles from the exact bundled fixture, even
@@ -2124,7 +2139,7 @@ mod agent_migration_tests {
     fn upgrades_pre_dial_conversational_presets_while_preserving_customized_profiles() {
         let mut draft = Draft::default();
         let ids = install_agent_starter_profiles(&mut draft).unwrap();
-        assert_eq!(ids.len(), 7);
+        assert_eq!(ids.len(), 8);
 
         for native_name in ["Cindy", "Codex"] {
             let pid = draft

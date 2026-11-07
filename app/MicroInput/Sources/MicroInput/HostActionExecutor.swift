@@ -343,9 +343,26 @@ enum AuditLogWriter {
     var activeDictationStopper: (String) async -> (Bool, String) = { adapter in
         await DesktopAgentControls.stopActiveDictationIfNeeded(adapter: adapter)
     }
+    static let appleFnKeyCode: CGKeyCode = 0x3F
+    private var heldAppleFnFlagsByBinding: [String: CGEventFlags] = [:]
+    var pendingHoldBindingForAppleFn: String?
     var pasteShortcutPoster: (() -> Bool)?
     var returnKeyPoster: (() -> Bool)?
+    var appleFnFlagsPoster: (Bool, CGEventFlags) -> Bool = { down, modifierFlags in
+        guard let event = LiveHostActionExecutor.makeAppleFnFlagsChangedEvent(down: down, modifierFlags: modifierFlags) else {
+            return false
+        }
+        event.post(tap: .cghidEventTap)
+        return true
+    }
     var macroKeyEventPoster: (CGKeyCode, Bool) -> Bool = { keyCode, down in
+        if keyCode == LiveHostActionExecutor.appleFnKeyCode {
+            guard let event = LiveHostActionExecutor.makeAppleFnFlagsChangedEvent(down: down, modifierFlags: []) else {
+                return false
+            }
+            event.post(tap: .cghidEventTap)
+            return true
+        }
         guard let source = CGEventSource(stateID: .hidSystemState),
               let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: down) else {
             return false
@@ -357,13 +374,54 @@ enum AuditLogWriter {
         try await Task.sleep(nanoseconds: nanoseconds)
     }
 
+    static func makeAppleFnFlagsChangedEvent(down: Bool, modifierFlags: CGEventFlags = []) -> CGEvent? {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let event = CGEvent(keyboardEventSource: source, virtualKey: appleFnKeyCode, keyDown: down) else {
+            return nil
+        }
+        // Apple Magic Keyboard's proprietary Fn / Globe key (HID usage page 0xFF00 / 0x00FF usage 0x0003,
+        // virtual key 0x3F / 63) is recognized by macOS Dictation and voice input event taps (e.g. Responsay's
+        // NativeHotkeyEventTap / CGEventTap) exclusively as kCGEventFlagsChanged (type 12) with
+        // kCGEventFlagMaskSecondaryFn (0x00800000) set on press and cleared on release, rather than keyDown/keyUp.
+        event.type = .flagsChanged
+        var flags = modifierFlags
+        if down {
+            flags.insert(.maskSecondaryFn)
+        } else {
+            flags.remove(.maskSecondaryFn)
+        }
+        event.flags = flags
+        return event
+    }
+
+    @discardableResult
+    func releaseHeldAppleFn(binding: String) -> Bool {
+        guard let modifierFlags = heldAppleFnFlagsByBinding.removeValue(forKey: binding) else {
+            return false
+        }
+        return appleFnFlagsPoster(false, modifierFlags)
+    }
+
+    func releaseAllHeldAppleFn() {
+        let bindings = Array(heldAppleFnFlagsByBinding.keys)
+        for binding in bindings {
+            _ = releaseHeldAppleFn(binding: binding)
+        }
+    }
+
+    var heldAppleFnBindings: Set<String> {
+        Set(heldAppleFnFlagsByBinding.keys)
+    }
+
     static var isAccessibilityTrusted: Bool {
         AXIsProcessTrusted()
     }
 
-    static func openAccessibilitySettings() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
+    static func openAccessibilitySettings(prompt: Bool = false) {
+        if prompt {
+            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+        }
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             _ = NSWorkspace.shared.open(url)
         }
@@ -386,7 +444,7 @@ enum AuditLogWriter {
             try? reset.run()
             reset.waitUntilExit()
         }
-        openAccessibilitySettings()
+        openAccessibilitySettings(prompt: true)
     }
 
     init(auditLogPath: String? = nil) {
@@ -563,8 +621,6 @@ enum AuditLogWriter {
     private func performMacroSequence(_ events: [ResolvedMacroEventPayload]) async -> (Bool, String) {
         guard !events.isEmpty else { return (false, "宏序列为空") }
         guard macroAccessibilityChecker() else {
-            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(options)
             return (false, "辅助功能未授权")
         }
 
@@ -614,16 +670,6 @@ enum AuditLogWriter {
     }
 
     private func postShortcut(keyCode: CGKeyCode, modifiers: [String]) -> Bool {
-        guard AXIsProcessTrusted() else {
-            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(options)
-            return false
-        }
-        guard let source = CGEventSource(stateID: .hidSystemState),
-              let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
-            return false
-        }
         var flags: CGEventFlags = []
         for mod in modifiers {
             switch mod.lowercased() {
@@ -633,6 +679,30 @@ enum AuditLogWriter {
             case "control", "ctrl": flags.insert(.maskControl)
             default: break
             }
+        }
+        if keyCode == Self.appleFnKeyCode {
+            guard macroAccessibilityChecker() else {
+                return false
+            }
+            if let holdBinding = pendingHoldBindingForAppleFn {
+                pendingHoldBindingForAppleFn = nil
+                if heldAppleFnFlagsByBinding[holdBinding] != nil {
+                    releaseHeldAppleFn(binding: holdBinding)
+                }
+                guard appleFnFlagsPoster(true, flags) else { return false }
+                heldAppleFnFlagsByBinding[holdBinding] = flags
+                return true
+            }
+            guard appleFnFlagsPoster(true, flags) else { return false }
+            return appleFnFlagsPoster(false, flags)
+        }
+        guard AXIsProcessTrusted() else {
+            return false
+        }
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
+            return false
         }
         down.flags = flags
         up.flags = flags
@@ -743,8 +813,6 @@ enum AuditLogWriter {
 
     private func pasteTextPreservingClipboard(_ sanitizedText: String) async -> Bool {
         guard macroAccessibilityChecker() else {
-            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(options)
             return false
         }
         if savedClipboardItems == nil {

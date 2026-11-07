@@ -706,6 +706,7 @@ pub fn actions() -> Vec<Action> {
     [
         ("search", "搜索文件", "快捷键", "需要前台编辑器 · 仅草稿", json!({"type":"shortcut","key":"p","modifiers":["command"],"target":"frontmost-editor"})),
         ("save", "保存文件", "快捷键", "需要前台编辑器 · 仅草稿", json!({"type":"shortcut","key":"s","modifiers":["command"],"target":"frontmost-editor"})),
+        ("apple-fn-key", "苹果 Fn 键（语音输入）", "快捷键", "合成 Apple Magic Keyboard 专属 🌐 Fn (0x3F flagsChanged) · 支持点按与长按语音输入", json!({"type":"shortcut","key":"fn","modifiers":[],"target":"frontmost-editor"})),
         ("review", "插入审查提示", "文本", "仅保存文本，不执行", json!({"type":"text","text":"请检查当前变更，优先报告可复现的问题。"})),
         ("prompt-continue", "工程指令 · Continue", "文本", "默认仅粘贴不回车（no_newline） · 自动暂存恢复剪贴板", json!({"type":"text","text":"Continue"})),
         ("prompt-test", "工程指令 · Test", "文本", "默认仅粘贴不回车（no_newline） · 自动暂存恢复剪贴板", json!({"type":"text","text":"Run the tests and fix any failures"})),
@@ -1110,6 +1111,41 @@ impl Draft {
                 .actions
                 .insert(binding.action_id.clone().unwrap(), action);
             if let Some(old) = old {
+                if !d.editable.graph.actions.get(&old).is_some_and(|a| {
+                    crate::macro_library::is_local_macro(a) || crate::multi::is_local_multi(a)
+                }) && crate::multi::parent_references(d, &old).is_empty()
+                    && !d.editable.graph.layers.values().any(|l| {
+                        l.controls
+                            .values()
+                            .any(|b| b.action_id.as_ref() == Some(&old))
+                    })
+                {
+                    d.editable.graph.actions.remove(&old);
+                    d.editable.source_refs.remove(&old);
+                }
+            }
+            Ok(())
+        })
+    }
+    pub fn unassign(&mut self, profile: &Value, layer: &Value, slot: u32) -> Result<(), String> {
+        let pid = profile.as_str().ok_or("配置必须是本地 UUID")?;
+        let lid = layer.as_str().ok_or("层必须是本地 UUID")?;
+        self.mutate(|d| {
+            let p = d.editable.graph.profiles.get(pid).ok_or("配置不存在")?;
+            if !p.layer_order.iter().any(|id| id == lid) {
+                return Err("层不属于所选配置".into());
+            }
+            if d.is_protected_oai_layer(lid) {
+                return Err("受保护宿主层（ChatGPT / Codex / Cindy）不支持修改按键映射".into());
+            }
+            let l = d.editable.graph.layers.get_mut(lid).ok_or("层不存在")?;
+            let binding = l
+                .controls
+                .values_mut()
+                .find(|b| b.logical_control == format!("logical-{slot}"))
+                .ok_or("控件不存在")?;
+            binding.original = serde_json::json!("Empty");
+            if let Some(old) = binding.action_id.take() {
                 if !d.editable.graph.actions.get(&old).is_some_and(|a| {
                     crate::macro_library::is_local_macro(a) || crate::multi::is_local_multi(a)
                 }) && crate::multi::parent_references(d, &old).is_empty()

@@ -238,6 +238,7 @@ extension Store {
     func clearPendingActions() {
         cancelRadialMenu()
         pushToTalk.cancel()
+        (actionExecutor as? LiveHostActionExecutor)?.releaseAllHeldAppleFn()
         let discarded = pendingHostActions; pendingHostActions.removeAll()
         discarded.forEach { $0.done?() }
     }
@@ -318,7 +319,8 @@ extension Store {
         guard !systemSleeping, !stopped, let bundleID, bundleID != Bundle.main.bundleIdentifier else { return }
         externalBundleID = bundleID; observationSequence += 1
         guard let routing, routing.auto_follow_enabled, !routing.manual_override,
-              let target = routing.app_profile_links[bundleID], hostProfiles.contains(where: { $0.id.text == target }) else { return }
+              let target = routing.app_profile_links[bundleID] ?? routing.app_profile_links[DesktopAgent.otherAppsWildcardBundleID],
+              hostProfiles.contains(where: { $0.id.text == target }) else { return }
         if !mutationDraining, target == routing.profile_id { return }
         let sequence = observationSequence
         foregroundTask = Task {
@@ -471,9 +473,28 @@ extension Store {
                         showRadialCheatSheet(entry)
                         continue
                     }
+                    let shouldHoldAppleFn: Bool = {
+                        guard entry.deviceSession != nil,
+                              inputBoundary.held[entry.binding] == entry.deviceIngress,
+                              let payload = try? JSONDecoder().decode(ResolvedHostActionPayload.self, from: Data(entry.json.utf8)),
+                              payload.action_type == "shortcut",
+                              payload.key_code == UInt16(LiveHostActionExecutor.appleFnKeyCode) else {
+                            return false
+                        }
+                        return true
+                    }()
+                    if shouldHoldAppleFn, let live = actionExecutor as? LiveHostActionExecutor {
+                        live.pendingHoldBindingForAppleFn = entry.binding
+                    }
                     _ = await executeHostAction(actionJSON: entry.json, bindingId: entry.binding, profileId: entry.profile, zcodeSelection: entry.zcodeSelection, zcodeCommand: entry.zcodeCommand, dshSelection: entry.dshSelection, dshCommand: entry.dshCommand, cindySelection: entry.cindySelection, cindyCommand: entry.cindyCommand, antigravitySelection: entry.antigravitySelection, antigravityCommand: entry.antigravityCommand, stillAdmitted: { [weak self] in
                         self?.admitAfterDictationCleanup(entry, executionGeneration: executionGeneration, checkAge: false) == true
                     })
+                    if shouldHoldAppleFn, let live = actionExecutor as? LiveHostActionExecutor {
+                        live.pendingHoldBindingForAppleFn = nil
+                        if inputBoundary.held[entry.binding] != entry.deviceIngress {
+                            live.releaseHeldAppleFn(binding: entry.binding)
+                        }
+                    }
                 }
             }
             guard hostExecutionIsCurrent(executionGeneration) else { return }
@@ -717,7 +738,10 @@ extension Store {
     }
     @discardableResult func consumeHostInput(_ event: InputEventInfo) -> Bool {
         guard event.sessionId == inputBoundary.session else { return true }
-        if event.kind == .released, let binding = event.bindingId { pushToTalk.release(binding: binding, ingress: event.ingressSequence) }
+        if event.kind == .released, let binding = event.bindingId {
+            pushToTalk.release(binding: binding, ingress: event.ingressSequence)
+            (actionExecutor as? LiveHostActionExecutor)?.releaseHeldAppleFn(binding: binding)
+        }
         if event.kind == .inputStreamGap {
             clearPendingActions(); inputNeedsResume = true
             status = "输入流丢失，已暂停派发；请恢复输入并松开按键 / 摇杆回中"

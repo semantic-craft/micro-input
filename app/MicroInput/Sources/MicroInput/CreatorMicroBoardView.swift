@@ -181,7 +181,7 @@ struct CreatorMicroStageView: View {
                 .frame(maxWidth: 220)
             }
 
-            if let agent = DesktopAgent.named(store.profile?.name ?? "") {
+            if let agent = DesktopAgent.named(store.profile?.name ?? ""), !agent.isGeneralFallback {
                 Button("打开 \(DesktopAgent.displayName(agent.name))") {
                     Task { await store.openDesktopAgent(agent) }
                 }
@@ -725,7 +725,8 @@ struct CreatorMicroBoardView: View {
 
     private var wideProgrammableKeyCell: some View {
         let isSelected = store.slot == 10 || store.slot == 11
-        let displaySlot = store.slot == 11 ? 11 : 10
+        let preferredSlot = (actionForSlot(10) == nil && actionForSlot(11) != nil) ? 11 : 10
+        let displaySlot = store.slot == 11 ? 11 : preferredSlot
         let currentAction = actionForSlot(displaySlot)
         let rawLabel = labelForSlot(displaySlot)
         let glyph = prefs.glyph(for: profileId, slot: displaySlot, agent: agentKind, action: currentAction)
@@ -733,7 +734,7 @@ struct CreatorMicroBoardView: View {
         let wideWidth = cellSize * 2 + gridSpacing
 
         return Button {
-            store.slot = 10
+            store.slot = preferredSlot
         } label: {
             actionKeycapSurface(glyph: glyph, isSelected: isSelected, caption: shortText, width: wideWidth)
         }
@@ -932,6 +933,10 @@ struct CreatorMicroInlineInspectorView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         slotSpecificControls
+
+                        if resolvedRole == .actionKey {
+                            customShortcutInspectorCard
+                        }
 
                         if controlSlot.isKeycap && resolvedRole == .actionKey {
                             glyphGridSection
@@ -1254,6 +1259,82 @@ struct CreatorMicroInlineInspectorView: View {
         .background(UITheme.subtleSurface, in: RoundedRectangle(cornerRadius: UITheme.Radius.itemInner))
     }
 
+    private var inlineShortcutBinding: Binding<CatalogAction> {
+        Binding(
+            get: {
+                if let currentAction, currentAction.payload["type"]?.text == "shortcut" {
+                    return currentAction
+                }
+                return CodexKeycapCatalog.makeShortcutAction(
+                    id: "custom-shortcut-slot-\(slot)",
+                    name: "快捷键",
+                    detail: "向当前前台软件发送自定义快捷键",
+                    key: "",
+                    modifiers: [],
+                    target: "frontmost-editor"
+                )
+            },
+            set: { updated in
+                let rawKey = (updated.payload["key"]?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if rawKey.isEmpty {
+                    Task { await store.clearSlot() }
+                } else {
+                    Task { _ = await store.saveAction(updated) }
+                }
+            }
+        )
+    }
+
+    private var customShortcutInspectorCard: some View {
+        let isAppleFn = currentAction?.id == "apple-fn-key"
+            || (currentAction?.payload["type"]?.text == "shortcut"
+                && ["fn", "globe", "apple_fn", "fn_globe"].contains((currentAction?.payload["key"]?.text ?? "").lowercased()))
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("自定义快捷键映射")
+                    .font(UITheme.Typography.bodySemibold)
+                    .foregroundStyle(UITheme.textPrimary)
+                Spacer()
+                Button(isAppleFn ? "已设为 🌐 苹果 Fn" : "设为 🌐 苹果 Fn") {
+                    prefs.setRole(.actionKey, for: profileId, slot: slot)
+                    prefs.setGlyph(.mic, for: profileId, slot: slot)
+                    Task { _ = await store.saveAction(CodexKeycapCatalog.makeAppleFnAction()) }
+                }
+                .controlSize(.small)
+                .disabled(store.busy || !store.canEditDraft)
+
+                if currentAction != nil {
+                    Button("设为空键") {
+                        prefs.setGlyph(.blank, for: profileId, slot: slot)
+                        Task { await store.clearSlot() }
+                    }
+                    .controlSize(.small)
+                    .disabled(store.busy || !store.canEditDraft)
+                }
+            }
+
+            ShortcutRecorder(
+                action: inlineShortcutBinding,
+                isDisabled: store.busy || !store.canEditDraft,
+                onCommit: { recorded in
+                    let keyLower = (recorded.payload["key"]?.text ?? "").lowercased()
+                    if ["fn", "globe", "apple_fn", "fn_globe"].contains(keyLower) {
+                        prefs.setGlyph(.mic, for: profileId, slot: slot)
+                        Task { _ = await store.saveAction(CodexKeycapCatalog.makeAppleFnAction()) }
+                    } else {
+                        Task { _ = await store.saveAction(recorded) }
+                    }
+                }
+            )
+
+            Text("点击上方「录制快捷键」后直接按键盘组合键即可绑定到当前键位；或点击「设为 🌐 苹果 Fn」触发系统/语音输入法专属 Fn（支持按住说话与单按切换）。")
+                .font(UITheme.Typography.caption)
+                .foregroundStyle(UITheme.textSecondary)
+        }
+        .padding(10)
+        .background(UITheme.subtleSurface, in: RoundedRectangle(cornerRadius: UITheme.Radius.itemInner))
+    }
+
     private var glyphGridSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -1276,8 +1357,12 @@ struct CreatorMicroInlineInspectorView: View {
                     Button {
                         prefs.setRole(.actionKey, for: profileId, slot: slot)
                         prefs.setGlyph(cap, for: profileId, slot: slot)
-                        let defaultAct = CodexKeycapCatalog.defaultAction(for: cap, agent: agentKind, slot: slot)
-                        Task { _ = await store.saveAction(defaultAct) }
+                        if cap == .blank && agentKind == .custom {
+                            Task { await store.clearSlot() }
+                        } else if currentAction == nil || agentKind != .custom {
+                            let defaultAct = CodexKeycapCatalog.defaultAction(for: cap, agent: agentKind, slot: slot)
+                            Task { _ = await store.saveAction(defaultAct) }
+                        }
                     } label: {
                         VStack(spacing: 4) {
                             CodexKeycapGlyphView(

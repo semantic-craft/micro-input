@@ -319,11 +319,18 @@ impl MicroInput {
     ) -> Result<String, BridgeError> {
         let profile = serde_json::from_str(&profile_id).map_err(failure)?;
         let layer = serde_json::from_str(&layer_id).map_err(failure)?;
-        let action = serde_json::from_str(&action_json).map_err(failure)?;
+        let trimmed = action_json.trim();
         let mut store = self.draft.lock().unwrap();
-        store
-            .update(|d| d.assign(&profile, &layer, slot, action))
-            .map_err(failure)?;
+        if trimmed.is_empty() || trimmed == "null" {
+            store
+                .update(|d| d.unassign(&profile, &layer, slot))
+                .map_err(failure)?;
+        } else {
+            let action = serde_json::from_str(&action_json).map_err(failure)?;
+            store
+                .update(|d| d.assign(&profile, &layer, slot, action))
+                .map_err(failure)?;
+        }
         document_response(&store, None)
     }
     pub async fn export_preset(

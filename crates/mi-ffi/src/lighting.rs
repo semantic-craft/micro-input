@@ -328,9 +328,9 @@ impl MicroInput {
                         .or_else(|| item["speed"].as_f64())
                         .unwrap_or(default_key_s)
                 };
-                entries.push(
-                    mi_proto::lighting_candidate::OaiKeyStatusEntry::with_style(k, c, b, e, s),
-                );
+                entries.push(mi_proto::lighting_candidate::OaiKeyStatusEntry::with_style(
+                    k, c, b, e, s,
+                ));
             }
         }
         if !self.write_capable() {

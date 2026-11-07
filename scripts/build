@@ -27,6 +27,6 @@ if [[ -z "$sign_id" ]]; then
 fi
 codesign --force --sign "${sign_id:--}" "$bundle"
 lsreg="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-if [[ -d "/Applications/Micro Input.app" && -x "$lsreg" ]]; then
+if [[ -x "$lsreg" ]]; then
   "$lsreg" -u "$PWD/$bundle" >/dev/null 2>&1 || true
 fi

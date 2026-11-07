@@ -171,6 +171,11 @@ final class CodexKeycapCatalogTests: XCTestCase {
         XCTAssertTrue(herdrItems.contains(where: { $0.action.name.contains("选择 Space / Tab") }), "Herdr must expose Space/Tab picker")
         XCTAssertTrue(herdrItems.contains(where: { $0.action.name.contains("向右分屏") }), "Herdr must expose split right")
         XCTAssertFalse(herdrItems.contains(where: { $0.action.payload["command"]?.text == "push-to-talk" }), "Herdr is a terminal multiplexer and must not expose voice dictation")
+
+        let customItems = CodexKeycapCatalog.actionGroups(for: .custom, slot: 11).flatMap(\.items)
+        XCTAssertTrue(customItems.contains(where: { $0.action.id == "apple-fn-key" && $0.keycap == .mic }), "其他软件 (.custom) must expose Apple Fn key preset with mic glyph")
+        XCTAssertEqual(CodexKeycapCatalog.inferKeycap(slot: 0, action: nil, agent: .custom), .blank, "Unassigned slots in 其他软件 must default to blank keycap")
+        XCTAssertEqual(CodexKeycapCatalog.inferKeycap(slot: 11, action: CodexKeycapCatalog.makeAppleFnAction(), agent: .custom), .mic, "Apple Fn key in 其他软件 must infer mic keycap")
     }
 
     func testKeycapCatalogSearchAndDefaultActionResolution() {

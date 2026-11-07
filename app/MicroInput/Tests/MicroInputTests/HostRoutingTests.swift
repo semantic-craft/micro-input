@@ -285,6 +285,14 @@ import MicroInputCore
             .cancelled
         )
         XCTAssertEqual(
+            ShortcutChord.from(keyCode: 0x3F, modifierFlags: [.function]),
+            .recorded(ShortcutChord(key: "fn", modifiers: []))
+        )
+        XCTAssertEqual(
+            ShortcutChord(key: "fn", modifiers: []).displayLabel,
+            "🌐 Fn"
+        )
+        XCTAssertEqual(
             ShortcutChord.from(keyCode: 0x35, modifierFlags: [.command]),
             .recorded(ShortcutChord(key: "escape", modifiers: ["command"]))
         )

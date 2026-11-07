@@ -182,7 +182,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     assert_eq!(draft.revision, 0);
     assert_eq!(draft.config.profiles.len(), 2);
     let created = install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(created.len(), 7);
+    assert_eq!(created.len(), 8);
     assert_eq!(
         draft.revision, 1,
         "install_agent_starter_profiles must commit as a single atomic revision"
@@ -191,10 +191,10 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     assert_eq!(
         draft.config.profiles.len(),
         2,
-        "single undo must revert all 7 starter profiles"
+        "single undo must revert all 8 starter profiles"
     );
     draft.undo(true).unwrap();
-    assert_eq!(draft.config.profiles.len(), 7);
+    assert_eq!(draft.config.profiles.len(), 8);
 
     let ag_pid = &created[0];
     let herdr_pid = &created[1];
@@ -575,7 +575,7 @@ fn host_preferences_persist_active_profile_and_execution_enabled() {
 fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
     let mut draft = Draft::default();
     let ids = install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(draft.config.profiles.len(), 7);
+    assert_eq!(draft.config.profiles.len(), 8);
     assert!(!draft
         .config
         .profiles
@@ -695,7 +695,7 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
         edited.document.editable.graph.profiles[&pid].name,
         "My existing mapping"
     );
-    assert_eq!(edited.config.profiles.len(), 8);
+    assert_eq!(edited.config.profiles.len(), 9);
 }
 
 #[test]
@@ -1066,6 +1066,7 @@ fn canonical_recorded_shortcut_keys_resolve_through_host_router() {
         ("forward_delete", 0x75),
         ("end", 0x77),
         ("page_down", 0x79),
+        ("fn", 0x3F),
     ] {
         draft
             .assign(
@@ -1097,4 +1098,109 @@ fn canonical_recorded_shortcut_keys_resolve_through_host_router() {
             })
         );
     }
+}
+
+#[test]
+fn other_apps_general_profile_binds_only_ag11_apple_fn_and_serves_as_wildcard_follow_fallback() {
+    use mi_model::{resolve_host_action_with_layout, BottomRowLayout};
+
+    let mut store = DocumentStore::default();
+    let ids = install_agent_starter_profiles(&mut store.draft).unwrap();
+    let other_pid = ids
+        .iter()
+        .find(|pid| store.draft.document.editable.graph.profiles[*pid].name == "其他软件")
+        .expect("其他软件 starter profile must be installed")
+        .clone();
+    let ag_pid = ids
+        .iter()
+        .find(|pid| store.draft.document.editable.graph.profiles[*pid].name == "Antigravity")
+        .unwrap()
+        .clone();
+
+    let expected_fn = ResolvedHostAction::Shortcut {
+        key: "fn".into(),
+        key_code: 0x3F,
+        modifiers: vec![],
+        target_bundle_id: None,
+    };
+
+    // In default Split mode, ONLY AG11 (logical-11, bottom row middle/second microphone key) is bound.
+    assert_eq!(
+        resolve_host_action_with_layout(
+            &store.draft.document,
+            Some(&other_pid),
+            "AG11",
+            true,
+            false,
+            BottomRowLayout::Split
+        ),
+        Some(expected_fn.clone())
+    );
+    for unbound in [
+        "AG00", "AG01", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10",
+        "AG12", "AG13", "AG14", "ENC_CLK", "AG15", "AG16", "AG17", "AG18",
+    ] {
+        assert_eq!(
+            resolve_host_action_with_layout(
+                &store.draft.document,
+                Some(&other_pid),
+                unbound,
+                true,
+                false,
+                BottomRowLayout::Split
+            ),
+            None,
+            "其他软件 {unbound} must start unassigned so the user can freely map shortcuts"
+        );
+    }
+
+    // In Merged 2U mode, both AG10 and AG11 fall back to logical-11 (Apple Fn).
+    for wide_binding in ["AG10", "AG11"] {
+        assert_eq!(
+            resolve_host_action_with_layout(
+                &store.draft.document,
+                Some(&other_pid),
+                wide_binding,
+                true,
+                false,
+                BottomRowLayout::Merged
+            ),
+            Some(expected_fn.clone())
+        );
+    }
+
+    // Wildcard "*" link routes any non-coding-agent app to "其他软件" while preserving explicit agent links.
+    for op in [
+        json!({"kind": "upsert", "bundle_id": "com.google.antigravity", "profile_id": ag_pid}),
+        json!({"kind": "upsert", "bundle_id": "*", "profile_id": other_pid}),
+        json!({"kind": "enable", "enabled": true}),
+        json!({"kind": "follow", "bundle_id": "com.google.antigravity"}),
+    ] {
+        let req = serde_json::from_value(json!({
+            "document_id": store.draft.document_id,
+            "document_revision": store.draft.revision,
+            "host_state_revision": store.host_revision(),
+            "operation": op
+        }))
+        .unwrap();
+        store.update_routing(req).unwrap();
+    }
+    assert_eq!(
+        store.host_active_profile_id().as_deref(),
+        Some(ag_pid.as_str())
+    );
+
+    let follow_safari = serde_json::from_value(json!({
+        "document_id": store.draft.document_id,
+        "document_revision": store.draft.revision,
+        "host_state_revision": store.host_revision(),
+        "operation": {"kind": "follow", "bundle_id": "com.apple.Safari"}
+    }))
+    .unwrap();
+    store.update_routing(follow_safari).unwrap();
+    assert_eq!(
+        store.host_active_profile_id().as_deref(),
+        Some(other_pid.as_str()),
+        "Switching to an app outside the coding agents must follow into 其他软件"
+    );
 }

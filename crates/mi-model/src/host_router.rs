@@ -430,6 +430,7 @@ pub fn macos_virtual_key_code(key: &str) -> Option<u16> {
         "grave" | "backtick" | "`" => Some(0x32),
         "delete" | "backspace" => Some(0x33),
         "escape" | "esc" => Some(0x35),
+        "fn" | "globe" | "apple_fn" | "fn_globe" => Some(0x3F),
         "f1" => Some(0x7A),
         "f2" => Some(0x78),
         "f3" => Some(0x63),

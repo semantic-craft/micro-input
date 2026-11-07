@@ -231,6 +231,16 @@ final class HostExecutionTests: XCTestCase {
                 await store.tryDesktopAction()
                 continue
             }
+            if agent.name == "其他软件" {
+                XCTAssertFalse(store.canTryDesktopAction, "其他软件 slot 0 is unassigned by default")
+                store.slot = 11
+                XCTAssertTrue(store.canTryDesktopAction, "其他软件 slot 11 (AG11) is bound to Apple Fn key")
+                await store.tryDesktopAction()
+                XCTAssertEqual(executor.receipts.last?.actionType, "shortcut")
+                XCTAssertEqual(executor.receipts.last?.target, "frontmost-editor")
+                XCTAssertEqual(executor.receipts.last?.detail, "fn")
+                continue
+            }
             await store.tryDesktopAction()
             XCTAssertEqual(executor.receipts.last?.target, agent.bundleID)
             store.slot = 14
@@ -1324,6 +1334,158 @@ final class HostExecutionTests: XCTestCase {
                 x: 420
             )
         )
+    }
+
+    @MainActor func testAppleFnKeySynthesizesFlagsChangedEventAndSupportsPhysicalHoldAndReleaseInOtherSoftwareProfile() async throws {
+        let downEvent = try XCTUnwrap(LiveHostActionExecutor.makeAppleFnFlagsChangedEvent(down: true))
+        XCTAssertEqual(downEvent.type, .flagsChanged)
+        XCTAssertEqual(UInt16(downEvent.getIntegerValueField(.keyboardEventKeycode)), 0x3F)
+        XCTAssertTrue(downEvent.flags.contains(.maskSecondaryFn))
+
+        let upEvent = try XCTUnwrap(LiveHostActionExecutor.makeAppleFnFlagsChangedEvent(down: false))
+        XCTAssertEqual(upEvent.type, .flagsChanged)
+        XCTAssertEqual(UInt16(upEvent.getIntegerValueField(.keyboardEventKeycode)), 0x3F)
+        XCTAssertFalse(upEvent.flags.contains(.maskSecondaryFn))
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("mi-apple-fn-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let liveExecutor = LiveHostActionExecutor(auditLogPath: directory.appendingPathComponent("audit.jsonl").path)
+        var postedFnEvents: [(down: Bool, hasFnFlag: Bool)] = []
+        liveExecutor.appleFnFlagsPoster = { down, modifierFlags in
+            var flags = modifierFlags
+            if down {
+                flags.insert(.maskSecondaryFn)
+            } else {
+                flags.remove(.maskSecondaryFn)
+            }
+            postedFnEvents.append((down: down, hasFnFlag: flags.contains(.maskSecondaryFn)))
+            return true
+        }
+
+        let store = Store(
+            nativeOwnership: NativeOwnershipController(isolated: true),
+            backend: MicroInputCore.MicroInput(),
+            documentURL: directory.appendingPathComponent("workbench.json"),
+            actionExecutor: liveExecutor
+        )
+        await store.loadWorkbench()
+        await store.prepareDesktopProfiles()
+        await store.ensureDefaultAgentLinks()
+        await store.setHostExecutionEnabled(true)
+
+        let otherProfile = try XCTUnwrap(store.hostProfiles.first(where: { $0.name == "其他软件" }))
+        XCTAssertEqual(store.routing?.app_profile_links[DesktopAgent.otherAppsWildcardBundleID], otherProfile.id.text)
+
+        // Switching to a non-agent app (e.g. Safari) falls back via "*" to "其他软件"
+        await store.setAutoFollow(true)
+        store.foregroundChanged(bundleID: "com.apple.Safari")
+        await store.foregroundTask?.value
+        while store.mutationDraining { await Task.yield() }
+        XCTAssertEqual(store.hostActiveProfileId, otherProfile.id.text)
+
+        // One-shot invocation (e.g. "测试动作") posts Fn down + Fn up immediately
+        let otherIndex = try XCTUnwrap(store.snapshot?.profiles.firstIndex(where: { $0.name == "其他软件" }))
+        store.selectProfile(otherIndex)
+        store.slot = 11
+        await store.tryDesktopAction()
+        XCTAssertEqual(postedFnEvents.count, 2)
+        XCTAssertEqual(postedFnEvents[0].down, true)
+        XCTAssertEqual(postedFnEvents[0].hasFnFlag, true)
+        XCTAssertEqual(postedFnEvents[1].down, false)
+        XCTAssertEqual(postedFnEvents[1].hasFnFlag, false)
+        XCTAssertTrue(liveExecutor.heldAppleFnBindings.isEmpty)
+
+        // Physical key press on AG11 holds Fn down until AG11 is released (supporting both hold-to-talk and tap)
+        postedFnEvents.removeAll()
+        await store.setHostActiveProfile(otherProfile.id.text)
+        store.inputBoundary.advance(InputWatermark(session_id: 1, ingress_sequence: 0))
+        func makeAG11Event(sequence: UInt64, kind: InputKind) -> InputEventInfo {
+            InputEventInfo(
+                sessionId: 1,
+                sequence: sequence,
+                ingressSequence: sequence,
+                radialCenter: nil,
+                radialPosition: nil,
+                timestampMs: 0,
+                kind: kind,
+                logicalSwitch: "logical-11",
+                bindingId: "AG11",
+                physicalControl: nil,
+                keycapGroup: nil,
+                actionRole: "momentary_key",
+                lostCount: 0,
+                verification: "test",
+                actionEligible: kind == .pressed
+            )
+        }
+
+        _ = store.consumeHostInput(makeAG11Event(sequence: 1, kind: .pressed))
+        await store.hostExecutionTask?.value
+        XCTAssertEqual(postedFnEvents.count, 1, "Pressing AG11 must hold Apple Fn down without premature release")
+        XCTAssertEqual(postedFnEvents[0].down, true)
+        XCTAssertEqual(postedFnEvents[0].hasFnFlag, true)
+        XCTAssertEqual(liveExecutor.heldAppleFnBindings, ["AG11"])
+
+        _ = store.consumeHostInput(makeAG11Event(sequence: 2, kind: .released))
+        XCTAssertEqual(postedFnEvents.count, 2, "Releasing AG11 must post Apple Fn release (flagsChanged without maskSecondaryFn)")
+        XCTAssertEqual(postedFnEvents[1].down, false)
+        XCTAssertEqual(postedFnEvents[1].hasFnFlag, false)
+        XCTAssertTrue(liveExecutor.heldAppleFnBindings.isEmpty)
+
+        await store.shutdown()
+    }
+
+    @MainActor func testZeroPatchREAShortcutSpecsAndSidebarStatusClassificationForDSHZCodeAndCindy() {
+        // DeepSeek Harness shortcuts from packages/client/ui-workspace/src/client/shortcuts.ts
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "dsh-desktop", command: "new-chat")?.label, "Cmd+N")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "dsh-desktop", command: "search")?.label, "Cmd+K")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "dsh-desktop", command: "project")?.label, "Cmd+O")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "dsh-desktop", command: "terminal")?.label, "Ctrl+`")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "dsh-desktop", command: "browser")?.label, "Cmd+T")
+
+        // ZCode shortcuts from packages/shared/src/shortcutCommands.ts
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "zcode", command: "new-chat")?.label, "Cmd+N")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "zcode", command: "search")?.label, "Cmd+K")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "zcode", command: "project")?.label, "Cmd+O")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "zcode", command: "prev-conversation")?.label, "Cmd+Shift+[")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "zcode", command: "next-conversation")?.label, "Cmd+Shift+]")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "zcode", command: "model")?.label, "Ctrl+M")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "zcode", command: "effort")?.label, "Ctrl+T")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "zcode", command: "terminal")?.label, "Cmd+J")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "zcode", command: "browser")?.label, "Cmd+Option+B")
+
+        // Cindy shortcuts from apps/desktop/src/shared/appShortcuts.ts
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "cindy", command: "new-chat")?.label, "Cmd+N")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "cindy", command: "search")?.label, "Cmd+F")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "cindy", command: "effort")?.label, "Shift+Tab")
+        XCTAssertEqual(DesktopAgentControls.nativeShortcutSpec(adapter: "cindy", command: "terminal")?.label, "Ctrl+`")
+
+        // Sidebar status classification for DSH, ZCode, and Cindy
+        let dshWorking = DesktopAgentControls.classifyDSHStatusLabels(["进行中", "2 个子智能体运行中"])
+        XCTAssertTrue(dshWorking.isWorking)
+        XCTAssertFalse(dshWorking.isUnreadCompleted)
+        let dshCompleted = DesktopAgentControls.classifyDSHStatusLabels(["已完成"])
+        XCTAssertFalse(dshCompleted.isWorking)
+        XCTAssertTrue(dshCompleted.isUnreadCompleted)
+        let dshAttention = DesktopAgentControls.classifyDSHStatusLabels(["等待审批"])
+        XCTAssertTrue(dshAttention.isUnreadCompleted)
+
+        let zcodeWorking = DesktopAgentControls.classifyZCodeDOMClasses([["group/task-item"], ["animate-spin"]])
+        XCTAssertTrue(zcodeWorking.isWorking)
+        XCTAssertFalse(zcodeWorking.isUnreadCompleted)
+        let zcodeBlueDot = DesktopAgentControls.classifyZCodeDOMClasses([["group/task-item"], ["rounded-full", "bg-icon-blue"]])
+        XCTAssertFalse(zcodeBlueDot.isWorking)
+        XCTAssertTrue(zcodeBlueDot.isUnreadCompleted)
+
+        let cindyWorking = DesktopAgentControls.classifyCindyStatusLabels(["运行中"])
+        XCTAssertTrue(cindyWorking.isWorking)
+        XCTAssertFalse(cindyWorking.isUnreadCompleted)
+        let cindyCompleted = DesktopAgentControls.classifyCindyStatusLabels(["已完成 — 点击查看"])
+        XCTAssertFalse(cindyCompleted.isWorking)
+        XCTAssertTrue(cindyCompleted.isUnreadCompleted)
     }
 }
 
