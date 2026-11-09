@@ -18,7 +18,7 @@ This increment changes host routing on the Mac. It does not write or activate a 
 
 ## The Problem
 
-The user currently switches host Profiles from the menu bar. Moving between Antigravity, Cindy, and Herdr requires a second manual step before the controller uses the desired mapping. The user also needs to see which Profile is active and recall what each physical key does without inspecting the editor.
+The user currently switches host Profiles from the menu bar. Moving between Antigravity, DeepSeek Harness, and Herdr requires a second manual step before the controller uses the desired mapping. The user also needs to see which Profile is active and recall what each physical key does without inspecting the editor.
 
 Automatic following creates a competing problem: it can undo an intentional manual choice. Keeping the last Profile in an unlinked app also means that the controller can still target the previous work app. The user has chosen that behavior. The interface must make the actual control target and manual override visible so this retained routing is understandable.
 
@@ -48,7 +48,7 @@ A cheat sheet can be misleading if it shows the Profile being edited instead of 
 ### 1. Move to a linked work app
 
 * **Given:** Following is enabled, no manual override is active, and Antigravity is associated with a valid Profile.
-* **When:** The user brings Antigravity to the foreground from Cindy.
+* **When:** The user brings Antigravity to the foreground from DeepSeek Harness.
 * **Then:** The associated host Profile becomes active; a brief notice identifies it after success; typing focus remains in Antigravity. Subsequent controller actions use the active mapping through the existing execution checks.
 
 ### 2. Consult an unlinked app, then return to work
@@ -56,20 +56,20 @@ A cheat sheet can be misleading if it shows the Profile being edited instead of 
 * **Given:** Following is enabled and Antigravity is active.
 * **When:** The user opens an unlinked browser to consult documentation.
 * **Then:** Antigravity remains the control Profile and no switch notice falsely reports a change. Existing actions can still target Antigravity according to their bindings.
-* **When:** The user then brings linked Cindy to the foreground.
-* **Then:** Following selects Cindy because visiting the unlinked browser did not create a manual override.
+* **When:** The user then brings linked DeepSeek Harness to the foreground.
+* **Then:** Following selects DeepSeek Harness because visiting the unlinked browser did not create a manual override.
 
 ### 3. Keep an intentional manual selection
 
 * **Given:** Following is enabled.
-* **When:** The user manually selects Cindy, switches among linked and unlinked apps, and restarts Micro Input.
-* **Then:** Cindy stays selected and the manual override remains visible. Only an explicit resume action clears the override. Restart must not silently restore automatic following.
+* **When:** The user manually selects DeepSeek Harness, switches among linked and unlinked apps, and restarts Micro Input.
+* **Then:** DeepSeek Harness stays selected and the manual override remains visible. Only an explicit resume action clears the override. Restart must not silently restore automatic following.
 
 ### 4. Recall a key without changing the target
 
-* **Given:** Antigravity is the active host Profile while the workbench is browsing Cindy.
+* **Given:** Antigravity is the active host Profile while the workbench is browsing DeepSeek Harness.
 * **When:** The user invokes the key cheat sheet.
-* **Then:** The sheet identifies Antigravity and shows its actual host key mapping. It neither activates Cindy nor steals typing focus. If host execution is unavailable, the display does not imply that the shown keys will execute successfully.
+* **Then:** The sheet identifies Antigravity and shows its actual host key mapping. It neither activates DeepSeek Harness nor steals typing focus. If host execution is unavailable, the display does not imply that the shown keys will execute successfully.
 
 ### 5. Switch while input is in progress
 

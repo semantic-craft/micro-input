@@ -1,4 +1,3 @@
-use crate::ownership::{NativeOwnershipController, OwnershipState};
 use mi_model::navigation_history::NavigationPlace;
 use mi_model::voice_control::{FourAppVoice, VoiceReplyMode};
 use std::collections::BTreeMap;
@@ -7,7 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub fn place_target_app(place: &NavigationPlace) -> &str {
     match place {
         NavigationPlace::Antigravity { .. } => "antigravity",
-        NavigationPlace::Cindy { .. } => "cindy",
         NavigationPlace::Dsh { .. } => "dsh-desktop",
         NavigationPlace::App { bundle_id } => bundle_id.as_str(),
         NavigationPlace::Session { adapter, .. } => adapter.as_str(),
@@ -20,10 +18,6 @@ pub fn place_display_label(place: &NavigationPlace) -> String {
             conversation_id,
             workspace_path,
         } => format!("{conversation_id}@{workspace_path}"),
-        NavigationPlace::Cindy {
-            workspace_path,
-            session_id,
-        } => format!("{session_id}@{workspace_path}"),
         NavigationPlace::Dsh {
             session_id,
             workspace_id,
@@ -152,14 +146,12 @@ pub trait VoiceReplyBackend {
 
 #[derive(Debug, Default, Clone)]
 pub struct SimulatedVoiceReplyBackend {
-    pub cindy_enabled: bool,
     pub dsh_enabled: bool,
 }
 
 impl VoiceReplyBackend for SimulatedVoiceReplyBackend {
     fn read_voice_reply_enabled(&self, app: &str) -> bool {
         match app {
-            "cindy" => self.cindy_enabled,
             "dsh-desktop" => self.dsh_enabled,
             _ => false,
         }
@@ -167,10 +159,6 @@ impl VoiceReplyBackend for SimulatedVoiceReplyBackend {
 
     fn write_voice_reply_enabled(&mut self, app: &str, enabled: bool) -> (bool, String) {
         match app {
-            "cindy" => {
-                self.cindy_enabled = enabled;
-                (true, format!("cindy voice_reply={enabled}"))
-            }
             "dsh-desktop" => {
                 self.dsh_enabled = enabled;
                 (true, format!("dsh-desktop voice_reply={enabled}"))
@@ -218,7 +206,6 @@ impl FourAppVoiceManager {
         session: NavigationPlace,
         binding: &str,
         profile: &str,
-        ownership: &NativeOwnershipController,
         host_execution_enabled: bool,
         ptt: &mut PushToTalkController,
     ) -> (bool, String) {
@@ -236,14 +223,6 @@ impl FourAppVoiceManager {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        if app == "cindy" && matches!(ownership.state(), OwnershipState::Native { .. }) {
-            self.dictation_state = FourAppDictationState::Recording {
-                app: app.to_owned(),
-                session,
-                started_at_ms: now_ms,
-            };
-            return (true, "Cindy 复用原生语音；按住听写已启动".into());
-        }
         if let FourAppDictationState::Recording {
             app: current_app,
             session: current_session,
@@ -258,9 +237,8 @@ impl FourAppVoiceManager {
                 ),
             );
         }
-        let dispatch_open = ownership.allows_execution() || ownership.is_transient_reconfirming();
-        if !dispatch_open || !host_execution_enabled || !ptt.cleanup_confirmed || ptt.is_active {
-            return (false, "宿主所有权或听写清理门禁未就绪，未启动听写".into());
+        if !host_execution_enabled || !ptt.cleanup_confirmed || ptt.is_active {
+            return (false, "宿主执行或听写清理门禁未就绪，未启动听写".into());
         }
         ptt.start_held_dictation(app, binding, profile);
         let (confirmed, detail) = ptt.wait_for_start_outcome().await;
@@ -280,7 +258,6 @@ impl FourAppVoiceManager {
         app: &str,
         session: NavigationPlace,
         binding: &str,
-        ownership: &NativeOwnershipController,
         ptt: &mut PushToTalkController,
     ) -> (bool, String) {
         let FourAppDictationState::Recording {
@@ -296,13 +273,6 @@ impl FourAppVoiceManager {
                 false,
                 format!("停止听写目标不匹配: 期望 {rec_app}, 实际 {app}"),
             );
-        }
-        if app == "cindy" && matches!(ownership.state(), OwnershipState::Native { .. }) {
-            self.dictation_state = FourAppDictationState::Stopped {
-                app: app.to_owned(),
-                session,
-            };
-            return (true, "已确认 Cindy 原生听写停止；未发送消息".into());
         }
         ptt.release(binding);
         ptt.wait_until_stopped().await;
@@ -324,7 +294,6 @@ impl FourAppVoiceManager {
     pub async fn stop_before_submit(
         &mut self,
         app: &str,
-        ownership: &NativeOwnershipController,
         ptt: &mut PushToTalkController,
     ) -> (bool, String) {
         if let FourAppDictationState::Recording {
@@ -334,13 +303,6 @@ impl FourAppVoiceManager {
         } = self.dictation_state.clone()
         {
             if rec_app == app {
-                if app == "cindy" && matches!(ownership.state(), OwnershipState::Native { .. }) {
-                    self.dictation_state = FourAppDictationState::Stopped {
-                        app: app.to_owned(),
-                        session,
-                    };
-                    return (true, "提交前已先停止活跃听写".into());
-                }
                 ptt.cancel();
                 ptt.wait_until_stopped().await;
                 let ptt_stopped = ptt.verify_stopped().await;
@@ -367,9 +329,7 @@ impl FourAppVoiceManager {
         backend: &dyn VoiceReplyBackend,
     ) -> VoiceReplyMode {
         let mode = match app {
-            "cindy" | "dsh-desktop" => {
-                VoiceReplyMode::Supported(backend.read_voice_reply_enabled(app))
-            }
+            "dsh-desktop" => VoiceReplyMode::Supported(backend.read_voice_reply_enabled(app)),
             "antigravity" => FourAppVoice::initial_voice_reply_mode("antigravity"),
             other => VoiceReplyMode::Unsupported {
                 app: other.to_owned(),
@@ -387,16 +347,13 @@ impl FourAppVoiceManager {
         backend: &mut dyn VoiceReplyBackend,
     ) -> (bool, VoiceReplyMode, String) {
         match app {
-            "cindy" | "dsh-desktop" => {
+            "dsh-desktop" => {
                 let (_, detail) = backend.write_voice_reply_enabled(app, enabled);
                 let readback = backend.read_voice_reply_enabled(app);
                 let mode = VoiceReplyMode::Supported(readback);
                 self.voice_reply_modes.insert(app.to_owned(), mode.clone());
                 let verified = readback == enabled;
-                let fallback = match app {
-                    "cindy" => "Cindy 语音回复回读不一致",
-                    _ => "DSH 语音回复回读不一致",
-                };
+                let fallback = "DSH 语音回复回读不一致";
                 (
                     verified,
                     mode,
@@ -444,10 +401,9 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_start_dictation_fails_closed_when_ownership_blocked_or_driver_rejects() {
+    async fn test_start_dictation_fails_closed_when_host_execution_disabled_or_driver_rejects() {
         let mut manager = FourAppVoiceManager::new();
         let mut ptt = PushToTalkController::new_simulated();
-        let blocked_ownership = NativeOwnershipController::new(None, false);
         let session = NavigationPlace::antigravity("conv-1", "/tmp/ws");
 
         let (ok, reason) = manager
@@ -456,8 +412,7 @@ mod tests {
                 session.clone(),
                 "AG10",
                 "profile-ag",
-                &blocked_ownership,
-                true,
+                false,
                 &mut ptt,
             )
             .await;
@@ -466,7 +421,6 @@ mod tests {
         assert_eq!(manager.dictation_state(), &FourAppDictationState::Idle);
         assert!(!ptt.is_active);
 
-        let isolated_ownership = NativeOwnershipController::new_isolated();
         ptt.set_next_start_outcome(false, "底层录音设备拒绝启动");
         let (ok2, reason2) = manager
             .start_dictation(
@@ -474,7 +428,6 @@ mod tests {
                 session.clone(),
                 "AG10",
                 "profile-ag",
-                &isolated_ownership,
                 true,
                 &mut ptt,
             )
@@ -491,7 +444,6 @@ mod tests {
                 session.clone(),
                 "AG10",
                 "profile-ag",
-                &isolated_ownership,
                 true,
                 &mut ptt,
             )

@@ -138,7 +138,6 @@ public struct DesktopAgent: Identifiable {
     }
 
     public static let all: [DesktopAgent] = [
-        .init(name: "Cindy", bundleID: "com.xd.cindy", symbol: "sparkles"),
         .init(name: "Codex", bundleID: "com.openai.codex", symbol: "terminal"),
         .init(name: "Antigravity", bundleID: "com.google.antigravity", symbol: "sparkles"),
         .init(name: "DeepSeek Coder (DSH)", bundleID: "com.deepseek.dsh", symbol: "terminal"),
@@ -207,7 +206,6 @@ public struct AgentBadge: View {
 }
 
 public enum AgentProfileKind: String {
-    case cindy = "Cindy"
     case codex = "Codex"
     case antigravity = "Antigravity"
     case dsh = "DeepSeek Coder (DSH)"
@@ -224,7 +222,7 @@ public enum AgentProfileKind: String {
 
     public var supportsLiveSessionSlots: Bool {
         switch self {
-        case .cindy, .codex, .antigravity, .dsh:
+        case .codex, .antigravity, .dsh:
             return true
         case .herdr, .custom:
             return false
@@ -233,8 +231,6 @@ public enum AgentProfileKind: String {
 
     public var bridgeDescription: String {
         switch self {
-        case .cindy:
-            return "支持 Cindy 原生控制与本机会话切换"
         case .codex:
             return "支持 Codex 会话切换、模型选择与语音听写"
         case .antigravity:

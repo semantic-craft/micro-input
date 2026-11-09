@@ -485,12 +485,12 @@ fn lighting_editor_dual_zone_all_layers_preview_and_protected_layer_isolation() 
         .dispatch_inspector_action(InspectorAction::StartShortcutRecording)
         .expect("start shortcut recording before switching to protected profile");
 
-    let cindy_id = store
-        .find_canonical_profile_id(CanonicalAgent::Cindy)
-        .expect("Cindy canonical profile must exist");
+    let codex_id = store
+        .find_canonical_profile_id(CanonicalAgent::Codex)
+        .expect("Codex canonical profile must exist");
     store
-        .dispatch_sidebar_action(SidebarAction::SelectProfile(cindy_id))
-        .expect("switch to protected Cindy profile");
+        .dispatch_sidebar_action(SidebarAction::SelectProfile(codex_id))
+        .expect("switch to protected Codex profile");
 
     assert!(store.is_selected_layer_protected());
     assert!(

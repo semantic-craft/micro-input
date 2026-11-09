@@ -265,71 +265,67 @@ fn mg1_protected_oai_layer_enforces_all_four_hard_isolation_invariants_and_one_c
     let temp = TempDir::new().unwrap();
     let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
 
-    for agent in [CanonicalAgent::Cindy, CanonicalAgent::Codex] {
-        let pid = store.find_canonical_profile_id(agent).unwrap();
-        store.select_and_activate_profile(&pid).unwrap();
-        assert!(store.is_selected_layer_protected());
-        assert_eq!(
-            store.ensure_layer_editable(),
-            Err(WorkbenchError::ProtectedLayerLocked)
-        );
-
-        let lock = store
-            .projection()
-            .canvas
-            .protected_lock
-            .as_ref()
-            .expect("protected layer must project ProtectedLayerLockProjection");
-        assert!(lock.is_locked);
-        assert!(!lock.lock_badge_text.is_empty());
-        assert!(!lock.explanation_text.is_empty());
-
-        assert!(!store.projection().canvas.can_edit_bindings);
-        assert!(!store.projection().canvas.inspector_expanded);
-        assert!(!store.projection().session_strip.can_mutate_layout);
-        assert_eq!(
-            store.dispatch_session_strip_action(SessionStripAction::BindTopSixAsSessionKeys),
-            Err(WorkbenchError::ProtectedLayerLocked)
-        );
-        assert_eq!(
-            store.dispatch_session_strip_action(SessionStripAction::RestoreDefaultLayout),
-            Err(WorkbenchError::ProtectedLayerLocked)
-        );
-        assert_eq!(
-            store.dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
-                KnobJoystickPreset::CycleWorkingAndBlueDot
-            )),
-            Err(WorkbenchError::ProtectedLayerLocked)
-        );
-        assert_eq!(
-            store.dispatch_canvas_action(CanvasAction::AssignSlotAction {
-                slot: 0,
-                action_id: "search".to_string(),
-            }),
-            Err(WorkbenchError::ProtectedLayerLocked)
-        );
-
-        assert!(!store.projection().canvas.can_add_lighting);
-        assert!(!store.projection().canvas.can_export_or_copy_layer);
-        assert!(
-            store
-                .projection()
-                .session_strip
-                .lighting_popover
-                .suspended_by_protected_layer
-        );
-        assert_eq!(
-            store.dispatch_session_strip_action(SessionStripAction::TriggerTestLighting(Some(
-                FourAppAgentPhase::Completed
-            ))),
-            Err(WorkbenchError::ProtectedLayerLocked)
-        );
-    }
-
-    let cindy_pid = store
-        .find_canonical_profile_id(CanonicalAgent::Cindy)
+    let pid = store
+        .find_canonical_profile_id(CanonicalAgent::Codex)
         .unwrap();
-    store.select_and_activate_profile(&cindy_pid).unwrap();
+    store.select_and_activate_profile(&pid).unwrap();
+    assert!(store.is_selected_layer_protected());
+    assert_eq!(
+        store.ensure_layer_editable(),
+        Err(WorkbenchError::ProtectedLayerLocked)
+    );
+
+    let lock = store
+        .projection()
+        .canvas
+        .protected_lock
+        .as_ref()
+        .expect("protected layer must project ProtectedLayerLockProjection");
+    assert!(lock.is_locked);
+    assert!(!lock.lock_badge_text.is_empty());
+    assert!(!lock.explanation_text.is_empty());
+
+    assert!(!store.projection().canvas.can_edit_bindings);
+    assert!(!store.projection().canvas.inspector_expanded);
+    assert!(!store.projection().session_strip.can_mutate_layout);
+    assert_eq!(
+        store.dispatch_session_strip_action(SessionStripAction::BindTopSixAsSessionKeys),
+        Err(WorkbenchError::ProtectedLayerLocked)
+    );
+    assert_eq!(
+        store.dispatch_session_strip_action(SessionStripAction::RestoreDefaultLayout),
+        Err(WorkbenchError::ProtectedLayerLocked)
+    );
+    assert_eq!(
+        store.dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
+            KnobJoystickPreset::CycleWorkingAndBlueDot
+        )),
+        Err(WorkbenchError::ProtectedLayerLocked)
+    );
+    assert_eq!(
+        store.dispatch_canvas_action(CanvasAction::AssignSlotAction {
+            slot: 0,
+            action_id: "search".to_string(),
+        }),
+        Err(WorkbenchError::ProtectedLayerLocked)
+    );
+
+    assert!(!store.projection().canvas.can_add_lighting);
+    assert!(!store.projection().canvas.can_export_or_copy_layer);
+    assert!(
+        store
+            .projection()
+            .session_strip
+            .lighting_popover
+            .suspended_by_protected_layer
+    );
+    assert_eq!(
+        store.dispatch_session_strip_action(SessionStripAction::TriggerTestLighting(Some(
+            FourAppAgentPhase::Completed
+        ))),
+        Err(WorkbenchError::ProtectedLayerLocked)
+    );
+
     let protected_lid = store.selected_layer_id().unwrap().to_string();
 
     store
@@ -381,9 +377,9 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
     store.select_and_activate_profile(&ag_pid).unwrap();
 
     let place_idle_recent = NavigationPlace::antigravity("conv-idle", "/ws/idle");
-    let place_viewed_done = NavigationPlace::cindy("/ws/cindy-viewed", "sess-viewed");
+    let place_viewed_done = NavigationPlace::dsh("sess-viewed", "ws-viewed", "host-1");
     let place_unread_done = NavigationPlace::antigravity("conv-done", "/ws/done");
-    let place_working = NavigationPlace::cindy("/ws/cindy-work", "sess-working");
+    let place_working = NavigationPlace::dsh("sess-working", "ws-working", "host-1");
     let place_attention = NavigationPlace::dsh("sess-attn", "ws-dsh", "host-1");
 
     store.ingest_four_app_candidates(vec![
@@ -416,7 +412,7 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
         },
         FourAppLiveCandidate {
             place: place_working.clone(),
-            title: "Cindy Running Build".into(),
+            title: "DSH Running Build".into(),
             phase: FourAppSessionKind::Working,
             watermark: "wm-work-1".into(),
             last_modified_ms: 7_000,
@@ -470,7 +466,7 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
 
     store.ingest_four_app_candidates(vec![FourAppLiveCandidate {
         place: place_working.clone(),
-        title: "Cindy Running Build Updated".into(),
+        title: "DSH Running Build Updated".into(),
         phase: FourAppSessionKind::Working,
         watermark: "wm-work-2".into(),
         last_modified_ms: 20_000,

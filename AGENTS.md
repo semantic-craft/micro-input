@@ -1,7 +1,7 @@
 # Micro Input
 
 - 五项持续交付范围与接续入口见 [持续交付](docs/autonomous-delivery.md)。完成一个 PR 后核对 #44 与下一可执行切片；代码合并不代表安装或实体效果验收。
-- **机器自动验收与日常迭代策略**：功能实现默认以 `scripts/verify-offline`（含静态/单元门禁 + 四个合成隔离 QA 场景自动回执校验）全量通过作为交付准绳，通过后可直接更新本机日常版 `/Applications/Micro Input.app` 供实际使用，不因等待人工逐键验收阻塞交付；日常使用中发现的体验或边缘问题再按需迭代修复。
+- **机器自动验收与日常迭代策略**：功能实现默认以 `scripts/verify-offline`（含静态/单元门禁 + 六个合成隔离 QA 场景自动回执校验）全量通过作为交付准绳，通过后可直接更新本机日常版 `/Applications/Micro Input.app` 供实际使用，不因等待人工逐键验收阻塞交付；日常使用中发现的体验或边缘问题再按需迭代修复。
 - **PStack 自动接力约定（A → B → C 跨对话推进）**：全景切片队列在 [docs/pstack-relay.md](docs/pstack-relay.md)，决策账本在 `.scratch/pstack-relay/decisions.tsv`。每次对话完成一个切片并通过验证后，必须运行 `scripts/pstack-relay advance <SLICE_ID> --evidence "<sha/receipt>" --copy`（若仅查询状态则运行 `scripts/pstack-relay status --copy`），并在回复末尾附上生成的 `## Next Chat Prompt (Copy & Paste)` 代码块，供用户直接粘贴到下一个新对话。
 
 - 开工读 README.md、docs/development.md 和 lessons.md；当前首轮为离线工作台；阶段范围见 docs/spec/BUILD_PROMPT.md 的 S1a。
@@ -36,10 +36,8 @@
 | --- | --- |
 | 严禁硬编码用户家目录（`/Users/<name>`），只允许 `Path.home()` / 环境变量 / 配置发现 | `scripts/check-boundaries.py`（`R-C01`，随 `scripts/check` 执行） |
 | 严禁向外部 Agent 维护侵入式补丁（`integrations/*/*.patch`），必须基于其开源代码与可观测行为在 `Micro Input` 侧直接适配 | `scripts/check-boundaries.py`（`R-C02`，随 `scripts/check` 执行） |
-| `Micro Input` 重启后须沿用已持久化的 `.fence` `clientInstance` 并递增 `generation` | `crates/mi-bridge/src/ownership.rs`（`restarted_controller_resumes_persisted_fence_identity_and_increments_generation`） |
 | 桌面 Agent 预设完整度唯一真源为 `WorkbenchStore::has_all_desktop_agent_presets`（派生自 `CANONICAL_DESKTOP_AGENT_PROFILES`），`prepare_desktop_profiles()` 幂等且不覆盖就绪状态 | `crates/mi-core/tests/workbench_store.rs`（`prepare_desktop_profiles_is_idempotent_and_preserves_ready_status`） |
 | 生产出口只读门禁、物理分帧隔离与 `UNKNOWN-*` 清单对齐 | `scripts/check-boundaries.py` + `mi-proto` / `mi-session` 边界测试 |
 | 构建 `target/MicroInput.app` 后注销临时包 LaunchServices 登记，且 `app/MicroInput/Sources/MicroInput/MicroInputApp.swift` 必须在 `setupStatusItem()` 前调用 `mi_core_acquire_instance_lock` 获取 `<documentDir>/instance.lock` 排他锁、`scripts/run` 必须使用严格 `argparse`（支持 `--list`/`--kill` 并剥离继承的 `__CFBundleIdentifier`），杜绝与 `/Applications/Micro Input.app` 双开产生双菜单栏图标 | `scripts/build` + `scripts/check-boundaries.py`（`R-C05`）+ `scripts/tests/test_run_verify_launcher.py` + `crates/mi-macos/tests/macos_scenarios.rs`（`document_instance_lock_rejects_duplicate_owner_until_released`） |
-| `NativeOwnershipController::is_unbridged_desktop_active` 仅以当前 `cindy-ownership.sock` 是否存在为唯一真源，严禁以粘滞 `bridge_observed` / `native_identity` 锁死 Cindy 退出后的本地桌面控制 | `scripts/check-boundaries.py`（`R-C03`）+ `crates/mi-bridge/src/ownership.rs`（`unbridged_desktop_recovers_when_bridge_socket_disappears_and_refences_on_reappear`） |
-| `FourAppVoiceManager::start_dictation` 必须先检查 `dispatch_open` 并等待 `PushToTalkController::wait_for_start_outcome()` 确认启动成功后才可进入 `FourAppDictationState::Recording`，严禁未确认即报告成功 | `scripts/check-boundaries.py`（`R-C04`）+ `crates/mi-bridge/src/voice.rs`（`start_dictation_fails_closed_when_ownership_blocked_or_driver_rejects`） |
+| `FourAppVoiceManager::start_dictation` 必须先检查宿主执行是否启用，并等待 `PushToTalkController::wait_for_start_outcome()` 确认启动成功后才可进入 `FourAppDictationState::Recording`，严禁未确认即报告成功 | `scripts/check-boundaries.py`（`R-C04`）+ `crates/mi-bridge/src/voice.rs`（`test_start_dictation_fails_closed_when_host_execution_disabled_or_driver_rejects`） |
 | `CoreStore` 必须采用 Swift `@Observable` + `Equatable` 域切片门禁（`header`、`sidebar`、`canvas`、`sessionStrip`、`inspector`、`statusMenu`、`overlay`、`footer`、`activeModal`），严禁使用全树广播的 `ObservableObject` / `@Published var model` 或向子视图传递巨石 `ProjectionModel`；Rust `mi_core_dispatch_json` 与 `poll_hardware_events` 必须以 `projection_generation` 门禁无变化短路 | `scripts/check-boundaries.py`（`R-C06`）+ `app/MicroInput/Tests/MicroInputTests/MicroInputTests.swift`（`testRenderInvalidationAndLatencyProfile`）+ `crates/mi-ffi/src/lib.rs`（`ffi_roundtrip_projects_and_dispatches_commands`） |

@@ -233,6 +233,22 @@ fn test_live_host_action_executor_apple_fn_paste_submit_and_macro_trust() {
     assert_eq!(macro_receipt.detail, "accessibility_untrusted");
 }
 
+#[test]
+fn unsupported_agent_commands_do_not_send_events_to_the_frontmost_app() {
+    let driver = RecordingOsDriver::new(true);
+    let executor = LiveHostActionExecutor::new(driver.clone());
+    for command in ["scroll-up", "approve", "push-to-talk"] {
+        let action = ResolvedHostAction::AgentCommand {
+            adapter: "unavailable-desktop-agent".to_string(),
+            command: command.to_string(),
+        };
+        let receipt = executor.execute("old-profile", "AG01", &action);
+        assert_eq!(receipt.outcome, "blocked");
+        assert_eq!(receipt.detail, "unsupported_agent_adapter");
+    }
+    assert!(driver.events().is_empty());
+}
+
 struct MockAxProvider {
     window: Mutex<AxWindowSnapshot>,
     press_calls: Mutex<Vec<String>>,
@@ -267,13 +283,13 @@ impl AxTreeProvider for MockAxProvider {
         let replace = *self.replace_control_on_stop.lock().unwrap();
         let mut win = self.window.lock().unwrap();
         if let Some(ctrl) = win.controls.iter_mut().find(|c| c.control_id == control_id) {
-            if ctrl.label == "开始语音输入" {
-                ctrl.label = "停止语音输入".to_string();
-            } else if ctrl.label == "停止语音输入" {
+            if ctrl.label == "Dictate" {
+                ctrl.label = "Stop dictation".to_string();
+            } else if ctrl.label == "Stop dictation" {
                 if replace {
                     ctrl.control_id = "btn-voice-rebuilt-2".to_string();
                 }
-                ctrl.label = "开始语音输入".to_string();
+                ctrl.label = "Dictate".to_string();
             }
         }
         Ok(())
@@ -296,9 +312,8 @@ impl AxTreeProvider for MockAxProvider {
 
 #[test]
 fn test_ax_dictation_leaf_validation_4tuple_lock_and_replacement_readback() {
-    assert!(DictationAdapter::Cindy.matches_start_label("开始语音输入"));
-    assert!(DictationAdapter::Cindy.matches_stop_label("停止语音输入"));
-    assert!(DictationAdapter::Cindy.matches_stop_label("结束语音输入"));
+    assert!(DictationAdapter::Codex.matches_start_label("Dictate"));
+    assert!(DictationAdapter::Codex.matches_stop_label("Stop dictation"));
 
     let leaf_attrs = vec!["AXRole".to_string(), "AXTitle".to_string()];
     let container_attrs = vec![
@@ -322,11 +337,11 @@ fn test_ax_dictation_leaf_validation_4tuple_lock_and_replacement_readback() {
         window: Mutex::new(AxWindowSnapshot {
             pid: 5150,
             window_id: 9001,
-            window_title: "Cindy - 主窗口".to_string(),
+            window_title: "Codex - 主窗口".to_string(),
             controls: vec![AxElementNode {
                 control_id: "btn-voice-1".to_string(),
                 role: "AXButton".to_string(),
-                label: "开始语音输入".to_string(),
+                label: "Dictate".to_string(),
                 parent_chain_to_window: vec![
                     "toolbar-1".to_string(),
                     "root-split".to_string(),
@@ -346,14 +361,14 @@ fn test_ax_dictation_leaf_validation_4tuple_lock_and_replacement_readback() {
     });
 
     let controller = AXDictationController::new(provider.clone());
-    let start = controller.start_dictation(DictationAdapter::Cindy);
+    let start = controller.start_dictation(DictationAdapter::Codex);
     let locked = match start {
         DictationOutcome::Started(t) => t,
         other => panic!("expected Started, got {:?}", other),
     };
     assert_eq!(locked.pid, 5150);
     assert_eq!(locked.window_id, 9001);
-    assert_eq!(locked.window_title, "Cindy - 主窗口");
+    assert_eq!(locked.window_title, "Codex - 主窗口");
     assert_eq!(locked.control_id, "btn-voice-1");
 
     let stop = controller.stop_dictation();

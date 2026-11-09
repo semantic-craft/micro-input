@@ -227,17 +227,8 @@ fn compact_host_keymap_stays_under_1024_bytes_while_preserving_all_profiles_and_
 {
     let mut draft = Draft::default();
     let profile_ids = preset::install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(profile_ids.len(), 6);
+    assert_eq!(profile_ids.len(), 5);
 
-    let cindy_pid = draft
-        .document
-        .editable
-        .graph
-        .profiles
-        .iter()
-        .find(|(_, p)| p.name == "Cindy")
-        .map(|(id, _)| id.clone())
-        .unwrap();
     let codex_pid = draft
         .document
         .editable
@@ -257,11 +248,8 @@ fn compact_host_keymap_stays_under_1024_bytes_while_preserving_all_profiles_and_
         .map(|(id, _)| id.clone())
         .unwrap();
 
-    let cindy_protected_lid =
-        draft.document.editable.graph.profiles[&cindy_pid].layer_order[0].clone();
     let codex_protected_lid =
         draft.document.editable.graph.profiles[&codex_pid].layer_order[0].clone();
-    assert!(draft.document.is_protected_oai_layer(&cindy_protected_lid));
     assert!(draft.document.is_protected_oai_layer(&codex_protected_lid));
 
     let ag_lid = draft.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
@@ -300,49 +288,44 @@ fn compact_host_keymap_stays_under_1024_bytes_while_preserving_all_profiles_and_
     }
     assert_eq!(draft.macros().len(), 30);
 
-    for (pid, expected_name) in [(&cindy_pid, "Cindy"), (&codex_pid, "Codex")] {
-        let compact = draft
-            .compile_compact_host_keymap(Some(pid))
-            .expect("compile compact host keymap");
-        assert!(
-            compact.len() < 1024,
-            "compact host keymap.json must be < 1024 bytes to avoid firmware 0.6.3 single-packet / 4KB overflow, got {} bytes",
-            compact.len()
-        );
-        let parsed = parse_device_files(&compact, None).expect("firmware-valid keymap.json");
-        assert!(
-            !parsed
-                .warnings
-                .iter()
-                .any(|w| w.contains("缺失") || w.contains("未知") || w.contains("重复")),
-            "{:?}",
-            parsed.warnings
-        );
-        assert_eq!(parsed.profiles.len(), 1);
-        assert_eq!(parsed.profiles[0].name, expected_name);
-        assert_eq!(parsed.profiles[0].layers.len(), 1);
-        assert!(is_protected_oai_layer(&parsed.profiles[0].layers[0]));
-        assert_eq!(
-            check_passthrough_health(
-                Some(&parsed),
-                Some(&HostIdentityStatus {
-                    version: Some("0.6.3".into()),
-                    profile_index: Some(0),
-                    layer_index: Some(1),
-                }),
-            ),
-            PassThroughHealth::Ready
-        );
-    }
+    let compact = draft
+        .compile_compact_host_keymap(Some(&codex_pid))
+        .expect("compile compact host keymap");
+    assert!(
+        compact.len() < 1024,
+        "compact host keymap.json must be < 1024 bytes to avoid firmware 0.6.3 single-packet / 4KB overflow, got {} bytes",
+        compact.len()
+    );
+    let parsed = parse_device_files(&compact, None).expect("firmware-valid keymap.json");
+    assert!(
+        !parsed
+            .warnings
+            .iter()
+            .any(|w| w.contains("缺失") || w.contains("未知") || w.contains("重复")),
+        "{:?}",
+        parsed.warnings
+    );
+    assert_eq!(parsed.profiles.len(), 1);
+    assert_eq!(parsed.profiles[0].name, "Codex");
+    assert_eq!(parsed.profiles[0].layers.len(), 1);
+    assert!(is_protected_oai_layer(&parsed.profiles[0].layers[0]));
+    assert_eq!(
+        check_passthrough_health(
+            Some(&parsed),
+            Some(&HostIdentityStatus {
+                version: Some("0.6.3".into()),
+                profile_index: Some(0),
+                layer_index: Some(1),
+            }),
+        ),
+        PassThroughHealth::Ready
+    );
 
     let serialized = serde_json::to_vec(&draft.document).unwrap();
     let reopened = Draft::from_bytes(&serialized).expect("reopen local v2 document");
     assert!(!reopened.read_only);
-    assert_eq!(reopened.config.profiles.len(), 6);
+    assert_eq!(reopened.config.profiles.len(), 5);
     assert_eq!(reopened.macros().len(), 30);
-    assert!(reopened
-        .document
-        .is_protected_oai_layer(&cindy_protected_lid));
     assert!(reopened
         .document
         .is_protected_oai_layer(&codex_protected_lid));

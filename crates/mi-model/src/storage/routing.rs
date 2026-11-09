@@ -325,10 +325,10 @@ mod tests {
     }
 
     #[test]
-    fn cheat_sheet_hud_displays_all_8_agent_presets_dial_joystick_and_redacts_custom_text() {
+    fn cheat_sheet_hud_displays_builtin_presets_dial_joystick_and_redacts_custom_text() {
         let mut store = DocumentStore::default();
         let ids = crate::preset::install_agent_starter_profiles(&mut store.draft).unwrap();
-        assert_eq!(ids.len(), 6);
+        assert_eq!(ids.len(), 5);
 
         for pid in &ids {
             let sel = request(&store, json!({"kind":"select","profile_id":pid}));
@@ -348,7 +348,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("missing {b} in {profile_name}"))
             };
 
-            if matches!(profile_name.as_str(), "Cindy" | "Codex") {
+            if profile_name == "Codex" {
                 assert_eq!(by_id("AG00")["available"], false);
                 assert_eq!(by_id("AG00")["label"], "不可用 / 未配置");
                 continue;

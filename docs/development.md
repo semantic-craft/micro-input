@@ -1,6 +1,6 @@
 # 当前实施入口
 
-当前前沿：[四应用控制计划](designs/four-app-control.md)。只对 Antigravity、Cindy、桌面 DeepSeek Harness 深入接入，保留 Cindy 原生能力；先核对[源码与接口证据](four-app-interfaces.md)，再按[接力队列](pstack-relay.md)领取可验收切片。下文早期 MVP 范围仅作阶段背景。
+当前范围见[四应用控制](designs/four-app-control.md)。适配入口见[四应用接口](four-app-interfaces.md)，接续见[接力队列](pstack-relay.md)。
 
 接手未完成工单或产品改动时，先执行[研究成果接入规则](agents/research-context.md)。其中包含 Input 1.1.0 的证据索引、按功能阅读路径和可直接使用的接续提示词；实际工单状态以 GitHub 当前记录为准。
 
@@ -88,7 +88,7 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 
 诊断导出：`MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=diagnostic-export MI_DIAGNOSTIC_EVIDENCE_PATH=/absolute/report.json scripts/run --verify --timeout=45`。隔离应用打开报告，生成 0600 的 JSON 和 `evidence/diagnostics.json`；后者确认失败阶段存在，并把实体键和灯光视觉固定为 `NOT_RUN`。单元测试覆盖路径、serial 和 JSON 载荷脱敏，以及失败读取后的行动报告。
 
-RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和四个 QA 场景的总入口；`--qa-only` 用于已完成单元门禁后的应用复验。每个应用场景 TTL 45 秒，启动器负责退出/清理，验证器另核对进程消失、回执数量及隔离目录移除。失败写入 FAIL 结果并非零退出；finally 恢复匹配的生产绑定/库/应用但不启动它。环境强制 `MI_AUTO_HOST_READY=0`，不运行任何物理探针。
+RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和六个 QA 场景的总入口；`--qa-only` 用于已完成单元门禁后的应用复验。每个应用场景 TTL 45 秒，启动器负责退出/清理，验证器另核对进程消失、回执数量及隔离目录移除。失败写入 FAIL 结果并非零退出；finally 恢复匹配的生产绑定/库/应用但不启动它。环境强制 `MI_AUTO_HOST_READY=0`，不运行任何物理探针。
 
 性能基线准备：`scripts/perf-baseline` 构建合成应用后启动隔离 QA，记录从启动到 Workbench 首次 `onAppear` 的耗时，再采样默认 10 秒空闲 CPU time 增量与 RSS。`--seconds 120` 可延长观察；launcher 超时随观察预算增加，包含启动和停止余量。结果写入该轮 `evidence/result.json`，状态为 `MEASURED`；设备连接、实体键、灯光视觉、安装版和验收预算固定 `NOT_RUN` 或 `NOT_SET`。该命令只建立可复测基线，不签收 #42 的插拔、睡眠唤醒或轻量预算。
 
@@ -107,7 +107,3 @@ RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和
 `RadialMenuState` 持有启用、等待回中、选择和确认后等待回中的状态。`RadialMenuRouting` 将冻结的菜单意图送入现有宿主队列及 lease，确认时重验同一会话和路由。原始角度/距离由 `mi-session` 验证并传递至 `mi-core`；连续位置资格独立于按键边沿。没有新硬件订阅或通用 RPC。
 
 菜单默认关闭，本机偏好为 `radialMenuEnabled`。启用或恢复后的旧缓冲回中不能解除隔离。实现与合成原生验收见[径向菜单验证配方](../skills/verify-micro-input/features/radial-menu.md)。当前软件策略的距离阈值和八向手感仍待实体核验，`kb.radial` 没有因此解锁。
-
-## Cindy 既有任务目录与导航确认
-
-菜单栏的「Cindy 任务连接」默认关闭。开启后读取 `cindy-grant.json` 显式授权工作区（`scopes: [{ workspacePath }]`）内的既有活跃可见任务元数据（`workspacePath`、`sessionId`、`title`、`phase`、`attention`、`pinned`），不创建任务，不暴露消息正文，且不放宽 Local Agent API 或插件 `cindy.tasks` 隔离。导航沿用 `cindy://session/<sessionId>` 深链，将 `delivered`（深链已被主进程接受但渲染端尚未提交目标路由）与 `confirmed`（渲染端已提交目标路由且回读 `selected == target`）严格分开。账号/实例/代次换代（`instanceId` / `generation` / `ownerEpoch`）使旧目录与选择立即失效。详见 [Cindy 桥](../integrations/cindy/README.md) 与 [Cindy 导航配方](../skills/verify-micro-input/features/cindy-navigation.md)。
