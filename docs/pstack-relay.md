@@ -290,6 +290,7 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 
 ## 当前切片
 
-### [ ] Slice R13: 收敛内置适配并保留通用按键方案
+### [x] Slice R13: 收敛内置适配并保留通用按键方案
 - **Outcome**: 内置适配仅提供 Antigravity、Herdr、Codex、DeepSeek Harness。任意其他应用可用「其他软件」录制快捷键。旧专属会话桥和所有权握手退出运行路径。
 - **Done Predicate**: 新文档只有四套内置适配和一套通用方案；升级只清理可识别的旧内置预设；Codex 受保护层和通用快捷键行为有回归覆盖；`scripts/verify-offline` 通过。
+- **Evidence**: 99815e9; .scratch/four-desktop-adapters/result.json (verify-offline PASS; six isolated scenarios)
