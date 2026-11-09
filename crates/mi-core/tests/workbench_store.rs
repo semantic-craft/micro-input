@@ -63,6 +63,67 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
 }
 
 #[test]
+fn restoring_cindy_keeps_a_saved_custom_profile_and_application_link() {
+    use mi_model::storage::DocumentStore;
+    use serde_json::json;
+
+    let temp = TempDir::new().unwrap();
+    let mut saved = DocumentStore::default();
+    saved.open(temp.path().join("workbench.json")).unwrap();
+    let mut custom_id = String::new();
+    saved
+        .update(|draft| {
+            custom_id = draft.create_profile("Cindy")?;
+            let layer_id =
+                draft.document.editable.graph.profiles[&custom_id].layer_order[0].clone();
+            draft.assign(
+                &json!(custom_id),
+                &json!(layer_id),
+                0,
+                mi_model::draft::Action {
+                    id: "my-cindy-shortcut".into(),
+                    name: "My shortcut".into(),
+                    category: "快捷键".into(),
+                    detail: String::new(),
+                    payload: json!({
+                        "type": "shortcut", "key": "k", "modifiers": ["command"],
+                        "target": "com.xd.cindy"
+                    }),
+                },
+            )
+        })
+        .unwrap();
+    let layer_id = saved.draft.document.editable.graph.profiles[&custom_id].layer_order[0].clone();
+    let original_layer = saved.draft.document.editable.graph.layers[&layer_id].clone();
+    saved.update_routing(serde_json::from_value(json!({
+        "document_id": saved.draft.document_id,
+        "document_revision": saved.draft.revision,
+        "host_state_revision": saved.host_revision(),
+        "operation": { "kind": "upsert", "bundle_id": "com.xd.cindy", "profile_id": custom_id }
+    })).unwrap()).unwrap();
+
+    let mut upgraded = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    let builtin_id = upgraded
+        .find_canonical_profile_id(CanonicalAgent::Cindy)
+        .unwrap();
+    assert_ne!(builtin_id, custom_id);
+    assert!(upgraded
+        .sidebar_rows()
+        .iter()
+        .any(|row| row.profile_id == builtin_id && row.is_protected_oai));
+    assert!(
+        upgraded.document_store.draft.document.editable.graph.layers[&layer_id] == original_layer
+    );
+    assert_eq!(
+        upgraded.document_store.routing_state()["app_profile_links"]["com.xd.cindy"],
+        json!(custom_id)
+    );
+    let revision = upgraded.document_store.draft.revision;
+    upgraded.prepare_desktop_profiles().unwrap();
+    assert_eq!(upgraded.document_store.draft.revision, revision);
+}
+
+#[test]
 fn switching_across_all_canonical_profiles_stays_under_two_milliseconds_with_zero_banner_flashes() {
     let temp = TempDir::new().unwrap();
     let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();

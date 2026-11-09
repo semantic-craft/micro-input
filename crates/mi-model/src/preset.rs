@@ -1580,7 +1580,13 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             .graph
             .profiles
             .iter()
-            .find(|(_, p)| p.name == profile_name)
+            .find(|(_, p)| {
+                p.name == profile_name
+                    && (profile_name != "Cindy"
+                        || p.layer_order
+                            .first()
+                            .is_some_and(|lid| work.document.is_protected_oai_layer(lid)))
+            })
             .map(|(id, _)| id.clone());
         let pid = if let Some(pid) = existing_id {
             let p = &work.document.editable.graph.profiles[&pid];

@@ -1018,7 +1018,13 @@ impl WorkbenchStore {
                     if p.name.trim() != *canonical_name {
                         return false;
                     }
-                    if matches!(*canonical_name, "Cindy" | "Codex") {
+                    if *canonical_name == "Cindy" {
+                        return p
+                            .layer_order
+                            .first()
+                            .is_some_and(|lid| doc.is_protected_oai_layer(lid));
+                    }
+                    if *canonical_name == "Codex" {
                         return p
                             .layer_order
                             .iter()
@@ -1054,22 +1060,26 @@ impl WorkbenchStore {
             if agent.is_manual_fallback() {
                 continue;
             }
-            if let Some((pid, _)) = self
-                .document_store
-                .draft
-                .document
-                .editable
-                .graph
-                .profiles
-                .iter()
-                .find(|(_, p)| CanonicalAgent::from_profile_name(&p.name) == Some(agent))
-            {
-                canonical_ids.push((agent, pid.clone()));
+            if let Some(pid) = self.find_canonical_profile_id(agent) {
+                canonical_ids.push((agent, pid));
             }
         }
 
         for (agent, pid) in canonical_ids {
             let bundle = agent.bundle_id();
+            if agent == CanonicalAgent::Cindy
+                && self.app_profile_links.get(bundle).is_some_and(|id| {
+                    self.document_store
+                        .draft
+                        .document
+                        .editable
+                        .graph
+                        .profiles
+                        .contains_key(id)
+                })
+            {
+                continue;
+            }
             if self.app_profile_links.get(bundle) != Some(&pid) {
                 self.apply_routing_operation(RoutingOperation::Upsert {
                     bundle_id: bundle.to_string(),
@@ -1712,7 +1722,10 @@ impl WorkbenchStore {
             .graph
             .profiles
             .iter()
-            .find(|(_, p)| CanonicalAgent::from_profile_name(&p.name) == Some(agent))
+            .find(|(pid, p)| {
+                CanonicalAgent::from_profile_name(&p.name) == Some(agent)
+                    && (agent != CanonicalAgent::Cindy || self.is_protected_oai_profile(pid))
+            })
             .map(|(pid, _)| pid.clone())
     }
 
@@ -2550,7 +2563,12 @@ impl WorkbenchStore {
             let Some(profile) = graph.profiles.get(pid) else {
                 continue;
             };
-            let canonical_agent = CanonicalAgent::from_profile_name(&profile.name);
+            let is_protected_oai = profile
+                .layer_order
+                .first()
+                .is_some_and(|lid| doc.is_protected_oai_layer(lid));
+            let canonical_agent = CanonicalAgent::from_profile_name(&profile.name)
+                .filter(|agent| *agent != CanonicalAgent::Cindy || is_protected_oai);
             if canonical_agent.is_none() && !self.show_other_profiles {
                 continue;
             }
@@ -2560,10 +2578,6 @@ impl WorkbenchStore {
             let badge_monogram = canonical_agent
                 .map(|a| a.badge_monogram().to_string())
                 .unwrap_or_else(|| custom_monogram(&profile.name));
-            let is_protected_oai = profile
-                .layer_order
-                .first()
-                .is_some_and(|lid| doc.is_protected_oai_layer(lid));
             let app_installed = canonical_agent
                 .map(|a| self.app_cache.resolve(a.bundle_id()).installed)
                 .unwrap_or(true);
@@ -4238,6 +4252,13 @@ impl WorkbenchStore {
             return Some(resolved);
         }
         let profile = doc.editable.graph.profiles.get(profile_id)?;
+        if profile
+            .name
+            .eq_ignore_ascii_case(CanonicalAgent::Cindy.profile_name())
+            && !self.is_protected_oai_profile(profile_id)
+        {
+            return None;
+        }
         if self.native_ownership.is_unbridged_desktop_active()
             || self.native_ownership.allows_execution()
         {
@@ -6581,10 +6602,10 @@ fn fallback_unbridged_oai_action(
     };
     let (adapter, bundle_id) = if profile_name.eq_ignore_ascii_case("Codex") {
         ("codex", "com.openai.codex")
-    } else if profile_name.eq_ignore_ascii_case("Cindy")
-        || profile_name.eq_ignore_ascii_case("ChatGPT")
-    {
+    } else if profile_name.eq_ignore_ascii_case("Cindy") {
         ("cindy", CanonicalAgent::Cindy.bundle_id())
+    } else if profile_name.eq_ignore_ascii_case("ChatGPT") {
+        ("cindy", "com.openai.atlas")
     } else {
         return None;
     };
