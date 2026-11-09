@@ -258,6 +258,14 @@ fn bottom_row_2u_wide_key_merge_split_and_silkscreen_icon_label_toggles() {
     );
     let truncated_plain = format_concise_keycap_caption("按住说话松开停止");
     assert_eq!(truncated_plain, "按住说话");
+    assert_eq!(
+        format_concise_keycap_caption("Gemini Live 实时语音"),
+        "实时语音"
+    );
+    assert_eq!(
+        format_concise_keycap_caption("Antigravity · Gemini Live 实时语音"),
+        "实时语音"
+    );
 }
 
 #[test]

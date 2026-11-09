@@ -602,3 +602,35 @@ fn antigravity_new_conversation_target_selector_matches_active_project_or_falls_
         AntigravityNewConversationTarget::FallbackShortcutCmdN
     );
 }
+
+#[test]
+fn antigravity_live_voice_does_not_map_to_dictation_shortcut_ctrl_m() {
+    use mi_macos::executor::native_shortcut_for_agent_command;
+
+    assert_eq!(
+        native_shortcut_for_agent_command("antigravity", "dictation"),
+        Some((0x2E, vec!["control".to_string()]))
+    );
+    assert_eq!(
+        native_shortcut_for_agent_command("antigravity", "live-voice"),
+        None,
+        "live-voice must trigger Antigravity Start/End Voice mode via AXPress, never Ctrl+M dictation"
+    );
+
+    let driver = RecordingOsDriver::new(true);
+    let executor = LiveHostActionExecutor::new(driver.clone());
+    let live_voice_action = ResolvedHostAction::AgentCommand {
+        adapter: "antigravity".to_string(),
+        command: "live-voice".to_string(),
+    };
+    let receipt = executor.execute("Antigravity", "AG06", &live_voice_action);
+    assert_eq!(receipt.outcome, "executed");
+    assert_eq!(receipt.detail, "antigravity/live-voice");
+    assert!(
+        !driver.events().iter().any(|e| matches!(
+            e,
+            RecordedOsEvent::PostKeyShortcut { key_code: 0x2E, .. }
+        )),
+        "executing antigravity/live-voice must never post Ctrl+M (0x2E) dictation shortcut"
+    );
+}
