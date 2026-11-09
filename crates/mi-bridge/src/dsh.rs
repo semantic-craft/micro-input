@@ -1,4 +1,4 @@
-use crate::ownership::{OwnershipTransportError, UnixNativeOwnershipTransport};
+use crate::socket::{LocalSocket, SocketError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -863,16 +863,16 @@ impl DSHSessionClient {
             }
         }
         let wire = serde_json::to_vec(&payload).map_err(|_| DSHFailure::InvalidReply)?;
-        let transport = UnixNativeOwnershipTransport {
+        let transport = LocalSocket {
             path: PathBuf::from(&grant.socket_path),
             request_limit: 65536,
             response_limit: 1_048_576,
             timeout: self.timeout,
         };
         let raw = transport.exchange_blocking(&wire).map_err(|e| match e {
-            OwnershipTransportError::Unavailable => DSHFailure::Unavailable,
-            OwnershipTransportError::InvalidPeer => DSHFailure::Denied,
-            OwnershipTransportError::InvalidReply => DSHFailure::InvalidReply,
+            SocketError::Unavailable => DSHFailure::Unavailable,
+            SocketError::InvalidPeer => DSHFailure::Denied,
+            SocketError::InvalidReply => DSHFailure::InvalidReply,
         })?;
         let (cur_g, cur_ep, cur_sub) = self.current_grant()?;
         if cur_ep != expected || &cur_g != grant || cur_sub != sub_id {
@@ -993,7 +993,7 @@ impl DSHSessionServing for DSHSessionClient {
         if let (Some(g), Some(sub)) = (prev_g, prev_sub) {
             let req = json!({"version": 1, "subscriptionId": sub, "id": Uuid::new_v4().to_string(), "token": g.token, "hostId": g.host_id, "generation": g.generation, "op": "close"});
             if let Ok(wire) = serde_json::to_vec(&req) {
-                let _ = (UnixNativeOwnershipTransport {
+                let _ = (LocalSocket {
                     path: PathBuf::from(&g.socket_path),
                     request_limit: 65536,
                     response_limit: 1_048_576,

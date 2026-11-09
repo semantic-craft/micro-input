@@ -251,13 +251,11 @@ impl FourAppSlotTable {
 pub fn agent_for_place(place: &NavigationPlace) -> CanonicalAgent {
     match place {
         NavigationPlace::Antigravity { .. } => CanonicalAgent::Antigravity,
-        NavigationPlace::Cindy { .. } => CanonicalAgent::Cindy,
         NavigationPlace::Dsh { .. } => CanonicalAgent::DeepseekHarness,
         NavigationPlace::App { bundle_id } => {
             CanonicalAgent::from_bundle_id(bundle_id).unwrap_or(CanonicalAgent::Antigravity)
         }
         NavigationPlace::Session { adapter, .. } => match adapter.as_str() {
-            "cindy" => CanonicalAgent::Cindy,
             "dsh" | "dsh-desktop" => CanonicalAgent::DeepseekHarness,
             "codex" => CanonicalAgent::Codex,
             "herdr" => CanonicalAgent::Herdr,

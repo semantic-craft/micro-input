@@ -123,80 +123,6 @@ def verify_evidence(run, scenario, started, process_alive):
             native_app="NOT_RUN",
             receipt_count=len(rows),
         )
-    elif scenario == "cindy-navigation":
-        navigation = json.loads((evidence / "cindy-navigation.json").read_text())
-        expected = {
-            "disabled_zero_reads",
-            "scoped_catalog_only",
-            "delivered_vs_confirmed_separated",
-            "same_name_exact_identity",
-            "selected_readback_matches",
-            "wrong_selected_unconfirmed",
-            "out_of_scope_zero_reads",
-            "deleted_target_no_redirect",
-            "account_or_generation_change_blocks_old_selection",
-            "stop_bound_to_run_and_stale_noop",
-            "resolve_bound_and_question_guard",
-            "workspace_create_and_target_prompt_steering",
-            "unread_tristate_and_pending_round",
-        }
-        checks = {item["name"]: item["status"] for item in navigation.get("checks", [])}
-        if (
-            navigation.get("status") != "PASS"
-            or set(checks) != expected
-            or not all(value == "PASS" for value in checks.values())
-            or navigation.get("unauthorized_metadata_reads") != 0
-            or navigation.get("local_agent_api_relaxed") is not False
-            or navigation.get("native_app") != "NOT_RUN"
-            or navigation.get("physical_key") != "NOT_RUN"
-        ):
-            raise ValueError("Cindy navigation evidence incomplete or overclaimed")
-        rows = [json.loads(line) for line in (evidence / "audit.jsonl").read_text().splitlines()]
-        cindy_rows = [row for row in rows if row["action_type"] == "cindy_open"]
-        delivered = [row for row in cindy_rows if row["outcome"] == "delivered"]
-        confirmed = [row for row in cindy_rows if row["outcome"] == "confirmed"]
-        unconfirmed = [row for row in cindy_rows if row["outcome"] == "unconfirmed"]
-        stale = [row for row in cindy_rows if row["outcome"] == "stale"]
-        stop_stopped = [row for row in rows if row["action_type"] == "cindy_stop" and row["outcome"] == "stopped"]
-        stop_noop = [row for row in rows if row["action_type"] == "cindy_stop" and row["outcome"] == "noop"]
-        resolve_ok = [row for row in rows if row["action_type"] == "cindy_resolve" and row["outcome"] == "resolved"]
-        resolve_mismatch = [row for row in rows if row["action_type"] == "cindy_resolve" and row["outcome"] == "interactionTypeMismatch"]
-        resolve_noop = [row for row in rows if row["action_type"] == "cindy_resolve" and row["outcome"] == "noop"]
-        created_ok = [row for row in rows if row["action_type"] == "cindy_create" and row["outcome"] == "confirmed"]
-        send_started = [row for row in rows if row["action_type"] == "cindy_send" and row["outcome"] == "started"]
-        send_steered = [row for row in rows if row["action_type"] == "cindy_send" and row["outcome"] == "steered"]
-        send_unknown = [row for row in rows if row["action_type"] == "cindy_send" and row["outcome"] == "unknown"]
-        query_queued = [row for row in rows if row["action_type"] == "cindy_query" and row["outcome"] == "queued"]
-        round_confirmed = [row for row in rows if row["action_type"] == "cindy_next_attention" and row["outcome"] == "confirmed"]
-        round_noop = [row for row in rows if row["action_type"] == "cindy_next_attention" and row["outcome"] == "noop"]
-        if (
-            len(delivered) != 1
-            or len(confirmed) < 2
-            or len(unconfirmed) != 1
-            or len(stale) < 2
-            or len(stop_stopped) != 1
-            or len(stop_noop) != 2
-            or len(resolve_ok) != 1
-            or len(resolve_mismatch) != 1
-            or len(resolve_noop) != 2
-            or len(created_ok) != 1
-            or len(send_started) != 1
-            or len(send_steered) != 1
-            or len(send_unknown) != 2
-            or len(query_queued) != 1
-            or len(round_confirmed) != 3
-            or len(round_noop) != 1
-            or any(row.get("target") != "cindy" for row in rows)
-        ):
-            raise ValueError("Cindy exact navigation/action receipts missing or unexpected")
-        result.update(
-            cindy_navigation="SYNTHETIC_PASS",
-            cindy_actions="SYNTHETIC_PASS",
-            unauthorized_metadata_reads=0,
-            local_agent_api_relaxed=False,
-            native_app="NOT_RUN",
-            receipt_count=len(rows),
-        )
     elif scenario == "antigravity-status":
         status_doc = json.loads((evidence / "antigravity-status.json").read_text())
         expected = {
@@ -296,21 +222,6 @@ def verify_evidence(run, scenario, started, process_alive):
             receipt_count=len(rows),
             native_app="NOT_RUN",
         )
-    elif scenario == "native-ownership":
-        ownership = json.loads((evidence / "ownership.json").read_text())
-        expected = {"native_blocks_wide_and_encoder", "released_wide_once_encoder_once",
-                    "profile_switch_rejects_old_release", "fresh_release_routes_current_profile",
-                    "lost_peer_blocks_input", "unknown_blocks_direct_action", "unknown_blocks_ptt_and_lighting",
-                    "protected_oai_layer_locks_ui_and_lighting", "cindy_codex_to_workbench_handoff"}
-        if (ownership.get("status") != "PASS" or set(ownership.get("checks", {})) != expected
-                or not all(value is True for value in ownership["checks"].values())
-                or ownership.get("receipt_count") != 3 or ownership.get("native_app") != "NOT_RUN"
-                or ownership.get("physical_key") != "NOT_RUN" or ownership.get("lighting_visual") != "NOT_RUN"):
-            raise ValueError("native ownership scenario incomplete or overclaimed")
-        rows = [json.loads(line) for line in (evidence / "audit.jsonl").read_text().splitlines()]
-        if len(rows) != 3 or any(row["outcome"] != "simulated" for row in rows):
-            raise ValueError("ownership host receipts differ from fixture counts")
-        result.update(ownership="SYNTHETIC_PASS", native_app="NOT_RUN", receipt_count=3)
     elif scenario == "diagnostic-export":
         diagnostics = json.loads((evidence / "diagnostics.json").read_text())
         expected = {
@@ -360,7 +271,7 @@ def main():
         if not args.qa_only:
             subprocess.run(["scripts/check"], cwd=ROOT, env=env, check=True)
         subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, env=env, check=True)
-        for scenario in ("host-execution", "native-ownership", "dsh-navigation", "cindy-navigation", "antigravity-status", "config-write", "lighting-control", "diagnostic-export"):
+        for scenario in ("host-execution", "dsh-navigation", "antigravity-status", "config-write", "lighting-control", "diagnostic-export"):
             started = int(time.time() * 1000)
             scenario_env = dict(env, MI_SYNTHETIC_SCENARIO=scenario)
             if scenario == "diagnostic-export":

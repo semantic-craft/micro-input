@@ -72,7 +72,7 @@ pub fn export(draft: &Draft, pid: Option<&str>, lid: Option<&str>) -> Result<Str
                 return Err("层不属于所选配置".into());
             }
             if doc.is_protected_oai_layer(lid) {
-                return Err("受保护宿主层（ChatGPT / Codex / Cindy）不支持导出".into());
+                return Err("受保护宿主层（Codex）不支持导出".into());
             }
             name = doc.editable.graph.layers[lid].name.clone();
             scope = "layer";
@@ -927,6 +927,52 @@ fn legacy_agent_specs() -> Vec<(&'static str, Vec<AgentAssignment>)> {
     ]
 }
 
+fn retired_desktop_agent_layers(doc: &LocalDocumentV2) -> impl Iterator<Item = (&str, &str)> {
+    let refs = &doc.editable.source_refs;
+    let graph = &doc.editable.graph;
+    graph.profiles.iter().filter_map(move |(id, profile)| {
+        if doc.origin["kind"] == "imported-local"
+            || profile.name != crate::host_router::RETIRED_DESKTOP_AGENT_PROFILE_NAME
+            || refs.contains_key(id)
+        {
+            return None;
+        }
+        let [lid] = profile.layer_order.as_slice() else {
+            return None;
+        };
+        let layer = &graph.layers[lid];
+        let tokens = crate::OFFICIAL_OAI_KEY_TOKENS
+            .iter()
+            .chain(crate::OFFICIAL_OAI_ENCODER_TOKENS.iter());
+        if refs.contains_key(lid)
+            || layer.name != "ChatGPT"
+            || layer.lighting.is_some()
+            || layer.control_settings.is_some()
+            || layer.control_order.len()
+                != crate::OFFICIAL_OAI_KEY_TOKENS.len() + crate::OFFICIAL_OAI_ENCODER_TOKENS.len()
+        {
+            return None;
+        }
+        layer
+            .control_order
+            .iter()
+            .zip(tokens)
+            .enumerate()
+            .all(|(slot, (bid, token))| {
+                let binding = &layer.controls[bid];
+                !refs.contains_key(bid)
+                    && binding.logical_control == format!("logical-{slot}")
+                    && binding.original == json!({"Unknown": token})
+                    && binding.action_id.is_none()
+            })
+            .then_some((id.as_str(), lid.as_str()))
+    })
+}
+
+pub fn has_retired_desktop_agent_preset(doc: &LocalDocumentV2) -> bool {
+    retired_desktop_agent_layers(doc).next().is_some()
+}
+
 pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, String> {
     let mut created_ids = Vec::new();
     // Retain the exact old built-ins only as migration fingerprints.
@@ -968,53 +1014,45 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     }
 
     // Desktop targets are bound explicitly; no inferred approval/send shortcuts.
-    for (name, adapter, bundle) in [
-        ("Cindy", "cindy", "com.xd.cindy"),
-        ("Codex", "codex", "com.openai.codex"),
-    ] {
-        let mut assignments = vec![(
+    let codex_assignments = vec![
+        (
             0,
             "desktop-open",
             "打开 / 聚焦应用",
             "应用",
-            bundle,
+            "com.openai.codex",
             ActionKind::OpenApp {
-                bundle_id: bundle.into(),
+                bundle_id: "com.openai.codex".into(),
             },
-        )];
-        {
-            assignments.push((
-                1,
-                "desktop-input",
-                "聚焦当前输入框",
-                "Agent",
-                bundle,
-                ActionKind::AgentCommand {
-                    adapter: adapter.into(),
-                    command: "focus-input".into(),
-                },
-            ));
-        }
-        if ["cindy", "codex"].contains(&adapter) {
-            assignments.push((
-                2,
-                "desktop-search",
-                "搜索任务",
-                "Agent",
-                bundle,
-                ActionKind::AgentCommand {
-                    adapter: adapter.into(),
-                    command: "search".into(),
-                },
-            ));
-        }
-        specs.push((name, assignments));
-    }
+        ),
+        (
+            1,
+            "desktop-input",
+            "聚焦当前输入框",
+            "Agent",
+            "com.openai.codex",
+            ActionKind::AgentCommand {
+                adapter: "codex".into(),
+                command: "focus-input".into(),
+            },
+        ),
+        (
+            2,
+            "desktop-search",
+            "搜索任务",
+            "Agent",
+            "com.openai.codex",
+            ActionKind::AgentCommand {
+                adapter: "codex".into(),
+                command: "search".into(),
+            },
+        ),
+    ];
+    specs.push(("Codex", codex_assignments));
 
     legacy_specs.extend(specs.clone());
     for (name, assignments) in &mut specs {
         let adapter = match *name {
-            "Cindy" => "cindy",
             "Codex" => "codex",
             "Antigravity" => "antigravity",
             "DeepSeek Coder (DSH)" => "dsh-desktop",
@@ -1065,17 +1103,14 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     legacy_specs.extend(
         specs
             .iter()
-            .filter(|(name, _)| matches!(*name, "Cindy" | "Codex" | "Antigravity"))
+            .filter(|(name, _)| matches!(*name, "Codex" | "Antigravity"))
             .cloned(),
     );
     for (_, assignments) in &mut specs {
         for (_, _, label, _, _, kind) in assignments {
             if let ActionKind::AgentCommand { adapter, command } = kind {
                 if command == "dictation"
-                    && matches!(
-                        adapter.as_str(),
-                        "cindy" | "codex" | "antigravity" | "dsh-desktop"
-                    )
+                    && matches!(adapter.as_str(), "codex" | "antigravity" | "dsh-desktop")
                 {
                     *command = "push-to-talk".into();
                     *label = "按住说话 · 松开停止";
@@ -1086,17 +1121,11 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     legacy_specs.extend(
         specs
             .iter()
-            .filter(|(name, _)| {
-                matches!(
-                    *name,
-                    "Cindy" | "Codex" | "Antigravity" | "DeepSeek Coder (DSH)"
-                )
-            })
+            .filter(|(name, _)| matches!(*name, "Codex" | "Antigravity" | "DeepSeek Coder (DSH)"))
             .cloned(),
     );
     for (name, assignments) in &mut specs {
         let adapter = match *name {
-            "Cindy" => "cindy",
             "Codex" => "codex",
             "Antigravity" => "antigravity",
             "DeepSeek Coder (DSH)" => "dsh-desktop",
@@ -1483,6 +1512,15 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     ));
 
     let mut work = draft.clone();
+    work.mutate(|doc| {
+        let graph = &mut doc.editable.graph;
+        for (pid, lid) in retired_desktop_agent_layers(&draft.document) {
+            graph.profile_order.retain(|id| id != pid);
+            graph.profiles.remove(pid);
+            graph.layers.remove(lid);
+        }
+        Ok(())
+    })?;
     // Retire only unchanged source profiles from the exact bundled fixture, even
     // when other profiles have since been added. Preserve edited and imported data.
     let mut seed = crate::demo().map_err(|e| format!("{e:?}"))?;
@@ -1573,7 +1611,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         work.delete_profile(&pid)?;
     }
     for (profile_name, assignments) in specs {
-        let is_native_oai_profile = matches!(profile_name, "Cindy" | "Codex");
+        let is_native_oai_profile = profile_name == "Codex";
         let existing_id = work
             .document
             .editable
@@ -1927,7 +1965,6 @@ pub fn install_four_app_cockpit_preset(
     let adapter = match profile_name.as_str() {
         "Antigravity" => "antigravity",
         "DeepSeek Coder (DSH)" => "dsh-desktop",
-        "Cindy" => "cindy",
         "Codex" => "codex",
         _ => "antigravity",
     };
@@ -2251,25 +2288,23 @@ mod agent_migration_tests {
     fn upgrades_pre_dial_conversational_presets_while_preserving_customized_profiles() {
         let mut draft = Draft::default();
         let ids = install_agent_starter_profiles(&mut draft).unwrap();
-        assert_eq!(ids.len(), 6);
+        assert_eq!(ids.len(), 5);
 
-        for native_name in ["Cindy", "Codex"] {
-            let pid = draft
-                .document
-                .editable
-                .graph
-                .profiles
-                .iter()
-                .find(|(_, p)| p.name == native_name)
-                .unwrap()
-                .0
-                .clone();
-            let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
-            assert!(
-                draft.document.is_protected_oai_layer(&lid),
-                "{native_name} default layer must be a protected KV_OAI_* layer"
-            );
-        }
+        let pid = draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == "Codex")
+            .unwrap()
+            .0
+            .clone();
+        let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+        assert!(
+            draft.document.is_protected_oai_layer(&lid),
+            "Codex default layer must be a protected KV_OAI_* layer"
+        );
 
         // Downgrade DeepSeek Coder (DSH) to pre-Slice-B 9-slot push-to-talk state (remove slots 13, 14, 15),
         // and customize Herdr by adding a joystick prompt slot (slot 16 -> prompt-continue).
@@ -2365,5 +2400,41 @@ mod agent_migration_tests {
             draft.document.editable.graph.layers[&herdr_lid] == herdr_before,
             "User-customized Herdr profile (with joystick prompt) must remain untouched"
         );
+    }
+
+    #[test]
+    fn retires_unchanged_legacy_agent_preset_and_preserves_custom_profiles() {
+        let mut draft = Draft::default();
+        install_agent_starter_profiles(&mut draft).unwrap();
+        let (retired, custom) = draft
+            .mutate(|doc| {
+                let retired = doc.create_profile("Cindy")?;
+                let base = doc.editable.graph.profiles[&retired].layer_order[0].clone();
+                doc.create_protected_oai_layer(&retired, "ChatGPT")?;
+                doc.delete_layer(&retired, &base)?;
+
+                let custom = doc.create_profile("Cindy")?;
+                doc.create_protected_oai_layer(&custom, "ChatGPT")?;
+                Ok((retired, custom))
+            })
+            .unwrap();
+        let bytes = serde_json::to_vec(&draft.document).unwrap();
+        let mut upgraded = Draft::from_bytes(&bytes).unwrap();
+        assert!(has_retired_desktop_agent_preset(&upgraded.document));
+
+        let custom_before = upgraded.document.editable.graph.profiles[&custom].clone();
+        install_agent_starter_profiles(&mut upgraded).unwrap();
+        assert!(!has_retired_desktop_agent_preset(&upgraded.document));
+        assert!(!upgraded
+            .document
+            .editable
+            .graph
+            .profiles
+            .contains_key(&retired));
+        assert!(upgraded.document.editable.graph.profiles[&custom] == custom_before);
+
+        let revision = upgraded.revision;
+        install_agent_starter_profiles(&mut upgraded).unwrap();
+        assert_eq!(upgraded.revision, revision);
     }
 }

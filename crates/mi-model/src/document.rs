@@ -516,7 +516,7 @@ impl LocalDocumentV2 {
             return Err("层不属于所选配置".into());
         }
         if self.is_protected_oai_layer(lid) {
-            return Err("受保护宿主层（ChatGPT / Codex / Cindy）不支持复制层".into());
+            return Err("受保护宿主层（Codex）不支持复制层".into());
         }
         let id = self.copy_layer(lid, name, &mut BTreeMap::new())?;
         self.editable

@@ -123,6 +123,7 @@ pub enum RadialPresetKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RadialSlotKind {
+    Empty,
     CheatSheet,
     OpenApp,
     Prompt,
@@ -272,7 +273,6 @@ impl RadialSlotConfig {
 
     pub fn default_app_launcher_slots() -> [Self; RADIAL_SECTOR_COUNT] {
         let agents = [
-            CanonicalAgent::Cindy,
             CanonicalAgent::Codex,
             CanonicalAgent::Herdr,
             CanonicalAgent::Antigravity,
@@ -281,19 +281,29 @@ impl RadialSlotConfig {
         [
             Self::navigate_back("后退", Some("chevron.backward"), Some("#00CCAA")),
             Self::cheat_sheet("按键速查", Some("rectangle.grid.3x2"), Some("#FFFFFF")),
+            Self {
+                kind: RadialSlotKind::Empty,
+                label: "未配置".into(),
+                text: None,
+                bundle_id: None,
+                adapter: None,
+                submit: false,
+                symbol: None,
+                color_hex: None,
+            },
             Self::open_app(
                 agents[0].display_name(),
                 agents[0].bundle_id(),
                 Some("app.badge"),
                 None,
             ),
+            Self::navigate_forward("前进", Some("chevron.forward"), Some("#00CCAA")),
             Self::open_app(
                 agents[1].display_name(),
                 agents[1].bundle_id(),
                 Some("app.badge"),
                 None,
             ),
-            Self::navigate_forward("前进", Some("chevron.forward"), Some("#00CCAA")),
             Self::open_app(
                 agents[2].display_name(),
                 agents[2].bundle_id(),
@@ -303,12 +313,6 @@ impl RadialSlotConfig {
             Self::open_app(
                 agents[3].display_name(),
                 agents[3].bundle_id(),
-                Some("app.badge"),
-                None,
-            ),
-            Self::open_app(
-                agents[4].display_name(),
-                agents[4].bundle_id(),
                 Some("app.badge"),
                 None,
             ),
@@ -524,6 +528,14 @@ pub fn resolve_radial_slots(
             };
 
         let (intent, unavailable_reason, target_preview) = match cfg.kind {
+            RadialSlotKind::Prompt | RadialSlotKind::Submit | RadialSlotKind::Stop
+                if cfg.adapter.as_deref().is_some_and(|adapter| {
+                    !mi_model::host_router::is_supported_agent_command_adapter(adapter)
+                }) =>
+            {
+                (None, Some("应用适配不可用".into()), None)
+            }
+            RadialSlotKind::Empty => (None, Some("未配置".into()), None),
             RadialSlotKind::CheatSheet => {
                 if ctx.has_active_profile {
                     (Some(RadialIntent::CheatSheet), None, None)

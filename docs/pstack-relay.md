@@ -9,7 +9,9 @@
 
 ---
 
-## 全景切片队列（A → E）
+## 历史切片队列（A → E）
+
+A–R12 记录当时的范围和证据。当前支持以[四应用控制](designs/four-app-control.md)为准。
 
 ### [x] Slice A: 全景差距对表、防冲突护栏与接力机关就位
 - **Playbook**: `Investigation` + `Authoring or modifying a skill` (`encode-lessons-in-structure`)
@@ -43,25 +45,25 @@
 
 ---
 
-## 当前覆盖与接续
+## 历史范围与交付
 
 A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制通过。2026-11-05 用户明确只做 Antigravity、Cindy、ZCode、桌面 DeepSeek Harness，并保留 Cindy 原生能力。上轮未开始的 F–K 由下列切片替代，不建立 Paseo 适配器，不强制复制 MCP/CLI 出口。
 
-源码与边界见[四应用接口](four-app-interfaces.md)，实现细节、依赖和完整验收见[四应用计划](designs/four-app-control.md)，状态归 [#81](https://github.com/semantic-craft/micro-input/issues/81) 及责任票。各片状态由勾选与证据记录确认；软件、原生安装和实体结果分别验收。
+当前源码入口见[四应用接口](four-app-interfaces.md)。当时的状态归 [#81](https://github.com/semantic-craft/micro-input/issues/81) 及责任票。各片状态由勾选与证据记录确认；软件、原生安装和实体结果分别验收。
 
 ### [x] Slice F: 保留 Cindy 原生输入和灯光所有权
 - **Outcome**: 增加 Cindy 原生所有权的活跃握手和代次确认；原生持有期间暂停 Micro Input 重叠按键、PTT 与灯光，未知时保持暂停。
 - **Done Predicate**: 同一宽键/旋钮输入投递两端后业务动作仅一次；切 Profile、失联和旧代回调不双执行；不切换 Cindy 设备开关或改 keymap。 不能只看进程存在；失联标 unknown，移交其他应用前取得释放回执，未确认就不接管。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: 无。责任票 #82。
 - **Evidence**: .scratch/qa-runs/1793813638607-83009/evidence/result.json
-- **Verification scope**: 软件片通过全量离线检查、Cindy 源码 187 项测试及完整类型检查、真实 UDS 双端配对 8 事件；安装版 Cindy、实体按键和灯光视觉为 NOT_RUN。补丁、恢复限制及重跑命令见 [原生所有权桥](../integrations/cindy/README.md)。
+- **Verification scope**: 软件片通过全量离线检查、Cindy 源码 187 项测试及完整类型检查、真实 UDS 双端配对 8 事件；安装版 Cindy、实体按键和灯光视觉为 NOT_RUN。补丁、恢复限制及重跑命令见 旧版集成文档（已退役，见 Git 历史）。
 
 ### [x] Slice G: 接通 ZCode 同实例状态与精确导航
 - **Outcome**: 通过最小桌面桥读取 v4 任务索引，在两个同名会话间准确打开目标。
 - **Done Predicate**: 两个工作区与同名任务身份不混淆；selected session 回读吻合；断连/换代/删除后不改开其他任务；默认不读正文。 未授权或越权请求零元数据读取。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: 无。责任票 #33。
 - **Evidence**: .scratch/qa-runs/1793838585847-10402/evidence/result.json
-- **Verification scope**: 软件片通过全量离线门禁及六个隔离应用场景；固定 ZCode 源码检查、16 项原生边界检查和真实 UDS Swift 双端联测通过。真实 renderer store 使用合成任务 owner；完整 Electron 窗口、安装版与实体为 NOT_RUN。补丁与重跑入口见 [ZCode 桥](../integrations/zcode/README.md)。
+- **Verification scope**: 软件片通过全量离线门禁及六个隔离应用场景；固定 ZCode 源码检查、16 项原生边界检查和真实 UDS Swift 双端联测通过。真实 renderer store 使用合成任务 owner；完整 Electron 窗口、安装版与实体为 NOT_RUN。补丁与重跑入口见 旧版集成文档（已退役，见 Git 历史）。
 
 ### [x] Slice H: 接通 DSH 同 Host 状态与精确导航
 - **Outcome**: 先核验 0.2.1-rc.5 接口，再在同 Host 读取状态并打开准确会话。
@@ -286,4 +288,9 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: `test ! -d crates/mi-gpui` 为真；`./scripts/check`、`./scripts/verify-offline` 与 `scripts/pstack-relay status --require-all-done` 全部 `PASS`；本机 `/Applications/Micro Input.app` 已更新为 `msime` 架构原生 SwiftUI 版本。
 - **Evidence**: Cargo.toml;scripts/build;scripts/check;scripts/check-boundaries.py;crates/mi-core;crates/mi-ffi;app/MicroInput;.scratch/qa-runs/1794153146682-84439/evidence/result.json
 
+## 当前切片
 
+### [x] Slice R13: 收敛内置适配并保留通用按键方案
+- **Outcome**: 内置适配仅提供 Antigravity、Herdr、Codex、DeepSeek Harness。任意其他应用可用「其他软件」录制快捷键。旧专属会话桥和所有权握手退出运行路径。
+- **Done Predicate**: 新文档只有四套内置适配和一套通用方案；升级只清理可识别的旧内置预设；Codex 受保护层和通用快捷键行为有回归覆盖；`scripts/verify-offline` 通过。
+- **Evidence**: 99815e9; .scratch/four-desktop-adapters/result.json (verify-offline PASS; six isolated scenarios)
