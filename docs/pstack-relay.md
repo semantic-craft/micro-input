@@ -295,6 +295,7 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: 新文档只有四套内置适配和一套通用方案；升级只清理可识别的旧内置预设；Codex 受保护层和通用快捷键行为有回归覆盖；`scripts/verify-offline` 通过。
 - **Evidence**: 99815e9; .scratch/four-desktop-adapters/result.json (verify-offline PASS; six isolated scenarios)
 
-### [ ] Slice R14: 恢复 Cindy 内置适配
+### [x] Slice R14: 恢复 Cindy 内置适配
 - **Outcome**: 恢复 Cindy 预设、会话桥和所有权协调，保留其他四款内置适配以及「其他软件」的逐键快捷键。
 - **Done Predicate**: `scripts/verify-offline` 的八个隔离场景通过，包含 Cindy 导航与原生所有权切换；不改写实体键盘映射。
+- **Evidence**: 8871a48; .scratch/restore-cindy/result.json (verify-offline PASS; eight isolated scenarios)
