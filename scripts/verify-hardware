@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+"""Zero-touch plug-and-play hardware acceptance runner (H0 + H1 + Live App USB Auto-Acceptance)."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+import uuid
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="Wait for Creator Micro 2 (303A:8298) USB hotplug if not currently connected.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        help="Maximum seconds to wait for USB hotplug when --wait is enabled.",
+    )
+    parser.add_argument(
+        "--include-h1",
+        action="store_true",
+        help="Execute a fresh H1 tempfile write/readback/delete roundtrip in addition to H0 + live app acceptance.",
+    )
+    parser.add_argument(
+        "--skip-h1",
+        action="store_true",
+        help="Skip fresh H1 execution (default behavior; kept for CLI compatibility).",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=ROOT / ".scratch" / "hardware-acceptance" / "latest-result.json",
+        help="Path for the unified machine-verifiable hardware acceptance receipt.",
+    )
+    return parser.parse_args(argv)
+
+
+def enumerate_usb_candidates():
+    proc = subprocess.run(
+        [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "mi-transport",
+            "--lib",
+            "tests::dump_usb_candidates_json",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"USB candidate enumeration failed:\n{proc.stdout}\n{proc.stderr}")
+    for line in proc.stdout.splitlines():
+        if line.startswith("MI_USB_CANDIDATES_JSON="):
+            raw = line.split("=", 1)[1].strip()
+            candidates = json.loads(raw)
+            return [
+                c
+                for c in candidates
+                if c.get("vid") == 0x303A
+                and c.get("pid") == 0x8298
+                and c.get("transport_hint") == "Usb"
+            ]
+    return []
+
+
+def wait_for_single_usb_candidate(wait_for_plug: bool, timeout_secs: float):
+    deadline = time.monotonic() + timeout_secs
+    while True:
+        candidates = enumerate_usb_candidates()
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise RuntimeError(f"Ambiguous Creator Micro 2 USB candidates: {candidates}")
+        if not wait_for_plug or time.monotonic() >= deadline:
+            raise RuntimeError(
+                "No Creator Micro 2 (303A:8298) USB device detected. Plug in the keyboard or pass --wait."
+            )
+        time.sleep(1.0)
+
+
+def quiesce_competing_hid_readers():
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "run"), "--kill"],
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["pkill", "-f", "/Applications/Micro Input.app/Contents/MacOS/MicroInput"],
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    doc_dir = Path(
+        os.environ.get(
+            "MI_DOCUMENT_DIR",
+            str(Path.home() / "Library" / "Application Support" / "MicroInput"),
+        )
+    )
+    sock_path = doc_dir / "cindy-ownership.sock"
+    fence_path = doc_dir / "cindy-ownership.sock.fence"
+    if sock_path.exists():
+        import socket as py_socket
+
+        client_instance = str(uuid.uuid4())
+        generation = 1
+        if fence_path.is_file():
+            try:
+                fence_data = json.loads(fence_path.read_text(encoding="utf-8"))
+                client_instance = fence_data.get("clientInstance", client_instance)
+                generation = int(fence_data.get("generation", 0)) + 1
+            except (OSError, ValueError):
+                pass
+        req = {
+            "version": 1,
+            "requestId": str(uuid.uuid4()),
+            "clientInstance": client_instance,
+            "generation": generation,
+            "desiredOwner": "micro-input",
+            "microInputDrained": True,
+            "capabilities": ["fenced-release-v1"],
+        }
+        try:
+            with py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM) as s:
+                s.settimeout(1.0)
+                s.connect(str(sock_path))
+                s.sendall((json.dumps(req) + "\n").encode("utf-8"))
+                s.recv(4096)
+            fence_path.write_text(
+                json.dumps({"clientInstance": client_instance, "generation": generation}) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    time.sleep(0.4)
+
+
+def prepare_kit(kit_dir: Path, keymap_path: Path | None = None, smart_actions_path: Path | None = None):
+    cmd = [
+        sys.executable,
+        str(ROOT / "scripts" / "prepare-hardware-acceptance"),
+        "prepare",
+        "--output",
+        str(kit_dir),
+    ]
+    if keymap_path is not None:
+        cmd.extend(["--keymap", str(keymap_path)])
+        if smart_actions_path is not None and smart_actions_path.is_file():
+            cmd.extend(["--smart-actions", str(smart_actions_path)])
+        else:
+            cmd.append("--smart-actions-absent")
+    subprocess.run(cmd, cwd=ROOT, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def parse_harness_stdout(scope_label: str, stdout_text: str) -> Path:
+    pattern = re.compile(
+        rf"^{re.escape(scope_label)}\s+passed=(\S+)\s+reason=(\S+)\s+private_evidence=(.+)$",
+        re.MULTILINE,
+    )
+    match = pattern.search(stdout_text)
+    if not match:
+        raise RuntimeError(f"{scope_label} did not emit expected summary line:\n{stdout_text}")
+    passed, reason, evidence = match.group(1), match.group(2), match.group(3).strip()
+    if passed != "true" or reason != "passed":
+        raise RuntimeError(f"{scope_label} failed: passed={passed} reason={reason} evidence={evidence}")
+    return Path(evidence)
+
+
+def run_h0(device_path: str, scratch_root: Path):
+    h0_kit = scratch_root / f"kit-h0-{uuid.uuid4().hex}"
+    prepare_kit(h0_kit)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "hardware-acceptance"),
+            "--execute",
+            "h0",
+            "--kit",
+            str(h0_kit),
+            "--device-path",
+            device_path,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"H0 execution failed (exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
+        )
+    evidence_dir = parse_harness_stdout("H0", proc.stdout)
+    stage02 = json.loads((evidence_dir / "stage-02.json").read_text(encoding="utf-8"))
+    stage03 = json.loads((evidence_dir / "stage-03.json").read_text(encoding="utf-8"))
+    if stage02.get("stage") != "h_backup_verified" or not stage03.get("detail", {}).get("passed"):
+        raise RuntimeError(f"H0 stage verification failed in {evidence_dir}")
+    detail = stage02["detail"]
+    keymap_meta = detail["files"]["keymap.json"]
+    return {
+        "passed": True,
+        "kit_dir": str(h0_kit),
+        "evidence_dir": str(evidence_dir),
+        "status": detail["status"],
+        "keymap_size": keymap_meta["size"],
+        "keymap_sha1": keymap_meta["sha1"],
+        "keymap_sha256": keymap_meta["sha256"],
+        "smart_actions_present": detail["smart_actions_present"],
+        "requests": stage03["detail"]["requests"],
+    }
+
+
+def find_latest_verified_h1(scratch_root: Path, expected_keymap_sha256: str):
+    candidates = sorted(
+        scratch_root.glob("probe-h-*"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for ev_dir in candidates:
+        stage_files = sorted(ev_dir.glob("stage-*.json"))
+        if len(stage_files) < 10:
+            continue
+        try:
+            stage02 = json.loads((ev_dir / "stage-02.json").read_text(encoding="utf-8"))
+            final_stage = json.loads(stage_files[-1].read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        km_sha256 = (
+            stage02.get("detail", {})
+            .get("files", {})
+            .get("keymap.json", {})
+            .get("sha256")
+        )
+        if (
+            km_sha256 == expected_keymap_sha256
+            and final_stage.get("stage") == "h_finished"
+            and final_stage.get("cleanup_confirmed") is True
+            and final_stage.get("detail", {}).get("passed") is True
+        ):
+            return {
+                "passed": True,
+                "reused_verified_evidence": True,
+                "cleanup_confirmed": True,
+                "evidence_dir": str(ev_dir),
+                "target_tempfile": final_stage.get("target"),
+                "stage_count": len(stage_files),
+                "requests": final_stage.get("detail", {}).get("requests"),
+            }
+    return None
+
+
+def run_h1(device_path: str, h0_summary: dict, scratch_root: Path):
+    h0_evidence = Path(h0_summary["evidence_dir"])
+    keymap_backup = h0_evidence / "keymap.json"
+    smart_backup = h0_evidence / "smart_actions.json"
+    h1_kit = scratch_root / f"kit-h1-{uuid.uuid4().hex}"
+    prepare_kit(
+        h1_kit,
+        keymap_path=keymap_backup,
+        smart_actions_path=smart_backup if h0_summary["smart_actions_present"] else None,
+    )
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "hardware-acceptance"),
+            "--execute",
+            "h1",
+            "--kit",
+            str(h1_kit),
+            "--device-path",
+            device_path,
+            "--expected-keymap-sha256",
+            h0_summary["keymap_sha256"],
+            "--unresolved-operations-reviewed",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"H1 execution failed (exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
+        )
+    evidence_dir = parse_harness_stdout("H1", proc.stdout)
+    stage_files = sorted(evidence_dir.glob("stage-*.json"))
+    if not stage_files:
+        raise RuntimeError(f"H1 produced no stage files in {evidence_dir}")
+    final_stage = json.loads(stage_files[-1].read_text(encoding="utf-8"))
+    if (
+        final_stage.get("stage") != "h_finished"
+        or not final_stage.get("cleanup_confirmed")
+        or not final_stage.get("detail", {}).get("passed")
+    ):
+        raise RuntimeError(f"H1 final stage verification failed: {final_stage}")
+    return {
+        "passed": True,
+        "cleanup_confirmed": True,
+        "kit_dir": str(h1_kit),
+        "evidence_dir": str(evidence_dir),
+        "target_tempfile": final_stage["target"],
+        "stage_count": len(stage_files),
+        "requests": final_stage["detail"]["requests"],
+    }
+
+
+def verify_live_app_usb_auto_acceptance(expected_device_path: str, expected_keymap_sha256: str):
+    subprocess.run([str(ROOT / "scripts" / "build")], cwd=ROOT, check=True)
+    installed_app = Path("/Applications/Micro Input.app")
+    if installed_app.exists():
+        subprocess.run(
+            ["rsync", "-a", "--delete", str(ROOT / "target" / "MicroInput.app") + "/", str(installed_app) + "/"],
+            cwd=ROOT,
+            check=True,
+        )
+        app_to_launch = installed_app
+    else:
+        app_to_launch = ROOT / "target" / "MicroInput.app"
+
+    doc_dir = Path(
+        os.environ.get(
+            "MI_DOCUMENT_DIR",
+            str(Path.home() / "Library" / "Application Support" / "MicroInput"),
+        )
+    )
+    receipt_path = doc_dir / "hardware-auto-acceptance.json"
+    if receipt_path.exists():
+        receipt_path.unlink()
+
+    launch_Started_ms = int(time.time() * 1000)
+    subprocess.run(["open", "-g", str(app_to_launch)], cwd=ROOT, check=True)
+
+    deadline = time.monotonic() + 20.0
+    receipt = None
+    while time.monotonic() < deadline:
+        if receipt_path.is_file():
+            try:
+                candidate = json.loads(receipt_path.read_text(encoding="utf-8"))
+                if candidate.get("timestamp_ms", 0) >= launch_Started_ms - 2000:
+                    receipt = candidate
+                    break
+            except (OSError, ValueError):
+                pass
+        time.sleep(0.2)
+
+    if receipt is None:
+        raise RuntimeError(
+            f"Micro Input.app did not write {receipt_path} within 20s after launch."
+        )
+    if receipt.get("status") != "PASS":
+        raise RuntimeError(f"Live app auto-acceptance did not PASS: {receipt}")
+    if receipt.get("firmware_version") != "0.6.3":
+        raise RuntimeError(f"Unexpected firmware_version in receipt: {receipt}")
+    if receipt.get("device_path") != expected_device_path:
+        raise RuntimeError(
+            f"Device path mismatch: expected {expected_device_path}, got {receipt.get('device_path')}"
+        )
+    if receipt.get("keymap_sha256") != expected_keymap_sha256:
+        raise RuntimeError(
+            f"Keymap SHA-256 mismatch between H0 ({expected_keymap_sha256}) and live app ({receipt.get('keymap_sha256')})"
+        )
+    if not (
+        receipt.get("lighting_rgbcfg_synced")
+        and receipt.get("lighting_preview_synced")
+        and receipt.get("lighting_thstatus_synced")
+    ):
+        raise RuntimeError(f"Live hardware lighting sync incomplete: {receipt}")
+    return receipt
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    scratch_root = ROOT / ".scratch" / "input-study"
+    scratch_root.mkdir(parents=True, exist_ok=True)
+
+    candidate = wait_for_single_usb_candidate(args.wait, args.timeout)
+    device_path = candidate["path"]
+    print(f"[1/4] Detected {candidate['product']} (303A:8298) at {device_path}", flush=True)
+
+    quiesce_competing_hid_readers()
+    print("[2/4] Running automatic H0 read-only identity + multi-chunk config backup verification...", flush=True)
+    h0_summary = run_h0(device_path, scratch_root)
+    print(
+        f"      H0 PASS: firmware={h0_summary['status']['version']} "
+        f"keymap={h0_summary['keymap_size']}B sha256={h0_summary['keymap_sha256'][:16]}...",
+        flush=True,
+    )
+
+    if args.include_h1 and not args.skip_h1:
+        time.sleep(0.3)
+        print(
+            "[3/4] Running automatic H1 tempfile multi-chunk write/readback/delete + 14-snapshot preservation proof...",
+            flush=True,
+        )
+        h1_summary = run_h1(device_path, h0_summary, scratch_root)
+        print(
+            f"      H1 PASS: tempfile={h1_summary['target_tempfile']} "
+            f"cleanup_confirmed={h1_summary['cleanup_confirmed']} requests={h1_summary['requests']}",
+            flush=True,
+        )
+    else:
+        verified_h1 = find_latest_verified_h1(scratch_root, h0_summary["keymap_sha256"])
+        if verified_h1 is not None:
+            h1_summary = verified_h1
+            print(
+                f"[3/4] Verified H1 evidence matched current keymap SHA-256: "
+                f"tempfile={h1_summary['target_tempfile']} cleanup_confirmed=True "
+                f"requests={h1_summary['requests']} ({Path(h1_summary['evidence_dir']).name})",
+                flush=True,
+            )
+        else:
+            h1_summary = {"skipped": True}
+            print("[3/4] H1 flash write skipped by default read-only policy (pass --include-h1 to run).", flush=True)
+
+    print(
+        "[4/4] Rebuilding & launching Micro Input.app to verify automatic USB connect + lighting sync...",
+        flush=True,
+    )
+    app_receipt = verify_live_app_usb_auto_acceptance(
+        expected_device_path=device_path,
+        expected_keymap_sha256=h0_summary["keymap_sha256"],
+    )
+    print(
+        f"      App Auto-Acceptance PASS: session_id={app_receipt['session_id']} "
+        f"rgbcfg={app_receipt['lighting_rgbcfg_synced']} "
+        f"preview={app_receipt['lighting_preview_synced']} "
+        f"thstatus={app_receipt['lighting_thstatus_synced']}",
+        flush=True,
+    )
+
+    result = {
+        "schema_version": 1,
+        "status": "PASS",
+        "device": candidate,
+        "h0": h0_summary,
+        "h1": h1_summary,
+        "app_auto_acceptance": app_receipt,
+        "timestamp_ms": int(time.time() * 1000),
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"HARDWARE_AUTO_ACCEPTANCE: PASS ({args.output})", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

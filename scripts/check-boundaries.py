@@ -137,4 +137,39 @@ assert rust_exec_src.count('AXIsProcessTrustedWithOptions') == 0, (
     'do not call AXIsProcessTrustedWithOptions inside host execution paths'
 )
 
+core_bridge_src = (root / 'app/MicroInput/Sources/MicroInputUI/CoreBridge.swift').read_text(encoding='utf-8')
+assert (
+    '@Observable' in core_bridge_src
+    and '@ObservationIgnored public private(set) var model: ProjectionModel' in core_bridge_src
+    and 'ObservableObject' not in core_bridge_src
+    and '@Published' not in core_bridge_src
+), (
+    'R-C06 violation in app/MicroInput/Sources/MicroInputUI/CoreBridge.swift: '
+    'CoreStore must use @Observable with @ObservationIgnored model and Equatable-gated domain slices; '
+    'do not use ObservableObject or @Published var model'
+)
+for view_name in (
+    'WorkbenchRootView.swift',
+    'ClassicWorkbenchView.swift',
+    'CreatorMicroBoardView.swift',
+    'InlineInspectorView.swift',
+    'ModalsAndStatusMenuView.swift',
+):
+    view_src = (root / 'app/MicroInput/Sources/MicroInputUI' / view_name).read_text(encoding='utf-8')
+    assert (
+        '@ObservedObject' not in view_src
+        and 'store.model' not in view_src
+        and 'let model: ProjectionModel' not in view_src
+    ), (
+        f'R-C06 violation in app/MicroInput/Sources/MicroInputUI/{view_name}: '
+        'SwiftUI views must read fine-grained domain slices (store.header, store.sidebar, store.canvas, '
+        'store.sessionStrip, store.inspector, store.statusMenu, store.overlay, store.footer) instead of '
+        '@ObservedObject, store.model, or passing monolithic ProjectionModel'
+    )
+ffi_lib_src = (root / 'crates/mi-ffi/src/lib.rs').read_text(encoding='utf-8')
+assert 'store.projection_generation() == before_gen' in ffi_lib_src, (
+    'R-C06 violation in crates/mi-ffi/src/lib.rs: '
+    'mi_core_dispatch_json must short-circuit with null when store.projection_generation() is unchanged'
+)
+
 print('UNKNOWN inventory and read-only/no-send boundaries: PASS')
