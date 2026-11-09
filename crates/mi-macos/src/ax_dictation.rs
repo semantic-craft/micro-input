@@ -6,6 +6,7 @@ pub const MAX_PARENT_CHAIN_HOPS: usize = 64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DictationAdapter {
     Antigravity,
+    Cindy,
     Dsh,
     Codex,
 }
@@ -14,6 +15,7 @@ impl DictationAdapter {
     pub fn parse(adapter: &str) -> Option<Self> {
         match adapter.trim().to_ascii_lowercase().as_str() {
             "antigravity" => Some(Self::Antigravity),
+            "cindy" => Some(Self::Cindy),
             "dsh" | "dsh-desktop" | "deepseek" => Some(Self::Dsh),
             "codex" => Some(Self::Codex),
             _ => None,
@@ -26,6 +28,7 @@ impl DictationAdapter {
             Self::Antigravity => {
                 matches!(trimmed, "Record Audio" | "Record voice memo")
             }
+            Self::Cindy => trimmed == "开始语音输入",
             Self::Dsh => matches!(trimmed, "开始听写" | "Voice Dictation"),
             Self::Codex => matches!(trimmed, "Dictate" | "听写"),
         }
@@ -37,6 +40,7 @@ impl DictationAdapter {
             Self::Antigravity => {
                 matches!(trimmed, "Stop Recording" | "Recording" | "Stop recording")
             }
+            Self::Cindy => matches!(trimmed, "停止语音输入" | "结束语音输入"),
             Self::Dsh => matches!(trimmed, "停止听写" | "Stop Dictation"),
             Self::Codex => matches!(trimmed, "Stop dictation" | "停止听写"),
         }

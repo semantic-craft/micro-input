@@ -65,7 +65,7 @@ pub(crate) fn binding<'a>(
         return Err("层不属于所选配置".into());
     }
     if doc.is_protected_oai_layer(lid) {
-        return Err("受保护宿主层（Codex）不支持绑定动作".into());
+        return Err("受保护宿主层（ChatGPT / Codex / Cindy）不支持绑定动作".into());
     }
     doc.editable
         .graph

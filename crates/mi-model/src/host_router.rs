@@ -32,13 +32,12 @@ fn default_true() -> bool {
     true
 }
 
-pub(crate) const RETIRED_DESKTOP_AGENT_PROFILE_NAME: &str = "Cindy";
-
-pub const CANONICAL_DESKTOP_AGENT_PROFILES: [&str; 5] = [
+pub const CANONICAL_DESKTOP_AGENT_PROFILES: [&str; 6] = [
     "Antigravity",
     "Codex",
     "DeepSeek Coder (DSH)",
     "Herdr",
+    "Cindy",
     "其他软件",
 ];
 
@@ -48,7 +47,8 @@ pub fn canonical_desktop_agent_rank(name: &str) -> Option<usize> {
         "Codex" => Some(1),
         "DeepSeek Coder (DSH)" | "DSH" | "DeepSeek Harness" | "Deepseek Harness" => Some(2),
         "Herdr" => Some(3),
-        "其他软件" => Some(4),
+        "Cindy" => Some(4),
+        "其他软件" => Some(5),
         _ => None,
     }
 }
@@ -56,23 +56,13 @@ pub fn canonical_desktop_agent_rank(name: &str) -> Option<usize> {
 pub fn desktop_agent_for_profile_name(name: &str) -> Option<(&'static str, &'static str)> {
     match name.trim() {
         "Antigravity" => Some(("antigravity", "com.google.antigravity")),
+        "Cindy" => Some(("cindy", "com.xd.cindy")),
         "Codex" => Some(("codex", "com.openai.codex")),
         "DeepSeek Coder (DSH)" | "DSH" | "DeepSeek Harness" | "Deepseek Harness" => {
             Some(("dsh-desktop", "com.deepseek.dsh"))
         }
         _ => None,
     }
-}
-
-pub fn is_supported_agent_adapter(adapter: &str) -> bool {
-    matches!(
-        adapter.trim().to_ascii_lowercase().as_str(),
-        "antigravity" | "codex" | "dsh-desktop" | "dsh" | "deepseek" | "herdr"
-    )
-}
-
-pub fn is_supported_agent_command_adapter(adapter: &str) -> bool {
-    is_supported_agent_adapter(adapter) || matches!(adapter, "host" | "navigation" | "four-app")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -516,8 +506,6 @@ fn convert_action(
     fallback_bundle_id: Option<&str>,
     command_execution_enabled: bool,
 ) -> Option<ResolvedHostAction> {
-    let retired_target =
-        profile_name.is_some_and(|name| name.trim() == RETIRED_DESKTOP_AGENT_PROFILE_NAME);
     let kind: ActionKind = serde_json::from_value(action.payload.clone()).ok()?;
     match kind {
         ActionKind::Shortcut {
@@ -541,7 +529,7 @@ fn convert_action(
             })
         }
         ActionKind::Text { text } => {
-            if retired_target || text.trim_end_matches(['\r', '\n']).trim().is_empty() {
+            if text.trim_end_matches(['\r', '\n']).trim().is_empty() {
                 return None;
             }
             let (adapter, target_bundle_id) = profile_name
@@ -567,9 +555,6 @@ fn convert_action(
         }),
         ActionKind::ShellCommand { .. } => None,
         ActionKind::AgentCommand { adapter, command } => {
-            if !is_supported_agent_command_adapter(&adapter) {
-                return None;
-            }
             if let Some(prompt) = command
                 .strip_prefix("prompt:")
                 .or_else(|| command.strip_prefix("submit-prompt:"))
@@ -584,9 +569,6 @@ fn convert_action(
                     || command.starts_with("prompt:")
                     || command.starts_with("submit-prompt:"))
             {
-                if retired_target {
-                    return None;
-                }
                 profile_name
                     .and_then(desktop_agent_for_profile_name)
                     .map(|(a, _)| a.to_owned())
@@ -600,7 +582,7 @@ fn convert_action(
             })
         }
         ActionKind::FocusSession { adapter, session } => {
-            if session == "unselected" || !is_supported_agent_adapter(&adapter) {
+            if session == "unselected" {
                 None
             } else {
                 Some(ResolvedHostAction::FocusSession { adapter, session })

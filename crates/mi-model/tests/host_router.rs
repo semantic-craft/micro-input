@@ -182,7 +182,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     assert_eq!(draft.revision, 0);
     assert_eq!(draft.config.profiles.len(), 2);
     let created = install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(created.len(), 5);
+    assert_eq!(created.len(), 6);
     assert_eq!(
         draft.revision, 1,
         "install_agent_starter_profiles must commit as a single atomic revision"
@@ -191,10 +191,10 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     assert_eq!(
         draft.config.profiles.len(),
         2,
-        "single undo must revert all starter profiles"
+        "single undo must revert all 6 starter profiles"
     );
     draft.undo(true).unwrap();
-    assert_eq!(draft.config.profiles.len(), 5);
+    assert_eq!(draft.config.profiles.len(), 6);
 
     let ag_pid = &created[0];
     let herdr_pid = &created[1];
@@ -575,31 +575,33 @@ fn host_preferences_persist_active_profile_and_execution_enabled() {
 fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
     let mut draft = Draft::default();
     let ids = install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(draft.config.profiles.len(), 5);
+    assert_eq!(draft.config.profiles.len(), 6);
     assert!(!draft
         .config
         .profiles
         .iter()
         .any(|p| p.name.contains("演示") || p.name.contains("示例")));
-    let codex_pid = draft
-        .document
-        .editable
-        .graph
-        .profiles
-        .iter()
-        .find(|(_, p)| p.name == "Codex")
-        .unwrap()
-        .0
-        .clone();
-    let lid = draft.document.editable.graph.profiles[&codex_pid].layer_order[0].clone();
-    assert!(
-        draft.document.is_protected_oai_layer(&lid),
-        "Codex default layer must be a protected KV_OAI_* layer"
-    );
-    assert!(
-        resolve_host_action(&draft.document, Some(&codex_pid), "AG00", true).is_none(),
-        "Codex protected layers do not resolve ordinary editable host bindings"
-    );
+    for name in ["Cindy", "Codex"] {
+        let pid = draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == name)
+            .unwrap()
+            .0
+            .clone();
+        let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+        assert!(
+            draft.document.is_protected_oai_layer(&lid),
+            "{name} default layer must be a protected KV_OAI_* layer"
+        );
+        assert!(
+            resolve_host_action(&draft.document, Some(&pid), "AG00", true).is_none(),
+            "{name} is controlled natively by its client app, not Micro Input host actions"
+        );
+    }
     for (name, bundle) in [("DeepSeek Coder (DSH)", "com.deepseek.dsh")] {
         let pid = draft
             .document
@@ -688,7 +690,7 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
         edited.document.editable.graph.profiles[&pid].name,
         "My existing mapping"
     );
-    assert_eq!(edited.config.profiles.len(), 6);
+    assert_eq!(edited.config.profiles.len(), 7);
 }
 
 #[test]
@@ -1204,110 +1206,50 @@ fn other_apps_general_profile_binds_only_ag11_apple_fn_and_serves_as_wildcard_fo
 }
 
 #[test]
-fn generic_profile_runs_user_shortcuts_and_blocks_retired_adapter_actions_after_reopen() {
+fn generic_profile_routes_user_shortcut_after_reopen() {
     let mut draft = Draft::default();
-    let ids = install_agent_starter_profiles(&mut draft).unwrap();
-    let profile = ids
-        .into_iter()
-        .find(|pid| draft.document.editable.graph.profiles[pid].name == "其他软件")
+    install_agent_starter_profiles(&mut draft).unwrap();
+    let (profile, data) = draft
+        .document
+        .editable
+        .graph
+        .profiles
+        .iter()
+        .find(|(_, p)| p.name == "其他软件")
         .unwrap();
-    let layer = draft.document.editable.graph.profiles[&profile].layer_order[0].clone();
+    let profile = profile.clone();
+    let layer = data.layer_order[0].clone();
     let target = "com.example.editor";
-    for (slot, id, kind) in [
-        (
+    let modifiers = vec!["command".to_string()];
+    draft
+        .assign(
+            &json!(profile),
+            &json!(layer),
             0,
-            "custom-shortcut",
-            ActionKind::Shortcut {
-                key: "k".into(),
-                modifiers: vec!["command".into()],
-                target: target.into(),
+            Action {
+                id: "custom-shortcut".into(),
+                name: "Custom shortcut".into(),
+                category: "test".into(),
+                detail: String::new(),
+                payload: serde_json::to_value(ActionKind::Shortcut {
+                    key: "k".into(),
+                    modifiers: modifiers.clone(),
+                    target: target.into(),
+                })
+                .unwrap(),
             },
-        ),
-        (
-            1,
-            "old-voice-command",
-            ActionKind::AgentCommand {
-                adapter: "cindy".into(),
-                command: "dictation".into(),
-            },
-        ),
-        (
-            2,
-            "old-session-command",
-            ActionKind::FocusSession {
-                adapter: "cindy".into(),
-                session: "old-session".into(),
-            },
-        ),
-    ] {
-        draft
-            .assign(
-                &json!(profile),
-                &json!(layer),
-                slot,
-                Action {
-                    id: id.into(),
-                    name: id.into(),
-                    category: "test".into(),
-                    detail: "saved assignment".into(),
-                    payload: serde_json::to_value(kind).unwrap(),
-                },
-            )
-            .unwrap();
-    }
+        )
+        .unwrap();
+
     let bytes = serde_json::to_vec(&draft.document).unwrap();
     let reopened = Draft::from_bytes(&bytes).unwrap();
-    assert!(!reopened.read_only);
     assert_eq!(
         resolve_host_action(&reopened.document, Some(&profile), "AG00", true),
         Some(ResolvedHostAction::Shortcut {
             key: "k".into(),
             key_code: 0x28,
-            modifiers: vec!["command".into()],
+            modifiers,
             target_bundle_id: Some(target.into()),
         })
     );
-    for binding in ["AG01", "AG02"] {
-        assert!(resolve_host_action(&reopened.document, Some(&profile), binding, true).is_none());
-    }
-}
-
-#[test]
-fn retained_profile_does_not_send_implicitly_targeted_text_to_another_app() {
-    let mut draft = Draft::default();
-    let profile = draft.mutate(|doc| doc.create_profile("Cindy")).unwrap();
-    let layer = draft.document.editable.graph.profiles[&profile].layer_order[0].clone();
-    for (slot, kind) in [
-        (
-            0,
-            ActionKind::Text {
-                text: "private input".into(),
-            },
-        ),
-        (
-            1,
-            ActionKind::AgentCommand {
-                adapter: "host".into(),
-                command: "submit-prompt:private input".into(),
-            },
-        ),
-    ] {
-        draft
-            .assign(
-                &json!(profile),
-                &json!(layer),
-                slot,
-                Action {
-                    id: format!("retired-target-{slot}"),
-                    name: "Old action".into(),
-                    category: "test".into(),
-                    detail: String::new(),
-                    payload: serde_json::to_value(kind).unwrap(),
-                },
-            )
-            .unwrap();
-    }
-    for binding in ["AG00", "AG01"] {
-        assert!(resolve_host_action(&draft.document, Some(&profile), binding, true).is_none());
-    }
 }

@@ -1,22 +1,27 @@
+use mi_macos::SimulatedHostActionExecutor;
 use std::{
     env, fs,
     path::{Path, PathBuf},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SyntheticScenario {
+pub enum SyntheticScenario9 {
     HostExecution,
+    NativeOwnership,
     DshNavigation,
+    CindyNavigation,
     AntigravityStatus,
     ConfigWrite,
     LightingControl,
     DiagnosticExport,
 }
 
-impl SyntheticScenario {
-    pub const ALL: [Self; 6] = [
+impl SyntheticScenario9 {
+    pub const ALL: [Self; 8] = [
         Self::HostExecution,
+        Self::NativeOwnership,
         Self::DshNavigation,
+        Self::CindyNavigation,
         Self::AntigravityStatus,
         Self::ConfigWrite,
         Self::LightingControl,
@@ -26,7 +31,9 @@ impl SyntheticScenario {
     pub fn parse(raw: &str) -> Result<Self, String> {
         match raw.trim() {
             "host-execution" => Ok(Self::HostExecution),
+            "native-ownership" => Ok(Self::NativeOwnership),
             "dsh-navigation" => Ok(Self::DshNavigation),
+            "cindy-navigation" => Ok(Self::CindyNavigation),
             "antigravity-status" => Ok(Self::AntigravityStatus),
             "config-write" => Ok(Self::ConfigWrite),
             "lighting-control" => Ok(Self::LightingControl),
@@ -38,7 +45,9 @@ impl SyntheticScenario {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::HostExecution => "host-execution",
+            Self::NativeOwnership => "native-ownership",
             Self::DshNavigation => "dsh-navigation",
+            Self::CindyNavigation => "cindy-navigation",
             Self::AntigravityStatus => "antigravity-status",
             Self::ConfigWrite => "config-write",
             Self::LightingControl => "lighting-control",
@@ -53,7 +62,7 @@ pub struct QaLaunchEnv {
     pub audit_log_path: Option<PathBuf>,
     pub run_dir: Option<PathBuf>,
     pub diagnostic_evidence_path: Option<PathBuf>,
-    pub scenario: Option<SyntheticScenario>,
+    pub scenario: Option<SyntheticScenario9>,
 }
 
 fn non_empty_path(raw: Option<&str>) -> Option<PathBuf> {
@@ -107,7 +116,7 @@ impl QaLaunchEnv {
                 .map(|d| d.join("evidence/diagnostic-report.json"))
         });
         let scenario = match scenario_raw.map(str::trim).filter(|s| !s.is_empty()) {
-            Some(raw) => Some(SyntheticScenario::parse(raw)?),
+            Some(raw) => Some(SyntheticScenario9::parse(raw)?),
             None => None,
         };
         Ok(Self {
@@ -144,10 +153,10 @@ impl QaLaunchEnv {
 
 pub fn run_synthetic_scenario(
     env: &QaLaunchEnv,
-    scenario: SyntheticScenario,
+    scenario: SyntheticScenario9,
 ) -> Result<(), String> {
     match scenario {
-        SyntheticScenario::HostExecution => {
+        SyntheticScenario9::HostExecution => {
             let run_dir = env.resolved_run_dir()?;
             let summary = mi_macos::run_host_execution_scenario(&run_dir)?;
             if summary.status != "PASS" {
@@ -158,8 +167,38 @@ pub fn run_synthetic_scenario(
             }
             Ok(())
         }
-
-        SyntheticScenario::DshNavigation => {
+        SyntheticScenario9::NativeOwnership => {
+            let audit_path = env.resolved_audit_log_path()?;
+            let peer_socket = non_empty_path(env::var("MI_OWNERSHIP_SOCKET").ok().as_deref());
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            let report = rt.block_on(mi_bridge::run_native_ownership_scenario(
+                peer_socket.as_deref(),
+                Some(&audit_path),
+            ))?;
+            if report.status != "PASS" {
+                return Err(format!(
+                    "native-ownership scenario returned status {}",
+                    report.status
+                ));
+            }
+            let _ = fs::remove_file(&audit_path);
+            let simulator = SimulatedHostActionExecutor::new();
+            for receipt in &report.receipts {
+                simulator
+                    .execute_and_record(
+                        &receipt.profile_id,
+                        &receipt.binding_id,
+                        &receipt.action,
+                        &audit_path,
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+        SyntheticScenario9::DshNavigation => {
             let audit_path = env.resolved_audit_log_path()?;
             let report = mi_bridge::run_dsh_navigation_scenario(Some(&audit_path))?;
             if report.status != "PASS" {
@@ -170,8 +209,18 @@ pub fn run_synthetic_scenario(
             }
             Ok(())
         }
-
-        SyntheticScenario::AntigravityStatus => {
+        SyntheticScenario9::CindyNavigation => {
+            let audit_path = env.resolved_audit_log_path()?;
+            let report = mi_bridge::run_cindy_navigation_scenario(Some(&audit_path))?;
+            if report.status != "PASS" {
+                return Err(format!(
+                    "cindy-navigation scenario returned status {}",
+                    report.status
+                ));
+            }
+            Ok(())
+        }
+        SyntheticScenario9::AntigravityStatus => {
             let audit_path = env.resolved_audit_log_path()?;
             let report = mi_bridge::run_antigravity_status_scenario(Some(&audit_path))?;
             if report.status != "PASS" {
@@ -182,7 +231,7 @@ pub fn run_synthetic_scenario(
             }
             Ok(())
         }
-        SyntheticScenario::ConfigWrite => {
+        SyntheticScenario9::ConfigWrite => {
             let run_dir = env.resolved_run_dir()?;
             let summary = mi_macos::run_config_write_scenario(&run_dir)?;
             let _ = fs::remove_dir_all(run_dir.join("workspace"));
@@ -194,7 +243,7 @@ pub fn run_synthetic_scenario(
             }
             Ok(())
         }
-        SyntheticScenario::LightingControl => {
+        SyntheticScenario9::LightingControl => {
             let run_dir = env.resolved_run_dir()?;
             let summary = mi_macos::run_lighting_control_scenario(&run_dir)?;
             let _ = fs::remove_dir_all(run_dir.join("workspace"));
@@ -206,7 +255,7 @@ pub fn run_synthetic_scenario(
             }
             Ok(())
         }
-        SyntheticScenario::DiagnosticExport => {
+        SyntheticScenario9::DiagnosticExport => {
             let run_dir = env.resolved_run_dir()?;
             let report_path = env.resolved_diagnostic_report_path()?;
             let summary = mi_macos::run_diagnostic_export_scenario(&run_dir, &report_path)?;

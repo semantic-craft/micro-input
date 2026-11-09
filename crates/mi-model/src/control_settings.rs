@@ -46,7 +46,7 @@ impl Draft {
                 return Err("层不属于所选配置".into());
             }
             if d.is_protected_oai_layer(lid) {
-                return Err("受保护宿主层（Codex）不支持修改控件设置".into());
+                return Err("受保护宿主层（ChatGPT / Codex / Cindy）不支持修改控件设置".into());
             }
             let layer = d.editable.graph.layers.get_mut(lid).ok_or("层不存在")?;
             if let Some(old) = &layer.control_settings {

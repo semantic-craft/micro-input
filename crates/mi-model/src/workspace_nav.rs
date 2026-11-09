@@ -117,7 +117,7 @@ mod tests {
         assert_eq!(nav.current(), None);
 
         let w1 = WorkspaceEntry::new("antigravity", "/qa/ag-1", "AG Alpha", 3);
-        let w2 = WorkspaceEntry::new("codex", "/qa/codex-1", "Codex Repo", 5);
+        let w2 = WorkspaceEntry::new("cindy", "/qa/cindy-1", "Cindy Repo", 5);
         let w3 = WorkspaceEntry::new("dsh", "/qa/dsh-1", "DSH Core", 2);
 
         nav.set_workspaces(vec![w1.clone(), w2.clone(), w3.clone()]);

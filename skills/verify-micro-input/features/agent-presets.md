@@ -1,6 +1,6 @@
 # 桌面 Agent 预设与切换
 
-四套独立 Agent Profile（Antigravity、Herdr、Codex、DeepSeek Harness）与「其他软件」通用预设。具体按键与能力差异以 README「桌面 Agent 常用控制」和 docs/verification/desktop-agent-controls.md 为准。
+五套独立 Agent Profile（Cindy、Codex、Antigravity、DSH、Herdr App）与「其他软件」通用预设。具体按键与能力差异以 README「桌面 Agent 常用控制」和 docs/verification/desktop-agent-controls.md 为准。
 
 1. `scripts/check` 验证迁移原子性、重复安装无变化、保留用户改动、目标应用绑定和输入路由。
 2. `scripts/build --synthetic` 后运行 `MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=25`。

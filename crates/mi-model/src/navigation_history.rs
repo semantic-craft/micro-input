@@ -19,6 +19,10 @@ pub enum NavigationPlace {
         conversation_id: String,
         workspace_path: String,
     },
+    Cindy {
+        workspace_path: String,
+        session_id: String,
+    },
     Dsh {
         session_id: String,
         workspace_id: String,
@@ -50,6 +54,13 @@ impl NavigationPlace {
         }
     }
 
+    pub fn cindy(workspace_path: impl Into<String>, session_id: impl Into<String>) -> Self {
+        Self::Cindy {
+            workspace_path: workspace_path.into(),
+            session_id: session_id.into(),
+        }
+    }
+
     pub fn dsh(
         session_id: impl Into<String>,
         workspace_id: impl Into<String>,
@@ -70,6 +81,10 @@ impl NavigationPlace {
                 conversation_id,
                 workspace_path,
             } => format!("antigravity:{conversation_id}@{workspace_path}"),
+            Self::Cindy {
+                workspace_path,
+                session_id,
+            } => format!("cindy:{session_id}@{workspace_path}"),
             Self::Dsh {
                 session_id,
                 workspace_id,
@@ -195,6 +210,7 @@ mod tests {
         let herdr = NavigationPlace::app("dev.herdr.app");
         let antigravity = NavigationPlace::app("com.google.antigravity");
         let dsh = NavigationPlace::app("com.deepseek.dsh");
+        let cindy = NavigationPlace::app("com.xd.cindy");
         let codex = NavigationPlace::app("com.openai.codex");
 
         assert!(!history.can_go_back(|_| true));
@@ -202,13 +218,14 @@ mod tests {
         assert_eq!(history.back(|_| true), None);
         assert_eq!(history.forward(|_| true), None);
 
-        for place in [&herdr, &antigravity, &dsh, &codex] {
+        for place in [&herdr, &antigravity, &dsh, &cindy, &codex] {
             history.visit(place.clone());
         }
         assert_eq!(history.current(), Some(&codex));
         assert!(history.can_go_back(|_| true));
         assert!(!history.can_go_forward(|_| true));
 
+        assert_eq!(history.back(|_| true), Some(cindy.clone()));
         assert_eq!(history.back(|_| true), Some(dsh.clone()));
         assert_eq!(history.back(|_| true), Some(antigravity.clone()));
         assert_eq!(history.back(|_| true), Some(herdr.clone()));
@@ -218,6 +235,7 @@ mod tests {
 
         assert_eq!(history.forward(|_| true), Some(antigravity));
         assert_eq!(history.forward(|_| true), Some(dsh));
+        assert_eq!(history.forward(|_| true), Some(cindy));
         assert_eq!(history.forward(|_| true), Some(codex));
         assert_eq!(history.forward(|_| true), None);
     }
@@ -226,19 +244,19 @@ mod tests {
     fn deduplicates_consecutive_visits_and_preserves_forward_stack_on_current_revisit() {
         let mut history = NavigationHistory::new();
         let herdr = NavigationPlace::app("dev.herdr.app");
-        let antigravity = NavigationPlace::app("com.google.antigravity");
+        let cindy = NavigationPlace::app("com.xd.cindy");
         let codex = NavigationPlace::app("com.openai.codex");
 
         history.visit(herdr.clone());
         history.visit(herdr.clone());
         assert_eq!(history.entries(), &[herdr.clone()]);
 
-        history.visit(antigravity.clone());
+        history.visit(cindy.clone());
         history.visit(codex.clone());
-        assert_eq!(history.back(|_| true), Some(antigravity.clone()));
+        assert_eq!(history.back(|_| true), Some(cindy.clone()));
 
         // Re-visiting the current place after stepping back must NOT drop the forward stack.
-        history.visit(antigravity);
+        history.visit(cindy);
         assert!(history.can_go_forward(|_| true));
         assert_eq!(history.forward(|_| true), Some(codex));
     }
@@ -248,12 +266,12 @@ mod tests {
         let mut history = NavigationHistory::new();
         let herdr = NavigationPlace::app("dev.herdr.app");
         let antigravity = NavigationPlace::app("com.google.antigravity");
-        let codex = NavigationPlace::app("com.openai.codex");
+        let cindy = NavigationPlace::app("com.xd.cindy");
         let dsh = NavigationPlace::app("com.deepseek.dsh");
 
         history.visit(herdr.clone());
         history.visit(antigravity.clone());
-        history.visit(codex);
+        history.visit(cindy);
 
         assert_eq!(history.back(|_| true), Some(antigravity.clone()));
         history.visit(dsh.clone());
@@ -317,6 +335,12 @@ mod tests {
         assert_ne!(ag_ws1, ag_ws2);
         assert_ne!(ag_ws1.target_id(), ag_ws2.target_id());
 
+        // Cindy: same session ID in two different workspaces
+        let cindy_ws1 = NavigationPlace::cindy("/path/workspace-alpha", "sess-1");
+        let cindy_ws2 = NavigationPlace::cindy("/path/workspace-beta", "sess-1");
+        assert_ne!(cindy_ws1, cindy_ws2);
+        assert_ne!(cindy_ws1.target_id(), cindy_ws2.target_id());
+
         // DSH: same session ID across two different workspaces or hosts
         let dsh_ws1 = NavigationPlace::dsh("sess-1", "workspace-alpha", "host-1");
         let dsh_ws2 = NavigationPlace::dsh("sess-1", "workspace-beta", "host-1");
@@ -327,13 +351,14 @@ mod tests {
         assert_ne!(dsh_ws1.target_id(), dsh_host2.target_id());
 
         // Visiting each place records distinct history entries without collision
-        for p in [&ag_ws1, &ag_ws2, &dsh_ws1, &dsh_ws2, &dsh_host2] {
+        for p in [&ag_ws1, &ag_ws2, &cindy_ws1, &cindy_ws2, &dsh_ws1, &dsh_ws2] {
             history.visit((*p).clone());
         }
-        assert_eq!(history.len(), 5);
-        assert_eq!(history.current(), Some(&dsh_host2));
-        assert_eq!(history.back(|_| true), Some(dsh_ws2));
+        assert_eq!(history.len(), 6);
+        assert_eq!(history.current(), Some(&dsh_ws2));
         assert_eq!(history.back(|_| true), Some(dsh_ws1));
+        assert_eq!(history.back(|_| true), Some(cindy_ws2));
+        assert_eq!(history.back(|_| true), Some(cindy_ws1));
         assert_eq!(history.back(|_| true), Some(ag_ws2));
         assert_eq!(history.back(|_| true), Some(ag_ws1));
     }

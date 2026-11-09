@@ -384,12 +384,7 @@ impl MicroInput {
             let initial = graph
                 .profile_order
                 .iter()
-                .find(|id| {
-                    graph
-                        .profiles
-                        .get(*id)
-                        .is_some_and(|p| p.name == "Antigravity")
-                })
+                .find(|id| graph.profiles.get(*id).is_some_and(|p| p.name == "Cindy"))
                 .cloned()
                 .or_else(|| created.first().cloned());
             if let Some(initial) = initial {

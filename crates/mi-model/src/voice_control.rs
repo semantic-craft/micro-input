@@ -166,17 +166,22 @@ impl VoiceDictationSession {
 pub struct FourAppVoice;
 
 impl FourAppVoice {
-    pub const APPS: [&'static str; 2] = ["antigravity", "dsh-desktop"];
+    pub const APPS: [&'static str; 3] = ["cindy", "antigravity", "dsh-desktop"];
 
     /// Whether the application supports voice dictation (hold-to-dictate).
     pub fn supports_dictation(app: &str) -> bool {
-        Self::APPS.contains(&app)
+        match app {
+            "cindy" | "antigravity" | "dsh-desktop" => true,
+            _ => false,
+        }
     }
 
     /// Initial voice reply capability for the application.
+    /// Cindy and DSH support voice reply.
     /// Antigravity 2.29.0 does NOT support voice reply; kept as an explicit incomplete gap.
     pub fn initial_voice_reply_mode(app: &str) -> VoiceReplyMode {
         match app {
+            "cindy" => VoiceReplyMode::Supported(false),
             "dsh-desktop" => VoiceReplyMode::Supported(false),
             "antigravity" => VoiceReplyMode::Unsupported {
                 app: "antigravity".into(),
@@ -200,15 +205,11 @@ mod tests {
         assert_eq!(session.phase, VoiceDictationPhase::Idle);
 
         // Target binding required
-        assert!(session.start("dsh-desktop", "", 1000).is_err());
-        assert!(session
-            .start("dsh-desktop", "workspace#session1", 1000)
-            .is_ok());
+        assert!(session.start("cindy", "", 1000).is_err());
+        assert!(session.start("cindy", "workspace#session1", 1000).is_ok());
 
         // Cannot double start
-        assert!(session
-            .start("dsh-desktop", "workspace#session1", 1005)
-            .is_err());
+        assert!(session.start("cindy", "workspace#session1", 1005).is_err());
 
         // Transcription separated from send
         session.append_transcription("Hello world");
@@ -222,14 +223,14 @@ mod tests {
         );
 
         // Target mismatch on stop
-        assert!(session.stop("dsh-desktop", "other#session").is_err());
+        assert!(session.stop("cindy", "other#session").is_err());
 
         // Successful stop
-        assert!(session.stop("dsh-desktop", "workspace#session1").is_ok());
+        assert!(session.stop("cindy", "workspace#session1").is_ok());
         assert_eq!(
             session.phase,
             VoiceDictationPhase::Stopped {
-                adapter: "dsh-desktop".into(),
+                adapter: "cindy".into(),
                 target: "workspace#session1".into(),
             }
         );
@@ -247,6 +248,8 @@ mod tests {
             assert!(FourAppVoice::supports_dictation(app));
         }
 
+        // Cindy and DSH support voice reply
+        assert!(FourAppVoice::initial_voice_reply_mode("cindy").is_supported());
         assert!(FourAppVoice::initial_voice_reply_mode("dsh-desktop").is_supported());
 
         // Antigravity voice reply is unsupported and kept incomplete

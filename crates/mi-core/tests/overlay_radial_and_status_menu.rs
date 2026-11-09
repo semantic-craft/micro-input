@@ -76,7 +76,12 @@ fn radial_8_way_selection_and_four_app_prompt_preview() {
 
     let launcher_slots = store.resolve_current_radial_slots();
     assert_eq!(launcher_slots[1].intent, Some(RadialIntent::CheatSheet));
-    assert_eq!(launcher_slots[2].intent, None);
+    assert_eq!(
+        launcher_slots[2].intent,
+        Some(RadialIntent::OpenApp {
+            bundle_id: CanonicalAgent::Cindy.bundle_id().to_string(),
+        })
+    );
 
     store.apply_radial_preset(RadialPresetKind::PaseoEngineering);
     let paseo_slots = store.resolve_current_radial_slots();
@@ -555,9 +560,9 @@ fn status_menu_quick_switch_2x2_favorites_swap_and_icon_and_preset_bounds() {
     let deepseek_id = store
         .find_canonical_profile_id(CanonicalAgent::DeepseekHarness)
         .expect("Deepseek");
-    let herdr_id = store
-        .find_canonical_profile_id(CanonicalAgent::Herdr)
-        .expect("Herdr");
+    let cindy_id = store
+        .find_canonical_profile_id(CanonicalAgent::Cindy)
+        .expect("Cindy");
     let codex_id = store
         .find_canonical_profile_id(CanonicalAgent::Codex)
         .expect("Codex");
@@ -572,7 +577,7 @@ fn status_menu_quick_switch_2x2_favorites_swap_and_icon_and_preset_bounds() {
     );
     assert_eq!(
         store.favorites_grid().slot(FavoriteSlotIndex::SLOT_2),
-        Some(herdr_id.as_str())
+        Some(cindy_id.as_str())
     );
     assert_eq!(
         store.favorites_grid().slot(FavoriteSlotIndex::SLOT_3),
