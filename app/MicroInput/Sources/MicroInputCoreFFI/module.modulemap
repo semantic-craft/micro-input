@@ -1,0 +1,4 @@
+module MicroInputCoreFFI [system] {
+    header "mi_ffi.h"
+    export *
+}

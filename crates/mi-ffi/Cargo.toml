@@ -2,17 +2,12 @@
 name = "mi-ffi"
 version.workspace = true
 edition.workspace = true
-[features]
-synthetic-backend = ["mi-transport/synthetic-backend", "mi-session/synthetic-backend"]
-[dependencies]
-mi-model = { path = "../mi-model" }
-mi-proto = { path = "../mi-proto" }
-mi-transport = { path = "../mi-transport" }
-mi-session = { path = "../mi-session" }
-serde_json.workspace = true
-tokio.workspace = true
-thiserror.workspace = true
-uniffi.workspace = true
+
 [lib]
-crate-type = ["staticlib", "cdylib", "lib"]
-doctest = false
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+mi-core = { path = "../mi-core" }
+mi-macos = { path = "../mi-macos" }
+serde.workspace = true
+serde_json.workspace = true
