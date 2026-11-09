@@ -972,7 +972,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         ("Cindy", "cindy", "com.xd.cindy"),
         ("Codex", "codex", "com.openai.codex"),
         ("千问办公", "qwenwork", "cn.qwenwork.desktop.mac"),
-        ("ZCode", "zcode", "dev.zcode.app"),
     ] {
         let mut assignments = vec![(
             0,
@@ -997,7 +996,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 },
             ));
         }
-        if ["cindy", "zcode", "codex"].contains(&adapter) {
+        if ["cindy", "codex"].contains(&adapter) {
             assignments.push((
                 2,
                 "desktop-search",
@@ -1010,7 +1009,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 },
             ));
         }
-        if adapter == "qwenwork" || adapter == "zcode" {
+        if adapter == "qwenwork" {
             assignments.push((
                 3,
                 "desktop-new",
@@ -1047,7 +1046,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             "Cindy" => "cindy",
             "Codex" => "codex",
             "千问办公" => "qwenwork",
-            "ZCode" => "zcode",
             "Antigravity" => "antigravity",
             "DeepSeek Coder (DSH)" => "dsh-desktop",
             _ => continue,
@@ -1106,7 +1104,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 if command == "dictation"
                     && matches!(
                         adapter.as_str(),
-                        "cindy" | "codex" | "qwenwork" | "antigravity" | "zcode" | "dsh-desktop"
+                        "cindy" | "codex" | "qwenwork" | "antigravity" | "dsh-desktop"
                     )
                 {
                     *command = "push-to-talk".into();
@@ -1121,12 +1119,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             .filter(|(name, _)| {
                 matches!(
                     *name,
-                    "Cindy"
-                        | "Codex"
-                        | "千问办公"
-                        | "ZCode"
-                        | "Antigravity"
-                        | "DeepSeek Coder (DSH)"
+                    "Cindy" | "Codex" | "千问办公" | "Antigravity" | "DeepSeek Coder (DSH)"
                 )
             })
             .cloned(),
@@ -1136,7 +1129,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             "Cindy" => "cindy",
             "Codex" => "codex",
             "千问办公" => "qwenwork",
-            "ZCode" => "zcode",
             "Antigravity" => "antigravity",
             "DeepSeek Coder (DSH)" => "dsh-desktop",
             _ => continue,
@@ -1581,46 +1573,49 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         let pid = if let Some(pid) = existing_id {
             let p = &work.document.editable.graph.profiles[&pid];
             if is_native_oai_profile
-                && p.layer_order.len() == 1
-                && work.document.is_protected_oai_layer(&p.layer_order[0])
+                && p.layer_order
+                    .iter()
+                    .any(|lid| work.document.is_protected_oai_layer(lid))
             {
                 created_ids.push(pid);
                 continue;
             }
             let can_upgrade = p.layer_order.len() == 1
-                && legacy_specs
-                    .iter()
-                    .filter(|(name, _)| *name == profile_name)
-                    .any(|(_, old)| {
-                        let layer = &work.document.editable.graph.layers[&p.layer_order[0]];
-                        layer.lighting.is_none()
-                            && layer.control_settings.as_ref().is_some_and(|settings| {
-                                settings.joystick_mode == "logical_sectors"
-                                    && settings.active_sectors == 4
-                            })
-                            && layer
-                                .controls
-                                .values()
-                                .filter(|b| b.action_id.is_some())
-                                .count()
-                                == old.len()
-                            && old.iter().all(|(slot, id, name, category, detail, kind)| {
-                                layer
+                && ((is_native_oai_profile
+                    && work.document.editable.graph.layers[&p.layer_order[0]].name == "基础层")
+                    || legacy_specs
+                        .iter()
+                        .filter(|(name, _)| *name == profile_name)
+                        .any(|(_, old)| {
+                            let layer = &work.document.editable.graph.layers[&p.layer_order[0]];
+                            layer.lighting.is_none()
+                                && layer.control_settings.as_ref().is_some_and(|settings| {
+                                    settings.joystick_mode == "logical_sectors"
+                                        && settings.active_sectors == 4
+                                })
+                                && layer
                                     .controls
                                     .values()
-                                    .find(|b| b.logical_control == format!("logical-{slot}"))
-                                    .and_then(|b| b.action_id.as_ref())
-                                    .and_then(|id| work.document.editable.graph.actions.get(id))
-                                    .is_some_and(|a| {
-                                        a.id == *id
-                                            && a.name == *name
-                                            && a.category == *category
-                                            && a.detail == *detail
-                                            && serde_json::to_value(kind).ok().as_ref()
-                                                == Some(&a.payload)
-                                    })
-                            })
-                    });
+                                    .filter(|b| b.action_id.is_some())
+                                    .count()
+                                    == old.len()
+                                && old.iter().all(|(slot, id, name, category, detail, kind)| {
+                                    layer
+                                        .controls
+                                        .values()
+                                        .find(|b| b.logical_control == format!("logical-{slot}"))
+                                        .and_then(|b| b.action_id.as_ref())
+                                        .and_then(|id| work.document.editable.graph.actions.get(id))
+                                        .is_some_and(|a| {
+                                            a.id == *id
+                                                && a.name == *name
+                                                && a.category == *category
+                                                && a.detail == *detail
+                                                && serde_json::to_value(kind).ok().as_ref()
+                                                    == Some(&a.payload)
+                                        })
+                                })
+                        }));
             if !can_upgrade {
                 if profile_name == "Antigravity" && !p.layer_order.is_empty() {
                     let lid = p.layer_order[0].clone();
@@ -1813,7 +1808,6 @@ pub fn install_four_app_cockpit_preset(
     let adapter = match profile_name.as_str() {
         "Antigravity" => "antigravity",
         "DeepSeek Coder (DSH)" => "dsh-desktop",
-        "ZCode" => "zcode",
         "Cindy" => "cindy",
         "Codex" => "codex",
         "千问办公" => "qwenwork",
@@ -2139,7 +2133,7 @@ mod agent_migration_tests {
     fn upgrades_pre_dial_conversational_presets_while_preserving_customized_profiles() {
         let mut draft = Draft::default();
         let ids = install_agent_starter_profiles(&mut draft).unwrap();
-        assert_eq!(ids.len(), 8);
+        assert_eq!(ids.len(), 7);
 
         for native_name in ["Cindy", "Codex"] {
             let pid = draft
@@ -2159,9 +2153,9 @@ mod agent_migration_tests {
             );
         }
 
-        // Downgrade DeepSeek Coder (DSH) and 千问办公 to pre-Slice-B 9-slot push-to-talk state (remove slots 13, 14, 15),
-        // and customize ZCode by adding a joystick prompt slot (slot 16 -> prompt-continue).
-        for profile_name in ["DeepSeek Coder (DSH)", "千问办公"] {
+        // Downgrade DeepSeek Coder (DSH) to pre-Slice-B 9-slot push-to-talk state (remove slots 13, 14, 15),
+        // and customize 千问办公 by adding a joystick prompt slot (slot 16 -> prompt-continue).
+        for profile_name in ["DeepSeek Coder (DSH)"] {
             let pid = draft
                 .document
                 .editable
@@ -2195,25 +2189,25 @@ mod agent_migration_tests {
                 .unwrap();
         }
 
-        let zcode_pid = draft
+        let qwen_pid = draft
             .document
             .editable
             .graph
             .profiles
             .iter()
-            .find(|(_, p)| p.name == "ZCode")
+            .find(|(_, p)| p.name == "千问办公")
             .unwrap()
             .0
             .clone();
-        let zcode_lid = draft.document.editable.graph.profiles[&zcode_pid].layer_order[0].clone();
+        let qwen_lid = draft.document.editable.graph.profiles[&qwen_pid].layer_order[0].clone();
         let prompt_continue = crate::draft::actions()
             .into_iter()
             .find(|a| a.id == "prompt-continue")
             .unwrap();
         draft
-            .assign(&json!(zcode_pid), &json!(zcode_lid), 16, prompt_continue)
+            .assign(&json!(qwen_pid), &json!(qwen_lid), 16, prompt_continue)
             .unwrap();
-        let zcode_before = draft.document.editable.graph.layers[&zcode_lid].clone();
+        let qwen_before = draft.document.editable.graph.layers[&qwen_lid].clone();
 
         let upgraded_ids = install_agent_starter_profiles(&mut draft).unwrap();
         assert_eq!(
@@ -2221,7 +2215,7 @@ mod agent_migration_tests {
             "Profile UUIDs must be preserved on upgrade"
         );
 
-        for profile_name in ["Antigravity", "DeepSeek Coder (DSH)", "千问办公"] {
+        for profile_name in ["Antigravity", "DeepSeek Coder (DSH)"] {
             let pid = draft
                 .document
                 .editable
@@ -2250,8 +2244,8 @@ mod agent_migration_tests {
         }
 
         assert!(
-            draft.document.editable.graph.layers[&zcode_lid] == zcode_before,
-            "User-customized ZCode profile (with joystick prompt) must remain untouched"
+            draft.document.editable.graph.layers[&qwen_lid] == qwen_before,
+            "User-customized 千问办公 profile (with joystick prompt) must remain untouched"
         );
     }
 }

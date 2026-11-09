@@ -166,23 +166,22 @@ impl VoiceDictationSession {
 pub struct FourAppVoice;
 
 impl FourAppVoice {
-    pub const APPS: [&'static str; 4] = ["cindy", "antigravity", "zcode", "dsh-desktop"];
+    pub const APPS: [&'static str; 3] = ["cindy", "antigravity", "dsh-desktop"];
 
     /// Whether the application supports voice dictation (hold-to-dictate).
     pub fn supports_dictation(app: &str) -> bool {
         match app {
-            "cindy" | "antigravity" | "zcode" | "dsh-desktop" => true,
+            "cindy" | "antigravity" | "dsh-desktop" => true,
             _ => false,
         }
     }
 
     /// Initial voice reply capability for the application.
-    /// Cindy, ZCode, and DSH support voice reply.
+    /// Cindy and DSH support voice reply.
     /// Antigravity 2.29.0 does NOT support voice reply; kept as an explicit incomplete gap.
     pub fn initial_voice_reply_mode(app: &str) -> VoiceReplyMode {
         match app {
             "cindy" => VoiceReplyMode::Supported(false),
-            "zcode" => VoiceReplyMode::Supported(false),
             "dsh-desktop" => VoiceReplyMode::Supported(false),
             "antigravity" => VoiceReplyMode::Unsupported {
                 app: "antigravity".into(),
@@ -249,9 +248,8 @@ mod tests {
             assert!(FourAppVoice::supports_dictation(app));
         }
 
-        // Cindy, ZCode, DSH support voice reply
+        // Cindy and DSH support voice reply
         assert!(FourAppVoice::initial_voice_reply_mode("cindy").is_supported());
-        assert!(FourAppVoice::initial_voice_reply_mode("zcode").is_supported());
         assert!(FourAppVoice::initial_voice_reply_mode("dsh-desktop").is_supported());
 
         // Antigravity voice reply is unsupported and kept incomplete

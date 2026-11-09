@@ -182,7 +182,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     assert_eq!(draft.revision, 0);
     assert_eq!(draft.config.profiles.len(), 2);
     let created = install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(created.len(), 8);
+    assert_eq!(created.len(), 7);
     assert_eq!(
         draft.revision, 1,
         "install_agent_starter_profiles must commit as a single atomic revision"
@@ -191,10 +191,10 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     assert_eq!(
         draft.config.profiles.len(),
         2,
-        "single undo must revert all 8 starter profiles"
+        "single undo must revert all 7 starter profiles"
     );
     draft.undo(true).unwrap();
-    assert_eq!(draft.config.profiles.len(), 8);
+    assert_eq!(draft.config.profiles.len(), 7);
 
     let ag_pid = &created[0];
     let herdr_pid = &created[1];
@@ -575,7 +575,7 @@ fn host_preferences_persist_active_profile_and_execution_enabled() {
 fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
     let mut draft = Draft::default();
     let ids = install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(draft.config.profiles.len(), 8);
+    assert_eq!(draft.config.profiles.len(), 7);
     assert!(!draft
         .config
         .profiles
@@ -602,10 +602,7 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
             "{name} is controlled natively by its client app, not Micro Input host actions"
         );
     }
-    for (name, bundle) in [
-        ("千问办公", "cn.qwenwork.desktop.mac"),
-        ("ZCode", "dev.zcode.app"),
-    ] {
+    for (name, bundle) in [("千问办公", "cn.qwenwork.desktop.mac")] {
         let pid = draft
             .document
             .editable
@@ -631,7 +628,6 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
     for (name, adapter) in [
         ("Antigravity", "antigravity"),
         ("千问办公", "qwenwork"),
-        ("ZCode", "zcode"),
         ("DeepSeek Coder (DSH)", "dsh-desktop"),
     ] {
         let pid = draft
@@ -695,7 +691,7 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
         edited.document.editable.graph.profiles[&pid].name,
         "My existing mapping"
     );
-    assert_eq!(edited.config.profiles.len(), 9);
+    assert_eq!(edited.config.profiles.len(), 8);
 }
 
 #[test]
@@ -743,7 +739,6 @@ fn joystick_prompt_slots_and_submit_control_route_to_target_agent_without_auto_e
     for (profile_name, expected_adapter, expected_bundle) in [
         ("Antigravity", "antigravity", "com.google.antigravity"),
         ("千问办公", "qwenwork", "cn.qwenwork.desktop.mac"),
-        ("ZCode", "zcode", "dev.zcode.app"),
         ("DeepSeek Coder (DSH)", "dsh-desktop", "com.deepseek.dsh"),
     ] {
         let pid = draft

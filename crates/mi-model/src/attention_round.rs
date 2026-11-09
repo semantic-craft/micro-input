@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn priority_rank_visits_interaction_before_unread_before_error() {
         let mut round = AttentionRound::new();
-        let p_interaction = NavigationPlace::zcode("s", "r", "/ws", "task-perm");
+        let p_interaction = NavigationPlace::dsh("dsh-perm", "ws-1", "host-1");
         let p_unread = NavigationPlace::cindy("/ws", "sess-unread");
         let p_error = NavigationPlace::antigravity("ag-err", "/ws");
 

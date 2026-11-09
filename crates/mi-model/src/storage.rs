@@ -683,9 +683,7 @@ impl HostPreferencesStore {
             .open(&pending)
             .map_err(|_| "收藏存在未完成保存文件；原件保留")?;
         let result = (|| -> Result<(), String> {
-            file.write_all(&bytes)
-                .and_then(|_| file.sync_all())
-                .map_err(|e| e.to_string())?;
+            file.write_all(&bytes).map_err(|e| e.to_string())?;
             if read(path)? != self.expected {
                 return Err("保存前收藏已变化；原件保留".into());
             }

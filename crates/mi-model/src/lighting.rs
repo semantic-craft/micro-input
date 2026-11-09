@@ -8,7 +8,7 @@ pub struct Lighting {
     pub backlight: Value,
     pub underglow: Value,
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Zone {
     Backlight,
     Underglow,

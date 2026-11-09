@@ -23,12 +23,6 @@ pub enum NavigationPlace {
         workspace_path: String,
         session_id: String,
     },
-    ZCode {
-        source_server: String,
-        remote_session: String,
-        workspace: String,
-        task_id: String,
-    },
     Dsh {
         session_id: String,
         workspace_id: String,
@@ -67,20 +61,6 @@ impl NavigationPlace {
         }
     }
 
-    pub fn zcode(
-        source_server: impl Into<String>,
-        remote_session: impl Into<String>,
-        workspace: impl Into<String>,
-        task_id: impl Into<String>,
-    ) -> Self {
-        Self::ZCode {
-            source_server: source_server.into(),
-            remote_session: remote_session.into(),
-            workspace: workspace.into(),
-            task_id: task_id.into(),
-        }
-    }
-
     pub fn dsh(
         session_id: impl Into<String>,
         workspace_id: impl Into<String>,
@@ -105,12 +85,6 @@ impl NavigationPlace {
                 workspace_path,
                 session_id,
             } => format!("cindy:{session_id}@{workspace_path}"),
-            Self::ZCode {
-                source_server,
-                remote_session,
-                workspace,
-                task_id,
-            } => format!("zcode:{source_server}:{remote_session}:{workspace}:{task_id}"),
             Self::Dsh {
                 session_id,
                 workspace_id,
@@ -367,12 +341,6 @@ mod tests {
         assert_ne!(cindy_ws1, cindy_ws2);
         assert_ne!(cindy_ws1.target_id(), cindy_ws2.target_id());
 
-        // ZCode: same task ID in two different workspaces/remote sessions
-        let zcode_ws1 = NavigationPlace::zcode("srv1", "rem1", "/path/workspace-alpha", "task-1");
-        let zcode_ws2 = NavigationPlace::zcode("srv1", "rem1", "/path/workspace-beta", "task-1");
-        assert_ne!(zcode_ws1, zcode_ws2);
-        assert_ne!(zcode_ws1.target_id(), zcode_ws2.target_id());
-
         // DSH: same session ID across two different workspaces or hosts
         let dsh_ws1 = NavigationPlace::dsh("sess-1", "workspace-alpha", "host-1");
         let dsh_ws2 = NavigationPlace::dsh("sess-1", "workspace-beta", "host-1");
@@ -383,16 +351,12 @@ mod tests {
         assert_ne!(dsh_ws1.target_id(), dsh_host2.target_id());
 
         // Visiting each place records distinct history entries without collision
-        for p in [
-            &ag_ws1, &ag_ws2, &cindy_ws1, &cindy_ws2, &zcode_ws1, &zcode_ws2, &dsh_ws1, &dsh_ws2,
-        ] {
+        for p in [&ag_ws1, &ag_ws2, &cindy_ws1, &cindy_ws2, &dsh_ws1, &dsh_ws2] {
             history.visit((*p).clone());
         }
-        assert_eq!(history.len(), 8);
+        assert_eq!(history.len(), 6);
         assert_eq!(history.current(), Some(&dsh_ws2));
         assert_eq!(history.back(|_| true), Some(dsh_ws1));
-        assert_eq!(history.back(|_| true), Some(zcode_ws2));
-        assert_eq!(history.back(|_| true), Some(zcode_ws1));
         assert_eq!(history.back(|_| true), Some(cindy_ws2));
         assert_eq!(history.back(|_| true), Some(cindy_ws1));
         assert_eq!(history.back(|_| true), Some(ag_ws2));

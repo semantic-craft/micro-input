@@ -1,0 +1,17 @@
+[package]
+name = "mi-bridge"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libc = "0.2"
+mi-model = { path = "../mi-model" }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "=0.10.9"
+thiserror.workspace = true
+tokio.workspace = true
+uuid = { version = "=1.28.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"

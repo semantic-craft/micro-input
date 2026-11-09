@@ -1,9 +1,9 @@
 //! Local action intents and honest prerequisites. No adapter discovery or execution.
 use crate::draft::{actions, Action, ActionKind};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionCapability {
     pub target: String,
     pub prerequisites: Vec<String>,
@@ -123,7 +123,6 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                     "navigation"
                         | "host"
                         | "cindy"
-                        | "zcode"
                         | "qwenwork"
                         | "codex"
                         | "antigravity"
@@ -178,7 +177,6 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                     "four-app"
                         | "host"
                         | "cindy"
-                        | "zcode"
                         | "qwenwork"
                         | "codex"
                         | "antigravity"
@@ -196,7 +194,7 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                     )) =>
             {
                 prerequisites.push(
-                    "需要 Mac 宿主常驻及对应四应用（Antigravity / DSH / ZCode / Cindy）会话桥或辅助功能权限"
+                    "需要 Mac 宿主常驻及对应桌面应用（Antigravity / DSH / Cindy）会话桥或辅助功能权限"
                         .into(),
                 );
                 (
@@ -211,13 +209,7 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
             Ok(ActionKind::AgentCommand { adapter, command })
                 if matches!(
                     adapter.as_str(),
-                    "host"
-                        | "cindy"
-                        | "zcode"
-                        | "qwenwork"
-                        | "codex"
-                        | "antigravity"
-                        | "dsh-desktop"
+                    "host" | "cindy" | "qwenwork" | "codex" | "antigravity" | "dsh-desktop"
                 ) && (command == "submit"
                     || command
                         .strip_prefix("prompt:")
@@ -247,7 +239,7 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
             Ok(ActionKind::AgentCommand { adapter, command }) => {
                 let desktop = matches!(
                     adapter.as_str(),
-                    "cindy" | "zcode" | "qwenwork" | "codex" | "antigravity" | "dsh-desktop"
+                    "cindy" | "qwenwork" | "codex" | "antigravity" | "dsh-desktop"
                 ) && (matches!(
                     command.as_str(),
                     "model"
@@ -273,17 +265,12 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                 ) || (command == "push-to-talk"
                     && matches!(
                         adapter.as_str(),
-                        "cindy" | "codex" | "qwenwork" | "antigravity" | "zcode" | "dsh-desktop"
+                        "cindy" | "codex" | "qwenwork" | "antigravity" | "dsh-desktop"
                     ))
                     || (matches!(command.as_str(), "voice-reply" | "toggle-voice-reply")
                         && matches!(
                             adapter.as_str(),
-                            "cindy"
-                                | "codex"
-                                | "qwenwork"
-                                | "antigravity"
-                                | "zcode"
-                                | "dsh-desktop"
+                            "cindy" | "codex" | "qwenwork" | "antigravity" | "dsh-desktop"
                         ))
                     || command == "focus-input"
                     || (command == "search" && adapter != "qwenwork")
@@ -390,6 +377,48 @@ pub struct LibraryEntry {
     pub favorite: bool,
 }
 
+struct CachedCatalogEntry {
+    action: Action,
+    cap_enabled: ActionCapability,
+    cap_disabled: ActionCapability,
+    search_text_enabled: String,
+    search_text_disabled: String,
+}
+
+fn cached_catalog() -> &'static [CachedCatalogEntry] {
+    static INDEX: std::sync::OnceLock<Vec<CachedCatalogEntry>> = std::sync::OnceLock::new();
+    INDEX.get_or_init(|| {
+        actions()
+            .into_iter()
+            .map(|action| {
+                let cap_enabled = capability(&action, true);
+                let cap_disabled = capability(&action, false);
+                let search_text_enabled = format!(
+                    "{} {} {} {} {}",
+                    action.name, action.category, action.detail, cap_enabled.target, action.payload
+                )
+                .to_lowercase();
+                let search_text_disabled = format!(
+                    "{} {} {} {} {}",
+                    action.name,
+                    action.category,
+                    action.detail,
+                    cap_disabled.target,
+                    action.payload
+                )
+                .to_lowercase();
+                CachedCatalogEntry {
+                    action,
+                    cap_enabled,
+                    cap_disabled,
+                    search_text_enabled,
+                    search_text_disabled,
+                }
+            })
+            .collect()
+    })
+}
+
 pub fn search(
     query: &str,
     category: &str,
@@ -398,23 +427,22 @@ pub fn search(
     command_execution_enabled: bool,
 ) -> Vec<LibraryEntry> {
     let query = query.trim().to_lowercase();
-    actions()
-        .into_iter()
-        .filter_map(|action| {
-            let favorite = favorites.contains(&action.id);
-            let info = capability(&action, command_execution_enabled);
-            let text = format!(
-                "{} {} {} {} {}",
-                action.name, action.category, action.detail, info.target, action.payload
-            )
-            .to_lowercase();
-            if (category == "全部" || category == action.category)
+    cached_catalog()
+        .iter()
+        .filter_map(|entry| {
+            let favorite = favorites.contains(&entry.action.id);
+            let (info, text) = if command_execution_enabled {
+                (&entry.cap_enabled, &entry.search_text_enabled)
+            } else {
+                (&entry.cap_disabled, &entry.search_text_disabled)
+            };
+            if (category == "全部" || category == entry.action.category)
                 && (!favorites_only || favorite)
                 && (query.is_empty() || text.contains(&query))
             {
                 Some(LibraryEntry {
-                    action,
-                    capability: info,
+                    action: entry.action.clone(),
+                    capability: info.clone(),
                     favorite,
                 })
             } else {

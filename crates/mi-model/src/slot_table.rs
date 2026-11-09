@@ -214,8 +214,8 @@ mod tests {
             .unwrap();
 
         let c1 = RecentCandidate {
-            place: NavigationPlace::zcode("srv", "rem", "/ws", "task-1"),
-            title: "ZCode Task 1".into(),
+            place: NavigationPlace::antigravity("ag-0", "/ws"),
+            title: "AG Task 1".into(),
             status: SlotStatus::Running,
             updated_at: 1000,
         };
@@ -249,7 +249,7 @@ mod tests {
         // Slot 1 gets c1
         assert_eq!(table.get(1).unwrap().mode, SlotMode::Recent);
         assert_eq!(table.active_place(1), Some(&c1.place));
-        assert_eq!(table.get(1).unwrap().title, "ZCode Task 1");
+        assert_eq!(table.get(1).unwrap().title, "AG Task 1");
         assert_eq!(table.get(1).unwrap().status, SlotStatus::Running);
 
         // Slot 2 gets c2

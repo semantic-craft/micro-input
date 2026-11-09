@@ -1,0 +1,19 @@
+[package]
+name = "mi-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mi-bridge = { path = "../mi-bridge" }
+mi-macos = { path = "../mi-macos" }
+mi-model = { path = "../mi-model" }
+mi-proto = { path = "../mi-proto" }
+mi-session = { path = "../mi-session" }
+mi-transport = { path = "../mi-transport" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

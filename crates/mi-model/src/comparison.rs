@@ -3,11 +3,11 @@ use crate::{
     document::{EditableState, LocalDocumentV2},
     DeviceConfig,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Choice {
     Merge,
     KeepLocal,

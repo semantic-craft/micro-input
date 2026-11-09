@@ -32,14 +32,40 @@ fn default_true() -> bool {
     true
 }
 
+pub const CANONICAL_DESKTOP_AGENT_PROFILES: [&str; 7] = [
+    "Antigravity",
+    "Codex",
+    "DeepSeek Coder (DSH)",
+    "Herdr",
+    "Cindy",
+    "千问办公",
+    "其他软件",
+];
+
+pub fn canonical_desktop_agent_rank(name: &str) -> Option<usize> {
+    match name.trim() {
+        "Antigravity" => Some(0),
+        "Codex" => Some(1),
+        "DeepSeek Coder (DSH)" | "DSH" | "DeepSeek Harness" | "Deepseek Harness" => Some(2),
+        "Herdr" => Some(3),
+        "Cindy" => Some(4),
+        "千问办公" | "QwenWork" | "千问百工" => Some(5),
+        "其他软件" => Some(6),
+        _ => None,
+    }
+}
+
 pub fn desktop_agent_for_profile_name(name: &str) -> Option<(&'static str, &'static str)> {
     match name.trim() {
         "Antigravity" => Some(("antigravity", "com.google.antigravity")),
-        "千问办公" | "QwenWork" => Some(("qwenwork", "cn.qwenwork.desktop.mac")),
+        "千问办公" | "QwenWork" | "千问百工" => {
+            Some(("qwenwork", "cn.qwenwork.desktop.mac"))
+        }
         "Cindy" => Some(("cindy", "com.xd.cindy")),
         "Codex" => Some(("codex", "com.openai.codex")),
-        "ZCode" => Some(("zcode", "dev.zcode.app")),
-        "DeepSeek Coder (DSH)" | "DSH" => Some(("dsh-desktop", "com.deepseek.dsh")),
+        "DeepSeek Coder (DSH)" | "DSH" | "DeepSeek Harness" | "Deepseek Harness" => {
+            Some(("dsh-desktop", "com.deepseek.dsh"))
+        }
         _ => None,
     }
 }
