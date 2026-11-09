@@ -1,16 +1,28 @@
 import AppKit
-import Combine
 import Foundation
 import MicroInputCoreFFI
+import Observation
 import SwiftUI
 
 @MainActor
-public final class CoreStore: ObservableObject {
-    private var handle: OpaquePointer?
-    private var pollTimer: Timer?
-    private var workspaceObserver: NSObjectProtocol?
+@Observable
+public final class CoreStore {
+    @ObservationIgnored private var handle: OpaquePointer?
+    @ObservationIgnored private var pollTimer: Timer?
+    @ObservationIgnored private var workspaceObserver: NSObjectProtocol?
+    @ObservationIgnored private var lastObservedBundleId: String?
 
-    @Published public private(set) var model: ProjectionModel = ProjectionModel()
+    @ObservationIgnored public private(set) var model: ProjectionModel = ProjectionModel()
+
+    public private(set) var header: HeaderSliceModel = HeaderSliceModel()
+    public private(set) var sidebar: SidebarSliceModel = SidebarSliceModel()
+    public private(set) var canvas: CanvasSliceModel = CanvasSliceModel()
+    public private(set) var sessionStrip: SessionStripSliceModel = SessionStripSliceModel()
+    public private(set) var inspector: InspectorSliceModel = InspectorSliceModel()
+    public private(set) var statusMenu: StatusMenuSliceModel = StatusMenuSliceModel()
+    public private(set) var overlay: OverlaySliceModel = OverlaySliceModel()
+    public private(set) var footer: FooterSliceModel = FooterSliceModel()
+    public private(set) var activeModal: ActiveModalModel? = nil
 
     public init(isolatedDirectory: String? = nil) {
         if let dir = isolatedDirectory {
@@ -33,11 +45,15 @@ public final class CoreStore: ObservableObject {
     }
 
     private func startEventLoops() {
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.12, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.pollHardware()
             }
         }
+        timer.tolerance = 0.03
+        RunLoop.main.add(timer, forMode: .common)
+        pollTimer = timer
+
         workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
@@ -47,12 +63,13 @@ public final class CoreStore: ObservableObject {
             let bundleId = app?.bundleIdentifier
             MainActor.assumeIsolated {
                 guard let self else { return }
-                if bundleId != Bundle.main.bundleIdentifier {
-                    self.dispatchRaw([
-                        "domain": "foreground_app_changed",
-                        "action": ["bundle_id": (bundleId as Any?) ?? NSNull()]
-                    ])
-                }
+                guard bundleId != Bundle.main.bundleIdentifier else { return }
+                guard bundleId != self.lastObservedBundleId else { return }
+                self.lastObservedBundleId = bundleId
+                self.dispatchRaw([
+                    "domain": "foreground_app_changed",
+                    "action": ["bundle_id": (bundleId as Any?) ?? NSNull()]
+                ])
             }
         }
     }
@@ -95,12 +112,167 @@ public final class CoreStore: ObservableObject {
     }
 
     private func applyProjectionJSON(_ jsonString: String) {
+        ViewRenderTelemetry.record("CoreStore.decodeProjection")
         guard let data = jsonString.data(using: .utf8),
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else {
             return
         }
-        self.model = Self.parseProjection(root)
+        let next = Self.parseProjection(root)
+        self.model = next
+        commitDomainSlices(from: next)
+    }
+
+    private func commitDomainSlices(from m: ProjectionModel) {
+        var nextHeader = HeaderSliceModel()
+        nextHeader.readyKind = m.readyKind
+        nextHeader.readyText = m.readyText
+        nextHeader.bannerKind = m.bannerKind
+        nextHeader.bannerText = m.bannerText
+        nextHeader.showConnectButton = m.showConnectButton
+        nextHeader.showReturnToHostButton = m.showReturnToHostButton
+        nextHeader.hostExecutionEnabled = m.hostExecutionEnabled
+        nextHeader.canEditDraft = m.canEditDraft
+        nextHeader.canUndo = m.canUndo
+        nextHeader.canRedo = m.canRedo
+        nextHeader.busy = m.busy
+        nextHeader.cheatSheetVisible = m.cheatSheetVisible
+        nextHeader.deviceConnected = m.deviceConnected
+        nextHeader.deviceSummary = m.deviceSummary
+        nextHeader.documentRevision = m.documentRevision
+        nextHeader.hostRevision = m.hostRevision
+        if self.header != nextHeader {
+            self.header = nextHeader
+        }
+
+        var nextSidebar = SidebarSliceModel()
+        nextSidebar.sidebarRows = m.sidebarRows
+        nextSidebar.hardwareSlots = m.hardwareSlots
+        nextSidebar.activeHardwareSlot = m.activeHardwareSlot
+        nextSidebar.selectedProfileId = m.selectedProfileId
+        nextSidebar.selectedDisplayName = m.selectedDisplayName
+        nextSidebar.activeHostProfileId = m.activeHostProfileId
+        nextSidebar.autoSwitchState = m.autoSwitchState
+        nextSidebar.autoFollowEnabled = m.autoFollowEnabled
+        nextSidebar.showOtherProfiles = m.showOtherProfiles
+        nextSidebar.editingDevice = m.editingDevice
+        nextSidebar.canMoveUp = m.canMoveUp
+        nextSidebar.canMoveDown = m.canMoveDown
+        nextSidebar.canDelete = m.canDelete
+        nextSidebar.selectedLayerId = m.selectedLayerId
+        nextSidebar.layerTabs = m.layerTabs
+        nextSidebar.inspectorLayerName = m.inspectorLayerName
+        nextSidebar.isProtectedLayer = m.isProtectedLayer
+        nextSidebar.lastExportedPreset = m.lastExportedPreset
+        if self.sidebar != nextSidebar {
+            self.sidebar = nextSidebar
+        }
+
+        var nextCanvas = CanvasSliceModel()
+        nextCanvas.selectedLayerId = m.selectedLayerId
+        nextCanvas.selectedSurface = m.selectedSurface
+        nextCanvas.selectedLogicalSlot = m.selectedLogicalSlot
+        nextCanvas.selectedJoystickDirection = m.selectedJoystickDirection
+        nextCanvas.bottomRowLayout = m.bottomRowLayout
+        nextCanvas.showKeycapIcons = m.showKeycapIcons
+        nextCanvas.showKeycapLabels = m.showKeycapLabels
+        nextCanvas.encoderCcwLabel = m.encoderCcwLabel
+        nextCanvas.encoderCwLabel = m.encoderCwLabel
+        nextCanvas.encoderPressLabel = m.encoderPressLabel
+        nextCanvas.encoderSelectedSlot = m.encoderSelectedSlot
+        nextCanvas.encoderRingGlowHex = m.encoderRingGlowHex
+        nextCanvas.joystickModeLabel = m.joystickModeLabel
+        nextCanvas.joystickActiveDirection = m.joystickActiveDirection
+        nextCanvas.joystickIsSelected = m.joystickIsSelected
+        nextCanvas.joystickSectors = m.joystickSectors
+        nextCanvas.keycapCells = m.keycapCells
+        nextCanvas.statusLedHex = m.statusLedHex
+        nextCanvas.underglowHex = m.underglowHex
+        nextCanvas.activeHardwareSlot = m.activeHardwareSlot
+        nextCanvas.touchLedStates = m.touchLedStates
+        nextCanvas.activeHardwareSlotLabel = m.activeHardwareSlotLabel
+        nextCanvas.protectedLock = m.protectedLock
+        nextCanvas.canEditBindings = m.canEditBindings
+        nextCanvas.canAddLighting = m.canAddLighting
+        nextCanvas.canExportOrCopyLayer = m.canExportOrCopyLayer
+        nextCanvas.deviceConnected = m.deviceConnected
+        nextCanvas.hostExecutionEnabled = m.hostExecutionEnabled
+        if self.canvas != nextCanvas {
+            self.canvas = nextCanvas
+        }
+
+        var nextSessionStrip = SessionStripSliceModel()
+        nextSessionStrip.sessionSlots = m.sessionSlots
+        nextSessionStrip.completedPills = m.completedPills
+        nextSessionStrip.workingPills = m.workingPills
+        nextSessionStrip.attentionPills = m.attentionPills
+        nextSessionStrip.unreadCompletedCount = m.unreadCompletedCount
+        nextSessionStrip.workingCount = m.workingCount
+        nextSessionStrip.topSixBoundAsSessionKeys = m.topSixBoundAsSessionKeys
+        nextSessionStrip.canMutateSessionLayout = m.canMutateSessionLayout
+        nextSessionStrip.simpleLighting = m.simpleLighting
+        if self.sessionStrip != nextSessionStrip {
+            self.sessionStrip = nextSessionStrip
+        }
+
+        var nextInspector = InspectorSliceModel()
+        nextInspector.selectedLogicalSlot = m.selectedLogicalSlot
+        nextInspector.selectedSurface = m.selectedSurface
+        nextInspector.selectedJoystickDirection = m.selectedJoystickDirection
+        nextInspector.bottomRowLayout = m.bottomRowLayout
+        let slotCell = m.keycapCells.first(where: {
+            $0.primarySlot == m.selectedLogicalSlot || $0.effectiveSlot == m.selectedLogicalSlot
+        })
+        nextInspector.selectedSlotRole = slotCell?.slotRole ?? m.editableInspector?.slotRole ?? "ActionKey"
+        nextInspector.inspectorLayerName = m.inspectorLayerName
+        nextInspector.isProtectedLayer = m.isProtectedLayer
+        nextInspector.protectedLock = m.protectedLock
+        nextInspector.editableInspector = m.editableInspector
+        if self.inspector != nextInspector {
+            self.inspector = nextInspector
+        }
+
+        var nextStatusMenu = StatusMenuSliceModel()
+        nextStatusMenu.statusMenuIconTitle = m.statusMenuIconTitle
+        nextStatusMenu.activeProfileName = m.activeProfileName
+        nextStatusMenu.routingModeSummary = m.routingModeSummary
+        nextStatusMenu.favorites2x2 = m.favorites2x2
+        nextStatusMenu.hostExecutionEnabled = m.hostExecutionEnabled
+        nextStatusMenu.autoFollowEnabled = m.autoFollowEnabled
+        nextStatusMenu.manualOverride = m.manualOverride
+        nextStatusMenu.radialMenuEnabled = m.radialMenuEnabled
+        nextStatusMenu.radialConfirmMode = m.radialConfirmMode
+        nextStatusMenu.radialReadiness = m.radialReadiness
+        nextStatusMenu.radialSlots = m.radialSlots
+        nextStatusMenu.cheatSheetVisible = m.cheatSheetVisible
+        nextStatusMenu.pendingImportName = m.pendingImportName
+        nextStatusMenu.pendingImportSummary = m.pendingImportSummary
+        nextStatusMenu.pendingExportScope = m.pendingExportScope
+        nextStatusMenu.presetError = m.presetError
+        if self.statusMenu != nextStatusMenu {
+            self.statusMenu = nextStatusMenu
+        }
+
+        var nextOverlay = OverlaySliceModel()
+        nextOverlay.cheatSheetVisible = m.cheatSheetVisible
+        nextOverlay.cheatSheet = m.cheatSheet
+        nextOverlay.passiveToastTitle = m.passiveToastTitle
+        nextOverlay.passiveToastSubtitle = m.passiveToastSubtitle
+        if self.overlay != nextOverlay {
+            self.overlay = nextOverlay
+        }
+
+        var nextFooter = FooterSliceModel()
+        nextFooter.statusMessage = m.statusMessage
+        nextFooter.footerStatusText = m.footerStatusText
+        nextFooter.footerLimitText = m.footerLimitText
+        if self.footer != nextFooter {
+            self.footer = nextFooter
+        }
+
+        if self.activeModal != m.activeModal {
+            self.activeModal = m.activeModal
+        }
     }
 
     private static func parseProjection(_ root: [String: Any]) -> ProjectionModel {
@@ -174,6 +346,23 @@ public final class CoreStore: ObservableObject {
                     )
                 }
             }
+            m.activeHardwareSlot = sidebar["active_hardware_slot"] as? Int ?? 0
+            if let hwSlots = sidebar["hardware_slots"] as? [[String: Any]] {
+                m.hardwareSlots = hwSlots.enumerated().map { idx, s in
+                    HardwareProfileSlotModel(
+                        slotIndex: s["slot_index"] as? Int ?? idx,
+                        slotKind: s["slot_kind"] as? String ?? "UsbPlug",
+                        title: s["title"] as? String ?? "",
+                        triggerBadge: s["trigger_badge"] as? String ?? "",
+                        profileId: s["profile_id"] as? String ?? "",
+                        displayName: s["display_name"] as? String ?? "",
+                        monogram: s["monogram"] as? String ?? "",
+                        bundleId: s["bundle_id"] as? String,
+                        isActiveSlot: s["is_active_slot"] as? Bool ?? false,
+                        isActiveProfile: s["is_active_profile"] as? Bool ?? false
+                    )
+                }
+            }
         }
 
         if let canvas = root["canvas"] as? [String: Any] {
@@ -186,6 +375,10 @@ public final class CoreStore: ObservableObject {
             m.showKeycapLabels = canvas["show_keycap_labels"] as? Bool ?? true
             m.statusLedHex = canvas["status_led_hex"] as? String ?? "#14C76B"
             m.underglowHex = canvas["underglow_hex"] as? String ?? "#3B82F6"
+            if let leds = canvas["touch_led_states"] as? [Bool], leds.count == 3 {
+                m.touchLedStates = leds
+            }
+            m.activeHardwareSlotLabel = canvas["active_hardware_slot_label"] as? String ?? "插入 USB · Antigravity"
             m.canEditBindings = canvas["can_edit_bindings"] as? Bool ?? true
             m.canAddLighting = canvas["can_add_lighting"] as? Bool ?? true
             m.canExportOrCopyLayer = canvas["can_export_or_copy_layer"] as? Bool ?? true

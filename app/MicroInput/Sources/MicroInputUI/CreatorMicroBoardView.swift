@@ -3,24 +3,25 @@ import SwiftUI
 
 struct CreatorMicroStageView: View {
     let store: CoreStore
-    let model: ProjectionModel
-    let rawProfileName: String
-    let agentKind: AgentProfileKind
     var onOpenFullActionLibrary: () -> Void
     var onOpenMacroLibrary: () -> Void
     var onPromptNewLayer: () -> Void
     var onPromptRenameLayer: () -> Void
 
     var body: some View {
-        let m = model
-        let selectedRow = m.sidebarRows.first(where: { $0.isSelected })
+        let _ = ViewRenderTelemetry.record("CreatorMicroStageView")
+        let s = store.sidebar
+        let h = store.header
+        let rawProfileName = s.selectedRawName
+        let agentKind = AgentProfileKind.from(profileName: rawProfileName)
+        let selectedRow = s.sidebarRows.first(where: { $0.isSelected })
         let isCurrentlyActive = selectedRow?.isActiveHost ?? false
 
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 8) {
-                        Text(m.selectedDisplayName)
+                        Text(s.selectedDisplayName)
                             .font(UITheme.title)
                             .foregroundStyle(UITheme.textPrimary)
                         if isCurrentlyActive {
@@ -49,15 +50,15 @@ struct CreatorMicroStageView: View {
 
                 Spacer()
 
-                if m.layerTabs.count > 1 {
+                if s.layerTabs.count > 1 {
                     Picker(
                         "层",
                         selection: Binding(
-                            get: { m.layerTabs.first(where: { $0.isSelected })?.id ?? "" },
+                            get: { s.layerTabs.first(where: { $0.isSelected })?.id ?? "" },
                             set: { store.dispatch("canvas", ["SelectLayer": $0]) }
                         )
                     ) {
-                        ForEach(m.layerTabs) { tab in
+                        ForEach(s.layerTabs) { tab in
                             Text(tab.name).tag(tab.id)
                         }
                     }
@@ -68,18 +69,18 @@ struct CreatorMicroStageView: View {
                 Menu("图层") {
                     Button("新建层…") { onPromptNewLayer() }
                     Button("重命名当前层…") { onPromptRenameLayer() }
-                        .disabled(m.isProtectedLayer)
+                        .disabled(s.isProtectedLayer)
                     Button("复制当前层") {
                         store.dispatch(
                             "inspector",
-                            ["DuplicateSelectedLayer": ["name": "\(m.inspectorLayerName) 副本"]]
+                            ["DuplicateSelectedLayer": ["name": "\(s.inspectorLayerName) 副本"]]
                         )
                     }
                     Divider()
                     Button("删除当前层", role: .destructive) {
                         store.dispatch("inspector", "DeleteSelectedLayer")
                     }
-                    .disabled(m.isProtectedLayer || m.layerTabs.count <= 1)
+                    .disabled(s.isProtectedLayer || s.layerTabs.count <= 1)
                 }
                 .controlSize(.small)
                 .fixedSize()
@@ -87,7 +88,7 @@ struct CreatorMicroStageView: View {
                 if let agent = DesktopAgent.named(rawProfileName),
                    !agent.isGeneralFallback
                 {
-                    Button("打开 \(m.selectedDisplayName)") {
+                    Button("打开 \(s.selectedDisplayName)") {
                         if let appURL = DesktopAgent.cachedAppURL(for: agent.bundleID) {
                             NSWorkspace.shared.openApplication(
                                 at: appURL,
@@ -105,13 +106,13 @@ struct CreatorMicroStageView: View {
 
             Rectangle().fill(UITheme.border).frame(height: 1)
 
-            if !m.deviceConnected || !m.hostExecutionEnabled || m.bannerKind == "Warning" {
-                healthWarningBanner(m: m)
+            if !h.deviceConnected || !h.hostExecutionEnabled || h.bannerKind == "Warning" {
+                healthWarningBanner(h: h)
                 Rectangle().fill(UITheme.border).frame(height: 1)
             }
 
             HStack(alignment: .top, spacing: 0) {
-                CreatorMicroBoardView(store: store, model: m, agentKind: agentKind)
+                CreatorMicroBoardView(store: store, agentKind: agentKind)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(UITheme.pageBackground)
 
@@ -119,7 +120,6 @@ struct CreatorMicroStageView: View {
 
                 CreatorMicroInlineInspectorView(
                     store: store,
-                    model: m,
                     agentKind: agentKind,
                     onOpenFullActionLibrary: onOpenFullActionLibrary,
                     onOpenMacroLibrary: onOpenMacroLibrary
@@ -131,16 +131,16 @@ struct CreatorMicroStageView: View {
         }
     }
 
-    private func healthWarningBanner(m: ProjectionModel) -> some View {
+    private func healthWarningBanner(h: HeaderSliceModel) -> some View {
         HStack(spacing: 12) {
             Image(systemName: "exclamationmark.circle.fill")
                 .foregroundStyle(UITheme.caution)
-            Text(m.bannerText)
+            Text(h.bannerText)
                 .font(UITheme.caption)
                 .foregroundStyle(UITheme.textPrimary)
                 .lineLimit(1)
             Spacer()
-            if !m.deviceConnected {
+            if !h.deviceConnected {
                 Button("重新检测键盘") {
                     store.dispatch("header", "ConnectKeyboard")
                 }
@@ -148,7 +148,7 @@ struct CreatorMicroStageView: View {
                 .tint(UITheme.accent)
                 .controlSize(.small)
             }
-            if !m.hostExecutionEnabled {
+            if !h.hostExecutionEnabled {
                 Button("开启按键控制") {
                     store.dispatch("header", ["SetExecutionEnabled": true])
                 }
@@ -164,7 +164,6 @@ struct CreatorMicroStageView: View {
 
 struct CreatorMicroBoardView: View {
     let store: CoreStore
-    let model: ProjectionModel
     let agentKind: AgentProfileKind
     @State private var jumpDirectlyOnGlowingSlotTap = true
     @State private var showLightingPopover = false
@@ -173,44 +172,46 @@ struct CreatorMicroBoardView: View {
     private let gridSpacing: CGFloat = 8
 
     var body: some View {
-        let m = model
+        let _ = ViewRenderTelemetry.record("CreatorMicroBoardView")
+        let c = store.canvas
+        let ss = store.sessionStrip
         VStack(spacing: 14) {
             Spacer(minLength: 8)
-            physicalBoardChassis(m: m)
-            compactBoardToolbar(m: m)
+            physicalBoardChassis(c: c, ss: ss)
+            compactBoardToolbar(c: c, ss: ss)
             Spacer(minLength: 8)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
     }
 
-    private func physicalBoardChassis(m: ProjectionModel) -> some View {
+    private func physicalBoardChassis(c: CanvasSliceModel, ss: SessionStripSliceModel) -> some View {
         VStack(spacing: gridSpacing) {
             HStack(spacing: gridSpacing) {
-                rotaryEncoderCell(m: m)
-                programmableKeyCell(slot: 0, m: m)
-                programmableKeyCell(slot: 1, m: m)
-                analogJoystickCell(m: m)
+                rotaryEncoderCell(c: c)
+                programmableKeyCell(slot: 0, c: c, ss: ss)
+                programmableKeyCell(slot: 1, c: c, ss: ss)
+                analogJoystickCell(c: c)
             }
             HStack(spacing: gridSpacing) {
                 ForEach(2..<6, id: \.self) { slot in
-                    programmableKeyCell(slot: slot, m: m)
+                    programmableKeyCell(slot: slot, c: c, ss: ss)
                 }
             }
             HStack(spacing: gridSpacing) {
                 ForEach(6..<10, id: \.self) { slot in
-                    programmableKeyCell(slot: slot, m: m)
+                    programmableKeyCell(slot: slot, c: c, ss: ss)
                 }
             }
             HStack(spacing: gridSpacing) {
-                statusIndicatorClusterCell(m: m)
-                if m.bottomRowLayout == "split" {
-                    programmableKeyCell(slot: 10, m: m)
-                    programmableKeyCell(slot: 11, m: m)
+                statusIndicatorClusterCell(c: c)
+                if c.bottomRowLayout == "split" {
+                    programmableKeyCell(slot: 10, c: c, ss: ss)
+                    programmableKeyCell(slot: 11, c: c, ss: ss)
                 } else {
-                    wideProgrammableKeyCell(m: m)
+                    wideProgrammableKeyCell(c: c, ss: ss)
                 }
-                programmableKeyCell(slot: 12, m: m)
+                programmableKeyCell(slot: 12, c: c, ss: ss)
             }
         }
         .padding(12)
@@ -224,14 +225,14 @@ struct CreatorMicroBoardView: View {
         )
     }
 
-    private func rotaryEncoderCell(m: ProjectionModel) -> some View {
-        let isSelected = m.selectedSurface.hasPrefix("Encoder") || (13...15).contains(m.selectedLogicalSlot)
+    private func rotaryEncoderCell(c: CanvasSliceModel) -> some View {
+        let isSelected = c.selectedSurface.hasPrefix("Encoder") || (13...15).contains(c.selectedLogicalSlot)
         return Button {
-            if !m.selectedSurface.hasPrefix("Encoder") {
+            if !c.selectedSurface.hasPrefix("Encoder") {
                 store.dispatch("canvas", ["SelectSurface": "EncoderCcw"])
-            } else if m.selectedSurface == "EncoderCcw" {
+            } else if c.selectedSurface == "EncoderCcw" {
                 store.dispatch("canvas", ["SelectSurface": "EncoderCw"])
-            } else if m.selectedSurface == "EncoderCw" {
+            } else if c.selectedSurface == "EncoderCw" {
                 store.dispatch("canvas", ["SelectSurface": "EncoderPress"])
             } else {
                 store.dispatch("canvas", ["SelectSurface": "EncoderCcw"])
@@ -272,12 +273,12 @@ struct CreatorMicroBoardView: View {
         .help("无极金属旋钮（点击切换左旋 / 右旋 / 按下配置）")
     }
 
-    private func analogJoystickCell(m: ProjectionModel) -> some View {
-        let isSelected = m.selectedSurface == "Joystick" || m.joystickIsSelected
+    private func analogJoystickCell(c: CanvasSliceModel) -> some View {
+        let isSelected = c.selectedSurface == "Joystick" || c.joystickIsSelected
         return Button {
             store.dispatch("canvas", ["SelectSurface": "Joystick"])
             let dirs = ["North", "West", "South", "East"]
-            if let idx = dirs.firstIndex(of: m.selectedJoystickDirection) {
+            if let idx = dirs.firstIndex(of: c.selectedJoystickDirection) {
                 let nextDir = dirs[(idx + 1) % dirs.count]
                 store.dispatch("canvas", ["SelectJoystickDirection": nextDir])
             } else {
@@ -317,49 +318,75 @@ struct CreatorMicroBoardView: View {
         .help("8 向摇杆（点击切换上 / 左 / 下 / 右方向配置）")
     }
 
-    private func statusIndicatorClusterCell(m: ProjectionModel) -> some View {
-        ZStack {
+    private func statusIndicatorClusterCell(c: CanvasSliceModel) -> some View {
+        let leds = c.touchLedStates.count == 3 ? c.touchLedStates : [true, false, false]
+        let slotBadge = c.activeHardwareSlot == 0 ? "USB" : "P\(c.activeHardwareSlot)"
+        return ZStack {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(UITheme.mutedSurface.opacity(0.55))
                 .frame(width: cellSize, height: cellSize)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(UITheme.border, lineWidth: 1)
+                        .stroke(
+                            c.activeHardwareSlot > 0 ? UITheme.accent.opacity(0.65) : UITheme.border,
+                            lineWidth: 1
+                        )
                 )
 
-            VStack(spacing: 8) {
+            VStack(spacing: 6) {
                 HStack(spacing: 6) {
-                    Circle()
-                        .fill(m.deviceConnected ? UITheme.accent : UITheme.strongBorder)
-                        .frame(width: 4.5, height: 4.5)
-                    Circle()
-                        .fill(m.hostExecutionEnabled ? UITheme.accent : UITheme.strongBorder)
-                        .frame(width: 4.5, height: 4.5)
-                    Circle()
-                        .fill(UITheme.strongBorder)
-                        .frame(width: 4.5, height: 4.5)
+                    ForEach(0..<3, id: \.self) { idx in
+                        Button {
+                            store.dispatch("canvas", ["ActivateHardwareSlot": idx + 1])
+                        } label: {
+                            Circle()
+                                .fill(leds[idx] ? UITheme.accent : UITheme.strongBorder)
+                                .frame(width: 5.5, height: 5.5)
+                        }
+                        .buttonStyle(.plain)
+                        .help("点击激活左下触控 \(idx + 1)")
+                    }
                 }
-                Circle()
-                    .fill(Color(red: 0.18, green: 0.18, blue: 0.20))
-                    .frame(width: 32, height: 32)
+                Button {
+                    store.dispatch("canvas", "CycleTouchProfileSlot")
+                } label: {
+                    ZStack {
+                        Circle()
+                            .fill(Color(red: 0.18, green: 0.18, blue: 0.20))
+                            .frame(width: 34, height: 34)
+                            .overlay(
+                                Circle()
+                                    .stroke(
+                                        c.activeHardwareSlot > 0 ? UITheme.accent : UITheme.strongBorder,
+                                        lineWidth: 1.2
+                                    )
+                            )
+                        Text(slotBadge)
+                            .font(UITheme.monoBadge)
+                            .foregroundStyle(UITheme.textPrimary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .help("\(c.activeHardwareSlotLabel) · 点击模拟按左下角触控区轮换 Profile 1 / 2 / 3")
             }
         }
     }
 
-    private func programmableKeyCell(slot: Int, m: ProjectionModel) -> some View {
-        let cell = m.keycapCells.first(where: { $0.primarySlot == slot })
-        return keycapButton(slot: slot, width: cellSize, cell: cell, m: m)
+    private func programmableKeyCell(slot: Int, c: CanvasSliceModel, ss: SessionStripSliceModel) -> some View {
+        let cell = c.keycapCells.first(where: { $0.primarySlot == slot })
+        return keycapButton(slot: slot, width: cellSize, cell: cell, c: c, ss: ss)
     }
 
-    private func wideProgrammableKeyCell(m: ProjectionModel) -> some View {
-        let activeSlot = (m.selectedLogicalSlot == 11) ? 11 : 10
-        let cell = m.keycapCells.first(where: { $0.primarySlot == 10 })
+    private func wideProgrammableKeyCell(c: CanvasSliceModel, ss: SessionStripSliceModel) -> some View {
+        let activeSlot = (c.selectedLogicalSlot == 11) ? 11 : 10
+        let cell = c.keycapCells.first(where: { $0.primarySlot == 10 })
         return keycapButton(
             slot: activeSlot,
             width: cellSize * 2 + gridSpacing,
             cell: cell,
-            m: m,
-            forceSelected: m.selectedLogicalSlot == 10 || m.selectedLogicalSlot == 11
+            c: c,
+            ss: ss,
+            forceSelected: c.selectedLogicalSlot == 10 || c.selectedLogicalSlot == 11
         )
     }
 
@@ -367,12 +394,13 @@ struct CreatorMicroBoardView: View {
         slot: Int,
         width: CGFloat,
         cell: KeycapCellModel?,
-        m: ProjectionModel,
+        c: CanvasSliceModel,
+        ss: SessionStripSliceModel,
         forceSelected: Bool = false
     ) -> some View {
-        let isSelected = forceSelected || (cell?.isSelected == true) || (m.selectedLogicalSlot == slot && m.selectedSurface.hasPrefix("Key"))
+        let isSelected = forceSelected || (cell?.isSelected == true) || (c.selectedLogicalSlot == slot && c.selectedSurface.hasPrefix("Key"))
         let isTaskRole = (slot < 6) && (cell?.slotRole == "TaskKey") && agentKind.supportsLiveSessionSlots
-        let sessionSlot = (slot < 6) ? m.sessionSlots.first(where: { $0.slotIndex == slot }) : nil
+        let sessionSlot = (slot < 6) ? ss.sessionSlots.first(where: { $0.slotIndex == slot }) : nil
         let keycap = CodexKeycapId(rustVariant: cell?.keycapId ?? "Apps")
         let sublabel = cell?.conciseCaption ?? "空白"
 
@@ -386,15 +414,15 @@ struct CreatorMicroBoardView: View {
             isTaskRole: isTaskRole,
             sessionSlot: sessionSlot,
             keycap: keycap,
-            showLabels: m.showKeycapLabels,
+            showLabels: c.showKeycapLabels,
             sublabel: sublabel,
             jumpDirectlyOnGlowingSlotTap: jumpDirectlyOnGlowingSlotTap
         )
         .equatable()
     }
 
-    private func compactBoardToolbar(m: ProjectionModel) -> some View {
-        let activeSessions = m.sessionSlots.filter {
+    private func compactBoardToolbar(c: CanvasSliceModel, ss: SessionStripSliceModel) -> some View {
+        let activeSessions = ss.sessionSlots.filter {
             $0.isUnreadBlueDot || $0.isWorkingAnimated || !$0.title.isEmpty
         }
 
@@ -403,7 +431,7 @@ struct CreatorMicroBoardView: View {
                 Toggle(
                     "显示键帽文字",
                     isOn: Binding(
-                        get: { m.showKeycapLabels },
+                        get: { c.showKeycapLabels },
                         set: { store.dispatch("canvas", ["SetShowKeycapLabels": $0]) }
                     )
                 )
@@ -458,8 +486,8 @@ struct CreatorMicroBoardView: View {
                     HStack(spacing: 6) {
                         Circle()
                             .fill(
-                                m.simpleLighting.lightingEnabled
-                                    ? Color(hex: m.statusLedHex)
+                                ss.simpleLighting.lightingEnabled
+                                    ? Color(hex: c.statusLedHex)
                                     : UITheme.textMuted
                             )
                             .frame(width: 7, height: 7)
@@ -524,10 +552,10 @@ struct CreatorMicroBoardView: View {
 }
 
 struct SimpleLightingControlCard: View {
-    @ObservedObject var store: CoreStore
+    let store: CoreStore
 
     var body: some View {
-        let lp = store.model.simpleLighting
+        let lp = store.sessionStrip.simpleLighting
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("键盘灯光与会话提醒")

@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 public struct ClassicWorkbenchView: View {
-    @ObservedObject var store: CoreStore
+    let store: CoreStore
     @State private var showSettingsSheet = false
     @State private var showFullActionLibrarySheet = false
     @State private var showMacroLibrarySheet = false
@@ -19,29 +19,30 @@ public struct ClassicWorkbenchView: View {
         self.store = store
     }
 
-    private var selectedRawName: String {
-        store.model.sidebarRows.first(where: { $0.isSelected })?.rawName
-            ?? store.model.selectedDisplayName
-    }
-
-    private var agentKind: AgentProfileKind {
-        AgentProfileKind.from(profileName: selectedRawName)
-    }
-
     public var body: some View {
-        let m = store.model
+        let _ = ViewRenderTelemetry.record("ClassicWorkbenchView")
         VStack(spacing: 0) {
-            topStatusBar(m: m)
+            WorkbenchHeaderBarView(
+                store: store,
+                onOpenSettings: { showSettingsSheet = true }
+            )
             Rectangle().fill(UITheme.border).frame(height: 1)
             HStack(spacing: 0) {
-                leftSidebar(m: m)
-                    .frame(width: 244)
+                WorkbenchSidebarView(
+                    store: store,
+                    onPromptNewProfile: {
+                        newProfileDraftName = ""
+                        showNewProfileDialog = true
+                    },
+                    onPromptRenameProfile: {
+                        renameProfileDraftName = store.sidebar.selectedRawName
+                        showRenameProfileDialog = true
+                    }
+                )
+                .frame(width: 244)
                 Rectangle().fill(UITheme.border).frame(width: 1)
                 CreatorMicroStageView(
                     store: store,
-                    model: m,
-                    rawProfileName: selectedRawName,
-                    agentKind: agentKind,
                     onOpenFullActionLibrary: { showFullActionLibrarySheet = true },
                     onOpenMacroLibrary: { showMacroLibrarySheet = true },
                     onPromptNewLayer: {
@@ -49,23 +50,24 @@ public struct ClassicWorkbenchView: View {
                         showNewLayerDialog = true
                     },
                     onPromptRenameLayer: {
-                        renameLayerDraftName = m.inspectorLayerName
+                        renameLayerDraftName = store.sidebar.inspectorLayerName
                         showRenameLayerDialog = true
                     }
                 )
             }
             Rectangle().fill(UITheme.border).frame(height: 1)
-            bottomFooterBar(m: m)
+            WorkbenchFooterBarView(store: store)
         }
         .background(UITheme.pageBackground)
         .sheet(isPresented: $showSettingsSheet) {
             ClassicMicroInputSettingsSheet(store: store)
         }
         .sheet(isPresented: $showFullActionLibrarySheet) {
+            let rawName = store.sidebar.selectedRawName
             ClassicActionLibrarySheet(
                 store: store,
-                rawProfileName: selectedRawName,
-                agentKind: agentKind
+                rawProfileName: rawName,
+                agentKind: AgentProfileKind.from(profileName: rawName)
             )
         }
         .sheet(isPresented: $showMacroLibrarySheet) {
@@ -87,7 +89,7 @@ public struct ClassicWorkbenchView: View {
             Button("取消", role: .cancel) {}
             Button("保存") {
                 let name = renameProfileDraftName.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let pid = m.selectedProfileId, !name.isEmpty {
+                if let pid = store.sidebar.selectedProfileId, !name.isEmpty {
                     store.dispatch(
                         "sidebar",
                         ["Profile": ["Rename": ["profile_id": pid, "name": name]]]
@@ -117,18 +119,25 @@ public struct ClassicWorkbenchView: View {
             }
         }
     }
+}
 
-    private func topStatusBar(m: ProjectionModel) -> some View {
-        let isReady = (m.readyKind == "Ready")
+private struct WorkbenchHeaderBarView: View {
+    let store: CoreStore
+    var onOpenSettings: () -> Void
+
+    var body: some View {
+        let _ = ViewRenderTelemetry.record("HeaderBar")
+        let h = store.header
+        let isReady = (h.readyKind == "Ready")
         let pillFg = isReady ? UITheme.accent : UITheme.caution
         let pillBg = isReady ? UITheme.accentSoft : UITheme.cautionSoft
 
-        return HStack(spacing: 12) {
+        HStack(spacing: 12) {
             HStack(spacing: 8) {
                 Circle()
                     .fill(pillFg)
                     .frame(width: 7, height: 7)
-                Text(m.readyText)
+                Text(h.readyText)
                     .font(UITheme.bodySemibold)
                     .foregroundStyle(pillFg)
                     .lineLimit(1)
@@ -137,7 +146,7 @@ public struct ClassicWorkbenchView: View {
             .padding(.vertical, 5)
             .background(Capsule().fill(pillBg))
 
-            if m.showConnectButton {
+            if h.showConnectButton {
                 Button("连接键盘") {
                     store.dispatch("header", "ConnectKeyboard")
                 }
@@ -151,7 +160,7 @@ public struct ClassicWorkbenchView: View {
             Toggle(
                 "按键控制",
                 isOn: Binding(
-                    get: { m.hostExecutionEnabled },
+                    get: { h.hostExecutionEnabled },
                     set: { store.dispatch("header", ["SetExecutionEnabled": $0]) }
                 )
             )
@@ -168,7 +177,7 @@ public struct ClassicWorkbenchView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(!m.canUndo)
+                .disabled(!h.canUndo)
                 .keyboardShortcut("z", modifiers: [.command])
                 .help("撤销上一步修改 (⌘Z)")
 
@@ -179,18 +188,18 @@ public struct ClassicWorkbenchView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(!m.canRedo)
+                .disabled(!h.canRedo)
                 .keyboardShortcut("z", modifiers: [.command, .shift])
                 .help("重做上一步修改 (⇧⌘Z)")
 
-                Button(m.cheatSheetVisible ? "隐藏速查" : "按键速查") {
+                Button(h.cheatSheetVisible ? "隐藏速查" : "按键速查") {
                     store.dispatch("overlay", "ToggleCheatSheet")
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
                 Button("设置…") {
-                    showSettingsSheet = true
+                    onOpenSettings()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -200,8 +209,16 @@ public struct ClassicWorkbenchView: View {
         .padding(.vertical, 10)
         .background(UITheme.surface)
     }
+}
 
-    private func leftSidebar(m: ProjectionModel) -> some View {
+private struct WorkbenchSidebarView: View {
+    let store: CoreStore
+    var onPromptNewProfile: () -> Void
+    var onPromptRenameProfile: () -> Void
+
+    var body: some View {
+        let _ = ViewRenderTelemetry.record("Sidebar")
+        let s = store.sidebar
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("常用软件方案")
@@ -215,12 +232,22 @@ public struct ClassicWorkbenchView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(m.sidebarRows) { row in
-                        sidebarProfileRow(row: row)
+                    ForEach(s.sidebarRows) { row in
+                        SidebarProfileRowButton(store: store, row: row)
+                            .equatable()
                     }
                 }
                 .padding(.horizontal, 10)
                 .padding(.bottom, 10)
+            }
+
+            if !s.hardwareSlots.isEmpty {
+                Rectangle().fill(UITheme.border).frame(height: 1)
+                HardwareProfileSlotsPanel(
+                    store: store,
+                    slots: s.hardwareSlots,
+                    rows: s.sidebarRows
+                )
             }
 
             Rectangle().fill(UITheme.border).frame(height: 1)
@@ -229,7 +256,7 @@ public struct ClassicWorkbenchView: View {
                 Toggle(
                     "切换软件时自动切换方案",
                     isOn: Binding(
-                        get: { m.autoFollowEnabled },
+                        get: { s.autoFollowEnabled },
                         set: { store.dispatch("sidebar", ["SetAutoFollow": $0]) }
                     )
                 )
@@ -241,7 +268,7 @@ public struct ClassicWorkbenchView: View {
                 Toggle(
                     "显示其他自定义方案",
                     isOn: Binding(
-                        get: { m.showOtherProfiles },
+                        get: { s.showOtherProfiles },
                         set: { store.dispatch("sidebar", ["SetShowOtherProfiles": $0]) }
                     )
                 )
@@ -253,20 +280,18 @@ public struct ClassicWorkbenchView: View {
                 HStack(spacing: 8) {
                     Menu("方案管理") {
                         Button("新建配置…") {
-                            newProfileDraftName = ""
-                            showNewProfileDialog = true
+                            onPromptNewProfile()
                         }
-                        if let pid = m.selectedProfileId {
+                        if let pid = s.selectedProfileId {
                             Button("重命名配置…") {
-                                renameProfileDraftName = selectedRawName
-                                showRenameProfileDialog = true
+                                onPromptRenameProfile()
                             }
                             Button("复制配置") {
                                 store.dispatch("sidebar", [
                                     "Profile": [
                                         "Duplicate": [
                                             "profile_id": pid,
-                                            "name": "\(m.selectedDisplayName) 副本"
+                                            "name": "\(s.selectedDisplayName) 副本"
                                         ]
                                     ]
                                 ])
@@ -275,16 +300,16 @@ public struct ClassicWorkbenchView: View {
                             Button("上移配置") {
                                 store.dispatch("sidebar", ["Profile": ["MoveUp": ["profile_id": pid]]])
                             }
-                            .disabled(!m.canMoveUp)
+                            .disabled(!s.canMoveUp)
                             Button("下移配置") {
                                 store.dispatch("sidebar", ["Profile": ["MoveDown": ["profile_id": pid]]])
                             }
-                            .disabled(!m.canMoveDown)
+                            .disabled(!s.canMoveDown)
                             Divider()
                             Button("删除配置…", role: .destructive) {
                                 store.dispatch("sidebar", ["Profile": ["Delete": ["profile_id": pid]]])
                             }
-                            .disabled(!m.canDelete)
+                            .disabled(!s.canDelete)
                         }
                         Divider()
                         Button("补齐内置软件方案") {
@@ -310,27 +335,27 @@ public struct ClassicWorkbenchView: View {
                             store.dispatch("sidebar", [
                                 "Backup": ["ExportPreset": ["profile_id": NSNull(), "layer_id": NSNull()]]
                             ])
-                            if let text = store.model.lastExportedPreset {
+                            if let text = store.sidebar.lastExportedPreset {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString(text, forType: .string)
                             }
                         }
-                        if let pid = m.selectedProfileId {
+                        if let pid = s.selectedProfileId {
                             Button("导出当前配置…") {
                                 store.dispatch("sidebar", [
                                     "Backup": ["ExportPreset": ["profile_id": pid, "layer_id": NSNull()]]
                                 ])
-                                if let text = store.model.lastExportedPreset {
+                                if let text = store.sidebar.lastExportedPreset {
                                     NSPasteboard.general.clearContents()
                                     NSPasteboard.general.setString(text, forType: .string)
                                 }
                             }
-                            if let lid = m.selectedLayerId {
+                            if let lid = s.selectedLayerId {
                                 Button("导出当前层…") {
                                     store.dispatch("sidebar", [
                                         "Backup": ["ExportPreset": ["profile_id": pid, "layer_id": lid]]
                                     ])
-                                    if let text = store.model.lastExportedPreset {
+                                    if let text = store.sidebar.lastExportedPreset {
                                         NSPasteboard.general.clearContents()
                                         NSPasteboard.general.setString(text, forType: .string)
                                     }
@@ -346,20 +371,21 @@ public struct ClassicWorkbenchView: View {
         }
         .background(UITheme.subtleSurface)
     }
+}
 
-    private func sidebarProfileRow(row: SidebarRowModel) -> some View {
-        SidebarProfileRowButton(store: store, row: row)
-            .equatable()
-    }
+private struct WorkbenchFooterBarView: View {
+    let store: CoreStore
 
-    private func bottomFooterBar(m: ProjectionModel) -> some View {
+    var body: some View {
+        let _ = ViewRenderTelemetry.record("FooterBar")
+        let f = store.footer
         HStack {
-            Text(m.statusMessage)
+            Text(f.statusMessage)
                 .font(UITheme.caption)
                 .foregroundStyle(UITheme.textSecondary)
                 .lineLimit(1)
             Spacer()
-            Text(m.footerLimitText)
+            Text(f.footerLimitText)
                 .font(UITheme.caption)
                 .foregroundStyle(UITheme.textMuted)
         }
@@ -410,5 +436,99 @@ private struct SidebarProfileRowButton: View, Equatable {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct HardwareProfileSlotsPanel: View {
+    let store: CoreStore
+    let slots: [HardwareProfileSlotModel]
+    let rows: [SidebarRowModel]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("硬件四槽位 (USB + 左下触控)")
+                    .font(UITheme.captionMedium)
+                    .foregroundStyle(UITheme.textPrimary)
+                Spacer()
+                Button("轮换触控") {
+                    store.dispatch("sidebar", "CycleTouchProfileSlot")
+                }
+                .buttonStyle(.borderless)
+                .font(UITheme.micro)
+                .foregroundStyle(UITheme.accent)
+                .help("模拟按下小键盘左下角触控按键（依次切换触控 1 -> 2 -> 3）")
+
+                Button("默认") {
+                    store.dispatch("sidebar", "ResetHardwareSlotsToDefault")
+                }
+                .buttonStyle(.borderless)
+                .font(UITheme.micro)
+                .foregroundStyle(UITheme.textSecondary)
+                .help("恢复默认四槽位映射：USB/触控1 -> Antigravity，触控2 -> Codex，触控3 -> Deepseek Harness")
+            }
+
+            ForEach(slots) { slot in
+                HStack(spacing: 6) {
+                    Button {
+                        store.dispatch("sidebar", ["ActivateHardwareSlot": slot.slotIndex])
+                    } label: {
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(slot.isActiveSlot ? UITheme.accent : UITheme.strongBorder)
+                                .frame(width: 6, height: 6)
+                            Text(slot.title)
+                                .font(slot.isActiveSlot ? UITheme.captionMedium : UITheme.caption)
+                                .foregroundStyle(UITheme.textPrimary)
+                                .lineLimit(1)
+                            Text(slot.triggerBadge)
+                                .font(UITheme.monoBadge)
+                                .foregroundStyle(UITheme.textMuted)
+                                .lineLimit(1)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("点击立即激活「\(slot.title)」槽位")
+
+                    Spacer(minLength: 4)
+
+                    Menu {
+                        ForEach(rows) { row in
+                            Button {
+                                store.dispatch("sidebar", [
+                                    "SetHardwareSlotProfile": [
+                                        "slot_index": slot.slotIndex,
+                                        "profile_id": row.profileId
+                                    ]
+                                ])
+                            } label: {
+                                if row.profileId == slot.profileId {
+                                    Text("✓ \(row.displayName)")
+                                } else {
+                                    Text(row.displayName)
+                                }
+                            }
+                        }
+                    } label: {
+                        Text(slot.displayName)
+                            .font(UITheme.micro)
+                            .foregroundStyle(slot.isActiveSlot ? UITheme.accent : UITheme.textSecondary)
+                            .lineLimit(1)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(slot.isActiveSlot ? UITheme.surface : Color.clear)
+                )
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(UITheme.subtleSurface)
     }
 }

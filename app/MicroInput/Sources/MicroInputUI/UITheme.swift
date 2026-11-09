@@ -140,7 +140,6 @@ public struct DesktopAgent: Identifiable {
     public static let all: [DesktopAgent] = [
         .init(name: "Cindy", bundleID: "com.xd.cindy", symbol: "sparkles"),
         .init(name: "Codex", bundleID: "com.openai.codex", symbol: "terminal"),
-        .init(name: "千问办公", bundleID: "cn.qwenwork.desktop.mac", symbol: "text.bubble"),
         .init(name: "Antigravity", bundleID: "com.google.antigravity", symbol: "sparkles"),
         .init(name: "DeepSeek Coder (DSH)", bundleID: "com.deepseek.dsh", symbol: "terminal"),
         .init(name: "Herdr", bundleID: "dev.herdr.app", symbol: "rectangle.split.2x2"),
@@ -212,7 +211,6 @@ public enum AgentProfileKind: String {
     case codex = "Codex"
     case antigravity = "Antigravity"
     case dsh = "DeepSeek Coder (DSH)"
-    case qwenwork = "千问办公"
     case herdr = "Herdr"
     case custom = "Custom"
 
@@ -228,7 +226,7 @@ public enum AgentProfileKind: String {
         switch self {
         case .cindy, .codex, .antigravity, .dsh:
             return true
-        case .qwenwork, .herdr, .custom:
+        case .herdr, .custom:
             return false
         }
     }
@@ -243,8 +241,6 @@ public enum AgentProfileKind: String {
             return "支持跨工作区会话切换、审批与实时语音"
         case .dsh:
             return "支持实时插话、停止生成与语音回复"
-        case .qwenwork:
-            return "千问办公高频动作直达，模型与档位合一"
         case .herdr:
             return "终端工作区全动作键模式，直控标签、分栏与面板焦点"
         case .custom:

@@ -2,38 +2,41 @@ import AppKit
 import SwiftUI
 
 public struct WorkbenchRootView: View {
-    @ObservedObject var store: CoreStore
+    let store: CoreStore
 
     public init(store: CoreStore) {
         self.store = store
     }
 
     public var body: some View {
+        let _ = ViewRenderTelemetry.record("WorkbenchRootView")
+        let overlay = store.overlay
+        let modal = store.activeModal
         ZStack {
             ClassicWorkbenchView(store: store)
 
-            if store.model.cheatSheetVisible, let cs = store.model.cheatSheet {
+            if overlay.cheatSheetVisible, let cs = overlay.cheatSheet {
                 CheatSheetOverlayView(store: store, sheet: cs)
             }
         }
         .frame(minWidth: 1020, minHeight: 680)
         .sheet(
             item: Binding(
-                get: { store.model.activeModal },
+                get: { modal },
                 set: { newVal in
                     if newVal == nil {
                         store.dispatch("editor", "CloseModal")
                     }
                 }
             )
-        ) { modal in
-            ActiveModalSheetView(store: store, modal: modal)
+        ) { activeModal in
+            ActiveModalSheetView(store: store, modal: activeModal)
         }
     }
 }
 
 struct CheatSheetOverlayView: View {
-    @ObservedObject var store: CoreStore
+    let store: CoreStore
     let sheet: CheatSheetModel
 
     var body: some View {

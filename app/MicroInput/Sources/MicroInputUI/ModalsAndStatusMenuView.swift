@@ -1,9 +1,8 @@
 import AppKit
 import SwiftUI
 
-
 public struct StatusMenuPopoverView: View {
-    @ObservedObject var store: CoreStore
+    let store: CoreStore
     var onOpenMainWindow: () -> Void
 
     public init(store: CoreStore, onOpenMainWindow: @escaping () -> Void) {
@@ -12,13 +11,15 @@ public struct StatusMenuPopoverView: View {
     }
 
     public var body: some View {
-        let m = store.model
+        let _ = ViewRenderTelemetry.record("StatusMenuPopoverView")
+        let sm = store.statusMenu
+        let ss = store.sessionStrip
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(m.activeProfileName)
+                    Text(sm.activeProfileName)
                         .font(.headline)
-                    Text(m.routingModeSummary)
+                    Text(sm.routingModeSummary)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -26,7 +27,7 @@ public struct StatusMenuPopoverView: View {
                 Toggle(
                     "键盘控制",
                     isOn: Binding(
-                        get: { m.hostExecutionEnabled },
+                        get: { sm.hostExecutionEnabled },
                         set: { store.dispatch("status_menu", ["SetHostExecutionEnabled": $0]) }
                     )
                 )
@@ -40,13 +41,13 @@ public struct StatusMenuPopoverView: View {
                 Toggle(
                     "自动跟随前台软件",
                     isOn: Binding(
-                        get: { m.autoFollowEnabled },
+                        get: { sm.autoFollowEnabled },
                         set: { store.dispatch("status_menu", ["SetAutoFollowEnabled": $0]) }
                     )
                 )
                 .font(.caption)
                 Spacer()
-                if m.manualOverride {
+                if sm.manualOverride {
                     Button("恢复自动") {
                         store.dispatch("status_menu", "ResumeAutoFollow")
                     }
@@ -59,7 +60,7 @@ public struct StatusMenuPopoverView: View {
                 .foregroundStyle(.secondary)
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 6) {
-                ForEach(m.favorites2x2) { fav in
+                ForEach(sm.favorites2x2) { fav in
                     Button {
                         store.dispatch("status_menu", ["ActivateFavoriteSlot": fav.slotIndex])
                     } label: {
@@ -92,7 +93,7 @@ public struct StatusMenuPopoverView: View {
                 .foregroundStyle(.secondary)
 
             VStack(spacing: 4) {
-                ForEach(m.sessionSlots.prefix(6)) { slot in
+                ForEach(ss.sessionSlots.prefix(6)) { slot in
                     Button {
                         store.dispatch("session_strip", ["ActivateSlot": slot.slotIndex])
                     } label: {
@@ -127,7 +128,7 @@ public struct StatusMenuPopoverView: View {
                 Toggle(
                     "轮盘菜单",
                     isOn: Binding(
-                        get: { m.radialMenuEnabled },
+                        get: { sm.radialMenuEnabled },
                         set: { store.dispatch("status_menu", ["SetRadialMenuEnabled": $0]) }
                     )
                 )
@@ -136,7 +137,7 @@ public struct StatusMenuPopoverView: View {
                 Toggle(
                     "状态灯效",
                     isOn: Binding(
-                        get: { m.simpleLighting.lightingEnabled },
+                        get: { ss.simpleLighting.lightingEnabled },
                         set: { store.dispatch("session_strip", ["SetLightingEnabled": $0]) }
                     )
                 )
@@ -144,7 +145,7 @@ public struct StatusMenuPopoverView: View {
 
                 Spacer()
 
-                Button(m.cheatSheetVisible ? "隐藏速查" : "按键速查") {
+                Button(sm.cheatSheetVisible ? "隐藏速查" : "按键速查") {
                     store.dispatch("status_menu", "ToggleCheatSheet")
                 }
                 .controlSize(.mini)
@@ -171,9 +172,8 @@ public struct StatusMenuPopoverView: View {
     }
 }
 
-
 public struct ActiveModalSheetView: View {
-    @ObservedObject var store: CoreStore
+    let store: CoreStore
     let modal: ActiveModalModel
 
     public init(store: CoreStore, modal: ActiveModalModel) {
@@ -198,7 +198,7 @@ public struct ActiveModalSheetView: View {
 }
 
 struct MacroEditorSheet: View {
-    @ObservedObject var store: CoreStore
+    let store: CoreStore
     let model: MacroEditorModel
     @State private var bindOnSave: Bool = true
 
@@ -318,7 +318,7 @@ struct MacroEditorSheet: View {
 }
 
 struct MultiEditorSheet: View {
-    @ObservedObject var store: CoreStore
+    let store: CoreStore
     let model: MultiEditorModel
     @State private var bindOnSave: Bool = true
 
@@ -428,7 +428,7 @@ struct MultiEditorSheet: View {
 }
 
 struct LightingEditorSheet: View {
-    @ObservedObject var store: CoreStore
+    let store: CoreStore
     let model: LightingEditorModel
 
     var body: some View {
@@ -626,7 +626,7 @@ struct LightingEditorSheet: View {
 }
 
 struct ReconnectComparisonSheet: View {
-    @ObservedObject var store: CoreStore
+    let store: CoreStore
     let model: ReconnectComparisonModel
 
     var body: some View {
@@ -692,7 +692,7 @@ struct ReconnectComparisonSheet: View {
 }
 
 struct ApplyPreparationSheet: View {
-    @ObservedObject var store: CoreStore
+    let store: CoreStore
     let model: ApplyPreparationModel
 
     var body: some View {

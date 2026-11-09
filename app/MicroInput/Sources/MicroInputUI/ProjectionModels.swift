@@ -1,5 +1,25 @@
 import Foundation
 
+@MainActor
+public enum ViewRenderTelemetry {
+    public static var isEnabled: Bool = false
+    public private(set) static var counts: [String: Int] = [:]
+
+    public static func reset() {
+        counts.removeAll()
+    }
+
+    @inline(__always)
+    public static func record(_ surface: String) {
+        guard isEnabled else { return }
+        counts[surface, default: 0] += 1
+    }
+
+    public static func count(_ surface: String) -> Int {
+        counts[surface, default: 0]
+    }
+}
+
 public struct SidebarRowModel: Identifiable, Equatable {
     public var id: String { profileId }
     public let profileId: String
@@ -12,6 +32,20 @@ public struct SidebarRowModel: Identifiable, Equatable {
     public let isProtectedOai: Bool
     public let appInstalled: Bool
     public let isManualFallback: Bool
+}
+
+public struct HardwareProfileSlotModel: Identifiable, Equatable {
+    public var id: Int { slotIndex }
+    public let slotIndex: Int
+    public let slotKind: String
+    public let title: String
+    public let triggerBadge: String
+    public let profileId: String
+    public let displayName: String
+    public let monogram: String
+    public let bundleId: String?
+    public let isActiveSlot: Bool
+    public let isActiveProfile: Bool
 }
 
 public struct LayerTabModel: Identifiable, Equatable {
@@ -382,6 +416,145 @@ public struct CheatSheetModel: Equatable {
     public var keyCells: [CheatSheetCellModel] = []
 }
 
+public struct HeaderSliceModel: Equatable {
+    public var readyKind: String = "Ready"
+    public var readyText: String = "已就绪"
+    public var bannerKind: String = "Ready"
+    public var bannerText: String = "就绪"
+    public var showConnectButton: Bool = true
+    public var showReturnToHostButton: Bool = false
+    public var hostExecutionEnabled: Bool = false
+    public var canEditDraft: Bool = true
+    public var canUndo: Bool = false
+    public var canRedo: Bool = false
+    public var busy: Bool = false
+    public var cheatSheetVisible: Bool = false
+    public var deviceConnected: Bool = false
+    public var deviceSummary: String = "Creator Micro 2 (303A:8298) · 离线草稿模式"
+    public var documentRevision: Int = 0
+    public var hostRevision: Int = 0
+    public init() {}
+}
+
+public struct SidebarSliceModel: Equatable {
+    public var sidebarRows: [SidebarRowModel] = []
+    public var hardwareSlots: [HardwareProfileSlotModel] = []
+    public var activeHardwareSlot: Int = 0
+    public var selectedProfileId: String? = nil
+    public var selectedDisplayName: String = "未选择方案"
+    public var activeHostProfileId: String? = nil
+    public var autoSwitchState: String = "Active"
+    public var autoFollowEnabled: Bool = true
+    public var showOtherProfiles: Bool = false
+    public var editingDevice: Bool = false
+    public var canMoveUp: Bool = false
+    public var canMoveDown: Bool = false
+    public var canDelete: Bool = false
+    public var selectedLayerId: String? = nil
+    public var layerTabs: [LayerTabModel] = []
+    public var inspectorLayerName: String = "默认层"
+    public var isProtectedLayer: Bool = false
+    public var lastExportedPreset: String? = nil
+    public init() {}
+
+    public var selectedRawName: String {
+        sidebarRows.first(where: { $0.isSelected })?.rawName ?? selectedDisplayName
+    }
+}
+
+public struct CanvasSliceModel: Equatable {
+    public var selectedLayerId: String? = nil
+    public var selectedSurface: String = "Key0"
+    public var selectedLogicalSlot: Int = 0
+    public var selectedJoystickDirection: String = "North"
+    public var bottomRowLayout: String = "split"
+    public var showKeycapIcons: Bool = true
+    public var showKeycapLabels: Bool = true
+    public var encoderCcwLabel: String = "上滚"
+    public var encoderCwLabel: String = "下滚"
+    public var encoderPressLabel: String = "按压"
+    public var encoderSelectedSlot: Int? = nil
+    public var encoderRingGlowHex: String = "#14C76B"
+    public var joystickModeLabel: String = "八向摇杆"
+    public var joystickActiveDirection: String = "North"
+    public var joystickIsSelected: Bool = false
+    public var joystickSectors: [JoystickSectorModel] = []
+    public var keycapCells: [KeycapCellModel] = []
+    public var statusLedHex: String = "#14C76B"
+    public var underglowHex: String = "#3B82F6"
+    public var activeHardwareSlot: Int = 0
+    public var touchLedStates: [Bool] = [true, true, true]
+    public var activeHardwareSlotLabel: String = "插入 USB · Antigravity"
+    public var protectedLock: ProtectedLockModel? = nil
+    public var canEditBindings: Bool = true
+    public var canAddLighting: Bool = true
+    public var canExportOrCopyLayer: Bool = true
+    public var deviceConnected: Bool = false
+    public var hostExecutionEnabled: Bool = false
+    public init() {}
+}
+
+public struct SessionStripSliceModel: Equatable {
+    public var sessionSlots: [SessionSlotModel] = []
+    public var completedPills: [SessionPillModel] = []
+    public var workingPills: [SessionPillModel] = []
+    public var attentionPills: [SessionPillModel] = []
+    public var unreadCompletedCount: Int = 0
+    public var workingCount: Int = 0
+    public var topSixBoundAsSessionKeys: Bool = false
+    public var canMutateSessionLayout: Bool = true
+    public var simpleLighting: SimpleLightingModel = SimpleLightingModel()
+    public init() {}
+}
+
+public struct InspectorSliceModel: Equatable {
+    public var selectedLogicalSlot: Int = 0
+    public var selectedSurface: String = "Key0"
+    public var selectedJoystickDirection: String = "North"
+    public var bottomRowLayout: String = "split"
+    public var selectedSlotRole: String = "TaskKey"
+    public var inspectorLayerName: String = "默认层"
+    public var isProtectedLayer: Bool = false
+    public var protectedLock: ProtectedLockModel? = nil
+    public var editableInspector: EditableInspectorModel? = EditableInspectorModel()
+    public init() {}
+}
+
+public struct StatusMenuSliceModel: Equatable {
+    public var statusMenuIconTitle: String = "MI"
+    public var activeProfileName: String = "Antigravity"
+    public var routingModeSummary: String = "自动跟随前台软件"
+    public var favorites2x2: [FavoriteSlotModel] = []
+    public var hostExecutionEnabled: Bool = false
+    public var autoFollowEnabled: Bool = true
+    public var manualOverride: Bool = false
+    public var radialMenuEnabled: Bool = false
+    public var radialConfirmMode: String = "encoder_press"
+    public var radialReadiness: String = "Ready"
+    public var radialSlots: [RadialSlotConfigModel] = []
+    public var cheatSheetVisible: Bool = false
+    public var pendingImportName: String? = nil
+    public var pendingImportSummary: String? = nil
+    public var pendingExportScope: String? = nil
+    public var presetError: String? = nil
+    public init() {}
+}
+
+public struct OverlaySliceModel: Equatable {
+    public var cheatSheetVisible: Bool = false
+    public var cheatSheet: CheatSheetModel? = nil
+    public var passiveToastTitle: String? = nil
+    public var passiveToastSubtitle: String? = nil
+    public init() {}
+}
+
+public struct FooterSliceModel: Equatable {
+    public var statusMessage: String = "已就绪"
+    public var footerStatusText: String = "就绪"
+    public var footerLimitText: String = "长按说话上限 120 秒，响应超时 8 秒"
+    public init() {}
+}
+
 public struct ProjectionModel: Equatable {
     public var readyKind: String = "Ready"
     public var readyText: String = "已就绪"
@@ -396,6 +569,8 @@ public struct ProjectionModel: Equatable {
     public var busy: Bool = false
 
     public var sidebarRows: [SidebarRowModel] = []
+    public var hardwareSlots: [HardwareProfileSlotModel] = []
+    public var activeHardwareSlot: Int = 0
     public var selectedProfileId: String? = nil
     public var selectedDisplayName: String = "未选择方案"
     public var activeHostProfileId: String? = nil
@@ -428,6 +603,8 @@ public struct ProjectionModel: Equatable {
     public var keycapCells: [KeycapCellModel] = []
     public var statusLedHex: String = "#14C76B"
     public var underglowHex: String = "#3B82F6"
+    public var touchLedStates: [Bool] = [true, true, true]
+    public var activeHardwareSlotLabel: String = "插入 USB · Antigravity"
     public var protectedLock: ProtectedLockModel? = nil
     public var canEditBindings: Bool = true
     public var canAddLighting: Bool = true

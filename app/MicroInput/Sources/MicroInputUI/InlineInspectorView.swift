@@ -2,21 +2,20 @@ import SwiftUI
 
 struct CreatorMicroInlineInspectorView: View {
     let store: CoreStore
-    let model: ProjectionModel
     let agentKind: AgentProfileKind
     var onOpenFullActionLibrary: () -> Void
     var onOpenMacroLibrary: () -> Void
 
     var body: some View {
-        let m = model
-        let slot = m.selectedLogicalSlot
-        let cell = m.keycapCells.first(where: { $0.primarySlot == slot || $0.effectiveSlot == slot })
-        let isTaskRole = (slot < 6) && (cell?.slotRole == "TaskKey") && agentKind.supportsLiveSessionSlots
+        let _ = ViewRenderTelemetry.record("CreatorMicroInlineInspectorView")
+        let insp = store.inspector
+        let slot = insp.selectedLogicalSlot
+        let isTaskRole = (slot < 6) && (insp.selectedSlotRole == "TaskKey") && agentKind.supportsLiveSessionSlots
 
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text(titleForSlot(slot: slot, isSplit: m.bottomRowLayout == "split"))
+                    Text(titleForSlot(slot: slot, isSplit: insp.bottomRowLayout == "split"))
                         .font(UITheme.heading)
                         .foregroundStyle(UITheme.textPrimary)
                     Spacer()
@@ -27,7 +26,7 @@ struct CreatorMicroInlineInspectorView: View {
                         .background(Capsule().fill(UITheme.subtleSurface))
                         .foregroundStyle(UITheme.textSecondary)
                 }
-                Text("当前绑定：\(m.editableInspector?.boundActionName ?? "未绑定")")
+                Text("当前绑定：\(insp.editableInspector?.boundActionName ?? "未绑定")")
                     .font(UITheme.captionMedium)
                     .foregroundStyle(UITheme.accent)
                     .lineLimit(1)
@@ -36,7 +35,7 @@ struct CreatorMicroInlineInspectorView: View {
 
             Rectangle().fill(UITheme.border).frame(height: 1)
 
-            if let lock = m.protectedLock {
+            if let lock = insp.protectedLock {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(lock.lockBadgeText)
                         .font(UITheme.bodySemibold)
@@ -56,8 +55,8 @@ struct CreatorMicroInlineInspectorView: View {
                 Rectangle().fill(UITheme.border).frame(height: 1)
             }
 
-            let edit = m.editableInspector ?? EditableInspectorModel()
-            let hasEditable = (m.editableInspector != nil)
+            let edit = insp.editableInspector ?? EditableInspectorModel()
+            let hasEditable = (insp.editableInspector != nil)
             let showActionControls = hasEditable && !isTaskRole
             let showGlyphGrid = showActionControls && slot < 13
             let showTaskControls = hasEditable && isTaskRole
@@ -65,11 +64,11 @@ struct CreatorMicroInlineInspectorView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     if hasEditable {
-                        slotSpecificControls(slot: slot, isTaskRole: isTaskRole, m: m)
+                        slotSpecificControls(slot: slot, isTaskRole: isTaskRole, insp: insp)
                     }
 
                     if showTaskControls {
-                        sessionSlotExplanationCard(slot: slot, m: m)
+                        sessionSlotExplanationCard(slot: slot, ss: store.sessionStrip)
                     }
 
                     VStack(alignment: .leading, spacing: 14) {
@@ -147,7 +146,7 @@ struct CreatorMicroInlineInspectorView: View {
     }
 
     @ViewBuilder
-    private func slotSpecificControls(slot: Int, isTaskRole: Bool, m: ProjectionModel) -> some View {
+    private func slotSpecificControls(slot: Int, isTaskRole: Bool, insp: InspectorSliceModel) -> some View {
         if slot < 6 && agentKind.supportsLiveSessionSlots {
             VStack(alignment: .leading, spacing: 6) {
                 Text("按键用途")
@@ -173,7 +172,7 @@ struct CreatorMicroInlineInspectorView: View {
                 Toggle(
                     "拆分为两个按键（1U + 1U）",
                     isOn: Binding(
-                        get: { m.bottomRowLayout == "split" },
+                        get: { insp.bottomRowLayout == "split" },
                         set: { isSplit in
                             store.dispatch("canvas", ["SetBottomRowLayout": isSplit ? "split" : "merged"])
                         }
@@ -183,7 +182,7 @@ struct CreatorMicroInlineInspectorView: View {
                 .controlSize(.small)
                 .font(UITheme.captionMedium)
 
-                if m.bottomRowLayout == "split" {
+                if insp.bottomRowLayout == "split" {
                     Picker(
                         "底行按键",
                         selection: Binding(
@@ -198,7 +197,7 @@ struct CreatorMicroInlineInspectorView: View {
                     .labelsHidden()
                 }
             }
-        } else if (13...15).contains(slot) || m.selectedSurface.hasPrefix("Encoder") {
+        } else if (13...15).contains(slot) || insp.selectedSurface.hasPrefix("Encoder") {
             VStack(alignment: .leading, spacing: 8) {
                 Text("无极旋钮动作方向")
                     .font(UITheme.captionMedium)
@@ -206,7 +205,7 @@ struct CreatorMicroInlineInspectorView: View {
                 Picker(
                     "旋钮方向",
                     selection: Binding(
-                        get: { m.selectedSurface },
+                        get: { insp.selectedSurface },
                         set: { store.dispatch("canvas", ["SelectSurface": $0]) }
                     )
                 ) {
@@ -228,7 +227,7 @@ struct CreatorMicroInlineInspectorView: View {
                     .controlSize(.mini)
                 }
             }
-        } else if (16...19).contains(slot) || m.selectedSurface == "Joystick" {
+        } else if (16...19).contains(slot) || insp.selectedSurface == "Joystick" {
             VStack(alignment: .leading, spacing: 8) {
                 Text("四向摇杆方向")
                     .font(UITheme.captionMedium)
@@ -236,7 +235,7 @@ struct CreatorMicroInlineInspectorView: View {
                 Picker(
                     "摇杆方向",
                     selection: Binding(
-                        get: { m.selectedJoystickDirection },
+                        get: { insp.selectedJoystickDirection },
                         set: {
                             store.dispatch("canvas", ["SelectSurface": "Joystick"])
                             store.dispatch("canvas", ["SelectJoystickDirection": $0])
@@ -341,8 +340,8 @@ struct CreatorMicroInlineInspectorView: View {
         }
     }
 
-    private func sessionSlotExplanationCard(slot: Int, m: ProjectionModel) -> some View {
-        let sessionSlot = m.sessionSlots.first(where: { $0.slotIndex == slot })
+    private func sessionSlotExplanationCard(slot: Int, ss: SessionStripSliceModel) -> some View {
+        let sessionSlot = ss.sessionSlots.first(where: { $0.slotIndex == slot })
         return VStack(alignment: .leading, spacing: 8) {
             Text("实时会话槽位（自动跟灯）")
                 .font(UITheme.bodySemibold)
@@ -572,11 +571,14 @@ private struct ActionCatalogRowButton: View, Equatable {
 }
 
 struct ClassicMicroInputSettingsSheet: View {
-    @ObservedObject var store: CoreStore
+    let store: CoreStore
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        let m = store.model
+        let h = store.header
+        let s = store.sidebar
+        let sm = store.statusMenu
+        let f = store.footer
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("Micro Input 设置与诊断")
@@ -593,21 +595,21 @@ struct ClassicMicroInputSettingsSheet: View {
                     Toggle(
                         "启用小键盘动作分发控制",
                         isOn: Binding(
-                            get: { m.hostExecutionEnabled },
+                            get: { h.hostExecutionEnabled },
                             set: { store.dispatch("header", ["SetExecutionEnabled": $0]) }
                         )
                     )
                     Toggle(
                         "切换前台软件时自动切换配套方案",
                         isOn: Binding(
-                            get: { m.autoFollowEnabled },
+                            get: { s.autoFollowEnabled },
                             set: { store.dispatch("sidebar", ["SetAutoFollow": $0]) }
                         )
                     )
                     Toggle(
                         "开启屏幕中央轮盘菜单",
                         isOn: Binding(
-                            get: { m.radialMenuEnabled },
+                            get: { sm.radialMenuEnabled },
                             set: { store.dispatch("status_menu", ["SetRadialMenuEnabled": $0]) }
                         )
                     )
@@ -618,7 +620,7 @@ struct ClassicMicroInputSettingsSheet: View {
             GroupBox("硬件同步与连接仿真") {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text(m.deviceSummary)
+                        Text(h.deviceSummary)
                             .font(UITheme.bodySemibold)
                         Spacer()
                         Button("检测键盘") {
@@ -626,7 +628,7 @@ struct ClassicMicroInputSettingsSheet: View {
                         }
                         .controlSize(.small)
                     }
-                    Text("文档修订 #\(m.documentRevision) · 宿主路由修订 #\(m.hostRevision) · \(m.statusMessage)")
+                    Text("文档修订 #\(h.documentRevision) · 宿主路由修订 #\(h.hostRevision) · \(f.statusMessage)")
                         .font(UITheme.caption)
                         .foregroundStyle(UITheme.textSecondary)
 
@@ -654,16 +656,17 @@ struct ClassicMicroInputSettingsSheet: View {
 }
 
 struct ClassicActionLibrarySheet: View {
-    @ObservedObject var store: CoreStore
+    let store: CoreStore
     let rawProfileName: String
     let agentKind: AgentProfileKind
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        let edit = store.model.editableInspector
+        let edit = store.inspector.editableInspector
+        let selectedDisplayName = store.sidebar.selectedDisplayName
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("全部可用动作库 · \(store.model.selectedDisplayName)")
+                Text("全部可用动作库 · \(selectedDisplayName)")
                     .font(UITheme.title)
                 Spacer()
                 Button("关闭") { dismiss() }
@@ -723,11 +726,11 @@ struct ClassicActionLibrarySheet: View {
 }
 
 struct ClassicMacroAndMultiLibrarySheet: View {
-    @ObservedObject var store: CoreStore
+    let store: CoreStore
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        let edit = store.model.editableInspector
+        let edit = store.inspector.editableInspector
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("键盘宏与四分支动作 (Multi)")
@@ -801,6 +804,6 @@ struct ClassicMacroAndMultiLibrarySheet: View {
             }
         }
         .padding(20)
-        .frame(width: 580)
+        .frame(width: 600)
     }
 }
