@@ -6525,6 +6525,12 @@ fn resolve_merged_bottom_slot(doc: &LocalDocumentV2, layer: Option<&LayerNode>) 
 
 fn resolve_silkscreen_icon(slot: u32, action: Option<&Action>) -> String {
     if let Some(a) = action {
+        if a.id == "ag-live-voice"
+            || a.id == "desktop-live-voice"
+            || a.payload.get("command").and_then(|v| v.as_str()) == Some("live-voice")
+        {
+            return "🎙".to_string();
+        }
         if a.payload.get("command").and_then(|v| v.as_str()) == Some("new-conversation-in-project")
         {
             return "＋".to_string();

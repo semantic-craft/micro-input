@@ -606,6 +606,10 @@ fn antigravity_new_conversation_target_selector_matches_active_project_or_falls_
 #[test]
 fn antigravity_live_voice_does_not_map_to_dictation_shortcut_ctrl_m() {
     use mi_macos::executor::native_shortcut_for_agent_command;
+    use mi_macos::{
+        antigravity_live_voice_state, parse_pid_from_lsappinfo_output,
+        select_antigravity_live_voice_target, AntigravityLiveVoiceTarget, AntigravitySidebarAxNode,
+    };
 
     assert_eq!(
         native_shortcut_for_agent_command("antigravity", "dictation"),
@@ -627,10 +631,129 @@ fn antigravity_live_voice_does_not_map_to_dictation_shortcut_ctrl_m() {
     assert_eq!(receipt.outcome, "executed");
     assert_eq!(receipt.detail, "antigravity/live-voice");
     assert!(
-        !driver.events().iter().any(|e| matches!(
-            e,
-            RecordedOsEvent::PostKeyShortcut { key_code: 0x2E, .. }
-        )),
+        !driver
+            .events()
+            .iter()
+            .any(|e| matches!(e, RecordedOsEvent::PostKeyShortcut { key_code: 0x2E, .. })),
         "executing antigravity/live-voice must never post Ctrl+M (0x2E) dictation shortcut"
     );
+    assert!(
+        driver
+            .events()
+            .contains(&RecordedOsEvent::ToggleLiveVoice("antigravity".to_string())),
+        "must record ToggleLiveVoice event for antigravity"
+    );
+
+    let idle_nodes_voice = vec![AntigravitySidebarAxNode {
+        index: 4,
+        role: "AXButton".to_string(),
+        title: "Start Voice mode".to_string(),
+        description: String::new(),
+    }];
+    assert_eq!(
+        select_antigravity_live_voice_target(&idle_nodes_voice),
+        AntigravityLiveVoiceTarget::StartButton {
+            label: "Start Voice mode".to_string(),
+            node_index: 4,
+        }
+    );
+
+    let idle_nodes_live_chat = vec![AntigravitySidebarAxNode {
+        index: 5,
+        role: "AXButton".to_string(),
+        title: "Start Live Chat".to_string(),
+        description: String::new(),
+    }];
+    assert_eq!(
+        select_antigravity_live_voice_target(&idle_nodes_live_chat),
+        AntigravityLiveVoiceTarget::StartButton {
+            label: "Start Live Chat".to_string(),
+            node_index: 5,
+        }
+    );
+
+    let active_nodes_both = vec![
+        AntigravitySidebarAxNode {
+            index: 2,
+            role: "AXButton".to_string(),
+            title: "Start Voice mode".to_string(),
+            description: String::new(),
+        },
+        AntigravitySidebarAxNode {
+            index: 7,
+            role: "AXButton".to_string(),
+            title: "End Voice mode".to_string(),
+            description: String::new(),
+        },
+    ];
+    assert_eq!(
+        select_antigravity_live_voice_target(&active_nodes_both),
+        AntigravityLiveVoiceTarget::EndButton {
+            label: "End Voice mode".to_string(),
+            node_index: 7,
+        }
+    );
+
+    let active_nodes_live_chat = vec![AntigravitySidebarAxNode {
+        index: 8,
+        role: "AXButton".to_string(),
+        title: "End Live chat".to_string(),
+        description: String::new(),
+    }];
+    assert_eq!(
+        select_antigravity_live_voice_target(&active_nodes_live_chat),
+        AntigravityLiveVoiceTarget::EndButton {
+            label: "End Live chat".to_string(),
+            node_index: 8,
+        }
+    );
+
+    for active_title in [
+        "End Voice mode",
+        "Voice mode in progress",
+        "Voice mode, 0:05",
+        "Live chat, 0:12",
+    ] {
+        let nodes = vec![AntigravitySidebarAxNode {
+            index: 1,
+            role: "AXButton".to_string(),
+            title: active_title.to_string(),
+            description: String::new(),
+        }];
+        assert!(
+            antigravity_live_voice_state(&nodes, true),
+            "expected active state for title: {active_title}"
+        );
+        assert!(
+            !antigravity_live_voice_state(&nodes, false),
+            "did not expect idle state when active indicator present: {active_title}"
+        );
+    }
+
+    let returned_idle_nodes = vec![AntigravitySidebarAxNode {
+        index: 3,
+        role: "AXButton".to_string(),
+        title: "Start Voice mode".to_string(),
+        description: String::new(),
+    }];
+    assert!(
+        antigravity_live_voice_state(&returned_idle_nodes, false),
+        "expected idle state for Start Voice mode"
+    );
+    assert!(
+        !antigravity_live_voice_state(&returned_idle_nodes, true),
+        "did not expect active state when only Start Voice mode is present"
+    );
+
+    assert_eq!(
+        parse_pid_from_lsappinfo_output("\"pid\"=3582\n"),
+        Some(3582)
+    );
+    assert_eq!(
+        parse_pid_from_lsappinfo_output(
+            "bundleID=[ NULL ] asn=[ 0x0,0x44044 ] ... pid = 3582 !cgsConnection\n"
+        ),
+        Some(3582)
+    );
+    assert_eq!(parse_pid_from_lsappinfo_output("no pid here"), None);
 }

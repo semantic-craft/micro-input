@@ -515,6 +515,9 @@ pub fn format_concise_keycap_caption(raw_label: &str) -> String {
     if segment == "聚焦当前输入框" {
         return "聚焦输入".to_string();
     }
+    if segment == "Gemini Live 实时语音" || segment == "Live 实时语音" {
+        return "实时语音".to_string();
+    }
 
     let compact: String = segment
         .chars()

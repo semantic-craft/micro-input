@@ -306,11 +306,21 @@ const KEYCAP_DESCRIPTORS: [KeycapDescriptor; 34] = [
     KeycapDescriptor {
         id: CodexKeycapId::Party,
         silk_code: "PARTY",
-        short_label: "Ship",
-        chinese_hint: "确认完成并庆祝交付",
-        glyph_symbol: "🎉",
-        search_keywords: &["party", "celebrate", "done", "ship", "完成", "庆祝", "交付"],
-        default_action_id: Some("agent-submit"),
+        short_label: "Live",
+        chinese_hint: "Gemini Live 实时语音对话",
+        glyph_symbol: "🎙",
+        search_keywords: &[
+            "party",
+            "live",
+            "voice",
+            "waveform",
+            "gemini",
+            "语音",
+            "实时语音",
+            "对话",
+            "波形",
+        ],
+        default_action_id: Some("ag-live-voice"),
     },
     KeycapDescriptor {
         id: CodexKeycapId::Time,
@@ -513,11 +523,19 @@ impl CodexKeycapId {
 
     pub fn infer_for_slot(slot: u32, action: Option<&Action>) -> Self {
         if let Some(a) = action {
+            let cmd = a.payload.get("command").and_then(|v| v.as_str());
+            if a.id == "ag-live-voice"
+                || a.id == "desktop-live-voice"
+                || a.id.contains("live-voice")
+                || cmd == Some("live-voice")
+                || a.name.contains("实时语音")
+            {
+                return Self::Party;
+            }
             if a.id == "apple-fn-key"
                 || a.id.contains("ptt")
                 || a.id.contains("dictation")
-                || a.id == "ag-live-voice"
-                || a.payload.get("command").and_then(|v| v.as_str()) == Some("push-to-talk")
+                || cmd == Some("push-to-talk")
             {
                 return Self::Mic;
             }

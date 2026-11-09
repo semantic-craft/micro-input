@@ -16,8 +16,8 @@ pub const KEY_CODE_N: u16 = 0x2D;
 pub const CG_EVENT_TYPE_FLAGS_CHANGED: u32 = 12;
 pub const CG_EVENT_FLAG_MASK_SECONDARY_FN: u64 = 0x0080_0000;
 pub const MAX_CLIPBOARD_STASH_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_ANTIGRAVITY_AX_DEPTH: usize = 16;
-pub const MAX_ANTIGRAVITY_AX_NODES: usize = 512;
+pub const MAX_ANTIGRAVITY_AX_DEPTH: usize = 36;
+pub const MAX_ANTIGRAVITY_AX_NODES: usize = 1800;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AntigravitySidebarAxNode {
@@ -103,6 +103,142 @@ pub fn select_antigravity_new_conversation_target(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AntigravityLiveVoiceTarget {
+    StartButton { label: String, node_index: usize },
+    EndButton { label: String, node_index: usize },
+    NotFound,
+}
+
+pub fn is_antigravity_live_voice_start_label(label: &str) -> bool {
+    let trimmed = label.trim();
+    trimmed.eq_ignore_ascii_case("Start Voice mode")
+        || trimmed.eq_ignore_ascii_case("Start Live Chat")
+        || trimmed.eq_ignore_ascii_case("Start Live chat")
+}
+
+pub fn is_antigravity_live_voice_end_label(label: &str) -> bool {
+    let trimmed = label.trim();
+    trimmed.eq_ignore_ascii_case("End Voice mode")
+        || trimmed.eq_ignore_ascii_case("End Live chat")
+        || trimmed.eq_ignore_ascii_case("End Live Chat")
+}
+
+pub fn is_antigravity_live_voice_control(node: &AntigravitySidebarAxNode) -> bool {
+    matches!(
+        node.role.as_str(),
+        "AXButton" | "AXLink" | "AXCheckBox" | "AXRadioButton"
+    ) && (is_antigravity_live_voice_start_label(&node.title)
+        || is_antigravity_live_voice_start_label(&node.description)
+        || is_antigravity_live_voice_end_label(&node.title)
+        || is_antigravity_live_voice_end_label(&node.description))
+}
+
+pub fn select_antigravity_live_voice_target(
+    nodes: &[AntigravitySidebarAxNode],
+) -> AntigravityLiveVoiceTarget {
+    for node in nodes {
+        if matches!(
+            node.role.as_str(),
+            "AXButton" | "AXLink" | "AXCheckBox" | "AXRadioButton"
+        ) {
+            let label = if is_antigravity_live_voice_end_label(&node.title) {
+                Some(node.title.trim().to_string())
+            } else if is_antigravity_live_voice_end_label(&node.description) {
+                Some(node.description.trim().to_string())
+            } else {
+                None
+            };
+            if let Some(l) = label {
+                return AntigravityLiveVoiceTarget::EndButton {
+                    label: l,
+                    node_index: node.index,
+                };
+            }
+        }
+    }
+    for node in nodes {
+        if matches!(
+            node.role.as_str(),
+            "AXButton" | "AXLink" | "AXCheckBox" | "AXRadioButton"
+        ) {
+            let label = if is_antigravity_live_voice_start_label(&node.title) {
+                Some(node.title.trim().to_string())
+            } else if is_antigravity_live_voice_start_label(&node.description) {
+                Some(node.description.trim().to_string())
+            } else {
+                None
+            };
+            if let Some(l) = label {
+                return AntigravityLiveVoiceTarget::StartButton {
+                    label: l,
+                    node_index: node.index,
+                };
+            }
+        }
+    }
+    AntigravityLiveVoiceTarget::NotFound
+}
+
+pub fn antigravity_live_voice_state(nodes: &[AntigravitySidebarAxNode], active: bool) -> bool {
+    let has_active_indicator = nodes.iter().any(|node| {
+        let t = node.title.trim();
+        let d = node.description.trim();
+        let check = |s: &str| {
+            is_antigravity_live_voice_end_label(s)
+                || s.eq_ignore_ascii_case("Voice mode in progress")
+                || s.eq_ignore_ascii_case("Live chat in progress")
+                || s.starts_with("Voice mode,")
+                || s.starts_with("Live chat,")
+                || s.starts_with("voice mode,")
+                || s.starts_with("live chat,")
+        };
+        check(t) || check(d)
+    });
+
+    if active {
+        has_active_indicator
+    } else {
+        matches!(
+            select_antigravity_live_voice_target(nodes),
+            AntigravityLiveVoiceTarget::StartButton { .. }
+        ) && !has_active_indicator
+    }
+}
+
+pub fn parse_pid_from_lsappinfo_output(text: &str) -> Option<i32> {
+    for line in text.lines() {
+        let lower = line.to_ascii_lowercase();
+        let mut search_from = 0;
+        while let Some(rel_pos) = lower[search_from..].find("pid") {
+            let pos = search_from + rel_pos;
+            search_from = pos + 3;
+
+            if pos > 0 && lower.as_bytes()[pos - 1].is_ascii_alphanumeric() {
+                continue;
+            }
+
+            let after_pid = &line[pos + 3..];
+            if let Some(eq_pos) = after_pid.find('=') {
+                let between = after_pid[..eq_pos].trim();
+                if between.is_empty() || between == "\"" || between == "'" {
+                    let after_eq = after_pid[eq_pos + 1..].trim_start();
+                    let digit_str: String = after_eq
+                        .chars()
+                        .take_while(|ch| ch.is_ascii_digit())
+                        .collect();
+                    if let Ok(pid) = digit_str.parse::<i32>() {
+                        if pid > 0 {
+                            return Some(pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn submit_modifiers_for_adapter(adapter: &str) -> Vec<String> {
     if adapter.trim().eq_ignore_ascii_case("antigravity") {
         vec!["command".to_string()]
@@ -151,7 +287,13 @@ unsafe extern "C" {
         attribute: CFStringRef,
         value: *mut CFTypeRef,
     ) -> AXError;
+    fn AXUIElementSetAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: CFTypeRef,
+    ) -> AXError;
     fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
+    static kCFBooleanTrue: CFTypeRef;
     fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
     fn CGEventCreateKeyboardEvent(
         source: CGEventSourceRef,
@@ -301,7 +443,10 @@ unsafe fn collect_antigravity_ax_nodes(
     }
     let role = ax_copy_string_attr(elem, "AXRole").unwrap_or_default();
     let title = ax_copy_string_attr(elem, "AXTitle").unwrap_or_default();
-    let description = ax_copy_string_attr(elem, "AXDescription").unwrap_or_default();
+    let mut description = ax_copy_string_attr(elem, "AXDescription").unwrap_or_default();
+    if description.trim().is_empty() {
+        description = ax_copy_string_attr(elem, "AXHelp").unwrap_or_default();
+    }
     if role == "AXWebArea" && web_area_title.is_none() && !title.trim().is_empty() {
         *web_area_title = Some(title.clone());
     }
@@ -311,21 +456,30 @@ unsafe fn collect_antigravity_ax_nodes(
     nodes.push(AntigravitySidebarAxNode {
         index: idx,
         role,
-        title,
-        description,
+        title: title.clone(),
+        description: description.clone(),
     });
-    let children = ax_copy_children(elem);
-    for child in children {
-        if nodes.len() < MAX_ANTIGRAVITY_AX_NODES {
-            collect_antigravity_ax_nodes(
-                child,
-                depth + 1,
-                web_area_title,
-                nodes,
-                retained_elements,
-            );
+    let skip_children = matches!(
+        title.trim(),
+        "Conversation turns" | "Agent response" | "User message"
+    ) || matches!(
+        description.trim(),
+        "Conversation turns" | "Agent response" | "User message"
+    );
+    if !skip_children {
+        let children = ax_copy_children(elem);
+        for child in children {
+            if nodes.len() < MAX_ANTIGRAVITY_AX_NODES {
+                collect_antigravity_ax_nodes(
+                    child,
+                    depth + 1,
+                    web_area_title,
+                    nodes,
+                    retained_elements,
+                );
+            }
+            CFRelease(child);
         }
-        CFRelease(child);
     }
 }
 
@@ -337,13 +491,7 @@ fn find_pid_for_bundle_id(bundle_id: &str) -> Option<i32> {
     {
         if out.status.success() {
             let text = String::from_utf8_lossy(&out.stdout);
-            if let Some((_, rhs)) = text.split_once('=') {
-                if let Ok(pid) = rhs.trim().parse::<i32>() {
-                    if pid > 0 {
-                        return Some(pid);
-                    }
-                }
-            }
+            return parse_pid_from_lsappinfo_output(&text);
         }
     }
     None
@@ -394,9 +542,7 @@ pub fn native_shortcut_for_agent_command(
         }
         ("antigravity", "browser") => Some((0x0B, mods(&["command", "shift"]))),
         ("antigravity", "terminal") => Some((0x26, mods(&["command"]))),
-        ("antigravity", "dictation" | "push-to-talk" | "live-voice") => {
-            Some((0x2E, mods(&["control"])))
-        }
+        ("antigravity", "dictation" | "push-to-talk") => Some((0x2E, mods(&["control"]))),
         ("antigravity", "split-right") => Some((0x02, mods(&["command"]))),
         (
             "antigravity" | "dsh-desktop" | "cindy",
@@ -585,6 +731,7 @@ pub trait HostOsDriver: Send + Sync {
     fn stop_active_dictation(&self, adapter: &str) -> Result<bool, String>;
     fn scroll_window(&self, req: &DialScrollRequest) -> Result<(), String>;
     fn new_conversation_in_project(&self, adapter: &str) -> Result<(), String>;
+    fn toggle_live_voice(&self, adapter: &str) -> Result<(), String>;
 }
 
 #[derive(Debug, Default)]
@@ -841,6 +988,11 @@ impl HostOsDriver for MacOsSystemDriver {
                     focused
                 };
                 if !app_elem.is_null() {
+                    let attr_manual = cf_string_from_str("AXManualAccessibility");
+                    if !attr_manual.is_null() {
+                        let _ = AXUIElementSetAttributeValue(app_elem, attr_manual, kCFBooleanTrue);
+                        CFRelease(attr_manual);
+                    }
                     let win_elem = ax_copy_element_attr(app_elem, "AXFocusedWindow")
                         .or_else(|| ax_copy_element_attr(app_elem, "AXMainWindow"))
                         .or_else(|| {
@@ -924,6 +1076,216 @@ impl HostOsDriver for MacOsSystemDriver {
         self.post_key_shortcut(KEY_CODE_N, &cmd, true)
             .and_then(|()| self.post_key_shortcut(KEY_CODE_N, &cmd, false))
     }
+
+    fn toggle_live_voice(&self, adapter: &str) -> Result<(), String> {
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        let bundle_id = bundle_id_for_adapter(adapter).unwrap_or("com.google.antigravity");
+        let _ = self.open_application(bundle_id);
+        #[cfg(target_os = "macos")]
+        if adapter.trim().eq_ignore_ascii_case("antigravity") {
+            unsafe {
+                let app_elem = if let Some(pid) = find_pid_for_bundle_id(bundle_id) {
+                    let elem = AXUIElementCreateApplication(pid);
+                    if elem.is_null() {
+                        return Err("antigravity_live_voice_control_not_found".to_string());
+                    }
+                    elem
+                } else {
+                    let sys = AXUIElementCreateSystemWide();
+                    let focused = if sys.is_null() {
+                        std::ptr::null()
+                    } else {
+                        let f = ax_copy_element_attr(sys, "AXFocusedApplication")
+                            .unwrap_or(std::ptr::null());
+                        CFRelease(sys);
+                        f
+                    };
+                    if focused.is_null() {
+                        return Err("antigravity_live_voice_control_not_found".to_string());
+                    }
+                    focused
+                };
+
+                let attr_manual = cf_string_from_str("AXManualAccessibility");
+                if !attr_manual.is_null() {
+                    let _ = AXUIElementSetAttributeValue(app_elem, attr_manual, kCFBooleanTrue);
+                    CFRelease(attr_manual);
+                }
+
+                let mut target = AntigravityLiveVoiceTarget::NotFound;
+                let mut retained: Vec<AXUIElementRef> = Vec::new();
+                let mut win_elem: Option<AXUIElementRef> = None;
+
+                for attempt in 0..10 {
+                    if attempt > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    let candidate_win = ax_copy_element_attr(app_elem, "AXFocusedWindow")
+                        .or_else(|| ax_copy_element_attr(app_elem, "AXMainWindow"))
+                        .or_else(|| {
+                            let attr_cf = cf_string_from_str("AXWindows");
+                            if attr_cf.is_null() {
+                                return None;
+                            }
+                            let mut val: CFTypeRef = std::ptr::null();
+                            let err = AXUIElementCopyAttributeValue(app_elem, attr_cf, &mut val);
+                            CFRelease(attr_cf);
+                            if err != K_AX_ERROR_SUCCESS || val.is_null() {
+                                return None;
+                            }
+                            let first = if CFArrayGetCount(val) > 0 {
+                                let item = CFArrayGetValueAtIndex(val, 0);
+                                if !item.is_null() {
+                                    CFRetain(item);
+                                    Some(item)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            CFRelease(val);
+                            first
+                        });
+
+                    if let Some(w) = candidate_win {
+                        let mut web_area_title = None;
+                        let mut nodes = Vec::new();
+                        let mut cur_retained = Vec::new();
+                        collect_antigravity_ax_nodes(
+                            w,
+                            0,
+                            &mut web_area_title,
+                            &mut nodes,
+                            &mut cur_retained,
+                        );
+                        let found_target = select_antigravity_live_voice_target(&nodes);
+                        if matches!(
+                            found_target,
+                            AntigravityLiveVoiceTarget::StartButton { .. }
+                                | AntigravityLiveVoiceTarget::EndButton { .. }
+                        ) {
+                            target = found_target;
+                            for elem in retained {
+                                CFRelease(elem);
+                            }
+                            retained = cur_retained;
+                            win_elem = Some(w);
+                            break;
+                        } else {
+                            for elem in cur_retained {
+                                CFRelease(elem);
+                            }
+                            CFRelease(w);
+                        }
+                    }
+                }
+
+                let Some(win) = win_elem else {
+                    CFRelease(app_elem);
+                    for elem in retained {
+                        CFRelease(elem);
+                    }
+                    return Err("antigravity_live_voice_control_not_found".to_string());
+                };
+
+                let (was_active, target_node_index) = match target {
+                    AntigravityLiveVoiceTarget::EndButton { node_index, .. } => (true, node_index),
+                    AntigravityLiveVoiceTarget::StartButton { node_index, .. } => {
+                        (false, node_index)
+                    }
+                    AntigravityLiveVoiceTarget::NotFound => {
+                        CFRelease(win);
+                        CFRelease(app_elem);
+                        for elem in retained {
+                            CFRelease(elem);
+                        }
+                        return Err("antigravity_live_voice_control_not_found".to_string());
+                    }
+                };
+
+                let pressed_ok = if let Some(&elem) = retained.get(target_node_index) {
+                    let action_cf = cf_string_from_str("AXPress");
+                    let ok = if !action_cf.is_null() {
+                        let err = AXUIElementPerformAction(elem, action_cf);
+                        CFRelease(action_cf);
+                        err == K_AX_ERROR_SUCCESS
+                    } else {
+                        false
+                    };
+                    ok
+                } else {
+                    false
+                };
+
+                for elem in retained {
+                    CFRelease(elem);
+                }
+
+                if !pressed_ok {
+                    CFRelease(win);
+                    CFRelease(app_elem);
+                    return Err("antigravity_live_voice_control_not_found".to_string());
+                }
+
+                let mut confirmed = false;
+                for _attempt in 0..25 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+
+                    let mut web_area_title = None;
+                    let mut poll_nodes = Vec::new();
+                    let mut poll_retained = Vec::new();
+                    collect_antigravity_ax_nodes(
+                        win,
+                        0,
+                        &mut web_area_title,
+                        &mut poll_nodes,
+                        &mut poll_retained,
+                    );
+
+                    if !was_active {
+                        for node in &poll_nodes {
+                            if node.role == "AXButton" {
+                                let t = node.title.trim();
+                                let d = node.description.trim();
+                                if t.starts_with("Use ") || d.starts_with("Use ") {
+                                    if let Some(&elem) = poll_retained.get(node.index) {
+                                        let action_cf = cf_string_from_str("AXPress");
+                                        if !action_cf.is_null() {
+                                            let _ = AXUIElementPerformAction(elem, action_cf);
+                                            CFRelease(action_cf);
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    let ok = antigravity_live_voice_state(&poll_nodes, !was_active);
+                    for elem in poll_retained {
+                        CFRelease(elem);
+                    }
+                    if ok {
+                        confirmed = true;
+                        break;
+                    }
+                }
+
+                CFRelease(win);
+                CFRelease(app_elem);
+
+                if confirmed {
+                    return Ok(());
+                } else {
+                    return Err("antigravity_live_voice_state_unconfirmed".to_string());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -954,6 +1316,7 @@ pub enum RecordedOsEvent {
     StopActiveDictation(String),
     ScrollWindow(DialScrollRequest),
     NewConversationInProject(String),
+    ToggleLiveVoice(String),
 }
 
 #[derive(Debug)]
@@ -1163,6 +1526,16 @@ impl HostOsDriver for RecordingOsDriver {
         st.events.push(RecordedOsEvent::NewConversationInProject(
             adapter.to_string(),
         ));
+        Ok(())
+    }
+
+    fn toggle_live_voice(&self, adapter: &str) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        if !st.trusted {
+            return Err("accessibility_untrusted".to_string());
+        }
+        st.events
+            .push(RecordedOsEvent::ToggleLiveVoice(adapter.to_string()));
         Ok(())
     }
 }
@@ -1633,6 +2006,14 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
                     match self.driver.new_conversation_in_project(adapter) {
+                        Ok(()) => make_receipt("executed", desc.detail),
+                        Err(err) => make_receipt("failed", err),
+                    }
+                } else if command == "live-voice" {
+                    if !self.driver.is_accessibility_trusted() {
+                        return make_receipt("blocked", "accessibility_untrusted".to_string());
+                    }
+                    match self.driver.toggle_live_voice(adapter) {
                         Ok(()) => make_receipt("executed", desc.detail),
                         Err(err) => make_receipt("failed", err),
                     }
