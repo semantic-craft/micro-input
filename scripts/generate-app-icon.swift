@@ -1,7 +1,5 @@
 import AppKit
 
-// Preserve the approved illustration; use the same inset/radius as Koe's macOS icon.
-// Run from the repository root: swift scripts/generate-app-icon.swift
 let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
 let source = root.appendingPathComponent("app/MicroInput/Resources/AppIcon-artwork.png")
 guard let image = NSImage(contentsOf: source),

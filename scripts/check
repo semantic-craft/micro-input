@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+export MACOSX_DEPLOYMENT_TARGET=14.0
 CHECK_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/micro-input-check.XXXXXX")"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 cleanup_check() {
@@ -22,9 +23,6 @@ export TMPDIR="$CHECK_TMPDIR"
 python3 -B -m unittest discover -s scripts/tests -p 'test_*launcher.py'
 cargo fmt --all -- --check
 cargo test --locked --workspace --all-features
-scripts/build --synthetic
-swift test --package-path app/MicroInput -Xswiftc -DMI_SYNTHETIC_BACKEND
-# Restore production bindings/static library/app as one matching ABI.
 scripts/build
 swift test --package-path app/MicroInput
 python3 scripts/check-boundaries.py

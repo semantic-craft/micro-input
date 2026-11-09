@@ -19,4 +19,4 @@
 
 ## Gotchas
 
-- `crates/mi-ffi/tests/input_observation.rs` 中的 `CandidateBindings` 测试专门验证未核实候选模式（`subscribe_input` 使用 `CandidateInputDecoder`，不合并 `AG10`/`AG11`，产出 8 条事件）；开启宿主动作执行时使用 `subscribe_verified_input`（内置 `WideKeyMerger` 与 `VerifiedInputDecoder`），两条路径按 `hostExecutionEnabled` 区分。
+- `crates/mi-session/tests/input_observation.rs` 中的 `CandidateBindings` 测试专门验证未核实候选模式（`subscribe_input` 使用 `CandidateInputDecoder`，不合并 `AG10`/`AG11`，产出 8 条事件）；开启宿主动作执行时使用 `subscribe_verified_input`（内置 `WideKeyMerger` 与 `VerifiedInputDecoder`），两条路径按 `hostExecutionEnabled` 区分。

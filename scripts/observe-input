@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""One bounded read-only observation. Default is synthetic only; no retries."""
 import json
 import os
 from pathlib import Path
@@ -11,7 +10,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
 MODE = sys.argv[1:]
-COMMAND = ['cargo', 'test', '--locked', '-p', 'mi-ffi', '--test', 'input_observation']
+COMMAND = ['cargo', 'test', '--locked', '-p', 'mi-session', '--test', 'input_observation']
 ENV_KEYS = ('MI_INPUT_OBSERVATION_OPERATOR', 'MI_INPUT_OBSERVATION_ID',
             'MI_INPUT_OBSERVATION_SECONDS', 'MI_INPUT_OBSERVATION_REPORT')
 env = dict(os.environ)
@@ -67,9 +66,8 @@ try:
     child = subprocess.Popen(COMMAND + ['native_input_observation', '--', '--ignored', '--exact', '--nocapture'],
                              cwd=ROOT, env=env, start_new_session=True)
     journal('started')
-    # Includes compilation, setup (100s), passive capture (45s), status recheck
-    # (15s) and joined shutdown (5s). First build may hit TTL; never auto-retry.
-    code = child.wait(timeout=180)
+    setup_s, capture_s, recheck_s, shutdown_s, build_buffer_s = 100, 45, 15, 5, 15
+    code = child.wait(timeout=setup_s + capture_s + recheck_s + shutdown_s + build_buffer_s)
     journal('child-exited')
 except (subprocess.TimeoutExpired, KeyboardInterrupt, OSError):
     stopped = stop_own_child()

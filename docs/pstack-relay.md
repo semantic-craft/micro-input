@@ -162,3 +162,128 @@ A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制�
 - **Verification scope**: 软件层 verify-offline 全量 PASS（两轮）。安装层 ZCode 补丁版完整窗口两会话任务脚本 PASS（create 双 confirmed、导航双向 confirmed、queue 发送+去重、executionId 真实停止、迟到 stop noop、过期 resolve 零误批、running→idle 回读、未授权 denied）；Antigravity 安装版 2.29.0 经 agentapi + LS Connect-JSON live 桥两会话 PASS（含 CancelCascadeInvocation 真实停止与 question-as-permission 拒绝，零 transcript/token 读取）；DSH 与 Cindy 为部分通过——补丁版均已部署（Cindy 自 0.1.126 回退至钉住源并修复桥仅随 HID 注册的部署缺陷，双桥开机自启实证；DSH 冷会话 fail-closed 与订阅粘性实证），但两会话活轮任务脚本分别受限于 host 会话注册表仅经交互客户端物化、渲染端工作区目录同步，保持开放。日常版 `/Applications/Micro Input.app` 已更新至最终构建；workbench 原映射零改动、全程零设备写入。实体层 USB 设备未连接，全部 NOT_RUN；#84 按未完成项不关闭约定保持开放。
 - **Evidence**: commit 9393bf5+6916630; verify-offline .scratch/qa-runs/1793938201140-8882/evidence/result.json (full PASS); installed-layer: .scratch/pstack-apps/runs/zcode/daily-result.json (PASS), .scratch/pstack-apps/runs/antigravity/daily-result.json (PASS), .scratch/pstack-apps/runs/dsh/daily-result.json (PARTIAL), .scratch/pstack-apps/runs/cindy/daily-result.json (PARTIAL); #84 kept open per unfinished-items rule
 
+---
+
+## 纯 Rust 内核 + 薄 C-ABI + 原生 SwiftUI 薄壳重构接力队列（R0 → R12，`msime` 架构定型）
+
+- **总目标**：借鉴 [`metasequoiaime/msime`](https://github.com/metasequoiaime/msime) 的「纯 Rust 跨平台内核 + 薄 C-ABI 边界 + 100% 原生宿主薄壳」设计，将 `Micro Input` 原 30,373 行肥 Swift 业务层全面下沉至纯 Rust 内核（`crates/mi-bridge`、`crates/mi-macos`、`crates/mi-core`），彻底移除 UniFFI 与历史实验性 `crates/mi-gpui`，通过 7 函数极简 C-ABI 静态库（`crates/mi-ffi`）向原生 macOS SwiftUI/AppKit 薄壳（`app/MicroInput`）提供单向状态投影（`WorkbenchProjection`）与动作派发（`WorkbenchCommand`），同时 100% 保持现有 8 套软件方案、四应用实时会话控制、Cindy 原生所有权桥、受保护 `Mg1` 层锁及 `scripts/verify-offline` 全部 9 个隔离验收场景零退化。
+- **参考实现**：`https://github.com/metasequoiaime/msime`（`crates/engine`、`crates/client-core`、`crates/host-api`、`platforms/macos`）
+- **自动验收入口**：`skills/verify-micro-input/SKILL.md`、`scripts/verify-offline`、`scripts/check`
+
+### 架构拓扑与分层边界（`principle-foundational-thinking`、`principle-boundary-discipline`）
+
+Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳层：
+
+1. **领域与协议层（既有 21.9k 行，零改动直接复用）**：
+   - `crates/mi-proto`：Creator Micro 2 HID 物理分帧、只读出口门禁与 `UNKNOWN-*` 边界。
+   - `crates/mi-transport`：USB HID 设备发现、生命周期与读写通道。
+   - `crates/mi-model`：文档模型、草稿三方合并、8 套 Agent 权威注册表（`CANONICAL_DESKTOP_AGENT_PROFILES`）、`Mg1`（`KV_OAI_*`）保护层判定、回退历史栈与待办轮询队列（`AttentionRound`）。
+   - `crates/mi-session`：工作台会话核心、路由状态机、输入水位线与灯光预览合成。
+2. **跨进程桥与仲裁层 `crates/mi-bridge`（纯 Rust 异步状态机，零 UI / AppKit 依赖）**：
+   - `ownership`：`NativeOwnershipController`、`.fence` 持久化代次递增、可中断轮询休眠、瞬态重确认窗口、`R-C03` 仅凭 `cindy-ownership.sock` 实时存在性判定 `is_unbridged_desktop_active`。
+   - `voice` & `lighting_arbiter`：`FourAppVoiceManager` + `PushToTalkController`（`R-C04` 强制等待 `wait_for_start_outcome` 后方可进入 `Recording`）与 `FourAppLightingArbiter`（硬件载荷摘要幂等去重、唯一发送者生命周期）。
+   - `zcode`、`dsh`、`cindy`、`antigravity`：四款桌面应用的 UDS / Connect-JSON / HTTP 会话控制器、精确导航、发送/插话/排队、运行级停止、审批/问题回答、模型/思考档位切换，以及对应的纯 Rust 合成验收场景生成器。
+3. **macOS 原生系统适配层 `crates/mi-macos`（薄机械边界层）**：
+   - `instance_lock`：`<documentDir>/instance.lock` 排他文件锁与 LaunchServices 临时包注销（`R-C05`）。
+   - `app_cache`：进程内线程安全的 `NSWorkspace` 应用安装路径与图标缓存。
+   - `executor` & `ax_dictation`：`LiveHostActionExecutor`（`CGEvent` 快捷键、`AXUIElement` 焦点/菜单自动化、Apple `Fn` HID 注入，常规路径严禁调用 `AXIsProcessTrustedWithOptions(prompt: true)`）与 `SimulatedHostActionExecutor`（生成确定性 `audit.jsonl` 回执），以及剪贴板无损暂存/恢复的 `AXDictation`。
+   - `status_item` & `passive_panel`：菜单栏快照规格与 `.nonactivatingPanel` + `.canJoinAllSpaces` 全屏辅助悬浮窗口几何契约。
+4. **纯 Rust 工作台内核 `crates/mi-core` + 薄 C-ABI `crates/mi-ffi` + 原生 SwiftUI 壳层 `app/MicroInput`**：
+   - `crates/mi-core`：无 UI 框架耦合的 `WorkbenchStore`、`SidebarProjection`、`HeaderProjection`、`CanvasProjection`、`SessionStripProjection`、`InspectorProjection`、`EditorModalProjection`、`RadialMenuState`、`OverlayController` 与 `qa_runner`（内置 9 景合成验收驱动器）。
+   - `crates/mi-ffi`：对齐 `msime/crates/host-api` 的 7 函数 `extern "C"` 静态库边界（`mi_core_new`、`mi_core_free`、`mi_core_project_json`、`mi_core_dispatch_json`、`mi_core_poll_json`、`mi_core_run_qa_from_env`、`mi_core_acquire_instance_lock` / `mi_core_release_instance_lock`）。
+   - `app/MicroInput`：仅保留薄宿主入口 `MicroInputApp.swift` 与 5 个纯展示文件（`CoreBridge.swift`、`WorkbenchRootView.swift`、`ClassicWorkbenchView.swift`、`ModalsAndStatusMenuView.swift`、`UITheme.swift`），零业务控制器与零状态分叉。
+
+### Agent 单次任务上下文容量护栏（`principle-guard-the-context-window`）
+
+为确保每个接力对话始终运行在模型推理最优上下文区间（单次会话上下文占用 `< 35%`），以下硬约束适用于 `R1 → R12` 每一棒：
+1. **单棒读取上限（Read Cap ≤ 1,850 LOC）**：每个切片只允许读取本切片指明的 2–5 个对应参考文件与直接依赖的 Rust 接口文件；若需跨文件检索，必须派发只读 `research` 或 `poteto-agent` 子代理并返回紧凑摘要，严禁把整仓源码读入主线程。
+2. **单棒写入上限（Write Cap ≤ 900 LOC）**：每个切片只聚焦 1 个新建/修改的 Rust crate 子模块与配套测试，单棒净增/修改代码控制在 500–900 行以内。
+3. **双轨常绿过渡（`principle-outcome-oriented-execution`）**：在 `R1 → R10` 期间，新建的 `crates/mi-bridge`、`crates/mi-macos`、`crates/mi-core` 在 Workspace 中独立编译与单测，不破坏既有 `scripts/check`；在 `R11–R12` 完成 `crates/mi-ffi` C-ABI 切换、退役 56 个旧肥 Swift 源文件与 UniFFI，并通过全九景离线验收。
+
+---
+
+### [x] Slice Q1: 专注跟随与固件 0.6.3 触控轮切架构定型及容量切分
+- **Playbook**: `Investigation` + `architect` (`principle-guard-the-context-window` + `principle-sequence-verifiable-units`)
+- **Outcome**: 完成「仅在指定 Coding Agent 间自动跟随 + 切去其他软件零切换/零落盘/零弹窗 + 其他软件保留为手动通用预设 + 固件 v0.6.3 左下角电容触控键（`wl_touch_btn`）驱动多层透传轮切指定 Profile」的三层架构设计（Rust 领域模型层、FFI/Swift 路由与 `device.status` 监听层、工作台 UI 与板载同步层），并将 Q1–Q4 写入 `docs/pstack-relay.md`。
+- **Done Predicate**: `scripts/pstack-relay selftest` 通过；架构契约与上下文容量预算表写入 `docs/pstack-relay.md` 与 `.scratch/pstack-relay/decisions.tsv`，推进 Q1 并产出 Q2 提示词。
+- **Evidence**: docs/pstack-relay.md;.scratch/input-study/fw-v0.6.3/firmware_0.6.3_merged.bin
+
+### [x] Slice R0: 侧边栏切换卡顿根因修复、全量资产盘点与 Rust 内核分片队列就位
+- **Playbook**: `Perf issue` + `figure-it-out` (`principle-fix-root-causes`, `principle-guard-the-context-window`)
+- **Outcome**: 修复当前版本点击左侧菜单切换方案的主线程卡顿与黄色横幅跳动（8 方案切换中位耗时由 `152.47 ms` 降至 `82.99 ms`，横幅闪烁由 `42` 降至 `0`）；完成 30.4k 行 Swift 与 21.9k 行 Rust 的逐模块盘点；确立 `mi-bridge` -> `mi-macos` -> `mi-core` 四层架构与单棒 `≤ 1,850 LOC` 读取预算的 `R1–R12` 全景接力队列。
+- **Done Predicate**: `./scripts/check` 全量通过；`scripts/pstack-relay selftest` 通过；本机 `/Applications/Micro Input.app` 已同步更新。
+- **Evidence**: docs/pstack-relay.md;AGENTS.md;app/MicroInput/Tests/MicroInputTests/MicroInputTests.swift
+
+### [x] Slice R1: 建立 `crates/mi-bridge` 原生所有权状态机、语音与灯光仲裁内核
+- **Playbook**: `Feature` (`architect` -> `poteto-agent` -> `tdd`)
+- **Outcome**: 新建 `crates/mi-bridge`（单棒读取预算 `≤ 1,650 LOC`：仅读 `NativeOwnership.swift`、`UnixNativeOwnershipTransport.swift`、`NativeOwnershipScenario.swift`、`FourAppVoice.swift`、`FourAppLightingController.swift`）。在纯 Rust 中实现 `NativeOwnershipController`（持久化 `.fence` `clientInstance` 与递增 `generation`、可中断轮询休眠、瞬态重确认窗口、`R-C03` 仅凭 `cindy-ownership.sock` 实时存在性判定 `is_unbridged_desktop_active`）、`FourAppVoiceManager` + `PushToTalkController`（`R-C04` 强制 `wait_for_start_outcome` 确认后才进入 `Recording`）与 `FourAppLightingArbiter`（硬件载荷摘要幂等去重），并内置 `native-ownership` 合成场景生成器。
+- **Done Predicate**: `cargo test --locked -p mi-bridge` 覆盖重启代次延续、无桥桌面恢复与重锁、PTT 未确认失败关闭、灯光幂等去重及 `native-ownership` 场景全部 9 项检查与 3 条模拟回执；`./scripts/check` 通过。
+- **Evidence**: crates/mi-bridge;.scratch/qa-runs/1794074657792-33981/evidence/result.json
+
+### [x] Slice R2: `crates/mi-bridge` 之 ZCode 同实例会话控制与合成验收迁移
+- **Playbook**: `Feature` (`principle-model-the-domain` + `tdd`)
+- **Outcome**: 在 `crates/mi-bridge::zcode` 中迁移 ZCode v4 桌面桥控制器（单棒读取预算 `≤ 1,800 LOC`：仅读 `ZCodeSessionModel.swift`、`ZCodeSessionClient.swift`、`ZCodeSessionController.swift`、`ZCodeNavigationScenario.swift`）。完整实现跨工作区同名会话区分、`selected` 回读确认、`createSession` / `sendText`（区分 `steered` 与 `queued`）、绑定 `executionId` 的 `stop`（迟到 `noop`）、绑定 `interactionId/type` 的审批/问题回答（严禁把问题当权限批准）与 `switchModelConfig` 思考档位校验，并内置纯 Rust `zcode-navigation` 合成场景运行器。
+- **Done Predicate**: `cargo test --locked -p mi-bridge --test zcode_scenario` 生成符合 `scripts/verify-offline` 中 `zcode-navigation` 全部 18 项检查、`body_reads == 0` 及精确 `audit.jsonl` 回执计数的证据；`./scripts/check` 通过。
+- **Evidence**: crates/mi-bridge;.scratch/qa-runs/1794079290114-26119/evidence/result.json
+
+### [x] Slice R3: `crates/mi-bridge` 之 DSH 同 Host 会话控制与合成验收迁移
+- **Playbook**: `Feature` (`principle-model-the-domain` + `tdd`)
+- **Outcome**: 在 `crates/mi-bridge::dsh` 中迁移 DSH 0.2.1-rc.5 桌面桥控制器（单棒读取预算 `≤ 1,800 LOC`：仅读 `DSHSessionModel.swift`、`DSHSessionClient.swift`、`DSHSessionController.swift`、`DSHNavigationScenario.swift`）。完整实现 `activate=false` 被动订阅、`pendingInput` 状态保留、同 Host 轮次原子性核对（无法证明原子性时拒绝发送）、`queue` 与 `steer` 分离确认、旧轮次 `cancel` 零误停、`cancelledQueueRemaining` 状态区分、请求级审批回答与 `selectModel` 思考档位回读，并内置纯 Rust `dsh-navigation` 合成场景运行器。
+- **Done Predicate**: `cargo test --locked -p mi-bridge --test dsh_scenario` 生成符合 `scripts/verify-offline` 中 `dsh-navigation` 全部 24 项检查、`body_reads == 0` 及精确 `audit.jsonl` 回执计数的证据；`./scripts/check` 通过。
+- **Evidence**: crates/mi-bridge;.scratch/qa-runs/1794101640109-27260/evidence/result.json
+
+### [x] Slice R4: `crates/mi-bridge` 之 Cindy 受限任务目录、深链确认与待办轮询迁移
+- **Playbook**: `Feature` (`principle-model-the-domain` + `tdd`)
+- **Outcome**: 在 `crates/mi-bridge::cindy` 中迁移 Cindy 受限元数据与动作桥（单棒读取预算 `≤ 1,800 LOC`：仅读 `CindySessionModel.swift`、`CindySessionClient.swift`、`CindySessionController.swift`、`CindyNavigationScenario.swift`）。完整实现显式授权范围目录读取、深链 `delivered` 与 `confirmed` 分离、账号/实例换代失效、运行绑定 `stop` 与 `resolve` 问题守卫、工作区新建与目标插话，以及三态未读与 `mi-model::AttentionRound` 待办轮询闭环，并内置纯 Rust `cindy-navigation` 合成场景运行器。
+- **Done Predicate**: `cargo test --locked -p mi-bridge --test cindy_scenario` 生成符合 `scripts/verify-offline` 中 `cindy-navigation` 全部 13 项检查、`unauthorized_metadata_reads == 0`、`local_agent_api_relaxed == false` 及精确 `audit.jsonl` 回执计数的证据；`./scripts/check` 通过。
+- **Evidence**: crates/mi-bridge;.scratch/qa-runs/1794104563552-13924/evidence/result.json
+
+### [x] Slice R5: `crates/mi-bridge` 之 Antigravity 状态流、目录导航与 L3 控制迁移
+- **Playbook**: `Feature` (`principle-model-the-domain` + `tdd`)
+- **Outcome**: 在 `crates/mi-bridge::antigravity` 中迁移 Antigravity 2.29.0 状态与控制桥（单棒读取预算 `≤ 1,850 LOC`：仅读 `AntigravityStatusModel.swift`、`AntigravityStatusClient.swift`、`AntigravityStatusController.swift`、`AntigravityStatusScenario.swift`）。完整实现 `agentapi` 与 LanguageServer Connect-JSON 协议、双会话隔离与重复事件去重、`Stop(fullyIdle=false)` 归入 `backgroundActive`、绑定 `projectId` 新建与绑定 `conversationId` 发送/插话、`CancelCascadeInvocation` 精确停止、审批/问题守卫、模型/思考档位切换，以及 `transcript_reads == 0` 与 `token_reads == 0` 的失败关闭硬边界，并内置纯 Rust `antigravity-status` 合成场景运行器。
+- **Done Predicate**: `cargo test --locked -p mi-bridge --test antigravity_scenario` 生成符合 `scripts/verify-offline` 中 `antigravity-status` 全部 26 项检查、版本号 `2.29.0` / `1013060670` 及精确 `audit.jsonl` 回执计数的证据；`./scripts/check` 通过。
+- **Evidence**: crates/mi-bridge;.scratch/qa-runs/1794117114926-27844/evidence/result.json
+
+### [x] Slice R6: 建立 `crates/mi-macos` 原生宿主动作执行器、辅助功能听写与合成执行场景
+- **Playbook**: `Feature` (`principle-boundary-discipline` + `tdd`)
+- **Outcome**: 新建 `crates/mi-macos`（单棒读取预算 `≤ 1,500 LOC`：仅读 `HostActionExecutor.swift`、`AXDictation.swift`、`DeviceOperations.swift`、`Diagnostics.swift`、`MicroInputApp.swift`）。封装 `DocumentInstanceLock`（`<documentDir>/instance.lock` 排他锁，`R-C05`）、内存缓存 `AppBundleCache`、`LiveHostActionExecutor`（`CGEvent` 键盘事件、`AXUIElement` 焦点/菜单点击、Apple `Fn` 注入，常规执行路径零 `AXIsProcessTrustedWithOptions(prompt: true)` 调用）、`SimulatedHostActionExecutor`、剪贴板无损恢复的 `AXDictation`，以及 `host-execution`、`config-write`、`lighting-control`、`diagnostic-export` 四个合成场景运行器。
+- **Done Predicate**: `cargo test --locked -p mi-macos` 独立跑通 `host-execution`（21 条模拟回执）、`config-write`、`lighting-control`、`diagnostic-export` 四个场景的证据校验与单实例锁互斥测试；`./scripts/check` 通过。
+- **Evidence**: crates/mi-macos;.scratch/qa-runs/1794124780031-64477/evidence/result.json
+
+### [x] Slice R7: 建立 `crates/mi-core` 纯 Rust 状态仓 `WorkbenchStore` 与左侧方案栏投影
+- **Playbook**: `Feature` (`architect` -> `poteto-agent`)
+- **Outcome**: 新建 `crates/mi-core`（单棒读取预算 `≤ 1,400 LOC`）。构建纯 Rust `WorkbenchStore`（直连 `mi-session`、`mi-bridge`、`mi-macos`），实现顶部设备状态栏投影（`HeaderProjection`：就绪胶囊、按键控制开关、撤销/重做）与左侧「常用软件方案」侧栏投影（`SidebarProjection`：严格按 `Antigravity` -> `Codex` -> `Deepseek Harness` -> `Herdr` -> `Cindy` -> `ZCode` -> `千问办公` -> `其他软件` 排序，含自动跟随开关、自定义方案过滤、方案管理/导入备份菜单及底部所有权状态条）。
+- **Done Predicate**: `cargo test --locked -p mi-core` 验证 `WorkbenchStore` 路由切换、8 套方案权威排序与 `< 2 ms` 零横幅闪烁切换耗时；`./scripts/check` 通过。
+- **Evidence**: crates/mi-core;.scratch/qa-runs/1794129146458-48119/evidence/result.json
+
+### [x] Slice R8: `crates/mi-core` 之 Creator Micro 2 17 键画布、受保护层锁与四应用实时会话条投影
+- **Playbook**: `Feature` (`principle-experience-first` + `poteto-agent`)
+- **Outcome**: 在 `crates/mi-core` 中实现中央工作台舞台状态投影（`CanvasProjection` 与 `SessionStripProjection`）：Creator Micro 2 17 键交互画布（左上旋钮顺/逆时针与按压、左下八向摇杆、12 键网格、底行 2U 宽键合并/拆分渲染、键帽丝印图标与文字开关、`Mg1` `KV_OAI_*` 受保护层锁定遮罩）及画布下方的四应用 6 槽实时会话状态条（蓝点已完成胶囊、Working 动画胶囊、一键已读熄灯、灯光调整浮层、上方 6 键设为会话键、恢复默认布局）。
+- **Done Predicate**: `cargo test --locked -p mi-core` 验证 17 键点击命中、底行 2U 宽键合并/拆分状态、`Mg1` 受保护层锁定硬隔离与 6 槽实时会话状态同步；`./scripts/check` 通过。
+- **Evidence**: crates/mi-core;.scratch/qa-runs/1794135562535-27711/evidence/result.json
+
+### [x] Slice R9: `crates/mi-core` 右侧属性检查器、丝印图标目录与宏/灯光/多动作编辑器状态机
+- **Playbook**: `Feature` (`poteto-agent`)
+- **Outcome**: 在 `crates/mi-core` 中实现右侧属性面板与各类编辑弹窗状态机（`InspectorProjection` 与 `EditorModalProjection`）：按键用途切换（会话键 vs 动作键）、自定义快捷键录制器与一键设为 Apple `Fn`、可搜索的 34 枚键帽丝印图标网格、动作与宏绑定抽屉，以及宏序列编辑器、单键/双区灯光编辑器、多动作分支编辑器与重连三方对比弹窗。
+- **Done Predicate**: `cargo test --locked -p mi-core` 覆盖检查器改绑、Apple `Fn` 绑定、宏/多动作/灯光草稿编辑及重连三方合并预览；`./scripts/check` 通过。
+- **Evidence**: crates/mi-core;.scratch/qa-runs/1794142293550-9281/evidence/result.json
+
+### [x] Slice R10: `crates/mi-core` 全屏非抢焦悬浮 HUD、八向径向菜单与状态栏常驻菜单
+- **Playbook**: `Feature` (`poteto-agent`)
+- **Outcome**: 在 `crates/mi-core` 与 `crates/mi-macos` 之间接通系统级浮层与常驻入口（`RadialMenuState`、`OverlayController`、`StatusMenuProjection`）：八向径向菜单（支持四应用 Prompt 槽位预览与中心取消零动作保证）、被动方案切换 HUD（主工作台聚焦时自动抑制）与 `NSStatusItem` 菜单栏快捷切换及 2×2 收藏夹。
+- **Done Predicate**: `cargo test --locked -p mi-core` 验证径向菜单八向选择、中心取消零副作用、主窗口激活时 HUD 抑制及状态栏菜单切换；`./scripts/check` 通过。
+- **Evidence**: crates/mi-core;crates/mi-macos;.scratch/qa-runs/1794147610068-21739/evidence/result.json
+
+### [x] Slice R11: 对齐 `msime` 建立 `crates/mi-ffi` 薄 C-ABI 边界、打包流水线与全九景闭环
+- **Playbook**: `Shipping` (`principle-prove-it-works` + `verify-micro-input`)
+- **Outcome**: 对齐 `metasequoiaime/msime` 的 `crates/host-api`，将 `crates/mi-ffi` 重构为无 UniFFI 的 7 函数 C-ABI 静态库（`MicroInputCoreFFI`），更新 `scripts/build`、`scripts/check` 与 `scripts/check-boundaries.py`（`R-C01`..`R-C05` 及薄壳文件白名单门禁），跑通 `scripts/verify-offline` 全部 9 个隔离验收场景。
+- **Done Predicate**: `./scripts/verify-offline` 驱动 `MicroInput.app` 全量跑通 `host-execution`、`native-ownership`、`zcode-navigation`、`dsh-navigation`、`cindy-navigation`、`antigravity-status`、`config-write`、`lighting-control`、`diagnostic-export` 共 9 个场景并产出 `PASS` 回执；`./scripts/check` 通过。
+- **Evidence**: scripts/build;scripts/check-boundaries.py;crates/mi-core;crates/mi-ffi;.scratch/qa-runs/1794150505406-23321/evidence/result.json
+
+### [x] Slice R12: 退役旧肥 Swift 业务层与 `crates/mi-gpui`、收敛原生 SwiftUI 薄壳并完成本机安装收口
+- **Playbook**: `Shipping` (`principle-migrate-callers-then-delete-legacy-apis` + `interrogate` + `verify-micro-input`)
+- **Outcome**: 按 `principle-migrate-callers-then-delete-legacy-apis` 与 `principle-subtract-before-you-add` 一次性移除 56 个旧肥 Swift 业务/控制器文件、35 个旧 Swift 测试文件、UniFFI 生成器及历史 `crates/mi-gpui`；收敛 `app/MicroInput/Sources/MicroInputUI` 为单一经典三栏 Scheme A 原生 SwiftUI 薄壳（5 个文件）；通过 `./scripts/check`、`./scripts/verify-offline` 并同步安装至 `/Applications/Micro Input.app`。
+- **Done Predicate**: `test ! -d crates/mi-gpui` 为真；`./scripts/check`、`./scripts/verify-offline` 与 `scripts/pstack-relay status --require-all-done` 全部 `PASS`；本机 `/Applications/Micro Input.app` 已更新为 `msime` 架构原生 SwiftUI 版本。
+- **Evidence**: Cargo.toml;scripts/build;scripts/check;scripts/check-boundaries.py;crates/mi-core;crates/mi-ffi;app/MicroInput;.scratch/qa-runs/1794153146682-84439/evidence/result.json
+
+

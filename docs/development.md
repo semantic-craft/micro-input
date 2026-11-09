@@ -1,6 +1,6 @@
 # 当前实施入口
 
-当前前沿：[四应用控制计划](designs/four-app-control.md)。只对 Antigravity、Cindy、ZCode、桌面 DeepSeek Harness 深入接入，保留 Cindy 原生能力；先核对[源码与接口证据](four-app-interfaces.md)，再按[接力队列](pstack-relay.md)领取可验收切片。下文早期 MVP 范围仅作阶段背景。
+当前前沿：[四应用控制计划](designs/four-app-control.md)。只对 Antigravity、Cindy、桌面 DeepSeek Harness 深入接入，保留 Cindy 原生能力；先核对[源码与接口证据](four-app-interfaces.md)，再按[接力队列](pstack-relay.md)领取可验收切片。下文早期 MVP 范围仅作阶段背景。
 
 接手未完成工单或产品改动时，先执行[研究成果接入规则](agents/research-context.md)。其中包含 Input 1.1.0 的证据索引、按功能阅读路径和可直接使用的接续提示词；实际工单状态以 GitHub 当前记录为准。
 
@@ -75,7 +75,7 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 
 ## S3 离线验证入口
 
-文档模型与候选：`cargo test -p mi-model --test lighting`；合成端到端：`cargo test -p mi-session --features synthetic-backend --test config_write`。后者仅用自编夹具、私有临时备份和编译的合成transport，不枚举/打开真实设备。合成写入器仅由显式 `synthetic_config_writer` 构造的高层 UniFFI 工作流调用；普通合成实例不开放写入；原生接线已由 E-108 补齐。默认统一门禁仍为 `scripts/check`，原生探针继续ignored。
+文档模型与候选：`cargo test -p mi-model --test lighting`；合成端到端：`cargo test -p mi-session --features synthetic-backend --test config_write`。后者仅用自编夹具、私有临时备份和编译的合成transport，不枚举/打开真实设备。合成写入器仅由显式 `synthetic_config_writer` 构造的高层工作流调用；普通合成实例不开放写入；原生接线已由 E-108 补齐。默认统一门禁仍为 `scripts/check`，原生探针继续ignored。
 
 既有宿主回归使用 `scripts/build --synthetic` 后的 `MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=25`；该场景验证既有预设/宿主模拟未回退，不代表新增灯光UI或真实设备功能。生产离线启动必须设置 `MI_AUTO_HOST_READY=0`，本轮不启动生产应用。
 
@@ -92,7 +92,7 @@ RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和
 
 性能基线准备：`scripts/perf-baseline` 构建合成应用后启动隔离 QA，记录从启动到 Workbench 首次 `onAppear` 的耗时，再采样默认 10 秒空闲 CPU time 增量与 RSS。`--seconds 120` 可延长观察；launcher 超时随观察预算增加，包含启动和停止余量。结果写入该轮 `evidence/result.json`，状态为 `MEASURED`；设备连接、实体键、灯光视觉、安装版和验收预算固定 `NOT_RUN` 或 `NOT_SET`。该命令只建立可复测基线，不签收 #42 的插拔、睡眠唤醒或轻量预算。
 
-`cargo test -p mi-session --features synthetic-backend lighting_preview` 覆盖合成运行态与文件分离、最新值合并、切层/断连、失败未知状态、编号保留、30 秒上限及所有者丢弃恢复。`LightingTests` 经实际 UniFFI 覆盖两区六效果、参数可用性、非法值、单次全层撤销、重开、RGB 应用/恢复及预览不修改本地文档。恢复设备保留本地目标意图；测试分别检查当前设备快照和本地草稿，不把两者相等当成要求。
+`cargo test -p mi-session --features synthetic-backend lighting_preview` 覆盖合成运行态与文件分离、最新值合并、切层/断连、失败未知状态、编号保留、30 秒上限及所有者丢弃恢复。`mi-core` 的 `inspector_and_editors` 回归覆盖两区六效果、参数可用性、非法值、单次全层撤销、重开、RGB 应用/恢复及预览不修改本地文档。恢复设备保留本地目标意图；测试分别检查当前设备快照和本地草稿，不把两者相等当成要求。
 
 ## 实机验收材料的离线准备
 
@@ -104,16 +104,9 @@ RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和
 
 ## 径向菜单
 
-`RadialMenuState` 持有启用、等待回中、选择和确认后等待回中的状态。`RadialMenuRouting` 将冻结的菜单意图送入现有宿主队列及 lease，确认时重验同一会话和路由。原始角度/距离由 `mi-session` 验证，通过 UniFFI 的 `RadialPositionInfo` 传递；连续位置资格独立于按键边沿。没有新硬件订阅或通用 RPC。
+`RadialMenuState` 持有启用、等待回中、选择和确认后等待回中的状态。`RadialMenuRouting` 将冻结的菜单意图送入现有宿主队列及 lease，确认时重验同一会话和路由。原始角度/距离由 `mi-session` 验证并传递至 `mi-core`；连续位置资格独立于按键边沿。没有新硬件订阅或通用 RPC。
 
 菜单默认关闭，本机偏好为 `radialMenuEnabled`。启用或恢复后的旧缓冲回中不能解除隔离。实现与合成原生验收见[径向菜单验证配方](../skills/verify-micro-input/features/radial-menu.md)。当前软件策略的距离阈值和八向手感仍待实体核验，`kb.radial` 没有因此解锁。
-
-
-## ZCode 同实例会话导航
-
-菜单栏的「ZCode 会话连接」默认关闭。显式连接读取原生桥授予的工作区元数据，完整地址与实例代次固定后，经宿主队列、听写清理和 Rust lease 打开目标。只有选中回读完全一致才记录 `confirmed`，不按标题匹配，不自动重试打开。断连、授权变化与来源换代清空旧目标。
-
-原生增量补丁和授权入口见 [ZCode 桥](../integrations/zcode/README.md)，隔离验收见 [ZCode 配方](../skills/verify-micro-input/features/zcode-navigation.md)。`scripts/verify-offline` 包含 `zcode-navigation`，`scripts/verify-zcode-paired --source <patched-source>` 检查固定源码与 Swift 客户端的真实 Unix socket 交换。源码、渲染状态存储、安装版窗口及实体按键分别记录。当前片不新增发送、停止、审批或设备写入。
 
 ## Cindy 既有任务目录与导航确认
 

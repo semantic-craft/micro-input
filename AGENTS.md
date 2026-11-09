@@ -6,7 +6,7 @@
 
 - 开工读 README.md、docs/development.md 和 lessons.md；当前首轮为离线工作台；阶段范围见 docs/spec/BUILD_PROMPT.md 的 S1a。
 - 接手未完成工单、实现或评审产品改动前，必读 [研究成果接入规则](docs/agents/research-context.md)，按任务选读 Input 架构、候选协议和模块契约，并在交付中记录采用的证据与验证缺口。拆分任务或交接时传递该入口。
-- 技术方向固定为 Rust 核心 + SwiftUI。初始化工程时补真实构建/运行说明和 scripts/check；不把文档校验当成应用验收。
+- 技术架构借鉴 [`metasequoiaime/msime`](https://github.com/metasequoiaime/msime) 的「纯 Rust 跨平台内核 + 薄 C-ABI 边界 + 原生宿主薄壳」设计：全部协议、模型、跨进程桥接、macOS 宿主执行与工作台状态机收敛在纯 Rust 内核（`crates/mi-proto`、`crates/mi-transport`、`crates/mi-model`、`crates/mi-session`、`crates/mi-bridge`、`crates/mi-macos`、`crates/mi-core`），经 7 函数极简 C-ABI 静态库（`crates/mi-ffi`）暴露给 100% 原生 macOS SwiftUI/AppKit 薄壳（`app/MicroInput`），彻底退役 UniFFI、`crates/mi-gpui` 及肥 Swift 业务层。
 - 兼容功能或协议工作查 README 中对应调研原件，分别标明观察、官方说明、社区线索和未知；社区旧版参数不能充当当前固件规格。
 - 真实设备操作保留已有映射。默认先做只读或脱敏夹具验证；涉及写入时依据当轮用户授权并验证恢复。Profile 选择在原 Input 中可能自动同步设备。
 - 当前原始材料唯一位置是 .scratch/input-study，受 Git 忽略；正式实现结论进入源码或 docs，不提交用户宏载荷、应用数据库或原始日志。
@@ -36,9 +36,9 @@
 | --- | --- |
 | 严禁硬编码用户家目录（`/Users/<name>`），只允许 `Path.home()` / 环境变量 / 配置发现 | `scripts/check-boundaries.py`（`R-C01`，随 `scripts/check` 执行） |
 | 严禁向外部 Agent 维护侵入式补丁（`integrations/*/*.patch`），必须基于其开源代码与可观测行为在 `Micro Input` 侧直接适配 | `scripts/check-boundaries.py`（`R-C02`，随 `scripts/check` 执行） |
-| `Micro Input` 重启后须沿用已持久化的 `.fence` `clientInstance` 并递增 `generation` | `NativeOwnershipTests.testRestartedControllerResumesPersistedFenceIdentityAndGeneration` |
-| 桌面 Agent 预设完整度唯一真源为 `Store.hasAllDesktopAgentPresets`（派生自 `DesktopAgent.all`），`prepareDesktopProfiles()` 幂等且不覆盖就绪状态 | `HostExecutionTests.testPrepareDesktopProfilesDoesNotClobberReadyStatusWhenPresetsExist` |
+| `Micro Input` 重启后须沿用已持久化的 `.fence` `clientInstance` 并递增 `generation` | `crates/mi-bridge/src/ownership.rs`（`restarted_controller_resumes_persisted_fence_identity_and_increments_generation`） |
+| 桌面 Agent 预设完整度唯一真源为 `WorkbenchStore::has_all_desktop_agent_presets`（派生自 `CANONICAL_DESKTOP_AGENT_PROFILES`），`prepare_desktop_profiles()` 幂等且不覆盖就绪状态 | `crates/mi-core/tests/workbench_store.rs`（`prepare_desktop_profiles_is_idempotent_and_preserves_ready_status`） |
 | 生产出口只读门禁、物理分帧隔离与 `UNKNOWN-*` 清单对齐 | `scripts/check-boundaries.py` + `mi-proto` / `mi-session` 边界测试 |
-| 构建 `target/MicroInput.app` 后注销临时包 LaunchServices 登记，且 `MicroInputApp.init()` 必须在创建 `StatusMenu` 前获取 `<documentDir>/instance.lock` 排他锁、`scripts/run` 必须使用严格 `argparse`（支持 `--list`/`--kill` 并剥离继承的 `__CFBundleIdentifier`），杜绝与 `/Applications/Micro Input.app` 双开产生双菜单栏图标 | `scripts/build` + `scripts/check-boundaries.py`（`R-C05`）+ `scripts/tests/test_run_verify_launcher.py` + `HostExecutionTests.testDocumentInstanceLockRejectsDuplicateOwnerUntilReleased` |
-| `NativeOwnershipController.isUnbridgedDesktopActive` 仅以当前 `cindy-ownership.sock` 是否存在为唯一真源，严禁以粘滞 `bridgeObserved` / `nativeIdentity` 锁死 Cindy 退出后的本地桌面控制 | `scripts/check-boundaries.py`（`R-C03`）+ `NativeOwnershipTests.testUnbridgedDesktopRecoversWhenBridgeSocketDisappearsAndRefencesOnReappear` |
-| `FourAppVoiceManager.startDictation` 必须先检查 `dispatchOpen` 并等待 `PushToTalkController.waitForStartOutcome()` 确认启动成功后才可进入 `.recording`，严禁未确认即报告成功 | `scripts/check-boundaries.py`（`R-C04`）+ `FourAppVoiceTests.testStartDictationFailsClosedWhenOwnershipBlockedOrDriverRejects` |
+| 构建 `target/MicroInput.app` 后注销临时包 LaunchServices 登记，且 `app/MicroInput/Sources/MicroInput/MicroInputApp.swift` 必须在 `setupStatusItem()` 前调用 `mi_core_acquire_instance_lock` 获取 `<documentDir>/instance.lock` 排他锁、`scripts/run` 必须使用严格 `argparse`（支持 `--list`/`--kill` 并剥离继承的 `__CFBundleIdentifier`），杜绝与 `/Applications/Micro Input.app` 双开产生双菜单栏图标 | `scripts/build` + `scripts/check-boundaries.py`（`R-C05`）+ `scripts/tests/test_run_verify_launcher.py` + `crates/mi-macos/tests/macos_scenarios.rs`（`document_instance_lock_rejects_duplicate_owner_until_released`） |
+| `NativeOwnershipController::is_unbridged_desktop_active` 仅以当前 `cindy-ownership.sock` 是否存在为唯一真源，严禁以粘滞 `bridge_observed` / `native_identity` 锁死 Cindy 退出后的本地桌面控制 | `scripts/check-boundaries.py`（`R-C03`）+ `crates/mi-bridge/src/ownership.rs`（`unbridged_desktop_recovers_when_bridge_socket_disappears_and_refences_on_reappear`） |
+| `FourAppVoiceManager::start_dictation` 必须先检查 `dispatch_open` 并等待 `PushToTalkController::wait_for_start_outcome()` 确认启动成功后才可进入 `FourAppDictationState::Recording`，严禁未确认即报告成功 | `scripts/check-boundaries.py`（`R-C04`）+ `crates/mi-bridge/src/voice.rs`（`start_dictation_fails_closed_when_ownership_blocked_or_driver_rejects`） |

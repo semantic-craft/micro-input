@@ -80,58 +80,6 @@ class OfflineEvidenceTests(unittest.TestCase):
         path.write_text(json.dumps(payload))
         with self.assertRaises(ValueError): module.verify_evidence(self.run, "native-ownership", 99, lambda _: False)
 
-    def test_zcode_navigation_requires_all_checks_and_exact_confirmation(self):
-        names = ["same_name_two_workspaces", "selected_readback_matches",
-                 "selected_only_isolation", "duplicate_command_dedup", "inflight_steering_vs_queue",
-                 "late_stop_noop", "timeout_same_id_no_replay", "create_workspace_readback",
-                 "question_never_approved_as_permission",
-                 "expired_and_duplicate_interaction_zero_misapproval",
-                 "unsupported_thought_not_sent",
-                 "model_and_thought_readback_consistent",
-                 "wrong_selected_unconfirmed",
-                 "deleted_target_no_redirect", "generation_change_blocks_old_selection",
-                 "disconnect_clears_targets", "disabled_zero_reads", "out_of_scope_zero_reads"]
-        payload = dict(status="PASS", checks=dict.fromkeys(names, True), body_reads=0,
-                       native_app="NOT_RUN", physical_key="NOT_RUN")
-        path = self.evidence / "zcode-navigation.json"
-        audit = self.evidence / "audit.jsonl"
-        audit_rows = [
-            dict(action_type="zcode_open", outcome="confirmed", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_open", outcome="confirmed", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_create", outcome="confirmed", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_send", outcome="steered", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_send", outcome="queued", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_send", outcome="unknown", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_stop", outcome="noop", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_stop", outcome="stopped", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_resolve", outcome="interactionTypeMismatch", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_resolve", outcome="interactionTypeMismatch", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_resolve", outcome="resolved", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_resolve", outcome="noop", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_resolve", outcome="resolved", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_resolve", outcome="resolved", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_resolve", outcome="resolved", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_switch_model", outcome="unsupportedThought", target="zcode", text_byte_len=None),
-            dict(action_type="zcode_switch_model", outcome="modelSwitched", target="zcode", text_byte_len=None),
-        ]
-        audit.write_text("\n".join(json.dumps(r) for r in audit_rows))
-        path.write_text(json.dumps(payload))
-        self.assertEqual(module.verify_evidence(self.run, "zcode-navigation", 99, lambda _: False)["zcode_navigation"], "SYNTHETIC_PASS")
-        for name in names:
-            payload["checks"][name] = False
-            path.write_text(json.dumps(payload))
-            with self.assertRaises(ValueError): module.verify_evidence(self.run, "zcode-navigation", 99, lambda _: False)
-            payload["checks"][name] = True
-        for field, wrong in [("body_reads", 1), ("native_app", "PASS"), ("physical_key", "PASS")]:
-            prior = payload[field]
-            payload[field] = wrong
-            path.write_text(json.dumps(payload))
-            with self.assertRaises(ValueError): module.verify_evidence(self.run, "zcode-navigation", 99, lambda _: False)
-            payload[field] = prior
-        path.write_text(json.dumps(payload))
-        audit.write_text(json.dumps(dict(action_type="zcode_open", outcome="delivered", target="zcode")))
-        with self.assertRaises(ValueError): module.verify_evidence(self.run, "zcode-navigation", 99, lambda _: False)
-
     def test_dsh_navigation_requires_pending_journal_and_exact_readback(self):
         names = [
             "disabled_zero_reads",

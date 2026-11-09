@@ -26,7 +26,7 @@ def verify_evidence(run, scenario, started, process_alive):
               "physical_key": "NOT_RUN", "lighting_visual": "NOT_RUN"}
     if scenario == "host-execution":
         rows = [json.loads(line) for line in (evidence / "audit.jsonl").read_text().splitlines()]
-        if len(rows) != 21 or any(r["outcome"] != "simulated" for r in rows):
+        if len(rows) != 20 or any(r["outcome"] != "simulated" for r in rows):
             raise ValueError("host simulation receipts incomplete")
         details = {r.get("detail") for r in rows}
         for required_detail in (
@@ -42,75 +42,11 @@ def verify_evidence(run, scenario, started, process_alive):
             (d or "").endswith("/submit") for d in details
         ):
             raise ValueError("missing back/forward navigation or submit simulation receipt")
-        if len({r["profile_id"] for r in rows}) != 5 or sum(r["binding_id"] in ("AG10", "AG11") for r in rows) != 1:
+        if len({r["profile_id"] for r in rows}) != 4 or sum(r["binding_id"] in ("AG10", "AG11") for r in rows) != 1:
             raise ValueError("profile/wide-key regression")
         if rows[-1]["action_type"] != "macro_sequence" or rows[-1]["detail"] != "steps=2 keys=2 delays=0":
             raise ValueError("local macro simulation receipt missing")
         result["receipt_count"] = len(rows)
-    elif scenario == "zcode-navigation":
-        navigation = json.loads((evidence / "zcode-navigation.json").read_text())
-        expected = {
-            "same_name_two_workspaces",
-            "selected_readback_matches",
-            "selected_only_isolation",
-            "duplicate_command_dedup",
-            "inflight_steering_vs_queue",
-            "late_stop_noop",
-            "timeout_same_id_no_replay",
-            "create_workspace_readback",
-            "question_never_approved_as_permission",
-            "expired_and_duplicate_interaction_zero_misapproval",
-            "unsupported_thought_not_sent",
-            "model_and_thought_readback_consistent",
-            "wrong_selected_unconfirmed",
-            "deleted_target_no_redirect",
-            "generation_change_blocks_old_selection",
-            "disconnect_clears_targets",
-            "disabled_zero_reads",
-            "out_of_scope_zero_reads",
-        }
-        if (navigation.get("status") != "PASS" or set(navigation.get("checks", {})) != expected
-                or not all(value is True for value in navigation["checks"].values())
-                or navigation.get("native_app") != "NOT_RUN" or navigation.get("physical_key") != "NOT_RUN"
-                or navigation.get("body_reads") != 0):
-            raise ValueError("ZCode navigation evidence incomplete or overclaimed")
-        rows = [json.loads(line) for line in (evidence / "audit.jsonl").read_text().splitlines()]
-        confirmed = [row for row in rows if row["action_type"] == "zcode_open" and row["outcome"] == "confirmed"]
-        created = [row for row in rows if row["action_type"] == "zcode_create" and row["outcome"] == "confirmed"]
-        steered = [row for row in rows if row["action_type"] == "zcode_send" and row["outcome"] == "steered"]
-        queued = [row for row in rows if row["action_type"] == "zcode_send" and row["outcome"] == "queued"]
-        unknown = [row for row in rows if row["action_type"] == "zcode_send" and row["outcome"] == "unknown"]
-        noop = [row for row in rows if row["action_type"] == "zcode_stop" and row["outcome"] == "noop"]
-        stopped = [row for row in rows if row["action_type"] == "zcode_stop" and row["outcome"] == "stopped"]
-        resolved = [row for row in rows if row["action_type"] == "zcode_resolve" and row["outcome"] == "resolved"]
-        resolve_mismatch = [row for row in rows if row["action_type"] == "zcode_resolve" and row["outcome"] == "interactionTypeMismatch"]
-        resolve_noop = [row for row in rows if row["action_type"] == "zcode_resolve" and row["outcome"] == "noop"]
-        model_switched = [row for row in rows if row["action_type"] == "zcode_switch_model" and row["outcome"] == "modelSwitched"]
-        unsupported_thought = [row for row in rows if row["action_type"] == "zcode_switch_model" and row["outcome"] == "unsupportedThought"]
-        if (
-            len(confirmed) < 2
-            or len(created) != 1
-            or len(steered) != 1
-            or len(queued) != 1
-            or len(unknown) != 1
-            or len(noop) != 1
-            or len(stopped) != 1
-            or len(resolved) != 4
-            or len(resolve_mismatch) != 2
-            or len(resolve_noop) != 1
-            or len(model_switched) != 1
-            or len(unsupported_thought) != 1
-            or any(row.get("target") != "zcode" or row.get("text_byte_len") is not None for row in rows)
-        ):
-            raise ValueError("ZCode exact navigation/execution receipts missing")
-        result.update(
-            zcode_navigation="SYNTHETIC_PASS",
-            zcode_execution="SYNTHETIC_PASS",
-            zcode_interactions_and_model="SYNTHETIC_PASS",
-            native_app="NOT_RUN",
-            receipt_count=len(rows),
-            body_reads=0,
-        )
     elif scenario == "dsh-navigation":
         navigation = json.loads((evidence / "dsh-navigation.json").read_text())
         expected = {
@@ -424,7 +360,7 @@ def main():
         if not args.qa_only:
             subprocess.run(["scripts/check"], cwd=ROOT, env=env, check=True)
         subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, env=env, check=True)
-        for scenario in ("host-execution", "native-ownership", "zcode-navigation", "dsh-navigation", "cindy-navigation", "antigravity-status", "config-write", "lighting-control", "diagnostic-export"):
+        for scenario in ("host-execution", "native-ownership", "dsh-navigation", "cindy-navigation", "antigravity-status", "config-write", "lighting-control", "diagnostic-export"):
             started = int(time.time() * 1000)
             scenario_env = dict(env, MI_SYNTHETIC_SCENARIO=scenario)
             if scenario == "diagnostic-export":

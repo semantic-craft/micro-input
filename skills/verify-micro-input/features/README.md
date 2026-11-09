@@ -10,7 +10,7 @@
 ## 2. 驱动约定
 
 - 每个功能配方均从干净的隔离 `MI_DOCUMENT_DIR` 开始。
-- 优先使用合成场景驱动（`MI_SYNTHETIC_SCENARIO=host-execution`）与真实 UniFFI 桥接测试验证确定性行为，避免向宿主机当前前台编辑器乱发真实按键。
+- 优先使用合成场景驱动（`MI_SYNTHETIC_SCENARIO=host-execution`）与 Rust `mi-core` / C-ABI 桥接测试验证确定性行为，避免向宿主机当前前台编辑器乱发真实按键。
 - 每次运行结束后核对 `launcher.json` 确认 `.app` 副本已清理且 `evidence/` 保留。
 
 ## 3. 证据与跳过报告
@@ -19,8 +19,8 @@
   - 宿主执行与预设切换：`<run-dir>/evidence/audit.jsonl`（JSONL 格式的 `HostActionReceipt`）与 `<run-dir>/evidence/launcher.json`。
   - 汇总判定：`<run-dir>/evidence/result.json`（状态词仅限 `PASS` / `FAIL` / `BLOCKED` / `NOT_RUN` / `N/A`）。
 - **证据层级声明**：
-  - `synthetic-unit`：Rust `cargo test` / Swift `RecordingHostActionExecutor` 单元与桥接测试；
-  - `isolated-app-synthetic-hid`：完整 `Micro Input QA.app` 经真实 UniFFI 接收合成 64B HID 帧并输出 `audit.jsonl`；
+  - `synthetic-unit`：Rust `cargo test` / Swift `MicroInputTests` 单元与 C-ABI 桥接测试；
+  - `isolated-app-synthetic-hid`：完整 `Micro Input QA.app` 经 `mi-core` 与 `mi-ffi` 接收合成 64B HID 帧并输出 `audit.jsonl`；
   - `live-hardware-readonly`：`scripts/observe-input --observe-once` 45 秒实机只读物理采样（需连接 USB `303A:8298` 设备并由操作者按压按键，缺设备时标 `BLOCKED` 并注明原因）。
 
 ## 4. 功能列表
@@ -32,8 +32,6 @@
 | [2U 宽键合并防抖与透传层健康检查 (`wide-key-and-passthrough`)](wide-key-and-passthrough.md) | 底部宽键双开关 (`AG10`+`AG11` / `ACT10`+`ACT11`) 先后按下/释放；检查 `KV_OAI_AG*` / `KV_OAI_ACT*` 透传层状态 | 宽键重叠按压仅触发 1 次动作且 `logical-10`↔`logical-11` 对称回退；非透传层返回 `LayerDriftWarning` | 电容触摸切层的实机通知形态需连接实机核验 |
 
 - [径向菜单](radial-menu.md)：八向选择、冻结目标、一次确认与回中取消；合成输入和实体手感分开验收。
-
-- [ZCode 精确会话导航](zcode-navigation.md)：授权工作区元数据、完整身份导航和选中回读；合成、原生源码与安装版证据分开。
 
 - [Cindy 既有任务目录与导航确认](cindy-navigation.md)：受限工作区既有任务元数据桥、同名会话精确区分、账号/实例换代失效、`cindy://session/<sessionId>` 深链 `delivered` 与渲染端路由回读 `confirmed` 严格分离、不放宽 Local Agent API 隔离。
 
