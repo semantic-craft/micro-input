@@ -367,6 +367,7 @@ pub fn modifiers_to_cg_flags(modifiers: &[String]) -> u64 {
 pub fn bundle_id_for_adapter(adapter: &str) -> Option<&'static str> {
     match adapter.trim().to_ascii_lowercase().as_str() {
         "antigravity" => Some("com.google.antigravity"),
+        "cindy" => Some("com.xd.cindy"),
         "codex" => Some("com.openai.codex"),
         "dsh-desktop" | "dsh" | "deepseek" => Some("com.deepseek.dsh"),
         "herdr" => Some("dev.herdr.app"),
@@ -398,11 +399,11 @@ pub fn native_shortcut_for_agent_command(
         }
         ("antigravity", "split-right") => Some((0x02, mods(&["command"]))),
         (
-            "antigravity" | "dsh-desktop",
+            "antigravity" | "dsh-desktop" | "cindy",
             "prev-conversation" | "working-prev" | "completed-prev" | "attention-prev",
         ) => Some((0x7E, mods(&["option"]))),
         (
-            "antigravity" | "dsh-desktop",
+            "antigravity" | "dsh-desktop" | "cindy",
             "next-conversation" | "working-next" | "completed-next" | "attention-next",
         ) => Some((0x7D, mods(&["option"]))),
         ("dsh-desktop", "new-chat" | "new-or-stop") => Some((0x2D, mods(&["command"]))),
@@ -412,6 +413,10 @@ pub fn native_shortcut_for_agent_command(
         }
         ("dsh-desktop", "terminal") => Some((0x32, mods(&["control"]))),
         ("dsh-desktop", "browser") => Some((0x11, mods(&["command"]))),
+        ("cindy", "new-chat" | "new-or-stop") => Some((0x2D, mods(&["command"]))),
+        ("cindy", "search") => Some((0x03, mods(&["command"]))),
+        ("cindy", "effort" | "model") => Some((0x30, mods(&["shift"]))),
+        ("cindy", "terminal") => Some((0x32, mods(&["control"]))),
         ("codex", "new-chat" | "new-or-stop") => Some((0x2D, mods(&["command"]))),
         ("codex", "search") => Some((0x28, mods(&["command"]))),
         (_, "approve") => Some((KEY_CODE_RETURN, mods(&["command"]))),
@@ -1534,9 +1539,6 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 }
             }
             ResolvedHostAction::AgentCommand { adapter, command } => {
-                if !mi_model::host_router::is_supported_agent_command_adapter(adapter) {
-                    return make_receipt("blocked", "unsupported_agent_adapter".to_string());
-                }
                 if command == "submit" {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());

@@ -11,7 +11,7 @@
 
 ## 历史切片队列（A → E）
 
-A–R12 记录当时的范围和证据。当前支持以[四应用控制](designs/four-app-control.md)为准。
+A–R12 记录当时的范围和证据。当前支持以[桌面应用控制](designs/four-app-control.md)为准。
 
 ### [x] Slice A: 全景差距对表、防冲突护栏与接力机关就位
 - **Playbook**: `Investigation` + `Authoring or modifying a skill` (`encode-lessons-in-structure`)
@@ -49,14 +49,14 @@ A–R12 记录当时的范围和证据。当前支持以[四应用控制](design
 
 A–E 是第一轮通用交互迁移历史，不代表四款应用深度控制通过。2026-11-05 用户明确只做 Antigravity、Cindy、ZCode、桌面 DeepSeek Harness，并保留 Cindy 原生能力。上轮未开始的 F–K 由下列切片替代，不建立 Paseo 适配器，不强制复制 MCP/CLI 出口。
 
-当前源码入口见[四应用接口](four-app-interfaces.md)。当时的状态归 [#81](https://github.com/semantic-craft/micro-input/issues/81) 及责任票。各片状态由勾选与证据记录确认；软件、原生安装和实体结果分别验收。
+当前源码入口见[桌面应用接口](four-app-interfaces.md)。当时的状态归 [#81](https://github.com/semantic-craft/micro-input/issues/81) 及责任票。各片状态由勾选与证据记录确认；软件、原生安装和实体结果分别验收。
 
 ### [x] Slice F: 保留 Cindy 原生输入和灯光所有权
 - **Outcome**: 增加 Cindy 原生所有权的活跃握手和代次确认；原生持有期间暂停 Micro Input 重叠按键、PTT 与灯光，未知时保持暂停。
 - **Done Predicate**: 同一宽键/旋钮输入投递两端后业务动作仅一次；切 Profile、失联和旧代回调不双执行；不切换 Cindy 设备开关或改 keymap。 不能只看进程存在；失联标 unknown，移交其他应用前取得释放回执，未确认就不接管。 软件片须通过项目适用检查和 scripts/verify-offline；原生与实体结果单列。
 - **Depends on**: 无。责任票 #82。
 - **Evidence**: .scratch/qa-runs/1793813638607-83009/evidence/result.json
-- **Verification scope**: 软件片通过全量离线检查、Cindy 源码 187 项测试及完整类型检查、真实 UDS 双端配对 8 事件；安装版 Cindy、实体按键和灯光视觉为 NOT_RUN。补丁、恢复限制及重跑命令见 旧版集成文档（已退役，见 Git 历史）。
+- **Verification scope**: 软件片通过全量离线检查、Cindy 源码 187 项测试及完整类型检查、真实 UDS 双端配对 8 事件；安装版 Cindy、实体按键和灯光视觉为 NOT_RUN。补丁、恢复限制及重跑命令见 [Cindy 适配说明](../integrations/cindy/README.md)。
 
 ### [x] Slice G: 接通 ZCode 同实例状态与精确导航
 - **Outcome**: 通过最小桌面桥读取 v4 任务索引，在两个同名会话间准确打开目标。
@@ -294,3 +294,7 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Outcome**: 内置适配仅提供 Antigravity、Herdr、Codex、DeepSeek Harness。任意其他应用可用「其他软件」录制快捷键。旧专属会话桥和所有权握手退出运行路径。
 - **Done Predicate**: 新文档只有四套内置适配和一套通用方案；升级只清理可识别的旧内置预设；Codex 受保护层和通用快捷键行为有回归覆盖；`scripts/verify-offline` 通过。
 - **Evidence**: 99815e9; .scratch/four-desktop-adapters/result.json (verify-offline PASS; six isolated scenarios)
+
+### [ ] Slice R14: 恢复 Cindy 内置适配
+- **Outcome**: 恢复 Cindy 预设、会话桥和所有权协调，保留其他四款内置适配以及「其他软件」的逐键快捷键。
+- **Done Predicate**: `scripts/verify-offline` 的八个隔离场景通过，包含 Cindy 导航与原生所有权切换；不改写实体键盘映射。

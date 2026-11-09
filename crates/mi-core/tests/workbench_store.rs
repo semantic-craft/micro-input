@@ -12,7 +12,7 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
 
     assert!(
         store.has_all_desktop_agent_presets(),
-        "initial isolated store must install all 5 canonical desktop agent presets"
+        "initial isolated store must install all 6 canonical desktop agent presets"
     );
 
     let expected_display_names = [
@@ -20,6 +20,7 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
         "Codex",
         "Deepseek Harness",
         "Herdr",
+        "Cindy",
         "其他软件",
     ];
     let actual_display_names: Vec<&str> = store
@@ -34,6 +35,7 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
         "Codex",
         "DeepSeek Coder (DSH)",
         "Herdr",
+        "Cindy",
         "其他软件",
     ];
     let actual_raw_names: Vec<&str> = store
@@ -55,7 +57,7 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
     assert_eq!(
         store.status_message(),
         "已就绪",
-        "prepare_desktop_profiles must be idempotent and never clobber ready status when all 5 presets exist"
+        "prepare_desktop_profiles must be idempotent and never clobber ready status when all 6 presets exist"
     );
     assert_eq!(store.projection().document_revision, rev_before);
 }
@@ -70,9 +72,9 @@ fn switching_across_all_canonical_profiles_stays_under_two_milliseconds_with_zer
         .iter()
         .map(|row| row.profile_id.clone())
         .collect();
-    assert_eq!(profile_ids.len(), 5);
+    assert_eq!(profile_ids.len(), 6);
 
-    let mut samples_us: Vec<u128> = Vec::with_capacity(35);
+    let mut samples_us: Vec<u128> = Vec::with_capacity(42);
     let mut completed_switches = 0usize;
     let mut error_count = 0usize;
 
@@ -114,12 +116,12 @@ fn switching_across_all_canonical_profiles_stays_under_two_milliseconds_with_zer
     let min_us = samples_us[0];
     let max_us = *samples_us.last().unwrap();
     println!(
-        "BENCHMARK_SWITCH_5_PROFILES rounds=7 switches={completed_switches} errors={error_count} median_us={median_us} range_us={min_us}..={max_us} banner_flashes={}",
+        "BENCHMARK_SWITCH_6_PROFILES rounds=7 switches={completed_switches} errors={error_count} median_us={median_us} range_us={min_us}..={max_us} banner_flashes={}",
         store.banner_flash_count()
     );
 
     assert_eq!(error_count, 0);
-    assert_eq!(completed_switches, 35);
+    assert_eq!(completed_switches, 42);
     assert_eq!(store.banner_flash_count(), 0);
 }
 
@@ -205,7 +207,7 @@ fn custom_profiles_filter_crud_undo_redo_and_preset_roundtrip_work_without_ffi()
         store.projection().sidebar.show_other_profiles,
         "creating a custom profile must automatically reveal non-canonical profiles"
     );
-    assert_eq!(store.sidebar_rows().len(), 6);
+    assert_eq!(store.sidebar_rows().len(), 7);
     let custom_id = store
         .sidebar_rows()
         .iter()
@@ -217,11 +219,11 @@ fn custom_profiles_filter_crud_undo_redo_and_preset_roundtrip_work_without_ffi()
     store.set_show_other_profiles(false);
     assert_eq!(
         store.sidebar_rows().len(),
-        5,
-        "hiding other profiles must leave only the 5 canonical profiles visible"
+        6,
+        "hiding other profiles must leave only the 6 canonical profiles visible"
     );
     store.set_show_other_profiles(true);
-    assert_eq!(store.sidebar_rows().len(), 6);
+    assert_eq!(store.sidebar_rows().len(), 7);
 
     store
         .apply_profile_command(ProfileCommand::Rename {
@@ -260,7 +262,7 @@ fn custom_profiles_filter_crud_undo_redo_and_preset_roundtrip_work_without_ffi()
             profile_id: custom_id,
         })
         .unwrap();
-    assert_eq!(store.sidebar_rows().len(), 5);
+    assert_eq!(store.sidebar_rows().len(), 6);
 
     store
         .apply_backup_command(BackupCommand::ImportPreset { text: exported })
@@ -269,46 +271,216 @@ fn custom_profiles_filter_crud_undo_redo_and_preset_roundtrip_work_without_ffi()
 }
 
 #[test]
-fn codex_protected_profile_routes_keys_locally_only_when_enabled() {
-    use mi_session::{InputEvent, InputEventKind};
+fn live_ownership_socket_handshake_reconciles_ready_and_native_held_banners_on_profile_switch() {
+    use mi_core::WorkbenchStoreConfig;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
 
     let temp = TempDir::new().unwrap();
-    let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
-    let codex = store
+    let sock_path = std::path::PathBuf::from("/tmp").join(format!(
+        "mi-own-{}-{}.sock",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&sock_path);
+    let listener = UnixListener::bind(&sock_path).unwrap();
+    std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let server_thread = std::thread::spawn(move || {
+        let native_inst = "11111111-2222-3333-4444-555555555555";
+        for stream in listener.incoming().take(3) {
+            let mut stream = stream.unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let desired = req["desiredOwner"].as_str().unwrap_or("native");
+            let (state, reason, input_drained, ptt_drained) = if desired == "micro-input" {
+                ("unknown", "native_drain_unconfirmed", false, false)
+            } else {
+                ("native", "desired_native", false, false)
+            };
+            let reply = serde_json::json!({
+                "version": 1,
+                "requestId": req["requestId"],
+                "clientInstance": req["clientInstance"],
+                "generation": req["generation"],
+                "nativeInstance": native_inst,
+                "nativeGeneration": 1,
+                "state": state,
+                "reason": reason,
+                "inputDrained": input_drained,
+                "pttDrained": ptt_drained,
+                "lightingDrained": true,
+                "capabilities": ["fenced-release-v1"]
+            });
+            let mut bytes = serde_json::to_vec(&reply).unwrap();
+            bytes.push(b'\n');
+            stream.write_all(&bytes).unwrap();
+        }
+    });
+
+    let mut cfg = WorkbenchStoreConfig::isolated(temp.path());
+    cfg.isolated = false;
+    cfg.allow_unbridged_desktop = true;
+    cfg.ownership_socket_path = Some(sock_path.clone());
+
+    let mut store = WorkbenchStore::open(cfg).unwrap();
+    assert_eq!(
+        store.projection().header.banner,
+        OwnershipBannerState::Ready {
+            summary: "Cindy 已确认释放".to_string()
+        }
+    );
+
+    let codex_id = store
         .find_canonical_profile_id(CanonicalAgent::Codex)
         .unwrap();
-    store.select_and_activate_profile(&codex).unwrap();
-    assert!(store.is_selected_layer_protected());
+    store.select_and_activate_profile(&codex_id).unwrap();
+    assert_eq!(
+        store.projection().header.banner,
+        OwnershipBannerState::NativeHeld {
+            summary: "Cindy 原生持有，Micro Input 按键、听写与灯光暂停".to_string()
+        }
+    );
 
-    let event = InputEvent {
-        session_id: 1,
-        sequence: 1,
-        ingress_sequence: 1,
-        radial_center: None,
-        radial_position: None,
-        timestamp_ms: 0,
-        kind: InputEventKind::Pressed,
-        logical_switch: Some("logical-0".into()),
-        binding_id: Some("AG00".into()),
-        physical_control: None,
-        keycap_group: None,
-        action_role: None,
-        lost_count: 0,
-        action_eligible: true,
-    };
-    store.set_host_execution_enabled(false).unwrap();
-    assert!(store
-        .consume_physical_input_event(event.clone(), Instant::now())
-        .is_none());
-
-    store.set_host_execution_enabled(true).unwrap();
-    let receipt = store
-        .consume_physical_input_event(event, Instant::now())
+    let ag_id = store
+        .find_canonical_profile_id(CanonicalAgent::Antigravity)
         .unwrap();
-    assert_eq!(receipt.profile_id, codex);
-    assert_eq!(receipt.action_type, "open_app");
-    assert_eq!(receipt.target, "com.openai.codex");
-    assert_eq!(receipt.outcome, "simulated");
+    store.select_and_activate_profile(&ag_id).unwrap();
+    assert_eq!(
+        store.projection().header.banner,
+        OwnershipBannerState::Ready {
+            summary: "Cindy 已确认释放".to_string()
+        }
+    );
+
+    server_thread.join().unwrap();
+    let _ = std::fs::remove_file(&sock_path);
+    let mut fence_os = sock_path.into_os_string();
+    fence_os.push(".fence");
+    let _ = std::fs::remove_file(std::path::PathBuf::from(fence_os));
+}
+
+#[test]
+fn live_ownership_slow_drain_defers_to_background_and_completes_on_poll() {
+    use mi_core::WorkbenchStoreConfig;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+    use std::time::{Duration, Instant};
+
+    let temp = TempDir::new().unwrap();
+    let sock_path = std::path::PathBuf::from("/tmp").join(format!(
+        "mi-slow-{}-{}.sock",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&sock_path);
+    let listener = UnixListener::bind(&sock_path).unwrap();
+    std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let server_thread = std::thread::spawn(move || {
+        let native_inst = "11111111-2222-3333-4444-555555555555";
+        for (idx, stream) in listener.incoming().take(3).enumerate() {
+            let mut stream = stream.unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let desired = req["desiredOwner"].as_str().unwrap_or("native");
+            if idx == 2 && desired == "micro-input" {
+                std::thread::sleep(Duration::from_millis(120));
+            }
+            let (state, reason) = if desired == "micro-input" {
+                ("unknown", "native_drain_unconfirmed")
+            } else {
+                ("unknown", "native_state_unconfirmed")
+            };
+            let reply = serde_json::json!({
+                "version": 1,
+                "requestId": req["requestId"],
+                "clientInstance": req["clientInstance"],
+                "generation": req["generation"],
+                "nativeInstance": native_inst,
+                "nativeGeneration": 1,
+                "state": state,
+                "reason": reason,
+                "inputDrained": false,
+                "pttDrained": false,
+                "lightingDrained": desired == "micro-input",
+                "capabilities": ["fenced-release-v1"]
+            });
+            let mut bytes = serde_json::to_vec(&reply).unwrap();
+            bytes.push(b'\n');
+            stream.write_all(&bytes).unwrap();
+        }
+    });
+
+    let mut cfg = WorkbenchStoreConfig::isolated(temp.path());
+    cfg.isolated = false;
+    cfg.allow_unbridged_desktop = true;
+    cfg.ownership_socket_path = Some(sock_path.clone());
+
+    let mut store = WorkbenchStore::open(cfg).unwrap();
+    let codex_id = store
+        .find_canonical_profile_id(CanonicalAgent::Codex)
+        .unwrap();
+    store.select_and_activate_profile(&codex_id).unwrap();
+    assert_eq!(
+        store.projection().header.banner,
+        OwnershipBannerState::NativeHeld {
+            summary: "Cindy 原生持有，Micro Input 按键、听写与灯光暂停".to_string()
+        }
+    );
+
+    let ag_id = store
+        .find_canonical_profile_id(CanonicalAgent::Antigravity)
+        .unwrap();
+    let switch_start = Instant::now();
+    store.select_and_activate_profile(&ag_id).unwrap();
+    let switch_elapsed = switch_start.elapsed();
+    assert!(
+        switch_elapsed < Duration::from_millis(45),
+        "expected fast non-blocking switch (<45ms), got {switch_elapsed:?}"
+    );
+    assert_eq!(
+        store.projection().header.banner,
+        OwnershipBannerState::Ready {
+            summary: "Cindy 已确认释放".to_string()
+        }
+    );
+
+    // Wait for background stream reply and drain hardware events
+    let wait_start = Instant::now();
+    while !store.poll_hardware_events() && wait_start.elapsed() < Duration::from_millis(500) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        store.projection().header.banner,
+        OwnershipBannerState::Ready {
+            summary: "Cindy 已确认释放".to_string()
+        }
+    );
+
+    // Subsequent switches between micro-input profiles should not re-poll socket
+    let herdr_id = store
+        .find_canonical_profile_id(CanonicalAgent::Herdr)
+        .unwrap();
+    let switch2_start = Instant::now();
+    store.select_and_activate_profile(&herdr_id).unwrap();
+    assert!(switch2_start.elapsed() < Duration::from_millis(5));
+
+    server_thread.join().unwrap();
+    let _ = std::fs::remove_file(&sock_path);
+    let mut fence_os = sock_path.into_os_string();
+    fence_os.push(".fence");
+    let _ = std::fs::remove_file(std::path::PathBuf::from(fence_os));
 }
 
 #[test]

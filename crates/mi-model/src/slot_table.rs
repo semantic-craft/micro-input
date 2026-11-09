@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn sync_recent_populates_unpinned_slots_without_displacing_pinned_slots() {
         let mut table = SlotTable::new();
-        let pinned_target = NavigationPlace::antigravity("sess-pinned", "/ws");
+        let pinned_target = NavigationPlace::cindy("/ws", "sess-pinned");
         table
             .pin(0, pinned_target.clone(), "Pinned Task", 500)
             .unwrap();

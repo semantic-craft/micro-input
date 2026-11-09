@@ -2,7 +2,7 @@
 
 本项目以 [#44](https://github.com/semantic-craft/micro-input/issues/44) 作为五项交付范围的唯一工单入口。每次接续先核对 `main`、现有 PR、工单、安装版和验收证据，再领取下一项可执行工作。工单关闭、源码合并、安装和真人验收分别登记。
 
-当前适配范围见[四应用控制](designs/four-app-control.md)。Paseo 只作能力参照。用户自建 Profile 可通过通用快捷键控制其他应用。设备写入仍遵守各自证据与授权。
+当前适配范围见[桌面应用控制](designs/four-app-control.md)。Paseo 只作能力参照。用户自建 Profile 可通过通用快捷键控制其他应用。设备写入仍遵守各自证据与授权。
 
 ## 五项都要完成
 

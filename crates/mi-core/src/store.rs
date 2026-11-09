@@ -47,7 +47,8 @@ use crate::{
     },
 };
 use mi_bridge::{
-    FourAppAgentPhase, FourAppLightingArbiter, FourAppVoiceManager, PushToTalkController,
+    FourAppAgentPhase, FourAppLightingArbiter, FourAppVoiceManager, NativeOwnershipController,
+    PushToTalkController, UnixNativeOwnershipTransport,
 };
 use mi_macos::{
     executor::APPLE_FN_KEY_CODE, AppBundleCache, AppBundleInfo, HostActionReceipt, HostOsDriver,
@@ -118,6 +119,10 @@ pub enum HardwareLoopEvent {
         session_id: u64,
     },
     DiscoveryChanged,
+    OwnershipReply {
+        request: mi_bridge::NativeOwnershipRequest,
+        reply: Option<mi_bridge::NativeOwnershipReply>,
+    },
     HardwareAutoAccepted {
         session_id: u64,
         receipt: HardwareAutoAcceptanceReceipt,
@@ -132,13 +137,17 @@ pub enum WorkbenchError {
     Routing(String),
     #[error("{0}")]
     Preset(String),
-    #[error("受保护宿主层（Codex）已锁定，不支持修改按键、预设或灯光")]
+    #[error("{0}")]
+    Ownership(String),
+    #[error("受保护宿主层（ChatGPT / Codex / Cindy）已锁定，不支持修改按键、预设或灯光")]
     ProtectedLayerLocked,
 }
 
 #[derive(Clone)]
 pub struct WorkbenchStoreConfig {
     pub document_dir: PathBuf,
+    pub ownership_socket_path: Option<PathBuf>,
+    pub allow_unbridged_desktop: bool,
     pub auto_connect_usb: bool,
     pub isolated: bool,
     pub app_cache: Arc<AppBundleCache>,
@@ -155,8 +164,11 @@ impl WorkbenchStoreConfig {
                     .map(|home| PathBuf::from(home).join("Library/Application Support/MicroInput"))
             })
             .unwrap_or_else(|| PathBuf::from(".micro-input"));
+        let ownership_socket_path = Some(document_dir.join("cindy-ownership.sock"));
         Self {
             document_dir,
+            ownership_socket_path,
+            allow_unbridged_desktop: true,
             auto_connect_usb: true,
             isolated: false,
             app_cache: Arc::new(AppBundleCache::new()),
@@ -180,6 +192,8 @@ impl WorkbenchStoreConfig {
         })));
         Self {
             document_dir,
+            ownership_socket_path: None,
+            allow_unbridged_desktop: false,
             auto_connect_usb: false,
             isolated: true,
             app_cache,
@@ -294,6 +308,7 @@ impl Default for WorkbenchProjection {
 pub struct WorkbenchStore {
     pub config: WorkbenchStoreConfig,
     pub document_store: DocumentStore,
+    pub native_ownership: NativeOwnershipController,
     pub voice_manager: FourAppVoiceManager,
     pub ptt_controller: PushToTalkController,
     pub lighting_arbiter: FourAppLightingArbiter,
@@ -380,6 +395,15 @@ impl WorkbenchStore {
                 .map_err(WorkbenchError::Storage)?;
         }
 
+        let native_ownership = if config.isolated {
+            NativeOwnershipController::new_isolated()
+        } else {
+            let transport = config
+                .ownership_socket_path
+                .as_ref()
+                .map(UnixNativeOwnershipTransport::new);
+            NativeOwnershipController::new(transport, config.allow_unbridged_desktop)
+        };
         let app_cache = config.app_cache.clone();
         let panel_host = config.panel_host.clone();
         let status_item_host = config.status_item_host.clone();
@@ -396,6 +420,7 @@ impl WorkbenchStore {
         let mut store = Self {
             config,
             document_store,
+            native_ownership,
             voice_manager: FourAppVoiceManager::new(),
             ptt_controller: PushToTalkController::new_simulated(),
             lighting_arbiter: FourAppLightingArbiter::new(),
@@ -634,6 +659,7 @@ impl WorkbenchStore {
                     "connected": self.device_session.is_some(),
                     "document_revision": self.document_store.draft.revision,
                     "host_revision": self.document_store.host_revision(),
+                    "ownership_summary": self.native_ownership.summary(),
                 });
                 if let Ok(bytes) = serde_json::to_vec_pretty(&report) {
                     let _ = fs::write(&diag_path, bytes);
@@ -876,6 +902,15 @@ impl WorkbenchStore {
                 }
                 None
             }
+            HardwareLoopEvent::OwnershipReply { request, reply } => {
+                match reply {
+                    Some(r) => self.native_ownership.receive_at(r, &request, now),
+                    None => self.native_ownership.failed(&request),
+                }
+                self.refresh_four_app_lighting();
+                self.rebuild_projection();
+                None
+            }
             HardwareLoopEvent::HardwareAutoAccepted {
                 session_id,
                 receipt,
@@ -983,7 +1018,7 @@ impl WorkbenchStore {
                     if p.name.trim() != *canonical_name {
                         return false;
                     }
-                    if *canonical_name == "Codex" {
+                    if matches!(*canonical_name, "Cindy" | "Codex") {
                         return p
                             .layer_order
                             .iter()
@@ -1002,11 +1037,7 @@ impl WorkbenchStore {
     }
 
     pub fn prepare_desktop_profiles(&mut self) -> Result<(), WorkbenchError> {
-        if self.has_all_desktop_agent_presets()
-            && !mi_model::preset::has_retired_desktop_agent_preset(
-                &self.document_store.draft.document,
-            )
-        {
+        if self.has_all_desktop_agent_presets() {
             return Ok(());
         }
         self.document_store
@@ -1023,8 +1054,17 @@ impl WorkbenchStore {
             if agent.is_manual_fallback() {
                 continue;
             }
-            if let Some(pid) = self.find_canonical_profile_id(agent) {
-                canonical_ids.push((agent, pid));
+            if let Some((pid, _)) = self
+                .document_store
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, p)| CanonicalAgent::from_profile_name(&p.name) == Some(agent))
+            {
+                canonical_ids.push((agent, pid.clone()));
             }
         }
 
@@ -1039,25 +1079,11 @@ impl WorkbenchStore {
             }
         }
 
-        let profiles = &self
-            .document_store
-            .host_store()
-            .draft
-            .document
-            .editable
-            .graph
-            .profiles;
-        let stale_links: Vec<_> = self
-            .app_profile_links
-            .iter()
-            .filter(|(bundle, pid)| bundle.as_str() == "*" || !profiles.contains_key(*pid))
-            .map(|(bundle, _)| bundle.clone())
-            .collect();
-        for bundle_id in stale_links {
+        if self.app_profile_links.contains_key("*") {
             self.apply_routing_operation(RoutingOperation::Remove {
-                bundle_id: bundle_id.clone(),
+                bundle_id: "*".to_string(),
             })?;
-            self.app_profile_links.remove(&bundle_id);
+            self.app_profile_links.remove("*");
         }
 
         Ok(())
@@ -1306,6 +1332,7 @@ impl WorkbenchStore {
         self.selected_profile_id = Some(profile_id.to_string());
         self.selected_layer_id = first_layer_id;
         self.normalize_surface_for_current_layer();
+        self.reconcile_ownership_for_profile(profile_id, now);
         self.last_switch_duration = started.elapsed();
         self.refresh_four_app_lighting();
         if emit_hud_notice && !self.overlay_controller.is_cheat_sheet_visible() {
@@ -1378,6 +1405,7 @@ impl WorkbenchStore {
             .get(&target_pid)
             .and_then(|p| p.layer_order.first().cloned());
         self.normalize_surface_for_current_layer();
+        self.reconcile_ownership_for_profile(&target_pid, started);
         self.last_switch_duration = started.elapsed();
         self.refresh_four_app_lighting();
         if !self.overlay_controller.is_cheat_sheet_visible() {
@@ -2182,6 +2210,7 @@ impl WorkbenchStore {
     }
 
     fn refresh_four_app_lighting(&mut self) {
+        self.ensure_live_ownership_fresh();
         let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
         let snapshots = self.slot_table.lighting_snapshots(&acks);
         let live_phase = self.derive_live_lighting_phase(&acks);
@@ -2198,6 +2227,7 @@ impl WorkbenchStore {
             live_phase,
             &snapshots,
             false,
+            &self.native_ownership,
             is_protected,
             false,
             is_split,
@@ -2408,6 +2438,9 @@ impl WorkbenchStore {
                 .get(pid)
                 .and_then(|p| p.layer_order.first().cloned())
         });
+        if let Some(pid) = &initial_pid {
+            self.reconcile_ownership_for_profile(pid, Instant::now());
+        }
         Ok(())
     }
 
@@ -2441,6 +2474,67 @@ impl WorkbenchStore {
             .get(profile_id)
             .and_then(|p| p.layer_order.first())
             .is_some_and(|lid| doc.is_protected_oai_layer(lid))
+    }
+
+    fn poll_ownership_fast_or_spawn(&mut self, micro_drained: bool, now: Instant) {
+        if let Some((request, stream)) = self.native_ownership.poll_fast_or_defer_at(
+            micro_drained,
+            now,
+            Duration::from_millis(12),
+        ) {
+            let tx = self.hardware_event_tx.clone();
+            std::thread::spawn(move || {
+                let reply = UnixNativeOwnershipTransport::finish_stream_reply(
+                    stream,
+                    4096,
+                    Duration::from_millis(950),
+                )
+                .ok();
+                let _ = tx.send(HardwareLoopEvent::OwnershipReply { request, reply });
+            });
+        }
+    }
+
+    fn reconcile_ownership_for_profile(&mut self, profile_id: &str, now: Instant) {
+        let is_protected = self.is_protected_oai_profile(profile_id);
+        let desired = if is_protected {
+            "native"
+        } else {
+            "micro-input"
+        };
+        if self.native_ownership.desired_owner() != desired {
+            self.native_ownership.set_desired_owner_at(desired, now);
+            self.poll_ownership_fast_or_spawn(true, now);
+        } else if self.config.isolated && desired == "micro-input" {
+            self.native_ownership
+                .invalidate_at("配置已切换，等待当前代回执", true, now);
+            self.native_ownership.poll_once_at(true, now);
+        } else {
+            self.ensure_live_ownership_fresh();
+        }
+    }
+
+    fn ensure_live_ownership_fresh(&mut self) {
+        if self.config.isolated || self.selected_profile_id.is_none() {
+            return;
+        }
+        self.native_ownership.reconcile_unbridged_transition();
+        if self.native_ownership.is_unbridged_desktop_active()
+            || self.native_ownership.has_pending_request()
+        {
+            return;
+        }
+        let needs_poll = if self.native_ownership.desired_owner() == "micro-input" {
+            !self.native_ownership.allows_execution()
+        } else {
+            !matches!(
+                self.native_ownership.state(),
+                mi_bridge::OwnershipState::Native { .. }
+            )
+        };
+        if needs_poll {
+            self.poll_ownership_fast_or_spawn(true, Instant::now());
+        }
     }
 
     fn compute_sidebar_rows(&self) -> Vec<SidebarProfileRow> {
@@ -2966,6 +3060,7 @@ impl WorkbenchStore {
     }
 
     fn rebuild_projection(&mut self) {
+        self.ensure_live_ownership_fresh();
         self.sync_modal_for_layer_protection();
         let rows = self.compute_sidebar_rows();
         let active_host_id = self.document_store.host_active_profile_id();
@@ -2974,7 +3069,8 @@ impl WorkbenchStore {
             .or(self.selected_profile_id.as_deref())
             .is_some_and(|pid| self.is_protected_oai_profile(pid));
 
-        let ownership_banner = OwnershipBannerState::evaluate(is_protected_active);
+        let ownership_banner =
+            OwnershipBannerState::evaluate(&self.native_ownership, is_protected_active);
         let editing_device = self.document_store.editing_device();
         let can_edit_draft =
             !self.document_store.draft.read_only && self.document_store.draft.loaded_format == 2;
@@ -3204,6 +3300,7 @@ impl WorkbenchStore {
             CanonicalAgent::Codex => Some("codex".to_string()),
             CanonicalAgent::DeepseekHarness => Some("dsh-desktop".to_string()),
             CanonicalAgent::Herdr => Some("herdr".to_string()),
+            CanonicalAgent::Cindy => Some("cindy".to_string()),
             CanonicalAgent::OtherApps => None,
         }
     }
@@ -3723,7 +3820,10 @@ impl WorkbenchStore {
         );
         let captured_confirm = self.radial_state.captures_confirm() && is_enc_clk;
 
+        self.ensure_live_ownership_fresh();
         let gates_ok = self.document_store.host_execution_enabled()
+            && (self.native_ownership.allows_execution()
+                || self.native_ownership.is_transient_reconfirming())
             && !self.ptt_controller.is_active
             && self.ptt_controller.cleanup_confirmed
             && self.radial_readiness == RadialInputReadiness::Ready
@@ -4138,15 +4238,12 @@ impl WorkbenchStore {
             return Some(resolved);
         }
         let profile = doc.editable.graph.profiles.get(profile_id)?;
-        if !self.is_protected_oai_profile(profile_id)
-            || !profile
-                .name
-                .trim()
-                .eq_ignore_ascii_case(CanonicalAgent::Codex.profile_name())
+        if self.native_ownership.is_unbridged_desktop_active()
+            || self.native_ownership.allows_execution()
         {
-            return None;
+            return fallback_unbridged_oai_action(&profile.name, binding_id, layout);
         }
-        protected_codex_action(binding_id, layout)
+        None
     }
 
     pub fn consume_physical_input_event(
@@ -4264,8 +4361,16 @@ impl WorkbenchStore {
                     _ => {}
                 }
 
+                self.ensure_live_ownership_fresh();
                 if !self.document_store.host_execution_enabled() {
                     self.status_message = format!("已按下 {binding_id}（快捷键映射已暂停）");
+                    self.rebuild_projection();
+                    return None;
+                }
+                if !self.native_ownership.allows_execution()
+                    && !self.native_ownership.is_transient_reconfirming()
+                {
+                    self.status_message = format!("已按下 {binding_id}（原生客户端正占用硬件）");
                     self.rebuild_projection();
                     return None;
                 }
@@ -6463,29 +6568,95 @@ fn bundle_id_for_place(place: &NavigationPlace) -> &str {
     }
 }
 
-fn protected_codex_action(binding_id: &str, layout: BottomRowLayout) -> Option<ResolvedHostAction> {
-    let command = match binding_id.trim().to_ascii_uppercase().as_str() {
-        "AG00" => {
-            return Some(ResolvedHostAction::OpenApp {
-                bundle_id: CanonicalAgent::Codex.bundle_id().to_owned(),
-            });
-        }
-        "AG01" => "new-chat",
-        "AG02" => "search",
-        "AG03" => "effort",
-        "AG05" => "terminal",
-        "AG10" if layout == BottomRowLayout::Split => "focus-input",
-        "AG10" | "AG11" => "push-to-talk",
-        "AG12" | "JS_CLK" => "submit",
-        "AG13" | "ENC_CCW" => "scroll-up",
-        "AG14" | "ENC_CW" => "scroll-down",
-        "ENC_CLK" => "scroll-to-bottom",
-        _ => return None,
+fn fallback_unbridged_oai_action(
+    profile_name: &str,
+    binding_id: &str,
+    layout: BottomRowLayout,
+) -> Option<ResolvedHostAction> {
+    let normalized = binding_id.trim().to_ascii_uppercase();
+    let effective = if layout == BottomRowLayout::Merged && normalized == "AG11" {
+        "AG10"
+    } else {
+        normalized.as_str()
     };
-    Some(ResolvedHostAction::AgentCommand {
-        adapter: "codex".to_owned(),
-        command: command.to_owned(),
-    })
+    let (adapter, bundle_id) = if profile_name.eq_ignore_ascii_case("Codex") {
+        ("codex", "com.openai.codex")
+    } else if profile_name.eq_ignore_ascii_case("Cindy")
+        || profile_name.eq_ignore_ascii_case("ChatGPT")
+    {
+        ("cindy", CanonicalAgent::Cindy.bundle_id())
+    } else {
+        return None;
+    };
+    match effective {
+        "AG00" => Some(ResolvedHostAction::OpenApp {
+            bundle_id: bundle_id.to_string(),
+        }),
+        "AG01" => Some(ResolvedHostAction::AgentCommand {
+            adapter: adapter.to_string(),
+            command: "new-chat".to_string(),
+        }),
+        "AG02" => Some(ResolvedHostAction::AgentCommand {
+            adapter: adapter.to_string(),
+            command: "search".to_string(),
+        }),
+        "AG03" => Some(ResolvedHostAction::AgentCommand {
+            adapter: adapter.to_string(),
+            command: if adapter == "codex" {
+                "effort".to_string()
+            } else {
+                "model".to_string()
+            },
+        }),
+        "AG05" if adapter == "codex" => Some(ResolvedHostAction::AgentCommand {
+            adapter: "codex".to_string(),
+            command: "terminal".to_string(),
+        }),
+        "AG10" => Some(ResolvedHostAction::AgentCommand {
+            adapter: adapter.to_string(),
+            command: if layout == BottomRowLayout::Merged {
+                "push-to-talk".to_string()
+            } else {
+                "focus-input".to_string()
+            },
+        }),
+        "AG11" => Some(ResolvedHostAction::AgentCommand {
+            adapter: adapter.to_string(),
+            command: "push-to-talk".to_string(),
+        }),
+        "AG12" | "JS_CLK" => Some(ResolvedHostAction::AgentCommand {
+            adapter: adapter.to_string(),
+            command: "submit".to_string(),
+        }),
+        "AG13" | "ENC_CCW" => Some(ResolvedHostAction::AgentCommand {
+            adapter: adapter.to_string(),
+            command: "scroll-up".to_string(),
+        }),
+        "AG14" | "ENC_CW" => Some(ResolvedHostAction::AgentCommand {
+            adapter: adapter.to_string(),
+            command: "scroll-down".to_string(),
+        }),
+        "ENC_CLK" => Some(ResolvedHostAction::AgentCommand {
+            adapter: adapter.to_string(),
+            command: "scroll-to-bottom".to_string(),
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod protected_profile_tests {
+    use super::*;
+
+    #[test]
+    fn cindy_fallback_open_targets_cindy_desktop() {
+        assert_eq!(
+            fallback_unbridged_oai_action("Cindy", "AG00", BottomRowLayout::Split),
+            Some(ResolvedHostAction::OpenApp {
+                bundle_id: "com.xd.cindy".to_owned(),
+            })
+        );
+    }
 }
 
 fn parse_hex_rgb(hex: &str) -> Option<u32> {

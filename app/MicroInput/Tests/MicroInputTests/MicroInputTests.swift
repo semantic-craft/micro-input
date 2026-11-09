@@ -19,15 +19,15 @@ final class MicroInputTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let store = CoreStore(isolatedDirectory: dir.path)
-        XCTAssertEqual(store.model.sidebarRows.count, 5)
+        XCTAssertEqual(store.model.sidebarRows.count, 6)
         XCTAssertEqual(store.model.selectedDisplayName, "Antigravity")
         XCTAssertEqual(store.model.keycapCells.count, 13)
         XCTAssertNil(store.model.protectedLock)
 
-        let codexRow = try XCTUnwrap(store.model.sidebarRows.first(where: { $0.rawName == "Codex" }))
-        XCTAssertTrue(codexRow.isProtectedOai)
-        store.dispatch("sidebar", ["SelectProfile": codexRow.profileId])
-        XCTAssertEqual(store.model.selectedDisplayName, "Codex")
+        let cindyRow = try XCTUnwrap(store.model.sidebarRows.first(where: { $0.rawName == "Cindy" }))
+        XCTAssertTrue(cindyRow.isProtectedOai)
+        store.dispatch("sidebar", ["SelectProfile": cindyRow.profileId])
+        XCTAssertEqual(store.model.selectedDisplayName, "Cindy")
         XCTAssertTrue(store.model.isProtectedLayer)
         XCTAssertEqual(store.model.protectedLock?.isLocked, true)
 
@@ -129,7 +129,7 @@ final class MicroInputTests: XCTestCase {
             "domain": "foreground_app_changed",
             "action": ["bundle_id": NSNull()]
         ])
-        XCTAssertEqual(store.model.sidebarRows.count, 5)
+        XCTAssertEqual(store.model.sidebarRows.count, 6)
 
         store.dispatch("device", "OpenReconnectComparison")
         guard case .reconnectComparison = store.model.activeModal else {

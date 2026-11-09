@@ -1,3 +1,4 @@
+use mi_bridge::{NativeOwnershipController, OwnershipState};
 use mi_model::host_router::canonical_desktop_agent_rank;
 use serde::{Deserialize, Serialize};
 
@@ -8,15 +9,17 @@ pub enum CanonicalAgent {
     Codex = 1,
     DeepseekHarness = 2,
     Herdr = 3,
-    OtherApps = 4,
+    Cindy = 4,
+    OtherApps = 5,
 }
 
 impl CanonicalAgent {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Antigravity,
         Self::Codex,
         Self::DeepseekHarness,
         Self::Herdr,
+        Self::Cindy,
         Self::OtherApps,
     ];
 
@@ -30,6 +33,7 @@ impl CanonicalAgent {
             Self::Codex => "Codex",
             Self::DeepseekHarness => "DeepSeek Coder (DSH)",
             Self::Herdr => "Herdr",
+            Self::Cindy => "Cindy",
             Self::OtherApps => "其他软件",
         }
     }
@@ -40,6 +44,7 @@ impl CanonicalAgent {
             Self::Codex => "Codex",
             Self::DeepseekHarness => "Deepseek Harness",
             Self::Herdr => "Herdr",
+            Self::Cindy => "Cindy",
             Self::OtherApps => "其他软件",
         }
     }
@@ -50,6 +55,7 @@ impl CanonicalAgent {
             Self::Codex => "com.openai.codex",
             Self::DeepseekHarness => "com.deepseek.dsh",
             Self::Herdr => "dev.herdr.app",
+            Self::Cindy => "com.xd.cindy",
             Self::OtherApps => "*",
         }
     }
@@ -60,12 +66,17 @@ impl CanonicalAgent {
             Self::Codex => "CX",
             Self::DeepseekHarness => "DS",
             Self::Herdr => "HD",
+            Self::Cindy => "CD",
             Self::OtherApps => "通用",
         }
     }
 
     pub const fn is_manual_fallback(self) -> bool {
         matches!(self, Self::OtherApps)
+    }
+
+    pub const fn is_native_oai_default(self) -> bool {
+        matches!(self, Self::Codex | Self::Cindy)
     }
 
     pub fn from_profile_name(name: &str) -> Option<Self> {
@@ -136,15 +147,18 @@ pub enum OwnershipBannerState {
 }
 
 impl OwnershipBannerState {
-    pub fn evaluate(is_protected_active_profile: bool) -> Self {
-        if is_protected_active_profile {
-            Self::NativeHeld {
-                summary: "受保护宿主层 · 按键编辑与灯光不可用".into(),
-            }
+    pub fn evaluate(
+        ownership: &NativeOwnershipController,
+        is_protected_active_profile: bool,
+    ) -> Self {
+        let summary = ownership.summary();
+        if is_protected_active_profile || matches!(ownership.state(), OwnershipState::Native { .. })
+        {
+            Self::NativeHeld { summary }
+        } else if ownership.allows_execution() || ownership.is_transient_reconfirming() {
+            Self::Ready { summary }
         } else {
-            Self::Ready {
-                summary: "本机按键控制".into(),
-            }
+            Self::Caution { reason: summary }
         }
     }
 

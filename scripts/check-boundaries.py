@@ -88,6 +88,18 @@ assert not residual_patches, (
     + '\n  '.join(residual_patches)
 )
 
+rust_ownership_src = (root / 'crates/mi-bridge/src/ownership.rs').read_text(encoding='utf-8')
+rust_unbridged_match = re.search(
+    r'pub fn is_unbridged_desktop_active\(&self\)\s*->\s*bool\s*\{([^}]+)\}',
+    rust_ownership_src,
+)
+assert rust_unbridged_match, 'NativeOwnershipController::is_unbridged_desktop_active definition missing in crates/mi-bridge/src/ownership.rs'
+rust_unbridged_body = rust_unbridged_match.group(1)
+assert 'bridge_observed' not in rust_unbridged_body and 'native_identity' not in rust_unbridged_body, (
+    'R-C03 violation in crates/mi-bridge/src/ownership.rs: '
+    'NativeOwnershipController::is_unbridged_desktop_active must not gate fallback on sticky bridge_observed or native_identity state'
+)
+
 rust_voice_src = (root / 'crates/mi-bridge/src/voice.rs').read_text(encoding='utf-8')
 held_start_pos = rust_voice_src.find('ptt.start_held_dictation(')
 wait_outcome_pos = rust_voice_src.find('ptt.wait_for_start_outcome().await')

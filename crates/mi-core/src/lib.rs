@@ -36,7 +36,7 @@ pub use overlay::{
     HostOverlayProjection, HudVisibilityState, OverlayController, TargetAgentStatusCardProjection,
     PASSIVE_NOTICE_DURATION,
 };
-pub use qa_runner::{run_synthetic_scenario, QaLaunchEnv, SyntheticScenario};
+pub use qa_runner::{run_synthetic_scenario, QaLaunchEnv, SyntheticScenario9};
 pub use radial::{
     octant_center_for_sector, resolve_radial_slots, strip_trailing_newlines, RadialConfirmMode,
     RadialConsumeOutcome, RadialInputEvent, RadialInputReadiness, RadialIntent, RadialMenuSession,

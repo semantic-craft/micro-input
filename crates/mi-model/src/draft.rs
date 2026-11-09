@@ -735,7 +735,7 @@ pub fn actions() -> Vec<Action> {
                 ("slot-open-3", "四应用槽位 4 · AG03", "四应用总控", "直跳或长按绑定第 4 个跨应用活跃会话槽位", json!({"type":"agent_command","adapter":"four-app","command":"slot-open:3"})),
                 ("slot-open-4", "四应用槽位 5 · AG04", "四应用总控", "直跳或长按绑定第 5 个跨应用活跃会话槽位", json!({"type":"agent_command","adapter":"four-app","command":"slot-open:4"})),
                 ("slot-open-5", "四应用槽位 6 · AG05", "四应用总控", "直跳或长按绑定第 6 个跨应用活跃会话槽位", json!({"type":"agent_command","adapter":"four-app","command":"slot-open:5"})),
-                ("four-app-attention", "四应用全局待办跳转", "四应用总控", "一键切到已连接应用中优先级最高的待关注会话", json!({"type":"agent_command","adapter":"four-app","command":"four-app-attention"})),
+                ("four-app-attention", "四应用全局待办跳转", "四应用总控", "一键切到 Antigravity / DSH / Cindy 中最高优先级待关注会话", json!({"type":"agent_command","adapter":"four-app","command":"four-app-attention"})),
                 ("agent-approve", "审批通过 · Approve", "四应用总控", "批准当前或最高优先级待决交互请求", json!({"type":"agent_command","adapter":"host","command":"approve"})),
                 ("agent-deny", "审批拒绝 · Deny", "四应用总控", "拒绝当前或最高优先级待决交互请求", json!({"type":"agent_command","adapter":"host","command":"deny"})),
                 ("agent-new-or-stop", "新建或停止会话 · New/Stop", "四应用总控", "运行中则停止当前生成，空闲或冷启动则新建会话", json!({"type":"agent_command","adapter":"host","command":"new-or-stop"})),
@@ -1106,7 +1106,7 @@ impl Draft {
                 return Err("层不属于所选配置".into());
             }
             if d.is_protected_oai_layer(lid) {
-                return Err("受保护宿主层（Codex）不支持修改按键映射".into());
+                return Err("受保护宿主层（ChatGPT / Codex / Cindy）不支持修改按键映射".into());
             }
             let l = d.editable.graph.layers.get_mut(lid).ok_or("层不存在")?;
             let binding = l
@@ -1153,7 +1153,7 @@ impl Draft {
                 return Err("层不属于所选配置".into());
             }
             if d.is_protected_oai_layer(lid) {
-                return Err("受保护宿主层（Codex）不支持修改按键映射".into());
+                return Err("受保护宿主层（ChatGPT / Codex / Cindy）不支持修改按键映射".into());
             }
             let l = d.editable.graph.layers.get_mut(lid).ok_or("层不存在")?;
             let binding = l
@@ -1198,7 +1198,7 @@ impl Draft {
                 return Err("层不属于配置".into());
             }
             if d.is_protected_oai_layer(layer_id) {
-                return Err("受保护宿主层（Codex）不支持绑定动作".into());
+                return Err("受保护宿主层（ChatGPT / Codex / Cindy）不支持绑定动作".into());
             }
             let graph = &mut d.editable.graph;
             if let Some(id) = action_id {

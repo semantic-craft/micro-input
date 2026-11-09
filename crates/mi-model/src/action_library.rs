@@ -120,7 +120,13 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                     "back" | "navigate-back" | "forward" | "navigate-forward"
                 ) && matches!(
                     adapter.as_str(),
-                    "navigation" | "host" | "codex" | "antigravity" | "dsh-desktop" | "herdr"
+                    "navigation"
+                        | "host"
+                        | "cindy"
+                        | "codex"
+                        | "antigravity"
+                        | "dsh-desktop"
+                        | "herdr"
                 ) =>
             {
                 prerequisites.push("需要 Mac 宿主常驻及至少一条小键盘打开历史".into());
@@ -167,7 +173,7 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
             Ok(ActionKind::AgentCommand { adapter, command })
                 if matches!(
                     adapter.as_str(),
-                    "four-app" | "host" | "codex" | "antigravity" | "dsh-desktop"
+                    "four-app" | "host" | "cindy" | "codex" | "antigravity" | "dsh-desktop"
                 ) && (command.starts_with("slot-open:")
                     || matches!(
                         command.as_str(),
@@ -180,7 +186,10 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                             | "previous-workspace"
                     )) =>
             {
-                prerequisites.push("需要 Mac 宿主常驻及目标应用的会话桥或辅助功能权限".into());
+                prerequisites.push(
+                    "需要 Mac 宿主常驻及对应桌面应用（Antigravity / DSH / Cindy）会话桥或辅助功能权限"
+                        .into(),
+                );
                 (
                     format!("{adapter} / {command}"),
                     true,
@@ -193,7 +202,7 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
             Ok(ActionKind::AgentCommand { adapter, command })
                 if matches!(
                     adapter.as_str(),
-                    "host" | "codex" | "antigravity" | "dsh-desktop"
+                    "host" | "cindy" | "codex" | "antigravity" | "dsh-desktop"
                 ) && (command == "submit"
                     || command
                         .strip_prefix("prompt:")
@@ -221,46 +230,55 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                 )
             }
             Ok(ActionKind::AgentCommand { adapter, command }) => {
-                let desktop = matches!(adapter.as_str(), "codex" | "antigravity" | "dsh-desktop")
-                    && (matches!(
-                        command.as_str(),
-                        "model"
-                            | "effort"
-                            | "dictation"
-                            | "browser"
-                            | "terminal"
-                            | "scroll-up"
-                            | "scroll-down"
-                            | "scroll-up-fast"
-                            | "scroll-down-fast"
-                            | "scroll-to-bottom"
-                            | "sidebar-scroll-up"
-                            | "sidebar-scroll-down"
-                            | "prev-project"
-                            | "next-project"
-                            | "cycle-working-prev"
-                            | "cycle-working-next"
-                            | "cycle-completed-prev"
-                            | "cycle-completed-next"
-                            | "cycle-attention-prev"
-                            | "cycle-attention-next"
-                            | "push-to-talk"
-                            | "voice-reply"
-                            | "toggle-voice-reply"
-                            | "focus-input"
-                            | "search"
-                    ) || (command == "new-chat"
+                let desktop = matches!(
+                    adapter.as_str(),
+                    "cindy" | "codex" | "antigravity" | "dsh-desktop"
+                ) && (matches!(
+                    command.as_str(),
+                    "model"
+                        | "effort"
+                        | "dictation"
+                        | "browser"
+                        | "terminal"
+                        | "scroll-up"
+                        | "scroll-down"
+                        | "scroll-up-fast"
+                        | "scroll-down-fast"
+                        | "scroll-to-bottom"
+                        | "sidebar-scroll-up"
+                        | "sidebar-scroll-down"
+                        | "prev-project"
+                        | "next-project"
+                        | "cycle-working-prev"
+                        | "cycle-working-next"
+                        | "cycle-completed-prev"
+                        | "cycle-completed-next"
+                        | "cycle-attention-prev"
+                        | "cycle-attention-next"
+                ) || (command == "push-to-talk"
+                    && matches!(
+                        adapter.as_str(),
+                        "cindy" | "codex" | "antigravity" | "dsh-desktop"
+                    ))
+                    || (matches!(command.as_str(), "voice-reply" | "toggle-voice-reply")
+                        && matches!(
+                            adapter.as_str(),
+                            "cindy" | "codex" | "antigravity" | "dsh-desktop"
+                        ))
+                    || command == "focus-input"
+                    || command == "search"
+                    || (command == "new-chat"
                         && matches!(adapter.as_str(), "antigravity" | "dsh-desktop"))
-                        || (adapter == "antigravity"
-                            && matches!(
-                                command.as_str(),
-                                "live-voice"
-                                    | "prev-conversation"
-                                    | "next-conversation"
-                                    | "project"
-                                    | "new-conversation-in-project"
-                                    | "split-right"
-                            )));
+                    || (adapter == "antigravity"
+                        && matches!(
+                            command.as_str(),
+                            "live-voice"
+                                | "prev-conversation"
+                                | "next-conversation"
+                                | "project"
+                                | "new-conversation-in-project"
+                                | "split-right"
+                        )));
                 let verified = matches!(adapter.as_str(), "herdr") || desktop;
                 if verified {
                     prerequisites.push(if desktop {
