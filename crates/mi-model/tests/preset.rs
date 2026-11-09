@@ -206,7 +206,7 @@ fn starter_contains_only_original_local_content() {
 fn eight_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
     let mut d = Draft::default();
     let ids = preset::install_agent_starter_profiles(&mut d).unwrap();
-    assert_eq!(ids.len(), 7);
+    assert_eq!(ids.len(), 6);
 
     // Bind Slice C & D actions (navigation, prompts, submit) onto Antigravity before exporting
     let ag_pid = ids[0].clone();
@@ -229,7 +229,7 @@ fn eight_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
     // 1. Full document export/import round-trip
     let doc_text = preset::export(&d, None, None).unwrap();
     let doc_imported = preset::import(&doc_text).unwrap();
-    assert_eq!(doc_imported.config.profiles.len(), 7);
+    assert_eq!(doc_imported.config.profiles.len(), 6);
     let imported_ag_pid = doc_imported
         .document
         .editable
@@ -330,6 +330,19 @@ fn antigravity_legacy_bottom_row_dictation_upgrades_to_focus_input_and_push_to_t
     d.assign(
         &json!(ag_pid),
         &json!(ag_lid),
+        7,
+        mi_model::draft::Action {
+            id: "desktop-browser".into(),
+            name: "打开内置浏览器".into(),
+            category: "Agent".into(),
+            detail: "呼出 Antigravity 内置预览浏览器".into(),
+            payload: json!({"type":"agent_command","adapter":"antigravity","command":"browser"}),
+        },
+    )
+    .unwrap();
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
         10,
         mi_model::draft::Action {
             id: "desktop-dictation".into(),
@@ -367,7 +380,17 @@ fn antigravity_legacy_bottom_row_dictation_upgrades_to_focus_input_and_push_to_t
     )
     .unwrap();
 
+    assert!(preset::antigravity_layer_needs_starter_slot_migration(
+        &d.document,
+        &ag_lid
+    ));
+
     preset::install_agent_starter_profiles(&mut d).unwrap();
+
+    assert!(!preset::antigravity_layer_needs_starter_slot_migration(
+        &d.document,
+        &ag_lid
+    ));
 
     let layer = &d.document.editable.graph.layers[&ag_lid];
     let action_for = |slot: &str| {
@@ -379,15 +402,25 @@ fn antigravity_legacy_bottom_row_dictation_upgrades_to_focus_input_and_push_to_t
             .unwrap();
         &d.document.editable.graph.actions[aid]
     };
+    let a7 = action_for("logical-7");
+    assert_eq!(a7.id, "desktop-input");
+    assert_eq!(a7.name, "聚焦当前输入框");
+    assert_eq!(a7.payload["command"], "focus-input");
+
     let a10 = action_for("logical-10");
-    assert_eq!(a10.id, "desktop-input");
-    assert_eq!(a10.name, "聚焦当前输入框");
-    assert_eq!(a10.payload["command"], "focus-input");
+    assert_eq!(a10.id, "desktop-new-project-chat");
+    assert_eq!(a10.name, "在项目中新建会话");
+    assert_eq!(a10.payload["command"], "new-conversation-in-project");
 
     let a11 = action_for("logical-11");
     assert_eq!(a11.id, "desktop-dictation");
     assert_eq!(a11.name, "按住说话 · 松开停止");
     assert_eq!(a11.payload["command"], "push-to-talk");
+
+    let a12 = action_for("logical-12");
+    assert_eq!(a12.id, "desktop-submit");
+    assert_eq!(a12.name, "发送消息（先停听写）");
+    assert_eq!(a12.payload["command"], "submit");
 
     let a9 = action_for("logical-9");
     assert_eq!(a9.id, "custom-user-key");

@@ -150,6 +150,7 @@ impl DocumentStore {
                 Some(OpenUrl{..}) => "打开网址".into(),
                 Some(AgentCommand{command,..}) => match command.as_str() {
                     "focus-input" => "聚焦输入框", "search" => "搜索会话", "new-chat" => "新建会话",
+                    "new-conversation-in-project" => "在项目中新建会话",
                     "model" => "选择模型", "effort" => "思考力度", "dictation" => "听写 / 语音输入",
                     "push-to-talk" => "按住说话",
                     "live-voice" => "Gemini Live 实时语音",
@@ -327,7 +328,7 @@ mod tests {
     fn cheat_sheet_hud_displays_all_8_agent_presets_dial_joystick_and_redacts_custom_text() {
         let mut store = DocumentStore::default();
         let ids = crate::preset::install_agent_starter_profiles(&mut store.draft).unwrap();
-        assert_eq!(ids.len(), 7);
+        assert_eq!(ids.len(), 6);
 
         for pid in &ids {
             let sel = request(&store, json!({"kind":"select","profile_id":pid}));
@@ -383,10 +384,10 @@ mod tests {
                 assert_eq!(by_id("AG04")["label"], "选择模型");
                 assert_eq!(by_id("AG05")["label"], "项目工作区快切 (command+shift K)");
                 assert_eq!(by_id("AG06")["label"], "Gemini Live 实时语音");
-                assert_eq!(by_id("AG07")["label"], "打开内置浏览器");
+                assert_eq!(by_id("AG07")["label"], "聚焦输入框");
                 assert_eq!(by_id("AG08")["label"], "打开终端面板");
                 assert_eq!(by_id("AG09")["label"], "快速向右分栏");
-                assert_eq!(by_id("AG10")["label"], "聚焦输入框");
+                assert_eq!(by_id("AG10")["label"], "在项目中新建会话");
                 assert_eq!(by_id("AG11")["label"], "按住说话");
                 assert_eq!(by_id("AG12")["label"], "停止听写并提交");
                 assert_eq!(by_id("AG13")["label"], "上一会话（侧栏轮转）");

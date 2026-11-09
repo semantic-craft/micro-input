@@ -53,14 +53,15 @@ pub use session_strip::{
     SimpleLightingPopoverProjection,
 };
 pub use sidebar::{
-    AutoSwitchState, BackupCommand, CanonicalAgent, OwnershipBannerState, ProfileCommand,
-    SidebarAction, SidebarProfileRow, SidebarProjection,
+    AutoSwitchState, BackupCommand, CanonicalAgent, HardwareProfileSlotKind,
+    HardwareProfileSlotProjection, OwnershipBannerState, ProfileCommand, SidebarAction,
+    SidebarProfileRow, SidebarProjection, HARDWARE_PROFILE_SLOT_COUNT,
 };
 pub use status_menu::{
     FavoriteSlotCardProjection, FavoriteSlotIndex, PendingPresetImportPreview, PinnedFavoritesGrid,
     PresetExportScope, StatusMenuAction, StatusMenuProjection, FAVORITE_SLOT_COUNT,
 };
 pub use store::{
-    DeviceWorkflowAction, HardwareLoopEvent, WorkbenchCommand, WorkbenchError, WorkbenchProjection,
-    WorkbenchStore, WorkbenchStoreConfig,
+    DeviceWorkflowAction, HardwareAutoAcceptanceReceipt, HardwareLoopEvent, WorkbenchCommand,
+    WorkbenchError, WorkbenchProjection, WorkbenchStore, WorkbenchStoreConfig,
 };

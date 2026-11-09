@@ -5,6 +5,10 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FourAppAgentPhase {

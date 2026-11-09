@@ -12,9 +12,104 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const APPLE_FN_KEY_CODE: u16 = 0x3F;
 pub const KEY_CODE_V: u16 = 0x09;
 pub const KEY_CODE_RETURN: u16 = 0x24;
+pub const KEY_CODE_N: u16 = 0x2D;
 pub const CG_EVENT_TYPE_FLAGS_CHANGED: u32 = 12;
 pub const CG_EVENT_FLAG_MASK_SECONDARY_FN: u64 = 0x0080_0000;
 pub const MAX_CLIPBOARD_STASH_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_ANTIGRAVITY_AX_DEPTH: usize = 16;
+pub const MAX_ANTIGRAVITY_AX_NODES: usize = 512;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AntigravitySidebarAxNode {
+    pub index: usize,
+    pub role: String,
+    pub title: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AntigravityNewConversationTarget {
+    ActiveProject {
+        project_label: String,
+        node_index: usize,
+    },
+    FirstVisibleProject {
+        project_label: Option<String>,
+        node_index: usize,
+    },
+    FallbackShortcutCmdN,
+}
+
+pub fn is_antigravity_new_conversation_control(node: &AntigravitySidebarAxNode) -> bool {
+    matches!(node.role.as_str(), "AXLink" | "AXButton")
+        && (matches!(
+            node.description.trim(),
+            "New Conversation in Project" | "New Conversation in Workspace"
+        ) || matches!(
+            node.title.trim(),
+            "New Conversation in Project" | "New Conversation in Workspace"
+        ))
+}
+
+pub fn select_antigravity_new_conversation_target(
+    web_area_title: &str,
+    nodes: &[AntigravitySidebarAxNode],
+) -> AntigravityNewConversationTarget {
+    let mut current_project: Option<(&str, usize)> = None;
+    let mut candidates: Vec<(Option<&str>, usize)> = Vec::new();
+    for (pos, node) in nodes.iter().enumerate() {
+        if is_antigravity_new_conversation_control(node) {
+            let assoc = current_project
+                .and_then(|(proj, proj_pos)| (pos.saturating_sub(proj_pos) <= 6).then_some(proj));
+            candidates.push((assoc, node.index));
+        } else if node.role == "AXButton" {
+            let trimmed = node.title.trim();
+            if !trimmed.is_empty()
+                && !matches!(
+                    trimmed,
+                    "Projects" | "Pinned Conversations" | "Automations" | "Project options"
+                )
+            {
+                current_project = Some((trimmed, pos));
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return AntigravityNewConversationTarget::FallbackShortcutCmdN;
+    }
+    if let Some(stem) = web_area_title
+        .trim()
+        .strip_suffix(" - Antigravity")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Some((Some(proj), idx)) = candidates
+            .iter()
+            .copied()
+            .filter(|(proj, _)| {
+                proj.is_some_and(|p| stem == p || stem.ends_with(&format!(" - {p}")))
+            })
+            .max_by_key(|(proj, _)| proj.map_or(0, str::len))
+        {
+            return AntigravityNewConversationTarget::ActiveProject {
+                project_label: proj.to_string(),
+                node_index: idx,
+            };
+        }
+    }
+    AntigravityNewConversationTarget::FirstVisibleProject {
+        project_label: candidates[0].0.map(str::to_owned),
+        node_index: candidates[0].1,
+    }
+}
+
+pub fn submit_modifiers_for_adapter(adapter: &str) -> Vec<String> {
+    if adapter.trim().eq_ignore_ascii_case("antigravity") {
+        vec!["command".to_string()]
+    } else {
+        Vec::new()
+    }
+}
 
 #[cfg(target_os = "macos")]
 type CGEventSourceRef = *mut std::ffi::c_void;
@@ -22,6 +117,16 @@ type CGEventSourceRef = *mut std::ffi::c_void;
 type CGEventRef = *mut std::ffi::c_void;
 #[cfg(target_os = "macos")]
 type CFTypeRef = *const std::ffi::c_void;
+#[cfg(target_os = "macos")]
+type AXUIElementRef = *const std::ffi::c_void;
+#[cfg(target_os = "macos")]
+type CFStringRef = *const std::ffi::c_void;
+#[cfg(target_os = "macos")]
+type CFArrayRef = *const std::ffi::c_void;
+#[cfg(target_os = "macos")]
+type CFIndex = isize;
+#[cfg(target_os = "macos")]
+type AXError = i32;
 
 #[cfg(target_os = "macos")]
 const CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE: i32 = 1;
@@ -29,11 +134,24 @@ const CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE: i32 = 1;
 const CG_HID_EVENT_TAP: u32 = 0;
 #[cfg(target_os = "macos")]
 const CG_SCROLL_EVENT_UNIT_LINE: u32 = 1;
+#[cfg(target_os = "macos")]
+const K_AX_ERROR_SUCCESS: AXError = 0;
+#[cfg(target_os = "macos")]
+const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 
 #[cfg(target_os = "macos")]
 #[link(name = "ApplicationServices", kind = "framework")]
+#[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
+    fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
+    fn AXUIElementCreateSystemWide() -> AXUIElementRef;
+    fn AXUIElementCopyAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: *mut CFTypeRef,
+    ) -> AXError;
+    fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
     fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
     fn CGEventCreateKeyboardEvent(
         source: CGEventSourceRef,
@@ -51,7 +169,184 @@ unsafe extern "C" {
     fn CGEventSetType(event: CGEventRef, event_type: u32);
     fn CGEventSetFlags(event: CGEventRef, flags: u64);
     fn CGEventPost(tap: u32, event: CGEventRef);
+    fn CFStringCreateWithBytes(
+        alloc: CFTypeRef,
+        bytes: *const u8,
+        num_bytes: CFIndex,
+        encoding: u32,
+        is_external_representation: u8,
+    ) -> CFStringRef;
+    fn CFStringGetLength(the_string: CFStringRef) -> CFIndex;
+    fn CFStringGetMaximumSizeForEncoding(length: CFIndex, encoding: u32) -> CFIndex;
+    fn CFStringGetCString(
+        the_string: CFStringRef,
+        buffer: *mut std::ffi::c_char,
+        buffer_size: CFIndex,
+        encoding: u32,
+    ) -> u8;
+    fn CFArrayGetCount(the_array: CFArrayRef) -> CFIndex;
+    fn CFArrayGetValueAtIndex(the_array: CFArrayRef, idx: CFIndex) -> CFTypeRef;
+    fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
     fn CFRelease(cf: CFTypeRef);
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn cf_string_from_str(s: &str) -> CFStringRef {
+    CFStringCreateWithBytes(
+        std::ptr::null(),
+        s.as_ptr(),
+        s.len() as CFIndex,
+        K_CF_STRING_ENCODING_UTF8,
+        0,
+    )
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn cf_string_to_rust(cf: CFStringRef) -> Option<String> {
+    if cf.is_null() {
+        return None;
+    }
+    let len = CFStringGetLength(cf);
+    if len < 0 {
+        return None;
+    }
+    let max_size = CFStringGetMaximumSizeForEncoding(len, K_CF_STRING_ENCODING_UTF8) + 1;
+    if max_size <= 0 || max_size > 16384 {
+        return None;
+    }
+    let mut buf = vec![0u8; max_size as usize];
+    let ok = CFStringGetCString(
+        cf,
+        buf.as_mut_ptr() as *mut std::ffi::c_char,
+        max_size,
+        K_CF_STRING_ENCODING_UTF8,
+    );
+    if ok == 0 {
+        return None;
+    }
+    let nul_pos = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8(buf[..nul_pos].to_vec()).ok()
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ax_copy_string_attr(elem: AXUIElementRef, attr: &str) -> Option<String> {
+    let attr_cf = cf_string_from_str(attr);
+    if attr_cf.is_null() {
+        return None;
+    }
+    let mut val: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(elem, attr_cf, &mut val);
+    CFRelease(attr_cf);
+    if err != K_AX_ERROR_SUCCESS || val.is_null() {
+        return None;
+    }
+    let out = cf_string_to_rust(val);
+    CFRelease(val);
+    out
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ax_copy_element_attr(elem: AXUIElementRef, attr: &str) -> Option<AXUIElementRef> {
+    let attr_cf = cf_string_from_str(attr);
+    if attr_cf.is_null() {
+        return None;
+    }
+    let mut val: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(elem, attr_cf, &mut val);
+    CFRelease(attr_cf);
+    if err != K_AX_ERROR_SUCCESS || val.is_null() {
+        return None;
+    }
+    Some(val)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ax_copy_children(elem: AXUIElementRef) -> Vec<AXUIElementRef> {
+    let attr_cf = cf_string_from_str("AXChildren");
+    if attr_cf.is_null() {
+        return Vec::new();
+    }
+    let mut val: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(elem, attr_cf, &mut val);
+    CFRelease(attr_cf);
+    if err != K_AX_ERROR_SUCCESS || val.is_null() {
+        return Vec::new();
+    }
+    let count = CFArrayGetCount(val);
+    let mut out = Vec::new();
+    if count > 0 {
+        for i in 0..count.min(256) {
+            let item = CFArrayGetValueAtIndex(val, i);
+            if !item.is_null() {
+                CFRetain(item);
+                out.push(item);
+            }
+        }
+    }
+    CFRelease(val);
+    out
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn collect_antigravity_ax_nodes(
+    elem: AXUIElementRef,
+    depth: usize,
+    web_area_title: &mut Option<String>,
+    nodes: &mut Vec<AntigravitySidebarAxNode>,
+    retained_elements: &mut Vec<AXUIElementRef>,
+) {
+    if elem.is_null() || depth > MAX_ANTIGRAVITY_AX_DEPTH || nodes.len() >= MAX_ANTIGRAVITY_AX_NODES
+    {
+        return;
+    }
+    let role = ax_copy_string_attr(elem, "AXRole").unwrap_or_default();
+    let title = ax_copy_string_attr(elem, "AXTitle").unwrap_or_default();
+    let description = ax_copy_string_attr(elem, "AXDescription").unwrap_or_default();
+    if role == "AXWebArea" && web_area_title.is_none() && !title.trim().is_empty() {
+        *web_area_title = Some(title.clone());
+    }
+    let idx = retained_elements.len();
+    CFRetain(elem);
+    retained_elements.push(elem);
+    nodes.push(AntigravitySidebarAxNode {
+        index: idx,
+        role,
+        title,
+        description,
+    });
+    let children = ax_copy_children(elem);
+    for child in children {
+        if nodes.len() < MAX_ANTIGRAVITY_AX_NODES {
+            collect_antigravity_ax_nodes(
+                child,
+                depth + 1,
+                web_area_title,
+                nodes,
+                retained_elements,
+            );
+        }
+        CFRelease(child);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn find_pid_for_bundle_id(bundle_id: &str) -> Option<i32> {
+    if let Ok(out) = Command::new("/usr/bin/lsappinfo")
+        .args(["info", "-only", "pid", "-app", bundle_id])
+        .output()
+    {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some((_, rhs)) = text.split_once('=') {
+                if let Ok(pid) = rhs.trim().parse::<i32>() {
+                    if pid > 0 {
+                        return Some(pid);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn modifiers_to_cg_flags(modifiers: &[String]) -> u64 {
@@ -75,7 +370,6 @@ pub fn bundle_id_for_adapter(adapter: &str) -> Option<&'static str> {
         "cindy" => Some("com.xd.cindy"),
         "codex" => Some("com.openai.codex"),
         "dsh-desktop" | "dsh" | "deepseek" => Some("com.deepseek.dsh"),
-        "qwenwork" | "qwen" | "qwen-work" | "千问办公" => Some("cn.qwenwork.desktop.mac"),
         "herdr" => Some("dev.herdr.app"),
         _ => None,
     }
@@ -87,7 +381,6 @@ pub fn native_shortcut_for_agent_command(
 ) -> Option<(u16, Vec<String>)> {
     let canonical = match adapter.trim().to_ascii_lowercase().as_str() {
         "dsh" | "deepseek" => "dsh-desktop".to_string(),
-        "qwen" | "qwen-work" | "千问办公" => "qwenwork".to_string(),
         other => other.to_string(),
     };
     let mods = |items: &[&str]| items.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
@@ -126,7 +419,6 @@ pub fn native_shortcut_for_agent_command(
         ("cindy", "terminal") => Some((0x32, mods(&["control"]))),
         ("codex", "new-chat" | "new-or-stop") => Some((0x2D, mods(&["command"]))),
         ("codex", "search") => Some((0x28, mods(&["command"]))),
-        ("qwenwork", "new-chat" | "new-or-stop") => Some((0x2D, mods(&["command"]))),
         (_, "approve") => Some((KEY_CODE_RETURN, mods(&["command"]))),
         (_, "deny") => Some((0x35, Vec::new())),
         _ => None,
@@ -292,6 +584,7 @@ pub trait HostOsDriver: Send + Sync {
     fn focus_agent_input(&self, adapter: &str) -> Result<(), String>;
     fn stop_active_dictation(&self, adapter: &str) -> Result<bool, String>;
     fn scroll_window(&self, req: &DialScrollRequest) -> Result<(), String>;
+    fn new_conversation_in_project(&self, adapter: &str) -> Result<(), String>;
 }
 
 #[derive(Debug, Default)]
@@ -523,6 +816,114 @@ impl HostOsDriver for MacOsSystemDriver {
         }
         Ok(())
     }
+
+    fn new_conversation_in_project(&self, adapter: &str) -> Result<(), String> {
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        let bundle_id = bundle_id_for_adapter(adapter).unwrap_or("com.google.antigravity");
+        let _ = self.open_application(bundle_id);
+        #[cfg(target_os = "macos")]
+        if adapter.trim().eq_ignore_ascii_case("antigravity") {
+            unsafe {
+                let app_elem = if let Some(pid) = find_pid_for_bundle_id(bundle_id) {
+                    AXUIElementCreateApplication(pid)
+                } else {
+                    let sys = AXUIElementCreateSystemWide();
+                    let focused = if sys.is_null() {
+                        std::ptr::null()
+                    } else {
+                        let f = ax_copy_element_attr(sys, "AXFocusedApplication")
+                            .unwrap_or(std::ptr::null());
+                        CFRelease(sys);
+                        f
+                    };
+                    focused
+                };
+                if !app_elem.is_null() {
+                    let win_elem = ax_copy_element_attr(app_elem, "AXFocusedWindow")
+                        .or_else(|| ax_copy_element_attr(app_elem, "AXMainWindow"))
+                        .or_else(|| {
+                            let attr_cf = cf_string_from_str("AXWindows");
+                            if attr_cf.is_null() {
+                                return None;
+                            }
+                            let mut val: CFTypeRef = std::ptr::null();
+                            let err = AXUIElementCopyAttributeValue(app_elem, attr_cf, &mut val);
+                            CFRelease(attr_cf);
+                            if err != K_AX_ERROR_SUCCESS || val.is_null() {
+                                return None;
+                            }
+                            let first = if CFArrayGetCount(val) > 0 {
+                                let item = CFArrayGetValueAtIndex(val, 0);
+                                if !item.is_null() {
+                                    CFRetain(item);
+                                    Some(item)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            CFRelease(val);
+                            first
+                        });
+                    CFRelease(app_elem);
+                    if let Some(win) = win_elem {
+                        let win_title = ax_copy_string_attr(win, "AXTitle").unwrap_or_default();
+                        let mut web_area_title: Option<String> = None;
+                        let mut nodes: Vec<AntigravitySidebarAxNode> = Vec::new();
+                        let mut retained: Vec<AXUIElementRef> = Vec::new();
+                        collect_antigravity_ax_nodes(
+                            win,
+                            0,
+                            &mut web_area_title,
+                            &mut nodes,
+                            &mut retained,
+                        );
+                        CFRelease(win);
+                        let effective_title =
+                            web_area_title.as_deref().unwrap_or(win_title.as_str());
+                        let target =
+                            select_antigravity_new_conversation_target(effective_title, &nodes);
+                        let pressed_ok = match target {
+                            AntigravityNewConversationTarget::ActiveProject {
+                                node_index, ..
+                            }
+                            | AntigravityNewConversationTarget::FirstVisibleProject {
+                                node_index,
+                                ..
+                            } => {
+                                if let Some(&elem) = retained.get(node_index) {
+                                    let action_cf = cf_string_from_str("AXPress");
+                                    let ok = if !action_cf.is_null() {
+                                        let err = AXUIElementPerformAction(elem, action_cf);
+                                        CFRelease(action_cf);
+                                        err == K_AX_ERROR_SUCCESS
+                                    } else {
+                                        false
+                                    };
+                                    ok
+                                } else {
+                                    false
+                                }
+                            }
+                            AntigravityNewConversationTarget::FallbackShortcutCmdN => false,
+                        };
+                        for elem in retained {
+                            CFRelease(elem);
+                        }
+                        if pressed_ok {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+        let cmd = vec!["command".to_string()];
+        self.post_key_shortcut(KEY_CODE_N, &cmd, true)
+            .and_then(|()| self.post_key_shortcut(KEY_CODE_N, &cmd, false))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -552,6 +953,7 @@ pub enum RecordedOsEvent {
     FocusAgentInput(String),
     StopActiveDictation(String),
     ScrollWindow(DialScrollRequest),
+    NewConversationInProject(String),
 }
 
 #[derive(Debug)]
@@ -750,6 +1152,17 @@ impl HostOsDriver for RecordingOsDriver {
             .unwrap()
             .events
             .push(RecordedOsEvent::ScrollWindow(clamped));
+        Ok(())
+    }
+
+    fn new_conversation_in_project(&self, adapter: &str) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        if !st.trusted {
+            return Err("accessibility_untrusted".to_string());
+        }
+        st.events.push(RecordedOsEvent::NewConversationInProject(
+            adapter.to_string(),
+        ));
         Ok(())
     }
 }
@@ -1136,11 +1549,14 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     if let Err(err) = self.driver.focus_agent_input(adapter) {
                         return make_receipt("failed", err);
                     }
+                    let submit_mods = submit_modifiers_for_adapter(adapter);
                     match self
                         .driver
-                        .post_key_shortcut(KEY_CODE_RETURN, &[], true)
-                        .and_then(|()| self.driver.post_key_shortcut(KEY_CODE_RETURN, &[], false))
-                    {
+                        .post_key_shortcut(KEY_CODE_RETURN, &submit_mods, true)
+                        .and_then(|()| {
+                            self.driver
+                                .post_key_shortcut(KEY_CODE_RETURN, &submit_mods, false)
+                        }) {
                         Ok(()) => make_receipt("executed", desc.detail),
                         Err(err) => make_receipt("failed", err),
                     }
@@ -1158,12 +1574,19 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     let snapshot = self.driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
                     let written_cc = self.driver.write_clipboard_plain_text(sanitized);
                     let cmd_mod = vec!["command".to_string()];
+                    let submit_mods = submit_modifiers_for_adapter(adapter);
                     let res = self
                         .driver
                         .post_key_shortcut(KEY_CODE_V, &cmd_mod, true)
                         .and_then(|()| self.driver.post_key_shortcut(KEY_CODE_V, &cmd_mod, false))
-                        .and_then(|()| self.driver.post_key_shortcut(KEY_CODE_RETURN, &[], true))
-                        .and_then(|()| self.driver.post_key_shortcut(KEY_CODE_RETURN, &[], false));
+                        .and_then(|()| {
+                            self.driver
+                                .post_key_shortcut(KEY_CODE_RETURN, &submit_mods, true)
+                        })
+                        .and_then(|()| {
+                            self.driver
+                                .post_key_shortcut(KEY_CODE_RETURN, &submit_mods, false)
+                        });
                     let _ = self.driver.restore_clipboard(&snapshot, written_cc);
                     match res {
                         Ok(()) => make_receipt("executed", desc.detail),
@@ -1202,6 +1625,14 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
                     match self.driver.focus_agent_input(adapter) {
+                        Ok(()) => make_receipt("executed", desc.detail),
+                        Err(err) => make_receipt("failed", err),
+                    }
+                } else if command == "new-conversation-in-project" {
+                    if !self.driver.is_accessibility_trusted() {
+                        return make_receipt("blocked", "accessibility_untrusted".to_string());
+                    }
+                    match self.driver.new_conversation_in_project(adapter) {
                         Ok(()) => make_receipt("executed", desc.detail),
                         Err(err) => make_receipt("failed", err),
                     }

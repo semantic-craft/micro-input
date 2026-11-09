@@ -154,6 +154,7 @@ pub unsafe extern "C" fn mi_core_dispatch_json(
         return ptr::null_mut();
     }
     let store = &mut *ptr;
+    let before_gen = store.projection_generation();
     let raw = CStr::from_ptr(cmd_utf8).to_string_lossy();
     match serde_json::from_str::<WorkbenchCommand>(&raw) {
         Ok(cmd) => {
@@ -163,7 +164,11 @@ pub unsafe extern "C" fn mi_core_dispatch_json(
         }
         Err(err) => {
             eprintln!("invalid WorkbenchCommand JSON ({raw}): {err}");
+            return ptr::null_mut();
         }
+    }
+    if store.projection_generation() == before_gen {
+        return ptr::null_mut();
     }
     match serde_json::to_string(store.projection()) {
         Ok(json) => string_to_c_char(json),
@@ -230,6 +235,22 @@ mod tests {
             let updated_str = CStr::from_ptr(updated_ptr).to_string_lossy().into_owned();
             mi_core_string_free(updated_ptr);
             assert!(updated_str.contains("\"EncoderPress\""));
+
+            let noop_repeat = mi_core_dispatch_json(store, cmd.as_ptr());
+            assert!(
+                noop_repeat.is_null(),
+                "repeating identical surface selection must short-circuit without JSON serialization"
+            );
+
+            let noop_fg =
+                CString::new(r#"{"domain":"foreground_app_changed","action":{"bundle_id":null}}"#)
+                    .unwrap();
+            assert!(mi_core_dispatch_json(store, noop_fg.as_ptr()).is_null());
+
+            let noop_win =
+                CString::new(r#"{"domain":"main_window_active_changed","action":{"active":true}}"#)
+                    .unwrap();
+            assert!(mi_core_dispatch_json(store, noop_win.as_ptr()).is_null());
 
             mi_core_free(store);
             mi_core_release_instance_lock(lock);

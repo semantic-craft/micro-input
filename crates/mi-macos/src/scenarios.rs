@@ -241,7 +241,7 @@ pub fn run_host_execution_scenario(run_dir: &Path) -> Result<ScenarioResultSumma
     let antigravity_pid = find_profile_id(&draft, "Antigravity")?;
     let dsh_pid = find_profile_id(&draft, "DeepSeek Coder (DSH)")?;
     let herdr_pid = find_profile_id(&draft, "Herdr")?;
-    let qwen_pid = find_profile_id(&draft, "千问办公")?;
+    let other_apps_pid = find_profile_id(&draft, "其他软件")?;
 
     let simulator = SimulatedHostActionExecutor::new();
     let mut receipts = Vec::new();
@@ -289,14 +289,19 @@ pub fn run_host_execution_scenario(run_dir: &Path) -> Result<ScenarioResultSumma
     }
     fire_binding(&mut receipts, &draft.document, &herdr_pid, "AG15")?;
 
-    fire_binding(&mut receipts, &draft.document, &qwen_pid, "AG00")?;
+    {
+        let other_lid =
+            draft.document.editable.graph.profiles[&other_apps_pid].layer_order[0].clone();
+        let apple_fn = find_catalog_action("apple-fn-key")?;
+        draft.assign(&json!(other_apps_pid), &json!(other_lid), 0, apple_fn)?;
+        fire_binding(&mut receipts, &draft.document, &other_apps_pid, "AG00")?;
+    }
 
     let mut nav = NavigationHistory::default();
     for target in [
         "com.google.antigravity",
         "com.deepseek.dsh",
         "dev.herdr.app",
-        "cn.qwenwork.desktop.mac",
     ] {
         nav.visit(NavigationPlace::app(target));
     }
@@ -320,7 +325,7 @@ pub fn run_host_execution_scenario(run_dir: &Path) -> Result<ScenarioResultSumma
         .ok_or_else(|| "navigation forward target missing".to_string())?;
     let forward_receipt = simulator
         .execute_and_record(
-            &qwen_pid,
+            &other_apps_pid,
             "menu-navigate-forward",
             &ResolvedHostAction::OpenApp {
                 bundle_id: forward_place.target_id(),

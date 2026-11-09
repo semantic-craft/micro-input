@@ -260,7 +260,6 @@ pub fn agent_for_place(place: &NavigationPlace) -> CanonicalAgent {
             "cindy" => CanonicalAgent::Cindy,
             "dsh" | "dsh-desktop" => CanonicalAgent::DeepseekHarness,
             "codex" => CanonicalAgent::Codex,
-            "qwenwork" => CanonicalAgent::QwenWork,
             "herdr" => CanonicalAgent::Herdr,
             _ => CanonicalAgent::Antigravity,
         },

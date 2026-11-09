@@ -12,8 +12,11 @@ pub use ax_dictation::{
     DictationAdapter, DictationOutcome, LockedDictationTarget,
 };
 pub use executor::{
+    is_antigravity_new_conversation_control, select_antigravity_new_conversation_target,
+    submit_modifiers_for_adapter, AntigravityNewConversationTarget, AntigravitySidebarAxNode,
     ClipboardItemSnapshot, ClipboardSnapshot, DialScrollRequest, HostActionReceipt, HostOsDriver,
-    LiveHostActionExecutor, MacOsSystemDriver, RecordingOsDriver, SimulatedHostActionExecutor,
+    LiveHostActionExecutor, MacOsSystemDriver, RecordedOsEvent, RecordingOsDriver,
+    SimulatedHostActionExecutor,
 };
 pub use instance_lock::DocumentInstanceLock;
 pub use passive_panel::{

@@ -756,6 +756,9 @@ pub fn actions() -> Vec<Action> {
                 ("ag-cycle-completed-next", "下一个蓝点已完成会话", "Agent", "轮询切换到下一个蓝点已完事待看的会话（🔵）", json!({"type":"agent_command","adapter":"antigravity","command":"cycle-completed-next"})),
                 ("ag-cycle-attention-prev", "上一个 Working 或蓝点会话", "Agent", "轮询切换到上一个 Working 运行中或蓝点已完成的会话", json!({"type":"agent_command","adapter":"antigravity","command":"cycle-attention-prev"})),
                 ("ag-cycle-attention-next", "下一个 Working 或蓝点会话", "Agent", "轮询切换到下一个 Working 运行中或蓝点已完成的会话", json!({"type":"agent_command","adapter":"antigravity","command":"cycle-attention-next"})),
+                ("ag-new-conversation-in-project", "在项目中新建会话", "Agent", "在当前或最近项目中新建会话（New Conversation in Project）", json!({"type":"agent_command","adapter":"antigravity","command":"new-conversation-in-project"})),
+                ("ag-focus-input", "聚焦当前输入框", "Agent", "激活 Antigravity 并聚焦当前对话输入框（Cmd+L）", json!({"type":"agent_command","adapter":"antigravity","command":"focus-input"})),
+                ("ag-browser", "Antigravity · 打开内置浏览器", "Agent", "切换右侧内置浏览器与预览面板（Cmd+Shift+B 或原生控件）", json!({"type":"agent_command","adapter":"antigravity","command":"browser"})),
                 ("ag-split-right", "Antigravity · 快速向右分栏", "Agent", "将当前会话向右分栏（Cmd+D）", json!({"type":"agent_command","adapter":"antigravity","command":"split-right"})),
             ]
             .into_iter()

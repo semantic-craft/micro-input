@@ -32,13 +32,12 @@ fn default_true() -> bool {
     true
 }
 
-pub const CANONICAL_DESKTOP_AGENT_PROFILES: [&str; 7] = [
+pub const CANONICAL_DESKTOP_AGENT_PROFILES: [&str; 6] = [
     "Antigravity",
     "Codex",
     "DeepSeek Coder (DSH)",
     "Herdr",
     "Cindy",
-    "千问办公",
     "其他软件",
 ];
 
@@ -49,8 +48,7 @@ pub fn canonical_desktop_agent_rank(name: &str) -> Option<usize> {
         "DeepSeek Coder (DSH)" | "DSH" | "DeepSeek Harness" | "Deepseek Harness" => Some(2),
         "Herdr" => Some(3),
         "Cindy" => Some(4),
-        "千问办公" | "QwenWork" | "千问百工" => Some(5),
-        "其他软件" => Some(6),
+        "其他软件" => Some(5),
         _ => None,
     }
 }
@@ -58,9 +56,6 @@ pub fn canonical_desktop_agent_rank(name: &str) -> Option<usize> {
 pub fn desktop_agent_for_profile_name(name: &str) -> Option<(&'static str, &'static str)> {
     match name.trim() {
         "Antigravity" => Some(("antigravity", "com.google.antigravity")),
-        "千问办公" | "QwenWork" | "千问百工" => {
-            Some(("qwenwork", "cn.qwenwork.desktop.mac"))
-        }
         "Cindy" => Some(("cindy", "com.xd.cindy")),
         "Codex" => Some(("codex", "com.openai.codex")),
         "DeepSeek Coder (DSH)" | "DSH" | "DeepSeek Harness" | "Deepseek Harness" => {
@@ -651,7 +646,11 @@ pub(crate) fn resolve_layer_slot_action_id<'a>(
                 .get(aid)
                 .and_then(|a| serde_json::from_value::<ActionKind>(a.payload.clone()).ok())
                 .is_some_and(|k| {
-                    matches!(k, ActionKind::AgentCommand { command, .. } if command == "focus-input")
+                    matches!(
+                        k,
+                        ActionKind::AgentCommand { command, .. }
+                            if matches!(command.as_str(), "focus-input" | "new-conversation-in-project")
+                    )
                 })
         };
         let is_voice_hold = |aid: &String| -> bool {

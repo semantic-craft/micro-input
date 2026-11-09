@@ -498,6 +498,17 @@ mod tests {
         d.usage_page = 1;
         assert!(!is_candidate(&d));
     }
+
+    #[test]
+    #[ignore = "live USB candidate enumeration"]
+    fn dump_usb_candidates_json() {
+        let transport = MacTransport::new();
+        let candidates = transport.enumerate().unwrap_or_default();
+        println!(
+            "MI_USB_CANDIDATES_JSON={}",
+            serde_json::to_string(&candidates).unwrap()
+        );
+    }
 }
 
 // R-D13/D05: explicit test-only OS discovery boundary; no physical open is possible.

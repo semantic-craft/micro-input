@@ -185,6 +185,35 @@ fn test_live_host_action_executor_apple_fn_paste_submit_and_macro_trust() {
         stop_idx < focus_idx,
         "submit must stop active dictation before focusing/sending Return"
     );
+    assert!(
+        post_submit_events.iter().any(|e| matches!(
+            e,
+            RecordedOsEvent::PostKeyShortcut {
+                key_code: mi_macos::executor::KEY_CODE_RETURN,
+                modifiers,
+                key_down: true,
+            } if modifiers == &vec!["command".to_string()]
+        )),
+        "antigravity submit must send Cmd+Enter"
+    );
+
+    let new_project_chat_action = ResolvedHostAction::AgentCommand {
+        adapter: "antigravity".to_string(),
+        command: "new-conversation-in-project".to_string(),
+    };
+    let new_project_chat_receipt =
+        executor.execute("Antigravity", "AG10", &new_project_chat_action);
+    assert_eq!(new_project_chat_receipt.outcome, "executed");
+    assert_eq!(
+        new_project_chat_receipt.detail,
+        "antigravity/new-conversation-in-project"
+    );
+    assert!(
+        driver.events().iter().any(
+            |e| matches!(e, RecordedOsEvent::NewConversationInProject(a) if a == "antigravity")
+        ),
+        "new-conversation-in-project must invoke driver new_conversation_in_project"
+    );
 
     driver.set_accessibility_trusted(false);
     let macro_action = ResolvedHostAction::MacroSequence {
@@ -238,13 +267,13 @@ impl AxTreeProvider for MockAxProvider {
         let replace = *self.replace_control_on_stop.lock().unwrap();
         let mut win = self.window.lock().unwrap();
         if let Some(ctrl) = win.controls.iter_mut().find(|c| c.control_id == control_id) {
-            if ctrl.label.starts_with("语音输入") {
-                ctrl.label = "停止录音（Right ⌘）".to_string();
-            } else if ctrl.label.starts_with("停止录音") {
+            if ctrl.label == "开始语音输入" {
+                ctrl.label = "停止语音输入".to_string();
+            } else if ctrl.label == "停止语音输入" {
                 if replace {
                     ctrl.control_id = "btn-voice-rebuilt-2".to_string();
                 }
-                ctrl.label = "语音输入（Right ⌘）".to_string();
+                ctrl.label = "开始语音输入".to_string();
             }
         }
         Ok(())
@@ -266,11 +295,10 @@ impl AxTreeProvider for MockAxProvider {
 }
 
 #[test]
-fn test_ax_dictation_qwen_suffix_leaf_validation_4tuple_lock_and_replacement_readback() {
-    assert!(DictationAdapter::QwenWork.matches_start_label("语音输入"));
-    assert!(DictationAdapter::QwenWork.matches_start_label("语音输入（Right ⌘）"));
-    assert!(DictationAdapter::QwenWork.matches_stop_label("停止录音"));
-    assert!(DictationAdapter::QwenWork.matches_stop_label("停止录音（Right ⌘）"));
+fn test_ax_dictation_leaf_validation_4tuple_lock_and_replacement_readback() {
+    assert!(DictationAdapter::Cindy.matches_start_label("开始语音输入"));
+    assert!(DictationAdapter::Cindy.matches_stop_label("停止语音输入"));
+    assert!(DictationAdapter::Cindy.matches_stop_label("结束语音输入"));
 
     let leaf_attrs = vec!["AXRole".to_string(), "AXTitle".to_string()];
     let container_attrs = vec![
@@ -294,11 +322,11 @@ fn test_ax_dictation_qwen_suffix_leaf_validation_4tuple_lock_and_replacement_rea
         window: Mutex::new(AxWindowSnapshot {
             pid: 5150,
             window_id: 9001,
-            window_title: "千问办公 - 主窗口".to_string(),
+            window_title: "Cindy - 主窗口".to_string(),
             controls: vec![AxElementNode {
                 control_id: "btn-voice-1".to_string(),
                 role: "AXButton".to_string(),
-                label: "语音输入（Right ⌘）".to_string(),
+                label: "开始语音输入".to_string(),
                 parent_chain_to_window: vec![
                     "toolbar-1".to_string(),
                     "root-split".to_string(),
@@ -318,14 +346,14 @@ fn test_ax_dictation_qwen_suffix_leaf_validation_4tuple_lock_and_replacement_rea
     });
 
     let controller = AXDictationController::new(provider.clone());
-    let start = controller.start_dictation(DictationAdapter::QwenWork);
+    let start = controller.start_dictation(DictationAdapter::Cindy);
     let locked = match start {
         DictationOutcome::Started(t) => t,
         other => panic!("expected Started, got {:?}", other),
     };
     assert_eq!(locked.pid, 5150);
     assert_eq!(locked.window_id, 9001);
-    assert_eq!(locked.window_title, "千问办公 - 主窗口");
+    assert_eq!(locked.window_title, "Cindy - 主窗口");
     assert_eq!(locked.control_id, "btn-voice-1");
 
     let stop = controller.stop_dictation();
@@ -479,4 +507,98 @@ fn test_four_synthetic_scenarios_match_verify_offline_contracts() {
     assert_eq!(diag_ev["failure_stage"], "config_read");
     assert_eq!(diag_ev["physical_key"], "NOT_RUN");
     assert_eq!(diag_ev["lighting_visual"], "NOT_RUN");
+}
+
+#[test]
+fn antigravity_new_conversation_target_selector_matches_active_project_or_falls_back() {
+    use mi_macos::{
+        select_antigravity_new_conversation_target, AntigravityNewConversationTarget,
+        AntigravitySidebarAxNode,
+    };
+
+    let nodes = vec![
+        AntigravitySidebarAxNode {
+            index: 0,
+            role: "AXButton".into(),
+            title: "agent-fleet".into(),
+            description: String::new(),
+        },
+        AntigravitySidebarAxNode {
+            index: 1,
+            role: "AXPopUpButton".into(),
+            title: String::new(),
+            description: "Project options".into(),
+        },
+        AntigravitySidebarAxNode {
+            index: 2,
+            role: "AXLink".into(),
+            title: String::new(),
+            description: "New Conversation in Project".into(),
+        },
+        AntigravitySidebarAxNode {
+            index: 3,
+            role: "AXButton".into(),
+            title: "responsay-macos".into(),
+            description: String::new(),
+        },
+        AntigravitySidebarAxNode {
+            index: 4,
+            role: "AXPopUpButton".into(),
+            title: String::new(),
+            description: "Project options".into(),
+        },
+        AntigravitySidebarAxNode {
+            index: 5,
+            role: "AXLink".into(),
+            title: String::new(),
+            description: "New Conversation in Project".into(),
+        },
+        AntigravitySidebarAxNode {
+            index: 6,
+            role: "AXButton".into(),
+            title: "micro-input".into(),
+            description: String::new(),
+        },
+        AntigravitySidebarAxNode {
+            index: 7,
+            role: "AXPopUpButton".into(),
+            title: String::new(),
+            description: "Project options".into(),
+        },
+        AntigravitySidebarAxNode {
+            index: 8,
+            role: "AXLink".into(),
+            title: String::new(),
+            description: "New Conversation in Workspace".into(),
+        },
+    ];
+
+    assert_eq!(
+        select_antigravity_new_conversation_target(
+            "Product Architecture Alignment And Analysis - responsay-macos - Antigravity",
+            &nodes
+        ),
+        AntigravityNewConversationTarget::ActiveProject {
+            project_label: "responsay-macos".into(),
+            node_index: 5,
+        }
+    );
+    assert_eq!(
+        select_antigravity_new_conversation_target("micro-input - Antigravity", &nodes),
+        AntigravityNewConversationTarget::ActiveProject {
+            project_label: "micro-input".into(),
+            node_index: 8,
+        }
+    );
+    assert_eq!(
+        select_antigravity_new_conversation_target("Standalone Chat - Antigravity", &nodes),
+        AntigravityNewConversationTarget::FirstVisibleProject {
+            project_label: Some("agent-fleet".into()),
+            node_index: 2,
+        }
+    );
+    assert_eq!(
+        select_antigravity_new_conversation_target("Antigravity", &[]),
+        AntigravityNewConversationTarget::FallbackShortcutCmdN
+    );
 }

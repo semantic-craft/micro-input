@@ -971,7 +971,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     for (name, adapter, bundle) in [
         ("Cindy", "cindy", "com.xd.cindy"),
         ("Codex", "codex", "com.openai.codex"),
-        ("千问办公", "qwenwork", "cn.qwenwork.desktop.mac"),
     ] {
         let mut assignments = vec![(
             0,
@@ -1009,34 +1008,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 },
             ));
         }
-        if adapter == "qwenwork" {
-            assignments.push((
-                3,
-                "desktop-new",
-                "新建任务",
-                "快捷键",
-                bundle,
-                ActionKind::Shortcut {
-                    key: "n".into(),
-                    modifiers: vec!["command".into()],
-                    target: bundle.into(),
-                },
-            ));
-        }
-        if adapter == "qwenwork" {
-            assignments.push((
-                2,
-                "desktop-search",
-                "搜索全部任务",
-                "快捷键",
-                bundle,
-                ActionKind::Shortcut {
-                    key: "g".into(),
-                    modifiers: vec!["command".into()],
-                    target: bundle.into(),
-                },
-            ));
-        }
         specs.push((name, assignments));
     }
 
@@ -1045,7 +1016,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         let adapter = match *name {
             "Cindy" => "cindy",
             "Codex" => "codex",
-            "千问办公" => "qwenwork",
             "Antigravity" => "antigravity",
             "DeepSeek Coder (DSH)" => "dsh-desktop",
             _ => continue,
@@ -1095,7 +1065,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     legacy_specs.extend(
         specs
             .iter()
-            .filter(|(name, _)| matches!(*name, "Cindy" | "Codex" | "千问办公" | "Antigravity"))
+            .filter(|(name, _)| matches!(*name, "Cindy" | "Codex" | "Antigravity"))
             .cloned(),
     );
     for (_, assignments) in &mut specs {
@@ -1104,7 +1074,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 if command == "dictation"
                     && matches!(
                         adapter.as_str(),
-                        "cindy" | "codex" | "qwenwork" | "antigravity" | "dsh-desktop"
+                        "cindy" | "codex" | "antigravity" | "dsh-desktop"
                     )
                 {
                     *command = "push-to-talk".into();
@@ -1119,7 +1089,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             .filter(|(name, _)| {
                 matches!(
                     *name,
-                    "Cindy" | "Codex" | "千问办公" | "Antigravity" | "DeepSeek Coder (DSH)"
+                    "Cindy" | "Codex" | "Antigravity" | "DeepSeek Coder (DSH)"
                 )
             })
             .cloned(),
@@ -1128,7 +1098,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         let adapter = match *name {
             "Cindy" => "cindy",
             "Codex" => "codex",
-            "千问办公" => "qwenwork",
             "Antigravity" => "antigravity",
             "DeepSeek Coder (DSH)" => "dsh-desktop",
             _ => continue,
@@ -1414,6 +1383,42 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             };
         }
     }
+    legacy_specs.push(("Antigravity", antigravity.clone()));
+    for (slot, id, label, category, detail, kind) in antigravity.iter_mut() {
+        match *slot {
+            7 => {
+                *id = "desktop-input";
+                *label = "聚焦当前输入框";
+                *category = "Agent";
+                *detail = "com.google.antigravity";
+                *kind = ActionKind::AgentCommand {
+                    adapter: "antigravity".into(),
+                    command: "focus-input".into(),
+                };
+            }
+            10 => {
+                *id = "desktop-new-project-chat";
+                *label = "在项目中新建会话";
+                *category = "Agent";
+                *detail = "在当前或最近项目中新建会话（New Conversation in Project）";
+                *kind = ActionKind::AgentCommand {
+                    adapter: "antigravity".into(),
+                    command: "new-conversation-in-project".into(),
+                };
+            }
+            12 => {
+                *id = "desktop-submit";
+                *label = "发送消息（先停听写）";
+                *category = "提交控制";
+                *detail = "若听写激活则先停并确认停止，再聚焦输入区按 Cmd+Enter 提交";
+                *kind = ActionKind::AgentCommand {
+                    adapter: "antigravity".into(),
+                    command: "submit".into(),
+                };
+            }
+            _ => {}
+        }
+    }
     let herdr = &mut specs
         .iter_mut()
         .find(|(name, _)| *name == "Herdr")
@@ -1526,18 +1531,23 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             }
         }
     }
-    let retired_qoder_ids: Vec<String> = work
+    let retired_profile_ids: Vec<String> = work
         .document
         .editable
         .graph
         .profiles
         .iter()
         .filter_map(|(pid, p)| {
-            if p.name != "Qoder CN" || p.layer_order.len() != 1 {
+            let (expected_bundle, expected_adapter) = match p.name.as_str() {
+                "Qoder CN" => ("com.qodercn.app", "qoder-cn"),
+                "千问办公" => ("cn.qwenwork.desktop.mac", "qwenwork"),
+                _ => return None,
+            };
+            if p.layer_order.len() != 1 {
                 return None;
             }
             let layer = work.document.editable.graph.layers.get(&p.layer_order[0])?;
-            let all_qoder = layer
+            let all_retired = layer
                 .controls
                 .values()
                 .filter_map(|b| b.action_id.as_ref())
@@ -1549,15 +1559,17 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                         .get(aid)
                         .is_some_and(|a| {
                             a.payload.get("bundle_id").and_then(Value::as_str)
-                                == Some("com.qodercn.app")
+                                == Some(expected_bundle)
+                                || a.payload.get("target").and_then(Value::as_str)
+                                    == Some(expected_bundle)
                                 || a.payload.get("adapter").and_then(Value::as_str)
-                                    == Some("qoder-cn")
+                                    == Some(expected_adapter)
                         })
                 });
-            all_qoder.then(|| pid.clone())
+            all_retired.then(|| pid.clone())
         })
         .collect();
-    for pid in retired_qoder_ids {
+    for pid in retired_profile_ids {
         work.delete_profile(&pid)?;
     }
     for (profile_name, assignments) in specs {
@@ -1619,56 +1631,127 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             if !can_upgrade {
                 if profile_name == "Antigravity" && !p.layer_order.is_empty() {
                     let lid = p.layer_order[0].clone();
-                    let slot_aid = |doc: &LocalDocumentV2, slot: &str| -> Option<String> {
-                        doc.editable.graph.layers[&lid]
-                            .controls
-                            .values()
-                            .find(|b| b.logical_control == slot)
-                            .and_then(|b| b.action_id.clone())
-                    };
-                    let aid10 = slot_aid(&work.document, "logical-10");
-                    let aid11 = slot_aid(&work.document, "logical-11");
-                    let is_legacy_dictation = |aid: &Option<String>, expected_id: &str| -> bool {
-                        aid.as_ref()
-                            .and_then(|id| work.document.editable.graph.actions.get(id))
-                            .is_some_and(|a| {
-                                a.id == expected_id
-                                    && matches!(
-                                        a.payload.get("command").and_then(Value::as_str),
-                                        Some("push-to-talk" | "dictation")
-                                    )
-                            })
-                    };
-                    if is_legacy_dictation(&aid10, "desktop-dictation")
-                        && is_legacy_dictation(&aid11, "desktop-dictation-r")
-                    {
+                    if antigravity_layer_needs_starter_slot_migration(&work.document, &lid) {
+                        let slot_aid = |doc: &LocalDocumentV2, slot: &str| -> Option<String> {
+                            doc.editable
+                                .graph
+                                .layers
+                                .get(&lid)?
+                                .controls
+                                .values()
+                                .find(|b| b.logical_control == slot)
+                                .and_then(|b| b.action_id.clone())
+                        };
+                        let aid7 = slot_aid(&work.document, "logical-7");
+                        let aid10 = slot_aid(&work.document, "logical-10");
+                        let aid11 = slot_aid(&work.document, "logical-11");
+                        let aid12 = slot_aid(&work.document, "logical-12");
                         work.mutate(|doc| {
+                            if let Some(id7) = &aid7 {
+                                let should_update_7 = doc
+                                    .editable
+                                    .graph
+                                    .actions
+                                    .get(id7)
+                                    .is_some_and(|a| {
+                                        a.id == "desktop-browser"
+                                            && a.payload.get("command").and_then(Value::as_str)
+                                                == Some("browser")
+                                    });
+                                if should_update_7 {
+                                    if let Some(a7) = doc.editable.graph.actions.get_mut(id7) {
+                                        a7.id = "desktop-input".into();
+                                        a7.name = "聚焦当前输入框".into();
+                                        a7.category = "Agent".into();
+                                        a7.detail = "com.google.antigravity".into();
+                                        a7.payload = serde_json::to_value(ActionKind::AgentCommand {
+                                            adapter: "antigravity".into(),
+                                            command: "focus-input".into(),
+                                        })
+                                        .map_err(|e| e.to_string())?;
+                                    }
+                                }
+                            }
                             if let Some(id10) = &aid10 {
-                                if let Some(a10) = doc.editable.graph.actions.get_mut(id10) {
-                                    a10.id = "desktop-input".into();
-                                    a10.name = "聚焦当前输入框".into();
-                                    a10.category = "Agent".into();
-                                    a10.detail = "com.google.antigravity".into();
-                                    a10.payload = serde_json::to_value(ActionKind::AgentCommand {
-                                        adapter: "antigravity".into(),
-                                        command: "focus-input".into(),
-                                    })
-                                    .map_err(|e| e.to_string())?;
+                                let should_update_10 = doc
+                                    .editable
+                                    .graph
+                                    .actions
+                                    .get(id10)
+                                    .is_some_and(|a| {
+                                        (a.id == "desktop-input"
+                                            && a.payload.get("command").and_then(Value::as_str)
+                                                == Some("focus-input"))
+                                            || (a.id == "desktop-dictation"
+                                                && matches!(
+                                                    a.payload
+                                                        .get("command")
+                                                        .and_then(Value::as_str),
+                                                    Some("push-to-talk" | "dictation")
+                                                ))
+                                    });
+                                if should_update_10 {
+                                    if let Some(a10) = doc.editable.graph.actions.get_mut(id10) {
+                                        a10.id = "desktop-new-project-chat".into();
+                                        a10.name = "在项目中新建会话".into();
+                                        a10.category = "Agent".into();
+                                        a10.detail =
+                                            "在当前或最近项目中新建会话（New Conversation in Project）"
+                                                .into();
+                                        a10.payload = serde_json::to_value(ActionKind::AgentCommand {
+                                            adapter: "antigravity".into(),
+                                            command: "new-conversation-in-project".into(),
+                                        })
+                                        .map_err(|e| e.to_string())?;
+                                    }
                                 }
                             }
                             if let Some(id11) = &aid11 {
-                                if let Some(a11) = doc.editable.graph.actions.get_mut(id11) {
-                                    a11.id = "desktop-dictation".into();
-                                    a11.name = "按住说话 · 松开停止".into();
-                                    a11.category = "Agent".into();
-                                    a11.detail =
-                                        "按住启动听写（Record Audio / Ctrl+M），松开自动停止"
-                                            .into();
-                                    a11.payload = serde_json::to_value(ActionKind::AgentCommand {
-                                        adapter: "antigravity".into(),
-                                        command: "push-to-talk".into(),
-                                    })
-                                    .map_err(|e| e.to_string())?;
+                                let should_update_11 = doc
+                                    .editable
+                                    .graph
+                                    .actions
+                                    .get(id11)
+                                    .is_some_and(|a| {
+                                        a.id == "desktop-dictation-r"
+                                            && matches!(
+                                                a.payload.get("command").and_then(Value::as_str),
+                                                Some("push-to-talk" | "dictation")
+                                            )
+                                    });
+                                if should_update_11 {
+                                    if let Some(a11) = doc.editable.graph.actions.get_mut(id11) {
+                                        a11.id = "desktop-dictation".into();
+                                        a11.name = "按住说话 · 松开停止".into();
+                                        a11.category = "Agent".into();
+                                        a11.detail =
+                                            "按住启动听写（Record Audio / Ctrl+M），松开自动停止"
+                                                .into();
+                                        a11.payload = serde_json::to_value(ActionKind::AgentCommand {
+                                            adapter: "antigravity".into(),
+                                            command: "push-to-talk".into(),
+                                        })
+                                        .map_err(|e| e.to_string())?;
+                                    }
+                                }
+                            }
+                            if let Some(id12) = &aid12 {
+                                let should_update_12 = doc
+                                    .editable
+                                    .graph
+                                    .actions
+                                    .get(id12)
+                                    .is_some_and(|a| {
+                                        a.id == "desktop-submit"
+                                            && a.payload.get("command").and_then(Value::as_str)
+                                                == Some("submit")
+                                    });
+                                if should_update_12 {
+                                    if let Some(a12) = doc.editable.graph.actions.get_mut(id12) {
+                                        a12.detail =
+                                            "若听写激活则先停并确认停止，再聚焦输入区按 Cmd+Enter 提交"
+                                                .into();
+                                    }
                                 }
                             }
                             Ok(())
@@ -1780,6 +1863,42 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     })
 }
 
+pub fn antigravity_layer_needs_starter_slot_migration(
+    doc: &LocalDocumentV2,
+    layer_id: &str,
+) -> bool {
+    let Some(layer) = doc.editable.graph.layers.get(layer_id) else {
+        return false;
+    };
+    let slot_action = |slot: &str| {
+        layer
+            .controls
+            .values()
+            .find(|b| b.logical_control == slot)
+            .and_then(|b| b.action_id.as_ref())
+            .and_then(|id| doc.editable.graph.actions.get(id))
+    };
+    let a7 = slot_action("logical-7");
+    let a10 = slot_action("logical-10");
+    let a11 = slot_action("logical-11");
+    let is_cmd =
+        |action: Option<&crate::draft::Action>, expected_id: &str, cmds: &[&str]| -> bool {
+            action.is_some_and(|a| {
+                a.id == expected_id
+                    && a.payload
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .is_some_and(|c| cmds.contains(&c))
+            })
+        };
+    let legacy_2u_dictation = is_cmd(a10, "desktop-dictation", &["push-to-talk", "dictation"])
+        && is_cmd(a11, "desktop-dictation-r", &["push-to-talk", "dictation"]);
+    let previous_starter_slots = is_cmd(a7, "desktop-browser", &["browser"])
+        || (is_cmd(a10, "desktop-input", &["focus-input"])
+            && is_cmd(a11, "desktop-dictation", &["push-to-talk", "dictation"]));
+    legacy_2u_dictation || previous_starter_slots
+}
+
 pub fn install_four_app_cockpit_preset(
     draft: &mut Draft,
     profile_id: &str,
@@ -1810,7 +1929,6 @@ pub fn install_four_app_cockpit_preset(
         "DeepSeek Coder (DSH)" => "dsh-desktop",
         "Cindy" => "cindy",
         "Codex" => "codex",
-        "千问办公" => "qwenwork",
         _ => "antigravity",
     };
     let existing_layer = work.document.editable.graph.profiles[&pid]
@@ -2133,7 +2251,7 @@ mod agent_migration_tests {
     fn upgrades_pre_dial_conversational_presets_while_preserving_customized_profiles() {
         let mut draft = Draft::default();
         let ids = install_agent_starter_profiles(&mut draft).unwrap();
-        assert_eq!(ids.len(), 7);
+        assert_eq!(ids.len(), 6);
 
         for native_name in ["Cindy", "Codex"] {
             let pid = draft
@@ -2154,7 +2272,7 @@ mod agent_migration_tests {
         }
 
         // Downgrade DeepSeek Coder (DSH) to pre-Slice-B 9-slot push-to-talk state (remove slots 13, 14, 15),
-        // and customize 千问办公 by adding a joystick prompt slot (slot 16 -> prompt-continue).
+        // and customize Herdr by adding a joystick prompt slot (slot 16 -> prompt-continue).
         for profile_name in ["DeepSeek Coder (DSH)"] {
             let pid = draft
                 .document
@@ -2189,25 +2307,25 @@ mod agent_migration_tests {
                 .unwrap();
         }
 
-        let qwen_pid = draft
+        let herdr_pid = draft
             .document
             .editable
             .graph
             .profiles
             .iter()
-            .find(|(_, p)| p.name == "千问办公")
+            .find(|(_, p)| p.name == "Herdr")
             .unwrap()
             .0
             .clone();
-        let qwen_lid = draft.document.editable.graph.profiles[&qwen_pid].layer_order[0].clone();
+        let herdr_lid = draft.document.editable.graph.profiles[&herdr_pid].layer_order[0].clone();
         let prompt_continue = crate::draft::actions()
             .into_iter()
             .find(|a| a.id == "prompt-continue")
             .unwrap();
         draft
-            .assign(&json!(qwen_pid), &json!(qwen_lid), 16, prompt_continue)
+            .assign(&json!(herdr_pid), &json!(herdr_lid), 16, prompt_continue)
             .unwrap();
-        let qwen_before = draft.document.editable.graph.layers[&qwen_lid].clone();
+        let herdr_before = draft.document.editable.graph.layers[&herdr_lid].clone();
 
         let upgraded_ids = install_agent_starter_profiles(&mut draft).unwrap();
         assert_eq!(
@@ -2244,8 +2362,8 @@ mod agent_migration_tests {
         }
 
         assert!(
-            draft.document.editable.graph.layers[&qwen_lid] == qwen_before,
-            "User-customized 千问办公 profile (with joystick prompt) must remain untouched"
+            draft.document.editable.graph.layers[&herdr_lid] == herdr_before,
+            "User-customized Herdr profile (with joystick prompt) must remain untouched"
         );
     }
 }

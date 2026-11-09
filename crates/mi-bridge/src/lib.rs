@@ -11,8 +11,8 @@ pub use cindy::*;
 pub use dsh::*;
 
 pub use lighting_arbiter::{
-    DualZoneLightingFeedback, FourAppAgentPhase, FourAppLightingArbiter, FourAppSlotSnapshot,
-    LightingUpdateResult, PerKeyLightingFeedback,
+    sha256_hex, DualZoneLightingFeedback, FourAppAgentPhase, FourAppLightingArbiter,
+    FourAppSlotSnapshot, LightingUpdateResult, PerKeyLightingFeedback,
 };
 pub use ownership::{
     InterruptibleSleeper, NativeOwnershipController, NativeOwnershipReply, NativeOwnershipRequest,

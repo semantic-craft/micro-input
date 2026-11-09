@@ -310,6 +310,51 @@ impl DocumentStore {
         }
         self.preferences.value.bottom_row_layout
     }
+    pub fn hardware_profile_slots(&self) -> [Option<String>; 4] {
+        if let Some(host) = &self.host {
+            return host.hardware_profile_slots();
+        }
+        self.preferences.value.hardware_profile_slots.clone()
+    }
+    pub fn active_hardware_slot(&self) -> u8 {
+        if let Some(host) = &self.host {
+            return host.active_hardware_slot();
+        }
+        self.preferences.value.active_hardware_slot.min(3)
+    }
+    pub fn set_hardware_profile_slots(
+        &mut self,
+        slots: [Option<String>; 4],
+        active_slot: u8,
+    ) -> Result<(), String> {
+        if let Some(host) = &mut self.host {
+            return host.set_hardware_profile_slots(slots, active_slot);
+        }
+        if self.blocked {
+            return Err("本地文档未载入，四槽位配置未保存".into());
+        }
+        for pid in slots.iter().flatten() {
+            if !self
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .contains_key(pid)
+            {
+                return Err("所选槽位 Profile 不存在".into());
+            }
+        }
+        let clamped_active = active_slot.min(3);
+        let changed = self.preferences.value.hardware_profile_slots != slots
+            || self.preferences.value.active_hardware_slot != clamped_active;
+        self.preferences
+            .set_hardware_profile_slots(slots, clamped_active)?;
+        if changed {
+            self.host_state_revision += 1;
+        }
+        Ok(())
+    }
     pub fn set_host_active_profile(&mut self, profile_id: Option<String>) -> Result<(), String> {
         if let Some(host) = &mut self.host {
             return host.set_host_active_profile(profile_id);
@@ -612,6 +657,10 @@ struct HostPreferences {
     bottom_row_layout: crate::host_router::BottomRowLayout,
     #[serde(default)]
     app_profile_links: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    hardware_profile_slots: [Option<String>; 4],
+    #[serde(default)]
+    active_hardware_slot: u8,
 }
 impl Default for HostPreferences {
     fn default() -> Self {
@@ -625,6 +674,8 @@ impl Default for HostPreferences {
             manual_override: false,
             bottom_row_layout: crate::host_router::BottomRowLayout::Split,
             app_profile_links: Default::default(),
+            hardware_profile_slots: [None, None, None, None],
+            active_hardware_slot: 0,
         }
     }
 }
@@ -723,6 +774,16 @@ impl HostPreferencesStore {
     fn set_command_execution_enabled(&mut self, enabled: bool) -> Result<(), String> {
         let mut next = self.value.clone();
         next.command_execution_enabled = enabled;
+        self.save(next)
+    }
+    fn set_hardware_profile_slots(
+        &mut self,
+        slots: [Option<String>; 4],
+        active_slot: u8,
+    ) -> Result<(), String> {
+        let mut next = self.value.clone();
+        next.hardware_profile_slots = slots;
+        next.active_hardware_slot = active_slot.min(3);
         self.save(next)
     }
 }

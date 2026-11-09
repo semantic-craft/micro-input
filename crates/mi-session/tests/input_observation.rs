@@ -147,7 +147,7 @@ async fn verified_input_subscription_merges_wide_key_and_resolves_host_actions()
     );
     let act10: serde_json::Value =
         serde_json::from_str(&core.resolve_input_action("AG10".into(), true).unwrap()).unwrap();
-    assert_eq!(act10["command"], "focus-input");
+    assert_eq!(act10["command"], "new-conversation-in-project");
 
     let split_p11 = sub.next_event().await.unwrap();
     assert_eq!(split_p11.kind, InputKind::Pressed);

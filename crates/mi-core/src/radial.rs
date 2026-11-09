@@ -274,7 +274,6 @@ impl RadialSlotConfig {
         let agents = [
             CanonicalAgent::Cindy,
             CanonicalAgent::Codex,
-            CanonicalAgent::QwenWork,
             CanonicalAgent::Herdr,
             CanonicalAgent::Antigravity,
             CanonicalAgent::DeepseekHarness,
@@ -294,6 +293,7 @@ impl RadialSlotConfig {
                 Some("app.badge"),
                 None,
             ),
+            Self::navigate_forward("前进", Some("chevron.forward"), Some("#00CCAA")),
             Self::open_app(
                 agents[2].display_name(),
                 agents[2].bundle_id(),
@@ -309,12 +309,6 @@ impl RadialSlotConfig {
             Self::open_app(
                 agents[4].display_name(),
                 agents[4].bundle_id(),
-                Some("app.badge"),
-                None,
-            ),
-            Self::open_app(
-                agents[5].display_name(),
-                agents[5].bundle_id(),
                 Some("app.badge"),
                 None,
             ),

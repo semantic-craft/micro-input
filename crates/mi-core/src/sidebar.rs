@@ -10,18 +10,16 @@ pub enum CanonicalAgent {
     DeepseekHarness = 2,
     Herdr = 3,
     Cindy = 4,
-    QwenWork = 5,
-    OtherApps = 6,
+    OtherApps = 5,
 }
 
 impl CanonicalAgent {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::Antigravity,
         Self::Codex,
         Self::DeepseekHarness,
         Self::Herdr,
         Self::Cindy,
-        Self::QwenWork,
         Self::OtherApps,
     ];
 
@@ -36,7 +34,6 @@ impl CanonicalAgent {
             Self::DeepseekHarness => "DeepSeek Coder (DSH)",
             Self::Herdr => "Herdr",
             Self::Cindy => "Cindy",
-            Self::QwenWork => "千问办公",
             Self::OtherApps => "其他软件",
         }
     }
@@ -48,7 +45,6 @@ impl CanonicalAgent {
             Self::DeepseekHarness => "Deepseek Harness",
             Self::Herdr => "Herdr",
             Self::Cindy => "Cindy",
-            Self::QwenWork => "千问办公",
             Self::OtherApps => "其他软件",
         }
     }
@@ -60,7 +56,6 @@ impl CanonicalAgent {
             Self::DeepseekHarness => "com.deepseek.dsh",
             Self::Herdr => "dev.herdr.app",
             Self::Cindy => "com.xd.cindy",
-            Self::QwenWork => "cn.qwenwork.desktop.mac",
             Self::OtherApps => "*",
         }
     }
@@ -72,7 +67,6 @@ impl CanonicalAgent {
             Self::DeepseekHarness => "DS",
             Self::Herdr => "HD",
             Self::Cindy => "CD",
-            Self::QwenWork => "千问",
             Self::OtherApps => "通用",
         }
     }
@@ -198,10 +192,113 @@ pub struct SidebarProfileRow {
     pub is_manual_fallback: bool,
 }
 
+pub const HARDWARE_PROFILE_SLOT_COUNT: usize = 4;
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum HardwareProfileSlotKind {
+    UsbPlug = 0,
+    TouchSlot1 = 1,
+    TouchSlot2 = 2,
+    TouchSlot3 = 3,
+}
+
+impl HardwareProfileSlotKind {
+    pub const ALL: [Self; HARDWARE_PROFILE_SLOT_COUNT] = [
+        Self::UsbPlug,
+        Self::TouchSlot1,
+        Self::TouchSlot2,
+        Self::TouchSlot3,
+    ];
+
+    pub const DEFAULT_AGENTS: [CanonicalAgent; HARDWARE_PROFILE_SLOT_COUNT] = [
+        CanonicalAgent::Antigravity,
+        CanonicalAgent::Antigravity,
+        CanonicalAgent::Codex,
+        CanonicalAgent::DeepseekHarness,
+    ];
+
+    pub const fn from_index(index: u8) -> Option<Self> {
+        match index {
+            0 => Some(Self::UsbPlug),
+            1 => Some(Self::TouchSlot1),
+            2 => Some(Self::TouchSlot2),
+            3 => Some(Self::TouchSlot3),
+            _ => None,
+        }
+    }
+
+    pub const fn index(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::UsbPlug => "插入 USB",
+            Self::TouchSlot1 => "左下触控 1",
+            Self::TouchSlot2 => "左下触控 2",
+            Self::TouchSlot3 => "左下触控 3",
+        }
+    }
+
+    pub const fn trigger_badge(self) -> &'static str {
+        match self {
+            Self::UsbPlug => "USB",
+            Self::TouchSlot1 => "LED 1 · ●○○",
+            Self::TouchSlot2 => "LED 2 · ○●○",
+            Self::TouchSlot3 => "LED 3 · ○○●",
+        }
+    }
+
+    pub const fn default_agent(self) -> CanonicalAgent {
+        Self::DEFAULT_AGENTS[self as usize]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HardwareProfileSlotProjection {
+    pub slot_index: u8,
+    pub slot_kind: HardwareProfileSlotKind,
+    pub title: String,
+    pub trigger_badge: String,
+    pub profile_id: String,
+    pub display_name: String,
+    pub monogram: String,
+    pub bundle_id: Option<String>,
+    pub is_active_slot: bool,
+    pub is_active_profile: bool,
+}
+
+impl Default for HardwareProfileSlotProjection {
+    fn default() -> Self {
+        Self::for_kind(HardwareProfileSlotKind::UsbPlug)
+    }
+}
+
+impl HardwareProfileSlotProjection {
+    pub fn for_kind(kind: HardwareProfileSlotKind) -> Self {
+        let agent = kind.default_agent();
+        Self {
+            slot_index: kind.index(),
+            slot_kind: kind,
+            title: kind.title().to_string(),
+            trigger_badge: kind.trigger_badge().to_string(),
+            profile_id: String::new(),
+            display_name: agent.display_name().to_string(),
+            monogram: agent.badge_monogram().to_string(),
+            bundle_id: Some(agent.bundle_id().to_string()),
+            is_active_slot: kind == HardwareProfileSlotKind::UsbPlug,
+            is_active_profile: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SidebarProjection {
     pub section_title: String,
     pub rows: Vec<SidebarProfileRow>,
+    pub hardware_slots: [HardwareProfileSlotProjection; HARDWARE_PROFILE_SLOT_COUNT],
+    pub active_hardware_slot: u8,
     pub selected_profile_id: Option<String>,
     pub selected_display_name: Option<String>,
     pub active_host_profile_id: Option<String>,
@@ -223,6 +320,10 @@ impl Default for SidebarProjection {
         Self {
             section_title: "常用软件方案".to_string(),
             rows: Vec::new(),
+            hardware_slots: std::array::from_fn(|idx| {
+                HardwareProfileSlotProjection::for_kind(HardwareProfileSlotKind::ALL[idx])
+            }),
+            active_hardware_slot: 0,
             selected_profile_id: None,
             selected_display_name: None,
             active_host_profile_id: None,
@@ -269,6 +370,10 @@ pub enum BackupCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SidebarAction {
     SelectProfile(String),
+    ActivateHardwareSlot(u8),
+    CycleTouchProfileSlot,
+    SetHardwareSlotProfile { slot_index: u8, profile_id: String },
+    ResetHardwareSlotsToDefault,
     SetAutoFollow(bool),
     ToggleAutoFollowPause,
     SetShowOtherProfiles(bool),

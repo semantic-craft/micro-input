@@ -325,6 +325,9 @@ pub struct CanvasProjection {
     pub status_cluster_bounds: CanvasRect,
     pub status_led_hex: String,
     pub underglow_hex: String,
+    pub active_hardware_slot: u8,
+    pub touch_led_states: [bool; 3],
+    pub active_hardware_slot_label: String,
     pub protected_lock: Option<ProtectedLayerLockProjection>,
     pub can_edit_bindings: bool,
     pub can_add_lighting: bool,
@@ -369,6 +372,9 @@ impl Default for CanvasProjection {
             status_cluster_bounds: zero,
             status_led_hex: String::new(),
             underglow_hex: String::new(),
+            active_hardware_slot: 0,
+            touch_led_states: [true, false, false],
+            active_hardware_slot_label: "USB · Antigravity".to_string(),
             protected_lock: None,
             can_edit_bindings: true,
             can_add_lighting: true,
@@ -477,6 +483,8 @@ pub enum CanvasAction {
     ApplyKnobJoystickPreset(KnobJoystickPreset),
     AssignSlotAction { slot: u32, action_id: String },
     UnlockBySwitchingOrCreatingCustomLayer,
+    CycleTouchProfileSlot,
+    ActivateHardwareSlot(u8),
 }
 
 pub fn format_concise_keycap_caption(raw_label: &str) -> String {
@@ -500,6 +508,13 @@ pub fn format_concise_keycap_caption(raw_label: &str) -> String {
     } else {
         without_paren
     };
+
+    if segment == "在项目中新建会话" {
+        return "项目新建".to_string();
+    }
+    if segment == "聚焦当前输入框" {
+        return "聚焦输入".to_string();
+    }
 
     let compact: String = segment
         .chars()

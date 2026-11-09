@@ -209,7 +209,7 @@ mod tests {
         let mut history = NavigationHistory::new();
         let herdr = NavigationPlace::app("dev.herdr.app");
         let antigravity = NavigationPlace::app("com.google.antigravity");
-        let qwen = NavigationPlace::app("cn.qwenwork.desktop.mac");
+        let dsh = NavigationPlace::app("com.deepseek.dsh");
         let cindy = NavigationPlace::app("com.xd.cindy");
         let codex = NavigationPlace::app("com.openai.codex");
 
@@ -218,7 +218,7 @@ mod tests {
         assert_eq!(history.back(|_| true), None);
         assert_eq!(history.forward(|_| true), None);
 
-        for place in [&herdr, &antigravity, &qwen, &cindy, &codex] {
+        for place in [&herdr, &antigravity, &dsh, &cindy, &codex] {
             history.visit(place.clone());
         }
         assert_eq!(history.current(), Some(&codex));
@@ -226,7 +226,7 @@ mod tests {
         assert!(!history.can_go_forward(|_| true));
 
         assert_eq!(history.back(|_| true), Some(cindy.clone()));
-        assert_eq!(history.back(|_| true), Some(qwen.clone()));
+        assert_eq!(history.back(|_| true), Some(dsh.clone()));
         assert_eq!(history.back(|_| true), Some(antigravity.clone()));
         assert_eq!(history.back(|_| true), Some(herdr.clone()));
         assert_eq!(history.back(|_| true), None);
@@ -234,7 +234,7 @@ mod tests {
         assert!(history.can_go_forward(|_| true));
 
         assert_eq!(history.forward(|_| true), Some(antigravity));
-        assert_eq!(history.forward(|_| true), Some(qwen));
+        assert_eq!(history.forward(|_| true), Some(dsh));
         assert_eq!(history.forward(|_| true), Some(cindy));
         assert_eq!(history.forward(|_| true), Some(codex));
         assert_eq!(history.forward(|_| true), None);
@@ -267,18 +267,18 @@ mod tests {
         let herdr = NavigationPlace::app("dev.herdr.app");
         let antigravity = NavigationPlace::app("com.google.antigravity");
         let cindy = NavigationPlace::app("com.xd.cindy");
-        let qwen = NavigationPlace::app("cn.qwenwork.desktop.mac");
+        let dsh = NavigationPlace::app("com.deepseek.dsh");
 
         history.visit(herdr.clone());
         history.visit(antigravity.clone());
         history.visit(cindy);
 
         assert_eq!(history.back(|_| true), Some(antigravity.clone()));
-        history.visit(qwen.clone());
+        history.visit(dsh.clone());
 
         assert!(!history.can_go_forward(|_| true));
         assert_eq!(history.forward(|_| true), None);
-        assert_eq!(history.entries(), &[herdr, antigravity.clone(), qwen]);
+        assert_eq!(history.entries(), &[herdr, antigravity.clone(), dsh]);
         assert_eq!(history.back(|_| true), Some(antigravity));
     }
 
