@@ -351,3 +351,9 @@
 
 - 观察超时或 IPC 失败不是属性不存在；截断的树不能据此宣布唯一目标。托管控件与会话导航共用有界批读，只有完整观察才能进入匹配。
 - 动作成功送达后回读失败，结果是未确认；不能返回表示未执行的 blocked。`native_ax` 的错误槽与部分树回归负责守住观察边界，原窗口和分屏目标仍须在动作前后核验。Seen 1x（2026-11-10）。
+
+## HID 全局管理器不能归临时操作线程所有
+
+- 起因与后果：恢复设备配置后，下一次应用在 `CFRunLoopAddSource` 崩溃。hidapi 的进程级管理器绑定首次初始化线程的 RunLoop；每次短生命周期任务新建 HidApi 会在原线程退出后重新枚举该管理器。
+- 修复：一个随进程存活的 HID 打开线程初始化并复用上下文，串行完成独占选项设置、打开与选项恢复。设备发现仍由现有 IOKit 实现负责，不额外维护一份枚举缓存。
+- 验证点：`hid_open_owner_survives_short_lived_callers_and_failed_opens` 与 `abandoned_hid_open_reply_releases_handle_and_keeps_owner_available` 自动回归；`native_usb_reopens_after_request_threads_exit` 在三个短线程请求间真实开关同一设备，零报告读写。应用层仍需实际恢复、应用与完整读回。Seen 1x（2026-11-10）。
