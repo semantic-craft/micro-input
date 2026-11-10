@@ -274,7 +274,6 @@ mod tests {
         store.native_ownership.set_desired_owner("native");
         store.document_store.set_host_active_profile(None).unwrap();
         let generation = store.native_ownership.generation();
-        let selected = store.projection().selected_profile_id.clone();
         let board = &store.projection().sidebar.board_layers;
         let codex = board
             .profile_choices
@@ -291,16 +290,35 @@ mod tests {
             .profile_id
             .clone();
         let commands = [
-            serde_json::json!({"PreviewBoardLayer":1}),
-            serde_json::json!({"SetBoardLayerProfile":{"layer":5,"profile_id":cindy}}),
-            serde_json::json!({"PreviewBoardLayer":5}),
-            serde_json::json!({"SetBoardLayerProfile":{"layer":6,"profile_id":codex}}),
-            serde_json::json!({"PreviewBoardLayer":6}),
-            serde_json::json!({"SetBoardLayerProfile":{"layer":6,"profile_id":null}}),
-            serde_json::json!("ResetBoardLayerPlan"),
-            serde_json::json!("ProvisionBoardLayers"),
+            (
+                serde_json::json!({"PreviewBoardLayer":1}),
+                Some(codex.clone()),
+            ),
+            (
+                serde_json::json!({"SetBoardLayerProfile":{"layer":5,"profile_id":cindy}}),
+                Some(codex.clone()),
+            ),
+            (
+                serde_json::json!({"PreviewBoardLayer":5}),
+                Some(cindy.clone()),
+            ),
+            (
+                serde_json::json!({"SetBoardLayerProfile":{"layer":6,"profile_id":codex}}),
+                Some(cindy.clone()),
+            ),
+            (
+                serde_json::json!({"PreviewBoardLayer":6}),
+                Some(codex.clone()),
+            ),
+            (
+                serde_json::json!({"SetBoardLayerProfile":{"layer":6,"profile_id":null}}),
+                Some(codex.clone()),
+            ),
+            (serde_json::json!({"PreviewBoardLayer":6}), None),
+            (serde_json::json!("ResetBoardLayerPlan"), None),
+            (serde_json::json!("ProvisionBoardLayers"), None),
         ];
-        for action in commands {
+        for (action, editing_profile) in commands {
             let input =
                 CString::new(serde_json::json!({"domain":"sidebar","action":action}).to_string())
                     .unwrap();
@@ -311,7 +329,7 @@ mod tests {
                 }
             }
             assert!(store.active_host_profile_id().is_none());
-            assert_eq!(store.projection().selected_profile_id, selected);
+            assert_eq!(store.projection().selected_profile_id, editing_profile);
             assert_eq!(store.native_ownership.generation(), generation);
             assert!(!store.native_ownership.has_pending_request());
             assert!(!store.ptt_controller.is_active);
@@ -321,6 +339,10 @@ mod tests {
                 std::io::ErrorKind::WouldBlock
             );
         }
+        store
+            .document_store
+            .set_host_active_profile(Some(codex))
+            .unwrap();
         // The listener is a live positive control for the path the commands must avoid.
         store.set_status_message("force normal runtime reconciliation");
         assert!(listener.accept().is_ok());

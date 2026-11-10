@@ -19,7 +19,7 @@ public struct WorkbenchRootView: View {
                 CheatSheetOverlayView(store: store, sheet: cs)
             }
         }
-        .frame(minWidth: 1020, minHeight: 680)
+        .frame(minWidth: 820, minHeight: 640)
         .sheet(
             item: Binding(
                 get: { modal },

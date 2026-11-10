@@ -336,6 +336,7 @@ pub enum BackupCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SidebarAction {
     SelectProfile(String),
+    BrowseProfile(String),
     PreviewBoardLayer(mi_model::board_layers::BoardLayer),
     PreviewUsbStartup,
     ProvisionBoardLayers,

@@ -30,18 +30,17 @@ struct CreatorMicroInlineInspectorView: View {
 
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
-                HStack {
+                VStack(alignment: .leading, spacing: 8) {
                     Text(titleForSlot(slot: slot, isSplit: insp.bottomRowLayout == "split"))
                         .font(UITheme.heading)
                         .foregroundStyle(UITheme.textPrimary)
-                    Spacer()
                     Text("\(insp.selectedDisplayName) · \(insp.inspectorLayerName)")
                         .font(UITheme.micro)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Capsule().fill(UITheme.accentSoft))
                         .foregroundStyle(UITheme.accent)
-                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(insp.isProtectedLayer ? "原生直通" : (isTaskRole ? "会话键" : "动作键"))
                         .font(UITheme.micro)
                         .padding(.horizontal, 6)
@@ -49,10 +48,10 @@ struct CreatorMicroInlineInspectorView: View {
                         .background(Capsule().fill(UITheme.subtleSurface))
                         .foregroundStyle(UITheme.textSecondary)
                 }
-                Text("当前绑定：\(boundSummaryText(insp: insp, slot: slot))")
-                    .font(UITheme.captionMedium)
+                Text(boundSummaryText(insp: insp, slot: slot))
+                    .font(UITheme.heading)
                     .foregroundStyle(UITheme.accent)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(14)
             .id("inspector-header-\(layerIdentity)")
@@ -324,7 +323,7 @@ struct CreatorMicroInlineInspectorView: View {
                     .font(UITheme.captionMedium)
                     .foregroundStyle(UITheme.textSecondary)
                 Spacer()
-                Button("设为 🌐 苹果 Fn") {
+                Button("设为 Fn 听写键") {
                     store.dispatch("inspector", "BindAppleFnKey")
                 }
                 .buttonStyle(.bordered)
@@ -526,12 +525,12 @@ private struct KeycapGlyphCellButton: View, Equatable {
                 )
                 .equatable()
                 Text(item.shortLabel)
-                    .font(.system(size: 9, weight: .medium))
+                    .font(UITheme.caption)
                     .foregroundStyle(item.isSelected ? UITheme.accent : UITheme.textSecondary)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 48)
+            .frame(minHeight: 56)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(item.isSelected ? UITheme.accentSoft : UITheme.subtleSurface)
@@ -614,7 +613,7 @@ private struct ActionCatalogRowButton: View, Equatable {
                     Text(act.name)
                         .font(isBound ? UITheme.bodySemibold : UITheme.body)
                         .foregroundStyle(UITheme.textPrimary)
-                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(act.category)
                         .font(UITheme.micro)
                         .foregroundStyle(UITheme.textSecondary)
@@ -642,96 +641,6 @@ private struct ActionCatalogRowButton: View, Equatable {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-}
-
-struct ClassicMicroInputSettingsSheet: View {
-    let store: CoreStore
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        let h = store.header
-        let s = store.sidebar
-        let sm = store.statusMenu
-        let f = store.footer
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Micro Input 设置与诊断")
-                    .font(UITheme.title)
-                    .foregroundStyle(UITheme.textPrimary)
-                Spacer()
-                Button("完成") { dismiss() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(UITheme.accent)
-            }
-
-            GroupBox("键盘灯光与会话提醒 (Idle 蓝光 / In Progress)") {
-                SimpleLightingControlCard(store: store)
-                    .padding(8)
-            }
-
-            GroupBox("前台软件与按键控制") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle(
-                        "启用小键盘动作分发控制",
-                        isOn: Binding(
-                            get: { h.hostExecutionEnabled },
-                            set: { store.dispatch("header", ["SetExecutionEnabled": $0]) }
-                        )
-                    )
-                    Toggle(
-                        "切换前台软件时自动切换配套方案",
-                        isOn: Binding(
-                            get: { s.autoFollowEnabled },
-                            set: { store.dispatch("sidebar", ["SetAutoFollow": $0]) }
-                        )
-                    )
-                    Toggle(
-                        "开启屏幕中央轮盘菜单",
-                        isOn: Binding(
-                            get: { sm.radialMenuEnabled },
-                            set: { store.dispatch("status_menu", ["SetRadialMenuEnabled": $0]) }
-                        )
-                    )
-                }
-                .padding(8)
-            }
-
-            GroupBox("硬件同步与连接仿真") {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text(h.deviceSummary)
-                            .font(UITheme.bodySemibold)
-                        Spacer()
-                        Button("检测键盘") {
-                            store.dispatch("header", "ConnectKeyboard")
-                        }
-                        .controlSize(.small)
-                    }
-                    Text("文档修订 #\(h.documentRevision) · 宿主路由修订 #\(h.hostRevision) · \(f.statusMessage)")
-                        .font(UITheme.caption)
-                        .foregroundStyle(UITheme.textSecondary)
-
-                    HStack(spacing: 8) {
-                        Button("预览并备份当前配置…") {
-                            dismiss()
-                            store.dispatch("device", "OpenApplyPreparation")
-                        }
-                        .controlSize(.small)
-
-                        Button("模拟设备重连三方比较…") {
-                            dismiss()
-                            store.dispatch("device", "OpenReconnectComparison")
-                        }
-                        .controlSize(.small)
-                    }
-                }
-                .padding(8)
-            }
-        }
-        .padding(20)
-        .frame(width: 560)
-        .background(UITheme.pageBackground)
     }
 }
 

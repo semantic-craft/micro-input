@@ -7,140 +7,80 @@ struct CreatorMicroStageView: View {
     var onOpenMacroLibrary: () -> Void
     var onPromptNewLayer: () -> Void
     var onPromptRenameLayer: () -> Void
-    @State private var showStageLightingPopover = false
 
     var body: some View {
         let _ = ViewRenderTelemetry.record("CreatorMicroStageView")
         let s = store.sidebar
         let h = store.header
-        let rawProfileName = s.selectedRawName
-        let agentKind = AgentProfileKind.from(profileName: rawProfileName)
-        let selectedRow = s.sidebarRows.first(where: { $0.isSelected })
-        let isCurrentlyActive = selectedRow?.isActiveHost ?? false
-
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 8) {
-                        Text(s.selectedDisplayName)
-                            .font(UITheme.title)
-                            .foregroundStyle(UITheme.textPrimary)
-                        if isCurrentlyActive {
-                            Text("当前生效")
-                                .font(UITheme.micro)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(UITheme.accentSoft))
-                                .foregroundStyle(UITheme.accent)
-                        } else {
-                            Button("启用此方案") {
-                                if let id = selectedRow?.profileId {
-                                    store.dispatch("sidebar", ["SelectProfile": id])
+        let agentKind = AgentProfileKind.from(profileName: s.selectedRawName)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("当前控制").font(UITheme.caption).foregroundStyle(UITheme.textSecondary)
+                    Text(h.hostExecutionEnabled ? store.statusMenu.activeProfileName : "按键控制已暂停")
+                        .font(UITheme.title).foregroundStyle(UITheme.textPrimary)
+                    Text(s.boardLayers.observedStatus)
+                        .font(UITheme.caption).foregroundStyle(UITheme.textSecondary)
+                }
+                Divider()
+                BoardLayerOverview(store: store, board: s.boardLayers)
+                if h.bannerKind != "Ready" { healthWarningBanner(h: h) }
+                if s.selectedProfileId != nil {
+                    HStack(alignment: .top, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(s.selectedDisplayName).font(UITheme.heading)
+                            Text("正在编辑，\(s.inspectorLayerName)")
+                                .font(UITheme.caption).foregroundStyle(UITheme.textSecondary)
+                        }
+                        Spacer(minLength: 0)
+                        Menu("按键层") {
+                            ForEach(s.layerTabs) { tab in
+                                Button(tab.name) { store.dispatch("canvas", ["SelectLayer": tab.id]) }
+                            }
+                            Divider()
+                            Button("新建层") { onPromptNewLayer() }
+                            Button("重命名当前层") { onPromptRenameLayer() }.disabled(s.isProtectedLayer)
+                            Button("复制当前层") {
+                                store.dispatch("inspector", ["DuplicateSelectedLayer": ["name": "\(s.inspectorLayerName) 副本"]])
+                            }
+                            Button("删除当前层", role: .destructive) { store.dispatch("inspector", "DeleteSelectedLayer") }
+                                .disabled(s.isProtectedLayer || s.layerTabs.count <= 1)
+                        }
+                        .fixedSize()
+                        if let profileId = s.selectedProfileId, profileId != s.activeHostProfileId {
+                            Button("启用此方案") { store.dispatch("sidebar", ["SelectProfile": profileId]) }
+                        }
+                        if let agent = DesktopAgent.named(s.selectedRawName), !agent.isGeneralFallback {
+                            Button("打开应用") {
+                                if let url = DesktopAgent.cachedAppURL(for: agent.bundleID) {
+                                    NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
                                 }
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(UITheme.accent)
-                            .controlSize(.mini)
                         }
                     }
-                    Text(agentKind.bridgeDescription)
-                        .font(UITheme.caption)
-                        .foregroundStyle(UITheme.textSecondary)
-                        .lineLimit(1)
-                }
-
-                Spacer()
-
-                if s.layerTabs.count > 1 {
-                    Picker(
-                        "层",
-                        selection: Binding(
-                            get: { s.layerTabs.first(where: { $0.isSelected })?.id ?? "" },
-                            set: { store.dispatch("canvas", ["SelectLayer": $0]) }
-                        )
-                    ) {
-                        ForEach(s.layerTabs) { tab in
-                            Text(tab.name).tag(tab.id)
-                        }
+                    CreatorMicroBoardView(store: store, agentKind: agentKind)
+                        .frame(maxWidth: .infinity).frame(height: 420)
+                        .background(UITheme.subtleSurface, in: RoundedRectangle(cornerRadius: 12))
+                    CreatorMicroInlineInspectorView(
+                        store: store, agentKind: agentKind,
+                        onOpenFullActionLibrary: onOpenFullActionLibrary,
+                        onOpenMacroLibrary: onOpenMacroLibrary
+                    )
+                    .frame(minHeight: 400, idealHeight: 540, maxHeight: 540)
+                } else {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("这一层尚未分配应用").font(UITheme.heading)
+                        Text("在应用方案中分配后，即可查看对应按键。")
+                            .foregroundStyle(UITheme.textSecondary)
                     }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 260)
-                }
-
-                Menu("图层") {
-                    Button("新建层…") { onPromptNewLayer() }
-                    Button("重命名当前层…") { onPromptRenameLayer() }
-                        .disabled(s.isProtectedLayer)
-                    Button("复制当前层") {
-                        store.dispatch(
-                            "inspector",
-                            ["DuplicateSelectedLayer": ["name": "\(s.inspectorLayerName) 副本"]]
-                        )
-                    }
-                    Divider()
-                    Button("删除当前层", role: .destructive) {
-                        store.dispatch("inspector", "DeleteSelectedLayer")
-                    }
-                    .disabled(s.isProtectedLayer || s.layerTabs.count <= 1)
-                }
-                .controlSize(.small)
-                .fixedSize()
-
-                Button("💡 灯光设置") {
-                    showStageLightingPopover.toggle()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .popover(isPresented: $showStageLightingPopover, arrowEdge: .bottom) {
-                    SimpleLightingControlCard(store: store)
-                        .frame(width: 360)
-                        .padding(14)
-                }
-
-                if let agent = DesktopAgent.named(rawProfileName),
-                   !agent.isGeneralFallback
-                {
-                    Button("打开 \(s.selectedDisplayName)") {
-                        if let appURL = DesktopAgent.cachedAppURL(for: agent.bundleID) {
-                            NSWorkspace.shared.openApplication(
-                                at: appURL,
-                                configuration: NSWorkspace.OpenConfiguration()
-                            )
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .padding(.vertical, 32)
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-            .background(UITheme.surface)
-
-            Rectangle().fill(UITheme.border).frame(height: 1)
-
-            if !h.deviceConnected || !h.hostExecutionEnabled || h.bannerKind == "Warning" {
-                healthWarningBanner(h: h)
-                Rectangle().fill(UITheme.border).frame(height: 1)
-            }
-
-            HStack(alignment: .top, spacing: 0) {
-                CreatorMicroBoardView(store: store, agentKind: agentKind)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(UITheme.pageBackground)
-
-                Rectangle().fill(UITheme.border).frame(width: 1)
-
-                CreatorMicroInlineInspectorView(
-                    store: store,
-                    agentKind: agentKind,
-                    onOpenFullActionLibrary: onOpenFullActionLibrary,
-                    onOpenMacroLibrary: onOpenMacroLibrary
-                )
-                .frame(width: 332)
-                .frame(maxHeight: .infinity)
-                .background(UITheme.surface)
-            }
+            .padding(UITheme.Layout.pagePadding)
+            .frame(maxWidth: UITheme.Layout.contentMaxWidth, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
+        .background(UITheme.pageBackground)
     }
 
     private func healthWarningBanner(h: HeaderSliceModel) -> some View {
@@ -150,7 +90,7 @@ struct CreatorMicroStageView: View {
             Text(h.bannerText)
                 .font(UITheme.caption)
                 .foregroundStyle(UITheme.textPrimary)
-                .lineLimit(1)
+                .fixedSize(horizontal: false, vertical: true)
             Spacer()
             if !h.deviceConnected {
                 Button("重新检测键盘") {
@@ -178,7 +118,6 @@ struct CreatorMicroBoardView: View {
     let store: CoreStore
     let agentKind: AgentProfileKind
     @State private var jumpDirectlyOnGlowingSlotTap = true
-    @State private var showLightingPopover = false
 
     private let cellSize: CGFloat = 68
     private let gridSpacing: CGFloat = 8
@@ -372,7 +311,7 @@ struct CreatorMicroBoardView: View {
                         )
                     if isSelected {
                         Text(dirArrow)
-                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .font(UITheme.captionMedium)
                             .foregroundStyle(Color.white.opacity(0.92))
                     }
                 }
@@ -385,7 +324,14 @@ struct CreatorMicroBoardView: View {
     }
 
     private func statusIndicatorClusterCell(c: CanvasSliceModel) -> some View {
-        let leds = c.touchLedStates.count == 3 ? c.touchLedStates : [false, false, false]
+        let board = store.sidebar.boardLayers
+        let matchesLayer = board.layers.contains {
+            $0.layer == c.boardPreviewLayer && $0.profileId == c.selectedProfileId
+        }
+        let matchesUsb = c.boardPreviewLayer == nil && board.usbStartupProfileId == c.selectedProfileId
+        let isBoardPreview = c.selectedProfileId != nil && (matchesLayer || matchesUsb)
+        let previewLabel = isBoardPreview ? c.boardPreviewLabel : "本机方案，没有选择物理层"
+        let leds = isBoardPreview && c.touchLedStates.count == 3 ? c.touchLedStates : [false, false, false]
         return VStack(spacing: 6) {
             HStack(spacing: 6) {
                 ForEach(0..<3, id: \.self) { index in
@@ -394,15 +340,15 @@ struct CreatorMicroBoardView: View {
                         .frame(width: 5.5, height: 5.5)
                 }
             }
-            Text(c.boardPreviewLayer.map { "L\($0)" } ?? "USB")
+            Text(isBoardPreview ? (c.boardPreviewLayer.map { "L\($0)" } ?? "USB") : "本机")
                 .font(UITheme.monoBadge)
                 .foregroundStyle(UITheme.textPrimary)
-            Text("预览").font(UITheme.micro).foregroundStyle(UITheme.textMuted)
+            Text(isBoardPreview ? "预览" : "方案").font(UITheme.micro).foregroundStyle(UITheme.textMuted)
         }
         .frame(width: cellSize, height: cellSize)
         .background(RoundedRectangle(cornerRadius: 12).fill(UITheme.mutedSurface.opacity(0.55)))
-        .help(c.boardPreviewLabel)
-        .accessibilityLabel(c.boardPreviewLabel)
+        .help(previewLabel)
+        .accessibilityLabel(previewLabel)
     }
 
     private func programmableKeyCell(slot: Int, c: CanvasSliceModel, ss: SessionStripSliceModel) -> some View {
@@ -460,147 +406,44 @@ struct CreatorMicroBoardView: View {
     }
 
     private func compactBoardToolbar(c: CanvasSliceModel, ss: SessionStripSliceModel) -> some View {
-        let activeSessions = ss.sessionSlots.filter {
-            $0.isUnreadBlueDot || $0.isWorkingAnimated || !$0.title.isEmpty
-        }
-
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                Toggle(
-                    "显示键帽文字",
-                    isOn: Binding(
-                        get: { c.showKeycapLabels },
-                        set: { store.dispatch("canvas", ["SetShowKeycapLabels": $0]) }
-                    )
-                )
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
-                .font(UITheme.caption)
-                .foregroundStyle(UITheme.textSecondary)
-
+        HStack(spacing: 16) {
+            Toggle("显示键帽文字", isOn: Binding(
+                get: { c.showKeycapLabels },
+                set: { store.dispatch("canvas", ["SetShowKeycapLabels": $0]) }
+            ))
+            .toggleStyle(.checkbox)
+            .font(UITheme.caption)
+            Spacer(minLength: 0)
+            Menu("布局选项") {
                 if agentKind.supportsLiveSessionSlots {
-                    Toggle("点击发光键直接跳转会话", isOn: $jumpDirectlyOnGlowingSlotTap)
-                        .toggleStyle(.checkbox)
-                        .controlSize(.small)
-                        .font(UITheme.caption)
-                        .foregroundStyle(UITheme.textSecondary)
+                    Toggle("点击发光键打开会话", isOn: $jumpDirectlyOnGlowingSlotTap)
+                    Button("上方六键设为会话键") { store.dispatch("session_strip", "BindTopSixAsSessionKeys") }
                 }
-
-                Spacer()
-
-                if !activeSessions.isEmpty {
-                    HStack(spacing: 6) {
-                        ForEach(activeSessions.prefix(3)) { s in
-                            Button {
-                                store.dispatch("session_strip", ["ActivateSlot": s.slotIndex])
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Circle()
-                                        .fill(Color(hex: s.ledColorHex))
-                                        .frame(width: 6, height: 6)
-                                    Text(s.title.isEmpty ? "会话 \(s.slotIndex + 1)" : s.title)
-                                        .font(UITheme.micro)
-                                        .foregroundStyle(UITheme.textPrimary)
-                                        .lineLimit(1)
-                                }
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 3)
-                                .background(Capsule().fill(UITheme.subtleSurface))
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                        }
-
-                        Button("已读熄灯") {
-                            store.dispatch("session_strip", "AcknowledgeAllCompleted")
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
-                    }
-                }
-
-                Button {
-                    showLightingPopover.toggle()
-                } label: {
-                    let statusLabel: String = {
-                        if !ss.simpleLighting.lightingEnabled {
-                            return "灯光已关"
-                        }
-                        if ss.unreadCompletedCount > 0 {
-                            return "💡 灯光设置 · Idle 蓝光 (\(ss.unreadCompletedCount))"
-                        }
-                        if ss.workingCount > 0 {
-                            return "💡 灯光设置 · In Progress (\(ss.workingCount))"
-                        }
-                        return "💡 灯光设置 · Idle 蓝光"
-                    }()
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(
-                                ss.simpleLighting.lightingEnabled
-                                    ? Color(hex: c.underglowHex)
-                                    : UITheme.textMuted
-                            )
-                            .frame(width: 8, height: 8)
-                        Text(statusLabel)
-                            .font(UITheme.captionMedium)
-                            .foregroundStyle(UITheme.textPrimary)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Capsule().fill(UITheme.surface))
-                    .overlay(Capsule().stroke(UITheme.border, lineWidth: 1))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .popover(isPresented: $showLightingPopover, arrowEdge: .bottom) {
-                    SimpleLightingControlCard(store: store)
-                        .frame(width: 360)
-                        .padding(14)
-                }
-            }
-
-            HStack(spacing: 8) {
-                if agentKind.supportsLiveSessionSlots {
-                    Button("上方 6 键设为会话键") {
-                        store.dispatch("session_strip", "BindTopSixAsSessionKeys")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-
-                Button("恢复默认布局") {
-                    store.dispatch("session_strip", "RestoreDefaultLayout")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
+                Button("恢复默认布局") { store.dispatch("session_strip", "RestoreDefaultLayout") }
                 if agentKind == .antigravity {
-                    Button("左旋钮切 Working/蓝点 + 右摇杆滚对话") {
+                    Divider()
+                    Button("旋钮切换会话，摇杆滚动对话") {
                         store.dispatch("canvas", ["ApplyKnobJoystickPreset": "CycleWorkingAndBlueDot"])
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-
-                    Button("左旋钮滚项目 + 右摇杆滚对话") {
+                    Button("旋钮滚动项目，摇杆滚动对话") {
                         store.dispatch("canvas", ["ApplyKnobJoystickPreset": "DualScrollProjectsAndChat"])
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                }
+                if !ss.sessionSlots.isEmpty {
+                    Divider()
+                    ForEach(ss.sessionSlots) { slot in
+                        Button(slot.title.isEmpty ? "会话 \(slot.slotIndex + 1)" : slot.title) {
+                            store.dispatch("session_strip", ["ActivateSlot": slot.slotIndex])
+                        }
+                    }
+                    Button("全部标为已读") { store.dispatch("session_strip", "AcknowledgeAllCompleted") }
                 }
             }
+            .fixedSize()
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: UITheme.cardCornerRadius, style: .continuous)
-                .fill(UITheme.surface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: UITheme.cardCornerRadius, style: .continuous)
-                .stroke(UITheme.border, lineWidth: 1)
-        )
+        .foregroundStyle(UITheme.textSecondary)
     }
+
 }
 
 struct SimpleLightingControlCard: View {
@@ -611,7 +454,7 @@ struct SimpleLightingControlCard: View {
         let lp = ss.simpleLighting
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Antigravity 灯光设置 (Idle / In Progress)")
+                Text("会话灯光")
                     .font(UITheme.heading)
                     .foregroundStyle(UITheme.textPrimary)
                 Spacer()
@@ -630,7 +473,7 @@ struct SimpleLightingControlCard: View {
                 Circle()
                     .fill(Color(hex: "#0088FF"))
                     .frame(width: 7, height: 7)
-                Text("Idle 蓝光 (未读 \(ss.unreadCompletedCount))")
+                Text("未读 \(ss.unreadCompletedCount)")
                     .font(UITheme.micro)
                     .foregroundStyle(UITheme.textSecondary)
                 Text("·")
@@ -638,14 +481,14 @@ struct SimpleLightingControlCard: View {
                 Circle()
                     .fill(Color(hex: "#00FF66"))
                     .frame(width: 7, height: 7)
-                Text("In Progress 进行中 (\(ss.workingCount))")
+                Text("进行中 \(ss.workingCount)")
                     .font(UITheme.micro)
                     .foregroundStyle(UITheme.textSecondary)
             }
 
             if lp.lightingEnabled {
                 Toggle(
-                    "随 Antigravity 会话状态自动变色 (Idle 蓝光 / In Progress 变色)",
+                    "随会话状态变色",
                     isOn: Binding(
                         get: { lp.autoSessionColor },
                         set: { store.dispatch("session_strip", ["SetAutoSessionColor": $0]) }
@@ -654,7 +497,7 @@ struct SimpleLightingControlCard: View {
                 .font(UITheme.caption)
 
                 Toggle(
-                    "In Progress（进行中）对话呼吸亮灯提示",
+                    "进行中的会话使用呼吸灯",
                     isOn: Binding(
                         get: { lp.glowOnWorking },
                         set: { store.dispatch("session_strip", ["SetGlowOnWorking": $0]) }
@@ -663,7 +506,7 @@ struct SimpleLightingControlCard: View {
                 .font(UITheme.caption)
 
                 Toggle(
-                    "仅在新完成或进行中时亮起（关闭则 Idle 常亮蓝光）",
+                    "仅在有新完成或进行中的会话时亮起",
                     isOn: Binding(
                         get: { lp.onlyGlowOnAttentionOrCompleted },
                         set: { store.dispatch("session_strip", ["SetOnlyGlowOnAttentionOrCompleted": $0]) }
@@ -674,7 +517,7 @@ struct SimpleLightingControlCard: View {
                 Divider()
 
                 Picker(
-                    "Idle（完成/空闲）光色",
+                    "完成与空闲时的颜色",
                     selection: Binding(
                         get: { lp.ambientColor },
                         set: { store.dispatch("session_strip", ["SetAmbientColor": $0]) }
@@ -689,7 +532,7 @@ struct SimpleLightingControlCard: View {
                 .controlSize(.small)
 
                 Picker(
-                    "In Progress（进行中）光色",
+                    "进行中时的颜色",
                     selection: Binding(
                         get: { lp.workingColor },
                         set: { store.dispatch("session_strip", ["SetWorkingColor": $0]) }
@@ -733,19 +576,19 @@ struct SimpleLightingControlCard: View {
                 Divider()
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("一键试灯（立即点亮实体键盘）")
+                    Text("在键盘上预览")
                         .font(UITheme.micro)
                         .foregroundStyle(UITheme.textSecondary)
                     HStack(spacing: 6) {
-                        Button("Idle 蓝光") {
+                        Button("完成与空闲") {
                             store.dispatch("session_strip", ["TriggerTestLighting": "completed"])
                         }
                         .controlSize(.mini)
-                        Button("In Progress 光") {
+                        Button("进行中") {
                             store.dispatch("session_strip", ["TriggerTestLighting": "thinking"])
                         }
                         .controlSize(.mini)
-                        Button("待确认黄光") {
+                        Button("待确认") {
                             store.dispatch("session_strip", ["TriggerTestLighting": "awaiting_input"])
                         }
                         .controlSize(.mini)
@@ -764,10 +607,11 @@ struct SimpleLightingControlCard: View {
                     }
                     .controlSize(.small)
                     Spacer()
-                    Button("双区 RGB 高级设置…") {
+                    Button("编辑层灯光") {
                         store.dispatch("editor", "OpenLightingEditor")
                     }
                     .controlSize(.small)
+                    .disabled(!store.canvas.canAddLighting)
                 }
             }
         }
@@ -827,6 +671,7 @@ private struct BoardKeycapCellButton: View, Equatable {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("按键 \(slot + 1)，\(sublabel.isEmpty ? "未绑定" : sublabel)")
     }
 
     private var taskKeycapSurface: some View {
@@ -854,16 +699,16 @@ private struct BoardKeycapCellButton: View, Equatable {
             if sessionSlot?.isWorkingAnimated == true || status == "Working" {
                 HStack(spacing: 4) {
                     Text("::")
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .font(UITheme.captionMedium)
                         .foregroundStyle(UITheme.textSecondary)
-                    Text("Working")
+                    Text("进行中")
                         .font(UITheme.micro)
                         .foregroundStyle(UITheme.textPrimary)
                 }
             } else if sessionSlot?.isUnreadBlueDot == true || status == "Completed" {
                 HStack(spacing: 4) {
                     Circle().fill(ledColor).frame(width: 7, height: 7)
-                    Text("● 蓝点完成")
+                    Text("已完成")
                         .font(UITheme.micro)
                         .foregroundStyle(UITheme.accent)
                 }
@@ -888,7 +733,7 @@ private struct BoardKeycapCellButton: View, Equatable {
                 Text(sessionSlot?.title.isEmpty == false ? sessionSlot!.title : fallbackLabel)
                     .font(UITheme.micro)
                     .foregroundStyle(UITheme.textSecondary)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.horizontal, 6)
@@ -906,21 +751,21 @@ private struct BoardKeycapCellButton: View, Equatable {
     }
 
     private var actionKeycapSurface: some View {
-        let darkCharcoal = Color(red: 0.165, green: 0.17, blue: 0.19)
+        let keySurface = UITheme.surface
         return VStack(spacing: 4) {
             Spacer(minLength: 2)
             CodexKeycapGlyphView(
                 keycap: keycap,
                 size: showLabels ? 20 : 23,
-                color: Color.white.opacity(0.95)
+                color: UITheme.textPrimary
             )
             .equatable()
             Spacer(minLength: 2)
             if showLabels {
                 Text(sublabel)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.85))
-                    .lineLimit(1)
+                    .font(UITheme.captionMedium)
+                    .foregroundStyle(UITheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.horizontal, 6)
@@ -928,7 +773,7 @@ private struct BoardKeycapCellButton: View, Equatable {
         .frame(width: width, height: cellSize)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(darkCharcoal)
+                .fill(keySurface)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)

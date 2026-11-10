@@ -1482,7 +1482,15 @@ fn six_layer_preview_cannot_activate_an_unassigned_or_missing_host() {
         assert!(!store.ptt_controller.is_active);
         assert!(store.dispatched_receipts().is_empty());
     }
-    store.set_status_message("normal reconciliation positive control");
+    let profile_id = store
+        .find_canonical_profile_id(CanonicalAgent::Antigravity)
+        .unwrap();
+    store
+        .document_store
+        .set_host_active_profile(Some(profile_id))
+        .unwrap();
+    assert_eq!(store.selected_profile_id(), None);
+    store.set_status_message("normal reconciliation positive control with an empty editor");
     assert!(listener.accept().is_ok());
 }
 
@@ -1841,4 +1849,119 @@ fn workspace_sleep_command_retires_a_held_dictation_without_editing_the_draft() 
         .profiles
         .values()
         .any(|p| p.name == "Sleep draft"));
+}
+
+#[test]
+fn browsing_profiles_changes_editor_without_activating_host() {
+    let temp = TempDir::new().unwrap();
+    let mut store = legacy_store(&temp);
+    let codex = store
+        .find_canonical_profile_id(CanonicalAgent::Codex)
+        .unwrap();
+    let active = store.active_host_profile_id();
+    let revision = store.document_store.host_revision();
+    let routing = store.projection().sidebar.auto_switch.clone();
+    let banner = store.projection().header.banner.clone();
+    store
+        .dispatch_sidebar_action(SidebarAction::BrowseProfile(codex.clone()))
+        .unwrap();
+    assert_eq!(store.selected_profile_id(), Some(codex.as_str()));
+    assert_eq!(
+        store.projection().canvas.profile_id.as_deref(),
+        Some(codex.as_str())
+    );
+    assert_eq!(
+        store.projection().inspector.profile_id.as_deref(),
+        Some(codex.as_str())
+    );
+    assert_eq!(store.active_host_profile_id(), active);
+    assert_eq!(store.document_store.host_revision(), revision);
+    assert_eq!(store.projection().sidebar.auto_switch, routing);
+    assert_eq!(store.projection().header.banner, banner);
+    assert!(store.dispatched_receipts().is_empty());
+
+    let before = store.projection().clone();
+    assert!(store
+        .dispatch_sidebar_action(SidebarAction::BrowseProfile("missing-profile".into()))
+        .is_err());
+    assert_eq!(store.projection(), &before);
+
+    store
+        .dispatch_sidebar_action(SidebarAction::SelectProfile(codex.clone()))
+        .unwrap();
+    assert_eq!(
+        store.active_host_profile_id().as_deref(),
+        Some(codex.as_str())
+    );
+}
+
+#[test]
+fn board_layer_preview_browses_assigned_profile_and_clears_empty_editor() {
+    let temp = TempDir::new().unwrap();
+    let mut store = legacy_store(&temp);
+    store.reset_board_layer_plan().unwrap();
+    let active = store.active_host_profile_id();
+    let revision = store.document_store.host_revision();
+    let codex = store.projection().sidebar.board_layers.layers[0]
+        .profile_id
+        .clone()
+        .unwrap();
+    store
+        .dispatch_sidebar_action(SidebarAction::PreviewBoardLayer(BoardLayer::ALL[0]))
+        .unwrap();
+    assert_eq!(store.selected_profile_id(), Some(codex.as_str()));
+    assert_eq!(store.projection().canvas.board_preview_layer, Some(1));
+    assert!(store.projection().canvas.protected_lock.is_some());
+
+    store
+        .dispatch_sidebar_action(SidebarAction::PreviewBoardLayer(BoardLayer::ALL[3]))
+        .unwrap();
+    assert_eq!(
+        store.projection().sidebar.selected_display_name.as_deref(),
+        Some("Cindy · Micro Input")
+    );
+    assert_eq!(
+        store.projection().canvas.profile_display_name,
+        "Cindy · Micro Input"
+    );
+    assert_eq!(store.active_host_profile_id(), active);
+
+    store
+        .dispatch_sidebar_action(SidebarAction::PreviewBoardLayer(BoardLayer::ALL[5]))
+        .unwrap();
+    assert_eq!(store.selected_profile_id(), None);
+    assert_eq!(store.projection().canvas.profile_id, None);
+    assert_eq!(store.projection().canvas.selected_layer_id, None);
+    assert_eq!(store.projection().canvas.board_preview_layer, Some(6));
+    assert!(!store.projection().canvas.can_edit_bindings);
+    assert!(!store.projection().canvas.can_add_lighting);
+    assert!(!store.projection().canvas.can_export_or_copy_layer);
+    assert_eq!(store.active_host_profile_id(), active);
+    assert_eq!(store.document_store.host_revision(), revision);
+    assert_eq!(store.projection().sidebar.board_layers.observed_layer, None);
+    assert!(store.dispatched_receipts().is_empty());
+}
+
+#[test]
+fn diagnostics_export_reports_failure_when_destination_cannot_be_written() {
+    let temp = TempDir::new().unwrap();
+    let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    let destination = temp.path().join("diagnostic-report.json");
+    std::fs::create_dir(&destination).unwrap();
+    let previous_status = store.status_message().to_owned();
+    let result =
+        store.dispatch_device_workflow_action(mi_core::DeviceWorkflowAction::ExportDiagnostics);
+    assert!(matches!(result, Err(mi_core::WorkbenchError::Storage(_))));
+    assert_eq!(store.status_message(), previous_status);
+    assert!(destination.is_dir());
+
+    std::fs::remove_dir(&destination).unwrap();
+    store
+        .dispatch_device_workflow_action(mi_core::DeviceWorkflowAction::ExportDiagnostics)
+        .unwrap();
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&destination).unwrap()).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["connected"], false);
+    assert!(store.status_message().contains("已导出诊断报告"));
 }

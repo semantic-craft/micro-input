@@ -288,3 +288,9 @@
 - 修复：Swift 仅转发 workspace 通知，Rust 先关闭输入准入，再等待旧 reader 与后台任务结束。唤醒使用描述符发现器；独占发现器会提前打开接口，不能仅靠忽略发现回调阻止连接。听写清理保留原窗口句柄，不能依赖执行器最近访问的窗口。
 - 验证点：`WorkspaceLifecycleTests`、`workspace_lifecycle` 模块测试和 `managed_controls` 的原目标清理测试。覆盖实际通知入口、延迟 reader、迟到运行对象与回执、草稿撤销重做、跨应用切换后的原目标清理。合成验证与真实合盖效果分开记录。
 - 复发记录：Seen 1x（2026-11-10）。
+
+## 浏览方案不能激活宿主；QA 窗口须隔离硬件
+
+- 起因与后果：原 `SelectProfile` 同时选择编辑对象与激活宿主，新的设置式界面若复用它浏览，会改变实际控制目标。空层清空编辑选择又暴露所有权维护依赖编辑对象的问题。原 QA 包虽隔离文档，仍以生产 CoreStore 启动并自动连接 USB。
+- 修复：新增 `BrowseProfile`，六层预览只切编辑对象，空层明确清空；运行所有权独立于编辑选择。QA 包必须有隔离文档目录并使用 isolated CoreStore，缺目录拒绝启动；日常包保持原初始化路径。
+- 验证：mi-core `browsing_profiles_changes_editor_without_activating_host` 与六层空态/所有权回归，mi-ffi 浏览边界回归；`scripts/run --verify` 原生 UI 应显示未连接，不枚举或打开真实键盘。Seen 1x（2026-11-10）。

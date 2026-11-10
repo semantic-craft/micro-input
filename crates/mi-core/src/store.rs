@@ -751,9 +751,12 @@ impl WorkbenchStore {
                     "host_revision": self.document_store.host_revision(),
                     "ownership_summary": self.native_ownership.summary(),
                 });
-                if let Ok(bytes) = serde_json::to_vec_pretty(&report) {
-                    let _ = fs::write(&diag_path, bytes);
-                }
+                let bytes = serde_json::to_vec_pretty(&report).map_err(|error| {
+                    WorkbenchError::Storage(format!("无法生成诊断报告：{error}"))
+                })?;
+                fs::write(&diag_path, bytes).map_err(|error| {
+                    WorkbenchError::Storage(format!("无法保存诊断报告：{error}"))
+                })?;
                 self.status_message = format!("已导出诊断报告：{}", diag_path.display());
                 self.rebuild_projection();
                 Ok(())
@@ -1674,7 +1677,29 @@ impl WorkbenchStore {
     }
 
     pub fn preview_board_layer(&mut self, layer: BoardLayer) -> Result<(), WorkbenchError> {
-        self.preview_board_selection(BoardPreviewSelection::Layer(layer))
+        if self.document_store.editing_device() {
+            return Err(WorkbenchError::Storage(
+                "请先返回软件方案，再查看键盘层".into(),
+            ));
+        }
+        let profile_id = self
+            .document_store
+            .board_layer_plan()
+            .and_then(|plan| plan.route(layer).profile_id())
+            .filter(|id| {
+                self.document_store
+                    .draft
+                    .document
+                    .editable
+                    .graph
+                    .profiles
+                    .contains_key(*id)
+            })
+            .map(str::to_owned);
+        self.preview_board_selection(BoardPreviewSelection::Layer(layer))?;
+        self.set_browsed_profile(profile_id);
+        self.rebuild_local_projection();
+        Ok(())
     }
 
     fn preview_board_selection(
@@ -1847,6 +1872,41 @@ impl WorkbenchStore {
         }
         self.project_six_layer_runtime(&mut result);
         result
+    }
+
+    pub fn browse_profile(&mut self, profile_id: &str) -> Result<(), WorkbenchError> {
+        if !self
+            .document_store
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .contains_key(profile_id)
+        {
+            return Err(WorkbenchError::Routing("方案不存在".into()));
+        }
+        self.set_browsed_profile(Some(profile_id.to_owned()));
+        self.rebuild_local_projection();
+        Ok(())
+    }
+
+    fn set_browsed_profile(&mut self, profile_id: Option<String>) {
+        if self.selected_profile_id == profile_id {
+            return;
+        }
+        self.selected_layer_id = profile_id.as_ref().and_then(|id| {
+            self.document_store
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .get(id)
+                .and_then(|profile| profile.layer_order.first().cloned())
+        });
+        self.selected_profile_id = profile_id;
+        self.normalize_surface_for_current_layer();
     }
 
     pub fn select_and_activate_profile(&mut self, profile_id: &str) -> Result<(), WorkbenchError> {
@@ -2228,6 +2288,7 @@ impl WorkbenchStore {
             SidebarAction::SelectProfile(profile_id) => {
                 self.select_and_activate_profile(&profile_id)
             }
+            SidebarAction::BrowseProfile(profile_id) => self.browse_profile(&profile_id),
             SidebarAction::PreviewBoardLayer(layer) => self.preview_board_layer(layer),
             SidebarAction::PreviewUsbStartup => {
                 self.preview_board_selection(BoardPreviewSelection::UsbStartup)
@@ -3138,7 +3199,8 @@ impl WorkbenchStore {
     fn ensure_live_ownership_fresh(&mut self) {
         if self.system_lifecycle != SystemLifecycle::Awake
             || self.config.isolated
-            || self.selected_profile_id.is_none()
+            || (self.selected_profile_id.is_none()
+                && self.document_store.host_active_profile_id().is_none())
         {
             return;
         }
@@ -3276,9 +3338,9 @@ impl WorkbenchStore {
         let bottom_row_layout = self.current_bottom_row_layout();
 
         let is_protected = self.is_selected_layer_protected();
-        let can_edit_bindings = can_edit_draft && !is_protected;
-        let can_add_lighting = can_edit_draft && !is_protected;
-        let can_export_or_copy_layer = !is_protected;
+        let can_edit_bindings = can_edit_draft && layer.is_some() && !is_protected;
+        let can_add_lighting = can_edit_draft && layer.is_some() && !is_protected;
+        let can_export_or_copy_layer = layer.is_some() && !is_protected;
         let inspector_expanded = !is_protected;
 
         let protected_lock = if is_protected {
@@ -3740,8 +3802,20 @@ impl WorkbenchStore {
 
         let selected_display_name = rows
             .iter()
-            .find(|r| r.is_selected)
-            .map(|r| r.display_name.clone());
+            .find(|row| row.is_selected)
+            .map(|row| row.display_name.clone())
+            .or_else(|| {
+                self.selected_profile_id.as_ref().and_then(|id| {
+                    self.document_store
+                        .draft
+                        .document
+                        .editable
+                        .graph
+                        .profiles
+                        .get(id)
+                        .map(|profile| profile.name.clone())
+                })
+            });
 
         let auto_switch =
             AutoSwitchState::from_flags(true, self.auto_follow_enabled, self.manual_override);

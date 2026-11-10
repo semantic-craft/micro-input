@@ -21,7 +21,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             Darwin.exit(0)
         }
         self.instanceLock = lock
-        self.store = CoreStore()
+        if Bundle.main.bundleIdentifier?.hasPrefix("com.semanticcraft.microinput.qa") == true {
+            guard let directory = ProcessInfo.processInfo.environment["MI_DOCUMENT_DIR"], !directory.isEmpty else {
+                Darwin.exit(1)
+            }
+            self.store = CoreStore(isolatedDirectory: directory)
+        } else {
+            self.store = CoreStore()
+        }
         super.init()
     }
 
@@ -144,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        win.minSize = NSSize(width: 1020, height: 680)
+        win.minSize = NSSize(width: 820, height: 640)
         win.title = "Micro Input"
         win.center()
         win.isReleasedWhenClosed = false
