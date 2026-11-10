@@ -1,3 +1,5 @@
+use crate::managed_controls::{ManagedAxControls, ManagedControlReadiness, ObservedDictationState};
+use crate::native_ax::NativeAxProvider;
 use mi_model::host_router::{ResolvedHostAction, ResolvedMacroEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -484,7 +486,7 @@ unsafe fn collect_antigravity_ax_nodes(
 }
 
 #[cfg(target_os = "macos")]
-fn find_pid_for_bundle_id(bundle_id: &str) -> Option<i32> {
+pub(crate) fn find_pid_for_bundle_id(bundle_id: &str) -> Option<i32> {
     if let Ok(out) = Command::new("/usr/bin/lsappinfo")
         .args(["info", "-only", "pid", "-app", bundle_id])
         .output()
@@ -729,6 +731,22 @@ pub trait HostOsDriver: Send + Sync {
     fn open_url(&self, url: &str) -> Result<(), String>;
     fn focus_agent_input(&self, adapter: &str) -> Result<(), String>;
     fn stop_active_dictation(&self, adapter: &str) -> Result<bool, String>;
+    fn toggle_dictation(&self, _adapter: &str) -> Result<ObservedDictationState, String> {
+        Err("blocked:dictation_toggle_unavailable".into())
+    }
+    fn submit_agent_input(&self, adapter: &str, prompt: Option<&str>) -> Result<(), String> {
+        legacy_submit_agent_input(self, adapter, prompt)
+    }
+    fn insert_agent_prompt(&self, adapter: &str, prompt: &str) -> Result<(), String> {
+        legacy_insert_agent_prompt(self, adapter, prompt)
+    }
+    fn agent_shortcut(&self, adapter: &str, key: u16, modifiers: &[String]) -> Result<(), String> {
+        if let Some(bundle) = bundle_id_for_adapter(adapter) {
+            let _ = self.open_application(bundle);
+        }
+        self.post_key_shortcut(key, modifiers, true)?;
+        self.post_key_shortcut(key, modifiers, false)
+    }
     fn scroll_window(&self, req: &DialScrollRequest) -> Result<(), String>;
     fn new_conversation_in_project(&self, adapter: &str) -> Result<(), String>;
     fn toggle_live_voice(&self, adapter: &str) -> Result<(), String>;
@@ -737,6 +755,16 @@ pub trait HostOsDriver: Send + Sync {
 #[derive(Debug, Default)]
 pub struct MacOsSystemDriver {
     clipboard_seq: Mutex<u64>,
+    managed_controls: ManagedAxControls<NativeAxProvider>,
+}
+
+impl MacOsSystemDriver {
+    pub fn inspect_managed_controls(
+        &self,
+        adapter: &str,
+    ) -> Result<ManagedControlReadiness, String> {
+        self.managed_controls.inspect(adapter)
+    }
 }
 
 impl HostOsDriver for MacOsSystemDriver {
@@ -894,23 +922,58 @@ impl HostOsDriver for MacOsSystemDriver {
     }
 
     fn focus_agent_input(&self, adapter: &str) -> Result<(), String> {
-        if let Some(bundle_id) = bundle_id_for_adapter(adapter) {
-            let _ = self.open_application(bundle_id);
+        if is_managed_adapter(adapter) {
+            return self.managed_controls.focus_input(adapter);
         }
-        if adapter.trim().eq_ignore_ascii_case("antigravity") {
-            let cmd = vec!["command".to_string()];
-            let _ = self
-                .post_key_shortcut(0x25, &cmd, true)
-                .and_then(|()| self.post_key_shortcut(0x25, &cmd, false));
+        if let Some(bundle) = bundle_id_for_adapter(adapter) {
+            let _ = self.open_application(bundle);
         }
         Ok(())
     }
 
-    fn stop_active_dictation(&self, _adapter: &str) -> Result<bool, String> {
-        Ok(false)
+    fn stop_active_dictation(&self, adapter: &str) -> Result<bool, String> {
+        if is_managed_adapter(adapter) {
+            self.managed_controls.stop_dictation(adapter)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn toggle_dictation(&self, adapter: &str) -> Result<ObservedDictationState, String> {
+        self.managed_controls.toggle_dictation(adapter)
+    }
+
+    fn submit_agent_input(&self, adapter: &str, prompt: Option<&str>) -> Result<(), String> {
+        if is_managed_adapter(adapter) {
+            self.managed_controls.submit(adapter, prompt)
+        } else {
+            legacy_submit_agent_input(self, adapter, prompt)
+        }
+    }
+
+    fn insert_agent_prompt(&self, adapter: &str, prompt: &str) -> Result<(), String> {
+        if is_managed_adapter(adapter) {
+            self.managed_controls.insert_prompt(adapter, prompt)
+        } else {
+            legacy_insert_agent_prompt(self, adapter, prompt)
+        }
+    }
+
+    fn agent_shortcut(&self, adapter: &str, key: u16, modifiers: &[String]) -> Result<(), String> {
+        if is_managed_adapter(adapter) {
+            return self.managed_controls.shortcut(adapter, key, modifiers);
+        }
+        if let Some(bundle) = bundle_id_for_adapter(adapter) {
+            let _ = self.open_application(bundle);
+        }
+        self.post_key_shortcut(key, modifiers, true)?;
+        self.post_key_shortcut(key, modifiers, false)
     }
 
     fn scroll_window(&self, req: &DialScrollRequest) -> Result<(), String> {
+        if is_managed_bundle(&req.target_bundle_id) {
+            return self.managed_controls.scroll(req);
+        }
         if !self.is_accessibility_trusted() {
             return Err("accessibility_untrusted".to_string());
         }
@@ -1912,78 +1975,52 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 }
             }
             ResolvedHostAction::AgentCommand { adapter, command } => {
-                if command == "submit" {
+                if command == "toggle-dictation" {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
-                    if let Err(err) = self.driver.stop_active_dictation(adapter) {
-                        return make_receipt("failed", err);
+                    if !matches!(
+                        crate::ax_dictation::DictationAdapter::parse(adapter),
+                        Some(
+                            crate::ax_dictation::DictationAdapter::Cindy
+                                | crate::ax_dictation::DictationAdapter::Antigravity
+                                | crate::ax_dictation::DictationAdapter::Dsh
+                        )
+                    ) {
+                        return make_receipt("blocked", "unsupported_dictation_adapter".into());
                     }
-                    if let Err(err) = self.driver.focus_agent_input(adapter) {
-                        return make_receipt("failed", err);
+                    match self.driver.toggle_dictation(adapter) {
+                        Ok(state) => make_receipt(
+                            "executed",
+                            match state {
+                                ObservedDictationState::Idle => "dictation_stopped",
+                                ObservedDictationState::Recording => "dictation_started",
+                            }
+                            .into(),
+                        ),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }
-                    let submit_mods = submit_modifiers_for_adapter(adapter);
-                    match self
-                        .driver
-                        .post_key_shortcut(KEY_CODE_RETURN, &submit_mods, true)
-                        .and_then(|()| {
-                            self.driver
-                                .post_key_shortcut(KEY_CODE_RETURN, &submit_mods, false)
-                        }) {
-                        Ok(()) => make_receipt("executed", desc.detail),
-                        Err(err) => make_receipt("failed", err),
-                    }
-                } else if let Some(prompt) = command.strip_prefix("submit-prompt:") {
+                } else if command == "submit" || command.starts_with("submit-prompt:") {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
-                    let sanitized = prompt.trim_end_matches(['\r', '\n']);
-                    if let Err(err) = self.driver.stop_active_dictation(adapter) {
-                        return make_receipt("failed", err);
-                    }
-                    if let Err(err) = self.driver.focus_agent_input(adapter) {
-                        return make_receipt("failed", err);
-                    }
-                    let snapshot = self.driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
-                    let written_cc = self.driver.write_clipboard_plain_text(sanitized);
-                    let cmd_mod = vec!["command".to_string()];
-                    let submit_mods = submit_modifiers_for_adapter(adapter);
-                    let res = self
-                        .driver
-                        .post_key_shortcut(KEY_CODE_V, &cmd_mod, true)
-                        .and_then(|()| self.driver.post_key_shortcut(KEY_CODE_V, &cmd_mod, false))
-                        .and_then(|()| {
-                            self.driver
-                                .post_key_shortcut(KEY_CODE_RETURN, &submit_mods, true)
-                        })
-                        .and_then(|()| {
-                            self.driver
-                                .post_key_shortcut(KEY_CODE_RETURN, &submit_mods, false)
-                        });
-                    let _ = self.driver.restore_clipboard(&snapshot, written_cc);
-                    match res {
+                    let prompt = command
+                        .strip_prefix("submit-prompt:")
+                        .map(|prompt| prompt.trim_end_matches(['\r', '\n']));
+                    match self.driver.submit_agent_input(adapter, prompt) {
                         Ok(()) => make_receipt("executed", desc.detail),
-                        Err(err) => make_receipt("failed", err),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }
                 } else if let Some(prompt) = command.strip_prefix("prompt:") {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
-                    let sanitized = prompt.trim_end_matches(['\r', '\n']);
-                    if let Err(err) = self.driver.focus_agent_input(adapter) {
-                        return make_receipt("failed", err);
-                    }
-                    let snapshot = self.driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
-                    let written_cc = self.driver.write_clipboard_plain_text(sanitized);
-                    let cmd_mod = vec!["command".to_string()];
-                    let res = self
+                    match self
                         .driver
-                        .post_key_shortcut(KEY_CODE_V, &cmd_mod, true)
-                        .and_then(|()| self.driver.post_key_shortcut(KEY_CODE_V, &cmd_mod, false));
-                    let _ = self.driver.restore_clipboard(&snapshot, written_cc);
-                    match res {
+                        .insert_agent_prompt(adapter, prompt.trim_end_matches(['\r', '\n']))
+                    {
                         Ok(()) => make_receipt("executed", desc.detail),
-                        Err(err) => make_receipt("failed", err),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }
                 } else if let Some(scroll_req) = parse_dial_scroll_command(adapter, command) {
                     if !self.driver.is_accessibility_trusted() {
@@ -1991,7 +2028,7 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     }
                     match self.driver.scroll_window(&scroll_req) {
                         Ok(()) => make_receipt("executed", desc.detail),
-                        Err(err) => make_receipt("failed", err),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }
                 } else if command == "focus-input" {
                     if !self.driver.is_accessibility_trusted() {
@@ -1999,7 +2036,7 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     }
                     match self.driver.focus_agent_input(adapter) {
                         Ok(()) => make_receipt("executed", desc.detail),
-                        Err(err) => make_receipt("failed", err),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }
                 } else if command == "new-conversation-in-project" {
                     if !self.driver.is_accessibility_trusted() {
@@ -2023,16 +2060,9 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
-                    if let Some(bundle_id) = bundle_id_for_adapter(adapter) {
-                        let _ = self.driver.open_application(bundle_id);
-                    }
-                    match self
-                        .driver
-                        .post_key_shortcut(key_code, &modifiers, true)
-                        .and_then(|()| self.driver.post_key_shortcut(key_code, &modifiers, false))
-                    {
+                    match self.driver.agent_shortcut(adapter, key_code, &modifiers) {
                         Ok(()) => make_receipt("executed", desc.detail),
-                        Err(err) => make_receipt("failed", err),
+                        Err(err) => make_receipt(managed_error_outcome(&err), err),
                     }
                 } else if matches!(command.as_str(), "dictation" | "push-to-talk") {
                     if !self.driver.is_accessibility_trusted() {
@@ -2119,4 +2149,64 @@ impl SimulatedHostActionExecutor {
         receipt.append_to_audit_log(audit_log_path)?;
         Ok(receipt)
     }
+}
+
+fn managed_error_outcome(error: &str) -> &'static str {
+    if error.starts_with("blocked:") {
+        "blocked"
+    } else {
+        "failed"
+    }
+}
+
+fn legacy_submit_agent_input<D: HostOsDriver + ?Sized>(
+    driver: &D,
+    adapter: &str,
+    prompt: Option<&str>,
+) -> Result<(), String> {
+    driver.stop_active_dictation(adapter)?;
+    driver.focus_agent_input(adapter)?;
+    let submit_modifiers = submit_modifiers_for_adapter(adapter);
+    if let Some(prompt) = prompt {
+        let snapshot = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
+        let written = driver.write_clipboard_plain_text(prompt);
+        let command = vec!["command".to_owned()];
+        let result = driver
+            .post_key_shortcut(KEY_CODE_V, &command, true)
+            .and_then(|()| driver.post_key_shortcut(KEY_CODE_V, &command, false))
+            .and_then(|()| driver.post_key_shortcut(KEY_CODE_RETURN, &submit_modifiers, true))
+            .and_then(|()| driver.post_key_shortcut(KEY_CODE_RETURN, &submit_modifiers, false));
+        driver.restore_clipboard(&snapshot, written);
+        result
+    } else {
+        driver.post_key_shortcut(KEY_CODE_RETURN, &submit_modifiers, true)?;
+        driver.post_key_shortcut(KEY_CODE_RETURN, &submit_modifiers, false)
+    }
+}
+
+fn legacy_insert_agent_prompt<D: HostOsDriver + ?Sized>(
+    driver: &D,
+    adapter: &str,
+    prompt: &str,
+) -> Result<(), String> {
+    driver.focus_agent_input(adapter)?;
+    let snapshot = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
+    let written = driver.write_clipboard_plain_text(prompt);
+    let modifiers = vec!["command".to_owned()];
+    let result = driver
+        .post_key_shortcut(KEY_CODE_V, &modifiers, true)
+        .and_then(|()| driver.post_key_shortcut(KEY_CODE_V, &modifiers, false));
+    driver.restore_clipboard(&snapshot, written);
+    result
+}
+
+fn is_managed_adapter(adapter: &str) -> bool {
+    crate::managed_controls::managed_adapter(adapter).is_ok()
+}
+
+fn is_managed_bundle(bundle: &str) -> bool {
+    matches!(
+        bundle,
+        "com.xd.cindy" | "com.google.antigravity" | "com.deepseek.dsh"
+    )
 }

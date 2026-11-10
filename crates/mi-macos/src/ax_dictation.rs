@@ -29,7 +29,10 @@ impl DictationAdapter {
                 matches!(trimmed, "Record Audio" | "Record voice memo")
             }
             Self::Cindy => trimmed == "开始语音输入",
-            Self::Dsh => matches!(trimmed, "开始听写" | "Voice Dictation"),
+            Self::Dsh => matches!(
+                trimmed,
+                "开始听写" | "Voice Dictation" | "开始录音" | "Start recording"
+            ),
             Self::Codex => matches!(trimmed, "Dictate" | "听写"),
         }
     }
@@ -41,7 +44,10 @@ impl DictationAdapter {
                 matches!(trimmed, "Stop Recording" | "Recording" | "Stop recording")
             }
             Self::Cindy => matches!(trimmed, "停止语音输入" | "结束语音输入"),
-            Self::Dsh => matches!(trimmed, "停止听写" | "Stop Dictation"),
+            Self::Dsh => matches!(
+                trimmed,
+                "停止听写" | "Stop Dictation" | "停止并识别" | "Stop and transcribe"
+            ),
             Self::Codex => matches!(trimmed, "Stop dictation" | "停止听写"),
         }
     }

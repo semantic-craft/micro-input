@@ -2,6 +2,8 @@ pub mod app_cache;
 pub mod ax_dictation;
 pub mod executor;
 pub mod instance_lock;
+pub mod managed_controls;
+mod native_ax;
 pub mod passive_panel;
 pub mod scenarios;
 pub mod status_item;
