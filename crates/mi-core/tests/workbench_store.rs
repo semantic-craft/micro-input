@@ -779,25 +779,49 @@ fn usb_connect_and_verified_input_pump_dispatches_host_actions_and_handles_disco
 
 #[test]
 fn usb_connect_automatically_verifies_identity_snapshot_lighting_and_writes_acceptance_receipt() {
-    check_usb_host_routing(false, 1, false);
+    check_usb_host_routing(false, 1, UsbRoutingCase::Normal);
 }
 
 #[test]
 fn verified_board_layers_dispatch_only_to_their_own_host_profile() {
-    check_usb_host_routing(true, 1, false);
+    check_usb_host_routing(true, 1, UsbRoutingCase::Normal);
 }
 
 #[test]
 fn managed_usb_reconnect_blocks_other_layers_until_a_first_layer_report() {
-    check_usb_host_routing(true, 2, false);
+    check_usb_host_routing(true, 2, UsbRoutingCase::Normal);
 }
 
 #[test]
 fn recognizing_old_firmware_without_old_bindings_does_not_use_desired_layers() {
-    check_usb_host_routing(true, 1, true);
+    check_usb_host_routing(true, 1, UsbRoutingCase::MissingBindings);
 }
 
-fn check_usb_host_routing(managed: bool, initial_layer: u32, missing_bindings: bool) {
+#[test]
+fn unavailable_legacy_layer_updates_observation_and_recovers_on_a_valid_layer() {
+    for profile in [None, Some("missing-profile"), Some("Codex"), Some("Cindy")] {
+        check_usb_host_routing(true, 1, UsbRoutingCase::UnavailableSecondLayer(profile));
+    }
+}
+
+#[test]
+fn automatic_usb_acceptance_preserves_saved_host_state_without_migrating() {
+    for managed in [false, true] {
+        for profile in [None, Some("DeepSeek Coder (DSH)")] {
+            check_usb_host_routing(managed, 1, UsbRoutingCase::SavedHost(profile));
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum UsbRoutingCase {
+    Normal,
+    MissingBindings,
+    UnavailableSecondLayer(Option<&'static str>),
+    SavedHost(Option<&'static str>),
+}
+
+fn check_usb_host_routing(managed: bool, initial_layer: u32, case: UsbRoutingCase) {
     use mi_core::HardwareAutoAcceptanceReceipt;
     use mi_proto::{Framer, NativeFramer};
     use mi_transport::{
@@ -972,23 +996,55 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32, missing_bindings: b
 
     let temp = TempDir::new().unwrap();
     let mut store = legacy_store(&temp);
-    if missing_bindings {
-        drop(store);
-        let path = temp.path().join("workbench.preferences.json");
+    let missing_bindings = matches!(case, UsbRoutingCase::MissingBindings);
+    let preserve_saved_host = matches!(case, UsbRoutingCase::SavedHost(_));
+    let path = temp.path().join("workbench.preferences.json");
+    if !matches!(case, UsbRoutingCase::Normal) {
         let mut preferences: Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        preferences
-            .as_object_mut()
-            .unwrap()
-            .remove("hardware_profile_slots");
-        std::fs::write(path, serde_json::to_vec(&preferences).unwrap()).unwrap();
+        let profile_id = |name: &str| {
+            store
+                .document_store
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, profile)| profile.name == name)
+                .map(|(id, _)| id.clone())
+                .unwrap_or_else(|| name.to_string())
+        };
+        match case {
+            UsbRoutingCase::MissingBindings => {
+                preferences
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("hardware_profile_slots");
+            }
+            UsbRoutingCase::UnavailableSecondLayer(profile) => {
+                preferences["hardware_profile_slots"][2] = json!(profile.map(profile_id));
+            }
+            UsbRoutingCase::SavedHost(profile) => {
+                preferences["host_active_profile_id"] = json!(profile.map(profile_id));
+                preferences["host_execution_enabled"] = json!(false);
+                preferences["manual_override"] = json!(false);
+            }
+            UsbRoutingCase::Normal => unreachable!(),
+        }
+        drop(store);
+        std::fs::write(&path, serde_json::to_vec_pretty(&preferences).unwrap()).unwrap();
         store = WorkbenchStore::open_isolated(temp.path()).unwrap();
     }
     let original_bindings = store.document_store.legacy_three_bindings().cloned();
-    store.reset_board_layer_plan().unwrap();
-    store.assign_board_layer(BoardLayer::ALL[1], None).unwrap();
+    if !preserve_saved_host {
+        store.reset_board_layer_plan().unwrap();
+        store.assign_board_layer(BoardLayer::ALL[1], None).unwrap();
+    }
     drop(store);
     let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    let original_preferences = std::fs::read(&path).unwrap();
+    let original_routing = store.document_store.routing_state();
     assert_eq!(
         store.document_store.legacy_three_bindings(),
         original_bindings.as_ref()
@@ -1043,7 +1099,9 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32, missing_bindings: b
         events,
     };
 
-    assert!(store.connect_with_transport(&transport, true).unwrap());
+    assert!(store
+        .connect_with_transport(&transport, !preserve_saved_host)
+        .unwrap());
 
     let wait_start = Instant::now();
     while !store.hardware_rpc_verified && wait_start.elapsed() < Duration::from_secs(5) {
@@ -1104,6 +1162,16 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32, missing_bindings: b
             None
         }
     );
+    if preserve_saved_host {
+        assert_eq!(store.document_store.routing_state(), original_routing);
+        assert!(!store.document_store.host_execution_enabled());
+        assert_eq!(std::fs::read(&path).unwrap(), original_preferences);
+        assert!(!temp
+            .path()
+            .join("workbench.preferences.v1.backup.json")
+            .exists());
+        return;
+    }
     let directory_entries = || {
         let mut names: Vec<_> = std::fs::read_dir(temp.path())
             .unwrap()
@@ -1133,6 +1201,60 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32, missing_bindings: b
             .is_none());
         assert_eq!(store.active_host_profile_id(), active);
         assert!(store.dispatched_receipts().is_empty());
+        return;
+    }
+
+    if matches!(case, UsbRoutingCase::UnavailableSecondLayer(_)) {
+        let session = store.device_session.as_ref().unwrap();
+        let session_id = session.id;
+        let ingress_sequence = session.input_watermark() + 1;
+        let active = store.active_host_profile_id();
+        let mut event = board_test_event("AG00", mi_session::InputEventKind::Pressed);
+        event.session_id = session_id;
+        event.ingress_sequence = ingress_sequence;
+        event.board_layer = Some(2);
+        assert!(store
+            .handle_hardware_loop_event(mi_core::HardwareLoopEvent::Input(event), Instant::now())
+            .is_none());
+        assert_eq!(store.active_host_profile_id(), active);
+        assert!(store.dispatched_receipts().is_empty());
+        assert_eq!(
+            store.projection().sidebar.board_layers.observed_layer,
+            Some(2)
+        );
+        assert!(store
+            .projection()
+            .sidebar
+            .board_layers
+            .observed_status
+            .contains("按键已暂停"));
+        store.preview_board_layer(BoardLayer::ALL[5]).unwrap();
+        assert_eq!(
+            store.projection().sidebar.board_layers.observed_layer,
+            Some(2)
+        );
+
+        let mut event = board_test_event("AG00", mi_session::InputEventKind::Pressed);
+        event.session_id = session_id;
+        event.ingress_sequence = ingress_sequence + 1;
+        event.board_layer = Some(1);
+        let receipt = store
+            .handle_hardware_loop_event(mi_core::HardwareLoopEvent::Input(event), Instant::now())
+            .unwrap();
+        assert!(receipt.succeeded());
+        assert_eq!(receipt.target, "com.google.antigravity");
+        assert_eq!(store.dispatched_receipts().len(), 1);
+        assert_eq!(
+            store.projection().sidebar.board_layers.observed_layer,
+            Some(1)
+        );
+        assert!(!store
+            .projection()
+            .sidebar
+            .board_layers
+            .observed_status
+            .contains("按键已暂停"));
+        assert!(!store.status_message().contains("按键已暂停"));
         return;
     }
 

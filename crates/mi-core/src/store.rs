@@ -536,16 +536,10 @@ impl WorkbenchStore {
         {
             store.lighting_popover.only_glow_on_attention_or_completed = false;
             store.lighting_arbiter.only_glow_on_attention_or_completed = false;
-            if let Some(ag_pid) = store.find_canonical_profile_id(CanonicalAgent::Antigravity) {
-                let _ = store.select_and_activate_profile_at(&ag_pid, Instant::now(), false);
-            }
-            if !store.document_store.host_execution_enabled() {
-                let _ =
-                    store.apply_routing_operation(RoutingOperation::Execution { enabled: true });
-            }
+            store.initialize_auto_host_ready(preserve_saved_host_state);
             store.start_mac_usb_discovery_watcher();
             store.start_antigravity_live_poller();
-            let _ = store.connect_default_usb();
+            let _ = store.connect_default_usb_with_execution(false);
         }
         store.refresh_four_app_lighting();
         store.rebuild_projection();
@@ -816,11 +810,18 @@ impl WorkbenchStore {
     }
 
     pub fn connect_default_usb(&mut self) -> Result<bool, WorkbenchError> {
+        self.connect_default_usb_with_execution(true)
+    }
+
+    fn connect_default_usb_with_execution(
+        &mut self,
+        enable_execution_on_connect: bool,
+    ) -> Result<bool, WorkbenchError> {
         let transport = self
             .mac_watcher_transport
             .clone()
             .unwrap_or_else(|| Arc::new(mi_transport::MacTransport::exclusive_vendor()));
-        let result = self.connect_with_transport(transport.as_ref(), true);
+        let result = self.connect_with_transport(transport.as_ref(), enable_execution_on_connect);
         if let Err(error) = &result {
             self.set_status_message(error.to_string());
         }
@@ -1020,7 +1021,7 @@ impl WorkbenchStore {
                             })
                         });
                         if reenumerated {
-                            let _ = self.connect_default_usb();
+                            let _ = self.connect_default_usb_with_execution(false);
                         }
                     }
                 }
@@ -1055,7 +1056,7 @@ impl WorkbenchStore {
                     self.lighting_arbiter.invalidate_hardware_cache();
                 }
                 if !self.config.isolated && self.device_session.is_none() {
-                    let _ = self.connect_default_usb();
+                    let _ = self.connect_default_usb_with_execution(false);
                 }
                 None
             }
@@ -1078,7 +1079,7 @@ impl WorkbenchStore {
                     .is_some_and(|s| s.id == session_id)
                 {
                     if self.board_routing == BoardRouting::Checking {
-                        self.confirm_board_routing(&receipt, now);
+                        self.confirm_board_routing(&receipt);
                     }
                     self.hardware_rpc_verified = true;
                     if self.board_routing == BoardRouting::Legacy {
@@ -1317,7 +1318,7 @@ impl WorkbenchStore {
         self.select_and_activate_profile_at(&id, now, notice)
     }
 
-    fn confirm_board_routing(&mut self, receipt: &HardwareAutoAcceptanceReceipt, now: Instant) {
+    fn confirm_board_routing(&mut self, receipt: &HardwareAutoAcceptanceReceipt) {
         let Some(snapshot) = self.device_session.as_ref().and_then(|s| s.snapshot()) else {
             return;
         };
@@ -1333,7 +1334,7 @@ impl WorkbenchStore {
                         .is_some_and(|layer| (1..=3).contains(&layer)) =>
             {
                 if receipt.layer_index == Some(1) {
-                    self.arm_board_routing(now);
+                    self.arm_board_routing();
                 } else {
                     self.wait_for_board_first_layer();
                 }
@@ -1345,13 +1346,13 @@ impl WorkbenchStore {
         }
     }
 
-    fn arm_board_routing(&mut self, now: Instant) {
+    fn arm_board_routing(&mut self) {
         let Some(session) = self.device_session.as_ref() else {
             return;
         };
         self.board_admit_after = session.input_watermark();
         self.board_decoder.store(true, Ordering::SeqCst);
-        self.enter_board_first_layer(now);
+        self.enter_board_first_layer();
     }
 
     fn wait_for_board_first_layer(&mut self) {
@@ -1364,15 +1365,14 @@ impl WorkbenchStore {
         self.status_message = "等待键盘返回第 1 层，其他层按键已暂停".into();
     }
 
-    fn enter_board_first_layer(&mut self, now: Instant) {
+    fn enter_board_first_layer(&mut self) {
         self.board_routing = BoardRouting::Managed { layer: 1 };
-        match self.activate_legacy_board_layer(1, now, false) {
-            Ok(()) => self.status_message = "板载三层已就绪 · 第 1 层".into(),
-            Err(error) => {
-                self.board_routing = BoardRouting::Unverified;
-                self.status_message = error.to_string();
-            }
+        self.status_message = if self.legacy_host_profile_id(1).is_some() {
+            "板载三层已就绪 · 第 1 层"
+        } else {
+            "旧三层绑定缺失或属于原生应用，按键已暂停"
         }
+        .into();
     }
 
     pub fn provision_board_layers(&mut self) -> Result<(), WorkbenchError> {
@@ -1390,7 +1390,7 @@ impl WorkbenchStore {
             {
                 return None;
             }
-            self.enter_board_first_layer(now);
+            self.enter_board_first_layer();
         }
         match self.board_routing {
             BoardRouting::Legacy if event.board_layer.is_none() => {
@@ -1410,16 +1410,24 @@ impl WorkbenchStore {
                     if layer != next {
                         self.release_board_inputs(event.session_id, now);
                     }
-                    let target = self.legacy_host_profile_id(next)?;
-                    if self.is_protected_oai_profile(&target) {
+                    self.board_routing = BoardRouting::Managed { layer: next };
+                    let Some(target) = self
+                        .legacy_host_profile_id(next)
+                        .filter(|id| !self.is_protected_oai_profile(id))
+                    else {
+                        self.set_status_message("旧三层绑定缺失或属于原生应用，按键已暂停");
                         return None;
-                    }
+                    };
                     if layer != next
                         || self.resolved_active_profile_id().as_deref() != Some(target.as_str())
                     {
-                        self.activate_legacy_board_layer(next, now, layer != next)
-                            .ok()?;
-                        self.board_routing = BoardRouting::Managed { layer: next };
+                        self.status_message = format!("板载三层已就绪 · 第 {next} 层");
+                        if let Err(error) =
+                            self.activate_legacy_board_layer(next, now, layer != next)
+                        {
+                            self.set_status_message(error.to_string());
+                            return None;
+                        }
                     }
                     self.board_pressed.insert(binding.clone());
                 } else if event.kind != InputEventKind::Released
@@ -1702,6 +1710,11 @@ impl WorkbenchStore {
                 result.observed_layer = Some(layer);
                 result.observed_profile_kind = Some("legacy_three".into());
                 result.observed_status = format!("已确认旧三层，第 {layer} 层");
+                if self.legacy_host_profile_id(layer).is_none() {
+                    result
+                        .observed_status
+                        .push_str(" · 绑定缺失或属于原生应用，按键已暂停");
+                }
             }
         }
         result
@@ -2827,6 +2840,18 @@ impl WorkbenchStore {
         self.document_store
             .update_routing(request)
             .map_err(WorkbenchError::Routing)
+    }
+
+    fn initialize_auto_host_ready(&mut self, preserve_saved_host_state: bool) {
+        if preserve_saved_host_state {
+            return;
+        }
+        if let Some(ag_pid) = self.find_canonical_profile_id(CanonicalAgent::Antigravity) {
+            let _ = self.select_and_activate_profile_at(&ag_pid, Instant::now(), false);
+        }
+        if !self.document_store.host_execution_enabled() {
+            let _ = self.apply_routing_operation(RoutingOperation::Execution { enabled: true });
+        }
     }
 
     fn initialize_selection(
@@ -7122,6 +7147,63 @@ fn fallback_unbridged_oai_action(
             command: "scroll-to-bottom".to_string(),
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn automatic_host_startup_preserves_saved_v1_state_without_migrating() {
+        for active_agent in [None, Some(CanonicalAgent::DeepseekHarness)] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let seed = WorkbenchStore::open_isolated(temp.path()).unwrap();
+            let active_id = active_agent.and_then(|agent| seed.find_canonical_profile_id(agent));
+            fs::write(
+                temp.path().join("workbench.json"),
+                serde_json::to_vec(&seed.document_store.draft.document).unwrap(),
+            )
+            .unwrap();
+            let original = serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 1, "favorites": [],
+                "host_active_profile_id": active_id,
+                "host_execution_enabled": false, "command_execution_enabled": false,
+                "manual_override": false, "auto_follow_enabled": true
+            }))
+            .unwrap();
+            let path = temp.path().join("workbench.preferences.json");
+            fs::write(&path, &original).unwrap();
+            drop(seed);
+
+            let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+            let preserve_saved_host_state = store.document_store.has_saved_host_preferences();
+            assert!(preserve_saved_host_state);
+            let before = store.document_store.routing_state();
+            store.initialize_auto_host_ready(preserve_saved_host_state);
+
+            assert_eq!(store.document_store.routing_state(), before);
+            assert_eq!(store.active_host_profile_id(), active_id);
+            assert!(!store.manual_override);
+            assert!(!store.document_store.host_execution_enabled());
+            assert_eq!(fs::read(path).unwrap(), original);
+            assert!(!temp
+                .path()
+                .join("workbench.preferences.v1.backup.json")
+                .exists());
+        }
+    }
+
+    #[test]
+    fn automatic_host_startup_initializes_a_new_install() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+        store.initialize_auto_host_ready(false);
+        assert_eq!(
+            store.active_host_profile_id(),
+            store.find_canonical_profile_id(CanonicalAgent::Antigravity)
+        );
+        assert!(store.document_store.host_execution_enabled());
     }
 }
 
