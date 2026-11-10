@@ -1166,7 +1166,7 @@ impl WorkbenchStore {
                     self.hardware_rpc_verified = false;
                     self.lighting_arbiter.invalidate_hardware_cache();
                 }
-                if !self.config.isolated && self.device_session.is_none() {
+                if !self.config.isolated && !self.device_session_connected() {
                     let _ = self.connect_default_usb_with_execution(false);
                 }
                 None
@@ -3759,6 +3759,11 @@ impl WorkbenchStore {
     }
 
     fn device_session_connected(&self) -> bool {
+        if let Some(running) = &self.six_layer_running {
+            return running.readiness.configuration_observed
+                && running.readiness.keyboard_grabbed
+                && running.receiver.failure().is_none();
+        }
         self.device_session
             .as_ref()
             .is_some_and(|session| !session.is_disconnected())
@@ -3839,7 +3844,7 @@ impl WorkbenchStore {
         let header = HeaderProjection {
             ready_state,
             banner: ownership_banner.clone(),
-            show_connect_button: self.device_session.is_none(),
+            show_connect_button: !self.device_session_connected(),
             show_return_to_host_button: editing_device,
             host_execution_enabled: self.document_store.host_execution_enabled(),
             can_edit_draft,

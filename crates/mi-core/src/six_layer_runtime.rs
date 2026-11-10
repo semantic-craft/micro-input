@@ -98,7 +98,7 @@ pub fn save(path: &Path, state: &SavedSixLayerState) -> Result<(), String> {
 pub struct RunningSixLayer {
     pub receiver: Arc<UserCommandReceiver>,
     pub readiness: Readiness,
-    pub session: Arc<DeviceSession>,
+    session: Arc<DeviceSession>,
     pub candidate: HidCandidate,
     pub installation: Installation,
     pub observed_layer: Arc<AtomicU8>,
@@ -345,15 +345,12 @@ impl RunningSixLayer {
         monitor_result.and(executor_result)
     }
 
-    pub fn start_monitor(&mut self, runtime: Arc<tokio::runtime::Runtime>) {
+    pub fn start_monitor(&mut self) {
         let receiver = Arc::clone(&self.receiver);
         let stop = Arc::clone(&self.stop);
         let readiness = self.readiness.clone();
         let patch = self.installation.config.clone();
         let target = self.installation.target.clone();
-        let session = Arc::clone(&self.session);
-        let observed = Arc::clone(&self.observed_layer);
-        let profile_index = self.installation.profile_index;
         self.monitor = Some(thread::spawn(move || {
             let mut wall = SystemTime::now();
             let mut monotonic = Instant::now();
@@ -373,53 +370,9 @@ impl RunningSixLayer {
                     > Duration::from_secs(1);
                 wall = now_wall;
                 monotonic = now_monotonic;
-                if slept {
-                    receiver.invalidate("检测到系统睡眠，六层输入已暂停");
+                if !check_input_connection(&receiver, slept, || readiness.recheck(&patch, &target))
+                {
                     return;
-                }
-                if session.is_disconnected() {
-                    let reason = session.terminal_failure().map_or_else(
-                        || "设备会话已关闭，六层输入已暂停".to_string(),
-                        |error| format!("设备会话已断开：{error}"),
-                    );
-                    receiver.invalidate(&reason);
-                    return;
-                }
-                if let Err(error) = readiness.recheck(&patch, &target) {
-                    receiver.invalidate(&error);
-                    return;
-                }
-                match runtime.block_on(async {
-                    tokio::time::timeout(Duration::from_secs(2), session.read_identity_info()).await
-                }) {
-                    Ok(Ok(identity))
-                        if identity.version.as_deref() == Some("0.6.3")
-                            && identity.profile_index == Some(profile_index)
-                            && identity
-                                .layer_index
-                                .is_some_and(|layer| (1..=6).contains(&layer)) =>
-                    {
-                        observed.store(identity.layer_index.unwrap() as u8, Ordering::Release);
-                    }
-                    Ok(Ok(identity)) => {
-                        receiver.invalidate(&format!(
-                            "当前设备方案或层位不符：固件 {:?}（预期 0.6.3），方案 {:?}（预期 {profile_index}），层位 {:?}（预期 1 至 6）",
-                            identity.version, identity.profile_index, identity.layer_index,
-                        ));
-                        return;
-                    }
-                    Ok(Err(error)) => {
-                        receiver.invalidate(&format!("设备身份查询失败：{error}"));
-                        return;
-                    }
-                    Err(_) => {
-                        let reason = session.terminal_failure().map_or_else(
-                            || "设备身份查询超过 2 秒，六层输入已暂停".to_string(),
-                            |error| format!("设备身份查询超过 2 秒，终态错误：{error}"),
-                        );
-                        receiver.invalidate(&reason);
-                        return;
-                    }
                 }
             }
         }));
@@ -436,15 +389,24 @@ impl Drop for RunningSixLayer {
     }
 }
 
-pub(super) fn renew_after_shutdown(
-    running: RunningSixLayer,
-    runtime: &tokio::runtime::Runtime,
-    reconnect: impl FnOnce() -> Result<RunningSixLayer, String>,
-) -> Result<RunningSixLayer, String> {
-    running
-        .shutdown(runtime)
-        .map_err(|error| format!("旧会话清理未确认，未重新连接：{error}"))?;
-    reconnect().map_err(|error| format!("会话重连失败，输入保持暂停：{error}"))
+// Input liveness belongs to the grabbed keyboard and its Karabiner generation.
+// Vendor RPC is used only while establishing or changing the configuration.
+fn check_input_connection(
+    receiver: &UserCommandReceiver,
+    slept: bool,
+    recheck: impl FnOnce() -> Result<(), String>,
+) -> bool {
+    let result = if slept {
+        Err("检测到系统睡眠，六层输入已暂停".into())
+    } else {
+        recheck()
+    };
+    if let Err(error) = result {
+        receiver.invalidate(&error);
+        false
+    } else {
+        true
+    }
 }
 
 fn execute_clicks(
@@ -559,102 +521,107 @@ pub async fn apply(
     )?;
     let exclusive = MacTransport::exclusive_vendor();
     let (session, _) = connect(&exclusive, &target)?;
-    let prepared = session
-        .prepare_six_layer_write(document_dir)
-        .await
-        .map_err(|e| e.to_string())?;
-    let candidate_bytes = prepared.candidate.clone();
-    let smart = match fs::read(prepared.backup.join("smart_actions.json")) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.to_string()),
-    };
-    let baseline = ReloadBaseline::capture()?;
-    patch.install(&document_dir.join("karabiner-backups"))?;
-    let readiness = match wait_ready(&baseline, &patch, &target) {
-        Ok(ready) => ready,
-        Err(error) => {
-            let rollback = patch.rollback_exact();
-            return Err(format!(
-                "{error}；规则恢复：{}",
-                rollback.map(|_| "已确认".into()).unwrap_or_else(|e| e)
-            ));
-        }
-    };
-    let previous = saved.clone();
-    let mut restoration_config = patch.clone();
-    let backup = if let Some(previous) = &saved.installation {
-        restoration_config.original = previous.config.original.clone();
-        restoration_config.original_device = previous.config.original_device.clone();
-        previous.backup.clone()
-    } else {
-        prepared.backup.clone()
-    };
-    let mut installation = Installation {
-        status: InstallationStatus::Applying,
-        plan,
-        target: target.clone(),
-        profile_index: prepared.profile_index,
-        backup,
-        config: restoration_config,
-    };
-    saved.installation = Some(installation.clone());
-    if let Err(error) = save(&state_path, &saved) {
-        let _ = patch.rollback_exact();
-        return Err(error);
-    }
-    let result = session.apply_six_layer_write(prepared).await;
-    let receipt = match result {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            if error.original_verified {
+    with_verification_session(&session, async {
+        let prepared = session
+            .prepare_six_layer_write(document_dir)
+            .await
+            .map_err(|e| e.to_string())?;
+        let candidate_bytes = prepared.candidate.clone();
+        let smart = match fs::read(prepared.backup.join("smart_actions.json")) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        let baseline = ReloadBaseline::capture()?;
+        patch.install(&document_dir.join("karabiner-backups"))?;
+        let readiness = match wait_ready(&baseline, &patch, &target) {
+            Ok(ready) => ready,
+            Err(error) => {
                 let rollback = patch.rollback_exact();
-                if rollback.is_ok() {
-                    let _ = save(&state_path, &previous);
-                }
                 return Err(format!(
-                    "{}；设备原件已确认；规则恢复：{}",
-                    error.detail,
+                    "{error}；规则恢复：{}",
                     rollback.map(|_| "已确认".into()).unwrap_or_else(|e| e)
                 ));
             }
-            installation.status = InstallationStatus::RecoveryRequired;
-            saved.installation = Some(installation);
-            let _ = save(&state_path, &saved);
-            return Err(format!(
-                "{}；设备恢复未确认，保留吞键规则，停止派发",
-                error.detail
-            ));
+        };
+        let previous = saved.clone();
+        let mut restoration_config = patch.clone();
+        let backup = if let Some(previous) = &saved.installation {
+            restoration_config.original = previous.config.original.clone();
+            restoration_config.original_device = previous.config.original_device.clone();
+            previous.backup.clone()
+        } else {
+            prepared.backup.clone()
+        };
+        let mut installation = Installation {
+            status: InstallationStatus::Applying,
+            plan,
+            target: target.clone(),
+            profile_index: prepared.profile_index,
+            backup,
+            config: restoration_config,
+        };
+        saved.installation = Some(installation.clone());
+        if let Err(error) = save(&state_path, &saved) {
+            let _ = patch.rollback_exact();
+            return Err(error);
         }
-    };
-    session.disconnect();
-    drop(session);
-    drop(exclusive);
-    let (shared, candidate) = match connect(&MacTransport::new(), &target) {
-        Ok(connected) => connected,
-        Err(error) => {
-            installation.status = InstallationStatus::RecoveryRequired;
-            saved.installation = Some(installation);
-            let _ = save(&state_path, &saved);
-            return Err(format!("{error}；保留吞键规则，请恢复设备"));
-        }
-    };
-    let layer = shared
-        .verify_six_layer_files(&candidate_bytes, smart.as_deref(), receipt.profile_index)
+        let result = session.apply_six_layer_write(prepared).await;
+        let receipt = match result {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if error.original_verified {
+                    let rollback = patch.rollback_exact();
+                    if rollback.is_ok() {
+                        let _ = save(&state_path, &previous);
+                    }
+                    return Err(format!(
+                        "{}；设备原件已确认；规则恢复：{}",
+                        error.detail,
+                        rollback.map(|_| "已确认".into()).unwrap_or_else(|e| e)
+                    ));
+                }
+                installation.status = InstallationStatus::RecoveryRequired;
+                saved.installation = Some(installation);
+                let _ = save(&state_path, &saved);
+                return Err(format!(
+                    "{}；设备恢复未确认，保留吞键规则，停止派发",
+                    error.detail
+                ));
+            }
+        };
+        session.shutdown().await;
+        drop(exclusive);
+        let (shared, candidate) = match connect(&MacTransport::new(), &target) {
+            Ok(connected) => connected,
+            Err(error) => {
+                installation.status = InstallationStatus::RecoveryRequired;
+                saved.installation = Some(installation);
+                let _ = save(&state_path, &saved);
+                return Err(format!("{error}；保留吞键规则，请恢复设备"));
+            }
+        };
+        with_verification_session(&shared, async {
+            let layer = shared
+                .verify_six_layer_files(&candidate_bytes, smart.as_deref(), receipt.profile_index)
+                .await
+                .map_err(|e| format!("{e}；保留吞键规则，请恢复设备"))?;
+            readiness.recheck(&patch, &target)?;
+            installation.status = InstallationStatus::Applied;
+            saved.installation = Some(installation.clone());
+            save(&state_path, &saved)?;
+            Ok(new_running(
+                receiver,
+                readiness,
+                shared.clone(),
+                candidate,
+                installation,
+                layer as u8,
+            ))
+        })
         .await
-        .map_err(|e| format!("{e}；保留吞键规则，请恢复设备"))?;
-    readiness.recheck(&patch, &target)?;
-    installation.status = InstallationStatus::Applied;
-    saved.installation = Some(installation.clone());
-    save(&state_path, &saved)?;
-    Ok(new_running(
-        receiver,
-        readiness,
-        shared,
-        candidate,
-        installation,
-        layer as u8,
-    ))
+    })
+    .await
 }
 
 fn new_running(
@@ -699,44 +666,57 @@ pub async fn resume(
         .ok_or("六层记录未完成，需要恢复")?;
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
     let (session, candidate) = connect(&MacTransport::new(), &target)?;
-    let expected =
-        fs::read(installation.backup.join("planned-keymap.json")).map_err(|e| e.to_string())?;
-    let smart = match fs::read(installation.backup.join("smart_actions.json")) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.to_string()),
-    };
-    let layer = session
-        .verify_six_layer_files(&expected, smart.as_deref(), installation.profile_index)
-        .await
-        .map_err(|e| format!("{e}；未写设备，请显式应用或恢复"))?;
-    let receiver = Arc::new(UserCommandReceiver::bind().map_err(|e| e.to_string())?);
-    let rule = karabiner::rules(&target, &receiver, installation.plan.bottom_row_layout)?;
-    let path = installation.config.path.clone();
-    let patch = karabiner::prepare_config(
-        path.clone(),
-        fs::read(&path).map_err(|e| e.to_string())?,
-        &target,
-        rule,
-    )?;
-    let baseline = ReloadBaseline::capture()?;
-    patch.install(&document_dir.join("karabiner-backups"))?;
-    installation.config.installed = patch.installed.clone();
-    installation.config.installed_device = patch.installed_device.clone();
-    installation.target = target.clone();
-    saved.installation = Some(installation.clone());
-    save(&document_dir.join("six-layer-runtime.json"), &saved)?;
-    // The board is already direct-coded. A failed reload must leave swallowing
-    // rules in place, including when the previous rule had been removed.
-    let readiness = wait_ready(&baseline, &patch, &target)?;
-    Ok(new_running(
-        receiver,
-        readiness,
-        session,
-        candidate,
-        installation,
-        layer as u8,
-    ))
+    with_verification_session(&session, async {
+        let expected =
+            fs::read(installation.backup.join("planned-keymap.json")).map_err(|e| e.to_string())?;
+        let smart = match fs::read(installation.backup.join("smart_actions.json")) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        let layer = session
+            .verify_six_layer_files(&expected, smart.as_deref(), installation.profile_index)
+            .await
+            .map_err(|e| format!("{e}；未写设备，请显式应用或恢复"))?;
+        let receiver = Arc::new(UserCommandReceiver::bind().map_err(|e| e.to_string())?);
+        let rule = karabiner::rules(&target, &receiver, installation.plan.bottom_row_layout)?;
+        let path = installation.config.path.clone();
+        let patch = karabiner::prepare_config(
+            path.clone(),
+            fs::read(&path).map_err(|e| e.to_string())?,
+            &target,
+            rule,
+        )?;
+        let baseline = ReloadBaseline::capture()?;
+        patch.install(&document_dir.join("karabiner-backups"))?;
+        installation.config.installed = patch.installed.clone();
+        installation.config.installed_device = patch.installed_device.clone();
+        installation.target = target.clone();
+        saved.installation = Some(installation.clone());
+        save(&document_dir.join("six-layer-runtime.json"), &saved)?;
+        // The board is already direct-coded. A failed reload must leave swallowing
+        // rules in place, including when the previous rule had been removed.
+        let readiness = wait_ready(&baseline, &patch, &target)?;
+        Ok(new_running(
+            receiver,
+            readiness,
+            session.clone(),
+            candidate,
+            installation,
+            layer as u8,
+        ))
+    })
+    .await
+}
+
+// The vendor reader is an establishment resource, never an input-liveness lease.
+async fn with_verification_session<T>(
+    session: &DeviceSession,
+    operation: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let result = operation.await;
+    session.shutdown().await;
+    result
 }
 
 fn wait_ready(
@@ -756,21 +736,23 @@ fn wait_ready(
 }
 
 pub async fn restore(document_dir: &Path, mut saved: SavedSixLayerState) -> Result<(), String> {
-    let installation = saved.installation.as_ref().ok_or("没有可恢复的六层记录")?;
+    let installation = saved.installation.clone().ok_or("没有可恢复的六层记录")?;
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
     if target.location_id != installation.target.location_id {
         return Err("键盘 USB 位置已变化，未自动恢复".into());
     }
     let transport = MacTransport::exclusive_vendor();
     let (session, _) = connect(&transport, &target)?;
-    session
-        .restore_six_layer_backup(&installation.backup)
-        .await
-        .map_err(|e| format!("{e}；保留吞键规则"))?;
-    installation.config.restore_owned(&target)?;
-    session.disconnect();
-    saved.installation = None;
-    save(&document_dir.join("six-layer-runtime.json"), &saved)
+    with_verification_session(&session, async {
+        session
+            .restore_six_layer_backup(&installation.backup)
+            .await
+            .map_err(|e| format!("{e}；保留吞键规则"))?;
+        installation.config.restore_owned(&target)?;
+        saved.installation = None;
+        save(&document_dir.join("six-layer-runtime.json"), &saved)
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -782,25 +764,57 @@ mod tests {
     use std::os::unix::net::UnixDatagram;
 
     #[test]
-    fn session_renewal_requires_owned_action_cleanup() {
-        let directory = tempfile::tempdir().unwrap();
+    fn verification_session_is_closed_on_success_and_failure() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
+        for outcome in [Ok(()), Err("readback mismatch".to_string())] {
+            let session = {
+                let _entered = runtime.enter();
+                let (link, _) = mi_transport::MockLink::new();
+                DeviceSession::new(
+                    link,
+                    Box::new(mi_proto::NativeFramer::default()),
+                    Arc::new(mi_session::ReadOnlySchema),
+                    mi_session::SessionConfig::default(),
+                )
+            };
+            let expected = outcome.clone();
+            let result = runtime.block_on(with_verification_session(&session, async { outcome }));
+            assert_eq!(result, expected);
+            assert!(session.is_disconnected());
+        }
+    }
+
+    #[test]
+    fn input_monitor_ticks_do_not_need_vendor_rpc_and_fail_closed_on_readiness_loss() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (link, _) = mi_transport::MockLink::new();
         let session = {
             let _entered = runtime.enter();
-            let (link, _) = mi_transport::MockLink::new();
             DeviceSession::new(
-                link,
+                link.clone(),
                 Box::new(mi_proto::NativeFramer::default()),
                 Arc::new(mi_session::ReadOnlySchema),
                 mi_session::SessionConfig::default(),
             )
         };
-        let mut running = RunningSixLayer::isolated(session, directory.path());
-        running.executor = Some(thread::spawn(|| Err("owned action still active".into())));
-        let result = renew_after_shutdown(running, &runtime, || {
-            panic!("cleanup failed: must not reconnect")
-        });
-        assert!(result.err().unwrap().contains("旧会话清理未确认"));
+        runtime.block_on(session.shutdown());
+        let receiver = UserCommandReceiver::bind().unwrap();
+        receiver.arm().unwrap();
+        for _ in 0..1000 {
+            assert!(check_input_connection(&receiver, false, || Ok(())));
+        }
+        assert!(link.writes.lock().unwrap().is_empty());
+        assert!(receiver.failure().is_none());
+        assert!(!check_input_connection(&receiver, false, || Err(
+            "USB target changed".into()
+        )));
+        assert_eq!(receiver.failure().as_deref(), Some("USB target changed"));
+        assert!(receiver.next().is_err());
+        let receiver = UserCommandReceiver::bind().unwrap();
+        assert!(!check_input_connection(&receiver, true, || panic!(
+            "sleep stops before recheck"
+        )));
+        assert!(receiver.failure().unwrap().contains("睡眠"));
     }
 
     fn send(receiver: &UserCommandReceiver, control: u8) {

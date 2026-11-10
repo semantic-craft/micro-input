@@ -332,7 +332,7 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: 前台切换与双分屏回归先失败后通过，独立审查及 `scripts/verify-offline` 通过，本机日常版更新。物理层仍按真实观察显示；第 1 层 Codex 原生通道及尚未实现的会话导航分别保留边界。
 - **Evidence**: e5c6e6d; .scratch/antigravity-foreground/result.json; eight offline scenarios PASS; installed; physical input not run
 
-### [ ] Slice R21: 共享通道响应隔离与会话续接
-- **Outcome**: 无法关联到 pending 的响应不终止本机 reader；六层监控耗尽会话编号后先完整退役旧代，再只读核验并建立新连接。保留具体失败原因，失效会话不再显示已连接。
-- **Done Predicate**: 无关联响应、耗尽与延迟 reader 回归先失败后通过；本请求坏包仍失败、无有效响应仍超时，换代、失败暂停、旧事件和睡眠边界通过；`scripts/verify-offline` 全量通过并更新本机。实机持续连接与宿主动作分别记录，同 ID 跨客户端歧义不宣称已解决。
+### [ ] Slice R21: 六层实体输入与配置 RPC 分离
+- **Outcome**: 首次配置核验完成后关闭共享 RPC reader，六层输入独立依赖 USB/Karabiner 与所有权检查，避免无关响应、身份查询超时或编号耗尽停用实体键。配置查询保留严格响应归属与终止原因。
+- **Done Predicate**: 核验后 reader 退出、运行期零 RPC、实体 token 路由与失效清理回归通过；无关联响应不误完成请求，本请求坏包仍失败；`scripts/verify-offline` 全量通过并更新本机。持续连接和实体动作分别记录，层位仅表述首次核验或最近输入，UNKNOWN-17 保留。
 - **Evidence**: .scratch/antigravity-session/
