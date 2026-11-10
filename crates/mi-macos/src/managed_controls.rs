@@ -42,6 +42,9 @@ pub struct ManagedControlReadiness {
 }
 
 pub trait ManagedAxProvider: Send {
+    fn process_has_exited(&self, _pid: i32) -> bool {
+        false
+    }
     fn capture(&mut self, bundle_id: &str) -> Result<ManagedWindow, String>;
     fn capture_for_scroll(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
         self.capture(bundle_id)
@@ -120,7 +123,7 @@ impl<P: ManagedAxProvider> ManagedAxControls<P> {
             .uncleared_targets
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
-        validate_uncleared_target(&targets, &window.identity)?;
+        validate_uncleared_target(&*provider, &mut targets, &window.identity)?;
         let (state, control) = dictation_control(&window, adapter)?;
         let desired = match state {
             ObservedDictationState::Idle => ObservedDictationState::Recording,
@@ -167,7 +170,7 @@ impl<P: ManagedAxProvider> ManagedAxControls<P> {
             .uncleared_targets
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
-        validate_uncleared_target(&targets, &window.identity)?;
+        validate_uncleared_target(provider, &mut targets, &window.identity)?;
         let allow_absent = !targets.contains_key(&window.identity.bundle_id);
         let result = stop_in_window(
             provider,
@@ -451,15 +454,19 @@ pub(crate) fn insert_at_utf16_selection(
     Ok(format!("{before}{text}{after}"))
 }
 
-fn validate_uncleared_target(
-    targets: &BTreeMap<String, ManagedWindowIdentity>,
+fn validate_uncleared_target<P: ManagedAxProvider>(
+    provider: &P,
+    targets: &mut BTreeMap<String, ManagedWindowIdentity>,
     target: &ManagedWindowIdentity,
 ) -> Result<(), String> {
-    if targets
+    if let Some(owned) = targets
         .get(&target.bundle_id)
-        .is_some_and(|owned| owned != target)
+        .filter(|owned| *owned != target)
     {
-        return Err(blocked("uncleared_dictation_target_changed"));
+        if !provider.process_has_exited(owned.pid) {
+            return Err(blocked("uncleared_dictation_target_changed"));
+        }
+        targets.remove(&target.bundle_id);
     }
     Ok(())
 }

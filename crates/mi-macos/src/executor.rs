@@ -1877,6 +1877,15 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 if !self.driver.is_accessibility_trusted() {
                     return make_receipt("blocked", "accessibility_untrusted".to_string());
                 }
+                if let Some(adapter) = target_bundle_id
+                    .as_deref()
+                    .and_then(managed_adapter_for_bundle)
+                {
+                    return match self.driver.agent_shortcut(adapter, *key_code, modifiers) {
+                        Ok(()) => make_receipt("executed", desc.detail),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
+                    };
+                }
                 if let Some(bundle_id) = target_bundle_id {
                     if let Err(err) = self.driver.open_application(bundle_id) {
                         return make_receipt("failed", err);
@@ -1899,15 +1908,12 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
             ResolvedHostAction::PasteText {
                 text,
                 target_bundle_id,
+                adapter,
                 no_newline,
                 submit,
-                ..
             } => {
                 if !self.driver.is_accessibility_trusted() {
                     return make_receipt("blocked", "accessibility_untrusted".to_string());
-                }
-                if let Some(bundle_id) = target_bundle_id {
-                    let _ = self.driver.open_application(bundle_id);
                 }
                 let sanitized = if *no_newline {
                     text.trim_end_matches(['\r', '\n'])
@@ -1916,6 +1922,38 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 };
                 if sanitized.trim().is_empty() {
                     return make_receipt("blocked", "empty_paste_text".to_string());
+                }
+                let managed = target_bundle_id
+                    .as_deref()
+                    .and_then(managed_adapter_for_bundle)
+                    .or_else(|| {
+                        adapter
+                            .as_deref()
+                            .filter(|adapter| is_managed_adapter(adapter))
+                    });
+                if let Some(managed) = managed {
+                    let expected_bundle = bundle_id_for_adapter(managed);
+                    if target_bundle_id
+                        .as_deref()
+                        .is_some_and(|bundle| Some(bundle) != expected_bundle)
+                        || adapter.as_deref().is_some_and(|adapter| {
+                            bundle_id_for_adapter(adapter) != expected_bundle
+                        })
+                    {
+                        return make_receipt("blocked", "blocked:managed_target_mismatch".into());
+                    }
+                    let result = if *submit {
+                        self.driver.submit_agent_input(managed, Some(sanitized))
+                    } else {
+                        self.driver.insert_agent_prompt(managed, sanitized)
+                    };
+                    return match result {
+                        Ok(()) => make_receipt("executed", desc.detail),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
+                    };
+                }
+                if let Some(bundle_id) = target_bundle_id {
+                    let _ = self.driver.open_application(bundle_id);
                 }
                 let snapshot = self.driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
                 let written_cc = self.driver.write_clipboard_plain_text(sanitized);
@@ -2205,8 +2243,14 @@ fn is_managed_adapter(adapter: &str) -> bool {
 }
 
 fn is_managed_bundle(bundle: &str) -> bool {
-    matches!(
-        bundle,
-        "com.xd.cindy" | "com.google.antigravity" | "com.deepseek.dsh"
-    )
+    managed_adapter_for_bundle(bundle).is_some()
+}
+
+fn managed_adapter_for_bundle(bundle: &str) -> Option<&'static str> {
+    match bundle {
+        "com.xd.cindy" => Some("cindy"),
+        "com.google.antigravity" => Some("antigravity"),
+        "com.deepseek.dsh" => Some("dsh-desktop"),
+        _ => None,
+    }
 }

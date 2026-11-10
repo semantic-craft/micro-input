@@ -71,6 +71,51 @@ mod macos {
         origin: Point,
         size: Size,
     }
+    impl Rect {
+        fn intersection(self, other: Self) -> Option<Self> {
+            let x = self.origin.x.max(other.origin.x);
+            let y = self.origin.y.max(other.origin.y);
+            let width =
+                (self.origin.x + self.size.width).min(other.origin.x + other.size.width) - x;
+            let height =
+                (self.origin.y + self.size.height).min(other.origin.y + other.size.height) - y;
+            (width > 0.0 && height > 0.0).then_some(Self {
+                origin: Point { x, y },
+                size: Size { width, height },
+            })
+        }
+    }
+
+    fn scroll_candidate_points(window: Rect, input: Rect, preferred: Option<Rect>) -> Vec<Point> {
+        if window.intersection(input).is_none() {
+            return Vec::new();
+        }
+        let above_input = Rect {
+            origin: Point {
+                x: input.origin.x,
+                y: window.origin.y,
+            },
+            size: Size {
+                width: input.size.width,
+                height: input.origin.y - window.origin.y,
+            },
+        };
+        let Some(area) = window.intersection(above_input) else {
+            return Vec::new();
+        };
+        let area = preferred
+            .and_then(|preferred| area.intersection(preferred))
+            .unwrap_or(area);
+        [0.75, 0.5, 0.25]
+            .into_iter()
+            .flat_map(|y| {
+                [0.5, 0.25, 0.75].into_iter().map(move |x| Point {
+                    x: area.origin.x + area.size.width * x,
+                    y: area.origin.y + area.size.height * y,
+                })
+            })
+            .collect()
+    }
     #[repr(C)]
     #[derive(Default)]
     struct Range {
@@ -82,10 +127,20 @@ mod macos {
     unsafe extern "C" {
         fn CGEventCreateKeyboardEvent(source: *mut c_void, key: u16, down: bool) -> *mut c_void;
         fn CGEventSetFlags(event: *mut c_void, flags: u64);
+        fn CGEventSetLocation(event: *mut c_void, point: Point);
+        fn CGEventCreateScrollWheelEvent2(
+            source: *mut c_void,
+            units: u32,
+            wheels: u32,
+            wheel1: i32,
+            wheel2: i32,
+            wheel3: i32,
+        ) -> *mut c_void;
         fn CGEventPostToPid(pid: i32, event: *mut c_void);
         fn AXIsProcessTrusted() -> bool;
         fn AXUIElementCreateApplication(pid: i32) -> Ref;
         fn AXUIElementGetPid(element: Ref, pid: *mut i32) -> i32;
+        fn AXUIElementCopyElementAtPosition(element: Ref, x: f32, y: f32, result: *mut Ref) -> i32;
         fn AXUIElementSetMessagingTimeout(element: Ref, timeout: f32) -> i32;
         fn AXUIElementCopyAttributeValue(element: Ref, attribute: Ref, value: *mut Ref) -> i32;
         fn AXUIElementCopyActionNames(element: Ref, value: *mut Ref) -> i32;
@@ -374,7 +429,7 @@ mod macos {
                 role.as_str(),
                 "AXButton" | "AXCheckBox" | "AXRadioButton" | "AXSwitch" | "AXToggleButton"
             );
-            let label = if button {
+            let label = if button || role == "AXHeading" {
                 element
                     .string_attr("AXDescription")
                     .filter(|v| !v.trim().is_empty())
@@ -405,7 +460,13 @@ mod macos {
                         | "发送消息"
                         | "提交"
                 ));
-            if !editable && !relevant_button && role != "AXScrollArea" {
+            let chat_heading = role == "AXHeading"
+                && label == "Conversation Log"
+                && self
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.identity.bundle_id == "com.google.antigravity");
+            if !editable && !relevant_button && !chat_heading && role != "AXScrollArea" {
                 return None;
             }
             Some(ManagedControl {
@@ -563,11 +624,161 @@ mod macos {
                 application,
                 window: window.clone(),
             });
-            self.read(&identity)
+            if reuse_controls {
+                self.read_for_scroll(&identity)
+            } else {
+                self.read(&identity)
+            }
+        }
+
+        fn read_for_scroll(
+            &mut self,
+            target: &ManagedWindowIdentity,
+        ) -> Result<ManagedWindow, String> {
+            let (_, window) = self.validate(target)?;
+            if let Some(controls) = self.refresh_controls(&window) {
+                self.validate(target)?;
+                return Ok(ManagedWindow {
+                    identity: target.clone(),
+                    controls,
+                });
+            }
+            self.read(target)
+        }
+
+        fn hit_is_passive_target(
+            &self,
+            app: &Owned,
+            window: &Owned,
+            pid: i32,
+            point: Point,
+            deadline: Instant,
+        ) -> bool {
+            let mut hit = std::ptr::null();
+            if unsafe {
+                AXUIElementCopyElementAtPosition(app.0, point.x as f32, point.y as f32, &mut hit)
+            } != 0
+            {
+                return false;
+            }
+            let Some(mut hit) = (unsafe { Owned::from_create(hit) }) else {
+                return false;
+            };
+            for depth in 0..MAX_DEPTH {
+                if Instant::now() >= deadline || hit.pid() != Some(pid) {
+                    return false;
+                }
+                if unsafe { CFEqual(hit.0, window.0) } != 0 {
+                    return depth > 0;
+                }
+                let Some(role) = hit.string_attr("AXRole") else {
+                    return false;
+                };
+                if matches!(
+                    role.as_str(),
+                    "AXButton"
+                        | "AXCheckBox"
+                        | "AXRadioButton"
+                        | "AXSwitch"
+                        | "AXToggleButton"
+                        | "AXPopUpButton"
+                        | "AXMenuButton"
+                        | "AXMenuItem"
+                        | "AXMenuBar"
+                        | "AXMenu"
+                        | "AXToolbar"
+                        | "AXTextField"
+                        | "AXTextArea"
+                        | "AXComboBox"
+                        | "AXLink"
+                        | "AXSlider"
+                        | "AXTabGroup"
+                        | "AXApplication"
+                ) {
+                    return false;
+                }
+                let Some(parent) = hit.attr("AXParent") else {
+                    return false;
+                };
+                hit = parent;
+            }
+            false
+        }
+
+        fn scroll_with_targeted_event(
+            &mut self,
+            target: &ManagedWindowIdentity,
+            input: Rect,
+            controls: &[ManagedControl],
+            request: &DialScrollRequest,
+        ) -> Result<(), String> {
+            if request.sidebar || request.jump_to_bottom {
+                return Err(blocked("target_scrollbar_or_bottom_control_unavailable"));
+            }
+            let (app, window) = self.validate(target)?;
+            let bounds = window
+                .rect()
+                .ok_or_else(|| blocked("window_geometry_unavailable"))?;
+            let headings: Vec<_> = controls
+                .iter()
+                .filter(|control| {
+                    control.role == "AXHeading" && control.label == "Conversation Log"
+                })
+                .collect();
+            let preferred = if let [heading] = headings.as_slice() {
+                self.element(heading.id)?
+                    .attr("AXParent")
+                    .and_then(|parent| parent.rect())
+            } else {
+                None
+            };
+            let deadline = Instant::now() + Duration::from_millis(400);
+            let point = scroll_candidate_points(bounds, input, preferred)
+                .into_iter()
+                .find(|point| {
+                    self.hit_is_passive_target(&app, &window, target.pid, *point, deadline)
+                })
+                .ok_or_else(|| blocked("passive_chat_region_unavailable"))?;
+            let delta = request.clamped_delta_lines();
+            if delta == 0 {
+                return Ok(());
+            }
+            let event = unsafe {
+                Owned::from_create(CGEventCreateScrollWheelEvent2(
+                    std::ptr::null_mut(),
+                    1,
+                    1,
+                    -delta,
+                    0,
+                    0,
+                ))
+            }
+            .ok_or_else(|| blocked("scroll_event_unavailable"))?;
+            unsafe {
+                CGEventSetLocation(event.0.cast_mut(), point);
+                CGEventSetFlags(event.0.cast_mut(), 0);
+            }
+            self.validate(target)?;
+            if !self.hit_is_passive_target(
+                &app,
+                &window,
+                target.pid,
+                point,
+                Instant::now() + Duration::from_millis(200),
+            ) {
+                return Err(blocked("scroll_target_changed"));
+            }
+            unsafe { CGEventPostToPid(target.pid, event.0.cast_mut()) };
+            Err("unconfirmed:scroll_dispatched".into())
         }
     }
 
     impl ManagedAxProvider for NativeAxProvider {
+        fn process_has_exited(&self, pid: i32) -> bool {
+            pid > 0
+                && unsafe { libc::kill(pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        }
         fn capture(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
             self.capture_window(bundle_id, false)
         }
@@ -576,19 +787,14 @@ mod macos {
         }
         fn read(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String> {
             let (_, window) = self.validate(target)?;
-            let controls = if let Some(controls) = self.refresh_controls(&window) {
-                controls
-            } else {
-                let mut controls = Vec::new();
-                self.walk(
-                    window,
-                    0,
-                    &mut 0,
-                    &mut controls,
-                    Instant::now() + Duration::from_millis(500),
-                )?;
-                controls
-            };
+            let mut controls = Vec::new();
+            self.walk(
+                window,
+                0,
+                &mut 0,
+                &mut controls,
+                Instant::now() + Duration::from_millis(500),
+            )?;
             self.cached_controls = controls.clone();
             self.validate(target)?;
             Ok(ManagedWindow {
@@ -601,6 +807,7 @@ mod macos {
             if !control.enabled || !control.pressable {
                 return Err(blocked("ax_control_not_pressable"));
             }
+            self.cached_controls.clear();
             element.action("AXPress")
         }
         fn focus(&mut self, target: &ManagedWindowIdentity, control: u64) -> Result<(), String> {
@@ -609,6 +816,7 @@ mod macos {
                 return Err(blocked("ax_input_not_focusable"));
             }
             let (application, window) = self.validate(target)?;
+            self.cached_controls.clear();
             application.set("AXFrontmost", unsafe { kCFBooleanTrue })?;
             window.action("AXRaise")?;
             self.validate(target)?;
@@ -619,7 +827,7 @@ mod macos {
             target: &ManagedWindowIdentity,
             request: &DialScrollRequest,
         ) -> Result<(), String> {
-            let snapshot = self.read(target)?;
+            let snapshot = self.read_for_scroll(target)?;
             if request.jump_to_bottom && !request.sidebar {
                 let buttons: Vec<_> = snapshot
                     .controls
@@ -701,6 +909,14 @@ mod macos {
                 {
                     candidates.push(bar);
                 }
+            }
+            if candidates.is_empty() {
+                return self.scroll_with_targeted_event(
+                    target,
+                    input_rect,
+                    &snapshot.controls,
+                    request,
+                );
             }
             let [bar] = candidates.as_slice() else {
                 return Err(blocked("ambiguous_or_missing_target_scrollbar"));
@@ -790,6 +1006,7 @@ mod macos {
             }
             let value = Owned::text(&replacement);
             self.validate(target)?;
+            self.cached_controls.clear();
             element.set("AXValue", value.0)?;
             let deadline = Instant::now() + Duration::from_millis(400);
             loop {
@@ -833,6 +1050,7 @@ mod macos {
             }
             .ok_or_else(|| blocked("keyboard_event_unavailable"))?;
             let flags = crate::executor::modifiers_to_cg_flags(modifiers);
+            self.cached_controls.clear();
             unsafe {
                 CGEventSetFlags(down.0.cast_mut(), flags);
                 CGEventSetFlags(up.0.cast_mut(), flags);
@@ -846,23 +1064,91 @@ mod macos {
             if !input.focused {
                 return Err(blocked("input_focus_changed"));
             }
-            let window = self.read(target)?;
-            let buttons: Vec<_> = window
-                .controls
+            let deadline = Instant::now() + Duration::from_millis(400);
+            loop {
+                let window = self.read(target)?;
+                if !window
+                    .controls
+                    .iter()
+                    .any(|input| input.id == control && input.focused && input.editable)
+                {
+                    return Err(blocked("input_focus_changed"));
+                }
+                let buttons: Vec<_> = window
+                    .controls
+                    .iter()
+                    .filter(|control| {
+                        control.enabled
+                            && control.pressable
+                            && matches!(
+                                control.label.trim(),
+                                "Send" | "Send message" | "Submit" | "发送" | "发送消息" | "提交"
+                            )
+                    })
+                    .collect();
+                if let [button] = buttons.as_slice() {
+                    return self.press(target, button.id);
+                }
+                if buttons.len() > 1 || Instant::now() >= deadline {
+                    return Err(blocked("ambiguous_or_missing_submit_control"));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
+            Rect {
+                origin: Point { x, y },
+                size: Size { width, height },
+            }
+        }
+
+        #[test]
+        fn scroll_points_stay_inside_window_above_the_composer() {
+            let window = rect(-1500.0, 100.0, 900.0, 800.0);
+            let composer = rect(-1200.0, 730.0, 700.0, 120.0);
+            let points = scroll_candidate_points(window, composer, None);
+            assert!(!points.is_empty());
+            assert!(points
                 .iter()
-                .filter(|control| {
-                    control.enabled
-                        && control.pressable
-                        && matches!(
-                            control.label.trim(),
-                            "Send" | "Send message" | "Submit" | "发送" | "发送消息" | "提交"
-                        )
-                })
-                .collect();
-            let [button] = buttons.as_slice() else {
-                return Err(blocked("ambiguous_or_missing_submit_control"));
-            };
-            self.press(target, button.id)
+                .all(|p| p.x > -1200.0 && p.x < -600.0 && p.y > 100.0 && p.y < 730.0));
+            assert!(
+                scroll_candidate_points(window, rect(-1200.0, 950.0, 300.0, 100.0), None)
+                    .is_empty()
+            );
+            assert!(
+                scroll_candidate_points(window, rect(-1200.0, 100.0, 300.0, 100.0), None)
+                    .is_empty()
+            );
+        }
+
+        #[test]
+        fn known_chat_region_constrains_scroll_points() {
+            let points = scroll_candidate_points(
+                rect(0.0, 0.0, 1200.0, 900.0),
+                rect(300.0, 700.0, 500.0, 100.0),
+                Some(rect(250.0, 150.0, 600.0, 450.0)),
+            );
+            assert!(!points.is_empty());
+            assert!(points
+                .iter()
+                .all(|p| p.x > 300.0 && p.x < 800.0 && p.y > 150.0 && p.y < 600.0));
+        }
+
+        #[test]
+        fn process_exit_requires_esrch_and_never_treats_this_process_as_exited() {
+            let provider = NativeAxProvider::default();
+            assert!(!provider.process_has_exited(std::process::id() as i32));
+            assert!(!provider.process_has_exited(0));
+            let mut process = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+            let pid = process.id() as i32;
+            process.wait().unwrap();
+            assert!(provider.process_has_exited(pid));
         }
     }
 }

@@ -23,6 +23,7 @@ struct Fixture {
     read_pid: Option<i32>,
     capture_error: Option<String>,
     focus_confirmed: bool,
+    exited_pids: Vec<i32>,
 }
 #[derive(Clone)]
 struct Provider(Arc<Mutex<Fixture>>);
@@ -62,6 +63,7 @@ impl Provider {
             read_pid: None,
             capture_error: None,
             focus_confirmed: true,
+            exited_pids: Vec::new(),
         })))
     }
     fn controls(&self) -> ManagedAxControls<Self> {
@@ -72,6 +74,9 @@ impl Provider {
     }
 }
 impl ManagedAxProvider for Provider {
+    fn process_has_exited(&self, pid: i32) -> bool {
+        self.0.lock().unwrap().exited_pids.contains(&pid)
+    }
     fn capture(&mut self, bundle: &str) -> Result<ManagedWindow, String> {
         let mut state = self.0.lock().unwrap();
         state.events.push(format!("capture:{bundle}"));
@@ -82,7 +87,10 @@ impl ManagedAxProvider for Provider {
     }
     fn read(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String> {
         let state = self.0.lock().unwrap();
-        assert_eq!(target.pid, 100, "must not reselect another PID");
+        assert_eq!(
+            target.pid, state.window.identity.pid,
+            "must not reselect another PID"
+        );
         let mut window = state.window.clone();
         if let Some(pid) = state.read_pid {
             window.identity.pid = pid;
@@ -455,6 +463,9 @@ impl HostOsDriver for Driver {
     fn submit_agent_input(&self, adapter: &str, prompt: Option<&str>) -> Result<(), String> {
         self.controls.submit(adapter, prompt)
     }
+    fn insert_agent_prompt(&self, adapter: &str, prompt: &str) -> Result<(), String> {
+        self.controls.insert_prompt(adapter, prompt)
+    }
     fn agent_shortcut(&self, adapter: &str, key: u16, modifiers: &[String]) -> Result<(), String> {
         self.controls.shortcut(adapter, key, modifiers)
     }
@@ -544,6 +555,93 @@ fn live_executor_uses_targeted_paths_for_submit_and_ordinary_shortcuts() {
 }
 
 #[test]
+fn shortcut_and_paste_action_types_never_use_global_input_for_managed_targets() {
+    for (bundle, adapter) in [
+        ("com.google.antigravity", "antigravity"),
+        ("com.deepseek.dsh", "dsh-desktop"),
+        ("com.xd.cindy", "cindy"),
+    ] {
+        let provider = Provider::cindy();
+        provider.0.lock().unwrap().window.identity.bundle_id = bundle.into();
+        let executor = LiveHostActionExecutor::new(Driver {
+            controls: provider.controls(),
+            trusted: true,
+        });
+        let action = ResolvedHostAction::Shortcut {
+            key: "k".into(),
+            key_code: 0x28,
+            modifiers: vec!["command".into()],
+            target_bundle_id: Some(bundle.into()),
+        };
+        assert_eq!(executor.execute("test", "key", &action).outcome, "executed");
+        for (target_bundle_id, adapter, submit) in [
+            (Some(bundle.into()), None, false),
+            (Some(bundle.into()), Some(adapter.into()), true),
+            (None, Some(adapter.into()), false),
+        ] {
+            let action = ResolvedHostAction::PasteText {
+                text: "test\r\n".into(),
+                target_bundle_id,
+                adapter,
+                no_newline: true,
+                submit,
+            };
+            let receipt = executor.execute("test", "key", &action);
+            assert_eq!(receipt.outcome, "executed", "{}", receipt.detail);
+            assert_eq!(receipt.text_byte_len, Some(4));
+        }
+        let events = provider.events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.as_str() == "targeted_shortcut")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.as_str() == "insert:test")
+                .count(),
+            3
+        );
+        assert_eq!(events.iter().filter(|e| e.as_str() == "submit").count(), 1);
+        assert!(events
+            .iter()
+            .filter(|e| e.starts_with("capture:"))
+            .all(|e| e == &format!("capture:{bundle}")));
+    }
+}
+
+#[test]
+fn conflicting_paste_target_and_adapter_do_not_touch_either_app() {
+    let provider = Provider::cindy();
+    let executor = LiveHostActionExecutor::new(Driver {
+        controls: provider.controls(),
+        trusted: true,
+    });
+    for (target, adapter) in [
+        ("com.google.antigravity", "cindy"),
+        ("com.apple.TextEdit", "cindy"),
+    ] {
+        let receipt = executor.execute(
+            "test",
+            "key",
+            &ResolvedHostAction::PasteText {
+                text: "test".into(),
+                target_bundle_id: Some(target.into()),
+                adapter: Some(adapter.into()),
+                no_newline: true,
+                submit: false,
+            },
+        );
+        assert_eq!(receipt.outcome, "blocked");
+        assert_eq!(receipt.detail, "blocked:managed_target_mismatch");
+    }
+    assert!(provider.events().is_empty());
+}
+
+#[test]
 fn absent_voice_capability_does_not_block_submit_but_uncleared_recording_does() {
     let provider = Provider::cindy();
     let controls = provider.controls();
@@ -585,6 +683,84 @@ fn an_uncleared_recording_cannot_be_stopped_or_submitted_in_a_replacement_window
             .events()
             .iter()
             .filter(|e| e.starts_with("press:"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn restarted_app_recovers_only_after_the_previous_process_is_confirmed_exited() {
+    for effect in [PressEffect::Toggle, PressEffect::NoChange] {
+        let provider = Provider::cindy();
+        let controls = provider.controls();
+        provider.0.lock().unwrap().effect = effect;
+        let _ = controls.toggle_dictation("cindy");
+        {
+            let mut state = provider.0.lock().unwrap();
+            state.window.identity.pid = 200;
+            state.window.identity.window_id = 2;
+            state.window.controls[0].label = "开始语音输入".into();
+            state.effect = PressEffect::Toggle;
+        }
+        assert_eq!(
+            controls.toggle_dictation("cindy").unwrap_err(),
+            "blocked:uncleared_dictation_target_changed"
+        );
+        assert_eq!(
+            provider
+                .events()
+                .iter()
+                .filter(|e| e.starts_with("press:"))
+                .count(),
+            1
+        );
+        provider.0.lock().unwrap().exited_pids.push(100);
+        assert_eq!(
+            controls.toggle_dictation("cindy").unwrap(),
+            ObservedDictationState::Recording
+        );
+        assert_eq!(
+            controls.toggle_dictation("cindy").unwrap(),
+            ObservedDictationState::Idle
+        );
+        assert_eq!(
+            provider
+                .events()
+                .iter()
+                .filter(|e| e.starts_with("press:"))
+                .count(),
+            3
+        );
+    }
+}
+
+#[test]
+fn stopping_after_a_confirmed_process_exit_does_not_press_the_new_idle_window() {
+    let provider = Provider::cindy();
+    let controls = provider.controls();
+    controls.toggle_dictation("cindy").unwrap();
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.window.identity.pid = 200;
+        state.window.identity.window_id = 2;
+        state.window.controls[0].label = "开始语音输入".into();
+        state.exited_pids.push(100);
+    }
+    assert!(!controls.stop_dictation("cindy").unwrap());
+    controls.submit("cindy", None).unwrap();
+    assert_eq!(
+        provider
+            .events()
+            .iter()
+            .filter(|e| e.starts_with("press:"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        provider
+            .events()
+            .iter()
+            .filter(|e| e.as_str() == "submit")
             .count(),
         1
     );

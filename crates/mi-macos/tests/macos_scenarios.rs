@@ -166,13 +166,18 @@ fn test_live_host_action_executor_apple_fn_paste_submit_and_macro_trust() {
     assert_eq!(restored_clip.items[0].types_and_bytes.len(), 2);
 
     driver.set_dictation_active(true);
+    let before_submit_count = driver.events().len();
     let submit_action = ResolvedHostAction::AgentCommand {
         adapter: "antigravity".to_string(),
         command: "submit".to_string(),
     };
     let submit_receipt = executor.execute("Antigravity", "AG09", &submit_action);
     assert!(submit_receipt.succeeded());
-    let post_submit_events = driver.events();
+    let post_submit_events: Vec<_> = driver
+        .events()
+        .into_iter()
+        .skip(before_submit_count)
+        .collect();
     let stop_idx = post_submit_events
         .iter()
         .position(|e| matches!(e, RecordedOsEvent::StopActiveDictation(a) if a == "antigravity"))
