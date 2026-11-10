@@ -1,4 +1,4 @@
-//! R-D01/R-D02/R-D07/R-N02: discovery, non-exclusive HID, and synthetic transport.
+//! R-D01/R-D02/R-D07/R-N02: discovery, USB HID access, and synthetic transport.
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -16,6 +16,8 @@ pub enum TransportError {
     Unavailable(String),
     #[error("仅支持 USB；连接类型待确认")]
     Unsupported,
+    #[error("只能独占 Creator Micro 2 的 USB 专用接口")]
+    ExclusiveVendorInterfaceRequired,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransportHint {
@@ -49,6 +51,16 @@ pub fn is_candidate(d: &HidCandidate) -> bool {
             .any(|p| p.page == 0xff00 && p.usage == 1)
             || (d.usage_pairs.is_empty() && d.usage_page == 0xff00 && d.usage == 1))
 }
+pub fn is_exclusive_vendor_candidate(d: &HidCandidate) -> bool {
+    d.vid == 0x303a
+        && d.pid == 0x8298
+        && d.transport_hint == TransportHint::Usb
+        && d.usage_page == 0xff00
+        && d.usage == 1
+        && d.usage_pairs
+            .iter()
+            .all(|p| p.page == 0xff00 && p.usage == 1)
+}
 /// R-D13/E-075: selected by compiled adapters, never by environment variables or RPC input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkBackend {
@@ -61,6 +73,10 @@ pub enum LinkBackend {
 pub trait HidLink: Send + Sync {
     fn backend(&self) -> LinkBackend {
         LinkBackend::Unverified
+    }
+    /// Whether this link was opened exclusively on the verified USB vendor interface.
+    fn is_exclusive_vendor(&self) -> bool {
+        false
     }
     async fn write(&self, report: &[u8]) -> Result<(), TransportError>;
     /// One RPC frame sequence. Native backends must not interleave blocking reads
@@ -147,9 +163,73 @@ pub fn input_monitoring_allowed() -> bool {
         false
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MacHidAccess {
+    Shared,
+    ExclusiveVendor,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct VendorLease {
+    staged: Option<(String, Arc<MacLink>)>,
+    active: Option<(String, std::sync::Weak<MacLink>)>,
+}
+
+#[cfg(target_os = "macos")]
+impl VendorLease {
+    fn retain_stage(&mut self, path: Option<&str>) {
+        if self
+            .staged
+            .as_ref()
+            .is_some_and(|(id, _)| Some(id.as_str()) != path)
+        {
+            self.staged = None;
+        }
+    }
+
+    fn stage(
+        &mut self,
+        path: Option<&str>,
+        open: impl FnOnce(&str) -> Result<Arc<MacLink>, TransportError>,
+    ) -> Result<(), TransportError> {
+        self.retain_stage(path);
+        let Some(path) = path else { return Ok(()) };
+        if self.staged.is_some()
+            || self.active.as_ref().is_some_and(|(id, link)| {
+                id == path
+                    && link
+                        .upgrade()
+                        .is_some_and(|link| !link.closed.load(Ordering::Acquire))
+            })
+        {
+            return Ok(());
+        }
+        self.staged = Some((path.to_owned(), open(path)?));
+        Ok(())
+    }
+
+    fn handoff(
+        &mut self,
+        path: &str,
+        open: impl FnOnce(&str) -> Result<Arc<MacLink>, TransportError>,
+    ) -> Result<Arc<MacLink>, TransportError> {
+        self.stage(Some(path), open)?;
+        let (id, link) = self
+            .staged
+            .take()
+            .ok_or_else(|| TransportError::Unavailable("USB 专用接口已由当前会话持有".into()))?;
+        self.active = Some((id, Arc::downgrade(&link)));
+        Ok(link)
+    }
+}
+
 pub struct MacTransport {
+    access: MacHidAccess,
     events: broadcast::Sender<()>,
     watcher: Mutex<Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>>,
+    #[cfg(target_os = "macos")]
+    vendor_lease: Option<Arc<Mutex<VendorLease>>>,
 }
 impl Default for MacTransport {
     fn default() -> Self {
@@ -158,10 +238,22 @@ impl Default for MacTransport {
 }
 impl MacTransport {
     pub fn new() -> Self {
+        Self::with_access(MacHidAccess::Shared)
+    }
+
+    pub fn exclusive_vendor() -> Self {
+        Self::with_access(MacHidAccess::ExclusiveVendor)
+    }
+
+    fn with_access(access: MacHidAccess) -> Self {
         let (events, _) = broadcast::channel(16);
         Self {
+            access,
             events,
             watcher: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            vendor_lease: (access == MacHidAccess::ExclusiveVendor)
+                .then(|| Arc::new(Mutex::new(VendorLease::default()))),
         }
     }
     fn start_watching(&self) {
@@ -174,22 +266,66 @@ impl MacTransport {
             let stop = Arc::new(AtomicBool::new(false));
             let thread_stop = stop.clone();
             let events = self.events.clone();
-            let thread = std::thread::spawn(move || unsafe {
-                // The callback only borrows this sender while mi_watch owns the run loop.
-                mi_watch(
-                    Arc::as_ptr(&thread_stop),
-                    discovery_changed,
-                    &events as *const _ as *mut std::ffi::c_void,
-                );
+            let vendor_lease = self.vendor_lease.clone();
+            let thread = std::thread::spawn(move || {
+                if let Some(lease) = vendor_lease {
+                    let (changes, pending) = std::sync::mpsc::sync_channel::<()>(1);
+                    std::thread::scope(|scope| {
+                        let stop = &thread_stop;
+                        scope.spawn(move || {
+                            while pending.recv().is_ok() && !stop.load(Ordering::Acquire) {
+                                for attempt in 0..4 {
+                                    let result = {
+                                        let mut lease = lease.lock().unwrap();
+                                        enumerate_mac().and_then(|devices| {
+                                            let path =
+                                                unique_vendor(&devices).map(|d| d.path.as_str());
+                                            lease.stage(path, open_vendor)
+                                        })
+                                    };
+                                    if result.is_ok() || stop.load(Ordering::Acquire) {
+                                        break;
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(
+                                        15 * (attempt + 1),
+                                    ));
+                                }
+                                let _ = events.send(());
+                            }
+                        });
+                        // Keep HID opening out of the IOKit matching callback and off the UI loop.
+                        unsafe {
+                            mi_watch(
+                                Arc::as_ptr(&thread_stop),
+                                vendor_discovery_changed,
+                                &changes as *const _ as *mut std::ffi::c_void,
+                            );
+                        }
+                        drop(changes);
+                    });
+                } else {
+                    // The callback only borrows this sender while mi_watch owns the run loop.
+                    unsafe {
+                        mi_watch(
+                            Arc::as_ptr(&thread_stop),
+                            discovery_changed,
+                            &events as *const _ as *mut std::ffi::c_void,
+                        );
+                    }
+                }
             });
             *watcher = Some((stop, thread));
         }
     }
     fn stop_watching(&self) {
-        let watcher = self.watcher.lock().unwrap().take();
-        if let Some((stop, thread)) = watcher {
+        let mut watcher = self.watcher.lock().unwrap();
+        if let Some((stop, thread)) = watcher.take() {
             stop.store(true, Ordering::SeqCst);
             let _ = thread.join();
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(lease) = &self.vendor_lease {
+            lease.lock().unwrap().staged = None;
         }
     }
 }
@@ -202,6 +338,24 @@ impl Drop for MacTransport {
 extern "C" fn discovery_changed(context: *mut std::ffi::c_void) {
     let sender = unsafe { &*(context as *const broadcast::Sender<()>) };
     let _ = sender.send(());
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn vendor_discovery_changed(context: *mut std::ffi::c_void) {
+    let changes = unsafe { &*(context as *const std::sync::mpsc::SyncSender<()>) };
+    let _ = changes.try_send(());
+}
+
+#[cfg(target_os = "macos")]
+fn unique_vendor(devices: &[HidCandidate]) -> Option<&HidCandidate> {
+    let mut candidates = devices.iter().filter(|d| is_exclusive_vendor_candidate(d));
+    let first = candidates.next()?;
+    candidates.next().is_none().then_some(first)
+}
+
+#[cfg(target_os = "macos")]
+fn open_vendor(path: &str) -> Result<Arc<MacLink>, TransportError> {
+    MacLink::open(path, true).map(Arc::new)
 }
 
 #[cfg(target_os = "macos")]
@@ -245,20 +399,25 @@ extern "C" fn discovered(
         }
     }
 }
+
+#[cfg(target_os = "macos")]
+fn enumerate_mac() -> Result<Vec<HidCandidate>, TransportError> {
+    let mut devices: Vec<HidCandidate> = Vec::new();
+    let result =
+        unsafe { mi_enumerate(discovered, &mut devices as *mut _ as *mut std::ffi::c_void) };
+    if result != 0 {
+        return Err(TransportError::Unavailable("系统 HID 枚举失败".into()));
+    }
+    devices.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(devices)
+}
+
 // TODO(UNKNOWN-05): USB source is OS-derived; BLE and cross-interface physical identity remain unverified.
 impl HidTransport for MacTransport {
     fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
         #[cfg(target_os = "macos")]
         {
-            let mut devices: Vec<HidCandidate> = Vec::new();
-            let result = unsafe {
-                mi_enumerate(discovered, &mut devices as *mut _ as *mut std::ffi::c_void)
-            };
-            if result != 0 {
-                return Err(TransportError::Unavailable("系统 HID 枚举失败".into()));
-            }
-            devices.sort_by(|a, b| a.path.cmp(&b.path));
-            Ok(devices)
+            enumerate_mac()
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -275,38 +434,89 @@ impl HidTransport for MacTransport {
         self.stop_watching();
     }
     fn open(&self, id: &str) -> Result<Arc<dyn HidLink>, TransportError> {
+        #[cfg(target_os = "macos")]
+        if let Some(lease) = &self.vendor_lease {
+            let mut lease = lease.lock().unwrap();
+            let devices = self.enumerate()?;
+            let path = unique_vendor(&devices).map(|d| d.path.as_str());
+            if path != Some(id) {
+                lease.retain_stage(path);
+                return Err(TransportError::ExclusiveVendorInterfaceRequired);
+            }
+            return Ok(lease.handoff(id, open_vendor)?);
+        }
         let d = self
             .enumerate()?
             .into_iter()
             .find(|d| d.path == id)
             .ok_or(TransportError::Disconnected)?;
+        let exclusive = self.access == MacHidAccess::ExclusiveVendor;
+        if exclusive && !is_exclusive_vendor_candidate(&d) {
+            return Err(TransportError::ExclusiveVendorInterfaceRequired);
+        }
         if d.transport_hint != TransportHint::Usb || d.pid != 0x8298 {
             return Err(TransportError::Unsupported);
         }
-        let api = hidapi::HidApi::new().map_err(|e| TransportError::Unavailable(e.to_string()))?;
-        let path =
-            std::ffi::CString::new(id).map_err(|e| TransportError::Unavailable(e.to_string()))?;
-        // macos-shared-device feature sets hid_darwin_set_open_exclusive(0).
-        let device = api
-            .open_path(&path)
-            .map_err(|e| TransportError::Unavailable(e.to_string()))?;
-        Ok(Arc::new(MacLink {
-            device: Arc::new(Mutex::new(Some(device))),
-        }))
+        #[cfg(target_os = "macos")]
+        {
+            Ok(Arc::new(MacLink::open(id, exclusive)?))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(TransportError::Unsupported)
+        }
     }
 }
+
+#[cfg(target_os = "macos")]
 struct MacLink {
     device: Arc<Mutex<Option<hidapi::HidDevice>>>,
+    exclusive: bool,
+    closed: AtomicBool,
 }
+#[cfg(target_os = "macos")]
+impl MacLink {
+    fn open(id: &str, exclusive: bool) -> Result<Self, TransportError> {
+        // hidapi's Darwin option is process-wide; each handle copies it when opened.
+        static OPEN_LOCK: Mutex<()> = Mutex::new(());
+        let path =
+            std::ffi::CString::new(id).map_err(|e| TransportError::Unavailable(e.to_string()))?;
+        let _open = OPEN_LOCK
+            .lock()
+            .map_err(|_| TransportError::Unavailable("HID 打开状态不可用".into()))?;
+        let api = hidapi::HidApi::new().map_err(|e| TransportError::Unavailable(e.to_string()))?;
+        let previous = api.get_open_exclusive();
+        api.set_open_exclusive(exclusive);
+        let device = api.open_path(&path);
+        api.set_open_exclusive(previous);
+        let device = device.map_err(|e| TransportError::Unavailable(e.to_string()))?;
+        let opened_exclusive = device
+            .is_open_exclusive()
+            .map_err(|e| TransportError::Unavailable(e.to_string()))?;
+        if opened_exclusive != exclusive {
+            return Err(TransportError::Unavailable(
+                "HID 打开方式与请求不一致".into(),
+            ));
+        }
+        Ok(Self {
+            device: Arc::new(Mutex::new(Some(device))),
+            exclusive: opened_exclusive,
+            closed: AtomicBool::new(false),
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
 #[async_trait::async_trait]
 impl HidLink for MacLink {
     fn backend(&self) -> LinkBackend {
-        if cfg!(target_os = "macos") {
-            LinkBackend::MacHidapi267Numbered
-        } else {
-            LinkBackend::Unverified
-        }
+        LinkBackend::MacHidapi267Numbered
     }
+
+    fn is_exclusive_vendor(&self) -> bool {
+        self.exclusive
+    }
+
     async fn write(&self, report: &[u8]) -> Result<(), TransportError> {
         self.write_batch(&[report.to_vec()]).await
     }
@@ -354,6 +564,7 @@ impl HidLink for MacLink {
     }
     fn close(&self) {
         self.device.lock().unwrap().take();
+        self.closed.store(true, Ordering::Release);
     }
 }
 /// R-N04: programmable mock, never an alternate physical wire implementation.
@@ -452,6 +663,58 @@ impl HidTransport for MockTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    fn test_vendor_link(_: &str) -> Result<Arc<MacLink>, TransportError> {
+        Ok(Arc::new(MacLink {
+            device: Arc::new(Mutex::new(None)),
+            exclusive: true,
+            closed: AtomicBool::new(false),
+        }))
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn staged_vendor_is_handed_off_once_without_reopening() {
+        let mut lease = VendorLease::default();
+        let first = test_vendor_link("device-a").unwrap();
+        lease
+            .stage(Some("device-a"), |_| Ok(first.clone()))
+            .unwrap();
+        let handed_off = lease
+            .handoff("device-a", |_| panic!("must reuse the staged link"))
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &handed_off));
+        lease
+            .stage(Some("device-a"), |_| {
+                panic!("must leave the session link held")
+            })
+            .unwrap();
+        assert!(lease
+            .handoff("device-a", |_| panic!("must not seize a second time"))
+            .is_err());
+        handed_off.close();
+        let replacement = lease.handoff("device-a", test_vendor_link).unwrap();
+        assert!(!Arc::ptr_eq(&first, &replacement));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn missing_or_ambiguous_vendor_invalidates_the_staged_link() {
+        let mut lease = VendorLease::default();
+        lease.stage(Some("device-a"), test_vendor_link).unwrap();
+        let old = Arc::downgrade(&lease.staged.as_ref().unwrap().1);
+        lease
+            .stage(None, |_| panic!("must not open an unverified device"))
+            .unwrap();
+        assert!(old.upgrade().is_none());
+        lease.stage(Some("device-b"), test_vendor_link).unwrap();
+        assert!(lease
+            .handoff("device-b", |_| panic!("must use only the new USB instance"))
+            .unwrap()
+            .is_exclusive_vendor());
+    }
+
     #[test]
     fn vendor_collection_is_found_when_primary_usage_is_keyboard() {
         let d = HidCandidate {
@@ -471,7 +734,38 @@ mod tests {
             path: "interface-a".into(),
         };
         assert!(is_candidate(&d));
+        assert!(!is_exclusive_vendor_candidate(&d));
     }
+
+    #[test]
+    fn exclusive_access_only_accepts_the_verified_usb_vendor_interface() {
+        let mut d = HidCandidate {
+            vid: 0x303a,
+            pid: 0x8298,
+            usage_page: 0xff00,
+            usage: 1,
+            usage_pairs: vec![UsagePair {
+                page: 0xff00,
+                usage: 1,
+            }],
+            transport_hint: TransportHint::Usb,
+            product: "Synthetic".into(),
+            path: "interface-a".into(),
+        };
+        assert!(is_exclusive_vendor_candidate(&d));
+        d.usage_pairs.push(UsagePair { page: 1, usage: 6 });
+        assert!(is_candidate(&d));
+        assert!(!is_exclusive_vendor_candidate(&d));
+        d.usage_pairs.clear();
+        assert!(is_exclusive_vendor_candidate(&d));
+        d.pid = 0x8297;
+        assert!(is_candidate(&d));
+        assert!(!is_exclusive_vendor_candidate(&d));
+        d.pid = 0x8298;
+        d.transport_hint = TransportHint::Bluetooth;
+        assert!(!is_exclusive_vendor_candidate(&d));
+    }
+
     #[test]
     fn filtering() {
         let mut d = HidCandidate {
@@ -508,6 +802,39 @@ mod tests {
             "MI_USB_CANDIDATES_JSON={}",
             serde_json::to_string(&candidates).unwrap()
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "requires one Creator Micro 2 on USB and Input Monitoring"]
+    async fn native_usb_exclusive_rejects_old_and_new_competitors() {
+        let shared = MacTransport::new();
+        let eligible: Vec<_> = shared
+            .enumerate()
+            .unwrap()
+            .into_iter()
+            .filter(is_exclusive_vendor_candidate)
+            .collect();
+        let [device] = eligible.as_slice() else {
+            panic!("expected exactly one Creator Micro 2 USB vendor interface");
+        };
+        let contender = shared.open(&device.path).unwrap();
+        let request = |id: u16| {
+            let json = format!(r#"{{"id":{id},"method":"sys.version","params":null}}"#);
+            let mut frame = [0_u8; 64];
+            frame[..3].copy_from_slice(&[6, 2, json.len() as u8]);
+            frame[3..3 + json.len()].copy_from_slice(json.as_bytes());
+            frame
+        };
+        contender.write(&request(8401)).await.unwrap();
+        let owner = MacTransport::exclusive_vendor().open(&device.path).unwrap();
+        assert!(owner.is_exclusive_vendor());
+        assert!(contender.write(&request(8402)).await.is_err());
+        assert!(shared.open(&device.path).is_err());
+        owner.write(&request(8403)).await.unwrap();
+        owner.close();
+        contender.write(&request(8404)).await.unwrap();
+        contender.close();
     }
 }
 

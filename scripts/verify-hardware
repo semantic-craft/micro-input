@@ -370,6 +370,8 @@ def verify_live_app_usb_auto_acceptance(expected_device_path: str, expected_keym
         raise RuntimeError(f"Live app auto-acceptance did not PASS: {receipt}")
     if receipt.get("firmware_version") != "0.6.3":
         raise RuntimeError(f"Unexpected firmware_version in receipt: {receipt}")
+    if receipt.get("exclusive_vendor") is not True:
+        raise RuntimeError("Live app did not acquire exclusive USB vendor access.")
     if receipt.get("device_path") != expected_device_path:
         raise RuntimeError(
             f"Device path mismatch: expected {expected_device_path}, got {receipt.get('device_path')}"

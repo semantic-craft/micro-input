@@ -83,6 +83,7 @@ public struct StatusMenuPopoverView: View {
                             RoundedRectangle(cornerRadius: 8)
                                 .stroke(fav.isActive ? UITheme.accent : UITheme.border, lineWidth: 1)
                         )
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
@@ -117,6 +118,7 @@ public struct StatusMenuPopoverView: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
                         .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor)))
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
@@ -554,6 +556,7 @@ struct LightingEditorSheet: View {
                                 .overlay(
                                     Circle().strokeBorder(zone.colorHex.uppercased() == hex ? Color.primary : Color.clear, lineWidth: 2)
                                 )
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .disabled(!zone.canEditColor)

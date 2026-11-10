@@ -227,7 +227,7 @@ fn compact_host_keymap_stays_under_1024_bytes_while_preserving_all_profiles_and_
 {
     let mut draft = Draft::default();
     let profile_ids = preset::install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(profile_ids.len(), 6);
+    assert_eq!(profile_ids.len(), 7);
 
     let cindy_pid = draft
         .document
@@ -338,7 +338,7 @@ fn compact_host_keymap_stays_under_1024_bytes_while_preserving_all_profiles_and_
     let serialized = serde_json::to_vec(&draft.document).unwrap();
     let reopened = Draft::from_bytes(&serialized).expect("reopen local v2 document");
     assert!(!reopened.read_only);
-    assert_eq!(reopened.config.profiles.len(), 6);
+    assert_eq!(reopened.config.profiles.len(), 7);
     assert_eq!(reopened.macros().len(), 30);
     assert!(reopened
         .document

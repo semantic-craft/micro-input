@@ -80,6 +80,9 @@ impl CanonicalAgent {
     }
 
     pub fn from_profile_name(name: &str) -> Option<Self> {
+        if name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME {
+            return Some(Self::Codex);
+        }
         let rank = canonical_desktop_agent_rank(name)?;
         Self::ALL.get(rank).copied()
     }
@@ -235,16 +238,16 @@ impl HardwareProfileSlotKind {
     pub const fn title(self) -> &'static str {
         match self {
             Self::UsbPlug => "插入 USB",
-            Self::TouchSlot1 => "左下触控 1",
-            Self::TouchSlot2 => "左下触控 2",
-            Self::TouchSlot3 => "左下触控 3",
+            Self::TouchSlot1 => "第 1 层",
+            Self::TouchSlot2 => "第 2 层",
+            Self::TouchSlot3 => "第 3 层",
         }
     }
 
     pub const fn trigger_badge(self) -> &'static str {
         match self {
             Self::UsbPlug => "USB",
-            Self::TouchSlot1 => "LED 1 · ●○○",
+            Self::TouchSlot1 => "USB 默认 · ●○○",
             Self::TouchSlot2 => "LED 2 · ○●○",
             Self::TouchSlot3 => "LED 3 · ○○●",
         }
@@ -299,6 +302,8 @@ pub struct SidebarProjection {
     pub rows: Vec<SidebarProfileRow>,
     pub hardware_slots: [HardwareProfileSlotProjection; HARDWARE_PROFILE_SLOT_COUNT],
     pub active_hardware_slot: u8,
+    pub board_profile_managed: bool,
+    pub can_provision_board: bool,
     pub selected_profile_id: Option<String>,
     pub selected_display_name: Option<String>,
     pub active_host_profile_id: Option<String>,
@@ -324,6 +329,8 @@ impl Default for SidebarProjection {
                 HardwareProfileSlotProjection::for_kind(HardwareProfileSlotKind::ALL[idx])
             }),
             active_hardware_slot: 0,
+            board_profile_managed: false,
+            can_provision_board: false,
             selected_profile_id: None,
             selected_display_name: None,
             active_host_profile_id: None,
@@ -372,6 +379,7 @@ pub enum SidebarAction {
     SelectProfile(String),
     ActivateHardwareSlot(u8),
     CycleTouchProfileSlot,
+    ProvisionBoardLayers,
     SetHardwareSlotProfile { slot_index: u8, profile_id: String },
     ResetHardwareSlotsToDefault,
     SetAutoFollow(bool),

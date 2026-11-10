@@ -570,6 +570,20 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
     assert_eq!(store.lighting_arbiter.idle_color_hex, "#00FF66");
 
     store
+        .dispatch_session_strip_action(SessionStripAction::SetWorkingColor(
+            AmbientColorPreset::AmberGold,
+        ))
+        .unwrap();
+    assert_eq!(store.lighting_arbiter.working_color_hex, "#FFAA00");
+
+    store
+        .dispatch_session_strip_action(SessionStripAction::SetAmbientColor(
+            AmbientColorPreset::OceanBlue,
+        ))
+        .unwrap();
+    assert_eq!(store.lighting_arbiter.idle_color_hex, "#0088FF");
+
+    store
         .dispatch_session_strip_action(SessionStripAction::SetAutoOffTimeout(
             LightingTimeoutPreset::FiveMinutes,
         ))

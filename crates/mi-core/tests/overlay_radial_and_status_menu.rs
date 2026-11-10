@@ -564,8 +564,12 @@ fn status_menu_quick_switch_2x2_favorites_swap_and_icon_and_preset_bounds() {
         .find_canonical_profile_id(CanonicalAgent::Cindy)
         .expect("Cindy");
     let codex_id = store
-        .find_canonical_profile_id(CanonicalAgent::Codex)
-        .expect("Codex");
+        .sidebar_rows()
+        .iter()
+        .find(|row| row.canonical_agent == Some(CanonicalAgent::Codex) && !row.is_protected_oai)
+        .expect("editable Codex")
+        .profile_id
+        .clone();
 
     assert_eq!(
         store.favorites_grid().slot(FavoriteSlotIndex::SLOT_0),

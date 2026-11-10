@@ -145,8 +145,9 @@ public struct SimpleLightingModel: Equatable {
     public var lightingEnabled: Bool = true
     public var autoSessionColor: Bool = true
     public var onlyGlowOnAttentionOrCompleted: Bool = true
-    public var glowOnWorking: Bool = false
-    public var ambientColor: String = "PureWhite"
+    public var glowOnWorking: Bool = true
+    public var ambientColor: String = "OceanBlue"
+    public var workingColor: String = "EmeraldGreen"
     public var brightness: String = "Standard"
     public var autoOffTimeout: String = "ThreeMinutes"
     public var manualPreviewPhase: String? = nil
@@ -440,6 +441,8 @@ public struct SidebarSliceModel: Equatable {
     public var sidebarRows: [SidebarRowModel] = []
     public var hardwareSlots: [HardwareProfileSlotModel] = []
     public var activeHardwareSlot: Int = 0
+    public var boardProfileManaged: Bool = false
+    public var canProvisionBoard: Bool = false
     public var selectedProfileId: String? = nil
     public var selectedDisplayName: String = "未选择方案"
     public var activeHostProfileId: String? = nil
@@ -463,6 +466,8 @@ public struct SidebarSliceModel: Equatable {
 }
 
 public struct CanvasSliceModel: Equatable {
+    public var selectedProfileId: String? = nil
+    public var selectedDisplayName: String = "未选择方案"
     public var selectedLayerId: String? = nil
     public var selectedSurface: String = "Key0"
     public var selectedLogicalSlot: Int = 0
@@ -508,6 +513,8 @@ public struct SessionStripSliceModel: Equatable {
 }
 
 public struct InspectorSliceModel: Equatable {
+    public var selectedProfileId: String? = nil
+    public var selectedDisplayName: String = "未选择方案"
     public var selectedLogicalSlot: Int = 0
     public var selectedSurface: String = "Key0"
     public var selectedJoystickDirection: String = "North"
@@ -571,6 +578,8 @@ public struct ProjectionModel: Equatable {
     public var sidebarRows: [SidebarRowModel] = []
     public var hardwareSlots: [HardwareProfileSlotModel] = []
     public var activeHardwareSlot: Int = 0
+    public var boardProfileManaged: Bool = false
+    public var canProvisionBoard: Bool = false
     public var selectedProfileId: String? = nil
     public var selectedDisplayName: String = "未选择方案"
     public var activeHostProfileId: String? = nil

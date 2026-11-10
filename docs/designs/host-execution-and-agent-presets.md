@@ -6,9 +6,9 @@
 
 --------------------------------------------------------------------------------
 
-## 当前实现校正（2026-11-03）
+## 当前实现校正（2026-11-10）
 
-下文 Phase 3 的三套 CLI/通用快捷键方案保留为历史设计。当前实现以六个桌面 Agent Profile 与通用兜底预设为准，DSH CLI 占位动作已阻止执行；Herdr Profile 指向独立的 Herdr App。默认动作、迁移规则、真实 UI 验收与未支持项见 [桌面控制验收](../verification/desktop-agent-controls.md)。合成场景为 20 条 simulated 回执，不等于真实应用接受操作。
+下文 Phase 3 的三套 CLI/通用快捷键方案保留为历史设计。当前实现以[五套内置 Agent Profile 和一套通用预设](four-app-control.md)为准，DSH CLI 占位动作已阻止执行；Herdr Profile 指向独立的 Herdr App。默认动作、迁移规则、真实 UI 验收与未支持项见 [桌面控制验收](../verification/desktop-agent-controls.md)。合成场景为 20 条 simulated 回执，不等于真实应用接受操作。
 
 ## Overview
 

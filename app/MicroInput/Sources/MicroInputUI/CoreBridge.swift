@@ -149,6 +149,8 @@ public final class CoreStore {
         nextSidebar.sidebarRows = m.sidebarRows
         nextSidebar.hardwareSlots = m.hardwareSlots
         nextSidebar.activeHardwareSlot = m.activeHardwareSlot
+        nextSidebar.boardProfileManaged = m.boardProfileManaged
+        nextSidebar.canProvisionBoard = m.canProvisionBoard
         nextSidebar.selectedProfileId = m.selectedProfileId
         nextSidebar.selectedDisplayName = m.selectedDisplayName
         nextSidebar.activeHostProfileId = m.activeHostProfileId
@@ -169,6 +171,8 @@ public final class CoreStore {
         }
 
         var nextCanvas = CanvasSliceModel()
+        nextCanvas.selectedProfileId = m.selectedProfileId
+        nextCanvas.selectedDisplayName = m.selectedDisplayName
         nextCanvas.selectedLayerId = m.selectedLayerId
         nextCanvas.selectedSurface = m.selectedSurface
         nextCanvas.selectedLogicalSlot = m.selectedLogicalSlot
@@ -216,6 +220,8 @@ public final class CoreStore {
         }
 
         var nextInspector = InspectorSliceModel()
+        nextInspector.selectedProfileId = m.selectedProfileId
+        nextInspector.selectedDisplayName = m.selectedDisplayName
         nextInspector.selectedLogicalSlot = m.selectedLogicalSlot
         nextInspector.selectedSurface = m.selectedSurface
         nextInspector.selectedJoystickDirection = m.selectedJoystickDirection
@@ -347,6 +353,8 @@ public final class CoreStore {
                 }
             }
             m.activeHardwareSlot = sidebar["active_hardware_slot"] as? Int ?? 0
+            m.boardProfileManaged = sidebar["board_profile_managed"] as? Bool ?? false
+            m.canProvisionBoard = sidebar["can_provision_board"] as? Bool ?? false
             if let hwSlots = sidebar["hardware_slots"] as? [[String: Any]] {
                 m.hardwareSlots = hwSlots.enumerated().map { idx, s in
                     HardwareProfileSlotModel(
@@ -475,8 +483,9 @@ public final class CoreStore {
                     lightingEnabled: lp["lighting_enabled"] as? Bool ?? true,
                     autoSessionColor: lp["auto_session_color"] as? Bool ?? true,
                     onlyGlowOnAttentionOrCompleted: lp["only_glow_on_attention_or_completed"] as? Bool ?? true,
-                    glowOnWorking: lp["glow_on_working"] as? Bool ?? false,
-                    ambientColor: lp["ambient_color"] as? String ?? "PureWhite",
+                    glowOnWorking: lp["glow_on_working"] as? Bool ?? true,
+                    ambientColor: lp["ambient_color"] as? String ?? "OceanBlue",
+                    workingColor: lp["working_color"] as? String ?? "EmeraldGreen",
                     brightness: lp["brightness"] as? String ?? "Standard",
                     autoOffTimeout: lp["auto_off_timeout"] as? String ?? "ThreeMinutes",
                     manualPreviewPhase: lp["manual_preview_phase"] as? String,

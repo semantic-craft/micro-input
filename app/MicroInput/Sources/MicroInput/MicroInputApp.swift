@@ -27,6 +27,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let iconImage = NSImage(contentsOf: iconURL)
+        {
+            NSApp.applicationIconImage = iconImage
+        }
         setupStatusItem()
         openMainWindow()
     }
@@ -39,10 +44,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag {
+        if !flag || mainWindow?.isMiniaturized == true || mainWindow?.isVisible != true {
             openMainWindow()
+        } else {
+            mainWindow?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
         }
         return true
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu(title: "Micro Input")
+        let openItem = NSMenuItem(
+            title: "打开主配置台",
+            action: #selector(handleDockOpenMainWindow(_:)),
+            keyEquivalent: ""
+        )
+        openItem.target = self
+        menu.addItem(openItem)
+
+        let toggleExecItem = NSMenuItem(
+            title: store.statusMenu.hostExecutionEnabled ? "暂停按键控制" : "启用按键控制",
+            action: #selector(handleDockToggleExecution(_:)),
+            keyEquivalent: ""
+        )
+        toggleExecItem.target = self
+        menu.addItem(toggleExecItem)
+
+        menu.addItem(.separator())
+
+        for fav in store.statusMenu.favorites2x2 {
+            let item = NSMenuItem(
+                title: "切换到 \(DesktopAgent.displayName(fav.title))",
+                action: #selector(handleDockSelectFavorite(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = fav.slotIndex
+            item.state = fav.isActive ? .on : .off
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    @objc private func handleDockOpenMainWindow(_ sender: Any?) {
+        store.dispatch("status_menu", "OpenMainWorkbenchWindow")
+        openMainWindow()
+    }
+
+    @objc private func handleDockToggleExecution(_ sender: Any?) {
+        let next = !store.statusMenu.hostExecutionEnabled
+        store.dispatch("status_menu", ["SetHostExecutionEnabled": next])
+    }
+
+    @objc private func handleDockSelectFavorite(_ sender: NSMenuItem) {
+        store.dispatch("status_menu", ["ActivateFavoriteSlot": sender.tag])
     }
 
     private func setupStatusItem() {
@@ -76,6 +132,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func openMainWindow() {
         if let win = mainWindow {
+            if win.isMiniaturized {
+                win.deminiaturize(nil)
+            }
             win.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             store.dispatchRaw(["domain": "main_window_active_changed", "action": ["active": true]])
@@ -110,6 +169,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func windowDidResignKey(_ notification: Notification) {
         store.dispatchRaw(["domain": "main_window_active_changed", "action": ["active": false]])
+    }
+
+    func windowDidMiniaturize(_ notification: Notification) {
+        store.dispatchRaw(["domain": "main_window_active_changed", "action": ["active": false]])
+    }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        store.dispatchRaw(["domain": "main_window_active_changed", "action": ["active": true]])
     }
 }
 

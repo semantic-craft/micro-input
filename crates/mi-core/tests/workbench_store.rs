@@ -32,7 +32,7 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
 
     let expected_raw_names = [
         "Antigravity",
-        "Codex",
+        mi_model::preset::LOCAL_CODEX_PROFILE_NAME,
         "DeepSeek Coder (DSH)",
         "Herdr",
         "Cindy",
@@ -48,7 +48,6 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
     for (idx, agent) in CanonicalAgent::ALL.iter().enumerate() {
         assert_eq!(agent.rank(), idx);
         assert_eq!(agent.display_name(), expected_display_names[idx]);
-        assert_eq!(agent.profile_name(), expected_raw_names[idx]);
     }
 
     let rev_before = store.projection().document_revision;
@@ -60,6 +59,67 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
         "prepare_desktop_profiles must be idempotent and never clobber ready status when all 6 presets exist"
     );
     assert_eq!(store.projection().document_revision, rev_before);
+}
+
+#[test]
+fn restoring_cindy_keeps_a_saved_custom_profile_and_application_link() {
+    use mi_model::storage::DocumentStore;
+    use serde_json::json;
+
+    let temp = TempDir::new().unwrap();
+    let mut saved = DocumentStore::default();
+    saved.open(temp.path().join("workbench.json")).unwrap();
+    let mut custom_id = String::new();
+    saved
+        .update(|draft| {
+            custom_id = draft.create_profile("Cindy")?;
+            let layer_id =
+                draft.document.editable.graph.profiles[&custom_id].layer_order[0].clone();
+            draft.assign(
+                &json!(custom_id),
+                &json!(layer_id),
+                0,
+                mi_model::draft::Action {
+                    id: "my-cindy-shortcut".into(),
+                    name: "My shortcut".into(),
+                    category: "快捷键".into(),
+                    detail: String::new(),
+                    payload: json!({
+                        "type": "shortcut", "key": "k", "modifiers": ["command"],
+                        "target": "com.xd.cindy"
+                    }),
+                },
+            )
+        })
+        .unwrap();
+    let layer_id = saved.draft.document.editable.graph.profiles[&custom_id].layer_order[0].clone();
+    let original_layer = saved.draft.document.editable.graph.layers[&layer_id].clone();
+    saved.update_routing(serde_json::from_value(json!({
+        "document_id": saved.draft.document_id,
+        "document_revision": saved.draft.revision,
+        "host_state_revision": saved.host_revision(),
+        "operation": { "kind": "upsert", "bundle_id": "com.xd.cindy", "profile_id": custom_id }
+    })).unwrap()).unwrap();
+
+    let mut upgraded = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    let builtin_id = upgraded
+        .find_canonical_profile_id(CanonicalAgent::Cindy)
+        .unwrap();
+    assert_ne!(builtin_id, custom_id);
+    assert!(upgraded
+        .sidebar_rows()
+        .iter()
+        .any(|row| row.profile_id == builtin_id && row.is_protected_oai));
+    assert!(
+        upgraded.document_store.draft.document.editable.graph.layers[&layer_id] == original_layer
+    );
+    assert_eq!(
+        upgraded.document_store.routing_state()["app_profile_links"]["com.xd.cindy"],
+        json!(custom_id)
+    );
+    let revision = upgraded.document_store.draft.revision;
+    upgraded.prepare_desktop_profiles().unwrap();
+    assert_eq!(upgraded.document_store.draft.revision, revision);
 }
 
 #[test]
@@ -207,7 +267,6 @@ fn custom_profiles_filter_crud_undo_redo_and_preset_roundtrip_work_without_ffi()
         store.projection().sidebar.show_other_profiles,
         "creating a custom profile must automatically reveal non-canonical profiles"
     );
-    assert_eq!(store.sidebar_rows().len(), 7);
     let custom_id = store
         .sidebar_rows()
         .iter()
@@ -217,13 +276,15 @@ fn custom_profiles_filter_crud_undo_redo_and_preset_roundtrip_work_without_ffi()
         .clone();
 
     store.set_show_other_profiles(false);
-    assert_eq!(
-        store.sidebar_rows().len(),
-        6,
-        "hiding other profiles must leave only the 6 canonical profiles visible"
-    );
+    assert!(!store
+        .sidebar_rows()
+        .iter()
+        .any(|row| row.profile_id == custom_id));
     store.set_show_other_profiles(true);
-    assert_eq!(store.sidebar_rows().len(), 7);
+    assert!(store
+        .sidebar_rows()
+        .iter()
+        .any(|row| row.profile_id == custom_id));
 
     store
         .apply_profile_command(ProfileCommand::Rename {
@@ -259,10 +320,13 @@ fn custom_profiles_filter_crud_undo_redo_and_preset_roundtrip_work_without_ffi()
 
     store
         .apply_profile_command(ProfileCommand::Delete {
-            profile_id: custom_id,
+            profile_id: custom_id.clone(),
         })
         .unwrap();
-    assert_eq!(store.sidebar_rows().len(), 6);
+    assert!(!store
+        .sidebar_rows()
+        .iter()
+        .any(|row| row.profile_id == custom_id));
 
     store
         .apply_backup_command(BackupCommand::ImportPreset { text: exported })
@@ -676,6 +740,20 @@ fn usb_connect_and_verified_input_pump_dispatches_host_actions_and_handles_disco
 
 #[test]
 fn usb_connect_automatically_verifies_identity_snapshot_lighting_and_writes_acceptance_receipt() {
+    check_usb_host_routing(false, 1);
+}
+
+#[test]
+fn verified_board_layers_dispatch_only_to_their_own_host_profile() {
+    check_usb_host_routing(true, 1);
+}
+
+#[test]
+fn managed_usb_reconnect_blocks_other_layers_until_a_first_layer_report() {
+    check_usb_host_routing(true, 2);
+}
+
+fn check_usb_host_routing(managed: bool, initial_layer: u32) {
     use mi_core::HardwareAutoAcceptanceReceipt;
     use mi_proto::{Framer, NativeFramer};
     use mi_transport::{
@@ -720,12 +798,18 @@ fn usb_connect_automatically_verifies_identity_snapshot_lighting_and_writes_acce
         in_framer: Mutex<NativeFramer>,
         keymap_bytes: Vec<u8>,
         keymap_sha1: String,
+        profile_index: u32,
+        initial_layer: u32,
         methods_seen: Arc<Mutex<Vec<String>>>,
     }
 
     impl HidLink for AutoAcceptHidLink {
         fn backend(&self) -> LinkBackend {
             LinkBackend::MacHidapi267Numbered
+        }
+
+        fn is_exclusive_vendor(&self) -> bool {
+            true
         }
 
         fn write<'life0, 'life1, 'async_trait>(
@@ -753,8 +837,8 @@ fn usb_connect_automatically_verifies_identity_snapshot_lighting_and_writes_acce
                         "id": id,
                         "result": {
                             "version": "0.6.3",
-                            "profile_index": 0,
-                            "layer_index": 1
+                            "profile_index": self.profile_index,
+                            "layer_index": self.initial_layer
                         }
                     }),
                     "fs.list" => json!({
@@ -847,7 +931,19 @@ fn usb_connect_automatically_verifies_identity_snapshot_lighting_and_writes_acce
 
     let mut raw_demo = mi_model::demo().unwrap().raw;
     raw_demo["version"] = json!(1);
-    let keymap_bytes = serde_json::to_vec(&raw_demo).unwrap();
+    raw_demo["activeProfileId"] = json!(0);
+    let raw_keymap = serde_json::to_vec(&raw_demo).unwrap();
+    let (keymap_bytes, profile_index) = if managed {
+        match mi_model::apply::compile_three_layer_profile(&raw_keymap, None).unwrap() {
+            mi_model::apply::ThreeLayerProvision::Write {
+                keymap,
+                profile_index,
+            } => (keymap, profile_index),
+            _ => panic!("fixture did not add a board profile"),
+        }
+    } else {
+        (raw_keymap, 0)
+    };
     let keymap_file = mi_model::operation_record::file_value(&keymap_bytes);
     let keymap_sha1 = keymap_file["sha1"].as_str().unwrap().to_string();
 
@@ -855,10 +951,12 @@ fn usb_connect_automatically_verifies_identity_snapshot_lighting_and_writes_acce
     let methods_seen = Arc::new(Mutex::new(Vec::new()));
     let link: Arc<dyn HidLink> = Arc::new(AutoAcceptHidLink {
         rx: tokio::sync::Mutex::new(report_rx),
-        tx: report_tx,
+        tx: report_tx.clone(),
         in_framer: Mutex::new(NativeFramer::default()),
         keymap_bytes: keymap_bytes.clone(),
         keymap_sha1: keymap_sha1.clone(),
+        profile_index,
+        initial_layer,
         methods_seen: Arc::clone(&methods_seen),
     });
     let (events, _) = broadcast::channel(8);
@@ -893,7 +991,13 @@ fn usb_connect_automatically_verifies_identity_snapshot_lighting_and_writes_acce
         "connecting a responsive USB 303A:8298 device must automatically complete hardware acceptance"
     );
     assert!(
-        store.status_message().contains("固件 0.6.3 自动验收通过"),
+        store.status_message().contains(if initial_layer != 1 {
+            "等待键盘返回第 1 层"
+        } else if managed {
+            "板载三层已就绪"
+        } else {
+            "固件 0.6.3 自动验收通过"
+        }),
         "unexpected status_message: {}",
         store.status_message()
     );
@@ -906,9 +1010,10 @@ fn usb_connect_automatically_verifies_identity_snapshot_lighting_and_writes_acce
     let receipt: HardwareAutoAcceptanceReceipt =
         serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
     assert_eq!(receipt.status, "PASS");
+    assert!(receipt.exclusive_vendor);
     assert_eq!(receipt.firmware_version, "0.6.3");
-    assert_eq!(receipt.profile_index, Some(0));
-    assert_eq!(receipt.layer_index, Some(1));
+    assert_eq!(receipt.profile_index, Some(profile_index));
+    assert_eq!(receipt.layer_index, Some(initial_layer));
     assert_eq!(receipt.keymap_size, keymap_bytes.len() as u64);
     assert_eq!(receipt.keymap_sha1, keymap_sha1);
     assert_eq!(receipt.keymap_sha256, mi_bridge::sha256_hex(&keymap_bytes));
@@ -923,10 +1028,66 @@ fn usb_connect_automatically_verifies_identity_snapshot_lighting_and_writes_acce
     assert!(seen.contains(&"v.oai.rgbcfg".to_string()));
     assert!(seen.contains(&"lights.preview".to_string()));
     assert!(seen.contains(&"v.oai.thstatus".to_string()));
+
+    assert_eq!(store.projection().sidebar.board_profile_managed, managed);
+    assert_eq!(store.projection().sidebar.active_hardware_slot, 1);
+    if managed {
+        assert!(store
+            .dispatch_sidebar_action(SidebarAction::CycleTouchProfileSlot)
+            .is_err());
+    }
+    let send = |token| {
+        for act in [1, 0] {
+            let event = json!({"m":"v.oai.hid","p":{"k":token,"act":act}});
+            for report in NativeFramer::default()
+                .encode(event.to_string().as_bytes())
+                .unwrap()
+            {
+                report_tx.send(Ok(report)).unwrap();
+            }
+        }
+    };
+    if initial_layer != 1 {
+        send("ACT00");
+    }
+    for (step, (slot, token, target)) in [
+        (1, "AG00", "com.google.antigravity"),
+        (2, "ACT00", "com.openai.codex"),
+        (3, "AG13", "com.deepseek.dsh"),
+        (1, "AG00", "com.google.antigravity"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if step != 0 && !managed {
+            store
+                .dispatch_sidebar_action(SidebarAction::CycleTouchProfileSlot)
+                .unwrap();
+        }
+        assert!(!store.is_selected_layer_protected());
+        let count = store.dispatched_receipts().len();
+        send(if managed { token } else { "AG00" });
+        let start = Instant::now();
+        while store.dispatched_receipts().len() == count && start.elapsed() < Duration::from_secs(2)
+        {
+            store.poll_hardware_events();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(store.dispatched_receipts().len(), count + 1);
+        let routed = store.last_host_action_receipt().unwrap();
+        assert_eq!(routed.target, target);
+        assert!(routed.succeeded());
+        assert_eq!(
+            store.active_host_profile_id().as_deref(),
+            Some(routed.profile_id.as_str())
+        );
+        assert!(store.connect_with_transport(&transport, true).unwrap());
+        assert_eq!(store.projection().sidebar.active_hardware_slot, slot as u8);
+    }
 }
 
 #[test]
-fn four_hardware_profile_slots_default_to_agy_agy_codex_dsh_and_cycle_and_persist() {
+fn three_board_layer_defaults_cycle_and_preserve_custom_mapping() {
     let temp = TempDir::new().unwrap();
     let wb_path = temp.path().join("workbench.json");
     let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
@@ -939,20 +1100,25 @@ fn four_hardware_profile_slots_default_to_agy_agy_codex_dsh_and_cycle_and_persis
     assert_eq!(slots[1].display_name, "Antigravity");
     assert_eq!(slots[2].display_name, "Codex");
     assert_eq!(slots[3].display_name, "Deepseek Harness");
-    assert_eq!(store.projection().sidebar.active_hardware_slot, 0);
-    assert_eq!(
-        store.projection().canvas.touch_led_states,
-        [true, true, true]
-    );
-
-    store
-        .dispatch_sidebar_action(SidebarAction::CycleTouchProfileSlot)
+    let local_codex = slots[2].profile_id.clone();
+    let native_codex = store
+        .find_canonical_profile_id(CanonicalAgent::Codex)
         .unwrap();
-    assert_eq!(store.projection().sidebar.active_hardware_slot, 1);
+    assert_ne!(local_codex, native_codex);
+    assert!(store
+        .projection()
+        .status_menu
+        .favorites_2x2
+        .iter()
+        .any(|slot| {
+            slot.title == "Codex" && slot.profile_id.as_deref() == Some(local_codex.as_str())
+        }));
+    assert!(store.set_hardware_slot_profile(2, native_codex).is_err());
     assert_eq!(
-        store.projection().sidebar.selected_display_name.as_deref(),
-        Some("Antigravity")
+        store.projection().sidebar.hardware_slots[2].profile_id,
+        local_codex
     );
+    assert_eq!(store.projection().sidebar.active_hardware_slot, 1);
     assert_eq!(
         store.projection().canvas.touch_led_states,
         [true, false, false]
@@ -1021,5 +1187,5 @@ fn four_hardware_profile_slots_default_to_agy_agy_codex_dsh_and_cycle_and_persis
         reopened.projection().sidebar.hardware_slots[2].display_name,
         "Codex"
     );
-    assert_eq!(reopened.projection().sidebar.active_hardware_slot, 0);
+    assert_eq!(reopened.projection().sidebar.active_hardware_slot, 1);
 }

@@ -20,10 +20,10 @@ impl FourAppSessionKind {
     pub const fn capsule_hex(self) -> &'static str {
         match self {
             Self::NeedsAttention => "#FFAA00",
-            Self::BlueDotCompleted => "#14C76B",
-            Self::Working => "#0088FF",
+            Self::BlueDotCompleted => "#0088FF",
+            Self::Working => "#00FF66",
             Self::Error => "#FF2200",
-            Self::Idle => "#334155",
+            Self::Idle => "#0088FF",
         }
     }
 
@@ -375,6 +375,7 @@ pub struct SimpleLightingPopoverProjection {
     pub only_glow_on_attention_or_completed: bool,
     pub glow_on_working: bool,
     pub ambient_color: AmbientColorPreset,
+    pub working_color: AmbientColorPreset,
     pub brightness: LightingBrightnessPreset,
     pub auto_off_timeout: LightingTimeoutPreset,
     pub manual_preview_phase: Option<FourAppAgentPhase>,
@@ -388,8 +389,9 @@ impl Default for SimpleLightingPopoverProjection {
             lighting_enabled: true,
             auto_session_color: true,
             only_glow_on_attention_or_completed: true,
-            glow_on_working: false,
-            ambient_color: AmbientColorPreset::PureWhite,
+            glow_on_working: true,
+            ambient_color: AmbientColorPreset::OceanBlue,
+            working_color: AmbientColorPreset::EmeraldGreen,
             brightness: LightingBrightnessPreset::Standard,
             auto_off_timeout: LightingTimeoutPreset::ThreeMinutes,
             manual_preview_phase: None,
@@ -489,6 +491,7 @@ pub enum SessionStripAction {
     SetOnlyGlowOnAttentionOrCompleted(bool),
     SetGlowOnWorking(bool),
     SetAmbientColor(AmbientColorPreset),
+    SetWorkingColor(AmbientColorPreset),
     SetBrightnessPreset(LightingBrightnessPreset),
     SetAutoOffTimeout(LightingTimeoutPreset),
     TriggerTestLighting(Option<FourAppAgentPhase>),

@@ -94,6 +94,8 @@ pub struct HardwareAutoAcceptanceReceipt {
     pub status: String,
     pub session_id: u64,
     pub backend: String,
+    #[serde(default)]
+    pub exclusive_vendor: bool,
     pub product: String,
     pub vid_pid: String,
     pub device_path: String,
@@ -127,6 +129,28 @@ pub enum HardwareLoopEvent {
         session_id: u64,
         receipt: HardwareAutoAcceptanceReceipt,
     },
+    ThreeLayerProvisioned {
+        session_id: u64,
+        result: Result<u32, String>,
+    },
+    LiveCandidatesUpdated {
+        candidates: Vec<FourAppLiveCandidate>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BoardRouting {
+    Legacy,
+    Checking,
+    Managed { layer: u8 },
+    WaitingForFirstLayer,
+    Unverified,
+}
+
+impl BoardRouting {
+    fn is_managed(self) -> bool {
+        matches!(self, Self::Managed { .. } | Self::WaitingForFirstLayer)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -223,6 +247,7 @@ pub enum DeviceWorkflowAction {
     PrepareApplyBackup,
     TakePreparedCandidate,
     CancelApplyPreview,
+    SimulateKeyPress { binding_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,6 +346,10 @@ pub struct WorkbenchStore {
     pub hardware_rpc_verified: bool,
     pub last_hardware_auto_acceptance: Option<HardwareAutoAcceptanceReceipt>,
     pub merge_wide_key: Arc<AtomicBool>,
+    board_routing: BoardRouting,
+    board_decoder: Arc<AtomicBool>,
+    board_pressed: BTreeSet<String>,
+    board_admit_after: u64,
     tokio_runtime: Arc<tokio::runtime::Runtime>,
     hardware_event_tx: tokio::sync::mpsc::UnboundedSender<HardwareLoopEvent>,
     hardware_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<HardwareLoopEvent>>,
@@ -456,6 +485,10 @@ impl WorkbenchStore {
             dial_pressed: false,
             dial_turned_while_pressed: false,
             held_ptt_binding: None,
+            board_routing: BoardRouting::Legacy,
+            board_decoder: Arc::new(AtomicBool::new(false)),
+            board_pressed: BTreeSet::new(),
+            board_admit_after: 0,
             selected_profile_id: None,
             selected_layer_id: None,
             selected_binding_slot: Some(0),
@@ -502,13 +535,23 @@ impl WorkbenchStore {
         store.ensure_default_hardware_profile_slots();
         store.initialize_selection()?;
         store.status_message = "已就绪".to_string();
-        store.refresh_four_app_lighting();
         if store.config.auto_connect_usb
             && env::var("MI_AUTO_HOST_READY").ok().as_deref() != Some("0")
         {
+            store.lighting_popover.only_glow_on_attention_or_completed = false;
+            store.lighting_arbiter.only_glow_on_attention_or_completed = false;
+            if let Some(ag_pid) = store.find_canonical_profile_id(CanonicalAgent::Antigravity) {
+                let _ = store.select_and_activate_profile_at(&ag_pid, Instant::now(), false);
+            }
+            if !store.document_store.host_execution_enabled() {
+                let _ =
+                    store.apply_routing_operation(RoutingOperation::Execution { enabled: true });
+            }
             store.start_mac_usb_discovery_watcher();
+            store.start_antigravity_live_poller();
             let _ = store.connect_default_usb();
         }
+        store.refresh_four_app_lighting();
         store.rebuild_projection();
         Ok(store)
     }
@@ -710,6 +753,27 @@ impl WorkbenchStore {
             DeviceWorkflowAction::CancelApplyPreview => {
                 self.dispatch_editor_action(EditorAction::ApplyCancelPreview)
             }
+            DeviceWorkflowAction::SimulateKeyPress { binding_id } => {
+                let ev = InputEvent {
+                    session_id: 1,
+                    board_layer: None,
+                    sequence: 1,
+                    ingress_sequence: 1,
+                    radial_center: None,
+                    radial_position: None,
+                    timestamp_ms: 0,
+                    kind: InputEventKind::Pressed,
+                    logical_switch: None,
+                    binding_id: Some(binding_id),
+                    physical_control: None,
+                    keycap_group: None,
+                    action_role: None,
+                    lost_count: 0,
+                    action_eligible: true,
+                };
+                let _ = self.consume_physical_input_event(ev, Instant::now());
+                Ok(())
+            }
         }
     }
 
@@ -717,7 +781,7 @@ impl WorkbenchStore {
         if self.config.isolated || self.mac_watcher_transport.is_some() {
             return;
         }
-        let transport = Arc::new(mi_transport::MacTransport::new());
+        let transport = Arc::new(mi_transport::MacTransport::exclusive_vendor());
         let mut rx = mi_transport::HidTransport::subscribe(transport.as_ref());
         let tx = self.hardware_event_tx.clone();
         self.tokio_runtime.spawn(async move {
@@ -730,9 +794,41 @@ impl WorkbenchStore {
         self.mac_watcher_transport = Some(transport);
     }
 
+    pub fn start_antigravity_live_poller(&self) {
+        if self.config.isolated {
+            return;
+        }
+        let tx = self.hardware_event_tx.clone();
+        std::thread::spawn(move || {
+            let mut seen_running_ids = BTreeSet::new();
+            let mut completed_transition_watermarks = BTreeMap::new();
+            loop {
+                if let Some(candidates) = poll_antigravity_daemon_candidates(
+                    &mut seen_running_ids,
+                    &mut completed_transition_watermarks,
+                ) {
+                    if tx
+                        .send(HardwareLoopEvent::LiveCandidatesUpdated { candidates })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1500));
+            }
+        });
+    }
+
     pub fn connect_default_usb(&mut self) -> Result<bool, WorkbenchError> {
-        let transport = mi_transport::MacTransport::new();
-        self.connect_with_transport(&transport, true)
+        let transport = self
+            .mac_watcher_transport
+            .clone()
+            .unwrap_or_else(|| Arc::new(mi_transport::MacTransport::exclusive_vendor()));
+        let result = self.connect_with_transport(transport.as_ref(), true);
+        if let Err(error) = &result {
+            self.set_status_message(error.to_string());
+        }
+        result
     }
 
     pub fn connect_with_transport(
@@ -748,10 +844,17 @@ impl WorkbenchStore {
             self.device_session = None;
             self.connected_candidate = None;
         }
-        if let (Some(_session), Some(cand)) = (&self.device_session, &self.connected_candidate) {
+        if let (Some(session), Some(cand)) = (&self.device_session, &self.connected_candidate) {
             self.status_message = format!(
-                "已连接 {} ({:04X}:{:04X}) · 已建立 HID 会话",
-                cand.product, cand.vid, cand.pid
+                "已连接 {} ({:04X}:{:04X}) · {}",
+                cand.product,
+                cand.vid,
+                cand.pid,
+                if session.has_exclusive_vendor_link() {
+                    "USB 专用接口已独占"
+                } else {
+                    "已建立 HID 会话"
+                }
             );
             self.rebuild_projection();
             return Ok(true);
@@ -776,6 +879,10 @@ impl WorkbenchStore {
                 let link = transport
                     .open(&target.path)
                     .map_err(|e| WorkbenchError::Storage(format!("打开 USB 小键盘失败：{e}")))?;
+                if !self.config.isolated && !link.is_exclusive_vendor() {
+                    link.close();
+                    return Err(WorkbenchError::Storage("未取得 USB 专用接口独占".into()));
+                }
                 let session = {
                     let _guard = self.tokio_runtime.enter();
                     DeviceSession::new(
@@ -787,8 +894,16 @@ impl WorkbenchStore {
                 };
                 self.merge_wide_key
                     .store(self.bottom_row_layout.is_merged(), Ordering::SeqCst);
-                let mut monitor = session
-                    .subscribe_verified_input_with_merge_flag(Arc::clone(&self.merge_wide_key));
+                self.board_decoder = Arc::new(AtomicBool::new(false));
+                self.board_routing = if session.has_exclusive_vendor_link() {
+                    BoardRouting::Checking
+                } else {
+                    BoardRouting::Legacy
+                };
+                let mut monitor = session.subscribe_verified_input_with_board_mode(
+                    Arc::clone(&self.merge_wide_key),
+                    Arc::clone(&self.board_decoder),
+                );
                 let session_id = session.id;
                 let tx = self.hardware_event_tx.clone();
                 self.tokio_runtime.spawn(async move {
@@ -806,7 +921,7 @@ impl WorkbenchStore {
                     let _ =
                         self.apply_routing_operation(RoutingOperation::Execution { enabled: true });
                 }
-                let _ = self.activate_hardware_slot_at(0, Instant::now(), false);
+                let _ = self.activate_hardware_slot_at(1, Instant::now(), false);
                 self.lighting_arbiter.invalidate_hardware_cache();
                 self.refresh_four_app_lighting();
                 let accept_session = Arc::clone(&session);
@@ -834,8 +949,15 @@ impl WorkbenchStore {
                     }
                 });
                 self.status_message = format!(
-                    "已连接 {} ({:04X}:{:04X}) · 已建立 HID 会话",
-                    target.product, target.vid, target.pid
+                    "已连接 {} ({:04X}:{:04X}) · {}",
+                    target.product,
+                    target.vid,
+                    target.pid,
+                    if session.has_exclusive_vendor_link() {
+                        "USB 专用接口已独占"
+                    } else {
+                        "已建立 HID 会话"
+                    }
                 );
                 self.rebuild_projection();
                 Ok(true)
@@ -869,7 +991,13 @@ impl WorkbenchStore {
     ) -> Option<HostActionReceipt> {
         match event {
             HardwareLoopEvent::Input(input_event) => {
-                self.consume_physical_input_event(input_event, now)
+                let session = self.device_session.as_ref()?;
+                if session.id != input_event.session_id
+                    || (session.is_disconnected() && input_event.kind != InputEventKind::Released)
+                {
+                    return None;
+                }
+                self.route_board_input(input_event, now)
             }
             HardwareLoopEvent::Disconnected { session_id } => {
                 if self
@@ -877,22 +1005,56 @@ impl WorkbenchStore {
                     .as_ref()
                     .is_some_and(|s| s.id == session_id)
                 {
+                    self.release_board_inputs(session_id, now);
+                    self.board_routing = BoardRouting::Checking;
                     self.device_session = None;
-                    self.connected_candidate = None;
+                    let previous = self.connected_candidate.take();
                     self.hardware_rpc_verified = false;
                     self.lighting_arbiter.invalidate_hardware_cache();
                     self.status_message = "小键盘已断开连接（等待重新插入）".to_string();
                     self.rebuild_projection();
+                    if self.config.auto_connect_usb && !self.config.isolated {
+                        let transport = mi_transport::MacTransport::exclusive_vendor();
+                        use mi_transport::HidTransport;
+                        let reenumerated = transport.enumerate().is_ok_and(|candidates| {
+                            candidates.iter().any(|candidate| {
+                                mi_transport::is_exclusive_vendor_candidate(candidate)
+                                    && previous
+                                        .as_ref()
+                                        .is_none_or(|old| old.path != candidate.path)
+                            })
+                        });
+                        if reenumerated {
+                            let _ = self.connect_default_usb();
+                        }
+                    }
                 }
                 None
             }
             HardwareLoopEvent::DiscoveryChanged => {
-                if self
+                let old_path_missing = self
+                    .mac_watcher_transport
+                    .as_ref()
+                    .zip(self.connected_candidate.as_ref())
+                    .is_some_and(|(transport, old)| {
+                        use mi_transport::HidTransport;
+                        transport.enumerate().is_ok_and(|candidates| {
+                            !candidates
+                                .iter()
+                                .any(|candidate| candidate.path == old.path)
+                        })
+                    });
+                if let Some(session_id) = self
                     .device_session
                     .as_ref()
-                    .is_some_and(|s| s.is_disconnected())
+                    .filter(|s| s.is_disconnected() || old_path_missing)
+                    .map(|s| s.id)
                 {
-                    self.device_session = None;
+                    self.release_board_inputs(session_id, now);
+                    self.board_routing = BoardRouting::Checking;
+                    if let Some(session) = self.device_session.take() {
+                        session.disconnect();
+                    }
                     self.connected_candidate = None;
                     self.hardware_rpc_verified = false;
                     self.lighting_arbiter.invalidate_hardware_cache();
@@ -920,15 +1082,44 @@ impl WorkbenchStore {
                     .as_ref()
                     .is_some_and(|s| s.id == session_id)
                 {
+                    if self.board_routing == BoardRouting::Checking {
+                        self.confirm_board_routing(&receipt, now);
+                    }
                     self.hardware_rpc_verified = true;
-                    self.status_message = format!(
-                        "已连接 {} ({}) · 固件 {} 自动验收通过",
-                        receipt.product, receipt.vid_pid, receipt.firmware_version
-                    );
+                    if self.board_routing == BoardRouting::Legacy {
+                        self.status_message = format!(
+                            "已连接 {} ({}) · 固件 {} 自动验收通过",
+                            receipt.product, receipt.vid_pid, receipt.firmware_version
+                        );
+                    }
                     self.last_hardware_auto_acceptance = Some(receipt);
                     self.lighting_arbiter.invalidate_hardware_cache();
                     self.refresh_four_app_lighting();
                     self.rebuild_projection();
+                }
+                None
+            }
+            HardwareLoopEvent::ThreeLayerProvisioned { session_id, result } => {
+                if self
+                    .device_session
+                    .as_ref()
+                    .is_some_and(|s| s.id == session_id)
+                {
+                    match result {
+                        Ok(1) => self.arm_board_routing(now),
+                        Ok(_) => self.wait_for_board_first_layer(),
+                        Err(error) => {
+                            self.board_routing = BoardRouting::Unverified;
+                            self.status_message = format!("板载三层未确认，按键已暂停：{error}");
+                        }
+                    }
+                    self.rebuild_projection();
+                }
+                None
+            }
+            HardwareLoopEvent::LiveCandidatesUpdated { candidates } => {
+                if self.slot_table.candidates() != candidates.as_slice() {
+                    self.ingest_four_app_candidates(candidates);
                 }
                 None
             }
@@ -1011,6 +1202,9 @@ impl WorkbenchStore {
     pub fn has_all_desktop_agent_presets(&self) -> bool {
         let doc = &self.document_store.draft.document;
         let profiles = &doc.editable.graph.profiles;
+        if self.local_codex_profile_id().is_none() {
+            return false;
+        }
         CANONICAL_DESKTOP_AGENT_PROFILES
             .iter()
             .all(|canonical_name| {
@@ -1018,7 +1212,13 @@ impl WorkbenchStore {
                     if p.name.trim() != *canonical_name {
                         return false;
                     }
-                    if matches!(*canonical_name, "Cindy" | "Codex") {
+                    if *canonical_name == "Cindy" {
+                        return p
+                            .layer_order
+                            .first()
+                            .is_some_and(|lid| doc.is_protected_oai_layer(lid));
+                    }
+                    if *canonical_name == "Codex" {
                         return p
                             .layer_order
                             .iter()
@@ -1054,22 +1254,26 @@ impl WorkbenchStore {
             if agent.is_manual_fallback() {
                 continue;
             }
-            if let Some((pid, _)) = self
-                .document_store
-                .draft
-                .document
-                .editable
-                .graph
-                .profiles
-                .iter()
-                .find(|(_, p)| CanonicalAgent::from_profile_name(&p.name) == Some(agent))
-            {
-                canonical_ids.push((agent, pid.clone()));
+            if let Some(pid) = self.default_host_profile_id(agent) {
+                canonical_ids.push((agent, pid));
             }
         }
 
         for (agent, pid) in canonical_ids {
             let bundle = agent.bundle_id();
+            if agent == CanonicalAgent::Cindy
+                && self.app_profile_links.get(bundle).is_some_and(|id| {
+                    self.document_store
+                        .draft
+                        .document
+                        .editable
+                        .graph
+                        .profiles
+                        .contains_key(id)
+                })
+            {
+                continue;
+            }
             if self.app_profile_links.get(bundle) != Some(&pid) {
                 self.apply_routing_operation(RoutingOperation::Upsert {
                     bundle_id: bundle.to_string(),
@@ -1096,7 +1300,7 @@ impl WorkbenchStore {
                 .as_ref()
                 .is_some_and(|pid| profiles.contains_key(pid));
             if !valid_existing {
-                self.pinned_favorites.slots[idx] = self.find_canonical_profile_id(agent);
+                self.pinned_favorites.slots[idx] = self.default_host_profile_id(agent);
             }
         }
     }
@@ -1123,9 +1327,13 @@ impl WorkbenchStore {
                         .profiles
                         .contains_key(pid)
                 });
-            if !valid_existing {
+            let legacy_codex_slot = kind == HardwareProfileSlotKind::TouchSlot2
+                && self.hardware_profile_slots[idx]
+                    .as_deref()
+                    .is_some_and(|pid| self.is_native_codex_profile(pid));
+            if !valid_existing || legacy_codex_slot {
                 self.hardware_profile_slots[idx] = self
-                    .find_canonical_profile_id(kind.default_agent())
+                    .default_host_profile_id(kind.default_agent())
                     .or_else(|| fallback_first.clone());
             }
         }
@@ -1133,6 +1341,9 @@ impl WorkbenchStore {
     }
 
     pub fn activate_hardware_slot(&mut self, slot_index: u8) -> Result<(), WorkbenchError> {
+        if self.board_routing.is_managed() {
+            return Err(WorkbenchError::Routing("请用键盘左下角切换板载层".into()));
+        }
         self.activate_hardware_slot_at(slot_index, Instant::now(), true)
     }
 
@@ -1163,7 +1374,7 @@ impl WorkbenchStore {
 
     pub fn cycle_touch_profile_slot(&mut self) -> Result<u8, WorkbenchError> {
         let next_slot = match self.active_hardware_slot {
-            1 => 2,
+            0 | 1 => 2,
             2 => 3,
             _ => 1,
         };
@@ -1181,8 +1392,176 @@ impl WorkbenchStore {
             3 => 3,
             _ => return Ok(None),
         };
-        self.activate_hardware_slot(slot_index)?;
+        self.activate_hardware_slot_at(slot_index, Instant::now(), true)?;
         Ok(Some(slot_index))
+    }
+
+    fn confirm_board_routing(&mut self, receipt: &HardwareAutoAcceptanceReceipt, now: Instant) {
+        let Some(snapshot) = self.device_session.as_ref().and_then(|s| s.snapshot()) else {
+            return;
+        };
+        match mi_model::apply::recognize_three_layer_profile(&snapshot.config) {
+            Ok(None) => self.board_routing = BoardRouting::Legacy,
+            Ok(Some(index))
+                if receipt.exclusive_vendor
+                    && receipt.firmware_version == "0.6.3"
+                    && receipt.profile_index == Some(index)
+                    && receipt
+                        .layer_index
+                        .is_some_and(|layer| (1..=3).contains(&layer)) =>
+            {
+                if receipt.layer_index == Some(1) {
+                    self.arm_board_routing(now);
+                } else {
+                    self.wait_for_board_first_layer();
+                }
+            }
+            _ => {
+                self.board_routing = BoardRouting::Unverified;
+                self.status_message = "板载三层或启动层未确认，按键已暂停".into();
+            }
+        }
+    }
+
+    fn arm_board_routing(&mut self, now: Instant) {
+        let Some(session) = self.device_session.as_ref() else {
+            return;
+        };
+        self.board_admit_after = session.input_watermark();
+        self.board_decoder.store(true, Ordering::SeqCst);
+        self.enter_board_first_layer(now);
+    }
+
+    fn wait_for_board_first_layer(&mut self) {
+        let Some(session) = self.device_session.as_ref() else {
+            return;
+        };
+        self.board_admit_after = session.input_watermark();
+        self.board_decoder.store(true, Ordering::SeqCst);
+        self.board_routing = BoardRouting::WaitingForFirstLayer;
+        self.status_message = "等待键盘返回第 1 层，其他层按键已暂停".into();
+    }
+
+    fn enter_board_first_layer(&mut self, now: Instant) {
+        self.board_routing = BoardRouting::Managed { layer: 1 };
+        match self.activate_hardware_slot_at(1, now, false) {
+            Ok(()) => self.status_message = "板载三层已就绪 · 第 1 层".into(),
+            Err(error) => {
+                self.board_routing = BoardRouting::Unverified;
+                self.status_message = error.to_string();
+            }
+        }
+    }
+
+    pub fn provision_board_layers(&mut self) -> Result<(), WorkbenchError> {
+        let session = self
+            .device_session
+            .as_ref()
+            .filter(|s| self.hardware_rpc_verified && s.has_exclusive_vendor_link())
+            .cloned()
+            .ok_or_else(|| WorkbenchError::Routing("请先连接并确认 Creator Micro 2 独占".into()))?;
+        if self.board_routing == BoardRouting::Checking {
+            return Err(WorkbenchError::Routing("正在确认板载配置".into()));
+        }
+        let now = Instant::now();
+        self.release_board_inputs(session.id, now);
+        self.board_routing = BoardRouting::Checking;
+        self.status_message = "正在备份原映射并应用板载三层…".into();
+        self.rebuild_projection();
+        let tx = self.hardware_event_tx.clone();
+        let backups = self.config.document_dir.clone();
+        self.tokio_runtime.spawn(async move {
+            let result = session
+                .provision_three_layer_profile(&backups)
+                .await
+                .map(|board| board.layer_index)
+                .map_err(|error| error.to_string());
+            let _ = tx.send(HardwareLoopEvent::ThreeLayerProvisioned {
+                session_id: session.id,
+                result,
+            });
+        });
+        Ok(())
+    }
+
+    fn route_board_input(&mut self, event: InputEvent, now: Instant) -> Option<HostActionReceipt> {
+        if self.board_routing == BoardRouting::WaitingForFirstLayer {
+            if event.ingress_sequence <= self.board_admit_after
+                || !event.action_eligible
+                || event.board_layer != Some(1)
+                || event.kind != InputEventKind::Pressed
+            {
+                return None;
+            }
+            self.enter_board_first_layer(now);
+        }
+        match self.board_routing {
+            BoardRouting::Legacy if event.board_layer.is_none() => {
+                return self.consume_physical_input_event(event, now);
+            }
+            BoardRouting::Managed { layer } => {
+                if event.kind == InputEventKind::InputStreamGap {
+                    self.release_board_inputs(event.session_id, now);
+                    return None;
+                }
+                if event.ingress_sequence <= self.board_admit_after || !event.action_eligible {
+                    return None;
+                }
+                let next = event.board_layer.filter(|value| (1..=3).contains(value))?;
+                let binding = event.binding_id.as_ref()?;
+                if event.kind == InputEventKind::Pressed {
+                    if layer != next {
+                        self.release_board_inputs(event.session_id, now);
+                    }
+                    let target = self.hardware_profile_slots[next as usize].as_deref()?;
+                    if self.is_protected_oai_profile(target) {
+                        return None;
+                    }
+                    if layer != next
+                        || self.active_or_selected_profile_id().as_deref() != Some(target)
+                    {
+                        self.activate_hardware_slot_at(next, now, layer != next)
+                            .ok()?;
+                        self.board_routing = BoardRouting::Managed { layer: next };
+                    }
+                    self.board_pressed.insert(binding.clone());
+                } else if event.kind != InputEventKind::Released
+                    || layer != next
+                    || !self.board_pressed.remove(binding)
+                {
+                    return None;
+                }
+                return self.consume_physical_input_event(event, now);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn release_board_inputs(&mut self, session_id: u64, now: Instant) {
+        for binding in std::mem::take(&mut self.board_pressed) {
+            let _ = self.consume_physical_input_event(
+                InputEvent {
+                    session_id,
+                    board_layer: None,
+                    sequence: 0,
+                    ingress_sequence: 0,
+                    radial_center: None,
+                    radial_position: None,
+                    timestamp_ms: 0,
+                    kind: InputEventKind::Released,
+                    logical_switch: None,
+                    binding_id: Some(binding),
+                    physical_control: None,
+                    keycap_group: None,
+                    action_role: None,
+                    lost_count: 0,
+                    action_eligible: true,
+                },
+                now,
+            );
+        }
+        self.radial_state.cancel();
     }
 
     pub fn set_hardware_slot_profile(
@@ -1204,6 +1583,11 @@ impl WorkbenchStore {
         {
             return Err(WorkbenchError::Routing("Profile 不存在".to_string()));
         }
+        if kind != HardwareProfileSlotKind::UsbPlug && self.is_protected_oai_profile(&profile_id) {
+            return Err(WorkbenchError::Routing(
+                "板载三层只能使用由 Micro Input 管理的可编辑方案".into(),
+            ));
+        }
         self.ensure_default_hardware_profile_slots();
         self.hardware_profile_slots[slot_index as usize] = Some(profile_id.clone());
         self.document_store
@@ -1222,22 +1606,25 @@ impl WorkbenchStore {
     }
 
     pub fn reset_hardware_slots_to_default(&mut self) -> Result<(), WorkbenchError> {
-        for (idx, kind) in HardwareProfileSlotKind::ALL.into_iter().enumerate() {
-            self.hardware_profile_slots[idx] = self.find_canonical_profile_id(kind.default_agent());
+        for kind in HardwareProfileSlotKind::ALL.into_iter().skip(1) {
+            let idx = kind.index() as usize;
+            self.hardware_profile_slots[idx] = self.default_host_profile_id(kind.default_agent());
         }
-        self.active_hardware_slot = 0;
+        self.active_hardware_slot = match self.board_routing {
+            BoardRouting::Managed { layer } => layer,
+            _ => 1,
+        };
         self.document_store
             .set_hardware_profile_slots(
                 self.hardware_profile_slots.clone(),
                 self.active_hardware_slot,
             )
             .map_err(WorkbenchError::Routing)?;
-        if let Some(pid) = self.hardware_profile_slots[0].clone() {
+        if let Some(pid) = self.hardware_profile_slots[self.active_hardware_slot as usize].clone() {
             self.select_and_activate_profile_at(&pid, Instant::now(), true)?;
         }
         self.status_message =
-            "已恢复四槽位默认映射（USB/触控1: Antigravity · 触控2: Codex · 触控3: Deepseek Harness）"
-                .to_string();
+            "已恢复三层默认映射（Antigravity · Codex · DeepSeek Harness）".to_string();
         self.rebuild_projection();
         Ok(())
     }
@@ -1269,7 +1656,7 @@ impl WorkbenchStore {
             let pid_opt = self.hardware_profile_slots[idx]
                 .clone()
                 .filter(|pid| graph.profiles.contains_key(pid))
-                .or_else(|| self.find_canonical_profile_id(kind.default_agent()));
+                .or_else(|| self.default_host_profile_id(kind.default_agent()));
             let Some(pid) = pid_opt else {
                 return HardwareProfileSlotProjection::for_kind(kind);
             };
@@ -1295,7 +1682,7 @@ impl WorkbenchStore {
                 display_name,
                 monogram,
                 bundle_id,
-                is_active_slot: self.active_hardware_slot == kind.index(),
+                is_active_slot: self.active_hardware_slot.max(1) == kind.index(),
                 is_active_profile: active_host_id == Some(pid.as_str()),
             }
         })
@@ -1362,7 +1749,7 @@ impl WorkbenchStore {
         else {
             return false;
         };
-        if !self.auto_follow_enabled || self.manual_override {
+        if self.board_routing.is_managed() || !self.auto_follow_enabled || self.manual_override {
             return false;
         }
         let Some(target_pid) = self.app_profile_links.get(bundle).cloned() else {
@@ -1684,6 +2071,7 @@ impl WorkbenchStore {
                 self.activate_hardware_slot(slot_index)
             }
             SidebarAction::CycleTouchProfileSlot => self.cycle_touch_profile_slot().map(|_| ()),
+            SidebarAction::ProvisionBoardLayers => self.provision_board_layers(),
             SidebarAction::SetHardwareSlotProfile {
                 slot_index,
                 profile_id,
@@ -1712,8 +2100,45 @@ impl WorkbenchStore {
             .graph
             .profiles
             .iter()
-            .find(|(_, p)| CanonicalAgent::from_profile_name(&p.name) == Some(agent))
+            .find(|(pid, p)| {
+                p.name != mi_model::preset::LOCAL_CODEX_PROFILE_NAME
+                    && CanonicalAgent::from_profile_name(&p.name) == Some(agent)
+                    && (agent != CanonicalAgent::Cindy || self.is_protected_oai_profile(pid))
+            })
             .map(|(pid, _)| pid.clone())
+    }
+
+    fn local_codex_profile_id(&self) -> Option<String> {
+        self.document_store
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
+            .map(|(pid, _)| pid.clone())
+    }
+
+    fn is_native_codex_profile(&self, profile_id: &str) -> bool {
+        self.document_store
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .get(profile_id)
+            .is_some_and(|profile| profile.name == "Codex")
+            && self.is_protected_oai_profile(profile_id)
+    }
+
+    fn default_host_profile_id(&self, agent: CanonicalAgent) -> Option<String> {
+        if agent == CanonicalAgent::Codex {
+            self.local_codex_profile_id()
+                .or_else(|| self.find_canonical_profile_id(agent))
+        } else {
+            self.find_canonical_profile_id(agent)
+        }
     }
 
     pub fn is_selected_layer_protected(&self) -> bool {
@@ -2179,6 +2604,13 @@ impl WorkbenchStore {
                 self.rebuild_projection();
                 Ok(())
             }
+            SessionStripAction::SetWorkingColor(preset) => {
+                self.lighting_popover.working_color = preset;
+                self.lighting_arbiter.working_color_hex = preset.hex().to_string();
+                self.refresh_four_app_lighting();
+                self.rebuild_projection();
+                Ok(())
+            }
             SessionStripAction::SetBrightnessPreset(preset) => {
                 self.lighting_popover.brightness = preset;
                 self.lighting_arbiter.brightness_scale = preset.scale();
@@ -2249,21 +2681,31 @@ impl WorkbenchStore {
         let mut has_completed = false;
         let mut has_working = false;
         let mut has_error = false;
+        let mut newest_completed_ms = 0u64;
+        let mut newest_working_ms = 0u64;
         for cand in self.slot_table.candidates() {
             match cand.effective_kind(acks) {
                 FourAppSessionKind::NeedsAttention => return FourAppAgentPhase::AwaitingInput,
                 FourAppSessionKind::Error => has_error = true,
-                FourAppSessionKind::BlueDotCompleted => has_completed = true,
-                FourAppSessionKind::Working => has_working = true,
+                FourAppSessionKind::BlueDotCompleted => {
+                    has_completed = true;
+                    newest_completed_ms = newest_completed_ms.max(cand.last_modified_ms);
+                }
+                FourAppSessionKind::Working => {
+                    has_working = true;
+                    newest_working_ms = newest_working_ms.max(cand.last_modified_ms);
+                }
                 FourAppSessionKind::Idle => {}
             }
         }
         if has_error {
             FourAppAgentPhase::Error
-        } else if has_completed {
+        } else if has_completed && (!has_working || newest_completed_ms >= newest_working_ms) {
             FourAppAgentPhase::Completed
         } else if has_working {
             FourAppAgentPhase::Thinking
+        } else if has_completed {
+            FourAppAgentPhase::Completed
         } else {
             FourAppAgentPhase::Idle
         }
@@ -2550,7 +2992,12 @@ impl WorkbenchStore {
             let Some(profile) = graph.profiles.get(pid) else {
                 continue;
             };
-            let canonical_agent = CanonicalAgent::from_profile_name(&profile.name);
+            let is_protected_oai = profile
+                .layer_order
+                .first()
+                .is_some_and(|lid| doc.is_protected_oai_layer(lid));
+            let canonical_agent = CanonicalAgent::from_profile_name(&profile.name)
+                .filter(|agent| *agent != CanonicalAgent::Cindy || is_protected_oai);
             if canonical_agent.is_none() && !self.show_other_profiles {
                 continue;
             }
@@ -2560,10 +3007,6 @@ impl WorkbenchStore {
             let badge_monogram = canonical_agent
                 .map(|a| a.badge_monogram().to_string())
                 .unwrap_or_else(|| custom_monogram(&profile.name));
-            let is_protected_oai = profile
-                .layer_order
-                .first()
-                .is_some_and(|lid| doc.is_protected_oai_layer(lid));
             let app_installed = canonical_agent
                 .map(|a| self.app_cache.resolve(a.bundle_id()).installed)
                 .unwrap_or(true);
@@ -2584,13 +3027,21 @@ impl WorkbenchStore {
             };
 
             if let Some(agent) = canonical_agent {
-                if !canonical_rows
-                    .iter()
-                    .any(|(existing, _)| *existing == agent)
+                if let Some((_, existing)) = canonical_rows
+                    .iter_mut()
+                    .find(|(existing, _)| *existing == agent)
                 {
+                    if profile.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME {
+                        let mut original = std::mem::replace(existing, row);
+                        original.display_name = "Codex · 原生".into();
+                        if self.show_other_profiles {
+                            custom_rows.push(original);
+                        }
+                    } else if self.show_other_profiles {
+                        custom_rows.push(row);
+                    }
+                } else {
                     canonical_rows.push((agent, row));
-                } else if self.show_other_profiles {
-                    custom_rows.push(row);
                 }
             } else {
                 custom_rows.push(row);
@@ -2871,7 +3322,7 @@ impl WorkbenchStore {
             .selected_binding_slot
             .unwrap_or_else(|| self.selected_surface.primary_logical_slot());
 
-        let active_hardware_slot = self.active_hardware_slot.min(3);
+        let active_hardware_slot = self.active_hardware_slot.clamp(1, 3);
         let touch_led_states = match active_hardware_slot {
             1 => [true, false, false],
             2 => [false, true, false],
@@ -3131,13 +3582,21 @@ impl WorkbenchStore {
         self.ensure_default_hardware_profile_slots();
         let hardware_slots =
             self.build_hardware_profile_slots_projection(active_host_id.as_deref());
-        let active_hardware_slot = self.active_hardware_slot.min(3);
+        let active_hardware_slot = self.active_hardware_slot.clamp(1, 3);
 
         let sidebar = SidebarProjection {
             section_title: "常用软件方案".to_string(),
             rows,
             hardware_slots,
             active_hardware_slot,
+            board_profile_managed: self.board_routing.is_managed(),
+            can_provision_board: self.hardware_rpc_verified
+                && self.board_routing != BoardRouting::Checking
+                && !self.board_routing.is_managed()
+                && self
+                    .device_session
+                    .as_ref()
+                    .is_some_and(|s| s.has_exclusive_vendor_link()),
             selected_profile_id: self.selected_profile_id.clone(),
             selected_display_name,
             active_host_profile_id: active_host_id,
@@ -4238,6 +4697,13 @@ impl WorkbenchStore {
             return Some(resolved);
         }
         let profile = doc.editable.graph.profiles.get(profile_id)?;
+        if profile
+            .name
+            .eq_ignore_ascii_case(CanonicalAgent::Cindy.profile_name())
+            && !self.is_protected_oai_profile(profile_id)
+        {
+            return None;
+        }
         if self.native_ownership.is_unbridged_desktop_active()
             || self.native_ownership.allows_execution()
         {
@@ -4348,17 +4814,22 @@ impl WorkbenchStore {
                     self.dial_turned_while_pressed = false;
                 }
 
-                if let Some(surface) = self.surface_for_binding(&binding_id) {
-                    self.selected_surface = surface;
-                    let slot = self.effective_slot_for_surface(surface);
-                    self.selected_binding_slot = Some(slot);
-                }
-                match binding_id.as_str() {
-                    "AG15" => self.selected_joystick_direction = JoystickDirection8::North,
-                    "AG16" => self.selected_joystick_direction = JoystickDirection8::West,
-                    "AG17" => self.selected_joystick_direction = JoystickDirection8::South,
-                    "AG18" => self.selected_joystick_direction = JoystickDirection8::East,
-                    _ => {}
+                let inspector_search_active = !self.action_search_query.trim().is_empty()
+                    || !self.keycap_search_query.trim().is_empty()
+                    || self.shortcut_recorder.is_recording;
+                if !inspector_search_active {
+                    if let Some(surface) = self.surface_for_binding(&binding_id) {
+                        self.selected_surface = surface;
+                        let slot = self.effective_slot_for_surface(surface);
+                        self.selected_binding_slot = Some(slot);
+                    }
+                    match binding_id.as_str() {
+                        "AG15" => self.selected_joystick_direction = JoystickDirection8::North,
+                        "AG16" => self.selected_joystick_direction = JoystickDirection8::West,
+                        "AG17" => self.selected_joystick_direction = JoystickDirection8::South,
+                        "AG18" => self.selected_joystick_direction = JoystickDirection8::East,
+                        _ => {}
+                    }
                 }
 
                 self.ensure_live_ownership_fresh();
@@ -6587,9 +7058,9 @@ fn fallback_unbridged_oai_action(
     };
     let (adapter, bundle_id) = if profile_name.eq_ignore_ascii_case("Codex") {
         ("codex", "com.openai.codex")
-    } else if profile_name.eq_ignore_ascii_case("Cindy")
-        || profile_name.eq_ignore_ascii_case("ChatGPT")
-    {
+    } else if profile_name.eq_ignore_ascii_case("Cindy") {
+        ("cindy", CanonicalAgent::Cindy.bundle_id())
+    } else if profile_name.eq_ignore_ascii_case("ChatGPT") {
         ("cindy", "com.openai.atlas")
     } else {
         return None;
@@ -6647,6 +7118,21 @@ fn fallback_unbridged_oai_action(
             command: "scroll-to-bottom".to_string(),
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod protected_profile_tests {
+    use super::*;
+
+    #[test]
+    fn cindy_fallback_open_targets_cindy_desktop() {
+        assert_eq!(
+            fallback_unbridged_oai_action("Cindy", "AG00", BottomRowLayout::Split),
+            Some(ResolvedHostAction::OpenApp {
+                bundle_id: "com.xd.cindy".to_owned(),
+            })
+        );
     }
 }
 
@@ -6818,6 +7304,7 @@ async fn run_automatic_hardware_acceptance(
         status: "PASS".to_string(),
         session_id: session.id,
         backend: session.backend_name().to_string(),
+        exclusive_vendor: session.has_exclusive_vendor_link(),
         product: target.product.clone(),
         vid_pid: format!("{:04X}:{:04X}", target.vid, target.pid),
         device_path: target.path.clone(),
@@ -6847,4 +7334,288 @@ async fn run_automatic_hardware_acceptance(
         }
     }
     Some(receipt)
+}
+
+fn parse_iso8601_utc_ms(raw: &str) -> u64 {
+    let trimmed = raw.trim().strip_suffix('Z').unwrap_or(raw.trim());
+    let Some((date_part, time_part)) = trimmed.split_once('T') else {
+        return 0;
+    };
+    let mut date_it = date_part.split('-');
+    let (Some(y_s), Some(m_s), Some(d_s)) = (date_it.next(), date_it.next(), date_it.next()) else {
+        return 0;
+    };
+    let (Ok(mut y), Ok(m), Ok(d)) = (y_s.parse::<i64>(), m_s.parse::<i64>(), d_s.parse::<i64>())
+    else {
+        return 0;
+    };
+    let (hms_part, frac_part) = time_part.split_once('.').unwrap_or((time_part, ""));
+    let mut hms_it = hms_part.split(':');
+    let (Some(hh_s), Some(mm_s), Some(ss_s)) = (hms_it.next(), hms_it.next(), hms_it.next()) else {
+        return 0;
+    };
+    let (Ok(hh), Ok(mm), Ok(ss)) = (
+        hh_s.parse::<u64>(),
+        mm_s.parse::<u64>(),
+        ss_s.parse::<u64>(),
+    ) else {
+        return 0;
+    };
+    let mut frac_ms = 0u64;
+    for (idx, ch) in frac_part.chars().take(3).enumerate() {
+        if let Some(digit) = ch.to_digit(10) {
+            let weight = match idx {
+                0 => 100,
+                1 => 10,
+                _ => 1,
+            };
+            frac_ms += u64::from(digit) * weight;
+        }
+    }
+    if m <= 2 {
+        y -= 1;
+    }
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let mp = (if m > 2 { m - 3 } else { m + 9 }) as u64;
+    let doy = (153 * mp + 2) / 5 + (d as u64) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + (doe as i64) - 719468;
+    if days < 0 {
+        return 0;
+    }
+    (days as u64) * 86_400_000 + (hh * 3600 + mm * 60 + ss) * 1000 + frac_ms
+}
+
+fn find_freshest_antigravity_hub() -> Option<(u16, String)> {
+    let home = env::var_os("HOME").map(PathBuf::from)?;
+    let daemon_dir = home.join(".gemini/antigravity/daemon");
+    let entries = fs::read_dir(daemon_dir).ok()?;
+    let mut hubs: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_str()?;
+            if !name.starts_with("hub_") || !name.ends_with(".json") {
+                return None;
+            }
+            let modified = e.metadata().ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect();
+    hubs.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in hubs {
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(val) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let Some(port_u64) = val.get("httpPort").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Ok(port) = u16::try_from(port_u64) else {
+            continue;
+        };
+        let Some(csrf) = val
+            .get("csrfToken")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        return Some((port, csrf.to_string()));
+    }
+    None
+}
+
+fn poll_antigravity_daemon_candidates(
+    seen_running_ids: &mut BTreeSet<String>,
+    completed_transition_watermarks: &mut BTreeMap<String, String>,
+) -> Option<Vec<FourAppLiveCandidate>> {
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+
+    let (port, csrf) = find_freshest_antigravity_hub()?;
+    let body = b"{\"metadata\":{}}";
+    let request = format!(
+        "POST /exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories HTTP/1.0\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         Content-Type: application/json\r\n\
+         Connect-Protocol-Version: 1\r\n\
+         x-codeium-csrf-token: {csrf}\r\n\
+         Connection: close\r\n\
+         Content-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(2000)).ok()?;
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(2000)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(6000)));
+    stream.write_all(request.as_bytes()).ok()?;
+    stream.write_all(body).ok()?;
+    let mut raw_resp = Vec::with_capacity(65536);
+    stream.read_to_end(&mut raw_resp).ok()?;
+    let sep = b"\r\n\r\n";
+    let body_start = raw_resp
+        .windows(sep.len())
+        .position(|w| w == sep)
+        .map(|pos| pos + sep.len())?;
+    let parsed: Value = serde_json::from_slice(&raw_resp[body_start..]).ok()?;
+    let summaries = parsed.get("trajectorySummaries")?.as_object()?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let mut candidates = Vec::new();
+    for (cid, item) in summaries {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let ann = obj.get("annotations").and_then(Value::as_object);
+        let meta = obj.get("trajectoryMetadata").and_then(Value::as_object);
+        if ann
+            .and_then(|a| a.get("antigravity.isSubagent"))
+            .and_then(Value::as_str)
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+        {
+            continue;
+        }
+        if let Some(m) = meta {
+            if m.get("parentConversationId")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty())
+                || m.get("subagentSpec").is_some()
+                || m.get("nestingDepth")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|d| d > 0)
+            {
+                continue;
+            }
+        }
+        let summary_str = obj
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let title_str = ann
+            .and_then(|a| a.get("title"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let has_user_input = obj
+            .get("lastUserInputTime")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        if summary_str.is_empty() && title_str.is_empty() && !has_user_input {
+            continue;
+        }
+        let title = if !summary_str.is_empty() {
+            summary_str.to_string()
+        } else if !title_str.is_empty() {
+            title_str.to_string()
+        } else {
+            cid.chars().take(8).collect()
+        };
+
+        let workspace_path = obj
+            .get("workspaces")
+            .and_then(Value::as_array)
+            .or_else(|| {
+                meta.and_then(|m| m.get("workspaces"))
+                    .and_then(Value::as_array)
+            })
+            .and_then(|arr| arr.first())
+            .and_then(Value::as_object)
+            .and_then(|w| {
+                w.get("workspaceFolderAbsolutePath")
+                    .and_then(Value::as_str)
+                    .or_else(|| w.get("workspaceFolderAbsoluteUri").and_then(Value::as_str))
+            })
+            .map(|u| u.strip_prefix("file://").unwrap_or(u).to_string())
+            .unwrap_or_else(|| "/".to_string());
+
+        let status_str = obj
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("CASCADE_RUN_STATUS_IDLE");
+        let last_mod_str = obj
+            .get("lastModifiedTime")
+            .and_then(Value::as_str)
+            .or_else(|| obj.get("createdTime").and_then(Value::as_str))
+            .unwrap_or_default();
+        let view_str = ann
+            .and_then(|a| a.get("lastUserViewTime"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let term_str = obj
+            .get("latestExecutorTerminationReason")
+            .and_then(Value::as_str)
+            .or_else(|| obj.get("terminationReason").and_then(Value::as_str))
+            .unwrap_or_default();
+
+        let last_modified_ms = parse_iso8601_utc_ms(last_mod_str);
+        let raw_view_ms = parse_iso8601_utc_ms(view_str);
+        let watermark = format!("{status_str}:{last_mod_str}:{term_str}");
+
+        let (phase, effective_view_ms) = match status_str {
+            "CASCADE_RUN_STATUS_WAITING_FOR_USER_INPUT"
+            | "CASCADE_RUN_STATUS_WAITING_FOR_PERMISSION" => {
+                seen_running_ids.insert(cid.clone());
+                (FourAppSessionKind::NeedsAttention, raw_view_ms)
+            }
+            "CASCADE_RUN_STATUS_RUNNING"
+            | "CASCADE_RUN_STATUS_WAITING_FOR_MODEL"
+            | "CASCADE_RUN_STATUS_CANCELING" => {
+                seen_running_ids.insert(cid.clone());
+                (FourAppSessionKind::Working, raw_view_ms)
+            }
+            "CASCADE_RUN_STATUS_ERROR" | "CASCADE_RUN_STATUS_FAILED" => {
+                seen_running_ids.remove(cid);
+                (FourAppSessionKind::Error, raw_view_ms)
+            }
+            _ => {
+                if seen_running_ids.remove(cid) {
+                    completed_transition_watermarks.insert(cid.clone(), watermark.clone());
+                }
+                let just_transitioned =
+                    completed_transition_watermarks.get(cid) == Some(&watermark);
+                let has_unviewed = last_modified_ms > raw_view_ms.saturating_add(500);
+                let is_recent = now_ms.saturating_sub(last_modified_ms) <= 15 * 60 * 1000;
+                let term_completed = term_str.ends_with("NO_TOOL_CALL")
+                    || term_str == "COMPLETED"
+                    || just_transitioned;
+                if term_completed && ((has_unviewed && is_recent) || just_transitioned) {
+                    let adj_view_ms = if has_unviewed {
+                        raw_view_ms
+                    } else {
+                        last_modified_ms.saturating_sub(1000)
+                    };
+                    (FourAppSessionKind::BlueDotCompleted, adj_view_ms)
+                } else {
+                    (FourAppSessionKind::Idle, raw_view_ms)
+                }
+            }
+        };
+
+        candidates.push(FourAppLiveCandidate {
+            place: NavigationPlace::antigravity(cid.clone(), workspace_path),
+            title,
+            phase,
+            watermark,
+            last_modified_ms,
+            last_user_view_ms: effective_view_ms,
+            updated_at_ms: last_modified_ms.max(effective_view_ms),
+        });
+    }
+
+    candidates.sort_by(|a, b| {
+        a.phase
+            .cmp(&b.phase)
+            .then_with(|| b.last_modified_ms.cmp(&a.last_modified_ms))
+            .then_with(|| a.place.target_id().cmp(&b.place.target_id()))
+    });
+    candidates.truncate(24);
+    Some(candidates)
 }

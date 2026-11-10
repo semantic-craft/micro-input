@@ -11,6 +11,22 @@ struct CreatorMicroInlineInspectorView: View {
         let insp = store.inspector
         let slot = insp.selectedLogicalSlot
         let isTaskRole = (slot < 6) && (insp.selectedSlotRole == "TaskKey") && agentKind.supportsLiveSessionSlots
+        let layerIdentity = "\(insp.selectedProfileId ?? "")-\(insp.inspectorLayerName)"
+        let controlGroupIdentity: String = {
+            if insp.selectedSurface.hasPrefix("Encoder") || (13...15).contains(slot) {
+                return "\(layerIdentity)-encoder"
+            }
+            if insp.selectedSurface == "Joystick" || (16...19).contains(slot) {
+                return "\(layerIdentity)-joystick"
+            }
+            if slot == 10 || slot == 11 {
+                return "\(layerIdentity)-bottom-\(insp.bottomRowLayout)"
+            }
+            if slot < 6 {
+                return "\(layerIdentity)-top6"
+            }
+            return "\(layerIdentity)-action"
+        }()
 
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
@@ -19,25 +35,33 @@ struct CreatorMicroInlineInspectorView: View {
                         .font(UITheme.heading)
                         .foregroundStyle(UITheme.textPrimary)
                     Spacer()
-                    Text(isTaskRole ? "会话键" : "动作键")
+                    Text("\(insp.selectedDisplayName) · \(insp.inspectorLayerName)")
+                        .font(UITheme.micro)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(UITheme.accentSoft))
+                        .foregroundStyle(UITheme.accent)
+                        .lineLimit(1)
+                    Text(insp.isProtectedLayer ? "原生直通" : (isTaskRole ? "会话键" : "动作键"))
                         .font(UITheme.micro)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Capsule().fill(UITheme.subtleSurface))
                         .foregroundStyle(UITheme.textSecondary)
                 }
-                Text("当前绑定：\(insp.editableInspector?.boundActionName ?? "未绑定")")
+                Text("当前绑定：\(boundSummaryText(insp: insp, slot: slot))")
                     .font(UITheme.captionMedium)
                     .foregroundStyle(UITheme.accent)
                     .lineLimit(1)
             }
             .padding(14)
+            .id("inspector-header-\(layerIdentity)")
 
             Rectangle().fill(UITheme.border).frame(height: 1)
 
             if let lock = insp.protectedLock {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(lock.lockBadgeText)
+                    Text("\(lock.ownerClientName) · \(lock.lockBadgeText)")
                         .font(UITheme.bodySemibold)
                         .foregroundStyle(UITheme.caution)
                     Text(lock.explanationText)
@@ -61,48 +85,58 @@ struct CreatorMicroInlineInspectorView: View {
             let showGlyphGrid = showActionControls && slot < 13
             let showTaskControls = hasEditable && isTaskRole
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if hasEditable {
-                        slotSpecificControls(slot: slot, isTaskRole: isTaskRole, insp: insp)
-                    }
-
-                    if showTaskControls {
-                        sessionSlotExplanationCard(slot: slot, ss: store.sessionStrip)
-                    }
-
+            ScrollViewReader { scrollProxy in
+                ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        customShortcutInspectorCard(edit: edit)
-                        KeycapGlyphGridSectionView(
-                            store: store,
-                            isVisible: showGlyphGrid,
-                            keycapSearchQuery: edit.keycapSearchQuery,
-                            filteredKeycaps: edit.filteredKeycaps,
-                            bindDefaultAction: edit.bindKeycapDefaultActionOnSelect
-                        )
-                        .equatable()
-                        .frame(maxHeight: showGlyphGrid ? .infinity : 0)
-                        .clipped()
-                        .opacity(showGlyphGrid ? 1 : 0)
+                        Color.clear
+                            .frame(height: 0)
+                            .id("inspector-scroll-top")
 
-                        AgentActionCatalogSectionView(
-                            store: store,
-                            isVisible: showActionControls,
-                            boundActionId: edit.boundActionId,
-                            actionSearchQuery: edit.actionSearchQuery,
-                            filteredActions: Array(edit.filteredActions.prefix(16))
-                        )
-                        .equatable()
+                        if hasEditable || (13...19).contains(slot) || insp.selectedSurface.hasPrefix("Encoder") || insp.selectedSurface == "Joystick" {
+                            slotSpecificControls(slot: slot, isTaskRole: isTaskRole, insp: insp)
+                                .id(controlGroupIdentity)
+                        }
+
+                        if showTaskControls {
+                            sessionSlotExplanationCard(slot: slot, ss: store.sessionStrip)
+                        }
+
+                        VStack(alignment: .leading, spacing: 14) {
+                            customShortcutInspectorCard(edit: edit)
+                            KeycapGlyphGridSectionView(
+                                store: store,
+                                isVisible: showGlyphGrid,
+                                keycapSearchQuery: edit.keycapSearchQuery,
+                                filteredKeycaps: edit.filteredKeycaps,
+                                bindDefaultAction: edit.bindKeycapDefaultActionOnSelect
+                            )
+                            .equatable()
+                            .frame(maxHeight: showGlyphGrid ? .infinity : 0)
+                            .clipped()
+                            .opacity(showGlyphGrid ? 1 : 0)
+
+                            AgentActionCatalogSectionView(
+                                store: store,
+                                isVisible: showActionControls,
+                                boundActionId: edit.boundActionId,
+                                actionSearchQuery: edit.actionSearchQuery,
+                                filteredActions: Array(edit.filteredActions.prefix(16))
+                            )
+                            .equatable()
+                        }
+                        .frame(maxHeight: showActionControls ? .infinity : 0)
+                        .clipped()
+                        .opacity(showActionControls ? 1 : 0)
+                        .allowsHitTesting(showActionControls)
                     }
-                    .frame(maxHeight: showActionControls ? .infinity : 0)
-                    .clipped()
-                    .opacity(showActionControls ? 1 : 0)
-                    .allowsHitTesting(showActionControls)
+                    .padding(14)
                 }
-                .padding(14)
+                .onChange(of: layerIdentity) { _, _ in
+                    scrollProxy.scrollTo("inspector-scroll-top", anchor: .top)
+                }
             }
-            .opacity(hasEditable ? 1 : 0)
-            .allowsHitTesting(hasEditable)
+            .opacity(hasEditable || insp.isProtectedLayer ? 1 : 0)
+            .allowsHitTesting(hasEditable || insp.isProtectedLayer)
 
             Rectangle().fill(UITheme.border).frame(height: 1)
 
@@ -138,11 +172,35 @@ struct CreatorMicroInlineInspectorView: View {
         case 14: return "旋钮右旋"
         case 15: return "旋钮按下"
         case 16: return "四向摇杆（上）"
-        case 17: return "四向摇杆（左）"
-        case 18: return "四向摇杆（下）"
+        case 17: return "四向摇杆（下）"
+        case 18: return "四向摇杆（左）"
         case 19: return "四向摇杆（右）"
         default: return "按键 \(slot + 1)"
         }
+    }
+
+    private func boundSummaryText(insp: InspectorSliceModel, slot: Int) -> String {
+        if let edit = insp.editableInspector {
+            return edit.boundActionName
+        }
+        if insp.isProtectedLayer {
+            let owner = insp.protectedLock?.ownerClientName ?? insp.selectedDisplayName
+            let code: String = {
+                switch slot {
+                case 0..<13: return String(format: "KV_OAI_%02d / AG%02d", slot, slot)
+                case 13: return "KV_OAI_ENC_CCW / AG13"
+                case 14: return "KV_OAI_ENC_CW / AG14"
+                case 15: return "KV_OAI_ENC_CLK / ENC_CLK"
+                case 16: return "KV_OAI_JOY_N / AG15"
+                case 17: return "KV_OAI_JOY_S / AG17"
+                case 18: return "KV_OAI_JOY_W / AG16"
+                case 19: return "KV_OAI_JOY_E / AG18"
+                default: return "KV_OAI"
+                }
+            }()
+            return "\(owner) 原生直通 (\(code))"
+        }
+        return "未绑定"
     }
 
     @ViewBuilder
@@ -237,7 +295,6 @@ struct CreatorMicroInlineInspectorView: View {
                     selection: Binding(
                         get: { insp.selectedJoystickDirection },
                         set: {
-                            store.dispatch("canvas", ["SelectSurface": "Joystick"])
                             store.dispatch("canvas", ["SelectJoystickDirection": $0])
                         }
                     )
@@ -334,6 +391,7 @@ struct CreatorMicroInlineInspectorView: View {
                         RoundedRectangle(cornerRadius: UITheme.controlCornerRadius, style: .continuous)
                             .stroke(UITheme.border, lineWidth: 1)
                     )
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
@@ -412,6 +470,16 @@ private struct KeycapGlyphGridSectionView: View, Equatable {
                 .textFieldStyle(.roundedBorder)
                 .controlSize(.small)
                 .frame(width: 120)
+                .onSubmit {
+                    if let first = filteredKeycaps.first {
+                        store.dispatch("inspector", [
+                            "ApplyKeycapIcon": [
+                                "keycap": first.keycapId,
+                                "bind_default_action": bindDefaultAction
+                            ]
+                        ])
+                    }
+                }
             }
 
             LazyVGrid(
@@ -472,6 +540,7 @@ private struct KeycapGlyphCellButton: View, Equatable {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(item.isSelected ? UITheme.accent : UITheme.border, lineWidth: 1)
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help(item.chineseHint)
@@ -510,6 +579,11 @@ private struct AgentActionCatalogSectionView: View, Equatable {
             )
             .textFieldStyle(.roundedBorder)
             .controlSize(.small)
+            .onSubmit {
+                if let first = filteredActions.first {
+                    store.dispatch("inspector", ["AssignCatalogAction": first.actionId])
+                }
+            }
 
             LazyVStack(spacing: 4) {
                 ForEach(filteredActions) { act in
@@ -565,6 +639,7 @@ private struct ActionCatalogRowButton: View, Equatable {
                 RoundedRectangle(cornerRadius: UITheme.controlCornerRadius, style: .continuous)
                     .stroke(isBound ? UITheme.accent : UITheme.border, lineWidth: 1)
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -588,6 +663,11 @@ struct ClassicMicroInputSettingsSheet: View {
                 Button("完成") { dismiss() }
                     .buttonStyle(.borderedProminent)
                     .tint(UITheme.accent)
+            }
+
+            GroupBox("键盘灯光与会话提醒 (Idle 蓝光 / In Progress)") {
+                SimpleLightingControlCard(store: store)
+                    .padding(8)
             }
 
             GroupBox("前台软件与按键控制") {

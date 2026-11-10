@@ -206,7 +206,7 @@ fn starter_contains_only_original_local_content() {
 fn eight_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
     let mut d = Draft::default();
     let ids = preset::install_agent_starter_profiles(&mut d).unwrap();
-    assert_eq!(ids.len(), 6);
+    assert_eq!(ids.len(), 7);
 
     // Bind Slice C & D actions (navigation, prompts, submit) onto Antigravity before exporting
     let ag_pid = ids[0].clone();
@@ -229,7 +229,7 @@ fn eight_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
     // 1. Full document export/import round-trip
     let doc_text = preset::export(&d, None, None).unwrap();
     let doc_imported = preset::import(&doc_text).unwrap();
-    assert_eq!(doc_imported.config.profiles.len(), 6);
+    assert_eq!(doc_imported.config.profiles.len(), 7);
     let imported_ag_pid = doc_imported
         .document
         .editable

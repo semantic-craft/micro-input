@@ -7,6 +7,7 @@ struct CreatorMicroStageView: View {
     var onOpenMacroLibrary: () -> Void
     var onPromptNewLayer: () -> Void
     var onPromptRenameLayer: () -> Void
+    @State private var showStageLightingPopover = false
 
     var body: some View {
         let _ = ViewRenderTelemetry.record("CreatorMicroStageView")
@@ -84,6 +85,17 @@ struct CreatorMicroStageView: View {
                 }
                 .controlSize(.small)
                 .fixedSize()
+
+                Button("💡 灯光设置") {
+                    showStageLightingPopover.toggle()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .popover(isPresented: $showStageLightingPopover, arrowEdge: .bottom) {
+                    SimpleLightingControlCard(store: store)
+                        .frame(width: 360)
+                        .padding(14)
+                }
 
                 if let agent = DesktopAgent.named(rawProfileName),
                    !agent.isGeneralFallback
@@ -267,7 +279,26 @@ struct CreatorMicroBoardView: View {
                     Spacer()
                 }
                 .frame(width: cellSize, height: cellSize)
+                .rotationEffect(
+                    .degrees(
+                        c.selectedSurface == "EncoderCcw"
+                            ? -32
+                            : (c.selectedSurface == "EncoderCw" ? 32 : 0)
+                    )
+                )
+
+                if isSelected {
+                    Text(
+                        c.selectedSurface == "EncoderCcw"
+                            ? "左旋"
+                            : (c.selectedSurface == "EncoderCw" ? "右旋" : "按下")
+                    )
+                    .font(UITheme.micro)
+                    .foregroundStyle(Color.white.opacity(0.92))
+                    .padding(.top, 14)
+                }
             }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help("无极金属旋钮（点击切换左旋 / 右旋 / 按下配置）")
@@ -275,14 +306,40 @@ struct CreatorMicroBoardView: View {
 
     private func analogJoystickCell(c: CanvasSliceModel) -> some View {
         let isSelected = c.selectedSurface == "Joystick" || c.joystickIsSelected
+        let activeDir = c.selectedJoystickDirection
+        let joyOffset: CGSize = {
+            guard isSelected else { return .zero }
+            switch activeDir {
+            case "North": return CGSize(width: 0, height: -4)
+            case "West": return CGSize(width: -4, height: 0)
+            case "South": return CGSize(width: 0, height: 4)
+            case "East": return CGSize(width: 4, height: 0)
+            default: return .zero
+            }
+        }()
+        let dirArrow: String = {
+            switch activeDir {
+            case "North": return "↑"
+            case "West": return "←"
+            case "South": return "↓"
+            case "East": return "→"
+            default: return "↑"
+            }
+        }()
         return Button {
-            store.dispatch("canvas", ["SelectSurface": "Joystick"])
-            let dirs = ["North", "West", "South", "East"]
-            if let idx = dirs.firstIndex(of: c.selectedJoystickDirection) {
-                let nextDir = dirs[(idx + 1) % dirs.count]
-                store.dispatch("canvas", ["SelectJoystickDirection": nextDir])
+            if !isSelected {
+                store.dispatch(
+                    "canvas",
+                    ["SelectJoystickDirection": activeDir.isEmpty ? "North" : activeDir]
+                )
             } else {
-                store.dispatch("canvas", ["SelectJoystickDirection": "North"])
+                let dirs = ["North", "West", "South", "East"]
+                if let idx = dirs.firstIndex(of: activeDir) {
+                    let nextDir = dirs[(idx + 1) % dirs.count]
+                    store.dispatch("canvas", ["SelectJoystickDirection": nextDir])
+                } else {
+                    store.dispatch("canvas", ["SelectJoystickDirection": "North"])
+                }
             }
         } label: {
             ZStack {
@@ -297,22 +354,31 @@ struct CreatorMicroBoardView: View {
                             )
                     )
 
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.24, green: 0.24, blue: 0.26),
-                                Color(red: 0.13, green: 0.13, blue: 0.15)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.24, green: 0.24, blue: 0.26),
+                                    Color(red: 0.13, green: 0.13, blue: 0.15)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
                         )
-                    )
-                    .frame(width: 42, height: 42)
-                    .overlay(
-                        Circle().stroke(Color.black.opacity(0.35), lineWidth: 1)
-                    )
+                        .frame(width: 42, height: 42)
+                        .overlay(
+                            Circle().stroke(Color.black.opacity(0.35), lineWidth: 1)
+                        )
+                    if isSelected {
+                        Text(dirArrow)
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color.white.opacity(0.92))
+                    }
+                }
+                .offset(joyOffset)
             }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help("8 向摇杆（点击切换上 / 左 / 下 / 右方向配置）")
@@ -320,7 +386,8 @@ struct CreatorMicroBoardView: View {
 
     private func statusIndicatorClusterCell(c: CanvasSliceModel) -> some View {
         let leds = c.touchLedStates.count == 3 ? c.touchLedStates : [true, false, false]
-        let slotBadge = c.activeHardwareSlot == 0 ? "USB" : "P\(c.activeHardwareSlot)"
+        let slotBadge = "L\(max(c.activeHardwareSlot, 1))"
+        let managed = store.sidebar.boardProfileManaged
         return ZStack {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(UITheme.mutedSurface.opacity(0.55))
@@ -342,9 +409,12 @@ struct CreatorMicroBoardView: View {
                             Circle()
                                 .fill(leds[idx] ? UITheme.accent : UITheme.strongBorder)
                                 .frame(width: 5.5, height: 5.5)
+                                .padding(3)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help("点击激活左下触控 \(idx + 1)")
+                        .disabled(managed)
+                        .help(managed ? "用键盘左下角换层" : "预览第 \(idx + 1) 层")
                     }
                 }
                 Button {
@@ -365,9 +435,11 @@ struct CreatorMicroBoardView: View {
                             .font(UITheme.monoBadge)
                             .foregroundStyle(UITheme.textPrimary)
                     }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("\(c.activeHardwareSlotLabel) · 点击模拟按左下角触控区轮换 Profile 1 / 2 / 3")
+                .disabled(managed)
+                .help(managed ? c.activeHardwareSlotLabel : "预览三个板载层的轮换顺序")
             }
         }
     }
@@ -402,7 +474,12 @@ struct CreatorMicroBoardView: View {
         let isTaskRole = (slot < 6) && (cell?.slotRole == "TaskKey") && agentKind.supportsLiveSessionSlots
         let sessionSlot = (slot < 6) ? ss.sessionSlots.first(where: { $0.slotIndex == slot }) : nil
         let keycap = CodexKeycapId(rustVariant: cell?.keycapId ?? "Apps")
-        let sublabel = cell?.conciseCaption ?? "空白"
+        let sublabel: String = {
+            if c.protectedLock != nil {
+                return "\(c.selectedDisplayName) 直通"
+            }
+            return cell?.conciseCaption ?? "空白"
+        }()
 
         return BoardKeycapCellButton(
             store: store,
@@ -468,6 +545,7 @@ struct CreatorMicroBoardView: View {
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 3)
                                 .background(Capsule().fill(UITheme.subtleSurface))
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                         }
@@ -483,15 +561,27 @@ struct CreatorMicroBoardView: View {
                 Button {
                     showLightingPopover.toggle()
                 } label: {
+                    let statusLabel: String = {
+                        if !ss.simpleLighting.lightingEnabled {
+                            return "灯光已关"
+                        }
+                        if ss.unreadCompletedCount > 0 {
+                            return "💡 灯光设置 · Idle 蓝光 (\(ss.unreadCompletedCount))"
+                        }
+                        if ss.workingCount > 0 {
+                            return "💡 灯光设置 · In Progress (\(ss.workingCount))"
+                        }
+                        return "💡 灯光设置 · Idle 蓝光"
+                    }()
                     HStack(spacing: 6) {
                         Circle()
                             .fill(
                                 ss.simpleLighting.lightingEnabled
-                                    ? Color(hex: c.statusLedHex)
+                                    ? Color(hex: c.underglowHex)
                                     : UITheme.textMuted
                             )
-                            .frame(width: 7, height: 7)
-                        Text("调整灯光")
+                            .frame(width: 8, height: 8)
+                        Text(statusLabel)
                             .font(UITheme.captionMedium)
                             .foregroundStyle(UITheme.textPrimary)
                     }
@@ -499,11 +589,12 @@ struct CreatorMicroBoardView: View {
                     .padding(.vertical, 5)
                     .background(Capsule().fill(UITheme.surface))
                     .overlay(Capsule().stroke(UITheme.border, lineWidth: 1))
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .popover(isPresented: $showLightingPopover, arrowEdge: .bottom) {
                     SimpleLightingControlCard(store: store)
-                        .frame(width: 340)
+                        .frame(width: 360)
                         .padding(14)
                 }
             }
@@ -555,10 +646,11 @@ struct SimpleLightingControlCard: View {
     let store: CoreStore
 
     var body: some View {
-        let lp = store.sessionStrip.simpleLighting
-        VStack(alignment: .leading, spacing: 12) {
+        let ss = store.sessionStrip
+        let lp = ss.simpleLighting
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("键盘灯光与会话提醒")
+                Text("Antigravity 灯光设置 (Idle / In Progress)")
                     .font(UITheme.heading)
                     .foregroundStyle(UITheme.textPrimary)
                 Spacer()
@@ -573,9 +665,26 @@ struct SimpleLightingControlCard: View {
                 .controlSize(.small)
             }
 
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(Color(hex: "#0088FF"))
+                    .frame(width: 7, height: 7)
+                Text("Idle 蓝光 (未读 \(ss.unreadCompletedCount))")
+                    .font(UITheme.micro)
+                    .foregroundStyle(UITheme.textSecondary)
+                Text("·")
+                    .foregroundStyle(UITheme.textMuted)
+                Circle()
+                    .fill(Color(hex: "#00FF66"))
+                    .frame(width: 7, height: 7)
+                Text("In Progress 进行中 (\(ss.workingCount))")
+                    .font(UITheme.micro)
+                    .foregroundStyle(UITheme.textSecondary)
+            }
+
             if lp.lightingEnabled {
                 Toggle(
-                    "随软件与会话状态自动变色",
+                    "随 Antigravity 会话状态自动变色 (Idle 蓝光 / In Progress 变色)",
                     isOn: Binding(
                         get: { lp.autoSessionColor },
                         set: { store.dispatch("session_strip", ["SetAutoSessionColor": $0]) }
@@ -584,16 +693,7 @@ struct SimpleLightingControlCard: View {
                 .font(UITheme.caption)
 
                 Toggle(
-                    "仅在待确认或刚完成时亮起",
-                    isOn: Binding(
-                        get: { lp.onlyGlowOnAttentionOrCompleted },
-                        set: { store.dispatch("session_strip", ["SetOnlyGlowOnAttentionOrCompleted": $0]) }
-                    )
-                )
-                .font(UITheme.caption)
-
-                Toggle(
-                    "后台运行中呼吸提示",
+                    "In Progress（进行中）对话呼吸亮灯提示",
                     isOn: Binding(
                         get: { lp.glowOnWorking },
                         set: { store.dispatch("session_strip", ["SetGlowOnWorking": $0]) }
@@ -601,19 +701,44 @@ struct SimpleLightingControlCard: View {
                 )
                 .font(UITheme.caption)
 
+                Toggle(
+                    "仅在新完成或进行中时亮起（关闭则 Idle 常亮蓝光）",
+                    isOn: Binding(
+                        get: { lp.onlyGlowOnAttentionOrCompleted },
+                        set: { store.dispatch("session_strip", ["SetOnlyGlowOnAttentionOrCompleted": $0]) }
+                    )
+                )
+                .font(UITheme.caption)
+
                 Divider()
 
                 Picker(
-                    "常驻氛围色",
+                    "Idle（完成/空闲）光色",
                     selection: Binding(
                         get: { lp.ambientColor },
                         set: { store.dispatch("session_strip", ["SetAmbientColor": $0]) }
                     )
                 ) {
+                    Text("海洋蓝 (默认蓝光)").tag("OceanBlue")
+                    Text("青碧").tag("CyanTeal")
                     Text("纯白").tag("PureWhite")
-                    Text("暖琥珀").tag("WarmAmber")
-                    Text("冰川蓝").tag("IceBlue")
                     Text("翡翠绿").tag("EmeraldGreen")
+                    Text("琥珀金").tag("AmberGold")
+                }
+                .controlSize(.small)
+
+                Picker(
+                    "In Progress（进行中）光色",
+                    selection: Binding(
+                        get: { lp.workingColor },
+                        set: { store.dispatch("session_strip", ["SetWorkingColor": $0]) }
+                    )
+                ) {
+                    Text("翡翠绿 (默认)").tag("EmeraldGreen")
+                    Text("琥珀金").tag("AmberGold")
+                    Text("青碧").tag("CyanTeal")
+                    Text("纯白").tag("PureWhite")
+                    Text("海洋蓝").tag("OceanBlue")
                 }
                 .controlSize(.small)
 
@@ -624,16 +749,56 @@ struct SimpleLightingControlCard: View {
                         set: { store.dispatch("session_strip", ["SetBrightnessPreset": $0]) }
                     )
                 ) {
-                    Text("柔和 35%").tag("Soft")
-                    Text("标准 70%").tag("Standard")
-                    Text("高亮 100%").tag("High")
+                    Text("柔和 (35%)").tag("Soft")
+                    Text("标准 (65%)").tag("Standard")
+                    Text("明亮 (95%)").tag("Bright")
+                }
+                .controlSize(.small)
+
+                Picker(
+                    "自动熄灯",
+                    selection: Binding(
+                        get: { lp.autoOffTimeout },
+                        set: { store.dispatch("session_strip", ["SetAutoOffTimeout": $0]) }
+                    )
+                ) {
+                    Text("1 分钟").tag("OneMinute")
+                    Text("3 分钟").tag("ThreeMinutes")
+                    Text("5 分钟").tag("FiveMinutes")
+                    Text("常亮").tag("Never")
                 }
                 .controlSize(.small)
 
                 Divider()
 
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("一键试灯（立即点亮实体键盘）")
+                        .font(UITheme.micro)
+                        .foregroundStyle(UITheme.textSecondary)
+                    HStack(spacing: 6) {
+                        Button("Idle 蓝光") {
+                            store.dispatch("session_strip", ["TriggerTestLighting": "completed"])
+                        }
+                        .controlSize(.mini)
+                        Button("In Progress 光") {
+                            store.dispatch("session_strip", ["TriggerTestLighting": "thinking"])
+                        }
+                        .controlSize(.mini)
+                        Button("待确认黄光") {
+                            store.dispatch("session_strip", ["TriggerTestLighting": "awaiting_input"])
+                        }
+                        .controlSize(.mini)
+                        Button("恢复自动") {
+                            store.dispatch("session_strip", ["TriggerTestLighting": NSNull()])
+                        }
+                        .controlSize(.mini)
+                    }
+                }
+
+                Divider()
+
                 HStack {
-                    Button("全部已读熄灯") {
+                    Button("全部标为已读") {
                         store.dispatch("session_strip", "AcknowledgeAllCompleted")
                     }
                     .controlSize(.small)
@@ -691,11 +856,14 @@ private struct BoardKeycapCellButton: View, Equatable {
                 store.dispatch("session_strip", ["ActivateSlot": slot])
             }
         } label: {
-            if isTaskRole {
-                taskKeycapSurface
-            } else {
-                actionKeycapSurface
+            Group {
+                if isTaskRole {
+                    taskKeycapSurface
+                } else {
+                    actionKeycapSurface
+                }
             }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -747,7 +915,7 @@ private struct BoardKeycapCellButton: View, Equatable {
                 }
             } else {
                 CodexKeycapGlyphView(
-                    keycap: .apps,
+                    keycap: keycap == .blank ? .apps : keycap,
                     size: 20,
                     color: UITheme.textSecondary
                 )
@@ -755,7 +923,8 @@ private struct BoardKeycapCellButton: View, Equatable {
             }
             Spacer(minLength: 2)
             if showLabels {
-                Text(sessionSlot?.title.isEmpty == false ? sessionSlot!.title : "会话 \(slot + 1)")
+                let fallbackLabel = (sublabel != "空白" && !sublabel.isEmpty) ? sublabel : "会话 \(slot + 1)"
+                Text(sessionSlot?.title.isEmpty == false ? sessionSlot!.title : fallbackLabel)
                     .font(UITheme.micro)
                     .foregroundStyle(UITheme.textSecondary)
                     .lineLimit(1)
@@ -772,6 +941,7 @@ private struct BoardKeycapCellButton: View, Equatable {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(borderColor, lineWidth: isSelected ? 2.5 : (hasActiveState ? 2.0 : 1.0))
         )
+        .contentShape(Rectangle())
     }
 
     private var actionKeycapSurface: some View {
@@ -806,5 +976,6 @@ private struct BoardKeycapCellButton: View, Equatable {
                     lineWidth: isSelected ? 2.5 : 1.0
                 )
         )
+        .contentShape(Rectangle())
     }
 }

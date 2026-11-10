@@ -927,6 +927,8 @@ fn legacy_agent_specs() -> Vec<(&'static str, Vec<AgentAssignment>)> {
     ]
 }
 
+pub const LOCAL_CODEX_PROFILE_NAME: &str = "Codex · Micro Input";
+
 pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, String> {
     let mut created_ids = Vec::new();
     // Retain the exact old built-ins only as migration fingerprints.
@@ -1482,6 +1484,14 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         )],
     ));
 
+    let codex_assignments = specs
+        .iter()
+        .find(|(name, _)| *name == "Codex")
+        .expect("Codex starter assignments")
+        .1
+        .clone();
+    specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments));
+
     let mut work = draft.clone();
     // Retire only unchanged source profiles from the exact bundled fixture, even
     // when other profiles have since been added. Preserve edited and imported data.
@@ -1580,10 +1590,20 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             .graph
             .profiles
             .iter()
-            .find(|(_, p)| p.name == profile_name)
+            .find(|(_, p)| {
+                p.name == profile_name
+                    && (profile_name != "Cindy"
+                        || p.layer_order
+                            .first()
+                            .is_some_and(|lid| work.document.is_protected_oai_layer(lid)))
+            })
             .map(|(id, _)| id.clone());
         let pid = if let Some(pid) = existing_id {
             let p = &work.document.editable.graph.profiles[&pid];
+            if profile_name == LOCAL_CODEX_PROFILE_NAME {
+                created_ids.push(pid);
+                continue;
+            }
             if is_native_oai_profile
                 && p.layer_order
                     .iter()
@@ -2251,7 +2271,7 @@ mod agent_migration_tests {
     fn upgrades_pre_dial_conversational_presets_while_preserving_customized_profiles() {
         let mut draft = Draft::default();
         let ids = install_agent_starter_profiles(&mut draft).unwrap();
-        assert_eq!(ids.len(), 6);
+        assert_eq!(ids.len(), 7);
 
         for native_name in ["Cindy", "Codex"] {
             let pid = draft

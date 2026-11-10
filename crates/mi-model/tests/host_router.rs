@@ -182,7 +182,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     assert_eq!(draft.revision, 0);
     assert_eq!(draft.config.profiles.len(), 2);
     let created = install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(created.len(), 6);
+    assert_eq!(created.len(), 7);
     assert_eq!(
         draft.revision, 1,
         "install_agent_starter_profiles must commit as a single atomic revision"
@@ -191,10 +191,10 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     assert_eq!(
         draft.config.profiles.len(),
         2,
-        "single undo must revert all 6 starter profiles"
+        "single undo must revert all 7 starter profiles"
     );
     draft.undo(true).unwrap();
-    assert_eq!(draft.config.profiles.len(), 6);
+    assert_eq!(draft.config.profiles.len(), 7);
 
     let ag_pid = &created[0];
     let herdr_pid = &created[1];
@@ -575,7 +575,7 @@ fn host_preferences_persist_active_profile_and_execution_enabled() {
 fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
     let mut draft = Draft::default();
     let ids = install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(draft.config.profiles.len(), 6);
+    assert_eq!(draft.config.profiles.len(), 7);
     assert!(!draft
         .config
         .profiles
@@ -690,7 +690,7 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
         edited.document.editable.graph.profiles[&pid].name,
         "My existing mapping"
     );
-    assert_eq!(edited.config.profiles.len(), 7);
+    assert_eq!(edited.config.profiles.len(), 8);
 }
 
 #[test]
@@ -1202,5 +1202,54 @@ fn other_apps_general_profile_binds_only_ag11_apple_fn_and_serves_as_wildcard_fo
         store.host_active_profile_id().as_deref(),
         Some(other_pid.as_str()),
         "Switching to an app outside the coding agents must follow into 其他软件"
+    );
+}
+
+#[test]
+fn generic_profile_routes_user_shortcut_after_reopen() {
+    let mut draft = Draft::default();
+    install_agent_starter_profiles(&mut draft).unwrap();
+    let (profile, data) = draft
+        .document
+        .editable
+        .graph
+        .profiles
+        .iter()
+        .find(|(_, p)| p.name == "其他软件")
+        .unwrap();
+    let profile = profile.clone();
+    let layer = data.layer_order[0].clone();
+    let target = "com.example.editor";
+    let modifiers = vec!["command".to_string()];
+    draft
+        .assign(
+            &json!(profile),
+            &json!(layer),
+            0,
+            Action {
+                id: "custom-shortcut".into(),
+                name: "Custom shortcut".into(),
+                category: "test".into(),
+                detail: String::new(),
+                payload: serde_json::to_value(ActionKind::Shortcut {
+                    key: "k".into(),
+                    modifiers: modifiers.clone(),
+                    target: target.into(),
+                })
+                .unwrap(),
+            },
+        )
+        .unwrap();
+
+    let bytes = serde_json::to_vec(&draft.document).unwrap();
+    let reopened = Draft::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        resolve_host_action(&reopened.document, Some(&profile), "AG00", true),
+        Some(ResolvedHostAction::Shortcut {
+            key: "k".into(),
+            key_code: 0x28,
+            modifiers,
+            target_bundle_id: Some(target.into()),
+        })
     );
 }

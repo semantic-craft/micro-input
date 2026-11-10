@@ -172,4 +172,54 @@ assert 'store.projection_generation() == before_gen' in ffi_lib_src, (
     'mi_core_dispatch_json must short-circuit with null when store.projection_generation() is unchanged'
 )
 
+for view_path in sorted((root / 'app/MicroInput/Sources/MicroInputUI').glob('*.swift')):
+    lines = view_path.read_text(encoding='utf-8').splitlines()
+    for idx, line in enumerate(lines):
+        if '.buttonStyle(.plain)' in line or '.onTapGesture' in line:
+            window_start = max(0, idx - 25)
+            window_end = min(len(lines), idx + 6)
+            window_text = '\n'.join(lines[window_start:window_end])
+            assert '.contentShape(Rectangle())' in window_text, (
+                f'R-C07 violation in {view_path.relative_to(root)}:{idx + 1}: '
+                'every .buttonStyle(.plain) and .onTapGesture control must attach .contentShape(Rectangle()) '
+                'so edge/spacer clicks within the control bounds are never dead zones'
+            )
+
+inspector_src = (root / 'app/MicroInput/Sources/MicroInputUI/InlineInspectorView.swift').read_text(encoding='utf-8')
+assert (
+    'ScrollViewReader' in inspector_src
+    and 'scrollTo("inspector-scroll-top"' in inspector_src
+    and inspector_src.count('.id(') >= 2
+    and inspector_src.count('.onSubmit') >= 2
+), (
+    'R-C07 violation in app/MicroInput/Sources/MicroInputUI/InlineInspectorView.swift: '
+    'CreatorMicroInlineInspectorView must bind .id(...) on slot/layer headers, reset scroll via ScrollViewReader, '
+    'and attach .onSubmit handlers to search TextFields'
+)
+
+store_src = (root / 'crates/mi-core/src/store.rs').read_text(encoding='utf-8')
+assert 'inspector_search_active' in store_src, (
+    'R-C07 violation in crates/mi-core/src/store.rs: '
+    'consume_physical_input_event must guard selected_surface auto-follow with !inspector_search_active '
+    'so hardware key events do not hijack InlineInspectorView focus during active search/recording'
+)
+
+assert (
+    'func applicationDockMenu(' in swift_app_src
+    and 'win.isMiniaturized' in swift_app_src
+    and 'win.deminiaturize(' in swift_app_src
+    and 'applicationShouldHandleReopen(' in swift_app_src
+    and 'applicationIconImage' in swift_app_src
+), (
+    'R-C07 violation in app/MicroInput/Sources/MicroInput/MicroInputApp.swift: '
+    'AppDelegate must implement applicationDockMenu, deminiaturize minimized windows in openMainWindow/reopen, '
+    'and set NSApp.applicationIconImage from AppIcon.icns'
+)
+
+info_plist_src = (root / 'app/MicroInput/Info.plist').read_text(encoding='utf-8')
+build_src = (root / 'scripts/build').read_text(encoding='utf-8')
+assert '<key>CFBundleIconFile</key>' in info_plist_src and '<string>AppIcon</string>' in info_plist_src and 'AppIcon.icns' in build_src, (
+    'R-C07 violation: app/MicroInput/Info.plist and scripts/build must package and declare AppIcon.icns'
+)
+
 print('UNKNOWN inventory and read-only/no-send boundaries: PASS')

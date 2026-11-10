@@ -245,8 +245,10 @@ private struct WorkbenchSidebarView: View {
                 Rectangle().fill(UITheme.border).frame(height: 1)
                 HardwareProfileSlotsPanel(
                     store: store,
-                    slots: s.hardwareSlots,
-                    rows: s.sidebarRows
+                    slots: s.hardwareSlots.filter { $0.slotIndex > 0 },
+                    rows: s.sidebarRows,
+                    managed: s.boardProfileManaged,
+                    canProvision: s.canProvisionBoard
                 )
             }
 
@@ -443,21 +445,31 @@ private struct HardwareProfileSlotsPanel: View {
     let store: CoreStore
     let slots: [HardwareProfileSlotModel]
     let rows: [SidebarRowModel]
+    let managed: Bool
+    let canProvision: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text("硬件四槽位 (USB + 左下触控)")
+                Text("板载 Profile · 三层")
                     .font(UITheme.captionMedium)
                     .foregroundStyle(UITheme.textPrimary)
                 Spacer()
-                Button("轮换触控") {
-                    store.dispatch("sidebar", "CycleTouchProfileSlot")
+                if canProvision {
+                    Button("应用到键盘") {
+                        store.dispatch("sidebar", "ProvisionBoardLayers")
+                    }
+                    .buttonStyle(.borderless)
+                    .font(UITheme.micro)
+                    .foregroundStyle(UITheme.accent)
+                    .help("备份原有映射，追加一个三层 Profile")
+                } else if !managed {
+                    Button("预览轮换") {
+                        store.dispatch("sidebar", "CycleTouchProfileSlot")
+                    }
+                    .buttonStyle(.borderless)
+                    .font(UITheme.micro)
                 }
-                .buttonStyle(.borderless)
-                .font(UITheme.micro)
-                .foregroundStyle(UITheme.accent)
-                .help("模拟按下小键盘左下角触控按键（依次切换触控 1 -> 2 -> 3）")
 
                 Button("默认") {
                     store.dispatch("sidebar", "ResetHardwareSlotsToDefault")
@@ -465,7 +477,7 @@ private struct HardwareProfileSlotsPanel: View {
                 .buttonStyle(.borderless)
                 .font(UITheme.micro)
                 .foregroundStyle(UITheme.textSecondary)
-                .help("恢复默认四槽位映射：USB/触控1 -> Antigravity，触控2 -> Codex，触控3 -> Deepseek Harness")
+                .help("恢复三层的宿主映射：Antigravity、Codex、DeepSeek Harness")
             }
 
             ForEach(slots) { slot in
@@ -485,16 +497,17 @@ private struct HardwareProfileSlotsPanel: View {
                                 .font(UITheme.monoBadge)
                                 .foregroundStyle(UITheme.textMuted)
                                 .lineLimit(1)
+                            Spacer(minLength: 4)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .help("点击立即激活「\(slot.title)」槽位")
-
-                    Spacer(minLength: 4)
+                    .disabled(managed)
+                    .help(managed ? "用键盘左下角换层" : "预览\(slot.title)")
 
                     Menu {
-                        ForEach(rows) { row in
+                        ForEach(rows.filter { !$0.isProtectedOai }) { row in
                             Button {
                                 store.dispatch("sidebar", [
                                     "SetHardwareSlotProfile": [

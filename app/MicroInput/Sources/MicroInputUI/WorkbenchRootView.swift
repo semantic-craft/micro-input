@@ -43,6 +43,7 @@ struct CheatSheetOverlayView: View {
         ZStack {
             Color.black.opacity(0.32)
                 .ignoresSafeArea()
+                .contentShape(Rectangle())
                 .onTapGesture {
                     store.dispatch("overlay", "CloseCheatSheet")
                 }
