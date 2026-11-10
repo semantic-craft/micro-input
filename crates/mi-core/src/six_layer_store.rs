@@ -239,6 +239,11 @@ impl WorkbenchStore {
         if self.six_layer_running.is_none() {
             return;
         }
+        if self.renew_exhausted_six_layer_session(|directory, saved, runtime| {
+            runtime.block_on(six_layer_runtime::resume(directory, saved))
+        }) {
+            return;
+        }
         if self.six_layer_ownership_checked_at.elapsed() > Duration::from_secs(2)
             && !self.native_ownership.has_pending_request()
         {
@@ -276,8 +281,8 @@ impl WorkbenchStore {
             || !receipts.is_empty();
         for receipt in receipts {
             let detail = match receipt.detail.as_str() {
-                "blocked:ambiguous_or_missing_focused_pane"
-                | "blocked:ambiguous_or_missing_input" => "请先点击目标分屏的输入框",
+                "blocked:ambiguous_or_missing_focused_pane" => "无法确定目标分屏，请点击目标会话区域",
+                "blocked:ambiguous_or_missing_input" => "未找到唯一可编辑输入框",
                 detail => detail,
             };
             self.status_message = format!(
@@ -299,6 +304,50 @@ impl WorkbenchStore {
         }
     }
 
+    fn renew_exhausted_six_layer_session(
+        &mut self,
+        reconnect: impl FnOnce(
+                &Path,
+                six_layer_runtime::SavedSixLayerState,
+                &tokio::runtime::Runtime,
+            ) -> Result<six_layer_runtime::RunningSixLayer, String>
+            + Send
+            + 'static,
+    ) -> bool {
+        if self.system_lifecycle != SystemLifecycle::Awake
+            || self.six_layer_job.is_some()
+            || !self.six_layer_running.as_ref().is_some_and(|running| {
+                matches!(
+                    running.session.terminal_failure(),
+                    Some(mi_session::SessionError::RequestIdExhausted)
+                )
+            })
+        {
+            return false;
+        }
+        let running = self.six_layer_running.take().unwrap();
+        running.retire();
+        self.device_session = None;
+        self.connected_candidate = None;
+        self.hardware_rpc_verified = false;
+        self.six_layer_ownership_identity = None;
+        self.lighting_arbiter.invalidate_hardware_cache();
+        let directory = self.config.document_dir.clone();
+        let saved = self.six_layer_state.clone();
+        let runtime = Arc::clone(&self.tokio_runtime);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.six_layer_job = Some(rx);
+        std::thread::spawn(move || {
+            let result = six_layer_runtime::renew_after_shutdown(running, &runtime, || {
+                reconnect(&directory, saved, &runtime)
+            });
+            let _ = tx.send(result.map(Some));
+        });
+        self.status_message = "设备会话编号已用尽，正在只读核验并建立新连接…".into();
+        self.rebuild_local_projection();
+        true
+    }
+
     pub(super) fn project_six_layer_runtime(&self, result: &mut BoardLayersProjection) {
         result.cindy_native_paused_confirmed = self.six_layer_state.cindy_native_paused_confirmed;
         result.restore_available =
@@ -317,6 +366,7 @@ impl WorkbenchStore {
                 running.readiness.keyboard_grabbed && running.receiver.failure().is_none();
             result.first_event_verified = running.first_event_verified.load(Ordering::Acquire);
             result.runtime_ready = running.armed
+                && !running.session.is_disconnected()
                 && running.receiver.failure().is_none()
                 && self.released_cindy_identity().is_some()
                 && self.document_store.host_execution_enabled();
@@ -361,6 +411,222 @@ impl WorkbenchStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Test-only framing: each report contains one JSON object, not a device packet.
+    struct TestFramer;
+    impl mi_proto::Framer for TestFramer {
+        fn encode(&self, bytes: &[u8]) -> Result<Vec<mi_proto::Report>, mi_proto::ProtoError> {
+            Ok(vec![bytes.to_vec()])
+        }
+        fn feed(&mut self, bytes: &[u8]) -> Result<Vec<mi_proto::Line>, mi_proto::ProtoError> {
+            Ok(vec![bytes.to_vec()])
+        }
+        fn clear(&mut self) {}
+    }
+
+    fn mock_session(runtime: &tokio::runtime::Runtime) -> Arc<DeviceSession> {
+        let _entered = runtime.enter();
+        let (link, mut requests) = mi_transport::MockLink::new();
+        let inject = link.inject.clone();
+        runtime.spawn(async move {
+            while let Some(request) = requests.recv().await {
+                let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
+                if inject
+                    .send(
+                        serde_json::json!({"id":request["id"],"result":null})
+                            .to_string()
+                            .into_bytes(),
+                    )
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        DeviceSession::new(
+            link,
+            Box::new(TestFramer),
+            Arc::new(mi_session::ReadOnlySchema),
+            mi_session::SessionConfig {
+                timeout: Duration::from_secs(1),
+                interval: Duration::ZERO,
+            },
+        )
+    }
+
+    fn exhaust_session(store: &mut WorkbenchStore) -> Arc<DeviceSession> {
+        let session = mock_session(&store.tokio_runtime);
+        store.tokio_runtime.block_on(async {
+            for _ in 0..999 {
+                session
+                    .request(mi_proto::Method::SysVersion, serde_json::Value::Null)
+                    .await
+                    .unwrap();
+            }
+            assert!(matches!(
+                session.read_identity_info().await,
+                Err(mi_session::SessionError::RequestIdExhausted)
+            ));
+        });
+        store.device_session = Some(session.clone());
+        store.six_layer_running = Some(six_layer_runtime::RunningSixLayer::isolated(
+            session.clone(),
+            &store.config.document_dir,
+        ));
+        session
+    }
+
+    #[test]
+    fn exhausted_six_layer_session_retires_before_fresh_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let old_session = exhaust_session(&mut store);
+        let old_session_id = old_session.id;
+        let old_receiver = store.six_layer_running.as_ref().unwrap().receiver.clone();
+        let old = old_receiver.clone();
+        assert!(
+            store.renew_exhausted_six_layer_session(move |directory, _, runtime| {
+                assert!(old_session.is_disconnected());
+                assert!(old.failure().is_some());
+                assert!(old.next().is_err());
+                Ok(six_layer_runtime::RunningSixLayer::isolated(
+                    mock_session(runtime),
+                    directory,
+                ))
+            })
+        );
+        assert!(store.six_layer_running.is_none());
+        assert!(!store.projection.device_connected);
+        let fresh = store
+            .six_layer_job
+            .take()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_ne!(fresh.receiver.generation(), old_receiver.generation());
+        assert!(!fresh.armed);
+        let fresh_session = fresh.session.clone();
+        store.device_session = Some(fresh_session.clone());
+        store.six_layer_running = Some(fresh);
+        store.handle_hardware_loop_event(
+            HardwareLoopEvent::Disconnected {
+                session_id: old_session_id,
+            },
+            Instant::now(),
+        );
+        assert_eq!(store.device_session.as_ref().unwrap().id, fresh_session.id);
+        assert!(!fresh_session.is_disconnected());
+        store
+            .six_layer_running
+            .take()
+            .unwrap()
+            .shutdown(&store.tokio_runtime)
+            .unwrap();
+    }
+
+    #[test]
+    fn failed_six_layer_renewal_stays_paused_without_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        exhaust_session(&mut store);
+        assert!(store.renew_exhausted_six_layer_session(|_, _, _| Err("readback mismatch".into())));
+        let result = store
+            .six_layer_job
+            .take()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let error = result.err().unwrap();
+        assert!(error.contains("输入保持暂停"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Err(error.clone())).unwrap();
+        store.six_layer_job = Some(rx);
+        for _ in 0..3 {
+            store.poll_six_layer_runtime();
+            assert_eq!(store.status_message, error);
+            assert!(store.six_layer_running.is_none());
+            assert!(store.six_layer_job.is_none());
+        }
+        assert!(!store.renew_exhausted_six_layer_session(|_, _, _| panic!("must not retry")));
+        let session = mock_session(&store.tokio_runtime);
+        session.disconnect();
+        store.six_layer_running = Some(six_layer_runtime::RunningSixLayer::isolated(
+            session.clone(),
+            directory.path(),
+        ));
+        assert!(!store.renew_exhausted_six_layer_session(|_, _, _| panic!("unknown disconnect")));
+        store
+            .six_layer_running
+            .take()
+            .unwrap()
+            .shutdown(&store.tokio_runtime)
+            .unwrap();
+    }
+
+    #[test]
+    fn sleep_drains_late_exhaustion_replacement_before_wake() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        exhaust_session(&mut store);
+        let (release, wait) = std::sync::mpsc::channel();
+        let (created, receive) = std::sync::mpsc::channel();
+        assert!(
+            store.renew_exhausted_six_layer_session(move |directory, _, runtime| {
+                wait.recv().unwrap();
+                let session = mock_session(runtime);
+                let running =
+                    six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory);
+                created.send((session, running.receiver.clone())).unwrap();
+                Ok(running)
+            })
+        );
+        store.system_will_sleep();
+        store.system_did_wake();
+        assert_eq!(store.system_lifecycle, SystemLifecycle::Waking);
+        release.send(()).unwrap();
+        let (session, receiver) = receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while store.system_lifecycle == SystemLifecycle::Waking && Instant::now() < deadline {
+            store.poll_hardware_events();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(store.system_lifecycle, SystemLifecycle::Awake);
+        assert!(session.is_disconnected());
+        assert!(receiver.failure().is_some());
+        assert!(store.six_layer_running.is_none());
+        assert!(store.device_session.is_none());
+    }
+
+    #[test]
+    fn disconnected_six_layer_session_is_not_projected_as_connected() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let (link, _) = mi_transport::MockLink::new();
+        let session = {
+            let _entered = store.tokio_runtime.enter();
+            DeviceSession::new(
+                link,
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig::default(),
+            )
+        };
+        let running =
+            six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        store.connected_candidate = Some(running.candidate.clone());
+        store.device_session = Some(session.clone());
+        store.six_layer_running = Some(running);
+        store.rebuild_local_projection();
+        assert!(store.projection.device_connected);
+        session.disconnect();
+        store.rebuild_local_projection();
+        assert!(!store.projection.device_connected);
+        assert!(!format!("{:?}", store.projection.header).contains("小键盘已连接"));
+        store.six_layer_running = None;
+        store.tokio_runtime.block_on(session.shutdown());
+    }
 
     #[test]
     fn six_layer_foreground_priority_ignores_legacy_manual_lock_and_keeps_physical_layer() {

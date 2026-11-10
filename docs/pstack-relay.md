@@ -331,3 +331,8 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Outcome**: 第 2–4 托管层优先使用当前前台应用的已安装方案，执行器按光标所在分屏选择控件；后台 Codex 不参与目标选择，旧输入不随切换转投新目标。
 - **Done Predicate**: 前台切换与双分屏回归先失败后通过，独立审查及 `scripts/verify-offline` 通过，本机日常版更新。物理层仍按真实观察显示；第 1 层 Codex 原生通道及尚未实现的会话导航分别保留边界。
 - **Evidence**: e5c6e6d; .scratch/antigravity-foreground/result.json; eight offline scenarios PASS; installed; physical input not run
+
+### [ ] Slice R21: 请求编号耗尽后安全恢复连接
+- **Outcome**: 六层监控耗尽会话编号后先完整退役旧代，再只读核验并建立新连接；保留具体失败原因，失效会话不再显示已连接。
+- **Done Predicate**: 耗尽与延迟 reader 回归先失败后通过；换代、失败暂停、旧事件和睡眠边界通过；`scripts/verify-offline` 全量通过并更新本机。实机持续连接与宿主动作分别记录，不把自动重连当成全部按键验收。
+- **Evidence**: .scratch/antigravity-session/

@@ -436,6 +436,17 @@ impl Drop for RunningSixLayer {
     }
 }
 
+pub(super) fn renew_after_shutdown(
+    running: RunningSixLayer,
+    runtime: &tokio::runtime::Runtime,
+    reconnect: impl FnOnce() -> Result<RunningSixLayer, String>,
+) -> Result<RunningSixLayer, String> {
+    running
+        .shutdown(runtime)
+        .map_err(|error| format!("旧会话清理未确认，未重新连接：{error}"))?;
+    reconnect().map_err(|error| format!("会话重连失败，输入保持暂停：{error}"))
+}
+
 fn execute_clicks(
     receiver: &UserCommandReceiver,
     plan: &AppliedSixLayerPlan,
@@ -769,6 +780,28 @@ mod tests {
     use mi_model::host_router::BottomRowLayout;
     use mi_transport::ActivationPayload;
     use std::os::unix::net::UnixDatagram;
+
+    #[test]
+    fn session_renewal_requires_owned_action_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let session = {
+            let _entered = runtime.enter();
+            let (link, _) = mi_transport::MockLink::new();
+            DeviceSession::new(
+                link,
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig::default(),
+            )
+        };
+        let mut running = RunningSixLayer::isolated(session, directory.path());
+        running.executor = Some(thread::spawn(|| Err("owned action still active".into())));
+        let result = renew_after_shutdown(running, &runtime, || {
+            panic!("cleanup failed: must not reconnect")
+        });
+        assert!(result.err().unwrap().contains("旧会话清理未确认"));
+    }
 
     fn send(receiver: &UserCommandReceiver, control: u8) {
         let payload =

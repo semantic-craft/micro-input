@@ -312,3 +312,9 @@
 - 起因与后果：六层独立执行器只读取物理层，已有前台通知不能改变它的目标；Antigravity 两个分屏的输入框和语音按钮又被展平成整窗列表，触发 `ambiguous_or_missing_dictation_control`。应用同时运行与控件歧义不能混为同一个原因。
 - 修复：第 2–4 托管层在已安装方案中优先匹配前台应用，切换时淘汰旧队列及等待权限核验的事件；AX 捕获保留祖先路径，以唯一焦点分支确定分屏，后续执行和读回固定到同一目标。实时语音复用该路径，不再维护整窗选择器。第 1 层 Codex 原生通道不在此规则控制范围。
 - 验证点：`foreground_switch_discards_queued_and_waiting_clicks_without_retargeting`、`split_panes_resolve_only_the_focused_branch`、`recording_cannot_migrate_to_another_pane_in_the_same_window`。多分屏无明确焦点时拒绝；窗口标题变化时旧录音清理仍可能拒绝，不能仅凭 AX 分屏引用宣称会话身份未变。Seen 1x（2026-11-10）。
+
+## 有限请求编号必须有完整会话换代
+
+- 起因与后果：设备会话在 999 个请求后停止以避免迟到响应串号，但六层状态监控持续消耗编号，耗尽后没有恢复入口；后续身份查询把终止原因盖成普通断开，界面仍因持有会话对象显示已连接。
+- 修复：保留编号不复用约束，结构化保留终止原因。只有编号耗尽触发旧代退役、reader 与动作清理、只读重连和重新核验所有权；失败保持暂停。连接投影读取实际连接状态。
+- 验证点：mi-session 耗尽后的身份查询和延迟 reader 退出回归，mi-core 换代、旧事件隔离、清理失败、睡眠迟到任务测试。不能在可被取消的请求 future 内取走 reader JoinHandle 后等待；否则后续 shutdown 无法证明 reader 已退出。软件回归与真实长时间连接分别验收，不以重连成功证明所有宿主按键已恢复。Seen 1x（2026-11-10）。

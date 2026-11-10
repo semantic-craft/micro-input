@@ -88,7 +88,7 @@ async fn malformed_timeout_disconnect_and_new_connection() {
     assert!(matches!(f.await.unwrap(), Err(SessionError::Protocol(_))));
     assert!(matches!(
         s.request(Method::FsList, json!({"checksum":true})).await,
-        Err(SessionError::Disconnected)
+        Err(SessionError::Protocol(_))
     ));
     let (s, l, _rx) = setup(25);
     assert!(matches!(
@@ -301,23 +301,78 @@ async fn exhausted_request_ids_end_the_session_and_require_reconnect() {
     for _ in 0..999 {
         s.request(Method::SysVersion, Value::Null).await.unwrap();
     }
-    let exhausted = s
-        .request(Method::SysVersion, Value::Null)
-        .await
-        .unwrap_err();
+    let exhausted = s.read_identity_info().await.unwrap_err();
     assert!(exhausted.to_string().contains("exhausted"));
+    assert!(matches!(exhausted, SessionError::RequestIdExhausted));
     let identity_error = s.read_identity_info().await.unwrap_err();
     assert!(
         identity_error.to_string().contains("exhausted"),
         "identity query lost terminal failure: {identity_error}"
     );
-    assert_eq!(link.writes.lock().unwrap().len(), 999);
+    assert!(matches!(identity_error, SessionError::RequestIdExhausted));
     assert!(matches!(
-        s.request(Method::SysVersion, Value::Null).await,
-        Err(SessionError::Disconnected)
+        s.terminal_failure(),
+        Some(SessionError::RequestIdExhausted)
     ));
+    assert_eq!(link.writes.lock().unwrap().len(), 999);
     s.shutdown().await;
     server.abort();
+}
+
+#[tokio::test]
+async fn exhausted_request_preserves_reader_join_for_lifecycle_shutdown() {
+    struct DelayedReaderClose {
+        link: Arc<MockLink>,
+        started: Notify,
+        release: Notify,
+    }
+    #[async_trait::async_trait]
+    impl HidLink for DelayedReaderClose {
+        async fn write(&self, report: &[u8]) -> Result<(), TransportError> {
+            self.link.write(report).await
+        }
+        async fn read(&self) -> Result<Vec<u8>, TransportError> {
+            self.started.notify_one();
+            let result = self.link.read().await;
+            self.release.notified().await;
+            result
+        }
+        fn close(&self) {
+            self.link.close();
+        }
+    }
+    let (link, _) = MockLink::new();
+    let delayed = Arc::new(DelayedReaderClose {
+        link,
+        started: Notify::new(),
+        release: Notify::new(),
+    });
+    let session = DeviceSession::new(
+        delayed.clone(),
+        Box::new(TestFramer),
+        Arc::new(ReadOnlySchema),
+        SessionConfig::default(),
+    );
+    delayed.started.notified().await;
+    // The full 999-request boundary is covered separately; isolate cleanup here.
+    session.queue.lock().await.next_id = 999;
+    assert!(matches!(
+        session.read_identity_info().await,
+        Err(SessionError::RequestIdExhausted)
+    ));
+    let closing = session.clone();
+    let mut shutdown = tokio::spawn(async move { closing.shutdown().await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut shutdown)
+            .await
+            .is_err(),
+        "shutdown returned before the reader exited"
+    );
+    delayed.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), shutdown)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]
@@ -762,7 +817,7 @@ async fn stalled_report_write_is_bounded_and_requires_a_new_session() {
     assert!(matches!(result, Ok(Err(SessionError::Timeout))));
     assert!(matches!(
         session.request(Method::SysVersion, Value::Null).await,
-        Err(SessionError::Disconnected)
+        Err(SessionError::Timeout)
     ));
     session.shutdown().await;
 }

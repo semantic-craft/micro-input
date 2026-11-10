@@ -748,7 +748,7 @@ impl WorkbenchStore {
                     "schema_version": 1,
                     "product": "Creator Micro 2",
                     "vid_pid": "303A:8298",
-                    "connected": self.device_session.is_some(),
+                    "connected": self.device_session_connected(),
                     "document_revision": self.document_store.draft.revision,
                     "host_revision": self.document_store.host_revision(),
                     "ownership_summary": self.native_ownership.summary(),
@@ -1861,7 +1861,7 @@ impl WorkbenchStore {
             .unwrap_or_else(|| "未分配".into());
         result.usb_preview_selected = preview == BoardPreviewSelection::UsbStartup;
         if let BoardRouting::Managed { layer } = self.board_routing {
-            if self.device_session.is_some() && self.hardware_rpc_verified {
+            if self.device_session_connected() && self.hardware_rpc_verified {
                 result.observed_layer = Some(layer);
                 result.observed_profile_kind = Some("legacy_three".into());
                 result.observed_status = format!("已确认旧三层，第 {layer} 层");
@@ -3758,6 +3758,12 @@ impl WorkbenchStore {
         self.build_projection(true);
     }
 
+    fn device_session_connected(&self) -> bool {
+        self.device_session
+            .as_ref()
+            .is_some_and(|session| !session.is_disconnected())
+    }
+
     fn rebuild_local_projection(&mut self) {
         self.build_projection(false);
     }
@@ -3785,7 +3791,7 @@ impl WorkbenchStore {
             HeaderReadyState::Caution {
                 text: ownership_banner.text().to_string(),
             }
-        } else if self.device_session.is_some() {
+        } else if self.device_session_connected() {
             HeaderReadyState::Ready {
                 text: "小键盘已连接".to_string(),
             }
@@ -3907,7 +3913,7 @@ impl WorkbenchStore {
 
         let (device_connected, device_summary) = if let Some(cand) = &self.connected_candidate {
             (
-                self.device_session.is_some(),
+                self.device_session_connected(),
                 format!(
                     "{} ({:04X}:{:04X}) · USB HID 只读保护已启用",
                     cand.product, cand.vid, cand.pid

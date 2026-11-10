@@ -24,6 +24,8 @@ pub enum SessionError {
     Transport(#[from] TransportError),
     #[error("设备已断开；会话已失效")]
     Disconnected,
+    #[error("request id space exhausted; reconnect")]
+    RequestIdExhausted,
     #[error("请求超时（本地策略，设备默认值待确认）")]
     Timeout,
     #[error("配置读取失败：{0}")]
@@ -313,6 +315,10 @@ impl DeviceSession {
     pub fn terminal_failure(&self) -> Option<SessionError> {
         self.terminal.lock().unwrap().clone()
     }
+    fn disconnection_error(&self) -> SessionError {
+        self.terminal_failure()
+            .unwrap_or(SessionError::Disconnected)
+    }
     pub fn is_disconnected(&self) -> bool {
         self.invalid.load(Ordering::SeqCst)
     }
@@ -339,7 +345,7 @@ impl DeviceSession {
     pub fn disconnect(&self) {
         self.invalid.store(true, Ordering::SeqCst);
         if let Some(pending) = self.pending.lock().unwrap().take() {
-            let _ = pending.sender.send(Err(SessionError::Disconnected));
+            let _ = pending.sender.send(Err(self.disconnection_error()));
         }
         self.link.close();
         if let Some(s) = self.snapshot.lock().unwrap().as_mut() {
@@ -457,14 +463,15 @@ impl DeviceSession {
     ) -> Result<Value, SessionError> {
         if self.invalid.load(Ordering::SeqCst) {
             q.framer.lock().unwrap().clear();
-            return Err(SessionError::Disconnected);
+            return Err(self.disconnection_error());
         }
         // Do not wrap IDs in a connection: a late timed-out response must never satisfy a later request.
         if q.next_id >= 999 {
-            let error: SessionError =
-                ProtoError::Invalid("request id space exhausted; reconnect".into()).into();
+            let error = SessionError::RequestIdExhausted;
             *self.terminal.lock().unwrap() = Some(error.clone());
-            self.shutdown().await;
+            // guarded() may cancel this request as soon as disconnect wakes it.
+            // Leave the reader handle for lifecycle shutdown to join before reopening.
+            self.disconnect();
             return Err(error);
         }
         // General byte callers remain read-only; typed mutation entries construct their own bytes.
@@ -520,7 +527,7 @@ impl DeviceSession {
             tokio::time::sleep_until(last + self.config.interval).await;
         }
         if self.invalid.load(Ordering::SeqCst) {
-            return Err(SessionError::Disconnected);
+            return Err(self.disconnection_error());
         }
         let (sender, receiver) = oneshot::channel();
         *self.pending.lock().unwrap() = Some(Pending { id, method, sender });
@@ -554,7 +561,7 @@ impl DeviceSession {
         tokio::time::timeout_at(deadline, receiver)
             .await
             .map_err(|_| SessionError::Timeout)?
-            .map_err(|_| SessionError::Disconnected)?
+            .map_err(|_| self.disconnection_error())?
     }
 
     async fn guarded<T>(
@@ -565,9 +572,9 @@ impl DeviceSession {
         tokio::pin!(n);
         n.as_mut().enable();
         if self.invalid.load(Ordering::SeqCst) {
-            return Err(SessionError::Disconnected);
+            return Err(self.disconnection_error());
         }
-        tokio::select! {biased;_=n=>{self.queue.lock().await.framer.lock().unwrap().clear();Err(self.terminal.lock().unwrap().clone().unwrap_or(SessionError::Disconnected))},r=f=>{if matches!(r,Err(SessionError::Transport(TransportError::Disconnected))){self.disconnect();}r}}
+        tokio::select! {biased;_=n=>{self.queue.lock().await.framer.lock().unwrap().clear();Err(self.disconnection_error())},r=f=>{if matches!(r,Err(SessionError::Transport(TransportError::Disconnected))){self.disconnect();}r}}
     }
     pub async fn request(&self, method: Method, params: Value) -> Result<Value, SessionError> {
         self.guarded(async {
@@ -584,6 +591,9 @@ impl DeviceSession {
             let status = self
                 .exchange(&mut q, Method::DeviceStatus, Value::Null)
                 .await;
+            if self.is_disconnected() {
+                return Err(self.disconnection_error());
+            }
             let status_value = status
                 .as_ref()
                 .ok()
@@ -750,7 +760,7 @@ impl DeviceSession {
                 );
                 let mut held = self.snapshot.lock().unwrap();
                 if self.invalid.load(Ordering::SeqCst) {
-                    return Err(SessionError::Disconnected);
+                    return Err(self.disconnection_error());
                 }
                 *held = Some(Snapshot {
                     config: parsed.clone(),
