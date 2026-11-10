@@ -356,7 +356,7 @@ mod macos {
         }
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct Target {
         identity: ManagedWindowIdentity,
         application: Owned,
@@ -366,6 +366,7 @@ mod macos {
     #[derive(Debug, Default)]
     pub struct NativeAxProvider {
         target: Option<Target>,
+        retained_targets: Vec<Target>,
         elements: Vec<Owned>,
         windows: Vec<(String, Owned, u64)>,
         next_window_id: u64,
@@ -393,13 +394,22 @@ mod macos {
                 .cloned()
                 .ok_or_else(|| blocked("ax_control_identity_lost"))
         }
+        fn target_for(&self, identity: &ManagedWindowIdentity) -> Option<&Target> {
+            self.retained_targets
+                .iter()
+                .find(|target| target.identity == *identity)
+                .or_else(|| {
+                    self.target
+                        .as_ref()
+                        .filter(|target| target.identity == *identity)
+                })
+        }
         fn validate(&self, identity: &ManagedWindowIdentity) -> Result<(Owned, Owned), String> {
             if !unsafe { AXIsProcessTrusted() } {
                 return Err(blocked("accessibility_untrusted"));
             }
             let target = self
-                .target
-                .as_ref()
+                .target_for(identity)
                 .ok_or_else(|| blocked("ax_target_missing"))?;
             if target.identity != *identity
                 || target.window.pid() != Some(identity.pid)
@@ -774,6 +784,26 @@ mod macos {
     }
 
     impl ManagedAxProvider for NativeAxProvider {
+        fn retain_target(&mut self, identity: &ManagedWindowIdentity) -> Result<(), String> {
+            if self
+                .retained_targets
+                .iter()
+                .any(|target| target.identity == *identity)
+            {
+                return Ok(());
+            }
+            let target = self
+                .target_for(identity)
+                .cloned()
+                .ok_or_else(|| blocked("ax_target_missing"))?;
+            self.retained_targets.push(target);
+            Ok(())
+        }
+        fn release_target(&mut self, identity: &ManagedWindowIdentity) {
+            self.retained_targets
+                .retain(|target| target.identity != *identity);
+        }
+
         fn process_has_exited(&self, pid: i32) -> bool {
             pid > 0
                 && unsafe { libc::kill(pid, 0) } == -1
@@ -787,6 +817,15 @@ mod macos {
         }
         fn read(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String> {
             let (_, window) = self.validate(target)?;
+            if self
+                .target
+                .as_ref()
+                .is_none_or(|current| current.identity != *target)
+            {
+                self.target = self.target_for(target).cloned();
+                self.elements.clear();
+                self.cached_controls.clear();
+            }
             let mut controls = Vec::new();
             self.walk(
                 window,
@@ -1100,6 +1139,41 @@ mod macos {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn owned_window_handles_survive_other_app_and_replacement_captures() {
+            let target = |bundle: &str, id: u64| Target {
+                identity: ManagedWindowIdentity {
+                    bundle_id: bundle.into(),
+                    pid: 123,
+                    window_id: id,
+                    title: format!("window-{id}"),
+                },
+                application: Owned::text(&format!("app-{bundle}")),
+                window: Owned::text(&format!("window-{id}")),
+            };
+            let original = target("com.google.antigravity", 1);
+            let identity = original.identity.clone();
+            let original_window = original.window.clone();
+            let mut provider = NativeAxProvider {
+                target: Some(original),
+                ..Default::default()
+            };
+            provider.retain_target(&identity).unwrap();
+            provider.target = Some(target("com.deepseek.dsh", 2));
+            assert_eq!(
+                provider.target_for(&identity).unwrap().window.0,
+                original_window.0
+            );
+            provider.target = Some(target("com.google.antigravity", 3));
+            assert_eq!(
+                provider.target_for(&identity).unwrap().window.0,
+                original_window.0
+            );
+            provider.release_target(&identity);
+            assert!(provider.target_for(&identity).is_none());
+            assert!(provider.retained_targets.is_empty());
+        }
 
         fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
             Rect {

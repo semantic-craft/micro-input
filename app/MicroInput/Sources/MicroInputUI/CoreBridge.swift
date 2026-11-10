@@ -10,6 +10,8 @@ public final class CoreStore {
     @ObservationIgnored private var handle: OpaquePointer?
     @ObservationIgnored private var pollTimer: Timer?
     @ObservationIgnored private var workspaceObserver: NSObjectProtocol?
+    @ObservationIgnored private var workspaceLifecycle: WorkspaceLifecycle?
+    @ObservationIgnored private let workspaceNotificationCenter: NotificationCenter
     @ObservationIgnored private var lastObservedBundleId: String?
 
     @ObservationIgnored public private(set) var model: ProjectionModel = ProjectionModel()
@@ -24,7 +26,11 @@ public final class CoreStore {
     public private(set) var footer: FooterSliceModel = FooterSliceModel()
     public private(set) var activeModal: ActiveModalModel? = nil
 
-    public init(isolatedDirectory: String? = nil) {
+    public init(
+        isolatedDirectory: String? = nil,
+        workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter
+    ) {
+        self.workspaceNotificationCenter = workspaceNotificationCenter
         if let dir = isolatedDirectory {
             self.handle = dir.withCString { ptr in
                 mi_core_new(ptr)
@@ -33,28 +39,47 @@ public final class CoreStore {
             self.handle = mi_core_new(nil)
         }
         refreshProjection()
+        workspaceLifecycle = WorkspaceLifecycle(center: workspaceNotificationCenter) { [weak self] event in
+            self?.dispatchRaw(["domain": event.rawValue])
+        }
         if isolatedDirectory == nil {
             startEventLoops()
         }
     }
 
     deinit {
+        pollTimer?.invalidate()
+        if let observer = workspaceObserver {
+            workspaceNotificationCenter.removeObserver(observer)
+        }
         if let h = handle {
             mi_core_free(h)
+        }
+    }
+
+    public func stopEventLoops() {
+        workspaceLifecycle?.stop()
+        workspaceLifecycle = nil
+        pollTimer?.invalidate()
+        pollTimer = nil
+        if let observer = workspaceObserver {
+            workspaceNotificationCenter.removeObserver(observer)
+            workspaceObserver = nil
         }
     }
 
     private func startEventLoops() {
         let timer = Timer(timeInterval: 0.12, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.pollHardware()
+                guard let self, self.pollTimer != nil else { return }
+                self.pollHardware()
             }
         }
         timer.tolerance = 0.03
         RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer
 
-        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+        workspaceObserver = workspaceNotificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
@@ -62,7 +87,7 @@ public final class CoreStore {
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             let bundleId = app?.bundleIdentifier
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self, self.workspaceObserver != nil else { return }
                 guard bundleId != Bundle.main.bundleIdentifier else { return }
                 guard bundleId != self.lastObservedBundleId else { return }
                 self.lastObservedBundleId = bundleId
@@ -910,5 +935,44 @@ public extension Color {
             b = 0.96
         }
         self.init(red: r, green: g, blue: b)
+    }
+}
+
+@MainActor
+final class WorkspaceLifecycle {
+    enum Event: String {
+        case willSleep = "system_will_sleep"
+        case didWake = "system_did_wake"
+    }
+
+    private let center: NotificationCenter
+    private let receive: (Event) -> Void
+    private var observers: [NSObjectProtocol] = []
+    private var active = true
+
+    init(center: NotificationCenter, receive: @escaping (Event) -> Void) {
+        self.center = center
+        self.receive = receive
+        for (name, event) in [
+            (NSWorkspace.willSleepNotification, Event.willSleep),
+            (NSWorkspace.didWakeNotification, Event.didWake),
+        ] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.active else { return }
+                    self.receive(event)
+                }
+            })
+        }
+    }
+
+    func stop() {
+        active = false
+        observers.forEach(center.removeObserver)
+        observers.removeAll()
+    }
+
+    deinit {
+        observers.forEach(center.removeObserver)
     }
 }

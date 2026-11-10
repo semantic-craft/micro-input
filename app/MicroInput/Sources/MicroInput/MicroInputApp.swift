@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        store.stopEventLoops()
         if let lock = instanceLock {
             mi_core_release_instance_lock(lock)
             instanceLock = nil

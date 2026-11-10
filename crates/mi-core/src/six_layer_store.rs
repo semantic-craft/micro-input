@@ -38,6 +38,7 @@ impl WorkbenchStore {
         &mut self,
         confirmed: bool,
     ) -> Result<(), WorkbenchError> {
+        self.require_awake()?;
         if self.six_layer_job.is_some() {
             return Err(WorkbenchError::Routing("六层操作正在进行".into()));
         }
@@ -80,6 +81,7 @@ impl WorkbenchStore {
         &mut self,
         resume: Option<AppliedSixLayerPlan>,
     ) -> Result<(), WorkbenchError> {
+        self.require_awake()?;
         if self.six_layer_job.is_some() {
             return Err(WorkbenchError::Routing("六层操作正在进行".into()));
         }
@@ -135,6 +137,7 @@ impl WorkbenchStore {
     }
 
     pub(super) fn start_six_layer_restore(&mut self) -> Result<(), WorkbenchError> {
+        self.require_awake()?;
         if self.six_layer_job.is_some()
             || self.six_layer_state.installation.is_none()
             || self.config.isolated
