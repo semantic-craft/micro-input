@@ -61,6 +61,13 @@ public struct BoardLayersModel: Equatable {
     public var observedProfileKind: String? = nil
     public var observedStatus: String = "设备层未确认"
     public var applyBlockReason: String = "六层输入与写入协议尚未验证，当前仅保存本地方案"
+    public var canApply: Bool = false
+    public var cindyNativePausedConfirmed: Bool = false
+    public var configurationObserved: Bool = false
+    public var keyboardGrabbed: Bool = false
+    public var firstEventVerified: Bool = false
+    public var runtimeReady: Bool = false
+    public var restoreAvailable: Bool = false
 }
 
 public struct LayerTabModel: Identifiable, Equatable {

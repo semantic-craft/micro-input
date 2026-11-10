@@ -484,7 +484,7 @@ private struct BoardLayersPanel: View {
                     if let issue = row.assignmentIssue {
                         Text(issue).font(UITheme.micro).foregroundStyle(UITheme.textMuted).fixedSize(horizontal: false, vertical: true)
                     } else if row.owner == "MicroInput" {
-                        Text("由 Micro Input 控制（尚未应用）").font(UITheme.micro).foregroundStyle(UITheme.textMuted)
+                        Text("由 Micro Input 控制").font(UITheme.micro).foregroundStyle(UITheme.textMuted)
                     }
                 }
                 .padding(6)
@@ -505,10 +505,38 @@ private struct BoardLayersPanel: View {
                 .menuStyle(.borderlessButton)
             }
             Text(board.observedStatus).font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
-            Button("应用到键盘") { store.dispatch("sidebar", "ProvisionBoardLayers") }
-                .disabled(true)
-                .font(UITheme.micro)
-            Text(board.applyBlockReason).font(UITheme.micro).foregroundStyle(UITheme.textMuted).fixedSize(horizontal: false, vertical: true)
+            Toggle(
+                "Cindy 原生键盘集成已关闭",
+                isOn: Binding(
+                    get: { board.cindyNativePausedConfirmed },
+                    set: { store.dispatch("sidebar", ["ConfirmCindyNativePaused": ["confirmed": $0]]) }
+                )
+            )
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .font(UITheme.micro)
+            .accessibilityIdentifier("board-cindy-native-paused")
+            HStack {
+                Button("应用到键盘") { store.dispatch("sidebar", "ProvisionBoardLayers") }
+                    .disabled(!board.canApply)
+                    .accessibilityIdentifier("board-apply")
+                if board.restoreAvailable {
+                    Button("恢复原键盘配置") { store.dispatch("sidebar", "RestoreBoardLayers") }
+                        .accessibilityIdentifier("board-restore")
+                }
+            }
+            .font(UITheme.micro)
+            if !board.applyBlockReason.isEmpty {
+                Text(board.applyBlockReason).font(UITheme.micro).foregroundStyle(UITheme.textMuted).fixedSize(horizontal: false, vertical: true)
+            }
+            if board.runtimeReady {
+                Text(board.firstEventVerified ? "分层控制已就绪" : "配置已应用，等待首次按键")
+                    .font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
+            } else if board.configurationObserved && board.keyboardGrabbed {
+                Text("按键接管已就绪").font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
+            }
+            Text("托管层需要 Karabiner 保持运行")
+                .font(UITheme.micro).foregroundStyle(UITheme.textMuted)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)

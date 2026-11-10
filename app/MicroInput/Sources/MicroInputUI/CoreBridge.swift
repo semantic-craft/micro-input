@@ -377,6 +377,13 @@ public final class CoreStore {
                 m.boardLayers.observedProfileKind = board["observed_profile_kind"] as? String
                 m.boardLayers.observedStatus = board["observed_status"] as? String ?? "设备层未确认"
                 m.boardLayers.applyBlockReason = board["apply_block_reason"] as? String ?? "六层应用尚未可用"
+                m.boardLayers.canApply = board["can_apply"] as? Bool ?? false
+                m.boardLayers.cindyNativePausedConfirmed = board["cindy_native_paused_confirmed"] as? Bool ?? false
+                m.boardLayers.configurationObserved = board["configuration_observed"] as? Bool ?? false
+                m.boardLayers.keyboardGrabbed = board["keyboard_grabbed"] as? Bool ?? false
+                m.boardLayers.firstEventVerified = board["first_event_verified"] as? Bool ?? false
+                m.boardLayers.runtimeReady = board["runtime_ready"] as? Bool ?? false
+                m.boardLayers.restoreAvailable = board["restore_available"] as? Bool ?? false
             }
         }
 
