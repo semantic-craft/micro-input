@@ -337,7 +337,7 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: 核验后 reader 退出、运行期零 RPC、实体 token 路由、无 Cindy 所有权桥的执行及失效清理回归通过；无关联响应不误完成请求，本请求坏包仍失败；`scripts/verify-offline` 全量通过并更新本机。持续连接和实体动作分别记录，层位仅表述首次核验或最近输入，UNKNOWN-17 保留。
 - **Evidence**: d529820; .scratch/antigravity-session/result.json; eight offline scenarios PASS; installed; 363s connected without Cindy; final physical keys NOT_RUN
 
-### [ ] Slice R23: 减少托管聚焦的重复 AX 扫描
+### [x] Slice R23: 减少托管聚焦的重复 AX 扫描
 - **Outcome**: 保留窗口、分屏和候选歧义检查，用已发现控件的实时路径校验与焦点读回减少按键动作等待，不增加跨动作缓存。
 - **Done Predicate**: 真实 AX 聚焦的匹配构建交替对照成功，范围与失败独立记录；失效路径、控件替换和目标改变回归通过；独立验收与 `scripts/verify-offline` 通过，并更新本机。物理按键完整延迟单独保留边界。
-- **Evidence**: docs/designs/host-input-latency.md; docs/verification/host-input-latency.json; installation pending
+- **Evidence**: ea3a82f; docs/verification/host-input-latency.json; .scratch/input-latency/result.json; eight offline QA PASS; installed and connected; physical latency NOT_MEASURED
