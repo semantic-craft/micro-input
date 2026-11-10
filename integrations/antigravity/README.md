@@ -6,8 +6,8 @@
 
 - [`mi-core/session_navigation.rs`](../../crates/mi-core/src/session_navigation.rs) 统一工作台与六层输入的槽位解析。稳定目标包含应用、工作区和会话，执行租约另绑定进程及 hub 实例。目录过期、身份变化或输入退役时拒绝执行。
 - [`mi-macos/native_ax.rs`](../../crates/mi-macos/src/native_ax.rs) 为托管控件和会话导航提供共同的原窗口观察。按用途批读属性，观察不完整时不发布唯一目标。
-- [`mi-macos/session_navigation.rs`](../../crates/mi-macos/src/session_navigation.rs) 精确匹配当前 hub origin 下的会话链接，执行一次，再读取原窗口文档 URL。目录存在或应用打开不构成选中确认。
-- 确认后才提交请求时的未读水位和导航历史。迟到结果不能覆盖后来明确的已读操作，也不能移到其他窗口或替代实例。
+- [`mi-macos/session_navigation.rs`](../../crates/mi-macos/src/session_navigation.rs) 通过原生 Search Conversations 输入完整会话 UUID，在同一搜索对话框内核对结果的专用 UUID 字段，选择一次，再读取原窗口文档 URL。此路径不依赖项目展开或侧栏最近列表；目录存在或应用打开不构成选中确认。
+- 搜索结果按安装版已观察的标题、项目、UUID、时间字段识别；标题或项目名相同不能替代 UUID，未知结构拒绝选择。确认后才提交请求时的未读水位和导航历史。迟到结果不能覆盖后来明确的已读操作，也不能移到其他窗口或替代实例。
 
 采用 [agent-desktop 的按需批读设计](https://github.com/vercel-labs/agent-desktop/blob/ab7dfb218cddc1594aa1d87a5bfcd0ac76da2276/crates/macos/src/tree/properties/node_attribute_fetch.rs)，保持项目现有 Rust 内核与薄原生壳边界。该版本公开观察模型没有导航必需的 `AXURL`，因此没有引入整套自动化引擎或另留 URL 读取旁路。此选择基于接口适配与代码收敛，不代表已测得性能提升。
 

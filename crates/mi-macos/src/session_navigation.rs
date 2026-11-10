@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 pub struct SessionNavigationWindow {
     pub pid: i32,
     pub window: u64,
-    pub links: Vec<(u64, String)>,
     pub selected_urls: Vec<String>,
 }
 
@@ -12,10 +11,11 @@ pub trait SessionNavigationProvider {
     fn capture(&mut self, pid: i32) -> Result<SessionNavigationWindow, String>;
     fn read(&mut self, target: &SessionNavigationWindow)
         -> Result<SessionNavigationWindow, String>;
-    fn press(
+    fn select_conversation(
         &mut self,
         target: &SessionNavigationWindow,
-        link: u64,
+        conversation: &str,
+        validate_lease: &mut dyn FnMut() -> Result<(), String>,
         is_current: &dyn Fn() -> bool,
     ) -> Result<(), String>;
 }
@@ -25,12 +25,6 @@ fn app_document_path(url: &str, expected_port: u16) -> Option<&str> {
     let (host, path) = rest.split_once('/')?;
     let port = host.strip_prefix("127.0.0.1:")?.parse::<u16>().ok()?;
     (port != 0 && port == expected_port).then_some(path)
-}
-
-fn conversation_url(url: &str, conversation: &str, expected_port: u16) -> bool {
-    app_document_path(url, expected_port).is_some_and(|path| {
-        path.split(['?', '#']).next() == Some(format!("c/{conversation}").as_str())
-    })
 }
 
 fn selected_conversation(window: &SessionNavigationWindow, port: u16) -> Result<String, String> {
@@ -64,17 +58,7 @@ pub fn navigate_session(
     if window.pid != pid {
         return Err("blocked:session_process_changed".into());
     }
-    let links: Vec<_> = window
-        .links
-        .iter()
-        .filter(|(_, url)| conversation_url(url, conversation, port))
-        .collect();
-    if links.len() != 1 {
-        return Err("blocked:session_link_unavailable_or_ambiguous".into());
-    }
-    let (link, _) = links[0];
-    validate_lease()?;
-    provider.press(&window, *link, &is_current)?;
+    provider.select_conversation(&window, conversation, &mut validate_lease, &is_current)?;
     let deadline = Instant::now() + Duration::from_millis(1500);
     loop {
         let readback = provider
@@ -158,12 +142,14 @@ mod tests {
             }
             Ok(readback)
         }
-        fn press(
+        fn select_conversation(
             &mut self,
             _: &SessionNavigationWindow,
-            _: u64,
+            _: &str,
+            validate_lease: &mut dyn FnMut() -> Result<(), String>,
             is_current: &dyn Fn() -> bool,
         ) -> Result<(), String> {
+            validate_lease()?;
             if !is_current() {
                 return Err("retired".into());
             }
@@ -181,7 +167,6 @@ mod tests {
             readback: SessionNavigationWindow {
                 pid: 12,
                 window: 1,
-                links: vec![(8, url.clone())],
                 selected_urls: vec![url],
             },
             presses: 0,
@@ -190,17 +175,13 @@ mod tests {
         }
     }
     #[test]
-    fn exact_unique_link_and_same_window_url_readback_are_required() {
+    fn selection_and_same_window_url_readback_are_required() {
         let mut p = fake();
         navigate_session(&mut p, 12, 4321, "target", || Ok(()), || true).unwrap();
         assert_eq!(p.presses, 1);
         let mut p = fake();
         p.reject = true;
         assert!(navigate_session(&mut p, 12, 4321, "target", || Ok(()), || true).is_err());
-        let mut p = fake();
-        p.readback.links.push(p.readback.links[0].clone());
-        assert!(navigate_session(&mut p, 12, 4321, "target", || Ok(()), || true).is_err());
-        assert_eq!(p.presses, 0);
         let mut p = fake();
         p.readback.selected_urls.clear();
         assert!(
@@ -282,8 +263,12 @@ mod tests {
             "https://127.0.0.1:45/c/ab",
             "https://127.0.0.1:0/c/a",
         ] {
-            assert!(!conversation_url(url, "a", 45));
+            let mut p = fake();
+            p.readback.selected_urls = vec![url.into()];
+            assert_ne!(selected_conversation(&p.readback, 45).as_deref(), Ok("a"));
         }
-        assert!(conversation_url("https://127.0.0.1:45/c/a", "a", 45));
+        let mut p = fake();
+        p.readback.selected_urls = vec!["https://127.0.0.1:45/c/a?project=workspace".into()];
+        assert_eq!(selected_conversation(&p.readback, 45).as_deref(), Ok("a"));
     }
 }

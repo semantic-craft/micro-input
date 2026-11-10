@@ -1057,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a running Antigravity and an explicitly chosen visible session"]
+    #[ignore = "requires a running Antigravity and an explicitly chosen session"]
     fn native_session_navigation_verifies_catalog_and_selected_url() {
         let conversation =
             std::env::var("MI_VERIFY_SESSION_ID").expect("MI_VERIFY_SESSION_ID is required");
