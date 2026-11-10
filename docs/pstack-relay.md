@@ -311,3 +311,8 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Outcome**: Swift 转发系统睡眠和唤醒通知；Rust 停止原目标听写、退役旧 USB 会话与迟到回执，保留草稿和撤销。唤醒等待资源释放后仅恢复此前开启的设备发现。
 - **Done Predicate**: 隔离场景覆盖持键睡眠、重复唤醒、旧回执迟到与草稿撤销保留；`scripts/verify-offline` 全量通过。不写设备配置。
 - **Evidence**: .scratch/sleep-wake/result.json; RUST_TEST_THREADS=1 scripts/verify-offline PASS (eight isolated scenarios)
+
+### [x] Slice R17: Dock 图标大小与系统对齐
+- **Outcome**: 保留现有插画，校正打包留白并使用系统处理后的运行图标；更新本机日常安装版。
+- **Done Predicate**: MI_AUTO_HOST_READY=0 RUST_TEST_THREADS=1 scripts/verify-offline && swift scripts/verify-app-icon.swift target/AppIcon.iconset && codesign --verify --strict "/Applications/Micro Input.app"
+- **Evidence**: /Applications/Micro Input.app; scripts/verify-offline PASS (eight scenarios); installed ICNS opaque frame 824px

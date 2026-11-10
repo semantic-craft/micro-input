@@ -1,5 +1,12 @@
 # 项目教训
 
+## Dock 图标轮廓与系统处理
+
+- 起因与后果：2026-11-10 用户发现 Micro Input 与 Koe 的 Dock 图标偏大；图案占画布 90%，启动时直接挂载原始 ICNS。
+- 修复：原插画不变，轮廓采用 1024 画布中的 824 像素，圆角同比缩放；启动时使用 `NSWorkspace.icon(forFile:)` 返回的系统图标。
+- 验证点：`swift scripts/verify-app-icon.swift target/AppIcon.iconset` 对照系统 Mail 图标的四档轮廓，改前失败、改后通过；构建入口自动运行该检查。安装包 ICNS 实测为 (100,100)–(924,924)，应用正常重启；Dock 专属截图未取得。Seen 1x（2026-11-10）。
+
+
 ## 固定应用层必须覆盖实际动作类型
 
 - 起因与后果：六层托管初版只给 `AgentCommand` 加了目标窗口约束，但现有预设也使用 `Shortcut` 和 `PasteText`；这些键仍可能经过全局输入路径，破坏固定应用层的隔离。
