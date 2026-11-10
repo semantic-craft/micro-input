@@ -317,9 +317,10 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: MI_AUTO_HOST_READY=0 RUST_TEST_THREADS=1 scripts/verify-offline && swift scripts/verify-app-icon.swift target/AppIcon.iconset && codesign --verify --strict "/Applications/Micro Input.app"
 - **Evidence**: /Applications/Micro Input.app; scripts/verify-offline PASS (eight scenarios); installed ICNS opaque frame 824px
 
-### [ ] Slice R18: 过期按键不再停用后续输入
+### [x] Slice R18: 过期按键不再停用后续输入
 - **Outcome**: 保留两秒有效期和所有权检查，仅丢弃过期按键，后续新按键继续执行；未实现的会话动作明确拒绝，设备核验失败显示具体原因。
 - **Done Predicate**: 过期后新输入回归先失败后通过；独立审查及 `scripts/verify-offline` 通过；本机日常版更新。实体按键与会话导航能力分别记录，不以明确拒绝当成导航完成。
+- **Evidence**: a857584; .scratch/antigravity-profile/result.json; scripts/verify-offline eight scenarios PASS; physical verification pending
 
 ### [ ] Slice R19: 接通会话键的真实目标导航
 - **Outcome**: 六层和工作台共享动态槽位解析，按完整目标身份切换会话；仅在实际选中被确认后更新已读和导航历史。
