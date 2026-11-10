@@ -316,3 +316,8 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Outcome**: 保留现有插画，校正打包留白并使用系统处理后的运行图标；更新本机日常安装版。
 - **Done Predicate**: MI_AUTO_HOST_READY=0 RUST_TEST_THREADS=1 scripts/verify-offline && swift scripts/verify-app-icon.swift target/AppIcon.iconset && codesign --verify --strict "/Applications/Micro Input.app"
 - **Evidence**: /Applications/Micro Input.app; scripts/verify-offline PASS (eight scenarios); installed ICNS opaque frame 824px
+
+### [x] Slice R18: 分离投影与执行并收敛动作归属和输入边界
+- **Outcome**: 纯投影读取、明确原生展示同步、原目标动作释放与失败清理；有界硬件输入、可靠断连及可重放时间。
+- **Done Predicate**: 原归属、失败释放、多输入 Fn、输入过载、旧来源隔离和纯投影回归通过；`scripts/verify-offline` 八个隔离场景全量通过。不写设备配置。
+- **Evidence**: 8ebfe13; scripts/verify-offline exit 0, eight isolated scenarios PASS and cleanup confirmed; .scratch/runtime-architecture/verification.json
