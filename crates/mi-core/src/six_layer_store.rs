@@ -29,10 +29,7 @@ impl WorkbenchStore {
             return None;
         }
         match self.native_ownership.state() {
-            mi_bridge::OwnershipState::Released {
-                instance,
-                generation,
-            } => Some(format!("{instance}:{generation}")),
+            mi_bridge::OwnershipState::Released { instance, .. } => Some(instance.to_string()),
             _ => None,
         }
     }
@@ -181,10 +178,17 @@ impl WorkbenchStore {
                     self.connected_candidate = Some(running.candidate.clone());
                     self.hardware_rpc_verified = true;
                     self.native_ownership.poll_once(true);
+                    self.six_layer_ownership_checked_at = Instant::now();
                     self.six_layer_ownership_identity = self.released_cindy_identity();
                     if self.six_layer_ownership_identity.is_some() {
                         running.armed = running.receiver.arm().is_ok();
                         if let Some(transport) = self.native_ownership.transport().cloned() {
+                            let min_native_gen = match self.native_ownership.state() {
+                                mi_bridge::OwnershipState::Released { generation, .. } => {
+                                    *generation
+                                }
+                                _ => 0,
+                            };
                             let request = mi_bridge::NativeOwnershipRequest {
                                 version: 1,
                                 request_id: mi_model::document::new_id().parse().unwrap(),
@@ -204,6 +208,10 @@ impl WorkbenchStore {
                                 transport,
                                 request,
                                 native_identity: self.six_layer_ownership_identity.clone().unwrap(),
+                                min_native_generation: std::sync::atomic::AtomicU64::new(
+                                    min_native_gen,
+                                ),
+                                allow_unbridged_drain: self.config.allow_unbridged_desktop,
                             });
                         }
                     } else {
@@ -227,7 +235,7 @@ impl WorkbenchStore {
         if self.six_layer_running.is_none() {
             return;
         }
-        if self.six_layer_ownership_checked_at.elapsed() > Duration::from_millis(500)
+        if self.six_layer_ownership_checked_at.elapsed() > Duration::from_secs(2)
             && !self.native_ownership.has_pending_request()
         {
             self.six_layer_ownership_checked_at = Instant::now();

@@ -1611,3 +1611,176 @@ fn opening_missing_board_references_preserves_them_and_all_unrelated_preferences
         value["host_active_profile_id"]
     );
 }
+
+#[test]
+#[ignore = "requires live Creator Micro 2 (303A:8298), Karabiner 16.3.0, and Cindy ownership socket"]
+fn live_six_layer_hardware_and_karabiner_acceptance() {
+    use mi_core::WorkbenchStoreConfig;
+    use mi_transport::HidTransport;
+    use std::path::PathBuf;
+
+    let home = PathBuf::from(std::env::var("HOME").expect("HOME env required"));
+    let doc_dir = home.join("Library/Application Support/MicroInput");
+    let three_layer_backups = doc_dir.join("three-layer-device-backups");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    if three_layer_backups.is_dir() {
+        for entry in std::fs::read_dir(&three_layer_backups).unwrap().flatten() {
+            if entry.path().join("manifest.json").is_file() {
+                let target = mi_transport::discover_target_keyboard().unwrap();
+                let transport = mi_transport::MacTransport::exclusive_vendor();
+                let link = transport.open(&target.vendor_path).unwrap();
+                rt.block_on(async {
+                    let session = mi_session::DeviceSession::new(
+                        link,
+                        Box::new(mi_proto::NativeFramer::default()),
+                        std::sync::Arc::new(mi_session::ReadOnlySchema),
+                        mi_session::SessionConfig::default(),
+                    );
+                    session
+                        .restore_three_layer_backup(&entry.path())
+                        .await
+                        .unwrap();
+                    session.disconnect();
+                });
+                drop(transport);
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        }
+    }
+
+    let make_config = || {
+        let mut cfg = WorkbenchStoreConfig::production();
+        cfg.auto_connect_usb = false;
+        cfg
+    };
+
+    let wait_for =
+        |store: &mut WorkbenchStore, pred: &dyn Fn(&WorkbenchStore) -> bool, label: &str| {
+            let deadline = Instant::now() + Duration::from_secs(25);
+            while Instant::now() < deadline {
+                store.poll_hardware_events();
+                if pred(store) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            panic!(
+                "timed out waiting for {label}; status_message={}",
+                store.status_message()
+            );
+        };
+
+    let mut store = WorkbenchStore::open(make_config()).unwrap();
+    store.poll_hardware_events();
+    std::thread::sleep(Duration::from_millis(50));
+    store.poll_hardware_events();
+    store
+        .dispatch_sidebar_action(SidebarAction::ResetBoardLayerPlan)
+        .unwrap();
+    store
+        .dispatch_sidebar_action(SidebarAction::ConfirmCindyNativePaused { confirmed: true })
+        .unwrap();
+    assert!(
+        store
+            .projection()
+            .sidebar
+            .board_layers
+            .cindy_native_paused_confirmed
+    );
+
+    if let Err(err) = store.dispatch_sidebar_action(SidebarAction::ProvisionBoardLayers) {
+        panic!(
+            "ProvisionBoardLayers err={err:?} ownership_state={:?}",
+            store.native_ownership.state()
+        );
+    }
+    wait_for(
+        &mut store,
+        &|s| {
+            let b = &s.projection().sidebar.board_layers;
+            b.configuration_observed && b.keyboard_grabbed && b.runtime_ready
+        },
+        "initial six-layer apply",
+    );
+
+    let first_state_bytes = std::fs::read(doc_dir.join("six-layer-runtime.json")).unwrap();
+    let first_state: serde_json::Value = serde_json::from_slice(&first_state_bytes).unwrap();
+    assert_eq!(first_state["installation"]["status"], "Applied");
+    let first_backup = PathBuf::from(first_state["installation"]["backup"].as_str().unwrap());
+    let orig_keymap = std::fs::read(first_backup.join("keymap.json")).unwrap();
+    let planned_keymap = std::fs::read(first_backup.join("planned-keymap.json")).unwrap();
+    assert_eq!(orig_keymap.len(), 7421);
+    assert!(planned_keymap.len() > orig_keymap.len());
+    let first_installed_karabiner = first_state["installation"]["config"]["installed"].clone();
+
+    drop(store);
+    std::thread::sleep(Duration::from_millis(300));
+
+    let mut reconnect_store = WorkbenchStore::open(make_config()).unwrap();
+    reconnect_store.connect_default_usb().unwrap();
+    wait_for(
+        &mut reconnect_store,
+        &|s| {
+            let b = &s.projection().sidebar.board_layers;
+            b.configuration_observed && b.keyboard_grabbed && b.runtime_ready
+        },
+        "read-only reconnect resume",
+    );
+    let resumed_state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(doc_dir.join("six-layer-runtime.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        resumed_state["installation"]["backup"],
+        first_state["installation"]["backup"]
+    );
+    assert_ne!(
+        resumed_state["installation"]["config"]["installed"],
+        first_installed_karabiner
+    );
+
+    reconnect_store
+        .dispatch_sidebar_action(SidebarAction::RestoreBoardLayers)
+        .unwrap();
+    wait_for(
+        &mut reconnect_store,
+        &|s| {
+            !s.projection().sidebar.board_layers.restore_available
+                && s.status_message() == "原设备配置及 Karabiner 设置已恢复"
+        },
+        "restore original board and Karabiner config",
+    );
+    let restored_state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(doc_dir.join("six-layer-runtime.json")).unwrap())
+            .unwrap();
+    assert!(restored_state["installation"].is_null());
+
+    reconnect_store
+        .dispatch_sidebar_action(SidebarAction::ProvisionBoardLayers)
+        .unwrap();
+    wait_for(
+        &mut reconnect_store,
+        &|s| {
+            let b = &s.projection().sidebar.board_layers;
+            b.configuration_observed && b.keyboard_grabbed && b.runtime_ready
+        },
+        "final six-layer re-apply for daily use",
+    );
+    let final_state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(doc_dir.join("six-layer-runtime.json")).unwrap())
+            .unwrap();
+    assert_eq!(final_state["installation"]["status"], "Applied");
+    println!(
+        "LIVE_SIX_LAYER_ACCEPTANCE_PASS profile_index={} observed_layer={:?} backup={}",
+        final_state["installation"]["profile_index"],
+        reconnect_store
+            .projection()
+            .sidebar
+            .board_layers
+            .observed_layer,
+        final_state["installation"]["backup"]
+    );
+}

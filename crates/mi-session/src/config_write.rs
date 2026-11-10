@@ -843,4 +843,37 @@ impl DeviceSession {
         })
         .await
     }
+
+    pub async fn restore_three_layer_backup(&self, backup: &Path) -> Result<(), SessionError> {
+        let original = std::fs::read(backup.join("keymap.json"))
+            .map_err(|e| SessionError::Config(e.to_string()))?;
+        let candidate = std::fs::read(backup.join("planned-keymap.json"))
+            .map_err(|e| SessionError::Config(e.to_string()))?;
+        let smart = match std::fs::read(backup.join("smart_actions.json")) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(SessionError::Config(e.to_string())),
+        };
+        let parsed = mi_model::parse_device_files(&candidate, smart.as_deref())
+            .map_err(|e| SessionError::Config(e.to_string()))?;
+        recognize_three_layer_profile(&parsed)
+            .map_err(SessionError::Config)?
+            .ok_or_else(|| SessionError::Config("恢复副本不是三层方案".into()))?;
+        self.guarded(async {
+            let mut queue = self.queue.lock().await;
+            self.three_layer_position(&mut queue).await?;
+            let current = self.read_files_locked(&mut queue).await?;
+            if exact_files(&current, &original, smart.as_deref()) {
+                return Ok(());
+            }
+            if !exact_files(&current, &candidate, smart.as_deref()) {
+                return Err(SessionError::Config(
+                    "设备与本次三层候选不符，拒绝覆盖恢复".into(),
+                ));
+            }
+            self.stage_three_layer_keymap(&mut queue, &original, smart.as_deref())
+                .await
+        })
+        .await
+    }
 }

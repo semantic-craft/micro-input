@@ -440,10 +440,13 @@ impl WorkbenchStore {
         let native_ownership = if config.isolated {
             NativeOwnershipController::new_isolated()
         } else {
-            let transport = config
-                .ownership_socket_path
-                .as_ref()
-                .map(UnixNativeOwnershipTransport::new);
+            let transport = config.ownership_socket_path.as_ref().map(|path| {
+                let mut t = UnixNativeOwnershipTransport::new(path);
+                if config.allow_unbridged_desktop {
+                    t.timeout = Duration::from_millis(1900);
+                }
+                t
+            });
             NativeOwnershipController::new(transport, config.allow_unbridged_desktop)
         };
         let app_cache = config.app_cache.clone();
@@ -1671,6 +1674,7 @@ impl WorkbenchStore {
             .cloned()
             .unwrap_or_default();
         let preview = self.document_store.board_preview_selection();
+        let managed_cindy_id = self.managed_cindy_profile_id();
         let mut result = BoardLayersProjection::default();
         result.layers = std::array::from_fn(|i| {
             let layer = BoardLayer::ALL[i];
@@ -1685,7 +1689,7 @@ impl WorkbenchStore {
                 }
                 BoardLayerRoute::Native { .. } => Some("由原生应用处理；六层隔离未验证".into()),
                 BoardLayerRoute::HostProfile { profile_id }
-                    if Some(profile_id) == self.managed_cindy_profile_id().as_ref() =>
+                    if Some(profile_id) == managed_cindy_id.as_ref() =>
                 {
                     Some("Cindy 托管方案；尚未接管，原生键盘集成状态未确认".into())
                 }
@@ -3335,10 +3339,7 @@ impl WorkbenchStore {
                     })
                 });
             let keycap_enum = self.selected_keycap(effective_slot);
-            let keycap_id = serde_json::to_value(keycap_enum)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_else(|| "Blank".to_string());
+            let keycap_id = format!("{keycap_enum:?}");
             let cell_role = if !(0..6u32).contains(&primary_slot) {
                 KeycapRole::ActionKey
             } else if is_protected {
@@ -5210,13 +5211,19 @@ impl WorkbenchStore {
             })
             .collect();
 
-        let all_catalog = mi_model::draft::actions();
-        let mut available_categories = vec!["全部".to_string()];
-        for act in &all_catalog {
-            if !available_categories.contains(&act.category) {
-                available_categories.push(act.category.clone());
-            }
-        }
+        static AVAILABLE_CATEGORIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        let available_categories = AVAILABLE_CATEGORIES
+            .get_or_init(|| {
+                let all_catalog = mi_model::draft::actions();
+                let mut categories = vec!["全部".to_string()];
+                for act in &all_catalog {
+                    if !categories.contains(&act.category) {
+                        categories.push(act.category.clone());
+                    }
+                }
+                categories
+            })
+            .clone();
 
         let entries = action_library::search(
             &self.action_search_query,

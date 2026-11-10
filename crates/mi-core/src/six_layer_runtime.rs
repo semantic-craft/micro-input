@@ -13,7 +13,7 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         Arc,
     },
     thread::{self, JoinHandle},
@@ -116,35 +116,51 @@ pub struct OwnershipPermit {
     pub transport: mi_bridge::UnixNativeOwnershipTransport,
     pub request: mi_bridge::NativeOwnershipRequest,
     pub native_identity: String,
+    pub min_native_generation: AtomicU64,
+    pub allow_unbridged_drain: bool,
 }
 
 impl OwnershipPermit {
     fn check(&self) -> Result<(), String> {
+        let _guard = self.transport.lock_path();
         let mut request = self.request.clone();
+        if let Some(fence) = self.transport.read_persisted_fence() {
+            request.client_instance = fence.client_instance;
+            request.generation = request.generation.max(fence.generation);
+        }
         request.request_id = mi_model::document::new_id()
             .parse()
             .map_err(|_| "请求身份生成失败")?;
         let reply = self
             .transport
-            .exchange(&request)
+            .exchange_locked(&request)
             .map_err(|e| e.to_string())?;
+        let has_fenced_cap = reply
+            .capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.iter().any(|cap| cap == "fenced-release-v1"));
+        let released_ok = (reply.state == "released"
+            && reply.input_drained
+            && reply.ptt_drained
+            && reply.lighting_drained)
+            || (self.allow_unbridged_drain
+                && reply.state == "unknown"
+                && reply.reason == "native_drain_unconfirmed"
+                && reply.lighting_drained);
+        let min_gen = self.min_native_generation.load(Ordering::Acquire);
         if reply.version != 1
             || reply.request_id != request.request_id
             || reply.client_instance != request.client_instance
             || reply.generation != request.generation
-            || reply.state != "released"
-            || !reply.input_drained
-            || !reply.ptt_drained
-            || !reply.lighting_drained
-            || !reply
-                .capabilities
-                .as_ref()
-                .is_some_and(|caps| caps.iter().any(|cap| cap == "fenced-release-v1"))
-            || format!("{}:{}", reply.native_instance, reply.native_generation)
-                != self.native_identity
+            || !released_ok
+            || !has_fenced_cap
+            || reply.native_instance.to_string() != self.native_identity
+            || reply.native_generation < min_gen
         {
             return Err("Cindy 当前代释放未确认".into());
         }
+        self.min_native_generation
+            .fetch_max(reply.native_generation, Ordering::AcqRel);
         Ok(())
     }
 }
@@ -689,5 +705,83 @@ mod tests {
         )
         .unwrap();
         assert!(load(&path).is_err());
+    }
+
+    #[test]
+    fn ownership_permit_accepts_monotonic_unbridged_drain_and_rejects_stale_native_generation() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+
+        let dir = tempfile::Builder::new()
+            .prefix("mi-permit-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let sock_path = dir.path().join("cindy-ownership.sock");
+        let transport = mi_bridge::UnixNativeOwnershipTransport::new(&sock_path);
+        let client_instance = "c426ac36-354d-4149-a8b7-40b719a9dfff".parse().unwrap();
+        let native_instance = "d1706f6a-dda3-4821-a862-e587e63cc25f";
+        let native_identity = native_instance.to_string();
+        transport
+            .write_persisted_fence(&mi_bridge::PersistedNativeOwnershipFence {
+                client_instance,
+                generation: 40,
+            })
+            .unwrap();
+
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let server = thread::spawn(move || {
+            for (expected_gen, native_gen) in [(40u64, 202u64), (41, 203), (41, 201)] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(req["generation"].as_u64(), Some(expected_gen));
+                let reply = serde_json::json!({
+                    "version": 1,
+                    "requestId": req["requestId"],
+                    "clientInstance": req["clientInstance"],
+                    "generation": req["generation"],
+                    "nativeInstance": native_instance,
+                    "nativeGeneration": native_gen,
+                    "state": "unknown",
+                    "reason": "native_drain_unconfirmed",
+                    "inputDrained": false,
+                    "pttDrained": false,
+                    "lightingDrained": true,
+                    "capabilities": ["fenced-release-v1"]
+                });
+                let mut out = serde_json::to_vec(&reply).unwrap();
+                out.push(b'\n');
+                stream.write_all(&out).unwrap();
+            }
+        });
+
+        let permit = OwnershipPermit {
+            transport: transport.clone(),
+            request: mi_bridge::NativeOwnershipRequest {
+                version: 1,
+                request_id: mi_model::document::new_id().parse().unwrap(),
+                client_instance,
+                generation: 38,
+                desired_owner: "micro-input".into(),
+                micro_drained: true,
+            },
+            native_identity,
+            min_native_generation: AtomicU64::new(202),
+            allow_unbridged_drain: true,
+        };
+
+        assert!(permit.check().is_ok());
+        transport
+            .write_persisted_fence(&mi_bridge::PersistedNativeOwnershipFence {
+                client_instance,
+                generation: 41,
+            })
+            .unwrap();
+        assert!(permit.check().is_ok());
+        assert!(permit.check().is_err());
+        server.join().unwrap();
     }
 }
