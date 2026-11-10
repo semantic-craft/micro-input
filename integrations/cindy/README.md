@@ -6,7 +6,7 @@ Micro Input 直接依据 Cindy（`com.xd.cindy`）开源代码与运行期可观
 
 1. **原生键盘所有权（`apps/desktop/src/shared/inputDevices.ts`）**：
    - Cindy 原生支持 Work Louder Creator Micro 2 的 `KV_OAI_*` 保护层。
-   - 当 `cindy-ownership.sock` 不存在时，`NativeOwnershipController.isUnbridgedDesktopActive` 自动放行本地桌面控制。
+   - 传统 Vendor 输入路径在 `cindy-ownership.sock` 不存在时使用 `NativeOwnershipController.isUnbridgedDesktopActive` 本地控制分支。六层专用标准键通过 Karabiner 独立处理，不依赖 Cindy 进程或该所有权桥。
 2. **原生快捷键（`apps/desktop/src/shared/appShortcuts.ts`）**：
    - 新建任务（`new-chat` / `new-maker`）：`Cmd+N`
    - 搜索（`search` / `find-in-page`）：`Cmd+F`

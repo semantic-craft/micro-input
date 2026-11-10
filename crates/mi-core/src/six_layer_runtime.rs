@@ -13,7 +13,7 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -153,59 +153,6 @@ impl ForegroundContext {
     }
 }
 
-pub struct OwnershipPermit {
-    pub transport: mi_bridge::UnixNativeOwnershipTransport,
-    pub request: mi_bridge::NativeOwnershipRequest,
-    pub native_identity: String,
-    pub min_native_generation: AtomicU64,
-    pub allow_unbridged_drain: bool,
-}
-
-impl OwnershipPermit {
-    fn check(&self) -> Result<(), String> {
-        let _guard = self.transport.lock_path();
-        let mut request = self.request.clone();
-        if let Some(fence) = self.transport.read_persisted_fence() {
-            request.client_instance = fence.client_instance;
-            request.generation = request.generation.max(fence.generation);
-        }
-        request.request_id = mi_model::document::new_id()
-            .parse()
-            .map_err(|_| "请求身份生成失败")?;
-        let reply = self
-            .transport
-            .exchange_locked(&request)
-            .map_err(|e| e.to_string())?;
-        let has_fenced_cap = reply
-            .capabilities
-            .as_ref()
-            .is_some_and(|caps| caps.iter().any(|cap| cap == "fenced-release-v1"));
-        let released_ok = (reply.state == "released"
-            && reply.input_drained
-            && reply.ptt_drained
-            && reply.lighting_drained)
-            || (self.allow_unbridged_drain
-                && reply.state == "unknown"
-                && reply.reason == "native_drain_unconfirmed"
-                && reply.lighting_drained);
-        let min_gen = self.min_native_generation.load(Ordering::Acquire);
-        if reply.version != 1
-            || reply.request_id != request.request_id
-            || reply.client_instance != request.client_instance
-            || reply.generation != request.generation
-            || !released_ok
-            || !has_fenced_cap
-            || reply.native_instance.to_string() != self.native_identity
-            || reply.native_generation < min_gen
-        {
-            return Err("Cindy 当前代释放未确认".into());
-        }
-        self.min_native_generation
-            .fetch_max(reply.native_generation, Ordering::AcqRel);
-        Ok(())
-    }
-}
-
 impl RunningSixLayer {
     pub fn foreground_changed(&self, bundle_id: Option<&str>) -> bool {
         self.foreground.lock().unwrap().update(bundle_id)
@@ -293,7 +240,7 @@ impl RunningSixLayer {
         )
     }
 
-    pub fn start_executor(&mut self, permit: OwnershipPermit) {
+    pub fn start_executor(&mut self) {
         let receiver = Arc::clone(&self.receiver);
         let plan = self.installation.plan.clone();
         let stop = Arc::clone(&self.stop);
@@ -317,7 +264,6 @@ impl RunningSixLayer {
                 &first,
                 &foreground,
                 &tx,
-                || permit.check(),
                 |profile, binding, action| executor.execute(profile, binding, action),
             );
             executor.stop_owned_actions()
@@ -419,7 +365,6 @@ fn execute_clicks(
     first: &AtomicBool,
     foreground: &Mutex<ForegroundContext>,
     receipts: &std::sync::mpsc::SyncSender<mi_macos::HostActionReceipt>,
-    mut permit: impl FnMut() -> Result<(), String>,
     mut execute: impl FnMut(&str, &str, &ResolvedHostAction) -> mi_macos::HostActionReceipt,
 ) {
     while !stop.load(Ordering::Acquire) {
@@ -452,10 +397,6 @@ fn execute_clicks(
             && !commands.load(Ordering::Acquire)
         {
             continue;
-        }
-        if let Err(error) = permit() {
-            receiver.invalidate(&error);
-            return;
         }
         if stop.load(Ordering::Acquire) || receiver.failure().is_some() {
             return;
@@ -506,9 +447,6 @@ pub async fn apply(
     mut saved: SavedSixLayerState,
 ) -> Result<RunningSixLayer, String> {
     let state_path = document_dir.join("six-layer-runtime.json");
-    if !saved.cindy_native_paused_confirmed {
-        return Err("请先确认 Cindy 原生键盘集成已关闭".into());
-    }
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
     let receiver = Arc::new(UserCommandReceiver::bind().map_err(|e| e.to_string())?);
     let rule = karabiner::rules(&target, &receiver, plan.bottom_row_layout)?;
@@ -656,9 +594,6 @@ pub async fn resume(
     document_dir: &Path,
     mut saved: SavedSixLayerState,
 ) -> Result<RunningSixLayer, String> {
-    if !saved.cindy_native_paused_confirmed {
-        return Err("Cindy 原生暂停尚未确认".into());
-    }
     let mut installation = saved
         .installation
         .clone()
@@ -883,7 +818,6 @@ mod tests {
                 &AtomicBool::new(false),
                 &foreground,
                 &tx,
-                || Ok(()),
                 |profile, binding, action| {
                     stop.store(true, Ordering::Release);
                     mi_macos::SimulatedHostActionExecutor.execute(profile, binding, action)
@@ -903,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn foreground_switch_discards_queued_and_waiting_clicks_without_retargeting() {
+    fn foreground_switch_discards_queued_clicks_without_retargeting() {
         let plan = foreground_test_plan();
         let receiver = UserCommandReceiver::bind().unwrap();
         receiver.arm().unwrap();
@@ -917,7 +851,6 @@ mod tests {
         send(&receiver, 27);
         let stop = AtomicBool::new(false);
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
-        let mut permits = 0;
         thread::scope(|scope| {
             let (done, wait) = std::sync::mpsc::channel::<()>();
             let stop_ref = &stop;
@@ -936,14 +869,6 @@ mod tests {
                 &AtomicBool::new(false),
                 &foreground,
                 &tx,
-                || {
-                    permits += 1;
-                    if permits == 1 {
-                        foreground.lock().unwrap().update(Some("com.deepseek.dsh"));
-                        send(&receiver, 47);
-                    }
-                    Ok(())
-                },
                 |profile, binding, action| {
                     stop.store(true, Ordering::Release);
                     mi_macos::SimulatedHostActionExecutor.execute(profile, binding, action)
@@ -952,15 +877,14 @@ mod tests {
             let _ = done.send(());
         });
         let receipts: Vec<_> = rx.try_iter().collect();
-        assert_eq!(permits, 2);
         assert_eq!(receipts.len(), 1);
-        assert_eq!(receipts[0].profile_id, plan.hosts[1].profile_id);
-        assert_eq!(receipts[0].detail, "dsh-desktop/browser");
+        assert_eq!(receipts[0].profile_id, plan.hosts[0].profile_id);
+        assert_eq!(receipts[0].detail, "antigravity/focus-input");
         assert!(receiver.failure().is_none());
     }
 
     #[test]
-    fn execute_clicks_routes_by_layer_and_stops_on_ownership_loss() {
+    fn execute_clicks_routes_without_cindy_and_stops_on_input_connection_loss() {
         let mut draft = mi_model::draft::Draft::default();
         mi_model::preset::install_agent_starter_profiles(&mut draft).unwrap();
         let id = |name: &str| {
@@ -1000,7 +924,6 @@ mod tests {
         let first = AtomicBool::new(false);
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
         let mut calls = Vec::new();
-        let mut permit_calls = 0usize;
 
         execute_clicks(
             &receiver,
@@ -1012,16 +935,11 @@ mod tests {
             &first,
             &Mutex::new(ForegroundContext::default()),
             &tx,
-            || {
-                permit_calls += 1;
-                if permit_calls <= 3 {
-                    Ok(())
-                } else {
-                    Err("Cindy 当前代释放未确认".into())
-                }
-            },
             |profile, binding, _action| {
                 calls.push((profile.to_owned(), binding.to_owned()));
+                if calls.len() == 3 {
+                    receiver.invalidate("USB target changed");
+                }
                 mi_macos::HostActionReceipt {
                     action_type: "open_app".into(),
                     binding_id: binding.into(),
@@ -1046,14 +964,11 @@ mod tests {
             ]
         );
         assert_eq!(rx.try_iter().count(), 3);
-        assert_eq!(
-            receiver.failure().as_deref(),
-            Some("Cindy 当前代释放未确认")
-        );
+        assert_eq!(receiver.failure().as_deref(), Some("USB target changed"));
     }
 
     #[test]
-    fn a_click_expiring_during_ownership_check_does_not_stop_fresh_clicks() {
+    fn expired_clicks_are_dropped_without_stopping_fresh_clicks() {
         let mut draft = mi_model::draft::Draft::default();
         mi_model::preset::install_agent_starter_profiles(&mut draft).unwrap();
         let id = |name: &str| {
@@ -1082,6 +997,8 @@ mod tests {
         receiver.arm().unwrap();
         send(&receiver, 0);
         thread::sleep(Duration::from_millis(30));
+        thread::sleep(Duration::from_millis(2100));
+        send(&receiver, 20);
         let stop = AtomicBool::new(false);
         let enabled = AtomicBool::new(true);
         let commands = AtomicBool::new(true);
@@ -1089,7 +1006,6 @@ mod tests {
         let first = AtomicBool::new(false);
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
         let mut calls = Vec::new();
-        let mut permit_calls = 0;
         thread::scope(|scope| {
             let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
             let watchdog_stop = &stop;
@@ -1108,15 +1024,6 @@ mod tests {
                 &first,
                 &Mutex::new(ForegroundContext::default()),
                 &tx,
-                || {
-                    permit_calls += 1;
-                    if permit_calls == 1 {
-                        thread::sleep(Duration::from_millis(2100));
-                        send(&receiver, 20);
-                        thread::sleep(Duration::from_millis(30));
-                    }
-                    Ok(())
-                },
                 |profile, binding, _| {
                     calls.push((profile.to_owned(), binding.to_owned()));
                     stop.store(true, Ordering::Release);
@@ -1135,7 +1042,6 @@ mod tests {
             let _ = cancel_tx.send(());
         });
         assert_eq!(calls, vec![(dsh_id, "AG00".into())]);
-        assert_eq!(permit_calls, 2);
         assert_eq!(rx.try_iter().count(), 1);
         assert!(receiver.failure().is_none());
     }
@@ -1155,83 +1061,5 @@ mod tests {
         )
         .unwrap();
         assert!(load(&path).is_err());
-    }
-
-    #[test]
-    fn ownership_permit_accepts_monotonic_unbridged_drain_and_rejects_stale_native_generation() {
-        use std::io::{BufRead, BufReader};
-        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
-
-        let dir = tempfile::Builder::new()
-            .prefix("mi-permit-")
-            .tempdir_in("/tmp")
-            .unwrap();
-        let sock_path = dir.path().join("cindy-ownership.sock");
-        let transport = mi_bridge::UnixNativeOwnershipTransport::new(&sock_path);
-        let client_instance = "c426ac36-354d-4149-a8b7-40b719a9dfff".parse().unwrap();
-        let native_instance = "d1706f6a-dda3-4821-a862-e587e63cc25f";
-        let native_identity = native_instance.to_string();
-        transport
-            .write_persisted_fence(&mi_bridge::PersistedNativeOwnershipFence {
-                client_instance,
-                generation: 40,
-            })
-            .unwrap();
-
-        let listener = UnixListener::bind(&sock_path).unwrap();
-        fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).unwrap();
-
-        let server = thread::spawn(move || {
-            for (expected_gen, native_gen) in [(40u64, 202u64), (41, 203), (41, 201)] {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut line = String::new();
-                BufReader::new(&stream).read_line(&mut line).unwrap();
-                let req: serde_json::Value = serde_json::from_str(&line).unwrap();
-                assert_eq!(req["generation"].as_u64(), Some(expected_gen));
-                let reply = serde_json::json!({
-                    "version": 1,
-                    "requestId": req["requestId"],
-                    "clientInstance": req["clientInstance"],
-                    "generation": req["generation"],
-                    "nativeInstance": native_instance,
-                    "nativeGeneration": native_gen,
-                    "state": "unknown",
-                    "reason": "native_drain_unconfirmed",
-                    "inputDrained": false,
-                    "pttDrained": false,
-                    "lightingDrained": true,
-                    "capabilities": ["fenced-release-v1"]
-                });
-                let mut out = serde_json::to_vec(&reply).unwrap();
-                out.push(b'\n');
-                stream.write_all(&out).unwrap();
-            }
-        });
-
-        let permit = OwnershipPermit {
-            transport: transport.clone(),
-            request: mi_bridge::NativeOwnershipRequest {
-                version: 1,
-                request_id: mi_model::document::new_id().parse().unwrap(),
-                client_instance,
-                generation: 38,
-                desired_owner: "micro-input".into(),
-                micro_drained: true,
-            },
-            native_identity,
-            min_native_generation: AtomicU64::new(202),
-            allow_unbridged_drain: true,
-        };
-
-        assert!(permit.check().is_ok());
-        transport
-            .write_persisted_fence(&mi_bridge::PersistedNativeOwnershipFence {
-                client_instance,
-                generation: 41,
-            })
-            .unwrap();
-        assert!(permit.check().is_ok());
-        assert!(permit.check().is_err());
-        server.join().unwrap();
     }
 }

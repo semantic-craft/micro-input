@@ -14,26 +14,6 @@ impl WorkbenchStore {
         )
     }
 
-    fn released_cindy_identity(&self) -> Option<String> {
-        if !self.six_layer_state.cindy_native_paused_confirmed
-            || !self.native_ownership.allows_execution()
-        {
-            return None;
-        }
-        if !self.config.isolated
-            && !self
-                .native_ownership
-                .transport()
-                .is_some_and(|transport| transport.socket_exists())
-        {
-            return None;
-        }
-        match self.native_ownership.state() {
-            mi_bridge::OwnershipState::Released { instance, .. } => Some(instance.to_string()),
-            _ => None,
-        }
-    }
-
     pub(super) fn confirm_cindy_native_paused(
         &mut self,
         confirmed: bool,
@@ -50,11 +30,6 @@ impl WorkbenchStore {
         )
         .map_err(WorkbenchError::Storage)?;
         self.six_layer_state = next;
-        if !confirmed {
-            if let Some(running) = &self.six_layer_running {
-                running.receiver.invalidate("Cindy 原生暂停确认已撤销");
-            }
-        }
         self.rebuild_local_projection();
         Ok(())
     }
@@ -64,7 +39,6 @@ impl WorkbenchStore {
         if let Some(running) = &running {
             running.retire();
         }
-        self.six_layer_ownership_identity = None;
         if let Some(session) = &self.device_session {
             self.release_board_inputs(session.id, Instant::now());
         }
@@ -94,11 +68,6 @@ impl WorkbenchStore {
             .map(Ok)
             .unwrap_or_else(|| self.compiled_six_layer_plan())
             .map_err(|e| WorkbenchError::Routing(format!("六层方案：{e}")))?;
-        if !self.six_layer_state.cindy_native_paused_confirmed {
-            return Err(WorkbenchError::Routing(
-                "应用六层前，请先确认 Cindy 原生键盘集成已关闭".into(),
-            ));
-        }
         if self.config.isolated {
             return Err(WorkbenchError::Routing(
                 "隔离工作台不能应用实体六层方案".into(),
@@ -112,13 +81,6 @@ impl WorkbenchStore {
         {
             return Err(WorkbenchError::Routing(
                 "六层恢复记录尚未处理，请先恢复原设备配置".into(),
-            ));
-        }
-        self.native_ownership.set_desired_owner("micro-input");
-        self.native_ownership.poll_once(true);
-        if self.released_cindy_identity().is_none() {
-            return Err(WorkbenchError::Ownership(
-                "六层输入需要 Cindy 当前代已释放的回执；无桥或失联时不执行".into(),
             ));
         }
         let previous = self.suspend_for_six_layer_operation();
@@ -195,48 +157,15 @@ impl WorkbenchStore {
                     self.device_session = None;
                     self.connected_candidate = Some(running.candidate.clone());
                     self.hardware_rpc_verified = true;
-                    self.native_ownership.poll_once(true);
-                    self.six_layer_ownership_checked_at = Instant::now();
-                    self.six_layer_ownership_identity = self.released_cindy_identity();
-                    if self.six_layer_ownership_identity.is_some() {
-                        running.armed = running.receiver.arm().is_ok();
-                        if let Some(transport) = self.native_ownership.transport().cloned() {
-                            let min_native_gen = match self.native_ownership.state() {
-                                mi_bridge::OwnershipState::Released { generation, .. } => {
-                                    *generation
-                                }
-                                _ => 0,
-                            };
-                            let request = mi_bridge::NativeOwnershipRequest {
-                                version: 1,
-                                request_id: mi_model::document::new_id().parse().unwrap(),
-                                client_instance: self.native_ownership.client_instance(),
-                                generation: self.native_ownership.generation(),
-                                desired_owner: "micro-input".into(),
-                                micro_drained: true,
-                            };
-                            running.execution_enabled.store(
-                                self.document_store.host_execution_enabled(),
-                                Ordering::Release,
-                            );
-                            running
-                                .command_execution_enabled
-                                .store(self.command_execution_enabled, Ordering::Release);
-                            running.start_executor(six_layer_runtime::OwnershipPermit {
-                                transport,
-                                request,
-                                native_identity: self.six_layer_ownership_identity.clone().unwrap(),
-                                min_native_generation: std::sync::atomic::AtomicU64::new(
-                                    min_native_gen,
-                                ),
-                                allow_unbridged_drain: self.config.allow_unbridged_desktop,
-                            });
-                        }
-                    } else {
-                        running
-                            .receiver
-                            .invalidate("Cindy 当前代释放未确认，请重新连接");
-                    }
+                    running.armed = running.receiver.arm().is_ok();
+                    running.execution_enabled.store(
+                        self.document_store.host_execution_enabled(),
+                        Ordering::Release,
+                    );
+                    running
+                        .command_execution_enabled
+                        .store(self.command_execution_enabled, Ordering::Release);
+                    running.start_executor();
                     running.start_monitor();
                     self.six_layer_running = Some(running);
                     self.status_message = "六层配置已读回，等待首次实体输入验证".into();
@@ -253,13 +182,6 @@ impl WorkbenchStore {
         if self.six_layer_running.is_none() {
             return;
         }
-        if self.six_layer_ownership_checked_at.elapsed() > Duration::from_secs(2)
-            && !self.native_ownership.has_pending_request()
-        {
-            self.six_layer_ownership_checked_at = Instant::now();
-            self.poll_ownership_fast_or_spawn(true, Instant::now());
-        }
-        let identity = self.released_cindy_identity();
         let running = self.six_layer_running.as_ref().unwrap();
         running.execution_enabled.store(
             self.document_store.host_execution_enabled(),
@@ -268,11 +190,6 @@ impl WorkbenchStore {
         running
             .command_execution_enabled
             .store(self.command_execution_enabled, Ordering::Release);
-        if identity.is_none() || identity != self.six_layer_ownership_identity {
-            running
-                .receiver
-                .invalidate("Cindy 原生所有权已变化，六层输入已暂停");
-        }
         let mut receipts = Vec::new();
         if let Some(rx) = &running.receipts {
             while let Ok(receipt) = rx.try_recv() {
@@ -321,8 +238,8 @@ impl WorkbenchStore {
             self.six_layer_state.installation.is_some() && self.six_layer_job.is_none();
         result.apply_block_reason = if self.six_layer_job.is_some() {
             "六层操作正在进行".into()
-        } else if !result.cindy_native_paused_confirmed {
-            "应用六层前，请确认 Cindy 原生键盘集成已关闭".into()
+        } else if self.config.isolated {
+            "隔离工作台不能应用实体六层方案".into()
         } else {
             self.compiled_six_layer_plan().err().unwrap_or_default()
         };
@@ -334,7 +251,6 @@ impl WorkbenchStore {
             result.first_event_verified = running.first_event_verified.load(Ordering::Acquire);
             result.runtime_ready = running.armed
                 && running.receiver.failure().is_none()
-                && self.released_cindy_identity().is_some()
                 && self.document_store.host_execution_enabled();
             result.observed_layer = Some(running.observed_layer.load(Ordering::Acquire));
             result.observed_profile_kind = Some("six_layer_direct".into());
@@ -414,6 +330,53 @@ mod tests {
             .invalidate("USB removed");
         store.rebuild_local_projection();
         assert!(!store.projection.device_connected);
+        store
+            .six_layer_running
+            .take()
+            .unwrap()
+            .shutdown(&store.tokio_runtime)
+            .unwrap();
+    }
+
+    #[test]
+    fn six_layer_ready_and_user_pause_are_independent_of_native_ownership() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        store.native_ownership = NativeOwnershipController::new(None, false);
+        assert!(!store.native_ownership.allows_execution());
+        let session = mock_session(&store.tokio_runtime);
+        let mut running =
+            six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        running.readiness.configuration_observed = true;
+        running.readiness.keyboard_grabbed = true;
+        running.receiver.arm().unwrap();
+        running.armed = true;
+        store.tokio_runtime.block_on(session.shutdown());
+        store.connected_candidate = Some(running.candidate.clone());
+        store.six_layer_state.installation = Some(running.installation.clone());
+        store.six_layer_running = Some(running);
+        store.set_host_execution_enabled(true).unwrap();
+        store.poll_six_layer_runtime();
+        assert!(store.projection.sidebar.board_layers.runtime_ready);
+        assert!(!format!("{:?}", store.projection.header).contains("原生所有权未知"));
+        store.confirm_cindy_native_paused(false).unwrap();
+        assert!(store.projection.sidebar.board_layers.runtime_ready);
+        store.set_host_execution_enabled(false).unwrap();
+        store.poll_six_layer_runtime();
+        assert!(!store.projection.sidebar.board_layers.runtime_ready);
+        assert!(!store
+            .six_layer_running
+            .as_ref()
+            .unwrap()
+            .execution_enabled
+            .load(Ordering::Acquire));
+        assert!(store
+            .six_layer_running
+            .as_ref()
+            .unwrap()
+            .receiver
+            .failure()
+            .is_none());
         store
             .six_layer_running
             .take()

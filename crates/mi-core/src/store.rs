@@ -368,8 +368,6 @@ pub struct WorkbenchStore {
             Result<Option<crate::six_layer_runtime::RunningSixLayer>, String>,
         >,
     >,
-    six_layer_ownership_identity: Option<String>,
-    six_layer_ownership_checked_at: Instant,
     foreground_bundle_id: Option<String>,
     tokio_runtime: Arc<tokio::runtime::Runtime>,
     hardware_event_tx: tokio::sync::mpsc::UnboundedSender<HardwareLoopEvent>,
@@ -528,8 +526,6 @@ impl WorkbenchStore {
             six_layer_state,
             six_layer_running: None,
             six_layer_job: None,
-            six_layer_ownership_identity: None,
-            six_layer_ownership_checked_at: Instant::now(),
             foreground_bundle_id: None,
             selected_profile_id: None,
             selected_layer_id: None,
@@ -3188,8 +3184,11 @@ impl WorkbenchStore {
     }
 
     fn reconcile_ownership_for_profile(&mut self, profile_id: &str, now: Instant) {
+        if self.six_layer_state.installation.is_some() {
+            return;
+        }
         let is_protected = self.is_protected_oai_profile(profile_id);
-        let desired = if is_protected && self.six_layer_state.installation.is_none() {
+        let desired = if is_protected {
             "native"
         } else {
             "micro-input"
@@ -3207,6 +3206,9 @@ impl WorkbenchStore {
     }
 
     fn ensure_live_ownership_fresh(&mut self) {
+        if self.six_layer_state.installation.is_some() {
+            return;
+        }
         if self.system_lifecycle != SystemLifecycle::Awake
             || self.config.isolated
             || (self.selected_profile_id.is_none()
@@ -3783,7 +3785,25 @@ impl WorkbenchStore {
             .is_some_and(|pid| self.is_protected_oai_profile(pid));
 
         let ownership_banner =
-            OwnershipBannerState::evaluate(&self.native_ownership, is_protected_active);
+            if self.six_layer_state.installation.is_some() || self.six_layer_running.is_some() {
+                if let Some(reason) = self
+                    .six_layer_running
+                    .as_ref()
+                    .and_then(|running| running.receiver.failure())
+                {
+                    OwnershipBannerState::Caution { reason }
+                } else if self.device_session_connected() {
+                    OwnershipBannerState::Ready {
+                        summary: "六层标准键输入已连接".into(),
+                    }
+                } else {
+                    OwnershipBannerState::Caution {
+                        reason: "六层输入尚未连接".into(),
+                    }
+                }
+            } else {
+                OwnershipBannerState::evaluate(&self.native_ownership, is_protected_active)
+            };
         let editing_device = self.document_store.editing_device();
         let can_edit_draft =
             !self.document_store.draft.read_only && self.document_store.draft.loaded_format == 2;

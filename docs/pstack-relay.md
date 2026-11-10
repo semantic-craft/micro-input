@@ -333,6 +333,6 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Evidence**: e5c6e6d; .scratch/antigravity-foreground/result.json; eight offline scenarios PASS; installed; physical input not run
 
 ### [ ] Slice R21: 六层实体输入与配置 RPC 分离
-- **Outcome**: 首次配置核验完成后关闭共享 RPC reader，六层输入独立依赖 USB/Karabiner 与所有权检查，避免无关响应、身份查询超时或编号耗尽停用实体键。配置查询保留严格响应归属与终止原因。
-- **Done Predicate**: 核验后 reader 退出、运行期零 RPC、实体 token 路由与失效清理回归通过；无关联响应不误完成请求，本请求坏包仍失败；`scripts/verify-offline` 全量通过并更新本机。持续连接和实体动作分别记录，层位仅表述首次核验或最近输入，UNKNOWN-17 保留。
+- **Outcome**: 首次配置核验完成后关闭共享 RPC reader，六层输入独立依赖 USB/Karabiner 与自身输入代次，不依赖 Cindy 进程或所有权桥。避免无关响应、身份查询超时或编号耗尽停用实体键。配置查询保留严格响应归属与终止原因。
+- **Done Predicate**: 核验后 reader 退出、运行期零 RPC、实体 token 路由、无 Cindy 所有权桥的执行及失效清理回归通过；无关联响应不误完成请求，本请求坏包仍失败；`scripts/verify-offline` 全量通过并更新本机。持续连接和实体动作分别记录，层位仅表述首次核验或最近输入，UNKNOWN-17 保留。
 - **Evidence**: .scratch/antigravity-session/
