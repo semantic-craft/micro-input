@@ -672,7 +672,10 @@ async fn foreign_response_echo_does_not_kill_reader_or_satisfy_current_request()
         json!({"id":-1,"error":{"code":1,"message":"synthetic"}}),
         json!({"i":true,"result":{}}),
     ];
-    for value in unmatched.iter().chain([json!({"method":"kb.radial"})].iter()) {
+    for value in unmatched
+        .iter()
+        .chain([json!({"method":"kb.radial"})].iter())
+    {
         for report in mi_proto::NativeFramer::default()
             .encode(value.to_string().as_bytes())
             .unwrap()
@@ -688,11 +691,14 @@ async fn foreign_response_echo_does_not_kill_reader_or_satisfy_current_request()
         tokio::spawn(async move { session.request(Method::DeviceStatus, Value::Null).await });
     let report = requests.recv().await.unwrap();
     let request: Value = serde_json::from_slice(&report[3..3 + report[2] as usize]).unwrap();
-    for value in unmatched.iter().chain([
-        json!({"id":request["id"],"method":"synthetic.foreign","params":{},"result":{}}),
-        json!({"id":request["id"],"method":"sys.version","result":{"version":"wrong-method"}}),
-        json!({"id":request["id"],"method":"device.status","result":{"version":"owned"}}),
-    ].iter()) {
+    for value in unmatched.iter().chain(
+        [
+            json!({"id":request["id"],"method":"synthetic.foreign","params":{},"result":{}}),
+            json!({"id":request["id"],"method":"sys.version","result":{"version":"wrong-method"}}),
+            json!({"id":request["id"],"method":"device.status","result":{"version":"owned"}}),
+        ]
+        .iter(),
+    ) {
         for report in mi_proto::NativeFramer::default()
             .encode(value.to_string().as_bytes())
             .unwrap()
@@ -706,32 +712,59 @@ async fn foreign_response_echo_does_not_kill_reader_or_satisfy_current_request()
 }
 
 #[tokio::test]
-async fn owned_malformed_response_remains_an_error_after_routing() {
-    let (link, mut requests) = MockLink::new();
-    let s = DeviceSession::new(
-        link.clone(),
-        Box::new(mi_proto::NativeFramer::default()),
-        Arc::new(ReadOnlySchema),
-        SessionConfig::default(),
-    );
-    let session = s.clone();
+async fn unassociated_response_cannot_complete_request_or_become_notification() {
+    let (session, link, mut requests) = setup(25);
+    let mut notices = session.notifications();
+    let pending = session.clone();
     let task =
-        tokio::spawn(async move { session.request(Method::DeviceStatus, Value::Null).await });
-    let report = requests.recv().await.unwrap();
-    let request: Value = serde_json::from_slice(&report[3..3 + report[2] as usize]).unwrap();
-    let value = json!({"id":request["id"],"method":"device.status","params":{},"result":{}});
-    for report in mi_proto::NativeFramer::default()
-        .encode(value.to_string().as_bytes())
-        .unwrap()
-    {
-        link.inject.send(report).unwrap();
+        tokio::spawn(async move { pending.request(Method::DeviceStatus, Value::Null).await });
+    requests.recv().await.unwrap();
+    link.inject
+        .send(
+            json!({"method":"kb.radial","result":{}})
+                .to_string()
+                .into_bytes(),
+        )
+        .unwrap();
+    assert!(matches!(task.await.unwrap(), Err(SessionError::Timeout)));
+    assert!(notices.try_recv().is_err());
+    assert!(session.terminal_failure().is_none());
+    session.shutdown().await;
+}
+
+#[tokio::test]
+async fn owned_malformed_response_remains_an_error_after_routing() {
+    for damage in 0..3 {
+        let (link, mut requests) = MockLink::new();
+        let s = DeviceSession::new(
+            link.clone(),
+            Box::new(mi_proto::NativeFramer::default()),
+            Arc::new(ReadOnlySchema),
+            SessionConfig::default(),
+        );
+        let session = s.clone();
+        let task =
+            tokio::spawn(async move { session.request(Method::DeviceStatus, Value::Null).await });
+        let report = requests.recv().await.unwrap();
+        let request: Value = serde_json::from_slice(&report[3..3 + report[2] as usize]).unwrap();
+        let value = match damage {
+            0 => json!({"id":request["id"],"method":"device.status","params":{},"result":{}}),
+            1 => json!({"id":request["id"],"i":1000,"method":"synthetic.other","result":{}}),
+            _ => json!({"id":1000,"i":request["id"],"result":{}}),
+        };
+        for report in mi_proto::NativeFramer::default()
+            .encode(value.to_string().as_bytes())
+            .unwrap()
+        {
+            link.inject.send(report).unwrap();
+        }
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(SessionError::Protocol(_))
+        ));
+        assert!(s.terminal_failure().is_some());
+        s.shutdown().await;
     }
-    assert!(matches!(
-        task.await.unwrap(),
-        Err(SessionError::Protocol(_))
-    ));
-    assert!(s.terminal_failure().is_some());
-    s.shutdown().await;
 }
 
 #[tokio::test]

@@ -281,7 +281,9 @@ impl WorkbenchStore {
             || !receipts.is_empty();
         for receipt in receipts {
             let detail = match receipt.detail.as_str() {
-                "blocked:ambiguous_or_missing_focused_pane" => "无法确定目标分屏，请点击目标会话区域",
+                "blocked:ambiguous_or_missing_focused_pane" => {
+                    "无法确定目标分屏，请点击目标会话区域"
+                }
                 "blocked:ambiguous_or_missing_input" => "未找到唯一可编辑输入框",
                 detail => detail,
             };
