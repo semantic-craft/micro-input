@@ -1,5 +1,11 @@
 # 项目教训
 
+## 固定应用层必须覆盖实际动作类型
+
+- 起因与后果：六层托管初版只给 `AgentCommand` 加了目标窗口约束，但现有预设也使用 `Shortcut` 和 `PasteText`；这些键仍可能经过全局输入路径，破坏固定应用层的隔离。
+- 修复：三个托管应用的快捷键和文本动作统一解析目标身份，目标与 adapter 冲突时拒绝执行，分别使用目标 PID 或同窗 AX 输入；不以抢到前台焦点代替定向发送。
+- 验证点：`crates/mi-macos/tests/managed_controls.rs` 的 `shortcut_and_paste_action_types_never_use_global_input_for_managed_targets` 让全局输入、剪贴板和应用启动接口一旦被调用就失败；同时核对真实预设生成的动作类型。Seen 1x（2026-11-10）。
+
 ## 浏览配置不一定是只读
 
 - 标签：#设备 #验收
@@ -175,7 +181,8 @@
 - 修复与证据：PR #74 仅在对原控件尝试停止后，允许原进程实例、窗口身份与标题不变时完整扫描唯一空闲控件。noValue 仅在角色仍有效、属性列表成功且未声明 AXChildren 时作为叶节点；其他错误仍未知。最终 a683a857 的千问原生启停通过，替代控件不接收动作。
 - 正确做法：连续修复仍未通过时先检查正常空闲状态下的扫描前提；区分没有子节点与读取失败，不根据 AXPress 返回值推定录音结束。
 - 验证点：PushToTalkTests.swift 中 testChildrenReadDistinguishesVerifiedLeavesFromMissingOrFailedValues、testStopReadsReplacementButNeverPressesIt 和 testChangedWindowCannotConfirmOrReadReplacement；原生验收同时核对开始/停止回执与最终空闲界面。软件与合成输入不替代实体宽键验收。
-- 复发记录：Seen 1x（2026-11-04）。两轮修复属于同一次原生失败，不重复计数。
+- 2026-11-10：六层托管听写的独立评审再次发现缓存控件漏掉录音后新出现的按钮。状态动作改为在同一进程、窗口中重新发现控件；仅普通滚动使用短期缓存。应用重启后，只有确认旧 PID 已退出才解除旧录音约束，不能仅凭新 PID 不同推断旧录音结束。回归见 `crates/mi-macos/tests/managed_controls.rs` 的 `toggle_observes_mouse_changes_and_replacement_controls` 与 `restarted_app_recovers_only_after_the_previous_process_is_confirmed_exited`；安装版录音效果另验。
+- 复发记录：Seen 2x（2026-11-04、2026-11-10）。同一次问题的多轮修复不重复计数。
 
 
 ## 旧代异步失败也须保持身份与未确认状态

@@ -299,3 +299,8 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Outcome**: 恢复 Cindy 预设、会话桥和所有权协调，保留其他四款内置适配以及「其他软件」的逐键快捷键。
 - **Done Predicate**: `scripts/verify-offline` 的八个隔离场景通过，包含 Cindy 导航与原生所有权切换；不改写实体键盘映射。
 - **Evidence**: 8871a48; .scratch/restore-cindy/result.json (verify-offline PASS; eight isolated scenarios)
+
+### [ ] Slice R15: 六层并用与点击听写
+- **Outcome**: Codex 原生占第 1 层，Antigravity、DeepSeek Harness、Cindy 分别由 Micro Input 控制第 2 至 4 层，第 5、6 层留空。复用 Karabiner 隔离普通键输入，听写按一下开始、再按一下停止。
+- **Done Predicate**: 六层编译、迁移、固定路由、双微动合并、输入换代、定向宿主控制和恢复链的自动回归通过；`scripts/verify-offline` 通过；本机日常版更新。设备写入与读回、恢复、实体按键及录音状态分别记录实际结果，不能互相替代。
+- **Evidence**: 进行中；本次源文件与检查点位于六层整合分支，实体按键尚未验收。
