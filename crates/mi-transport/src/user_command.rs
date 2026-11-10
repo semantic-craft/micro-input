@@ -56,6 +56,12 @@ pub struct Activation {
     pub received_at: Instant,
 }
 
+impl Activation {
+    pub fn is_expired_at(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.received_at) > MAX_AGE
+    }
+}
+
 #[derive(Default)]
 struct Queue {
     armed: bool,
@@ -214,15 +220,13 @@ impl UserCommandReceiver {
         if let Some(error) = &queue.failure {
             return Err(error.clone());
         }
-        if queue
+        let now = Instant::now();
+        while queue
             .events
             .front()
-            .is_some_and(|event| event.received_at.elapsed() > MAX_AGE)
+            .is_some_and(|event| event.is_expired_at(now))
         {
-            queue.events.clear();
-            queue.armed = false;
-            queue.failure = Some("输入已过期，已暂停；请重新连接".into());
-            return Err(queue.failure.clone().unwrap());
+            queue.events.pop_front();
         }
         Ok(queue.events.pop_front())
     }
@@ -232,15 +236,12 @@ impl UserCommandReceiver {
         if let Some(failure) = &queue.failure {
             return Err(failure.clone());
         }
-        if queue
+        while queue
             .events
             .front()
-            .is_some_and(|event| now.saturating_duration_since(event.received_at) > MAX_AGE)
+            .is_some_and(|event| event.is_expired_at(now))
         {
-            queue.events.clear();
-            queue.armed = false;
-            queue.failure = Some("输入已过期，已暂停；请重新连接".into());
-            return Err(queue.failure.clone().unwrap());
+            queue.events.pop_front();
         }
         Ok(queue.events.drain(..).collect())
     }
@@ -329,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn receiver_drops_overflow_and_expired_clicks_without_replay() {
+    fn receiver_drops_overflow_without_replay() {
         let receiver = UserCommandReceiver::bind().unwrap();
         receiver.arm().unwrap();
         for _ in 0..=MAX_PENDING {
@@ -340,6 +341,11 @@ mod tests {
         }
         settle();
         assert!(receiver.take().unwrap_err().contains("积压"));
+        assert!(receiver.arm().is_err());
+    }
+
+    #[test]
+    fn expired_clicks_do_not_disable_new_clicks() {
         let receiver = UserCommandReceiver::bind().unwrap();
         receiver.arm().unwrap();
         send(
@@ -349,8 +355,47 @@ mod tests {
         settle();
         assert!(receiver
             .take_at(Instant::now() + MAX_AGE)
-            .unwrap_err()
-            .contains("过期"));
-        assert!(receiver.arm().is_err());
+            .unwrap()
+            .is_empty());
+        assert!(receiver.failure().is_none());
+        send(
+            &receiver,
+            serde_json::to_value(ActivationPayload::new(receiver.generation(), 1)).unwrap(),
+        );
+        settle();
+        assert_eq!(receiver.next().unwrap().unwrap().control, 1);
+    }
+
+    #[test]
+    fn reads_preserve_fresh_clicks_after_an_expired_prefix() {
+        for take_all in [false, true] {
+            let receiver = UserCommandReceiver::bind().unwrap();
+            receiver.arm().unwrap();
+            for control in [0, 1, 2] {
+                send(
+                    &receiver,
+                    serde_json::to_value(ActivationPayload::new(receiver.generation(), control))
+                        .unwrap(),
+                );
+            }
+            settle();
+            {
+                let mut queue = receiver.queue.lock().unwrap();
+                for event in queue.events.iter_mut().take(2) {
+                    event.received_at = Instant::now() - MAX_AGE - Duration::from_secs(1);
+                }
+            }
+            let events = if take_all {
+                receiver.take().unwrap()
+            } else {
+                vec![receiver.next().unwrap().unwrap()]
+            };
+            assert_eq!(
+                events.iter().map(|event| event.control).collect::<Vec<_>>(),
+                vec![2]
+            );
+            assert!(receiver.next().unwrap().is_none());
+            assert!(receiver.failure().is_none());
+        }
     }
 }

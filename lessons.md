@@ -299,3 +299,16 @@
 
 - 完整会话标题不能放入固定高度键帽后强制不限高度换行。键帽显示编号与短状态，完整标题由自然高度列表承载。
 - 布局验收必须覆盖真实投影格式、长中英文标题与所有状态。`SessionKeycapLayoutTests` 已覆盖内容区高度、全文行高及 JSON null 空槽；仍需在原生运行界面检查对应关系。
+
+## 过期按键与连接失效分别处理
+
+- 起因与后果：六层输入排队后还需核验 Cindy 所有权。实机观察到一次事件核验前已等待 1617 毫秒，核验另用 1156 毫秒；超过两秒有效期后，原实现永久停用整个接收器，后续新按键也没有反应。
+- 修复：`Activation::is_expired_at` 统一有效期，接收与执行阶段只淘汰过期事件。所有权拒绝、断连、代次终止及溢出继续停止执行。
+- 验证点：`expired_clicks_do_not_disable_new_clicks`、`reads_preserve_fresh_clicks_after_an_expired_prefix` 和 `a_click_expiring_during_ownership_check_does_not_stop_fresh_clicks`。必须证明旧动作没有执行，同一代次的后续新动作仍会执行。Seen 1x（2026-11-10）。
+- 同轮发现：底层执行器不支持的会话导航曾返回成功而无系统动作。`unsupported_` 回归以真实执行器和记录型系统驱动验证明确拒绝，并用受支持的聚焦输入动作作正对照。明确拒绝不代表导航能力已实现。
+
+## 前台应用与分屏必须分别确定目标
+
+- 起因与后果：六层独立执行器只读取物理层，已有前台通知不能改变它的目标；Antigravity 两个分屏的输入框和语音按钮又被展平成整窗列表，触发 `ambiguous_or_missing_dictation_control`。应用同时运行与控件歧义不能混为同一个原因。
+- 修复：第 2–4 托管层在已安装方案中优先匹配前台应用，切换时淘汰旧队列及等待权限核验的事件；AX 捕获保留祖先路径，以唯一焦点分支确定分屏，后续执行和读回固定到同一目标。实时语音复用该路径，不再维护整窗选择器。第 1 层 Codex 原生通道不在此规则控制范围。
+- 验证点：`foreground_switch_discards_queued_and_waiting_clicks_without_retargeting`、`split_panes_resolve_only_the_focused_branch`、`recording_cannot_migrate_to_another_pane_in_the_same_window`。多分屏无明确焦点时拒绝；窗口标题变化时旧录音清理仍可能拒绝，不能仅凭 AX 分屏引用宣称会话身份未变。Seen 1x（2026-11-10）。

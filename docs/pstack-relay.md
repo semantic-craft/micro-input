@@ -316,3 +316,18 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Outcome**: 保留现有插画，校正打包留白并使用系统处理后的运行图标；更新本机日常安装版。
 - **Done Predicate**: MI_AUTO_HOST_READY=0 RUST_TEST_THREADS=1 scripts/verify-offline && swift scripts/verify-app-icon.swift target/AppIcon.iconset && codesign --verify --strict "/Applications/Micro Input.app"
 - **Evidence**: /Applications/Micro Input.app; scripts/verify-offline PASS (eight scenarios); installed ICNS opaque frame 824px
+
+### [x] Slice R18: 过期按键不再停用后续输入
+- **Outcome**: 保留两秒有效期和所有权检查，仅丢弃过期按键，后续新按键继续执行；未实现的会话动作明确拒绝，设备核验失败显示具体原因。
+- **Done Predicate**: 过期后新输入回归先失败后通过；独立审查及 `scripts/verify-offline` 通过；本机日常版更新。实体按键与会话导航能力分别记录，不以明确拒绝当成导航完成。
+- **Evidence**: a857584; .scratch/antigravity-profile/result.json; scripts/verify-offline eight scenarios PASS; physical verification pending
+
+### [ ] Slice R19: 接通会话键的真实目标导航
+- **Outcome**: 六层和工作台共享动态槽位解析，按完整目标身份切换会话；仅在实际选中被确认后更新已读和导航历史。
+- **Done Predicate**: 覆盖空槽、过期目标、实例换代、导航拒绝与成功回读；在两个真实 Antigravity 会话间完成实体键跳转。打开应用不能代替切换会话。
+- **Evidence**: #84；`integrations/antigravity/live-bridge.py` 的现有打开路径仅激活应用，真实会话导航仍未验收。
+
+### [x] Slice R20: 托管按键跟随前台与分屏焦点
+- **Outcome**: 第 2–4 托管层优先使用当前前台应用的已安装方案，执行器按光标所在分屏选择控件；后台 Codex 不参与目标选择，旧输入不随切换转投新目标。
+- **Done Predicate**: 前台切换与双分屏回归先失败后通过，独立审查及 `scripts/verify-offline` 通过，本机日常版更新。物理层仍按真实观察显示；第 1 层 Codex 原生通道及尚未实现的会话导航分别保留边界。
+- **Evidence**: e5c6e6d; .scratch/antigravity-foreground/result.json; eight offline scenarios PASS; installed; physical input not run

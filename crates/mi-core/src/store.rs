@@ -370,6 +370,7 @@ pub struct WorkbenchStore {
     >,
     six_layer_ownership_identity: Option<String>,
     six_layer_ownership_checked_at: Instant,
+    foreground_bundle_id: Option<String>,
     tokio_runtime: Arc<tokio::runtime::Runtime>,
     hardware_event_tx: tokio::sync::mpsc::UnboundedSender<HardwareLoopEvent>,
     hardware_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<HardwareLoopEvent>>,
@@ -529,6 +530,7 @@ impl WorkbenchStore {
             six_layer_job: None,
             six_layer_ownership_identity: None,
             six_layer_ownership_checked_at: Instant::now(),
+            foreground_bundle_id: None,
             selected_profile_id: None,
             selected_layer_id: None,
             selected_binding_slot: Some(0),
@@ -1964,10 +1966,18 @@ impl WorkbenchStore {
     }
 
     pub fn foreground_changed(&mut self, bundle_id: Option<&str>) -> bool {
-        let Some(bundle) = bundle_id
+        let bundle_id = bundle_id
             .map(str::trim)
-            .filter(|s| !s.is_empty() && *s != "*")
-        else {
+            .filter(|bundle| !bundle.is_empty() && *bundle != "*");
+        self.foreground_bundle_id = bundle_id.map(str::to_owned);
+        if let Some(running) = &self.six_layer_running {
+            let changed = running.foreground_changed(bundle_id);
+            if changed {
+                self.build_projection(true);
+            }
+            return changed;
+        }
+        let Some(bundle) = bundle_id else {
             return false;
         };
         if self.board_routing.is_managed() || !self.auto_follow_enabled || self.manual_override {
@@ -3968,6 +3978,13 @@ impl WorkbenchStore {
     }
 
     fn resolved_active_profile_id(&self) -> Option<String> {
+        if let Some(profile) = self
+            .six_layer_running
+            .as_ref()
+            .and_then(|running| running.effective_profile_id())
+        {
+            return Some(profile);
+        }
         self.document_store.host_active_profile_id().filter(|pid| {
             self.document_store
                 .draft
@@ -4025,7 +4042,9 @@ impl WorkbenchStore {
     }
 
     fn routing_mode_summary_label(&self) -> String {
-        let mode = if !self.auto_follow_enabled {
+        let mode = if self.six_layer_running.is_some() {
+            "托管层前台优先"
+        } else if !self.auto_follow_enabled {
             "手动模式"
         } else if self.manual_override {
             "手动锁定（自动跟随已暂停）"

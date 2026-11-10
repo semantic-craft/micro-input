@@ -85,18 +85,22 @@ public final class CoreStore {
             queue: .main
         ) { [weak self] note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            let bundleId = app?.bundleIdentifier
             MainActor.assumeIsolated {
                 guard let self, self.workspaceObserver != nil else { return }
-                guard bundleId != Bundle.main.bundleIdentifier else { return }
-                guard bundleId != self.lastObservedBundleId else { return }
-                self.lastObservedBundleId = bundleId
-                self.dispatchRaw([
-                    "domain": "foreground_app_changed",
-                    "action": ["bundle_id": (bundleId as Any?) ?? NSNull()]
-                ])
+                self.observeForeground(app?.bundleIdentifier)
             }
         }
+        observeForeground(NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+    }
+
+    private func observeForeground(_ bundleId: String?) {
+        guard bundleId != Bundle.main.bundleIdentifier else { return }
+        guard bundleId != lastObservedBundleId else { return }
+        lastObservedBundleId = bundleId
+        dispatchRaw([
+            "domain": "foreground_app_changed",
+            "action": ["bundle_id": (bundleId as Any?) ?? NSNull()]
+        ])
     }
 
     public func refreshProjection() {
