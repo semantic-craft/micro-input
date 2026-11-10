@@ -414,6 +414,51 @@ impl WorkbenchStore {
 mod tests {
     use super::*;
 
+    #[test]
+    fn six_layer_connection_outlives_the_verification_rpc_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let session = mock_session(&store.tokio_runtime);
+        let mut running =
+            six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        running.readiness.configuration_observed = true;
+        running.readiness.keyboard_grabbed = true;
+        store.tokio_runtime.block_on(session.shutdown());
+        store.connected_candidate = Some(running.candidate.clone());
+        store.six_layer_running = Some(running);
+        store.rebuild_local_projection();
+        assert!(store.projection.device_connected);
+        assert!(store.device_session.is_none());
+        store.handle_hardware_loop_event(
+            HardwareLoopEvent::Disconnected {
+                session_id: session.id,
+            },
+            Instant::now(),
+        );
+        assert!(store
+            .six_layer_running
+            .as_ref()
+            .unwrap()
+            .receiver
+            .failure()
+            .is_none());
+        store
+            .six_layer_running
+            .as_ref()
+            .unwrap()
+            .receiver
+            .invalidate("USB removed");
+        store.rebuild_local_projection();
+        assert!(!store.projection.device_connected);
+        store
+            .six_layer_running
+            .take()
+            .unwrap()
+            .shutdown(&store.tokio_runtime)
+            .unwrap();
+    }
+
+
     // Test-only framing: each report contains one JSON object, not a device packet.
     struct TestFramer;
     impl mi_proto::Framer for TestFramer {
