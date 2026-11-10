@@ -328,3 +328,9 @@
 
 - 起因与后果：六层专用标准键由 Karabiner 抓取，却继承了 Cindy 原生 Vendor 通道的释放回执门禁。用户退出且不再使用 Cindy 后，Antigravity 仍无法连接。
 - 修复与验证：六层输入只检查它实际使用的 USB/Karabiner、输入代次、前台目标及用户执行开关，不依赖 Cindy 进程或 socket。第 1 层原生 OAI 映射不变，传统 Vendor 通道的所有权机制单独保留。回归覆盖无所有权桥仍执行、新旧输入代次隔离及真实输入条件失效；不为不再使用的应用新增进程探测框架。Seen 1x（2026-11-10）。
+
+## 已选控件的确认不需要重新发现整棵树
+
+- 起因与后果：真实按键采样显示聚焦输入重复遍历 AX 树。捕获和选择后，执行前校验与焦点读回仍完整扫描，单次等待还会阻塞后续按键。
+- 修复：保留完整发现与输入歧义判断，只对已选控件做实时路径校验和焦点确认。首次实测证明一个 AXScrollArea 的 AXParent 与 AXChildren 不互逆，因此使用最近一次完整选择扫描记录的向下路径，逐段检查当前子节点、原 scope、PID、窗口及可见性；不信任旧属性，也不转向替代控件。
+- 验证点：`exact_control_membership_rejects_removed_or_replaced_path_edges`、`exact_control_membership_requires_the_original_scope`、`input_added_after_capture_is_rejected_before_focus` 和焦点确认期间的替换/身份变化回归。成功的真实 AX 对照与拒绝分别计数，物理开关延迟不能由测试进程时长推算。见 `docs/designs/host-input-latency.md`。Seen 1x（2026-11-10）。

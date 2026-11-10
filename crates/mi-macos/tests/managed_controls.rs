@@ -28,15 +28,17 @@ struct Fixture {
     enforce_target_cache: bool,
     latest_target: Option<ManagedWindowIdentity>,
     retained_targets: Vec<ManagedWindowIdentity>,
+    after_capture: Option<fn(&mut Fixture)>,
+    after_focus: Option<fn(&mut Fixture)>,
 }
 #[derive(Clone)]
 struct Provider(Arc<Mutex<Fixture>>);
 impl Provider {
-    fn cindy() -> Self {
+    fn with_target(bundle_id: &str, start_label: &str) -> Self {
         Self(Arc::new(Mutex::new(Fixture {
             window: ManagedWindow {
                 identity: ManagedWindowIdentity {
-                    bundle_id: "com.xd.cindy".into(),
+                    bundle_id: bundle_id.into(),
                     pid: 100,
                     window_id: 1,
                     scope_id: 0,
@@ -46,7 +48,7 @@ impl Provider {
                     ManagedControl {
                         id: 2,
                         role: "AXCheckBox".into(),
-                        label: "开始语音输入".into(),
+                        label: start_label.into(),
                         enabled: true,
                         pressable: true,
                         editable: false,
@@ -72,7 +74,15 @@ impl Provider {
             enforce_target_cache: false,
             latest_target: None,
             retained_targets: Vec::new(),
+            after_capture: None,
+            after_focus: None,
         })))
+    }
+    fn cindy() -> Self {
+        Self::with_target("com.xd.cindy", "开始语音输入")
+    }
+    fn dsh() -> Self {
+        Self::with_target("com.deepseek.dsh", "开始听写")
     }
     fn controls(&self) -> ManagedAxControls<Self> {
         ManagedAxControls::with_readback_timeout(self.clone(), Duration::ZERO)
@@ -111,6 +121,9 @@ impl ManagedAxProvider for Provider {
             window.controls[0].label = "开始听写".into();
         }
         state.latest_target = Some(window.identity.clone());
+        if let Some(change) = state.after_capture.take() {
+            change(&mut state);
+        }
         Ok(window)
     }
     fn read(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String> {
@@ -176,6 +189,9 @@ impl ManagedAxProvider for Provider {
             .unwrap()
             .focused = confirmed;
         state.events.push(format!("focus:{id}"));
+        if let Some(change) = state.after_focus.take() {
+            change(&mut state);
+        }
         Ok(())
     }
     fn scroll(
@@ -408,6 +424,73 @@ fn focused_input_is_selected_when_another_pane_has_an_input() {
     }
     provider.controls().focus_input("cindy").unwrap();
     assert_eq!(provider.events(), ["capture:com.xd.cindy", "focus:8"]);
+}
+
+#[test]
+fn input_added_after_capture_is_rejected_before_focus() {
+    let provider = Provider::dsh();
+    provider.0.lock().unwrap().after_capture = Some(|state| {
+        let mut extra = state.window.controls[1].clone();
+        extra.id = 8;
+        state.window.controls.push(extra);
+    });
+    assert_eq!(
+        provider.controls().focus_input("dsh-desktop").unwrap_err(),
+        "blocked:ambiguous_or_missing_input"
+    );
+    assert_eq!(provider.events(), ["capture:com.deepseek.dsh"]);
+}
+
+#[test]
+fn focus_confirmation_rejects_removed_or_replaced_input() {
+    for replace in [false, true] {
+        let provider = Provider::dsh();
+        provider.0.lock().unwrap().after_focus = Some(if replace {
+            |state| state.window.controls[1].id = 8
+        } else {
+            |state| {
+                state.window.controls.remove(1);
+            }
+        });
+        assert_eq!(
+            provider.controls().focus_input("dsh-desktop").unwrap_err(),
+            "unconfirmed:blocked:ax_control_removed"
+        );
+        assert_eq!(provider.events(), ["capture:com.deepseek.dsh", "focus:3"]);
+    }
+}
+
+#[test]
+fn focus_confirmation_cannot_follow_changed_window_or_scope() {
+    let changes: [fn(&mut Fixture); 4] = [
+        |state| state.read_pid = Some(999),
+        |state| state.window.identity.window_id += 1,
+        |state| state.window.identity.scope_id += 1,
+        |state| state.window.identity.title = "replacement".into(),
+    ];
+    for change in changes {
+        let provider = Provider::dsh();
+        provider.0.lock().unwrap().after_focus = Some(change);
+        assert_eq!(
+            provider.controls().focus_input("dsh-desktop").unwrap_err(),
+            "unconfirmed:blocked:target_identity_changed"
+        );
+        assert_eq!(provider.events(), ["capture:com.deepseek.dsh", "focus:3"]);
+    }
+}
+
+#[test]
+fn unconfirmed_focus_never_inserts_text() {
+    let provider = Provider::dsh();
+    provider.0.lock().unwrap().focus_confirmed = false;
+    assert_eq!(
+        provider
+            .controls()
+            .submit("dsh-desktop", Some("must not be inserted"))
+            .unwrap_err(),
+        "unconfirmed:input_focus"
+    );
+    assert_eq!(provider.events(), ["capture:com.deepseek.dsh", "focus:3"]);
 }
 
 #[test]
@@ -950,9 +1033,25 @@ fn manual_managed_ax_control() {
                 .inspect_managed_controls(&adapter)
                 .expect("inspect target")
         ),
-        "focus" => driver
-            .focus_agent_input(&adapter)
-            .expect("focus target input"),
+        "focus" => {
+            let started = std::time::Instant::now();
+            let result = driver.focus_agent_input(&adapter);
+            let elapsed = started.elapsed();
+            if std::env::var("MI_LIVE_AX_TIMING").as_deref() == Ok("1") {
+                let outcome = match &result {
+                    Ok(()) => "success",
+                    Err(error) if error.starts_with("unconfirmed:") => "unconfirmed",
+                    Err(error) if error.starts_with("blocked:") => "blocked",
+                    Err(_) => "error",
+                };
+                println!(
+                    "managed_ax_timing action=focus elapsed_us={} result={outcome} confirmed={}",
+                    elapsed.as_micros(),
+                    result.is_ok()
+                );
+            }
+            result.expect("focus target input");
+        }
         "toggle" => println!(
             "{:?}",
             driver

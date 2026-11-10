@@ -56,6 +56,17 @@ pub trait ManagedAxProvider: Send {
         self.capture(bundle_id)
     }
     fn read(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String>;
+    fn read_control(
+        &mut self,
+        target: &ManagedWindowIdentity,
+        control: u64,
+    ) -> Result<ManagedControl, String> {
+        read(self, target)?
+            .controls
+            .into_iter()
+            .find(|item| item.id == control)
+            .ok_or_else(|| blocked("ax_control_removed"))
+    }
     fn press(&mut self, target: &ManagedWindowIdentity, control: u64) -> Result<(), String>;
     fn focus(&mut self, target: &ManagedWindowIdentity, control: u64) -> Result<(), String>;
     fn scroll(
@@ -425,7 +436,7 @@ fn capture<P: ManagedAxProvider>(
     Ok(window)
 }
 
-fn read<P: ManagedAxProvider>(
+fn read<P: ManagedAxProvider + ?Sized>(
     provider: &mut P,
     target: &ManagedWindowIdentity,
 ) -> Result<ManagedWindow, String> {
@@ -608,12 +619,10 @@ fn focus_in_window<P: ManagedAxProvider>(
     provider.focus(target, id)?;
     let deadline = Instant::now() + timeout;
     loop {
-        let window = read(provider, target).map_err(|error| format!("unconfirmed:{error}"))?;
-        if window
-            .controls
-            .iter()
-            .any(|control| control.id == id && control.editable && control.focused)
-        {
+        let control = provider
+            .read_control(target, id)
+            .map_err(|error| format!("unconfirmed:{error}"))?;
+        if control.id == id && control.editable && control.focused {
             return Ok(id);
         }
         if Instant::now() >= deadline {

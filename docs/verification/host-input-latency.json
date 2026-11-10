@@ -1,0 +1,459 @@
+{
+  "source_base": "6eaae095b0a97da80221d36a02af1b12d60c7b6e",
+  "target": "Antigravity 2.31.0",
+  "scope": "focus_agent_input call through native focus confirmation; no physical switch, Karabiner or receiver timing",
+  "condition": "repeated focus in existing target; first warmup per side excluded; baseline and candidate alternate; no compilation or profiler during timing",
+  "results": {
+    "debug": {
+      "summary": {
+        "baseline": {
+          "successes": 7,
+          "failures": 0,
+          "median_ms": 483.704,
+          "range_ms": [
+            476.045,
+            511.791
+          ]
+        },
+        "candidate": {
+          "successes": 7,
+          "failures": 0,
+          "median_ms": 291.669,
+          "range_ms": [
+            277.348,
+            308.113
+          ]
+        }
+      },
+      "binary_sha256": {
+        "baseline": "ce2b1de6c407c4dc643949d95322709e5a1be024b1f6d30828ac80e298b63910",
+        "candidate": "3e1f8873eb2c5c6ae5e0b0b6712646255fac86be322f9699a66506f8649541c6"
+      },
+      "samples": [
+        {
+          "side": "baseline",
+          "trial": 1,
+          "warmup": false,
+          "process_elapsed_ms": 489.030833,
+          "returncode": 0,
+          "elapsed_ms": 483.518,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "candidate",
+          "trial": 1,
+          "warmup": false,
+          "process_elapsed_ms": 296.3295,
+          "returncode": 0,
+          "elapsed_ms": 291.669,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "baseline",
+          "trial": 2,
+          "warmup": false,
+          "process_elapsed_ms": 493.037291,
+          "returncode": 0,
+          "elapsed_ms": 486.594,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "candidate",
+          "trial": 2,
+          "warmup": false,
+          "process_elapsed_ms": 305.3375,
+          "returncode": 0,
+          "elapsed_ms": 299.051,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "baseline",
+          "trial": 3,
+          "warmup": false,
+          "process_elapsed_ms": 517.228625,
+          "returncode": 0,
+          "elapsed_ms": 511.791,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "candidate",
+          "trial": 3,
+          "warmup": false,
+          "process_elapsed_ms": 298.883792,
+          "returncode": 0,
+          "elapsed_ms": 293.247,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "baseline",
+          "trial": 4,
+          "warmup": false,
+          "process_elapsed_ms": 488.824208,
+          "returncode": 0,
+          "elapsed_ms": 483.704,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "candidate",
+          "trial": 4,
+          "warmup": false,
+          "process_elapsed_ms": 313.846834,
+          "returncode": 0,
+          "elapsed_ms": 308.113,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "baseline",
+          "trial": 5,
+          "warmup": false,
+          "process_elapsed_ms": 499.712583,
+          "returncode": 0,
+          "elapsed_ms": 493.746,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "candidate",
+          "trial": 5,
+          "warmup": false,
+          "process_elapsed_ms": 285.042042,
+          "returncode": 0,
+          "elapsed_ms": 279.459,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "baseline",
+          "trial": 6,
+          "warmup": false,
+          "process_elapsed_ms": 481.925708,
+          "returncode": 0,
+          "elapsed_ms": 476.045,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "candidate",
+          "trial": 6,
+          "warmup": false,
+          "process_elapsed_ms": 283.243542,
+          "returncode": 0,
+          "elapsed_ms": 277.348,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "baseline",
+          "trial": 7,
+          "warmup": false,
+          "process_elapsed_ms": 485.225,
+          "returncode": 0,
+          "elapsed_ms": 480.086,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "candidate",
+          "trial": 7,
+          "warmup": false,
+          "process_elapsed_ms": 286.654375,
+          "returncode": 0,
+          "elapsed_ms": 281.338,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        }
+      ],
+      "load": "21:19  up  2:10, 1 user, load averages: 4.68 5.14 5.88",
+      "cores": "18"
+    },
+    "release": {
+      "summary": {
+        "baseline": {
+          "successes": 7,
+          "failures": 0,
+          "median_ms": 486.85,
+          "range_ms": [
+            469.269,
+            493.753
+          ]
+        },
+        "candidate": {
+          "successes": 7,
+          "failures": 0,
+          "median_ms": 284.311,
+          "range_ms": [
+            275.542,
+            294.437
+          ]
+        }
+      },
+      "binary_sha256": {
+        "baseline": "8f2abcebef978430d1fe98a2a6900cb719e487fdee3c82c195eb27fe6eecd8ad",
+        "candidate": "92b5fa35b12545cede406e312938c6bb89f4348ccb50501d4bc4616ed3402a1a"
+      },
+      "samples": [
+        {
+          "side": "baseline",
+          "trial": 1,
+          "warmup": false,
+          "process_elapsed_ms": 498.606792,
+          "returncode": 0,
+          "elapsed_ms": 491.043,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "candidate",
+          "trial": 1,
+          "warmup": false,
+          "process_elapsed_ms": 300.185667,
+          "returncode": 0,
+          "elapsed_ms": 294.437,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "baseline",
+          "trial": 2,
+          "warmup": false,
+          "process_elapsed_ms": 496.599208,
+          "returncode": 0,
+          "elapsed_ms": 490.974,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "candidate",
+          "trial": 2,
+          "warmup": false,
+          "process_elapsed_ms": 285.984417,
+          "returncode": 0,
+          "elapsed_ms": 280.313,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "baseline",
+          "trial": 3,
+          "warmup": false,
+          "process_elapsed_ms": 474.57575,
+          "returncode": 0,
+          "elapsed_ms": 469.269,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "candidate",
+          "trial": 3,
+          "warmup": false,
+          "process_elapsed_ms": 281.305667,
+          "returncode": 0,
+          "elapsed_ms": 275.542,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "baseline",
+          "trial": 4,
+          "warmup": false,
+          "process_elapsed_ms": 492.334292,
+          "returncode": 0,
+          "elapsed_ms": 486.85,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "candidate",
+          "trial": 4,
+          "warmup": false,
+          "process_elapsed_ms": 290.2945,
+          "returncode": 0,
+          "elapsed_ms": 284.311,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "baseline",
+          "trial": 5,
+          "warmup": false,
+          "process_elapsed_ms": 499.911208,
+          "returncode": 0,
+          "elapsed_ms": 493.753,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "candidate",
+          "trial": 5,
+          "warmup": false,
+          "process_elapsed_ms": 300.12325,
+          "returncode": 0,
+          "elapsed_ms": 293.942,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "baseline",
+          "trial": 6,
+          "warmup": false,
+          "process_elapsed_ms": 478.1795,
+          "returncode": 0,
+          "elapsed_ms": 472.716,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "candidate",
+          "trial": 6,
+          "warmup": false,
+          "process_elapsed_ms": 299.440042,
+          "returncode": 0,
+          "elapsed_ms": 293.514,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "baseline",
+          "trial": 7,
+          "warmup": false,
+          "process_elapsed_ms": 491.512584,
+          "returncode": 0,
+          "elapsed_ms": 485.258,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        },
+        {
+          "side": "candidate",
+          "trial": 7,
+          "warmup": false,
+          "process_elapsed_ms": 282.375375,
+          "returncode": 0,
+          "elapsed_ms": 276.471,
+          "outcome": "success",
+          "confirmed": true,
+          "error": null,
+          "success": true
+        }
+      ],
+      "load": "21:19  up  2:10, 1 user, load averages: 5.08 5.23 5.92",
+      "cores": "18"
+    }
+  },
+  "earlier_runs": [
+    {
+      "kind": "first candidate, upward parent-path assumption",
+      "result": "blocked:ax_control_removed twice; rejected, not a speed result",
+      "diagnosis": "AXScrollArea depth28, parent children1, membership false"
+    },
+    {
+      "kind": "first debug comparison after downward-path correction",
+      "baseline": {
+        "successes": 6,
+        "failures": 1
+      },
+      "candidate": {
+        "successes": 6,
+        "failures": 1
+      },
+      "limitation": "exact failure codes were not retained; excluded from primary comparison, retained locally"
+    }
+  ],
+  "real_focus_transition": {
+    "before": "HTML content",
+    "after": "Message input text entry area",
+    "result": "confirmed by independent CUA AX observation"
+  },
+  "physical_candidate_keys": "NOT_RUN",
+  "offline": "PASS: scripts/verify-offline, eight isolated QA scenarios",
+  "measured_source_patch_sha256": "fa1a42bc6b70e3b52918a06475e801373f2778a48d6d46ae6c0b403186494d95",
+  "production_stable_patch_id": "024bb394a6aaed58ce1b031bd01f6ed615fba9f4",
+  "independent_verification": {
+    "verdict": "PASS+NOTES",
+    "release_baseline": {
+      "successes": 5,
+      "failures": 0,
+      "median_ms": 489.847,
+      "range_ms": [
+        475.688,
+        618.776
+      ]
+    },
+    "release_candidate": {
+      "successes": 5,
+      "failures": 0,
+      "median_ms": 284.795,
+      "range_ms": [
+        282.313,
+        314.675
+      ]
+    },
+    "notes": [
+      "includes native focus confirmation, not physical input or queue",
+      "test-only fixture change separately rechecked"
+    ]
+  },
+  "final_rust_patch_sha256": "4ad807b3abb53c4f33332797330b14118ca1104a8a70a8e0654388374444a2bf",
+  "fixture_verification": "PASS: 18 library tests + 33 integration tests; 1 live test ignored; four new cases use DSH fixture"
+}
