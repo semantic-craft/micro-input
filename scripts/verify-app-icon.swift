@@ -54,4 +54,3 @@ for (filename, pixels) in [
 }
 guard failures == 0 else { exit(1) }
 print("App icon artwork frame matches the system at 128, 256, 512 and 1024 px: PASS")
-
