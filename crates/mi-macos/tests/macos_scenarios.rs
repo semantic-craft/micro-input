@@ -22,6 +22,66 @@ use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 #[test]
+fn unsupported_session_navigation_does_not_report_success() {
+    for action in [
+        ResolvedHostAction::AgentCommand {
+            adapter: "four-app".into(),
+            command: "slot-open:0".into(),
+        },
+        ResolvedHostAction::FocusSession {
+            adapter: "antigravity".into(),
+            session: "session-1".into(),
+        },
+    ] {
+        let driver = RecordingOsDriver::new(true);
+        let executor = LiveHostActionExecutor::new(driver.clone());
+        let receipt = executor.execute("Antigravity", "AG00", &action);
+        assert_eq!(receipt.outcome, "blocked", "{action:?}");
+        assert_eq!(receipt.detail, "session_navigation_unavailable");
+        assert!(driver.events().is_empty());
+    }
+}
+
+#[test]
+fn unsupported_agent_command_does_not_activate_an_application() {
+    let driver = RecordingOsDriver::new(true);
+    let executor = LiveHostActionExecutor::new(driver.clone());
+    let receipt = executor.execute(
+        "Antigravity",
+        "AG00",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "unknown-command".into(),
+        },
+    );
+    assert_eq!(receipt.outcome, "blocked");
+    assert_eq!(receipt.detail, "unsupported_agent_command");
+    assert!(driver.events().is_empty());
+}
+
+#[test]
+fn supported_agent_command_performs_the_requested_action() {
+    let driver = RecordingOsDriver::new(true);
+    let executor = LiveHostActionExecutor::new(driver.clone());
+    let receipt = executor.execute(
+        "Antigravity",
+        "AG07",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "focus-input".into(),
+        },
+    );
+    assert_eq!(receipt.outcome, "executed");
+    assert_eq!(
+        driver.events(),
+        vec![
+            RecordedOsEvent::CheckAccessibilityTrusted,
+            RecordedOsEvent::FocusAgentInput("antigravity".into()),
+        ]
+    );
+}
+
+#[test]
 fn test_document_instance_lock_rejects_duplicate_owner_until_released() {
     let temp = TempDir::new().expect("temp dir");
     let doc_dir = temp.path().join("micro-input-doc");

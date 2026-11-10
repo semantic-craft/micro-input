@@ -781,6 +781,93 @@ mod tests {
     }
 
     #[test]
+    fn a_click_expiring_during_ownership_check_does_not_stop_fresh_clicks() {
+        let mut draft = mi_model::draft::Draft::default();
+        mi_model::preset::install_agent_starter_profiles(&mut draft).unwrap();
+        let id = |name: &str| {
+            draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, p)| p.name == name)
+                .unwrap()
+                .0
+                .clone()
+        };
+        let codex_id = id("Codex");
+        let ag_id = id("Antigravity");
+        let dsh_id = id("DeepSeek Coder (DSH)");
+        let cindy_id = id(mi_model::preset::MANAGED_CINDY_PROFILE_NAME);
+        let desired =
+            BoardLayerPlan::recommended(codex_id, ag_id.clone(), dsh_id.clone(), cindy_id.clone());
+        let plan =
+            AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
+                .unwrap();
+
+        let receiver = Arc::new(UserCommandReceiver::bind().unwrap());
+        receiver.arm().unwrap();
+        send(&receiver, 0);
+        thread::sleep(Duration::from_millis(30));
+        let stop = AtomicBool::new(false);
+        let enabled = AtomicBool::new(true);
+        let commands = AtomicBool::new(true);
+        let observed = AtomicU8::new(1);
+        let first = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let mut calls = Vec::new();
+        let mut permit_calls = 0;
+        thread::scope(|scope| {
+            let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
+            let watchdog_stop = &stop;
+            scope.spawn(move || {
+                if cancel_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                    watchdog_stop.store(true, Ordering::Release);
+                }
+            });
+            execute_clicks(
+                &receiver,
+                &plan,
+                &stop,
+                &enabled,
+                &commands,
+                &observed,
+                &first,
+                &tx,
+                || {
+                    permit_calls += 1;
+                    if permit_calls == 1 {
+                        thread::sleep(Duration::from_millis(2100));
+                        send(&receiver, 20);
+                        thread::sleep(Duration::from_millis(30));
+                    }
+                    Ok(())
+                },
+                |profile, binding, _| {
+                    calls.push((profile.to_owned(), binding.to_owned()));
+                    stop.store(true, Ordering::Release);
+                    mi_macos::HostActionReceipt {
+                        action_type: "open_app".into(),
+                        binding_id: binding.into(),
+                        detail: "ok".into(),
+                        outcome: "executed".into(),
+                        profile_id: profile.into(),
+                        target: "test".into(),
+                        text_byte_len: None,
+                        timestamp_ms: 1,
+                    }
+                },
+            );
+            let _ = cancel_tx.send(());
+        });
+        assert_eq!(calls, vec![(dsh_id, "AG00".into())]);
+        assert_eq!(permit_calls, 2);
+        assert_eq!(rx.try_iter().count(), 1);
+        assert!(receiver.failure().is_none());
+    }
+
+    #[test]
     fn saved_state_roundtrips_and_rejects_unsupported_versions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("six-layer-runtime.json");
