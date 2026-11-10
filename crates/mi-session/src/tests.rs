@@ -664,10 +664,15 @@ async fn foreign_response_echo_does_not_kill_reader_or_satisfy_current_request()
         SessionConfig::default(),
     );
     let mut notices = s.notifications();
-    for value in [
+    let unmatched = [
         json!({"id":1000,"method":"synthetic.foreign","params":{},"result":{}}),
-        json!({"method":"kb.radial"}),
-    ] {
+        json!({"method":"synthetic.foreign","result":{}}),
+        json!({"id":null,"result":{}}),
+        json!({"id":"0","result":{}}),
+        json!({"id":-1,"error":{"code":1,"message":"synthetic"}}),
+        json!({"i":true,"result":{}}),
+    ];
+    for value in unmatched.iter().chain([json!({"method":"kb.radial"})].iter()) {
         for report in mi_proto::NativeFramer::default()
             .encode(value.to_string().as_bytes())
             .unwrap()
@@ -675,20 +680,19 @@ async fn foreign_response_echo_does_not_kill_reader_or_satisfy_current_request()
             link.inject.send(report).unwrap();
         }
     }
-    tokio::time::timeout(Duration::from_secs(1), notices.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let notice = tokio::time::timeout(Duration::from_secs(1), notices.recv()).await;
+    assert!(notice.is_ok(), "reader stopped: {:?}", s.terminal_failure());
+    notice.unwrap().unwrap();
     let session = s.clone();
     let task =
         tokio::spawn(async move { session.request(Method::DeviceStatus, Value::Null).await });
     let report = requests.recv().await.unwrap();
     let request: Value = serde_json::from_slice(&report[3..3 + report[2] as usize]).unwrap();
-    for value in [
-        json!({"id":1000,"method":"synthetic.foreign","params":{},"result":{}}),
+    for value in unmatched.iter().chain([
+        json!({"id":request["id"],"method":"synthetic.foreign","params":{},"result":{}}),
         json!({"id":request["id"],"method":"sys.version","result":{"version":"wrong-method"}}),
         json!({"id":request["id"],"method":"device.status","result":{"version":"owned"}}),
-    ] {
+    ].iter()) {
         for report in mi_proto::NativeFramer::default()
             .encode(value.to_string().as_bytes())
             .unwrap()
