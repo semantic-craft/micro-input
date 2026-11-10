@@ -393,6 +393,20 @@ fn missing_or_ambiguous_or_unconfirmed_input_cannot_submit_or_send_shortcuts() {
 }
 
 #[test]
+fn focused_input_is_selected_when_another_pane_has_an_input() {
+    let provider = Provider::cindy();
+    {
+        let mut state = provider.0.lock().unwrap();
+        let mut second = state.window.controls[1].clone();
+        second.id = 8;
+        second.focused = true;
+        state.window.controls.push(second);
+    }
+    provider.controls().focus_input("cindy").unwrap();
+    assert_eq!(provider.events(), ["capture:com.xd.cindy", "focus:8"]);
+}
+
+#[test]
 fn bottom_scroll_and_shortcut_remain_on_captured_target() {
     let provider = Provider::cindy();
     provider
