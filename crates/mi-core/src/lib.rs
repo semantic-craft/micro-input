@@ -3,12 +3,12 @@ pub mod editors;
 pub mod header;
 pub mod inspector;
 pub mod karabiner;
-pub mod six_layer_runtime;
 pub mod overlay;
 pub mod qa_runner;
 pub mod radial;
 pub mod session_strip;
 pub mod sidebar;
+pub mod six_layer_runtime;
 pub mod status_menu;
 pub mod store;
 

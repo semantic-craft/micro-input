@@ -931,8 +931,10 @@ pub const MANAGED_CINDY_PROFILE_NAME: &str = "Cindy · Micro Input";
 
 fn managed_cindy_dictation_action() -> crate::draft::Action {
     crate::draft::Action {
-        id: "desktop-dictation".into(), name: "点击开始 / 停止语音".into(),
-        category: "Agent".into(), detail: "com.xd.cindy".into(),
+        id: "desktop-dictation".into(),
+        name: "点击开始 / 停止语音".into(),
+        category: "Agent".into(),
+        detail: "com.xd.cindy".into(),
         payload: serde_json::json!({"type":"agent_command","adapter":"cindy","command":"toggle-dictation"}),
     }
 }
@@ -940,20 +942,86 @@ fn managed_cindy_dictation_action() -> crate::draft::Action {
 /// Upgrade only the unchanged four-action preset on an explicit apply/reset.
 pub fn upgrade_managed_cindy_click_preset(draft: &mut Draft) -> Result<bool, String> {
     let graph = &draft.document.editable.graph;
-    let Some((pid, profile)) = graph.profiles.iter().find(|(_, p)| p.name == MANAGED_CINDY_PROFILE_NAME) else { return Ok(false); };
-    if profile.layer_order.len() != 1 { return Ok(false); }
+    let Some((pid, profile)) = graph
+        .profiles
+        .iter()
+        .find(|(_, p)| p.name == MANAGED_CINDY_PROFILE_NAME)
+    else {
+        return Ok(false);
+    };
+    if profile.layer_order.len() != 1 {
+        return Ok(false);
+    }
     let lid = &profile.layer_order[0];
     let layer = &graph.layers[lid];
-    if layer.lighting.is_some() || layer.controls.values().filter(|b| b.action_id.is_some()).count() != 4 || !layer.control_settings.as_ref().is_some_and(|s| s.joystick_mode == "logical_sectors" && s.active_sectors == 4) { return Ok(false); }
+    if layer.lighting.is_some()
+        || layer
+            .controls
+            .values()
+            .filter(|b| b.action_id.is_some())
+            .count()
+            != 4
+        || !layer
+            .control_settings
+            .as_ref()
+            .is_some_and(|s| s.joystick_mode == "logical_sectors" && s.active_sectors == 4)
+    {
+        return Ok(false);
+    }
     let expected = [
-        (0, "desktop-open", "打开 / 聚焦 Cindy", "应用", serde_json::json!({"type":"open_app","bundle_id":"com.xd.cindy"})),
-        (1, "desktop-input", "聚焦当前输入框", "Agent", serde_json::json!({"type":"agent_command","adapter":"cindy","command":"focus-input"})),
-        (2, "desktop-search", "搜索任务", "Agent", serde_json::json!({"type":"agent_command","adapter":"cindy","command":"search"})),
-        (3, "desktop-new", "新建会话", "Agent", serde_json::json!({"type":"agent_command","adapter":"cindy","command":"new-chat"})),
+        (
+            0,
+            "desktop-open",
+            "打开 / 聚焦 Cindy",
+            "应用",
+            serde_json::json!({"type":"open_app","bundle_id":"com.xd.cindy"}),
+        ),
+        (
+            1,
+            "desktop-input",
+            "聚焦当前输入框",
+            "Agent",
+            serde_json::json!({"type":"agent_command","adapter":"cindy","command":"focus-input"}),
+        ),
+        (
+            2,
+            "desktop-search",
+            "搜索任务",
+            "Agent",
+            serde_json::json!({"type":"agent_command","adapter":"cindy","command":"search"}),
+        ),
+        (
+            3,
+            "desktop-new",
+            "新建会话",
+            "Agent",
+            serde_json::json!({"type":"agent_command","adapter":"cindy","command":"new-chat"}),
+        ),
     ];
-    if !expected.iter().all(|(slot,id,name,category,payload)| layer.controls.values().find(|binding| binding.logical_control == format!("logical-{slot}")).and_then(|binding| binding.action_id.as_ref()).and_then(|aid| graph.actions.get(aid)).is_some_and(|action| action.id == *id && action.name == *name && action.category == *category && action.detail == "com.xd.cindy" && action.payload == *payload)) { return Ok(false); }
+    if !expected.iter().all(|(slot, id, name, category, payload)| {
+        layer
+            .controls
+            .values()
+            .find(|binding| binding.logical_control == format!("logical-{slot}"))
+            .and_then(|binding| binding.action_id.as_ref())
+            .and_then(|aid| graph.actions.get(aid))
+            .is_some_and(|action| {
+                action.id == *id
+                    && action.name == *name
+                    && action.category == *category
+                    && action.detail == "com.xd.cindy"
+                    && action.payload == *payload
+            })
+    }) {
+        return Ok(false);
+    }
     let (pid, lid) = (pid.clone(), lid.clone());
-    draft.assign(&json!(pid), &json!(lid), 11, managed_cindy_dictation_action())?;
+    draft.assign(
+        &json!(pid),
+        &json!(lid),
+        11,
+        managed_cindy_dictation_action(),
+    )?;
     Ok(true)
 }
 
@@ -1574,7 +1642,10 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 "点击开始 / 停止语音",
                 "Agent",
                 "com.xd.cindy",
-                ActionKind::AgentCommand { adapter: "cindy".into(), command: "toggle-dictation".into() },
+                ActionKind::AgentCommand {
+                    adapter: "cindy".into(),
+                    command: "toggle-dictation".into(),
+                },
             ),
         ],
     ));
@@ -1691,7 +1762,9 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 profile_name,
                 LOCAL_CODEX_PROFILE_NAME | MANAGED_CINDY_PROFILE_NAME
             ) {
-                if profile_name == MANAGED_CINDY_PROFILE_NAME { upgrade_managed_cindy_click_preset(&mut work)?; }
+                if profile_name == MANAGED_CINDY_PROFILE_NAME {
+                    upgrade_managed_cindy_click_preset(&mut work)?;
+                }
                 created_ids.push(pid);
                 continue;
             }

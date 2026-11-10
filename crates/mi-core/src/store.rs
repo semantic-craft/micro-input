@@ -354,7 +354,11 @@ pub struct WorkbenchStore {
     board_admit_after: u64,
     six_layer_state: crate::six_layer_runtime::SavedSixLayerState,
     six_layer_running: Option<crate::six_layer_runtime::RunningSixLayer>,
-    six_layer_job: Option<std::sync::mpsc::Receiver<Result<Option<crate::six_layer_runtime::RunningSixLayer>, String>>>,
+    six_layer_job: Option<
+        std::sync::mpsc::Receiver<
+            Result<Option<crate::six_layer_runtime::RunningSixLayer>, String>,
+        >,
+    >,
     six_layer_ownership_identity: Option<String>,
     six_layer_ownership_checked_at: Instant,
     tokio_runtime: Arc<tokio::runtime::Runtime>,
@@ -430,7 +434,9 @@ impl WorkbenchStore {
         }
 
         let preserve_saved_host_state = document_store.has_saved_host_preferences();
-        let six_layer_state = crate::six_layer_runtime::load(&config.document_dir.join("six-layer-runtime.json")).map_err(WorkbenchError::Storage)?;
+        let six_layer_state =
+            crate::six_layer_runtime::load(&config.document_dir.join("six-layer-runtime.json"))
+                .map_err(WorkbenchError::Storage)?;
         let native_ownership = if config.isolated {
             NativeOwnershipController::new_isolated()
         } else {
@@ -838,7 +844,12 @@ impl WorkbenchStore {
     ) -> Result<bool, WorkbenchError> {
         if let Some(installation) = &self.six_layer_state.installation {
             let plan = installation.plan.clone();
-            if self.six_layer_running.as_ref().is_none_or(|running| running.receiver.failure().is_some()) && self.six_layer_job.is_none() {
+            if self
+                .six_layer_running
+                .as_ref()
+                .is_none_or(|running| running.receiver.failure().is_some())
+                && self.six_layer_job.is_none()
+            {
                 self.start_six_layer_apply(Some(plan))?;
             }
             return Ok(self.six_layer_running.is_some());
@@ -1027,7 +1038,9 @@ impl WorkbenchStore {
                     .as_ref()
                     .is_some_and(|s| s.id == session_id)
                 {
-                    if let Some(running) = &self.six_layer_running { running.receiver.invalidate("USB 会话已断开"); }
+                    if let Some(running) = &self.six_layer_running {
+                        running.receiver.invalidate("USB 会话已断开");
+                    }
                     self.release_board_inputs(session_id, now);
                     self.board_routing = BoardRouting::Checking;
                     self.device_session = None;
@@ -1073,7 +1086,9 @@ impl WorkbenchStore {
                     .filter(|s| s.is_disconnected() || old_path_missing)
                     .map(|s| s.id)
                 {
-                    if let Some(running) = &self.six_layer_running { running.receiver.invalidate("USB 设备身份已变化"); }
+                    if let Some(running) = &self.six_layer_running {
+                        running.receiver.invalidate("USB 设备身份已变化");
+                    }
                     self.release_board_inputs(session_id, now);
                     self.board_routing = BoardRouting::Checking;
                     if let Some(session) = self.device_session.take() {
@@ -2134,7 +2149,9 @@ impl WorkbenchStore {
                 self.preview_board_selection(BoardPreviewSelection::UsbStartup)
             }
             SidebarAction::ProvisionBoardLayers => self.provision_board_layers(),
-            SidebarAction::ConfirmCindyNativePaused { confirmed } => self.confirm_cindy_native_paused(confirmed),
+            SidebarAction::ConfirmCindyNativePaused { confirmed } => {
+                self.confirm_cindy_native_paused(confirmed)
+            }
             SidebarAction::RestoreBoardLayers => self.start_six_layer_restore(),
             SidebarAction::SetBoardLayerProfile { layer, profile_id } => {
                 self.assign_board_layer(layer, profile_id)
@@ -2699,11 +2716,12 @@ impl WorkbenchStore {
         let is_protected = self.is_selected_layer_protected();
         let is_split = self.current_bottom_row_layout() == BottomRowLayout::Split;
         let connected_device_id = self.connected_candidate.as_ref().map(|c| c.path.clone());
-        let session_for_lighting = if self.hardware_rpc_verified && self.six_layer_state.installation.is_none() {
-            self.device_session.clone()
-        } else {
-            None
-        };
+        let session_for_lighting =
+            if self.hardware_rpc_verified && self.six_layer_state.installation.is_none() {
+                self.device_session.clone()
+            } else {
+                None
+            };
         let runtime_for_lighting = Arc::clone(&self.tokio_runtime);
         let _ = self.lighting_arbiter.update_feedback(
             live_phase,

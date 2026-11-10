@@ -339,7 +339,9 @@ pub enum SidebarAction {
     PreviewBoardLayer(mi_model::board_layers::BoardLayer),
     PreviewUsbStartup,
     ProvisionBoardLayers,
-    ConfirmCindyNativePaused { confirmed: bool },
+    ConfirmCindyNativePaused {
+        confirmed: bool,
+    },
     RestoreBoardLayers,
     SetBoardLayerProfile {
         layer: mi_model::board_layers::BoardLayer,
