@@ -33,6 +33,7 @@ void mi_watch(const atomic_bool *stop, change_callback notify, void *context) {
 // Descriptor-only enumeration: never IOHIDManagerOpen/IOHIDDeviceOpen or report I/O.
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <IOKit/IOKitLib.h>
 static int number(CFTypeRef value) {
     int result = 0;
@@ -89,4 +90,73 @@ int mi_enumerate(candidate_callback callback, void *context) {
     }
     free(entries); CFRelease(devices); CFRelease(manager);
     return 0;
+}
+
+static uint64_t keyboard_usb_parent(IOHIDDeviceRef device) {
+    io_registry_entry_t current = IOHIDDeviceGetService(device);
+    IOObjectRetain(current);
+    for (unsigned i = 0; current && i < 24; ++i) {
+        if (IOObjectConformsTo(current, "IOUSBHostDevice")) {
+            uint64_t ident = 0;
+            IORegistryEntryGetRegistryEntryID(current, &ident);
+            IOObjectRelease(current);
+            return ident;
+        }
+        io_registry_entry_t parent = 0;
+        kern_return_t result = IORegistryEntryGetParentEntry(current, kIOServicePlane, &parent);
+        IOObjectRelease(current);
+        current = result == KERN_SUCCESS ? parent : 0;
+    }
+    if (current) IOObjectRelease(current);
+    return 0;
+}
+
+int mi_keyboard_identity(void (*callback)(void *, uint32_t, uint64_t, uint64_t), void *context) {
+    static const uint8_t descriptor[] = {
+        0x05,0x01,0x09,0x06,0xa1,0x01,0x05,0x07,0x19,0xe0,0x29,0xe7,
+        0x15,0x00,0x25,0x01,0x95,0x08,0x75,0x01,0x81,0x02,0x95,0x01,
+        0x75,0x08,0x81,0x01,0x05,0x08,0x19,0x01,0x29,0x05,0x95,0x05,
+        0x75,0x01,0x91,0x02,0x95,0x01,0x75,0x03,0x91,0x01,0x05,0x07,
+        0x19,0x00,0x2a,0xff,0x00,0x15,0x00,0x26,0xff,0x00,0x95,0x06,
+        0x75,0x08,0x81,0x00,0xc0
+    };
+    IOHIDManagerRef manager = IOHIDManagerCreate(NULL, kIOHIDOptionsTypeNone);
+    if (!manager) return -1;
+    int vid = 0x303a;
+    CFNumberRef vendor_id = CFNumberCreate(NULL, kCFNumberIntType, &vid);
+    const void *keys[] = {CFSTR(kIOHIDVendorIDKey)};
+    const void *values[] = {vendor_id};
+    CFDictionaryRef filter = CFDictionaryCreate(NULL, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    IOHIDManagerSetDeviceMatching(manager, filter);
+    CFRelease(filter); CFRelease(vendor_id);
+    CFSetRef devices = IOHIDManagerCopyDevices(manager);
+    CFIndex count = devices ? CFSetGetCount(devices) : 0;
+    const void **items = calloc((size_t)count + 1, sizeof(*items));
+    if (!items) { if (devices) CFRelease(devices); CFRelease(manager); return -1; }
+    if (devices) CFSetGetValues(devices, items);
+    IOHIDDeviceRef keyboard = NULL, vendor = NULL;
+    unsigned keyboards = 0, vendors = 0;
+    for (CFIndex i = 0; i < count; ++i) {
+        IOHIDDeviceRef d = (IOHIDDeviceRef)items[i];
+        CFTypeRef transport = IOHIDDeviceGetProperty(d, CFSTR(kIOHIDTransportKey));
+        if (number(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDProductIDKey))) != 0x8298 || !transport || !CFEqual(transport, CFSTR("USB"))) continue;
+        int page = number(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDPrimaryUsagePageKey)));
+        int usage = number(IOHIDDeviceGetProperty(d, CFSTR(kIOHIDPrimaryUsageKey)));
+        if (page == 1 && usage == 6) { keyboard = d; ++keyboards; }
+        if (page == 0xff00 && usage == 1) { vendor = d; ++vendors; }
+    }
+    int status = -1;
+    if (keyboards == 1 && vendors == 1) {
+        uint64_t parent = keyboard_usb_parent(keyboard), vendor_id_value = 0;
+        uint32_t location = (uint32_t)number(IOHIDDeviceGetProperty(keyboard, CFSTR(kIOHIDLocationIDKey)));
+        CFTypeRef actual = IOHIDDeviceGetProperty(keyboard, CFSTR(kIOHIDReportDescriptorKey));
+        if (parent && parent == keyboard_usb_parent(vendor) && location && actual && CFGetTypeID(actual) == CFDataGetTypeID() && CFDataGetLength(actual) == sizeof(descriptor) && !memcmp(CFDataGetBytePtr(actual), descriptor, sizeof(descriptor)) && IORegistryEntryGetRegistryEntryID(IOHIDDeviceGetService(vendor), &vendor_id_value) == KERN_SUCCESS) {
+            callback(context, location, parent, vendor_id_value);
+            status = 0;
+        }
+    }
+    free(items);
+    if (devices) CFRelease(devices);
+    CFRelease(manager);
+    return status;
 }

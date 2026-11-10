@@ -223,6 +223,13 @@ pub struct BoardLayersProjection {
     pub observed_profile_kind: Option<String>,
     pub observed_status: String,
     pub apply_block_reason: String,
+    pub can_apply: bool,
+    pub cindy_native_paused_confirmed: bool,
+    pub configuration_observed: bool,
+    pub keyboard_grabbed: bool,
+    pub first_event_verified: bool,
+    pub runtime_ready: bool,
+    pub restore_available: bool,
 }
 
 impl Default for BoardLayersProjection {
@@ -245,6 +252,13 @@ impl Default for BoardLayersProjection {
             observed_profile_kind: None,
             observed_status: "设备层未确认".into(),
             apply_block_reason: "六层输入与写入协议尚未验证，当前仅保存本地方案".into(),
+            can_apply: false,
+            cindy_native_paused_confirmed: false,
+            configuration_observed: false,
+            keyboard_grabbed: false,
+            first_event_verified: false,
+            runtime_ready: false,
+            restore_available: false,
         }
     }
 }
@@ -325,6 +339,8 @@ pub enum SidebarAction {
     PreviewBoardLayer(mi_model::board_layers::BoardLayer),
     PreviewUsbStartup,
     ProvisionBoardLayers,
+    ConfirmCindyNativePaused { confirmed: bool },
+    RestoreBoardLayers,
     SetBoardLayerProfile {
         layer: mi_model::board_layers::BoardLayer,
         profile_id: Option<String>,

@@ -2,6 +2,8 @@ pub mod canvas;
 pub mod editors;
 pub mod header;
 pub mod inspector;
+pub mod karabiner;
+pub mod six_layer_runtime;
 pub mod overlay;
 pub mod qa_runner;
 pub mod radial;

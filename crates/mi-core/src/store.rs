@@ -91,6 +91,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "six_layer_store.rs"]
+mod six_layer_store;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HardwareAutoAcceptanceReceipt {
     pub schema_version: u32,
@@ -349,6 +352,11 @@ pub struct WorkbenchStore {
     board_decoder: Arc<AtomicBool>,
     board_pressed: BTreeSet<String>,
     board_admit_after: u64,
+    six_layer_state: crate::six_layer_runtime::SavedSixLayerState,
+    six_layer_running: Option<crate::six_layer_runtime::RunningSixLayer>,
+    six_layer_job: Option<std::sync::mpsc::Receiver<Result<Option<crate::six_layer_runtime::RunningSixLayer>, String>>>,
+    six_layer_ownership_identity: Option<String>,
+    six_layer_ownership_checked_at: Instant,
     tokio_runtime: Arc<tokio::runtime::Runtime>,
     hardware_event_tx: tokio::sync::mpsc::UnboundedSender<HardwareLoopEvent>,
     hardware_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<HardwareLoopEvent>>,
@@ -422,6 +430,7 @@ impl WorkbenchStore {
         }
 
         let preserve_saved_host_state = document_store.has_saved_host_preferences();
+        let six_layer_state = crate::six_layer_runtime::load(&config.document_dir.join("six-layer-runtime.json")).map_err(WorkbenchError::Storage)?;
         let native_ownership = if config.isolated {
             NativeOwnershipController::new_isolated()
         } else {
@@ -485,6 +494,11 @@ impl WorkbenchStore {
             board_decoder: Arc::new(AtomicBool::new(false)),
             board_pressed: BTreeSet::new(),
             board_admit_after: 0,
+            six_layer_state,
+            six_layer_running: None,
+            six_layer_job: None,
+            six_layer_ownership_identity: None,
+            six_layer_ownership_checked_at: Instant::now(),
             selected_profile_id: None,
             selected_layer_id: None,
             selected_binding_slot: Some(0),
@@ -554,6 +568,7 @@ impl WorkbenchStore {
 
     pub fn poll_hardware_events(&mut self) -> bool {
         let before_gen = self.projection_generation;
+        self.poll_six_layer_runtime();
         let mut drained = Vec::new();
         if let Some(rx) = &mut self.hardware_event_rx {
             while let Ok(ev) = rx.try_recv() {
@@ -771,7 +786,11 @@ impl WorkbenchStore {
         if self.config.isolated || self.mac_watcher_transport.is_some() {
             return;
         }
-        let transport = Arc::new(mi_transport::MacTransport::exclusive_vendor());
+        let transport = Arc::new(if self.six_layer_state.installation.is_some() {
+            mi_transport::MacTransport::new()
+        } else {
+            mi_transport::MacTransport::exclusive_vendor()
+        });
         let mut rx = mi_transport::HidTransport::subscribe(transport.as_ref());
         let tx = self.hardware_event_tx.clone();
         self.tokio_runtime.spawn(async move {
@@ -817,6 +836,13 @@ impl WorkbenchStore {
         &mut self,
         enable_execution_on_connect: bool,
     ) -> Result<bool, WorkbenchError> {
+        if let Some(installation) = &self.six_layer_state.installation {
+            let plan = installation.plan.clone();
+            if self.six_layer_running.as_ref().is_none_or(|running| running.receiver.failure().is_some()) && self.six_layer_job.is_none() {
+                self.start_six_layer_apply(Some(plan))?;
+            }
+            return Ok(self.six_layer_running.is_some());
+        }
         let transport = self
             .mac_watcher_transport
             .clone()
@@ -1001,6 +1027,7 @@ impl WorkbenchStore {
                     .as_ref()
                     .is_some_and(|s| s.id == session_id)
                 {
+                    if let Some(running) = &self.six_layer_running { running.receiver.invalidate("USB 会话已断开"); }
                     self.release_board_inputs(session_id, now);
                     self.board_routing = BoardRouting::Checking;
                     self.device_session = None;
@@ -1046,6 +1073,7 @@ impl WorkbenchStore {
                     .filter(|s| s.is_disconnected() || old_path_missing)
                     .map(|s| s.id)
                 {
+                    if let Some(running) = &self.six_layer_running { running.receiver.invalidate("USB 设备身份已变化"); }
                     self.release_board_inputs(session_id, now);
                     self.board_routing = BoardRouting::Checking;
                     if let Some(session) = self.device_session.take() {
@@ -1376,12 +1404,13 @@ impl WorkbenchStore {
     }
 
     pub fn provision_board_layers(&mut self) -> Result<(), WorkbenchError> {
-        Err(WorkbenchError::Routing(
-            BoardLayersProjection::default().apply_block_reason,
-        ))
+        self.start_six_layer_apply(None)
     }
 
     fn route_board_input(&mut self, event: InputEvent, now: Instant) -> Option<HostActionReceipt> {
+        if self.six_layer_state.installation.is_some() || self.six_layer_job.is_some() {
+            return None;
+        }
         if self.board_routing == BoardRouting::WaitingForFirstLayer {
             if event.ingress_sequence <= self.board_admit_after
                 || !event.action_eligible
@@ -1717,6 +1746,7 @@ impl WorkbenchStore {
                 }
             }
         }
+        self.project_six_layer_runtime(&mut result);
         result
     }
 
@@ -2104,6 +2134,8 @@ impl WorkbenchStore {
                 self.preview_board_selection(BoardPreviewSelection::UsbStartup)
             }
             SidebarAction::ProvisionBoardLayers => self.provision_board_layers(),
+            SidebarAction::ConfirmCindyNativePaused { confirmed } => self.confirm_cindy_native_paused(confirmed),
+            SidebarAction::RestoreBoardLayers => self.start_six_layer_restore(),
             SidebarAction::SetBoardLayerProfile { layer, profile_id } => {
                 self.assign_board_layer(layer, profile_id)
             }
@@ -2667,7 +2699,7 @@ impl WorkbenchStore {
         let is_protected = self.is_selected_layer_protected();
         let is_split = self.current_bottom_row_layout() == BottomRowLayout::Split;
         let connected_device_id = self.connected_candidate.as_ref().map(|c| c.path.clone());
-        let session_for_lighting = if self.hardware_rpc_verified {
+        let session_for_lighting = if self.hardware_rpc_verified && self.six_layer_state.installation.is_none() {
             self.device_session.clone()
         } else {
             None
@@ -2975,7 +3007,7 @@ impl WorkbenchStore {
 
     fn reconcile_ownership_for_profile(&mut self, profile_id: &str, now: Instant) {
         let is_protected = self.is_protected_oai_profile(profile_id);
-        let desired = if is_protected {
+        let desired = if is_protected && self.six_layer_state.installation.is_none() {
             "native"
         } else {
             "micro-input"

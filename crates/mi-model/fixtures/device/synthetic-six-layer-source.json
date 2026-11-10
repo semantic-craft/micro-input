@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "activeProfileId": 0,
+  "unrecognizedRoot": { "keep": [true, 9.00] },
+  "profiles": [{ "id": 0, "name": "User-renamed native", "layers": [{ "id": 0, "name": "Native", "color": 65446,
+    "layout": { "keymap": [["KV_OAI_AG00","KV_OAI_AG01"],["KV_OAI_AG02","KV_OAI_AG03","KV_OAI_AG04","KV_OAI_AG05"],["KV_OAI_ACT06","KV_OAI_ACT07","KV_OAI_ACT08","KV_OAI_ACT09"],["KV_OAI_ACT10","KV_OAI_ACT11","KV_OAI_ACT12"]], "encoders": [["KV_OAI_ENC_CC","KV_OAI_ENC_CW","KV_OAI_ENC_CLK"]], "joystick": { "type": "VENDOR", "sectors": [] }, "unknownNativeField": 1.00 }
+  }] }],
+  "macros": [], "multiActions": []
+}

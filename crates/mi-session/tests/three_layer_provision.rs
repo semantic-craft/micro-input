@@ -310,3 +310,98 @@ async fn explicit_recovery_is_bound_to_the_successful_write_and_current_lease() 
     let (keymap, _) = worker.await.unwrap();
     assert_eq!(keymap, KEYMAP);
 }
+
+#[tokio::test]
+async fn six_layer_prepare_apply_readonly_verify_and_restore_roundtrip() {
+    const SIX_SOURCE: &[u8] =
+        include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+    let dir = tempfile::tempdir().unwrap();
+    let (link, mut requests) = MockLink::new();
+    let inject = link.inject.clone();
+    let session = DeviceSession::new(
+        Arc::new(ExclusiveFixture(link)),
+        Box::<NativeFramer>::default(),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_secs(2),
+            interval: Duration::ZERO,
+        },
+    );
+    let worker = tokio::spawn(async move {
+        let mut incoming = NativeFramer::default();
+        let outbound = NativeFramer::default();
+        let mut active = 0u64;
+        let mut keymap = SIX_SOURCE.to_vec();
+        let mut staged = vec![];
+        let mut commits = 0usize;
+        while let Some(frame) = requests.recv().await {
+            for bytes in incoming.feed(&frame).unwrap() {
+                let request: Value = serde_json::from_slice(&bytes).unwrap();
+                let params = &request["params"];
+                let result = match request["method"].as_str().unwrap() {
+                    "device.status" => {
+                        json!({"version":"0.6.3","profile_index":active,"layer_index":1})
+                    }
+                    "fs.list" => json!([
+                        metadata("keymap.json", &keymap),
+                        metadata("smart_actions.json", SMART)
+                    ]),
+                    "fs.readbin" => {
+                        let bytes = match params["file"].as_str().unwrap() {
+                            "keymap.json" => keymap.as_slice(),
+                            "smart_actions.json" => SMART,
+                            file => panic!("unexpected read {file}"),
+                        };
+                        let offset = params["offset"].as_u64().unwrap() as usize;
+                        let limit = params["len"].as_u64().unwrap() as usize;
+                        json!({"total_size":bytes.len(),"data":STANDARD.encode(&bytes[offset..(offset+limit).min(bytes.len())])})
+                    }
+                    "fs.txbegin" => json!({"tx":23}),
+                    "fs.writebin" => {
+                        assert_eq!(params["file"], "keymap.json");
+                        assert_eq!(params["tx"], 23);
+                        assert_eq!(params["offset"], staged.len());
+                        staged.extend(STANDARD.decode(params["data"].as_str().unwrap()).unwrap());
+                        Value::Null
+                    }
+                    "fs.txcommit" => {
+                        assert_eq!(params["tx"], 23);
+                        keymap = std::mem::take(&mut staged);
+                        let applied: Value = serde_json::from_slice(&keymap).unwrap();
+                        active = applied["activeProfileId"].as_u64().unwrap();
+                        commits += 1;
+                        Value::Null
+                    }
+                    method => panic!("unexpected method {method}"),
+                };
+                let response = json!({"id":request["id"],"result":result});
+                let mut wire = response.to_string();
+                wire.push('\n');
+                for frame in outbound.encode(wire.as_bytes()).unwrap() {
+                    inject.send(frame).unwrap();
+                }
+            }
+        }
+        (keymap, commits)
+    });
+
+    let prepared = session.prepare_six_layer_write(dir.path()).await.unwrap();
+    let candidate = prepared.candidate.clone();
+    let backup = prepared.backup.clone();
+    let receipt = session.apply_six_layer_write(prepared).await.unwrap();
+    assert_eq!(receipt.profile_index, 1);
+    assert_eq!(receipt.layer_index, 1);
+
+    let verified_layer = session
+        .verify_six_layer_files(&candidate, Some(SMART), receipt.profile_index)
+        .await
+        .unwrap();
+    assert_eq!(verified_layer, 1);
+
+    session.restore_six_layer_backup(&backup).await.unwrap();
+    session.shutdown().await;
+    drop(session);
+    let (final_keymap, commits) = worker.await.unwrap();
+    assert_eq!(final_keymap, SIX_SOURCE);
+    assert_eq!(commits, 2);
+}

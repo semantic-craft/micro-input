@@ -8,6 +8,10 @@ use std::{
     },
 };
 use tokio::sync::{broadcast, mpsc};
+#[cfg(unix)]
+mod user_command;
+#[cfg(unix)]
+pub use user_command::{Activation, ActivationPayload, UserCommandReceiver};
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum TransportError {
     #[error("设备已断开")]
@@ -29,6 +33,35 @@ pub enum TransportHint {
 pub struct UsagePair {
     pub page: u16,
     pub usage: u16,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TargetKeyboard {
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub location_id: u32,
+    pub usb_parent: u64,
+    pub vendor_path: String,
+}
+
+/// Descriptor-only selection of one physical keyboard and its vendor sibling.
+pub fn discover_target_keyboard() -> Result<TargetKeyboard, TransportError> {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn mi_keyboard_identity(callback: extern "C" fn(*mut std::ffi::c_void, u32, u64, u64), context: *mut std::ffi::c_void) -> i32;
+        }
+        extern "C" fn found(context: *mut std::ffi::c_void, location: u32, parent: u64, vendor: u64) {
+            let result = unsafe { &mut *(context as *mut Option<TargetKeyboard>) };
+            *result = Some(TargetKeyboard { vendor_id: 0x303a, product_id: 0x8298, location_id: location, usb_parent: parent, vendor_path: format!("DevSrvsID:{vendor}") });
+        }
+        let mut result = None;
+        let status = unsafe { mi_keyboard_identity(found, &mut result as *mut _ as *mut std::ffi::c_void) };
+        if status == 0 {
+            if let Some(result) = result { return Ok(result); }
+        }
+    }
+    Err(TransportError::Unavailable("未确认唯一 Creator Micro 2 的标准键盘描述符、USB 位置及专用接口".into()))
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HidCandidate {

@@ -635,3 +635,111 @@ impl DeviceSession {
         .await
     }
 }
+
+pub struct PreparedSixLayerWrite {
+    original: DeviceFiles,
+    before: ThreeLayerBoard,
+    pub profile_index: u32,
+    pub candidate: Vec<u8>,
+    pub backup: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub struct SixLayerWriteReceipt {
+    pub profile_index: u32,
+    pub layer_index: u32,
+    pub backup: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct SixLayerWriteFailure {
+    pub detail: String,
+    /// True only after reading exact original files, or before any mutation.
+    pub original_verified: bool,
+    pub backup: Option<PathBuf>,
+}
+
+impl DeviceSession {
+    pub async fn prepare_six_layer_write(&self, backup_parent: &Path) -> Result<PreparedSixLayerWrite, SessionError> {
+        self.guarded(async {
+            let mut queue = self.queue.lock().await;
+            let before = self.three_layer_position(&mut queue).await?;
+            let original = self.read_files_locked(&mut queue).await?;
+            let compiled = mi_model::apply::compile_six_layer_profile(&original.keymap.bytes, smart_bytes(&original)).map_err(SessionError::Config)?;
+            if self.three_layer_position(&mut queue).await? != before { return Err(SessionError::Config("准备期间设备切换了方案或层".into())); }
+            let root = backup_parent.join("six-layer-recovery");
+            std::fs::create_dir_all(&root).map_err(|e| SessionError::Config(e.to_string()))?;
+            let backup = back_up_three_layer_write(&root, before, compiled.profile_index, &original.keymap.bytes, &compiled.keymap, smart_bytes(&original)).map_err(SessionError::Config)?;
+            Ok(PreparedSixLayerWrite { original, before, profile_index: compiled.profile_index, candidate: compiled.keymap, backup })
+        }).await
+    }
+
+    pub async fn apply_six_layer_write(&self, prepared: PreparedSixLayerWrite) -> Result<SixLayerWriteReceipt, SixLayerWriteFailure> {
+        let backup = Some(prepared.backup.clone());
+        let mut sent = false;
+        let result = self.guarded(async {
+            let mut queue = self.queue.lock().await;
+            let smart = smart_bytes(&prepared.original);
+            let current = self.read_files_locked(&mut queue).await?;
+            if !exact_files(&current, &prepared.original.keymap.bytes, smart) || self.three_layer_position(&mut queue).await? != prepared.before { return Err(SessionError::Config("设备在准备后发生变化，未写入".into())); }
+            require_budget(&queue, &[&prepared.candidate, &prepared.original.keymap.bytes], mutation_cost(&prepared.candidate, smart) + 6 + 2 * read_cost(&prepared.candidate, smart) + mutation_cost(&prepared.original.keymap.bytes, smart))?;
+            let path = prepared.backup.clone();
+            if prepared.candidate != prepared.original.keymap.bytes.as_ref() {
+                sent = true;
+                self.stage_three_layer_keymap(&mut queue, &prepared.candidate, smart).await?;
+            }
+            for attempt in 0..5 {
+                if attempt > 0 { tokio::time::sleep(Duration::from_millis(100)).await; }
+                let position = self.three_layer_position(&mut queue).await?;
+                if position.profile_index == prepared.profile_index && (1..=6).contains(&position.layer_index) {
+                    return Ok(SixLayerWriteReceipt { profile_index: position.profile_index, layer_index: position.layer_index, backup: path });
+                }
+            }
+            Err(SessionError::Config("六层文件已读回，但活动方案与层未确认".into()))
+        }).await;
+        match result {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                let original_verified = if !sent { true } else {
+                    self.guarded(async {
+                        let mut queue = self.queue.lock().await;
+                        let smart = smart_bytes(&prepared.original);
+                        let current = self.read_files_locked(&mut queue).await?;
+                        if exact_files(&current, &prepared.original.keymap.bytes, smart) { return Ok(()); }
+                        if !exact_files(&current, &prepared.candidate, smart) { return Err(SessionError::Config("当前文件既非原件也非候选，停止自动恢复".into())); }
+                        self.stage_three_layer_keymap(&mut queue, &prepared.original.keymap.bytes, smart).await
+                    }).await.is_ok()
+                };
+                Err(SixLayerWriteFailure { detail: error.to_string(), original_verified, backup })
+            }
+        }
+    }
+
+    pub async fn verify_six_layer_files(&self, candidate: &[u8], smart: Option<&[u8]>, profile_index: u32) -> Result<u32, SessionError> {
+        self.guarded(async {
+            let mut queue = self.queue.lock().await;
+            let current = self.read_files_locked(&mut queue).await?;
+            if !exact_files(&current, candidate, smart) { return Err(SessionError::Config("六层读回与已应用快照不符".into())); }
+            let response = self.exchange(&mut queue, Method::DeviceStatus, Value::Null).await?;
+            let result = identity_result(&response)?;
+            let layer = result["layer_index"].as_u64().filter(|n| (1..=6).contains(n)).ok_or_else(|| SessionError::Config("未确认六层层位".into()))?;
+            if result["version"] != "0.6.3" || result["profile_index"] != profile_index { return Err(SessionError::Config("六层固件或方案身份不符".into())); }
+            Ok(layer as u32)
+        }).await
+    }
+
+    pub async fn restore_six_layer_backup(&self, backup: &Path) -> Result<(), SessionError> {
+        let original = std::fs::read(backup.join("keymap.json")).map_err(|e| SessionError::Config(e.to_string()))?;
+        let candidate = std::fs::read(backup.join("planned-keymap.json")).map_err(|e| SessionError::Config(e.to_string()))?;
+        let smart = match std::fs::read(backup.join("smart_actions.json")) { Ok(bytes) => Some(bytes), Err(e) if e.kind() == std::io::ErrorKind::NotFound => None, Err(e) => return Err(SessionError::Config(e.to_string())) };
+        mi_model::apply::recognize_six_layer_profile(&candidate, smart.as_deref()).map_err(SessionError::Config)?.ok_or_else(|| SessionError::Config("恢复副本不是六层方案".into()))?;
+        self.guarded(async {
+            let mut queue = self.queue.lock().await;
+            self.three_layer_position(&mut queue).await?;
+            let current = self.read_files_locked(&mut queue).await?;
+            if exact_files(&current, &original, smart.as_deref()) { return Ok(()); }
+            if !exact_files(&current, &candidate, smart.as_deref()) { return Err(SessionError::Config("设备与本次候选不符，拒绝覆盖恢复".into())); }
+            self.stage_three_layer_keymap(&mut queue, &original, smart.as_deref()).await
+        }).await
+    }
+}
