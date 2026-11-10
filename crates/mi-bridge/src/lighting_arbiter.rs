@@ -449,6 +449,37 @@ impl FourAppLightingArbiter {
         preview_busy: bool,
         is_bottom_row_split: bool,
         connected_device_id: Option<&str>,
+        write_hardware: F,
+    ) -> LightingUpdateResult
+    where
+        F: FnMut(&str) -> Result<String, String>,
+    {
+        self.update_feedback_at(
+            live_phase,
+            slots,
+            dictation_active,
+            ownership,
+            is_protected_layer,
+            preview_busy,
+            is_bottom_row_split,
+            connected_device_id,
+            std::time::Instant::now(),
+            write_hardware,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_feedback_at<F>(
+        &mut self,
+        live_phase: FourAppAgentPhase,
+        slots: &[FourAppSlotSnapshot],
+        dictation_active: bool,
+        ownership: &NativeOwnershipController,
+        is_protected_layer: bool,
+        preview_busy: bool,
+        is_bottom_row_split: bool,
+        connected_device_id: Option<&str>,
+        now: std::time::Instant,
         mut write_hardware: F,
     ) -> LightingUpdateResult
     where
@@ -464,7 +495,7 @@ impl FourAppLightingArbiter {
         self.active_phase = phase;
 
         if matches!(ownership.state(), OwnershipState::Native { .. })
-            || !ownership.allows_execution()
+            || !ownership.allows_execution_at(now)
         {
             self.release();
             self.last_update_result = LightingUpdateResult::YieldedToNative;

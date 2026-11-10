@@ -33,10 +33,8 @@ impl WorkbenchStore {
         self.system_lifecycle = SystemLifecycle::Sleeping;
         self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
         self.resume_requires_explicit_connect = true;
-        self.native_ownership.stop();
-        self.held_ptt_binding = None;
+        self.native_ownership.stop_at(self.update_now);
         self.ptt_controller.cancel();
-        self.board_pressed.clear();
         self.dial_pressed = false;
         self.dial_turned_while_pressed = false;
         self.board_decoder.store(false, Ordering::Release);
@@ -91,12 +89,11 @@ impl WorkbenchStore {
                 Err("原听写停止未确认".into())
             }
         } else {
-            self.live_executor.stop_owned_actions()
+            Ok(())
         };
-        self.ptt_controller.cleanup_confirmed = stop_result.is_ok();
-        if stop_result.is_ok() {
-            self.voice_manager.confirm_dictation_stopped();
-        }
+        self.ptt_controller.cleanup_confirmed = false;
+        let executor = Arc::clone(&self.live_executor);
+        let isolated = self.config.isolated;
         let runtime = Arc::clone(&self.tokio_runtime);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -116,18 +113,21 @@ impl WorkbenchStore {
                     Err(_) => result = result.and(Err("旧设备操作清理未确认".into())),
                 }
             }
+            if !isolated {
+                result = result.and(executor.stop_owned_actions());
+            }
             let _ = tx.send(result);
         });
         self.lifecycle_cleanup = Some(rx);
         self.status_message = "系统睡眠 · 旧会话已失效，正在释放资源".into();
-        self.rebuild_projection();
+        self.commit_runtime_update();
     }
 
     pub fn system_did_wake(&mut self) {
         if self.system_lifecycle == SystemLifecycle::Sleeping {
             self.system_lifecycle = SystemLifecycle::Waking;
             self.status_message = "系统已唤醒 · 等待旧会话释放".into();
-            self.rebuild_projection();
+            self.commit_runtime_update();
         }
         self.poll_workspace_lifecycle();
     }
@@ -137,12 +137,11 @@ impl WorkbenchStore {
             match rx.try_recv() {
                 Ok(result) => {
                     self.lifecycle_cleanup = None;
-                    if let Err(error) = result {
-                        self.ptt_controller.cleanup_confirmed = false;
+                    if let Err(error) = self.finish_host_cleanup(result) {
                         self.status_message =
                             format!("旧会话清理未确认 · {error}；宿主输入保持暂停");
                         self.system_lifecycle = SystemLifecycle::CleanupFailed(error);
-                        self.rebuild_projection();
+                        self.commit_runtime_update();
                         return;
                     }
                 }
@@ -151,7 +150,7 @@ impl WorkbenchStore {
                     self.lifecycle_cleanup = None;
                     self.system_lifecycle = SystemLifecycle::CleanupFailed("清理任务已中断".into());
                     self.status_message = "清理任务已中断 · 宿主输入保持暂停".into();
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return;
                 }
             }
@@ -172,7 +171,7 @@ impl WorkbenchStore {
             "系统已唤醒 · USB 发现尚未开始"
         }
         .into();
-        self.rebuild_projection();
+        self.commit_runtime_update();
     }
 }
 

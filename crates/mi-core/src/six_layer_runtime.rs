@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime},
@@ -95,6 +95,54 @@ pub fn save(path: &Path, state: &SavedSixLayerState) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Default)]
+struct ExecutionPolicy {
+    state: Mutex<ExecutionPolicyState>,
+}
+
+#[derive(Default)]
+struct ExecutionPolicyState {
+    enabled: bool,
+    commands: bool,
+    epoch: u64,
+    admit_after: Option<Instant>,
+}
+
+#[derive(Clone, Copy)]
+struct ExecutionAdmission {
+    epoch: u64,
+    received_at: Instant,
+}
+
+impl ExecutionPolicy {
+    fn set(&self, enabled: bool, commands: bool, now: Instant) {
+        let mut state = self.state.lock().unwrap();
+        if state.enabled != enabled || state.commands != commands {
+            state.enabled = enabled;
+            state.commands = commands;
+            state.epoch += 1;
+            state.admit_after = Some(now);
+        }
+    }
+
+    fn capture(&self, received_at: Instant) -> ExecutionAdmission {
+        ExecutionAdmission {
+            epoch: self.state.lock().unwrap().epoch,
+            received_at,
+        }
+    }
+
+    fn admits(&self, admission: ExecutionAdmission, action: &ResolvedHostAction) -> bool {
+        let state = self.state.lock().unwrap();
+        state.epoch == admission.epoch
+            && state.enabled
+            && state
+                .admit_after
+                .is_none_or(|after| admission.received_at >= after)
+            && (!matches!(action, ResolvedHostAction::ShellCommand { .. }) || state.commands)
+    }
+}
+
 pub struct RunningSixLayer {
     pub receiver: Arc<UserCommandReceiver>,
     pub readiness: Readiness,
@@ -104,8 +152,7 @@ pub struct RunningSixLayer {
     pub observed_layer: Arc<AtomicU8>,
     pub first_event_verified: Arc<AtomicBool>,
     pub armed: bool,
-    pub execution_enabled: Arc<AtomicBool>,
-    pub command_execution_enabled: Arc<AtomicBool>,
+    execution_policy: Arc<ExecutionPolicy>,
     pub receipts: Option<std::sync::mpsc::Receiver<mi_macos::HostActionReceipt>>,
     stop: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
@@ -235,32 +282,43 @@ impl RunningSixLayer {
         )
     }
 
-    pub fn start_executor(&mut self, permit: OwnershipPermit) {
+    pub fn set_execution_policy(&self, enabled: bool, commands: bool, now: Instant) {
+        self.execution_policy.set(enabled, commands, now);
+    }
+
+    pub fn start_executor(
+        &mut self,
+        permit: OwnershipPermit,
+        executor: Arc<mi_macos::LiveHostActionExecutor<mi_macos::MacOsSystemDriver>>,
+    ) {
         let receiver = Arc::clone(&self.receiver);
         let plan = self.installation.plan.clone();
         let stop = Arc::clone(&self.stop);
-        let enabled = Arc::clone(&self.execution_enabled);
-        let commands = Arc::clone(&self.command_execution_enabled);
+        let policy = Arc::clone(&self.execution_policy);
         let observed = Arc::clone(&self.observed_layer);
         let first = Arc::clone(&self.first_event_verified);
         let (tx, rx) = std::sync::mpsc::sync_channel(32);
         self.receipts = Some(rx);
         self.executor = Some(thread::spawn(move || {
-            let executor =
-                mi_macos::LiveHostActionExecutor::new(mi_macos::MacOsSystemDriver::default());
             execute_clicks(
                 &receiver,
                 &plan,
                 &stop,
-                &enabled,
-                &commands,
+                &policy,
                 &observed,
                 &first,
                 &tx,
+                || receiver.next(),
                 || permit.check(),
-                |profile, binding, action| executor.execute(profile, binding, action),
+                |profile, binding, action, admission| {
+                    executor.execute_when(profile, binding, action, || {
+                        !stop.load(Ordering::Acquire)
+                            && receiver.failure().is_none()
+                            && policy.admits(admission, action)
+                    })
+                },
             );
-            executor.stop_owned_actions()
+            Ok(())
         }));
     }
 
@@ -270,7 +328,15 @@ impl RunningSixLayer {
         self.session.disconnect();
     }
 
+    pub fn is_retired(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
+
     pub fn shutdown(mut self, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
+        self.quiesce(runtime)
+    }
+
+    pub fn quiesce(&mut self, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         self.retire();
         runtime.block_on(self.session.shutdown());
         let monitor_result = self.monitor.take().map_or(Ok(()), |monitor| {
@@ -357,16 +423,21 @@ fn execute_clicks(
     receiver: &UserCommandReceiver,
     plan: &AppliedSixLayerPlan,
     stop: &AtomicBool,
-    enabled: &AtomicBool,
-    commands: &AtomicBool,
+    policy: &ExecutionPolicy,
     observed: &AtomicU8,
     first: &AtomicBool,
     receipts: &std::sync::mpsc::SyncSender<mi_macos::HostActionReceipt>,
+    mut next: impl FnMut() -> Result<Option<mi_transport::Activation>, String>,
     mut permit: impl FnMut() -> Result<(), String>,
-    mut execute: impl FnMut(&str, &str, &ResolvedHostAction) -> mi_macos::HostActionReceipt,
+    mut execute: impl FnMut(
+        &str,
+        &str,
+        &ResolvedHostAction,
+        ExecutionAdmission,
+    ) -> mi_macos::HostActionReceipt,
 ) {
     while !stop.load(Ordering::Acquire) {
-        let event = match receiver.next() {
+        let event = match next() {
             Ok(Some(event)) => event,
             Ok(None) => {
                 thread::sleep(Duration::from_millis(5));
@@ -374,22 +445,18 @@ fn execute_clicks(
             }
             Err(_) => return,
         };
+        let admission = policy.capture(event.received_at);
         if event.generation != receiver.generation() {
             continue;
         }
         let control = &DIRECT_CONTROLS[event.control as usize];
         observed.store(control.layer, Ordering::Release);
         first.store(true, Ordering::Release);
-        if !enabled.load(Ordering::Acquire) {
-            continue;
-        }
         let host = &plan.hosts[(control.layer - 2) as usize];
         let Some(action) = &host.actions[control.slot as usize] else {
             continue;
         };
-        if matches!(action, ResolvedHostAction::ShellCommand { .. })
-            && !commands.load(Ordering::Acquire)
-        {
+        if !policy.admits(admission, action) {
             continue;
         }
         if let Err(error) = permit() {
@@ -407,6 +474,7 @@ fn execute_clicks(
             &host.profile_id,
             CONTROL_BINDINGS[control.slot as usize],
             action,
+            admission,
         );
         if receipts.try_send(receipt).is_err() {
             receiver.invalidate("执行回执积压，输入已暂停");
@@ -573,8 +641,7 @@ fn new_running(
         observed_layer: Arc::new(AtomicU8::new(layer)),
         first_event_verified: Arc::new(AtomicBool::new(false)),
         armed: false,
-        execution_enabled: Arc::new(AtomicBool::new(false)),
-        command_execution_enabled: Arc::new(AtomicBool::new(false)),
+        execution_policy: Arc::new(ExecutionPolicy::default()),
         receipts: None,
         stop: Arc::new(AtomicBool::new(false)),
         monitor: None,
@@ -688,8 +755,7 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
-    fn execute_clicks_routes_by_layer_and_stops_on_ownership_loss() {
+    fn test_plan() -> AppliedSixLayerPlan {
         let mut draft = mi_model::draft::Draft::default();
         mi_model::preset::install_agent_starter_profiles(&mut draft).unwrap();
         let id = |name: &str| {
@@ -710,10 +776,16 @@ mod tests {
         let cindy_id = id(mi_model::preset::MANAGED_CINDY_PROFILE_NAME);
         let desired =
             BoardLayerPlan::recommended(codex_id, ag_id.clone(), dsh_id.clone(), cindy_id.clone());
-        let plan =
-            AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
-                .unwrap();
+        AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
+            .unwrap()
+    }
 
+    #[test]
+    fn execute_clicks_routes_by_layer_and_stops_on_ownership_loss() {
+        let plan = test_plan();
+        let ag_id = plan.hosts[0].profile_id.clone();
+        let dsh_id = plan.hosts[1].profile_id.clone();
+        let cindy_id = plan.hosts[2].profile_id.clone();
         let receiver = Arc::new(UserCommandReceiver::bind().unwrap());
         receiver.arm().unwrap();
         send(&receiver, 0);
@@ -723,8 +795,8 @@ mod tests {
         thread::sleep(Duration::from_millis(30));
 
         let stop = AtomicBool::new(false);
-        let enabled = AtomicBool::new(true);
-        let commands = AtomicBool::new(true);
+        let policy = ExecutionPolicy::default();
+        policy.set(true, true, Instant::now() - Duration::from_secs(1));
         let observed = AtomicU8::new(1);
         let first = AtomicBool::new(false);
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
@@ -735,11 +807,11 @@ mod tests {
             &receiver,
             &plan,
             &stop,
-            &enabled,
-            &commands,
+            &policy,
             &observed,
             &first,
             &tx,
+            || receiver.next(),
             || {
                 permit_calls += 1;
                 if permit_calls <= 3 {
@@ -748,7 +820,7 @@ mod tests {
                     Err("Cindy 当前代释放未确认".into())
                 }
             },
-            |profile, binding, _action| {
+            |profile, binding, _action, _epoch| {
                 calls.push((profile.to_owned(), binding.to_owned()));
                 mi_macos::HostActionReceipt {
                     action_type: "open_app".into(),
@@ -778,6 +850,151 @@ mod tests {
             receiver.failure().as_deref(),
             Some("Cindy 当前代释放未确认")
         );
+    }
+
+    #[test]
+    fn disable_then_enable_rejects_in_flight_request_and_accepts_new_input() {
+        use mi_macos::{LiveHostActionExecutor, RecordingOsDriver};
+        use std::sync::mpsc;
+
+        let receiver = Arc::new(UserCommandReceiver::bind().unwrap());
+        let plan = test_plan();
+        let now = Instant::now();
+        let policy = Arc::new(ExecutionPolicy::default());
+        policy.set(true, true, now);
+        let old_admission = policy.capture(now);
+        policy.set(true, true, now + Duration::from_millis(1));
+        assert_eq!(policy.capture(now).epoch, old_admission.epoch);
+        let driver = RecordingOsDriver::new(true);
+        let executor = Arc::new(LiveHostActionExecutor::new(driver.clone()));
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+        let (receipt_tx, receipt_rx) = mpsc::sync_channel(1);
+        let worker_policy = Arc::clone(&policy);
+        let worker_executor = Arc::clone(&executor);
+        let worker = thread::spawn(move || {
+            let stop = AtomicBool::new(false);
+            let event = mi_transport::Activation {
+                control: 0,
+                generation: receiver.generation().into(),
+                received_sequence: 1,
+                received_at: now,
+            };
+            let mut pending = Some(event);
+            execute_clicks(
+                &receiver,
+                &plan,
+                &stop,
+                &worker_policy,
+                &AtomicU8::new(1),
+                &AtomicBool::new(false),
+                &receipt_tx,
+                || {
+                    pending
+                        .take()
+                        .map(Some)
+                        .ok_or_else(|| "test input exhausted".into())
+                },
+                || {
+                    entered_tx.send(()).unwrap();
+                    resume_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                    Ok(())
+                },
+                |profile, binding, action, admission| {
+                    let receipt = worker_executor.execute_when(profile, binding, action, || {
+                        !stop.load(Ordering::Acquire)
+                            && receiver.failure().is_none()
+                            && worker_policy.admits(admission, action)
+                    });
+                    stop.store(true, Ordering::Release);
+                    receipt
+                },
+            );
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        policy.set(false, true, now + Duration::from_millis(2));
+        executor.stop_owned_actions().unwrap();
+        policy.set(true, true, now + Duration::from_millis(3));
+        resume_tx.send(()).unwrap();
+        worker.join().unwrap();
+        let receipt = receipt_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(receipt.outcome, "blocked");
+        assert_eq!(receipt.detail, "input_retired");
+        assert!(driver.events().is_empty());
+        let action = ResolvedHostAction::OpenApp {
+            bundle_id: "com.example.editor".into(),
+        };
+        let new_admission = policy.capture(now + Duration::from_millis(4));
+        let receipt = executor.execute_when("new", "AG00", &action, || {
+            policy.admits(new_admission, &action)
+        });
+        assert_eq!(receipt.outcome, "executed");
+        assert!(!driver.events().is_empty());
+    }
+
+    #[test]
+    fn disable_then_enable_discards_queued_old_input_before_execution() {
+        use mi_macos::{LiveHostActionExecutor, RecordingOsDriver};
+
+        let receiver = UserCommandReceiver::bind().unwrap();
+        let plan = test_plan();
+        let now = Instant::now();
+        let policy = ExecutionPolicy::default();
+        policy.set(true, true, now);
+        let mut pending = std::collections::VecDeque::from([
+            mi_transport::Activation {
+                control: 0,
+                generation: receiver.generation().into(),
+                received_sequence: 1,
+                received_at: now,
+            },
+            mi_transport::Activation {
+                control: 0,
+                generation: receiver.generation().into(),
+                received_sequence: 2,
+                received_at: now + Duration::from_millis(3),
+            },
+        ]);
+        let driver = RecordingOsDriver::new(true);
+        let executor = LiveHostActionExecutor::new(driver.clone());
+        policy.set(false, true, now + Duration::from_millis(1));
+        executor.stop_owned_actions().unwrap();
+        policy.set(true, true, now + Duration::from_millis(2));
+        let stop = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::sync_channel(2);
+        let mut executed = 0;
+        execute_clicks(
+            &receiver,
+            &plan,
+            &stop,
+            &policy,
+            &AtomicU8::new(1),
+            &AtomicBool::new(false),
+            &tx,
+            || {
+                pending
+                    .pop_front()
+                    .map(Some)
+                    .ok_or_else(|| "test input exhausted".into())
+            },
+            || Ok(()),
+            |profile, binding, action, admission| {
+                assert_eq!(admission.received_at, now + Duration::from_millis(3));
+                assert!(driver.events().is_empty());
+                executed += 1;
+                let receipt = executor.execute_when(profile, binding, action, || {
+                    !stop.load(Ordering::Acquire)
+                        && receiver.failure().is_none()
+                        && policy.admits(admission, action)
+                });
+                stop.store(true, Ordering::Release);
+                receipt
+            },
+        );
+        assert_eq!(executed, 1);
+        assert_eq!(rx.try_iter().count(), 1);
+        assert!(!driver.events().is_empty());
+        assert!(receiver.failure().is_none());
     }
 
     #[test]

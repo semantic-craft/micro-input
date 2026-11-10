@@ -564,6 +564,10 @@ impl NativeOwnershipController {
     }
 
     pub fn reconcile_unbridged_transition(&mut self) -> bool {
+        self.reconcile_unbridged_transition_at(Instant::now())
+    }
+
+    pub fn reconcile_unbridged_transition_at(&mut self, now: Instant) -> bool {
         if self.is_unbridged_desktop_active() {
             if self.bridge_observed || self.native_identity.is_some() {
                 self.bridge_observed = false;
@@ -581,7 +585,7 @@ impl NativeOwnershipController {
         if self.allow_unbridged_desktop && !self.bridge_observed {
             self.bridge_observed = true;
             self.sync_persisted_fence_if_needed();
-            self.invalidate("检测到 Cindy 原生所有权桥，等待确认", false);
+            self.invalidate_at("检测到 Cindy 原生所有权桥，等待确认", false, now);
             return true;
         }
         false
@@ -626,6 +630,10 @@ impl NativeOwnershipController {
     }
 
     pub fn summary(&self) -> String {
+        self.summary_at(Instant::now())
+    }
+
+    pub fn summary_at(&self, now: Instant) -> String {
         if self.isolated {
             return "隔离合成所有权".into();
         }
@@ -634,7 +642,7 @@ impl NativeOwnershipController {
         }
         match &self.state {
             OwnershipState::Unknown(reason) => {
-                if self.is_transient_reconfirming() {
+                if self.is_transient_reconfirming_at(now) {
                     "Cindy 已确认释放".into()
                 } else {
                     format!("原生所有权未知，按键、听写与灯光暂停 · {reason}")
@@ -644,7 +652,7 @@ impl NativeOwnershipController {
                 "Cindy 原生持有，Micro Input 按键、听写与灯光暂停".into()
             }
             OwnershipState::Released { .. } => {
-                if self.allows_execution() {
+                if self.allows_execution_at(now) {
                     "Cindy 已确认释放".into()
                 } else {
                     "原生回执已过期，输入暂停".into()
@@ -846,11 +854,15 @@ impl NativeOwnershipController {
     }
 
     pub fn failed(&mut self, request: &NativeOwnershipRequest) {
+        self.failed_at(request, Instant::now());
+    }
+
+    pub fn failed_at(&mut self, request: &NativeOwnershipRequest, now: Instant) {
         if self.pending.as_ref() != Some(request) || self.generation != request.generation {
             return;
         }
         self.last_released_at = None;
-        self.invalidate("Cindy 握手失联或不可用", false);
+        self.invalidate_at("Cindy 握手失联或不可用", false, now);
     }
 
     pub fn poll_once(&mut self, micro_drained: bool) {
@@ -866,7 +878,7 @@ impl NativeOwnershipController {
         if self.isolated {
             return None;
         }
-        self.reconcile_unbridged_transition();
+        self.reconcile_unbridged_transition_at(now);
         if self.is_unbridged_desktop_active() {
             return None;
         }
@@ -874,7 +886,7 @@ impl NativeOwnershipController {
         for _ in 0..2 {
             let guard = transport.lock_path();
             self.sync_persisted_fence_if_needed();
-            let req_now = Instant::now().max(now);
+            let req_now = now;
             let req = self.begin_request_at(micro_drained, req_now);
             match transport.begin_stream_request_locked(&req, fast_timeout, guard) {
                 Ok(Ok(reply)) => {
@@ -885,7 +897,7 @@ impl NativeOwnershipController {
                             "stale_generation" | "returned_generation" | "different_client"
                         ))
                         || prev_inst.is_some_and(|id| id != reply.native_instance);
-                    self.receive_at(reply, &req, Instant::now().max(req_now));
+                    self.receive_at(reply, &req, now);
                     if !retry_needed {
                         break;
                     }
@@ -894,7 +906,7 @@ impl NativeOwnershipController {
                     return Some((req, deferred));
                 }
                 Err(_) => {
-                    self.failed(&req);
+                    self.failed_at(&req, now);
                     break;
                 }
             }
@@ -906,7 +918,7 @@ impl NativeOwnershipController {
         if self.isolated {
             return;
         }
-        self.reconcile_unbridged_transition();
+        self.reconcile_unbridged_transition_at(now);
         if self.is_unbridged_desktop_active() {
             return;
         }
@@ -920,7 +932,7 @@ impl NativeOwnershipController {
                 self.generation = self.generation.wrapping_add(1);
                 self.pending = None;
             }
-            let req_now = Instant::now().max(now);
+            let req_now = now;
             let req = self.begin_request_at(micro_drained, req_now);
             match transport.exchange_locked(&req) {
                 Ok(reply) => {
@@ -931,13 +943,13 @@ impl NativeOwnershipController {
                             "stale_generation" | "returned_generation" | "different_client"
                         ))
                         || prev_inst.is_some_and(|id| id != reply.native_instance);
-                    self.receive_at(reply, &req, Instant::now().max(req_now));
+                    self.receive_at(reply, &req, now);
                     if !retry_needed {
                         break;
                     }
                 }
                 Err(_) => {
-                    self.failed(&req);
+                    self.failed_at(&req, now);
                     break;
                 }
             }
@@ -956,8 +968,12 @@ impl NativeOwnershipController {
     }
 
     pub fn stop(&mut self) {
+        self.stop_at(Instant::now());
+    }
+
+    pub fn stop_at(&mut self, now: Instant) {
         self.sleeper.interrupt();
-        self.invalidate("握手已停止", false);
+        self.invalidate_at("握手已停止", false, now);
     }
 }
 

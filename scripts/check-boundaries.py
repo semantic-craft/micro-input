@@ -222,4 +222,26 @@ assert '<key>CFBundleIconFile</key>' in info_plist_src and '<string>AppIcon</str
     'R-C07 violation: app/MicroInput/Info.plist and scripts/build must package and declare AppIcon.icns'
 )
 
+projection_src = (root / 'crates/mi-core/src/projection.rs').read_text(encoding='utf-8')
+for forbidden in (
+    'WorkbenchStore', 'NativeOwnershipController', 'PushToTalkController',
+    'AppBundleCache', 'DeviceSession', 'RunningSixLayer', 'Instant::now',
+    '.elapsed(', '.load(Ordering', 'std::fs', 'self.panel_host', 'self.status_item_host',
+):
+    assert forbidden not in projection_src, (
+        f'R-C08 violation in crates/mi-core/src/projection.rs: {forbidden} is a runtime capability; '
+        'projection must read captured value inputs only'
+    )
+assert 'UnboundedSender<HardwareLoopEvent>' not in store_src and 'UnboundedReceiver<HardwareLoopEvent>' not in store_src, (
+    'R-C08 violation: Workbench hardware ingress must remain bounded with independent loss/control delivery'
+)
+
+six_layer_runtime_src = (root / 'crates/mi-core/src/six_layer_runtime.rs').read_text(encoding='utf-8').split('#[cfg(test)]\nmod tests {', 1)[0]
+assert 'LiveHostActionExecutor::new' not in six_layer_runtime_src and '.driver()' not in store_src, (
+    'R-C08 violation: six-layer and UI host actions must share the Store executor admission/cleanup boundary'
+)
+assert 'executor.execute_when(' in six_layer_runtime_src and 'executor.execute(' not in six_layer_runtime_src, (
+    'R-C08 violation: six-layer admission must be checked inside the executor effect lock'
+)
+
 print('UNKNOWN inventory and read-only/no-send boundaries: PASS')

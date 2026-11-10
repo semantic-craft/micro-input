@@ -252,6 +252,15 @@ mod tests {
                     .unwrap();
             assert!(mi_core_dispatch_json(store, noop_win.as_ptr()).is_null());
 
+            let unchanged_ptr = mi_core_project_json(store);
+            assert!(!unchanged_ptr.is_null());
+            let unchanged = CStr::from_ptr(unchanged_ptr).to_string_lossy().into_owned();
+            mi_core_string_free(unchanged_ptr);
+            assert_eq!(
+                unchanged, updated_str,
+                "null dispatch must preserve the published JSON"
+            );
+
             mi_core_free(store);
             mi_core_release_instance_lock(lock);
         }

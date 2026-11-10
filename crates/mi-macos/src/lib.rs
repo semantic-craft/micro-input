@@ -19,8 +19,8 @@ pub use executor::{
     select_antigravity_live_voice_target, select_antigravity_new_conversation_target,
     submit_modifiers_for_adapter, AntigravityLiveVoiceTarget, AntigravityNewConversationTarget,
     AntigravitySidebarAxNode, ClipboardItemSnapshot, ClipboardSnapshot, DialScrollRequest,
-    HostActionReceipt, HostOsDriver, LiveHostActionExecutor, MacOsSystemDriver, RecordedOsEvent,
-    RecordingOsDriver, SimulatedHostActionExecutor,
+    HeldInputId, HostActionReceipt, HostOsDriver, LiveHostActionExecutor, MacOsSystemDriver,
+    RecordedOsEvent, RecordingOsDriver, SimulatedHostActionExecutor,
 };
 pub use instance_lock::DocumentInstanceLock;
 pub use passive_panel::{

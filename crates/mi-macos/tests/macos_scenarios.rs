@@ -3,7 +3,7 @@ use mi_macos::ax_dictation::{
     AxWindowSnapshot, DictationAdapter, DictationOutcome,
 };
 use mi_macos::executor::{
-    ClipboardItemSnapshot, ClipboardSnapshot, LiveHostActionExecutor, RecordedOsEvent,
+    ClipboardItemSnapshot, ClipboardSnapshot, HeldInputId, LiveHostActionExecutor, RecordedOsEvent,
     RecordingOsDriver, APPLE_FN_KEY_CODE, CG_EVENT_FLAG_MASK_SECONDARY_FN,
     CG_EVENT_TYPE_FLAGS_CHANGED,
 };
@@ -108,19 +108,23 @@ fn test_live_host_action_executor_apple_fn_paste_submit_and_macro_trust() {
     );
     let executor = LiveHostActionExecutor::new(driver.clone());
 
+    let input = HeldInputId {
+        session_id: 1,
+        binding_id: "AG04".into(),
+    };
     let fn_press = executor
-        .handle_apple_fn_press("Antigravity", "AG04", "frontmost-editor")
+        .handle_apple_fn_press(&input, "Antigravity", "frontmost-editor")
         .expect("apple fn press receipt");
     assert_eq!(fn_press.outcome, "executed");
     assert_eq!(fn_press.detail, "fn (press)");
     assert!(
         executor
-            .handle_apple_fn_press("Antigravity", "AG04", "frontmost-editor")
+            .handle_apple_fn_press(&input, "Antigravity", "frontmost-editor")
             .is_none(),
         "duplicate press while held must be ignored"
     );
     let fn_release = executor
-        .handle_apple_fn_release("Antigravity", "AG04", "frontmost-editor")
+        .handle_apple_fn_release(&input)
         .expect("apple fn release receipt");
     assert_eq!(fn_release.outcome, "executed");
     assert_eq!(fn_release.detail, "fn (release)");
@@ -761,4 +765,148 @@ fn antigravity_live_voice_does_not_map_to_dictation_shortcut_ctrl_m() {
         Some(3582)
     );
     assert_eq!(parse_pid_from_lsappinfo_output("no pid here"), None);
+}
+
+#[test]
+fn held_fn_uses_original_owner_and_releases_only_the_last_input() {
+    let driver = RecordingOsDriver::new(true);
+    let executor = LiveHostActionExecutor::new(driver.clone());
+    let first = HeldInputId {
+        session_id: 7,
+        binding_id: "AG04".into(),
+    };
+    let second = HeldInputId {
+        session_id: 7,
+        binding_id: "AG05".into(),
+    };
+    executor
+        .handle_apple_fn_press(&first, "profile-a", "target-a")
+        .unwrap();
+    executor
+        .handle_apple_fn_press(&second, "profile-b", "target-b")
+        .unwrap();
+    let stale = HeldInputId {
+        session_id: 6,
+        binding_id: "AG04".into(),
+    };
+    assert!(executor.handle_apple_fn_release(&stale).is_none());
+    let released = executor.handle_apple_fn_release(&first).unwrap();
+    assert_eq!(released.profile_id, "profile-a");
+    assert_eq!(released.target, "target-a");
+    assert!(executor.handle_apple_fn_release(&first).is_none());
+    let flags = || {
+        driver
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                RecordedOsEvent::PostAppleFnFlags { key_down, .. } => Some(*key_down),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(flags(), vec![true]);
+    let pulse = ResolvedHostAction::Shortcut {
+        key: "fn".into(),
+        key_code: APPLE_FN_KEY_CODE,
+        modifiers: Vec::new(),
+        target_bundle_id: None,
+    };
+    let blocked = executor.execute("new-profile", "AG06", &pulse);
+    assert_eq!(blocked.detail, "apple_fn_already_held");
+    assert_eq!(flags(), vec![true]);
+    let released = executor.handle_apple_fn_release(&second).unwrap();
+    assert_eq!(released.profile_id, "profile-b");
+    assert_eq!(released.target, "target-b");
+    assert_eq!(flags(), vec![true, false]);
+}
+
+#[test]
+fn failed_fn_release_preserves_owner_until_confirmed_cleanup() {
+    let driver = RecordingOsDriver::new(true);
+    let executor = LiveHostActionExecutor::new(driver.clone());
+    let input = HeldInputId {
+        session_id: 7,
+        binding_id: "AG04".into(),
+    };
+    executor
+        .handle_apple_fn_press(&input, "original", "original-target")
+        .unwrap();
+    driver.set_accessibility_trusted(false);
+    let failed = executor.handle_apple_fn_release(&input).unwrap();
+    assert_eq!(failed.outcome, "failed");
+    assert!(executor.has_unconfirmed_apple_fn_release());
+    assert_eq!(failed.profile_id, "original");
+    assert!(executor.stop_owned_actions().is_err());
+    driver.set_accessibility_trusted(true);
+    let shortcut = ResolvedHostAction::Shortcut {
+        key: "a".into(),
+        key_code: 0,
+        modifiers: vec!["command".into()],
+        target_bundle_id: Some("com.example.editor".into()),
+    };
+    let events = driver.events();
+    let refused = executor.execute("new", "AG01", &shortcut);
+    assert_eq!(refused.outcome, "blocked");
+    assert_eq!(refused.detail, "apple_fn_cleanup_unconfirmed");
+    assert_eq!(
+        driver.events(),
+        events,
+        "uncertain cleanup blocks all host effects"
+    );
+    let next = HeldInputId {
+        session_id: 8,
+        binding_id: "AG04".into(),
+    };
+    let blocked = executor
+        .handle_apple_fn_press(&next, "new", "new-target")
+        .unwrap();
+    assert_eq!(blocked.outcome, "blocked");
+    assert_eq!(blocked.detail, "apple_fn_cleanup_unconfirmed");
+    let retried = executor.handle_apple_fn_release(&input).unwrap();
+    assert_eq!(retried.outcome, "executed");
+    assert!(!executor.has_unconfirmed_apple_fn_release());
+    assert_eq!(retried.target, "original-target");
+    assert!(executor.handle_apple_fn_release(&input).is_none());
+    assert_eq!(
+        executor
+            .handle_apple_fn_press(&next, "new", "new-target")
+            .unwrap()
+            .outcome,
+        "executed"
+    );
+    executor.stop_owned_actions().unwrap();
+    assert!(executor.handle_apple_fn_release(&next).is_none());
+    let flags: Vec<_> = driver
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            RecordedOsEvent::PostAppleFnFlags { key_down, .. } => Some(*key_down),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(flags, vec![true, false, true, false]);
+}
+
+#[test]
+fn dropping_executor_releases_its_remaining_fn_output() {
+    let driver = RecordingOsDriver::new(true);
+    {
+        let executor = LiveHostActionExecutor::new(driver.clone());
+        let input = HeldInputId {
+            session_id: 9,
+            binding_id: "AG04".into(),
+        };
+        executor
+            .handle_apple_fn_press(&input, "profile", "target")
+            .unwrap();
+    }
+    let flags: Vec<_> = driver
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            RecordedOsEvent::PostAppleFnFlags { key_down, .. } => Some(*key_down),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(flags, vec![true, false]);
 }

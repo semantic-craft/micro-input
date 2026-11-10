@@ -2,7 +2,7 @@ use crate::managed_controls::{ManagedAxControls, ManagedControlReadiness, Observ
 use crate::native_ax::NativeAxProvider;
 use mi_model::host_router::{ResolvedHostAction, ResolvedMacroEvent};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -1763,56 +1763,121 @@ pub(crate) fn describe_resolved_action(action: &ResolvedHostAction) -> ActionDes
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HeldInputId {
+    pub session_id: u64,
+    pub binding_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum FnHoldKey {
+    Input(HeldInputId),
+    Pulse,
+}
+
+struct FnOwner {
+    profile_id: String,
+    target: String,
+    release_failed: bool,
+}
+
 pub struct LiveHostActionExecutor<D: HostOsDriver = MacOsSystemDriver> {
     driver: D,
-    held_apple_fn_bindings: Mutex<HashSet<String>>,
+    execution_lock: Mutex<()>,
+    held_apple_fn_bindings: Mutex<HashMap<FnHoldKey, FnOwner>>,
+}
+
+impl<D: HostOsDriver> Drop for LiveHostActionExecutor<D> {
+    fn drop(&mut self) {
+        if let Err(error) = self.stop_owned_actions() {
+            eprintln!("host action cleanup unconfirmed: {error}");
+        }
+    }
 }
 
 impl<D: HostOsDriver> LiveHostActionExecutor<D> {
     pub fn new(driver: D) -> Self {
         Self {
             driver,
-            held_apple_fn_bindings: Mutex::new(HashSet::new()),
+            execution_lock: Mutex::new(()),
+            held_apple_fn_bindings: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn driver(&self) -> &D {
-        &self.driver
+    pub fn has_unconfirmed_apple_fn_release(&self) -> bool {
+        self.held_apple_fn_bindings
+            .lock()
+            .unwrap()
+            .values()
+            .any(|owner| owner.release_failed)
     }
 
     pub fn stop_owned_actions(&self) -> Result<(), String> {
+        let _execution = self.execution_lock.lock().unwrap();
         let mut held = self.held_apple_fn_bindings.lock().unwrap();
         let released = if held.is_empty() {
             Ok(())
         } else {
-            self.driver
-                .post_apple_fn_flags(false)
-                .map(|()| held.clear())
+            match self.driver.post_apple_fn_flags(false) {
+                Ok(()) => {
+                    held.clear();
+                    Ok(())
+                }
+                Err(error) => {
+                    for owner in held.values_mut() {
+                        owner.release_failed = true;
+                    }
+                    Err(error)
+                }
+            }
         };
         let stopped = self.driver.stop_owned_dictations();
         released.and(stopped)
     }
 
+    pub fn start_owned_dictation(&self, adapter: &str) -> Result<(), String> {
+        let _execution = self.execution_lock.lock().unwrap();
+        if self.has_unconfirmed_apple_fn_release() {
+            return Err("apple_fn_cleanup_unconfirmed".into());
+        }
+        self.driver.start_owned_dictation(adapter)
+    }
+
+    pub fn stop_owned_dictations(&self) -> Result<(), String> {
+        let _execution = self.execution_lock.lock().unwrap();
+        self.driver.stop_owned_dictations()
+    }
+
     pub fn handle_apple_fn_press(
         &self,
+        input: &HeldInputId,
         profile_id: &str,
-        binding_id: &str,
         target: &str,
     ) -> Option<HostActionReceipt> {
+        let _execution = self.execution_lock.lock().unwrap();
         let mut held = self.held_apple_fn_bindings.lock().unwrap();
-        if held.contains(binding_id) {
+        let key = FnHoldKey::Input(input.clone());
+        if held.contains_key(&key) {
             return None;
         }
+        let binding_id = &input.binding_id;
         let resolved_target = if target.trim().is_empty() {
             "frontmost-editor"
         } else {
             target
         };
-        if !self.driver.is_accessibility_trusted() {
+        let blocked = if held.values().any(|owner| owner.release_failed) {
+            Some("apple_fn_cleanup_unconfirmed")
+        } else if !self.driver.is_accessibility_trusted() {
+            Some("accessibility_untrusted")
+        } else {
+            None
+        };
+        if let Some(reason) = blocked {
             return Some(HostActionReceipt {
                 action_type: "shortcut".to_string(),
                 binding_id: binding_id.to_string(),
-                detail: "accessibility_untrusted".to_string(),
+                detail: reason.to_string(),
                 outcome: "blocked".to_string(),
                 profile_id: profile_id.to_string(),
                 target: resolved_target.to_string(),
@@ -1820,7 +1885,12 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 timestamp_ms: now_timestamp_ms(),
             });
         }
-        if let Err(err) = self.driver.post_apple_fn_flags(true) {
+        let pressed = if held.is_empty() {
+            self.driver.post_apple_fn_flags(true)
+        } else {
+            Ok(())
+        };
+        if let Err(err) = pressed {
             return Some(HostActionReceipt {
                 action_type: "shortcut".to_string(),
                 binding_id: binding_id.to_string(),
@@ -1832,7 +1902,14 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 timestamp_ms: now_timestamp_ms(),
             });
         }
-        held.insert(binding_id.to_string());
+        held.insert(
+            key,
+            FnOwner {
+                profile_id: profile_id.to_string(),
+                target: resolved_target.to_string(),
+                release_failed: false,
+            },
+        );
         Some(HostActionReceipt {
             action_type: "shortcut".to_string(),
             binding_id: binding_id.to_string(),
@@ -1845,35 +1922,57 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
         })
     }
 
-    pub fn handle_apple_fn_release(
-        &self,
-        profile_id: &str,
-        binding_id: &str,
-        target: &str,
-    ) -> Option<HostActionReceipt> {
+    pub fn handle_apple_fn_release(&self, input: &HeldInputId) -> Option<HostActionReceipt> {
+        let _execution = self.execution_lock.lock().unwrap();
         let mut held = self.held_apple_fn_bindings.lock().unwrap();
-        if !held.remove(binding_id) {
-            return None;
-        }
-        let resolved_target = if target.trim().is_empty() {
-            "frontmost-editor"
+        let key = FnHoldKey::Input(input.clone());
+        let owner = held.get(&key)?;
+        let profile_id = owner.profile_id.clone();
+        let target = owner.target.clone();
+        let released = if held.len() == 1 {
+            self.driver.post_apple_fn_flags(false)
         } else {
-            target
+            Ok(())
         };
-        let (outcome, detail) = match self.driver.post_apple_fn_flags(false) {
-            Ok(()) => ("executed".to_string(), "fn (release)".to_string()),
-            Err(err) => ("failed".to_string(), err),
+        let (outcome, detail) = match released {
+            Ok(()) => {
+                held.remove(&key);
+                ("executed".to_string(), "fn (release)".to_string())
+            }
+            Err(err) => {
+                held.get_mut(&key).unwrap().release_failed = true;
+                ("failed".to_string(), err)
+            }
         };
         Some(HostActionReceipt {
             action_type: "shortcut".to_string(),
-            binding_id: binding_id.to_string(),
+            binding_id: input.binding_id.clone(),
             detail,
             outcome,
-            profile_id: profile_id.to_string(),
-            target: resolved_target.to_string(),
+            profile_id,
+            target,
             text_byte_len: None,
             timestamp_ms: now_timestamp_ms(),
         })
+    }
+
+    fn pulse_apple_fn(&self, profile_id: &str, target: &str) -> Result<(), String> {
+        let mut held = self.held_apple_fn_bindings.lock().unwrap();
+        if !held.is_empty() {
+            return Err("apple_fn_already_held".into());
+        }
+        self.driver.post_apple_fn_flags(true)?;
+        held.insert(
+            FnHoldKey::Pulse,
+            FnOwner {
+                profile_id: profile_id.to_string(),
+                target: target.to_string(),
+                release_failed: true,
+            },
+        );
+        self.driver.post_apple_fn_flags(false)?;
+        held.remove(&FnHoldKey::Pulse);
+        Ok(())
     }
 
     pub fn execute(
@@ -1882,6 +1981,17 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
         binding_id: &str,
         action: &ResolvedHostAction,
     ) -> HostActionReceipt {
+        self.execute_when(profile_id, binding_id, action, || true)
+    }
+
+    pub fn execute_when(
+        &self,
+        profile_id: &str,
+        binding_id: &str,
+        action: &ResolvedHostAction,
+        admitted: impl FnOnce() -> bool,
+    ) -> HostActionReceipt {
+        let _execution = self.execution_lock.lock().unwrap();
         let desc = describe_resolved_action(action);
         let make_receipt = |outcome: &str, detail: String| HostActionReceipt {
             action_type: desc.action_type.clone(),
@@ -1893,6 +2003,13 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
             text_byte_len: desc.text_byte_len,
             timestamp_ms: now_timestamp_ms(),
         };
+
+        if !admitted() {
+            return make_receipt("blocked", "input_retired".to_string());
+        }
+        if self.has_unconfirmed_apple_fn_release() {
+            return make_receipt("blocked", "apple_fn_cleanup_unconfirmed".to_string());
+        }
 
         match action {
             ResolvedHostAction::Shortcut {
@@ -1919,9 +2036,7 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     }
                 }
                 let res = if *key_code == APPLE_FN_KEY_CODE && modifiers.is_empty() {
-                    self.driver
-                        .post_apple_fn_flags(true)
-                        .and_then(|()| self.driver.post_apple_fn_flags(false))
+                    self.pulse_apple_fn(profile_id, &desc.target)
                 } else {
                     self.driver
                         .post_key_shortcut(*key_code, modifiers, true)
@@ -2136,11 +2251,7 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     if let Some(bundle_id) = bundle_id_for_adapter(adapter) {
                         let _ = self.driver.open_application(bundle_id);
                     }
-                    match self
-                        .driver
-                        .post_apple_fn_flags(true)
-                        .and_then(|()| self.driver.post_apple_fn_flags(false))
-                    {
+                    match self.pulse_apple_fn(profile_id, &desc.target) {
                         Ok(()) => make_receipt("executed", desc.detail),
                         Err(err) => make_receipt("failed", err),
                     }
