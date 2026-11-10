@@ -48,7 +48,7 @@ impl NavigationCommand {
 pub(crate) struct SlotRevision {
     pub revision: u64,
     pub changed_at: Instant,
-    targets: Vec<Option<(NavigationPlace, String)>>,
+    targets: Vec<Option<NavigationPlace>>,
     instance: Option<AntigravityInstance>,
 }
 impl Default for SlotRevision {
@@ -140,45 +140,18 @@ impl WorkbenchStore {
         let mut current = self.session_navigation.dispatch.slots.lock().unwrap();
         let unchanged = current.instance.as_ref() == instance
             && current.targets.len() == slots.len()
-            && current.targets.iter().zip(slots).all(|(target, slot)| {
-                match (target, &slot.place) {
-                    (None, None) => true,
-                    (Some((place, watermark)), Some(slot_place)) => {
-                        place == slot_place
-                            && watermark
-                                == self
-                                    .slot_table
-                                    .find_candidate(place)
-                                    .map(|c| c.watermark.as_str())
-                                    .unwrap_or_default()
-                    }
-                    _ => false,
-                }
-            });
+            && current
+                .targets
+                .iter()
+                .zip(slots)
+                .all(|(target, slot)| target == &slot.place);
         if unchanged {
             return;
         }
-        let targets = slots
-            .iter()
-            .map(|slot| {
-                slot.place.as_ref().map(|place| {
-                    (
-                        place.clone(),
-                        self.slot_table
-                            .find_candidate(place)
-                            .map(|c| c.watermark.clone())
-                            .unwrap_or_default(),
-                    )
-                })
-            })
-            .collect();
-        let instance = instance.cloned();
-        if current.targets != targets || current.instance != instance {
-            current.targets = targets;
-            current.instance = instance;
-            current.revision += 1;
-            current.changed_at = Instant::now();
-        }
+        current.targets = slots.iter().map(|slot| slot.place.clone()).collect();
+        current.instance = instance.cloned();
+        current.revision += 1;
+        current.changed_at = Instant::now();
     }
 
     pub(super) fn cancel_session_navigation(&mut self) {
@@ -1129,5 +1102,107 @@ mod tests {
             .unwrap()
             .shutdown(&store.tokio_runtime)
             .unwrap();
+    }
+
+    #[test]
+    fn watermark_ticks_with_unchanged_slot_places_keep_physical_revision_valid() {
+        let (_dir, mut store) = store();
+        let initial = candidate("session-a", "wm1");
+        store.update_navigation_catalog(Some(catalog(vec![initial.clone()], "hub")));
+        let initial_places: Vec<_> = store
+            .slot_table
+            .slot_table()
+            .slots()
+            .iter()
+            .map(|slot| slot.place.clone())
+            .collect();
+        assert_eq!(initial_places.len(), 6);
+        let (initial_revision, initial_changed_at) = {
+            let slots = store.session_navigation.dispatch.slots.lock().unwrap();
+            (slots.revision, slots.changed_at)
+        };
+
+        let mut updated = candidate("session-a", "wm2");
+        updated.updated_at_ms = 6000;
+        store.update_navigation_catalog(Some(catalog(vec![updated.clone()], "hub")));
+        let after_tick_places: Vec<_> = store
+            .slot_table
+            .slot_table()
+            .slots()
+            .iter()
+            .map(|slot| slot.place.clone())
+            .collect();
+        assert_eq!(after_tick_places, initial_places);
+        let (after_tick_revision, after_tick_changed_at) = {
+            let slots = store.session_navigation.dispatch.slots.lock().unwrap();
+            (slots.revision, slots.changed_at)
+        };
+        assert_eq!(after_tick_revision, initial_revision);
+        assert_eq!(after_tick_changed_at, initial_changed_at);
+
+        let rx = worker(&mut store);
+        store.request_navigation_command(
+            NavigationCommand::Slot(0),
+            Some(initial_revision),
+            None,
+            "test".into(),
+            "AG00".into(),
+        );
+        let (requested, reply) = rx.recv().unwrap();
+        assert_eq!(requested, initial.place);
+        reply.send(Ok(requested)).unwrap();
+        store.poll_session_navigation();
+        assert_eq!(
+            store.lighting_arbiter.acknowledged_watermarks[&initial.place.target_id()],
+            "wm2"
+        );
+
+        let mut other = candidate("session-b", "wm3");
+        other.updated_at_ms = 7000;
+        store.update_navigation_catalog(Some(catalog(vec![other.clone(), updated.clone()], "hub")));
+        let slot_changed_revision = store
+            .session_navigation
+            .dispatch
+            .slots
+            .lock()
+            .unwrap()
+            .revision;
+        assert!(slot_changed_revision > initial_revision);
+        let rx = worker(&mut store);
+        store.request_navigation_command(
+            NavigationCommand::Slot(0),
+            Some(initial_revision),
+            None,
+            "test".into(),
+            "AG00".into(),
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            store.dispatched_receipts.last().unwrap().detail,
+            "blocked:session_slots_changed"
+        );
+
+        store.update_navigation_catalog(Some(catalog(vec![other, updated], "replacement-hub")));
+        let instance_changed_revision = store
+            .session_navigation
+            .dispatch
+            .slots
+            .lock()
+            .unwrap()
+            .revision;
+        assert!(instance_changed_revision > slot_changed_revision);
+        let rx = worker(&mut store);
+        store.request_navigation_command(
+            NavigationCommand::Slot(0),
+            Some(slot_changed_revision),
+            None,
+            "test".into(),
+            "AG00".into(),
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            store.dispatched_receipts.last().unwrap().detail,
+            "blocked:session_slots_changed"
+        );
     }
 }

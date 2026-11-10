@@ -943,7 +943,7 @@ mod macos {
                 .pop()
                 .flatten();
             if text_attribute(query)?.as_deref() != Some(conversation) {
-                return Err(blocked("session_search_query_changed"));
+                return Err(blocked("session_search_query_changed_final_guard"));
             }
             let identity = read(&self.fields[3], &["AXValue"], deadline)?
                 .pop()
@@ -1051,7 +1051,7 @@ mod macos {
                 return Err(blocked("session_search_changed"));
             }
             if current.input.string_attr("AXValue")?.as_deref() != Some(conversation) {
-                return Err(blocked("session_search_query_changed"));
+                return Err(blocked("session_search_query_changed_before_results"));
             }
             let results = observe_window_until(
                 current.root.clone(),
@@ -1162,7 +1162,7 @@ mod macos {
         conversation: &str,
     ) -> Result<Option<usize>, String> {
         if query != Some(conversation) {
-            return Err(blocked("session_search_query_changed"));
+            return Err(blocked("session_search_query_changed_after_results"));
         }
         if !matches!(search_controls(observation)?, Some((0, _))) {
             return Err(blocked("session_search_dialog_changed"));
@@ -1251,7 +1251,27 @@ mod macos {
                 return Err(blocked("session_search_changed"));
             }
             self.before_mutation(is_current)?;
-            current.input.set("AXValue", Owned::text(conversation).0)?;
+            write_with_readback(
+                || current.input.set("AXValue", Owned::text(conversation).0),
+                || {
+                    self.before_mutation(is_current)?;
+                    let observed = self
+                        .search_dialog(target.pid, Instant::now() + Duration::from_millis(400))?
+                        .ok_or_else(|| blocked("session_search_closed"))?;
+                    if unsafe { CFEqual(current.root.0, observed.root.0) } == 0
+                        || unsafe { CFEqual(current.input.0, observed.input.0) } == 0
+                    {
+                        return Err(blocked("session_search_changed_during_query_write"));
+                    }
+                    let applied =
+                        observed.input.string_attr("AXValue")?.as_deref() == Some(conversation);
+                    if !is_current() {
+                        return Err(blocked("session_navigation_retired"));
+                    }
+                    Ok(applied)
+                },
+                "session_search_query_not_applied",
+            )?;
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
                 if Instant::now() >= deadline {
@@ -2377,6 +2397,70 @@ mod macos {
             )
             .is_err());
             assert_eq!(presses.get(), 1);
+        }
+
+        #[test]
+        fn query_write_waits_for_application_once_then_rejects_later_query_changes() {
+            let writes = std::cell::Cell::new(0);
+            let mut readbacks = [None, Some(""), Some("target-uuid")].into_iter();
+            write_with_readback(
+                || {
+                    writes.set(writes.get() + 1);
+                    Ok(())
+                },
+                || Ok(readbacks.next().expect("bounded query readback") == Some("target-uuid")),
+                "session_search_query_not_applied",
+            )
+            .unwrap();
+            assert_eq!(writes.get(), 1);
+            assert!(readbacks.next().is_none());
+
+            let tree = search_fixture();
+            let presses = std::cell::Cell::new(0);
+            let changed = press_search_selection(
+                &mut || Ok(()),
+                || {
+                    verified_search_result(&tree, Some("user-changed-query"), "target-uuid")
+                        .map(|_| ())
+                },
+                &|| true,
+                || {
+                    presses.set(presses.get() + 1);
+                    Ok(())
+                },
+            );
+            assert!(changed
+                .unwrap_err()
+                .contains("session_search_query_changed_after_results"));
+            assert_eq!(presses.get(), 0);
+            assert_eq!(writes.get(), 1);
+        }
+
+        #[test]
+        fn cancellation_while_query_is_applying_never_rewrites_the_query() {
+            let writes = std::cell::Cell::new(0);
+            let mut reads = 0;
+            let result = write_with_readback(
+                || {
+                    writes.set(writes.get() + 1);
+                    Ok(())
+                },
+                || {
+                    reads += 1;
+                    if reads == 1 {
+                        Ok(false)
+                    } else {
+                        Err(blocked("session_navigation_retired"))
+                    }
+                },
+                "session_search_query_not_applied",
+            );
+            assert_eq!(
+                result.unwrap_err(),
+                "unconfirmed:blocked:session_navigation_retired"
+            );
+            assert_eq!(writes.get(), 1);
+            assert_eq!(reads, 2);
         }
 
         #[test]
