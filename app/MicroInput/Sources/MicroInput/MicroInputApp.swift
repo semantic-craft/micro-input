@@ -27,11 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
-           let iconImage = NSImage(contentsOf: iconURL)
-        {
-            NSApp.applicationIconImage = iconImage
-        }
+        NSApp.applicationIconImage = NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
         setupStatusItem()
         openMainWindow()
     }
