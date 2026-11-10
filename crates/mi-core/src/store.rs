@@ -90,10 +90,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "session_navigation.rs"]
+pub(crate) mod session_navigation;
 #[path = "six_layer_store.rs"]
 mod six_layer_store;
 #[path = "workspace_lifecycle.rs"]
 mod workspace_lifecycle;
+use session_navigation::{
+    AntigravityInstance, NavigationCatalog, NavigationCommand, NavigationInputLease,
+    SessionNavigation,
+};
 use workspace_lifecycle::SystemLifecycle;
 #[path = "projection.rs"]
 mod projection;
@@ -144,7 +150,7 @@ pub enum HardwareLoopEvent {
     },
     LiveCandidatesUpdated {
         epoch: u64,
-        candidates: Vec<FourAppLiveCandidate>,
+        catalog: Option<NavigationCatalog>,
     },
 }
 
@@ -376,6 +382,7 @@ pub struct WorkbenchStore {
     discovery_refresh_count: u64,
     resume_requires_explicit_connect: bool,
     pub navigation_history: NavigationHistory,
+    session_navigation: SessionNavigation,
     pub radial_state: RadialMenuState,
     pub radial_readiness: RadialInputReadiness,
     pub radial_slot_configs: [RadialSlotConfig; RADIAL_SECTOR_COUNT],
@@ -492,6 +499,7 @@ impl WorkbenchStore {
             discovery_refresh_count: 0,
             resume_requires_explicit_connect: false,
             navigation_history: NavigationHistory::new(),
+            session_navigation: SessionNavigation::default(),
             radial_state: RadialMenuState::new(),
             radial_readiness: RadialInputReadiness::Ready,
             radial_slot_configs: RadialSlotConfig::default_app_launcher_slots(),
@@ -594,6 +602,7 @@ impl WorkbenchStore {
             self.poll_six_layer_runtime();
         }
         self.drain_pending_hardware_events(now);
+        self.poll_session_navigation();
         self.overlay_controller.expire_notice_if_due(now);
         self.commit_runtime_update();
         self.projection_generation != before_gen
@@ -864,16 +873,15 @@ impl WorkbenchStore {
             let mut completed_transition_watermarks = BTreeMap::new();
             loop {
                 let epoch = epoch_source.load(Ordering::Acquire);
-                if let Some(candidates) = poll_antigravity_daemon_candidates(
+                let catalog = poll_antigravity_daemon_candidates(
                     &mut seen_running_ids,
                     &mut completed_transition_watermarks,
-                ) {
-                    if tx
-                        .send(HardwareLoopEvent::LiveCandidatesUpdated { epoch, candidates })
-                        .is_err()
-                    {
-                        break;
-                    }
+                );
+                if tx
+                    .send(HardwareLoopEvent::LiveCandidatesUpdated { epoch, catalog })
+                    .is_err()
+                {
+                    break;
                 }
                 std::thread::sleep(Duration::from_millis(1500));
             }
@@ -1214,13 +1222,11 @@ impl WorkbenchStore {
                 }
                 None
             }
-            HardwareLoopEvent::LiveCandidatesUpdated { epoch, candidates } => {
+            HardwareLoopEvent::LiveCandidatesUpdated { epoch, catalog } => {
                 if epoch != self.lifecycle_epoch.load(Ordering::Acquire) {
                     return None;
                 }
-                if self.slot_table.candidates() != candidates.as_slice() {
-                    self.ingest_four_app_candidates(candidates);
-                }
+                self.update_navigation_catalog(catalog);
                 None
             }
         }
@@ -1536,6 +1542,7 @@ impl WorkbenchStore {
 
     fn release_board_inputs(&mut self, now: Instant) {
         self.update_now = now;
+        self.cancel_physical_session_navigation();
         self.dial_pressed = false;
         self.dial_turned_while_pressed = false;
         self.radial_state.cancel();
@@ -1816,6 +1823,7 @@ impl WorkbenchStore {
         let bundle_id = bundle_id
             .map(str::trim)
             .filter(|bundle| !bundle.is_empty() && *bundle != "*");
+        self.navigation_foreground_changed(bundle_id);
         self.foreground_bundle_id = bundle_id.map(str::to_owned);
         if let Some(running) = &self.six_layer_running {
             let changed = running.foreground_changed(bundle_id);
@@ -2454,27 +2462,13 @@ impl WorkbenchStore {
         self.require_awake()?;
         match action {
             SessionStripAction::ActivateSlot(slot_index) => {
-                if slot_index >= SLOT_COUNT {
-                    return Ok(());
-                }
-                let maybe_place = self.slot_table.slot_table().slots()[slot_index]
-                    .place
-                    .clone();
-                if let Some(place) = maybe_place {
-                    let watermark = self
-                        .slot_table
-                        .find_candidate(&place)
-                        .map(|c| c.watermark.clone())
-                        .unwrap_or_default();
-                    if !watermark.is_empty() {
-                        self.lighting_arbiter.acknowledge_slot(&place, watermark);
-                    }
-                    self.navigation_history.visit(place);
-                    let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
-                    self.slot_table.refresh_with_watermarks(&acks);
-                    self.refresh_four_app_lighting();
-                    self.commit_runtime_update();
-                }
+                self.request_navigation_command(
+                    NavigationCommand::Slot(slot_index),
+                    None,
+                    None,
+                    "workbench".into(),
+                    "session-strip".into(),
+                );
                 Ok(())
             }
             SessionStripAction::TogglePinSlot(slot_index) => {
@@ -2503,19 +2497,7 @@ impl WorkbenchStore {
                 Ok(())
             }
             SessionStripAction::JumpToSession(place) => {
-                let watermark = self
-                    .slot_table
-                    .find_candidate(&place)
-                    .map(|c| c.watermark.clone())
-                    .unwrap_or_default();
-                if !watermark.is_empty() {
-                    self.lighting_arbiter.acknowledge_slot(&place, watermark);
-                }
-                self.navigation_history.visit(place);
-                let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
-                self.slot_table.refresh_with_watermarks(&acks);
-                self.refresh_four_app_lighting();
-                self.commit_runtime_update();
+                self.request_session_navigation(place);
                 Ok(())
             }
             SessionStripAction::AcknowledgeAllCompleted => {
@@ -3124,6 +3106,7 @@ impl WorkbenchStore {
     }
 
     fn normalize_view_state(&mut self) {
+        self.refresh_navigation_revision();
         self.sync_modal_for_layer_protection();
         self.ensure_default_pinned_favorites();
         if self.overlay_controller.is_cheat_sheet_visible() {
@@ -4047,55 +4030,20 @@ impl WorkbenchStore {
                             .active_desktop_agent_adapter()
                             .unwrap_or_else(|| "antigravity".to_string());
                     }
-                    if let Some(slot_str) = command.strip_prefix("slot-open:") {
-                        if let Ok(slot_idx) = slot_str.trim().parse::<usize>() {
-                            let _ = self.dispatch_session_strip_action(
-                                SessionStripAction::ActivateSlot(slot_idx),
-                            );
-                            let target = self
-                                .slot_table
-                                .slot_table()
-                                .slots()
-                                .get(slot_idx)
-                                .and_then(|slot| slot.place.as_ref())
-                                .map(|place| bundle_id_for_place(place).to_owned());
-                            let receipt = if let Some(bundle_id) = target {
-                                let action = ResolvedHostAction::OpenApp { bundle_id };
-                                if self.config.isolated {
-                                    mi_macos::SimulatedHostActionExecutor::new().execute(
-                                        &profile_id,
-                                        &binding_id,
-                                        &action,
-                                    )
-                                } else {
-                                    self.live_executor
-                                        .execute(&profile_id, &binding_id, &action)
-                                }
-                            } else {
-                                HostActionReceipt {
-                                    action_type: "open_app".into(),
-                                    binding_id: binding_id.clone(),
-                                    detail: "empty_session_slot".into(),
-                                    outcome: "blocked".into(),
-                                    profile_id,
-                                    target: "four-app".into(),
-                                    text_byte_len: None,
-                                    timestamp_ms: 0,
-                                }
-                            };
-                            self.status_message = format!(
-                                "{} · {}",
-                                if receipt.succeeded() {
-                                    "已执行"
-                                } else {
-                                    "未执行"
-                                },
-                                receipt.detail
-                            );
-                            self.record_host_action_receipt(receipt.clone());
-                            self.commit_runtime_update();
-                            return Some(receipt);
-                        }
+                    if let Some(command) =
+                        NavigationCommand::from_action(&ResolvedHostAction::AgentCommand {
+                            adapter: adapter.clone(),
+                            command: command.clone(),
+                        })
+                    {
+                        self.request_navigation_command(
+                            command,
+                            None,
+                            Some(NavigationInputLease::Vendor(event.session_id)),
+                            profile_id,
+                            binding_id,
+                        );
+                        return None;
                     }
                     if command == "push-to-talk" {
                         let resolved_adapter = adapter.clone();
@@ -4153,21 +4101,6 @@ impl WorkbenchStore {
                         self.record_host_action_receipt(receipt.clone());
                         self.commit_runtime_update();
                         return Some(receipt);
-                    }
-                    if adapter == "navigation" && matches!(command.as_str(), "back" | "forward") {
-                        let app_cache = self.app_cache.clone();
-                        let entry = if command == "back" {
-                            self.navigation_history
-                                .back(|p| app_cache.resolve(bundle_id_for_place(p)).installed)
-                        } else {
-                            self.navigation_history
-                                .forward(|p| app_cache.resolve(bundle_id_for_place(p)).installed)
-                        };
-                        if let Some(entry) = entry {
-                            action = ResolvedHostAction::OpenApp {
-                                bundle_id: bundle_id_for_place(&entry).into(),
-                            };
-                        }
                     }
                 }
 
@@ -6383,7 +6316,7 @@ fn parse_iso8601_utc_ms(raw: &str) -> u64 {
     (days as u64) * 86_400_000 + (hh * 3600 + mm * 60 + ss) * 1000 + frac_ms
 }
 
-fn find_freshest_antigravity_hub() -> Option<(u16, String)> {
+fn find_freshest_antigravity_hub() -> Option<(u16, String, AntigravityInstance)> {
     let home = env::var_os("HOME").map(PathBuf::from)?;
     let daemon_dir = home.join(".gemini/antigravity/daemon");
     let entries = fs::read_dir(daemon_dir).ok()?;
@@ -6420,7 +6353,20 @@ fn find_freshest_antigravity_hub() -> Option<(u16, String)> {
         else {
             continue;
         };
-        return Some((port, csrf.to_string()));
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        path.hash(&mut hash);
+        raw.hash(&mut hash);
+        let pid = mi_macos::session_navigation::antigravity_process_id()?;
+        return Some((
+            port,
+            csrf.to_string(),
+            AntigravityInstance {
+                hub: format!("{:x}", hash.finish()),
+                pid,
+                ui_port: u16::try_from(val.get("httpsPort")?.as_u64()?).ok()?,
+            },
+        ));
     }
     None
 }
@@ -6428,11 +6374,11 @@ fn find_freshest_antigravity_hub() -> Option<(u16, String)> {
 fn poll_antigravity_daemon_candidates(
     seen_running_ids: &mut BTreeSet<String>,
     completed_transition_watermarks: &mut BTreeMap<String, String>,
-) -> Option<Vec<FourAppLiveCandidate>> {
+) -> Option<NavigationCatalog> {
     use std::io::{Read, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 
-    let (port, csrf) = find_freshest_antigravity_hub()?;
+    let (port, csrf, instance) = find_freshest_antigravity_hub()?;
     let body = b"{\"metadata\":{}}";
     let request = format!(
         "POST /exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories HTTP/1.0\r\n\
@@ -6447,11 +6393,36 @@ fn poll_antigravity_daemon_candidates(
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(2000)).ok()?;
     let _ = stream.set_write_timeout(Some(Duration::from_millis(2000)));
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(6000)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     stream.write_all(request.as_bytes()).ok()?;
     stream.write_all(body).ok()?;
     let mut raw_resp = Vec::with_capacity(65536);
-    stream.read_to_end(&mut raw_resp).ok()?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if Instant::now() >= deadline || raw_resp.len() > 4 * 1024 * 1024 {
+            return None;
+        }
+        let mut chunk = [0u8; 16384];
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => raw_resp.extend_from_slice(&chunk[..count]),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue
+            }
+            Err(_) => return None,
+        }
+    }
+    if !raw_resp.starts_with(b"HTTP/1.1 200") && !raw_resp.starts_with(b"HTTP/1.0 200") {
+        return None;
+    }
+    if find_freshest_antigravity_hub()?.2 != instance {
+        return None;
+    }
     let sep = b"\r\n\r\n";
     let body_start = raw_resp
         .windows(sep.len())
@@ -6515,22 +6486,9 @@ fn poll_antigravity_daemon_candidates(
             cid.chars().take(8).collect()
         };
 
-        let workspace_path = obj
-            .get("workspaces")
-            .and_then(Value::as_array)
-            .or_else(|| {
-                meta.and_then(|m| m.get("workspaces"))
-                    .and_then(Value::as_array)
-            })
-            .and_then(|arr| arr.first())
-            .and_then(Value::as_object)
-            .and_then(|w| {
-                w.get("workspaceFolderAbsolutePath")
-                    .and_then(Value::as_str)
-                    .or_else(|| w.get("workspaceFolderAbsoluteUri").and_then(Value::as_str))
-            })
-            .map(|u| u.strip_prefix("file://").unwrap_or(u).to_string())
-            .unwrap_or_else(|| "/".to_string());
+        let Some(workspace_path) = session_navigation::workspace_from_summary(item) else {
+            continue;
+        };
 
         let status_str = obj
             .get("status")
@@ -6612,8 +6570,11 @@ fn poll_antigravity_daemon_candidates(
             .then_with(|| b.last_modified_ms.cmp(&a.last_modified_ms))
             .then_with(|| a.place.target_id().cmp(&b.place.target_id()))
     });
-    candidates.truncate(24);
-    Some(candidates)
+    Some(NavigationCatalog {
+        instance,
+        observed_at: Instant::now(),
+        candidates,
+    })
 }
 
 #[cfg(test)]

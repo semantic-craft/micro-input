@@ -4,7 +4,7 @@
 
 | 应用 | 入口和证据 |
 | --- | --- |
-| Antigravity | [状态桥](../integrations/antigravity/README.md)、[Rust 桥](../crates/mi-bridge/src/antigravity.rs)和原生执行器。状态流只消费目标会话元数据。 |
+| Antigravity | [会话目录与原生导航](../integrations/antigravity/README.md)。工作台直接读取 hub 元数据并通过原窗口 AX 回读确认；[Rust 桥](../crates/mi-bridge/src/antigravity.rs)保留独立协议回归。 |
 | Herdr | [桌面控制验收](verification/desktop-agent-controls.md)记录本机桌面版的快捷键入口。预设只对 `dev.herdr.app` 派发。 |
 | Codex | [原生执行器](../crates/mi-macos/src/executor.rs)和[受保护层测试](../crates/mi-model/tests/protected_oai_layer.rs)。设备层识别与应用快捷键分开。 |
 | DeepSeek Harness | [同 Host 桥](../integrations/dsh/README.md)和 [Rust 实现](../crates/mi-bridge/src/dsh.rs)。目录、订阅和命令受授权范围与目标身份限制。 |

@@ -40,7 +40,7 @@ impl ManagedAxProvider for NativeAxProvider {
 }
 
 #[cfg(target_os = "macos")]
-pub use macos::NativeAxProvider;
+pub use macos::{NativeAxProvider, NativeSessionNavigation};
 
 #[cfg(target_os = "macos")]
 mod macos {
@@ -203,13 +203,21 @@ mod macos {
         fn AXUIElementGetPid(element: Ref, pid: *mut i32) -> i32;
         fn AXUIElementCopyElementAtPosition(element: Ref, x: f32, y: f32, result: *mut Ref) -> i32;
         fn AXUIElementSetMessagingTimeout(element: Ref, timeout: f32) -> i32;
-        fn AXUIElementCopyAttributeValue(element: Ref, attribute: Ref, value: *mut Ref) -> i32;
+        fn AXUIElementCopyMultipleAttributeValues(
+            element: Ref,
+            attributes: Ref,
+            options: u32,
+            values: *mut Ref,
+        ) -> i32;
         fn AXUIElementCopyActionNames(element: Ref, value: *mut Ref) -> i32;
         fn AXUIElementIsAttributeSettable(element: Ref, attribute: Ref, value: *mut u8) -> i32;
         fn AXUIElementSetAttributeValue(element: Ref, attribute: Ref, value: Ref) -> i32;
         fn AXUIElementPerformAction(element: Ref, action: Ref) -> i32;
         fn AXValueGetValue(value: Ref, kind: u32, output: *mut c_void) -> bool;
         fn AXValueGetTypeID() -> usize;
+        fn AXValueGetType(value: Ref) -> u32;
+        #[cfg(test)]
+        fn AXValueCreate(kind: u32, value: *const c_void) -> Ref;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -228,7 +236,11 @@ mod macos {
             encoding: u32,
         ) -> u8;
         fn CFStringGetTypeID() -> usize;
+        fn CFURLGetTypeID() -> usize;
+        fn CFURLGetString(value: Ref) -> Ref;
         fn CFArrayGetTypeID() -> usize;
+        fn CFArrayCreate(allocator: Ref, values: *const Ref, count: isize, callbacks: Ref) -> Ref;
+        fn CFNullGetTypeID() -> usize;
         fn CFArrayGetCount(value: Ref) -> isize;
         fn CFArrayGetValueAtIndex(value: Ref, index: isize) -> Ref;
         fn CFBooleanGetTypeID() -> usize;
@@ -277,23 +289,48 @@ mod macos {
                 ))
             }
         }
-        fn attr(&self, name: &str) -> Option<Self> {
-            let name = Self::text(name);
-            let mut value = std::ptr::null();
-            let status = unsafe { AXUIElementCopyAttributeValue(self.0, name.0, &mut value) };
+        fn attributes(
+            &self,
+            names: &[&str],
+            deadline: Instant,
+        ) -> Result<Vec<Option<Self>>, String> {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| blocked("ax_snapshot_timeout"))?;
+            let timeout = remaining.as_secs_f32().min(0.2);
+            if unsafe { AXUIElementSetMessagingTimeout(self.0, timeout) } != 0 {
+                return Err(blocked("ax_timeout_unavailable"));
+            }
+            let names: Vec<_> = names.iter().map(|name| Self::text(name)).collect();
+            let refs: Vec<_> = names.iter().map(|name| name.0).collect();
+            let attributes = unsafe {
+                Self::from_create(CFArrayCreate(
+                    std::ptr::null(),
+                    refs.as_ptr(),
+                    refs.len() as isize,
+                    std::ptr::null(),
+                ))
+            }
+            .ok_or_else(|| blocked("ax_attribute_names_unavailable"))?;
+            let mut result = std::ptr::null();
+            let status = unsafe {
+                AXUIElementCopyMultipleAttributeValues(self.0, attributes.0, 0, &mut result)
+            };
+            let result = unsafe { Self::from_create(result) };
             if status != 0 {
-                return None;
+                return Err(format!("blocked:ax_batch_{status}"));
             }
-            unsafe { Self::from_create(value) }
+            let values = result.ok_or_else(|| blocked("ax_batch_missing"))?.array()?;
+            if values.len() != names.len() {
+                return Err(blocked("ax_batch_length"));
+            }
+            values.into_iter().map(decode_attribute_slot).collect()
         }
-        fn optional_attr(&self, name: &str) -> Result<Option<Self>, String> {
-            let name = Self::text(name);
-            let mut value = std::ptr::null();
-            match unsafe { AXUIElementCopyAttributeValue(self.0, name.0, &mut value) } {
-                0 => Ok(unsafe { Self::from_create(value) }),
-                -25205 | -25212 => Ok(None),
-                code => Err(format!("blocked:ax_attribute_{code}")),
-            }
+        fn attr(&self, name: &str) -> Result<Option<Self>, String> {
+            Ok(self
+                .attributes(&[name], Instant::now() + Duration::from_millis(200))?
+                .pop()
+                .flatten())
         }
         fn string(&self) -> Option<String> {
             if unsafe { CFGetTypeID(self.0) != CFStringGetTypeID() } {
@@ -314,8 +351,35 @@ mod macos {
             let end = buffer.iter().position(|byte| *byte == 0)?;
             std::str::from_utf8(&buffer[..end]).ok().map(str::to_owned)
         }
-        fn string_attr(&self, name: &str) -> Option<String> {
-            self.attr(name)?.string()
+        fn string_attr(&self, name: &str) -> Result<Option<String>, String> {
+            self.attr(name)?
+                .map(|value| {
+                    value
+                        .string()
+                        .ok_or_else(|| blocked("ax_string_type_or_limit"))
+                })
+                .transpose()
+        }
+        fn boolean(&self) -> Result<bool, String> {
+            if unsafe { CFGetTypeID(self.0) == CFBooleanGetTypeID() } {
+                return Ok(unsafe { CFBooleanGetValue(self.0) } != 0);
+            }
+            self.number()
+                .map(|value| value != 0.0)
+                .ok_or_else(|| blocked("ax_boolean_type"))
+        }
+        fn url(&self) -> Result<String, String> {
+            if unsafe { CFGetTypeID(self.0) == CFURLGetTypeID() } {
+                let text = unsafe { CFURLGetString(self.0) };
+                if text.is_null() {
+                    return Err(blocked("ax_url_unavailable"));
+                }
+                unsafe { Self(CFRetain(text)) }
+                    .string()
+                    .ok_or_else(|| blocked("ax_url_type_or_limit"))
+            } else {
+                self.string().ok_or_else(|| blocked("ax_url_type_or_limit"))
+            }
         }
         fn number(&self) -> Option<f64> {
             if unsafe { CFGetTypeID(self.0) != CFNumberGetTypeID() } {
@@ -326,12 +390,8 @@ mod macos {
                 && value.is_finite())
             .then_some(value)
         }
-        fn bool_attr(&self, name: &str) -> Option<bool> {
-            let value = self.attr(name)?;
-            if unsafe { CFGetTypeID(value.0) == CFBooleanGetTypeID() } {
-                return Some(unsafe { CFBooleanGetValue(value.0) } != 0);
-            }
-            value.number().map(|n| n != 0.0)
+        fn bool_attr(&self, name: &str) -> Result<Option<bool>, String> {
+            self.attr(name)?.map(|value| value.boolean()).transpose()
         }
         fn array(&self) -> Result<Vec<Self>, String> {
             if unsafe { CFGetTypeID(self.0) != CFArrayGetTypeID() } {
@@ -344,35 +404,32 @@ mod macos {
             let mut items = Vec::new();
             for index in 0..count {
                 let value = unsafe { CFArrayGetValueAtIndex(self.0, index) };
-                if !value.is_null() {
-                    items.push(unsafe { Self(CFRetain(value)) });
+                if value.is_null() {
+                    return Err(blocked("ax_array_null_element"));
                 }
+                items.push(unsafe { Self(CFRetain(value)) });
             }
             Ok(items)
         }
-        fn children(&self) -> Result<Vec<Self>, String> {
-            self.attr("AXChildren")
-                .map_or_else(|| Ok(Vec::new()), |v| v.array())
-        }
-        fn actions(&self) -> Vec<String> {
+        fn actions(&self) -> Result<Vec<String>, String> {
             let mut value = std::ptr::null();
-            if unsafe { AXUIElementCopyActionNames(self.0, &mut value) } != 0 {
-                return Vec::new();
+            let status = unsafe { AXUIElementCopyActionNames(self.0, &mut value) };
+            let value = unsafe { Self::from_create(value) };
+            if attribute_error(status)?.is_none() {
+                return Ok(Vec::new());
             }
-            let Some(value) = (unsafe { Self::from_create(value) }) else {
-                return Vec::new();
-            };
             value
-                .array()
-                .unwrap_or_default()
+                .ok_or_else(|| blocked("ax_actions_missing"))?
+                .array()?
                 .iter()
-                .filter_map(Self::string)
+                .map(|item| item.string().ok_or_else(|| blocked("ax_action_type")))
                 .collect()
         }
-        fn settable(&self, name: &str) -> bool {
+        fn settable(&self, name: &str) -> Result<bool, String> {
             let name = Self::text(name);
             let mut value = 0u8;
-            unsafe { AXUIElementIsAttributeSettable(self.0, name.0, &mut value) == 0 && value != 0 }
+            let status = unsafe { AXUIElementIsAttributeSettable(self.0, name.0, &mut value) };
+            Ok(attribute_error(status)?.is_some() && value != 0)
         }
         fn set(&self, name: &str, value: Ref) -> Result<(), String> {
             let name = Self::text(name);
@@ -396,14 +453,22 @@ mod macos {
             let mut pid = 0;
             (unsafe { AXUIElementGetPid(self.0, &mut pid) } == 0 && pid > 0).then_some(pid)
         }
-        fn rect(&self) -> Option<Rect> {
-            let origin = self.attr("AXPosition")?;
-            let size = self.attr("AXSize")?;
+        fn rect(&self) -> Result<Option<Rect>, String> {
+            let mut attrs = self
+                .attributes(
+                    &["AXPosition", "AXSize"],
+                    Instant::now() + Duration::from_millis(200),
+                )?
+                .into_iter();
+            let (Some(origin), Some(size)) = (attrs.next().flatten(), attrs.next().flatten())
+            else {
+                return Ok(None);
+            };
             if unsafe {
                 CFGetTypeID(origin.0) != AXValueGetTypeID()
                     || CFGetTypeID(size.0) != AXValueGetTypeID()
             } {
-                return None;
+                return Err(blocked("ax_geometry_type"));
             }
             let mut point = Point::default();
             let mut dimensions = Size::default();
@@ -411,9 +476,9 @@ mod macos {
                 AXValueGetValue(origin.0, 1, (&mut point as *mut Point).cast())
                     && AXValueGetValue(size.0, 2, (&mut dimensions as *mut Size).cast())
             } {
-                return None;
+                return Err(blocked("ax_geometry_type"));
             }
-            (point.x.is_finite()
+            Ok((point.x.is_finite()
                 && point.y.is_finite()
                 && dimensions.width.is_finite()
                 && dimensions.height.is_finite()
@@ -422,15 +487,476 @@ mod macos {
                 .then_some(Rect {
                     origin: point,
                     size: dimensions,
+                }))
+        }
+    }
+
+    fn attribute_error(code: i32) -> Result<Option<()>, String> {
+        match code {
+            0 => Ok(Some(())),
+            -25205 | -25212 => Ok(None),
+            _ => Err(format!("blocked:ax_attribute_{code}")),
+        }
+    }
+
+    fn decode_attribute_slot(value: Owned) -> Result<Option<Owned>, String> {
+        if unsafe { CFGetTypeID(value.0) == CFNullGetTypeID() } {
+            return Ok(None);
+        }
+        if unsafe { CFGetTypeID(value.0) == AXValueGetTypeID() && AXValueGetType(value.0) == 5 } {
+            let mut code = 0i32;
+            if !unsafe { AXValueGetValue(value.0, 5, (&mut code as *mut i32).cast()) } {
+                return Err(blocked("ax_slot_error_unavailable"));
+            }
+            return attribute_error(code).map(|_| None);
+        }
+        Ok(Some(value))
+    }
+
+    fn text_attribute(value: Option<Owned>) -> Result<Option<String>, String> {
+        value
+            .map(|value| {
+                value
+                    .string()
+                    .ok_or_else(|| blocked("ax_string_type_or_limit"))
+            })
+            .transpose()
+    }
+    fn bool_attribute(value: Option<Owned>) -> Result<Option<bool>, String> {
+        value.map(|value| value.boolean()).transpose()
+    }
+
+    fn unconfirmed(error: String) -> String {
+        if error.starts_with("unconfirmed:") {
+            error
+        } else {
+            format!("unconfirmed:{error}")
+        }
+    }
+
+    fn write_with_readback(
+        write: impl FnOnce() -> Result<(), String>,
+        mut read: impl FnMut() -> Result<bool, String>,
+        timeout_reason: &str,
+    ) -> Result<(), String> {
+        write()?;
+        let deadline = Instant::now() + Duration::from_millis(400);
+        loop {
+            if read().map_err(unconfirmed)? {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("unconfirmed:{timeout_reason}"));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ObservationPurpose {
+        Controls,
+        Sessions,
+    }
+
+    #[derive(Default)]
+    struct NodeData {
+        role: String,
+        children: Vec<Owned>,
+        label: String,
+        enabled: bool,
+        pressable: bool,
+        editable: bool,
+        focused: bool,
+        url: Option<String>,
+    }
+    struct ObservedNode {
+        element: Owned,
+        parent: Option<usize>,
+        data: NodeData,
+    }
+    struct WindowObservation {
+        nodes: Vec<ObservedNode>,
+    }
+
+    fn observe_tree(
+        root: Owned,
+        deadline: Instant,
+        mut read_node: impl FnMut(&Owned) -> Result<Option<NodeData>, String>,
+    ) -> Result<WindowObservation, String> {
+        loop {
+            match observe_tree_once(root.clone(), deadline, &mut read_node) {
+                Err(error)
+                    if matches!(
+                        error.as_str(),
+                        "blocked:ax_batch_-25202" | "blocked:ax_attribute_-25202"
+                    ) =>
+                {
+                    let remaining = deadline
+                        .checked_duration_since(Instant::now())
+                        .ok_or_else(|| blocked("ax_snapshot_timeout"))?;
+                    std::thread::sleep(remaining.min(Duration::from_millis(10)));
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn observe_tree_once(
+        root: Owned,
+        deadline: Instant,
+        mut read_node: impl FnMut(&Owned) -> Result<Option<NodeData>, String>,
+    ) -> Result<WindowObservation, String> {
+        let mut nodes = Vec::new();
+        let mut pending = vec![(root, None, 0)];
+        let mut visited = 0;
+        while let Some((element, parent, depth)) = pending.pop() {
+            visited += 1;
+            if visited > MAX_NODES || depth > MAX_DEPTH {
+                return Err(blocked("ax_tree_limit"));
+            }
+            if Instant::now() >= deadline {
+                return Err(blocked("ax_snapshot_timeout"));
+            }
+            let Some(mut data) = read_node(&element)? else {
+                continue;
+            };
+            if Instant::now() >= deadline {
+                return Err(blocked("ax_snapshot_timeout"));
+            }
+            if visited + pending.len() + data.children.len() > MAX_NODES {
+                return Err(blocked("ax_tree_limit"));
+            }
+            let index = nodes.len();
+            for child in std::mem::take(&mut data.children).into_iter().rev() {
+                pending.push((child, Some(index), depth + 1));
+            }
+            nodes.push(ObservedNode {
+                element,
+                parent,
+                data,
+            });
+        }
+        Ok(WindowObservation { nodes })
+    }
+
+    fn observe_window(
+        root: Owned,
+        purpose: ObservationPurpose,
+    ) -> Result<WindowObservation, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        observe_tree(root, deadline, |element| {
+            let mut attrs = element
+                .attributes(&["AXRole", "AXSubrole", "AXHidden"], deadline)?
+                .into_iter();
+            let role = text_attribute(attrs.next().flatten())?
+                .ok_or_else(|| blocked("ax_role_unavailable"))?;
+            let subrole = text_attribute(attrs.next().flatten())?;
+            let hidden = bool_attribute(attrs.next().flatten())?.unwrap_or(false);
+            if hidden || role == "AXStaticText" {
+                return Ok(None);
+            }
+            let input = matches!(
+                role.as_str(),
+                "AXTextArea" | "AXTextField" | "AXSecureTextField"
+            );
+            let button = matches!(
+                role.as_str(),
+                "AXButton"
+                    | "AXCheckBox"
+                    | "AXRadioButton"
+                    | "AXSwitch"
+                    | "AXToggleButton"
+                    | "AXLink"
+            );
+            let names: &[&str] = match purpose {
+                ObservationPurpose::Controls if input => &["AXEnabled", "AXFocused"],
+                ObservationPurpose::Controls if button || role == "AXHeading" => {
+                    &["AXChildren", "AXDescription", "AXTitle", "AXEnabled"]
+                }
+                ObservationPurpose::Sessions if role == "AXLink" => {
+                    &["AXChildren", "AXURL", "AXEnabled"]
+                }
+                ObservationPurpose::Sessions if role == "AXWebArea" => &["AXChildren", "AXURL"],
+                _ if input => &[],
+                _ => &["AXChildren"],
+            };
+            let mut attrs = if names.is_empty() {
+                Vec::new()
+            } else {
+                element.attributes(names, deadline)?
+            }
+            .into_iter();
+            let children = if input {
+                Vec::new()
+            } else {
+                attrs
+                    .next()
+                    .flatten()
+                    .map(|value| value.array())
+                    .transpose()?
+                    .unwrap_or_default()
+            };
+            let mut data = NodeData {
+                role,
+                children,
+                enabled: true,
+                ..Default::default()
+            };
+            match purpose {
+                ObservationPurpose::Controls if input => {
+                    data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
+                    data.focused = bool_attribute(attrs.next().flatten())?.unwrap_or(false);
+                    data.editable = data.role != "AXSecureTextField"
+                        && subrole.as_deref() != Some("AXSecureTextField")
+                        && element.settable("AXValue")?;
+                }
+                ObservationPurpose::Controls if button || data.role == "AXHeading" => {
+                    data.label = text_attribute(attrs.next().flatten())?
+                        .filter(|s| !s.trim().is_empty())
+                        .or(text_attribute(attrs.next().flatten())?)
+                        .unwrap_or_default();
+                    data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
+                    data.pressable =
+                        button && element.actions()?.iter().any(|action| action == "AXPress");
+                }
+                ObservationPurpose::Sessions
+                    if matches!(data.role.as_str(), "AXLink" | "AXWebArea") =>
+                {
+                    data.url = attrs
+                        .next()
+                        .flatten()
+                        .map(|value| value.url())
+                        .transpose()?;
+                    if data.role == "AXLink" {
+                        data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
+                        data.pressable =
+                            element.actions()?.iter().any(|action| action == "AXPress");
+                    }
+                }
+                _ => {}
+            }
+            Ok(Some(data))
+        })
+    }
+
+    #[derive(Debug, Clone)]
+    struct CapturedWindow {
+        bundle_id: String,
+        pid: i32,
+        application: Owned,
+        element: Owned,
+        title: String,
+    }
+    impl CapturedWindow {
+        fn capture(bundle: &str, prefer_focused: bool) -> Result<Self, String> {
+            if !unsafe { AXIsProcessTrusted() } {
+                return Err(blocked("accessibility_untrusted"));
+            }
+            let pid = crate::executor::find_pid_for_bundle_id(bundle)
+                .ok_or_else(|| blocked("target_application_missing"))?;
+            let application = unsafe { Owned::from_create(AXUIElementCreateApplication(pid)) }
+                .ok_or_else(|| blocked("ax_application_unavailable"))?;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            if unsafe { AXUIElementSetMessagingTimeout(application.0, 0.2) } != 0 {
+                return Err(blocked("ax_timeout_unavailable"));
+            }
+            if application.settable("AXManualAccessibility")? {
+                application.set("AXManualAccessibility", unsafe { kCFBooleanTrue })?;
+            }
+            let mut attrs = application
+                .attributes(&["AXWindows", "AXFocusedWindow"], deadline)?
+                .into_iter();
+            let windows = attrs
+                .next()
+                .flatten()
+                .ok_or_else(|| blocked("target_window_missing"))?
+                .array()?;
+            let focused = attrs.next().flatten();
+            let mut visible = Vec::new();
+            for element in windows {
+                let mut attrs = element
+                    .attributes(&["AXRole", "AXMinimized", "AXTitle"], deadline)?
+                    .into_iter();
+                let role = text_attribute(attrs.next().flatten())?
+                    .ok_or_else(|| blocked("ax_role_unavailable"))?;
+                let minimized = bool_attribute(attrs.next().flatten())?.unwrap_or(false);
+                let title = text_attribute(attrs.next().flatten())?.unwrap_or_default();
+                if role == "AXWindow" && !minimized {
+                    visible.push((element, title));
+                }
+            }
+            let selected = if prefer_focused {
+                focused.as_ref().and_then(|focused| {
+                    visible
+                        .iter()
+                        .position(|(window, _)| unsafe { CFEqual(window.0, focused.0) } != 0)
                 })
+            } else {
+                None
+            };
+            let index = selected
+                .or_else(|| (visible.len() == 1).then_some(0))
+                .ok_or_else(|| blocked("ambiguous_or_missing_target_window"))?;
+            let (element, title) = visible.swap_remove(index);
+            let window = Self {
+                bundle_id: bundle.into(),
+                pid,
+                application,
+                element,
+                title,
+            };
+            window.validate(None)?;
+            Ok(window)
+        }
+        fn validate(&self, expected_title: Option<&str>) -> Result<(), String> {
+            if !unsafe { AXIsProcessTrusted() } {
+                return Err(blocked("accessibility_untrusted"));
+            }
+            if self.application.pid() != Some(self.pid)
+                || self.element.pid() != Some(self.pid)
+                || crate::executor::find_pid_for_bundle_id(&self.bundle_id) != Some(self.pid)
+            {
+                return Err(blocked("target_pid_mismatch"));
+            }
+            let windows = self
+                .application
+                .attr("AXWindows")?
+                .ok_or_else(|| blocked("target_window_lost"))?
+                .array()?;
+            if !windows
+                .iter()
+                .any(|window| unsafe { CFEqual(window.0, self.element.0) } != 0)
+            {
+                return Err(blocked("target_window_changed"));
+            }
+            let mut attrs = self
+                .element
+                .attributes(
+                    &["AXMinimized", "AXTitle"],
+                    Instant::now() + Duration::from_millis(400),
+                )?
+                .into_iter();
+            if bool_attribute(attrs.next().flatten())? == Some(true) {
+                return Err(blocked("target_window_changed"));
+            }
+            let title = text_attribute(attrs.next().flatten())?.unwrap_or_default();
+            if expected_title.is_some_and(|expected| expected != title) {
+                return Err(blocked("target_window_changed"));
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct NativeSessionNavigation {
+        window: Option<CapturedWindow>,
+        links: Vec<Owned>,
+    }
+    impl NativeSessionNavigation {
+        fn inspect(
+            &mut self,
+            pid: i32,
+        ) -> Result<crate::session_navigation::SessionNavigationWindow, String> {
+            use crate::session_navigation::SessionNavigationWindow;
+            let window = self
+                .window
+                .as_ref()
+                .ok_or_else(|| blocked("session_window_missing"))?;
+            if pid != window.pid {
+                return Err(blocked("session_process_changed"));
+            }
+            window.validate(None)?;
+            let observation = observe_window(window.element.clone(), ObservationPurpose::Sessions)?;
+            window.validate(None)?;
+            let mut links = Vec::new();
+            let mut selected_urls = Vec::new();
+            for node in &observation.nodes {
+                let Some(url) = &node.data.url else {
+                    continue;
+                };
+                if node.data.role == "AXWebArea" {
+                    let mut ancestor = node.parent;
+                    let mut nested = false;
+                    while let Some(index) = ancestor {
+                        let parent = &observation.nodes[index];
+                        if parent.data.role == "AXWebArea"
+                            && parent.data.url.as_ref().is_some_and(|url| !url.is_empty())
+                        {
+                            nested = true;
+                            break;
+                        }
+                        ancestor = parent.parent;
+                    }
+                    if !nested && !url.is_empty() {
+                        selected_urls.push(url.clone());
+                    }
+                } else if node.data.enabled && node.data.pressable {
+                    let index = self
+                        .links
+                        .iter()
+                        .position(|old| unsafe { CFEqual(old.0, node.element.0) } != 0)
+                        .unwrap_or_else(|| {
+                            self.links.push(node.element.clone());
+                            self.links.len() - 1
+                        });
+                    links.push((index as u64, url.clone()));
+                }
+            }
+            Ok(SessionNavigationWindow {
+                pid,
+                window: 1,
+                links,
+                selected_urls,
+            })
+        }
+    }
+    impl crate::session_navigation::SessionNavigationProvider for NativeSessionNavigation {
+        fn capture(
+            &mut self,
+            pid: i32,
+        ) -> Result<crate::session_navigation::SessionNavigationWindow, String> {
+            let window = CapturedWindow::capture("com.google.antigravity", true)?;
+            if window.pid != pid {
+                return Err(blocked("session_process_changed"));
+            }
+            self.window = Some(window);
+            self.links.clear();
+            self.inspect(pid)
+        }
+        fn read(
+            &mut self,
+            target: &crate::session_navigation::SessionNavigationWindow,
+        ) -> Result<crate::session_navigation::SessionNavigationWindow, String> {
+            self.inspect(target.pid)
+        }
+        fn press(
+            &mut self,
+            target: &crate::session_navigation::SessionNavigationWindow,
+            link: u64,
+            is_current: &dyn Fn() -> bool,
+        ) -> Result<(), String> {
+            let current = self.inspect(target.pid)?;
+            if !current
+                .links
+                .iter()
+                .any(|entry| entry.0 == link && target.links.contains(entry))
+            {
+                return Err(blocked("session_link_changed"));
+            }
+            if !is_current() {
+                return Err(blocked("session_navigation_retired"));
+            }
+            self.links
+                .get(link as usize)
+                .ok_or_else(|| blocked("session_link_missing"))?
+                .action("AXPress")
         }
     }
 
     #[derive(Debug, Clone)]
     struct Target {
         identity: ManagedWindowIdentity,
-        application: Owned,
-        window: Owned,
+        window: CapturedWindow,
         scope: Owned,
     }
 
@@ -441,7 +967,6 @@ mod macos {
         elements: Vec<Owned>,
         windows: Vec<(String, Owned, u64)>,
         next_window_id: u64,
-        cached_controls: Vec<ManagedControl>,
         control_paths: Vec<(u64, Vec<u64>)>,
         next_scope_id: u64,
     }
@@ -478,35 +1003,20 @@ mod macos {
                 })
         }
         fn validate(&self, identity: &ManagedWindowIdentity) -> Result<(Owned, Owned), String> {
-            if !unsafe { AXIsProcessTrusted() } {
-                return Err(blocked("accessibility_untrusted"));
-            }
             let target = self
                 .target_for(identity)
                 .ok_or_else(|| blocked("ax_target_missing"))?;
-            if target.identity != *identity
-                || target.window.pid() != Some(identity.pid)
-                || target.application.pid() != Some(identity.pid)
-            {
+            if target.identity != *identity || target.window.pid != identity.pid {
                 return Err(blocked("target_pid_mismatch"));
             }
-            let windows = target
-                .application
-                .attr("AXWindows")
-                .ok_or_else(|| blocked("target_window_lost"))?
-                .array()?;
-            if !windows
-                .iter()
-                .any(|window| unsafe { CFEqual(window.0, target.window.0) } != 0)
-                || target.window.string_attr("AXTitle").unwrap_or_default() != identity.title
-                || target.window.bool_attr("AXMinimized") == Some(true)
-            {
-                return Err(blocked("target_window_changed"));
-            }
-            if !self.is_descendant(&target.scope, &target.window) {
+            target.window.validate(Some(&identity.title))?;
+            if !self.is_descendant(&target.scope, &target.window.element) {
                 return Err(blocked("target_scope_changed"));
             }
-            Ok((target.application.clone(), target.window.clone()))
+            Ok((
+                target.window.application.clone(),
+                target.window.element.clone(),
+            ))
         }
         fn is_descendant(&self, element: &Owned, ancestor: &Owned) -> bool {
             let deadline = Instant::now() + Duration::from_millis(300);
@@ -518,46 +1028,27 @@ mod macos {
                 if Instant::now() >= deadline {
                     return false;
                 }
-                let Some(parent) = current.attr("AXParent") else {
+                let Ok(Some(parent)) = current.attr("AXParent") else {
                     return false;
                 };
                 current = parent;
             }
             false
         }
-        fn metadata(&self, element: &Owned, id: u64, role: String) -> Option<ManagedControl> {
-            let editable = matches!(role.as_str(), "AXTextArea" | "AXTextField")
-                && element.settable("AXValue");
-            let button = matches!(
-                role.as_str(),
-                "AXButton"
-                    | "AXCheckBox"
-                    | "AXRadioButton"
-                    | "AXSwitch"
-                    | "AXToggleButton"
-                    | "AXLink"
-            );
-            let label = if button || role == "AXHeading" {
-                element
-                    .string_attr("AXDescription")
-                    .filter(|v| !v.trim().is_empty())
-                    .or_else(|| element.string_attr("AXTitle"))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            let relevant_button = button
+        fn control_from_node_data(&self, id: u64, data: NodeData) -> Option<ManagedControl> {
+            let relevant_button = data.pressable
                 && ([
                     crate::ax_dictation::DictationAdapter::Antigravity,
                     crate::ax_dictation::DictationAdapter::Dsh,
                 ]
                 .iter()
                 .any(|adapter| {
-                    adapter.matches_start_label(&label) || adapter.matches_stop_label(&label)
-                }) || crate::executor::is_antigravity_live_voice_start_label(&label)
-                    || crate::executor::is_antigravity_live_voice_end_label(&label)
+                    adapter.matches_start_label(&data.label)
+                        || adapter.matches_stop_label(&data.label)
+                }) || crate::executor::is_antigravity_live_voice_start_label(&data.label)
+                    || crate::executor::is_antigravity_live_voice_end_label(&data.label)
                     || matches!(
-                        label.trim(),
+                        data.label.trim(),
                         "Jump to bottom"
                             | "Scroll to bottom"
                             | "跳到底部"
@@ -569,84 +1060,102 @@ mod macos {
                             | "发送消息"
                             | "提交"
                     ));
-            let chat_heading = role == "AXHeading"
-                && label == "Conversation Log"
+            let chat_heading = data.role == "AXHeading"
+                && data.label == "Conversation Log"
                 && self
                     .target
                     .as_ref()
                     .is_some_and(|target| target.identity.bundle_id == "com.google.antigravity");
-            if !editable && !relevant_button && !chat_heading && role != "AXScrollArea" {
+            if !data.editable && !relevant_button && !chat_heading && data.role != "AXScrollArea" {
                 return None;
             }
             Some(ManagedControl {
                 id,
-                role,
-                label,
-                enabled: element.bool_attr("AXEnabled").unwrap_or(true),
-                pressable: relevant_button
-                    && element.actions().iter().any(|action| action == "AXPress"),
-                editable,
-                focused: editable && element.bool_attr("AXFocused").unwrap_or(false),
+                role: data.role,
+                label: data.label,
+                enabled: data.enabled,
+                pressable: relevant_button,
+                editable: data.editable,
+                focused: data.focused,
             })
         }
-        fn walk(
-            &mut self,
-            element: Owned,
-            depth: usize,
-            visited: &mut usize,
-            controls: &mut Vec<ManagedControl>,
-            path: &mut Vec<u64>,
+        fn read_single_control_node(
+            element: &Owned,
             deadline: Instant,
-        ) -> Result<(), String> {
-            if Instant::now() >= deadline {
-                return Err(blocked("ax_snapshot_timeout"));
-            }
-            *visited += 1;
-            if *visited > MAX_NODES || depth > MAX_DEPTH {
-                return Err(blocked("ax_tree_limit"));
-            }
-            let role = element
-                .string_attr("AXRole")
+        ) -> Result<Option<NodeData>, String> {
+            let mut attrs = element
+                .attributes(&["AXRole", "AXSubrole", "AXHidden"], deadline)?
+                .into_iter();
+            let role = text_attribute(attrs.next().flatten())?
                 .ok_or_else(|| blocked("ax_role_unavailable"))?;
-            if role == "AXStaticText" {
-                return Ok(());
+            let subrole = text_attribute(attrs.next().flatten())?;
+            let hidden = bool_attribute(attrs.next().flatten())?.unwrap_or(false);
+            if hidden || role == "AXStaticText" {
+                return Ok(None);
             }
-            if element.bool_attr("AXHidden") == Some(true) {
-                return Ok(());
+            let input = matches!(
+                role.as_str(),
+                "AXTextArea" | "AXTextField" | "AXSecureTextField"
+            );
+            let button = matches!(
+                role.as_str(),
+                "AXButton"
+                    | "AXCheckBox"
+                    | "AXRadioButton"
+                    | "AXSwitch"
+                    | "AXToggleButton"
+                    | "AXLink"
+            );
+            let mut data = NodeData {
+                role,
+                enabled: true,
+                ..Default::default()
+            };
+            if input {
+                let mut attrs = element
+                    .attributes(&["AXEnabled", "AXFocused"], deadline)?
+                    .into_iter();
+                data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
+                data.focused = bool_attribute(attrs.next().flatten())?.unwrap_or(false);
+                data.editable = data.role != "AXSecureTextField"
+                    && subrole.as_deref() != Some("AXSecureTextField")
+                    && element.settable("AXValue")?;
+            } else if button || data.role == "AXHeading" {
+                let mut attrs = element
+                    .attributes(&["AXDescription", "AXTitle", "AXEnabled"], deadline)?
+                    .into_iter();
+                data.label = text_attribute(attrs.next().flatten())?
+                    .filter(|s| !s.trim().is_empty())
+                    .or(text_attribute(attrs.next().flatten())?)
+                    .unwrap_or_default();
+                data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
+                data.pressable =
+                    button && element.actions()?.iter().any(|action| action == "AXPress");
             }
-            let id = self.register(&element)?;
-            path.push(id);
-            if let Some(control) = self.metadata(&element, id, role.clone()) {
-                self.control_paths.push((id, path.clone()));
+            Ok(Some(data))
+        }
+        fn controls_from_observation(
+            &mut self,
+            observation: WindowObservation,
+        ) -> Result<Vec<ManagedControl>, String> {
+            let mut controls = Vec::new();
+            let mut paths: Vec<Vec<u64>> = Vec::new();
+            self.control_paths.clear();
+            for node in observation.nodes {
+                let id = self.register(&node.element)?;
+                let mut path = node
+                    .parent
+                    .map(|index| paths[index].clone())
+                    .unwrap_or_default();
+                path.push(id);
+                paths.push(path.clone());
+                let Some(control) = self.control_from_node_data(id, node.data) else {
+                    continue;
+                };
+                self.control_paths.push((id, path));
                 controls.push(control);
             }
-            if !matches!(role.as_str(), "AXTextArea" | "AXTextField") {
-                for child in element.children()? {
-                    self.walk(child, depth + 1, visited, controls, path, deadline)?;
-                }
-            }
-            path.pop();
-            Ok(())
-        }
-        fn refresh_controls(&self, window: &Owned) -> Option<Vec<ManagedControl>> {
-            if self.cached_controls.is_empty() {
-                return None;
-            }
-            self.cached_controls
-                .iter()
-                .map(|control| {
-                    let element = self.element(control.id).ok()?;
-                    let owner = element.attr("AXWindow")?;
-                    if element.pid() != window.pid()
-                        || unsafe { CFEqual(owner.0, window.0) } == 0
-                        || element.bool_attr("AXHidden") == Some(true)
-                        || !self.is_descendant(&element, &self.target.as_ref()?.scope)
-                    {
-                        return None;
-                    }
-                    self.metadata(&element, control.id, element.string_attr("AXRole")?)
-                })
-                .collect()
+            Ok(controls)
         }
         fn checked_control(
             &mut self,
@@ -696,41 +1205,37 @@ mod macos {
                 deadline,
                 same,
                 |node| {
-                    let hidden = node
-                        .optional_attr("AXHidden")?
-                        .map(|value| {
-                            if unsafe { CFGetTypeID(value.0) == CFBooleanGetTypeID() } {
-                                Ok(unsafe { CFBooleanGetValue(value.0) } != 0)
-                            } else {
-                                value
-                                    .number()
-                                    .map(|n| n != 0.0)
-                                    .ok_or_else(|| blocked("ax_hidden_unavailable"))
-                            }
-                        })
-                        .transpose()?
-                        .unwrap_or(false);
+                    let names: &[&str] = if same(node, &element) {
+                        &["AXRole", "AXHidden", "AXWindow"]
+                    } else {
+                        &["AXRole", "AXHidden", "AXWindow", "AXChildren"]
+                    };
+                    let mut attrs = node.attributes(names, deadline)?.into_iter();
+                    let role = text_attribute(attrs.next().flatten())?;
+                    let hidden = bool_attribute(attrs.next().flatten())?.unwrap_or(false);
+                    let window = attrs.next().flatten();
                     let children = if same(node, &element) {
                         Vec::new()
                     } else {
-                        node.attr("AXChildren")
+                        attrs
+                            .next()
+                            .flatten()
                             .ok_or_else(|| blocked("ax_control_removed"))?
                             .array()?
                     };
                     Ok(ControlNode {
                         pid: node.pid(),
-                        role: node.string_attr("AXRole"),
+                        role,
                         hidden,
-                        window: node.optional_attr("AXWindow")?,
+                        window,
                         children,
                     })
                 },
             )?;
-            let role = element
-                .string_attr("AXRole")
-                .ok_or_else(|| blocked("ax_role_unavailable"))?;
+            let node_data = Self::read_single_control_node(&element, deadline)?
+                .ok_or_else(|| blocked("ax_control_removed"))?;
             let metadata = self
-                .metadata(&element, id, role)
+                .control_from_node_data(id, node_data)
                 .ok_or_else(|| blocked("ax_control_removed"))?;
             self.validate(target)?;
             if Instant::now() >= deadline {
@@ -763,40 +1268,9 @@ mod macos {
         }
 
         fn capture_window(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
-            if !unsafe { AXIsProcessTrusted() } {
-                return Err(blocked("accessibility_untrusted"));
-            }
-            let pid = crate::executor::find_pid_for_bundle_id(bundle_id)
-                .ok_or_else(|| blocked("target_application_missing"))?;
-            let application = unsafe { Owned::from_create(AXUIElementCreateApplication(pid)) }
-                .ok_or_else(|| blocked("ax_application_unavailable"))?;
-            unsafe {
-                AXUIElementSetMessagingTimeout(application.0, 0.2);
-            }
-            if application.pid() != Some(pid) {
-                return Err(blocked("target_pid_mismatch"));
-            }
-            if application.settable("AXManualAccessibility") {
-                application.set("AXManualAccessibility", unsafe { kCFBooleanTrue })?;
-            }
-            let windows = application
-                .attr("AXWindows")
-                .ok_or_else(|| blocked("target_window_missing"))?
-                .array()?;
-            let windows: Vec<_> = windows
-                .into_iter()
-                .filter(|window| {
-                    window.bool_attr("AXMinimized") != Some(true)
-                        && window.string_attr("AXRole").as_deref() == Some("AXWindow")
-                })
-                .collect();
-            let [window] = windows.as_slice() else {
-                return Err(blocked("ambiguous_or_missing_target_window"));
-            };
-            if window.pid() != Some(pid) {
-                return Err(blocked("target_pid_mismatch"));
-            }
-            self.cached_controls.clear();
+            let captured = CapturedWindow::capture(bundle_id, false)?;
+            let pid = captured.pid;
+            let window = captured.element.clone();
             self.elements.clear();
             let window_id = if let Some((_, _, id)) =
                 self.windows.iter().find(|(bundle, old, _)| {
@@ -815,13 +1289,12 @@ mod macos {
                 pid,
                 window_id,
                 scope_id: 0,
-                title: window.string_attr("AXTitle").unwrap_or_default(),
+                title: captured.title.clone(),
             };
             let previous_target = self.target.clone();
             self.target = Some(Target {
                 identity: identity.clone(),
-                application,
-                window: window.clone(),
+                window: captured,
                 scope: window.clone(),
             });
             let snapshot = self.read(&identity)?;
@@ -843,7 +1316,10 @@ mod macos {
                 let mut focused = self
                     .target
                     .as_ref()
-                    .and_then(|target| target.application.attr("AXFocusedUIElement"));
+                    .unwrap()
+                    .window
+                    .application
+                    .attr("AXFocusedUIElement")?;
                 let deadline = Instant::now() + Duration::from_millis(300);
                 for _ in 0..MAX_DEPTH {
                     let Some(element) = focused else {
@@ -856,7 +1332,7 @@ mod macos {
                     if unsafe { CFEqual(element.0, window.0) } != 0 {
                         break;
                     }
-                    focused = element.attr("AXParent");
+                    focused = element.attr("AXParent")?;
                 }
                 focus_path.reverse();
             }
@@ -881,23 +1357,7 @@ mod macos {
                         .any(|(id, path)| *id == control.id && path.contains(&scope_element_id))
                 })
                 .collect();
-            self.cached_controls = controls.clone();
             Ok(ManagedWindow { identity, controls })
-        }
-
-        fn read_for_scroll(
-            &mut self,
-            target: &ManagedWindowIdentity,
-        ) -> Result<ManagedWindow, String> {
-            let (_, window) = self.validate(target)?;
-            if let Some(controls) = self.refresh_controls(&window) {
-                self.validate(target)?;
-                return Ok(ManagedWindow {
-                    identity: target.clone(),
-                    controls,
-                });
-            }
-            self.read(target)
         }
 
         fn hit_is_passive_target(
@@ -925,7 +1385,7 @@ mod macos {
                 if unsafe { CFEqual(hit.0, window.0) } != 0 {
                     return depth > 0;
                 }
-                let Some(role) = hit.string_attr("AXRole") else {
+                let Ok(Some(role)) = hit.string_attr("AXRole") else {
                     return false;
                 };
                 if matches!(
@@ -951,7 +1411,7 @@ mod macos {
                 ) {
                     return false;
                 }
-                let Some(parent) = hit.attr("AXParent") else {
+                let Ok(Some(parent)) = hit.attr("AXParent") else {
                     return false;
                 };
                 hit = parent;
@@ -971,7 +1431,7 @@ mod macos {
             }
             let (app, window) = self.validate(target)?;
             let bounds = window
-                .rect()
+                .rect()?
                 .ok_or_else(|| blocked("window_geometry_unavailable"))?;
             let headings: Vec<_> = controls
                 .iter()
@@ -981,8 +1441,10 @@ mod macos {
                 .collect();
             let preferred = if let [heading] = headings.as_slice() {
                 self.element(heading.id)?
-                    .attr("AXParent")
-                    .and_then(|parent| parent.rect())
+                    .attr("AXParent")?
+                    .map(|parent| parent.rect())
+                    .transpose()?
+                    .flatten()
             } else {
                 None
             };
@@ -1068,24 +1530,14 @@ mod macos {
             {
                 self.target = self.target_for(target).cloned();
                 self.elements.clear();
-                self.cached_controls.clear();
             }
             let scope = self
                 .target_for(target)
                 .ok_or_else(|| blocked("ax_target_missing"))?
                 .scope
                 .clone();
-            let mut controls = Vec::new();
-            self.control_paths.clear();
-            self.walk(
-                scope,
-                0,
-                &mut 0,
-                &mut controls,
-                &mut Vec::new(),
-                Instant::now() + Duration::from_millis(500),
-            )?;
-            self.cached_controls = controls.clone();
+            let observation = observe_window(scope, ObservationPurpose::Controls)?;
+            let controls = self.controls_from_observation(observation)?;
             self.validate(target)?;
             Ok(ManagedWindow {
                 identity: target.clone(),
@@ -1097,7 +1549,6 @@ mod macos {
             if !control.enabled || !control.pressable {
                 return Err(blocked("ax_control_not_pressable"));
             }
-            self.cached_controls.clear();
             element.action("AXPress")
         }
         fn read_control(
@@ -1110,14 +1561,13 @@ mod macos {
         }
         fn focus(&mut self, target: &ManagedWindowIdentity, control: u64) -> Result<(), String> {
             let (metadata, element) = self.checked_exact_control(target, control)?;
-            if !metadata.enabled || !metadata.editable || !element.settable("AXFocused") {
+            if !metadata.enabled || !metadata.editable || !element.settable("AXFocused")? {
                 return Err(blocked("ax_input_not_focusable"));
             }
             let (application, window) = self.validate(target)?;
-            self.cached_controls.clear();
             application.set("AXFrontmost", unsafe { kCFBooleanTrue })?;
             window.action("AXRaise")?;
-            self.validate(target)?;
+            self.validate(target).map_err(unconfirmed)?;
             element.set("AXFocused", unsafe { kCFBooleanTrue })
         }
         fn scroll(
@@ -1125,7 +1575,7 @@ mod macos {
             target: &ManagedWindowIdentity,
             request: &DialScrollRequest,
         ) -> Result<(), String> {
-            let snapshot = self.read_for_scroll(target)?;
+            let snapshot = self.read(target)?;
             if request.jump_to_bottom && !request.sidebar {
                 let buttons: Vec<_> = snapshot
                     .controls
@@ -1173,7 +1623,7 @@ mod macos {
             };
             let input_rect = self
                 .element(input.id)?
-                .rect()
+                .rect()?
                 .ok_or_else(|| blocked("input_geometry_unavailable"))?;
             let mut candidates: Vec<Owned> = Vec::new();
             for control in snapshot
@@ -1182,7 +1632,7 @@ mod macos {
                 .filter(|control| control.role == "AXScrollArea")
             {
                 let area = self.element(control.id)?;
-                let Some(rect) = area.rect() else {
+                let Some(rect) = area.rect()? else {
                     continue;
                 };
                 let overlap = (rect.origin.x + rect.size.width)
@@ -1197,10 +1647,10 @@ mod macos {
                 if !matches_region {
                     continue;
                 }
-                let Some(bar) = area.attr("AXVerticalScrollBar") else {
+                let Some(bar) = area.attr("AXVerticalScrollBar")? else {
                     continue;
                 };
-                if bar.settable("AXValue")
+                if bar.settable("AXValue")?
                     && !candidates
                         .iter()
                         .any(|old| unsafe { CFEqual(old.0, bar.0) } != 0)
@@ -1223,15 +1673,15 @@ mod macos {
                 return Err(blocked("scrollbar_pid_mismatch"));
             }
             let current = bar
-                .attr("AXValue")
+                .attr("AXValue")?
                 .and_then(|v| v.number())
                 .ok_or_else(|| blocked("scroll_position_unavailable"))?;
             let min = bar
-                .attr("AXMinValue")
+                .attr("AXMinValue")?
                 .and_then(|v| v.number())
                 .ok_or_else(|| blocked("scroll_range_unavailable"))?;
             let max = bar
-                .attr("AXMaxValue")
+                .attr("AXMaxValue")?
                 .and_then(|v| v.number())
                 .ok_or_else(|| blocked("scroll_range_unavailable"))?;
             if max <= min {
@@ -1252,24 +1702,19 @@ mod macos {
                 ))
             }
             .ok_or_else(|| blocked("scroll_value_unavailable"))?;
-            bar.set("AXValue", value.0)?;
-            let deadline = Instant::now() + Duration::from_millis(400);
-            loop {
-                self.validate(target)
-                    .map_err(|e| format!("unconfirmed:{e}"))?;
-                if bar
-                    .attr("AXValue")
-                    .and_then(|v| v.number())
-                    .is_some_and(|value| (value - next).abs() <= 0.001 * (max - min))
-                {
-                    return Ok(());
-                }
-                if Instant::now() >= deadline {
-                    return Err("unconfirmed:scroll_readback".into());
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
+            write_with_readback(
+                || bar.set("AXValue", value.0),
+                || {
+                    self.validate(target)?;
+                    Ok(bar
+                        .attr("AXValue")?
+                        .and_then(|value| value.number())
+                        .is_some_and(|value| (value - next).abs() <= 0.001 * (max - min)))
+                },
+                "scroll_readback",
+            )
         }
+
         fn insert_text(
             &mut self,
             target: &ManagedWindowIdentity,
@@ -1281,10 +1726,10 @@ mod macos {
                 return Err(blocked("input_focus_changed"));
             }
             let original = element
-                .string_attr("AXValue")
+                .string_attr("AXValue")?
                 .ok_or_else(|| blocked("input_value_unavailable"))?;
             let range = element
-                .attr("AXSelectedTextRange")
+                .attr("AXSelectedTextRange")?
                 .ok_or_else(|| blocked("input_selection_unavailable"))?;
             if unsafe { CFGetTypeID(range.0) != AXValueGetTypeID() } {
                 return Err(blocked("input_selection_unavailable"));
@@ -1304,21 +1749,16 @@ mod macos {
             }
             let value = Owned::text(&replacement);
             self.validate(target)?;
-            self.cached_controls.clear();
-            element.set("AXValue", value.0)?;
-            let deadline = Instant::now() + Duration::from_millis(400);
-            loop {
-                self.validate(target)
-                    .map_err(|e| format!("unconfirmed:{e}"))?;
-                if element.string_attr("AXValue").as_deref() == Some(&replacement) {
-                    return Ok(());
-                }
-                if Instant::now() >= deadline {
-                    return Err("unconfirmed:input_value_readback".into());
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
+            write_with_readback(
+                || element.set("AXValue", value.0),
+                || {
+                    self.validate(target)?;
+                    Ok(element.string_attr("AXValue")?.as_deref() == Some(&replacement))
+                },
+                "input_value_readback",
+            )
         }
+
         fn shortcut(
             &mut self,
             target: &ManagedWindowIdentity,
@@ -1332,9 +1772,9 @@ mod macos {
             }
             let (app, window) = self.validate(target)?;
             let focused = app
-                .attr("AXFocusedWindow")
+                .attr("AXFocusedWindow")?
                 .ok_or_else(|| blocked("target_window_not_focused"))?;
-            if app.bool_attr("AXFrontmost") != Some(true)
+            if app.bool_attr("AXFrontmost")? != Some(true)
                 || unsafe { CFEqual(focused.0, window.0) } == 0
             {
                 return Err(blocked("target_window_not_focused"));
@@ -1348,7 +1788,6 @@ mod macos {
             }
             .ok_or_else(|| blocked("keyboard_event_unavailable"))?;
             let flags = crate::executor::modifiers_to_cg_flags(modifiers);
-            self.cached_controls.clear();
             unsafe {
                 CGEventSetFlags(down.0.cast_mut(), flags);
                 CGEventSetFlags(up.0.cast_mut(), flags);
@@ -1400,6 +1839,177 @@ mod macos {
         use super::*;
 
         #[test]
+        fn unsupported_attributes_are_absent_but_failed_reads_abort_observation() {
+            for code in [-25205i32, -25212] {
+                let value =
+                    unsafe { Owned::from_create(AXValueCreate(5, (&code as *const i32).cast())) }
+                        .unwrap();
+                assert!(decode_attribute_slot(value).unwrap().is_none());
+            }
+            let code = -25204i32;
+            let value =
+                unsafe { Owned::from_create(AXValueCreate(5, (&code as *const i32).cast())) }
+                    .unwrap();
+            assert!(decode_attribute_slot(value).is_err());
+            let value = decode_attribute_slot(Owned::text("AXLink"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(value.string().as_deref(), Some("AXLink"));
+        }
+
+        #[test]
+        fn successful_write_with_failed_observation_is_unconfirmed_and_never_retried() {
+            let writes = std::cell::Cell::new(0);
+            let result = write_with_readback(
+                || {
+                    writes.set(writes.get() + 1);
+                    Ok(())
+                },
+                || Err("blocked:ax_attribute_-25204".into()),
+                "value_readback",
+            );
+            assert_eq!(writes.get(), 1);
+            assert_eq!(
+                result.unwrap_err(),
+                "unconfirmed:blocked:ax_attribute_-25204"
+            );
+            assert!(write_with_readback(
+                || Err("unconfirmed:ax_set_-25204".into()),
+                || panic!("no read after failed write"),
+                "value_readback"
+            )
+            .is_err());
+        }
+
+        #[test]
+        fn a_partial_tree_never_publishes_a_unique_candidate() {
+            let mut visited = 0;
+            let observation = observe_tree(
+                Owned::text("root"),
+                Instant::now() + Duration::from_secs(1),
+                |element| {
+                    visited += 1;
+                    match element.string().as_deref() {
+                        Some("root") => Ok(Some(NodeData {
+                            children: vec![Owned::text("candidate"), Owned::text("unreadable")],
+                            ..Default::default()
+                        })),
+                        Some("candidate") => Ok(Some(NodeData {
+                            role: "AXLink".into(),
+                            url: Some("https://127.0.0.1:1/c/target".into()),
+                            enabled: true,
+                            pressable: true,
+                            ..Default::default()
+                        })),
+                        _ => Err("blocked:ax_attribute_-25204".into()),
+                    }
+                },
+            );
+            assert_eq!(visited, 3);
+            assert!(observation.is_err());
+            let complete = observe_tree(
+                Owned::text("leaf"),
+                Instant::now() + Duration::from_secs(1),
+                |_| Ok(Some(NodeData::default())),
+            )
+            .unwrap();
+            assert_eq!(complete.nodes.len(), 1);
+        }
+
+        #[test]
+        fn transient_rebuild_discards_the_entire_incomplete_attempt() {
+            let mut attempt = 0;
+            let observation = observe_tree(
+                Owned::text("window"),
+                Instant::now() + Duration::from_millis(300),
+                |element| match element.string().as_deref() {
+                    Some("window") => {
+                        attempt += 1;
+                        let children = if attempt == 1 {
+                            vec![Owned::text("old-candidate"), Owned::text("retired-node")]
+                        } else {
+                            vec![Owned::text("new-candidate")]
+                        };
+                        Ok(Some(NodeData {
+                            children,
+                            ..Default::default()
+                        }))
+                    }
+                    Some("retired-node") => Err("blocked:ax_batch_-25202".into()),
+                    _ => Ok(Some(NodeData {
+                        role: "AXLink".into(),
+                        ..Default::default()
+                    })),
+                },
+            )
+            .unwrap();
+            assert_eq!(attempt, 2);
+            assert_eq!(observation.nodes.len(), 2);
+            assert_eq!(
+                observation.nodes[1].element.string().as_deref(),
+                Some("new-candidate")
+            );
+            assert!(observe_tree(
+                Owned::text("retired-window"),
+                Instant::now() + Duration::from_millis(20),
+                |_| Err("blocked:ax_batch_-25202".into())
+            )
+            .is_err());
+        }
+
+        #[test]
+        fn traversal_refuses_cycles_deadlines_and_oversized_frontiers() {
+            assert!(observe_tree(
+                Owned::text("cycle"),
+                Instant::now() + Duration::from_secs(1),
+                |element| Ok(Some(NodeData {
+                    children: vec![element.clone()],
+                    ..Default::default()
+                }))
+            )
+            .is_err());
+            assert!(observe_tree(
+                Owned::text("expired"),
+                Instant::now() - Duration::from_millis(1),
+                |_| panic!("expired reads must not start")
+            )
+            .is_err());
+            let leaf = Owned::text("leaf");
+            assert!(observe_tree(
+                Owned::text("wide"),
+                Instant::now() + Duration::from_secs(1),
+                |_| Ok(Some(NodeData {
+                    children: vec![leaf.clone(); MAX_NODES],
+                    ..Default::default()
+                }))
+            )
+            .is_err());
+        }
+
+        #[test]
+        #[ignore = "read-only observation of the running Antigravity window"]
+        fn native_window_observation_reads_both_purposes_without_input_values() {
+            use crate::session_navigation::SessionNavigationProvider;
+            let pid =
+                crate::session_navigation::antigravity_process_id().expect("running Antigravity");
+            let mut sessions = NativeSessionNavigation::default();
+            let selected = sessions.capture(pid).unwrap();
+            assert!(!selected.links.is_empty());
+            assert!(selected
+                .selected_urls
+                .iter()
+                .any(|url| url.starts_with("https://127.0.0.1:")));
+            let mut controls = NativeAxProvider::default();
+            let snapshot = controls.capture("com.google.antigravity").unwrap();
+            assert_eq!(snapshot.identity.pid, pid);
+            assert!(snapshot.controls.iter().any(|control| control.editable));
+            assert_eq!(
+                controls.read(&snapshot.identity).unwrap().identity,
+                snapshot.identity
+            );
+        }
+
+        #[test]
         fn owned_window_handles_survive_other_app_and_replacement_captures() {
             let target = |bundle: &str, id: u64| Target {
                 identity: ManagedWindowIdentity {
@@ -1409,8 +2019,13 @@ mod macos {
                     scope_id: 0,
                     title: format!("window-{id}"),
                 },
-                application: Owned::text(&format!("app-{bundle}")),
-                window: Owned::text(&format!("window-{id}")),
+                window: CapturedWindow {
+                    bundle_id: bundle.into(),
+                    pid: 123,
+                    application: Owned::text(&format!("app-{bundle}")),
+                    element: Owned::text(&format!("window-{id}")),
+                    title: format!("window-{id}"),
+                },
                 scope: Owned::text(&format!("window-{id}")),
             };
             let original = target("com.google.antigravity", 1);
@@ -1427,13 +2042,13 @@ mod macos {
                 "blocked:target_identity_changed"
             );
             assert_eq!(
-                provider.target_for(&identity).unwrap().window.0,
-                original_window.0
+                provider.target_for(&identity).unwrap().window.element.0,
+                original_window.element.0
             );
             provider.target = Some(target("com.google.antigravity", 3));
             assert_eq!(
-                provider.target_for(&identity).unwrap().window.0,
-                original_window.0
+                provider.target_for(&identity).unwrap().window.element.0,
+                original_window.element.0
             );
             provider.release_target(&identity);
             assert!(provider.target_for(&identity).is_none());
@@ -1451,8 +2066,13 @@ mod macos {
                     scope_id: 10,
                     title: "window".into(),
                 },
-                application: Owned::text("app"),
-                window,
+                window: CapturedWindow {
+                    bundle_id: "com.google.antigravity".into(),
+                    pid: 123,
+                    application: Owned::text("app"),
+                    element: window,
+                    title: "window".into(),
+                },
                 scope: Owned::text("left-pane"),
             };
             let original = target.identity.clone();
@@ -1689,5 +2309,32 @@ mod macos {
             process.wait().unwrap();
             assert!(provider.process_has_exited(pid));
         }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Default)]
+pub struct NativeSessionNavigation;
+#[cfg(not(target_os = "macos"))]
+impl crate::session_navigation::SessionNavigationProvider for NativeSessionNavigation {
+    fn capture(
+        &mut self,
+        _: i32,
+    ) -> Result<crate::session_navigation::SessionNavigationWindow, String> {
+        Err("blocked:macos_required".into())
+    }
+    fn read(
+        &mut self,
+        _: &crate::session_navigation::SessionNavigationWindow,
+    ) -> Result<crate::session_navigation::SessionNavigationWindow, String> {
+        Err("blocked:macos_required".into())
+    }
+    fn press(
+        &mut self,
+        _: &crate::session_navigation::SessionNavigationWindow,
+        _: u64,
+        _: &dyn Fn() -> bool,
+    ) -> Result<(), String> {
+        Err("blocked:macos_required".into())
     }
 }

@@ -1,4 +1,7 @@
 use crate::karabiner::{self, ConfigPatch, Readiness, ReloadBaseline};
+use crate::store::session_navigation::{
+    NavigationCommand, NavigationDispatch, PhysicalNavigationIntent,
+};
 use mi_model::apply::AppliedSixLayerPlan;
 use mi_model::{
     direct_controls::{CONTROL_BINDINGS, DIRECT_CONTROLS},
@@ -113,8 +116,8 @@ struct ExecutionPolicyState {
     admit_after: Option<Instant>,
 }
 
-#[derive(Clone, Copy)]
-struct ExecutionAdmission {
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ExecutionAdmission {
     epoch: u64,
     received_at: Instant,
 }
@@ -160,6 +163,7 @@ pub struct RunningSixLayer {
     execution_policy: Arc<ExecutionPolicy>,
     pub receipts: Option<std::sync::mpsc::Receiver<mi_macos::HostActionReceipt>>,
     foreground: Arc<Mutex<ForegroundContext>>,
+    pub(crate) navigation: Option<NavigationDispatch>,
     stop: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
     executor: Option<JoinHandle<Result<(), String>>>,
@@ -295,6 +299,15 @@ impl RunningSixLayer {
         self.execution_policy.set(enabled, commands, now);
     }
 
+    pub(crate) fn admits_navigation(&self, admission: ExecutionAdmission) -> bool {
+        let state = self.execution_policy.state.lock().unwrap();
+        state.epoch == admission.epoch
+            && state.enabled
+            && state
+                .admit_after
+                .is_none_or(|after| admission.received_at >= after)
+    }
+
     #[cfg(test)]
     pub(crate) fn is_execution_enabled(&self) -> bool {
         self.execution_policy.state.lock().unwrap().enabled
@@ -311,6 +324,7 @@ impl RunningSixLayer {
         let observed = Arc::clone(&self.observed_layer);
         let first = Arc::clone(&self.first_event_verified);
         let foreground = Arc::clone(&self.foreground);
+        let navigation = self.navigation.clone();
         let (tx, rx) = std::sync::mpsc::sync_channel(32);
         self.receipts = Some(rx);
         self.executor = Some(thread::spawn(move || {
@@ -323,6 +337,7 @@ impl RunningSixLayer {
                 &first,
                 &foreground,
                 &tx,
+                navigation.as_ref(),
                 || receiver.next(),
                 || receiver.failure().map_or(Ok(()), Err),
                 |profile, binding, action, admission| {
@@ -439,6 +454,7 @@ fn execute_clicks(
     first: &AtomicBool,
     foreground: &Mutex<ForegroundContext>,
     receipts: &std::sync::mpsc::SyncSender<mi_macos::HostActionReceipt>,
+    navigation: Option<&NavigationDispatch>,
     mut next: impl FnMut() -> Result<Option<mi_transport::Activation>, String>,
     mut check_connection: impl FnMut() -> Result<(), String>,
     mut execute: impl FnMut(
@@ -491,6 +507,34 @@ fn execute_clicks(
             continue;
         }
         if foreground.lock().unwrap().generation != context.generation {
+            continue;
+        }
+        if let (Some(command), Some(dispatch)) =
+            (NavigationCommand::from_action(action), navigation)
+        {
+            if !policy.admits(admission, action) {
+                continue;
+            }
+            let snapshot = dispatch.slots.lock().unwrap().clone();
+            if event.received_at < snapshot.changed_at {
+                continue;
+            }
+            if dispatch
+                .tx
+                .try_send(PhysicalNavigationIntent {
+                    command,
+                    revision: snapshot.revision,
+                    input_generation: event.generation.clone(),
+                    admission,
+                    received_at: event.received_at,
+                    profile: host.profile_id.clone(),
+                    binding: CONTROL_BINDINGS[control.slot as usize].into(),
+                })
+                .is_err()
+            {
+                receiver.invalidate("会话导航积压，输入已暂停");
+                return;
+            }
             continue;
         }
         let receipt = execute(
@@ -670,6 +714,7 @@ fn new_running(
         execution_policy: Arc::new(ExecutionPolicy::default()),
         receipts: None,
         foreground: Arc::new(Mutex::new(ForegroundContext::default())),
+        navigation: None,
         stop: Arc::new(AtomicBool::new(false)),
         monitor: None,
         executor: None,
@@ -964,6 +1009,7 @@ mod tests {
                 &AtomicBool::new(false),
                 &foreground,
                 &tx,
+                None,
                 || receiver.next(),
                 || Ok(()),
                 |profile, binding, action, _| {
@@ -1019,6 +1065,7 @@ mod tests {
                 &AtomicBool::new(false),
                 &foreground,
                 &tx,
+                None,
                 || receiver.next(),
                 || {
                     permits += 1;
@@ -1075,6 +1122,7 @@ mod tests {
             &first,
             &Mutex::new(ForegroundContext::default()),
             &tx,
+            None,
             || receiver.next(),
             || {
                 permit_calls += 1;
@@ -1143,6 +1191,7 @@ mod tests {
                 &first,
                 &Mutex::new(ForegroundContext::default()),
                 &tx,
+                None,
                 || receiver.next(),
                 || {
                     permit_calls += 1;
@@ -1214,6 +1263,7 @@ mod tests {
                 &AtomicBool::new(false),
                 &Mutex::new(ForegroundContext::default()),
                 &receipt_tx,
+                None,
                 || {
                     pending
                         .take()
@@ -1297,6 +1347,7 @@ mod tests {
             &AtomicBool::new(false),
             &Mutex::new(ForegroundContext::default()),
             &tx,
+            None,
             || {
                 pending
                     .pop_front()

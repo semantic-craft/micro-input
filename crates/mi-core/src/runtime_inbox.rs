@@ -246,7 +246,7 @@ mod tests {
             inbox
                 .send(HardwareLoopEvent::LiveCandidatesUpdated {
                     epoch,
-                    candidates: Vec::new(),
+                    catalog: None,
                 })
                 .unwrap();
         }

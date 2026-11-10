@@ -1,6 +1,8 @@
 # Antigravity 官方桌面扩展、既有会话目录、精确导航、agentapi 创建/发送与 L3 请求/模型控制
 
-菜单栏的「Antigravity 状态连接」默认关闭。开启后，Micro Input 读取私有 `0600` 授权文件并通过私有 Unix 域套接字订阅 `integrations/antigravity/live-bridge.py` 归并的既有会话目录与实时状态事件，支持按 `(conversationId, workspacePath)` 精确聚焦并读回确认 `selected`、通过 `antigravity-agentapi-v1` 契约执行绑定 `projectId` 的 `new-conversation` 创建与绑定 `conversationId` 的 `send-message` 发送，以及通过经只读 REA 核实的固定白名单契约（`antigravity-stop-v1`、`antigravity-interaction-v1`、`antigravity-model-config-v1`）执行当前选中会话停止、待处理交互审批/提问回答和模型/思考档位切换（绝不开放任意 RPC）。
+`antigravity-status` 验证 `mi-bridge` 的合成状态、导航及命令协议。旧 Python live bridge 已退役，当前工作台直接通过 Rust 读取 hub 目录并执行原生 AX 导航，见 [当前接口](../../../integrations/antigravity/README.md)。本页合成回执不能证明真实应用选中、发送、停止或模型变更。
+
+真实导航另运行 `mi-core` 的 `native_session_navigation_verifies_catalog_and_selected_url` 忽略测试，设置 `MI_VERIFY_SESSION_ID` 为已存在的测试会话，使用 `--ignored --nocapture`。该测试会实际切换会话；分别覆盖两个目标并保留命令输出。完整验收还须在生产应用中操作工作台和实体键，回读原窗口的会话 URL，核对 `session_navigation` 审计回执。软件注入不能证明实体键路径。
 
 ## 隔离应用检查
 
