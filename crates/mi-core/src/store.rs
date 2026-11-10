@@ -85,7 +85,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -93,6 +93,9 @@ use std::{
 
 #[path = "six_layer_store.rs"]
 mod six_layer_store;
+#[path = "workspace_lifecycle.rs"]
+mod workspace_lifecycle;
+use workspace_lifecycle::SystemLifecycle;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HardwareAutoAcceptanceReceipt {
@@ -126,8 +129,11 @@ pub enum HardwareLoopEvent {
     Disconnected {
         session_id: u64,
     },
-    DiscoveryChanged,
+    DiscoveryChanged {
+        epoch: u64,
+    },
     OwnershipReply {
+        epoch: u64,
         request: mi_bridge::NativeOwnershipRequest,
         reply: Option<mi_bridge::NativeOwnershipReply>,
     },
@@ -136,6 +142,7 @@ pub enum HardwareLoopEvent {
         receipt: HardwareAutoAcceptanceReceipt,
     },
     LiveCandidatesUpdated {
+        epoch: u64,
         candidates: Vec<FourAppLiveCandidate>,
     },
 }
@@ -255,6 +262,8 @@ pub enum DeviceWorkflowAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "domain", content = "action", rename_all = "snake_case")]
 pub enum WorkbenchCommand {
+    SystemWillSleep,
+    SystemDidWake,
     Header(HeaderAction),
     Sidebar(SidebarAction),
     Canvas(CanvasAction),
@@ -365,6 +374,12 @@ pub struct WorkbenchStore {
     hardware_event_tx: tokio::sync::mpsc::UnboundedSender<HardwareLoopEvent>,
     hardware_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<HardwareLoopEvent>>,
     mac_watcher_transport: Option<Arc<mi_transport::MacTransport>>,
+    system_lifecycle: SystemLifecycle,
+    lifecycle_epoch: Arc<AtomicU64>,
+    lifecycle_cleanup: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    discovery_enabled: bool,
+    discovery_refresh_count: u64,
+    resume_requires_explicit_connect: bool,
     pub navigation_history: NavigationHistory,
     pub radial_state: RadialMenuState,
     pub radial_readiness: RadialInputReadiness,
@@ -482,6 +497,12 @@ impl WorkbenchStore {
             hardware_event_tx,
             hardware_event_rx: Some(hardware_event_rx),
             mac_watcher_transport: None,
+            system_lifecycle: SystemLifecycle::Awake,
+            lifecycle_epoch: Arc::new(AtomicU64::new(0)),
+            lifecycle_cleanup: None,
+            discovery_enabled: false,
+            discovery_refresh_count: 0,
+            resume_requires_explicit_connect: false,
             navigation_history: NavigationHistory::new(),
             radial_state: RadialMenuState::new(),
             radial_readiness: RadialInputReadiness::Ready,
@@ -577,7 +598,10 @@ impl WorkbenchStore {
 
     pub fn poll_hardware_events(&mut self) -> bool {
         let before_gen = self.projection_generation;
-        self.poll_six_layer_runtime();
+        self.poll_workspace_lifecycle();
+        if self.system_lifecycle == SystemLifecycle::Awake {
+            self.poll_six_layer_runtime();
+        }
         let mut drained = Vec::new();
         if let Some(rx) = &mut self.hardware_event_rx {
             while let Ok(ev) = rx.try_recv() {
@@ -600,6 +624,14 @@ impl WorkbenchStore {
 
     pub fn dispatch_command(&mut self, command: WorkbenchCommand) -> Result<(), WorkbenchError> {
         match command {
+            WorkbenchCommand::SystemWillSleep => {
+                self.system_will_sleep();
+                Ok(())
+            }
+            WorkbenchCommand::SystemDidWake => {
+                self.system_did_wake();
+                Ok(())
+            }
             WorkbenchCommand::Header(a) => self.dispatch_header_action(a),
             WorkbenchCommand::Sidebar(a) => self.dispatch_sidebar_action(a),
             WorkbenchCommand::Canvas(a) => self.dispatch_canvas_action(a),
@@ -686,6 +718,7 @@ impl WorkbenchStore {
         &mut self,
         action: DeviceWorkflowAction,
     ) -> Result<(), WorkbenchError> {
+        self.require_awake()?;
         match action {
             DeviceWorkflowAction::ReadIdentity => {
                 let msg = if let Some(cand) = &self.connected_candidate {
@@ -792,19 +825,27 @@ impl WorkbenchStore {
     }
 
     pub fn start_mac_usb_discovery_watcher(&mut self) {
+        self.discovery_enabled = true;
+        if self.system_lifecycle != SystemLifecycle::Awake {
+            return;
+        }
         if self.config.isolated || self.mac_watcher_transport.is_some() {
             return;
         }
-        let transport = Arc::new(if self.six_layer_state.installation.is_some() {
+        let transport = Arc::new(if self.discovery_is_descriptor_only() {
             mi_transport::MacTransport::new()
         } else {
             mi_transport::MacTransport::exclusive_vendor()
         });
         let mut rx = mi_transport::HidTransport::subscribe(transport.as_ref());
         let tx = self.hardware_event_tx.clone();
+        let epoch = self.lifecycle_epoch.load(Ordering::Acquire);
         self.tokio_runtime.spawn(async move {
             while rx.recv().await.is_ok() {
-                if tx.send(HardwareLoopEvent::DiscoveryChanged).is_err() {
+                if tx
+                    .send(HardwareLoopEvent::DiscoveryChanged { epoch })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -817,16 +858,18 @@ impl WorkbenchStore {
             return;
         }
         let tx = self.hardware_event_tx.clone();
+        let epoch_source = Arc::clone(&self.lifecycle_epoch);
         std::thread::spawn(move || {
             let mut seen_running_ids = BTreeSet::new();
             let mut completed_transition_watermarks = BTreeMap::new();
             loop {
+                let epoch = epoch_source.load(Ordering::Acquire);
                 if let Some(candidates) = poll_antigravity_daemon_candidates(
                     &mut seen_running_ids,
                     &mut completed_transition_watermarks,
                 ) {
                     if tx
-                        .send(HardwareLoopEvent::LiveCandidatesUpdated { candidates })
+                        .send(HardwareLoopEvent::LiveCandidatesUpdated { epoch, candidates })
                         .is_err()
                     {
                         break;
@@ -838,6 +881,14 @@ impl WorkbenchStore {
     }
 
     pub fn connect_default_usb(&mut self) -> Result<bool, WorkbenchError> {
+        self.require_awake()?;
+        if self.resume_requires_explicit_connect {
+            if let Some(transport) = self.mac_watcher_transport.take() {
+                mi_transport::HidTransport::stop_discovery(transport.as_ref());
+            }
+            self.resume_requires_explicit_connect = false;
+            self.start_mac_usb_discovery_watcher();
+        }
         self.connect_default_usb_with_execution(true)
     }
 
@@ -845,6 +896,7 @@ impl WorkbenchStore {
         &mut self,
         enable_execution_on_connect: bool,
     ) -> Result<bool, WorkbenchError> {
+        self.require_awake()?;
         if let Some(installation) = &self.six_layer_state.installation {
             let plan = installation.plan.clone();
             if self
@@ -873,6 +925,7 @@ impl WorkbenchStore {
         transport: &dyn mi_transport::HidTransport,
         enable_execution_on_connect: bool,
     ) -> Result<bool, WorkbenchError> {
+        self.require_awake()?;
         if self
             .device_session
             .as_ref()
@@ -963,7 +1016,6 @@ impl WorkbenchStore {
                 let accept_session = Arc::clone(&session);
                 let accept_target = target.clone();
                 let accept_tx = self.hardware_event_tx.clone();
-                let accept_doc_dir = self.config.document_dir.clone();
                 let initial_lighting_json = self
                     .lighting_arbiter
                     .last_hardware_sync_json
@@ -974,7 +1026,6 @@ impl WorkbenchStore {
                         &accept_session,
                         &accept_target,
                         &initial_lighting_json,
-                        &accept_doc_dir,
                     )
                     .await
                     {
@@ -1025,6 +1076,9 @@ impl WorkbenchStore {
         event: HardwareLoopEvent,
         now: Instant,
     ) -> Option<HostActionReceipt> {
+        if self.system_lifecycle != SystemLifecycle::Awake {
+            return None;
+        }
         match event {
             HardwareLoopEvent::Input(input_event) => {
                 let session = self.device_session.as_ref()?;
@@ -1070,7 +1124,13 @@ impl WorkbenchStore {
                 }
                 None
             }
-            HardwareLoopEvent::DiscoveryChanged => {
+            HardwareLoopEvent::DiscoveryChanged { epoch } => {
+                if epoch != self.lifecycle_epoch.load(Ordering::Acquire) {
+                    return None;
+                }
+                if self.resume_requires_explicit_connect {
+                    return None;
+                }
                 let old_path_missing = self
                     .mac_watcher_transport
                     .as_ref()
@@ -1106,7 +1166,14 @@ impl WorkbenchStore {
                 }
                 None
             }
-            HardwareLoopEvent::OwnershipReply { request, reply } => {
+            HardwareLoopEvent::OwnershipReply {
+                epoch,
+                request,
+                reply,
+            } => {
+                if epoch != self.lifecycle_epoch.load(Ordering::Acquire) {
+                    return None;
+                }
                 match reply {
                     Some(r) => self.native_ownership.receive_at(r, &request, now),
                     None => self.native_ownership.failed(&request),
@@ -1134,6 +1201,16 @@ impl WorkbenchStore {
                             receipt.product, receipt.vid_pid, receipt.firmware_version
                         );
                     }
+                    if let Ok(bytes) = serde_json::to_vec_pretty(&receipt) {
+                        let path = self
+                            .config
+                            .document_dir
+                            .join("hardware-auto-acceptance.json");
+                        let tmp = path.with_extension("json.tmp");
+                        if fs::write(&tmp, bytes).is_ok() {
+                            let _ = fs::rename(tmp, path);
+                        }
+                    }
                     self.last_hardware_auto_acceptance = Some(receipt);
                     self.lighting_arbiter.invalidate_hardware_cache();
                     self.refresh_four_app_lighting();
@@ -1141,7 +1218,10 @@ impl WorkbenchStore {
                 }
                 None
             }
-            HardwareLoopEvent::LiveCandidatesUpdated { candidates } => {
+            HardwareLoopEvent::LiveCandidatesUpdated { epoch, candidates } => {
+                if epoch != self.lifecycle_epoch.load(Ordering::Acquire) {
+                    return None;
+                }
                 if self.slot_table.candidates() != candidates.as_slice() {
                     self.ingest_four_app_candidates(candidates);
                 }
@@ -2459,6 +2539,7 @@ impl WorkbenchStore {
         &mut self,
         action: SessionStripAction,
     ) -> Result<(), WorkbenchError> {
+        self.require_awake()?;
         match action {
             SessionStripAction::ActivateSlot(slot_index) => {
                 if slot_index >= SLOT_COUNT {
@@ -3009,12 +3090,16 @@ impl WorkbenchStore {
     }
 
     fn poll_ownership_fast_or_spawn(&mut self, micro_drained: bool, now: Instant) {
+        if self.system_lifecycle != SystemLifecycle::Awake {
+            return;
+        }
         if let Some((request, stream)) = self.native_ownership.poll_fast_or_defer_at(
             micro_drained,
             now,
             Duration::from_millis(12),
         ) {
             let tx = self.hardware_event_tx.clone();
+            let epoch = self.lifecycle_epoch.load(Ordering::Acquire);
             std::thread::spawn(move || {
                 let reply = UnixNativeOwnershipTransport::finish_stream_reply(
                     stream,
@@ -3022,7 +3107,11 @@ impl WorkbenchStore {
                     Duration::from_millis(950),
                 )
                 .ok();
-                let _ = tx.send(HardwareLoopEvent::OwnershipReply { request, reply });
+                let _ = tx.send(HardwareLoopEvent::OwnershipReply {
+                    epoch,
+                    request,
+                    reply,
+                });
             });
         }
     }
@@ -3047,7 +3136,10 @@ impl WorkbenchStore {
     }
 
     fn ensure_live_ownership_fresh(&mut self) {
-        if self.config.isolated || self.selected_profile_id.is_none() {
+        if self.system_lifecycle != SystemLifecycle::Awake
+            || self.config.isolated
+            || self.selected_profile_id.is_none()
+        {
             return;
         }
         self.native_ownership.reconcile_unbridged_transition();
@@ -4321,7 +4413,7 @@ impl WorkbenchStore {
         event: RadialInputEvent,
         now: Instant,
     ) -> RadialConsumeOutcome {
-        if !self.radial_state.enabled() {
+        if self.system_lifecycle != SystemLifecycle::Awake || !self.radial_state.enabled() {
             return RadialConsumeOutcome {
                 consumed: false,
                 confirmed_intent: None,
@@ -4354,7 +4446,8 @@ impl WorkbenchStore {
         let captured_confirm = self.radial_state.captures_confirm() && is_enc_clk;
 
         self.ensure_live_ownership_fresh();
-        let gates_ok = self.document_store.host_execution_enabled()
+        let gates_ok = self.system_lifecycle == SystemLifecycle::Awake
+            && self.document_store.host_execution_enabled()
             && (self.native_ownership.allows_execution()
                 || self.native_ownership.is_transient_reconfirming())
             && !self.ptt_controller.is_active
@@ -4488,6 +4581,7 @@ impl WorkbenchStore {
         &mut self,
         action: RadialOverlayAction,
     ) -> Result<Option<HostActionReceipt>, WorkbenchError> {
+        self.require_awake()?;
         match action {
             RadialOverlayAction::CancelEscape => {
                 self.radial_state.cancel();
@@ -4791,6 +4885,9 @@ impl WorkbenchStore {
         event: InputEvent,
         now: Instant,
     ) -> Option<HostActionReceipt> {
+        if self.system_lifecycle != SystemLifecycle::Awake {
+            return None;
+        }
         let profile_id = self.resolved_active_profile_id();
         if event.kind != InputEventKind::Released
             && profile_id
@@ -4850,24 +4947,17 @@ impl WorkbenchStore {
                 if let Some((held_binding, held_adapter)) = self.held_ptt_binding.clone() {
                     if held_binding == binding_id {
                         self.held_ptt_binding = None;
-                        self.ptt_controller.is_active = false;
-                        if !self.config.isolated {
-                            if held_adapter.eq_ignore_ascii_case("antigravity") {
-                                let ctrl = vec!["control".to_string()];
-                                let _ = self
-                                    .live_executor
-                                    .driver()
-                                    .post_key_shortcut(0x2E, &ctrl, true)
-                                    .and_then(|()| {
-                                        self.live_executor
-                                            .driver()
-                                            .post_key_shortcut(0x2E, &ctrl, false)
-                                    });
-                            } else {
-                                let _ = self.live_executor.driver().post_apple_fn_flags(false);
-                            }
-                        }
-                        self.status_message = format!("已结束按住语音 ({binding_id})");
+                        let stopped = if self.config.isolated {
+                            Ok(())
+                        } else {
+                            self.live_executor.stop_owned_actions()
+                        };
+                        self.ptt_controller.cancel();
+                        self.ptt_controller.cleanup_confirmed = stopped.is_ok();
+                        self.status_message = match stopped {
+                            Ok(()) => format!("已结束原目标听写 ({binding_id}, {held_adapter})"),
+                            Err(error) => format!("原目标听写停止未确认 · {error}"),
+                        };
                         self.rebuild_projection();
                     }
                 }
@@ -5012,37 +5102,53 @@ impl WorkbenchStore {
                     }
                     if command == "push-to-talk" {
                         let resolved_adapter = adapter.clone();
-                        self.held_ptt_binding =
-                            Some((binding_id.clone(), resolved_adapter.clone()));
-                        self.ptt_controller.is_active = true;
-                        let receipt = if self.config.isolated {
-                            HostActionReceipt {
-                                action_type: "agent_command".to_string(),
-                                binding_id: binding_id.clone(),
-                                detail: format!("{resolved_adapter}/push-to-talk"),
-                                outcome: "simulated".to_string(),
-                                profile_id,
-                                target: resolved_adapter,
-                                text_byte_len: None,
-                                timestamp_ms: 0,
-                            }
-                        } else if resolved_adapter.eq_ignore_ascii_case("antigravity") {
-                            self.live_executor
-                                .execute(&profile_id, &binding_id, &action)
+                        if self.held_ptt_binding.is_some() {
+                            return None;
+                        }
+                        let started = if self.config.isolated {
+                            Ok(())
                         } else {
-                            let _ = self.live_executor.driver().post_apple_fn_flags(true);
-                            HostActionReceipt {
-                                action_type: "agent_command".to_string(),
-                                binding_id: binding_id.clone(),
-                                detail: format!("{resolved_adapter}/push-to-talk"),
-                                outcome: "executed".to_string(),
-                                profile_id,
-                                target: resolved_adapter,
-                                text_byte_len: None,
-                                timestamp_ms: 0,
+                            self.live_executor
+                                .driver()
+                                .start_owned_dictation(&resolved_adapter)
+                        };
+                        let uncertain = started
+                            .as_ref()
+                            .is_err_and(|error| error.starts_with("unconfirmed:"));
+                        self.ptt_controller.is_active = started.is_ok();
+                        self.ptt_controller.cleanup_confirmed = !uncertain;
+                        if started.is_ok() || uncertain {
+                            self.held_ptt_binding =
+                                Some((binding_id.clone(), resolved_adapter.clone()));
+                        }
+                        let (outcome, detail) = match started {
+                            Ok(()) => (
+                                if self.config.isolated {
+                                    "simulated"
+                                } else {
+                                    "executed"
+                                },
+                                format!("{resolved_adapter}/push-to-talk"),
+                            ),
+                            Err(error) => {
+                                (if uncertain { "unconfirmed" } else { "blocked" }, error)
                             }
                         };
-                        self.status_message = format!("正在按住语音 ({binding_id})…");
+                        let receipt = HostActionReceipt {
+                            action_type: "agent_command".into(),
+                            binding_id: binding_id.clone(),
+                            detail: detail.clone(),
+                            outcome: outcome.into(),
+                            profile_id,
+                            target: resolved_adapter,
+                            text_byte_len: None,
+                            timestamp_ms: 0,
+                        };
+                        self.status_message = if self.ptt_controller.is_active {
+                            format!("正在按住语音 ({binding_id})…")
+                        } else {
+                            format!("听写未启动 · {detail}")
+                        };
                         self.record_host_action_receipt(receipt.clone());
                         self.rebuild_projection();
                         return Some(receipt);
@@ -5770,6 +5876,18 @@ impl WorkbenchStore {
     }
 
     pub fn dispatch_editor_action(&mut self, action: EditorAction) -> Result<(), WorkbenchError> {
+        if matches!(
+            action,
+            EditorAction::OpenReconnectComparison { .. }
+                | EditorAction::ComparisonConfirmIdentity { .. }
+                | EditorAction::ComparisonResolve { .. }
+                | EditorAction::OpenApplyPreparation { .. }
+                | EditorAction::ApplyPrepareBackup { .. }
+                | EditorAction::ApplyTakePreparedCandidate { .. }
+                | EditorAction::LightingBeginPreview
+        ) {
+            self.require_awake()?;
+        }
         match action {
             EditorAction::CloseModal => {
                 self.lighting_preview_active = false;
@@ -7419,7 +7537,6 @@ async fn run_automatic_hardware_acceptance(
     session: &DeviceSession,
     target: &mi_transport::HidCandidate,
     initial_lighting_json: &str,
-    document_dir: &Path,
 ) -> Option<HardwareAutoAcceptanceReceipt> {
     let identity = session.read_identity_info().await.ok()?;
     let _config = session.read_config_snapshot().await.ok()?;
@@ -7468,14 +7585,6 @@ async fn run_automatic_hardware_acceptance(
             .map(|d| d.as_millis())
             .unwrap_or(0),
     };
-    if let Ok(bytes) = serde_json::to_vec_pretty(&receipt) {
-        let _ = fs::create_dir_all(document_dir);
-        let final_path = document_dir.join("hardware-auto-acceptance.json");
-        let tmp_path = document_dir.join("hardware-auto-acceptance.json.tmp");
-        if fs::write(&tmp_path, &bytes).is_ok() {
-            let _ = fs::rename(&tmp_path, &final_path);
-        }
-    }
     Some(receipt)
 }
 

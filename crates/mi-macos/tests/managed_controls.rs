@@ -24,6 +24,9 @@ struct Fixture {
     capture_error: Option<String>,
     focus_confirmed: bool,
     exited_pids: Vec<i32>,
+    enforce_target_cache: bool,
+    latest_target: Option<ManagedWindowIdentity>,
+    retained_targets: Vec<ManagedWindowIdentity>,
 }
 #[derive(Clone)]
 struct Provider(Arc<Mutex<Fixture>>);
@@ -64,6 +67,9 @@ impl Provider {
             capture_error: None,
             focus_confirmed: true,
             exited_pids: Vec::new(),
+            enforce_target_cache: false,
+            latest_target: None,
+            retained_targets: Vec::new(),
         })))
     }
     fn controls(&self) -> ManagedAxControls<Self> {
@@ -74,6 +80,18 @@ impl Provider {
     }
 }
 impl ManagedAxProvider for Provider {
+    fn retain_target(&mut self, target: &ManagedWindowIdentity) -> Result<(), String> {
+        self.0.lock().unwrap().retained_targets.push(target.clone());
+        Ok(())
+    }
+    fn release_target(&mut self, target: &ManagedWindowIdentity) {
+        self.0
+            .lock()
+            .unwrap()
+            .retained_targets
+            .retain(|old| old != target);
+    }
+
     fn process_has_exited(&self, pid: i32) -> bool {
         self.0.lock().unwrap().exited_pids.contains(&pid)
     }
@@ -83,10 +101,24 @@ impl ManagedAxProvider for Provider {
         if let Some(error) = &state.capture_error {
             return Err(error.clone());
         }
-        Ok(state.window.clone())
+        let mut window = state.window.clone();
+        if state.enforce_target_cache && bundle == "com.deepseek.dsh" {
+            window.identity.bundle_id = bundle.into();
+            window.identity.pid = 200;
+            window.identity.window_id = 2;
+            window.controls[0].label = "开始听写".into();
+        }
+        state.latest_target = Some(window.identity.clone());
+        Ok(window)
     }
     fn read(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String> {
         let state = self.0.lock().unwrap();
+        if state.enforce_target_cache
+            && state.latest_target.as_ref() != Some(target)
+            && !state.retained_targets.contains(target)
+        {
+            return Err("blocked:ax_target_missing".into());
+        }
         assert_eq!(
             target.pid, state.window.identity.pid,
             "must not reselect another PID"
@@ -826,4 +858,148 @@ fn manual_managed_ax_control() {
             .expect("scroll target"),
         _ => panic!("allowed actions: inspect, focus, toggle, scroll-up, scroll-down, bottom"),
     }
+}
+
+#[test]
+fn owned_dictation_cleanup_reads_the_original_target_without_capturing_frontmost() {
+    let provider = Provider::cindy();
+    let controls = provider.controls();
+    controls.start_dictation("cindy").unwrap();
+    provider.0.lock().unwrap().capture_error = Some("frontmost changed".into());
+    controls.stop_owned_dictations().unwrap();
+    controls.stop_owned_dictations().unwrap();
+    assert_eq!(
+        provider
+            .events()
+            .iter()
+            .filter(|e| e.starts_with("capture:"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        provider
+            .events()
+            .iter()
+            .filter(|e| e.starts_with("press:"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        provider.0.lock().unwrap().window.controls[0].label,
+        "开始语音输入"
+    );
+}
+
+#[test]
+fn owned_dictation_cleanup_keeps_failed_target_and_refuses_replacement() {
+    let provider = Provider::cindy();
+    let controls = provider.controls();
+    controls.start_dictation("cindy").unwrap();
+    provider.0.lock().unwrap().read_pid = Some(999);
+    assert!(controls.stop_owned_dictations().is_err());
+    assert_eq!(
+        provider
+            .events()
+            .iter()
+            .filter(|e| e.starts_with("press:"))
+            .count(),
+        1
+    );
+    provider.0.lock().unwrap().read_pid = None;
+    provider.0.lock().unwrap().effect = PressEffect::NoChange;
+    assert!(controls
+        .stop_owned_dictations()
+        .unwrap_err()
+        .contains("unconfirmed"));
+    provider.0.lock().unwrap().effect = PressEffect::Toggle;
+    controls.stop_owned_dictations().unwrap();
+    assert_eq!(
+        provider.0.lock().unwrap().window.controls[0].label,
+        "开始语音输入"
+    );
+}
+
+#[test]
+fn rejected_owned_start_never_claims_user_recording_or_unsupported_adapter() {
+    let provider = Provider::cindy();
+    let controls = provider.controls();
+    provider.0.lock().unwrap().window.controls[0].label = "停止语音输入".into();
+    assert!(controls
+        .start_dictation("cindy")
+        .unwrap_err()
+        .starts_with("blocked:"));
+    assert!(controls
+        .start_dictation("herdr")
+        .unwrap_err()
+        .starts_with("blocked:"));
+    controls.stop_owned_dictations().unwrap();
+    assert!(!provider
+        .events()
+        .iter()
+        .any(|event| event.starts_with("press:")));
+}
+
+#[test]
+fn uncertain_start_keeps_original_target_until_release_and_zero_press_failure_does_not() {
+    let provider = Provider::cindy();
+    let controls = provider.controls();
+    provider.0.lock().unwrap().read_pid = Some(999);
+    assert!(controls
+        .start_dictation("cindy")
+        .unwrap_err()
+        .starts_with("blocked:"));
+    provider.0.lock().unwrap().read_pid = None;
+    provider.0.lock().unwrap().window.controls[0].label = "停止语音输入".into();
+    controls.stop_owned_dictations().unwrap();
+    assert!(!provider
+        .events()
+        .iter()
+        .any(|event| event.starts_with("press:")));
+    provider.0.lock().unwrap().window.controls[0].label = "开始语音输入".into();
+    provider.0.lock().unwrap().effect = PressEffect::NoChange;
+    assert!(controls
+        .start_dictation("cindy")
+        .unwrap_err()
+        .starts_with("unconfirmed:"));
+    provider.0.lock().unwrap().window.controls[0].label = "停止语音输入".into();
+    provider.0.lock().unwrap().effect = PressEffect::Toggle;
+    controls.stop_owned_dictations().unwrap();
+    assert_eq!(
+        provider.0.lock().unwrap().window.controls[0].label,
+        "开始语音输入"
+    );
+}
+
+#[test]
+fn owned_dictation_survives_another_apps_capture_and_releases_its_native_target() {
+    let provider = Provider::cindy();
+    provider.0.lock().unwrap().enforce_target_cache = true;
+    let controls = provider.controls();
+    controls.start_dictation("cindy").unwrap();
+    controls.inspect("dsh").unwrap();
+    assert_eq!(
+        provider
+            .0
+            .lock()
+            .unwrap()
+            .latest_target
+            .as_ref()
+            .unwrap()
+            .pid,
+        200
+    );
+    controls.stop_owned_dictations().unwrap();
+    assert_eq!(
+        provider.0.lock().unwrap().window.controls[0].label,
+        "开始语音输入"
+    );
+    assert!(provider.0.lock().unwrap().retained_targets.is_empty());
+    assert_eq!(
+        provider
+            .events()
+            .iter()
+            .filter(|event| event.starts_with("press:"))
+            .count(),
+        2
+    );
 }

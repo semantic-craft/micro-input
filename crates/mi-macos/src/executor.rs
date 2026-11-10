@@ -734,6 +734,12 @@ pub trait HostOsDriver: Send + Sync {
     fn toggle_dictation(&self, _adapter: &str) -> Result<ObservedDictationState, String> {
         Err("blocked:dictation_toggle_unavailable".into())
     }
+    fn start_owned_dictation(&self, _adapter: &str) -> Result<(), String> {
+        Err("blocked:bound_dictation_unavailable".into())
+    }
+    fn stop_owned_dictations(&self) -> Result<(), String> {
+        Ok(())
+    }
     fn submit_agent_input(&self, adapter: &str, prompt: Option<&str>) -> Result<(), String> {
         legacy_submit_agent_input(self, adapter, prompt)
     }
@@ -941,6 +947,14 @@ impl HostOsDriver for MacOsSystemDriver {
 
     fn toggle_dictation(&self, adapter: &str) -> Result<ObservedDictationState, String> {
         self.managed_controls.toggle_dictation(adapter)
+    }
+
+    fn start_owned_dictation(&self, adapter: &str) -> Result<(), String> {
+        self.managed_controls.start_dictation(adapter)
+    }
+
+    fn stop_owned_dictations(&self) -> Result<(), String> {
+        self.managed_controls.stop_owned_dictations()
     }
 
     fn submit_agent_input(&self, adapter: &str, prompt: Option<&str>) -> Result<(), String> {
@@ -1764,6 +1778,19 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
 
     pub fn driver(&self) -> &D {
         &self.driver
+    }
+
+    pub fn stop_owned_actions(&self) -> Result<(), String> {
+        let mut held = self.held_apple_fn_bindings.lock().unwrap();
+        let released = if held.is_empty() {
+            Ok(())
+        } else {
+            self.driver
+                .post_apple_fn_flags(false)
+                .map(|()| held.clear())
+        };
+        let stopped = self.driver.stop_owned_dictations();
+        released.and(stopped)
     }
 
     pub fn handle_apple_fn_press(

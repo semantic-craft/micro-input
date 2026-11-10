@@ -449,6 +449,21 @@ pub struct Readiness {
     pub keyboard_grabbed: bool,
 }
 
+#[cfg(test)]
+impl Readiness {
+    pub(crate) fn isolated() -> Self {
+        Self {
+            baseline: ReloadBaseline {
+                generation: "isolated".into(),
+                inode: 0,
+                offset: 0,
+            },
+            configuration_observed: false,
+            keyboard_grabbed: false,
+        }
+    }
+}
+
 impl ReloadBaseline {
     pub fn capture() -> Result<Self, String> {
         let generation = service_generation()?;

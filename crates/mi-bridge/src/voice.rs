@@ -208,6 +208,15 @@ impl FourAppVoiceManager {
         &self.dictation_state
     }
 
+    pub fn confirm_dictation_stopped(&mut self) {
+        if let FourAppDictationState::Recording { app, session, .. } = &self.dictation_state {
+            self.dictation_state = FourAppDictationState::Stopped {
+                app: app.clone(),
+                session: session.clone(),
+            };
+        }
+    }
+
     pub fn voice_reply_modes(&self) -> &BTreeMap<String, VoiceReplyMode> {
         &self.voice_reply_modes
     }

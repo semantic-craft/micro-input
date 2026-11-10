@@ -305,3 +305,9 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: 六层编译、迁移、固定路由、双微动合并、输入换代、定向宿主控制和恢复链的自动回归通过；`scripts/verify-offline` 通过；本机日常版更新。设备写入与读回、恢复、实体按键及录音状态分别记录实际结果，不能互相替代。
 - **Verification scope**: 软件层 `MI_AUTO_HOST_READY=0 ./scripts/check` 与 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 八景全量 PASS（`241ebc3`）。安装层 `/Applications/Micro Input.app` 已更新并常驻运行（`pid 14523`），只读重连绑定 Karabiner `send_user_command` 套接字 `/tmp/micro-input-3ae2924a1ac1eb395625ad0a7f93af0c/in`。设备层与恢复链经 `live_six_layer_hardware_and_karabiner_acceptance` 实机通过（Creator Micro 2 `303A:8298` 固件 `0.6.3`、Karabiner-Elements `16.3.0`、Cindy `pid 5800`）：原 `7421B` `keymap.json`（SHA-256 `90f916f5880e5e3f9f7e6425855406b7321d68b909d740433c8389535dfccb78`）备份、六层 `profile_index=3` 写入与 SHA-256 读回、只读重连（零 Flash 重写）、一键恢复原 `7421B` 配置与 Karabiner 规则、以及恢复后重新应用六层日常态全部 PASS。实体第 2–4 层物理按压与真人语音录音转写留待日常使用中实测，不以合成回执替代。
 - **Evidence**:241ebc3;.scratch/qa-runs/1794288350074-12181/evidence/result.json
+
+
+### [x] Slice R16: 恢复睡眠唤醒会话边界
+- **Outcome**: Swift 转发系统睡眠和唤醒通知；Rust 停止原目标听写、退役旧 USB 会话与迟到回执，保留草稿和撤销。唤醒等待资源释放后仅恢复此前开启的设备发现。
+- **Done Predicate**: 隔离场景覆盖持键睡眠、重复唤醒、旧回执迟到与草稿撤销保留；`scripts/verify-offline` 全量通过。不写设备配置。
+- **Evidence**: .scratch/sleep-wake/result.json; RUST_TEST_THREADS=1 scripts/verify-offline PASS (eight isolated scenarios)

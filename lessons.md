@@ -273,3 +273,11 @@
 - 起因与后果：一是 macOS SwiftUI 中 `.buttonStyle(.plain)` 与 `.onTapGesture` 若未显式附加 `.contentShape(Rectangle())`，控件内的 `Spacer()`、内边距与圆角四角会成为点击盲区（如 17 键画布格子边缘、旋钮/摇杆四角、Inspector 动作行右侧空白、状态栏磁贴空白处点击无响应）；二是 `Codex` 与 `Cindy` 两个受保护 `KV_OAI_*` 方案在 `CanvasSliceModel` / `InspectorSliceModel` 中未投影 `selectedProfileId` 与 `selectedDisplayName` 且 `taskKeycapSurface` 硬编码 `.apps` 与 `会话 1..6`，导致切换两方案时画布与 Inspector 渲染完全一致；同时首次点击摇杆时连续分发 `SelectSurface: "Joystick"` 与 `SelectJoystickDirection` 跳过了 `North`（上）方向，且 `titleForSlot` 将 `17 (South)` 与 `18 (West)` 标题颠倒；三是物理按键事件 `consume_physical_input_event` 无条件覆写 `selected_surface`，在用户在 Inspector 输入框搜索或录制快捷键时会抢占当前编辑槽位并打断焦点；四是 `MicroInputApp.swift` 缺少 `applicationDockMenu` 与 `win.deminiaturize(nil)`，窗口最小化后点击 Dock 无法自动还原。
 - 修复与证据：为 `MicroInputUI` 全部 `.buttonStyle(.plain)` 与 `.onTapGesture` 补齐 `.contentShape(Rectangle())`；在 `CanvasSliceModel` 与 `InspectorSliceModel` 纳入 `selectedProfileId` / `selectedDisplayName`，为 `InlineInspectorView` 补齐 `.id(...)`、`ScrollViewReader` 滚动置顶与搜索框 `.onSubmit` 回车直绑，修正摇杆首次点击与上下左右槽位标题并在画布旋钮/摇杆渲染实时方向指示；在 `consume_physical_input_event` 增加 `!inspector_search_active` 守卫；在 `MicroInputApp.swift` 补齐 `applicationDockMenu`、`win.deminiaturize(nil)` 与 `NSApp.applicationIconImage`；在 `scripts/check-boundaries.py` 固化 `R-C07` 静态门禁。
 - 验证点：`MicroInputTests.testSidebarProfileAndSurfaceSwitchDistinctnessAndSearchFocusIsolation`、`python3 scripts/check-boundaries.py`（`R-C07`）及 `./scripts/run --verify` 真实窗口边缘坐标点击验证。Seen 1x（2026-11-10）。
+
+
+## 生命周期迁移须验证通知入口和旧任务释放
+
+- 起因与后果：Rust 核心迁移删除了 Swift `WorkspaceLifecycle`，但 README 仍声称支持睡眠唤醒。旧 USB 会话、按住听写和六层后台任务没有统一退役入口。
+- 修复：Swift 仅转发 workspace 通知，Rust 先关闭输入准入，再等待旧 reader 与后台任务结束。唤醒使用描述符发现器；独占发现器会提前打开接口，不能仅靠忽略发现回调阻止连接。听写清理保留原窗口句柄，不能依赖执行器最近访问的窗口。
+- 验证点：`WorkspaceLifecycleTests`、`workspace_lifecycle` 模块测试和 `managed_controls` 的原目标清理测试。覆盖实际通知入口、延迟 reader、迟到运行对象与回执、草稿撤销重做、跨应用切换后的原目标清理。合成验证与真实合盖效果分开记录。
+- 复发记录：Seen 1x（2026-11-10）。

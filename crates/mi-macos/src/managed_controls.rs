@@ -42,6 +42,11 @@ pub struct ManagedControlReadiness {
 }
 
 pub trait ManagedAxProvider: Send {
+    fn retain_target(&mut self, _target: &ManagedWindowIdentity) -> Result<(), String> {
+        Ok(())
+    }
+    fn release_target(&mut self, _target: &ManagedWindowIdentity) {}
+
     fn process_has_exited(&self, _pid: i32) -> bool {
         false
     }
@@ -123,7 +128,7 @@ impl<P: ManagedAxProvider> ManagedAxControls<P> {
             .uncleared_targets
             .lock()
             .map_err(|_| blocked("ax_lock_poisoned"))?;
-        validate_uncleared_target(&*provider, &mut targets, &window.identity)?;
+        validate_uncleared_target(&mut *provider, &mut targets, &window.identity)?;
         let (state, control) = dictation_control(&window, adapter)?;
         let desired = match state {
             ObservedDictationState::Idle => ObservedDictationState::Recording,
@@ -139,11 +144,13 @@ impl<P: ManagedAxProvider> ManagedAxControls<P> {
         );
         if result.is_ok() && desired == ObservedDictationState::Idle {
             targets.remove(&window.identity.bundle_id);
+            provider.release_target(&window.identity);
         } else if result.is_ok()
             || result
                 .as_ref()
                 .is_err_and(|error| error.starts_with("unconfirmed:"))
         {
+            provider.retain_target(&window.identity)?;
             targets.insert(window.identity.bundle_id.clone(), window.identity.clone());
         }
         result?;
@@ -158,6 +165,95 @@ impl<P: ManagedAxProvider> ManagedAxControls<P> {
             .map_err(|_| blocked("ax_lock_poisoned"))?;
         let window = capture(&mut *provider, adapter)?;
         self.stop_in_window(&mut *provider, &window, adapter)
+    }
+
+    pub fn start_dictation(&self, adapter: &str) -> Result<(), String> {
+        let adapter = managed_adapter(adapter)?;
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let window = capture(&mut *provider, adapter)?;
+        let mut targets = self
+            .uncleared_targets
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        validate_uncleared_target(&mut *provider, &mut targets, &window.identity)?;
+        let (state, control) = dictation_control(&window, adapter)?;
+        if state != ObservedDictationState::Idle {
+            return Err(blocked("dictation_already_recording"));
+        }
+        let result = press_and_confirm(
+            &mut *provider,
+            &window.identity,
+            adapter,
+            control,
+            ObservedDictationState::Recording,
+            self.readback_timeout,
+        );
+        if result.is_ok()
+            || result
+                .as_ref()
+                .is_err_and(|error| error.starts_with("unconfirmed:"))
+        {
+            provider.retain_target(&window.identity)?;
+            targets.insert(window.identity.bundle_id.clone(), window.identity.clone());
+        }
+        result
+    }
+
+    pub fn stop_owned_dictations(&self) -> Result<(), String> {
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let mut targets = self
+            .uncleared_targets
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let mut failures = Vec::new();
+        for target in targets.values().cloned().collect::<Vec<_>>() {
+            if provider.process_has_exited(target.pid) {
+                targets.remove(&target.bundle_id);
+                provider.release_target(&target);
+                continue;
+            }
+            let Some(adapter) = [
+                DictationAdapter::Cindy,
+                DictationAdapter::Antigravity,
+                DictationAdapter::Dsh,
+                DictationAdapter::Codex,
+            ]
+            .into_iter()
+            .find(|adapter| adapter_bundle(*adapter) == target.bundle_id) else {
+                failures.push(blocked("unsupported_dictation_target"));
+                continue;
+            };
+            let result = provider.read(&target).and_then(|window| {
+                if window.identity != target {
+                    return Err("unconfirmed:dictation_target_changed".into());
+                }
+                stop_in_window(
+                    &mut *provider,
+                    &window,
+                    adapter,
+                    self.readback_timeout,
+                    false,
+                )
+            });
+            match result {
+                Ok(_) => {
+                    targets.remove(&target.bundle_id);
+                    provider.release_target(&target);
+                }
+                Err(error) => failures.push(error),
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
     }
 
     fn stop_in_window(
@@ -181,10 +277,12 @@ impl<P: ManagedAxProvider> ManagedAxControls<P> {
         );
         if result.is_ok() {
             targets.remove(&window.identity.bundle_id);
+            provider.release_target(&window.identity);
         } else if result
             .as_ref()
             .is_err_and(|error| error.starts_with("unconfirmed:"))
         {
+            provider.retain_target(&window.identity)?;
             targets.insert(window.identity.bundle_id.clone(), window.identity.clone());
         }
         result
@@ -455,7 +553,7 @@ pub(crate) fn insert_at_utf16_selection(
 }
 
 fn validate_uncleared_target<P: ManagedAxProvider>(
-    provider: &P,
+    provider: &mut P,
     targets: &mut BTreeMap<String, ManagedWindowIdentity>,
     target: &ManagedWindowIdentity,
 ) -> Result<(), String> {
@@ -466,6 +564,7 @@ fn validate_uncleared_target<P: ManagedAxProvider>(
         if !provider.process_has_exited(owned.pid) {
             return Err(blocked("uncleared_dictation_target_changed"));
         }
+        provider.release_target(owned);
         targets.remove(&target.bundle_id);
     }
     Ok(())

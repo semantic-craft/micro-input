@@ -1784,3 +1784,61 @@ fn live_six_layer_hardware_and_karabiner_acceptance() {
         final_state["installation"]["backup"]
     );
 }
+
+#[test]
+fn workspace_sleep_command_retires_a_held_dictation_without_editing_the_draft() {
+    let temp = TempDir::new().unwrap();
+    let mut store = legacy_store(&temp);
+    store.consume_physical_input_event(
+        board_test_event("AG11", mi_session::InputEventKind::Pressed),
+        Instant::now(),
+    );
+    assert!(store.ptt_controller.is_active);
+    let original = store.document_store.draft.document.editable.clone();
+    store
+        .document_store
+        .update(|draft| draft.create_profile("Sleep draft").map(|_| ()))
+        .unwrap();
+    let before = serde_json::to_value(&store.document_store.draft.document).unwrap();
+    let command = serde_json::from_value::<mi_core::WorkbenchCommand>(
+        serde_json::json!({"domain": "system_will_sleep"}),
+    );
+    assert!(
+        command.is_ok(),
+        "system_will_sleep must reach the Rust lifecycle"
+    );
+    store.dispatch_command(command.unwrap()).unwrap();
+    assert!(
+        !store.ptt_controller.is_active,
+        "sleep must stop held dictation"
+    );
+    assert_eq!(
+        before,
+        serde_json::to_value(&store.document_store.draft.document).unwrap()
+    );
+    store.system_did_wake();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while store.status_message().contains("等待旧会话") {
+        assert!(Instant::now() < deadline);
+        store.poll_hardware_events();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    store
+        .document_store
+        .update(|draft| draft.undo(false))
+        .unwrap();
+    assert!(original == store.document_store.draft.document.editable);
+    store
+        .document_store
+        .update(|draft| draft.undo(true))
+        .unwrap();
+    assert!(store
+        .document_store
+        .draft
+        .document
+        .editable
+        .graph
+        .profiles
+        .values()
+        .any(|p| p.name == "Sleep draft"));
+}

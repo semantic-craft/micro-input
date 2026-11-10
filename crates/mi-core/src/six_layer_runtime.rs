@@ -109,7 +109,7 @@ pub struct RunningSixLayer {
     pub receipts: Option<std::sync::mpsc::Receiver<mi_macos::HostActionReceipt>>,
     stop: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
-    executor: Option<JoinHandle<()>>,
+    executor: Option<JoinHandle<Result<(), String>>>,
 }
 
 pub struct OwnershipPermit {
@@ -166,6 +166,75 @@ impl OwnershipPermit {
 }
 
 impl RunningSixLayer {
+    #[cfg(test)]
+    pub(crate) fn isolated(session: Arc<DeviceSession>, directory: &Path) -> Self {
+        let mut draft = mi_model::draft::Draft::default();
+        mi_model::preset::install_agent_starter_profiles(&mut draft).unwrap();
+        let id = |name: &str| {
+            draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, p)| p.name == name)
+                .unwrap()
+                .0
+                .clone()
+        };
+        let desired = mi_model::board_layers::BoardLayerPlan::recommended(
+            id("Codex"),
+            id("Antigravity"),
+            id("DeepSeek Coder (DSH)"),
+            id(mi_model::preset::MANAGED_CINDY_PROFILE_NAME),
+        );
+        let plan = AppliedSixLayerPlan::compile(
+            &desired,
+            &draft.document,
+            mi_model::host_router::BottomRowLayout::Split,
+            true,
+        )
+        .unwrap();
+        let candidate = HidCandidate {
+            path: "isolated".into(),
+            vid: 0x303a,
+            pid: 0x8298,
+            product: "Synthetic".into(),
+            usage_page: 0xff60,
+            usage: 0x61,
+            usage_pairs: vec![],
+            transport_hint: mi_transport::TransportHint::Usb,
+        };
+        new_running(
+            Arc::new(UserCommandReceiver::bind().unwrap()),
+            Readiness::isolated(),
+            session,
+            candidate,
+            Installation {
+                status: InstallationStatus::Applied,
+                plan,
+                target: TargetKeyboard {
+                    vendor_id: 0x303a,
+                    product_id: 0x8298,
+                    location_id: 0,
+                    usb_parent: 0,
+                    vendor_path: "isolated".into(),
+                },
+                profile_index: 0,
+                backup: directory.join("backup"),
+                config: ConfigPatch {
+                    path: directory.join("karabiner.json"),
+                    original: vec![],
+                    installed: vec![],
+                    profile_name: "isolated".into(),
+                    original_device: None,
+                    installed_device: serde_json::Value::Null,
+                },
+            },
+            1,
+        )
+    }
+
     pub fn start_executor(&mut self, permit: OwnershipPermit) {
         let receiver = Arc::clone(&self.receiver);
         let plan = self.installation.plan.clone();
@@ -191,7 +260,29 @@ impl RunningSixLayer {
                 || permit.check(),
                 |profile, binding, action| executor.execute(profile, binding, action),
             );
+            executor.stop_owned_actions()
         }));
+    }
+
+    pub fn retire(&self) {
+        self.receiver.invalidate("运行代次已结束");
+        self.stop.store(true, Ordering::Release);
+        self.session.disconnect();
+    }
+
+    pub fn shutdown(mut self, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
+        self.retire();
+        runtime.block_on(self.session.shutdown());
+        let monitor_result = self.monitor.take().map_or(Ok(()), |monitor| {
+            monitor.join().map_err(|_| "设备监视清理失败".to_string())
+        });
+        let executor_result = self.executor.take().map_or(Ok(()), |executor| {
+            executor
+                .join()
+                .map_err(|_| "宿主动作清理失败".to_string())
+                .and_then(|result| result)
+        });
+        monitor_result.and(executor_result)
     }
 
     pub fn start_monitor(&mut self, runtime: Arc<tokio::runtime::Runtime>) {
@@ -254,8 +345,7 @@ impl RunningSixLayer {
 
 impl Drop for RunningSixLayer {
     fn drop(&mut self) {
-        self.receiver.invalidate("运行代次已结束");
-        self.stop.store(true, Ordering::Release);
+        self.retire();
         // The monitor only owns immutable evidence and its old receiver, so it
         // may finish a bounded CLI check without delaying the workbench thread.
         self.monitor.take();
