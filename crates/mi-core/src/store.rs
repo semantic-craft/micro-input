@@ -368,8 +368,6 @@ pub struct WorkbenchStore {
             Result<Option<crate::six_layer_runtime::RunningSixLayer>, String>,
         >,
     >,
-    six_layer_ownership_identity: Option<String>,
-    six_layer_ownership_checked_at: Instant,
     foreground_bundle_id: Option<String>,
     tokio_runtime: Arc<tokio::runtime::Runtime>,
     hardware_event_tx: tokio::sync::mpsc::UnboundedSender<HardwareLoopEvent>,
@@ -528,8 +526,6 @@ impl WorkbenchStore {
             six_layer_state,
             six_layer_running: None,
             six_layer_job: None,
-            six_layer_ownership_identity: None,
-            six_layer_ownership_checked_at: Instant::now(),
             foreground_bundle_id: None,
             selected_profile_id: None,
             selected_layer_id: None,
@@ -748,7 +744,7 @@ impl WorkbenchStore {
                     "schema_version": 1,
                     "product": "Creator Micro 2",
                     "vid_pid": "303A:8298",
-                    "connected": self.device_session.is_some(),
+                    "connected": self.device_session_connected(),
                     "document_revision": self.document_store.draft.revision,
                     "host_revision": self.document_store.host_revision(),
                     "ownership_summary": self.native_ownership.summary(),
@@ -1166,7 +1162,7 @@ impl WorkbenchStore {
                     self.hardware_rpc_verified = false;
                     self.lighting_arbiter.invalidate_hardware_cache();
                 }
-                if !self.config.isolated && self.device_session.is_none() {
+                if !self.config.isolated && !self.device_session_connected() {
                     let _ = self.connect_default_usb_with_execution(false);
                 }
                 None
@@ -1861,7 +1857,7 @@ impl WorkbenchStore {
             .unwrap_or_else(|| "未分配".into());
         result.usb_preview_selected = preview == BoardPreviewSelection::UsbStartup;
         if let BoardRouting::Managed { layer } = self.board_routing {
-            if self.device_session.is_some() && self.hardware_rpc_verified {
+            if self.device_session_connected() && self.hardware_rpc_verified {
                 result.observed_layer = Some(layer);
                 result.observed_profile_kind = Some("legacy_three".into());
                 result.observed_status = format!("已确认旧三层，第 {layer} 层");
@@ -3188,8 +3184,11 @@ impl WorkbenchStore {
     }
 
     fn reconcile_ownership_for_profile(&mut self, profile_id: &str, now: Instant) {
+        if self.six_layer_state.installation.is_some() {
+            return;
+        }
         let is_protected = self.is_protected_oai_profile(profile_id);
-        let desired = if is_protected && self.six_layer_state.installation.is_none() {
+        let desired = if is_protected {
             "native"
         } else {
             "micro-input"
@@ -3207,6 +3206,9 @@ impl WorkbenchStore {
     }
 
     fn ensure_live_ownership_fresh(&mut self) {
+        if self.six_layer_state.installation.is_some() {
+            return;
+        }
         if self.system_lifecycle != SystemLifecycle::Awake
             || self.config.isolated
             || (self.selected_profile_id.is_none()
@@ -3758,6 +3760,17 @@ impl WorkbenchStore {
         self.build_projection(true);
     }
 
+    fn device_session_connected(&self) -> bool {
+        if let Some(running) = &self.six_layer_running {
+            return running.readiness.configuration_observed
+                && running.readiness.keyboard_grabbed
+                && running.receiver.failure().is_none();
+        }
+        self.device_session
+            .as_ref()
+            .is_some_and(|session| !session.is_disconnected())
+    }
+
     fn rebuild_local_projection(&mut self) {
         self.build_projection(false);
     }
@@ -3772,7 +3785,25 @@ impl WorkbenchStore {
             .is_some_and(|pid| self.is_protected_oai_profile(pid));
 
         let ownership_banner =
-            OwnershipBannerState::evaluate(&self.native_ownership, is_protected_active);
+            if self.six_layer_state.installation.is_some() || self.six_layer_running.is_some() {
+                if let Some(reason) = self
+                    .six_layer_running
+                    .as_ref()
+                    .and_then(|running| running.receiver.failure())
+                {
+                    OwnershipBannerState::Caution { reason }
+                } else if self.device_session_connected() {
+                    OwnershipBannerState::Ready {
+                        summary: "六层标准键输入已连接".into(),
+                    }
+                } else {
+                    OwnershipBannerState::Caution {
+                        reason: "六层输入尚未连接".into(),
+                    }
+                }
+            } else {
+                OwnershipBannerState::evaluate(&self.native_ownership, is_protected_active)
+            };
         let editing_device = self.document_store.editing_device();
         let can_edit_draft =
             !self.document_store.draft.read_only && self.document_store.draft.loaded_format == 2;
@@ -3785,7 +3816,7 @@ impl WorkbenchStore {
             HeaderReadyState::Caution {
                 text: ownership_banner.text().to_string(),
             }
-        } else if self.device_session.is_some() {
+        } else if self.device_session_connected() {
             HeaderReadyState::Ready {
                 text: "小键盘已连接".to_string(),
             }
@@ -3833,7 +3864,7 @@ impl WorkbenchStore {
         let header = HeaderProjection {
             ready_state,
             banner: ownership_banner.clone(),
-            show_connect_button: self.device_session.is_none(),
+            show_connect_button: !self.device_session_connected(),
             show_return_to_host_button: editing_device,
             host_execution_enabled: self.document_store.host_execution_enabled(),
             can_edit_draft,
@@ -3907,7 +3938,7 @@ impl WorkbenchStore {
 
         let (device_connected, device_summary) = if let Some(cand) = &self.connected_candidate {
             (
-                self.device_session.is_some(),
+                self.device_session_connected(),
                 format!(
                     "{} ({:04X}:{:04X}) · USB HID 只读保护已启用",
                     cand.product, cand.vid, cand.pid

@@ -196,7 +196,7 @@ E-079/E-081：当前0.6.3/USB8298应用已通过显式身份→fs.list→smart/k
 
 读取限额为本地策略：每文件4MiB、总量8MiB、每块最多3072字节、单请求10秒、整次60秒、无自动重试。失败/取消保留旧字节和时间并标stale；smart缺失、零字节、合法空对象分别处理。前后list一致不证明跨文件原子性或无ABA变化。
 
-接收循环先对完整JSON提取合法响应ID；非pending回应丢弃，不以其未知echo终结当前会话。只有当前请求的回应继续接受第8节严格echo/result/error验证；带method/id但无result/error的消息仍为未执行通知。这没有解决同ID跨进程冲突或共享channel写流交错，UNKNOWN-17保留。
+接收循环先对完整 JSON 判断响应归属；非 pending ID 或没有可关联数字 ID 的 result/error 包丢弃，不完成请求，也不转成输入通知。若 id/i 任一匹配 pending，则仍检查别名冲突；ID 匹配但 method 明确不同的响应也忽略。只有当前请求的回应继续接受第 8 节严格 echo/result/error 验证。带 method/id 但无 result/error 的消息仍为未执行通知。无法关联的错误不一定来自其他客户端；若没有有效回应，本请求仍超时失败。这没有解决同 ID 跨进程冲突或共享 channel 写流交错，UNKNOWN-17 保留。
 
 ## 10. 会话终止、取消与退出
 

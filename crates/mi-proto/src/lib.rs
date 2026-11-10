@@ -87,6 +87,36 @@ pub fn response_id(line: &[u8]) -> Result<Option<u64>, ProtoError> {
         .ok_or_else(|| ProtoError::Invalid("invalid response id".into()))?;
     Ok(Some(id))
 }
+/// Discard responses that cannot be associated with the pending request before
+/// strict decoding. A matching ID in either alias still requires validation;
+/// conflicting aliases must not disguise a damaged matching response.
+pub fn is_unmatched_response(
+    line: &[u8],
+    pending: Option<(u16, &str)>,
+) -> Result<bool, ProtoError> {
+    let v: Value = serde_json::from_slice(line)
+        .map_err(|_| ProtoError::Invalid("invalid JSON object".into()))?;
+    if !v.is_object() {
+        return Err(ProtoError::Invalid("expected object".into()));
+    }
+    if v.get("result").is_none() && v.get("error").is_none() {
+        return Ok(false);
+    }
+    let Some((id, method)) = pending else {
+        return Ok(true);
+    };
+    if !["id", "i"]
+        .iter()
+        .any(|key| v.get(key).and_then(Value::as_u64) == Some(u64::from(id)))
+    {
+        return Ok(true);
+    }
+    // Check ID aliases before a method mismatch can discard a matching packet.
+    alias(&v, "id", "i")?;
+    Ok(alias(&v, "method", "m")?
+        .and_then(Value::as_str)
+        .is_some_and(|echo| echo != method))
+}
 pub struct JsonCodec;
 impl RpcCodec for JsonCodec {
     fn encode(&self, r: &RpcRequest) -> Result<Vec<u8>, ProtoError> {
