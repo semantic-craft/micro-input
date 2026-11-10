@@ -325,9 +325,9 @@ pub struct CanvasProjection {
     pub status_cluster_bounds: CanvasRect,
     pub status_led_hex: String,
     pub underglow_hex: String,
-    pub active_hardware_slot: u8,
+    pub board_preview_layer: Option<u8>,
     pub touch_led_states: [bool; 3],
-    pub active_hardware_slot_label: String,
+    pub board_preview_label: String,
     pub protected_lock: Option<ProtectedLayerLockProjection>,
     pub can_edit_bindings: bool,
     pub can_add_lighting: bool,
@@ -372,9 +372,9 @@ impl Default for CanvasProjection {
             status_cluster_bounds: zero,
             status_led_hex: String::new(),
             underglow_hex: String::new(),
-            active_hardware_slot: 0,
+            board_preview_layer: None,
             touch_led_states: [true, false, false],
-            active_hardware_slot_label: "USB · Antigravity".to_string(),
+            board_preview_label: "USB 启动方案预览".to_string(),
             protected_lock: None,
             can_edit_bindings: true,
             can_add_lighting: true,
@@ -483,8 +483,6 @@ pub enum CanvasAction {
     ApplyKnobJoystickPreset(KnobJoystickPreset),
     AssignSlotAction { slot: u32, action_id: String },
     UnlockBySwitchingOrCreatingCustomLayer,
-    CycleTouchProfileSlot,
-    ActivateHardwareSlot(u8),
 }
 
 pub fn format_concise_keycap_caption(raw_label: &str) -> String {

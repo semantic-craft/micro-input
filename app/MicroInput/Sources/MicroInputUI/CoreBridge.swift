@@ -147,10 +147,7 @@ public final class CoreStore {
 
         var nextSidebar = SidebarSliceModel()
         nextSidebar.sidebarRows = m.sidebarRows
-        nextSidebar.hardwareSlots = m.hardwareSlots
-        nextSidebar.activeHardwareSlot = m.activeHardwareSlot
-        nextSidebar.boardProfileManaged = m.boardProfileManaged
-        nextSidebar.canProvisionBoard = m.canProvisionBoard
+        nextSidebar.boardLayers = m.boardLayers
         nextSidebar.selectedProfileId = m.selectedProfileId
         nextSidebar.selectedDisplayName = m.selectedDisplayName
         nextSidebar.activeHostProfileId = m.activeHostProfileId
@@ -192,9 +189,9 @@ public final class CoreStore {
         nextCanvas.keycapCells = m.keycapCells
         nextCanvas.statusLedHex = m.statusLedHex
         nextCanvas.underglowHex = m.underglowHex
-        nextCanvas.activeHardwareSlot = m.activeHardwareSlot
+        nextCanvas.boardPreviewLayer = m.boardPreviewLayer
         nextCanvas.touchLedStates = m.touchLedStates
-        nextCanvas.activeHardwareSlotLabel = m.activeHardwareSlotLabel
+        nextCanvas.boardPreviewLabel = m.boardPreviewLabel
         nextCanvas.protectedLock = m.protectedLock
         nextCanvas.canEditBindings = m.canEditBindings
         nextCanvas.canAddLighting = m.canAddLighting
@@ -352,24 +349,34 @@ public final class CoreStore {
                     )
                 }
             }
-            m.activeHardwareSlot = sidebar["active_hardware_slot"] as? Int ?? 0
-            m.boardProfileManaged = sidebar["board_profile_managed"] as? Bool ?? false
-            m.canProvisionBoard = sidebar["can_provision_board"] as? Bool ?? false
-            if let hwSlots = sidebar["hardware_slots"] as? [[String: Any]] {
-                m.hardwareSlots = hwSlots.enumerated().map { idx, s in
-                    HardwareProfileSlotModel(
-                        slotIndex: s["slot_index"] as? Int ?? idx,
-                        slotKind: s["slot_kind"] as? String ?? "UsbPlug",
-                        title: s["title"] as? String ?? "",
-                        triggerBadge: s["trigger_badge"] as? String ?? "",
-                        profileId: s["profile_id"] as? String ?? "",
-                        displayName: s["display_name"] as? String ?? "",
-                        monogram: s["monogram"] as? String ?? "",
-                        bundleId: s["bundle_id"] as? String,
-                        isActiveSlot: s["is_active_slot"] as? Bool ?? false,
-                        isActiveProfile: s["is_active_profile"] as? Bool ?? false
-                    )
+            if let board = sidebar["board_layers"] as? [String: Any] {
+                if let layers = board["layers"] as? [[String: Any]] {
+                    m.boardLayers.layers = layers.compactMap { row in
+                        guard let layer = row["layer"] as? Int,
+                              let leds = row["leds"] as? [Bool], leds.count == 3 else { return nil }
+                        return BoardLayerModel(
+                            layer: layer, leds: leds,
+                            profileId: row["profile_id"] as? String,
+                            displayName: row["display_name"] as? String ?? "未分配",
+                            owner: row["owner"] as? String ?? "Unassigned",
+                            isPreviewSelected: row["is_preview_selected"] as? Bool ?? false,
+                            assignmentIssue: row["assignment_issue"] as? String
+                        )
+                    }
                 }
+                if let choices = board["profile_choices"] as? [[String: Any]] {
+                    m.boardLayers.profileChoices = choices.compactMap { row in
+                        guard let id = row["profile_id"] as? String, let name = row["display_name"] as? String else { return nil }
+                        return BoardProfileChoiceModel(profileId: id, displayName: name)
+                    }
+                }
+                m.boardLayers.usbStartupProfileId = board["usb_startup_profile_id"] as? String
+                m.boardLayers.usbStartupDisplayName = board["usb_startup_display_name"] as? String ?? "未分配"
+                m.boardLayers.usbPreviewSelected = board["usb_preview_selected"] as? Bool ?? false
+                m.boardLayers.observedLayer = board["observed_layer"] as? Int
+                m.boardLayers.observedProfileKind = board["observed_profile_kind"] as? String
+                m.boardLayers.observedStatus = board["observed_status"] as? String ?? "设备层未确认"
+                m.boardLayers.applyBlockReason = board["apply_block_reason"] as? String ?? "六层应用尚未可用"
             }
         }
 
@@ -386,7 +393,8 @@ public final class CoreStore {
             if let leds = canvas["touch_led_states"] as? [Bool], leds.count == 3 {
                 m.touchLedStates = leds
             }
-            m.activeHardwareSlotLabel = canvas["active_hardware_slot_label"] as? String ?? "插入 USB · Antigravity"
+            m.boardPreviewLayer = canvas["board_preview_layer"] as? Int
+            m.boardPreviewLabel = canvas["board_preview_label"] as? String ?? "USB 启动方案预览"
             m.canEditBindings = canvas["can_edit_bindings"] as? Bool ?? true
             m.canAddLighting = canvas["can_add_lighting"] as? Bool ?? true
             m.canExportOrCopyLayer = canvas["can_export_or_copy_layer"] as? Bool ?? true

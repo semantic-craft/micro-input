@@ -257,4 +257,74 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+    #[test]
+    fn ffi_board_intent_never_refreshes_ownership_or_activates_a_host() {
+        use mi_bridge::{NativeOwnershipController, UnixNativeOwnershipTransport};
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path();
+        let socket = directory.join("ownership.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut store = WorkbenchStore::open_isolated(&directory).unwrap();
+        store.config.isolated = false;
+        store.native_ownership =
+            NativeOwnershipController::new(Some(UnixNativeOwnershipTransport::new(&socket)), false);
+        store.native_ownership.set_desired_owner("native");
+        store.document_store.set_host_active_profile(None).unwrap();
+        let generation = store.native_ownership.generation();
+        let selected = store.projection().selected_profile_id.clone();
+        let board = &store.projection().sidebar.board_layers;
+        let codex = board
+            .profile_choices
+            .iter()
+            .find(|row| row.display_name == "Codex")
+            .unwrap()
+            .profile_id
+            .clone();
+        let cindy = board
+            .profile_choices
+            .iter()
+            .find(|row| row.display_name == "Cindy")
+            .unwrap()
+            .profile_id
+            .clone();
+        let commands = [
+            serde_json::json!({"PreviewBoardLayer":1}),
+            serde_json::json!({"SetBoardLayerProfile":{"layer":5,"profile_id":cindy}}),
+            serde_json::json!({"PreviewBoardLayer":5}),
+            serde_json::json!({"SetBoardLayerProfile":{"layer":6,"profile_id":codex}}),
+            serde_json::json!({"PreviewBoardLayer":6}),
+            serde_json::json!({"SetBoardLayerProfile":{"layer":6,"profile_id":null}}),
+            serde_json::json!("ResetBoardLayerPlan"),
+            serde_json::json!("ProvisionBoardLayers"),
+        ];
+        for action in commands {
+            let input =
+                CString::new(serde_json::json!({"domain":"sidebar","action":action}).to_string())
+                    .unwrap();
+            unsafe {
+                let output = mi_core_dispatch_json(&mut store, input.as_ptr());
+                if !output.is_null() {
+                    mi_core_string_free(output);
+                }
+            }
+            assert!(store.active_host_profile_id().is_none());
+            assert_eq!(store.projection().selected_profile_id, selected);
+            assert_eq!(store.native_ownership.generation(), generation);
+            assert!(!store.native_ownership.has_pending_request());
+            assert!(!store.ptt_controller.is_active);
+            assert!(store.dispatched_receipts().is_empty());
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+        // The listener is a live positive control for the path the commands must avoid.
+        store.set_status_message("force normal runtime reconciliation");
+        assert!(listener.accept().is_ok());
+        drop(store);
+        drop(listener);
+    }
 }

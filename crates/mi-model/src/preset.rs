@@ -927,6 +927,8 @@ fn legacy_agent_specs() -> Vec<(&'static str, Vec<AgentAssignment>)> {
     ]
 }
 
+pub const MANAGED_CINDY_PROFILE_NAME: &str = "Cindy · Micro Input";
+
 pub const LOCAL_CODEX_PROFILE_NAME: &str = "Codex · Micro Input";
 
 pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, String> {
@@ -1492,6 +1494,55 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         .clone();
     specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments));
 
+    specs.push((
+        MANAGED_CINDY_PROFILE_NAME,
+        vec![
+            (
+                0,
+                "desktop-open",
+                "打开 / 聚焦 Cindy",
+                "应用",
+                "com.xd.cindy",
+                ActionKind::OpenApp {
+                    bundle_id: "com.xd.cindy".into(),
+                },
+            ),
+            (
+                1,
+                "desktop-input",
+                "聚焦当前输入框",
+                "Agent",
+                "com.xd.cindy",
+                ActionKind::AgentCommand {
+                    adapter: "cindy".into(),
+                    command: "focus-input".into(),
+                },
+            ),
+            (
+                2,
+                "desktop-search",
+                "搜索任务",
+                "Agent",
+                "com.xd.cindy",
+                ActionKind::AgentCommand {
+                    adapter: "cindy".into(),
+                    command: "search".into(),
+                },
+            ),
+            (
+                3,
+                "desktop-new",
+                "新建会话",
+                "Agent",
+                "com.xd.cindy",
+                ActionKind::AgentCommand {
+                    adapter: "cindy".into(),
+                    command: "new-chat".into(),
+                },
+            ),
+        ],
+    ));
+
     let mut work = draft.clone();
     // Retire only unchanged source profiles from the exact bundled fixture, even
     // when other profiles have since been added. Preserve edited and imported data.
@@ -1600,7 +1651,10 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             .map(|(id, _)| id.clone());
         let pid = if let Some(pid) = existing_id {
             let p = &work.document.editable.graph.profiles[&pid];
-            if profile_name == LOCAL_CODEX_PROFILE_NAME {
+            if matches!(
+                profile_name,
+                LOCAL_CODEX_PROFILE_NAME | MANAGED_CINDY_PROFILE_NAME
+            ) {
                 created_ids.push(pid);
                 continue;
             }
@@ -2271,7 +2325,7 @@ mod agent_migration_tests {
     fn upgrades_pre_dial_conversational_presets_while_preserving_customized_profiles() {
         let mut draft = Draft::default();
         let ids = install_agent_starter_profiles(&mut draft).unwrap();
-        assert_eq!(ids.len(), 7);
+        assert_eq!(ids.len(), 8);
 
         for native_name in ["Cindy", "Codex"] {
             let pid = draft

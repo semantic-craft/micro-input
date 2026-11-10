@@ -366,10 +366,12 @@ dependencies = [
 name = "mi-ffi"
 version = "0.2.0"
 dependencies = [
+ "mi-bridge",
  "mi-core",
  "mi-macos",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

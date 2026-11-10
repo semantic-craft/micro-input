@@ -2,8 +2,43 @@ use mi_core::{
     AutoSwitchState, BackupCommand, CanonicalAgent, HeaderAction, OwnershipBannerState,
     ProfileCommand, SidebarAction, WorkbenchStore,
 };
+use mi_model::board_layers::{BoardLayer, BoardLayerRoute, BoardPreviewSelection};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+fn legacy_store(temp: &TempDir) -> WorkbenchStore {
+    let store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    let doc = &store.document_store.draft.document;
+    let find = |name: &str| {
+        doc.editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == name)
+            .unwrap()
+            .0
+            .clone()
+    };
+    let ag = find("Antigravity");
+    let preferences = serde_json::json!({
+        "schema_version":1, "favorites":[], "host_active_profile_id":ag,
+        "host_execution_enabled":true, "command_execution_enabled":true,
+        "hardware_profile_slots":[ag, ag, find(mi_model::preset::LOCAL_CODEX_PROFILE_NAME), find("DeepSeek Coder (DSH)")],
+        "active_hardware_slot":1
+    });
+    std::fs::write(
+        temp.path().join("workbench.json"),
+        serde_json::to_vec(doc).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("workbench.preferences.json"),
+        serde_json::to_vec(&preferences).unwrap(),
+    )
+    .unwrap();
+    drop(store);
+    WorkbenchStore::open_isolated(temp.path()).unwrap()
+}
 
 #[test]
 fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status() {
@@ -538,7 +573,11 @@ fn live_ownership_slow_drain_defers_to_background_and_completes_on_poll() {
         .unwrap();
     let switch2_start = Instant::now();
     store.select_and_activate_profile(&herdr_id).unwrap();
-    assert!(switch2_start.elapsed() < Duration::from_millis(5));
+    assert!(
+        switch2_start.elapsed() < Duration::from_millis(5),
+        "steady host switch took {:?}",
+        switch2_start.elapsed()
+    );
 
     server_thread.join().unwrap();
     let _ = std::fs::remove_file(&sock_path);
@@ -740,20 +779,25 @@ fn usb_connect_and_verified_input_pump_dispatches_host_actions_and_handles_disco
 
 #[test]
 fn usb_connect_automatically_verifies_identity_snapshot_lighting_and_writes_acceptance_receipt() {
-    check_usb_host_routing(false, 1);
+    check_usb_host_routing(false, 1, false);
 }
 
 #[test]
 fn verified_board_layers_dispatch_only_to_their_own_host_profile() {
-    check_usb_host_routing(true, 1);
+    check_usb_host_routing(true, 1, false);
 }
 
 #[test]
 fn managed_usb_reconnect_blocks_other_layers_until_a_first_layer_report() {
-    check_usb_host_routing(true, 2);
+    check_usb_host_routing(true, 2, false);
 }
 
-fn check_usb_host_routing(managed: bool, initial_layer: u32) {
+#[test]
+fn recognizing_old_firmware_without_old_bindings_does_not_use_desired_layers() {
+    check_usb_host_routing(true, 1, true);
+}
+
+fn check_usb_host_routing(managed: bool, initial_layer: u32, missing_bindings: bool) {
     use mi_core::HardwareAutoAcceptanceReceipt;
     use mi_proto::{Framer, NativeFramer};
     use mi_transport::{
@@ -927,7 +971,28 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32) {
     }
 
     let temp = TempDir::new().unwrap();
+    let mut store = legacy_store(&temp);
+    if missing_bindings {
+        drop(store);
+        let path = temp.path().join("workbench.preferences.json");
+        let mut preferences: Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        preferences
+            .as_object_mut()
+            .unwrap()
+            .remove("hardware_profile_slots");
+        std::fs::write(path, serde_json::to_vec(&preferences).unwrap()).unwrap();
+        store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    }
+    let original_bindings = store.document_store.legacy_three_bindings().cloned();
+    store.reset_board_layer_plan().unwrap();
+    store.assign_board_layer(BoardLayer::ALL[1], None).unwrap();
+    drop(store);
     let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert_eq!(
+        store.document_store.legacy_three_bindings(),
+        original_bindings.as_ref()
+    );
 
     let mut raw_demo = mi_model::demo().unwrap().raw;
     raw_demo["version"] = json!(1);
@@ -991,7 +1056,9 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32) {
         "connecting a responsive USB 303A:8298 device must automatically complete hardware acceptance"
     );
     assert!(
-        store.status_message().contains(if initial_layer != 1 {
+        store.status_message().contains(if missing_bindings {
+            "未确认"
+        } else if initial_layer != 1 {
             "等待键盘返回第 1 层"
         } else if managed {
             "板载三层已就绪"
@@ -1029,13 +1096,46 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32) {
     assert!(seen.contains(&"lights.preview".to_string()));
     assert!(seen.contains(&"v.oai.thstatus".to_string()));
 
-    assert_eq!(store.projection().sidebar.board_profile_managed, managed);
-    assert_eq!(store.projection().sidebar.active_hardware_slot, 1);
-    if managed {
+    assert_eq!(
+        store.projection().sidebar.board_layers.observed_layer,
+        if managed && initial_layer == 1 && !missing_bindings {
+            Some(1)
+        } else {
+            None
+        }
+    );
+    let directory_entries = || {
+        let mut names: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    let before_files = directory_entries();
+    let before = methods_seen.lock().unwrap().len();
+    let generation = store.projection_generation();
+    assert!(store
+        .provision_board_layers()
+        .unwrap_err()
+        .to_string()
+        .contains("六层"));
+    assert_eq!(methods_seen.lock().unwrap().len(), before);
+    assert_eq!(store.projection_generation(), generation);
+    assert_eq!(directory_entries(), before_files);
+    if missing_bindings {
+        let mut event = board_test_event("AG00", mi_session::InputEventKind::Pressed);
+        event.session_id = store.device_session.as_ref().unwrap().id;
+        event.board_layer = Some(1);
+        let active = store.active_host_profile_id();
         assert!(store
-            .dispatch_sidebar_action(SidebarAction::CycleTouchProfileSlot)
-            .is_err());
+            .handle_hardware_loop_event(mi_core::HardwareLoopEvent::Input(event), Instant::now())
+            .is_none());
+        assert_eq!(store.active_host_profile_id(), active);
+        assert!(store.dispatched_receipts().is_empty());
+        return;
     }
+
     let send = |token| {
         for act in [1, 0] {
             let event = json!({"m":"v.oai.hid","p":{"k":token,"act":act}});
@@ -1060,9 +1160,10 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32) {
     .enumerate()
     {
         if step != 0 && !managed {
-            store
-                .dispatch_sidebar_action(SidebarAction::CycleTouchProfileSlot)
+            let pid = original_bindings.as_ref().unwrap().0[slot - 1]
+                .as_ref()
                 .unwrap();
+            store.select_and_activate_profile(pid).unwrap();
         }
         assert!(!store.is_selected_layer_protected());
         let count = store.dispatched_receipts().len();
@@ -1074,7 +1175,7 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32) {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(store.dispatched_receipts().len(), count + 1);
-        let routed = store.last_host_action_receipt().unwrap();
+        let routed = store.last_host_action_receipt().unwrap().clone();
         assert_eq!(routed.target, target);
         assert!(routed.succeeded());
         assert_eq!(
@@ -1082,110 +1183,309 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32) {
             Some(routed.profile_id.as_str())
         );
         assert!(store.connect_with_transport(&transport, true).unwrap());
-        assert_eq!(store.projection().sidebar.active_hardware_slot, slot as u8);
+        assert_eq!(
+            store.projection().sidebar.board_layers.observed_layer,
+            if managed { Some(slot as u8) } else { None }
+        );
+        store.preview_board_layer(BoardLayer::ALL[5]).unwrap();
+        store.reset_board_layer_plan().unwrap();
+        assert_eq!(
+            store.active_host_profile_id().as_deref(),
+            Some(routed.profile_id.as_str())
+        );
+    }
+    let session_id = store.device_session.as_ref().unwrap().id;
+    store.handle_hardware_loop_event(
+        mi_core::HardwareLoopEvent::Disconnected { session_id },
+        Instant::now(),
+    );
+    assert_eq!(store.projection().sidebar.board_layers.observed_layer, None);
+    assert_eq!(
+        store.document_store.legacy_three_bindings(),
+        original_bindings.as_ref()
+    );
+}
+
+#[test]
+fn six_layer_defaults_and_edits_preserve_running_target_and_empty_slots() {
+    let temp = TempDir::new().unwrap();
+    let mut store = legacy_store(&temp);
+    let legacy = store.document_store.legacy_three_bindings().cloned();
+    let usb = store
+        .document_store
+        .usb_startup_profile_id()
+        .map(str::to_owned);
+    let active = store.active_host_profile_id();
+    let host_revision = store.document_store.host_revision();
+    store.reset_board_layer_plan().unwrap();
+    let board = &store.projection().sidebar.board_layers;
+    assert_eq!(
+        board
+            .layers
+            .iter()
+            .map(|r| r.display_name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Codex",
+            "Antigravity",
+            "DeepSeek Coder (DSH)",
+            "Cindy · Micro Input",
+            "未分配",
+            "未分配"
+        ]
+    );
+    assert_eq!(board.layers[0].owner, "Codex");
+    assert_eq!(board.layers[3].owner, "MicroInput");
+    assert!(board.layers[3]
+        .assignment_issue
+        .as_ref()
+        .unwrap()
+        .contains("尚未接管"));
+    for layer in BoardLayer::ALL {
+        store.preview_board_layer(layer).unwrap();
+        assert_eq!(store.projection().canvas.touch_led_states, layer.leds());
+        assert_eq!(store.active_host_profile_id(), active);
+        assert_eq!(store.document_store.host_revision(), host_revision);
+        assert_eq!(
+            store.document_store.legacy_three_bindings(),
+            legacy.as_ref()
+        );
+        assert_eq!(
+            store.document_store.usb_startup_profile_id(),
+            usb.as_deref()
+        );
+        assert_eq!(store.projection().sidebar.board_layers.observed_layer, None);
+    }
+    let cindy = store
+        .find_canonical_profile_id(CanonicalAgent::Cindy)
+        .unwrap();
+    store
+        .assign_board_layer(BoardLayer::ALL[4], Some(cindy))
+        .unwrap();
+    assert_eq!(
+        store.projection().sidebar.board_layers.layers[4].owner,
+        "Cindy"
+    );
+    store.assign_board_layer(BoardLayer::ALL[4], None).unwrap();
+    let before = std::fs::read(temp.path().join("workbench.preferences.json")).unwrap();
+    drop(store);
+    let store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert_eq!(
+        std::fs::read(temp.path().join("workbench.preferences.json")).unwrap(),
+        before
+    );
+    assert_eq!(
+        store.document_store.board_preview_selection(),
+        BoardPreviewSelection::Layer(BoardLayer::ALL[5])
+    );
+    assert_eq!(
+        store
+            .document_store
+            .board_layer_plan()
+            .unwrap()
+            .route(BoardLayer::ALL[4]),
+        &BoardLayerRoute::Unassigned
+    );
+    assert_eq!(
+        store.document_store.legacy_three_bindings(),
+        legacy.as_ref()
+    );
+}
+
+#[test]
+fn failed_board_edits_leave_projection_preferences_and_host_state_unchanged() {
+    let temp = TempDir::new().unwrap();
+    let mut store = legacy_store(&temp);
+    let before = store.projection().clone();
+    let plan = store.document_store.board_layer_plan().cloned();
+    let path = temp.path().join("workbench.preferences.json");
+    std::fs::write(path.with_extension("pending"), b"occupied").unwrap();
+    assert!(store.preview_board_layer(BoardLayer::ALL[5]).is_err());
+    assert!(store.reset_board_layer_plan().is_err());
+    assert_eq!(store.projection(), &before);
+    assert_eq!(store.document_store.board_layer_plan(), plan.as_ref());
+}
+
+#[test]
+fn six_layer_preview_cannot_activate_an_unassigned_or_missing_host() {
+    use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+    let temp = TempDir::new().unwrap();
+    let socket = temp.path().join("ownership.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut store = legacy_store(&temp);
+    store.document_store.set_host_active_profile(None).unwrap();
+    store.config.isolated = false;
+    store.native_ownership = mi_bridge::NativeOwnershipController::new(
+        Some(mi_bridge::UnixNativeOwnershipTransport::new(&socket)),
+        false,
+    );
+    store.radial_state.set_enabled(true);
+    for layer in [BoardLayer::ALL[0], BoardLayer::ALL[3], BoardLayer::ALL[5]] {
+        store.preview_board_layer(layer).unwrap();
+        let event = mi_session::InputEvent {
+            session_id: 1,
+            board_layer: None,
+            sequence: 1,
+            ingress_sequence: 1,
+            radial_center: None,
+            radial_position: None,
+            timestamp_ms: 0,
+            kind: mi_session::InputEventKind::Pressed,
+            logical_switch: None,
+            binding_id: Some("AG00".into()),
+            physical_control: None,
+            keycap_group: None,
+            action_role: None,
+            lost_count: 0,
+            action_eligible: true,
+        };
+        assert!(store
+            .consume_physical_input_event(event, Instant::now())
+            .is_none());
+        let mut radial = board_test_event("AG00", mi_session::InputEventKind::UnknownNotification);
+        radial.binding_id = None;
+        radial.radial_position = Some(mi_session::RadialPosition {
+            angle_turns: 0.2,
+            distance: 0.8,
+        });
+        assert!(store
+            .consume_physical_input_event(radial, Instant::now())
+            .is_none());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert!(!store.ptt_controller.is_active);
+        assert!(store.dispatched_receipts().is_empty());
+    }
+    store.set_status_message("normal reconciliation positive control");
+    assert!(listener.accept().is_ok());
+}
+
+fn board_test_event(binding: &str, kind: mi_session::InputEventKind) -> mi_session::InputEvent {
+    mi_session::InputEvent {
+        session_id: 1,
+        board_layer: None,
+        sequence: 1,
+        ingress_sequence: 1,
+        radial_center: None,
+        radial_position: None,
+        timestamp_ms: 0,
+        kind,
+        logical_switch: None,
+        binding_id: Some(binding.into()),
+        physical_control: None,
+        keycap_group: None,
+        action_role: None,
+        lost_count: 0,
+        action_eligible: true,
     }
 }
 
 #[test]
-fn three_board_layer_defaults_cycle_and_preserve_custom_mapping() {
+fn desired_board_edits_leave_held_ptt_for_the_original_release() {
     let temp = TempDir::new().unwrap();
-    let wb_path = temp.path().join("workbench.json");
-    let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
-    store.document_store.open(wb_path).unwrap();
-    store.prepare_desktop_profiles().unwrap();
-    store.ensure_default_hardware_profile_slots();
-
-    let slots = &store.projection().sidebar.hardware_slots;
-    assert_eq!(slots[0].display_name, "Antigravity");
-    assert_eq!(slots[1].display_name, "Antigravity");
-    assert_eq!(slots[2].display_name, "Codex");
-    assert_eq!(slots[3].display_name, "Deepseek Harness");
-    let local_codex = slots[2].profile_id.clone();
-    let native_codex = store
+    let mut store = legacy_store(&temp);
+    let active = store.active_host_profile_id();
+    store.consume_physical_input_event(
+        board_test_event("AG11", mi_session::InputEventKind::Pressed),
+        Instant::now(),
+    );
+    assert!(store.ptt_controller.is_active);
+    let generation = store.native_ownership.generation();
+    let receipts = store.dispatched_receipts().len();
+    store.reset_board_layer_plan().unwrap();
+    let native = store
         .find_canonical_profile_id(CanonicalAgent::Codex)
         .unwrap();
-    assert_ne!(local_codex, native_codex);
-    assert!(store
-        .projection()
-        .status_menu
-        .favorites_2x2
-        .iter()
-        .any(|slot| {
-            slot.title == "Codex" && slot.profile_id.as_deref() == Some(local_codex.as_str())
-        }));
-    assert!(store.set_hardware_slot_profile(2, native_codex).is_err());
-    assert_eq!(
-        store.projection().sidebar.hardware_slots[2].profile_id,
-        local_codex
-    );
-    assert_eq!(store.projection().sidebar.active_hardware_slot, 1);
-    assert_eq!(
-        store.projection().canvas.touch_led_states,
-        [true, false, false]
-    );
-
     store
-        .dispatch_sidebar_action(SidebarAction::CycleTouchProfileSlot)
+        .assign_board_layer(BoardLayer::ALL[0], Some(native))
         .unwrap();
-    assert_eq!(store.projection().sidebar.active_hardware_slot, 2);
-    assert_eq!(
-        store.projection().sidebar.selected_display_name.as_deref(),
-        Some("Codex")
+    store.preview_board_layer(BoardLayer::ALL[0]).unwrap();
+    assert!(store.ptt_controller.is_active);
+    assert_eq!(store.active_host_profile_id(), active);
+    assert_eq!(store.native_ownership.generation(), generation);
+    assert_eq!(store.dispatched_receipts().len(), receipts);
+    store.consume_physical_input_event(
+        board_test_event("AG11", mi_session::InputEventKind::Released),
+        Instant::now(),
     );
-    assert_eq!(
-        store.projection().canvas.touch_led_states,
-        [false, true, false]
-    );
+    assert!(!store.ptt_controller.is_active);
+}
 
-    store
-        .dispatch_sidebar_action(SidebarAction::CycleTouchProfileSlot)
-        .unwrap();
-    assert_eq!(store.projection().sidebar.active_hardware_slot, 3);
-    assert_eq!(
-        store.projection().sidebar.selected_display_name.as_deref(),
-        Some("Deepseek Harness")
-    );
-    assert_eq!(
-        store.projection().canvas.touch_led_states,
-        [false, false, true]
-    );
+#[test]
+fn a_forged_host_route_does_not_grant_execution_to_native_profiles() {
+    let temp = TempDir::new().unwrap();
+    let mut store = legacy_store(&temp);
+    for agent in [CanonicalAgent::Codex, CanonicalAgent::Cindy] {
+        let id = store.find_canonical_profile_id(agent).unwrap();
+        let mut plan = store.document_store.board_layer_plan().unwrap().clone();
+        plan.replace(
+            BoardLayer::ALL[0],
+            BoardLayerRoute::HostProfile {
+                profile_id: id.clone(),
+            },
+        );
+        store
+            .document_store
+            .save_board_configuration(plan, BoardPreviewSelection::Layer(BoardLayer::ALL[0]), None)
+            .unwrap();
+        store
+            .document_store
+            .set_host_active_profile(Some(id))
+            .unwrap();
+        store.preview_board_layer(BoardLayer::ALL[0]).unwrap();
+        assert!(store.projection().sidebar.board_layers.layers[0]
+            .assignment_issue
+            .as_ref()
+            .unwrap()
+            .contains("不一致"));
+        let generation = store.native_ownership.generation();
+        assert!(store
+            .consume_physical_input_event(
+                board_test_event("AG00", mi_session::InputEventKind::Pressed),
+                Instant::now()
+            )
+            .is_none());
+        assert_eq!(store.native_ownership.generation(), generation);
+        assert!(!store.ptt_controller.is_active);
+        assert!(store.dispatched_receipts().is_empty());
+    }
+}
 
-    store
-        .dispatch_sidebar_action(SidebarAction::CycleTouchProfileSlot)
-        .unwrap();
-    assert_eq!(store.projection().sidebar.active_hardware_slot, 1);
-    assert_eq!(
-        store.projection().sidebar.selected_display_name.as_deref(),
-        Some("Antigravity")
-    );
-
-    let herdr_id = store
-        .find_canonical_profile_id(CanonicalAgent::Herdr)
-        .unwrap();
-    store
-        .dispatch_sidebar_action(SidebarAction::SetHardwareSlotProfile {
-            slot_index: 2,
-            profile_id: herdr_id.clone(),
-        })
-        .unwrap();
-    assert_eq!(
-        store.projection().sidebar.hardware_slots[2].display_name,
-        "Herdr"
-    );
-
+#[test]
+fn opening_missing_board_references_preserves_them_and_all_unrelated_preferences() {
+    let temp = TempDir::new().unwrap();
+    let store = legacy_store(&temp);
     drop(store);
-    let mut reopened = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    let path = temp.path().join("workbench.preferences.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value["hardware_profile_slots"] =
+        serde_json::json!(["missing-usb", "missing-first", null, "missing-third"]);
+    value["host_active_profile_id"] = serde_json::Value::Null;
+    value["app_profile_links"] = serde_json::json!({"preserved.app":"missing-first"});
+    value["auto_follow_enabled"] = serde_json::json!(true);
+    value["manual_override"] = serde_json::json!(true);
+    let original = serde_json::to_vec_pretty(&value).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(store.active_host_profile_id().is_none());
+    let board = &store.projection().sidebar.board_layers;
+    assert_eq!(board.layers[0].profile_id.as_deref(), Some("missing-first"));
+    assert_eq!(board.layers[0].display_name, "缺失的方案");
+    assert!(board.layers[1].profile_id.is_none());
+    assert_eq!(board.usb_startup_profile_id.as_deref(), Some("missing-usb"));
+    store.preview_board_layer(BoardLayer::ALL[5]).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["app_profile_links"], value["app_profile_links"]);
+    assert_eq!(saved["auto_follow_enabled"], value["auto_follow_enabled"]);
+    assert_eq!(saved["manual_override"], value["manual_override"]);
     assert_eq!(
-        reopened.projection().sidebar.hardware_slots[2].display_name,
-        "Herdr"
+        saved["host_active_profile_id"],
+        value["host_active_profile_id"]
     );
-
-    reopened
-        .dispatch_sidebar_action(SidebarAction::ResetHardwareSlotsToDefault)
-        .unwrap();
-    assert_eq!(
-        reopened.projection().sidebar.hardware_slots[2].display_name,
-        "Codex"
-    );
-    assert_eq!(reopened.projection().sidebar.active_hardware_slot, 1);
 }

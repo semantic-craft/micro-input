@@ -36,9 +36,9 @@ use crate::{
         SessionStripProjection, SimpleLightingPopoverProjection,
     },
     sidebar::{
-        AutoSwitchState, BackupCommand, CanonicalAgent, HardwareProfileSlotKind,
-        HardwareProfileSlotProjection, OwnershipBannerState, ProfileCommand, SidebarAction,
-        SidebarProfileRow, SidebarProjection, HARDWARE_PROFILE_SLOT_COUNT,
+        AutoSwitchState, BackupCommand, BoardLayerProjection, BoardLayersProjection,
+        BoardProfileChoice, CanonicalAgent, OwnershipBannerState, ProfileCommand, SidebarAction,
+        SidebarProfileRow, SidebarProjection,
     },
     status_menu::{
         FavoriteSlotCardProjection, FavoriteSlotIndex, PendingPresetImportPreview,
@@ -58,6 +58,9 @@ use mi_macos::{
 };
 use mi_model::{
     action_library,
+    board_layers::{
+        BoardLayer, BoardLayerPlan, BoardLayerRoute, BoardPreviewSelection, NativeLayerOwner,
+    },
     document::{LayerNode, LocalDocumentV2},
     draft::{Action, ActionKind, Draft},
     host_router::{
@@ -128,10 +131,6 @@ pub enum HardwareLoopEvent {
     HardwareAutoAccepted {
         session_id: u64,
         receipt: HardwareAutoAcceptanceReceipt,
-    },
-    ThreeLayerProvisioned {
-        session_id: u64,
-        result: Result<u32, String>,
     },
     LiveCandidatesUpdated {
         candidates: Vec<FourAppLiveCandidate>,
@@ -360,8 +359,6 @@ pub struct WorkbenchStore {
     pub radial_slot_configs: [RadialSlotConfig; RADIAL_SECTOR_COUNT],
     pub overlay_controller: OverlayController,
     pub pinned_favorites: PinnedFavoritesGrid,
-    pub hardware_profile_slots: [Option<String>; HARDWARE_PROFILE_SLOT_COUNT],
-    pub active_hardware_slot: u8,
     pub screen_geometry: ScreenGeometry,
     pub last_cursor_position: ScreenPoint,
     pub pending_preset_import: Option<PendingPresetImportPreview>,
@@ -424,6 +421,7 @@ impl WorkbenchStore {
                 .map_err(WorkbenchError::Storage)?;
         }
 
+        let preserve_saved_host_state = document_store.has_saved_host_preferences();
         let native_ownership = if config.isolated {
             NativeOwnershipController::new_isolated()
         } else {
@@ -472,8 +470,6 @@ impl WorkbenchStore {
             radial_slot_configs: RadialSlotConfig::default_app_launcher_slots(),
             overlay_controller: OverlayController::new(),
             pinned_favorites: PinnedFavoritesGrid::default(),
-            hardware_profile_slots: [None, None, None, None],
-            active_hardware_slot: 0,
             screen_geometry: ScreenGeometry::default(),
             last_cursor_position: ScreenPoint::default(),
             pending_preset_import: None,
@@ -532,8 +528,8 @@ impl WorkbenchStore {
         store.prepare_desktop_profiles()?;
         store.ensure_default_agent_links()?;
         store.ensure_default_pinned_favorites();
-        store.ensure_default_hardware_profile_slots();
-        store.initialize_selection()?;
+        store.initialize_board_plan()?;
+        store.initialize_selection(preserve_saved_host_state)?;
         store.status_message = "已就绪".to_string();
         if store.config.auto_connect_usb
             && env::var("MI_AUTO_HOST_READY").ok().as_deref() != Some("0")
@@ -921,7 +917,6 @@ impl WorkbenchStore {
                     let _ =
                         self.apply_routing_operation(RoutingOperation::Execution { enabled: true });
                 }
-                let _ = self.activate_hardware_slot_at(1, Instant::now(), false);
                 self.lighting_arbiter.invalidate_hardware_cache();
                 self.refresh_four_app_lighting();
                 let accept_session = Arc::clone(&session);
@@ -1099,24 +1094,6 @@ impl WorkbenchStore {
                 }
                 None
             }
-            HardwareLoopEvent::ThreeLayerProvisioned { session_id, result } => {
-                if self
-                    .device_session
-                    .as_ref()
-                    .is_some_and(|s| s.id == session_id)
-                {
-                    match result {
-                        Ok(1) => self.arm_board_routing(now),
-                        Ok(_) => self.wait_for_board_first_layer(),
-                        Err(error) => {
-                            self.board_routing = BoardRouting::Unverified;
-                            self.status_message = format!("板载三层未确认，按键已暂停：{error}");
-                        }
-                    }
-                    self.rebuild_projection();
-                }
-                None
-            }
             HardwareLoopEvent::LiveCandidatesUpdated { candidates } => {
                 if self.slot_table.candidates() != candidates.as_slice() {
                     self.ingest_four_app_candidates(candidates);
@@ -1202,7 +1179,7 @@ impl WorkbenchStore {
     pub fn has_all_desktop_agent_presets(&self) -> bool {
         let doc = &self.document_store.draft.document;
         let profiles = &doc.editable.graph.profiles;
-        if self.local_codex_profile_id().is_none() {
+        if self.local_codex_profile_id().is_none() || self.managed_cindy_profile_id().is_none() {
             return false;
         }
         CANONICAL_DESKTOP_AGENT_PROFILES
@@ -1249,6 +1226,9 @@ impl WorkbenchStore {
     }
 
     pub fn ensure_default_agent_links(&mut self) -> Result<(), WorkbenchError> {
+        if self.document_store.has_saved_host_preferences() {
+            return Ok(());
+        }
         let mut canonical_ids: Vec<(CanonicalAgent, String)> = Vec::new();
         for agent in CanonicalAgent::ALL {
             if agent.is_manual_fallback() {
@@ -1305,95 +1285,36 @@ impl WorkbenchStore {
         }
     }
 
-    pub fn ensure_default_hardware_profile_slots(&mut self) {
-        let fallback_first = self
+    fn legacy_host_profile_id(&self, layer: u8) -> Option<String> {
+        let index = layer.checked_sub(1)? as usize;
+        let id = self
             .document_store
-            .draft
-            .document
-            .editable
-            .graph
-            .profile_order
-            .first()
-            .cloned();
-        for (idx, kind) in HardwareProfileSlotKind::ALL.into_iter().enumerate() {
-            let valid_existing = self.hardware_profile_slots[idx]
-                .as_ref()
-                .is_some_and(|pid| {
-                    self.document_store
-                        .draft
-                        .document
-                        .editable
-                        .graph
-                        .profiles
-                        .contains_key(pid)
-                });
-            let legacy_codex_slot = kind == HardwareProfileSlotKind::TouchSlot2
-                && self.hardware_profile_slots[idx]
-                    .as_deref()
-                    .is_some_and(|pid| self.is_native_codex_profile(pid));
-            if !valid_existing || legacy_codex_slot {
-                self.hardware_profile_slots[idx] = self
-                    .default_host_profile_id(kind.default_agent())
-                    .or_else(|| fallback_first.clone());
-            }
+            .legacy_three_bindings()?
+            .0
+            .get(index)?
+            .as_ref()?;
+        let doc = &self.document_store.host_store().draft.document;
+        let profile = doc.editable.graph.profiles.get(id)?;
+        if profile
+            .layer_order
+            .iter()
+            .any(|lid| doc.is_protected_oai_layer(lid))
+        {
+            return None;
         }
-        self.active_hardware_slot = self.active_hardware_slot.min(3);
+        Some(id.clone())
     }
 
-    pub fn activate_hardware_slot(&mut self, slot_index: u8) -> Result<(), WorkbenchError> {
-        if self.board_routing.is_managed() {
-            return Err(WorkbenchError::Routing("请用键盘左下角切换板载层".into()));
-        }
-        self.activate_hardware_slot_at(slot_index, Instant::now(), true)
-    }
-
-    pub fn activate_hardware_slot_at(
+    fn activate_legacy_board_layer(
         &mut self,
-        slot_index: u8,
+        layer: u8,
         now: Instant,
-        emit_hud_notice: bool,
+        notice: bool,
     ) -> Result<(), WorkbenchError> {
-        let Some(kind) = HardwareProfileSlotKind::from_index(slot_index) else {
-            return Err(WorkbenchError::Routing("无效硬件槽位编号".to_string()));
-        };
-        self.ensure_default_hardware_profile_slots();
-        let pid = self.hardware_profile_slots[slot_index as usize]
-            .clone()
-            .ok_or_else(|| WorkbenchError::Routing("该硬件槽位未绑定方案".to_string()))?;
-        self.active_hardware_slot = slot_index;
-        let _ = self.document_store.set_hardware_profile_slots(
-            self.hardware_profile_slots.clone(),
-            self.active_hardware_slot,
-        );
-        self.select_and_activate_profile_at(&pid, now, emit_hud_notice)?;
-        let active_name = self.active_or_selected_profile_display_name();
-        self.status_message = format!("已激活「{}」-> {}", kind.title(), active_name);
-        self.rebuild_projection();
-        Ok(())
-    }
-
-    pub fn cycle_touch_profile_slot(&mut self) -> Result<u8, WorkbenchError> {
-        let next_slot = match self.active_hardware_slot {
-            0 | 1 => 2,
-            2 => 3,
-            _ => 1,
-        };
-        self.activate_hardware_slot(next_slot)?;
-        Ok(next_slot)
-    }
-
-    pub fn handle_firmware_touch_layer_index(
-        &mut self,
-        layer_index: u32,
-    ) -> Result<Option<u8>, WorkbenchError> {
-        let slot_index = match layer_index {
-            1 => 1,
-            2 => 2,
-            3 => 3,
-            _ => return Ok(None),
-        };
-        self.activate_hardware_slot_at(slot_index, Instant::now(), true)?;
-        Ok(Some(slot_index))
+        let id = self.legacy_host_profile_id(layer).ok_or_else(|| {
+            WorkbenchError::Routing("旧三层绑定缺失或属于原生应用，按键已暂停".into())
+        })?;
+        self.select_and_activate_profile_at(&id, now, notice)
     }
 
     fn confirm_board_routing(&mut self, receipt: &HardwareAutoAcceptanceReceipt, now: Instant) {
@@ -1404,6 +1325,7 @@ impl WorkbenchStore {
             Ok(None) => self.board_routing = BoardRouting::Legacy,
             Ok(Some(index))
                 if receipt.exclusive_vendor
+                    && self.document_store.legacy_three_bindings().is_some()
                     && receipt.firmware_version == "0.6.3"
                     && receipt.profile_index == Some(index)
                     && receipt
@@ -1444,7 +1366,7 @@ impl WorkbenchStore {
 
     fn enter_board_first_layer(&mut self, now: Instant) {
         self.board_routing = BoardRouting::Managed { layer: 1 };
-        match self.activate_hardware_slot_at(1, now, false) {
+        match self.activate_legacy_board_layer(1, now, false) {
             Ok(()) => self.status_message = "板载三层已就绪 · 第 1 层".into(),
             Err(error) => {
                 self.board_routing = BoardRouting::Unverified;
@@ -1454,34 +1376,9 @@ impl WorkbenchStore {
     }
 
     pub fn provision_board_layers(&mut self) -> Result<(), WorkbenchError> {
-        let session = self
-            .device_session
-            .as_ref()
-            .filter(|s| self.hardware_rpc_verified && s.has_exclusive_vendor_link())
-            .cloned()
-            .ok_or_else(|| WorkbenchError::Routing("请先连接并确认 Creator Micro 2 独占".into()))?;
-        if self.board_routing == BoardRouting::Checking {
-            return Err(WorkbenchError::Routing("正在确认板载配置".into()));
-        }
-        let now = Instant::now();
-        self.release_board_inputs(session.id, now);
-        self.board_routing = BoardRouting::Checking;
-        self.status_message = "正在备份原映射并应用板载三层…".into();
-        self.rebuild_projection();
-        let tx = self.hardware_event_tx.clone();
-        let backups = self.config.document_dir.clone();
-        self.tokio_runtime.spawn(async move {
-            let result = session
-                .provision_three_layer_profile(&backups)
-                .await
-                .map(|board| board.layer_index)
-                .map_err(|error| error.to_string());
-            let _ = tx.send(HardwareLoopEvent::ThreeLayerProvisioned {
-                session_id: session.id,
-                result,
-            });
-        });
-        Ok(())
+        Err(WorkbenchError::Routing(
+            BoardLayersProjection::default().apply_block_reason,
+        ))
     }
 
     fn route_board_input(&mut self, event: InputEvent, now: Instant) -> Option<HostActionReceipt> {
@@ -1513,14 +1410,14 @@ impl WorkbenchStore {
                     if layer != next {
                         self.release_board_inputs(event.session_id, now);
                     }
-                    let target = self.hardware_profile_slots[next as usize].as_deref()?;
-                    if self.is_protected_oai_profile(target) {
+                    let target = self.legacy_host_profile_id(next)?;
+                    if self.is_protected_oai_profile(&target) {
                         return None;
                     }
                     if layer != next
-                        || self.active_or_selected_profile_id().as_deref() != Some(target)
+                        || self.resolved_active_profile_id().as_deref() != Some(target.as_str())
                     {
-                        self.activate_hardware_slot_at(next, now, layer != next)
+                        self.activate_legacy_board_layer(next, now, layer != next)
                             .ok()?;
                         self.board_routing = BoardRouting::Managed { layer: next };
                     }
@@ -1564,128 +1461,250 @@ impl WorkbenchStore {
         self.radial_state.cancel();
     }
 
-    pub fn set_hardware_slot_profile(
-        &mut self,
-        slot_index: u8,
-        profile_id: String,
-    ) -> Result<(), WorkbenchError> {
-        let Some(kind) = HardwareProfileSlotKind::from_index(slot_index) else {
-            return Err(WorkbenchError::Routing("无效硬件槽位编号".to_string()));
-        };
-        if !self
-            .document_store
+    fn managed_cindy_profile_id(&self) -> Option<String> {
+        self.document_store
+            .host_store()
             .draft
             .document
             .editable
             .graph
             .profiles
-            .contains_key(&profile_id)
-        {
-            return Err(WorkbenchError::Routing("Profile 不存在".to_string()));
-        }
-        if kind != HardwareProfileSlotKind::UsbPlug && self.is_protected_oai_profile(&profile_id) {
-            return Err(WorkbenchError::Routing(
-                "板载三层只能使用由 Micro Input 管理的可编辑方案".into(),
-            ));
-        }
-        self.ensure_default_hardware_profile_slots();
-        self.hardware_profile_slots[slot_index as usize] = Some(profile_id.clone());
-        self.document_store
-            .set_hardware_profile_slots(
-                self.hardware_profile_slots.clone(),
-                self.active_hardware_slot,
-            )
-            .map_err(WorkbenchError::Routing)?;
-        if self.active_hardware_slot == slot_index {
-            self.select_and_activate_profile_at(&profile_id, Instant::now(), true)?;
-        }
-        let target_name = self.profile_display_name_for_id(&profile_id);
-        self.status_message = format!("已将「{}」绑定到「{}」", kind.title(), target_name);
-        self.rebuild_projection();
-        Ok(())
+            .iter()
+            .find(|(id, p)| {
+                p.name == mi_model::preset::MANAGED_CINDY_PROFILE_NAME
+                    && !self.is_protected_oai_profile(id)
+            })
+            .map(|(id, _)| id.clone())
     }
 
-    pub fn reset_hardware_slots_to_default(&mut self) -> Result<(), WorkbenchError> {
-        for kind in HardwareProfileSlotKind::ALL.into_iter().skip(1) {
-            let idx = kind.index() as usize;
-            self.hardware_profile_slots[idx] = self.default_host_profile_id(kind.default_agent());
-        }
-        self.active_hardware_slot = match self.board_routing {
-            BoardRouting::Managed { layer } => layer,
-            _ => 1,
+    fn recommended_board_plan(&self) -> Result<BoardLayerPlan, WorkbenchError> {
+        let required = |id: Option<String>| {
+            id.ok_or_else(|| WorkbenchError::Preset("默认六层所需的软件方案未就绪".into()))
         };
-        self.document_store
-            .set_hardware_profile_slots(
-                self.hardware_profile_slots.clone(),
-                self.active_hardware_slot,
-            )
-            .map_err(WorkbenchError::Routing)?;
-        if let Some(pid) = self.hardware_profile_slots[self.active_hardware_slot as usize].clone() {
-            self.select_and_activate_profile_at(&pid, Instant::now(), true)?;
+        Ok(BoardLayerPlan::recommended(
+            required(self.find_canonical_profile_id(CanonicalAgent::Codex))?,
+            required(self.find_canonical_profile_id(CanonicalAgent::Antigravity))?,
+            required(self.find_canonical_profile_id(CanonicalAgent::DeepseekHarness))?,
+            required(self.managed_cindy_profile_id())?,
+        ))
+    }
+
+    fn initialize_board_plan(&mut self) -> Result<(), WorkbenchError> {
+        if self.document_store.board_layer_plan().is_none() {
+            let plan = self.recommended_board_plan()?;
+            self.document_store.initialize_board_plan_if_absent(plan);
         }
-        self.status_message =
-            "已恢复三层默认映射（Antigravity · Codex · DeepSeek Harness）".to_string();
-        self.rebuild_projection();
         Ok(())
     }
 
-    fn profile_display_name_for_id(&self, profile_id: &str) -> String {
-        let Some(profile) = self
-            .document_store
-            .draft
-            .document
+    fn route_for_profile(&self, profile_id: &str) -> Result<BoardLayerRoute, WorkbenchError> {
+        let doc = &self.document_store.host_store().draft.document;
+        let profile = doc
             .editable
             .graph
             .profiles
             .get(profile_id)
-        else {
-            return "未选择方案".to_string();
-        };
-        CanonicalAgent::from_profile_name(&profile.name)
-            .map(|a| a.display_name().to_string())
-            .unwrap_or_else(|| profile.name.clone())
+            .ok_or_else(|| WorkbenchError::Routing("所选方案不存在".into()))?;
+        if let Some(owner) = mi_model::board_layers::native_owner(doc, profile_id) {
+            return Ok(BoardLayerRoute::Native {
+                owner,
+                profile_id: profile_id.into(),
+            });
+        }
+        if profile
+            .layer_order
+            .iter()
+            .any(|lid| doc.is_protected_oai_layer(lid))
+        {
+            return Err(WorkbenchError::Routing(
+                "受保护方案的原生所有者未确认".into(),
+            ));
+        }
+        Ok(BoardLayerRoute::HostProfile {
+            profile_id: profile_id.into(),
+        })
     }
 
-    fn build_hardware_profile_slots_projection(
-        &self,
-        active_host_id: Option<&str>,
-    ) -> [HardwareProfileSlotProjection; HARDWARE_PROFILE_SLOT_COUNT] {
-        let graph = &self.document_store.draft.document.editable.graph;
-        std::array::from_fn(|idx| {
-            let kind = HardwareProfileSlotKind::ALL[idx];
-            let pid_opt = self.hardware_profile_slots[idx]
-                .clone()
-                .filter(|pid| graph.profiles.contains_key(pid))
-                .or_else(|| self.default_host_profile_id(kind.default_agent()));
-            let Some(pid) = pid_opt else {
-                return HardwareProfileSlotProjection::for_kind(kind);
+    fn save_board_plan(
+        &mut self,
+        plan: BoardLayerPlan,
+        preview: BoardPreviewSelection,
+        usb: Option<String>,
+    ) -> Result<(), WorkbenchError> {
+        self.document_store
+            .save_board_configuration(plan, preview, usb)
+            .map_err(WorkbenchError::Storage)?;
+        self.rebuild_local_projection();
+        Ok(())
+    }
+
+    pub fn preview_board_layer(&mut self, layer: BoardLayer) -> Result<(), WorkbenchError> {
+        self.preview_board_selection(BoardPreviewSelection::Layer(layer))
+    }
+
+    fn preview_board_selection(
+        &mut self,
+        preview: BoardPreviewSelection,
+    ) -> Result<(), WorkbenchError> {
+        self.save_board_plan(
+            self.document_store
+                .board_layer_plan()
+                .cloned()
+                .unwrap_or_default(),
+            preview,
+            self.document_store
+                .usb_startup_profile_id()
+                .map(str::to_owned),
+        )
+    }
+
+    pub fn assign_board_layer(
+        &mut self,
+        layer: BoardLayer,
+        profile_id: Option<String>,
+    ) -> Result<(), WorkbenchError> {
+        let route = profile_id
+            .as_deref()
+            .map(|id| self.route_for_profile(id))
+            .transpose()?
+            .unwrap_or_default();
+        let mut plan = self
+            .document_store
+            .board_layer_plan()
+            .cloned()
+            .unwrap_or_default();
+        plan.replace(layer, route);
+        self.save_board_plan(
+            plan,
+            self.document_store.board_preview_selection(),
+            self.document_store
+                .usb_startup_profile_id()
+                .map(str::to_owned),
+        )
+    }
+
+    pub fn set_usb_startup_profile(
+        &mut self,
+        profile_id: Option<String>,
+    ) -> Result<(), WorkbenchError> {
+        if let Some(id) = &profile_id {
+            self.route_for_profile(id)?;
+        }
+        self.save_board_plan(
+            self.document_store
+                .board_layer_plan()
+                .cloned()
+                .unwrap_or_default(),
+            self.document_store.board_preview_selection(),
+            profile_id,
+        )
+    }
+
+    pub fn reset_board_layer_plan(&mut self) -> Result<(), WorkbenchError> {
+        let plan = self.recommended_board_plan()?;
+        self.save_board_plan(
+            plan,
+            self.document_store.board_preview_selection(),
+            self.document_store
+                .usb_startup_profile_id()
+                .map(str::to_owned),
+        )
+    }
+
+    fn build_board_layers_projection(&self) -> BoardLayersProjection {
+        let doc = &self.document_store.host_store().draft.document;
+        let plan = self
+            .document_store
+            .board_layer_plan()
+            .cloned()
+            .unwrap_or_default();
+        let preview = self.document_store.board_preview_selection();
+        let mut result = BoardLayersProjection::default();
+        result.layers = std::array::from_fn(|i| {
+            let layer = BoardLayer::ALL[i];
+            let route = plan.route(layer);
+            let id = route.profile_id();
+            let profile = id.and_then(|id| doc.editable.graph.profiles.get(id));
+            let issue = match route {
+                BoardLayerRoute::Unassigned => None,
+                _ if profile.is_none() => Some("方案不存在，原引用已保留".into()),
+                _ if id.and_then(|id| self.route_for_profile(id).ok()).as_ref() != Some(route) => {
+                    Some("方案归属与保存的意图不一致，不能执行".into())
+                }
+                BoardLayerRoute::Native { .. } => Some("由原生应用处理；六层隔离未验证".into()),
+                BoardLayerRoute::HostProfile { profile_id }
+                    if Some(profile_id) == self.managed_cindy_profile_id().as_ref() =>
+                {
+                    Some("Cindy 托管方案；尚未接管，原生键盘集成状态未确认".into())
+                }
+                _ => None,
             };
-            let Some(profile) = graph.profiles.get(&pid) else {
-                return HardwareProfileSlotProjection::for_kind(kind);
-            };
-            let canonical = CanonicalAgent::from_profile_name(&profile.name);
-            let display_name = canonical
-                .map(|a| a.display_name().to_string())
-                .unwrap_or_else(|| profile.name.clone());
-            let monogram = canonical
-                .map(|a| a.badge_monogram().to_string())
-                .unwrap_or_else(|| custom_monogram(&profile.name));
-            let bundle_id = canonical
-                .filter(|a| !a.is_manual_fallback())
-                .map(|a| a.bundle_id().to_string());
-            HardwareProfileSlotProjection {
-                slot_index: kind.index(),
-                slot_kind: kind,
-                title: kind.title().to_string(),
-                trigger_badge: kind.trigger_badge().to_string(),
-                profile_id: pid.clone(),
-                display_name,
-                monogram,
-                bundle_id,
-                is_active_slot: self.active_hardware_slot.max(1) == kind.index(),
-                is_active_profile: active_host_id == Some(pid.as_str()),
+            BoardLayerProjection {
+                layer: layer.number(),
+                leds: layer.leds(),
+                profile_id: id.map(str::to_owned),
+                display_name: profile.map(|p| p.name.clone()).unwrap_or_else(|| {
+                    if id.is_some() {
+                        "缺失的方案".into()
+                    } else {
+                        "未分配".into()
+                    }
+                }),
+                owner: match route {
+                    BoardLayerRoute::Unassigned => "Unassigned",
+                    BoardLayerRoute::HostProfile { .. } => "MicroInput",
+                    BoardLayerRoute::Native {
+                        owner: NativeLayerOwner::Codex,
+                        ..
+                    } => "Codex",
+                    BoardLayerRoute::Native {
+                        owner: NativeLayerOwner::Cindy,
+                        ..
+                    } => "Cindy",
+                }
+                .into(),
+                is_preview_selected: preview == BoardPreviewSelection::Layer(layer),
+                assignment_issue: issue,
             }
-        })
+        });
+        result.profile_choices = doc
+            .editable
+            .graph
+            .profile_order
+            .iter()
+            .filter_map(|id| {
+                self.route_for_profile(id).ok()?;
+                Some(BoardProfileChoice {
+                    profile_id: id.clone(),
+                    display_name: doc.editable.graph.profiles.get(id)?.name.clone(),
+                })
+            })
+            .collect();
+        result.usb_startup_profile_id = self
+            .document_store
+            .usb_startup_profile_id()
+            .map(str::to_owned);
+        result.usb_startup_display_name = result
+            .usb_startup_profile_id
+            .as_ref()
+            .map(|id| {
+                doc.editable
+                    .graph
+                    .profiles
+                    .get(id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "缺失的方案（原引用保留）".into())
+            })
+            .unwrap_or_else(|| "未分配".into());
+        result.usb_preview_selected = preview == BoardPreviewSelection::UsbStartup;
+        if let BoardRouting::Managed { layer } = self.board_routing {
+            if self.device_session.is_some() && self.hardware_rpc_verified {
+                result.observed_layer = Some(layer);
+                result.observed_profile_kind = Some("legacy_three".into());
+                result.observed_status = format!("已确认旧三层，第 {layer} 层");
+            }
+        }
+        result
     }
 
     pub fn select_and_activate_profile(&mut self, profile_id: &str) -> Result<(), WorkbenchError> {
@@ -1723,7 +1742,7 @@ impl WorkbenchStore {
         self.last_switch_duration = started.elapsed();
         self.refresh_four_app_lighting();
         if emit_hud_notice && !self.overlay_controller.is_cheat_sheet_visible() {
-            let profile_name = self.active_or_selected_profile_display_name();
+            let profile_name = self.active_profile_display_name();
             let mode_summary = self.routing_mode_summary_label();
             let empty_sheet = CheatSheetProjection::default();
             self.overlay_controller.request_profile_switch_notice(
@@ -1796,7 +1815,7 @@ impl WorkbenchStore {
         self.last_switch_duration = started.elapsed();
         self.refresh_four_app_lighting();
         if !self.overlay_controller.is_cheat_sheet_visible() {
-            let profile_name = self.active_or_selected_profile_display_name();
+            let profile_name = self.active_profile_display_name();
             let mode_summary = self.routing_mode_summary_label();
             let empty_sheet = CheatSheetProjection::default();
             self.overlay_controller.request_profile_switch_notice(
@@ -2067,16 +2086,18 @@ impl WorkbenchStore {
             SidebarAction::SelectProfile(profile_id) => {
                 self.select_and_activate_profile(&profile_id)
             }
-            SidebarAction::ActivateHardwareSlot(slot_index) => {
-                self.activate_hardware_slot(slot_index)
+            SidebarAction::PreviewBoardLayer(layer) => self.preview_board_layer(layer),
+            SidebarAction::PreviewUsbStartup => {
+                self.preview_board_selection(BoardPreviewSelection::UsbStartup)
             }
-            SidebarAction::CycleTouchProfileSlot => self.cycle_touch_profile_slot().map(|_| ()),
             SidebarAction::ProvisionBoardLayers => self.provision_board_layers(),
-            SidebarAction::SetHardwareSlotProfile {
-                slot_index,
-                profile_id,
-            } => self.set_hardware_slot_profile(slot_index, profile_id),
-            SidebarAction::ResetHardwareSlotsToDefault => self.reset_hardware_slots_to_default(),
+            SidebarAction::SetBoardLayerProfile { layer, profile_id } => {
+                self.assign_board_layer(layer, profile_id)
+            }
+            SidebarAction::SetUsbStartupProfile(profile_id) => {
+                self.set_usb_startup_profile(profile_id)
+            }
+            SidebarAction::ResetBoardLayerPlan => self.reset_board_layer_plan(),
             SidebarAction::SetAutoFollow(enabled) => self.set_auto_follow(enabled),
             SidebarAction::ToggleAutoFollowPause => self.toggle_auto_follow_pause(),
             SidebarAction::SetShowOtherProfiles(show) => {
@@ -2118,18 +2139,6 @@ impl WorkbenchStore {
             .iter()
             .find(|(_, p)| p.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
             .map(|(pid, _)| pid.clone())
-    }
-
-    fn is_native_codex_profile(&self, profile_id: &str) -> bool {
-        self.document_store
-            .draft
-            .document
-            .editable
-            .graph
-            .profiles
-            .get(profile_id)
-            .is_some_and(|profile| profile.name == "Codex")
-            && self.is_protected_oai_profile(profile_id)
     }
 
     fn default_host_profile_id(&self, agent: CanonicalAgent) -> Option<String> {
@@ -2376,10 +2385,6 @@ impl WorkbenchStore {
                 self.refresh_four_app_lighting();
                 self.rebuild_projection();
                 Ok(())
-            }
-            CanvasAction::CycleTouchProfileSlot => self.cycle_touch_profile_slot().map(|_| ()),
-            CanvasAction::ActivateHardwareSlot(slot_index) => {
-                self.activate_hardware_slot(slot_index)
             }
         }
     }
@@ -2798,8 +2803,6 @@ impl WorkbenchStore {
         self.merge_wide_key
             .store(self.bottom_row_layout.is_merged(), Ordering::SeqCst);
         self.command_execution_enabled = self.document_store.command_execution_enabled();
-        self.hardware_profile_slots = self.document_store.hardware_profile_slots();
-        self.active_hardware_slot = self.document_store.active_hardware_slot();
         self.app_profile_links.clear();
         if let Some(map) = state.get("app_profile_links").and_then(|v| v.as_object()) {
             for (k, v) in map {
@@ -2826,7 +2829,10 @@ impl WorkbenchStore {
             .map_err(WorkbenchError::Routing)
     }
 
-    fn initialize_selection(&mut self) -> Result<(), WorkbenchError> {
+    fn initialize_selection(
+        &mut self,
+        preserve_saved_host_state: bool,
+    ) -> Result<(), WorkbenchError> {
         let existing_active = self.document_store.host_active_profile_id().filter(|pid| {
             self.document_store
                 .draft
@@ -2861,10 +2867,12 @@ impl WorkbenchStore {
                         .first()
                         .cloned()
                 });
-            if let Some(pid) = &antigravity_id {
-                self.document_store
-                    .set_host_active_profile(Some(pid.clone()))
-                    .map_err(WorkbenchError::Routing)?;
+            if !preserve_saved_host_state {
+                if let Some(pid) = &antigravity_id {
+                    self.document_store
+                        .set_host_active_profile(Some(pid.clone()))
+                        .map_err(WorkbenchError::Routing)?;
+                }
             }
             antigravity_id
         };
@@ -2914,8 +2922,11 @@ impl WorkbenchStore {
             .graph
             .profiles
             .get(profile_id)
-            .and_then(|p| p.layer_order.first())
-            .is_some_and(|lid| doc.is_protected_oai_layer(lid))
+            .is_some_and(|p| {
+                p.layer_order
+                    .iter()
+                    .any(|lid| doc.is_protected_oai_layer(lid))
+            })
     }
 
     fn poll_ownership_fast_or_spawn(&mut self, micro_drained: bool, now: Instant) {
@@ -3322,24 +3333,16 @@ impl WorkbenchStore {
             .selected_binding_slot
             .unwrap_or_else(|| self.selected_surface.primary_logical_slot());
 
-        let active_hardware_slot = self.active_hardware_slot.clamp(1, 3);
-        let touch_led_states = match active_hardware_slot {
-            1 => [true, false, false],
-            2 => [false, true, false],
-            3 => [false, false, true],
-            _ => [true, true, true],
+        let board_preview_layer = match self.document_store.board_preview_selection() {
+            BoardPreviewSelection::Layer(layer) => Some(layer),
+            BoardPreviewSelection::UsbStartup => None,
         };
-        let active_slot_kind = HardwareProfileSlotKind::from_index(active_hardware_slot)
-            .unwrap_or(HardwareProfileSlotKind::UsbPlug);
-        let active_slot_profile_name = self.hardware_profile_slots[active_hardware_slot as usize]
-            .as_deref()
-            .map(|pid| self.profile_display_name_for_id(pid))
-            .unwrap_or_else(|| active_slot_kind.default_agent().display_name().to_string());
-        let active_hardware_slot_label = format!(
-            "{} · {}",
-            active_slot_kind.title(),
-            active_slot_profile_name
-        );
+        let touch_led_states = board_preview_layer
+            .map(|layer| layer.leds())
+            .unwrap_or([false; 3]);
+        let board_preview_label = board_preview_layer
+            .map(|layer| format!("第 {} 层预览", layer.number()))
+            .unwrap_or_else(|| "USB 启动方案预览".into());
 
         CanvasProjection {
             profile_id: self.selected_profile_id.clone(),
@@ -3363,9 +3366,9 @@ impl WorkbenchStore {
             ),
             status_led_hex: underglow_hex.clone(),
             underglow_hex,
-            active_hardware_slot,
+            board_preview_layer: board_preview_layer.map(|layer| layer.number()),
             touch_led_states,
-            active_hardware_slot_label,
+            board_preview_label,
             protected_lock,
             can_edit_bindings,
             can_add_lighting,
@@ -3512,6 +3515,14 @@ impl WorkbenchStore {
 
     fn rebuild_projection(&mut self) {
         self.ensure_live_ownership_fresh();
+        self.build_projection(true);
+    }
+
+    fn rebuild_local_projection(&mut self) {
+        self.build_projection(false);
+    }
+
+    fn build_projection(&mut self, sync_host: bool) {
         self.sync_modal_for_layer_protection();
         let rows = self.compute_sidebar_rows();
         let active_host_id = self.document_store.host_active_profile_id();
@@ -3579,24 +3590,10 @@ impl WorkbenchStore {
             busy: self.busy,
         };
 
-        self.ensure_default_hardware_profile_slots();
-        let hardware_slots =
-            self.build_hardware_profile_slots_projection(active_host_id.as_deref());
-        let active_hardware_slot = self.active_hardware_slot.clamp(1, 3);
-
         let sidebar = SidebarProjection {
             section_title: "常用软件方案".to_string(),
             rows,
-            hardware_slots,
-            active_hardware_slot,
-            board_profile_managed: self.board_routing.is_managed(),
-            can_provision_board: self.hardware_rpc_verified
-                && self.board_routing != BoardRouting::Checking
-                && !self.board_routing.is_managed()
-                && self
-                    .device_session
-                    .as_ref()
-                    .is_some_and(|s| s.has_exclusive_vendor_link()),
+            board_layers: self.build_board_layers_projection(),
             selected_profile_id: self.selected_profile_id.clone(),
             selected_display_name,
             active_host_profile_id: active_host_id,
@@ -3629,10 +3626,14 @@ impl WorkbenchStore {
         let overlay = self
             .overlay_controller
             .project(&self.screen_geometry, self.last_cursor_position);
-        self.reconcile_hud_panel(&overlay);
+        if sync_host {
+            self.reconcile_hud_panel(&overlay);
+        }
 
         let radial = self.build_radial_projection();
-        self.reconcile_radial_panel(&radial);
+        if sync_host {
+            self.reconcile_radial_panel(&radial);
+        }
 
         let status_menu = self.build_status_menu_projection(can_edit_draft);
         let next_status_snapshot = StatusItemSnapshot {
@@ -3646,7 +3647,7 @@ impl WorkbenchStore {
             cheat_sheet_visible: status_menu.cheat_sheet_visible,
             pinned_favorite_ids: self.pinned_favorites.slots.clone(),
         };
-        if self.last_status_item_snapshot.as_ref() != Some(&next_status_snapshot) {
+        if sync_host && self.last_status_item_snapshot.as_ref() != Some(&next_status_snapshot) {
             self.status_item_host
                 .sync_status_item(next_status_snapshot.clone());
             self.last_status_item_snapshot = Some(next_status_snapshot);
@@ -3724,23 +3725,20 @@ impl WorkbenchStore {
         }
     }
 
-    fn active_or_selected_profile_id(&self) -> Option<String> {
-        self.document_store
-            .host_active_profile_id()
-            .or_else(|| self.selected_profile_id.clone())
-            .filter(|pid| {
-                self.document_store
-                    .draft
-                    .document
-                    .editable
-                    .graph
-                    .profiles
-                    .contains_key(pid)
-            })
+    fn resolved_active_profile_id(&self) -> Option<String> {
+        self.document_store.host_active_profile_id().filter(|pid| {
+            self.document_store
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .contains_key(pid)
+        })
     }
 
-    fn active_or_selected_canonical_agent(&self) -> Option<CanonicalAgent> {
-        let pid = self.active_or_selected_profile_id()?;
+    fn active_canonical_agent(&self) -> Option<CanonicalAgent> {
+        let pid = self.resolved_active_profile_id()?;
         let profile = self
             .document_store
             .draft
@@ -3753,7 +3751,7 @@ impl WorkbenchStore {
     }
 
     fn active_desktop_agent_adapter(&self) -> Option<String> {
-        let agent = self.active_or_selected_canonical_agent()?;
+        let agent = self.active_canonical_agent()?;
         match agent {
             CanonicalAgent::Antigravity => Some("antigravity".to_string()),
             CanonicalAgent::Codex => Some("codex".to_string()),
@@ -3764,8 +3762,8 @@ impl WorkbenchStore {
         }
     }
 
-    fn active_or_selected_profile_display_name(&self) -> String {
-        let Some(pid) = self.active_or_selected_profile_id() else {
+    fn active_profile_display_name(&self) -> String {
+        let Some(pid) = self.resolved_active_profile_id() else {
             return "未选择方案".to_string();
         };
         let Some(profile) = self
@@ -3804,8 +3802,8 @@ impl WorkbenchStore {
         RadialRouteStamp {
             document_revision: self.document_store.draft.revision,
             host_revision: self.document_store.host_revision(),
-            profile_id: self.active_or_selected_profile_id(),
-            profile_name: self.active_or_selected_profile_display_name(),
+            profile_id: self.resolved_active_profile_id(),
+            profile_name: self.active_profile_display_name(),
         }
     }
 
@@ -3831,7 +3829,7 @@ impl WorkbenchStore {
     fn build_cheat_sheet_projection(&self) -> CheatSheetProjection {
         let doc = &self.document_store.draft.document;
         let graph = &doc.editable.graph;
-        let pid_opt = self.active_or_selected_profile_id();
+        let pid_opt = self.resolved_active_profile_id();
         let layer = pid_opt
             .as_ref()
             .and_then(|pid| graph.profiles.get(pid))
@@ -3892,7 +3890,7 @@ impl WorkbenchStore {
 
         let target_agent_card = self.active_desktop_agent_adapter().map(|adapter| {
             let agent_name = self
-                .active_or_selected_canonical_agent()
+                .active_canonical_agent()
                 .map(|a| a.display_name().to_string())
                 .unwrap_or_else(|| adapter.clone());
             let acks = &self.lighting_arbiter.acknowledged_watermarks;
@@ -3923,7 +3921,7 @@ impl WorkbenchStore {
         });
 
         CheatSheetProjection {
-            profile_name: self.active_or_selected_profile_display_name(),
+            profile_name: self.active_profile_display_name(),
             routing_summary: self.routing_mode_summary_label(),
             target_agent_card,
             key_cells,
@@ -3932,7 +3930,7 @@ impl WorkbenchStore {
 
     fn build_status_menu_projection(&self, can_edit_draft: bool) -> StatusMenuProjection {
         let profiles = &self.document_store.draft.document.editable.graph.profiles;
-        let active_pid = self.active_or_selected_profile_id();
+        let active_pid = self.resolved_active_profile_id();
         let favorites_2x2: [FavoriteSlotCardProjection; FAVORITE_SLOT_COUNT] =
             std::array::from_fn(|idx| {
                 let slot = FavoriteSlotIndex::ALL[idx];
@@ -3959,7 +3957,7 @@ impl WorkbenchStore {
         StatusMenuProjection {
             icon: StatusItemIconSpec::canonical(),
             active_profile_id: active_pid,
-            active_profile_name: self.active_or_selected_profile_display_name(),
+            active_profile_name: self.active_profile_display_name(),
             routing_mode_summary: self.routing_mode_summary_label(),
             favorites_2x2,
             host_execution_enabled: self.document_store.host_execution_enabled(),
@@ -4057,7 +4055,7 @@ impl WorkbenchStore {
     }
 
     pub fn resolve_current_radial_slots(&self) -> [RadialSlot; RADIAL_SECTOR_COUNT] {
-        let active_agent = self.active_or_selected_canonical_agent();
+        let active_agent = self.active_canonical_agent();
         let active_session_preview = active_agent.and_then(|agent| {
             self.slot_table
                 .candidates()
@@ -4066,7 +4064,7 @@ impl WorkbenchStore {
                 .map(|c| c.title.clone())
         });
         let ctx = RadialSlotResolutionContext {
-            has_active_profile: self.active_or_selected_profile_id().is_some(),
+            has_active_profile: self.resolved_active_profile_id().is_some(),
             active_adapter: self.active_desktop_agent_adapter(),
             active_agent_display_name: active_agent.map(|a| a.display_name().to_string()),
             active_session_preview,
@@ -4286,7 +4284,7 @@ impl WorkbenchStore {
             && !self.ptt_controller.is_active
             && self.ptt_controller.cleanup_confirmed
             && self.radial_readiness == RadialInputReadiness::Ready
-            && self.active_or_selected_profile_id().is_some();
+            && self.resolved_active_profile_id().is_some();
 
         if !gates_ok {
             self.radial_state.cancel();
@@ -4717,6 +4715,14 @@ impl WorkbenchStore {
         event: InputEvent,
         now: Instant,
     ) -> Option<HostActionReceipt> {
+        let profile_id = self.resolved_active_profile_id();
+        if event.kind != InputEventKind::Released
+            && profile_id
+                .as_ref()
+                .is_none_or(|id| self.is_protected_oai_profile(id))
+        {
+            return None;
+        }
         if let Some(pos) = event.radial_position {
             if self.radial_state.enabled() {
                 let outcome = self.consume_radial_input(
@@ -4747,9 +4753,7 @@ impl WorkbenchStore {
             return None;
         }
 
-        let profile_id = self
-            .active_or_selected_profile_id()
-            .unwrap_or_else(|| "default".to_string());
+        let profile_id = profile_id.unwrap_or_default();
 
         match event.kind {
             InputEventKind::Released => {

@@ -1,5 +1,8 @@
 //! R-E08: bounded local storage, conflict detection, atomic replacement. No device access.
 pub mod routing;
+use crate::board_layers::{
+    BoardLayer, BoardLayerPlan, BoardLayerRoute, BoardPreviewSelection, LegacyThreeBindings,
+};
 use crate::draft::Draft;
 use std::os::unix::fs::OpenOptionsExt;
 use std::{
@@ -268,6 +271,25 @@ impl DocumentStore {
         self.expected = bytes;
         self.selection = Some((selection_path, selection_bytes));
         self.preferences.open(preferences_path);
+        if self.preferences.migration_backup.is_some() {
+            if let Some(plan) = &mut self.preferences.value.board_layer_plan {
+                for layer in BoardLayer::ALL {
+                    if let Some(id) = plan.route(layer).profile_id().map(str::to_owned) {
+                        if let Some(owner) =
+                            crate::board_layers::native_owner(&self.draft.document, &id)
+                        {
+                            plan.replace(
+                                layer,
+                                BoardLayerRoute::Native {
+                                    owner,
+                                    profile_id: id,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
         self.blocked = false;
         Ok(())
     }
@@ -310,50 +332,58 @@ impl DocumentStore {
         }
         self.preferences.value.bottom_row_layout
     }
-    pub fn hardware_profile_slots(&self) -> [Option<String>; 4] {
-        if let Some(host) = &self.host {
-            return host.hardware_profile_slots();
-        }
-        self.preferences.value.hardware_profile_slots.clone()
+    pub fn has_saved_host_preferences(&self) -> bool {
+        self.host_store().preferences.expected.is_some()
     }
-    pub fn active_hardware_slot(&self) -> u8 {
-        if let Some(host) = &self.host {
-            return host.active_hardware_slot();
-        }
-        self.preferences.value.active_hardware_slot.min(3)
+    pub fn board_layer_plan(&self) -> Option<&BoardLayerPlan> {
+        self.host_store()
+            .preferences
+            .value
+            .board_layer_plan
+            .as_ref()
     }
-    pub fn set_hardware_profile_slots(
+    pub fn board_preview_selection(&self) -> BoardPreviewSelection {
+        self.host_store().preferences.value.preview_selection
+    }
+    pub fn usb_startup_profile_id(&self) -> Option<&str> {
+        self.host_store()
+            .preferences
+            .value
+            .usb_startup_profile_id
+            .as_deref()
+    }
+    pub fn legacy_three_bindings(&self) -> Option<&LegacyThreeBindings> {
+        self.host_store()
+            .preferences
+            .value
+            .legacy_three_bindings
+            .as_ref()
+    }
+    pub fn initialize_board_plan_if_absent(&mut self, plan: BoardLayerPlan) {
+        if let Some(host) = &mut self.host {
+            host.initialize_board_plan_if_absent(plan);
+        } else if self.preferences.value.board_layer_plan.is_none() {
+            self.preferences.value.board_layer_plan = Some(plan);
+            self.preferences.pending_defaults = true;
+        }
+    }
+    pub fn save_board_configuration(
         &mut self,
-        slots: [Option<String>; 4],
-        active_slot: u8,
+        plan: BoardLayerPlan,
+        preview: BoardPreviewSelection,
+        usb_startup: Option<String>,
     ) -> Result<(), String> {
         if let Some(host) = &mut self.host {
-            return host.set_hardware_profile_slots(slots, active_slot);
+            return host.save_board_configuration(plan, preview, usb_startup);
         }
         if self.blocked {
-            return Err("本地文档未载入，四槽位配置未保存".into());
+            return Err("本地文档未载入，六层方案没有保存".into());
         }
-        for pid in slots.iter().flatten() {
-            if !self
-                .draft
-                .document
-                .editable
-                .graph
-                .profiles
-                .contains_key(pid)
-            {
-                return Err("所选槽位 Profile 不存在".into());
-            }
-        }
-        let clamped_active = active_slot.min(3);
-        let changed = self.preferences.value.hardware_profile_slots != slots
-            || self.preferences.value.active_hardware_slot != clamped_active;
-        self.preferences
-            .set_hardware_profile_slots(slots, clamped_active)?;
-        if changed {
-            self.host_state_revision += 1;
-        }
-        Ok(())
+        let mut next = self.preferences.value.clone();
+        next.board_layer_plan = Some(plan);
+        next.preview_selection = preview;
+        next.usb_startup_profile_id = usb_startup;
+        self.preferences.save_with_sync(next, true)
     }
     pub fn set_host_active_profile(&mut self, profile_id: Option<String>) -> Result<(), String> {
         if let Some(host) = &mut self.host {
@@ -640,7 +670,7 @@ impl DocumentStore {
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct HostPreferences {
+struct HostPreferencesV1 {
     schema_version: u32,
     favorites: std::collections::BTreeSet<String>,
     #[serde(default)]
@@ -658,14 +688,38 @@ struct HostPreferences {
     #[serde(default)]
     app_profile_links: std::collections::BTreeMap<String, String>,
     #[serde(default)]
-    hardware_profile_slots: [Option<String>; 4],
+    hardware_profile_slots: Option<[Option<String>; 4]>,
     #[serde(default)]
     active_hardware_slot: u8,
+}
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostPreferences {
+    schema_version: u32,
+    favorites: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    host_active_profile_id: Option<String>,
+    #[serde(default)]
+    host_execution_enabled: bool,
+    #[serde(default)]
+    command_execution_enabled: bool,
+    #[serde(default)]
+    auto_follow_enabled: bool,
+    #[serde(default)]
+    manual_override: bool,
+    #[serde(default)]
+    bottom_row_layout: crate::host_router::BottomRowLayout,
+    #[serde(default)]
+    app_profile_links: std::collections::BTreeMap<String, String>,
+    usb_startup_profile_id: Option<String>,
+    board_layer_plan: Option<BoardLayerPlan>,
+    preview_selection: BoardPreviewSelection,
+    legacy_three_bindings: Option<LegacyThreeBindings>,
 }
 impl Default for HostPreferences {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             favorites: Default::default(),
             host_active_profile_id: None,
             host_execution_enabled: false,
@@ -674,8 +728,10 @@ impl Default for HostPreferences {
             manual_override: false,
             bottom_row_layout: crate::host_router::BottomRowLayout::Split,
             app_profile_links: Default::default(),
-            hardware_profile_slots: [None, None, None, None],
-            active_hardware_slot: 0,
+            usb_startup_profile_id: None,
+            board_layer_plan: None,
+            preview_selection: BoardPreviewSelection::UsbStartup,
+            legacy_three_bindings: None,
         }
     }
 }
@@ -685,20 +741,83 @@ struct HostPreferencesStore {
     path: Option<PathBuf>,
     expected: Option<Vec<u8>>,
     error: Option<String>,
+    migration_backup: Option<Vec<u8>>,
+    pending_defaults: bool,
 }
 impl HostPreferencesStore {
     fn open(&mut self, path: PathBuf) {
         *self = Self::default();
         let result = (|| -> Result<(), String> {
             let bytes = read(&path)?;
-            let value: HostPreferences = match &bytes {
-                Some(bytes) => serde_json::from_slice(bytes)
-                    .map_err(|_| "收藏文件损坏或包含未知字段；原件保留")?,
+            let value = match &bytes {
+                Some(bytes) => {
+                    let header: serde_json::Value =
+                        serde_json::from_slice(bytes).map_err(|_| "偏好文件损坏；原件保留")?;
+                    match header.get("schema_version").and_then(|v| v.as_u64()) {
+                        Some(1) => {
+                            // An explicit null is not an absent array.
+                            if header
+                                .get("hardware_profile_slots")
+                                .is_some_and(|v| v.is_null())
+                            {
+                                return Err("硬件槽位格式无效；原件保留".into());
+                            }
+                            let old: HostPreferencesV1 = serde_json::from_slice(bytes)
+                                .map_err(|_| "偏好文件损坏或包含未知字段；原件保留")?;
+                            if old.active_hardware_slot > 3 {
+                                return Err("旧硬件槽位编号无效；原件保留".into());
+                            }
+                            let plan = old.hardware_profile_slots.as_ref().map(|slots| {
+                                let mut plan = BoardLayerPlan::default();
+                                for (layer, id) in
+                                    BoardLayer::ALL.into_iter().take(3).zip(&slots[1..])
+                                {
+                                    if let Some(profile_id) = id {
+                                        plan.replace(
+                                            layer,
+                                            BoardLayerRoute::HostProfile {
+                                                profile_id: profile_id.clone(),
+                                            },
+                                        );
+                                    }
+                                }
+                                plan
+                            });
+                            let legacy = old.hardware_profile_slots.as_ref().map(|s| {
+                                LegacyThreeBindings([s[1].clone(), s[2].clone(), s[3].clone()])
+                            });
+                            self.migration_backup = Some(bytes.clone());
+                            HostPreferences {
+                                schema_version: 2,
+                                favorites: old.favorites,
+                                host_active_profile_id: old.host_active_profile_id,
+                                host_execution_enabled: old.host_execution_enabled,
+                                command_execution_enabled: old.command_execution_enabled,
+                                auto_follow_enabled: old.auto_follow_enabled,
+                                manual_override: old.manual_override,
+                                bottom_row_layout: old.bottom_row_layout,
+                                app_profile_links: old.app_profile_links,
+                                usb_startup_profile_id: old
+                                    .hardware_profile_slots
+                                    .and_then(|s| s[0].clone()),
+                                board_layer_plan: plan,
+                                preview_selection: if old.active_hardware_slot == 0 {
+                                    BoardPreviewSelection::UsbStartup
+                                } else {
+                                    BoardPreviewSelection::Layer(BoardLayer::try_from(
+                                        old.active_hardware_slot,
+                                    )?)
+                                },
+                                legacy_three_bindings: legacy,
+                            }
+                        }
+                        Some(2) => serde_json::from_slice(bytes)
+                            .map_err(|_| "偏好文件损坏或包含未知字段；原件保留")?,
+                        _ => return Err("偏好版本不支持；原件保留".into()),
+                    }
+                }
                 None => HostPreferences::default(),
             };
-            if value.schema_version != 1 {
-                return Err("收藏版本不支持；原件保留".into());
-            }
             self.value = value;
             self.path = Some(path);
             self.expected = bytes;
@@ -707,14 +826,18 @@ impl HostPreferencesStore {
         self.error = result.err();
     }
     fn save(&mut self, value: HostPreferences) -> Result<(), String> {
+        self.save_with_sync(value, false)
+    }
+    fn save_with_sync(&mut self, value: HostPreferences, durable: bool) -> Result<(), String> {
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
-        if value == self.value {
+        if value == self.value && self.migration_backup.is_none() && !self.pending_defaults {
             return Ok(());
         }
         let Some(path) = self.path.as_ref() else {
             self.value = value;
+            self.pending_defaults = false;
             return Ok(());
         };
         fs::create_dir_all(path.parent().ok_or("无效收藏目录")?).map_err(|e| e.to_string())?;
@@ -735,6 +858,33 @@ impl HostPreferencesStore {
             .map_err(|_| "收藏存在未完成保存文件；原件保留")?;
         let result = (|| -> Result<(), String> {
             file.write_all(&bytes).map_err(|e| e.to_string())?;
+            // Board edits and migration are durable recovery boundaries; runtime routing keeps its atomic rename latency.
+            if durable || self.pending_defaults || self.migration_backup.is_some() {
+                file.sync_all().map_err(|e| e.to_string())?;
+            }
+            if let Some(original) = &self.migration_backup {
+                let backup = path.with_extension("v1.backup.json");
+                match read(&backup)? {
+                    Some(existing) if existing == *original => {}
+                    Some(_) => return Err("旧偏好备份已存在且内容不同；原件保留".into()),
+                    None => {
+                        let mut recovery = OpenOptions::new()
+                            .write(true)
+                            .mode(0o600)
+                            .create_new(true)
+                            .open(&backup)
+                            .map_err(|e| e.to_string())?;
+                        recovery.write_all(original).map_err(|e| e.to_string())?;
+                        recovery.sync_all().map_err(|e| e.to_string())?;
+                    }
+                }
+                if read(&backup)?.as_ref() != Some(original) {
+                    return Err("旧偏好备份读回不符；原件保留".into());
+                }
+                fs::File::open(path.parent().ok_or("无效偏好目录")?)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|e| e.to_string())?;
+            }
             if read(path)? != self.expected {
                 return Err("保存前收藏已变化；原件保留".into());
             }
@@ -746,6 +896,8 @@ impl HostPreferencesStore {
         result?;
         self.value = value;
         self.expected = Some(bytes);
+        self.migration_backup = None;
+        self.pending_defaults = false;
         Ok(())
     }
     fn set_favorite(&mut self, id: &str, favorite: bool) -> Result<(), String> {
@@ -774,16 +926,6 @@ impl HostPreferencesStore {
     fn set_command_execution_enabled(&mut self, enabled: bool) -> Result<(), String> {
         let mut next = self.value.clone();
         next.command_execution_enabled = enabled;
-        self.save(next)
-    }
-    fn set_hardware_profile_slots(
-        &mut self,
-        slots: [Option<String>; 4],
-        active_slot: u8,
-    ) -> Result<(), String> {
-        let mut next = self.value.clone();
-        next.hardware_profile_slots = slots;
-        next.active_hardware_slot = active_slot.min(3);
         self.save(next)
     }
 }

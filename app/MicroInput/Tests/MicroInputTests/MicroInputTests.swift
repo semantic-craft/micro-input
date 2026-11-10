@@ -222,50 +222,34 @@ final class MicroInputTests: XCTestCase {
     }
 
     @MainActor
-    func testThreeBoardLayersDefaultCycleAndReassign() throws {
-        let dir = try makeIsolatedTempDir("hw-slots")
+    func testSixBoardLayersPreviewAndReassignWithoutActivation() throws {
+        let dir = try makeIsolatedTempDir("board-layers")
         defer { try? FileManager.default.removeItem(at: dir) }
-
         let store = CoreStore(isolatedDirectory: dir.path)
-        XCTAssertEqual(store.sidebar.hardwareSlots.count, 4)
-        XCTAssertEqual(store.sidebar.hardwareSlots[0].displayName, "Antigravity")
-        XCTAssertEqual(store.sidebar.hardwareSlots[1].displayName, "Antigravity")
-        XCTAssertEqual(store.sidebar.hardwareSlots[2].displayName, "Codex")
-        XCTAssertEqual(store.sidebar.hardwareSlots[3].displayName, "Deepseek Harness")
-        XCTAssertEqual(store.sidebar.activeHardwareSlot, 1)
-        XCTAssertFalse(store.sidebar.boardProfileManaged)
-        XCTAssertFalse(store.sidebar.canProvisionBoard)
-
-        XCTAssertEqual(store.canvas.touchLedStates, [true, false, false])
-
-        store.dispatch("canvas", "CycleTouchProfileSlot")
-        XCTAssertEqual(store.sidebar.activeHardwareSlot, 2)
-        XCTAssertEqual(store.sidebar.selectedDisplayName, "Codex")
-        XCTAssertEqual(store.canvas.touchLedStates, [false, true, false])
-
-        store.dispatch("canvas", "CycleTouchProfileSlot")
-        XCTAssertEqual(store.sidebar.activeHardwareSlot, 3)
-        XCTAssertEqual(store.sidebar.selectedDisplayName, "Deepseek Harness")
-        XCTAssertEqual(store.canvas.touchLedStates, [false, false, true])
-
-        let herdrRow = try XCTUnwrap(store.sidebar.sidebarRows.first(where: { $0.rawName == "Herdr" }))
-        store.dispatch("sidebar", [
-            "SetHardwareSlotProfile": [
-                "slot_index": 3,
-                "profile_id": herdrRow.profileId
-            ]
-        ])
-        XCTAssertEqual(store.sidebar.hardwareSlots[3].displayName, "Herdr")
-        XCTAssertEqual(store.sidebar.selectedDisplayName, "Herdr")
-
-        store.dispatch("canvas", "CycleTouchProfileSlot")
-        XCTAssertEqual(store.sidebar.activeHardwareSlot, 1)
-        XCTAssertEqual(store.sidebar.selectedDisplayName, "Antigravity")
-
-        store.dispatch("sidebar", "ResetHardwareSlotsToDefault")
-        XCTAssertEqual(store.sidebar.hardwareSlots[3].displayName, "Deepseek Harness")
-        XCTAssertEqual(store.sidebar.activeHardwareSlot, 1)
-        XCTAssertEqual(store.sidebar.selectedDisplayName, "Antigravity")
+        let active = store.sidebar.activeHostProfileId
+        XCTAssertEqual(store.sidebar.boardLayers.layers.count, 6)
+        XCTAssertEqual(store.sidebar.boardLayers.layers.map(\.displayName), ["Codex", "Antigravity", "DeepSeek Coder (DSH)", "Cindy · Micro Input", "未分配", "未分配"])
+        XCTAssertEqual(store.sidebar.boardLayers.layers[0].owner, "Codex")
+        XCTAssertEqual(store.sidebar.boardLayers.layers[3].owner, "MicroInput")
+        for (layer, leds) in [(4, [true,true,false]), (5, [false,true,true]), (6, [true,true,true])] {
+            store.dispatch("sidebar", ["PreviewBoardLayer": layer])
+            XCTAssertEqual(store.canvas.boardPreviewLayer, layer)
+            XCTAssertEqual(store.canvas.touchLedStates, leds)
+            XCTAssertEqual(store.sidebar.activeHostProfileId, active)
+            XCTAssertNil(store.sidebar.boardLayers.observedLayer)
+        }
+        let native = try XCTUnwrap(store.sidebar.boardLayers.profileChoices.first(where: { $0.displayName == "Cindy" }))
+        store.dispatch("sidebar", ["SetBoardLayerProfile": ["layer": 5, "profile_id": native.profileId]])
+        XCTAssertEqual(store.sidebar.boardLayers.layers[4].owner, "Cindy")
+        XCTAssertTrue(store.sidebar.boardLayers.layers[4].assignmentIssue?.contains("原生") == true)
+        store.dispatch("sidebar", ["SetBoardLayerProfile": ["layer": 5, "profile_id": NSNull()]])
+        XCTAssertNil(store.sidebar.boardLayers.layers[4].profileId)
+        store.dispatch("sidebar", "ResetBoardLayerPlan")
+        XCTAssertNil(store.sidebar.boardLayers.layers[5].profileId)
+        XCTAssertEqual(store.sidebar.activeHostProfileId, active)
+        store.dispatch("sidebar", "ProvisionBoardLayers")
+        XCTAssertNil(store.sidebar.boardLayers.observedLayer)
+        XCTAssertFalse(store.sidebar.boardLayers.applyBlockReason.isEmpty)
     }
 
     @MainActor

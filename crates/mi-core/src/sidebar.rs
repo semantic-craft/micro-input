@@ -195,103 +195,56 @@ pub struct SidebarProfileRow {
     pub is_manual_fallback: bool,
 }
 
-pub const HARDWARE_PROFILE_SLOT_COUNT: usize = 4;
-
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum HardwareProfileSlotKind {
-    UsbPlug = 0,
-    TouchSlot1 = 1,
-    TouchSlot2 = 2,
-    TouchSlot3 = 3,
-}
-
-impl HardwareProfileSlotKind {
-    pub const ALL: [Self; HARDWARE_PROFILE_SLOT_COUNT] = [
-        Self::UsbPlug,
-        Self::TouchSlot1,
-        Self::TouchSlot2,
-        Self::TouchSlot3,
-    ];
-
-    pub const DEFAULT_AGENTS: [CanonicalAgent; HARDWARE_PROFILE_SLOT_COUNT] = [
-        CanonicalAgent::Antigravity,
-        CanonicalAgent::Antigravity,
-        CanonicalAgent::Codex,
-        CanonicalAgent::DeepseekHarness,
-    ];
-
-    pub const fn from_index(index: u8) -> Option<Self> {
-        match index {
-            0 => Some(Self::UsbPlug),
-            1 => Some(Self::TouchSlot1),
-            2 => Some(Self::TouchSlot2),
-            3 => Some(Self::TouchSlot3),
-            _ => None,
-        }
-    }
-
-    pub const fn index(self) -> u8 {
-        self as u8
-    }
-
-    pub const fn title(self) -> &'static str {
-        match self {
-            Self::UsbPlug => "插入 USB",
-            Self::TouchSlot1 => "第 1 层",
-            Self::TouchSlot2 => "第 2 层",
-            Self::TouchSlot3 => "第 3 层",
-        }
-    }
-
-    pub const fn trigger_badge(self) -> &'static str {
-        match self {
-            Self::UsbPlug => "USB",
-            Self::TouchSlot1 => "USB 默认 · ●○○",
-            Self::TouchSlot2 => "LED 2 · ○●○",
-            Self::TouchSlot3 => "LED 3 · ○○●",
-        }
-    }
-
-    pub const fn default_agent(self) -> CanonicalAgent {
-        Self::DEFAULT_AGENTS[self as usize]
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardProfileChoice {
+    pub profile_id: String,
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HardwareProfileSlotProjection {
-    pub slot_index: u8,
-    pub slot_kind: HardwareProfileSlotKind,
-    pub title: String,
-    pub trigger_badge: String,
-    pub profile_id: String,
+pub struct BoardLayerProjection {
+    pub layer: u8,
+    pub leds: [bool; 3],
+    pub profile_id: Option<String>,
     pub display_name: String,
-    pub monogram: String,
-    pub bundle_id: Option<String>,
-    pub is_active_slot: bool,
-    pub is_active_profile: bool,
+    pub owner: String,
+    pub is_preview_selected: bool,
+    pub assignment_issue: Option<String>,
 }
 
-impl Default for HardwareProfileSlotProjection {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardLayersProjection {
+    pub layers: [BoardLayerProjection; 6],
+    pub profile_choices: Vec<BoardProfileChoice>,
+    pub usb_startup_profile_id: Option<String>,
+    pub usb_startup_display_name: String,
+    pub usb_preview_selected: bool,
+    pub observed_layer: Option<u8>,
+    pub observed_profile_kind: Option<String>,
+    pub observed_status: String,
+    pub apply_block_reason: String,
+}
+
+impl Default for BoardLayersProjection {
     fn default() -> Self {
-        Self::for_kind(HardwareProfileSlotKind::UsbPlug)
-    }
-}
-
-impl HardwareProfileSlotProjection {
-    pub fn for_kind(kind: HardwareProfileSlotKind) -> Self {
-        let agent = kind.default_agent();
         Self {
-            slot_index: kind.index(),
-            slot_kind: kind,
-            title: kind.title().to_string(),
-            trigger_badge: kind.trigger_badge().to_string(),
-            profile_id: String::new(),
-            display_name: agent.display_name().to_string(),
-            monogram: agent.badge_monogram().to_string(),
-            bundle_id: Some(agent.bundle_id().to_string()),
-            is_active_slot: kind == HardwareProfileSlotKind::UsbPlug,
-            is_active_profile: false,
+            layers: std::array::from_fn(|i| BoardLayerProjection {
+                layer: mi_model::board_layers::BoardLayer::ALL[i].number(),
+                leds: mi_model::board_layers::BoardLayer::ALL[i].leds(),
+                profile_id: None,
+                display_name: "未分配".into(),
+                owner: "Unassigned".into(),
+                is_preview_selected: false,
+                assignment_issue: None,
+            }),
+            profile_choices: Vec::new(),
+            usb_startup_profile_id: None,
+            usb_startup_display_name: "未分配".into(),
+            usb_preview_selected: true,
+            observed_layer: None,
+            observed_profile_kind: None,
+            observed_status: "设备层未确认".into(),
+            apply_block_reason: "六层输入与写入协议尚未验证，当前仅保存本地方案".into(),
         }
     }
 }
@@ -300,10 +253,7 @@ impl HardwareProfileSlotProjection {
 pub struct SidebarProjection {
     pub section_title: String,
     pub rows: Vec<SidebarProfileRow>,
-    pub hardware_slots: [HardwareProfileSlotProjection; HARDWARE_PROFILE_SLOT_COUNT],
-    pub active_hardware_slot: u8,
-    pub board_profile_managed: bool,
-    pub can_provision_board: bool,
+    pub board_layers: BoardLayersProjection,
     pub selected_profile_id: Option<String>,
     pub selected_display_name: Option<String>,
     pub active_host_profile_id: Option<String>,
@@ -325,12 +275,7 @@ impl Default for SidebarProjection {
         Self {
             section_title: "常用软件方案".to_string(),
             rows: Vec::new(),
-            hardware_slots: std::array::from_fn(|idx| {
-                HardwareProfileSlotProjection::for_kind(HardwareProfileSlotKind::ALL[idx])
-            }),
-            active_hardware_slot: 0,
-            board_profile_managed: false,
-            can_provision_board: false,
+            board_layers: BoardLayersProjection::default(),
             selected_profile_id: None,
             selected_display_name: None,
             active_host_profile_id: None,
@@ -377,11 +322,15 @@ pub enum BackupCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SidebarAction {
     SelectProfile(String),
-    ActivateHardwareSlot(u8),
-    CycleTouchProfileSlot,
+    PreviewBoardLayer(mi_model::board_layers::BoardLayer),
+    PreviewUsbStartup,
     ProvisionBoardLayers,
-    SetHardwareSlotProfile { slot_index: u8, profile_id: String },
-    ResetHardwareSlotsToDefault,
+    SetBoardLayerProfile {
+        layer: mi_model::board_layers::BoardLayer,
+        profile_id: Option<String>,
+    },
+    SetUsbStartupProfile(Option<String>),
+    ResetBoardLayerPlan,
     SetAutoFollow(bool),
     ToggleAutoFollowPause,
     SetShowOtherProfiles(bool),

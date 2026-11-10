@@ -34,18 +34,33 @@ public struct SidebarRowModel: Identifiable, Equatable {
     public let isManualFallback: Bool
 }
 
-public struct HardwareProfileSlotModel: Identifiable, Equatable {
-    public var id: Int { slotIndex }
-    public let slotIndex: Int
-    public let slotKind: String
-    public let title: String
-    public let triggerBadge: String
+public struct BoardProfileChoiceModel: Identifiable, Equatable {
+    public var id: String { profileId }
     public let profileId: String
     public let displayName: String
-    public let monogram: String
-    public let bundleId: String?
-    public let isActiveSlot: Bool
-    public let isActiveProfile: Bool
+}
+
+public struct BoardLayerModel: Identifiable, Equatable {
+    public var id: Int { layer }
+    public let layer: Int
+    public let leds: [Bool]
+    public let profileId: String?
+    public let displayName: String
+    public let owner: String
+    public let isPreviewSelected: Bool
+    public let assignmentIssue: String?
+}
+
+public struct BoardLayersModel: Equatable {
+    public var layers: [BoardLayerModel] = []
+    public var profileChoices: [BoardProfileChoiceModel] = []
+    public var usbStartupProfileId: String? = nil
+    public var usbStartupDisplayName: String = "未分配"
+    public var usbPreviewSelected: Bool = true
+    public var observedLayer: Int? = nil
+    public var observedProfileKind: String? = nil
+    public var observedStatus: String = "设备层未确认"
+    public var applyBlockReason: String = "六层输入与写入协议尚未验证，当前仅保存本地方案"
 }
 
 public struct LayerTabModel: Identifiable, Equatable {
@@ -439,10 +454,7 @@ public struct HeaderSliceModel: Equatable {
 
 public struct SidebarSliceModel: Equatable {
     public var sidebarRows: [SidebarRowModel] = []
-    public var hardwareSlots: [HardwareProfileSlotModel] = []
-    public var activeHardwareSlot: Int = 0
-    public var boardProfileManaged: Bool = false
-    public var canProvisionBoard: Bool = false
+    public var boardLayers: BoardLayersModel = BoardLayersModel()
     public var selectedProfileId: String? = nil
     public var selectedDisplayName: String = "未选择方案"
     public var activeHostProfileId: String? = nil
@@ -487,9 +499,9 @@ public struct CanvasSliceModel: Equatable {
     public var keycapCells: [KeycapCellModel] = []
     public var statusLedHex: String = "#14C76B"
     public var underglowHex: String = "#3B82F6"
-    public var activeHardwareSlot: Int = 0
+    public var boardPreviewLayer: Int? = nil
     public var touchLedStates: [Bool] = [true, true, true]
-    public var activeHardwareSlotLabel: String = "插入 USB · Antigravity"
+    public var boardPreviewLabel: String = "USB 启动方案预览"
     public var protectedLock: ProtectedLockModel? = nil
     public var canEditBindings: Bool = true
     public var canAddLighting: Bool = true
@@ -576,10 +588,7 @@ public struct ProjectionModel: Equatable {
     public var busy: Bool = false
 
     public var sidebarRows: [SidebarRowModel] = []
-    public var hardwareSlots: [HardwareProfileSlotModel] = []
-    public var activeHardwareSlot: Int = 0
-    public var boardProfileManaged: Bool = false
-    public var canProvisionBoard: Bool = false
+    public var boardLayers: BoardLayersModel = BoardLayersModel()
     public var selectedProfileId: String? = nil
     public var selectedDisplayName: String = "未选择方案"
     public var activeHostProfileId: String? = nil
@@ -612,8 +621,9 @@ public struct ProjectionModel: Equatable {
     public var keycapCells: [KeycapCellModel] = []
     public var statusLedHex: String = "#14C76B"
     public var underglowHex: String = "#3B82F6"
+    public var boardPreviewLayer: Int? = nil
     public var touchLedStates: [Bool] = [true, true, true]
-    public var activeHardwareSlotLabel: String = "插入 USB · Antigravity"
+    public var boardPreviewLabel: String = "USB 启动方案预览"
     public var protectedLock: ProtectedLockModel? = nil
     public var canEditBindings: Bool = true
     public var canAddLighting: Bool = true

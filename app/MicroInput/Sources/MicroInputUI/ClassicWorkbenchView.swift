@@ -241,15 +241,9 @@ private struct WorkbenchSidebarView: View {
                 .padding(.bottom, 10)
             }
 
-            if !s.hardwareSlots.isEmpty {
+            if !s.boardLayers.layers.isEmpty {
                 Rectangle().fill(UITheme.border).frame(height: 1)
-                HardwareProfileSlotsPanel(
-                    store: store,
-                    slots: s.hardwareSlots.filter { $0.slotIndex > 0 },
-                    rows: s.sidebarRows,
-                    managed: s.boardProfileManaged,
-                    canProvision: s.canProvisionBoard
-                )
+                BoardLayersPanel(store: store, board: s.boardLayers)
             }
 
             Rectangle().fill(UITheme.border).frame(height: 1)
@@ -441,104 +435,80 @@ private struct SidebarProfileRowButton: View, Equatable {
     }
 }
 
-private struct HardwareProfileSlotsPanel: View {
+private struct BoardLayersPanel: View {
     let store: CoreStore
-    let slots: [HardwareProfileSlotModel]
-    let rows: [SidebarRowModel]
-    let managed: Bool
-    let canProvision: Bool
+    let board: BoardLayersModel
+
+    private func assign(_ layer: Int, _ profileId: String?) {
+        store.dispatch("sidebar", ["SetBoardLayerProfile": ["layer": layer, "profile_id": profileId as Any? ?? NSNull()]])
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Text("板载 Profile · 三层")
-                    .font(UITheme.captionMedium)
-                    .foregroundStyle(UITheme.textPrimary)
+            HStack {
+                Text("本地六层方案").font(UITheme.captionMedium)
                 Spacer()
-                if canProvision {
-                    Button("应用到键盘") {
-                        store.dispatch("sidebar", "ProvisionBoardLayers")
-                    }
+                Button("默认") { store.dispatch("sidebar", "ResetBoardLayerPlan") }
                     .buttonStyle(.borderless)
                     .font(UITheme.micro)
-                    .foregroundStyle(UITheme.accent)
-                    .help("备份原有映射，追加一个三层 Profile")
-                } else if !managed {
-                    Button("预览轮换") {
-                        store.dispatch("sidebar", "CycleTouchProfileSlot")
-                    }
-                    .buttonStyle(.borderless)
-                    .font(UITheme.micro)
-                }
-
-                Button("默认") {
-                    store.dispatch("sidebar", "ResetHardwareSlotsToDefault")
-                }
-                .buttonStyle(.borderless)
-                .font(UITheme.micro)
-                .foregroundStyle(UITheme.textSecondary)
-                .help("恢复三层的宿主映射：Antigravity、Codex、DeepSeek Harness")
+                    .help("Codex 原生、Antigravity、DeepSeek Harness、Cindy 托管，5 / 6 层留空")
             }
-
-            ForEach(slots) { slot in
-                HStack(spacing: 6) {
-                    Button {
-                        store.dispatch("sidebar", ["ActivateHardwareSlot": slot.slotIndex])
-                    } label: {
-                        HStack(spacing: 5) {
-                            Circle()
-                                .fill(slot.isActiveSlot ? UITheme.accent : UITheme.strongBorder)
-                                .frame(width: 6, height: 6)
-                            Text(slot.title)
-                                .font(slot.isActiveSlot ? UITheme.captionMedium : UITheme.caption)
-                                .foregroundStyle(UITheme.textPrimary)
-                                .lineLimit(1)
-                            Text(slot.triggerBadge)
-                                .font(UITheme.monoBadge)
-                                .foregroundStyle(UITheme.textMuted)
-                                .lineLimit(1)
-                            Spacer(minLength: 4)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(managed)
-                    .help(managed ? "用键盘左下角换层" : "预览\(slot.title)")
-
-                    Menu {
-                        ForEach(rows.filter { !$0.isProtectedOai }) { row in
-                            Button {
-                                store.dispatch("sidebar", [
-                                    "SetHardwareSlotProfile": [
-                                        "slot_index": slot.slotIndex,
-                                        "profile_id": row.profileId
-                                    ]
-                                ])
-                            } label: {
-                                if row.profileId == slot.profileId {
-                                    Text("✓ \(row.displayName)")
-                                } else {
-                                    Text(row.displayName)
+            ForEach(board.layers) { row in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Button {
+                            store.dispatch("sidebar", ["PreviewBoardLayer": row.layer])
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text("第 \(row.layer) 层").font(UITheme.caption)
+                                ForEach(Array(row.leds.enumerated()), id: \.offset) { led in
+                                    Circle().fill(led.element ? UITheme.accent : UITheme.strongBorder).frame(width: 4, height: 4)
                                 }
+                                Spacer(minLength: 0)
                             }
+                            .contentShape(Rectangle())
                         }
-                    } label: {
-                        Text(slot.displayName)
-                            .font(UITheme.micro)
-                            .foregroundStyle(slot.isActiveSlot ? UITheme.accent : UITheme.textSecondary)
-                            .lineLimit(1)
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("board-preview-\(row.layer)")
+                        Menu {
+                            Button("未分配") { assign(row.layer, nil) }
+                            ForEach(board.profileChoices) { choice in
+                                Button(choice.displayName) { assign(row.layer, choice.profileId) }
+                            }
+                        } label: {
+                            Text(row.displayName).font(UITheme.micro).lineLimit(1)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .accessibilityIdentifier("board-assignment-\(row.layer)")
                     }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
+                    if let issue = row.assignmentIssue {
+                        Text(issue).font(UITheme.micro).foregroundStyle(UITheme.textMuted).fixedSize(horizontal: false, vertical: true)
+                    } else if row.owner == "MicroInput" {
+                        Text("由 Micro Input 控制（尚未应用）").font(UITheme.micro).foregroundStyle(UITheme.textMuted)
+                    }
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(slot.isActiveSlot ? UITheme.surface : Color.clear)
-                )
+                .padding(6)
+                .background(row.isPreviewSelected ? UITheme.surface : Color.clear)
             }
+            Divider()
+            HStack {
+                Button("USB 启动方案") { store.dispatch("sidebar", "PreviewUsbStartup") }
+                    .buttonStyle(.borderless)
+                    .font(UITheme.micro)
+                    .foregroundStyle(board.usbPreviewSelected ? UITheme.accent : UITheme.textSecondary)
+                Menu {
+                    Button("未分配") { store.dispatch("sidebar", ["SetUsbStartupProfile": NSNull()]) }
+                    ForEach(board.profileChoices) { choice in
+                        Button(choice.displayName) { store.dispatch("sidebar", ["SetUsbStartupProfile": choice.profileId]) }
+                    }
+                } label: { Text(board.usbStartupDisplayName).font(UITheme.micro).lineLimit(1) }
+                .menuStyle(.borderlessButton)
+            }
+            Text(board.observedStatus).font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
+            Button("应用到键盘") { store.dispatch("sidebar", "ProvisionBoardLayers") }
+                .disabled(true)
+                .font(UITheme.micro)
+            Text(board.applyBlockReason).font(UITheme.micro).foregroundStyle(UITheme.textMuted).fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)

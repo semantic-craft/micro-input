@@ -11,3 +11,7 @@ mi-core = { path = "../mi-core" }
 mi-macos = { path = "../mi-macos" }
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+mi-bridge = { path = "../mi-bridge" }
+tempfile = "3"

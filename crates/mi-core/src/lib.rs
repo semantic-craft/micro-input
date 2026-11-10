@@ -53,9 +53,9 @@ pub use session_strip::{
     SimpleLightingPopoverProjection,
 };
 pub use sidebar::{
-    AutoSwitchState, BackupCommand, CanonicalAgent, HardwareProfileSlotKind,
-    HardwareProfileSlotProjection, OwnershipBannerState, ProfileCommand, SidebarAction,
-    SidebarProfileRow, SidebarProjection, HARDWARE_PROFILE_SLOT_COUNT,
+    AutoSwitchState, BackupCommand, BoardLayerProjection, BoardLayersProjection,
+    BoardProfileChoice, CanonicalAgent, OwnershipBannerState, ProfileCommand, SidebarAction,
+    SidebarProfileRow, SidebarProjection,
 };
 pub use status_menu::{
     FavoriteSlotCardProjection, FavoriteSlotIndex, PendingPresetImportPreview, PinnedFavoritesGrid,

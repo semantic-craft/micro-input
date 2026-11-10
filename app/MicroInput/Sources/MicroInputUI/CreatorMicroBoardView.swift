@@ -385,63 +385,24 @@ struct CreatorMicroBoardView: View {
     }
 
     private func statusIndicatorClusterCell(c: CanvasSliceModel) -> some View {
-        let leds = c.touchLedStates.count == 3 ? c.touchLedStates : [true, false, false]
-        let slotBadge = "L\(max(c.activeHardwareSlot, 1))"
-        let managed = store.sidebar.boardProfileManaged
-        return ZStack {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(UITheme.mutedSurface.opacity(0.55))
-                .frame(width: cellSize, height: cellSize)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(
-                            c.activeHardwareSlot > 0 ? UITheme.accent.opacity(0.65) : UITheme.border,
-                            lineWidth: 1
-                        )
-                )
-
-            VStack(spacing: 6) {
-                HStack(spacing: 6) {
-                    ForEach(0..<3, id: \.self) { idx in
-                        Button {
-                            store.dispatch("canvas", ["ActivateHardwareSlot": idx + 1])
-                        } label: {
-                            Circle()
-                                .fill(leds[idx] ? UITheme.accent : UITheme.strongBorder)
-                                .frame(width: 5.5, height: 5.5)
-                                .padding(3)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(managed)
-                        .help(managed ? "用键盘左下角换层" : "预览第 \(idx + 1) 层")
-                    }
+        let leds = c.touchLedStates.count == 3 ? c.touchLedStates : [false, false, false]
+        return VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .fill(leds[index] ? UITheme.accent : UITheme.strongBorder)
+                        .frame(width: 5.5, height: 5.5)
                 }
-                Button {
-                    store.dispatch("canvas", "CycleTouchProfileSlot")
-                } label: {
-                    ZStack {
-                        Circle()
-                            .fill(Color(red: 0.18, green: 0.18, blue: 0.20))
-                            .frame(width: 34, height: 34)
-                            .overlay(
-                                Circle()
-                                    .stroke(
-                                        c.activeHardwareSlot > 0 ? UITheme.accent : UITheme.strongBorder,
-                                        lineWidth: 1.2
-                                    )
-                            )
-                        Text(slotBadge)
-                            .font(UITheme.monoBadge)
-                            .foregroundStyle(UITheme.textPrimary)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .disabled(managed)
-                .help(managed ? c.activeHardwareSlotLabel : "预览三个板载层的轮换顺序")
             }
+            Text(c.boardPreviewLayer.map { "L\($0)" } ?? "USB")
+                .font(UITheme.monoBadge)
+                .foregroundStyle(UITheme.textPrimary)
+            Text("预览").font(UITheme.micro).foregroundStyle(UITheme.textMuted)
         }
+        .frame(width: cellSize, height: cellSize)
+        .background(RoundedRectangle(cornerRadius: 12).fill(UITheme.mutedSurface.opacity(0.55)))
+        .help(c.boardPreviewLabel)
+        .accessibilityLabel(c.boardPreviewLabel)
     }
 
     private func programmableKeyCell(slot: Int, c: CanvasSliceModel, ss: SessionStripSliceModel) -> some View {
