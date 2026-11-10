@@ -50,7 +50,7 @@ mod macos {
     use std::time::{Duration, Instant};
 
     type Ref = *const c_void;
-    const MAX_NODES: usize = 4096;
+    const MAX_NODES: usize = 16384;
     const MAX_DEPTH: usize = 48;
     const UTF8: u32 = 0x0800_0100;
 
@@ -253,6 +253,8 @@ mod macos {
         fn CFRetain(value: Ref) -> Ref;
         fn CFRelease(value: Ref);
         static kCFBooleanTrue: Ref;
+        #[cfg(test)]
+        static kCFTypeArrayCallBacks: u8;
     }
 
     #[derive(Debug)]
@@ -556,6 +558,7 @@ mod macos {
     enum ObservationPurpose {
         Controls,
         Sessions,
+        SessionDocuments,
         SessionSearch,
     }
 
@@ -655,122 +658,138 @@ mod macos {
         deadline: Instant,
     ) -> Result<WindowObservation, String> {
         observe_tree(root, deadline, |element| {
-            let mut attrs = element
-                .attributes(&["AXRole", "AXSubrole", "AXHidden"], deadline)?
-                .into_iter();
-            let role = text_attribute(attrs.next().flatten())?
-                .ok_or_else(|| blocked("ax_role_unavailable"))?;
-            let subrole = text_attribute(attrs.next().flatten())?;
-            let hidden = bool_attribute(attrs.next().flatten())?.unwrap_or(false);
-            if hidden || (role == "AXStaticText" && purpose != ObservationPurpose::SessionSearch) {
-                return Ok(None);
+            read_observed_node(
+                purpose,
+                |names| element.attributes(names, deadline),
+                |name| element.settable(name),
+                || element.actions(),
+            )
+        })
+    }
+
+    fn read_observed_node(
+        purpose: ObservationPurpose,
+        mut attributes: impl FnMut(&[&str]) -> Result<Vec<Option<Owned>>, String>,
+        mut settable: impl FnMut(&str) -> Result<bool, String>,
+        mut actions: impl FnMut() -> Result<Vec<String>, String>,
+    ) -> Result<Option<NodeData>, String> {
+        let mut attrs = attributes(&["AXRole", "AXSubrole", "AXHidden", "AXChildren"])?.into_iter();
+        let role = text_attribute(attrs.next().flatten())?
+            .ok_or_else(|| blocked("ax_role_unavailable"))?;
+        let subrole = text_attribute(attrs.next().flatten())?;
+        let hidden = bool_attribute(attrs.next().flatten())?.unwrap_or(false);
+        let raw_children = attrs.next().flatten();
+        if hidden || (role == "AXStaticText" && purpose != ObservationPurpose::SessionSearch) {
+            return Ok(None);
+        }
+        let input = matches!(
+            role.as_str(),
+            "AXTextArea" | "AXTextField" | "AXSecureTextField"
+        ) || (purpose != ObservationPurpose::Controls && role == "AXComboBox");
+        let button = matches!(
+            role.as_str(),
+            "AXButton" | "AXCheckBox" | "AXRadioButton" | "AXSwitch" | "AXToggleButton" | "AXLink"
+        );
+        let children = if input {
+            Vec::new()
+        } else {
+            raw_children
+                .map(|value| value.array())
+                .transpose()?
+                .unwrap_or_default()
+        };
+        let names: &[&str] = match purpose {
+            ObservationPurpose::Controls if input => &["AXEnabled", "AXFocused"],
+            ObservationPurpose::Controls if button || role == "AXHeading" => {
+                &["AXDescription", "AXTitle", "AXEnabled"]
             }
-            let input = matches!(
-                role.as_str(),
-                "AXTextArea" | "AXTextField" | "AXSecureTextField"
-            ) || (purpose != ObservationPurpose::Controls && role == "AXComboBox");
-            let button = matches!(
-                role.as_str(),
-                "AXButton"
-                    | "AXCheckBox"
-                    | "AXRadioButton"
-                    | "AXSwitch"
-                    | "AXToggleButton"
-                    | "AXLink"
-            );
-            let names: &[&str] = match purpose {
-                ObservationPurpose::Controls if input => &["AXEnabled", "AXFocused"],
-                ObservationPurpose::Controls if button || role == "AXHeading" => {
-                    &["AXChildren", "AXDescription", "AXTitle", "AXEnabled"]
-                }
-                ObservationPurpose::Sessions | ObservationPurpose::SessionSearch
-                    if role == "AXComboBox" =>
-                {
-                    &["AXPlaceholderValue", "AXEnabled"]
-                }
-                ObservationPurpose::Sessions if role == "AXWebArea" => &["AXChildren", "AXURL"],
-                ObservationPurpose::Sessions if role == "AXButton" => {
-                    &["AXChildren", "AXDescription", "AXTitle", "AXEnabled"]
-                }
-                ObservationPurpose::SessionSearch if role == "AXStaticText" => {
-                    &["AXChildren", "AXValue", "AXEnabled"]
-                }
-                _ if input => &[],
-                _ => &["AXChildren"],
-            };
-            let mut attrs = if names.is_empty() {
-                Vec::new()
-            } else {
-                element.attributes(names, deadline)?
+            ObservationPurpose::Sessions | ObservationPurpose::SessionSearch
+                if role == "AXComboBox" =>
+            {
+                &["AXPlaceholderValue", "AXEnabled"]
             }
-            .into_iter();
-            let children = if input {
-                Vec::new()
-            } else {
-                attrs
+            ObservationPurpose::Sessions | ObservationPurpose::SessionDocuments
+                if role == "AXWebArea" =>
+            {
+                &["AXURL"]
+            }
+            ObservationPurpose::Sessions if role == "AXButton" => {
+                &["AXDescription", "AXTitle", "AXEnabled"]
+            }
+            ObservationPurpose::SessionSearch if role == "AXStaticText" => {
+                &["AXValue", "AXEnabled"]
+            }
+            _ => &[],
+        };
+        let mut attrs = if names.is_empty() {
+            Vec::new()
+        } else {
+            attributes(names)?
+        }
+        .into_iter();
+        let mut data = NodeData {
+            role,
+            subrole: subrole.clone().unwrap_or_default(),
+            children,
+            enabled: true,
+            ..Default::default()
+        };
+        match purpose {
+            ObservationPurpose::Controls if input => {
+                data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
+                data.focused = bool_attribute(attrs.next().flatten())?.unwrap_or(false);
+                data.editable = data.role != "AXSecureTextField"
+                    && subrole.as_deref() != Some("AXSecureTextField")
+                    && settable("AXValue")?;
+            }
+            ObservationPurpose::Controls if button || data.role == "AXHeading" => {
+                data.label = text_attribute(attrs.next().flatten())?
+                    .filter(|s| !s.trim().is_empty())
+                    .or(text_attribute(attrs.next().flatten())?)
+                    .unwrap_or_default();
+                data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
+                data.pressable = button && actions()?.iter().any(|action| action == "AXPress");
+            }
+            ObservationPurpose::Sessions | ObservationPurpose::SessionSearch
+                if data.role == "AXComboBox" =>
+            {
+                data.label = text_attribute(attrs.next().flatten())?.unwrap_or_default();
+                data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
+                data.editable = settable("AXValue")?;
+            }
+            ObservationPurpose::Sessions if data.role == "AXButton" => {
+                data.label = text_attribute(attrs.next().flatten())?
+                    .filter(|s| !s.trim().is_empty())
+                    .or(text_attribute(attrs.next().flatten())?)
+                    .unwrap_or_default();
+                data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
+                data.pressable = actions()?.iter().any(|action| action == "AXPress");
+            }
+            ObservationPurpose::SessionSearch if data.role == "AXStaticText" => {
+                // This purpose is used only inside the identified search
+                // dialog. Conversation-body text is never read here.
+                data.label = text_attribute(attrs.next().flatten())?.unwrap_or_default();
+                data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
+                data.pressable = matches!(data.children.len(), 5 | 6)
+                    && actions()?.iter().any(|action| action == "AXPress");
+            }
+            ObservationPurpose::Sessions | ObservationPurpose::SessionDocuments
+                if data.role == "AXWebArea" =>
+            {
+                data.url = attrs
                     .next()
                     .flatten()
-                    .map(|value| value.array())
-                    .transpose()?
-                    .unwrap_or_default()
-            };
-            let mut data = NodeData {
-                role,
-                subrole: subrole.clone().unwrap_or_default(),
-                children,
-                enabled: true,
-                ..Default::default()
-            };
-            match purpose {
-                ObservationPurpose::Controls if input => {
-                    data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
-                    data.focused = bool_attribute(attrs.next().flatten())?.unwrap_or(false);
-                    data.editable = data.role != "AXSecureTextField"
-                        && subrole.as_deref() != Some("AXSecureTextField")
-                        && element.settable("AXValue")?;
-                }
-                ObservationPurpose::Controls if button || data.role == "AXHeading" => {
-                    data.label = text_attribute(attrs.next().flatten())?
-                        .filter(|s| !s.trim().is_empty())
-                        .or(text_attribute(attrs.next().flatten())?)
-                        .unwrap_or_default();
-                    data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
-                    data.pressable =
-                        button && element.actions()?.iter().any(|action| action == "AXPress");
-                }
-                ObservationPurpose::Sessions | ObservationPurpose::SessionSearch
-                    if data.role == "AXComboBox" =>
+                    .map(|value| value.url())
+                    .transpose()?;
+                if purpose == ObservationPurpose::SessionDocuments
+                    && data.url.as_deref().is_some_and(|url| !url.is_empty())
                 {
-                    data.label = text_attribute(attrs.next().flatten())?.unwrap_or_default();
-                    data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
-                    data.editable = element.settable("AXValue")?;
+                    data.children.clear();
                 }
-                ObservationPurpose::Sessions if data.role == "AXButton" => {
-                    data.label = text_attribute(attrs.next().flatten())?
-                        .filter(|s| !s.trim().is_empty())
-                        .or(text_attribute(attrs.next().flatten())?)
-                        .unwrap_or_default();
-                    data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
-                    data.pressable = element.actions()?.iter().any(|action| action == "AXPress");
-                }
-                ObservationPurpose::SessionSearch if data.role == "AXStaticText" => {
-                    // This purpose is used only inside the identified search
-                    // dialog. Conversation-body text is never read here.
-                    data.label = text_attribute(attrs.next().flatten())?.unwrap_or_default();
-                    data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
-                    data.pressable = element.actions()?.iter().any(|action| action == "AXPress");
-                }
-                ObservationPurpose::Sessions if data.role == "AXWebArea" => {
-                    data.url = attrs
-                        .next()
-                        .flatten()
-                        .map(|value| value.url())
-                        .transpose()?;
-                }
-                _ => {}
             }
-            Ok(Some(data))
-        })
+            _ => {}
+        }
+        Ok(Some(data))
     }
 
     #[derive(Debug, Clone)]
@@ -959,6 +978,14 @@ mod macos {
             self.observe_until(pid, Instant::now() + Duration::from_secs(2))
         }
         fn observe_until(&self, pid: i32, deadline: Instant) -> Result<WindowObservation, String> {
+            self.observe_purpose_until(pid, ObservationPurpose::Sessions, deadline)
+        }
+        fn observe_purpose_until(
+            &self,
+            pid: i32,
+            purpose: ObservationPurpose,
+            deadline: Instant,
+        ) -> Result<WindowObservation, String> {
             let window = self
                 .window
                 .as_ref()
@@ -967,11 +994,7 @@ mod macos {
                 return Err(blocked("session_process_changed"));
             }
             window.validate(None)?;
-            let observation = observe_window_until(
-                window.element.clone(),
-                ObservationPurpose::Sessions,
-                deadline,
-            )?;
+            let observation = observe_window_until(window.element.clone(), purpose, deadline)?;
             window.validate(None)?;
             Ok(observation)
         }
@@ -981,34 +1004,15 @@ mod macos {
             pid: i32,
         ) -> Result<crate::session_navigation::SessionNavigationWindow, String> {
             use crate::session_navigation::SessionNavigationWindow;
-            let observation = self.observe(pid)?;
-            let mut selected_urls = Vec::new();
-            for node in &observation.nodes {
-                let Some(url) = &node.data.url else {
-                    continue;
-                };
-                if node.data.role == "AXWebArea" {
-                    let mut ancestor = node.parent;
-                    let mut nested = false;
-                    while let Some(index) = ancestor {
-                        let parent = &observation.nodes[index];
-                        if parent.data.role == "AXWebArea"
-                            && parent.data.url.as_ref().is_some_and(|url| !url.is_empty())
-                        {
-                            nested = true;
-                            break;
-                        }
-                        ancestor = parent.parent;
-                    }
-                    if !nested && !url.is_empty() {
-                        selected_urls.push(url.clone());
-                    }
-                }
-            }
+            let observation = self.observe_purpose_until(
+                pid,
+                ObservationPurpose::SessionDocuments,
+                Instant::now() + Duration::from_secs(2),
+            )?;
             Ok(SessionNavigationWindow {
                 pid,
                 window: 1,
-                selected_urls,
+                selected_urls: selected_web_area_urls(&observation),
             })
         }
 
@@ -1037,27 +1041,53 @@ mod macos {
             })
         }
 
-        fn search_result(
+        fn observe_search_dialog(
             &self,
-            pid: i32,
-            dialog: &Owned,
-            conversation: &str,
+            dialog: &SessionSearchDialog,
             deadline: Instant,
-        ) -> Result<Option<SessionSearchSelection>, String> {
-            let current = self
-                .search_dialog(pid, deadline)?
-                .ok_or_else(|| blocked("session_search_closed"))?;
-            if unsafe { CFEqual(dialog.0, current.root.0) } == 0 {
-                return Err(blocked("session_search_changed"));
-            }
-            if current.input.string_attr("AXValue")?.as_deref() != Some(conversation) {
-                return Err(blocked("session_search_query_changed_before_results"));
+        ) -> Result<WindowObservation, String> {
+            let window = self
+                .window
+                .as_ref()
+                .ok_or_else(|| blocked("session_window_missing"))?;
+            window.validate(None)?;
+            for element in [&dialog.root, &dialog.input] {
+                let attached = element
+                    .attributes(&["AXWindow"], deadline)?
+                    .pop()
+                    .flatten()
+                    .ok_or_else(|| blocked("session_search_closed"))?;
+                if unsafe { CFEqual(attached.0, window.element.0) } == 0 {
+                    return Err(blocked("session_search_changed"));
+                }
             }
             let results = observe_window_until(
-                current.root.clone(),
+                dialog.root.clone(),
                 ObservationPurpose::SessionSearch,
                 deadline,
             )?;
+            window.validate(None)?;
+            match search_controls(&results)? {
+                None => Err(blocked("session_search_closed")),
+                Some((0, input))
+                    if unsafe { CFEqual(results.nodes[input].element.0, dialog.input.0) } != 0 =>
+                {
+                    Ok(results)
+                }
+                Some(_) => Err(blocked("session_search_changed")),
+            }
+        }
+
+        fn search_result(
+            &self,
+            current: &SessionSearchDialog,
+            conversation: &str,
+            deadline: Instant,
+        ) -> Result<Option<SessionSearchSelection>, String> {
+            if current.input.string_attr("AXValue")?.as_deref() != Some(conversation) {
+                return Err(blocked("session_search_query_changed_before_results"));
+            }
+            let results = self.observe_search_dialog(current, deadline)?;
             // Re-read the query after observation so an older result snapshot
             // cannot authorize selection after the user edits the search.
             verified_search_result(
@@ -1068,7 +1098,10 @@ mod macos {
             .map(|row| {
                 row.map(|i| SessionSearchSelection {
                     window: self.window.as_ref().unwrap().element.clone(),
-                    dialog: current,
+                    dialog: SessionSearchDialog {
+                        root: current.root.clone(),
+                        input: current.input.clone(),
+                    },
                     row: results.nodes[i].element.clone(),
                     fields: results
                         .nodes
@@ -1079,6 +1112,33 @@ mod macos {
                 })
             })
         }
+    }
+
+    fn selected_web_area_urls(observation: &WindowObservation) -> Vec<String> {
+        let mut selected_urls = Vec::new();
+        for node in &observation.nodes {
+            let Some(url) = &node.data.url else {
+                continue;
+            };
+            if node.data.role == "AXWebArea" {
+                let mut ancestor = node.parent;
+                let mut nested = false;
+                while let Some(index) = ancestor {
+                    let parent = &observation.nodes[index];
+                    if parent.data.role == "AXWebArea"
+                        && parent.data.url.as_ref().is_some_and(|url| !url.is_empty())
+                    {
+                        nested = true;
+                        break;
+                    }
+                    ancestor = parent.parent;
+                }
+                if !nested && !url.is_empty() {
+                    selected_urls.push(url.clone());
+                }
+            }
+        }
+        selected_urls
     }
 
     fn search_controls(observation: &WindowObservation) -> Result<Option<(usize, usize)>, String> {
@@ -1131,22 +1191,33 @@ mod macos {
                 .iter()
                 .filter(|n| n.parent == Some(index))
                 .collect();
-            // Observed Antigravity search row: title, project icon, project,
-            // conversation UUID, age. Never mistake a title equal to a UUID
-            // for the dedicated identity field; unknown row shapes fail closed.
-            if children
-                .iter()
-                .map(|n| n.data.role.as_str())
-                .collect::<Vec<_>>()
-                != [
-                    "AXStaticText",
-                    "AXImage",
-                    "AXStaticText",
-                    "AXStaticText",
-                    "AXStaticText",
-                ]
-                || children[3].data.label != conversation
-            {
+            // Observed Antigravity search rows carry [title, icon, project,
+            // uuid, age] or [title, icon, project, uuid, unread_badge, age].
+            // Never mistake a title equal to a UUID for the dedicated identity
+            // field; unknown row shapes fail closed.
+            let valid_row = match children.as_slice() {
+                [title, icon, project, uuid, age] => {
+                    title.data.role == "AXStaticText"
+                        && icon.data.role == "AXImage"
+                        && project.data.role == "AXStaticText"
+                        && uuid.data.role == "AXStaticText"
+                        && age.data.role == "AXStaticText"
+                        && uuid.data.label == conversation
+                }
+                [title, icon, project, uuid, badge, age] => {
+                    title.data.role == "AXStaticText"
+                        && icon.data.role == "AXImage"
+                        && project.data.role == "AXStaticText"
+                        && uuid.data.role == "AXStaticText"
+                        && badge.data.label.is_empty()
+                        && ((badge.data.role == "AXGroup" && badge.data.subrole == "AXEmptyGroup")
+                            || badge.data.role == "AXImage")
+                        && age.data.role == "AXStaticText"
+                        && uuid.data.label == conversation
+                }
+                _ => false,
+            };
+            if !valid_row {
                 continue;
             }
             if found.replace(index).is_some() {
@@ -1185,6 +1256,52 @@ mod macos {
         }
         press().map_err(|error| format!("session_search_press:{error}"))?;
         Ok(true)
+    }
+
+    fn select_search_result_until<T>(
+        deadline: Instant,
+        is_current: &dyn Fn() -> bool,
+        mut find_result: impl FnMut() -> Result<Option<T>, String>,
+        mut try_press: impl FnMut(T) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        let mut saw_invalid = false;
+        let timeout_error = |saw_invalid: bool, is_current: &dyn Fn() -> bool| {
+            if saw_invalid && is_current() {
+                "unconfirmed:session_search_result_unstable".to_string()
+            } else {
+                "unconfirmed:session_search_result_unavailable".to_string()
+            }
+        };
+        loop {
+            if !is_current() || Instant::now() >= deadline {
+                return Err(timeout_error(saw_invalid, is_current));
+            }
+            let selection = match find_result() {
+                Ok(selection) => selection,
+                Err(error)
+                    if error == "blocked:ax_snapshot_timeout" && Instant::now() >= deadline =>
+                {
+                    return Err(timeout_error(saw_invalid, is_current));
+                }
+                Err(error) => return Err(unconfirmed(error)),
+            };
+            if let Some(selection) = selection {
+                // Reacquire only references invalidated before AXPress.
+                // Query writes and AXPress itself are never replayed.
+                if try_press(selection).map_err(unconfirmed)? {
+                    return Ok(());
+                }
+                saw_invalid = true;
+            }
+            if !is_current() || Instant::now() >= deadline {
+                return Err(timeout_error(saw_invalid, is_current));
+            }
+            std::thread::sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(25)),
+            );
+        }
     }
     impl crate::session_navigation::SessionNavigationProvider for NativeSessionNavigation {
         fn capture(
@@ -1255,35 +1372,49 @@ mod macos {
                 || current.input.set("AXValue", Owned::text(conversation).0),
                 || {
                     self.before_mutation(is_current)?;
-                    let observed = self
-                        .search_dialog(target.pid, Instant::now() + Duration::from_millis(400))?
-                        .ok_or_else(|| blocked("session_search_closed"))?;
-                    if unsafe { CFEqual(current.root.0, observed.root.0) } == 0
-                        || unsafe { CFEqual(current.input.0, observed.input.0) } == 0
-                    {
-                        return Err(blocked("session_search_changed_during_query_write"));
+                    let window = self
+                        .window
+                        .as_ref()
+                        .ok_or_else(|| blocked("session_window_missing"))?;
+                    let check_deadline = Instant::now() + Duration::from_millis(400);
+                    for element in [&current.root, &current.input] {
+                        let attached = element
+                            .attributes(&["AXWindow"], check_deadline)?
+                            .pop()
+                            .flatten()
+                            .ok_or_else(|| blocked("session_search_closed"))?;
+                        if unsafe { CFEqual(attached.0, window.element.0) } == 0 {
+                            return Err(blocked("session_search_changed_during_query_write"));
+                        }
                     }
-                    let applied =
-                        observed.input.string_attr("AXValue")?.as_deref() == Some(conversation);
+                    if current.input.string_attr("AXValue")?.as_deref() != Some(conversation) {
+                        if !is_current() {
+                            return Err(blocked("session_navigation_retired"));
+                        }
+                        return Ok(false);
+                    }
+                    self.observe_search_dialog(&current, check_deadline)
+                        .map_err(|error| {
+                            if error == "blocked:session_search_changed" {
+                                blocked("session_search_changed_during_query_write")
+                            } else {
+                                error
+                            }
+                        })?;
                     if !is_current() {
                         return Err(blocked("session_navigation_retired"));
                     }
-                    Ok(applied)
+                    Ok(true)
                 },
                 "session_search_query_not_applied",
             )?;
             let deadline = Instant::now() + Duration::from_secs(2);
-            loop {
-                if Instant::now() >= deadline {
-                    return Err("unconfirmed:session_search_result_unstable_or_unavailable".into());
-                }
-                if let Some(selection) = self
-                    .search_result(target.pid, &dialog, conversation, deadline)
-                    .map_err(unconfirmed)?
-                {
-                    // Reacquire only references invalidated before AXPress.
-                    // Query writes and AXPress itself are never replayed.
-                    if press_search_selection(
+            select_search_result_until(
+                deadline,
+                is_current,
+                || self.search_result(&current, conversation, deadline),
+                |selection| {
+                    press_search_selection(
                         validate_lease,
                         || {
                             self.before_mutation(is_current)?;
@@ -1296,16 +1427,8 @@ mod macos {
                         is_current,
                         || selection.row.action("AXPress"),
                     )
-                    .map_err(unconfirmed)?
-                    {
-                        return Ok(());
-                    }
-                }
-                if !is_current() || Instant::now() >= deadline {
-                    return Err("unconfirmed:session_search_result_unavailable".into());
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
+                },
+            )
         }
     }
 
@@ -2932,6 +3055,598 @@ mod macos {
             let pid = process.id() as i32;
             process.wait().unwrap();
             assert!(provider.process_has_exited(pid));
+        }
+
+        fn ax_array(items: &[&str]) -> Option<Owned> {
+            let owned: Vec<_> = items.iter().map(|item| Owned::text(item)).collect();
+            let refs: Vec<_> = owned.iter().map(|item| item.0).collect();
+            unsafe {
+                Owned::from_create(CFArrayCreate(
+                    std::ptr::null(),
+                    refs.as_ptr(),
+                    refs.len() as isize,
+                    (&raw const kCFTypeArrayCallBacks).cast(),
+                ))
+            }
+        }
+
+        #[test]
+        fn session_documents_prunes_non_empty_web_areas_after_traversing_wrappers() {
+            let mut container_batches = 0;
+            let observation = observe_tree_once(
+                Owned::text("window"),
+                Instant::now() + Duration::from_secs(1),
+                |element| {
+                    let id = element.string().unwrap();
+                    read_observed_node(
+                        ObservationPurpose::SessionDocuments,
+                        |names| match (id.as_str(), names) {
+                            ("window", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                container_batches += 1;
+                                Ok(vec![
+                                    Some(Owned::text("AXWindow")),
+                                    None,
+                                    None,
+                                    ax_array(&["split"]),
+                                ])
+                            }
+                            ("split", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                container_batches += 1;
+                                Ok(vec![
+                                    Some(Owned::text("AXSplitGroup")),
+                                    None,
+                                    None,
+                                    ax_array(&["empty-wrapper", "none-wrapper"]),
+                                ])
+                            }
+                            (
+                                "empty-wrapper",
+                                ["AXRole", "AXSubrole", "AXHidden", "AXChildren"],
+                            ) => Ok(vec![
+                                Some(Owned::text("AXWebArea")),
+                                None,
+                                None,
+                                ax_array(&["conversation"]),
+                            ]),
+                            ("empty-wrapper", ["AXURL"]) => Ok(vec![Some(Owned::text(""))]),
+                            ("conversation", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXWebArea")),
+                                    None,
+                                    None,
+                                    ax_array(&["conversation-dom"]),
+                                ])
+                            }
+                            ("conversation", ["AXURL"]) => {
+                                Ok(vec![Some(Owned::text("https://127.0.0.1:4321/c/target"))])
+                            }
+                            ("none-wrapper", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXWebArea")),
+                                    None,
+                                    None,
+                                    ax_array(&["background"]),
+                                ])
+                            }
+                            ("none-wrapper", ["AXURL"]) => Ok(vec![None]),
+                            ("background", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXWebArea")),
+                                    None,
+                                    None,
+                                    ax_array(&["background-dom"]),
+                                ])
+                            }
+                            ("background", ["AXURL"]) => {
+                                Ok(vec![Some(Owned::text("data:text/html,background"))])
+                            }
+                            (other, batch) => {
+                                panic!("unexpected read on {other}: {batch:?}")
+                            }
+                        },
+                        |_| panic!("SessionDocuments never checks settable"),
+                        || panic!("SessionDocuments never queries actions"),
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(container_batches, 2);
+            assert_eq!(
+                selected_web_area_urls(&observation),
+                vec![
+                    "https://127.0.0.1:4321/c/target".to_string(),
+                    "data:text/html,background".to_string(),
+                ]
+            );
+        }
+
+        #[test]
+        fn session_search_skips_leaf_actions_and_matches_five_child_rows() {
+            let mut action_queries = 0;
+            let observation = observe_tree_once(
+                Owned::text("dialog"),
+                Instant::now() + Duration::from_secs(1),
+                |element| {
+                    let id = element.string().unwrap();
+                    read_observed_node(
+                        ObservationPurpose::SessionSearch,
+                        |names| match (id.as_str(), names) {
+                            ("dialog", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXGroup")),
+                                    Some(Owned::text("AXApplicationDialog")),
+                                    None,
+                                    ax_array(&["input", "list"]),
+                                ])
+                            }
+                            ("input", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXComboBox")),
+                                    None,
+                                    None,
+                                    ax_array(&["combo-internal"]),
+                                ])
+                            }
+                            ("input", ["AXPlaceholderValue", "AXEnabled"]) => Ok(vec![
+                                Some(Owned::text("Search for conversations...")),
+                                unsafe { Some(Owned(CFRetain(kCFBooleanTrue))) },
+                            ]),
+                            ("list", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXList")),
+                                    None,
+                                    None,
+                                    ax_array(&["group"]),
+                                ])
+                            }
+                            ("group", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXGroup")),
+                                    None,
+                                    None,
+                                    ax_array(&["row"]),
+                                ])
+                            }
+                            ("row", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => Ok(vec![
+                                Some(Owned::text("AXStaticText")),
+                                None,
+                                None,
+                                ax_array(&["title", "icon", "project", "uuid", "age"]),
+                            ]),
+                            ("row", ["AXValue", "AXEnabled"]) => {
+                                Ok(vec![Some(Owned::text("result")), unsafe {
+                                    Some(Owned(CFRetain(kCFBooleanTrue)))
+                                }])
+                            }
+                            ("icon", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXImage")),
+                                    None,
+                                    None,
+                                    ax_array(&[]),
+                                ])
+                            }
+                            (
+                                "title" | "project" | "uuid" | "age",
+                                ["AXRole", "AXSubrole", "AXHidden", "AXChildren"],
+                            ) => Ok(vec![
+                                Some(Owned::text("AXStaticText")),
+                                None,
+                                None,
+                                ax_array(&[]),
+                            ]),
+                            (leaf, ["AXValue", "AXEnabled"]) => {
+                                let text = match leaf {
+                                    "title" => "Bidirectional CLI",
+                                    "project" => "micro-input",
+                                    "uuid" => "target-uuid",
+                                    "age" => "2m",
+                                    other => panic!("unexpected AXStaticText {other}"),
+                                };
+                                Ok(vec![Some(Owned::text(text)), unsafe {
+                                    Some(Owned(CFRetain(kCFBooleanTrue)))
+                                }])
+                            }
+                            (other, batch) => panic!("unexpected read on {other}: {batch:?}"),
+                        },
+                        |attr| {
+                            assert_eq!(id, "input");
+                            assert_eq!(attr, "AXValue");
+                            Ok(true)
+                        },
+                        || {
+                            assert_eq!(id, "row", "leaf AXStaticText must not query actions");
+                            action_queries += 1;
+                            Ok(vec!["AXPress".into()])
+                        },
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(action_queries, 1);
+            assert!(observation.nodes[4].data.pressable);
+            assert!(observation.nodes[5..].iter().all(|n| !n.data.pressable));
+            assert_eq!(
+                verified_search_result(&observation, Some("target-uuid"), "target-uuid").unwrap(),
+                Some(4)
+            );
+        }
+
+        #[test]
+        fn search_result_loop_distinguishes_unavailable_and_unstable_timeouts() {
+            let unavailable = select_search_result_until(
+                Instant::now() + Duration::from_millis(30),
+                &|| true,
+                || Ok(None::<()>),
+                |()| unreachable!(),
+            );
+            assert_eq!(
+                unavailable.unwrap_err(),
+                "unconfirmed:session_search_result_unavailable"
+            );
+
+            let mut validate = || Ok(());
+            let unstable = select_search_result_until(
+                Instant::now() + Duration::from_millis(30),
+                &|| true,
+                || Ok(Some(())),
+                |()| {
+                    press_search_selection(
+                        &mut validate,
+                        || Err("blocked:ax_batch_-25202".into()),
+                        &|| true,
+                        || unreachable!(),
+                    )
+                },
+            );
+            assert_eq!(
+                unstable.unwrap_err(),
+                "unconfirmed:session_search_result_unstable"
+            );
+
+            let current = std::cell::Cell::new(true);
+            let cancelled = select_search_result_until(
+                Instant::now() + Duration::from_secs(1),
+                &|| current.get(),
+                || Ok(Some(())),
+                |()| {
+                    let keep = press_search_selection(
+                        &mut validate,
+                        || Err("blocked:ax_batch_-25202".into()),
+                        &|| current.get(),
+                        || unreachable!(),
+                    )?;
+                    current.set(false);
+                    Ok(keep)
+                },
+            );
+            assert_eq!(
+                cancelled.unwrap_err(),
+                "unconfirmed:session_search_result_unavailable"
+            );
+
+            let attempts = std::cell::Cell::new(0);
+            let presses = std::cell::Cell::new(0);
+            select_search_result_until(
+                Instant::now() + Duration::from_secs(1),
+                &|| true,
+                || Ok(Some(())),
+                |()| {
+                    let attempt = attempts.get() + 1;
+                    attempts.set(attempt);
+                    press_search_selection(
+                        &mut validate,
+                        || {
+                            if attempt == 1 {
+                                Err("blocked:ax_batch_-25202".into())
+                            } else {
+                                Ok(())
+                            }
+                        },
+                        &|| true,
+                        || {
+                            presses.set(presses.get() + 1);
+                            Ok(())
+                        },
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(attempts.get(), 2);
+            assert_eq!(presses.get(), 1);
+        }
+
+        fn six_child_search_fixture() -> WindowObservation {
+            let fields = [
+                ("AXGroup", "AXApplicationDialog", "", None),
+                ("AXComboBox", "", "Search for conversations...", Some(0)),
+                ("AXList", "", "", Some(0)),
+                ("AXGroup", "", "", Some(2)),
+                ("AXStaticText", "", "result", Some(3)),
+                ("AXStaticText", "", "title", Some(4)),
+                ("AXImage", "", "", Some(4)),
+                ("AXStaticText", "", "project", Some(4)),
+                ("AXStaticText", "", "target-uuid", Some(4)),
+                ("AXGroup", "AXEmptyGroup", "", Some(4)),
+                ("AXGroup", "AXEmptyGroup", "", Some(9)),
+                ("AXStaticText", "", "age", Some(4)),
+            ];
+            let mut nodes: Vec<_> = fields
+                .into_iter()
+                .enumerate()
+                .map(|(index, (role, subrole, label, parent))| ObservedNode {
+                    element: Owned::text(&index.to_string()),
+                    parent,
+                    data: NodeData {
+                        role: role.into(),
+                        subrole: subrole.into(),
+                        label: label.into(),
+                        enabled: true,
+                        ..Default::default()
+                    },
+                })
+                .collect();
+            nodes[1].data.editable = true;
+            nodes[4].data.pressable = true;
+            WindowObservation { nodes }
+        }
+
+        #[test]
+        fn six_child_unread_badge_row_matches_and_verifies_selection_fields() {
+            let mut action_queries = 0;
+            let observation = observe_tree_once(
+                Owned::text("dialog"),
+                Instant::now() + Duration::from_secs(1),
+                |element| {
+                    let id = element.string().unwrap();
+                    read_observed_node(
+                        ObservationPurpose::SessionSearch,
+                        |names| match (id.as_str(), names) {
+                            ("dialog", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXGroup")),
+                                    Some(Owned::text("AXApplicationDialog")),
+                                    None,
+                                    ax_array(&["input", "list"]),
+                                ])
+                            }
+                            ("input", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXComboBox")),
+                                    None,
+                                    None,
+                                    ax_array(&[]),
+                                ])
+                            }
+                            ("input", ["AXPlaceholderValue", "AXEnabled"]) => Ok(vec![
+                                Some(Owned::text("Search for conversations...")),
+                                unsafe { Some(Owned(CFRetain(kCFBooleanTrue))) },
+                            ]),
+                            ("list", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXList")),
+                                    None,
+                                    None,
+                                    ax_array(&["group", "two-child-text"]),
+                                ])
+                            }
+                            (
+                                "two-child-text",
+                                ["AXRole", "AXSubrole", "AXHidden", "AXChildren"],
+                            ) => Ok(vec![
+                                Some(Owned::text("AXStaticText")),
+                                None,
+                                None,
+                                ax_array(&["extra-a", "extra-b"]),
+                            ]),
+                            ("two-child-text", ["AXValue", "AXEnabled"]) => {
+                                Ok(vec![Some(Owned::text("header")), unsafe {
+                                    Some(Owned(CFRetain(kCFBooleanTrue)))
+                                }])
+                            }
+                            ("group", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXGroup")),
+                                    None,
+                                    None,
+                                    ax_array(&["row"]),
+                                ])
+                            }
+                            ("row", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => Ok(vec![
+                                Some(Owned::text("AXStaticText")),
+                                None,
+                                None,
+                                ax_array(&["title", "icon", "project", "uuid", "badge", "age"]),
+                            ]),
+                            ("row", ["AXValue", "AXEnabled"]) => {
+                                Ok(vec![Some(Owned::text("result")), unsafe {
+                                    Some(Owned(CFRetain(kCFBooleanTrue)))
+                                }])
+                            }
+                            ("icon", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXImage")),
+                                    None,
+                                    None,
+                                    ax_array(&[]),
+                                ])
+                            }
+                            ("badge", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXGroup")),
+                                    Some(Owned::text("AXEmptyGroup")),
+                                    None,
+                                    ax_array(&["badge-dot"]),
+                                ])
+                            }
+                            ("badge-dot", ["AXRole", "AXSubrole", "AXHidden", "AXChildren"]) => {
+                                Ok(vec![
+                                    Some(Owned::text("AXGroup")),
+                                    Some(Owned::text("AXEmptyGroup")),
+                                    None,
+                                    ax_array(&[]),
+                                ])
+                            }
+                            (
+                                "title" | "project" | "uuid" | "age" | "extra-a" | "extra-b",
+                                ["AXRole", "AXSubrole", "AXHidden", "AXChildren"],
+                            ) => Ok(vec![
+                                Some(Owned::text("AXStaticText")),
+                                None,
+                                None,
+                                ax_array(&[]),
+                            ]),
+                            (leaf, ["AXValue", "AXEnabled"]) => {
+                                let text = match leaf {
+                                    "title" => "Unread Conversation",
+                                    "project" => "micro-input",
+                                    "uuid" => "target-uuid",
+                                    "age" => "1m",
+                                    "extra-a" | "extra-b" => "meta",
+                                    other => panic!("unexpected AXStaticText {other}"),
+                                };
+                                Ok(vec![Some(Owned::text(text)), unsafe {
+                                    Some(Owned(CFRetain(kCFBooleanTrue)))
+                                }])
+                            }
+                            (other, batch) => panic!("unexpected read on {other}: {batch:?}"),
+                        },
+                        |attr| {
+                            assert_eq!(id, "input");
+                            assert_eq!(attr, "AXValue");
+                            Ok(true)
+                        },
+                        || {
+                            assert_eq!(id, "row", "only 5- or 6-child rows may query AXActions");
+                            action_queries += 1;
+                            Ok(vec!["AXPress".into()])
+                        },
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(action_queries, 1);
+            let row_index =
+                verified_search_result(&observation, Some("target-uuid"), "target-uuid")
+                    .unwrap()
+                    .expect("6-child unread row must match");
+            let selection = SessionSearchSelection {
+                dialog: SessionSearchDialog {
+                    root: observation.nodes[0].element.clone(),
+                    input: observation.nodes[1].element.clone(),
+                },
+                window: Owned::text("window"),
+                row: observation.nodes[row_index].element.clone(),
+                fields: observation
+                    .nodes
+                    .iter()
+                    .filter(|node| node.parent == Some(row_index))
+                    .map(|node| node.element.clone())
+                    .collect(),
+            };
+            assert_eq!(selection.fields.len(), 6);
+            assert_eq!(selection.fields[3].string().as_deref(), Some("uuid"));
+            let mut value_reads = Vec::new();
+            selection
+                .verify_with(
+                    "target-uuid",
+                    Instant::now() + Duration::from_secs(1),
+                    |element, names, _| {
+                        let id = element.string().unwrap();
+                        Ok(names
+                            .iter()
+                            .map(|name| match *name {
+                                "AXWindow" => Some(Owned::text("window")),
+                                "AXRole" => Some(Owned::text("AXStaticText")),
+                                "AXEnabled" => unsafe { Some(Owned(CFRetain(kCFBooleanTrue))) },
+                                "AXChildren" => {
+                                    ax_array(&["title", "icon", "project", "uuid", "badge", "age"])
+                                }
+                                "AXValue" => {
+                                    value_reads.push(id.clone());
+                                    Some(Owned::text("target-uuid"))
+                                }
+                                _ => None,
+                            })
+                            .collect())
+                    },
+                )
+                .unwrap();
+            assert_eq!(value_reads, vec!["input".to_string(), "uuid".to_string()]);
+
+            let mut image_badge = six_child_search_fixture();
+            image_badge.nodes[9].data.role = "AXImage".into();
+            image_badge.nodes[9].data.subrole.clear();
+            assert_eq!(
+                verified_search_result(&image_badge, Some("target-uuid"), "target-uuid").unwrap(),
+                Some(4)
+            );
+        }
+
+        #[test]
+        fn six_child_search_row_rejects_spoofed_badges_trailing_roles_and_title_uuids() {
+            let baseline = six_child_search_fixture();
+            assert_eq!(
+                verified_search_result(&baseline, Some("target-uuid"), "target-uuid").unwrap(),
+                Some(4)
+            );
+
+            let mut text_badge = six_child_search_fixture();
+            text_badge.nodes[9].data.role = "AXStaticText".into();
+            text_badge.nodes[9].data.subrole.clear();
+            assert_eq!(
+                verified_search_result(&text_badge, Some("target-uuid"), "target-uuid").unwrap(),
+                None
+            );
+
+            let mut labeled_group_badge = six_child_search_fixture();
+            labeled_group_badge.nodes[9].data.label = "target-uuid".into();
+            assert_eq!(
+                verified_search_result(&labeled_group_badge, Some("target-uuid"), "target-uuid")
+                    .unwrap(),
+                None
+            );
+
+            let mut labeled_image_badge = six_child_search_fixture();
+            labeled_image_badge.nodes[9].data.role = "AXImage".into();
+            labeled_image_badge.nodes[9].data.subrole.clear();
+            labeled_image_badge.nodes[9].data.label = "badge".into();
+            assert_eq!(
+                verified_search_result(&labeled_image_badge, Some("target-uuid"), "target-uuid")
+                    .unwrap(),
+                None
+            );
+
+            let mut non_empty_subrole_badge = six_child_search_fixture();
+            non_empty_subrole_badge.nodes[9].data.subrole.clear();
+            assert_eq!(
+                verified_search_result(
+                    &non_empty_subrole_badge,
+                    Some("target-uuid"),
+                    "target-uuid"
+                )
+                .unwrap(),
+                None
+            );
+
+            let mut trailing_group = six_child_search_fixture();
+            trailing_group.nodes[11].data.role = "AXGroup".into();
+            trailing_group.nodes[11].data.subrole = "AXEmptyGroup".into();
+            assert_eq!(
+                verified_search_result(&trailing_group, Some("target-uuid"), "target-uuid")
+                    .unwrap(),
+                None
+            );
+
+            let mut spoofed_title = six_child_search_fixture();
+            spoofed_title.nodes[5].data.label = "target-uuid".into();
+            spoofed_title.nodes[7].data.label = "target-uuid".into();
+            spoofed_title.nodes[8].data.label = "other-uuid".into();
+            spoofed_title.nodes[11].data.label = "target-uuid".into();
+            assert_eq!(
+                verified_search_result(&spoofed_title, Some("target-uuid"), "target-uuid").unwrap(),
+                None
+            );
         }
     }
 }
