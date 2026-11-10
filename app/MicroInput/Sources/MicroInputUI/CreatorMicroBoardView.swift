@@ -61,6 +61,7 @@ struct CreatorMicroStageView: View {
                     CreatorMicroBoardView(store: store, agentKind: agentKind)
                         .frame(maxWidth: .infinity).frame(height: 420)
                         .background(UITheme.subtleSurface, in: RoundedRectangle(cornerRadius: 12))
+                    CreatorMicroSessionListView(store: store, agentKind: agentKind)
                     CreatorMicroInlineInspectorView(
                         store: store, agentKind: agentKind,
                         onOpenFullActionLibrary: onOpenFullActionLibrary,
@@ -383,7 +384,7 @@ struct CreatorMicroBoardView: View {
         let keycap = CodexKeycapId(rustVariant: cell?.keycapId ?? "Apps")
         let sublabel: String = {
             if c.protectedLock != nil {
-                return "\(c.selectedDisplayName) 直通"
+                return "原生直通"
             }
             return cell?.conciseCaption ?? "空白"
         }()
@@ -671,18 +672,21 @@ private struct BoardKeycapCellButton: View, Equatable {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("按键 \(slot + 1)，\(sublabel.isEmpty ? "未绑定" : sublabel)")
+        .help(isTaskRole ? (sessionSlot?.title ?? "尚未分配会话") : sublabel)
+        .accessibilityLabel(isTaskRole
+            ? "会话 \(slot + 1)，\(sessionSlot?.title ?? "尚未分配会话")，\(SessionKeyStatusView.label(for: sessionSlot))"
+            : "按键 \(slot + 1)，\(sublabel.isEmpty ? "未绑定" : sublabel)")
     }
 
     private var taskKeycapSurface: some View {
-        let status = sessionSlot?.status ?? "Idle"
+        let status = sessionSlot?.kind ?? "Idle"
         let hasActiveState = (sessionSlot?.isUnreadBlueDot == true)
             || (sessionSlot?.isWorkingAnimated == true)
-            || (status == "Attention")
+            || (status == "NeedsAttention")
         let ledColor = Color(hex: sessionSlot?.ledColorHex ?? "#36526D")
 
         let fillSurface: Color = {
-            if sessionSlot?.isUnreadBlueDot == true || status == "Attention" {
+            if sessionSlot?.isUnreadBlueDot == true || status == "NeedsAttention" {
                 return UITheme.accentSoft
             }
             return UITheme.subtleSurface
@@ -694,48 +698,7 @@ private struct BoardKeycapCellButton: View, Equatable {
             return UITheme.strongBorder
         }()
 
-        return VStack(spacing: 4) {
-            Spacer(minLength: 2)
-            if sessionSlot?.isWorkingAnimated == true || status == "Working" {
-                HStack(spacing: 4) {
-                    Text("::")
-                        .font(UITheme.captionMedium)
-                        .foregroundStyle(UITheme.textSecondary)
-                    Text("进行中")
-                        .font(UITheme.micro)
-                        .foregroundStyle(UITheme.textPrimary)
-                }
-            } else if sessionSlot?.isUnreadBlueDot == true || status == "Completed" {
-                HStack(spacing: 4) {
-                    Circle().fill(ledColor).frame(width: 7, height: 7)
-                    Text("已完成")
-                        .font(UITheme.micro)
-                        .foregroundStyle(UITheme.accent)
-                }
-            } else if status == "Attention" {
-                HStack(spacing: 4) {
-                    Circle().fill(ledColor).frame(width: 7, height: 7)
-                    Text("待回应")
-                        .font(UITheme.micro)
-                        .foregroundStyle(UITheme.caution)
-                }
-            } else {
-                CodexKeycapGlyphView(
-                    keycap: keycap == .blank ? .apps : keycap,
-                    size: 20,
-                    color: UITheme.textSecondary
-                )
-                .equatable()
-            }
-            Spacer(minLength: 2)
-            if showLabels {
-                let fallbackLabel = (sublabel != "空白" && !sublabel.isEmpty) ? sublabel : "会话 \(slot + 1)"
-                Text(sessionSlot?.title.isEmpty == false ? sessionSlot!.title : fallbackLabel)
-                    .font(UITheme.micro)
-                    .foregroundStyle(UITheme.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
+        return SessionKeycapContent(slotIndex: slot, sessionSlot: sessionSlot, showLabels: showLabels)
         .padding(.horizontal, 6)
         .padding(.vertical, 6)
         .frame(width: width, height: cellSize)
@@ -783,5 +746,113 @@ private struct BoardKeycapCellButton: View, Equatable {
                 )
         )
         .contentShape(Rectangle())
+    }
+}
+
+struct CreatorMicroSessionListView: View {
+    let store: CoreStore
+    let agentKind: AgentProfileKind
+
+    var body: some View {
+        let canvas = store.canvas
+        let sessions = store.sessionStrip
+        let keys = canvas.keycapCells.filter {
+            agentKind.supportsLiveSessionSlots && $0.slotRole == "TaskKey" && (0..<6).contains($0.primarySlot)
+        }
+        if !keys.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("会话").font(UITheme.heading).foregroundStyle(UITheme.textPrimary)
+                VStack(spacing: 4) {
+                    ForEach(keys) { key in
+                        let session = sessions.sessionSlots.first { $0.slotIndex == key.primarySlot }
+                        SessionTitleRow(
+                            slotIndex: key.primarySlot,
+                            title: session?.title.isEmpty == false ? session!.title : "尚未分配会话",
+                            sessionSlot: session,
+                            isSelected: canvas.selectedSurface == key.surface,
+                            onSelect: { store.dispatch("canvas", ["SelectSurface": key.surface]) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct SessionTitleRow: View {
+    let slotIndex: Int
+    let title: String
+    let sessionSlot: SessionSlotModel?
+    let isSelected: Bool
+    var onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(alignment: .top, spacing: 12) {
+                Text("\(slotIndex + 1)")
+                    .font(UITheme.bodySemibold)
+                    .foregroundStyle(isSelected ? UITheme.accent : UITheme.textSecondary)
+                    .frame(width: 28, height: 28)
+                    .background(UITheme.subtleSurface, in: RoundedRectangle(cornerRadius: 6))
+                Text(title)
+                    .font(UITheme.body)
+                    .foregroundStyle(UITheme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 4)
+                SessionKeyStatusView(sessionSlot: sessionSlot)
+                    .font(UITheme.caption)
+                    .fixedSize()
+                    .padding(.top, 4)
+            }
+            .padding(12)
+            .background(isSelected ? UITheme.accentSoft : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("session-title-\(slotIndex)")
+        .accessibilityLabel("会话 \(slotIndex + 1)，\(title)，\(SessionKeyStatusView.label(for: sessionSlot))")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+struct SessionKeycapContent: View {
+    let slotIndex: Int
+    let sessionSlot: SessionSlotModel?
+    let showLabels: Bool
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Text("\(slotIndex + 1)")
+                .font(UITheme.heading)
+                .foregroundStyle(UITheme.textPrimary)
+            if showLabels {
+                SessionKeyStatusView(sessionSlot: sessionSlot)
+                    .font(UITheme.caption)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct SessionKeyStatusView: View {
+    let sessionSlot: SessionSlotModel?
+
+    static func label(for slot: SessionSlotModel?) -> String {
+        guard let slot else { return "未分配" }
+        if slot.title.isEmpty && (slot.placeRaw == nil || slot.placeRaw is NSNull) { return "未分配" }
+        switch slot.kind {
+        case "Working": return "进行中"
+        case "BlueDotCompleted": return "已完成"
+        case "NeedsAttention": return "待回应"
+        case "Error": return "执行异常"
+        case "Idle": return "就绪"
+        default: return "状态未知"
+        }
+    }
+
+    var body: some View {
+        Text(Self.label(for: sessionSlot))
+            .foregroundStyle(sessionSlot?.isUnreadBlueDot == true ? UITheme.accent : UITheme.textSecondary)
     }
 }

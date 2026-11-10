@@ -294,3 +294,8 @@
 - 起因与后果：原 `SelectProfile` 同时选择编辑对象与激活宿主，新的设置式界面若复用它浏览，会改变实际控制目标。空层清空编辑选择又暴露所有权维护依赖编辑对象的问题。原 QA 包虽隔离文档，仍以生产 CoreStore 启动并自动连接 USB。
 - 修复：新增 `BrowseProfile`，六层预览只切编辑对象，空层明确清空；运行所有权独立于编辑选择。QA 包必须有隔离文档目录并使用 isolated CoreStore，缺目录拒绝启动；日常包保持原初始化路径。
 - 验证：mi-core `browsing_profiles_changes_editor_without_activating_host` 与六层空态/所有权回归，mi-ffi 浏览边界回归；`scripts/run --verify` 原生 UI 应显示未连接，不枚举或打开真实键盘。Seen 1x（2026-11-10）。
+
+## 固定键帽与动态标题分离
+
+- 完整会话标题不能放入固定高度键帽后强制不限高度换行。键帽显示编号与短状态，完整标题由自然高度列表承载。
+- 布局验收必须覆盖真实投影格式、长中英文标题与所有状态。`SessionKeycapLayoutTests` 已覆盖内容区高度、全文行高及 JSON null 空槽；仍需在原生运行界面检查对应关系。
