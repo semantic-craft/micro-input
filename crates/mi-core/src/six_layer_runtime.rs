@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime},
@@ -107,9 +107,50 @@ pub struct RunningSixLayer {
     pub execution_enabled: Arc<AtomicBool>,
     pub command_execution_enabled: Arc<AtomicBool>,
     pub receipts: Option<std::sync::mpsc::Receiver<mi_macos::HostActionReceipt>>,
+    foreground: Arc<Mutex<ForegroundContext>>,
     stop: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
     executor: Option<JoinHandle<Result<(), String>>>,
+}
+
+#[derive(Clone, Debug)]
+struct ForegroundContext {
+    bundle_id: Option<String>,
+    generation: u64,
+    changed_at: Instant,
+}
+
+impl Default for ForegroundContext {
+    fn default() -> Self {
+        Self {
+            bundle_id: None,
+            generation: 0,
+            changed_at: Instant::now(),
+        }
+    }
+}
+
+impl ForegroundContext {
+    fn update(&mut self, bundle_id: Option<&str>) -> bool {
+        if self.bundle_id.as_deref() == bundle_id {
+            return false;
+        }
+        self.bundle_id = bundle_id.map(str::to_owned);
+        self.generation += 1;
+        self.changed_at = Instant::now();
+        true
+    }
+
+    fn host_index(&self, plan: &AppliedSixLayerPlan, physical_layer: u8) -> usize {
+        self.bundle_id
+            .as_deref()
+            .and_then(|bundle| {
+                plan.hosts.iter().position(|host| {
+                    mi_macos::executor::bundle_id_for_adapter(&host.adapter) == Some(bundle)
+                })
+            })
+            .unwrap_or((physical_layer - 2) as usize)
+    }
 }
 
 pub struct OwnershipPermit {
@@ -166,6 +207,23 @@ impl OwnershipPermit {
 }
 
 impl RunningSixLayer {
+    pub fn foreground_changed(&self, bundle_id: Option<&str>) -> bool {
+        self.foreground.lock().unwrap().update(bundle_id)
+    }
+
+    pub fn effective_profile_id(&self) -> Option<String> {
+        let layer = self.observed_layer.load(Ordering::Acquire);
+        if !(2..=4).contains(&layer) {
+            return None;
+        }
+        let foreground = self.foreground.lock().unwrap();
+        Some(
+            self.installation.plan.hosts[foreground.host_index(&self.installation.plan, layer)]
+                .profile_id
+                .clone(),
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn isolated(session: Arc<DeviceSession>, directory: &Path) -> Self {
         let mut draft = mi_model::draft::Draft::default();
@@ -243,6 +301,7 @@ impl RunningSixLayer {
         let commands = Arc::clone(&self.command_execution_enabled);
         let observed = Arc::clone(&self.observed_layer);
         let first = Arc::clone(&self.first_event_verified);
+        let foreground = Arc::clone(&self.foreground);
         let (tx, rx) = std::sync::mpsc::sync_channel(32);
         self.receipts = Some(rx);
         self.executor = Some(thread::spawn(move || {
@@ -256,6 +315,7 @@ impl RunningSixLayer {
                 &commands,
                 &observed,
                 &first,
+                &foreground,
                 &tx,
                 || permit.check(),
                 |profile, binding, action| executor.execute(profile, binding, action),
@@ -384,6 +444,7 @@ fn execute_clicks(
     commands: &AtomicBool,
     observed: &AtomicU8,
     first: &AtomicBool,
+    foreground: &Mutex<ForegroundContext>,
     receipts: &std::sync::mpsc::SyncSender<mi_macos::HostActionReceipt>,
     mut permit: impl FnMut() -> Result<(), String>,
     mut execute: impl FnMut(&str, &str, &ResolvedHostAction) -> mi_macos::HostActionReceipt,
@@ -406,7 +467,11 @@ fn execute_clicks(
         if !enabled.load(Ordering::Acquire) {
             continue;
         }
-        let host = &plan.hosts[(control.layer - 2) as usize];
+        let context = foreground.lock().unwrap().clone();
+        if context.generation != 0 && event.received_at < context.changed_at {
+            continue;
+        }
+        let host = &plan.hosts[context.host_index(plan, control.layer)];
         let Some(action) = &host.actions[control.slot as usize] else {
             continue;
         };
@@ -423,6 +488,9 @@ fn execute_clicks(
             return;
         }
         if event.is_expired_at(Instant::now()) {
+            continue;
+        }
+        if foreground.lock().unwrap().generation != context.generation {
             continue;
         }
         let receipt = execute(
@@ -598,6 +666,7 @@ fn new_running(
         execution_enabled: Arc::new(AtomicBool::new(false)),
         command_execution_enabled: Arc::new(AtomicBool::new(false)),
         receipts: None,
+        foreground: Arc::new(Mutex::new(ForegroundContext::default())),
         stop: Arc::new(AtomicBool::new(false)),
         monitor: None,
         executor: None,
@@ -710,6 +779,139 @@ mod tests {
             .unwrap();
     }
 
+    fn foreground_test_plan() -> AppliedSixLayerPlan {
+        let mut draft = mi_model::draft::Draft::default();
+        mi_model::preset::install_agent_starter_profiles(&mut draft).unwrap();
+        let id = |name: &str| {
+            draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, profile)| profile.name == name)
+                .unwrap()
+                .0
+                .clone()
+        };
+        let desired = BoardLayerPlan::recommended(
+            id("Codex"),
+            id("Antigravity"),
+            id("DeepSeek Coder (DSH)"),
+            id(mi_model::preset::MANAGED_CINDY_PROFILE_NAME),
+        );
+        AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
+            .unwrap()
+    }
+
+    #[test]
+    fn foreground_host_overrides_physical_host_without_changing_observed_layer() {
+        let plan = foreground_test_plan();
+        let receiver = UserCommandReceiver::bind().unwrap();
+        receiver.arm().unwrap();
+        let foreground = Mutex::new(ForegroundContext::default());
+        foreground
+            .lock()
+            .unwrap()
+            .update(Some("com.google.antigravity"));
+        send(&receiver, 27);
+        let stop = AtomicBool::new(false);
+        let observed = AtomicU8::new(1);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        thread::scope(|scope| {
+            let (done, wait) = std::sync::mpsc::channel::<()>();
+            let stop_ref = &stop;
+            scope.spawn(move || {
+                if wait.recv_timeout(Duration::from_secs(5)).is_err() {
+                    stop_ref.store(true, Ordering::Release);
+                }
+            });
+            execute_clicks(
+                &receiver,
+                &plan,
+                &stop,
+                &AtomicBool::new(true),
+                &AtomicBool::new(true),
+                &observed,
+                &AtomicBool::new(false),
+                &foreground,
+                &tx,
+                || Ok(()),
+                |profile, binding, action| {
+                    stop.store(true, Ordering::Release);
+                    mi_macos::SimulatedHostActionExecutor.execute(profile, binding, action)
+                },
+            );
+            let _ = done.send(());
+        });
+        let receipt = rx.try_recv().unwrap();
+        assert_eq!(receipt.profile_id, plan.hosts[0].profile_id);
+        assert_eq!(receipt.detail, "antigravity/focus-input");
+        assert_eq!(observed.load(Ordering::Acquire), 3);
+        let mut context = foreground.lock().unwrap();
+        context.update(Some("com.openai.codex"));
+        assert_eq!(context.host_index(&plan, 3), 1);
+        context.update(Some("com.apple.finder"));
+        assert_eq!(context.host_index(&plan, 4), 2);
+    }
+
+    #[test]
+    fn foreground_switch_discards_queued_and_waiting_clicks_without_retargeting() {
+        let plan = foreground_test_plan();
+        let receiver = UserCommandReceiver::bind().unwrap();
+        receiver.arm().unwrap();
+        let foreground = Mutex::new(ForegroundContext::default());
+        send(&receiver, 7);
+        thread::sleep(Duration::from_millis(30));
+        foreground
+            .lock()
+            .unwrap()
+            .update(Some("com.google.antigravity"));
+        send(&receiver, 27);
+        let stop = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let mut permits = 0;
+        thread::scope(|scope| {
+            let (done, wait) = std::sync::mpsc::channel::<()>();
+            let stop_ref = &stop;
+            scope.spawn(move || {
+                if wait.recv_timeout(Duration::from_secs(5)).is_err() {
+                    stop_ref.store(true, Ordering::Release);
+                }
+            });
+            execute_clicks(
+                &receiver,
+                &plan,
+                &stop,
+                &AtomicBool::new(true),
+                &AtomicBool::new(true),
+                &AtomicU8::new(1),
+                &AtomicBool::new(false),
+                &foreground,
+                &tx,
+                || {
+                    permits += 1;
+                    if permits == 1 {
+                        foreground.lock().unwrap().update(Some("com.deepseek.dsh"));
+                        send(&receiver, 47);
+                    }
+                    Ok(())
+                },
+                |profile, binding, action| {
+                    stop.store(true, Ordering::Release);
+                    mi_macos::SimulatedHostActionExecutor.execute(profile, binding, action)
+                },
+            );
+            let _ = done.send(());
+        });
+        let receipts: Vec<_> = rx.try_iter().collect();
+        assert_eq!(permits, 2);
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].profile_id, plan.hosts[1].profile_id);
+        assert_eq!(receipts[0].detail, "dsh-desktop/browser");
+        assert!(receiver.failure().is_none());
+    }
+
     #[test]
     fn execute_clicks_routes_by_layer_and_stops_on_ownership_loss() {
         let mut draft = mi_model::draft::Draft::default();
@@ -761,6 +963,7 @@ mod tests {
             &commands,
             &observed,
             &first,
+            &Mutex::new(ForegroundContext::default()),
             &tx,
             || {
                 permit_calls += 1;
@@ -856,6 +1059,7 @@ mod tests {
                 &commands,
                 &observed,
                 &first,
+                &Mutex::new(ForegroundContext::default()),
                 &tx,
                 || {
                     permit_calls += 1;

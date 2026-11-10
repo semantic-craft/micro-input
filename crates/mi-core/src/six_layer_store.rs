@@ -177,6 +177,7 @@ impl WorkbenchStore {
             }
             match result {
                 Ok(Some(mut running)) => {
+                    running.foreground_changed(self.foreground_bundle_id.as_deref());
                     self.device_session = Some(Arc::clone(&running.session));
                     self.connected_candidate = Some(running.candidate.clone());
                     self.hardware_rpc_verified = true;
@@ -274,6 +275,11 @@ impl WorkbenchStore {
                 .is_some_and(|failure| &self.status_message != failure)
             || !receipts.is_empty();
         for receipt in receipts {
+            let detail = match receipt.detail.as_str() {
+                "blocked:ambiguous_or_missing_focused_pane"
+                | "blocked:ambiguous_or_missing_input" => "请先点击目标分屏的输入框",
+                detail => detail,
+            };
             self.status_message = format!(
                 "{} · {}",
                 match receipt.outcome.as_str() {
@@ -281,7 +287,7 @@ impl WorkbenchStore {
                     _ if receipt.succeeded() => "已执行",
                     _ => "未执行",
                 },
-                receipt.detail
+                detail
             );
             self.record_host_action_receipt(receipt);
         }
@@ -317,9 +323,22 @@ impl WorkbenchStore {
             result.observed_layer = Some(running.observed_layer.load(Ordering::Acquire));
             result.observed_profile_kind = Some("six_layer_direct".into());
             result.observed_status = running.receiver.failure().unwrap_or_else(|| {
+                let layer = running.observed_layer.load(Ordering::Acquire);
+                let priority = self
+                    .foreground_bundle_id
+                    .as_deref()
+                    .filter(|_| (2..=4).contains(&layer))
+                    .and_then(|bundle| {
+                        running.installation.plan.hosts.iter().find(|host| {
+                            mi_macos::executor::bundle_id_for_adapter(&host.adapter) == Some(bundle)
+                        })
+                    })
+                    .map(|host| format!(" · 前台优先 {}", host.adapter))
+                    .unwrap_or_default();
                 format!(
-                    "六层配置已核验 · 第 {} 层 · {}",
-                    running.observed_layer.load(Ordering::Acquire),
+                    "六层配置已核验 · 物理第 {} 层{} · {}",
+                    layer,
+                    priority,
                     if running.first_event_verified.load(Ordering::Acquire) {
                         "实体输入已验证"
                     } else {
@@ -336,5 +355,55 @@ impl WorkbenchStore {
             }
             .into();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn six_layer_foreground_priority_ignores_legacy_manual_lock_and_keeps_physical_layer() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let (link, _writes) = mi_transport::MockLink::new();
+        let session = {
+            let _entered = store.tokio_runtime.enter();
+            DeviceSession::new(
+                link.clone(),
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig::default(),
+            )
+        };
+        let mut running =
+            six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        running.installation.plan = store.compiled_six_layer_plan().unwrap();
+        let antigravity = running.installation.plan.hosts[0].profile_id.clone();
+        let dsh = running.installation.plan.hosts[1].profile_id.clone();
+        running.observed_layer.store(3, Ordering::Release);
+        store.six_layer_running = Some(running);
+        store.auto_follow_enabled = false;
+        store.manual_override = true;
+        let saved_profile = store.document_store.host_active_profile_id();
+        assert!(store.foreground_changed(Some("com.google.antigravity")));
+        assert_eq!(store.resolved_active_profile_id(), Some(antigravity));
+        assert_eq!(
+            store.projection.sidebar.board_layers.observed_layer,
+            Some(3)
+        );
+        assert!(store
+            .projection
+            .sidebar
+            .board_layers
+            .observed_status
+            .contains("前台优先 antigravity"));
+        assert!(!store.foreground_changed(Some("com.google.antigravity")));
+        assert!(store.foreground_changed(Some("com.openai.codex")));
+        assert_eq!(store.resolved_active_profile_id(), Some(dsh));
+        assert_eq!(store.document_store.host_active_profile_id(), saved_profile);
+        assert!(link.writes.lock().unwrap().is_empty());
+        store.six_layer_running = None;
+        store.tokio_runtime.block_on(session.shutdown());
     }
 }
