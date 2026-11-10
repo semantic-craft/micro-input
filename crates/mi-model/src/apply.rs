@@ -11,6 +11,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "three_layer_board.rs"]
+mod three_layer_board;
+pub use three_layer_board::*;
+#[path = "six_layer_board.rs"]
+mod six_layer_board;
+pub use six_layer_board::*;
+
 pub const UNAVAILABLE: &str = "请核验当前连接并保存原配置副本后应用";
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Preview {

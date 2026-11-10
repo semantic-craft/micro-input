@@ -1,6 +1,8 @@
+use crate::managed_controls::{ManagedAxControls, ManagedControlReadiness, ObservedDictationState};
+use crate::native_ax::NativeAxProvider;
 use mi_model::host_router::{ResolvedHostAction, ResolvedMacroEvent};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -16,8 +18,8 @@ pub const KEY_CODE_N: u16 = 0x2D;
 pub const CG_EVENT_TYPE_FLAGS_CHANGED: u32 = 12;
 pub const CG_EVENT_FLAG_MASK_SECONDARY_FN: u64 = 0x0080_0000;
 pub const MAX_CLIPBOARD_STASH_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_ANTIGRAVITY_AX_DEPTH: usize = 16;
-pub const MAX_ANTIGRAVITY_AX_NODES: usize = 512;
+pub const MAX_ANTIGRAVITY_AX_DEPTH: usize = 36;
+pub const MAX_ANTIGRAVITY_AX_NODES: usize = 1800;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AntigravitySidebarAxNode {
@@ -103,6 +105,142 @@ pub fn select_antigravity_new_conversation_target(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AntigravityLiveVoiceTarget {
+    StartButton { label: String, node_index: usize },
+    EndButton { label: String, node_index: usize },
+    NotFound,
+}
+
+pub fn is_antigravity_live_voice_start_label(label: &str) -> bool {
+    let trimmed = label.trim();
+    trimmed.eq_ignore_ascii_case("Start Voice mode")
+        || trimmed.eq_ignore_ascii_case("Start Live Chat")
+        || trimmed.eq_ignore_ascii_case("Start Live chat")
+}
+
+pub fn is_antigravity_live_voice_end_label(label: &str) -> bool {
+    let trimmed = label.trim();
+    trimmed.eq_ignore_ascii_case("End Voice mode")
+        || trimmed.eq_ignore_ascii_case("End Live chat")
+        || trimmed.eq_ignore_ascii_case("End Live Chat")
+}
+
+pub fn is_antigravity_live_voice_control(node: &AntigravitySidebarAxNode) -> bool {
+    matches!(
+        node.role.as_str(),
+        "AXButton" | "AXLink" | "AXCheckBox" | "AXRadioButton"
+    ) && (is_antigravity_live_voice_start_label(&node.title)
+        || is_antigravity_live_voice_start_label(&node.description)
+        || is_antigravity_live_voice_end_label(&node.title)
+        || is_antigravity_live_voice_end_label(&node.description))
+}
+
+pub fn select_antigravity_live_voice_target(
+    nodes: &[AntigravitySidebarAxNode],
+) -> AntigravityLiveVoiceTarget {
+    for node in nodes {
+        if matches!(
+            node.role.as_str(),
+            "AXButton" | "AXLink" | "AXCheckBox" | "AXRadioButton"
+        ) {
+            let label = if is_antigravity_live_voice_end_label(&node.title) {
+                Some(node.title.trim().to_string())
+            } else if is_antigravity_live_voice_end_label(&node.description) {
+                Some(node.description.trim().to_string())
+            } else {
+                None
+            };
+            if let Some(l) = label {
+                return AntigravityLiveVoiceTarget::EndButton {
+                    label: l,
+                    node_index: node.index,
+                };
+            }
+        }
+    }
+    for node in nodes {
+        if matches!(
+            node.role.as_str(),
+            "AXButton" | "AXLink" | "AXCheckBox" | "AXRadioButton"
+        ) {
+            let label = if is_antigravity_live_voice_start_label(&node.title) {
+                Some(node.title.trim().to_string())
+            } else if is_antigravity_live_voice_start_label(&node.description) {
+                Some(node.description.trim().to_string())
+            } else {
+                None
+            };
+            if let Some(l) = label {
+                return AntigravityLiveVoiceTarget::StartButton {
+                    label: l,
+                    node_index: node.index,
+                };
+            }
+        }
+    }
+    AntigravityLiveVoiceTarget::NotFound
+}
+
+pub fn antigravity_live_voice_state(nodes: &[AntigravitySidebarAxNode], active: bool) -> bool {
+    let has_active_indicator = nodes.iter().any(|node| {
+        let t = node.title.trim();
+        let d = node.description.trim();
+        let check = |s: &str| {
+            is_antigravity_live_voice_end_label(s)
+                || s.eq_ignore_ascii_case("Voice mode in progress")
+                || s.eq_ignore_ascii_case("Live chat in progress")
+                || s.starts_with("Voice mode,")
+                || s.starts_with("Live chat,")
+                || s.starts_with("voice mode,")
+                || s.starts_with("live chat,")
+        };
+        check(t) || check(d)
+    });
+
+    if active {
+        has_active_indicator
+    } else {
+        matches!(
+            select_antigravity_live_voice_target(nodes),
+            AntigravityLiveVoiceTarget::StartButton { .. }
+        ) && !has_active_indicator
+    }
+}
+
+pub fn parse_pid_from_lsappinfo_output(text: &str) -> Option<i32> {
+    for line in text.lines() {
+        let lower = line.to_ascii_lowercase();
+        let mut search_from = 0;
+        while let Some(rel_pos) = lower[search_from..].find("pid") {
+            let pos = search_from + rel_pos;
+            search_from = pos + 3;
+
+            if pos > 0 && lower.as_bytes()[pos - 1].is_ascii_alphanumeric() {
+                continue;
+            }
+
+            let after_pid = &line[pos + 3..];
+            if let Some(eq_pos) = after_pid.find('=') {
+                let between = after_pid[..eq_pos].trim();
+                if between.is_empty() || between == "\"" || between == "'" {
+                    let after_eq = after_pid[eq_pos + 1..].trim_start();
+                    let digit_str: String = after_eq
+                        .chars()
+                        .take_while(|ch| ch.is_ascii_digit())
+                        .collect();
+                    if let Ok(pid) = digit_str.parse::<i32>() {
+                        if pid > 0 {
+                            return Some(pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn submit_modifiers_for_adapter(adapter: &str) -> Vec<String> {
     if adapter.trim().eq_ignore_ascii_case("antigravity") {
         vec!["command".to_string()]
@@ -151,7 +289,13 @@ unsafe extern "C" {
         attribute: CFStringRef,
         value: *mut CFTypeRef,
     ) -> AXError;
+    fn AXUIElementSetAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: CFTypeRef,
+    ) -> AXError;
     fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
+    static kCFBooleanTrue: CFTypeRef;
     fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
     fn CGEventCreateKeyboardEvent(
         source: CGEventSourceRef,
@@ -301,7 +445,10 @@ unsafe fn collect_antigravity_ax_nodes(
     }
     let role = ax_copy_string_attr(elem, "AXRole").unwrap_or_default();
     let title = ax_copy_string_attr(elem, "AXTitle").unwrap_or_default();
-    let description = ax_copy_string_attr(elem, "AXDescription").unwrap_or_default();
+    let mut description = ax_copy_string_attr(elem, "AXDescription").unwrap_or_default();
+    if description.trim().is_empty() {
+        description = ax_copy_string_attr(elem, "AXHelp").unwrap_or_default();
+    }
     if role == "AXWebArea" && web_area_title.is_none() && !title.trim().is_empty() {
         *web_area_title = Some(title.clone());
     }
@@ -311,39 +458,42 @@ unsafe fn collect_antigravity_ax_nodes(
     nodes.push(AntigravitySidebarAxNode {
         index: idx,
         role,
-        title,
-        description,
+        title: title.clone(),
+        description: description.clone(),
     });
-    let children = ax_copy_children(elem);
-    for child in children {
-        if nodes.len() < MAX_ANTIGRAVITY_AX_NODES {
-            collect_antigravity_ax_nodes(
-                child,
-                depth + 1,
-                web_area_title,
-                nodes,
-                retained_elements,
-            );
+    let skip_children = matches!(
+        title.trim(),
+        "Conversation turns" | "Agent response" | "User message"
+    ) || matches!(
+        description.trim(),
+        "Conversation turns" | "Agent response" | "User message"
+    );
+    if !skip_children {
+        let children = ax_copy_children(elem);
+        for child in children {
+            if nodes.len() < MAX_ANTIGRAVITY_AX_NODES {
+                collect_antigravity_ax_nodes(
+                    child,
+                    depth + 1,
+                    web_area_title,
+                    nodes,
+                    retained_elements,
+                );
+            }
+            CFRelease(child);
         }
-        CFRelease(child);
     }
 }
 
 #[cfg(target_os = "macos")]
-fn find_pid_for_bundle_id(bundle_id: &str) -> Option<i32> {
+pub(crate) fn find_pid_for_bundle_id(bundle_id: &str) -> Option<i32> {
     if let Ok(out) = Command::new("/usr/bin/lsappinfo")
         .args(["info", "-only", "pid", "-app", bundle_id])
         .output()
     {
         if out.status.success() {
             let text = String::from_utf8_lossy(&out.stdout);
-            if let Some((_, rhs)) = text.split_once('=') {
-                if let Ok(pid) = rhs.trim().parse::<i32>() {
-                    if pid > 0 {
-                        return Some(pid);
-                    }
-                }
-            }
+            return parse_pid_from_lsappinfo_output(&text);
         }
     }
     None
@@ -394,9 +544,7 @@ pub fn native_shortcut_for_agent_command(
         }
         ("antigravity", "browser") => Some((0x0B, mods(&["command", "shift"]))),
         ("antigravity", "terminal") => Some((0x26, mods(&["command"]))),
-        ("antigravity", "dictation" | "push-to-talk" | "live-voice") => {
-            Some((0x2E, mods(&["control"])))
-        }
+        ("antigravity", "dictation" | "push-to-talk") => Some((0x2E, mods(&["control"]))),
         ("antigravity", "split-right") => Some((0x02, mods(&["command"]))),
         (
             "antigravity" | "dsh-desktop" | "cindy",
@@ -583,13 +731,46 @@ pub trait HostOsDriver: Send + Sync {
     fn open_url(&self, url: &str) -> Result<(), String>;
     fn focus_agent_input(&self, adapter: &str) -> Result<(), String>;
     fn stop_active_dictation(&self, adapter: &str) -> Result<bool, String>;
+    fn toggle_dictation(&self, _adapter: &str) -> Result<ObservedDictationState, String> {
+        Err("blocked:dictation_toggle_unavailable".into())
+    }
+    fn start_owned_dictation(&self, _adapter: &str) -> Result<(), String> {
+        Err("blocked:bound_dictation_unavailable".into())
+    }
+    fn stop_owned_dictations(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn submit_agent_input(&self, adapter: &str, prompt: Option<&str>) -> Result<(), String> {
+        legacy_submit_agent_input(self, adapter, prompt)
+    }
+    fn insert_agent_prompt(&self, adapter: &str, prompt: &str) -> Result<(), String> {
+        legacy_insert_agent_prompt(self, adapter, prompt)
+    }
+    fn agent_shortcut(&self, adapter: &str, key: u16, modifiers: &[String]) -> Result<(), String> {
+        if let Some(bundle) = bundle_id_for_adapter(adapter) {
+            let _ = self.open_application(bundle);
+        }
+        self.post_key_shortcut(key, modifiers, true)?;
+        self.post_key_shortcut(key, modifiers, false)
+    }
     fn scroll_window(&self, req: &DialScrollRequest) -> Result<(), String>;
     fn new_conversation_in_project(&self, adapter: &str) -> Result<(), String>;
+    fn toggle_live_voice(&self, adapter: &str) -> Result<(), String>;
 }
 
 #[derive(Debug, Default)]
 pub struct MacOsSystemDriver {
     clipboard_seq: Mutex<u64>,
+    managed_controls: ManagedAxControls<NativeAxProvider>,
+}
+
+impl MacOsSystemDriver {
+    pub fn inspect_managed_controls(
+        &self,
+        adapter: &str,
+    ) -> Result<ManagedControlReadiness, String> {
+        self.managed_controls.inspect(adapter)
+    }
 }
 
 impl HostOsDriver for MacOsSystemDriver {
@@ -747,23 +928,66 @@ impl HostOsDriver for MacOsSystemDriver {
     }
 
     fn focus_agent_input(&self, adapter: &str) -> Result<(), String> {
-        if let Some(bundle_id) = bundle_id_for_adapter(adapter) {
-            let _ = self.open_application(bundle_id);
+        if is_managed_adapter(adapter) {
+            return self.managed_controls.focus_input(adapter);
         }
-        if adapter.trim().eq_ignore_ascii_case("antigravity") {
-            let cmd = vec!["command".to_string()];
-            let _ = self
-                .post_key_shortcut(0x25, &cmd, true)
-                .and_then(|()| self.post_key_shortcut(0x25, &cmd, false));
+        if let Some(bundle) = bundle_id_for_adapter(adapter) {
+            let _ = self.open_application(bundle);
         }
         Ok(())
     }
 
-    fn stop_active_dictation(&self, _adapter: &str) -> Result<bool, String> {
-        Ok(false)
+    fn stop_active_dictation(&self, adapter: &str) -> Result<bool, String> {
+        if is_managed_adapter(adapter) {
+            self.managed_controls.stop_dictation(adapter)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn toggle_dictation(&self, adapter: &str) -> Result<ObservedDictationState, String> {
+        self.managed_controls.toggle_dictation(adapter)
+    }
+
+    fn start_owned_dictation(&self, adapter: &str) -> Result<(), String> {
+        self.managed_controls.start_dictation(adapter)
+    }
+
+    fn stop_owned_dictations(&self) -> Result<(), String> {
+        self.managed_controls.stop_owned_dictations()
+    }
+
+    fn submit_agent_input(&self, adapter: &str, prompt: Option<&str>) -> Result<(), String> {
+        if is_managed_adapter(adapter) {
+            self.managed_controls.submit(adapter, prompt)
+        } else {
+            legacy_submit_agent_input(self, adapter, prompt)
+        }
+    }
+
+    fn insert_agent_prompt(&self, adapter: &str, prompt: &str) -> Result<(), String> {
+        if is_managed_adapter(adapter) {
+            self.managed_controls.insert_prompt(adapter, prompt)
+        } else {
+            legacy_insert_agent_prompt(self, adapter, prompt)
+        }
+    }
+
+    fn agent_shortcut(&self, adapter: &str, key: u16, modifiers: &[String]) -> Result<(), String> {
+        if is_managed_adapter(adapter) {
+            return self.managed_controls.shortcut(adapter, key, modifiers);
+        }
+        if let Some(bundle) = bundle_id_for_adapter(adapter) {
+            let _ = self.open_application(bundle);
+        }
+        self.post_key_shortcut(key, modifiers, true)?;
+        self.post_key_shortcut(key, modifiers, false)
     }
 
     fn scroll_window(&self, req: &DialScrollRequest) -> Result<(), String> {
+        if is_managed_bundle(&req.target_bundle_id) {
+            return self.managed_controls.scroll(req);
+        }
         if !self.is_accessibility_trusted() {
             return Err("accessibility_untrusted".to_string());
         }
@@ -841,6 +1065,11 @@ impl HostOsDriver for MacOsSystemDriver {
                     focused
                 };
                 if !app_elem.is_null() {
+                    let attr_manual = cf_string_from_str("AXManualAccessibility");
+                    if !attr_manual.is_null() {
+                        let _ = AXUIElementSetAttributeValue(app_elem, attr_manual, kCFBooleanTrue);
+                        CFRelease(attr_manual);
+                    }
                     let win_elem = ax_copy_element_attr(app_elem, "AXFocusedWindow")
                         .or_else(|| ax_copy_element_attr(app_elem, "AXMainWindow"))
                         .or_else(|| {
@@ -924,6 +1153,216 @@ impl HostOsDriver for MacOsSystemDriver {
         self.post_key_shortcut(KEY_CODE_N, &cmd, true)
             .and_then(|()| self.post_key_shortcut(KEY_CODE_N, &cmd, false))
     }
+
+    fn toggle_live_voice(&self, adapter: &str) -> Result<(), String> {
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        let bundle_id = bundle_id_for_adapter(adapter).unwrap_or("com.google.antigravity");
+        let _ = self.open_application(bundle_id);
+        #[cfg(target_os = "macos")]
+        if adapter.trim().eq_ignore_ascii_case("antigravity") {
+            unsafe {
+                let app_elem = if let Some(pid) = find_pid_for_bundle_id(bundle_id) {
+                    let elem = AXUIElementCreateApplication(pid);
+                    if elem.is_null() {
+                        return Err("antigravity_live_voice_control_not_found".to_string());
+                    }
+                    elem
+                } else {
+                    let sys = AXUIElementCreateSystemWide();
+                    let focused = if sys.is_null() {
+                        std::ptr::null()
+                    } else {
+                        let f = ax_copy_element_attr(sys, "AXFocusedApplication")
+                            .unwrap_or(std::ptr::null());
+                        CFRelease(sys);
+                        f
+                    };
+                    if focused.is_null() {
+                        return Err("antigravity_live_voice_control_not_found".to_string());
+                    }
+                    focused
+                };
+
+                let attr_manual = cf_string_from_str("AXManualAccessibility");
+                if !attr_manual.is_null() {
+                    let _ = AXUIElementSetAttributeValue(app_elem, attr_manual, kCFBooleanTrue);
+                    CFRelease(attr_manual);
+                }
+
+                let mut target = AntigravityLiveVoiceTarget::NotFound;
+                let mut retained: Vec<AXUIElementRef> = Vec::new();
+                let mut win_elem: Option<AXUIElementRef> = None;
+
+                for attempt in 0..10 {
+                    if attempt > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    let candidate_win = ax_copy_element_attr(app_elem, "AXFocusedWindow")
+                        .or_else(|| ax_copy_element_attr(app_elem, "AXMainWindow"))
+                        .or_else(|| {
+                            let attr_cf = cf_string_from_str("AXWindows");
+                            if attr_cf.is_null() {
+                                return None;
+                            }
+                            let mut val: CFTypeRef = std::ptr::null();
+                            let err = AXUIElementCopyAttributeValue(app_elem, attr_cf, &mut val);
+                            CFRelease(attr_cf);
+                            if err != K_AX_ERROR_SUCCESS || val.is_null() {
+                                return None;
+                            }
+                            let first = if CFArrayGetCount(val) > 0 {
+                                let item = CFArrayGetValueAtIndex(val, 0);
+                                if !item.is_null() {
+                                    CFRetain(item);
+                                    Some(item)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            CFRelease(val);
+                            first
+                        });
+
+                    if let Some(w) = candidate_win {
+                        let mut web_area_title = None;
+                        let mut nodes = Vec::new();
+                        let mut cur_retained = Vec::new();
+                        collect_antigravity_ax_nodes(
+                            w,
+                            0,
+                            &mut web_area_title,
+                            &mut nodes,
+                            &mut cur_retained,
+                        );
+                        let found_target = select_antigravity_live_voice_target(&nodes);
+                        if matches!(
+                            found_target,
+                            AntigravityLiveVoiceTarget::StartButton { .. }
+                                | AntigravityLiveVoiceTarget::EndButton { .. }
+                        ) {
+                            target = found_target;
+                            for elem in retained {
+                                CFRelease(elem);
+                            }
+                            retained = cur_retained;
+                            win_elem = Some(w);
+                            break;
+                        } else {
+                            for elem in cur_retained {
+                                CFRelease(elem);
+                            }
+                            CFRelease(w);
+                        }
+                    }
+                }
+
+                let Some(win) = win_elem else {
+                    CFRelease(app_elem);
+                    for elem in retained {
+                        CFRelease(elem);
+                    }
+                    return Err("antigravity_live_voice_control_not_found".to_string());
+                };
+
+                let (was_active, target_node_index) = match target {
+                    AntigravityLiveVoiceTarget::EndButton { node_index, .. } => (true, node_index),
+                    AntigravityLiveVoiceTarget::StartButton { node_index, .. } => {
+                        (false, node_index)
+                    }
+                    AntigravityLiveVoiceTarget::NotFound => {
+                        CFRelease(win);
+                        CFRelease(app_elem);
+                        for elem in retained {
+                            CFRelease(elem);
+                        }
+                        return Err("antigravity_live_voice_control_not_found".to_string());
+                    }
+                };
+
+                let pressed_ok = if let Some(&elem) = retained.get(target_node_index) {
+                    let action_cf = cf_string_from_str("AXPress");
+                    let ok = if !action_cf.is_null() {
+                        let err = AXUIElementPerformAction(elem, action_cf);
+                        CFRelease(action_cf);
+                        err == K_AX_ERROR_SUCCESS
+                    } else {
+                        false
+                    };
+                    ok
+                } else {
+                    false
+                };
+
+                for elem in retained {
+                    CFRelease(elem);
+                }
+
+                if !pressed_ok {
+                    CFRelease(win);
+                    CFRelease(app_elem);
+                    return Err("antigravity_live_voice_control_not_found".to_string());
+                }
+
+                let mut confirmed = false;
+                for _attempt in 0..25 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+
+                    let mut web_area_title = None;
+                    let mut poll_nodes = Vec::new();
+                    let mut poll_retained = Vec::new();
+                    collect_antigravity_ax_nodes(
+                        win,
+                        0,
+                        &mut web_area_title,
+                        &mut poll_nodes,
+                        &mut poll_retained,
+                    );
+
+                    if !was_active {
+                        for node in &poll_nodes {
+                            if node.role == "AXButton" {
+                                let t = node.title.trim();
+                                let d = node.description.trim();
+                                if t.starts_with("Use ") || d.starts_with("Use ") {
+                                    if let Some(&elem) = poll_retained.get(node.index) {
+                                        let action_cf = cf_string_from_str("AXPress");
+                                        if !action_cf.is_null() {
+                                            let _ = AXUIElementPerformAction(elem, action_cf);
+                                            CFRelease(action_cf);
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    let ok = antigravity_live_voice_state(&poll_nodes, !was_active);
+                    for elem in poll_retained {
+                        CFRelease(elem);
+                    }
+                    if ok {
+                        confirmed = true;
+                        break;
+                    }
+                }
+
+                CFRelease(win);
+                CFRelease(app_elem);
+
+                if confirmed {
+                    return Ok(());
+                } else {
+                    return Err("antigravity_live_voice_state_unconfirmed".to_string());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -954,6 +1393,7 @@ pub enum RecordedOsEvent {
     StopActiveDictation(String),
     ScrollWindow(DialScrollRequest),
     NewConversationInProject(String),
+    ToggleLiveVoice(String),
 }
 
 #[derive(Debug)]
@@ -1165,6 +1605,16 @@ impl HostOsDriver for RecordingOsDriver {
         ));
         Ok(())
     }
+
+    fn toggle_live_voice(&self, adapter: &str) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        if !st.trusted {
+            return Err("accessibility_untrusted".to_string());
+        }
+        st.events
+            .push(RecordedOsEvent::ToggleLiveVoice(adapter.to_string()));
+        Ok(())
+    }
 }
 
 pub(crate) struct ActionDescriptor {
@@ -1313,43 +1763,121 @@ pub(crate) fn describe_resolved_action(action: &ResolvedHostAction) -> ActionDes
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HeldInputId {
+    pub session_id: u64,
+    pub binding_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum FnHoldKey {
+    Input(HeldInputId),
+    Pulse,
+}
+
+struct FnOwner {
+    profile_id: String,
+    target: String,
+    release_failed: bool,
+}
+
 pub struct LiveHostActionExecutor<D: HostOsDriver = MacOsSystemDriver> {
     driver: D,
-    held_apple_fn_bindings: Mutex<HashSet<String>>,
+    execution_lock: Mutex<()>,
+    held_apple_fn_bindings: Mutex<HashMap<FnHoldKey, FnOwner>>,
+}
+
+impl<D: HostOsDriver> Drop for LiveHostActionExecutor<D> {
+    fn drop(&mut self) {
+        if let Err(error) = self.stop_owned_actions() {
+            eprintln!("host action cleanup unconfirmed: {error}");
+        }
+    }
 }
 
 impl<D: HostOsDriver> LiveHostActionExecutor<D> {
     pub fn new(driver: D) -> Self {
         Self {
             driver,
-            held_apple_fn_bindings: Mutex::new(HashSet::new()),
+            execution_lock: Mutex::new(()),
+            held_apple_fn_bindings: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn driver(&self) -> &D {
-        &self.driver
+    pub fn has_unconfirmed_apple_fn_release(&self) -> bool {
+        self.held_apple_fn_bindings
+            .lock()
+            .unwrap()
+            .values()
+            .any(|owner| owner.release_failed)
+    }
+
+    pub fn stop_owned_actions(&self) -> Result<(), String> {
+        let _execution = self.execution_lock.lock().unwrap();
+        let mut held = self.held_apple_fn_bindings.lock().unwrap();
+        let released = if held.is_empty() {
+            Ok(())
+        } else {
+            match self.driver.post_apple_fn_flags(false) {
+                Ok(()) => {
+                    held.clear();
+                    Ok(())
+                }
+                Err(error) => {
+                    for owner in held.values_mut() {
+                        owner.release_failed = true;
+                    }
+                    Err(error)
+                }
+            }
+        };
+        let stopped = self.driver.stop_owned_dictations();
+        released.and(stopped)
+    }
+
+    pub fn start_owned_dictation(&self, adapter: &str) -> Result<(), String> {
+        let _execution = self.execution_lock.lock().unwrap();
+        if self.has_unconfirmed_apple_fn_release() {
+            return Err("apple_fn_cleanup_unconfirmed".into());
+        }
+        self.driver.start_owned_dictation(adapter)
+    }
+
+    pub fn stop_owned_dictations(&self) -> Result<(), String> {
+        let _execution = self.execution_lock.lock().unwrap();
+        self.driver.stop_owned_dictations()
     }
 
     pub fn handle_apple_fn_press(
         &self,
+        input: &HeldInputId,
         profile_id: &str,
-        binding_id: &str,
         target: &str,
     ) -> Option<HostActionReceipt> {
+        let _execution = self.execution_lock.lock().unwrap();
         let mut held = self.held_apple_fn_bindings.lock().unwrap();
-        if held.contains(binding_id) {
+        let key = FnHoldKey::Input(input.clone());
+        if held.contains_key(&key) {
             return None;
         }
+        let binding_id = &input.binding_id;
         let resolved_target = if target.trim().is_empty() {
             "frontmost-editor"
         } else {
             target
         };
-        if !self.driver.is_accessibility_trusted() {
+        let blocked = if held.values().any(|owner| owner.release_failed) {
+            Some("apple_fn_cleanup_unconfirmed")
+        } else if !self.driver.is_accessibility_trusted() {
+            Some("accessibility_untrusted")
+        } else {
+            None
+        };
+        if let Some(reason) = blocked {
             return Some(HostActionReceipt {
                 action_type: "shortcut".to_string(),
                 binding_id: binding_id.to_string(),
-                detail: "accessibility_untrusted".to_string(),
+                detail: reason.to_string(),
                 outcome: "blocked".to_string(),
                 profile_id: profile_id.to_string(),
                 target: resolved_target.to_string(),
@@ -1357,7 +1885,12 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 timestamp_ms: now_timestamp_ms(),
             });
         }
-        if let Err(err) = self.driver.post_apple_fn_flags(true) {
+        let pressed = if held.is_empty() {
+            self.driver.post_apple_fn_flags(true)
+        } else {
+            Ok(())
+        };
+        if let Err(err) = pressed {
             return Some(HostActionReceipt {
                 action_type: "shortcut".to_string(),
                 binding_id: binding_id.to_string(),
@@ -1369,7 +1902,14 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 timestamp_ms: now_timestamp_ms(),
             });
         }
-        held.insert(binding_id.to_string());
+        held.insert(
+            key,
+            FnOwner {
+                profile_id: profile_id.to_string(),
+                target: resolved_target.to_string(),
+                release_failed: false,
+            },
+        );
         Some(HostActionReceipt {
             action_type: "shortcut".to_string(),
             binding_id: binding_id.to_string(),
@@ -1382,35 +1922,57 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
         })
     }
 
-    pub fn handle_apple_fn_release(
-        &self,
-        profile_id: &str,
-        binding_id: &str,
-        target: &str,
-    ) -> Option<HostActionReceipt> {
+    pub fn handle_apple_fn_release(&self, input: &HeldInputId) -> Option<HostActionReceipt> {
+        let _execution = self.execution_lock.lock().unwrap();
         let mut held = self.held_apple_fn_bindings.lock().unwrap();
-        if !held.remove(binding_id) {
-            return None;
-        }
-        let resolved_target = if target.trim().is_empty() {
-            "frontmost-editor"
+        let key = FnHoldKey::Input(input.clone());
+        let owner = held.get(&key)?;
+        let profile_id = owner.profile_id.clone();
+        let target = owner.target.clone();
+        let released = if held.len() == 1 {
+            self.driver.post_apple_fn_flags(false)
         } else {
-            target
+            Ok(())
         };
-        let (outcome, detail) = match self.driver.post_apple_fn_flags(false) {
-            Ok(()) => ("executed".to_string(), "fn (release)".to_string()),
-            Err(err) => ("failed".to_string(), err),
+        let (outcome, detail) = match released {
+            Ok(()) => {
+                held.remove(&key);
+                ("executed".to_string(), "fn (release)".to_string())
+            }
+            Err(err) => {
+                held.get_mut(&key).unwrap().release_failed = true;
+                ("failed".to_string(), err)
+            }
         };
         Some(HostActionReceipt {
             action_type: "shortcut".to_string(),
-            binding_id: binding_id.to_string(),
+            binding_id: input.binding_id.clone(),
             detail,
             outcome,
-            profile_id: profile_id.to_string(),
-            target: resolved_target.to_string(),
+            profile_id,
+            target,
             text_byte_len: None,
             timestamp_ms: now_timestamp_ms(),
         })
+    }
+
+    fn pulse_apple_fn(&self, profile_id: &str, target: &str) -> Result<(), String> {
+        let mut held = self.held_apple_fn_bindings.lock().unwrap();
+        if !held.is_empty() {
+            return Err("apple_fn_already_held".into());
+        }
+        self.driver.post_apple_fn_flags(true)?;
+        held.insert(
+            FnHoldKey::Pulse,
+            FnOwner {
+                profile_id: profile_id.to_string(),
+                target: target.to_string(),
+                release_failed: true,
+            },
+        );
+        self.driver.post_apple_fn_flags(false)?;
+        held.remove(&FnHoldKey::Pulse);
+        Ok(())
     }
 
     pub fn execute(
@@ -1419,6 +1981,17 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
         binding_id: &str,
         action: &ResolvedHostAction,
     ) -> HostActionReceipt {
+        self.execute_when(profile_id, binding_id, action, || true)
+    }
+
+    pub fn execute_when(
+        &self,
+        profile_id: &str,
+        binding_id: &str,
+        action: &ResolvedHostAction,
+        admitted: impl FnOnce() -> bool,
+    ) -> HostActionReceipt {
+        let _execution = self.execution_lock.lock().unwrap();
         let desc = describe_resolved_action(action);
         let make_receipt = |outcome: &str, detail: String| HostActionReceipt {
             action_type: desc.action_type.clone(),
@@ -1431,6 +2004,13 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
             timestamp_ms: now_timestamp_ms(),
         };
 
+        if !admitted() {
+            return make_receipt("blocked", "input_retired".to_string());
+        }
+        if self.has_unconfirmed_apple_fn_release() {
+            return make_receipt("blocked", "apple_fn_cleanup_unconfirmed".to_string());
+        }
+
         match action {
             ResolvedHostAction::Shortcut {
                 key_code,
@@ -1441,15 +2021,22 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 if !self.driver.is_accessibility_trusted() {
                     return make_receipt("blocked", "accessibility_untrusted".to_string());
                 }
+                if let Some(adapter) = target_bundle_id
+                    .as_deref()
+                    .and_then(managed_adapter_for_bundle)
+                {
+                    return match self.driver.agent_shortcut(adapter, *key_code, modifiers) {
+                        Ok(()) => make_receipt("executed", desc.detail),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
+                    };
+                }
                 if let Some(bundle_id) = target_bundle_id {
                     if let Err(err) = self.driver.open_application(bundle_id) {
                         return make_receipt("failed", err);
                     }
                 }
                 let res = if *key_code == APPLE_FN_KEY_CODE && modifiers.is_empty() {
-                    self.driver
-                        .post_apple_fn_flags(true)
-                        .and_then(|()| self.driver.post_apple_fn_flags(false))
+                    self.pulse_apple_fn(profile_id, &desc.target)
                 } else {
                     self.driver
                         .post_key_shortcut(*key_code, modifiers, true)
@@ -1463,15 +2050,12 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
             ResolvedHostAction::PasteText {
                 text,
                 target_bundle_id,
+                adapter,
                 no_newline,
                 submit,
-                ..
             } => {
                 if !self.driver.is_accessibility_trusted() {
                     return make_receipt("blocked", "accessibility_untrusted".to_string());
-                }
-                if let Some(bundle_id) = target_bundle_id {
-                    let _ = self.driver.open_application(bundle_id);
                 }
                 let sanitized = if *no_newline {
                     text.trim_end_matches(['\r', '\n'])
@@ -1480,6 +2064,38 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 };
                 if sanitized.trim().is_empty() {
                     return make_receipt("blocked", "empty_paste_text".to_string());
+                }
+                let managed = target_bundle_id
+                    .as_deref()
+                    .and_then(managed_adapter_for_bundle)
+                    .or_else(|| {
+                        adapter
+                            .as_deref()
+                            .filter(|adapter| is_managed_adapter(adapter))
+                    });
+                if let Some(managed) = managed {
+                    let expected_bundle = bundle_id_for_adapter(managed);
+                    if target_bundle_id
+                        .as_deref()
+                        .is_some_and(|bundle| Some(bundle) != expected_bundle)
+                        || adapter.as_deref().is_some_and(|adapter| {
+                            bundle_id_for_adapter(adapter) != expected_bundle
+                        })
+                    {
+                        return make_receipt("blocked", "blocked:managed_target_mismatch".into());
+                    }
+                    let result = if *submit {
+                        self.driver.submit_agent_input(managed, Some(sanitized))
+                    } else {
+                        self.driver.insert_agent_prompt(managed, sanitized)
+                    };
+                    return match result {
+                        Ok(()) => make_receipt("executed", desc.detail),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
+                    };
+                }
+                if let Some(bundle_id) = target_bundle_id {
+                    let _ = self.driver.open_application(bundle_id);
                 }
                 let snapshot = self.driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
                 let written_cc = self.driver.write_clipboard_plain_text(sanitized);
@@ -1539,78 +2155,52 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 }
             }
             ResolvedHostAction::AgentCommand { adapter, command } => {
-                if command == "submit" {
+                if command == "toggle-dictation" {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
-                    if let Err(err) = self.driver.stop_active_dictation(adapter) {
-                        return make_receipt("failed", err);
+                    if !matches!(
+                        crate::ax_dictation::DictationAdapter::parse(adapter),
+                        Some(
+                            crate::ax_dictation::DictationAdapter::Cindy
+                                | crate::ax_dictation::DictationAdapter::Antigravity
+                                | crate::ax_dictation::DictationAdapter::Dsh
+                        )
+                    ) {
+                        return make_receipt("blocked", "unsupported_dictation_adapter".into());
                     }
-                    if let Err(err) = self.driver.focus_agent_input(adapter) {
-                        return make_receipt("failed", err);
+                    match self.driver.toggle_dictation(adapter) {
+                        Ok(state) => make_receipt(
+                            "executed",
+                            match state {
+                                ObservedDictationState::Idle => "dictation_stopped",
+                                ObservedDictationState::Recording => "dictation_started",
+                            }
+                            .into(),
+                        ),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }
-                    let submit_mods = submit_modifiers_for_adapter(adapter);
-                    match self
-                        .driver
-                        .post_key_shortcut(KEY_CODE_RETURN, &submit_mods, true)
-                        .and_then(|()| {
-                            self.driver
-                                .post_key_shortcut(KEY_CODE_RETURN, &submit_mods, false)
-                        }) {
-                        Ok(()) => make_receipt("executed", desc.detail),
-                        Err(err) => make_receipt("failed", err),
-                    }
-                } else if let Some(prompt) = command.strip_prefix("submit-prompt:") {
+                } else if command == "submit" || command.starts_with("submit-prompt:") {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
-                    let sanitized = prompt.trim_end_matches(['\r', '\n']);
-                    if let Err(err) = self.driver.stop_active_dictation(adapter) {
-                        return make_receipt("failed", err);
-                    }
-                    if let Err(err) = self.driver.focus_agent_input(adapter) {
-                        return make_receipt("failed", err);
-                    }
-                    let snapshot = self.driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
-                    let written_cc = self.driver.write_clipboard_plain_text(sanitized);
-                    let cmd_mod = vec!["command".to_string()];
-                    let submit_mods = submit_modifiers_for_adapter(adapter);
-                    let res = self
-                        .driver
-                        .post_key_shortcut(KEY_CODE_V, &cmd_mod, true)
-                        .and_then(|()| self.driver.post_key_shortcut(KEY_CODE_V, &cmd_mod, false))
-                        .and_then(|()| {
-                            self.driver
-                                .post_key_shortcut(KEY_CODE_RETURN, &submit_mods, true)
-                        })
-                        .and_then(|()| {
-                            self.driver
-                                .post_key_shortcut(KEY_CODE_RETURN, &submit_mods, false)
-                        });
-                    let _ = self.driver.restore_clipboard(&snapshot, written_cc);
-                    match res {
+                    let prompt = command
+                        .strip_prefix("submit-prompt:")
+                        .map(|prompt| prompt.trim_end_matches(['\r', '\n']));
+                    match self.driver.submit_agent_input(adapter, prompt) {
                         Ok(()) => make_receipt("executed", desc.detail),
-                        Err(err) => make_receipt("failed", err),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }
                 } else if let Some(prompt) = command.strip_prefix("prompt:") {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
-                    let sanitized = prompt.trim_end_matches(['\r', '\n']);
-                    if let Err(err) = self.driver.focus_agent_input(adapter) {
-                        return make_receipt("failed", err);
-                    }
-                    let snapshot = self.driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
-                    let written_cc = self.driver.write_clipboard_plain_text(sanitized);
-                    let cmd_mod = vec!["command".to_string()];
-                    let res = self
+                    match self
                         .driver
-                        .post_key_shortcut(KEY_CODE_V, &cmd_mod, true)
-                        .and_then(|()| self.driver.post_key_shortcut(KEY_CODE_V, &cmd_mod, false));
-                    let _ = self.driver.restore_clipboard(&snapshot, written_cc);
-                    match res {
+                        .insert_agent_prompt(adapter, prompt.trim_end_matches(['\r', '\n']))
+                    {
                         Ok(()) => make_receipt("executed", desc.detail),
-                        Err(err) => make_receipt("failed", err),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }
                 } else if let Some(scroll_req) = parse_dial_scroll_command(adapter, command) {
                     if !self.driver.is_accessibility_trusted() {
@@ -1618,7 +2208,7 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     }
                     match self.driver.scroll_window(&scroll_req) {
                         Ok(()) => make_receipt("executed", desc.detail),
-                        Err(err) => make_receipt("failed", err),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }
                 } else if command == "focus-input" {
                     if !self.driver.is_accessibility_trusted() {
@@ -1626,7 +2216,7 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     }
                     match self.driver.focus_agent_input(adapter) {
                         Ok(()) => make_receipt("executed", desc.detail),
-                        Err(err) => make_receipt("failed", err),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }
                 } else if command == "new-conversation-in-project" {
                     if !self.driver.is_accessibility_trusted() {
@@ -1636,22 +2226,23 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                         Ok(()) => make_receipt("executed", desc.detail),
                         Err(err) => make_receipt("failed", err),
                     }
+                } else if command == "live-voice" {
+                    if !self.driver.is_accessibility_trusted() {
+                        return make_receipt("blocked", "accessibility_untrusted".to_string());
+                    }
+                    match self.driver.toggle_live_voice(adapter) {
+                        Ok(()) => make_receipt("executed", desc.detail),
+                        Err(err) => make_receipt("failed", err),
+                    }
                 } else if let Some((key_code, modifiers)) =
                     native_shortcut_for_agent_command(adapter, command)
                 {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
-                    if let Some(bundle_id) = bundle_id_for_adapter(adapter) {
-                        let _ = self.driver.open_application(bundle_id);
-                    }
-                    match self
-                        .driver
-                        .post_key_shortcut(key_code, &modifiers, true)
-                        .and_then(|()| self.driver.post_key_shortcut(key_code, &modifiers, false))
-                    {
+                    match self.driver.agent_shortcut(adapter, key_code, &modifiers) {
                         Ok(()) => make_receipt("executed", desc.detail),
-                        Err(err) => make_receipt("failed", err),
+                        Err(err) => make_receipt(managed_error_outcome(&err), err),
                     }
                 } else if matches!(command.as_str(), "dictation" | "push-to-talk") {
                     if !self.driver.is_accessibility_trusted() {
@@ -1660,11 +2251,7 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     if let Some(bundle_id) = bundle_id_for_adapter(adapter) {
                         let _ = self.driver.open_application(bundle_id);
                     }
-                    match self
-                        .driver
-                        .post_apple_fn_flags(true)
-                        .and_then(|()| self.driver.post_apple_fn_flags(false))
-                    {
+                    match self.pulse_apple_fn(profile_id, &desc.target) {
                         Ok(()) => make_receipt("executed", desc.detail),
                         Err(err) => make_receipt("failed", err),
                     }
@@ -1737,5 +2324,71 @@ impl SimulatedHostActionExecutor {
         let receipt = self.execute(profile_id, binding_id, action);
         receipt.append_to_audit_log(audit_log_path)?;
         Ok(receipt)
+    }
+}
+
+fn managed_error_outcome(error: &str) -> &'static str {
+    if error.starts_with("blocked:") {
+        "blocked"
+    } else {
+        "failed"
+    }
+}
+
+fn legacy_submit_agent_input<D: HostOsDriver + ?Sized>(
+    driver: &D,
+    adapter: &str,
+    prompt: Option<&str>,
+) -> Result<(), String> {
+    driver.stop_active_dictation(adapter)?;
+    driver.focus_agent_input(adapter)?;
+    let submit_modifiers = submit_modifiers_for_adapter(adapter);
+    if let Some(prompt) = prompt {
+        let snapshot = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
+        let written = driver.write_clipboard_plain_text(prompt);
+        let command = vec!["command".to_owned()];
+        let result = driver
+            .post_key_shortcut(KEY_CODE_V, &command, true)
+            .and_then(|()| driver.post_key_shortcut(KEY_CODE_V, &command, false))
+            .and_then(|()| driver.post_key_shortcut(KEY_CODE_RETURN, &submit_modifiers, true))
+            .and_then(|()| driver.post_key_shortcut(KEY_CODE_RETURN, &submit_modifiers, false));
+        driver.restore_clipboard(&snapshot, written);
+        result
+    } else {
+        driver.post_key_shortcut(KEY_CODE_RETURN, &submit_modifiers, true)?;
+        driver.post_key_shortcut(KEY_CODE_RETURN, &submit_modifiers, false)
+    }
+}
+
+fn legacy_insert_agent_prompt<D: HostOsDriver + ?Sized>(
+    driver: &D,
+    adapter: &str,
+    prompt: &str,
+) -> Result<(), String> {
+    driver.focus_agent_input(adapter)?;
+    let snapshot = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
+    let written = driver.write_clipboard_plain_text(prompt);
+    let modifiers = vec!["command".to_owned()];
+    let result = driver
+        .post_key_shortcut(KEY_CODE_V, &modifiers, true)
+        .and_then(|()| driver.post_key_shortcut(KEY_CODE_V, &modifiers, false));
+    driver.restore_clipboard(&snapshot, written);
+    result
+}
+
+fn is_managed_adapter(adapter: &str) -> bool {
+    crate::managed_controls::managed_adapter(adapter).is_ok()
+}
+
+fn is_managed_bundle(bundle: &str) -> bool {
+    managed_adapter_for_bundle(bundle).is_some()
+}
+
+fn managed_adapter_for_bundle(bundle: &str) -> Option<&'static str> {
+    match bundle {
+        "com.xd.cindy" => Some("cindy"),
+        "com.google.antigravity" => Some("antigravity"),
+        "com.deepseek.dsh" => Some("dsh-desktop"),
+        _ => None,
     }
 }

@@ -553,3 +553,6 @@ pub mod workspace_nav;
 pub mod attention_round;
 
 pub mod voice_control;
+
+pub mod board_layers;
+pub mod direct_controls;

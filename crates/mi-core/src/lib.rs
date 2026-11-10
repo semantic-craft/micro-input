@@ -2,11 +2,13 @@ pub mod canvas;
 pub mod editors;
 pub mod header;
 pub mod inspector;
+pub mod karabiner;
 pub mod overlay;
 pub mod qa_runner;
 pub mod radial;
 pub mod session_strip;
 pub mod sidebar;
+pub mod six_layer_runtime;
 pub mod status_menu;
 pub mod store;
 
@@ -53,9 +55,9 @@ pub use session_strip::{
     SimpleLightingPopoverProjection,
 };
 pub use sidebar::{
-    AutoSwitchState, BackupCommand, CanonicalAgent, HardwareProfileSlotKind,
-    HardwareProfileSlotProjection, OwnershipBannerState, ProfileCommand, SidebarAction,
-    SidebarProfileRow, SidebarProjection, HARDWARE_PROFILE_SLOT_COUNT,
+    AutoSwitchState, BackupCommand, BoardLayerProjection, BoardLayersProjection,
+    BoardProfileChoice, CanonicalAgent, OwnershipBannerState, ProfileCommand, SidebarAction,
+    SidebarProfileRow, SidebarProjection,
 };
 pub use status_menu::{
     FavoriteSlotCardProjection, FavoriteSlotIndex, PendingPresetImportPreview, PinnedFavoritesGrid,

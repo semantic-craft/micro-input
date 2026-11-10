@@ -38,6 +38,8 @@ pub struct InputEvent {
     /// Local subscription order, including skipped items; not a firmware sequence.
     pub sequence: u64,
     pub ingress_sequence: u64,
+    /// One-based layer identified by the managed keymap token, when present.
+    pub board_layer: Option<u8>,
     /// Physical radial state, including notifications that do not create an action edge.
     pub radial_center: Option<bool>,
     pub radial_position: Option<RadialPosition>,
@@ -60,7 +62,7 @@ pub trait InputDecoder: Send + Sync {
     fn decode(&self, notification: &HostNotification) -> Option<(InputEventKind, String)>;
 }
 
-fn parse_ag_notification(notification: &HostNotification) -> Option<(bool, String)> {
+fn vendor_key_fields(notification: &HostNotification) -> Option<(&str, i64)> {
     let HostNotification::Unknown(raw) = notification else {
         return None;
     };
@@ -75,7 +77,31 @@ fn parse_ag_notification(notification: &HostNotification) -> Option<(bool, Strin
         return None;
     }
     let params = candidate_alias(raw, "params", "p")?.as_object()?;
-    let binding = params.get("k")?.as_str()?;
+    Some((params.get("k")?.as_str()?, params.get("act")?.as_i64()?))
+}
+
+fn parse_board_notification(
+    notification: &HostNotification,
+) -> Option<(u8, InputEventKind, String)> {
+    let (token, act) = vendor_key_fields(notification)?;
+    let (layer, physical_index) = mi_model::apply::THREE_LAYER_MATRIX_BINDINGS
+        .iter()
+        .enumerate()
+        .find_map(|(layer, keys)| {
+            keys.iter()
+                .position(|key| *key == token)
+                .map(|position| (layer as u8 + 1, position))
+        })?;
+    let kind = match act {
+        0 => InputEventKind::Released,
+        1 => InputEventKind::Pressed,
+        _ => return None,
+    };
+    Some((layer, kind, format!("AG{physical_index:02}")))
+}
+
+fn parse_ag_notification(notification: &HostNotification) -> Option<(bool, String)> {
+    let (binding, act) = vendor_key_fields(notification)?;
     let digits = binding.strip_prefix("AG")?;
     if digits.len() != 2
         || !digits.bytes().all(|b| b.is_ascii_digit())
@@ -83,7 +109,7 @@ fn parse_ag_notification(notification: &HostNotification) -> Option<(bool, Strin
     {
         return None;
     }
-    let pressed = match params.get("act")?.as_i64()? {
+    let pressed = match act {
         1 => true,
         0 => false,
         _ => return None,
@@ -250,14 +276,22 @@ impl InputDecoder for UnverifiedInputDecoder {
         None
     }
 }
+#[derive(Default)]
+struct PressState {
+    switches: BTreeSet<String>,
+    wide_switches: BTreeSet<String>,
+}
+
 pub struct InputMonitor {
     session: Arc<DeviceSession>,
     receiver: broadcast::Receiver<crate::ReceivedNotification>,
     decoder: Box<dyn InputDecoder>,
     sequence: u64,
     stopped: bool,
-    pressed: BTreeSet<String>,
-    active_wide_switches: BTreeSet<String>,
+    // Slot 0 is legacy; slots 1 through 3 are independent board layers.
+    presses: [PressState; 4],
+    managed: Arc<AtomicBool>,
+    was_managed: bool,
     active_radial_sector: Option<String>,
     verified_radial: bool,
     merge_wide_key: Arc<AtomicBool>,
@@ -274,15 +308,27 @@ impl DeviceSession {
         self: &Arc<Self>,
         merge_wide_key: Arc<AtomicBool>,
     ) -> InputMonitor {
+        self.subscribe_verified_input_with_board_mode(
+            merge_wide_key,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+    pub fn subscribe_verified_input_with_board_mode(
+        self: &Arc<Self>,
+        merge_wide_key: Arc<AtomicBool>,
+        managed: Arc<AtomicBool>,
+    ) -> InputMonitor {
         let was_merging_wide_key = merge_wide_key.load(Ordering::SeqCst);
+        let was_managed = managed.load(Ordering::SeqCst);
         InputMonitor {
             session: self.clone(),
             receiver: self.notifications(),
             decoder: Box::new(VerifiedInputDecoder),
             sequence: 0,
             stopped: false,
-            pressed: BTreeSet::new(),
-            active_wide_switches: BTreeSet::new(),
+            presses: std::array::from_fn(|_| PressState::default()),
+            managed,
+            was_managed,
             active_radial_sector: None,
             verified_radial: true,
             merge_wide_key,
@@ -299,8 +345,9 @@ impl DeviceSession {
             decoder,
             sequence: 0,
             stopped: false,
-            pressed: BTreeSet::new(),
-            active_wide_switches: BTreeSet::new(),
+            presses: std::array::from_fn(|_| PressState::default()),
+            managed: Arc::new(AtomicBool::new(false)),
+            was_managed: false,
             active_radial_sector: None,
             verified_radial: false,
             merge_wide_key: Arc::new(AtomicBool::new(false)),
@@ -320,6 +367,7 @@ impl InputMonitor {
             session_id: self.session.id,
             sequence: self.sequence,
             ingress_sequence,
+            board_layer: None,
             radial_center: Some(centered),
             radial_position,
             timestamp_ms: 0,
@@ -334,18 +382,26 @@ impl InputMonitor {
         }
     }
     pub fn pressed_switches(&self) -> Vec<String> {
-        self.pressed.iter().cloned().collect()
+        self.presses
+            .iter()
+            .flat_map(|p| p.switches.iter().cloned())
+            .collect()
     }
     pub fn active_wide_switches(&self) -> Vec<String> {
-        self.active_wide_switches.iter().cloned().collect()
+        self.presses
+            .iter()
+            .flat_map(|p| p.wide_switches.iter().cloned())
+            .collect()
     }
     pub fn stopped(&self) -> bool {
         self.stopped
     }
     pub fn close(&mut self) {
         self.stopped = true;
-        self.pressed.clear();
-        self.active_wide_switches.clear();
+        self.clear_pressed();
+    }
+    fn clear_pressed(&mut self) {
+        self.presses = std::array::from_fn(|_| PressState::default());
         self.active_radial_sector = None;
     }
     /// Overflow is terminal for this subscription. Recovery creates a new subscription and
@@ -361,21 +417,16 @@ impl InputMonitor {
             tokio::pin!(changed);
             changed.as_mut().enable();
             if self.session.invalid.load(Ordering::SeqCst) {
-                self.stopped = true;
-                self.pressed.clear();
-                self.active_wide_switches.clear();
-                self.active_radial_sector = None;
+                self.close();
                 return None;
             }
             let result = tokio::select! { biased; _ = changed => None, value = self.receiver.recv() => Some(value) };
             if self.session.invalid.load(Ordering::SeqCst) || result.is_none() {
-                self.stopped = true;
-                self.pressed.clear();
-                self.active_wide_switches.clear();
-                self.active_radial_sector = None;
+                self.close();
                 return None;
             }
             let mut ingress_sequence = 0;
+            let mut board_layer = None;
             let mut radial_center = None;
             let mut radial_position = None;
             let (
@@ -391,13 +442,33 @@ impl InputMonitor {
                 Ok(received) => {
                     ingress_sequence = received.ingress_sequence;
                     let notification = received.notification;
-                    let is_radial = is_radial_notification(&notification);
-                    if self.verified_radial {
+                    let managed = self.managed.load(Ordering::SeqCst);
+                    if managed != self.was_managed {
+                        self.clear_pressed();
+                        self.was_managed = managed;
+                    }
+                    let decoded = if managed {
+                        let Some((layer, kind, binding)) = parse_board_notification(&notification)
+                        else {
+                            continue;
+                        };
+                        board_layer = Some(layer);
+                        Some((kind, binding))
+                    } else {
+                        self.decoder.decode(&notification)
+                    };
+                    let is_radial = !managed && is_radial_notification(&notification);
+                    if is_radial && self.verified_radial {
                         radial_position = parse_radial_position(&notification);
                     }
                     let merge_wide = self.merge_wide_key.load(Ordering::SeqCst);
                     if merge_wide != self.was_merging_wide_key {
-                        self.active_wide_switches.clear();
+                        for pressed in &mut self.presses {
+                            pressed.wide_switches.clear();
+                            if managed {
+                                pressed.switches.clear();
+                            }
+                        }
                         self.was_merging_wide_key = merge_wide;
                     }
                     let layout = if merge_wide {
@@ -412,7 +483,6 @@ impl InputMonitor {
                             verified_physical_mapping(id)
                         }
                     };
-                    let decoded = self.decoder.decode(&notification);
                     if is_radial {
                         radial_center = match &decoded {
                             Some((_, id)) if id == "__RADIAL_CENTER__" => Some(true),
@@ -431,9 +501,9 @@ impl InputMonitor {
                             }
                             if let Some(prev) = self.active_radial_sector.replace(sector.clone()) {
                                 if let Some(prev_spec) = map_physical(&prev) {
-                                    self.pressed.remove(prev_spec.logical_switch);
+                                    self.presses[0].switches.remove(prev_spec.logical_switch);
                                 } else {
-                                    self.pressed.remove(&prev);
+                                    self.presses[0].switches.remove(&prev);
                                 }
                             }
                             Some((InputEventKind::Pressed, sector))
@@ -460,11 +530,12 @@ impl InputMonitor {
                         other => other,
                     };
                     self.sequence += 1;
+                    let pressed = &mut self.presses[usize::from(board_layer.unwrap_or(0))];
                     match normalized {
                         Some((InputEventKind::Pressed, raw_id)) => {
                             if merge_wide && matches!(raw_id.as_str(), "AG10" | "AG11") {
-                                let was_empty = self.active_wide_switches.is_empty();
-                                self.active_wide_switches.insert(raw_id);
+                                let was_empty = pressed.wide_switches.is_empty();
+                                pressed.wide_switches.insert(raw_id);
                                 if !was_empty {
                                     continue;
                                 }
@@ -473,7 +544,7 @@ impl InputMonitor {
                                     BottomRowLayout::Merged,
                                 )
                                 .unwrap();
-                                self.pressed.insert(spec.logical_switch.to_owned());
+                                pressed.switches.insert(spec.logical_switch.to_owned());
                                 (
                                     InputEventKind::Pressed,
                                     Some(spec.logical_switch.to_owned()),
@@ -486,7 +557,7 @@ impl InputMonitor {
                                 )
                             } else if let Some(spec) = map_physical(&raw_id) {
                                 if spec.action_role != "encoder_step" {
-                                    if !self.pressed.insert(spec.logical_switch.to_owned()) {
+                                    if !pressed.switches.insert(spec.logical_switch.to_owned()) {
                                         continue;
                                     }
                                 }
@@ -501,7 +572,7 @@ impl InputMonitor {
                                     true,
                                 )
                             } else {
-                                self.pressed.insert(raw_id.clone());
+                                pressed.switches.insert(raw_id.clone());
                                 (
                                     InputEventKind::Pressed,
                                     Some(raw_id),
@@ -516,8 +587,8 @@ impl InputMonitor {
                         }
                         Some((InputEventKind::Released, raw_id)) => {
                             if merge_wide && matches!(raw_id.as_str(), "AG10" | "AG11") {
-                                let removed = self.active_wide_switches.remove(&raw_id);
-                                if !removed || !self.active_wide_switches.is_empty() {
+                                let removed = pressed.wide_switches.remove(&raw_id);
+                                if !removed || !pressed.wide_switches.is_empty() {
                                     continue;
                                 }
                                 let spec = verified_physical_mapping_for_layout(
@@ -525,7 +596,7 @@ impl InputMonitor {
                                     BottomRowLayout::Merged,
                                 )
                                 .unwrap();
-                                self.pressed.remove(spec.logical_switch);
+                                pressed.switches.remove(spec.logical_switch);
                                 (
                                     InputEventKind::Released,
                                     Some(spec.logical_switch.to_owned()),
@@ -537,7 +608,10 @@ impl InputMonitor {
                                     true,
                                 )
                             } else if let Some(spec) = map_physical(&raw_id) {
-                                self.pressed.remove(spec.logical_switch);
+                                let was_pressed = pressed.switches.remove(spec.logical_switch);
+                                if managed && !was_pressed {
+                                    continue;
+                                }
                                 (
                                     InputEventKind::Released,
                                     Some(spec.logical_switch.to_owned()),
@@ -549,7 +623,7 @@ impl InputMonitor {
                                     true,
                                 )
                             } else {
-                                self.pressed.remove(&raw_id);
+                                pressed.switches.remove(&raw_id);
                                 (
                                     InputEventKind::Released,
                                     Some(raw_id),
@@ -581,10 +655,7 @@ impl InputMonitor {
                 }
                 Err(broadcast::error::RecvError::Lagged(count)) => {
                     self.sequence += count;
-                    self.stopped = true;
-                    self.pressed.clear();
-                    self.active_wide_switches.clear();
-                    self.active_radial_sector = None;
+                    self.close();
                     (
                         InputEventKind::InputStreamGap,
                         None,
@@ -597,10 +668,7 @@ impl InputMonitor {
                     )
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    self.stopped = true;
-                    self.pressed.clear();
-                    self.active_wide_switches.clear();
-                    self.active_radial_sector = None;
+                    self.close();
                     return None;
                 }
             };
@@ -608,6 +676,7 @@ impl InputMonitor {
                 session_id: self.session.id,
                 sequence: self.sequence,
                 ingress_sequence,
+                board_layer,
                 radial_center,
                 radial_position,
                 timestamp_ms: SystemTime::now()
@@ -625,5 +694,132 @@ impl InputMonitor {
                 action_eligible,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod board_mode_tests {
+    use super::*;
+    use crate::{ReadOnlySchema, ReceivedNotification, SessionConfig};
+    use mi_proto::NativeFramer;
+    use mi_transport::MockLink;
+    use serde_json::{json, Value};
+    use std::time::Duration;
+
+    fn session() -> Arc<DeviceSession> {
+        let (link, _) = MockLink::new();
+        DeviceSession::new(
+            link,
+            Box::new(NativeFramer::default()),
+            Arc::new(ReadOnlySchema),
+            SessionConfig::default(),
+        )
+    }
+
+    fn key(token: &str, act: i32) -> Value {
+        json!({"m":"v.oai.hid","p":{"k":token,"act":act}})
+    }
+
+    fn enqueue(session: &DeviceSession, raws: impl IntoIterator<Item = Value>) {
+        for (index, raw) in raws.into_iter().enumerate() {
+            session
+                .notifications
+                .send(ReceivedNotification {
+                    ingress_sequence: index as u64 + 1,
+                    notification: HostNotification::Unknown(raw),
+                })
+                .unwrap();
+        }
+    }
+
+    async fn expect(
+        monitor: &mut InputMonitor,
+        layer: Option<u8>,
+        kind: InputEventKind,
+        binding: &str,
+    ) {
+        let event = tokio::time::timeout(Duration::from_secs(1), monitor.next())
+            .await
+            .expect("no event arrived")
+            .unwrap();
+        assert_eq!(
+            (event.board_layer, event.kind, event.binding_id.as_deref()),
+            (layer, kind, Some(binding))
+        );
+        assert!(event.action_eligible);
+    }
+
+    #[tokio::test]
+    async fn managed_wide_switches_release_only_their_own_layer() {
+        use InputEventKind::{Pressed, Released};
+        let session = session();
+        let mut monitor = session.subscribe_verified_input_with_board_mode(
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(true)),
+        );
+        enqueue(
+            &session,
+            [
+                key("AG10", 1),
+                key("ACT10", 1),
+                key("ACT16", 1),
+                key("ACT17", 1),
+                key("ACT11", 0),
+                key("ACT16", 0),
+                key("AG10", 0),
+                key("ACT10", 0),
+                key("ACT17", 0),
+                key("AG10", 1),
+            ],
+        );
+
+        expect(&mut monitor, Some(1), Pressed, "AG10").await;
+        expect(&mut monitor, Some(2), Pressed, "AG10").await;
+        expect(&mut monitor, Some(3), Pressed, "AG10").await;
+        expect(&mut monitor, Some(1), Released, "AG10").await;
+        expect(&mut monitor, Some(2), Released, "AG10").await;
+        expect(&mut monitor, Some(3), Released, "AG10").await;
+        expect(&mut monitor, Some(1), Pressed, "AG10").await;
+        session.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn managed_mode_discards_old_state_and_reports_without_layer_identity() {
+        use InputEventKind::{Pressed, Released};
+        let session = session();
+        let managed = Arc::new(AtomicBool::new(false));
+        let mut monitor = session.subscribe_verified_input_with_board_mode(
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&managed),
+        );
+        enqueue(&session, [key("AG00", 1)]);
+        expect(&mut monitor, None, Pressed, "AG00").await;
+
+        managed.store(true, Ordering::SeqCst);
+        enqueue(
+            &session,
+            [
+                key("AG00", 0),
+                key("ENC_CLK", 1),
+                key("AG13", 2),
+                key("ACT19", 1),
+                json!({"m":"v.oai.rad","p":{"a":0.2,"d":0.9}}),
+                json!({"m":"v.oai.hid","p":{"k":"AG13","act":1},"id":8}),
+                key("AG00", 1),
+                key("AG00", 1),
+                key("ACT00", 1),
+                key("AG13", 1),
+                key("AG00", 0),
+                key("ACT00", 0),
+                key("AG13", 0),
+            ],
+        );
+        for layer in 1..=3 {
+            expect(&mut monitor, Some(layer), Pressed, "AG00").await;
+        }
+        for layer in 1..=3 {
+            expect(&mut monitor, Some(layer), Released, "AG00").await;
+        }
+        session.shutdown().await;
     }
 }

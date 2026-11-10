@@ -1,5 +1,18 @@
 # 项目教训
 
+## Dock 图标轮廓与系统处理
+
+- 起因与后果：2026-11-10 用户发现 Micro Input 与 Koe 的 Dock 图标偏大；图案占画布 90%，启动时直接挂载原始 ICNS。
+- 修复：原插画不变，轮廓采用 1024 画布中的 824 像素，圆角同比缩放；启动时使用 `NSWorkspace.icon(forFile:)` 返回的系统图标。
+- 验证点：`swift scripts/verify-app-icon.swift target/AppIcon.iconset` 对照系统 Mail 图标的四档轮廓，改前失败、改后通过；构建入口自动运行该检查。安装包 ICNS 实测为 (100,100)–(924,924)，应用正常重启；Dock 专属截图未取得。Seen 1x（2026-11-10）。
+
+
+## 固定应用层必须覆盖实际动作类型
+
+- 起因与后果：六层托管初版只给 `AgentCommand` 加了目标窗口约束，但现有预设也使用 `Shortcut` 和 `PasteText`；这些键仍可能经过全局输入路径，破坏固定应用层的隔离。
+- 修复：三个托管应用的快捷键和文本动作统一解析目标身份，目标与 adapter 冲突时拒绝执行，分别使用目标 PID 或同窗 AX 输入；不以抢到前台焦点代替定向发送。
+- 验证点：`crates/mi-macos/tests/managed_controls.rs` 的 `shortcut_and_paste_action_types_never_use_global_input_for_managed_targets` 让全局输入、剪贴板和应用启动接口一旦被调用就失败；同时核对真实预设生成的动作类型。Seen 1x（2026-11-10）。
+
 ## 浏览配置不一定是只读
 
 - 标签：#设备 #验收
@@ -175,7 +188,8 @@
 - 修复与证据：PR #74 仅在对原控件尝试停止后，允许原进程实例、窗口身份与标题不变时完整扫描唯一空闲控件。noValue 仅在角色仍有效、属性列表成功且未声明 AXChildren 时作为叶节点；其他错误仍未知。最终 a683a857 的千问原生启停通过，替代控件不接收动作。
 - 正确做法：连续修复仍未通过时先检查正常空闲状态下的扫描前提；区分没有子节点与读取失败，不根据 AXPress 返回值推定录音结束。
 - 验证点：PushToTalkTests.swift 中 testChildrenReadDistinguishesVerifiedLeavesFromMissingOrFailedValues、testStopReadsReplacementButNeverPressesIt 和 testChangedWindowCannotConfirmOrReadReplacement；原生验收同时核对开始/停止回执与最终空闲界面。软件与合成输入不替代实体宽键验收。
-- 复发记录：Seen 1x（2026-11-04）。两轮修复属于同一次原生失败，不重复计数。
+- 2026-11-10：六层托管听写的独立评审再次发现缓存控件漏掉录音后新出现的按钮。状态动作改为在同一进程、窗口中重新发现控件；仅普通滚动使用短期缓存。应用重启后，只有确认旧 PID 已退出才解除旧录音约束，不能仅凭新 PID 不同推断旧录音结束。回归见 `crates/mi-macos/tests/managed_controls.rs` 的 `toggle_observes_mouse_changes_and_replacement_controls` 与 `restarted_app_recovers_only_after_the_previous_process_is_confirmed_exited`；安装版录音效果另验。
+- 复发记录：Seen 2x（2026-11-04、2026-11-10）。同一次问题的多轮修复不重复计数。
 
 
 ## 旧代异步失败也须保持身份与未确认状态
@@ -259,3 +273,29 @@
 - 起因与后果：一是 `WorkbenchStoreConfig::production()` 默认配置了 `ownership_socket_path = Some(<document_dir>/cindy-ownership.sock)`，而 `WorkbenchStore::open` 曾用 `store.config.ownership_socket_path.is_none()` 作为是否调用 `connect_default_usb()` 的守卫，导致生产应用启动时虽启动了热插拔监听，但对启动前已插好的 Creator Micro 2（`303A:8298`）不会自动连接；二是当 `cindy-ownership.sock` 存在时，启动首轮所有权握手走 `12ms` 异步后台快速轮询，连接瞬间 `lighting_arbiter.last_hardware_sync_json` 尚未生成，若直接跳过灯光同步会导致首轮 `v.oai.rgbcfg` 未验证。
 - 修复与证据：在 `WorkbenchStoreConfig` 中显式引入 `pub auto_connect_usb: bool`（`production()` 为 `true`，`isolated()` 与单测夹具为 `false`）；`WorkbenchStore::connect_with_transport` 建立连接后在 `tokio_runtime` 后台自动执行 `run_automatic_hardware_acceptance`（依次核验 `read_identity_info` 固件 `0.6.3`、`read_config_snapshot` 多分块 `keymap.json` SHA-1/SHA-256 与 `smart_actions.json`、以及 `send_oai_rgbcfg` / `send_lights_preview` / `send_oai_thstatus` 三项灯光 RPC，未生成仲裁载荷时回退 `default_acceptance_lighting_payload` 并在 `HardwareAutoAccepted` 与 `OwnershipReply` 到达后刷新实时会话灯光），写出 `<document_dir>/hardware-auto-acceptance.json`；新增一键插上键盘全自动验收脚本 `scripts/verify-hardware`（串联 `H0` 只读身份与配置备份、`H1` 临时文件多分块写读删与 14 次快照零污染校验、以及生产 `Micro Input.app` 自动连接与灯光同步回执校验）。
 - 验证点：`crates/mi-core/tests/workbench_store.rs`（`usb_connect_automatically_verifies_identity_snapshot_lighting_and_writes_acceptance_receipt`）、`scripts/tests/test_verify_hardware_launcher.py` 与实机 `./scripts/verify-hardware`（产出 `.scratch/hardware-acceptance/latest-result.json` 与 `~/Library/Application Support/MicroInput/hardware-auto-acceptance.json`）。Seen 1x（2026-11-09）。
+
+## SwiftUI 平面按钮矩形热区、Inspector 搜索防抢占与 Dock 恢复生命周期门禁
+
+- 标签：#macOS #UI #验收 #自动化
+- 起因与后果：一是 macOS SwiftUI 中 `.buttonStyle(.plain)` 与 `.onTapGesture` 若未显式附加 `.contentShape(Rectangle())`，控件内的 `Spacer()`、内边距与圆角四角会成为点击盲区（如 17 键画布格子边缘、旋钮/摇杆四角、Inspector 动作行右侧空白、状态栏磁贴空白处点击无响应）；二是 `Codex` 与 `Cindy` 两个受保护 `KV_OAI_*` 方案在 `CanvasSliceModel` / `InspectorSliceModel` 中未投影 `selectedProfileId` 与 `selectedDisplayName` 且 `taskKeycapSurface` 硬编码 `.apps` 与 `会话 1..6`，导致切换两方案时画布与 Inspector 渲染完全一致；同时首次点击摇杆时连续分发 `SelectSurface: "Joystick"` 与 `SelectJoystickDirection` 跳过了 `North`（上）方向，且 `titleForSlot` 将 `17 (South)` 与 `18 (West)` 标题颠倒；三是物理按键事件 `consume_physical_input_event` 无条件覆写 `selected_surface`，在用户在 Inspector 输入框搜索或录制快捷键时会抢占当前编辑槽位并打断焦点；四是 `MicroInputApp.swift` 缺少 `applicationDockMenu` 与 `win.deminiaturize(nil)`，窗口最小化后点击 Dock 无法自动还原。
+- 修复与证据：为 `MicroInputUI` 全部 `.buttonStyle(.plain)` 与 `.onTapGesture` 补齐 `.contentShape(Rectangle())`；在 `CanvasSliceModel` 与 `InspectorSliceModel` 纳入 `selectedProfileId` / `selectedDisplayName`，为 `InlineInspectorView` 补齐 `.id(...)`、`ScrollViewReader` 滚动置顶与搜索框 `.onSubmit` 回车直绑，修正摇杆首次点击与上下左右槽位标题并在画布旋钮/摇杆渲染实时方向指示；在 `consume_physical_input_event` 增加 `!inspector_search_active` 守卫；在 `MicroInputApp.swift` 补齐 `applicationDockMenu`、`win.deminiaturize(nil)` 与 `NSApp.applicationIconImage`；在 `scripts/check-boundaries.py` 固化 `R-C07` 静态门禁。
+- 验证点：`MicroInputTests.testSidebarProfileAndSurfaceSwitchDistinctnessAndSearchFocusIsolation`、`python3 scripts/check-boundaries.py`（`R-C07`）及 `./scripts/run --verify` 真实窗口边缘坐标点击验证。Seen 1x（2026-11-10）。
+
+
+## 生命周期迁移须验证通知入口和旧任务释放
+
+- 起因与后果：Rust 核心迁移删除了 Swift `WorkspaceLifecycle`，但 README 仍声称支持睡眠唤醒。旧 USB 会话、按住听写和六层后台任务没有统一退役入口。
+- 修复：Swift 仅转发 workspace 通知，Rust 先关闭输入准入，再等待旧 reader 与后台任务结束。唤醒使用描述符发现器；独占发现器会提前打开接口，不能仅靠忽略发现回调阻止连接。听写清理保留原窗口句柄，不能依赖执行器最近访问的窗口。
+- 验证点：`WorkspaceLifecycleTests`、`workspace_lifecycle` 模块测试和 `managed_controls` 的原目标清理测试。覆盖实际通知入口、延迟 reader、迟到运行对象与回执、草稿撤销重做、跨应用切换后的原目标清理。合成验证与真实合盖效果分开记录。
+- 复发记录：Seen 1x（2026-11-10）。
+
+## 浏览方案不能激活宿主；QA 窗口须隔离硬件
+
+- 起因与后果：原 `SelectProfile` 同时选择编辑对象与激活宿主，新的设置式界面若复用它浏览，会改变实际控制目标。空层清空编辑选择又暴露所有权维护依赖编辑对象的问题。原 QA 包虽隔离文档，仍以生产 CoreStore 启动并自动连接 USB。
+- 修复：新增 `BrowseProfile`，六层预览只切编辑对象，空层明确清空；运行所有权独立于编辑选择。QA 包必须有隔离文档目录并使用 isolated CoreStore，缺目录拒绝启动；日常包保持原初始化路径。
+- 验证：mi-core `browsing_profiles_changes_editor_without_activating_host` 与六层空态/所有权回归，mi-ffi 浏览边界回归；`scripts/run --verify` 原生 UI 应显示未连接，不枚举或打开真实键盘。Seen 1x（2026-11-10）。
+
+## 固定键帽与动态标题分离
+
+- 完整会话标题不能放入固定高度键帽后强制不限高度换行。键帽显示编号与短状态，完整标题由自然高度列表承载。
+- 布局验收必须覆盖真实投影格式、长中英文标题与所有状态。`SessionKeycapLayoutTests` 已覆盖内容区高度、全文行高及 JSON null 空槽；仍需在原生运行界面检查对应关系。

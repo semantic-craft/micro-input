@@ -58,6 +58,24 @@ pub enum OwnershipTransportError {
     InvalidReply,
 }
 
+#[derive(Debug)]
+pub struct OwnershipPathLockGuard {
+    slot: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl Drop for OwnershipPathLockGuard {
+    fn drop(&mut self) {
+        let mut busy = self.slot.0.lock().unwrap_or_else(|e| e.into_inner());
+        *busy = false;
+        self.slot.1.notify_one();
+    }
+}
+
+pub struct DeferredOwnershipStream {
+    pub stream: UnixStream,
+    _guard: OwnershipPathLockGuard,
+}
+
 #[derive(Debug, Clone)]
 pub struct UnixNativeOwnershipTransport {
     pub path: PathBuf,
@@ -150,7 +168,44 @@ impl UnixNativeOwnershipTransport {
         file.sync_all()
     }
 
+    pub fn lock_path(&self) -> OwnershipPathLockGuard {
+        static PATH_LOCKS: std::sync::OnceLock<
+            std::sync::Mutex<
+                std::collections::BTreeMap<
+                    PathBuf,
+                    Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+                >,
+            >,
+        > = std::sync::OnceLock::new();
+        let slot = {
+            let mut map = PATH_LOCKS
+                .get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            map.entry(self.path.clone())
+                .or_insert_with(|| {
+                    Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()))
+                })
+                .clone()
+        };
+        let mut busy = slot.0.lock().unwrap_or_else(|e| e.into_inner());
+        while *busy {
+            busy = slot.1.wait(busy).unwrap_or_else(|e| e.into_inner());
+        }
+        *busy = true;
+        drop(busy);
+        OwnershipPathLockGuard { slot }
+    }
+
     pub fn exchange_blocking(
+        &self,
+        request_bytes: &[u8],
+    ) -> Result<Vec<u8>, OwnershipTransportError> {
+        let _guard = self.lock_path();
+        self.exchange_blocking_locked(request_bytes)
+    }
+
+    pub fn exchange_blocking_locked(
         &self,
         request_bytes: &[u8],
     ) -> Result<Vec<u8>, OwnershipTransportError> {
@@ -233,16 +288,26 @@ impl UnixNativeOwnershipTransport {
         &self,
         request: &NativeOwnershipRequest,
     ) -> Result<NativeOwnershipReply, OwnershipTransportError> {
+        let _guard = self.lock_path();
+        self.exchange_locked(request)
+    }
+
+    pub fn exchange_locked(
+        &self,
+        request: &NativeOwnershipRequest,
+    ) -> Result<NativeOwnershipReply, OwnershipTransportError> {
         let bytes = self.serialize_request(request)?;
-        let raw = self.exchange_blocking(&bytes)?;
+        let raw = self.exchange_blocking_locked(&bytes)?;
         serde_json::from_slice(&raw).map_err(|_| OwnershipTransportError::InvalidReply)
     }
 
-    pub fn begin_stream_request(
+    pub fn begin_stream_request_locked(
         &self,
         request: &NativeOwnershipRequest,
         fast_timeout: Duration,
-    ) -> Result<Result<NativeOwnershipReply, UnixStream>, OwnershipTransportError> {
+        guard: OwnershipPathLockGuard,
+    ) -> Result<Result<NativeOwnershipReply, DeferredOwnershipStream>, OwnershipTransportError>
+    {
         let request_bytes = self.serialize_request(request)?;
         let c_path = CString::new(self.path.as_os_str().as_bytes())
             .map_err(|_| OwnershipTransportError::InvalidPeer)?;
@@ -303,7 +368,10 @@ impl UnixNativeOwnershipTransport {
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                         ) =>
                 {
-                    return Ok(Err(stream));
+                    return Ok(Err(DeferredOwnershipStream {
+                        stream,
+                        _guard: guard,
+                    }));
                 }
                 Err(_) => return Err(OwnershipTransportError::Unavailable),
             }
@@ -312,10 +380,11 @@ impl UnixNativeOwnershipTransport {
     }
 
     pub fn finish_stream_reply(
-        mut stream: UnixStream,
+        deferred: DeferredOwnershipStream,
         response_limit: usize,
         full_timeout: Duration,
     ) -> Result<NativeOwnershipReply, OwnershipTransportError> {
+        let mut stream = deferred.stream;
         stream
             .set_read_timeout(Some(full_timeout))
             .map_err(|_| OwnershipTransportError::Unavailable)?;
@@ -495,6 +564,10 @@ impl NativeOwnershipController {
     }
 
     pub fn reconcile_unbridged_transition(&mut self) -> bool {
+        self.reconcile_unbridged_transition_at(Instant::now())
+    }
+
+    pub fn reconcile_unbridged_transition_at(&mut self, now: Instant) -> bool {
         if self.is_unbridged_desktop_active() {
             if self.bridge_observed || self.native_identity.is_some() {
                 self.bridge_observed = false;
@@ -512,7 +585,7 @@ impl NativeOwnershipController {
         if self.allow_unbridged_desktop && !self.bridge_observed {
             self.bridge_observed = true;
             self.sync_persisted_fence_if_needed();
-            self.invalidate("检测到 Cindy 原生所有权桥，等待确认", false);
+            self.invalidate_at("检测到 Cindy 原生所有权桥，等待确认", false, now);
             return true;
         }
         false
@@ -557,6 +630,10 @@ impl NativeOwnershipController {
     }
 
     pub fn summary(&self) -> String {
+        self.summary_at(Instant::now())
+    }
+
+    pub fn summary_at(&self, now: Instant) -> String {
         if self.isolated {
             return "隔离合成所有权".into();
         }
@@ -565,7 +642,7 @@ impl NativeOwnershipController {
         }
         match &self.state {
             OwnershipState::Unknown(reason) => {
-                if self.is_transient_reconfirming() {
+                if self.is_transient_reconfirming_at(now) {
                     "Cindy 已确认释放".into()
                 } else {
                     format!("原生所有权未知，按键、听写与灯光暂停 · {reason}")
@@ -575,7 +652,7 @@ impl NativeOwnershipController {
                 "Cindy 原生持有，Micro Input 按键、听写与灯光暂停".into()
             }
             OwnershipState::Released { .. } => {
-                if self.allows_execution() {
+                if self.allows_execution_at(now) {
                     "Cindy 已确认释放".into()
                 } else {
                     "原生回执已过期，输入暂停".into()
@@ -777,11 +854,15 @@ impl NativeOwnershipController {
     }
 
     pub fn failed(&mut self, request: &NativeOwnershipRequest) {
+        self.failed_at(request, Instant::now());
+    }
+
+    pub fn failed_at(&mut self, request: &NativeOwnershipRequest, now: Instant) {
         if self.pending.as_ref() != Some(request) || self.generation != request.generation {
             return;
         }
         self.last_released_at = None;
-        self.invalidate("Cindy 握手失联或不可用", false);
+        self.invalidate_at("Cindy 握手失联或不可用", false, now);
     }
 
     pub fn poll_once(&mut self, micro_drained: bool) {
@@ -793,19 +874,21 @@ impl NativeOwnershipController {
         micro_drained: bool,
         now: Instant,
         fast_timeout: Duration,
-    ) -> Option<(NativeOwnershipRequest, UnixStream)> {
+    ) -> Option<(NativeOwnershipRequest, DeferredOwnershipStream)> {
         if self.isolated {
             return None;
         }
-        self.reconcile_unbridged_transition();
+        self.reconcile_unbridged_transition_at(now);
         if self.is_unbridged_desktop_active() {
             return None;
         }
         let transport = self.transport.clone()?;
         for _ in 0..2 {
-            let req_now = Instant::now().max(now);
+            let guard = transport.lock_path();
+            self.sync_persisted_fence_if_needed();
+            let req_now = now;
             let req = self.begin_request_at(micro_drained, req_now);
-            match transport.begin_stream_request(&req, fast_timeout) {
+            match transport.begin_stream_request_locked(&req, fast_timeout, guard) {
                 Ok(Ok(reply)) => {
                     let prev_inst = self.native_identity.map(|(id, _)| id);
                     let retry_needed = (reply.state == "unknown"
@@ -814,16 +897,16 @@ impl NativeOwnershipController {
                             "stale_generation" | "returned_generation" | "different_client"
                         ))
                         || prev_inst.is_some_and(|id| id != reply.native_instance);
-                    self.receive_at(reply, &req, Instant::now().max(req_now));
+                    self.receive_at(reply, &req, now);
                     if !retry_needed {
                         break;
                     }
                 }
-                Ok(Err(stream)) => {
-                    return Some((req, stream));
+                Ok(Err(deferred)) => {
+                    return Some((req, deferred));
                 }
                 Err(_) => {
-                    self.failed(&req);
+                    self.failed_at(&req, now);
                     break;
                 }
             }
@@ -835,7 +918,7 @@ impl NativeOwnershipController {
         if self.isolated {
             return;
         }
-        self.reconcile_unbridged_transition();
+        self.reconcile_unbridged_transition_at(now);
         if self.is_unbridged_desktop_active() {
             return;
         }
@@ -843,9 +926,15 @@ impl NativeOwnershipController {
             return;
         };
         for _ in 0..2 {
-            let req_now = Instant::now().max(now);
+            let _guard = transport.lock_path();
+            self.sync_persisted_fence_if_needed();
+            if self.pending.is_some() {
+                self.generation = self.generation.wrapping_add(1);
+                self.pending = None;
+            }
+            let req_now = now;
             let req = self.begin_request_at(micro_drained, req_now);
-            match transport.exchange(&req) {
+            match transport.exchange_locked(&req) {
                 Ok(reply) => {
                     let prev_inst = self.native_identity.map(|(id, _)| id);
                     let retry_needed = (reply.state == "unknown"
@@ -854,13 +943,13 @@ impl NativeOwnershipController {
                             "stale_generation" | "returned_generation" | "different_client"
                         ))
                         || prev_inst.is_some_and(|id| id != reply.native_instance);
-                    self.receive_at(reply, &req, Instant::now().max(req_now));
+                    self.receive_at(reply, &req, now);
                     if !retry_needed {
                         break;
                     }
                 }
                 Err(_) => {
-                    self.failed(&req);
+                    self.failed_at(&req, now);
                     break;
                 }
             }
@@ -879,8 +968,12 @@ impl NativeOwnershipController {
     }
 
     pub fn stop(&mut self) {
+        self.stop_at(Instant::now());
+    }
+
+    pub fn stop_at(&mut self, now: Instant) {
         self.sleeper.interrupt();
-        self.invalidate("握手已停止", false);
+        self.invalidate_at("握手已停止", false, now);
     }
 }
 
@@ -1078,6 +1171,84 @@ mod tests {
         controller.poll_once(true);
         assert!(controller.allows_execution());
         assert_eq!(controller.summary(), "Cindy 已确认释放");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn test_deferred_stream_and_poll_once_serialize_per_socket_path() {
+        use std::io::{BufRead, BufReader};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::Builder::new()
+            .prefix("mi-serial-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let sock_path = dir.path().join("cindy-ownership.sock");
+        let transport = UnixNativeOwnershipTransport::new(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let first_in_flight = Arc::new(AtomicBool::new(false));
+        let first_in_flight_server = Arc::clone(&first_in_flight);
+        let server_transport = transport.clone();
+
+        let server = std::thread::spawn(move || {
+            for idx in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                assert!(!first_in_flight_server.swap(true, Ordering::SeqCst));
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if idx == 0 {
+                    std::thread::sleep(Duration::from_millis(80));
+                }
+                let client_inst: Uuid = req["clientInstance"].as_str().unwrap().parse().unwrap();
+                let gen = req["generation"].as_u64().unwrap();
+                server_transport
+                    .write_persisted_fence(&PersistedNativeOwnershipFence {
+                        client_instance: client_inst,
+                        generation: gen,
+                    })
+                    .unwrap();
+                let reply = serde_json::json!({
+                    "version": 1,
+                    "requestId": req["requestId"],
+                    "clientInstance": req["clientInstance"],
+                    "generation": gen,
+                    "nativeInstance": "d1706f6a-dda3-4821-a862-e587e63cc25f",
+                    "nativeGeneration": 200 + idx,
+                    "state": "unknown",
+                    "reason": "native_drain_unconfirmed",
+                    "inputDrained": false,
+                    "pttDrained": false,
+                    "lightingDrained": true,
+                    "capabilities": ["fenced-release-v1"]
+                });
+                let mut out = serde_json::to_vec(&reply).unwrap();
+                out.push(b'\n');
+                stream.write_all(&out).unwrap();
+                first_in_flight_server.store(false, Ordering::SeqCst);
+            }
+        });
+
+        let mut controller = NativeOwnershipController::new(Some(transport), true);
+        controller.set_desired_owner("micro-input");
+        let (_req, deferred) = controller
+            .poll_fast_or_defer_at(true, Instant::now(), Duration::from_millis(10))
+            .expect("first request should defer while server sleeps 80ms");
+
+        let bg = std::thread::spawn(move || {
+            UnixNativeOwnershipTransport::finish_stream_reply(
+                deferred,
+                4096,
+                Duration::from_millis(950),
+            )
+            .unwrap()
+        });
+
+        controller.poll_once(true);
+        assert!(controller.allows_execution());
+        assert!(bg.join().is_ok());
         server.join().unwrap();
     }
 }

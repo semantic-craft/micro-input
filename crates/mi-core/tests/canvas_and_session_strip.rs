@@ -258,6 +258,14 @@ fn bottom_row_2u_wide_key_merge_split_and_silkscreen_icon_label_toggles() {
     );
     let truncated_plain = format_concise_keycap_caption("按住说话松开停止");
     assert_eq!(truncated_plain, "按住说话");
+    assert_eq!(
+        format_concise_keycap_caption("Gemini Live 实时语音"),
+        "实时语音"
+    );
+    assert_eq!(
+        format_concise_keycap_caption("Antigravity · Gemini Live 实时语音"),
+        "实时语音"
+    );
 }
 
 #[test]
@@ -560,6 +568,20 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
         ))
         .unwrap();
     assert_eq!(store.lighting_arbiter.idle_color_hex, "#00FF66");
+
+    store
+        .dispatch_session_strip_action(SessionStripAction::SetWorkingColor(
+            AmbientColorPreset::AmberGold,
+        ))
+        .unwrap();
+    assert_eq!(store.lighting_arbiter.working_color_hex, "#FFAA00");
+
+    store
+        .dispatch_session_strip_action(SessionStripAction::SetAmbientColor(
+            AmbientColorPreset::OceanBlue,
+        ))
+        .unwrap();
+    assert_eq!(store.lighting_arbiter.idle_color_hex, "#0088FF");
 
     store
         .dispatch_session_strip_action(SessionStripAction::SetAutoOffTimeout(

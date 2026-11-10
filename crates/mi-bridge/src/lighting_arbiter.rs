@@ -96,6 +96,7 @@ pub struct FourAppLightingArbiter {
     pub glow_on_working_sessions: bool,
     pub brightness_scale: f64,
     pub idle_color_hex: String,
+    pub working_color_hex: String,
     pub manual_preview_phase: Option<FourAppAgentPhase>,
     pub acknowledged_watermarks: BTreeMap<String, String>,
     pub hardware_synced: bool,
@@ -122,9 +123,10 @@ impl FourAppLightingArbiter {
             lighting_enabled: true,
             session_lighting_linked: true,
             only_glow_on_attention_or_completed: true,
-            glow_on_working_sessions: false,
+            glow_on_working_sessions: true,
             brightness_scale: 0.85,
-            idle_color_hex: "#FFFFFF".into(),
+            idle_color_hex: "#0088FF".into(),
+            working_color_hex: "#00FF66".into(),
             manual_preview_phase: None,
             acknowledged_watermarks: BTreeMap::new(),
             hardware_synced: false,
@@ -197,11 +199,13 @@ impl FourAppLightingArbiter {
         dictation_active: bool,
         native_ownership_active: bool,
     ) -> DualZoneLightingFeedback {
+        let idle_hex = self.idle_color_hex.as_str();
+        let working_hex = self.working_color_hex.as_str();
         let (bl_color, bl_effect, bl_brightness, bl_speed) = match phase {
-            FourAppAgentPhase::Idle => ("#FFFFFF", "solid", 0.5, 0.5),
-            FourAppAgentPhase::Thinking => ("#0088FF", "breath", 0.8, 0.7),
+            FourAppAgentPhase::Idle => (idle_hex, "solid", 0.72, 0.5),
+            FourAppAgentPhase::Thinking => (working_hex, "breath", 0.85, 0.7),
             FourAppAgentPhase::AwaitingInput => ("#FFAA00", "breath", 1.0, 0.8),
-            FourAppAgentPhase::Completed => ("#00FF66", "breath", 0.95, 0.65),
+            FourAppAgentPhase::Completed => (idle_hex, "breath", 0.95, 0.65),
             FourAppAgentPhase::Error => ("#FF2200", "breath", 1.0, 0.9),
             FourAppAgentPhase::BackgroundActive => ("#AA44FF", "breath", 0.7, 0.5),
         };
@@ -210,9 +214,15 @@ impl FourAppLightingArbiter {
         } else if dictation_active {
             ("#8800FF", "solid", 1.0, 0.5)
         } else if phase == FourAppAgentPhase::Completed {
-            ("#00FF66", "breath", 0.9, 0.65)
+            (idle_hex, "breath", 0.95, 0.65)
+        } else if phase == FourAppAgentPhase::Thinking {
+            (working_hex, "breath", 0.85, 0.65)
+        } else if phase == FourAppAgentPhase::AwaitingInput {
+            ("#FFAA00", "breath", 0.95, 0.75)
+        } else if phase == FourAppAgentPhase::Error {
+            ("#FF2200", "breath", 1.0, 0.85)
         } else {
-            ("#00CCAA", "solid", 0.6, 0.5)
+            (idle_hex, "solid", 0.78, 0.5)
         };
         DualZoneLightingFeedback {
             backlight_color: bl_color.into(),
@@ -233,19 +243,21 @@ impl FourAppLightingArbiter {
     ) -> Vec<PerKeyLightingFeedback> {
         let mut result = Vec::with_capacity(8);
         let key_ids = ["AG00", "AG01", "AG02", "AG03", "AG04", "AG05"];
+        let idle_hex = self.idle_color_hex.as_str();
+        let working_hex = self.working_color_hex.as_str();
         for (i, key_id) in key_ids.iter().enumerate() {
             if let Some(slot) = slots.get(i).filter(|s| s.place.is_some()) {
                 let (phase, color) = match slot.status.as_str() {
                     "running" | "runningTool" | "generating" | "busy" | "active" => {
-                        (FourAppAgentPhase::Thinking, "#0088FF")
+                        (FourAppAgentPhase::Thinking, working_hex)
                     }
                     "waiting" | "waiting_approval" | "needs-interaction" | "needs_interaction" => {
                         (FourAppAgentPhase::AwaitingInput, "#FFAA00")
                     }
                     "error" => (FourAppAgentPhase::Error, "#FF2200"),
                     "background_active" => (FourAppAgentPhase::BackgroundActive, "#AA44FF"),
-                    "completed" => (FourAppAgentPhase::Completed, "#00FF66"),
-                    _ => (FourAppAgentPhase::Idle, "#00FF66"),
+                    "completed" => (FourAppAgentPhase::Completed, idle_hex),
+                    _ => (FourAppAgentPhase::Idle, idle_hex),
                 };
                 let label = if slot.title.is_empty() {
                     format!("{} slot {i}", slot.app)
@@ -437,6 +449,37 @@ impl FourAppLightingArbiter {
         preview_busy: bool,
         is_bottom_row_split: bool,
         connected_device_id: Option<&str>,
+        write_hardware: F,
+    ) -> LightingUpdateResult
+    where
+        F: FnMut(&str) -> Result<String, String>,
+    {
+        self.update_feedback_at(
+            live_phase,
+            slots,
+            dictation_active,
+            ownership,
+            is_protected_layer,
+            preview_busy,
+            is_bottom_row_split,
+            connected_device_id,
+            std::time::Instant::now(),
+            write_hardware,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_feedback_at<F>(
+        &mut self,
+        live_phase: FourAppAgentPhase,
+        slots: &[FourAppSlotSnapshot],
+        dictation_active: bool,
+        ownership: &NativeOwnershipController,
+        is_protected_layer: bool,
+        preview_busy: bool,
+        is_bottom_row_split: bool,
+        connected_device_id: Option<&str>,
+        now: std::time::Instant,
         mut write_hardware: F,
     ) -> LightingUpdateResult
     where
@@ -452,7 +495,7 @@ impl FourAppLightingArbiter {
         self.active_phase = phase;
 
         if matches!(ownership.state(), OwnershipState::Native { .. })
-            || !ownership.allows_execution()
+            || !ownership.allows_execution_at(now)
         {
             self.release();
             self.last_update_result = LightingUpdateResult::YieldedToNative;
@@ -505,19 +548,31 @@ impl FourAppLightingArbiter {
             } else if phase == FourAppAgentPhase::AwaitingInput
                 || attention_slots.iter().any(|s| s.status != "completed")
             {
+                dual_zone.backlight_color = "#FFAA00".into();
+                dual_zone.backlight_effect = "breath".into();
+                dual_zone.backlight_brightness = (0.85 * clamped_scale).min(1.0);
+                dual_zone.backlight_speed = 0.75;
                 dual_zone.underglow_color = "#FFAA00".into();
                 dual_zone.underglow_effect = "breath".into();
                 dual_zone.underglow_brightness = (0.95 * clamped_scale).min(1.0);
                 dual_zone.underglow_speed = 0.75;
             } else if phase == FourAppAgentPhase::Completed || !attention_slots.is_empty() {
-                dual_zone.underglow_color = "#00FF66".into();
+                dual_zone.backlight_color = self.idle_color_hex.clone();
+                dual_zone.backlight_effect = "breath".into();
+                dual_zone.backlight_brightness = (0.85 * clamped_scale).min(1.0);
+                dual_zone.backlight_speed = 0.65;
+                dual_zone.underglow_color = self.idle_color_hex.clone();
                 dual_zone.underglow_effect = "breath".into();
                 dual_zone.underglow_brightness = (0.95 * clamped_scale).min(1.0);
                 dual_zone.underglow_speed = 0.65;
             } else if self.glow_on_working_sessions
                 && (phase == FourAppAgentPhase::Thinking || !working_slots.is_empty())
             {
-                dual_zone.underglow_color = "#0088FF".into();
+                dual_zone.backlight_color = self.working_color_hex.clone();
+                dual_zone.backlight_effect = "breath".into();
+                dual_zone.backlight_brightness = (0.80 * clamped_scale).min(1.0);
+                dual_zone.backlight_speed = 0.65;
+                dual_zone.underglow_color = self.working_color_hex.clone();
                 dual_zone.underglow_effect = "breath".into();
                 dual_zone.underglow_brightness = (0.85 * clamped_scale).min(1.0);
                 dual_zone.underglow_speed = 0.65;
@@ -575,7 +630,7 @@ impl FourAppLightingArbiter {
                         let attn_color = if phase == FourAppAgentPhase::AwaitingInput {
                             "#FFAA00"
                         } else {
-                            "#00FF66"
+                            self.idle_color_hex.as_str()
                         };
                         return PerKeyLightingFeedback {
                             binding_id: item.binding_id,
@@ -771,5 +826,60 @@ mod tests {
         );
         assert_eq!(r4, LightingUpdateResult::Applied);
         assert_eq!(arbiter.hardware_write_count, 3);
+    }
+
+    #[test]
+    fn test_antigravity_idle_is_blue_and_in_progress_is_distinct_color_by_default() {
+        let mut arbiter = FourAppLightingArbiter::new();
+        let ownership = NativeOwnershipController::new_isolated();
+        assert!(arbiter.glow_on_working_sessions);
+        assert_eq!(arbiter.idle_color_hex, "#0088FF");
+        assert_eq!(arbiter.working_color_hex, "#00FF66");
+
+        let running_slot = FourAppSlotSnapshot {
+            app: "antigravity".into(),
+            title: "In Progress Task".into(),
+            status: "running".into(),
+            place: Some(NavigationPlace::antigravity("conv-run", "/tmp/ws")),
+            watermark: "running:1".into(),
+        };
+        let _ = arbiter.update_feedback(
+            FourAppAgentPhase::Thinking,
+            &[running_slot],
+            false,
+            &ownership,
+            false,
+            false,
+            false,
+            Some("dev-1"),
+            |_| Ok("{\"synced\":true}".into()),
+        );
+        let dz_running = arbiter.dual_zone_feedback.as_ref().unwrap();
+        assert_eq!(dz_running.underglow_color, "#00FF66");
+        assert_eq!(dz_running.backlight_color, "#00FF66");
+        assert_eq!(arbiter.full_keypad_feedback[0].color, "#00FF66");
+
+        let completed_slot = FourAppSlotSnapshot {
+            app: "antigravity".into(),
+            title: "Idle Completed Task".into(),
+            status: "completed".into(),
+            place: Some(NavigationPlace::antigravity("conv-run", "/tmp/ws")),
+            watermark: "idle:2".into(),
+        };
+        let _ = arbiter.update_feedback(
+            FourAppAgentPhase::Completed,
+            &[completed_slot],
+            false,
+            &ownership,
+            false,
+            false,
+            false,
+            Some("dev-1"),
+            |_| Ok("{\"synced\":true}".into()),
+        );
+        let dz_idle = arbiter.dual_zone_feedback.as_ref().unwrap();
+        assert_eq!(dz_idle.underglow_color, "#0088FF");
+        assert_eq!(dz_idle.backlight_color, "#0088FF");
+        assert_eq!(arbiter.full_keypad_feedback[0].color, "#0088FF");
     }
 }

@@ -316,6 +316,9 @@ impl DeviceSession {
     pub fn is_disconnected(&self) -> bool {
         self.invalid.load(Ordering::SeqCst)
     }
+    pub fn has_exclusive_vendor_link(&self) -> bool {
+        !self.is_disconnected() && self.link.is_exclusive_vendor()
+    }
     pub fn backend_name(&self) -> &'static str {
         match self.link.backend() {
             mi_transport::LinkBackend::MacHidapi267Numbered => "hidapi-2.6.7/macOS/numbered-0x06",

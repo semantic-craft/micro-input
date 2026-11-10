@@ -10,6 +10,8 @@ public final class CoreStore {
     @ObservationIgnored private var handle: OpaquePointer?
     @ObservationIgnored private var pollTimer: Timer?
     @ObservationIgnored private var workspaceObserver: NSObjectProtocol?
+    @ObservationIgnored private var workspaceLifecycle: WorkspaceLifecycle?
+    @ObservationIgnored private let workspaceNotificationCenter: NotificationCenter
     @ObservationIgnored private var lastObservedBundleId: String?
 
     @ObservationIgnored public private(set) var model: ProjectionModel = ProjectionModel()
@@ -24,7 +26,11 @@ public final class CoreStore {
     public private(set) var footer: FooterSliceModel = FooterSliceModel()
     public private(set) var activeModal: ActiveModalModel? = nil
 
-    public init(isolatedDirectory: String? = nil) {
+    public init(
+        isolatedDirectory: String? = nil,
+        workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter
+    ) {
+        self.workspaceNotificationCenter = workspaceNotificationCenter
         if let dir = isolatedDirectory {
             self.handle = dir.withCString { ptr in
                 mi_core_new(ptr)
@@ -33,28 +39,47 @@ public final class CoreStore {
             self.handle = mi_core_new(nil)
         }
         refreshProjection()
+        workspaceLifecycle = WorkspaceLifecycle(center: workspaceNotificationCenter) { [weak self] event in
+            self?.dispatchRaw(["domain": event.rawValue])
+        }
         if isolatedDirectory == nil {
             startEventLoops()
         }
     }
 
     deinit {
+        pollTimer?.invalidate()
+        if let observer = workspaceObserver {
+            workspaceNotificationCenter.removeObserver(observer)
+        }
         if let h = handle {
             mi_core_free(h)
+        }
+    }
+
+    public func stopEventLoops() {
+        workspaceLifecycle?.stop()
+        workspaceLifecycle = nil
+        pollTimer?.invalidate()
+        pollTimer = nil
+        if let observer = workspaceObserver {
+            workspaceNotificationCenter.removeObserver(observer)
+            workspaceObserver = nil
         }
     }
 
     private func startEventLoops() {
         let timer = Timer(timeInterval: 0.12, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.pollHardware()
+                guard let self, self.pollTimer != nil else { return }
+                self.pollHardware()
             }
         }
         timer.tolerance = 0.03
         RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer
 
-        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+        workspaceObserver = workspaceNotificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
@@ -62,7 +87,7 @@ public final class CoreStore {
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             let bundleId = app?.bundleIdentifier
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self, self.workspaceObserver != nil else { return }
                 guard bundleId != Bundle.main.bundleIdentifier else { return }
                 guard bundleId != self.lastObservedBundleId else { return }
                 self.lastObservedBundleId = bundleId
@@ -147,8 +172,7 @@ public final class CoreStore {
 
         var nextSidebar = SidebarSliceModel()
         nextSidebar.sidebarRows = m.sidebarRows
-        nextSidebar.hardwareSlots = m.hardwareSlots
-        nextSidebar.activeHardwareSlot = m.activeHardwareSlot
+        nextSidebar.boardLayers = m.boardLayers
         nextSidebar.selectedProfileId = m.selectedProfileId
         nextSidebar.selectedDisplayName = m.selectedDisplayName
         nextSidebar.activeHostProfileId = m.activeHostProfileId
@@ -169,6 +193,8 @@ public final class CoreStore {
         }
 
         var nextCanvas = CanvasSliceModel()
+        nextCanvas.selectedProfileId = m.selectedProfileId
+        nextCanvas.selectedDisplayName = m.selectedDisplayName
         nextCanvas.selectedLayerId = m.selectedLayerId
         nextCanvas.selectedSurface = m.selectedSurface
         nextCanvas.selectedLogicalSlot = m.selectedLogicalSlot
@@ -188,9 +214,9 @@ public final class CoreStore {
         nextCanvas.keycapCells = m.keycapCells
         nextCanvas.statusLedHex = m.statusLedHex
         nextCanvas.underglowHex = m.underglowHex
-        nextCanvas.activeHardwareSlot = m.activeHardwareSlot
+        nextCanvas.boardPreviewLayer = m.boardPreviewLayer
         nextCanvas.touchLedStates = m.touchLedStates
-        nextCanvas.activeHardwareSlotLabel = m.activeHardwareSlotLabel
+        nextCanvas.boardPreviewLabel = m.boardPreviewLabel
         nextCanvas.protectedLock = m.protectedLock
         nextCanvas.canEditBindings = m.canEditBindings
         nextCanvas.canAddLighting = m.canAddLighting
@@ -216,6 +242,8 @@ public final class CoreStore {
         }
 
         var nextInspector = InspectorSliceModel()
+        nextInspector.selectedProfileId = m.selectedProfileId
+        nextInspector.selectedDisplayName = m.selectedDisplayName
         nextInspector.selectedLogicalSlot = m.selectedLogicalSlot
         nextInspector.selectedSurface = m.selectedSurface
         nextInspector.selectedJoystickDirection = m.selectedJoystickDirection
@@ -346,22 +374,41 @@ public final class CoreStore {
                     )
                 }
             }
-            m.activeHardwareSlot = sidebar["active_hardware_slot"] as? Int ?? 0
-            if let hwSlots = sidebar["hardware_slots"] as? [[String: Any]] {
-                m.hardwareSlots = hwSlots.enumerated().map { idx, s in
-                    HardwareProfileSlotModel(
-                        slotIndex: s["slot_index"] as? Int ?? idx,
-                        slotKind: s["slot_kind"] as? String ?? "UsbPlug",
-                        title: s["title"] as? String ?? "",
-                        triggerBadge: s["trigger_badge"] as? String ?? "",
-                        profileId: s["profile_id"] as? String ?? "",
-                        displayName: s["display_name"] as? String ?? "",
-                        monogram: s["monogram"] as? String ?? "",
-                        bundleId: s["bundle_id"] as? String,
-                        isActiveSlot: s["is_active_slot"] as? Bool ?? false,
-                        isActiveProfile: s["is_active_profile"] as? Bool ?? false
-                    )
+            if let board = sidebar["board_layers"] as? [String: Any] {
+                if let layers = board["layers"] as? [[String: Any]] {
+                    m.boardLayers.layers = layers.compactMap { row in
+                        guard let layer = row["layer"] as? Int,
+                              let leds = row["leds"] as? [Bool], leds.count == 3 else { return nil }
+                        return BoardLayerModel(
+                            layer: layer, leds: leds,
+                            profileId: row["profile_id"] as? String,
+                            displayName: row["display_name"] as? String ?? "未分配",
+                            owner: row["owner"] as? String ?? "Unassigned",
+                            isPreviewSelected: row["is_preview_selected"] as? Bool ?? false,
+                            assignmentIssue: row["assignment_issue"] as? String
+                        )
+                    }
                 }
+                if let choices = board["profile_choices"] as? [[String: Any]] {
+                    m.boardLayers.profileChoices = choices.compactMap { row in
+                        guard let id = row["profile_id"] as? String, let name = row["display_name"] as? String else { return nil }
+                        return BoardProfileChoiceModel(profileId: id, displayName: name)
+                    }
+                }
+                m.boardLayers.usbStartupProfileId = board["usb_startup_profile_id"] as? String
+                m.boardLayers.usbStartupDisplayName = board["usb_startup_display_name"] as? String ?? "未分配"
+                m.boardLayers.usbPreviewSelected = board["usb_preview_selected"] as? Bool ?? false
+                m.boardLayers.observedLayer = board["observed_layer"] as? Int
+                m.boardLayers.observedProfileKind = board["observed_profile_kind"] as? String
+                m.boardLayers.observedStatus = board["observed_status"] as? String ?? "设备层未确认"
+                m.boardLayers.applyBlockReason = board["apply_block_reason"] as? String ?? "六层应用尚未可用"
+                m.boardLayers.canApply = board["can_apply"] as? Bool ?? false
+                m.boardLayers.cindyNativePausedConfirmed = board["cindy_native_paused_confirmed"] as? Bool ?? false
+                m.boardLayers.configurationObserved = board["configuration_observed"] as? Bool ?? false
+                m.boardLayers.keyboardGrabbed = board["keyboard_grabbed"] as? Bool ?? false
+                m.boardLayers.firstEventVerified = board["first_event_verified"] as? Bool ?? false
+                m.boardLayers.runtimeReady = board["runtime_ready"] as? Bool ?? false
+                m.boardLayers.restoreAvailable = board["restore_available"] as? Bool ?? false
             }
         }
 
@@ -378,7 +425,8 @@ public final class CoreStore {
             if let leds = canvas["touch_led_states"] as? [Bool], leds.count == 3 {
                 m.touchLedStates = leds
             }
-            m.activeHardwareSlotLabel = canvas["active_hardware_slot_label"] as? String ?? "插入 USB · Antigravity"
+            m.boardPreviewLayer = canvas["board_preview_layer"] as? Int
+            m.boardPreviewLabel = canvas["board_preview_label"] as? String ?? "USB 启动方案预览"
             m.canEditBindings = canvas["can_edit_bindings"] as? Bool ?? true
             m.canAddLighting = canvas["can_add_lighting"] as? Bool ?? true
             m.canExportOrCopyLayer = canvas["can_export_or_copy_layer"] as? Bool ?? true
@@ -475,8 +523,9 @@ public final class CoreStore {
                     lightingEnabled: lp["lighting_enabled"] as? Bool ?? true,
                     autoSessionColor: lp["auto_session_color"] as? Bool ?? true,
                     onlyGlowOnAttentionOrCompleted: lp["only_glow_on_attention_or_completed"] as? Bool ?? true,
-                    glowOnWorking: lp["glow_on_working"] as? Bool ?? false,
-                    ambientColor: lp["ambient_color"] as? String ?? "PureWhite",
+                    glowOnWorking: lp["glow_on_working"] as? Bool ?? true,
+                    ambientColor: lp["ambient_color"] as? String ?? "OceanBlue",
+                    workingColor: lp["working_color"] as? String ?? "EmeraldGreen",
                     brightness: lp["brightness"] as? String ?? "Standard",
                     autoOffTimeout: lp["auto_off_timeout"] as? String ?? "ThreeMinutes",
                     manualPreviewPhase: lp["manual_preview_phase"] as? String,
@@ -886,5 +935,44 @@ public extension Color {
             b = 0.96
         }
         self.init(red: r, green: g, blue: b)
+    }
+}
+
+@MainActor
+final class WorkspaceLifecycle {
+    enum Event: String {
+        case willSleep = "system_will_sleep"
+        case didWake = "system_did_wake"
+    }
+
+    private let center: NotificationCenter
+    private let receive: (Event) -> Void
+    private var observers: [NSObjectProtocol] = []
+    private var active = true
+
+    init(center: NotificationCenter, receive: @escaping (Event) -> Void) {
+        self.center = center
+        self.receive = receive
+        for (name, event) in [
+            (NSWorkspace.willSleepNotification, Event.willSleep),
+            (NSWorkspace.didWakeNotification, Event.didWake),
+        ] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.active else { return }
+                    self.receive(event)
+                }
+            })
+        }
+    }
+
+    func stop() {
+        active = false
+        observers.forEach(center.removeObserver)
+        observers.removeAll()
+    }
+
+    deinit {
+        observers.forEach(center.removeObserver)
     }
 }

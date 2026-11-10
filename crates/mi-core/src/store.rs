@@ -36,9 +36,9 @@ use crate::{
         SessionStripProjection, SimpleLightingPopoverProjection,
     },
     sidebar::{
-        AutoSwitchState, BackupCommand, CanonicalAgent, HardwareProfileSlotKind,
-        HardwareProfileSlotProjection, OwnershipBannerState, ProfileCommand, SidebarAction,
-        SidebarProfileRow, SidebarProjection, HARDWARE_PROFILE_SLOT_COUNT,
+        AutoSwitchState, BackupCommand, BoardLayerProjection, BoardLayersProjection,
+        BoardProfileChoice, CanonicalAgent, OwnershipBannerState, ProfileCommand, SidebarAction,
+        SidebarProfileRow, SidebarProjection,
     },
     status_menu::{
         FavoriteSlotCardProjection, FavoriteSlotIndex, PendingPresetImportPreview,
@@ -51,13 +51,16 @@ use mi_bridge::{
     PushToTalkController, UnixNativeOwnershipTransport,
 };
 use mi_macos::{
-    executor::APPLE_FN_KEY_CODE, AppBundleCache, AppBundleInfo, HostActionReceipt, HostOsDriver,
+    executor::APPLE_FN_KEY_CODE, AppBundleCache, AppBundleInfo, HeldInputId, HostActionReceipt,
     LiveHostActionExecutor, MacOsSystemDriver, PassivePanelFrameSpec, PassivePanelHost,
     PassivePanelRole, PresetFileEnvelope, RecordingPassivePanelHost, RecordingStatusItemHost,
     ScreenGeometry, ScreenPoint, StatusItemHost, StatusItemIconSpec, StatusItemSnapshot,
 };
 use mi_model::{
     action_library,
+    board_layers::{
+        BoardLayer, BoardLayerPlan, BoardLayerRoute, BoardPreviewSelection, NativeLayerOwner,
+    },
     document::{LayerNode, LocalDocumentV2},
     draft::{Action, ActionKind, Draft},
     host_router::{
@@ -82,11 +85,23 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
 };
+
+#[path = "six_layer_store.rs"]
+mod six_layer_store;
+#[path = "workspace_lifecycle.rs"]
+mod workspace_lifecycle;
+use workspace_lifecycle::SystemLifecycle;
+#[path = "projection.rs"]
+mod projection;
+use projection::{OwnershipView, ProjectionInputs, SixLayerView};
+#[path = "runtime_inbox.rs"]
+mod runtime_inbox;
+use runtime_inbox::RuntimeInbox;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HardwareAutoAcceptanceReceipt {
@@ -94,6 +109,8 @@ pub struct HardwareAutoAcceptanceReceipt {
     pub status: String,
     pub session_id: u64,
     pub backend: String,
+    #[serde(default)]
+    pub exclusive_vendor: bool,
     pub product: String,
     pub vid_pid: String,
     pub device_path: String,
@@ -118,8 +135,11 @@ pub enum HardwareLoopEvent {
     Disconnected {
         session_id: u64,
     },
-    DiscoveryChanged,
+    DiscoveryChanged {
+        epoch: u64,
+    },
     OwnershipReply {
+        epoch: u64,
         request: mi_bridge::NativeOwnershipRequest,
         reply: Option<mi_bridge::NativeOwnershipReply>,
     },
@@ -127,6 +147,25 @@ pub enum HardwareLoopEvent {
         session_id: u64,
         receipt: HardwareAutoAcceptanceReceipt,
     },
+    LiveCandidatesUpdated {
+        epoch: u64,
+        candidates: Vec<FourAppLiveCandidate>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BoardRouting {
+    Legacy,
+    Checking,
+    Managed { layer: u8 },
+    WaitingForFirstLayer,
+    Unverified,
+}
+
+impl BoardRouting {
+    fn is_managed(self) -> bool {
+        matches!(self, Self::Managed { .. } | Self::WaitingForFirstLayer)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -223,11 +262,14 @@ pub enum DeviceWorkflowAction {
     PrepareApplyBackup,
     TakePreparedCandidate,
     CancelApplyPreview,
+    SimulateKeyPress { binding_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "domain", content = "action", rename_all = "snake_case")]
 pub enum WorkbenchCommand {
+    SystemWillSleep,
+    SystemDidWake,
     Header(HeaderAction),
     Sidebar(SidebarAction),
     Canvas(CanvasAction),
@@ -305,6 +347,13 @@ impl Default for WorkbenchProjection {
     }
 }
 
+#[derive(Clone)]
+struct HeldDictation {
+    input: HeldInputId,
+    profile_id: String,
+    adapter: String,
+}
+
 pub struct WorkbenchStore {
     pub config: WorkbenchStoreConfig,
     pub document_store: DocumentStore,
@@ -321,18 +370,34 @@ pub struct WorkbenchStore {
     pub hardware_rpc_verified: bool,
     pub last_hardware_auto_acceptance: Option<HardwareAutoAcceptanceReceipt>,
     pub merge_wide_key: Arc<AtomicBool>,
+    board_routing: BoardRouting,
+    board_decoder: Arc<AtomicBool>,
+    board_admit_after: u64,
+    six_layer_state: crate::six_layer_runtime::SavedSixLayerState,
+    six_layer_running: Option<crate::six_layer_runtime::RunningSixLayer>,
+    six_layer_job: Option<
+        std::sync::mpsc::Receiver<
+            Result<Option<crate::six_layer_runtime::RunningSixLayer>, String>,
+        >,
+    >,
+    six_layer_ownership_identity: Option<String>,
+    six_layer_ownership_checked_at: Instant,
     tokio_runtime: Arc<tokio::runtime::Runtime>,
-    hardware_event_tx: tokio::sync::mpsc::UnboundedSender<HardwareLoopEvent>,
-    hardware_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<HardwareLoopEvent>>,
+    hardware_event_tx: RuntimeInbox,
+    ownership_in_flight: Option<mi_bridge::NativeOwnershipRequest>,
     mac_watcher_transport: Option<Arc<mi_transport::MacTransport>>,
+    system_lifecycle: SystemLifecycle,
+    lifecycle_epoch: Arc<AtomicU64>,
+    lifecycle_cleanup: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    discovery_enabled: bool,
+    discovery_refresh_count: u64,
+    resume_requires_explicit_connect: bool,
     pub navigation_history: NavigationHistory,
     pub radial_state: RadialMenuState,
     pub radial_readiness: RadialInputReadiness,
     pub radial_slot_configs: [RadialSlotConfig; RADIAL_SECTOR_COUNT],
     pub overlay_controller: OverlayController,
     pub pinned_favorites: PinnedFavoritesGrid,
-    pub hardware_profile_slots: [Option<String>; HARDWARE_PROFILE_SLOT_COUNT],
-    pub active_hardware_slot: u8,
     pub screen_geometry: ScreenGeometry,
     pub last_cursor_position: ScreenPoint,
     pub pending_preset_import: Option<PendingPresetImportPreview>,
@@ -340,10 +405,10 @@ pub struct WorkbenchStore {
     pub preset_transfer_error: Option<String>,
     pub last_host_action_receipt: Option<HostActionReceipt>,
     pub dispatched_receipts: Vec<HostActionReceipt>,
-    pub live_executor: LiveHostActionExecutor<MacOsSystemDriver>,
+    pub live_executor: Arc<LiveHostActionExecutor<MacOsSystemDriver>>,
     dial_pressed: bool,
     dial_turned_while_pressed: bool,
-    held_ptt_binding: Option<(String, String)>,
+    held_dictation: Option<HeldDictation>,
     selected_profile_id: Option<String>,
     selected_layer_id: Option<String>,
     selected_binding_slot: Option<u32>,
@@ -379,12 +444,20 @@ pub struct WorkbenchStore {
     status_menu_open: bool,
     active_modal: Option<EditorModalProjection>,
     last_status_item_snapshot: Option<StatusItemSnapshot>,
+    last_hud_panel: Option<Option<PassivePanelFrameSpec>>,
+    last_radial_panel: Option<Option<PassivePanelFrameSpec>>,
+    ownership_view: OwnershipView,
+    applications: BTreeMap<String, bool>,
+    six_layer_view: Option<SixLayerView>,
+    update_now: Instant,
+    input_lost_session: Option<u64>,
     projection_generation: u64,
     projection: WorkbenchProjection,
 }
 
 impl WorkbenchStore {
     pub fn open(config: WorkbenchStoreConfig) -> Result<Self, WorkbenchError> {
+        let now = Instant::now();
         fs::create_dir_all(&config.document_dir)
             .map_err(|e| WorkbenchError::Storage(e.to_string()))?;
         let mut document_store = DocumentStore::default();
@@ -395,13 +468,20 @@ impl WorkbenchStore {
                 .map_err(WorkbenchError::Storage)?;
         }
 
+        let preserve_saved_host_state = document_store.has_saved_host_preferences();
+        let six_layer_state =
+            crate::six_layer_runtime::load(&config.document_dir.join("six-layer-runtime.json"))
+                .map_err(WorkbenchError::Storage)?;
         let native_ownership = if config.isolated {
             NativeOwnershipController::new_isolated()
         } else {
-            let transport = config
-                .ownership_socket_path
-                .as_ref()
-                .map(UnixNativeOwnershipTransport::new);
+            let transport = config.ownership_socket_path.as_ref().map(|path| {
+                let mut t = UnixNativeOwnershipTransport::new(path);
+                if config.allow_unbridged_desktop {
+                    t.timeout = Duration::from_millis(1900);
+                }
+                t
+            });
             NativeOwnershipController::new(transport, config.allow_unbridged_desktop)
         };
         let app_cache = config.app_cache.clone();
@@ -414,7 +494,7 @@ impl WorkbenchStore {
                 .build()
                 .map_err(|e| WorkbenchError::Storage(format!("创建异步运行时失败：{e}")))?,
         );
-        let (hardware_event_tx, hardware_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hardware_event_tx = RuntimeInbox::default();
         let merge_wide_key = Arc::new(AtomicBool::new(false));
 
         let mut store = Self {
@@ -435,16 +515,20 @@ impl WorkbenchStore {
             merge_wide_key,
             tokio_runtime,
             hardware_event_tx,
-            hardware_event_rx: Some(hardware_event_rx),
+            ownership_in_flight: None,
             mac_watcher_transport: None,
+            system_lifecycle: SystemLifecycle::Awake,
+            lifecycle_epoch: Arc::new(AtomicU64::new(0)),
+            lifecycle_cleanup: None,
+            discovery_enabled: false,
+            discovery_refresh_count: 0,
+            resume_requires_explicit_connect: false,
             navigation_history: NavigationHistory::new(),
             radial_state: RadialMenuState::new(),
             radial_readiness: RadialInputReadiness::Ready,
             radial_slot_configs: RadialSlotConfig::default_app_launcher_slots(),
             overlay_controller: OverlayController::new(),
             pinned_favorites: PinnedFavoritesGrid::default(),
-            hardware_profile_slots: [None, None, None, None],
-            active_hardware_slot: 0,
             screen_geometry: ScreenGeometry::default(),
             last_cursor_position: ScreenPoint::default(),
             pending_preset_import: None,
@@ -452,10 +536,18 @@ impl WorkbenchStore {
             preset_transfer_error: None,
             last_host_action_receipt: None,
             dispatched_receipts: Vec::new(),
-            live_executor: LiveHostActionExecutor::new(MacOsSystemDriver::default()),
+            live_executor: Arc::new(LiveHostActionExecutor::new(MacOsSystemDriver::default())),
             dial_pressed: false,
             dial_turned_while_pressed: false,
-            held_ptt_binding: None,
+            held_dictation: None,
+            board_routing: BoardRouting::Legacy,
+            board_decoder: Arc::new(AtomicBool::new(false)),
+            board_admit_after: 0,
+            six_layer_state,
+            six_layer_running: None,
+            six_layer_job: None,
+            six_layer_ownership_identity: None,
+            six_layer_ownership_checked_at: now,
             selected_profile_id: None,
             selected_layer_id: None,
             selected_binding_slot: Some(0),
@@ -491,6 +583,13 @@ impl WorkbenchStore {
             status_menu_open: false,
             active_modal: None,
             last_status_item_snapshot: None,
+            last_hud_panel: None,
+            last_radial_panel: None,
+            ownership_view: OwnershipView::default(),
+            applications: BTreeMap::new(),
+            six_layer_view: None,
+            update_now: now,
+            input_lost_session: None,
             projection_generation: 0,
             projection: WorkbenchProjection::default(),
         };
@@ -499,41 +598,38 @@ impl WorkbenchStore {
         store.prepare_desktop_profiles()?;
         store.ensure_default_agent_links()?;
         store.ensure_default_pinned_favorites();
-        store.ensure_default_hardware_profile_slots();
-        store.initialize_selection()?;
+        store.initialize_board_plan()?;
+        store.initialize_selection(preserve_saved_host_state)?;
         store.status_message = "已就绪".to_string();
-        store.refresh_four_app_lighting();
         if store.config.auto_connect_usb
             && env::var("MI_AUTO_HOST_READY").ok().as_deref() != Some("0")
         {
+            store.lighting_popover.only_glow_on_attention_or_completed = false;
+            store.lighting_arbiter.only_glow_on_attention_or_completed = false;
+            store.initialize_auto_host_ready(preserve_saved_host_state);
             store.start_mac_usb_discovery_watcher();
-            let _ = store.connect_default_usb();
+            store.start_antigravity_live_poller();
+            let _ = store.connect_default_usb_with_execution(false);
         }
-        store.rebuild_projection();
+        store.refresh_four_app_lighting();
+        store.commit_runtime_update();
         Ok(store)
     }
 
-    pub fn take_hardware_event_receiver(
-        &mut self,
-    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<HardwareLoopEvent>> {
-        self.hardware_event_rx.take()
+    pub fn poll_hardware_events(&mut self) -> bool {
+        self.poll_at(Instant::now())
     }
 
-    pub fn poll_hardware_events(&mut self) -> bool {
+    pub fn poll_at(&mut self, now: Instant) -> bool {
+        self.update_now = now;
         let before_gen = self.projection_generation;
-        let mut drained = Vec::new();
-        if let Some(rx) = &mut self.hardware_event_rx {
-            while let Ok(ev) = rx.try_recv() {
-                drained.push(ev);
-            }
+        self.poll_workspace_lifecycle();
+        if self.system_lifecycle == SystemLifecycle::Awake {
+            self.poll_six_layer_runtime();
         }
-        let now = Instant::now();
-        for ev in drained {
-            let _ = self.handle_hardware_loop_event(ev, now);
-        }
-        if self.overlay_controller.expire_notice_if_due(now) {
-            self.rebuild_projection();
-        }
+        self.drain_pending_hardware_events(now);
+        self.overlay_controller.expire_notice_if_due(now);
+        self.commit_runtime_update();
         self.projection_generation != before_gen
     }
 
@@ -542,7 +638,31 @@ impl WorkbenchStore {
     }
 
     pub fn dispatch_command(&mut self, command: WorkbenchCommand) -> Result<(), WorkbenchError> {
+        let started = Instant::now();
+        let previous_profile = self.document_store.host_active_profile_id();
+        let result = self.dispatch_at(command, started);
+        if self.document_store.host_active_profile_id() != previous_profile {
+            self.last_switch_duration = started.elapsed();
+            self.commit_local_update();
+        }
+        result
+    }
+
+    pub fn dispatch_at(
+        &mut self,
+        command: WorkbenchCommand,
+        now: Instant,
+    ) -> Result<(), WorkbenchError> {
+        self.update_now = now;
         match command {
+            WorkbenchCommand::SystemWillSleep => {
+                self.system_will_sleep();
+                Ok(())
+            }
+            WorkbenchCommand::SystemDidWake => {
+                self.system_did_wake();
+                Ok(())
+            }
             WorkbenchCommand::Header(a) => self.dispatch_header_action(a),
             WorkbenchCommand::Sidebar(a) => self.dispatch_sidebar_action(a),
             WorkbenchCommand::Canvas(a) => self.dispatch_canvas_action(a),
@@ -629,6 +749,7 @@ impl WorkbenchStore {
         &mut self,
         action: DeviceWorkflowAction,
     ) -> Result<(), WorkbenchError> {
+        self.require_awake()?;
         match action {
             DeviceWorkflowAction::ReadIdentity => {
                 let msg = if let Some(cand) = &self.connected_candidate {
@@ -640,14 +761,14 @@ impl WorkbenchStore {
                     "当前处于离线草稿模式 · 设备身份：Creator Micro 2 (303A:8298)".to_string()
                 };
                 self.status_message = msg;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             DeviceWorkflowAction::ReadSnapshot => {
                 let snap = self.current_or_synthetic_device_snapshot();
                 let sha1 = snap["keymap"]["sha1"].as_str().unwrap_or("-");
                 self.status_message = format!("设备快照已核验 · keymap sha1={sha1}");
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             DeviceWorkflowAction::ExportDiagnostics => {
@@ -659,13 +780,16 @@ impl WorkbenchStore {
                     "connected": self.device_session.is_some(),
                     "document_revision": self.document_store.draft.revision,
                     "host_revision": self.document_store.host_revision(),
-                    "ownership_summary": self.native_ownership.summary(),
+                    "ownership_summary": self.native_ownership.summary_at(self.update_now),
                 });
-                if let Ok(bytes) = serde_json::to_vec_pretty(&report) {
-                    let _ = fs::write(&diag_path, bytes);
-                }
+                let bytes = serde_json::to_vec_pretty(&report).map_err(|error| {
+                    WorkbenchError::Storage(format!("无法生成诊断报告：{error}"))
+                })?;
+                fs::write(&diag_path, bytes).map_err(|error| {
+                    WorkbenchError::Storage(format!("无法保存诊断报告：{error}"))
+                })?;
                 self.status_message = format!("已导出诊断报告：{}", diag_path.display());
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             DeviceWorkflowAction::OpenReconnectComparison => {
@@ -710,19 +834,52 @@ impl WorkbenchStore {
             DeviceWorkflowAction::CancelApplyPreview => {
                 self.dispatch_editor_action(EditorAction::ApplyCancelPreview)
             }
+            DeviceWorkflowAction::SimulateKeyPress { binding_id } => {
+                let ev = InputEvent {
+                    session_id: 1,
+                    board_layer: None,
+                    sequence: 1,
+                    ingress_sequence: 1,
+                    radial_center: None,
+                    radial_position: None,
+                    timestamp_ms: 0,
+                    kind: InputEventKind::Pressed,
+                    logical_switch: None,
+                    binding_id: Some(binding_id),
+                    physical_control: None,
+                    keycap_group: None,
+                    action_role: None,
+                    lost_count: 0,
+                    action_eligible: true,
+                };
+                let _ = self.consume_physical_input_event(ev, self.update_now);
+                Ok(())
+            }
         }
     }
 
     pub fn start_mac_usb_discovery_watcher(&mut self) {
+        self.discovery_enabled = true;
+        if self.system_lifecycle != SystemLifecycle::Awake {
+            return;
+        }
         if self.config.isolated || self.mac_watcher_transport.is_some() {
             return;
         }
-        let transport = Arc::new(mi_transport::MacTransport::new());
+        let transport = Arc::new(if self.discovery_is_descriptor_only() {
+            mi_transport::MacTransport::new()
+        } else {
+            mi_transport::MacTransport::exclusive_vendor()
+        });
         let mut rx = mi_transport::HidTransport::subscribe(transport.as_ref());
         let tx = self.hardware_event_tx.clone();
+        let epoch = self.lifecycle_epoch.load(Ordering::Acquire);
         self.tokio_runtime.spawn(async move {
             while rx.recv().await.is_ok() {
-                if tx.send(HardwareLoopEvent::DiscoveryChanged).is_err() {
+                if tx
+                    .send(HardwareLoopEvent::DiscoveryChanged { epoch })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -730,9 +887,71 @@ impl WorkbenchStore {
         self.mac_watcher_transport = Some(transport);
     }
 
+    pub fn start_antigravity_live_poller(&self) {
+        if self.config.isolated {
+            return;
+        }
+        let tx = self.hardware_event_tx.clone();
+        let epoch_source = Arc::clone(&self.lifecycle_epoch);
+        std::thread::spawn(move || {
+            let mut seen_running_ids = BTreeSet::new();
+            let mut completed_transition_watermarks = BTreeMap::new();
+            loop {
+                let epoch = epoch_source.load(Ordering::Acquire);
+                if let Some(candidates) = poll_antigravity_daemon_candidates(
+                    &mut seen_running_ids,
+                    &mut completed_transition_watermarks,
+                ) {
+                    if tx
+                        .send(HardwareLoopEvent::LiveCandidatesUpdated { epoch, candidates })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1500));
+            }
+        });
+    }
+
     pub fn connect_default_usb(&mut self) -> Result<bool, WorkbenchError> {
-        let transport = mi_transport::MacTransport::new();
-        self.connect_with_transport(&transport, true)
+        self.require_awake()?;
+        if self.resume_requires_explicit_connect {
+            if let Some(transport) = self.mac_watcher_transport.take() {
+                mi_transport::HidTransport::stop_discovery(transport.as_ref());
+            }
+            self.resume_requires_explicit_connect = false;
+            self.start_mac_usb_discovery_watcher();
+        }
+        self.connect_default_usb_with_execution(true)
+    }
+
+    fn connect_default_usb_with_execution(
+        &mut self,
+        enable_execution_on_connect: bool,
+    ) -> Result<bool, WorkbenchError> {
+        self.require_awake()?;
+        if let Some(installation) = &self.six_layer_state.installation {
+            let plan = installation.plan.clone();
+            if self
+                .six_layer_running
+                .as_ref()
+                .is_none_or(|running| running.receiver.failure().is_some())
+                && self.six_layer_job.is_none()
+            {
+                self.start_six_layer_apply(Some(plan))?;
+            }
+            return Ok(self.six_layer_running.is_some());
+        }
+        let transport = self
+            .mac_watcher_transport
+            .clone()
+            .unwrap_or_else(|| Arc::new(mi_transport::MacTransport::exclusive_vendor()));
+        let result = self.connect_with_transport(transport.as_ref(), enable_execution_on_connect);
+        if let Err(error) = &result {
+            self.set_status_message(error.to_string());
+        }
+        result
     }
 
     pub fn connect_with_transport(
@@ -740,20 +959,38 @@ impl WorkbenchStore {
         transport: &dyn mi_transport::HidTransport,
         enable_execution_on_connect: bool,
     ) -> Result<bool, WorkbenchError> {
+        self.require_awake()?;
         if self
             .device_session
             .as_ref()
-            .is_some_and(|s| s.is_disconnected())
+            .is_some_and(|s| s.is_disconnected() || self.input_lost_session == Some(s.id))
         {
-            self.device_session = None;
+            self.release_board_inputs(self.update_now);
+            if let Some(session) = self.device_session.take() {
+                self.tokio_runtime.block_on(session.shutdown());
+            }
             self.connected_candidate = None;
         }
-        if let (Some(_session), Some(cand)) = (&self.device_session, &self.connected_candidate) {
+        if self.live_executor.has_unconfirmed_apple_fn_release()
+            || !self.ptt_controller.cleanup_confirmed
+        {
+            let stopped = self.live_executor.stop_owned_actions();
+            self.finish_host_cleanup(stopped)
+                .map_err(WorkbenchError::Routing)?;
+        }
+        if let (Some(session), Some(cand)) = (&self.device_session, &self.connected_candidate) {
             self.status_message = format!(
-                "已连接 {} ({:04X}:{:04X}) · 已建立 HID 会话",
-                cand.product, cand.vid, cand.pid
+                "已连接 {} ({:04X}:{:04X}) · {}",
+                cand.product,
+                cand.vid,
+                cand.pid,
+                if session.has_exclusive_vendor_link() {
+                    "USB 专用接口已独占"
+                } else {
+                    "已建立 HID 会话"
+                }
             );
-            self.rebuild_projection();
+            self.commit_runtime_update();
             return Ok(true);
         }
 
@@ -776,6 +1013,10 @@ impl WorkbenchStore {
                 let link = transport
                     .open(&target.path)
                     .map_err(|e| WorkbenchError::Storage(format!("打开 USB 小键盘失败：{e}")))?;
+                if !self.config.isolated && !link.is_exclusive_vendor() {
+                    link.close();
+                    return Err(WorkbenchError::Storage("未取得 USB 专用接口独占".into()));
+                }
                 let session = {
                     let _guard = self.tokio_runtime.enter();
                     DeviceSession::new(
@@ -787,9 +1028,19 @@ impl WorkbenchStore {
                 };
                 self.merge_wide_key
                     .store(self.bottom_row_layout.is_merged(), Ordering::SeqCst);
-                let mut monitor = session
-                    .subscribe_verified_input_with_merge_flag(Arc::clone(&self.merge_wide_key));
+                self.board_decoder = Arc::new(AtomicBool::new(false));
+                self.board_routing = if session.has_exclusive_vendor_link() {
+                    BoardRouting::Checking
+                } else {
+                    BoardRouting::Legacy
+                };
+                let mut monitor = session.subscribe_verified_input_with_board_mode(
+                    Arc::clone(&self.merge_wide_key),
+                    Arc::clone(&self.board_decoder),
+                );
                 let session_id = session.id;
+                self.hardware_event_tx.open_source(session_id);
+                self.input_lost_session = None;
                 let tx = self.hardware_event_tx.clone();
                 self.tokio_runtime.spawn(async move {
                     while let Some(event) = monitor.next().await {
@@ -806,13 +1057,11 @@ impl WorkbenchStore {
                     let _ =
                         self.apply_routing_operation(RoutingOperation::Execution { enabled: true });
                 }
-                let _ = self.activate_hardware_slot_at(0, Instant::now(), false);
                 self.lighting_arbiter.invalidate_hardware_cache();
                 self.refresh_four_app_lighting();
                 let accept_session = Arc::clone(&session);
                 let accept_target = target.clone();
                 let accept_tx = self.hardware_event_tx.clone();
-                let accept_doc_dir = self.config.document_dir.clone();
                 let initial_lighting_json = self
                     .lighting_arbiter
                     .last_hardware_sync_json
@@ -823,7 +1072,6 @@ impl WorkbenchStore {
                         &accept_session,
                         &accept_target,
                         &initial_lighting_json,
-                        &accept_doc_dir,
                     )
                     .await
                     {
@@ -834,10 +1082,17 @@ impl WorkbenchStore {
                     }
                 });
                 self.status_message = format!(
-                    "已连接 {} ({:04X}:{:04X}) · 已建立 HID 会话",
-                    target.product, target.vid, target.pid
+                    "已连接 {} ({:04X}:{:04X}) · {}",
+                    target.product,
+                    target.vid,
+                    target.pid,
+                    if session.has_exclusive_vendor_link() {
+                        "USB 专用接口已独占"
+                    } else {
+                        "已建立 HID 会话"
+                    }
                 );
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(true)
             }
             0 => {
@@ -850,13 +1105,13 @@ impl WorkbenchStore {
                     self.status_message =
                         "未检测到 Creator Micro 2 USB 连接（离线工作台就绪）".to_string();
                 }
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(false)
             }
             _ => {
                 self.status_message =
                     "检测到多台 Creator Micro 2 USB 设备，请只保留一台连接".to_string();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(false)
             }
         }
@@ -867,9 +1122,24 @@ impl WorkbenchStore {
         event: HardwareLoopEvent,
         now: Instant,
     ) -> Option<HostActionReceipt> {
+        self.update_now = now;
+        if let HardwareLoopEvent::OwnershipReply { request, .. } = &event {
+            if self.ownership_in_flight.as_ref() == Some(request) {
+                self.ownership_in_flight = None;
+            }
+        }
+        if self.system_lifecycle != SystemLifecycle::Awake {
+            return None;
+        }
         match event {
             HardwareLoopEvent::Input(input_event) => {
-                self.consume_physical_input_event(input_event, now)
+                let session = self.device_session.as_ref()?;
+                if session.id != input_event.session_id
+                    || (session.is_disconnected() && input_event.kind != InputEventKind::Released)
+                {
+                    return None;
+                }
+                self.route_board_input(input_event, now)
             }
             HardwareLoopEvent::Disconnected { session_id } => {
                 if self
@@ -877,38 +1147,90 @@ impl WorkbenchStore {
                     .as_ref()
                     .is_some_and(|s| s.id == session_id)
                 {
+                    if let Some(running) = &self.six_layer_running {
+                        running.receiver.invalidate("USB 会话已断开");
+                    }
+                    self.release_board_inputs(now);
+                    self.board_routing = BoardRouting::Checking;
                     self.device_session = None;
-                    self.connected_candidate = None;
+                    let previous = self.connected_candidate.take();
                     self.hardware_rpc_verified = false;
                     self.lighting_arbiter.invalidate_hardware_cache();
                     self.status_message = "小键盘已断开连接（等待重新插入）".to_string();
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
+                    if self.config.auto_connect_usb && !self.config.isolated {
+                        let transport = mi_transport::MacTransport::exclusive_vendor();
+                        use mi_transport::HidTransport;
+                        let reenumerated = transport.enumerate().is_ok_and(|candidates| {
+                            candidates.iter().any(|candidate| {
+                                mi_transport::is_exclusive_vendor_candidate(candidate)
+                                    && previous
+                                        .as_ref()
+                                        .is_none_or(|old| old.path != candidate.path)
+                            })
+                        });
+                        if reenumerated {
+                            let _ = self.connect_default_usb_with_execution(false);
+                        }
+                    }
                 }
                 None
             }
-            HardwareLoopEvent::DiscoveryChanged => {
+            HardwareLoopEvent::DiscoveryChanged { epoch } => {
+                if epoch != self.lifecycle_epoch.load(Ordering::Acquire) {
+                    return None;
+                }
+                if self.resume_requires_explicit_connect {
+                    return None;
+                }
+                let old_path_missing = self
+                    .mac_watcher_transport
+                    .as_ref()
+                    .zip(self.connected_candidate.as_ref())
+                    .is_some_and(|(transport, old)| {
+                        use mi_transport::HidTransport;
+                        transport.enumerate().is_ok_and(|candidates| {
+                            !candidates
+                                .iter()
+                                .any(|candidate| candidate.path == old.path)
+                        })
+                    });
                 if self
                     .device_session
                     .as_ref()
-                    .is_some_and(|s| s.is_disconnected())
+                    .is_some_and(|s| s.is_disconnected() || old_path_missing)
                 {
-                    self.device_session = None;
+                    if let Some(running) = &self.six_layer_running {
+                        running.receiver.invalidate("USB 设备身份已变化");
+                    }
+                    self.release_board_inputs(now);
+                    self.board_routing = BoardRouting::Checking;
+                    if let Some(session) = self.device_session.take() {
+                        session.disconnect();
+                    }
                     self.connected_candidate = None;
                     self.hardware_rpc_verified = false;
                     self.lighting_arbiter.invalidate_hardware_cache();
                 }
                 if !self.config.isolated && self.device_session.is_none() {
-                    let _ = self.connect_default_usb();
+                    let _ = self.connect_default_usb_with_execution(false);
                 }
                 None
             }
-            HardwareLoopEvent::OwnershipReply { request, reply } => {
+            HardwareLoopEvent::OwnershipReply {
+                epoch,
+                request,
+                reply,
+            } => {
+                if epoch != self.lifecycle_epoch.load(Ordering::Acquire) {
+                    return None;
+                }
                 match reply {
                     Some(r) => self.native_ownership.receive_at(r, &request, now),
-                    None => self.native_ownership.failed(&request),
+                    None => self.native_ownership.failed_at(&request, now),
                 }
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 None
             }
             HardwareLoopEvent::HardwareAutoAccepted {
@@ -920,15 +1242,39 @@ impl WorkbenchStore {
                     .as_ref()
                     .is_some_and(|s| s.id == session_id)
                 {
+                    if self.board_routing == BoardRouting::Checking {
+                        self.confirm_board_routing(&receipt);
+                    }
                     self.hardware_rpc_verified = true;
-                    self.status_message = format!(
-                        "已连接 {} ({}) · 固件 {} 自动验收通过",
-                        receipt.product, receipt.vid_pid, receipt.firmware_version
-                    );
+                    if self.board_routing == BoardRouting::Legacy {
+                        self.status_message = format!(
+                            "已连接 {} ({}) · 固件 {} 自动验收通过",
+                            receipt.product, receipt.vid_pid, receipt.firmware_version
+                        );
+                    }
+                    if let Ok(bytes) = serde_json::to_vec_pretty(&receipt) {
+                        let path = self
+                            .config
+                            .document_dir
+                            .join("hardware-auto-acceptance.json");
+                        let tmp = path.with_extension("json.tmp");
+                        if fs::write(&tmp, bytes).is_ok() {
+                            let _ = fs::rename(tmp, path);
+                        }
+                    }
                     self.last_hardware_auto_acceptance = Some(receipt);
                     self.lighting_arbiter.invalidate_hardware_cache();
                     self.refresh_four_app_lighting();
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
+                }
+                None
+            }
+            HardwareLoopEvent::LiveCandidatesUpdated { epoch, candidates } => {
+                if epoch != self.lifecycle_epoch.load(Ordering::Acquire) {
+                    return None;
+                }
+                if self.slot_table.candidates() != candidates.as_slice() {
+                    self.ingest_four_app_candidates(candidates);
                 }
                 None
             }
@@ -936,12 +1282,8 @@ impl WorkbenchStore {
     }
 
     pub fn drain_pending_hardware_events(&mut self, now: Instant) -> Vec<HostActionReceipt> {
-        let mut events = Vec::new();
-        if let Some(rx) = &mut self.hardware_event_rx {
-            while let Ok(ev) = rx.try_recv() {
-                events.push(ev);
-            }
-        }
+        self.update_now = now;
+        let events = self.hardware_event_tx.take_batch();
         let mut receipts = Vec::new();
         for ev in events {
             if let Some(receipt) = self.handle_hardware_loop_event(ev, now) {
@@ -955,8 +1297,8 @@ impl WorkbenchStore {
         &mut self,
         now: Instant,
     ) -> Option<Option<HostActionReceipt>> {
-        let ev = self.hardware_event_rx.as_mut()?.recv().await?;
-        Some(self.handle_hardware_loop_event(ev, now))
+        let event = self.hardware_event_tx.recv().await;
+        Some(self.handle_hardware_loop_event(event, now))
     }
 
     pub fn open_isolated(dir: &Path) -> Result<Self, WorkbenchError> {
@@ -993,7 +1335,7 @@ impl WorkbenchStore {
 
     pub fn set_status_message(&mut self, message: impl Into<String>) {
         self.status_message = message.into();
-        self.rebuild_projection();
+        self.commit_runtime_update();
     }
 
     pub fn banner_flash_count(&self) -> usize {
@@ -1011,6 +1353,9 @@ impl WorkbenchStore {
     pub fn has_all_desktop_agent_presets(&self) -> bool {
         let doc = &self.document_store.draft.document;
         let profiles = &doc.editable.graph.profiles;
+        if self.local_codex_profile_id().is_none() || self.managed_cindy_profile_id().is_none() {
+            return false;
+        }
         CANONICAL_DESKTOP_AGENT_PROFILES
             .iter()
             .all(|canonical_name| {
@@ -1050,17 +1395,20 @@ impl WorkbenchStore {
             .update(|draft| mi_model::preset::install_agent_starter_profiles(draft).map(|_| ()))
             .map_err(WorkbenchError::Preset)?;
         self.ensure_default_agent_links()?;
-        self.rebuild_projection();
+        self.commit_runtime_update();
         Ok(())
     }
 
     pub fn ensure_default_agent_links(&mut self) -> Result<(), WorkbenchError> {
+        if self.document_store.has_saved_host_preferences() {
+            return Ok(());
+        }
         let mut canonical_ids: Vec<(CanonicalAgent, String)> = Vec::new();
         for agent in CanonicalAgent::ALL {
             if agent.is_manual_fallback() {
                 continue;
             }
-            if let Some(pid) = self.find_canonical_profile_id(agent) {
+            if let Some(pid) = self.default_host_profile_id(agent) {
                 canonical_ids.push((agent, pid));
             }
         }
@@ -1106,103 +1454,352 @@ impl WorkbenchStore {
                 .as_ref()
                 .is_some_and(|pid| profiles.contains_key(pid));
             if !valid_existing {
-                self.pinned_favorites.slots[idx] = self.find_canonical_profile_id(agent);
+                self.pinned_favorites.slots[idx] = self.default_host_profile_id(agent);
             }
         }
     }
 
-    pub fn ensure_default_hardware_profile_slots(&mut self) {
-        let fallback_first = self
-            .document_store
-            .draft
-            .document
-            .editable
-            .graph
-            .profile_order
-            .first()
-            .cloned();
-        for (idx, kind) in HardwareProfileSlotKind::ALL.into_iter().enumerate() {
-            let valid_existing = self.hardware_profile_slots[idx]
-                .as_ref()
-                .is_some_and(|pid| {
-                    self.document_store
-                        .draft
-                        .document
-                        .editable
-                        .graph
-                        .profiles
-                        .contains_key(pid)
-                });
-            if !valid_existing {
-                self.hardware_profile_slots[idx] = self
-                    .find_canonical_profile_id(kind.default_agent())
-                    .or_else(|| fallback_first.clone());
-            }
-        }
-        self.active_hardware_slot = self.active_hardware_slot.min(3);
+    fn legacy_host_profile_id(&self, layer: u8) -> Option<String> {
+        self.projection_inputs().legacy_host_profile_id(layer)
     }
 
-    pub fn activate_hardware_slot(&mut self, slot_index: u8) -> Result<(), WorkbenchError> {
-        self.activate_hardware_slot_at(slot_index, Instant::now(), true)
-    }
-
-    pub fn activate_hardware_slot_at(
+    fn activate_legacy_board_layer(
         &mut self,
-        slot_index: u8,
+        layer: u8,
         now: Instant,
-        emit_hud_notice: bool,
+        notice: bool,
     ) -> Result<(), WorkbenchError> {
-        let Some(kind) = HardwareProfileSlotKind::from_index(slot_index) else {
-            return Err(WorkbenchError::Routing("无效硬件槽位编号".to_string()));
+        let id = self.legacy_host_profile_id(layer).ok_or_else(|| {
+            WorkbenchError::Routing("旧三层绑定缺失或属于原生应用，按键已暂停".into())
+        })?;
+        self.select_and_activate_profile_at(&id, now, notice)
+    }
+
+    fn confirm_board_routing(&mut self, receipt: &HardwareAutoAcceptanceReceipt) {
+        let Some(snapshot) = self.device_session.as_ref().and_then(|s| s.snapshot()) else {
+            return;
         };
-        self.ensure_default_hardware_profile_slots();
-        let pid = self.hardware_profile_slots[slot_index as usize]
-            .clone()
-            .ok_or_else(|| WorkbenchError::Routing("该硬件槽位未绑定方案".to_string()))?;
-        self.active_hardware_slot = slot_index;
-        let _ = self.document_store.set_hardware_profile_slots(
-            self.hardware_profile_slots.clone(),
-            self.active_hardware_slot,
-        );
-        self.select_and_activate_profile_at(&pid, now, emit_hud_notice)?;
-        let active_name = self.active_or_selected_profile_display_name();
-        self.status_message = format!("已激活「{}」-> {}", kind.title(), active_name);
-        self.rebuild_projection();
+        match mi_model::apply::recognize_three_layer_profile(&snapshot.config) {
+            Ok(None) => self.board_routing = BoardRouting::Legacy,
+            Ok(Some(index))
+                if receipt.exclusive_vendor
+                    && self.document_store.legacy_three_bindings().is_some()
+                    && receipt.firmware_version == "0.6.3"
+                    && receipt.profile_index == Some(index)
+                    && receipt
+                        .layer_index
+                        .is_some_and(|layer| (1..=3).contains(&layer)) =>
+            {
+                if receipt.layer_index == Some(1) {
+                    self.arm_board_routing();
+                } else {
+                    self.wait_for_board_first_layer();
+                }
+            }
+            _ => {
+                self.board_routing = BoardRouting::Unverified;
+                self.status_message = "板载三层或启动层未确认，按键已暂停".into();
+            }
+        }
+    }
+
+    fn arm_board_routing(&mut self) {
+        let Some(session) = self.device_session.as_ref() else {
+            return;
+        };
+        self.board_admit_after = session.input_watermark();
+        self.board_decoder.store(true, Ordering::SeqCst);
+        self.enter_board_first_layer();
+    }
+
+    fn wait_for_board_first_layer(&mut self) {
+        let Some(session) = self.device_session.as_ref() else {
+            return;
+        };
+        self.board_admit_after = session.input_watermark();
+        self.board_decoder.store(true, Ordering::SeqCst);
+        self.board_routing = BoardRouting::WaitingForFirstLayer;
+        self.status_message = "等待键盘返回第 1 层，其他层按键已暂停".into();
+    }
+
+    fn enter_board_first_layer(&mut self) {
+        self.board_routing = BoardRouting::Managed { layer: 1 };
+        self.status_message = if self.legacy_host_profile_id(1).is_some() {
+            "板载三层已就绪 · 第 1 层"
+        } else {
+            "旧三层绑定缺失或属于原生应用，按键已暂停"
+        }
+        .into();
+    }
+
+    pub fn provision_board_layers(&mut self) -> Result<(), WorkbenchError> {
+        self.start_six_layer_apply(None)
+    }
+
+    fn route_board_input(&mut self, event: InputEvent, now: Instant) -> Option<HostActionReceipt> {
+        if event.kind == InputEventKind::InputStreamGap {
+            self.input_lost_session = Some(event.session_id);
+            self.release_board_inputs(now);
+            self.status_message = "输入流有缺口，已停止原目标动作，请重新连接".into();
+            self.commit_runtime_update();
+            return None;
+        }
+        if event.kind == InputEventKind::Released {
+            return self.consume_physical_input_event(event, now);
+        }
+        if self.input_lost_session == Some(event.session_id)
+            || self.hardware_event_tx.source_closed(event.session_id)
+        {
+            return None;
+        }
+        if self.six_layer_state.installation.is_some() || self.six_layer_job.is_some() {
+            return None;
+        }
+        if self.board_routing == BoardRouting::WaitingForFirstLayer {
+            if event.ingress_sequence <= self.board_admit_after
+                || !event.action_eligible
+                || event.board_layer != Some(1)
+                || event.kind != InputEventKind::Pressed
+            {
+                return None;
+            }
+            self.enter_board_first_layer();
+        }
+        match self.board_routing {
+            BoardRouting::Legacy if event.board_layer.is_none() => {
+                return self.consume_physical_input_event(event, now);
+            }
+            BoardRouting::Managed { layer } => {
+                if event.ingress_sequence <= self.board_admit_after || !event.action_eligible {
+                    return None;
+                }
+                let next = event.board_layer.filter(|value| (1..=3).contains(value))?;
+                if event.kind == InputEventKind::Pressed {
+                    if layer != next {
+                        self.release_board_inputs(now);
+                    }
+                    self.board_routing = BoardRouting::Managed { layer: next };
+                    let Some(target) = self
+                        .legacy_host_profile_id(next)
+                        .filter(|id| !self.is_protected_oai_profile(id))
+                    else {
+                        self.set_status_message("旧三层绑定缺失或属于原生应用，按键已暂停");
+                        return None;
+                    };
+                    if layer != next
+                        || self.resolved_active_profile_id().as_deref() != Some(target.as_str())
+                    {
+                        self.status_message = format!("板载三层已就绪 · 第 {next} 层");
+                        if let Err(error) =
+                            self.activate_legacy_board_layer(next, now, layer != next)
+                        {
+                            self.set_status_message(error.to_string());
+                            return None;
+                        }
+                    }
+                } else {
+                    return None;
+                }
+                return self.consume_physical_input_event(event, now);
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn release_board_inputs(&mut self, now: Instant) {
+        self.update_now = now;
+        self.dial_pressed = false;
+        self.dial_turned_while_pressed = false;
+        self.radial_state.cancel();
+        let stopped = self.live_executor.stop_owned_actions();
+        let _ = self.finish_host_cleanup(stopped);
+    }
+
+    fn finish_host_cleanup(&mut self, stopped: Result<(), String>) -> Result<(), String> {
+        if self.held_dictation.is_some() {
+            self.finish_dictation(stopped.clone());
+        } else {
+            self.ptt_controller.cancel();
+            self.ptt_controller.cleanup_confirmed = stopped.is_ok();
+        }
+        match &stopped {
+            Ok(()) => self.voice_manager.confirm_dictation_stopped(),
+            Err(error) => self.status_message = format!("原目标释放未确认 · {error}"),
+        }
+        stopped
+    }
+
+    fn finish_dictation(&mut self, stopped: Result<(), String>) -> Option<HostActionReceipt> {
+        let held = self.held_dictation.as_ref()?.clone();
+        self.ptt_controller.cancel();
+        self.ptt_controller.cleanup_confirmed = stopped.is_ok();
+        let (outcome, detail) = match stopped {
+            Ok(()) => {
+                self.held_dictation = None;
+                (
+                    "executed",
+                    format!(
+                        "已结束原目标听写 ({}, {})",
+                        held.input.binding_id, held.adapter
+                    ),
+                )
+            }
+            Err(error) => ("unconfirmed", format!("原目标听写停止未确认 · {error}")),
+        };
+        let receipt = HostActionReceipt {
+            action_type: "agent_command".into(),
+            binding_id: held.input.binding_id,
+            profile_id: held.profile_id,
+            target: held.adapter,
+            outcome: outcome.into(),
+            detail: detail.clone(),
+            text_byte_len: None,
+            timestamp_ms: 0,
+        };
+        self.status_message = detail;
+        self.record_host_action_receipt(receipt.clone());
+        self.commit_runtime_update();
+        Some(receipt)
+    }
+
+    fn managed_cindy_profile_id(&self) -> Option<String> {
+        self.projection_inputs().managed_cindy_profile_id()
+    }
+
+    fn recommended_board_plan(&self) -> Result<BoardLayerPlan, WorkbenchError> {
+        let required = |id: Option<String>| {
+            id.ok_or_else(|| WorkbenchError::Preset("默认六层所需的软件方案未就绪".into()))
+        };
+        Ok(BoardLayerPlan::recommended(
+            required(self.find_canonical_profile_id(CanonicalAgent::Codex))?,
+            required(self.find_canonical_profile_id(CanonicalAgent::Antigravity))?,
+            required(self.find_canonical_profile_id(CanonicalAgent::DeepseekHarness))?,
+            required(self.managed_cindy_profile_id())?,
+        ))
+    }
+
+    fn initialize_board_plan(&mut self) -> Result<(), WorkbenchError> {
+        if self.document_store.board_layer_plan().is_none() {
+            let plan = self.recommended_board_plan()?;
+            self.document_store.initialize_board_plan_if_absent(plan);
+        }
         Ok(())
     }
 
-    pub fn cycle_touch_profile_slot(&mut self) -> Result<u8, WorkbenchError> {
-        let next_slot = match self.active_hardware_slot {
-            1 => 2,
-            2 => 3,
-            _ => 1,
-        };
-        self.activate_hardware_slot(next_slot)?;
-        Ok(next_slot)
+    fn route_for_profile(&self, profile_id: &str) -> Result<BoardLayerRoute, WorkbenchError> {
+        self.projection_inputs().route_for_profile(profile_id)
     }
 
-    pub fn handle_firmware_touch_layer_index(
+    fn save_board_plan(
         &mut self,
-        layer_index: u32,
-    ) -> Result<Option<u8>, WorkbenchError> {
-        let slot_index = match layer_index {
-            1 => 1,
-            2 => 2,
-            3 => 3,
-            _ => return Ok(None),
-        };
-        self.activate_hardware_slot(slot_index)?;
-        Ok(Some(slot_index))
-    }
-
-    pub fn set_hardware_slot_profile(
-        &mut self,
-        slot_index: u8,
-        profile_id: String,
+        plan: BoardLayerPlan,
+        preview: BoardPreviewSelection,
+        usb: Option<String>,
     ) -> Result<(), WorkbenchError> {
-        let Some(kind) = HardwareProfileSlotKind::from_index(slot_index) else {
-            return Err(WorkbenchError::Routing("无效硬件槽位编号".to_string()));
-        };
+        self.document_store
+            .save_board_configuration(plan, preview, usb)
+            .map_err(WorkbenchError::Storage)?;
+        self.commit_local_update();
+        Ok(())
+    }
+
+    pub fn preview_board_layer(&mut self, layer: BoardLayer) -> Result<(), WorkbenchError> {
+        if self.document_store.editing_device() {
+            return Err(WorkbenchError::Storage(
+                "请先返回软件方案，再查看键盘层".into(),
+            ));
+        }
+        let profile_id = self
+            .document_store
+            .board_layer_plan()
+            .and_then(|plan| plan.route(layer).profile_id())
+            .filter(|id| {
+                self.document_store
+                    .draft
+                    .document
+                    .editable
+                    .graph
+                    .profiles
+                    .contains_key(*id)
+            })
+            .map(str::to_owned);
+        self.preview_board_selection(BoardPreviewSelection::Layer(layer))?;
+        self.set_browsed_profile(profile_id);
+        self.commit_local_update();
+        Ok(())
+    }
+
+    fn preview_board_selection(
+        &mut self,
+        preview: BoardPreviewSelection,
+    ) -> Result<(), WorkbenchError> {
+        self.save_board_plan(
+            self.document_store
+                .board_layer_plan()
+                .cloned()
+                .unwrap_or_default(),
+            preview,
+            self.document_store
+                .usb_startup_profile_id()
+                .map(str::to_owned),
+        )
+    }
+
+    pub fn assign_board_layer(
+        &mut self,
+        layer: BoardLayer,
+        profile_id: Option<String>,
+    ) -> Result<(), WorkbenchError> {
+        let route = profile_id
+            .as_deref()
+            .map(|id| self.route_for_profile(id))
+            .transpose()?
+            .unwrap_or_default();
+        let mut plan = self
+            .document_store
+            .board_layer_plan()
+            .cloned()
+            .unwrap_or_default();
+        plan.replace(layer, route);
+        self.save_board_plan(
+            plan,
+            self.document_store.board_preview_selection(),
+            self.document_store
+                .usb_startup_profile_id()
+                .map(str::to_owned),
+        )
+    }
+
+    pub fn set_usb_startup_profile(
+        &mut self,
+        profile_id: Option<String>,
+    ) -> Result<(), WorkbenchError> {
+        if let Some(id) = &profile_id {
+            self.route_for_profile(id)?;
+        }
+        self.save_board_plan(
+            self.document_store
+                .board_layer_plan()
+                .cloned()
+                .unwrap_or_default(),
+            self.document_store.board_preview_selection(),
+            profile_id,
+        )
+    }
+
+    pub fn reset_board_layer_plan(&mut self) -> Result<(), WorkbenchError> {
+        let plan = self.recommended_board_plan()?;
+        self.save_board_plan(
+            plan,
+            self.document_store.board_preview_selection(),
+            self.document_store
+                .usb_startup_profile_id()
+                .map(str::to_owned),
+        )
+    }
+
+    pub fn browse_profile(&mut self, profile_id: &str) -> Result<(), WorkbenchError> {
         if !self
             .document_store
             .draft
@@ -1210,109 +1807,39 @@ impl WorkbenchStore {
             .editable
             .graph
             .profiles
-            .contains_key(&profile_id)
+            .contains_key(profile_id)
         {
-            return Err(WorkbenchError::Routing("Profile 不存在".to_string()));
+            return Err(WorkbenchError::Routing("方案不存在".into()));
         }
-        self.ensure_default_hardware_profile_slots();
-        self.hardware_profile_slots[slot_index as usize] = Some(profile_id.clone());
-        self.document_store
-            .set_hardware_profile_slots(
-                self.hardware_profile_slots.clone(),
-                self.active_hardware_slot,
-            )
-            .map_err(WorkbenchError::Routing)?;
-        if self.active_hardware_slot == slot_index {
-            self.select_and_activate_profile_at(&profile_id, Instant::now(), true)?;
-        }
-        let target_name = self.profile_display_name_for_id(&profile_id);
-        self.status_message = format!("已将「{}」绑定到「{}」", kind.title(), target_name);
-        self.rebuild_projection();
+        self.set_browsed_profile(Some(profile_id.to_owned()));
+        self.commit_local_update();
         Ok(())
     }
 
-    pub fn reset_hardware_slots_to_default(&mut self) -> Result<(), WorkbenchError> {
-        for (idx, kind) in HardwareProfileSlotKind::ALL.into_iter().enumerate() {
-            self.hardware_profile_slots[idx] = self.find_canonical_profile_id(kind.default_agent());
+    fn set_browsed_profile(&mut self, profile_id: Option<String>) {
+        if self.selected_profile_id == profile_id {
+            return;
         }
-        self.active_hardware_slot = 0;
-        self.document_store
-            .set_hardware_profile_slots(
-                self.hardware_profile_slots.clone(),
-                self.active_hardware_slot,
-            )
-            .map_err(WorkbenchError::Routing)?;
-        if let Some(pid) = self.hardware_profile_slots[0].clone() {
-            self.select_and_activate_profile_at(&pid, Instant::now(), true)?;
-        }
-        self.status_message =
-            "已恢复四槽位默认映射（USB/触控1: Antigravity · 触控2: Codex · 触控3: Deepseek Harness）"
-                .to_string();
-        self.rebuild_projection();
-        Ok(())
-    }
-
-    fn profile_display_name_for_id(&self, profile_id: &str) -> String {
-        let Some(profile) = self
-            .document_store
-            .draft
-            .document
-            .editable
-            .graph
-            .profiles
-            .get(profile_id)
-        else {
-            return "未选择方案".to_string();
-        };
-        CanonicalAgent::from_profile_name(&profile.name)
-            .map(|a| a.display_name().to_string())
-            .unwrap_or_else(|| profile.name.clone())
-    }
-
-    fn build_hardware_profile_slots_projection(
-        &self,
-        active_host_id: Option<&str>,
-    ) -> [HardwareProfileSlotProjection; HARDWARE_PROFILE_SLOT_COUNT] {
-        let graph = &self.document_store.draft.document.editable.graph;
-        std::array::from_fn(|idx| {
-            let kind = HardwareProfileSlotKind::ALL[idx];
-            let pid_opt = self.hardware_profile_slots[idx]
-                .clone()
-                .filter(|pid| graph.profiles.contains_key(pid))
-                .or_else(|| self.find_canonical_profile_id(kind.default_agent()));
-            let Some(pid) = pid_opt else {
-                return HardwareProfileSlotProjection::for_kind(kind);
-            };
-            let Some(profile) = graph.profiles.get(&pid) else {
-                return HardwareProfileSlotProjection::for_kind(kind);
-            };
-            let canonical = CanonicalAgent::from_profile_name(&profile.name);
-            let display_name = canonical
-                .map(|a| a.display_name().to_string())
-                .unwrap_or_else(|| profile.name.clone());
-            let monogram = canonical
-                .map(|a| a.badge_monogram().to_string())
-                .unwrap_or_else(|| custom_monogram(&profile.name));
-            let bundle_id = canonical
-                .filter(|a| !a.is_manual_fallback())
-                .map(|a| a.bundle_id().to_string());
-            HardwareProfileSlotProjection {
-                slot_index: kind.index(),
-                slot_kind: kind,
-                title: kind.title().to_string(),
-                trigger_badge: kind.trigger_badge().to_string(),
-                profile_id: pid.clone(),
-                display_name,
-                monogram,
-                bundle_id,
-                is_active_slot: self.active_hardware_slot == kind.index(),
-                is_active_profile: active_host_id == Some(pid.as_str()),
-            }
-        })
+        self.selected_layer_id = profile_id.as_ref().and_then(|id| {
+            self.document_store
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .get(id)
+                .and_then(|profile| profile.layer_order.first().cloned())
+        });
+        self.selected_profile_id = profile_id;
+        self.normalize_surface_for_current_layer();
     }
 
     pub fn select_and_activate_profile(&mut self, profile_id: &str) -> Result<(), WorkbenchError> {
-        self.select_and_activate_profile_at(profile_id, Instant::now(), true)
+        let started = Instant::now();
+        let result = self.select_and_activate_profile_at(profile_id, started, true);
+        self.last_switch_duration = started.elapsed();
+        self.commit_local_update();
+        result
     }
 
     pub fn select_and_activate_profile_at(
@@ -1321,7 +1848,7 @@ impl WorkbenchStore {
         now: Instant,
         emit_hud_notice: bool,
     ) -> Result<(), WorkbenchError> {
-        let started = Instant::now();
+        self.update_now = now;
         let first_layer_id = self
             .document_store
             .draft
@@ -1343,10 +1870,9 @@ impl WorkbenchStore {
         self.selected_layer_id = first_layer_id;
         self.normalize_surface_for_current_layer();
         self.reconcile_ownership_for_profile(profile_id, now);
-        self.last_switch_duration = started.elapsed();
         self.refresh_four_app_lighting();
         if emit_hud_notice && !self.overlay_controller.is_cheat_sheet_visible() {
-            let profile_name = self.active_or_selected_profile_display_name();
+            let profile_name = self.active_profile_display_name();
             let mode_summary = self.routing_mode_summary_label();
             let empty_sheet = CheatSheetProjection::default();
             self.overlay_controller.request_profile_switch_notice(
@@ -1358,7 +1884,7 @@ impl WorkbenchStore {
                 now,
             );
         }
-        self.rebuild_projection();
+        self.commit_runtime_update();
         if self.projection.header.banner.is_caution() {
             self.banner_flash_count += 1;
         }
@@ -1372,7 +1898,7 @@ impl WorkbenchStore {
         else {
             return false;
         };
-        if !self.auto_follow_enabled || self.manual_override {
+        if self.board_routing.is_managed() || !self.auto_follow_enabled || self.manual_override {
             return false;
         }
         let Some(target_pid) = self.app_profile_links.get(bundle).cloned() else {
@@ -1395,7 +1921,7 @@ impl WorkbenchStore {
             return false;
         }
 
-        let started = Instant::now();
+        let started = self.update_now;
         if self
             .apply_routing_operation(RoutingOperation::Follow {
                 bundle_id: bundle.to_string(),
@@ -1416,10 +1942,9 @@ impl WorkbenchStore {
             .and_then(|p| p.layer_order.first().cloned());
         self.normalize_surface_for_current_layer();
         self.reconcile_ownership_for_profile(&target_pid, started);
-        self.last_switch_duration = started.elapsed();
         self.refresh_four_app_lighting();
         if !self.overlay_controller.is_cheat_sheet_visible() {
-            let profile_name = self.active_or_selected_profile_display_name();
+            let profile_name = self.active_profile_display_name();
             let mode_summary = self.routing_mode_summary_label();
             let empty_sheet = CheatSheetProjection::default();
             self.overlay_controller.request_profile_switch_notice(
@@ -1431,7 +1956,7 @@ impl WorkbenchStore {
                 started,
             );
         }
-        self.rebuild_projection();
+        self.commit_runtime_update();
         if self.projection.header.banner.is_caution() {
             self.banner_flash_count += 1;
         }
@@ -1440,7 +1965,13 @@ impl WorkbenchStore {
 
     pub fn set_host_execution_enabled(&mut self, enabled: bool) -> Result<(), WorkbenchError> {
         self.apply_routing_operation(RoutingOperation::Execution { enabled })?;
-        self.rebuild_projection();
+        if let Some(running) = &self.six_layer_running {
+            running.set_execution_policy(enabled, self.command_execution_enabled, self.update_now);
+        }
+        if !enabled {
+            self.release_board_inputs(self.update_now);
+        }
+        self.commit_runtime_update();
         Ok(())
     }
 
@@ -1451,7 +1982,7 @@ impl WorkbenchStore {
             self.apply_routing_operation(RoutingOperation::Resume)?;
             self.manual_override = false;
         }
-        self.rebuild_projection();
+        self.commit_runtime_update();
         Ok(())
     }
 
@@ -1470,14 +2001,14 @@ impl WorkbenchStore {
             self.apply_routing_operation(RoutingOperation::Select { profile_id: pid })?;
             self.manual_override = true;
         }
-        self.rebuild_projection();
+        self.commit_runtime_update();
         Ok(())
     }
 
     pub fn set_show_other_profiles(&mut self, show: bool) {
         self.show_other_profiles = show;
         self.ensure_selected_profile_visible();
-        self.rebuild_projection();
+        self.commit_runtime_update();
     }
 
     pub fn undo_draft(&mut self, redo: bool) -> Result<(), WorkbenchError> {
@@ -1486,7 +2017,7 @@ impl WorkbenchStore {
             .map_err(WorkbenchError::Storage)?;
         self.ensure_selected_profile_visible();
         self.normalize_surface_for_current_layer();
-        self.rebuild_projection();
+        self.commit_runtime_update();
         Ok(())
     }
 
@@ -1597,7 +2128,7 @@ impl WorkbenchStore {
                 self.status_message = "已恢复默认软件方案".to_string();
             }
         }
-        self.rebuild_projection();
+        self.commit_runtime_update();
         Ok(())
     }
 
@@ -1618,7 +2149,7 @@ impl WorkbenchStore {
                 .map_err(WorkbenchError::Preset)?;
                 self.last_exported_preset = Some(exported.clone());
                 self.status_message = "已导出方案预设".to_string();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(Some(exported))
             }
             BackupCommand::ImportPreset { text } => {
@@ -1637,7 +2168,7 @@ impl WorkbenchStore {
                 self.show_other_profiles = true;
                 self.ensure_selected_profile_visible();
                 self.status_message = "已导入方案预设".to_string();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(None)
             }
             BackupCommand::ReturnToHostDocument => {
@@ -1645,7 +2176,7 @@ impl WorkbenchStore {
                 self.sync_routing_snapshot();
                 self.ensure_selected_profile_visible();
                 self.status_message = "已返回常用软件方案".to_string();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(None)
             }
         }
@@ -1656,12 +2187,12 @@ impl WorkbenchStore {
             HeaderAction::ConnectKeyboard => {
                 if self.config.isolated {
                     self.status_message = "正在检测小键盘连接…".to_string();
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                 } else {
                     self.start_mac_usb_discovery_watcher();
                     if let Err(err) = self.connect_default_usb() {
                         self.status_message = err.to_string();
-                        self.rebuild_projection();
+                        self.commit_runtime_update();
                     }
                 }
                 Ok(())
@@ -1679,7 +2210,7 @@ impl WorkbenchStore {
                 } else {
                     "已关闭高级设置".to_string()
                 };
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
         }
@@ -1688,17 +2219,25 @@ impl WorkbenchStore {
     pub fn dispatch_sidebar_action(&mut self, action: SidebarAction) -> Result<(), WorkbenchError> {
         match action {
             SidebarAction::SelectProfile(profile_id) => {
-                self.select_and_activate_profile(&profile_id)
+                self.select_and_activate_profile_at(&profile_id, self.update_now, true)
             }
-            SidebarAction::ActivateHardwareSlot(slot_index) => {
-                self.activate_hardware_slot(slot_index)
+            SidebarAction::BrowseProfile(profile_id) => self.browse_profile(&profile_id),
+            SidebarAction::PreviewBoardLayer(layer) => self.preview_board_layer(layer),
+            SidebarAction::PreviewUsbStartup => {
+                self.preview_board_selection(BoardPreviewSelection::UsbStartup)
             }
-            SidebarAction::CycleTouchProfileSlot => self.cycle_touch_profile_slot().map(|_| ()),
-            SidebarAction::SetHardwareSlotProfile {
-                slot_index,
-                profile_id,
-            } => self.set_hardware_slot_profile(slot_index, profile_id),
-            SidebarAction::ResetHardwareSlotsToDefault => self.reset_hardware_slots_to_default(),
+            SidebarAction::ProvisionBoardLayers => self.provision_board_layers(),
+            SidebarAction::ConfirmCindyNativePaused { confirmed } => {
+                self.confirm_cindy_native_paused(confirmed)
+            }
+            SidebarAction::RestoreBoardLayers => self.start_six_layer_restore(),
+            SidebarAction::SetBoardLayerProfile { layer, profile_id } => {
+                self.assign_board_layer(layer, profile_id)
+            }
+            SidebarAction::SetUsbStartupProfile(profile_id) => {
+                self.set_usb_startup_profile(profile_id)
+            }
+            SidebarAction::ResetBoardLayerPlan => self.reset_board_layer_plan(),
             SidebarAction::SetAutoFollow(enabled) => self.set_auto_follow(enabled),
             SidebarAction::ToggleAutoFollowPause => self.toggle_auto_follow_pause(),
             SidebarAction::SetShowOtherProfiles(show) => {
@@ -1723,20 +2262,36 @@ impl WorkbenchStore {
             .profiles
             .iter()
             .find(|(pid, p)| {
-                CanonicalAgent::from_profile_name(&p.name) == Some(agent)
+                p.name != mi_model::preset::LOCAL_CODEX_PROFILE_NAME
+                    && CanonicalAgent::from_profile_name(&p.name) == Some(agent)
                     && (agent != CanonicalAgent::Cindy || self.is_protected_oai_profile(pid))
             })
             .map(|(pid, _)| pid.clone())
     }
 
-    pub fn is_selected_layer_protected(&self) -> bool {
-        let doc = &self.document_store.draft.document;
-        if let Some(lid) = &self.selected_layer_id {
-            return doc.is_protected_oai_layer(lid);
+    fn local_codex_profile_id(&self) -> Option<String> {
+        self.document_store
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
+            .map(|(pid, _)| pid.clone())
+    }
+
+    fn default_host_profile_id(&self, agent: CanonicalAgent) -> Option<String> {
+        if agent == CanonicalAgent::Codex {
+            self.local_codex_profile_id()
+                .or_else(|| self.find_canonical_profile_id(agent))
+        } else {
+            self.find_canonical_profile_id(agent)
         }
-        self.selected_profile_id
-            .as_deref()
-            .is_some_and(|pid| self.is_protected_oai_profile(pid))
+    }
+
+    pub fn is_selected_layer_protected(&self) -> bool {
+        self.projection_inputs().is_selected_layer_protected()
     }
 
     pub fn ensure_layer_editable(&self) -> Result<(), WorkbenchError> {
@@ -1756,7 +2311,7 @@ impl WorkbenchStore {
                 self.selected_surface = surface;
                 let slot = self.effective_slot_for_surface(surface);
                 self.selected_binding_slot = Some(slot);
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             CanvasAction::SelectLogicalSlot(slot) => {
@@ -1774,7 +2329,7 @@ impl WorkbenchStore {
                             _ => JoystickDirection8::East,
                         };
                     }
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                 }
                 Ok(())
             }
@@ -1782,7 +2337,7 @@ impl WorkbenchStore {
                 self.selected_surface = ControlSurfaceId::Joystick;
                 self.selected_joystick_direction = dir;
                 self.selected_binding_slot = Some(dir.logical_sector_slot());
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             CanvasAction::ClickCanvasPoint {
@@ -1799,14 +2354,14 @@ impl WorkbenchStore {
                     self.selected_surface = ControlSurfaceId::Joystick;
                     self.selected_joystick_direction = dir;
                     self.selected_binding_slot = Some(dir.logical_sector_slot());
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return Ok(());
                 }
                 if let Some(surface) = self.projection.canvas.hit_test_point(px_x, px_y) {
                     self.selected_surface = surface;
                     let slot = self.effective_slot_for_surface(surface);
                     self.selected_binding_slot = Some(slot);
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                 }
                 Ok(())
             }
@@ -1823,7 +2378,7 @@ impl WorkbenchStore {
                     self.selected_layer_id = Some(layer_id);
                     self.normalize_surface_for_current_layer();
                     self.refresh_four_app_lighting();
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                 }
                 Ok(())
             }
@@ -1835,7 +2390,7 @@ impl WorkbenchStore {
                     .store(layout.is_merged(), Ordering::SeqCst);
                 self.normalize_surface_for_current_layer();
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             CanvasAction::MergeBottomRowAcrossLayers => {
@@ -1859,17 +2414,17 @@ impl WorkbenchStore {
                 self.merge_wide_key.store(true, Ordering::SeqCst);
                 self.normalize_surface_for_current_layer();
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             CanvasAction::SetShowKeycapIcons(show) => {
                 self.show_keycap_icons = show;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             CanvasAction::SetShowKeycapLabels(show) => {
                 self.show_keycap_labels = show;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             CanvasAction::ApplyKnobJoystickPreset(preset) => {
@@ -1909,7 +2464,7 @@ impl WorkbenchStore {
                         Ok(())
                     })
                     .map_err(WorkbenchError::Storage)?;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             CanvasAction::AssignSlotAction { slot, action_id } => {
@@ -1919,7 +2474,7 @@ impl WorkbenchStore {
                 self.document_store
                     .update(|draft| draft.assign(&json!(pid), &json!(lid), slot, action))
                     .map_err(WorkbenchError::Storage)?;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             CanvasAction::UnlockBySwitchingOrCreatingCustomLayer => {
@@ -1962,12 +2517,8 @@ impl WorkbenchStore {
                 self.selected_layer_id = Some(target_lid);
                 self.normalize_surface_for_current_layer();
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
-            }
-            CanvasAction::CycleTouchProfileSlot => self.cycle_touch_profile_slot().map(|_| ()),
-            CanvasAction::ActivateHardwareSlot(slot_index) => {
-                self.activate_hardware_slot(slot_index)
             }
         }
     }
@@ -1976,6 +2527,7 @@ impl WorkbenchStore {
         &mut self,
         action: SessionStripAction,
     ) -> Result<(), WorkbenchError> {
+        self.require_awake()?;
         match action {
             SessionStripAction::ActivateSlot(slot_index) => {
                 if slot_index >= SLOT_COUNT {
@@ -1997,7 +2549,7 @@ impl WorkbenchStore {
                     let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
                     self.slot_table.refresh_with_watermarks(&acks);
                     self.refresh_four_app_lighting();
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                 }
                 Ok(())
             }
@@ -2023,7 +2575,7 @@ impl WorkbenchStore {
                         .map_err(WorkbenchError::Storage)?;
                 }
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             SessionStripAction::JumpToSession(place) => {
@@ -2039,7 +2591,7 @@ impl WorkbenchStore {
                 let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
                 self.slot_table.refresh_with_watermarks(&acks);
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             SessionStripAction::AcknowledgeAllCompleted => {
@@ -2058,7 +2610,7 @@ impl WorkbenchStore {
                 self.lighting_popover.manual_preview_phase = None;
                 self.lighting_arbiter.manual_preview_phase = None;
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             SessionStripAction::BindTopSixAsSessionKeys => {
@@ -2079,7 +2631,7 @@ impl WorkbenchStore {
                         Ok(())
                     })
                     .map_err(WorkbenchError::Storage)?;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             SessionStripAction::RestoreDefaultLayout => {
@@ -2149,59 +2701,66 @@ impl WorkbenchStore {
                 self.bottom_row_layout = BottomRowLayout::Split;
                 self.merge_wide_key.store(false, Ordering::SeqCst);
                 self.normalize_surface_for_current_layer();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             SessionStripAction::ToggleLightingPopover => {
                 self.lighting_popover.is_open = !self.lighting_popover.is_open;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             SessionStripAction::SetLightingEnabled(enabled) => {
                 self.lighting_popover.lighting_enabled = enabled;
                 self.lighting_arbiter.lighting_enabled = enabled;
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             SessionStripAction::SetAutoSessionColor(auto_col) => {
                 self.lighting_popover.auto_session_color = auto_col;
                 self.lighting_arbiter.session_lighting_linked = auto_col;
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             SessionStripAction::SetOnlyGlowOnAttentionOrCompleted(only_done) => {
                 self.lighting_popover.only_glow_on_attention_or_completed = only_done;
                 self.lighting_arbiter.only_glow_on_attention_or_completed = only_done;
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             SessionStripAction::SetGlowOnWorking(glow_working) => {
                 self.lighting_popover.glow_on_working = glow_working;
                 self.lighting_arbiter.glow_on_working_sessions = glow_working;
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             SessionStripAction::SetAmbientColor(preset) => {
                 self.lighting_popover.ambient_color = preset;
                 self.lighting_arbiter.idle_color_hex = preset.hex().to_string();
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
+                Ok(())
+            }
+            SessionStripAction::SetWorkingColor(preset) => {
+                self.lighting_popover.working_color = preset;
+                self.lighting_arbiter.working_color_hex = preset.hex().to_string();
+                self.refresh_four_app_lighting();
+                self.commit_runtime_update();
                 Ok(())
             }
             SessionStripAction::SetBrightnessPreset(preset) => {
                 self.lighting_popover.brightness = preset;
                 self.lighting_arbiter.brightness_scale = preset.scale();
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             SessionStripAction::SetAutoOffTimeout(preset) => {
                 self.lighting_popover.auto_off_timeout = preset;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             SessionStripAction::TriggerTestLighting(phase) => {
@@ -2209,7 +2768,7 @@ impl WorkbenchStore {
                 self.lighting_popover.manual_preview_phase = phase;
                 self.lighting_arbiter.manual_preview_phase = phase;
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
         }
@@ -2219,7 +2778,7 @@ impl WorkbenchStore {
         let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
         self.slot_table.update_candidates(candidates, &acks);
         self.refresh_four_app_lighting();
-        self.rebuild_projection();
+        self.commit_runtime_update();
     }
 
     fn refresh_four_app_lighting(&mut self) {
@@ -2230,13 +2789,14 @@ impl WorkbenchStore {
         let is_protected = self.is_selected_layer_protected();
         let is_split = self.current_bottom_row_layout() == BottomRowLayout::Split;
         let connected_device_id = self.connected_candidate.as_ref().map(|c| c.path.clone());
-        let session_for_lighting = if self.hardware_rpc_verified {
-            self.device_session.clone()
-        } else {
-            None
-        };
+        let session_for_lighting =
+            if self.hardware_rpc_verified && self.six_layer_state.installation.is_none() {
+                self.device_session.clone()
+            } else {
+                None
+            };
         let runtime_for_lighting = Arc::clone(&self.tokio_runtime);
-        let _ = self.lighting_arbiter.update_feedback(
+        let _ = self.lighting_arbiter.update_feedback_at(
             live_phase,
             &snapshots,
             false,
@@ -2245,6 +2805,7 @@ impl WorkbenchStore {
             false,
             is_split,
             connected_device_id.as_deref(),
+            self.update_now,
             |payload_str| {
                 let (preview, entries) = parse_hardware_lighting_payload(payload_str)?;
                 if let Some(session) = session_for_lighting.clone() {
@@ -2259,31 +2820,11 @@ impl WorkbenchStore {
     }
 
     fn derive_live_lighting_phase(&self, acks: &BTreeMap<String, String>) -> FourAppAgentPhase {
-        let mut has_completed = false;
-        let mut has_working = false;
-        let mut has_error = false;
-        for cand in self.slot_table.candidates() {
-            match cand.effective_kind(acks) {
-                FourAppSessionKind::NeedsAttention => return FourAppAgentPhase::AwaitingInput,
-                FourAppSessionKind::Error => has_error = true,
-                FourAppSessionKind::BlueDotCompleted => has_completed = true,
-                FourAppSessionKind::Working => has_working = true,
-                FourAppSessionKind::Idle => {}
-            }
-        }
-        if has_error {
-            FourAppAgentPhase::Error
-        } else if has_completed {
-            FourAppAgentPhase::Completed
-        } else if has_working {
-            FourAppAgentPhase::Thinking
-        } else {
-            FourAppAgentPhase::Idle
-        }
+        self.projection_inputs().derive_live_lighting_phase(acks)
     }
 
     fn current_bottom_row_layout(&self) -> BottomRowLayout {
-        self.bottom_row_layout
+        self.projection_inputs().current_bottom_row_layout()
     }
 
     fn effective_slot_for_surface(&self, surface: ControlSurfaceId) -> u32 {
@@ -2369,8 +2910,13 @@ impl WorkbenchStore {
         self.merge_wide_key
             .store(self.bottom_row_layout.is_merged(), Ordering::SeqCst);
         self.command_execution_enabled = self.document_store.command_execution_enabled();
-        self.hardware_profile_slots = self.document_store.hardware_profile_slots();
-        self.active_hardware_slot = self.document_store.active_hardware_slot();
+        if let Some(running) = &self.six_layer_running {
+            running.set_execution_policy(
+                self.document_store.host_execution_enabled(),
+                self.command_execution_enabled,
+                self.update_now,
+            );
+        }
         self.app_profile_links.clear();
         if let Some(map) = state.get("app_profile_links").and_then(|v| v.as_object()) {
             for (k, v) in map {
@@ -2397,7 +2943,22 @@ impl WorkbenchStore {
             .map_err(WorkbenchError::Routing)
     }
 
-    fn initialize_selection(&mut self) -> Result<(), WorkbenchError> {
+    fn initialize_auto_host_ready(&mut self, preserve_saved_host_state: bool) {
+        if preserve_saved_host_state {
+            return;
+        }
+        if let Some(ag_pid) = self.find_canonical_profile_id(CanonicalAgent::Antigravity) {
+            let _ = self.select_and_activate_profile_at(&ag_pid, self.update_now, false);
+        }
+        if !self.document_store.host_execution_enabled() {
+            let _ = self.apply_routing_operation(RoutingOperation::Execution { enabled: true });
+        }
+    }
+
+    fn initialize_selection(
+        &mut self,
+        preserve_saved_host_state: bool,
+    ) -> Result<(), WorkbenchError> {
         let existing_active = self.document_store.host_active_profile_id().filter(|pid| {
             self.document_store
                 .draft
@@ -2432,10 +2993,12 @@ impl WorkbenchStore {
                         .first()
                         .cloned()
                 });
-            if let Some(pid) = &antigravity_id {
-                self.document_store
-                    .set_host_active_profile(Some(pid.clone()))
-                    .map_err(WorkbenchError::Routing)?;
+            if !preserve_saved_host_state {
+                if let Some(pid) = &antigravity_id {
+                    self.document_store
+                        .set_host_active_profile(Some(pid.clone()))
+                        .map_err(WorkbenchError::Routing)?;
+                }
             }
             antigravity_id
         };
@@ -2452,7 +3015,7 @@ impl WorkbenchStore {
                 .and_then(|p| p.layer_order.first().cloned())
         });
         if let Some(pid) = &initial_pid {
-            self.reconcile_ownership_for_profile(pid, Instant::now());
+            self.reconcile_ownership_for_profile(pid, self.update_now);
         }
         Ok(())
     }
@@ -2480,22 +3043,22 @@ impl WorkbenchStore {
     }
 
     fn is_protected_oai_profile(&self, profile_id: &str) -> bool {
-        let doc = &self.document_store.draft.document;
-        doc.editable
-            .graph
-            .profiles
-            .get(profile_id)
-            .and_then(|p| p.layer_order.first())
-            .is_some_and(|lid| doc.is_protected_oai_layer(lid))
+        self.projection_inputs()
+            .is_protected_oai_profile(profile_id)
     }
 
     fn poll_ownership_fast_or_spawn(&mut self, micro_drained: bool, now: Instant) {
+        if self.system_lifecycle != SystemLifecycle::Awake || self.ownership_in_flight.is_some() {
+            return;
+        }
         if let Some((request, stream)) = self.native_ownership.poll_fast_or_defer_at(
             micro_drained,
             now,
             Duration::from_millis(12),
         ) {
+            self.ownership_in_flight = Some(request.clone());
             let tx = self.hardware_event_tx.clone();
+            let epoch = self.lifecycle_epoch.load(Ordering::Acquire);
             std::thread::spawn(move || {
                 let reply = UnixNativeOwnershipTransport::finish_stream_reply(
                     stream,
@@ -2503,14 +3066,18 @@ impl WorkbenchStore {
                     Duration::from_millis(950),
                 )
                 .ok();
-                let _ = tx.send(HardwareLoopEvent::OwnershipReply { request, reply });
+                let _ = tx.send(HardwareLoopEvent::OwnershipReply {
+                    epoch,
+                    request,
+                    reply,
+                });
             });
         }
     }
 
     fn reconcile_ownership_for_profile(&mut self, profile_id: &str, now: Instant) {
         let is_protected = self.is_protected_oai_profile(profile_id);
-        let desired = if is_protected {
+        let desired = if is_protected && self.six_layer_state.installation.is_none() {
             "native"
         } else {
             "micro-input"
@@ -2528,17 +3095,22 @@ impl WorkbenchStore {
     }
 
     fn ensure_live_ownership_fresh(&mut self) {
-        if self.config.isolated || self.selected_profile_id.is_none() {
+        if self.system_lifecycle != SystemLifecycle::Awake
+            || self.config.isolated
+            || (self.selected_profile_id.is_none()
+                && self.document_store.host_active_profile_id().is_none())
+        {
             return;
         }
-        self.native_ownership.reconcile_unbridged_transition();
+        self.native_ownership
+            .reconcile_unbridged_transition_at(self.update_now);
         if self.native_ownership.is_unbridged_desktop_active()
             || self.native_ownership.has_pending_request()
         {
             return;
         }
         let needs_poll = if self.native_ownership.desired_owner() == "micro-input" {
-            !self.native_ownership.allows_execution()
+            !self.native_ownership.allows_execution_at(self.update_now)
         } else {
             !matches!(
                 self.native_ownership.state(),
@@ -2546,632 +3118,157 @@ impl WorkbenchStore {
             )
         };
         if needs_poll {
-            self.poll_ownership_fast_or_spawn(true, Instant::now());
+            self.poll_ownership_fast_or_spawn(true, self.update_now);
         }
     }
 
     fn compute_sidebar_rows(&self) -> Vec<SidebarProfileRow> {
-        let doc = &self.document_store.draft.document;
-        let graph = &doc.editable.graph;
-        let active_host_id = self.document_store.host_active_profile_id();
-        let selected_id = self.selected_profile_id.as_deref();
-
-        let mut canonical_rows: Vec<(CanonicalAgent, SidebarProfileRow)> = Vec::with_capacity(8);
-        let mut custom_rows: Vec<SidebarProfileRow> = Vec::new();
-
-        for pid in &graph.profile_order {
-            let Some(profile) = graph.profiles.get(pid) else {
-                continue;
-            };
-            let is_protected_oai = profile
-                .layer_order
-                .first()
-                .is_some_and(|lid| doc.is_protected_oai_layer(lid));
-            let canonical_agent = CanonicalAgent::from_profile_name(&profile.name)
-                .filter(|agent| *agent != CanonicalAgent::Cindy || is_protected_oai);
-            if canonical_agent.is_none() && !self.show_other_profiles {
-                continue;
-            }
-            let display_name = canonical_agent
-                .map(|a| a.display_name().to_string())
-                .unwrap_or_else(|| profile.name.clone());
-            let badge_monogram = canonical_agent
-                .map(|a| a.badge_monogram().to_string())
-                .unwrap_or_else(|| custom_monogram(&profile.name));
-            let app_installed = canonical_agent
-                .map(|a| self.app_cache.resolve(a.bundle_id()).installed)
-                .unwrap_or(true);
-            let is_manual_fallback =
-                canonical_agent.is_some_and(CanonicalAgent::is_manual_fallback);
-
-            let row = SidebarProfileRow {
-                profile_id: pid.clone(),
-                raw_name: profile.name.clone(),
-                display_name,
-                badge_monogram,
-                canonical_agent,
-                is_selected: selected_id == Some(pid.as_str()),
-                is_active_host: active_host_id.as_deref() == Some(pid.as_str()),
-                is_protected_oai,
-                app_installed,
-                is_manual_fallback,
-            };
-
-            if let Some(agent) = canonical_agent {
-                if !canonical_rows
-                    .iter()
-                    .any(|(existing, _)| *existing == agent)
-                {
-                    canonical_rows.push((agent, row));
-                } else if self.show_other_profiles {
-                    custom_rows.push(row);
-                }
-            } else {
-                custom_rows.push(row);
-            }
-        }
-
-        canonical_rows.sort_by_key(|(agent, _)| agent.rank());
-        let mut rows: Vec<SidebarProfileRow> =
-            canonical_rows.into_iter().map(|(_, row)| row).collect();
-        rows.extend(custom_rows);
-        rows
+        self.projection_inputs().compute_sidebar_rows()
     }
 
-    fn build_canvas_projection(&self, can_edit_draft: bool) -> CanvasProjection {
-        let doc = &self.document_store.draft.document;
-        let graph = &doc.editable.graph;
-        let profile = self
-            .selected_profile_id
-            .as_ref()
-            .and_then(|pid| graph.profiles.get(pid));
-        let profile_display_name = profile
-            .map(|p| {
-                CanonicalAgent::from_profile_name(&p.name)
-                    .map(|a| a.display_name().to_string())
-                    .unwrap_or_else(|| p.name.clone())
-            })
-            .unwrap_or_default();
+    fn commit_runtime_update(&mut self) {
+        self.ensure_live_ownership_fresh();
+        self.capture_runtime_view();
+        self.commit_local_update();
+        self.reconcile_presentation();
+    }
 
-        let layer_tabs: Vec<CanvasLayerTab> = profile
-            .map(|p| {
-                p.layer_order
-                    .iter()
-                    .filter_map(|lid| {
-                        let l = graph.layers.get(lid)?;
-                        Some(CanvasLayerTab {
-                            layer_id: lid.clone(),
-                            name: l.name.clone(),
-                            is_selected: self.selected_layer_id.as_deref() == Some(lid.as_str()),
-                            is_protected_oai: doc.is_protected_oai_layer(lid),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let layer = self
-            .selected_layer_id
-            .as_ref()
-            .and_then(|lid| graph.layers.get(lid));
-        let bottom_row_layout = self.current_bottom_row_layout();
-
-        let is_protected = self.is_selected_layer_protected();
-        let can_edit_bindings = can_edit_draft && !is_protected;
-        let can_add_lighting = can_edit_draft && !is_protected;
-        let can_export_or_copy_layer = !is_protected;
-        let inspector_expanded = !is_protected;
-
-        let protected_lock = if is_protected {
-            let lid = self.selected_layer_id.clone().unwrap_or_default();
-            let layer_name = layer
-                .map(|l| l.name.clone())
-                .unwrap_or_else(|| "ChatGPT".to_string());
-            let owner_client_name = profile
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| "ChatGPT / Codex".to_string());
-            Some(ProtectedLayerLockProjection {
-                is_locked: true,
-                layer_id: lid,
-                layer_name,
-                owner_client_name,
-                lock_badge_text: "只读保护层 · 原生直通 (KV_OAI_*)".to_string(),
-                explanation_text:
-                    "当前层由宿主原生固件协议接管，按键映射、预设覆盖与灯光效果均已锁定隔离。"
-                        .to_string(),
-                unlock_button_title: "新建并切换到自定义层".to_string(),
-            })
-        } else {
-            None
-        };
-
-        let step = KEY_1U_SIZE + KEY_GAP;
-        let encoder_bounds =
-            CanvasRect::new(CANVAS_PADDING, CANVAS_PADDING, KEY_1U_SIZE, KEY_1U_SIZE);
-        let encoder = EncoderDialProjection {
-            bounds: encoder_bounds,
-            ccw_bounds: CanvasRect::new(CANVAS_PADDING, CANVAS_PADDING, 22.0, KEY_1U_SIZE),
-            cw_bounds: CanvasRect::new(
-                CANVAS_PADDING + KEY_1U_SIZE - 22.0,
-                CANVAS_PADDING,
-                22.0,
-                KEY_1U_SIZE,
-            ),
-            press_bounds: CanvasRect::new(CANVAS_PADDING + 22.0, CANVAS_PADDING + 22.0, 24.0, 24.0),
-            ccw_label: resolve_slot_title(doc, layer, 13),
-            cw_label: resolve_slot_title(doc, layer, 14),
-            press_label: format_concise_keycap_caption(&resolve_slot_title(doc, layer, 15)),
-            selected_slot: match self.selected_surface {
-                ControlSurfaceId::EncoderCcw => Some(13),
-                ControlSurfaceId::EncoderCw => Some(14),
-                ControlSurfaceId::EncoderPress => Some(15),
-                _ => None,
-            },
-            ring_glow_hex: if is_protected {
-                "#222222".to_string()
-            } else {
-                "#0088FF".to_string()
-            },
-        };
-
-        let joy_x = CANVAS_PADDING + step * 3.0;
-        let joy_y = CANVAS_PADDING;
-        let joy_bounds = CanvasRect::new(joy_x, joy_y, KEY_1U_SIZE, KEY_1U_SIZE);
-        let (jcx, jcy) = joy_bounds.center();
-        let sectors: Vec<JoystickDirectionBadge> = JoystickDirection8::ALL
-            .into_iter()
-            .map(|dir| {
-                let (ux, uy) = dir.unit_offset();
-                let bx = jcx + ux * 24.0;
-                let by = jcy + uy * 24.0;
-                let logical_slot = dir.logical_sector_slot();
-                let full_title = resolve_slot_title(doc, layer, logical_slot);
-                JoystickDirectionBadge {
-                    direction: dir,
-                    logical_slot,
-                    bounds: CanvasRect::new(bx - 6.0, by - 6.0, 12.0, 12.0),
-                    concise_label: format_concise_keycap_caption(&full_title),
-                    icon_token: Some(dir.label().to_string()),
-                    is_selected: self.selected_surface == ControlSurfaceId::Joystick
-                        && self.selected_joystick_direction == dir,
-                }
-            })
-            .collect();
-
-        let joystick = JoystickPadProjection {
-            bounds: joy_bounds,
-            center_deadzone_radius: KEY_1U_SIZE * 0.20,
-            mode_label: "8向摇杆".to_string(),
-            active_direction: self.selected_joystick_direction,
-            sectors,
-            is_selected: self.selected_surface == ControlSurfaceId::Joystick,
-        };
-
-        let key_surfaces = [
-            (ControlSurfaceId::Key0, 0u8, 1u8),
-            (ControlSurfaceId::Key1, 0, 2),
-            (ControlSurfaceId::Key2, 1, 0),
-            (ControlSurfaceId::Key3, 1, 1),
-            (ControlSurfaceId::Key4, 1, 2),
-            (ControlSurfaceId::Key5, 1, 3),
-            (ControlSurfaceId::Key6, 2, 0),
-            (ControlSurfaceId::Key7, 2, 1),
-            (ControlSurfaceId::Key8, 2, 2),
-            (ControlSurfaceId::Key9, 2, 3),
-            (ControlSurfaceId::Key10, 3, 1),
-            (ControlSurfaceId::Key11, 3, 2),
-            (ControlSurfaceId::Key12, 3, 3),
-        ];
-
-        let mut keycap_cells = Vec::with_capacity(13);
-        for (surface, row, col) in key_surfaces {
-            if surface == ControlSurfaceId::Key11 && bottom_row_layout == BottomRowLayout::Merged {
-                continue;
-            }
-            let span_cols = if surface == ControlSurfaceId::Key10
-                && bottom_row_layout == BottomRowLayout::Merged
-            {
-                2u8
-            } else {
-                1u8
-            };
-            let width = if span_cols == 2 {
-                KEY_2U_WIDTH
-            } else {
-                KEY_1U_SIZE
-            };
-            let x = CANVAS_PADDING + (col as f32) * step;
-            let y = CANVAS_PADDING + (row as f32) * step;
-            let primary_slot = surface.primary_logical_slot();
-            let effective_slot = if surface == ControlSurfaceId::Key10
-                && bottom_row_layout == BottomRowLayout::Merged
-            {
-                resolve_merged_bottom_slot(doc, layer)
-            } else {
-                primary_slot
-            };
-            let (full_action_title, action_obj) =
-                resolve_slot_action_info(doc, layer, effective_slot);
-            let silkscreen_icon = Some(
-                self.selected_profile_id
-                    .as_ref()
-                    .and_then(|pid| self.keycap_overrides.get(&(pid.clone(), effective_slot)))
-                    .map(|k| k.glyph_symbol().to_string())
-                    .unwrap_or_else(|| resolve_silkscreen_icon(effective_slot, action_obj)),
-            );
-            let concise_caption = format_concise_keycap_caption(&full_action_title);
-            let is_session_slot = (0..6u32)
-                .contains(&primary_slot)
-                .then_some(primary_slot as usize)
-                .filter(|slot_idx| {
-                    action_obj.is_some_and(|a| {
-                        a.id == format!("slot-open-{slot_idx}")
-                            || a.id == format!("cockpit-slot-{slot_idx}")
-                            || a.payload.get("command").and_then(|v| v.as_str())
-                                == Some(&format!("slot-open:{slot_idx}"))
-                    })
-                });
-            let keycap_enum = self.selected_keycap(effective_slot);
-            let keycap_id = serde_json::to_value(keycap_enum)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_else(|| "Blank".to_string());
-            let cell_role = if !(0..6u32).contains(&primary_slot) {
-                KeycapRole::ActionKey
-            } else if is_protected {
-                KeycapRole::TaskKey
-            } else if let Some(pid) = &self.selected_profile_id {
-                self.slot_role_overrides
-                    .get(&(pid.clone(), primary_slot))
-                    .copied()
-                    .unwrap_or(if is_session_slot.is_some() {
-                        KeycapRole::TaskKey
-                    } else {
-                        KeycapRole::ActionKey
-                    })
-            } else if is_session_slot.is_some() {
-                KeycapRole::TaskKey
-            } else {
-                KeycapRole::ActionKey
-            };
-            let slot_role = match cell_role {
-                KeycapRole::TaskKey => "TaskKey".to_string(),
-                KeycapRole::ActionKey => "ActionKey".to_string(),
-            };
-            let binding_id = surface.binding_id().to_string();
-            let per_key_led_hex = if is_protected || !self.lighting_popover.lighting_enabled {
-                "#000000".to_string()
-            } else {
-                self.lighting_arbiter
-                    .full_keypad_feedback
-                    .iter()
-                    .find(|item| item.binding_id == binding_id)
-                    .map(|item| item.color.clone())
-                    .unwrap_or_else(|| self.lighting_popover.ambient_color.hex().to_string())
-            };
-
-            keycap_cells.push(ControlCellProjection {
-                surface,
-                primary_slot,
-                effective_slot,
-                binding_id,
-                row,
-                col,
-                span_cols,
-                bounds: CanvasRect::new(x, y, width, KEY_1U_SIZE),
-                silkscreen_icon,
-                keycap_id,
-                slot_role,
-                concise_caption,
-                full_action_title,
-                is_session_slot,
-                is_selected: self.selected_surface == surface,
-                is_available: action_obj.is_some() || is_protected,
-                per_key_led_hex,
-            });
+    fn commit_local_update(&mut self) {
+        self.normalize_view_state();
+        let next = self.projection_inputs().project();
+        if self.projection_generation == 0 || self.projection != next {
+            self.projection = next;
+            self.projection_generation = self.projection_generation.wrapping_add(1);
         }
+    }
 
-        let underglow_hex = if is_protected || !self.lighting_popover.lighting_enabled {
-            "#000000".to_string()
-        } else {
-            self.lighting_arbiter
-                .dual_zone_feedback
-                .as_ref()
-                .map(|d| d.underglow_color.clone())
-                .unwrap_or_else(|| self.lighting_popover.ambient_color.hex().to_string())
-        };
-
-        let selected_logical_slot = self
-            .selected_binding_slot
-            .unwrap_or_else(|| self.selected_surface.primary_logical_slot());
-
-        let active_hardware_slot = self.active_hardware_slot.min(3);
-        let touch_led_states = match active_hardware_slot {
-            1 => [true, false, false],
-            2 => [false, true, false],
-            3 => [false, false, true],
-            _ => [true, true, true],
-        };
-        let active_slot_kind = HardwareProfileSlotKind::from_index(active_hardware_slot)
-            .unwrap_or(HardwareProfileSlotKind::UsbPlug);
-        let active_slot_profile_name = self.hardware_profile_slots[active_hardware_slot as usize]
-            .as_deref()
-            .map(|pid| self.profile_display_name_for_id(pid))
-            .unwrap_or_else(|| active_slot_kind.default_agent().display_name().to_string());
-        let active_hardware_slot_label = format!(
-            "{} · {}",
-            active_slot_kind.title(),
-            active_slot_profile_name
-        );
-
-        CanvasProjection {
-            profile_id: self.selected_profile_id.clone(),
-            profile_display_name,
-            selected_layer_id: self.selected_layer_id.clone(),
-            layer_tabs,
-            selected_surface: self.selected_surface,
-            selected_logical_slot,
+    fn projection_inputs(&self) -> ProjectionInputs<'_> {
+        ProjectionInputs {
+            action_category_filter: &self.action_category_filter,
+            action_search_query: &self.action_search_query,
+            active_modal: &self.active_modal,
+            applications: &self.applications,
+            auto_follow_enabled: self.auto_follow_enabled,
+            banner_flash_count: self.banner_flash_count,
+            bind_keycap_default_action_on_select: self.bind_keycap_default_action_on_select,
+            board_routing: self.board_routing,
+            bottom_row_layout: self.bottom_row_layout,
+            busy: self.busy,
+            command_execution_enabled: self.command_execution_enabled,
+            connected_candidate: &self.connected_candidate,
+            device_connected: self.device_session.is_some(),
+            document_store: &self.document_store,
+            favorite_action_ids: &self.favorite_action_ids,
+            favorites_only: self.favorites_only,
+            hardware_rpc_verified: self.hardware_rpc_verified,
+            keycap_overrides: &self.keycap_overrides,
+            keycap_search_query: &self.keycap_search_query,
+            last_cursor_position: self.last_cursor_position,
+            last_exported_preset: &self.last_exported_preset,
+            last_switch_duration: self.last_switch_duration,
+            acknowledged_watermarks: &self.lighting_arbiter.acknowledged_watermarks,
+            full_keypad_feedback: &self.lighting_arbiter.full_keypad_feedback,
+            dual_zone_feedback: &self.lighting_arbiter.dual_zone_feedback,
+            lighting_popover: &self.lighting_popover,
+            manual_override: self.manual_override,
+            navigation_history: &self.navigation_history,
+            open_drawers: &self.open_drawers,
+            overlay_controller: &self.overlay_controller,
+            ownership_view: &self.ownership_view,
+            pending_preset_export_scope: self.pending_preset_export_scope,
+            pending_preset_import: &self.pending_preset_import,
+            pinned_favorites: &self.pinned_favorites,
+            preset_transfer_error: &self.preset_transfer_error,
+            ptt_active: self.ptt_controller.is_active,
+            radial_readiness: &self.radial_readiness,
+            radial_slot_configs: &self.radial_slot_configs,
+            radial_state: &self.radial_state,
+            screen_geometry: &self.screen_geometry,
+            selected_binding_slot: self.selected_binding_slot,
             selected_joystick_direction: self.selected_joystick_direction,
-            bottom_row_layout,
+            selected_layer_id: &self.selected_layer_id,
+            selected_profile_id: &self.selected_profile_id,
+            selected_surface: self.selected_surface,
+            shortcut_recorder: &self.shortcut_recorder,
             show_keycap_icons: self.show_keycap_icons,
             show_keycap_labels: self.show_keycap_labels,
-            encoder,
-            joystick,
-            keycap_cells,
-            status_cluster_bounds: CanvasRect::new(
-                CANVAS_PADDING,
-                CANVAS_PADDING + step * 3.0,
-                KEY_1U_SIZE,
-                KEY_1U_SIZE,
-            ),
-            status_led_hex: underglow_hex.clone(),
-            underglow_hex,
-            active_hardware_slot,
-            touch_led_states,
-            active_hardware_slot_label,
-            protected_lock,
-            can_edit_bindings,
-            can_add_lighting,
-            can_export_or_copy_layer,
-            inspector_expanded,
-        }
-    }
-
-    fn build_session_strip_projection(&self, can_edit_draft: bool) -> SessionStripProjection {
-        let doc = &self.document_store.draft.document;
-        let graph = &doc.editable.graph;
-        let layer = self
-            .selected_layer_id
-            .as_ref()
-            .and_then(|lid| graph.layers.get(lid));
-        let is_protected = self.is_selected_layer_protected();
-        let acks = &self.lighting_arbiter.acknowledged_watermarks;
-
-        let mut completed_blue_dot_pills = Vec::new();
-        let mut working_pills = Vec::new();
-        let mut attention_pills = Vec::new();
-
-        for cand in self.slot_table.candidates() {
-            let eff_kind = cand.effective_kind(acks);
-            if eff_kind == FourAppSessionKind::Idle {
-                continue;
-            }
-            let agent = agent_for_place(&cand.place);
-            let pill = SessionCapsulePillProjection {
-                place: cand.place.clone(),
-                agent,
-                agent_monogram: agent.badge_monogram().to_string(),
-                title: cand.title.clone(),
-                kind: eff_kind,
-                badge_text: eff_kind.badge_prefix().to_string(),
-                color_hex: eff_kind.capsule_hex().to_string(),
-                watermark: cand.watermark.clone(),
-            };
-            match eff_kind {
-                FourAppSessionKind::NeedsAttention | FourAppSessionKind::Error => {
-                    attention_pills.push(pill);
-                }
-                FourAppSessionKind::BlueDotCompleted => {
-                    completed_blue_dot_pills.push(pill);
-                }
-                FourAppSessionKind::Working => {
-                    working_pills.push(pill);
-                }
-                FourAppSessionKind::Idle => {}
-            }
-        }
-
-        let unread_completed_count = completed_blue_dot_pills.len();
-        let working_count = working_pills.len();
-
-        let top_six_bound_as_session_keys = (0..6u32).all(|slot| {
-            resolve_slot_action_info(doc, layer, slot)
-                .1
-                .is_some_and(|a| {
-                    a.id == format!("slot-open-{slot}")
-                        || a.id == format!("cockpit-slot-{slot}")
-                        || a.payload.get("command").and_then(|v| v.as_str())
-                            == Some(&format!("slot-open:{slot}"))
-                })
-        });
-
-        let binding_ids = ["AG00", "AG01", "AG02", "AG03", "AG04", "AG05"];
-
-        let slots: [SessionSlotCardProjection; SLOT_COUNT] = std::array::from_fn(|idx| {
-            let slot = &self.slot_table.slot_table().slots()[idx];
-            let cand = slot
-                .place
-                .as_ref()
-                .and_then(|p| self.slot_table.find_candidate(p));
-            let kind = cand
-                .map(|c| c.effective_kind(acks))
-                .unwrap_or(FourAppSessionKind::Idle);
-            let agent = slot.place.as_ref().map(agent_for_place);
-            let agent_monogram = agent
-                .map(|a| a.badge_monogram().to_string())
-                .unwrap_or_default();
-            let is_unread_blue_dot = cand.is_some_and(|c| c.is_unread_blue_dot(acks));
-            let is_working_animated = kind == FourAppSessionKind::Working;
-            let is_bound_to_top_key = resolve_slot_action_info(doc, layer, idx as u32)
-                .1
-                .is_some_and(|a| {
-                    a.id == format!("slot-open-{idx}")
-                        || a.id == format!("cockpit-slot-{idx}")
-                        || a.payload.get("command").and_then(|v| v.as_str())
-                            == Some(&format!("slot-open:{idx}"))
-                });
-            let led_color_hex = if is_protected || !self.lighting_popover.lighting_enabled {
-                "#000000".to_string()
-            } else {
-                self.lighting_arbiter
-                    .full_keypad_feedback
-                    .iter()
-                    .find(|item| item.binding_id == binding_ids[idx])
-                    .map(|item| item.color.clone())
-                    .unwrap_or_else(|| "#222222".to_string())
-            };
-            let subtitle = match kind {
-                FourAppSessionKind::NeedsAttention => "待处理审批/输入".to_string(),
-                FourAppSessionKind::BlueDotCompleted => "● 已完成待查看".to_string(),
-                FourAppSessionKind::Working => ":: 正在运行".to_string(),
-                FourAppSessionKind::Error => "执行异常".to_string(),
-                FourAppSessionKind::Idle => "空闲已读".to_string(),
-            };
-
-            SessionSlotCardProjection {
-                slot_index: idx,
-                key_binding_id: binding_ids[idx].to_string(),
-                mode: slot.mode,
-                status: slot.status,
-                kind,
-                agent,
-                agent_monogram,
-                title: slot.title.clone(),
-                subtitle,
-                place: slot.place.clone(),
-                watermark: cand.map(|c| c.watermark.clone()).unwrap_or_default(),
-                is_unread_blue_dot,
-                is_working_animated,
-                is_bound_to_top_key,
-                led_color_hex,
-            }
-        });
-
-        let mut lighting_popover = self.lighting_popover.clone();
-        lighting_popover.suspended_by_protected_layer = is_protected;
-
-        SessionStripProjection {
-            slots,
-            completed_blue_dot_pills,
-            working_pills,
-            attention_pills,
-            unread_completed_count,
-            working_count,
-            top_six_bound_as_session_keys,
-            can_mutate_layout: can_edit_draft && !is_protected,
-            lighting_popover,
-        }
-    }
-
-    fn rebuild_projection(&mut self) {
-        self.ensure_live_ownership_fresh();
-        self.sync_modal_for_layer_protection();
-        let rows = self.compute_sidebar_rows();
-        let active_host_id = self.document_store.host_active_profile_id();
-        let is_protected_active = active_host_id
-            .as_deref()
-            .or(self.selected_profile_id.as_deref())
-            .is_some_and(|pid| self.is_protected_oai_profile(pid));
-
-        let ownership_banner =
-            OwnershipBannerState::evaluate(&self.native_ownership, is_protected_active);
-        let editing_device = self.document_store.editing_device();
-        let can_edit_draft =
-            !self.document_store.draft.read_only && self.document_store.draft.loaded_format == 2;
-
-        let ready_state = if editing_device {
-            HeaderReadyState::ModeNotice {
-                text: "硬件布局草稿模式 · 返回后继续管理软件方案".to_string(),
-            }
-        } else if ownership_banner.is_caution() {
-            HeaderReadyState::Caution {
-                text: ownership_banner.text().to_string(),
-            }
-        } else if self.device_session.is_some() {
-            HeaderReadyState::Ready {
-                text: "小键盘已连接".to_string(),
-            }
-        } else {
-            HeaderReadyState::Ready {
-                text: "已就绪".to_string(),
-            }
-        };
-
-        let order = &self
-            .document_store
-            .draft
-            .document
-            .editable
-            .graph
-            .profile_order;
-        let selected_pos = self
-            .selected_profile_id
-            .as_ref()
-            .and_then(|pid| order.iter().position(|id| id == pid));
-        let can_move_up = selected_pos.is_some_and(|pos| pos > 0);
-        let can_move_down = selected_pos.is_some_and(|pos| pos + 1 < order.len());
-        let can_delete = order.len() > 1 && self.selected_profile_id.is_some();
-
-        let selected_display_name = rows
-            .iter()
-            .find(|r| r.is_selected)
-            .map(|r| r.display_name.clone());
-
-        let auto_switch =
-            AutoSwitchState::from_flags(true, self.auto_follow_enabled, self.manual_override);
-
-        let header = HeaderProjection {
-            ready_state,
-            banner: ownership_banner.clone(),
-            show_connect_button: self.device_session.is_none(),
-            show_return_to_host_button: editing_device,
-            host_execution_enabled: self.document_store.host_execution_enabled(),
-            can_edit_draft,
-            can_undo: self.document_store.draft.can_undo,
-            can_redo: self.document_store.draft.can_redo,
-            busy: self.busy,
-        };
-
-        self.ensure_default_hardware_profile_slots();
-        let hardware_slots =
-            self.build_hardware_profile_slots_projection(active_host_id.as_deref());
-        let active_hardware_slot = self.active_hardware_slot.min(3);
-
-        let sidebar = SidebarProjection {
-            section_title: "常用软件方案".to_string(),
-            rows,
-            hardware_slots,
-            active_hardware_slot,
-            selected_profile_id: self.selected_profile_id.clone(),
-            selected_display_name,
-            active_host_profile_id: active_host_id,
-            auto_switch,
             show_other_profiles: self.show_other_profiles,
-            can_edit_draft,
-            editing_device,
-            can_move_up,
-            can_move_down,
-            can_delete,
-            busy: self.busy,
-            ownership_banner: ownership_banner.clone(),
-            footer_status_text: ownership_banner.text().to_string(),
-            footer_limit_text: "长按说话上限 120 秒，响应超时 8 秒".to_string(),
+            six_layer_busy: self.six_layer_job.is_some(),
+            six_layer_state: &self.six_layer_state,
+            six_layer_view: &self.six_layer_view,
+            slot_role_overrides: &self.slot_role_overrides,
+            slot_table: &self.slot_table,
+            status_menu_open: self.status_menu_open,
+            status_message: &self.status_message,
+        }
+    }
+
+    fn capture_runtime_view(&mut self) {
+        self.ownership_view = OwnershipView {
+            summary: self.native_ownership.summary_at(self.update_now),
+            native: matches!(
+                self.native_ownership.state(),
+                mi_bridge::OwnershipState::Native { .. }
+            ),
+            permits_execution: self.native_ownership.allows_execution_at(self.update_now)
+                || self
+                    .native_ownership
+                    .is_transient_reconfirming_at(self.update_now),
         };
+        let bundles = CanonicalAgent::ALL
+            .into_iter()
+            .map(|agent| agent.bundle_id().to_owned())
+            .chain(
+                self.radial_slot_configs
+                    .iter()
+                    .filter_map(|slot| slot.bundle_id.clone()),
+            );
+        for bundle in bundles {
+            self.applications
+                .insert(bundle.clone(), self.app_cache.resolve(&bundle).installed);
+        }
+        self.six_layer_view = self.six_layer_running.as_ref().map(|running| SixLayerView {
+            configuration_observed: running.readiness.configuration_observed,
+            keyboard_grabbed: running.readiness.keyboard_grabbed,
+            first_event_verified: running.first_event_verified.load(Ordering::Acquire),
+            observed_layer: running.observed_layer.load(Ordering::Acquire),
+            armed: running.armed,
+            ownership_released: self.released_cindy_identity().is_some(),
+            failure: running.receiver.failure(),
+        });
+    }
 
-        let canvas = self.build_canvas_projection(can_edit_draft);
-        let session_strip = self.build_session_strip_projection(can_edit_draft);
-        let inspector = self.build_inspector_projection(can_edit_draft, &canvas);
+    fn reconcile_presentation(&mut self) {
+        let overlay = &self.projection.overlay;
+        if self.last_hud_panel.as_ref() != Some(&overlay.panel_spec) {
+            self.reconcile_hud_panel(overlay);
+            self.last_hud_panel = Some(overlay.panel_spec.clone());
+        }
+        let radial = &self.projection.radial;
+        if self.last_radial_panel.as_ref() != Some(&radial.panel_spec) {
+            self.reconcile_radial_panel(radial);
+            self.last_radial_panel = Some(radial.panel_spec.clone());
+        }
+        let menu = &self.projection.status_menu;
+        let next = StatusItemSnapshot {
+            icon: menu.icon.clone(),
+            active_profile_name: menu.active_profile_name.clone(),
+            routing_mode_label: menu.routing_mode_summary.clone(),
+            host_execution_enabled: menu.host_execution_enabled,
+            auto_follow_enabled: menu.auto_follow_enabled,
+            manual_override: menu.manual_override,
+            radial_menu_enabled: menu.radial_menu_enabled,
+            cheat_sheet_visible: menu.cheat_sheet_visible,
+            pinned_favorite_ids: self.pinned_favorites.slots.clone(),
+        };
+        if self.last_status_item_snapshot.as_ref() != Some(&next) {
+            self.status_item_host.sync_status_item(next.clone());
+            self.last_status_item_snapshot = Some(next);
+        }
+    }
 
+    fn normalize_view_state(&mut self) {
+        self.sync_modal_for_layer_protection();
         self.ensure_default_pinned_favorites();
         if self.overlay_controller.is_cheat_sheet_visible() {
             let cheat_sheet = self.build_cheat_sheet_projection();
@@ -3180,75 +3277,6 @@ impl WorkbenchStore {
                 &self.screen_geometry,
                 self.last_cursor_position,
             );
-        }
-        let overlay = self
-            .overlay_controller
-            .project(&self.screen_geometry, self.last_cursor_position);
-        self.reconcile_hud_panel(&overlay);
-
-        let radial = self.build_radial_projection();
-        self.reconcile_radial_panel(&radial);
-
-        let status_menu = self.build_status_menu_projection(can_edit_draft);
-        let next_status_snapshot = StatusItemSnapshot {
-            icon: status_menu.icon.clone(),
-            active_profile_name: status_menu.active_profile_name.clone(),
-            routing_mode_label: status_menu.routing_mode_summary.clone(),
-            host_execution_enabled: status_menu.host_execution_enabled,
-            auto_follow_enabled: status_menu.auto_follow_enabled,
-            manual_override: status_menu.manual_override,
-            radial_menu_enabled: status_menu.radial_menu_enabled,
-            cheat_sheet_visible: status_menu.cheat_sheet_visible,
-            pinned_favorite_ids: self.pinned_favorites.slots.clone(),
-        };
-        if self.last_status_item_snapshot.as_ref() != Some(&next_status_snapshot) {
-            self.status_item_host
-                .sync_status_item(next_status_snapshot.clone());
-            self.last_status_item_snapshot = Some(next_status_snapshot);
-        }
-
-        let (device_connected, device_summary) = if let Some(cand) = &self.connected_candidate {
-            (
-                self.device_session.is_some(),
-                format!(
-                    "{} ({:04X}:{:04X}) · USB HID 只读保护已启用",
-                    cand.product, cand.vid, cand.pid
-                ),
-            )
-        } else {
-            (
-                false,
-                "Creator Micro 2 (303A:8298) · 离线草稿模式".to_string(),
-            )
-        };
-
-        let next_projection = WorkbenchProjection {
-            header,
-            sidebar,
-            canvas,
-            session_strip,
-            inspector,
-            radial,
-            radial_slot_configs: self.radial_slot_configs.clone(),
-            overlay,
-            status_menu,
-            status_menu_open: self.status_menu_open,
-            active_modal: self.active_modal.clone(),
-            selected_profile_id: self.selected_profile_id.clone(),
-            selected_layer_id: self.selected_layer_id.clone(),
-            selected_binding_slot: self.selected_binding_slot,
-            status_message: self.status_message.clone(),
-            last_exported_preset: self.last_exported_preset.clone(),
-            device_connected,
-            device_summary,
-            document_revision: self.document_store.draft.revision,
-            host_revision: self.document_store.host_revision(),
-            banner_flash_count: self.banner_flash_count,
-            last_switch_duration: self.last_switch_duration,
-        };
-        if self.projection_generation == 0 || self.projection != next_projection {
-            self.projection = next_projection;
-            self.projection_generation = self.projection_generation.wrapping_add(1);
         }
     }
 
@@ -3279,256 +3307,33 @@ impl WorkbenchStore {
         }
     }
 
-    fn active_or_selected_profile_id(&self) -> Option<String> {
-        self.document_store
-            .host_active_profile_id()
-            .or_else(|| self.selected_profile_id.clone())
-            .filter(|pid| {
-                self.document_store
-                    .draft
-                    .document
-                    .editable
-                    .graph
-                    .profiles
-                    .contains_key(pid)
-            })
-    }
-
-    fn active_or_selected_canonical_agent(&self) -> Option<CanonicalAgent> {
-        let pid = self.active_or_selected_profile_id()?;
-        let profile = self
-            .document_store
-            .draft
-            .document
-            .editable
-            .graph
-            .profiles
-            .get(&pid)?;
-        CanonicalAgent::from_profile_name(&profile.name)
+    fn resolved_active_profile_id(&self) -> Option<String> {
+        self.projection_inputs().resolved_active_profile_id()
     }
 
     fn active_desktop_agent_adapter(&self) -> Option<String> {
-        let agent = self.active_or_selected_canonical_agent()?;
-        match agent {
-            CanonicalAgent::Antigravity => Some("antigravity".to_string()),
-            CanonicalAgent::Codex => Some("codex".to_string()),
-            CanonicalAgent::DeepseekHarness => Some("dsh-desktop".to_string()),
-            CanonicalAgent::Herdr => Some("herdr".to_string()),
-            CanonicalAgent::Cindy => Some("cindy".to_string()),
-            CanonicalAgent::OtherApps => None,
-        }
+        self.projection_inputs().active_desktop_agent_adapter()
     }
 
-    fn active_or_selected_profile_display_name(&self) -> String {
-        let Some(pid) = self.active_or_selected_profile_id() else {
-            return "未选择方案".to_string();
-        };
-        let Some(profile) = self
-            .document_store
-            .draft
-            .document
-            .editable
-            .graph
-            .profiles
-            .get(&pid)
-        else {
-            return "未选择方案".to_string();
-        };
-        CanonicalAgent::from_profile_name(&profile.name)
-            .map(|a| a.display_name().to_string())
-            .unwrap_or_else(|| profile.name.clone())
+    fn active_profile_display_name(&self) -> String {
+        self.projection_inputs().active_profile_display_name()
     }
 
     fn routing_mode_summary_label(&self) -> String {
-        let mode = if !self.auto_follow_enabled {
-            "手动模式"
-        } else if self.manual_override {
-            "手动锁定（自动跟随已暂停）"
-        } else {
-            "自动跟随前台软件"
-        };
-        let exec = if self.document_store.host_execution_enabled() {
-            "按键控制已启用"
-        } else {
-            "按键控制已暂停"
-        };
-        format!("{mode}，{exec}")
+        self.projection_inputs().routing_mode_summary_label()
     }
 
     fn current_radial_route_stamp(&self) -> RadialRouteStamp {
         RadialRouteStamp {
             document_revision: self.document_store.draft.revision,
             host_revision: self.document_store.host_revision(),
-            profile_id: self.active_or_selected_profile_id(),
-            profile_name: self.active_or_selected_profile_display_name(),
-        }
-    }
-
-    fn build_radial_projection(&self) -> RadialOverlayProjection {
-        let visible_session = self.radial_state.session().cloned();
-        let panel_spec = visible_session
-            .as_ref()
-            .map(|session| PassivePanelFrameSpec {
-                role: PassivePanelRole::RadialMenu,
-                title: "Micro Input 径向菜单".to_string(),
-                frame: session.anchor_frame,
-                style: mi_macos::PassivePanelStyleSpec::for_role(PassivePanelRole::RadialMenu),
-            });
-        RadialOverlayProjection {
-            enabled: self.radial_state.enabled(),
-            readiness: self.radial_readiness,
-            confirm_mode: self.radial_state.confirm_mode(),
-            visible_session,
-            panel_spec,
+            profile_id: self.resolved_active_profile_id(),
+            profile_name: self.active_profile_display_name(),
         }
     }
 
     fn build_cheat_sheet_projection(&self) -> CheatSheetProjection {
-        let doc = &self.document_store.draft.document;
-        let graph = &doc.editable.graph;
-        let pid_opt = self.active_or_selected_profile_id();
-        let layer = pid_opt
-            .as_ref()
-            .and_then(|pid| graph.profiles.get(pid))
-            .and_then(|p| p.layer_order.first())
-            .and_then(|lid| graph.layers.get(lid));
-
-        let is_split = self.current_bottom_row_layout() == BottomRowLayout::Split;
-        let slot_defs: [(u32, &str, &str); 19] = [
-            (0, "AG00", "左上键"),
-            (1, "AG01", "右上键"),
-            (2, "AG02", "按键 03"),
-            (3, "AG03", "按键 04"),
-            (4, "AG04", "按键 05"),
-            (5, "AG05", "按键 06"),
-            (6, "AG06", "按键 07"),
-            (7, "AG07", "按键 08"),
-            (8, "AG08", "按键 09"),
-            (9, "AG09", "按键 10"),
-            (
-                10,
-                "AG10",
-                if is_split {
-                    "底行左键"
-                } else {
-                    "底部宽键（2U）"
-                },
-            ),
-            (11, "AG11", "底行中键"),
-            (12, "AG12", "底行右键"),
-            (13, "AG13", "旋钮左旋"),
-            (14, "AG14", "旋钮右旋"),
-            (15, "ENC_CLK", "旋钮按下"),
-            (16, "AG15", "摇杆（上）"),
-            (17, "AG16", "摇杆（左）"),
-            (18, "AG17", "摇杆（下）"),
-        ];
-
-        let mut key_cells = Vec::with_capacity(20);
-        for (slot, binding_id, control_name) in slot_defs {
-            if slot == 11 && !is_split {
-                continue;
-            }
-            let (label, act_opt) = resolve_slot_action_info(doc, layer, slot);
-            key_cells.push(CheatSheetKeyCellProjection {
-                binding_id: binding_id.to_string(),
-                control_name: control_name.to_string(),
-                label,
-                available: act_opt.is_some(),
-            });
-        }
-        let (label_right, act_right) = resolve_slot_action_info(doc, layer, 19);
-        key_cells.push(CheatSheetKeyCellProjection {
-            binding_id: "AG18".to_string(),
-            control_name: "摇杆（右）".to_string(),
-            label: label_right,
-            available: act_right.is_some(),
-        });
-
-        let target_agent_card = self.active_desktop_agent_adapter().map(|adapter| {
-            let agent_name = self
-                .active_or_selected_canonical_agent()
-                .map(|a| a.display_name().to_string())
-                .unwrap_or_else(|| adapter.clone());
-            let acks = &self.lighting_arbiter.acknowledged_watermarks;
-            let phase = self.derive_live_lighting_phase(acks);
-            let (phase_label, phase_symbol) = match phase {
-                FourAppAgentPhase::Idle => ("空闲就绪", "checkmark.circle"),
-                FourAppAgentPhase::Thinking => ("正在运行", "sparkles"),
-                FourAppAgentPhase::AwaitingInput => ("等待确认", "exclamationmark.Bubble"),
-                FourAppAgentPhase::Completed => ("已完成待查看", "circle.fill"),
-                FourAppAgentPhase::Error => ("执行异常", "xmark.octagon.fill"),
-                FourAppAgentPhase::BackgroundActive => ("后台运行中", "clock.arrow.circlepath"),
-            };
-            let is_recording = self.ptt_controller.is_active;
-            let voice_summary = if is_recording {
-                "语音输入中".to_string()
-            } else {
-                "按住说话已就绪".to_string()
-            };
-            TargetAgentStatusCardProjection {
-                agent_name,
-                adapter,
-                phase_label: phase_label.to_string(),
-                phase_symbol: phase_symbol.to_string(),
-                is_recording,
-                voice_summary,
-                confirm_mode: self.radial_state.confirm_mode(),
-            }
-        });
-
-        CheatSheetProjection {
-            profile_name: self.active_or_selected_profile_display_name(),
-            routing_summary: self.routing_mode_summary_label(),
-            target_agent_card,
-            key_cells,
-        }
-    }
-
-    fn build_status_menu_projection(&self, can_edit_draft: bool) -> StatusMenuProjection {
-        let profiles = &self.document_store.draft.document.editable.graph.profiles;
-        let active_pid = self.active_or_selected_profile_id();
-        let favorites_2x2: [FavoriteSlotCardProjection; FAVORITE_SLOT_COUNT] =
-            std::array::from_fn(|idx| {
-                let slot = FavoriteSlotIndex::ALL[idx];
-                let pid_opt = self.pinned_favorites.slots[idx].clone();
-                let title = pid_opt
-                    .as_ref()
-                    .and_then(|pid| profiles.get(pid))
-                    .map(|p| {
-                        CanonicalAgent::from_profile_name(&p.name)
-                            .map(|a| a.display_name().to_string())
-                            .unwrap_or_else(|| p.name.clone())
-                    })
-                    .unwrap_or_else(|| "未绑定".to_string());
-                let is_active = pid_opt.is_some() && pid_opt == active_pid;
-                FavoriteSlotCardProjection {
-                    slot,
-                    profile_id: pid_opt,
-                    title,
-                    is_active,
-                }
-            });
-
-        let is_protected = self.is_selected_layer_protected();
-        StatusMenuProjection {
-            icon: StatusItemIconSpec::canonical(),
-            active_profile_id: active_pid,
-            active_profile_name: self.active_or_selected_profile_display_name(),
-            routing_mode_summary: self.routing_mode_summary_label(),
-            favorites_2x2,
-            host_execution_enabled: self.document_store.host_execution_enabled(),
-            auto_follow_enabled: self.auto_follow_enabled,
-            manual_override: self.manual_override,
-            radial_menu_enabled: self.radial_state.enabled(),
-            radial_confirm_mode: self.radial_state.confirm_mode(),
-            cheat_sheet_visible: self.overlay_controller.is_cheat_sheet_visible(),
-            can_export_profile: can_edit_draft && self.selected_profile_id.is_some(),
-            can_export_layer: can_edit_draft && !is_protected && self.selected_layer_id.is_some(),
-            pending_import: self.pending_preset_import.clone(),
-            pending_export_scope: self.pending_preset_export_scope,
-            preset_error: self.preset_transfer_error.clone(),
-        }
+        self.projection_inputs().build_cheat_sheet_projection()
     }
 
     pub fn set_hosts(
@@ -3539,7 +3344,9 @@ impl WorkbenchStore {
         self.panel_host = panel_host;
         self.status_item_host = status_item_host;
         self.last_status_item_snapshot = None;
-        self.rebuild_projection();
+        self.last_hud_panel = None;
+        self.last_radial_panel = None;
+        self.commit_runtime_update();
     }
 
     pub fn update_screen_context(
@@ -3549,40 +3356,43 @@ impl WorkbenchStore {
         main_window_active: bool,
         now: Instant,
     ) {
+        self.update_now = now;
         self.screen_geometry = screen;
         self.last_cursor_position = cursor;
         self.overlay_controller
             .set_main_workbench_window_active(main_window_active);
         self.overlay_controller.expire_notice_if_due(now);
-        self.rebuild_projection();
+        self.commit_runtime_update();
     }
 
     pub fn set_main_workbench_window_active(&mut self, active: bool) {
-        let prev_vis = self.overlay_controller.visibility().clone();
+        let previous_visibility = self.overlay_controller.visibility().clone();
         self.overlay_controller
             .set_main_workbench_window_active(active);
-        self.projection.overlay.main_workbench_window_active = active;
-        if *self.overlay_controller.visibility() != prev_vis {
-            self.rebuild_projection();
+        if self.overlay_controller.visibility() != &previous_visibility {
+            self.commit_runtime_update();
+        } else {
+            self.commit_local_update();
         }
     }
 
     pub fn expire_overlay_if_due(&mut self, now: Instant) -> bool {
+        self.update_now = now;
         let expired = self.overlay_controller.expire_notice_if_due(now);
         if expired {
-            self.rebuild_projection();
+            self.commit_runtime_update();
         }
         expired
     }
 
     pub fn set_radial_menu_enabled(&mut self, enabled: bool) {
         self.radial_state.set_enabled(enabled);
-        self.rebuild_projection();
+        self.commit_runtime_update();
     }
 
     pub fn set_radial_confirm_mode(&mut self, mode: RadialConfirmMode) {
         self.radial_state.set_confirm_mode(mode);
-        self.rebuild_projection();
+        self.commit_runtime_update();
     }
 
     pub fn set_radial_input_readiness(&mut self, readiness: RadialInputReadiness) {
@@ -3590,48 +3400,29 @@ impl WorkbenchStore {
         if readiness != RadialInputReadiness::Ready {
             self.radial_state.cancel();
         }
-        self.rebuild_projection();
+        self.commit_runtime_update();
     }
 
     pub fn apply_radial_preset(&mut self, preset: RadialPresetKind) {
         self.radial_slot_configs = RadialSlotConfig::for_preset(preset);
         self.radial_state.cancel();
-        self.rebuild_projection();
+        self.commit_runtime_update();
     }
 
     pub fn set_radial_slot_configs(&mut self, configs: [RadialSlotConfig; RADIAL_SECTOR_COUNT]) {
         self.radial_slot_configs = configs;
         self.radial_state.cancel();
-        self.rebuild_projection();
+        self.commit_runtime_update();
     }
 
     pub fn set_radial_slot_config(&mut self, sector: SectorIndex, config: RadialSlotConfig) {
         self.radial_slot_configs[sector.as_usize()] = config;
         self.radial_state.cancel();
-        self.rebuild_projection();
+        self.commit_runtime_update();
     }
 
     pub fn resolve_current_radial_slots(&self) -> [RadialSlot; RADIAL_SECTOR_COUNT] {
-        let active_agent = self.active_or_selected_canonical_agent();
-        let active_session_preview = active_agent.and_then(|agent| {
-            self.slot_table
-                .candidates()
-                .iter()
-                .find(|c| agent_for_place(&c.place) == agent)
-                .map(|c| c.title.clone())
-        });
-        let ctx = RadialSlotResolutionContext {
-            has_active_profile: self.active_or_selected_profile_id().is_some(),
-            active_adapter: self.active_desktop_agent_adapter(),
-            active_agent_display_name: active_agent.map(|a| a.display_name().to_string()),
-            active_session_preview,
-            can_navigate_back: self.navigation_history.can_go_back(|_| true),
-            can_navigate_forward: self.navigation_history.can_go_forward(|_| true),
-        };
-        let app_cache = &self.app_cache;
-        resolve_radial_slots(&self.radial_slot_configs, &ctx, |bundle_id| {
-            app_cache.resolve(bundle_id).installed
-        })
+        self.projection_inputs().resolve_current_radial_slots()
     }
 
     fn execute_radial_intent(
@@ -3639,19 +3430,36 @@ impl WorkbenchStore {
         session: &RadialMenuSession,
         intent: &RadialIntent,
     ) -> HostActionReceipt {
-        let profile_id = session.route.profile_id.clone().unwrap_or_default();
-        let (action_type, target, text_byte_len, detail) = match intent {
-            RadialIntent::OpenApp { bundle_id } => {
-                if !self.config.isolated {
-                    let _ = self.live_executor.driver().open_application(bundle_id);
-                }
-                (
-                    "open_app".to_string(),
-                    bundle_id.clone(),
-                    None,
-                    format!("已打开应用 {bundle_id}"),
-                )
+        let executor = Arc::clone(&self.live_executor);
+        let isolated = self.config.isolated;
+        self.execute_radial_intent_using(session, intent, move |profile, action| {
+            if isolated {
+                mi_macos::SimulatedHostActionExecutor::new().execute(profile, "radial-menu", action)
+            } else {
+                executor.execute(profile, "radial-menu", action)
             }
+        })
+    }
+
+    fn execute_radial_intent_using(
+        &mut self,
+        session: &RadialMenuSession,
+        intent: &RadialIntent,
+        execute: impl FnOnce(&str, &ResolvedHostAction) -> HostActionReceipt,
+    ) -> HostActionReceipt {
+        let profile_id = session.route.profile_id.clone().unwrap_or_default();
+        let local_receipt = |outcome: &str, detail: &str| HostActionReceipt {
+            action_type: "cheat_sheet".into(),
+            binding_id: "radial-menu".into(),
+            detail: detail.into(),
+            outcome: outcome.into(),
+            profile_id: profile_id.clone(),
+            target: "micro-input".into(),
+            text_byte_len: None,
+            timestamp_ms: 0,
+        };
+        let previous_history = self.navigation_history.clone();
+        let action = match intent {
             RadialIntent::CheatSheet => {
                 let sheet = self.build_cheat_sheet_projection();
                 self.overlay_controller.show_cheat_sheet(
@@ -3659,140 +3467,73 @@ impl WorkbenchStore {
                     &self.screen_geometry,
                     self.last_cursor_position,
                 );
-                (
-                    "cheat_sheet".to_string(),
-                    "micro-input".to_string(),
-                    None,
-                    "已显示当前宿主配置的按键速查".to_string(),
-                )
+                let receipt = local_receipt("executed", "已显示当前宿主配置的按键速查");
+                self.record_host_action_receipt(receipt.clone());
+                return receipt;
             }
+            RadialIntent::OpenApp { bundle_id } => ResolvedHostAction::OpenApp {
+                bundle_id: bundle_id.clone(),
+            },
             RadialIntent::Prompt {
                 text,
                 adapter,
                 submit,
-            } => {
-                let target_adapter = adapter
+            } => ResolvedHostAction::AgentCommand {
+                adapter: adapter
                     .clone()
                     .or_else(|| self.active_desktop_agent_adapter())
-                    .unwrap_or_else(|| "host".to_string());
-                if !self.config.isolated {
-                    let cmd = if *submit {
-                        format!("submit-prompt:{text}")
+                    .unwrap_or_else(|| "host".into()),
+                command: format!(
+                    "{}:{text}",
+                    if *submit { "submit-prompt" } else { "prompt" }
+                ),
+            },
+            RadialIntent::Submit { adapter } | RadialIntent::Stop { adapter } => {
+                ResolvedHostAction::AgentCommand {
+                    adapter: adapter
+                        .clone()
+                        .or_else(|| self.active_desktop_agent_adapter())
+                        .unwrap_or_else(|| "host".into()),
+                    command: if matches!(intent, RadialIntent::Submit { .. }) {
+                        "submit"
                     } else {
-                        format!("prompt:{text}")
-                    };
-                    let _ = self.live_executor.execute(
-                        &profile_id,
-                        "radial-menu",
-                        &ResolvedHostAction::AgentCommand {
-                            adapter: target_adapter.clone(),
-                            command: cmd,
-                        },
-                    );
-                }
-                (
-                    "paste_text".to_string(),
-                    target_adapter,
-                    Some(text.len()),
-                    format!("已发送径向指令（submit={submit}）"),
-                )
-            }
-            RadialIntent::Submit { adapter } => {
-                let target_adapter = adapter
-                    .clone()
-                    .or_else(|| self.active_desktop_agent_adapter())
-                    .unwrap_or_else(|| "host".to_string());
-                if !self.config.isolated {
-                    let _ = self.live_executor.execute(
-                        &profile_id,
-                        "radial-menu",
-                        &ResolvedHostAction::AgentCommand {
-                            adapter: target_adapter.clone(),
-                            command: "submit".to_string(),
-                        },
-                    );
-                }
-                (
-                    "agent_command".to_string(),
-                    target_adapter,
-                    None,
-                    "已触发 Agent 提交 (submit)".to_string(),
-                )
-            }
-            RadialIntent::Stop { adapter } => {
-                let target_adapter = adapter
-                    .clone()
-                    .or_else(|| self.active_desktop_agent_adapter())
-                    .unwrap_or_else(|| "host".to_string());
-                if !self.config.isolated {
-                    let _ = self.live_executor.execute(
-                        &profile_id,
-                        "radial-menu",
-                        &ResolvedHostAction::AgentCommand {
-                            adapter: target_adapter.clone(),
-                            command: "deny".to_string(),
-                        },
-                    );
-                }
-                (
-                    "agent_command".to_string(),
-                    target_adapter,
-                    None,
-                    "已触发 Agent 停止 (stop)".to_string(),
-                )
-            }
-            RadialIntent::NavigateBack => {
-                if !self.config.isolated {
-                    let app_cache = self.app_cache.clone();
-                    if let Some(entry) = self
-                        .navigation_history
-                        .back(|p| app_cache.resolve(bundle_id_for_place(p)).installed)
-                    {
-                        let _ = self
-                            .live_executor
-                            .driver()
-                            .open_application(bundle_id_for_place(&entry));
+                        "deny"
                     }
+                    .into(),
                 }
-                (
-                    "agent_command".to_string(),
-                    "navigation".to_string(),
-                    None,
-                    "已执行历史后退".to_string(),
-                )
             }
-            RadialIntent::NavigateForward => {
-                if !self.config.isolated {
-                    let app_cache = self.app_cache.clone();
-                    if let Some(entry) = self
-                        .navigation_history
-                        .forward(|p| app_cache.resolve(bundle_id_for_place(p)).installed)
-                    {
-                        let _ = self
-                            .live_executor
-                            .driver()
-                            .open_application(bundle_id_for_place(&entry));
-                    }
+            RadialIntent::NavigateBack | RadialIntent::NavigateForward => {
+                let applications = &self.applications;
+                let available = |place: &NavigationPlace| {
+                    applications
+                        .get(bundle_id_for_place(place))
+                        .copied()
+                        .unwrap_or(false)
+                };
+                let entry = if matches!(intent, RadialIntent::NavigateBack) {
+                    self.navigation_history.back(available)
+                } else {
+                    self.navigation_history.forward(available)
+                };
+                let Some(entry) = entry else {
+                    let mut receipt = local_receipt("blocked", "没有可打开的历史目标");
+                    receipt.action_type = "open_app".into();
+                    receipt.target = "navigation".into();
+                    self.record_host_action_receipt(receipt.clone());
+                    return receipt;
+                };
+                ResolvedHostAction::OpenApp {
+                    bundle_id: bundle_id_for_place(&entry).into(),
                 }
-                (
-                    "agent_command".to_string(),
-                    "navigation".to_string(),
-                    None,
-                    "已执行历史前进".to_string(),
-                )
             }
         };
-
-        let receipt = HostActionReceipt {
-            action_type,
-            binding_id: "radial-menu".to_string(),
-            detail,
-            outcome: "executed".to_string(),
-            profile_id,
-            target,
-            text_byte_len,
-            timestamp_ms: 0,
-        };
+        let mut receipt = execute(&profile_id, &action);
+        if matches!(intent, RadialIntent::Prompt { .. }) {
+            receipt.action_type = "paste_text".into();
+        }
+        if !receipt.succeeded() {
+            self.navigation_history = previous_history;
+        }
         self.record_host_action_receipt(receipt.clone());
         receipt
     }
@@ -3802,7 +3543,8 @@ impl WorkbenchStore {
         event: RadialInputEvent,
         now: Instant,
     ) -> RadialConsumeOutcome {
-        if !self.radial_state.enabled() {
+        self.update_now = now;
+        if self.system_lifecycle != SystemLifecycle::Awake || !self.radial_state.enabled() {
             return RadialConsumeOutcome {
                 consumed: false,
                 confirmed_intent: None,
@@ -3813,7 +3555,7 @@ impl WorkbenchStore {
         if let RadialInputEvent::EscapeKeyDown { key_code } = event {
             if key_code == ESCAPE_KEY_CODE && self.radial_state.session().is_some() {
                 self.radial_state.cancel();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 return RadialConsumeOutcome {
                     consumed: true,
                     confirmed_intent: None,
@@ -3835,17 +3577,21 @@ impl WorkbenchStore {
         let captured_confirm = self.radial_state.captures_confirm() && is_enc_clk;
 
         self.ensure_live_ownership_fresh();
-        let gates_ok = self.document_store.host_execution_enabled()
-            && (self.native_ownership.allows_execution()
-                || self.native_ownership.is_transient_reconfirming())
+        let gates_ok = self.system_lifecycle == SystemLifecycle::Awake
+            && self.document_store.host_execution_enabled()
+            && (self.native_ownership.allows_execution_at(self.update_now)
+                || self
+                    .native_ownership
+                    .is_transient_reconfirming_at(self.update_now))
             && !self.ptt_controller.is_active
             && self.ptt_controller.cleanup_confirmed
+            && !self.live_executor.has_unconfirmed_apple_fn_release()
             && self.radial_readiness == RadialInputReadiness::Ready
-            && self.active_or_selected_profile_id().is_some();
+            && self.resolved_active_profile_id().is_some();
 
         if !gates_ok {
             self.radial_state.cancel();
-            self.rebuild_projection();
+            self.commit_runtime_update();
             return RadialConsumeOutcome {
                 consumed: is_position || captured_confirm,
                 confirmed_intent: None,
@@ -3865,7 +3611,7 @@ impl WorkbenchStore {
                 || active_session.route != current_route
             {
                 self.radial_state.cancel();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 if captured_confirm {
                     return RadialConsumeOutcome {
                         consumed: true,
@@ -3885,7 +3631,7 @@ impl WorkbenchStore {
             } => {
                 if !admitted {
                     self.radial_state.cancel();
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return RadialConsumeOutcome {
                         consumed: true,
                         confirmed_intent: None,
@@ -3909,14 +3655,14 @@ impl WorkbenchStore {
                 });
                 if let Some((confirmed_session, intent)) = confirmed {
                     let receipt = self.execute_radial_intent(&confirmed_session, &intent);
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return RadialConsumeOutcome {
                         consumed: true,
                         confirmed_intent: Some(intent),
                         dispatched_receipt: Some(receipt),
                     };
                 }
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 RadialConsumeOutcome {
                     consumed: true,
                     confirmed_intent: None,
@@ -3932,7 +3678,7 @@ impl WorkbenchStore {
                     if admitted {
                         if let Some((confirmed_session, intent)) = self.radial_state.confirm() {
                             let receipt = self.execute_radial_intent(&confirmed_session, &intent);
-                            self.rebuild_projection();
+                            self.commit_runtime_update();
                             return RadialConsumeOutcome {
                                 consumed: true,
                                 confirmed_intent: Some(intent),
@@ -3940,7 +3686,7 @@ impl WorkbenchStore {
                             };
                         }
                     }
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return RadialConsumeOutcome {
                         consumed: true,
                         confirmed_intent: None,
@@ -3949,7 +3695,7 @@ impl WorkbenchStore {
                 }
                 if self.radial_state.session().is_some() {
                     self.radial_state.cancel();
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                 }
                 RadialConsumeOutcome {
                     consumed: false,
@@ -3969,16 +3715,17 @@ impl WorkbenchStore {
         &mut self,
         action: RadialOverlayAction,
     ) -> Result<Option<HostActionReceipt>, WorkbenchError> {
+        self.require_awake()?;
         match action {
             RadialOverlayAction::CancelEscape => {
                 self.radial_state.cancel();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(None)
             }
             RadialOverlayAction::SelectSector(sector) => {
                 self.radial_state
-                    .select_sector_in_place(sector, Instant::now());
-                self.rebuild_projection();
+                    .select_sector_in_place(sector, self.update_now);
+                self.commit_runtime_update();
                 Ok(None)
             }
             RadialOverlayAction::ConfirmSelected => {
@@ -3986,7 +3733,7 @@ impl WorkbenchStore {
                     .radial_state
                     .confirm()
                     .map(|(session, intent)| self.execute_radial_intent(&session, &intent));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(outcome)
             }
         }
@@ -3999,7 +3746,7 @@ impl WorkbenchStore {
         match action {
             HostOverlayAction::CloseCheatSheet => {
                 self.overlay_controller.hide();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             HostOverlayAction::ToggleCheatSheet => {
@@ -4009,7 +3756,7 @@ impl WorkbenchStore {
                     &self.screen_geometry,
                     self.last_cursor_position,
                 );
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
         }
@@ -4026,7 +3773,7 @@ impl WorkbenchStore {
                     .slot(slot)
                     .map(str::to_string)
                     .ok_or_else(|| WorkbenchError::Routing("该常用格未绑定方案".to_string()))?;
-                self.select_and_activate_profile_at(&pid, Instant::now(), true)
+                self.select_and_activate_profile_at(&pid, self.update_now, true)
             }
             StatusMenuAction::PinFavoriteSlot { slot, profile_id } => {
                 if !self
@@ -4041,11 +3788,11 @@ impl WorkbenchStore {
                     return Err(WorkbenchError::Routing("Profile 不存在".to_string()));
                 }
                 self.pinned_favorites.assign_or_swap(slot, profile_id);
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             StatusMenuAction::SelectProfile(profile_id) => {
-                self.select_and_activate_profile_at(&profile_id, Instant::now(), true)
+                self.select_and_activate_profile_at(&profile_id, self.update_now, true)
             }
             StatusMenuAction::SetHostExecutionEnabled(enabled) => {
                 self.set_host_execution_enabled(enabled)
@@ -4060,7 +3807,7 @@ impl WorkbenchStore {
                     self.apply_routing_operation(RoutingOperation::Enable { enabled: true })?;
                     self.auto_follow_enabled = true;
                 }
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             StatusMenuAction::SetRadialMenuEnabled(enabled) => {
@@ -4084,7 +3831,7 @@ impl WorkbenchStore {
                     Err(msg) => {
                         self.preset_transfer_error = Some(msg.clone());
                         self.pending_preset_import = None;
-                        self.rebuild_projection();
+                        self.commit_runtime_update();
                         return Err(WorkbenchError::Preset(msg));
                     }
                 };
@@ -4093,7 +3840,7 @@ impl WorkbenchStore {
                     Err(msg) => {
                         self.preset_transfer_error = Some(msg.clone());
                         self.pending_preset_import = None;
-                        self.rebuild_projection();
+                        self.commit_runtime_update();
                         return Err(WorkbenchError::Preset(msg));
                     }
                 };
@@ -4112,14 +3859,14 @@ impl WorkbenchStore {
                     action_count: graph.actions.len(),
                 });
                 self.preset_transfer_error = None;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             StatusMenuAction::ConfirmStagedPresetImport => {
                 let Some(staged) = self.pending_preset_import.take() else {
                     let msg = "没有待确认的预设导入".to_string();
                     self.preset_transfer_error = Some(msg.clone());
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return Err(WorkbenchError::Preset(msg));
                 };
                 self.preset_transfer_error = None;
@@ -4131,20 +3878,20 @@ impl WorkbenchStore {
             StatusMenuAction::CancelStagedPresetImport => {
                 self.pending_preset_import = None;
                 self.preset_transfer_error = None;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             StatusMenuAction::RequestPresetExport(scope) => {
                 self.pending_preset_export_scope = Some(scope);
                 self.preset_transfer_error = None;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             StatusMenuAction::ConfirmPresetExport => {
                 let Some(scope) = self.pending_preset_export_scope.take() else {
                     let msg = "没有待确认的预设导出范围".to_string();
                     self.preset_transfer_error = Some(msg.clone());
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return Err(WorkbenchError::Preset(msg));
                 };
                 let (profile_id, layer_id) = match scope {
@@ -4165,13 +3912,13 @@ impl WorkbenchStore {
             StatusMenuAction::CancelPresetExport => {
                 self.pending_preset_export_scope = None;
                 self.preset_transfer_error = None;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             StatusMenuAction::OpenMainWorkbenchWindow => {
                 self.set_main_workbench_window_active(true);
                 self.status_message = "已打开主工作台窗口".to_string();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
         }
@@ -4260,7 +4007,7 @@ impl WorkbenchStore {
             return None;
         }
         if self.native_ownership.is_unbridged_desktop_active()
-            || self.native_ownership.allows_execution()
+            || self.native_ownership.allows_execution_at(self.update_now)
         {
             return fallback_unbridged_oai_action(&profile.name, binding_id, layout);
         }
@@ -4272,6 +4019,30 @@ impl WorkbenchStore {
         event: InputEvent,
         now: Instant,
     ) -> Option<HostActionReceipt> {
+        if self.system_lifecycle != SystemLifecycle::Awake {
+            return None;
+        }
+        self.update_now = now;
+        if event.kind == InputEventKind::InputStreamGap {
+            self.input_lost_session = Some(event.session_id);
+            self.release_board_inputs(now);
+            self.commit_runtime_update();
+            return None;
+        }
+        if event.kind != InputEventKind::Released
+            && (self.input_lost_session == Some(event.session_id)
+                || self.hardware_event_tx.source_closed(event.session_id))
+        {
+            return None;
+        }
+        let profile_id = self.resolved_active_profile_id();
+        if event.kind != InputEventKind::Released
+            && profile_id
+                .as_ref()
+                .is_none_or(|id| self.is_protected_oai_profile(id))
+        {
+            return None;
+        }
         if let Some(pos) = event.radial_position {
             if self.radial_state.enabled() {
                 let outcome = self.consume_radial_input(
@@ -4298,13 +4069,16 @@ impl WorkbenchStore {
         let Some(binding_id) = event.binding_id.clone() else {
             return None;
         };
-        if !event.action_eligible {
+        if event.kind != InputEventKind::Released
+            && (!event.action_eligible
+                || self.input_lost_session == Some(event.session_id)
+                || self.live_executor.has_unconfirmed_apple_fn_release()
+                || !self.ptt_controller.cleanup_confirmed)
+        {
             return None;
         }
 
-        let profile_id = self
-            .active_or_selected_profile_id()
-            .unwrap_or_else(|| "default".to_string());
+        let profile_id = profile_id.unwrap_or_default();
 
         match event.kind {
             InputEventKind::Released => {
@@ -4312,39 +4086,27 @@ impl WorkbenchStore {
                     self.dial_pressed = false;
                     self.dial_turned_while_pressed = false;
                 }
-                if let Some(receipt) = self.live_executor.handle_apple_fn_release(
-                    &profile_id,
-                    &binding_id,
-                    "frontmost-editor",
-                ) {
+                let input = HeldInputId {
+                    session_id: event.session_id,
+                    binding_id: binding_id.clone(),
+                };
+                if let Some(receipt) = self.live_executor.handle_apple_fn_release(&input) {
                     self.status_message = format!("已释放 {} · {}", binding_id, receipt.detail);
                     self.record_host_action_receipt(receipt.clone());
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return Some(receipt);
                 }
-                if let Some((held_binding, held_adapter)) = self.held_ptt_binding.clone() {
-                    if held_binding == binding_id {
-                        self.held_ptt_binding = None;
-                        self.ptt_controller.is_active = false;
-                        if !self.config.isolated {
-                            if held_adapter.eq_ignore_ascii_case("antigravity") {
-                                let ctrl = vec!["control".to_string()];
-                                let _ = self
-                                    .live_executor
-                                    .driver()
-                                    .post_key_shortcut(0x2E, &ctrl, true)
-                                    .and_then(|()| {
-                                        self.live_executor
-                                            .driver()
-                                            .post_key_shortcut(0x2E, &ctrl, false)
-                                    });
-                            } else {
-                                let _ = self.live_executor.driver().post_apple_fn_flags(false);
-                            }
-                        }
-                        self.status_message = format!("已结束按住语音 ({binding_id})");
-                        self.rebuild_projection();
-                    }
+                if self
+                    .held_dictation
+                    .as_ref()
+                    .is_some_and(|held| held.input == input)
+                {
+                    let stopped = if self.config.isolated {
+                        Ok(())
+                    } else {
+                        self.live_executor.stop_owned_dictations()
+                    };
+                    return self.finish_dictation(stopped);
                 }
                 None
             }
@@ -4369,30 +4131,37 @@ impl WorkbenchStore {
                     self.dial_turned_while_pressed = false;
                 }
 
-                if let Some(surface) = self.surface_for_binding(&binding_id) {
-                    self.selected_surface = surface;
-                    let slot = self.effective_slot_for_surface(surface);
-                    self.selected_binding_slot = Some(slot);
-                }
-                match binding_id.as_str() {
-                    "AG15" => self.selected_joystick_direction = JoystickDirection8::North,
-                    "AG16" => self.selected_joystick_direction = JoystickDirection8::West,
-                    "AG17" => self.selected_joystick_direction = JoystickDirection8::South,
-                    "AG18" => self.selected_joystick_direction = JoystickDirection8::East,
-                    _ => {}
+                let inspector_search_active = !self.action_search_query.trim().is_empty()
+                    || !self.keycap_search_query.trim().is_empty()
+                    || self.shortcut_recorder.is_recording;
+                if !inspector_search_active {
+                    if let Some(surface) = self.surface_for_binding(&binding_id) {
+                        self.selected_surface = surface;
+                        let slot = self.effective_slot_for_surface(surface);
+                        self.selected_binding_slot = Some(slot);
+                    }
+                    match binding_id.as_str() {
+                        "AG15" => self.selected_joystick_direction = JoystickDirection8::North,
+                        "AG16" => self.selected_joystick_direction = JoystickDirection8::West,
+                        "AG17" => self.selected_joystick_direction = JoystickDirection8::South,
+                        "AG18" => self.selected_joystick_direction = JoystickDirection8::East,
+                        _ => {}
+                    }
                 }
 
                 self.ensure_live_ownership_fresh();
                 if !self.document_store.host_execution_enabled() {
                     self.status_message = format!("已按下 {binding_id}（快捷键映射已暂停）");
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return None;
                 }
-                if !self.native_ownership.allows_execution()
-                    && !self.native_ownership.is_transient_reconfirming()
+                if !self.native_ownership.allows_execution_at(self.update_now)
+                    && !self
+                        .native_ownership
+                        .is_transient_reconfirming_at(self.update_now)
                 {
                     self.status_message = format!("已按下 {binding_id}（原生客户端正占用硬件）");
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return None;
                 }
 
@@ -4401,7 +4170,7 @@ impl WorkbenchStore {
                     self.resolve_physical_action(&profile_id, &binding_id, layout)
                 else {
                     self.status_message = format!("已按下 {binding_id}（当前槽位未绑定动作）");
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return None;
                 };
 
@@ -4426,14 +4195,17 @@ impl WorkbenchStore {
                     if *key_code == APPLE_FN_KEY_CODE && modifiers.is_empty() {
                         let target = target_bundle_id.as_deref().unwrap_or("frontmost-editor");
                         if let Some(receipt) = self.live_executor.handle_apple_fn_press(
+                            &HeldInputId {
+                                session_id: event.session_id,
+                                binding_id: binding_id.clone(),
+                            },
                             &profile_id,
-                            &binding_id,
                             target,
                         ) {
                             self.status_message =
                                 format!("已触发 {} · {}", binding_id, receipt.detail);
                             self.record_host_action_receipt(receipt.clone());
-                            self.rebuild_projection();
+                            self.commit_runtime_update();
                             return Some(receipt);
                         }
                         return None;
@@ -4451,70 +4223,106 @@ impl WorkbenchStore {
                             let _ = self.dispatch_session_strip_action(
                                 SessionStripAction::ActivateSlot(slot_idx),
                             );
-                            if !self.config.isolated {
-                                if let Some(place) = self
-                                    .slot_table
-                                    .slot_table()
-                                    .slots()
-                                    .get(slot_idx)
-                                    .and_then(|s| s.place.as_ref())
-                                {
-                                    let bundle = bundle_id_for_place(place);
-                                    let _ = self.live_executor.driver().open_application(bundle);
+                            let target = self
+                                .slot_table
+                                .slot_table()
+                                .slots()
+                                .get(slot_idx)
+                                .and_then(|slot| slot.place.as_ref())
+                                .map(|place| bundle_id_for_place(place).to_owned());
+                            let receipt = if let Some(bundle_id) = target {
+                                let action = ResolvedHostAction::OpenApp { bundle_id };
+                                if self.config.isolated {
+                                    mi_macos::SimulatedHostActionExecutor::new().execute(
+                                        &profile_id,
+                                        &binding_id,
+                                        &action,
+                                    )
+                                } else {
+                                    self.live_executor
+                                        .execute(&profile_id, &binding_id, &action)
                                 }
-                            }
-                            let receipt = HostActionReceipt {
-                                action_type: "agent_command".to_string(),
-                                binding_id: binding_id.clone(),
-                                detail: format!("four-app/slot-open:{slot_idx}"),
-                                outcome: "executed".to_string(),
-                                profile_id,
-                                target: "four-app".to_string(),
-                                text_byte_len: None,
-                                timestamp_ms: 0,
+                            } else {
+                                HostActionReceipt {
+                                    action_type: "open_app".into(),
+                                    binding_id: binding_id.clone(),
+                                    detail: "empty_session_slot".into(),
+                                    outcome: "blocked".into(),
+                                    profile_id,
+                                    target: "four-app".into(),
+                                    text_byte_len: None,
+                                    timestamp_ms: 0,
+                                }
                             };
-                            self.status_message =
-                                format!("已触发 {} · 槽位 {}", binding_id, slot_idx + 1);
+                            self.status_message = format!(
+                                "{} · {}",
+                                if receipt.succeeded() {
+                                    "已执行"
+                                } else {
+                                    "未执行"
+                                },
+                                receipt.detail
+                            );
                             self.record_host_action_receipt(receipt.clone());
-                            self.rebuild_projection();
+                            self.commit_runtime_update();
                             return Some(receipt);
                         }
                     }
                     if command == "push-to-talk" {
                         let resolved_adapter = adapter.clone();
-                        self.held_ptt_binding =
-                            Some((binding_id.clone(), resolved_adapter.clone()));
-                        self.ptt_controller.is_active = true;
-                        let receipt = if self.config.isolated {
-                            HostActionReceipt {
-                                action_type: "agent_command".to_string(),
-                                binding_id: binding_id.clone(),
-                                detail: format!("{resolved_adapter}/push-to-talk"),
-                                outcome: "simulated".to_string(),
-                                profile_id,
-                                target: resolved_adapter,
-                                text_byte_len: None,
-                                timestamp_ms: 0,
-                            }
-                        } else if resolved_adapter.eq_ignore_ascii_case("antigravity") {
-                            self.live_executor
-                                .execute(&profile_id, &binding_id, &action)
+                        if self.held_dictation.is_some() {
+                            return None;
+                        }
+                        let started = if self.config.isolated {
+                            Ok(())
                         } else {
-                            let _ = self.live_executor.driver().post_apple_fn_flags(true);
-                            HostActionReceipt {
-                                action_type: "agent_command".to_string(),
-                                binding_id: binding_id.clone(),
-                                detail: format!("{resolved_adapter}/push-to-talk"),
-                                outcome: "executed".to_string(),
-                                profile_id,
-                                target: resolved_adapter,
-                                text_byte_len: None,
-                                timestamp_ms: 0,
+                            self.live_executor.start_owned_dictation(&resolved_adapter)
+                        };
+                        let uncertain = started
+                            .as_ref()
+                            .is_err_and(|error| error.starts_with("unconfirmed:"));
+                        self.ptt_controller.is_active = started.is_ok();
+                        self.ptt_controller.cleanup_confirmed = !uncertain;
+                        if started.is_ok() || uncertain {
+                            self.held_dictation = Some(HeldDictation {
+                                input: HeldInputId {
+                                    session_id: event.session_id,
+                                    binding_id: binding_id.clone(),
+                                },
+                                profile_id: profile_id.clone(),
+                                adapter: resolved_adapter.clone(),
+                            });
+                        }
+                        let (outcome, detail) = match started {
+                            Ok(()) => (
+                                if self.config.isolated {
+                                    "simulated"
+                                } else {
+                                    "executed"
+                                },
+                                format!("{resolved_adapter}/push-to-talk"),
+                            ),
+                            Err(error) => {
+                                (if uncertain { "unconfirmed" } else { "blocked" }, error)
                             }
                         };
-                        self.status_message = format!("正在按住语音 ({binding_id})…");
+                        let receipt = HostActionReceipt {
+                            action_type: "agent_command".into(),
+                            binding_id: binding_id.clone(),
+                            detail: detail.clone(),
+                            outcome: outcome.into(),
+                            profile_id,
+                            target: resolved_adapter,
+                            text_byte_len: None,
+                            timestamp_ms: 0,
+                        };
+                        self.status_message = if self.ptt_controller.is_active {
+                            format!("正在按住语音 ({binding_id})…")
+                        } else {
+                            format!("听写未启动 · {detail}")
+                        };
                         self.record_host_action_receipt(receipt.clone());
-                        self.rebuild_projection();
+                        self.commit_runtime_update();
                         return Some(receipt);
                     }
                     if adapter == "navigation" && matches!(command.as_str(), "back" | "forward") {
@@ -4527,12 +4335,9 @@ impl WorkbenchStore {
                                 .forward(|p| app_cache.resolve(bundle_id_for_place(p)).installed)
                         };
                         if let Some(entry) = entry {
-                            if !self.config.isolated {
-                                let _ = self
-                                    .live_executor
-                                    .driver()
-                                    .open_application(bundle_id_for_place(&entry));
-                            }
+                            action = ResolvedHostAction::OpenApp {
+                                bundle_id: bundle_id_for_place(&entry).into(),
+                            };
                         }
                     }
                 }
@@ -4561,7 +4366,7 @@ impl WorkbenchStore {
                     format!("未执行 {} · {}", binding_id, receipt.detail)
                 };
                 self.record_host_action_receipt(receipt.clone());
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Some(receipt)
             }
             _ => None,
@@ -4586,247 +4391,7 @@ impl WorkbenchStore {
     }
 
     fn current_selected_slot(&self) -> u32 {
-        self.selected_binding_slot
-            .unwrap_or_else(|| self.selected_surface.primary_logical_slot())
-    }
-
-    fn build_inspector_projection(
-        &self,
-        can_edit_draft: bool,
-        canvas: &CanvasProjection,
-    ) -> InspectorProjection {
-        let doc = &self.document_store.draft.document;
-        let graph = &doc.editable.graph;
-        let layer = self
-            .selected_layer_id
-            .as_ref()
-            .and_then(|lid| graph.layers.get(lid));
-        let layer_name = layer
-            .map(|l| l.name.clone())
-            .unwrap_or_else(|| "默认层".to_string());
-        let is_protected = self.is_selected_layer_protected();
-
-        if let Some(lock) = &canvas.protected_lock {
-            return InspectorProjection {
-                width_px: INSPECTOR_WIDTH,
-                profile_id: self.selected_profile_id.clone(),
-                profile_display_name: canvas.profile_display_name.clone(),
-                layer_id: self.selected_layer_id.clone(),
-                layer_name,
-                is_protected_layer: true,
-                can_edit_draft,
-                body: InspectorBodyProjection::ProtectedLocked(lock.clone()),
-            };
-        }
-
-        let slot = self.current_selected_slot();
-        let supports_task_role = (0..6u32).contains(&slot);
-        let (bound_action_name, action_obj) = resolve_slot_action_info(doc, layer, slot);
-        let bound_graph_action_id = resolve_slot_graph_action_id(layer, slot);
-        let bound_action_id = action_obj
-            .map(|a| a.id.clone())
-            .or_else(|| bound_graph_action_id.clone());
-        let bound_action_category = action_obj.map(|a| a.category.clone()).unwrap_or_default();
-        let bound_action_detail = action_obj.map(|a| a.detail.clone()).unwrap_or_default();
-        let bound_capability =
-            action_obj.map(|a| action_library::capability(a, self.command_execution_enabled));
-
-        let is_session_action = action_obj.is_some_and(|a| {
-            a.id.starts_with("slot-open-")
-                || a.id.starts_with("cockpit-slot-")
-                || a.payload
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|c| c.starts_with("slot-open:"))
-        });
-
-        let slot_role = if !supports_task_role {
-            KeycapRole::ActionKey
-        } else if let Some(pid) = &self.selected_profile_id {
-            self.slot_role_overrides
-                .get(&(pid.clone(), slot))
-                .copied()
-                .unwrap_or(if is_session_action {
-                    KeycapRole::TaskKey
-                } else {
-                    KeycapRole::ActionKey
-                })
-        } else if is_session_action {
-            KeycapRole::TaskKey
-        } else {
-            KeycapRole::ActionKey
-        };
-
-        let is_apple_fn_bound = action_obj.is_some_and(|a| {
-            a.id == "apple-fn-key"
-                || matches!(
-                    serde_json::from_value::<ActionKind>(a.payload.clone()),
-                    Ok(ActionKind::Shortcut { key, modifiers, .. })
-                        if key.eq_ignore_ascii_case("fn") && modifiers.is_empty()
-                )
-        });
-
-        let selected_keycap = self.selected_keycap(slot);
-        let filtered_keycaps: Vec<KeycapCatalogItemProjection> = CodexKeycapId::ALL_34
-            .into_iter()
-            .filter(|k| k.matches_query(&self.keycap_search_query))
-            .map(|k| KeycapCatalogItemProjection {
-                id: k,
-                silk_code: k.silk_code().to_string(),
-                short_label: k.short_label().to_string(),
-                chinese_hint: k.chinese_hint().to_string(),
-                glyph_symbol: k.glyph_symbol().to_string(),
-                default_action_id: k.default_action_id().map(str::to_string),
-                is_selected: k == selected_keycap,
-            })
-            .collect();
-
-        let all_catalog = mi_model::draft::actions();
-        let mut available_categories = vec!["全部".to_string()];
-        for act in &all_catalog {
-            if !available_categories.contains(&act.category) {
-                available_categories.push(act.category.clone());
-            }
-        }
-
-        let entries = action_library::search(
-            &self.action_search_query,
-            &self.action_category_filter,
-            self.favorites_only,
-            &self.favorite_action_ids,
-            self.command_execution_enabled,
-        );
-        let filtered_actions: Vec<ActionLibraryRowProjection> = entries
-            .into_iter()
-            .map(|entry| {
-                let is_currently_bound =
-                    bound_action_id.as_deref() == Some(entry.action.id.as_str());
-                ActionLibraryRowProjection {
-                    action_id: entry.action.id,
-                    name: entry.action.name,
-                    category: entry.action.category,
-                    detail: entry.action.detail,
-                    target_summary: entry.capability.target,
-                    execution_available: entry.capability.execution_available,
-                    unavailable_reason: entry.capability.unavailable_reason,
-                    is_favorite: entry.favorite,
-                    is_currently_bound,
-                }
-            })
-            .collect();
-
-        let macros: Vec<MacroLibraryRowProjection> = self
-            .document_store
-            .draft
-            .macros()
-            .into_iter()
-            .map(|m| {
-                let is_currently_bound = bound_graph_action_id.as_deref() == Some(m.id.as_str())
-                    || bound_action_id.as_deref() == Some(m.id.as_str());
-                let event_count = m
-                    .action
-                    .payload
-                    .get("macro_sequence")
-                    .and_then(|s| s.get("events"))
-                    .and_then(|e| e.as_array())
-                    .map(Vec::len)
-                    .unwrap_or(0);
-                let reference_count = m.references.len();
-                let reference_summary = format_macro_references(&m.references);
-                MacroLibraryRowProjection {
-                    id: m.id,
-                    name: m.action.name,
-                    is_multi: false,
-                    step_or_branch_summary: format!("{event_count} 步"),
-                    reference_count,
-                    reference_summary,
-                    is_currently_bound,
-                }
-            })
-            .collect();
-
-        let multis: Vec<MacroLibraryRowProjection> = self
-            .document_store
-            .draft
-            .multis()
-            .into_iter()
-            .map(|m| {
-                let is_currently_bound = bound_graph_action_id.as_deref() == Some(m.id.as_str())
-                    || bound_action_id.as_deref() == Some(m.id.as_str());
-                let reference_count = m.references.len();
-                let reference_summary = format_macro_references(&m.references);
-                MacroLibraryRowProjection {
-                    id: m.id,
-                    name: m.action.name,
-                    is_multi: true,
-                    step_or_branch_summary: "四分支 Multi".to_string(),
-                    reference_count,
-                    reference_summary,
-                    is_currently_bound,
-                }
-            })
-            .collect();
-
-        let can_add_lighting = self
-            .selected_layer_id
-            .as_ref()
-            .is_some_and(|lid| !doc.is_protected_oai_layer(lid));
-        let has_layer_lighting = self
-            .selected_layer_id
-            .as_ref()
-            .is_some_and(|lid| doc.lighting(lid).is_ok());
-
-        let surface_display_name = match self.selected_surface {
-            ControlSurfaceId::Joystick => {
-                format!("摇杆 · {}", self.selected_joystick_direction.label())
-            }
-            other => format!("按键 {}", other.binding_id()),
-        };
-
-        let editable = EditableSlotInspectorProjection {
-            selected_surface: self.selected_surface,
-            selected_logical_slot: slot,
-            selected_binding_id: self.selected_surface.binding_id().to_string(),
-            surface_display_name,
-            joystick_direction: (self.selected_surface == ControlSurfaceId::Joystick)
-                .then_some(self.selected_joystick_direction),
-            bottom_row_layout: self.current_bottom_row_layout(),
-            supports_task_role,
-            slot_role,
-            bound_action_id,
-            bound_action_name,
-            bound_action_category,
-            bound_action_detail,
-            bound_capability,
-            is_apple_fn_bound,
-            selected_keycap,
-            keycap_search_query: self.keycap_search_query.clone(),
-            filtered_keycaps,
-            bind_keycap_default_action_on_select: self.bind_keycap_default_action_on_select,
-            shortcut_recorder: self.shortcut_recorder.clone(),
-            action_search_query: self.action_search_query.clone(),
-            action_category_filter: self.action_category_filter.clone(),
-            available_categories,
-            favorites_only: self.favorites_only,
-            filtered_actions,
-            macros,
-            multis,
-            open_drawers: self.open_drawers.clone(),
-            can_add_lighting,
-            has_layer_lighting,
-            command_execution_enabled: self.command_execution_enabled,
-        };
-
-        InspectorProjection {
-            width_px: INSPECTOR_WIDTH,
-            profile_id: self.selected_profile_id.clone(),
-            profile_display_name: canvas.profile_display_name.clone(),
-            layer_id: self.selected_layer_id.clone(),
-            layer_name,
-            is_protected_layer: is_protected,
-            can_edit_draft,
-            body: InspectorBodyProjection::Editable(Box::new(editable)),
-        }
+        self.projection_inputs().current_selected_slot()
     }
 
     pub fn dispatch_inspector_action(
@@ -4845,12 +4410,12 @@ impl WorkbenchStore {
             }
             InspectorAction::SetKeycapSearchQuery(query) => {
                 self.keycap_search_query = query;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::SetBindKeycapDefaultAction(bind) => {
                 self.bind_keycap_default_action_on_select = bind;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::ToggleDrawer(drawer) => {
@@ -4859,22 +4424,22 @@ impl WorkbenchStore {
                 } else {
                     self.open_drawers.push(drawer);
                 }
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::SetActionSearchQuery(query) => {
                 self.action_search_query = query;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::SetActionCategoryFilter(category) => {
                 self.action_category_filter = category;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::SetFavoritesOnly(fav_only) => {
                 self.favorites_only = fav_only;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::ToggleActionFavorite {
@@ -4886,18 +4451,25 @@ impl WorkbenchStore {
                 } else {
                     self.favorite_action_ids.remove(&action_id);
                 }
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::SetCommandExecutionEnabled(enabled) => {
                 self.command_execution_enabled = enabled;
-                self.rebuild_projection();
+                if let Some(running) = &self.six_layer_running {
+                    running.set_execution_policy(
+                        self.document_store.host_execution_enabled(),
+                        enabled,
+                        self.update_now,
+                    );
+                }
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::CancelShortcutRecording => {
                 self.shortcut_recorder.is_recording = false;
                 self.shortcut_recorder.validation_error = None;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::CreateCustomLayer { name } => {
@@ -4915,7 +4487,7 @@ impl WorkbenchStore {
                 self.selected_layer_id = Some(created_lid);
                 self.normalize_surface_for_current_layer();
                 self.refresh_four_app_lighting();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::OpenEditor(editor_action) => {
@@ -4982,7 +4554,7 @@ impl WorkbenchStore {
                         }
                     }
                 }
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::UnassignSelectedSlot => {
@@ -4994,7 +4566,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 self.slot_role_overrides
                     .insert((pid, slot), KeycapRole::ActionKey);
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::ApplyKeycapIcon {
@@ -5018,7 +4590,7 @@ impl WorkbenchStore {
                             .map_err(WorkbenchError::Storage)?;
                     }
                 }
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::BindAppleFnKey => {
@@ -5035,7 +4607,7 @@ impl WorkbenchStore {
                     .insert((pid, slot), KeycapRole::ActionKey);
                 self.shortcut_recorder.is_recording = false;
                 self.shortcut_recorder.validation_error = None;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::StartShortcutRecording => {
@@ -5048,7 +4620,7 @@ impl WorkbenchStore {
                     preview_badge: "请按下快捷键…".to_string(),
                     validation_error: None,
                 };
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::CaptureShortcutChord { key, mut modifiers } => {
@@ -5064,13 +4636,13 @@ impl WorkbenchStore {
                 self.shortcut_recorder.modifiers = modifiers;
                 self.shortcut_recorder.preview_badge = badge;
                 self.shortcut_recorder.validation_error = None;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::SetShortcutTarget(target) => {
                 self.ensure_layer_editable()?;
                 self.shortcut_recorder.target = target;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::CommitRecordedShortcut => {
@@ -5079,7 +4651,7 @@ impl WorkbenchStore {
                 if raw_key.is_empty() {
                     let msg = "请先录入快捷键按键".to_string();
                     self.shortcut_recorder.validation_error = Some(msg.clone());
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return Err(WorkbenchError::Storage(msg));
                 }
                 if self.shortcut_recorder.modifiers.is_empty()
@@ -5125,7 +4697,7 @@ impl WorkbenchStore {
                     .insert((pid, slot), KeycapRole::ActionKey);
                 self.shortcut_recorder.is_recording = false;
                 self.shortcut_recorder.validation_error = None;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::AssignCatalogAction(action_id)
@@ -5144,7 +4716,7 @@ impl WorkbenchStore {
                     self.slot_role_overrides
                         .insert((pid, slot), KeycapRole::ActionKey);
                 }
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::AssignCustomText {
@@ -5186,7 +4758,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 self.slot_role_overrides
                     .insert((pid, slot), KeycapRole::ActionKey);
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::RenameSelectedLayer { name } => {
@@ -5195,7 +4767,7 @@ impl WorkbenchStore {
                 self.document_store
                     .update(|draft| draft.rename_layer(&lid, &name))
                     .map_err(WorkbenchError::Storage)?;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::DuplicateSelectedLayer { name } => {
@@ -5209,7 +4781,7 @@ impl WorkbenchStore {
                     })
                     .map_err(WorkbenchError::Storage)?;
                 self.selected_layer_id = Some(created);
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             InspectorAction::DeleteSelectedLayer => {
@@ -5227,25 +4799,37 @@ impl WorkbenchStore {
                     .profiles
                     .get(&pid)
                     .and_then(|p| p.layer_order.first().cloned());
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
         }
     }
 
     pub fn dispatch_editor_action(&mut self, action: EditorAction) -> Result<(), WorkbenchError> {
+        if matches!(
+            action,
+            EditorAction::OpenReconnectComparison { .. }
+                | EditorAction::ComparisonConfirmIdentity { .. }
+                | EditorAction::ComparisonResolve { .. }
+                | EditorAction::OpenApplyPreparation { .. }
+                | EditorAction::ApplyPrepareBackup { .. }
+                | EditorAction::ApplyTakePreparedCandidate { .. }
+                | EditorAction::LightingBeginPreview
+        ) {
+            self.require_awake()?;
+        }
         match action {
             EditorAction::CloseModal => {
                 self.lighting_preview_active = false;
                 self.lighting_preview_remaining_secs = 0;
                 self.active_modal = None;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::ApplyCancelPreview => {
                 self.document_store.cancel_apply_preview();
                 self.active_modal = None;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::OpenReconnectComparison {
@@ -5259,7 +4843,7 @@ impl WorkbenchStore {
                 self.active_modal = Some(EditorModalProjection::ReconnectComparison(
                     build_comparison_modal_projection(&cmp),
                 ));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::ComparisonConfirmIdentity { current_snapshot } => {
@@ -5274,7 +4858,7 @@ impl WorkbenchStore {
                 self.active_modal = Some(EditorModalProjection::ReconnectComparison(
                     build_comparison_modal_projection(&cmp),
                 ));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::ComparisonResolve {
@@ -5290,7 +4874,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 self.active_modal = None;
                 self.ensure_selected_profile_visible();
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::OpenApplyPreparation { current_snapshot } => {
@@ -5301,7 +4885,7 @@ impl WorkbenchStore {
                 self.active_modal = Some(EditorModalProjection::ApplyPreparation(
                     build_apply_modal_projection(&preview),
                 ));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::ApplyPrepareBackup { current_snapshot } => {
@@ -5323,7 +4907,7 @@ impl WorkbenchStore {
                 modal.unavailable_reason = prepared.unavailable_reason;
                 modal.error_message = None;
                 self.active_modal = Some(EditorModalProjection::ApplyPreparation(modal));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::ApplyTakePreparedCandidate { current_snapshot } => {
@@ -5343,7 +4927,7 @@ impl WorkbenchStore {
                 modal.candidate_operation_id = Some(candidate.operation_id().to_string());
                 modal.error_message = None;
                 self.active_modal = Some(EditorModalProjection::ApplyPreparation(modal));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             mutating_action => {
@@ -5411,28 +4995,28 @@ impl WorkbenchStore {
                     )
                 };
                 self.active_modal = Some(EditorModalProjection::MacroEditor(proj));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MacroSetName(name) => {
                 let mut modal = self.take_macro_modal()?;
                 modal.name = name;
                 self.active_modal = Some(EditorModalProjection::MacroEditor(modal));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MacroSetDraftKeyInput(key) => {
                 let mut modal = self.take_macro_modal()?;
                 modal.draft_key_input = key;
                 self.active_modal = Some(EditorModalProjection::MacroEditor(modal));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MacroSetDraftDelayMs(ms) => {
                 let mut modal = self.take_macro_modal()?;
                 modal.draft_delay_ms = ms;
                 self.active_modal = Some(EditorModalProjection::MacroEditor(modal));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MacroAppendEvent(event) => {
@@ -5442,7 +5026,7 @@ impl WorkbenchStore {
                 events.push(event);
                 let next = rebuild_macro_modal_with_events(modal, events);
                 self.active_modal = Some(EditorModalProjection::MacroEditor(next));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MacroAddTapKey { key, delay_ms } => {
@@ -5461,7 +5045,7 @@ impl WorkbenchStore {
                 });
                 let next = rebuild_macro_modal_with_events(modal, events);
                 self.active_modal = Some(EditorModalProjection::MacroEditor(next));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MacroRemoveStep(index) => {
@@ -5473,7 +5057,7 @@ impl WorkbenchStore {
                 }
                 let next = rebuild_macro_modal_with_events(modal, events);
                 self.active_modal = Some(EditorModalProjection::MacroEditor(next));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MacroMoveStep { from, to } => {
@@ -5486,14 +5070,14 @@ impl WorkbenchStore {
                 }
                 let next = rebuild_macro_modal_with_events(modal, events);
                 self.active_modal = Some(EditorModalProjection::MacroEditor(next));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MacroClearSteps => {
                 let modal = self.take_macro_modal()?;
                 let next = rebuild_macro_modal_with_events(modal, Vec::new());
                 self.active_modal = Some(EditorModalProjection::MacroEditor(next));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MacroSave {
@@ -5504,7 +5088,7 @@ impl WorkbenchStore {
                     let msg = "宏库已达 30 个上限".to_string();
                     modal.validation_error = Some(msg.clone());
                     self.active_modal = Some(EditorModalProjection::MacroEditor(modal));
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return Err(WorkbenchError::Storage(msg));
                 }
                 let events: Vec<MacroEvent> = modal.steps.iter().map(|s| s.event.clone()).collect();
@@ -5515,7 +5099,7 @@ impl WorkbenchStore {
                 if let Err(err) = local_macro.validate() {
                     modal.validation_error = Some(err.clone());
                     self.active_modal = Some(EditorModalProjection::MacroEditor(modal));
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return Err(WorkbenchError::Storage(err));
                 }
                 let action = Action {
@@ -5561,7 +5145,7 @@ impl WorkbenchStore {
                         .map_err(WorkbenchError::Storage)?;
                 }
                 self.active_modal = None;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MacroBindExisting { macro_id } => {
@@ -5574,7 +5158,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 self.slot_role_overrides
                     .insert((pid, slot), KeycapRole::ActionKey);
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MacroDelete { macro_id } => {
@@ -5587,20 +5171,20 @@ impl WorkbenchStore {
                 ) {
                     self.active_modal = None;
                 }
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::OpenLightingEditor => {
                 let proj = self.build_lighting_modal_projection(None)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::LightingSetApplyToAllLayers(all_layers) => {
                 self.lighting_apply_to_all_layers = all_layers;
                 let proj = self.build_lighting_modal_projection(None)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::LightingAddDefault => {
@@ -5611,7 +5195,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 let proj = self.build_lighting_modal_projection(None)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::LightingEditEffect {
@@ -5635,7 +5219,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 let proj = self.build_lighting_modal_projection(None)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::LightingEditBrightness {
@@ -5660,7 +5244,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 let proj = self.build_lighting_modal_projection(None)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::LightingEditSpeed {
@@ -5685,7 +5269,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 let proj = self.build_lighting_modal_projection(None)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::LightingEditMagic {
@@ -5710,7 +5294,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 let proj = self.build_lighting_modal_projection(None)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::LightingEditColorHex {
@@ -5735,7 +5319,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 let proj = self.build_lighting_modal_projection(None)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::LightingResetLayer => {
@@ -5763,7 +5347,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 let proj = self.build_lighting_modal_projection(None)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::LightingBeginPreview => {
@@ -5771,7 +5355,7 @@ impl WorkbenchStore {
                 self.lighting_preview_remaining_secs = 30;
                 let proj = self.build_lighting_modal_projection(None)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::LightingEndPreview => {
@@ -5779,27 +5363,27 @@ impl WorkbenchStore {
                 self.lighting_preview_remaining_secs = 0;
                 let proj = self.build_lighting_modal_projection(None)?;
                 self.active_modal = Some(EditorModalProjection::LightingEditor(proj));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::OpenMultiEditor { multi_id } => {
                 let proj = self.build_multi_modal_projection(multi_id)?;
                 self.active_modal = Some(EditorModalProjection::MultiEditor(proj));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MultiSetName(name) => {
                 let mut modal = self.take_multi_modal()?;
                 modal.name = name;
                 self.active_modal = Some(EditorModalProjection::MultiEditor(modal));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MultiSetTermMs(term_ms) => {
                 let mut modal = self.take_multi_modal()?;
                 modal.term_ms = term_ms;
                 self.active_modal = Some(EditorModalProjection::MultiEditor(modal));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MultiSetBranch { branch, target } => {
@@ -5815,7 +5399,7 @@ impl WorkbenchStore {
                     target_display_name: display_name,
                 };
                 self.active_modal = Some(EditorModalProjection::MultiEditor(modal));
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MultiSave {
@@ -5831,7 +5415,7 @@ impl WorkbenchStore {
                             Err(err) => {
                                 modal.validation_error = Some(err.to_string());
                                 self.active_modal = Some(EditorModalProjection::MultiEditor(modal));
-                                self.rebuild_projection();
+                                self.commit_runtime_update();
                                 return Err(err);
                             }
                         }
@@ -5848,7 +5432,7 @@ impl WorkbenchStore {
                 if let Err(err) = local_multi.validate() {
                     modal.validation_error = Some(err.clone());
                     self.active_modal = Some(EditorModalProjection::MultiEditor(modal));
-                    self.rebuild_projection();
+                    self.commit_runtime_update();
                     return Err(WorkbenchError::Storage(err));
                 }
                 let action = Action {
@@ -5910,7 +5494,7 @@ impl WorkbenchStore {
                         .map_err(WorkbenchError::Storage)?;
                 }
                 self.active_modal = None;
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MultiBindExisting { multi_id } => {
@@ -5923,7 +5507,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 self.slot_role_overrides
                     .insert((pid, slot), KeycapRole::ActionKey);
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             EditorAction::MultiDelete { multi_id } => {
@@ -5936,7 +5520,7 @@ impl WorkbenchStore {
                 ) {
                     self.active_modal = None;
                 }
-                self.rebuild_projection();
+                self.commit_runtime_update();
                 Ok(())
             }
             _ => Ok(()),
@@ -6197,18 +5781,19 @@ impl WorkbenchStore {
     }
 
     pub fn selected_keycap(&self, slot: u32) -> CodexKeycapId {
-        if let Some(pid) = &self.selected_profile_id {
-            if let Some(&override_id) = self.keycap_overrides.get(&(pid.clone(), slot)) {
-                return override_id;
-            }
+        self.projection_inputs().selected_keycap(slot)
+    }
+}
+
+impl Drop for WorkbenchStore {
+    fn drop(&mut self) {
+        self.hardware_event_tx.close();
+        if let Some(session) = &self.device_session {
+            session.disconnect();
         }
-        let doc = &self.document_store.draft.document;
-        let layer = self
-            .selected_layer_id
-            .as_ref()
-            .and_then(|lid| doc.editable.graph.layers.get(lid));
-        let (_, action_obj) = resolve_slot_action_info(doc, layer, slot);
-        CodexKeycapId::infer_for_slot(slot, action_obj)
+        if let Some(running) = &self.six_layer_running {
+            running.retire();
+        }
     }
 }
 
@@ -6546,6 +6131,12 @@ fn resolve_merged_bottom_slot(doc: &LocalDocumentV2, layer: Option<&LayerNode>) 
 
 fn resolve_silkscreen_icon(slot: u32, action: Option<&Action>) -> String {
     if let Some(a) = action {
+        if a.id == "ag-live-voice"
+            || a.id == "desktop-live-voice"
+            || a.payload.get("command").and_then(|v| v.as_str()) == Some("live-voice")
+        {
+            return "🎙".to_string();
+        }
         if a.payload.get("command").and_then(|v| v.as_str()) == Some("new-conversation-in-project")
         {
             return "＋".to_string();
@@ -6662,6 +6253,64 @@ fn fallback_unbridged_oai_action(
             command: "scroll-to-bottom".to_string(),
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+
+    fn automatic_host_startup_preserves_saved_v1_state_without_migrating() {
+        for active_agent in [None, Some(CanonicalAgent::DeepseekHarness)] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let seed = WorkbenchStore::open_isolated(temp.path()).unwrap();
+            let active_id = active_agent.and_then(|agent| seed.find_canonical_profile_id(agent));
+            fs::write(
+                temp.path().join("workbench.json"),
+                serde_json::to_vec(&seed.document_store.draft.document).unwrap(),
+            )
+            .unwrap();
+            let original = serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 1, "favorites": [],
+                "host_active_profile_id": active_id,
+                "host_execution_enabled": false, "command_execution_enabled": false,
+                "manual_override": false, "auto_follow_enabled": true
+            }))
+            .unwrap();
+            let path = temp.path().join("workbench.preferences.json");
+            fs::write(&path, &original).unwrap();
+            drop(seed);
+
+            let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+            let preserve_saved_host_state = store.document_store.has_saved_host_preferences();
+            assert!(preserve_saved_host_state);
+            let before = store.document_store.routing_state();
+            store.initialize_auto_host_ready(preserve_saved_host_state);
+
+            assert_eq!(store.document_store.routing_state(), before);
+            assert_eq!(store.active_host_profile_id(), active_id);
+            assert!(!store.manual_override);
+            assert!(!store.document_store.host_execution_enabled());
+            assert_eq!(fs::read(path).unwrap(), original);
+            assert!(!temp
+                .path()
+                .join("workbench.preferences.v1.backup.json")
+                .exists());
+        }
+    }
+
+    #[test]
+    fn automatic_host_startup_initializes_a_new_install() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+        store.initialize_auto_host_ready(false);
+        assert_eq!(
+            store.active_host_profile_id(),
+            store.find_canonical_profile_id(CanonicalAgent::Antigravity)
+        );
+        assert!(store.document_store.host_execution_enabled());
     }
 }
 
@@ -6820,7 +6469,6 @@ async fn run_automatic_hardware_acceptance(
     session: &DeviceSession,
     target: &mi_transport::HidCandidate,
     initial_lighting_json: &str,
-    document_dir: &Path,
 ) -> Option<HardwareAutoAcceptanceReceipt> {
     let identity = session.read_identity_info().await.ok()?;
     let _config = session.read_config_snapshot().await.ok()?;
@@ -6848,6 +6496,7 @@ async fn run_automatic_hardware_acceptance(
         status: "PASS".to_string(),
         session_id: session.id,
         backend: session.backend_name().to_string(),
+        exclusive_vendor: session.has_exclusive_vendor_link(),
         product: target.product.clone(),
         vid_pid: format!("{:04X}:{:04X}", target.vid, target.pid),
         device_path: target.path.clone(),
@@ -6868,13 +6517,293 @@ async fn run_automatic_hardware_acceptance(
             .map(|d| d.as_millis())
             .unwrap_or(0),
     };
-    if let Ok(bytes) = serde_json::to_vec_pretty(&receipt) {
-        let _ = fs::create_dir_all(document_dir);
-        let final_path = document_dir.join("hardware-auto-acceptance.json");
-        let tmp_path = document_dir.join("hardware-auto-acceptance.json.tmp");
-        if fs::write(&tmp_path, &bytes).is_ok() {
-            let _ = fs::rename(&tmp_path, &final_path);
-        }
-    }
     Some(receipt)
 }
+
+fn parse_iso8601_utc_ms(raw: &str) -> u64 {
+    let trimmed = raw.trim().strip_suffix('Z').unwrap_or(raw.trim());
+    let Some((date_part, time_part)) = trimmed.split_once('T') else {
+        return 0;
+    };
+    let mut date_it = date_part.split('-');
+    let (Some(y_s), Some(m_s), Some(d_s)) = (date_it.next(), date_it.next(), date_it.next()) else {
+        return 0;
+    };
+    let (Ok(mut y), Ok(m), Ok(d)) = (y_s.parse::<i64>(), m_s.parse::<i64>(), d_s.parse::<i64>())
+    else {
+        return 0;
+    };
+    let (hms_part, frac_part) = time_part.split_once('.').unwrap_or((time_part, ""));
+    let mut hms_it = hms_part.split(':');
+    let (Some(hh_s), Some(mm_s), Some(ss_s)) = (hms_it.next(), hms_it.next(), hms_it.next()) else {
+        return 0;
+    };
+    let (Ok(hh), Ok(mm), Ok(ss)) = (
+        hh_s.parse::<u64>(),
+        mm_s.parse::<u64>(),
+        ss_s.parse::<u64>(),
+    ) else {
+        return 0;
+    };
+    let mut frac_ms = 0u64;
+    for (idx, ch) in frac_part.chars().take(3).enumerate() {
+        if let Some(digit) = ch.to_digit(10) {
+            let weight = match idx {
+                0 => 100,
+                1 => 10,
+                _ => 1,
+            };
+            frac_ms += u64::from(digit) * weight;
+        }
+    }
+    if m <= 2 {
+        y -= 1;
+    }
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let mp = (if m > 2 { m - 3 } else { m + 9 }) as u64;
+    let doy = (153 * mp + 2) / 5 + (d as u64) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + (doe as i64) - 719468;
+    if days < 0 {
+        return 0;
+    }
+    (days as u64) * 86_400_000 + (hh * 3600 + mm * 60 + ss) * 1000 + frac_ms
+}
+
+fn find_freshest_antigravity_hub() -> Option<(u16, String)> {
+    let home = env::var_os("HOME").map(PathBuf::from)?;
+    let daemon_dir = home.join(".gemini/antigravity/daemon");
+    let entries = fs::read_dir(daemon_dir).ok()?;
+    let mut hubs: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_str()?;
+            if !name.starts_with("hub_") || !name.ends_with(".json") {
+                return None;
+            }
+            let modified = e.metadata().ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect();
+    hubs.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in hubs {
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(val) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let Some(port_u64) = val.get("httpPort").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Ok(port) = u16::try_from(port_u64) else {
+            continue;
+        };
+        let Some(csrf) = val
+            .get("csrfToken")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        return Some((port, csrf.to_string()));
+    }
+    None
+}
+
+fn poll_antigravity_daemon_candidates(
+    seen_running_ids: &mut BTreeSet<String>,
+    completed_transition_watermarks: &mut BTreeMap<String, String>,
+) -> Option<Vec<FourAppLiveCandidate>> {
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+
+    let (port, csrf) = find_freshest_antigravity_hub()?;
+    let body = b"{\"metadata\":{}}";
+    let request = format!(
+        "POST /exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories HTTP/1.0\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         Content-Type: application/json\r\n\
+         Connect-Protocol-Version: 1\r\n\
+         x-codeium-csrf-token: {csrf}\r\n\
+         Connection: close\r\n\
+         Content-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(2000)).ok()?;
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(2000)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(6000)));
+    stream.write_all(request.as_bytes()).ok()?;
+    stream.write_all(body).ok()?;
+    let mut raw_resp = Vec::with_capacity(65536);
+    stream.read_to_end(&mut raw_resp).ok()?;
+    let sep = b"\r\n\r\n";
+    let body_start = raw_resp
+        .windows(sep.len())
+        .position(|w| w == sep)
+        .map(|pos| pos + sep.len())?;
+    let parsed: Value = serde_json::from_slice(&raw_resp[body_start..]).ok()?;
+    let summaries = parsed.get("trajectorySummaries")?.as_object()?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let mut candidates = Vec::new();
+    for (cid, item) in summaries {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let ann = obj.get("annotations").and_then(Value::as_object);
+        let meta = obj.get("trajectoryMetadata").and_then(Value::as_object);
+        if ann
+            .and_then(|a| a.get("antigravity.isSubagent"))
+            .and_then(Value::as_str)
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+        {
+            continue;
+        }
+        if let Some(m) = meta {
+            if m.get("parentConversationId")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty())
+                || m.get("subagentSpec").is_some()
+                || m.get("nestingDepth")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|d| d > 0)
+            {
+                continue;
+            }
+        }
+        let summary_str = obj
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let title_str = ann
+            .and_then(|a| a.get("title"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let has_user_input = obj
+            .get("lastUserInputTime")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        if summary_str.is_empty() && title_str.is_empty() && !has_user_input {
+            continue;
+        }
+        let title = if !summary_str.is_empty() {
+            summary_str.to_string()
+        } else if !title_str.is_empty() {
+            title_str.to_string()
+        } else {
+            cid.chars().take(8).collect()
+        };
+
+        let workspace_path = obj
+            .get("workspaces")
+            .and_then(Value::as_array)
+            .or_else(|| {
+                meta.and_then(|m| m.get("workspaces"))
+                    .and_then(Value::as_array)
+            })
+            .and_then(|arr| arr.first())
+            .and_then(Value::as_object)
+            .and_then(|w| {
+                w.get("workspaceFolderAbsolutePath")
+                    .and_then(Value::as_str)
+                    .or_else(|| w.get("workspaceFolderAbsoluteUri").and_then(Value::as_str))
+            })
+            .map(|u| u.strip_prefix("file://").unwrap_or(u).to_string())
+            .unwrap_or_else(|| "/".to_string());
+
+        let status_str = obj
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("CASCADE_RUN_STATUS_IDLE");
+        let last_mod_str = obj
+            .get("lastModifiedTime")
+            .and_then(Value::as_str)
+            .or_else(|| obj.get("createdTime").and_then(Value::as_str))
+            .unwrap_or_default();
+        let view_str = ann
+            .and_then(|a| a.get("lastUserViewTime"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let term_str = obj
+            .get("latestExecutorTerminationReason")
+            .and_then(Value::as_str)
+            .or_else(|| obj.get("terminationReason").and_then(Value::as_str))
+            .unwrap_or_default();
+
+        let last_modified_ms = parse_iso8601_utc_ms(last_mod_str);
+        let raw_view_ms = parse_iso8601_utc_ms(view_str);
+        let watermark = format!("{status_str}:{last_mod_str}:{term_str}");
+
+        let (phase, effective_view_ms) = match status_str {
+            "CASCADE_RUN_STATUS_WAITING_FOR_USER_INPUT"
+            | "CASCADE_RUN_STATUS_WAITING_FOR_PERMISSION" => {
+                seen_running_ids.insert(cid.clone());
+                (FourAppSessionKind::NeedsAttention, raw_view_ms)
+            }
+            "CASCADE_RUN_STATUS_RUNNING"
+            | "CASCADE_RUN_STATUS_WAITING_FOR_MODEL"
+            | "CASCADE_RUN_STATUS_CANCELING" => {
+                seen_running_ids.insert(cid.clone());
+                (FourAppSessionKind::Working, raw_view_ms)
+            }
+            "CASCADE_RUN_STATUS_ERROR" | "CASCADE_RUN_STATUS_FAILED" => {
+                seen_running_ids.remove(cid);
+                (FourAppSessionKind::Error, raw_view_ms)
+            }
+            _ => {
+                if seen_running_ids.remove(cid) {
+                    completed_transition_watermarks.insert(cid.clone(), watermark.clone());
+                }
+                let just_transitioned =
+                    completed_transition_watermarks.get(cid) == Some(&watermark);
+                let has_unviewed = last_modified_ms > raw_view_ms.saturating_add(500);
+                let is_recent = now_ms.saturating_sub(last_modified_ms) <= 15 * 60 * 1000;
+                let term_completed = term_str.ends_with("NO_TOOL_CALL")
+                    || term_str == "COMPLETED"
+                    || just_transitioned;
+                if term_completed && ((has_unviewed && is_recent) || just_transitioned) {
+                    let adj_view_ms = if has_unviewed {
+                        raw_view_ms
+                    } else {
+                        last_modified_ms.saturating_sub(1000)
+                    };
+                    (FourAppSessionKind::BlueDotCompleted, adj_view_ms)
+                } else {
+                    (FourAppSessionKind::Idle, raw_view_ms)
+                }
+            }
+        };
+
+        candidates.push(FourAppLiveCandidate {
+            place: NavigationPlace::antigravity(cid.clone(), workspace_path),
+            title,
+            phase,
+            watermark,
+            last_modified_ms,
+            last_user_view_ms: effective_view_ms,
+            updated_at_ms: last_modified_ms.max(effective_view_ms),
+        });
+    }
+
+    candidates.sort_by(|a, b| {
+        a.phase
+            .cmp(&b.phase)
+            .then_with(|| b.last_modified_ms.cmp(&a.last_modified_ms))
+            .then_with(|| a.place.target_id().cmp(&b.place.target_id()))
+    });
+    candidates.truncate(24);
+    Some(candidates)
+}
+
+#[cfg(test)]
+#[path = "runtime_consistency_tests.rs"]
+mod runtime_consistency_tests;

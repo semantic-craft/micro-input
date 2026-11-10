@@ -10,6 +10,7 @@ touch target/.metadata_never_index 2>/dev/null || true
 bundle=target/MicroInput.app
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 swift scripts/generate-app-icon.swift
+swift scripts/verify-app-icon.swift target/AppIcon.iconset
 iconutil -c icns target/AppIcon.iconset -o "$bundle/Contents/Resources/AppIcon.icns"
 cp app/MicroInput/.build/debug/MicroInput "$bundle/Contents/MacOS/MicroInput"
 cp app/MicroInput/Info.plist "$bundle/Contents/Info.plist"

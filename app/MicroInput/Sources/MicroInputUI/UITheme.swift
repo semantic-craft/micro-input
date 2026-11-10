@@ -10,22 +10,22 @@ public enum UITheme {
         })
     }
 
-    public static let accent = adaptive(light: (54, 82, 109), dark: (106, 147, 184))
+    public static let accent = adaptive(light: (98, 87, 130), dark: (181, 169, 212))
     public static let accentSoft = accent.opacity(0.11)
     public static let accentBorder = accent.opacity(0.38)
 
-    public static let pageBackground = adaptive(light: (242, 239, 233), dark: (24, 23, 22))
-    public static let surface = adaptive(light: (250, 248, 245), dark: (32, 30, 28))
-    public static let subtleSurface = adaptive(light: (243, 239, 234), dark: (40, 37, 34))
-    public static let mutedSurface = adaptive(light: (234, 228, 220), dark: (50, 46, 42))
-    public static let border = adaptive(light: (228, 222, 213), dark: (58, 54, 49))
-    public static let strongBorder = adaptive(light: (210, 201, 189), dark: (76, 70, 63))
+    public static let pageBackground = adaptive(light: (255, 255, 255), dark: (27, 26, 25))
+    public static let surface = adaptive(light: (255, 255, 255), dark: (32, 30, 28))
+    public static let subtleSurface = adaptive(light: (248, 247, 244), dark: (35, 33, 31))
+    public static let mutedSurface = adaptive(light: (238, 235, 230), dark: (45, 42, 39))
+    public static let border = adaptive(light: (226, 223, 218), dark: (60, 56, 52))
+    public static let strongBorder = adaptive(light: (205, 200, 192), dark: (83, 77, 70))
 
-    public static let textPrimary = adaptive(light: (36, 34, 32), dark: (237, 232, 225))
-    public static let textSecondary = adaptive(light: (110, 104, 97), dark: (168, 160, 150))
-    public static let textMuted = adaptive(light: (148, 140, 130), dark: (125, 118, 109))
+    public static let textPrimary = adaptive(light: (41, 39, 35), dark: (239, 235, 229))
+    public static let textSecondary = adaptive(light: (105, 100, 93), dark: (183, 176, 166))
+    public static let textMuted = adaptive(light: (112, 106, 98), dark: (169, 162, 152))
 
-    public static let caution = adaptive(light: (140, 74, 62), dark: (201, 122, 107))
+    public static let caution = textSecondary
     public static let cautionSoft = caution.opacity(0.10)
 
     public static let title = Typography.title
@@ -35,20 +35,39 @@ public enum UITheme {
     public static let bodySemibold = Typography.bodySemibold
     public static let caption = Typography.caption
     public static let captionMedium = Typography.captionMedium
-    public static let micro = Font.system(size: 10.5, weight: .medium)
+    public static let micro = Typography.captionMedium
     public static let monoBadge = Typography.mono
     public static let cardCornerRadius: CGFloat = Radius.panelOuter
     public static let controlCornerRadius: CGFloat = Radius.itemInner
 
     public enum Typography {
-        public static let title = Font.system(size: 20, weight: .semibold)
-        public static let heading = Font.system(size: 15, weight: .semibold)
-        public static let body = Font.system(size: 13, weight: .regular)
-        public static let bodyMedium = Font.system(size: 13, weight: .medium)
-        public static let bodySemibold = Font.system(size: 13, weight: .semibold)
-        public static let caption = Font.system(size: 11, weight: .regular)
-        public static let captionMedium = Font.system(size: 11, weight: .medium)
-        public static let mono = Font.system(size: 11, weight: .regular, design: .monospaced)
+        public static let title = Font.system(size: 28, weight: .semibold)
+        public static let heading = Font.system(size: 20, weight: .semibold)
+        public static let body = Font.system(size: 14, weight: .regular)
+        public static let bodyMedium = Font.system(size: 14, weight: .medium)
+        public static let bodySemibold = Font.system(size: 14, weight: .semibold)
+        public static let caption = Font.system(size: 13, weight: .regular)
+        public static let captionMedium = Font.system(size: 13, weight: .medium)
+        public static let mono = Font.system(size: 13, weight: .regular, design: .monospaced)
+    }
+
+    public enum Spacing {
+        public static let tight: CGFloat = 4
+        public static let related: CGFloat = 8
+        public static let control: CGFloat = 12
+        public static let content: CGFloat = 16
+        public static let group: CGFloat = 24
+        public static let section: CGFloat = 32
+        public static let page: CGFloat = 48
+    }
+
+    public enum Layout {
+        public static let sidebarWidth: CGFloat = 220
+        public static let contentMaxWidth: CGFloat = 880
+        public static let pagePadding: CGFloat = Spacing.section
+        public static let sectionGap: CGFloat = Spacing.section
+        public static let sidebarRowHeight: CGFloat = 36
+        public static let sidebarInset: CGFloat = Spacing.control
     }
 
     public enum Radius {
@@ -56,8 +75,8 @@ public enum UITheme {
         public static let chassisPadding: CGFloat = 12
         public static let keycapInner: CGFloat = 8
 
-        public static let panelOuter: CGFloat = 14
-        public static let panelPadding: CGFloat = 6
+        public static let panelOuter: CGFloat = 12
+        public static let panelPadding: CGFloat = 4
         public static let itemInner: CGFloat = 8
 
         public static let segmentedOuter: CGFloat = 9
@@ -149,7 +168,9 @@ public struct DesktopAgent: Identifiable {
     public static func displayName(_ name: String) -> String {
         switch name {
         case "DeepSeek Coder (DSH)", "DSH", "DeepSeek Harness":
-            return "Deepseek Harness"
+            return "DeepSeek Harness"
+        case "Cindy · Micro Input":
+            return "Cindy"
         default:
             return name
         }

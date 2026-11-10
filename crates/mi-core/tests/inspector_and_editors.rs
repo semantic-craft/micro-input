@@ -180,6 +180,24 @@ fn role_switching_keycap_catalog_and_apple_fn_shortcut_recording() {
         .expect("select middle row slot 6");
     let editable = store.projection().inspector.editable().unwrap();
     assert!(!editable.supports_task_role);
+    assert_eq!(
+        editable.bound_action_id.as_deref(),
+        Some("desktop-live-voice")
+    );
+    assert_eq!(
+        editable.selected_keycap,
+        CodexKeycapId::Party,
+        "Antigravity slot 6 (Gemini Live 实时语音) must infer Party (5-bar voice waveform) keycap instead of Term"
+    );
+    let cell6 = store
+        .projection()
+        .canvas
+        .keycap_cells
+        .iter()
+        .find(|c| c.primary_slot == 6)
+        .expect("cell 6 on canvas");
+    assert_eq!(cell6.keycap_id, "Party");
+    assert_eq!(cell6.concise_caption, "实时语音");
     let role_err = store
         .dispatch_inspector_action(InspectorAction::SetSlotRole(KeycapRole::TaskKey))
         .expect_err("slot 6 must reject TaskKey role");

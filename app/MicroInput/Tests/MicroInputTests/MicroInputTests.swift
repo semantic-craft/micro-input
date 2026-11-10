@@ -28,6 +28,18 @@ final class MicroInputTests: XCTestCase {
         XCTAssertTrue(cindyRow.isProtectedOai)
         store.dispatch("sidebar", ["SelectProfile": cindyRow.profileId])
         XCTAssertEqual(store.model.selectedDisplayName, "Cindy")
+
+        let localCodex = try XCTUnwrap(store.model.sidebarRows.first(where: { $0.displayName == "Codex" }))
+        XCTAssertFalse(localCodex.isProtectedOai)
+        store.dispatch("sidebar", ["SelectProfile": localCodex.profileId])
+        XCTAssertEqual(store.model.selectedDisplayName, "Codex")
+        XCTAssertFalse(store.model.isProtectedLayer)
+
+        store.dispatch("sidebar", ["SetShowOtherProfiles": true])
+        let codexRow = try XCTUnwrap(store.model.sidebarRows.first(where: { $0.rawName == "Codex" }))
+        XCTAssertTrue(codexRow.isProtectedOai)
+        store.dispatch("sidebar", ["SelectProfile": codexRow.profileId])
+        XCTAssertEqual(store.model.selectedDisplayName, codexRow.displayName)
         XCTAssertTrue(store.model.isProtectedLayer)
         XCTAssertEqual(store.model.protectedLock?.isLocked, true)
 
@@ -210,46 +222,130 @@ final class MicroInputTests: XCTestCase {
     }
 
     @MainActor
-    func testFourHardwareProfileSlotsDefaultCycleAndReassign() throws {
-        let dir = try makeIsolatedTempDir("hw-slots")
+    func testSixBoardLayersPreviewAndReassignWithoutActivation() throws {
+        let dir = try makeIsolatedTempDir("board-layers")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = CoreStore(isolatedDirectory: dir.path)
+        let active = store.sidebar.activeHostProfileId
+        XCTAssertEqual(store.sidebar.boardLayers.layers.count, 6)
+        XCTAssertEqual(store.sidebar.boardLayers.layers.map(\.displayName), ["Codex", "Antigravity", "DeepSeek Coder (DSH)", "Cindy · Micro Input", "未分配", "未分配"])
+        XCTAssertEqual(store.sidebar.boardLayers.layers[0].owner, "Codex")
+        XCTAssertEqual(store.sidebar.boardLayers.layers[3].owner, "MicroInput")
+        for (layer, leds) in [(4, [true,true,false]), (5, [false,true,true]), (6, [true,true,true])] {
+            store.dispatch("sidebar", ["PreviewBoardLayer": layer])
+            XCTAssertEqual(store.canvas.boardPreviewLayer, layer)
+            XCTAssertEqual(store.canvas.touchLedStates, leds)
+            XCTAssertEqual(store.sidebar.activeHostProfileId, active)
+            XCTAssertNil(store.sidebar.boardLayers.observedLayer)
+        }
+        let native = try XCTUnwrap(store.sidebar.boardLayers.profileChoices.first(where: { $0.displayName == "Cindy" }))
+        store.dispatch("sidebar", ["SetBoardLayerProfile": ["layer": 5, "profile_id": native.profileId]])
+        XCTAssertEqual(store.sidebar.boardLayers.layers[4].owner, "Cindy")
+        XCTAssertTrue(store.sidebar.boardLayers.layers[4].assignmentIssue?.contains("原生") == true)
+        store.dispatch("sidebar", ["SetBoardLayerProfile": ["layer": 5, "profile_id": NSNull()]])
+        XCTAssertNil(store.sidebar.boardLayers.layers[4].profileId)
+        store.dispatch("sidebar", "ResetBoardLayerPlan")
+        XCTAssertNil(store.sidebar.boardLayers.layers[5].profileId)
+        XCTAssertEqual(store.sidebar.activeHostProfileId, active)
+        store.dispatch("sidebar", "ProvisionBoardLayers")
+        XCTAssertNil(store.sidebar.boardLayers.observedLayer)
+        XCTAssertFalse(store.sidebar.boardLayers.applyBlockReason.isEmpty)
+    }
+
+    @MainActor
+    func testAntigravityIdleBlueAndInProgressLightingConfig() throws {
+        let dir = try makeIsolatedTempDir("lighting-ag")
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let store = CoreStore(isolatedDirectory: dir.path)
-        XCTAssertEqual(store.sidebar.hardwareSlots.count, 4)
-        XCTAssertEqual(store.sidebar.hardwareSlots[0].displayName, "Antigravity")
-        XCTAssertEqual(store.sidebar.hardwareSlots[1].displayName, "Antigravity")
-        XCTAssertEqual(store.sidebar.hardwareSlots[2].displayName, "Codex")
-        XCTAssertEqual(store.sidebar.hardwareSlots[3].displayName, "Deepseek Harness")
-        XCTAssertEqual(store.sidebar.activeHardwareSlot, 0)
-
-        store.dispatch("canvas", "CycleTouchProfileSlot")
-        XCTAssertEqual(store.sidebar.activeHardwareSlot, 1)
         XCTAssertEqual(store.sidebar.selectedDisplayName, "Antigravity")
-        XCTAssertEqual(store.canvas.touchLedStates, [true, false, false])
+        XCTAssertTrue(store.sessionStrip.simpleLighting.lightingEnabled)
+        XCTAssertTrue(store.sessionStrip.simpleLighting.autoSessionColor)
+        XCTAssertTrue(store.sessionStrip.simpleLighting.glowOnWorking)
+        XCTAssertEqual(store.sessionStrip.simpleLighting.ambientColor, "OceanBlue")
+        XCTAssertEqual(store.sessionStrip.simpleLighting.workingColor, "EmeraldGreen")
 
-        store.dispatch("canvas", "CycleTouchProfileSlot")
-        XCTAssertEqual(store.sidebar.activeHardwareSlot, 2)
-        XCTAssertEqual(store.sidebar.selectedDisplayName, "Codex")
-        XCTAssertEqual(store.canvas.touchLedStates, [false, true, false])
+        store.dispatch("session_strip", ["TriggerTestLighting": "completed"])
+        XCTAssertEqual(store.sessionStrip.simpleLighting.manualPreviewPhase, "completed")
+        XCTAssertEqual(store.canvas.underglowHex, "#0088FF")
 
-        store.dispatch("canvas", "CycleTouchProfileSlot")
-        XCTAssertEqual(store.sidebar.activeHardwareSlot, 3)
-        XCTAssertEqual(store.sidebar.selectedDisplayName, "Deepseek Harness")
-        XCTAssertEqual(store.canvas.touchLedStates, [false, false, true])
+        store.dispatch("session_strip", ["TriggerTestLighting": "thinking"])
+        XCTAssertEqual(store.sessionStrip.simpleLighting.manualPreviewPhase, "thinking")
+        XCTAssertEqual(store.canvas.underglowHex, "#00FF66")
 
-        let herdrRow = try XCTUnwrap(store.sidebar.sidebarRows.first(where: { $0.rawName == "Herdr" }))
-        store.dispatch("sidebar", [
-            "SetHardwareSlotProfile": [
-                "slot_index": 3,
-                "profile_id": herdrRow.profileId
-            ]
+        store.dispatch("session_strip", ["SetWorkingColor": "AmberGold"])
+        XCTAssertEqual(store.sessionStrip.simpleLighting.workingColor, "AmberGold")
+        XCTAssertEqual(store.canvas.underglowHex, "#FFAA00")
+
+        store.dispatch("session_strip", ["TriggerTestLighting": NSNull()])
+        XCTAssertNil(store.sessionStrip.simpleLighting.manualPreviewPhase)
+    }
+
+    @MainActor
+    func testSidebarProfileAndSurfaceSwitchDistinctnessAndSearchFocusIsolation() throws {
+        let dir = try makeIsolatedTempDir("distinct-switch")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        var seenCanvasProfiles = Set<String>()
+        var seenInspectorIdentities = Set<String>()
+
+        for row in store.sidebar.sidebarRows {
+            store.dispatch("sidebar", ["SelectProfile": row.profileId])
+            XCTAssertEqual(store.sidebar.selectedProfileId, row.profileId)
+            XCTAssertEqual(store.canvas.selectedProfileId, row.profileId)
+            XCTAssertEqual(store.canvas.selectedDisplayName, row.displayName)
+            XCTAssertEqual(store.inspector.selectedProfileId, row.profileId)
+            XCTAssertEqual(store.inspector.selectedDisplayName, row.displayName)
+            seenCanvasProfiles.insert("\(store.canvas.selectedProfileId ?? ""):\(store.canvas.selectedDisplayName)")
+            let lockOwner = store.inspector.protectedLock?.ownerClientName ?? "editable"
+            seenInspectorIdentities.insert("\(store.inspector.selectedProfileId ?? ""):\(store.inspector.selectedDisplayName):\(lockOwner)")
+        }
+        XCTAssertEqual(seenCanvasProfiles.count, store.sidebar.sidebarRows.count)
+        XCTAssertEqual(seenInspectorIdentities.count, store.sidebar.sidebarRows.count)
+
+        let agRow = try XCTUnwrap(store.sidebar.sidebarRows.first(where: { $0.rawName == "Antigravity" }))
+        store.dispatch("sidebar", ["SelectProfile": agRow.profileId])
+
+        for (surface, expectedSlot) in [("EncoderCcw", 13), ("EncoderCw", 14), ("EncoderPress", 15)] {
+            store.dispatch("canvas", ["SelectSurface": surface])
+            XCTAssertEqual(store.canvas.selectedSurface, surface)
+            XCTAssertEqual(store.inspector.selectedSurface, surface)
+            XCTAssertEqual(store.inspector.selectedLogicalSlot, expectedSlot)
+        }
+
+        for (dirName, expectedSlot) in [("North", 16), ("South", 17), ("West", 18), ("East", 19)] {
+            store.dispatch("canvas", ["SelectJoystickDirection": dirName])
+            XCTAssertEqual(store.canvas.selectedSurface, "Joystick")
+            XCTAssertEqual(store.canvas.selectedJoystickDirection, dirName)
+            XCTAssertEqual(store.inspector.selectedJoystickDirection, dirName)
+            XCTAssertEqual(store.inspector.selectedLogicalSlot, expectedSlot)
+        }
+
+        store.dispatch("canvas", ["SelectLogicalSlot": 6])
+        store.dispatch("inspector", ["SetActionSearchQuery": "保存文件"])
+        XCTAssertEqual(store.inspector.selectedLogicalSlot, 6)
+        XCTAssertEqual(store.inspector.editableInspector?.actionSearchQuery, "保存文件")
+        let firstAction = try XCTUnwrap(store.inspector.editableInspector?.filteredActions.first)
+
+        // Simulate a physical key press on AG00 while inspector search is active:
+        // must not hijack selectedSurface / selectedLogicalSlot or wipe actionSearchQuery.
+        store.dispatch("device", [
+            "SimulateKeyPress": ["binding_id": "AG00"]
         ])
-        XCTAssertEqual(store.sidebar.hardwareSlots[3].displayName, "Herdr")
-        XCTAssertEqual(store.sidebar.selectedDisplayName, "Herdr")
+        XCTAssertEqual(store.inspector.selectedLogicalSlot, 6)
+        XCTAssertEqual(store.inspector.selectedSurface, "Key6")
+        XCTAssertEqual(store.inspector.editableInspector?.actionSearchQuery, "保存文件")
 
-        store.dispatch("sidebar", "ResetHardwareSlotsToDefault")
-        XCTAssertEqual(store.sidebar.hardwareSlots[3].displayName, "Deepseek Harness")
-        XCTAssertEqual(store.sidebar.activeHardwareSlot, 0)
-        XCTAssertEqual(store.sidebar.selectedDisplayName, "Antigravity")
+        store.dispatch("inspector", ["AssignCatalogAction": firstAction.actionId])
+        XCTAssertEqual(store.inspector.editableInspector?.boundActionId, firstAction.actionId)
+
+        // Once search query is cleared, physical key press on AG00 does follow to Key0 (slot 0).
+        store.dispatch("inspector", ["SetActionSearchQuery": ""])
+        store.dispatch("device", [
+            "SimulateKeyPress": ["binding_id": "AG00"]
+        ])
+        XCTAssertEqual(store.inspector.selectedLogicalSlot, 0)
+        XCTAssertEqual(store.inspector.selectedSurface, "Key0")
     }
 }

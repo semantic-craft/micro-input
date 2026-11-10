@@ -64,6 +64,14 @@
 
 上述为主要序列化字段，不是包含全部 layout、灯效值域和型号分支的完整 schema。
 
+### 六层隔离的补充证据
+
+固件 0.6.3 的内置 Codex 布局是前六个矩阵键 `KV_OAI_AG00` 至 `AG05`，后七个为 `KV_OAI_ACT06` 至 `ACT12`，旋钮为 `ENC_CC/ENC_CW/ENC_CLK`，摇杆为 `VENDOR`。不能把它重建为十三个 `ACT` 键。六层编译器识别唯一完整原生布局并保留其原字节，另外三层用普通键码，第五、六层用 `KC_NONE`。
+
+普通摇杆动作使用 `RADIAL` 和 `sectors: [{k, a1, a2}]`，不是 `KEY`。Input 1.1.0 的界面以一圈为 1，向右为 0、向下为 .25、向左为 .5、向上为 .75；跨零区间有效。四向区间分别为 N `.625→.875`、W `.375→.625`、S `.125→.375`、E `.875→.125`。这是序列化和界面坐标证据，实体方向与动作触发时机仍需实测。
+
+定位依据为固件默认 JSON `0x012598` 与原生布局 `0x012f24`；Input 资源 `device_config_data-D1iqtQNe.js` 的类型和扇区模型，以及 `smart_action-CXGxoOrO.js` 的扇区绘制、命中逻辑。后者 SHA-256 为 `ed18815dfd5b358585512df40e2f516d5d5edf1e2ebaa6e050217ad5c09c60c1`，本地原件与定位记录在 `.scratch/input-study/six-layer-joystick-20261110/`。仅提取结构与行为，没有在产品中加载原厂代码。
+
 ## RGB 静态参数规则
 
 Input 1.1.0 的两区为 backlight/underglow；effect 为 off、solid、snake、rainbow、breath、gradient。brightness/speed/magic 在 UI 为0–100，协议表示为0–1；color 为24位RGB整数（例如 #123456 → 1193046）。对应 IA-17（M:2015–2083、2867–2891），效果枚举 K:5358–5366；本机补充研究为 `.scratch/input-study/rea-s3-rgb-20261103/implementation-plan.md`。

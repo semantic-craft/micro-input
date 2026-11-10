@@ -122,7 +122,7 @@ class LiveHub:
             raise RuntimeError("antigravity_hub_not_found")
         hub = json.loads(candidates[0].read_text(encoding="utf-8"))
         version = str(hub.get("lsVersion", ""))
-        if version != PINNED_LS_VERSION:
+        if version != PINNED_LS_VERSION and not version.startswith("2.29."):
             raise RuntimeError(f"antigravity_hub_version_changed:{version}")
         port = hub.get("httpPort")
         token = hub.get("csrfToken")

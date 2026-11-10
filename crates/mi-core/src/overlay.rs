@@ -62,7 +62,6 @@ pub enum ActiveHudContent {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct HostOverlayProjection {
-    pub main_workbench_window_active: bool,
     pub content: ActiveHudContent,
     pub panel_spec: Option<PassivePanelFrameSpec>,
 }
@@ -205,12 +204,10 @@ impl OverlayController {
     pub fn project(&self, screen: &ScreenGeometry, cursor: ScreenPoint) -> HostOverlayProjection {
         match &self.visibility {
             HudVisibilityState::Hidden => HostOverlayProjection {
-                main_workbench_window_active: self.main_workbench_window_active,
                 content: ActiveHudContent::Hidden,
                 panel_spec: None,
             },
             HudVisibilityState::SuppressedByActiveWorkbench => HostOverlayProjection {
-                main_workbench_window_active: self.main_workbench_window_active,
                 content: ActiveHudContent::SuppressedByActiveWorkbench,
                 panel_spec: None,
             },
@@ -221,13 +218,11 @@ impl OverlayController {
             } => {
                 if self.main_workbench_window_active {
                     HostOverlayProjection {
-                        main_workbench_window_active: true,
                         content: ActiveHudContent::SuppressedByActiveWorkbench,
                         panel_spec: None,
                     }
                 } else {
                     HostOverlayProjection {
-                        main_workbench_window_active: false,
                         content: ActiveHudContent::PassiveToast {
                             profile_name: profile_name.clone(),
                             mode_summary: mode_summary.clone(),
@@ -237,7 +232,6 @@ impl OverlayController {
                 }
             }
             HudVisibilityState::InteractiveCheatSheet { projection, .. } => HostOverlayProjection {
-                main_workbench_window_active: self.main_workbench_window_active,
                 content: ActiveHudContent::InteractiveCheatSheet(projection.clone()),
                 panel_spec: Some(PassivePanelFrameSpec::for_cheat_sheet(cursor, screen)),
             },
