@@ -2145,13 +2145,17 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                         Err(err) => make_receipt("failed", err),
                     }
                 } else {
-                    if let Some(bundle_id) = bundle_id_for_adapter(adapter) {
-                        let _ = self.driver.open_application(bundle_id);
-                    }
-                    make_receipt("executed", desc.detail)
+                    let reason = if adapter == "four-app" && command.starts_with("slot-open:") {
+                        "session_navigation_unavailable"
+                    } else {
+                        "unsupported_agent_command"
+                    };
+                    make_receipt("blocked", reason.into())
                 }
             }
-            ResolvedHostAction::FocusSession { .. } => make_receipt("executed", desc.detail),
+            ResolvedHostAction::FocusSession { .. } => {
+                make_receipt("blocked", "session_navigation_unavailable".into())
+            }
             ResolvedHostAction::MacroSequence { events } => {
                 if !self.driver.is_accessibility_trusted() {
                     return make_receipt("blocked", "accessibility_untrusted".to_string());

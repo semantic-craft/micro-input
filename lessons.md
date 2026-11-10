@@ -299,3 +299,10 @@
 
 - 完整会话标题不能放入固定高度键帽后强制不限高度换行。键帽显示编号与短状态，完整标题由自然高度列表承载。
 - 布局验收必须覆盖真实投影格式、长中英文标题与所有状态。`SessionKeycapLayoutTests` 已覆盖内容区高度、全文行高及 JSON null 空槽；仍需在原生运行界面检查对应关系。
+
+## 过期按键与连接失效分别处理
+
+- 起因与后果：六层输入排队后还需核验 Cindy 所有权。实机观察到一次事件核验前已等待 1617 毫秒，核验另用 1156 毫秒；超过两秒有效期后，原实现永久停用整个接收器，后续新按键也没有反应。
+- 修复：`Activation::is_expired_at` 统一有效期，接收与执行阶段只淘汰过期事件。所有权拒绝、断连、代次终止及溢出继续停止执行。
+- 验证点：`expired_clicks_do_not_disable_new_clicks`、`reads_preserve_fresh_clicks_after_an_expired_prefix` 和 `a_click_expiring_during_ownership_check_does_not_stop_fresh_clicks`。必须证明旧动作没有执行，同一代次的后续新动作仍会执行。Seen 1x（2026-11-10）。
+- 同轮发现：底层执行器不支持的会话导航曾返回成功而无系统动作。`unsupported_` 回归以真实执行器和记录型系统驱动验证明确拒绝，并用受支持的聚焦输入动作作正对照。明确拒绝不代表导航能力已实现。

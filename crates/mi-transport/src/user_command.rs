@@ -56,6 +56,12 @@ pub struct Activation {
     pub received_at: Instant,
 }
 
+impl Activation {
+    pub fn is_expired_at(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.received_at) > MAX_AGE
+    }
+}
+
 #[derive(Default)]
 struct Queue {
     armed: bool,
@@ -214,15 +220,13 @@ impl UserCommandReceiver {
         if let Some(error) = &queue.failure {
             return Err(error.clone());
         }
-        if queue
+        let now = Instant::now();
+        while queue
             .events
             .front()
-            .is_some_and(|event| event.received_at.elapsed() > MAX_AGE)
+            .is_some_and(|event| event.is_expired_at(now))
         {
-            queue.events.clear();
-            queue.armed = false;
-            queue.failure = Some("输入已过期，已暂停；请重新连接".into());
-            return Err(queue.failure.clone().unwrap());
+            queue.events.pop_front();
         }
         Ok(queue.events.pop_front())
     }
@@ -232,15 +236,12 @@ impl UserCommandReceiver {
         if let Some(failure) = &queue.failure {
             return Err(failure.clone());
         }
-        if queue
+        while queue
             .events
             .front()
-            .is_some_and(|event| now.saturating_duration_since(event.received_at) > MAX_AGE)
+            .is_some_and(|event| event.is_expired_at(now))
         {
-            queue.events.clear();
-            queue.armed = false;
-            queue.failure = Some("输入已过期，已暂停；请重新连接".into());
-            return Err(queue.failure.clone().unwrap());
+            queue.events.pop_front();
         }
         Ok(queue.events.drain(..).collect())
     }

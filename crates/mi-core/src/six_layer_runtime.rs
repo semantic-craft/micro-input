@@ -313,8 +313,16 @@ impl RunningSixLayer {
                     > Duration::from_secs(1);
                 wall = now_wall;
                 monotonic = now_monotonic;
-                if slept || session.is_disconnected() {
-                    receiver.invalidate("系统睡眠或设备连接已变化");
+                if slept {
+                    receiver.invalidate("检测到系统睡眠，六层输入已暂停");
+                    return;
+                }
+                if session.is_disconnected() {
+                    let reason = session.terminal_failure().map_or_else(
+                        || "设备会话已关闭，六层输入已暂停".to_string(),
+                        |error| format!("设备会话已断开：{error}"),
+                    );
+                    receiver.invalidate(&reason);
                     return;
                 }
                 if let Err(error) = readiness.recheck(&patch, &target) {
@@ -333,8 +341,23 @@ impl RunningSixLayer {
                     {
                         observed.store(identity.layer_index.unwrap() as u8, Ordering::Release);
                     }
-                    _ => {
-                        receiver.invalidate("当前设备方案或层位未确认");
+                    Ok(Ok(identity)) => {
+                        receiver.invalidate(&format!(
+                            "当前设备方案或层位不符：固件 {:?}（预期 0.6.3），方案 {:?}（预期 {profile_index}），层位 {:?}（预期 1 至 6）",
+                            identity.version, identity.profile_index, identity.layer_index,
+                        ));
+                        return;
+                    }
+                    Ok(Err(error)) => {
+                        receiver.invalidate(&format!("设备身份查询失败：{error}"));
+                        return;
+                    }
+                    Err(_) => {
+                        let reason = session.terminal_failure().map_or_else(
+                            || "设备身份查询超过 2 秒，六层输入已暂停".to_string(),
+                            |error| format!("设备身份查询超过 2 秒，终态错误：{error}"),
+                        );
+                        receiver.invalidate(&reason);
                         return;
                     }
                 }
@@ -399,9 +422,8 @@ fn execute_clicks(
         if stop.load(Ordering::Acquire) || receiver.failure().is_some() {
             return;
         }
-        if event.received_at.elapsed() > Duration::from_secs(2) {
-            receiver.invalidate("点击已过期，停止派发积压输入");
-            return;
+        if event.is_expired_at(Instant::now()) {
+            continue;
         }
         let receipt = execute(
             &host.profile_id,
