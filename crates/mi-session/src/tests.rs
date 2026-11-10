@@ -306,6 +306,12 @@ async fn exhausted_request_ids_end_the_session_and_require_reconnect() {
         .await
         .unwrap_err();
     assert!(exhausted.to_string().contains("exhausted"));
+    let identity_error = s.read_identity_info().await.unwrap_err();
+    assert!(
+        identity_error.to_string().contains("exhausted"),
+        "identity query lost terminal failure: {identity_error}"
+    );
+    assert_eq!(link.writes.lock().unwrap().len(), 999);
     assert!(matches!(
         s.request(Method::SysVersion, Value::Null).await,
         Err(SessionError::Disconnected)
