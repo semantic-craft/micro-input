@@ -15,6 +15,7 @@ enum PressEffect {
     NoChange,
     Replace,
     LoseTarget,
+    LoseScope,
 }
 struct Fixture {
     window: ManagedWindow,
@@ -38,6 +39,7 @@ impl Provider {
                     bundle_id: "com.xd.cindy".into(),
                     pid: 100,
                     window_id: 1,
+                    scope_id: 0,
                     title: "Test".into(),
                 },
                 controls: vec![
@@ -144,10 +146,11 @@ impl ManagedAxProvider for Provider {
         let old_label = control.label.clone();
         match effect {
             PressEffect::Toggle | PressEffect::Replace => {
-                control.label = if control.label == "开始语音输入" {
-                    "停止语音输入"
-                } else {
-                    "开始语音输入"
+                control.label = match control.label.as_str() {
+                    "开始语音输入" => "停止语音输入",
+                    "Start Voice mode" => "End Voice mode",
+                    "End Voice mode" => "Start Voice mode",
+                    _ => "开始语音输入",
                 }
                 .into();
                 if matches!(effect, PressEffect::Replace) {
@@ -155,6 +158,7 @@ impl ManagedAxProvider for Provider {
                 }
             }
             PressEffect::LoseTarget => state.read_pid = Some(999),
+            PressEffect::LoseScope => state.window.identity.scope_id += 1,
             PressEffect::NoChange => {}
         }
         state.events.push(format!("press:{old_label}"));
@@ -404,6 +408,101 @@ fn focused_input_is_selected_when_another_pane_has_an_input() {
     }
     provider.controls().focus_input("cindy").unwrap();
     assert_eq!(provider.events(), ["capture:com.xd.cindy", "focus:8"]);
+}
+
+#[test]
+fn recording_cannot_migrate_to_another_pane_in_the_same_window() {
+    let provider = Provider::cindy();
+    provider.0.lock().unwrap().window.identity.scope_id = 10;
+    let controls = provider.controls();
+    controls.start_dictation("cindy").unwrap();
+    provider.0.lock().unwrap().window.identity.scope_id = 11;
+    assert_eq!(
+        controls.stop_dictation("cindy").unwrap_err(),
+        "blocked:uncleared_dictation_target_changed"
+    );
+    assert!(controls
+        .stop_owned_dictations()
+        .unwrap_err()
+        .contains("dictation_target_changed"));
+    assert_eq!(
+        provider
+            .events()
+            .iter()
+            .filter(|event| event.starts_with("press:"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn changed_window_title_leaves_owned_recording_unconfirmed_without_another_press() {
+    let provider = Provider::cindy();
+    let controls = provider.controls();
+    controls.start_dictation("cindy").unwrap();
+    provider.0.lock().unwrap().window.identity.title = "Different conversation".into();
+    assert!(controls
+        .stop_owned_dictations()
+        .unwrap_err()
+        .contains("dictation_target_changed"));
+    assert_eq!(
+        provider
+            .events()
+            .iter()
+            .filter(|event| event.starts_with("press:"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn live_voice_uses_the_captured_pane_and_never_retries_after_scope_loss() {
+    for lost in [false, true] {
+        let provider = Provider::cindy();
+        {
+            let mut state = provider.0.lock().unwrap();
+            state.window.identity.bundle_id = "com.google.antigravity".into();
+            state.window.identity.scope_id = 10;
+            state.window.controls[0].label = "Start Voice mode".into();
+            if lost {
+                state.effect = PressEffect::LoseScope;
+            }
+        }
+        let result = provider.controls().toggle_live_voice("antigravity");
+        if lost {
+            assert_eq!(
+                result.unwrap_err(),
+                "unconfirmed:blocked:target_identity_changed"
+            );
+        } else {
+            result.unwrap();
+        }
+        assert_eq!(
+            provider.events(),
+            ["capture:com.google.antigravity", "press:Start Voice mode"]
+        );
+    }
+}
+
+#[test]
+fn ambiguous_live_voice_buttons_never_press_either_pane() {
+    let provider = Provider::cindy();
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.window.identity.bundle_id = "com.google.antigravity".into();
+        state.window.controls[0].label = "Start Voice mode".into();
+        let mut other = state.window.controls[0].clone();
+        other.id = 8;
+        state.window.controls.push(other);
+    }
+    assert_eq!(
+        provider
+            .controls()
+            .toggle_live_voice("antigravity")
+            .unwrap_err(),
+        "blocked:ambiguous_or_missing_live_voice_control"
+    );
+    assert_eq!(provider.events(), ["capture:com.google.antigravity"]);
 }
 
 #[test]
