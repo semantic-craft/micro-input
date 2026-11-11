@@ -14,7 +14,7 @@ scripts/run            # 启动当前checkout的target/MicroInput.app
 scripts/run --verify   # 独立QA标识/文档，10分钟自动退出并回收副本
 ```
 
-需要macOS14+、Rust stable、Swift工具链。构建不加载凭据。仅本地ad-hoc开发签名，未正式发布。
+需要 macOS 14+、Rust stable 与 Swift 工具链。本地开发构建不加载凭据并使用本机开发或 ad-hoc 签名；正式发行包经 Developer ID 签名与 Apple 公证分发，在工作台「通用」设置与菜单栏提供基于 Sparkle 的自动与手动检查更新。仓库采用 MIT 许可证（见 [LICENSE](LICENSE)）。
 
 启动载入所选本地草稿，无文件时载入合成配置；点击“查找 / 刷新 USB”后只读枚举 USB HID 描述符并持续监听插拔，不会打开硬件或申请权限。候选经完整 usage pairs 与 OS USB 来源筛选，多候选必须明确选择；0x8297 标为未验型号；候选只展示 OS 身份，显式查询前固件显示未知。插拔事件更新候选，选择不读取或应用设备配置。本地文档默认在用户Application Support/MicroInput/workbench.json；v1浏览不改文件，首次修改先备份原字节再保存v2。设备快照保持只读，点击“从快照新建草稿”才保存独立draft-UUID.json；原工作台保留，所选文档记录带锁/冲突检查，退出重开继续新草稿。参数表单需点击保存，撤销历史仅在当前会话。原生配置应用限已核验的唯一 USB Creator Micro 2 / 0.6.3 当前连接，宿主动作能力见下节。支持显式USB身份查询，当前303A:8298/固件0.6.3已在应用路径读回；显式身份为受支持的0.6.3后可读取两份限定配置文件，按块校验原始SHA-1并再次list，再一次发布只读快照。查看设备不会改变本地草稿，返回后保留编辑与撤销。核验快照可与文档基线、本地草稿作三方比较；整份保留本地、采用设备或取消均需明确选择，不写设备。接受前先保存不可覆盖恢复副本，再原子保存并清空跨基线撤销；身份不确定、源 ID 歧义或未知原值变化禁用自动合并，临时接口变化须先核对并确认同一设备，确认仅对当前会话快照有效；已知身份不同仍不能套用基线。其他固件仍拒绝读取，不把演示或导入数据作为设备快照。
 
@@ -80,11 +80,11 @@ Input 1.1.0 的[业务架构与证据定位](docs/input-architecture.md)、[写�
 
 以下为本机原始调查材料，保存在 Git 忽略的 `.scratch/input-study/`，不随源码提交：
 
-- [官方来源、能力矩阵与公开协议线索](.scratch/input-study/out/research.md)
-- [已连接 UI 清单](.scratch/input-study/out/connected-ui-inventory.md)
-- [灯光、摇杆、层、AppSense 与参数实验](.scratch/input-study/out/layer-lighting-joystick-followup.md)
-- [观察规格](.scratch/input-study/out/spec.json)和[证据记录](.scratch/input-study/out/evidence.jsonl)
-- [原任务历史](.scratch/input-study/task-history.md)
+- 官方来源、能力矩阵与公开协议线索：`.scratch/input-study/out/research.md`
+- 已连接 UI 清单：`.scratch/input-study/out/connected-ui-inventory.md`
+- 灯光、摇杆、层、AppSense 与参数实验：`.scratch/input-study/out/layer-lighting-joystick-followup.md`
+- 观察规格 `.scratch/input-study/out/spec.json` 与证据记录 `.scratch/input-study/out/evidence.jsonl`
+- 原任务历史：`.scratch/input-study/task-history.md`
 
 旧入口 `~/agent-tasks/worklouder-input-study` 仅保留晋升记录和兼容链接。后续项目事实、代码和进度只在本项目维护。
 

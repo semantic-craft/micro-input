@@ -8,3 +8,7 @@ __pycache__/
 *.pyc
 .env
 .env.*
+DerivedData/
+*.xcuserdatad/
+*.xcuserstate
+build/
