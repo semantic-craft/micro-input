@@ -3,9 +3,18 @@ import SwiftUI
 
 public struct WorkbenchRootView: View {
     let store: CoreStore
+    let navigation: WorkbenchNavigationModel
+    let updater: SoftwareUpdateController
 
-    public init(store: CoreStore) {
+    @MainActor
+    public init(
+        store: CoreStore,
+        navigation: WorkbenchNavigationModel? = nil,
+        updater: SoftwareUpdateController? = nil
+    ) {
         self.store = store
+        self.navigation = navigation ?? WorkbenchNavigationModel()
+        self.updater = updater ?? SoftwareUpdateController()
     }
 
     public var body: some View {
@@ -13,7 +22,7 @@ public struct WorkbenchRootView: View {
         let overlay = store.overlay
         let modal = store.activeModal
         ZStack {
-            ClassicWorkbenchView(store: store)
+            ClassicWorkbenchView(store: store, navigation: navigation, updater: updater)
 
             if overlay.cheatSheetVisible, let cs = overlay.cheatSheet {
                 CheatSheetOverlayView(store: store, sheet: cs)

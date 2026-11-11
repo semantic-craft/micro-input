@@ -92,6 +92,10 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
         "prepare_desktop_profiles must be idempotent and never clobber ready status when all 5 presets exist"
     );
     assert_eq!(store.projection().document_revision, rev_before);
+    assert_eq!(
+        store.projection().header.engine_version,
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 #[test]

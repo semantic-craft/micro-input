@@ -1381,6 +1381,7 @@ impl ProjectionInputs<'_> {
             AutoSwitchState::from_flags(true, self.auto_follow_enabled, self.manual_override);
 
         let header = HeaderProjection {
+            engine_version: env!("CARGO_PKG_VERSION").to_string(),
             ready_state,
             banner: ownership_banner.clone(),
             show_connect_button: !self.device_connected,
