@@ -1,5 +1,17 @@
 # 项目教训
 
+## Creator Micro 2 逐键状态灯须绑定 KV_OAI_AG 键位并基于真实设备 ACK 记账
+
+- 起因与后果：固件 `0.6.3`（`wl_lights.cpp`）仅对当前层键码为 `KV_OAI_AG00..KV_OAI_AG19` 的物理轴体应用 `v.oai.thstatus` 逐键颜色，标准 HID 键码直接回退渲染层背光且省去 `"lights"` 时默认整盘常亮 `#FFFFFF` 纯白；加之六层核验后关闭 `DeviceSession`、`store.rs` 跳过发送却硬编码返回 `"synced": true`、草稿选中层保护混入实时灯效，导致菜单栏显示绿/蓝会话槽位而实体键盘全白。
+- 修复：六层 V2 将第 2/3 层顶部 6 槽编为 `KV_OAI_AG06..AG11` 与 `KV_OAI_AG12..AG17`（避开第 1 层 Codex 独占的 `AG00..AG05`）并为托管层写入 `"lights"` 关灯底色；`SharedVendorBridge` 共享侧通道同时承载 `v.oai.hid` 6 微动跨层去重收键与 `v.oai.thstatus` 真实 ACK 确认（`WireSyncState::Confirmed`）、900 次请求无感预轮转；拆分编辑器选中保护与实时灯效保护，支持 V1 只读续接与保留出厂备份的原位升级。
+- 验证点：`mi-proto` 校验 `AG00..AG19` 20 键边界并拒绝 `ENC_*`；`mi-model` / `mi-session` 覆盖 V1->V2 原位升级保留第 1 层原始字节与恢复链；`mi-bridge` / `mi-core` 覆盖绿/蓝逐键下发、真实 ACK 同步确认、断联关灯防重放与 `R21` 隔离。Seen 1x（2026-11-11）。
+
+## Antigravity 会话状态分类与侧栏直达须对齐 Jetski Web 与 AXLink
+
+- 起因与后果：UI 改版与 `3b72418` 引入两处退化。其一，`store.rs` 按主观猜测匹配不存在的 `WAITING_FOR_*` 枚举并加了 15 分钟蓝点过期与 `NO_TOOL_CALL` 门控，导致超过 15 分钟的未读完成会话丢蓝点、`BUSY` / `hasRunningSubagents` / `notFullyIdle` 漏判进行中；其二，`native_ax.rs` 读取 `AXLink` 时漏读 `AXURL`，退而点击 `Search Conversations` 向模态搜索框输入 UUID，造成切换时弹窗闪烁。
+- 修复：经只读 REA 解包 `language_server` 内嵌 `Jetski Web`（`Pk` / `Rk` / `Qcb`）与实机侧栏 AX 核验，`classify_antigravity_trajectory_summaries` 对齐真实状态谓词并结合最前窗口 `/c/<cid>` 抑制已打开蓝点；`ObservationPurpose::Sessions` 补读 `AXLink.AXURL`、`AXButton.AXExpanded` 与 `AXStaticText.AXValue`，直接按侧栏行 `Stop execution` / `Archive conversation` / 时间戳识别三态并对目标 `/c/<uuid>` 执行单次 `AXPress`，删除全部模态搜索弹窗代码；主舞台恢复 `灯光筛选` 浮层与 `已读熄灯`。
+- 验证点：`mi-core::session_navigation` 覆盖 2 小时未读蓝点保留、`markedAsUnread`、最前窗口抑制与 `BUSY` / `waitingSteps` 分类；`mi-macos::native_ax` 覆盖同名会话 `AXURL` 区分、折叠侧栏/项目/`See all` 原地展开及跨工作区同名目录消歧。Seen 1x（2026-11-11）。
+
 ## Antigravity 实时语音须走应用内 Start/End Voice，不得映射成 Ctrl+M 听写
 
 - 出事：`14c0d0b`（2026-11-09 22:10 Asia/Shanghai）复现 Antigravity `live-voice` 被映射为 Ctrl+M（keycode 0x2E）系统听写快捷键；第 6 槽「Gemini Live 实时语音」键帽误用 Term，而不是 Party（5 格波形）。

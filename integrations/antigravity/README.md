@@ -4,10 +4,10 @@
 
 ## 当前管线
 
-- [`mi-core/session_navigation.rs`](../../crates/mi-core/src/session_navigation.rs) 统一工作台与六层输入的槽位解析。稳定目标包含应用、工作区和会话，执行租约另绑定进程及 hub 实例。目录过期、身份变化或输入退役时拒绝执行。
-- [`mi-macos/native_ax.rs`](../../crates/mi-macos/src/native_ax.rs) 为托管控件和会话导航提供共同的原窗口观察。按用途批读属性，观察不完整时不发布唯一目标。
-- [`mi-macos/session_navigation.rs`](../../crates/mi-macos/src/session_navigation.rs) 通过原生 Search Conversations 输入完整会话 UUID，在同一搜索对话框内核对结果的专用 UUID 字段，选择一次，再读取原窗口文档 URL。此路径不依赖项目展开或侧栏最近列表；目录存在或应用打开不构成选中确认。
-- 搜索结果按安装版已观察的标题、项目、UUID、时间字段识别；标题或项目名相同不能替代 UUID，未知结构拒绝选择。确认后才提交请求时的未读水位和导航历史。迟到结果不能覆盖后来明确的已读操作，也不能移到其他窗口或替代实例。
+- [`mi-core/store.rs`](../../crates/mi-core/src/store.rs) 与 [`mi-core/session_navigation.rs`](../../crates/mi-core/src/session_navigation.rs) 统一工作台与六层输入的槽位解析。稳定目标包含应用、工作区和会话，目录同时携带 `trajectoryMetadata.projectId`，执行租约另绑定进程及 hub 实例。目录分类严格对齐安装版 `Jetski Web`（`Pk` / `Rk` / `Qcb`）：排除归档、子代理、Battle Mode 分叉、`SIDE_QUESTION`、`COMMIT_MESSAGE_GENERATION` 与 `hideFromConversationList` 条目；识别 `waitingSteps` 待回应、`BUSY` / `hasRunningSubagents` / `notFullyIdle` 进行中、`errored` / `*_ERROR` 异常；已完成未读（`lastModifiedTime > lastUserViewTime` 或 `markedAsUnread`）保持蓝点直至在原应用查看或在工作台确认，且在 Antigravity 处于最前窗口并已打开对应 `/c/<conversation_id>` 时自动抑制蓝点。
+- [`mi-macos/native_ax.rs`](../../crates/mi-macos/src/native_ax.rs) 为托管控件、侧栏会话行视觉状态观察（`SidebarRowVisualState`：`Stop execution` 四点旋转进行中、`Archive conversation` 无时间戳蓝点未读、`Archive conversation` 带时间戳已读空闲）与零弹窗会话切换提供共同的原窗口观察。`ObservationPurpose::Sessions` 按需批读 `AXLink`（`AXURL`）、`AXButton`（`AXExpanded`）与 `AXStaticText`（`AXValue`），观察不完整时不发布唯一目标。
+- [`mi-macos/session_navigation.rs`](../../crates/mi-macos/src/session_navigation.rs) 直接按侧栏 `AXLink` 的精确 `https://127.0.0.1:<port>/c/<conversation_id>` 导航，绝不点击 `Search Conversations` 或向搜索弹窗输入 UUID。若原窗口当前文档已是目标会话则零 `AXPress` 直接走同窗口 URL 回读；若侧栏已挂载目标 `AXLink`，在有界时间内直接重验原窗口归属与实时 `AXURL` 后单次 `AXPress`；若侧栏折叠、目标项目折叠（优先匹配 `?project=<projectId>`，次选唯一工作区目录名）或折叠在目标项目的 `See all (...)` 下，则依次原地展开后点击目标 `AXLink`，否则返回 `unconfirmed:session_sidebar_link_unavailable`。
+- 确认仍以同窗口主文档 `AXWebArea.AXURL` 双次回读命中 `/c/<conversation_id>` 且目录租约未变为准；目录存在或应用打开不构成选中确认。确认后才提交请求时的未读水位和导航历史；迟到结果不能覆盖后来明确的已读操作，也不能移到其他窗口或替代实例。
 
 采用 [agent-desktop 的按需批读设计](https://github.com/vercel-labs/agent-desktop/blob/ab7dfb218cddc1594aa1d87a5bfcd0ac76da2276/crates/macos/src/tree/properties/node_attribute_fetch.rs)，保持项目现有 Rust 内核与薄原生壳边界。该版本公开观察模型没有导航必需的 `AXURL`，因此没有引入整套自动化引擎或另留 URL 读取旁路。此选择基于接口适配与代码收敛，不代表已测得性能提升。
 

@@ -1,5 +1,19 @@
 use std::time::{Duration, Instant};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarRowVisualState {
+    InProgress,
+    UnreadIdle,
+    ReadIdle,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarConversationObservation {
+    pub conversation_id: String,
+    pub title: String,
+    pub state: SidebarRowVisualState,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionNavigationWindow {
     pub pid: i32,
@@ -20,14 +34,70 @@ pub trait SessionNavigationProvider {
     ) -> Result<(), String>;
 }
 
-fn app_document_path(url: &str, expected_port: u16) -> Option<&str> {
+pub(crate) fn app_document_path(url: &str, expected_port: u16) -> Option<&str> {
     let rest = url.strip_prefix("https://")?;
     let (host, path) = rest.split_once('/')?;
     let port = host.strip_prefix("127.0.0.1:")?.parse::<u16>().ok()?;
     (port != 0 && port == expected_port).then_some(path)
 }
 
-fn selected_conversation(window: &SessionNavigationWindow, port: u16) -> Result<String, String> {
+pub(crate) fn conversation_id_from_url(url: &str, expected_port: u16) -> Option<&str> {
+    let path = app_document_path(url, expected_port)?;
+    path.split(['?', '#'])
+        .next()
+        .and_then(|path| path.strip_prefix("c/"))
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+}
+
+fn percent_decode(raw: &str) -> Option<String> {
+    let mut out = Vec::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(index + 1..index + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else if bytes[index] == b'+' {
+            out.push(b' ');
+            index += 1;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+pub(crate) fn url_matches_project(
+    url: &str,
+    expected_port: u16,
+    expected_project_id: &str,
+) -> bool {
+    if expected_project_id.is_empty() {
+        return false;
+    }
+    let Some(path_and_query) = app_document_path(url, expected_port) else {
+        return false;
+    };
+    let before_fragment = path_and_query.split('#').next().unwrap_or_default();
+    let Some((_, query)) = before_fragment.split_once('?') else {
+        return false;
+    };
+    query.split('&').any(|pair| {
+        let Some((key, value)) = pair.split_once('=') else {
+            return false;
+        };
+        key == "project"
+            && (value == expected_project_id
+                || percent_decode(value).as_deref() == Some(expected_project_id))
+    })
+}
+
+pub(crate) fn selected_conversation(
+    window: &SessionNavigationWindow,
+    port: u16,
+) -> Result<String, String> {
     let documents: Vec<_> = window
         .selected_urls
         .iter()
@@ -101,15 +171,44 @@ pub fn antigravity_process_id() -> Option<i32> {
     }
 }
 
+pub fn frontmost_selected_antigravity_conversation(pid: i32, port: u16) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::native_ax::frontmost_selected_antigravity_conversation(pid, port)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (pid, port);
+        None
+    }
+}
+
+pub fn observe_antigravity_sidebar_conversations(
+    pid: i32,
+    port: u16,
+) -> Result<Vec<SidebarConversationObservation>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::native_ax::observe_antigravity_sidebar_conversations(pid, port)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (pid, port);
+        Err("blocked:macos_required".into())
+    }
+}
+
 pub fn navigate_antigravity_session(
     pid: i32,
     port: u16,
     conversation: &str,
+    workspace_path: &str,
+    project_id: Option<&str>,
     validate_lease: impl FnMut() -> Result<(), String>,
     is_current: impl Fn() -> bool,
 ) -> Result<(), String> {
     navigate_session(
-        &mut crate::native_ax::NativeSessionNavigation::default(),
+        &mut crate::native_ax::NativeSessionNavigation::new(port, workspace_path, project_id),
         pid,
         port,
         conversation,

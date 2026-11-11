@@ -1679,6 +1679,21 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
         self.execute_when(profile_id, binding_id, action, || true)
     }
 
+    pub fn with_serialized_host_effect<T>(
+        &self,
+        admitted: impl FnOnce() -> bool,
+        effect: impl FnOnce(&D) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _execution = self.execution_lock.lock().unwrap();
+        if !admitted() {
+            return Err("blocked:session_navigation_retired".to_string());
+        }
+        if self.has_unconfirmed_apple_fn_release() {
+            return Err("blocked:unconfirmed_apple_fn_release".to_string());
+        }
+        effect(&self.driver)
+    }
+
     pub fn execute_when(
         &self,
         profile_id: &str,
@@ -2099,5 +2114,97 @@ fn managed_adapter_for_bundle(bundle: &str) -> Option<&'static str> {
         "com.google.antigravity" => Some("antigravity"),
         "com.deepseek.dsh" => Some("dsh-desktop"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod serialized_effect_tests {
+    use super::*;
+
+    #[test]
+    fn with_serialized_host_effect_enforces_lock_admission_and_unconfirmed_apple_fn_gate() {
+        let driver = RecordingOsDriver::new(true);
+        let executor = Arc::new(LiveHostActionExecutor::new(driver.clone()));
+
+        assert_eq!(
+            executor.with_serialized_host_effect(|| false, |_| Ok(())),
+            Err("blocked:session_navigation_retired".to_string())
+        );
+
+        let held_input = HeldInputId {
+            session_id: 1,
+            binding_id: "AG00".into(),
+        };
+        let press_receipt = executor
+            .handle_apple_fn_press(&held_input, "prof", "frontmost-editor")
+            .unwrap();
+        assert_eq!(press_receipt.outcome, "executed");
+        driver.set_accessibility_trusted(false);
+        let release_receipt = executor.handle_apple_fn_release(&held_input).unwrap();
+        assert_eq!(release_receipt.outcome, "failed");
+        assert!(executor.has_unconfirmed_apple_fn_release());
+
+        assert_eq!(
+            executor
+                .with_serialized_host_effect(|| true, |d| d.open_application("com.example.app")),
+            Err("blocked:unconfirmed_apple_fn_release".to_string())
+        );
+
+        driver.set_accessibility_trusted(true);
+        executor.stop_owned_actions().unwrap();
+        assert!(!executor.has_unconfirmed_apple_fn_release());
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let exec_bg = Arc::clone(&executor);
+        let bg = std::thread::spawn(move || {
+            exec_bg
+                .with_serialized_host_effect(
+                    || true,
+                    |d| {
+                        entered_tx.send(()).unwrap();
+                        release_rx
+                            .recv_timeout(std::time::Duration::from_secs(2))
+                            .unwrap();
+                        d.open_application("com.google.antigravity")
+                    },
+                )
+                .unwrap();
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+
+        let exec_fg = Arc::clone(&executor);
+        let fg = std::thread::spawn(move || {
+            exec_fg.execute(
+                "prof",
+                "AG01",
+                &ResolvedHostAction::OpenApp {
+                    bundle_id: "com.openai.codex".into(),
+                },
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        release_tx.send(()).unwrap();
+        bg.join().unwrap();
+        let fg_receipt = fg.join().unwrap();
+        assert_eq!(fg_receipt.outcome, "executed");
+
+        let app_opens: Vec<String> = driver
+            .events()
+            .into_iter()
+            .filter_map(|ev| match ev {
+                RecordedOsEvent::OpenApplication(bundle) => Some(bundle),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            app_opens,
+            vec![
+                "com.google.antigravity".to_string(),
+                "com.openai.codex".to_string()
+            ]
+        );
     }
 }

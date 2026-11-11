@@ -6404,9 +6404,246 @@ fn find_freshest_antigravity_hub() -> Option<(u16, String, AntigravityInstance)>
     None
 }
 
+pub(crate) fn classify_antigravity_trajectory_summaries(
+    summaries: &serde_json::Map<String, Value>,
+    active_frontmost_cid: Option<&str>,
+    seen_running_ids: &mut BTreeSet<String>,
+    completed_transition_watermarks: &mut BTreeMap<String, String>,
+) -> (
+    Vec<FourAppLiveCandidate>,
+    BTreeMap<String, String>,
+    Option<(NavigationPlace, String)>,
+) {
+    let mut candidates = Vec::new();
+    let mut project_ids = BTreeMap::new();
+    let mut frontmost_acknowledged = None;
+    for (cid, item) in summaries {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let ann = obj.get("annotations").and_then(Value::as_object);
+        let meta = obj.get("trajectoryMetadata").and_then(Value::as_object);
+        if ann.and_then(|a| a.get("archived")).and_then(Value::as_bool) == Some(true)
+            || ann
+                .and_then(|a| a.get("antigravity.isSubagent"))
+                .is_some_and(|v| {
+                    v.as_bool() == Some(true)
+                        || v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("true"))
+                })
+        {
+            seen_running_ids.remove(cid);
+            completed_transition_watermarks.remove(cid);
+            continue;
+        }
+        if let Some(m) = meta {
+            if m.get("parentConversationId")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty())
+                || m.get("subagentSpec").is_some_and(|v| !v.is_null())
+                || m.get("isBattleModeFork").and_then(Value::as_bool) == Some(true)
+                || m.get("nestingDepth")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|d| d > 0)
+                || m.get("sourceMetadata")
+                    .and_then(Value::as_object)
+                    .and_then(|sm| sm.get("hideFromConversationList"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+            {
+                seen_running_ids.remove(cid);
+                completed_transition_watermarks.remove(cid);
+                continue;
+            }
+        }
+        let trajectory_type = obj
+            .get("trajectoryType")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                meta.and_then(|m| m.get("trajectoryType"))
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or_default();
+        if trajectory_type.ends_with("SIDE_QUESTION")
+            || trajectory_type.ends_with("COMMIT_MESSAGE_GENERATION")
+        {
+            seen_running_ids.remove(cid);
+            completed_transition_watermarks.remove(cid);
+            continue;
+        }
+        let summary_str = obj
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let title_str = ann
+            .and_then(|a| a.get("title"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let has_user_input = obj
+            .get("lastUserInputTime")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        if summary_str.is_empty() && title_str.is_empty() && !has_user_input {
+            continue;
+        }
+        let Some(workspace_path) = session_navigation::workspace_from_summary(item) else {
+            continue;
+        };
+        if let Some(pid_str) = meta
+            .and_then(|m| m.get("projectId"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            project_ids.insert(cid.clone(), pid_str.to_string());
+        }
+        let title = if !summary_str.is_empty() {
+            summary_str.to_string()
+        } else if !title_str.is_empty() {
+            title_str.to_string()
+        } else {
+            cid.chars().take(8).collect()
+        };
+
+        let status_str = obj
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("CASCADE_RUN_STATUS_IDLE");
+        let last_mod_str = obj
+            .get("lastModifiedTime")
+            .and_then(Value::as_str)
+            .or_else(|| obj.get("createdTime").and_then(Value::as_str))
+            .unwrap_or_default();
+        let view_str = ann
+            .and_then(|a| a.get("lastUserViewTime"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let term_str = obj
+            .get("latestExecutorTerminationReason")
+            .and_then(Value::as_str)
+            .or_else(|| obj.get("terminationReason").and_then(Value::as_str))
+            .unwrap_or_default();
+        let killed = obj.get("killed").and_then(Value::as_bool).unwrap_or(false);
+        let waiting_steps = obj
+            .get("waitingSteps")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+        let has_running_subagents = obj
+            .get("hasRunningSubagents")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let not_fully_idle = obj
+            .get("notFullyIdle")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let errored = obj.get("errored").and_then(Value::as_bool).unwrap_or(false);
+        let marked_unread = ann
+            .and_then(|a| a.get("markedAsUnread"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let last_modified_ms = parse_iso8601_utc_ms(last_mod_str);
+        let raw_view_ms = parse_iso8601_utc_ms(view_str);
+        let watermark = if marked_unread {
+            format!("{status_str}:{last_mod_str}:{term_str}:unread")
+        } else {
+            format!("{status_str}:{last_mod_str}:{term_str}")
+        };
+
+        let (phase, effective_view_ms) = if !killed
+            && (waiting_steps
+                || matches!(
+                    status_str,
+                    "CASCADE_RUN_STATUS_WAITING_FOR_USER_INPUT"
+                        | "CASCADE_RUN_STATUS_WAITING_FOR_PERMISSION"
+                )) {
+            seen_running_ids.insert(cid.clone());
+            (FourAppSessionKind::NeedsAttention, raw_view_ms)
+        } else if !killed
+            && (matches!(
+                status_str,
+                "CASCADE_RUN_STATUS_RUNNING"
+                    | "CASCADE_RUN_STATUS_BUSY"
+                    | "CASCADE_RUN_STATUS_CANCELING"
+                    | "CASCADE_RUN_STATUS_WAITING_FOR_MODEL"
+            ) || has_running_subagents
+                || not_fully_idle)
+        {
+            seen_running_ids.insert(cid.clone());
+            (FourAppSessionKind::Working, raw_view_ms)
+        } else if errored
+            || matches!(
+                status_str,
+                "CASCADE_RUN_STATUS_ERROR" | "CASCADE_RUN_STATUS_FAILED"
+            )
+            || term_str == "ERROR"
+            || term_str.ends_with("_ERROR")
+        {
+            seen_running_ids.remove(cid);
+            (FourAppSessionKind::Error, raw_view_ms)
+        } else {
+            if seen_running_ids.remove(cid) {
+                completed_transition_watermarks.insert(cid.clone(), watermark.clone());
+            }
+            let just_transitioned = completed_transition_watermarks.get(cid) == Some(&watermark);
+            let has_unviewed = marked_unread || last_modified_ms > raw_view_ms.saturating_add(500);
+            if active_frontmost_cid == Some(cid.as_str()) && !marked_unread {
+                completed_transition_watermarks.remove(cid);
+                if !watermark.is_empty() {
+                    frontmost_acknowledged = Some((
+                        NavigationPlace::antigravity(cid.clone(), workspace_path.clone()),
+                        watermark.clone(),
+                    ));
+                }
+                (FourAppSessionKind::Idle, last_modified_ms.max(raw_view_ms))
+            } else if has_unviewed || just_transitioned {
+                let adj_view_ms = if last_modified_ms > raw_view_ms.saturating_add(500) {
+                    raw_view_ms
+                } else {
+                    last_modified_ms.saturating_sub(1000)
+                };
+                (FourAppSessionKind::BlueDotCompleted, adj_view_ms)
+            } else {
+                (FourAppSessionKind::Idle, raw_view_ms)
+            }
+        };
+
+        candidates.push(FourAppLiveCandidate {
+            place: NavigationPlace::antigravity(cid.clone(), workspace_path),
+            title,
+            phase,
+            watermark,
+            last_modified_ms,
+            last_user_view_ms: effective_view_ms,
+            updated_at_ms: last_modified_ms.max(effective_view_ms),
+        });
+    }
+
+    candidates.sort_by(|a, b| {
+        a.phase
+            .cmp(&b.phase)
+            .then_with(|| b.last_modified_ms.cmp(&a.last_modified_ms))
+            .then_with(|| a.place.target_id().cmp(&b.place.target_id()))
+    });
+    (candidates, project_ids, frontmost_acknowledged)
+}
+
 fn poll_antigravity_daemon_candidates(
     seen_running_ids: &mut BTreeSet<String>,
     completed_transition_watermarks: &mut BTreeMap<String, String>,
+) -> Option<NavigationCatalog> {
+    poll_antigravity_daemon_candidates_with_frontmost(
+        seen_running_ids,
+        completed_transition_watermarks,
+        true,
+    )
+}
+
+fn poll_antigravity_daemon_candidates_with_frontmost(
+    seen_running_ids: &mut BTreeSet<String>,
+    completed_transition_watermarks: &mut BTreeMap<String, String>,
+    suppress_frontmost: bool,
 ) -> Option<NavigationCatalog> {
     use std::io::{Read, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
@@ -6463,150 +6700,27 @@ fn poll_antigravity_daemon_candidates(
         .map(|pos| pos + sep.len())?;
     let parsed: Value = serde_json::from_slice(&raw_resp[body_start..]).ok()?;
     let summaries = parsed.get("trajectorySummaries")?.as_object()?;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-
-    let mut candidates = Vec::new();
-    for (cid, item) in summaries {
-        let Some(obj) = item.as_object() else {
-            continue;
-        };
-        let ann = obj.get("annotations").and_then(Value::as_object);
-        let meta = obj.get("trajectoryMetadata").and_then(Value::as_object);
-        if ann
-            .and_then(|a| a.get("antigravity.isSubagent"))
-            .and_then(Value::as_str)
-            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
-        {
-            continue;
-        }
-        if let Some(m) = meta {
-            if m.get("parentConversationId")
-                .and_then(Value::as_str)
-                .is_some_and(|s| !s.is_empty())
-                || m.get("subagentSpec").is_some()
-                || m.get("nestingDepth")
-                    .and_then(Value::as_i64)
-                    .is_some_and(|d| d > 0)
-            {
-                continue;
-            }
-        }
-        let summary_str = obj
-            .get("summary")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim();
-        let title_str = ann
-            .and_then(|a| a.get("title"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim();
-        let has_user_input = obj
-            .get("lastUserInputTime")
-            .and_then(Value::as_str)
-            .is_some_and(|s| !s.is_empty());
-        if summary_str.is_empty() && title_str.is_empty() && !has_user_input {
-            continue;
-        }
-        let title = if !summary_str.is_empty() {
-            summary_str.to_string()
-        } else if !title_str.is_empty() {
-            title_str.to_string()
-        } else {
-            cid.chars().take(8).collect()
-        };
-
-        let Some(workspace_path) = session_navigation::workspace_from_summary(item) else {
-            continue;
-        };
-
-        let status_str = obj
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("CASCADE_RUN_STATUS_IDLE");
-        let last_mod_str = obj
-            .get("lastModifiedTime")
-            .and_then(Value::as_str)
-            .or_else(|| obj.get("createdTime").and_then(Value::as_str))
-            .unwrap_or_default();
-        let view_str = ann
-            .and_then(|a| a.get("lastUserViewTime"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let term_str = obj
-            .get("latestExecutorTerminationReason")
-            .and_then(Value::as_str)
-            .or_else(|| obj.get("terminationReason").and_then(Value::as_str))
-            .unwrap_or_default();
-
-        let last_modified_ms = parse_iso8601_utc_ms(last_mod_str);
-        let raw_view_ms = parse_iso8601_utc_ms(view_str);
-        let watermark = format!("{status_str}:{last_mod_str}:{term_str}");
-
-        let (phase, effective_view_ms) = match status_str {
-            "CASCADE_RUN_STATUS_WAITING_FOR_USER_INPUT"
-            | "CASCADE_RUN_STATUS_WAITING_FOR_PERMISSION" => {
-                seen_running_ids.insert(cid.clone());
-                (FourAppSessionKind::NeedsAttention, raw_view_ms)
-            }
-            "CASCADE_RUN_STATUS_RUNNING"
-            | "CASCADE_RUN_STATUS_WAITING_FOR_MODEL"
-            | "CASCADE_RUN_STATUS_CANCELING" => {
-                seen_running_ids.insert(cid.clone());
-                (FourAppSessionKind::Working, raw_view_ms)
-            }
-            "CASCADE_RUN_STATUS_ERROR" | "CASCADE_RUN_STATUS_FAILED" => {
-                seen_running_ids.remove(cid);
-                (FourAppSessionKind::Error, raw_view_ms)
-            }
-            _ => {
-                if seen_running_ids.remove(cid) {
-                    completed_transition_watermarks.insert(cid.clone(), watermark.clone());
-                }
-                let just_transitioned =
-                    completed_transition_watermarks.get(cid) == Some(&watermark);
-                let has_unviewed = last_modified_ms > raw_view_ms.saturating_add(500);
-                let is_recent = now_ms.saturating_sub(last_modified_ms) <= 15 * 60 * 1000;
-                let term_completed = term_str.ends_with("NO_TOOL_CALL")
-                    || term_str == "COMPLETED"
-                    || just_transitioned;
-                if term_completed && ((has_unviewed && is_recent) || just_transitioned) {
-                    let adj_view_ms = if has_unviewed {
-                        raw_view_ms
-                    } else {
-                        last_modified_ms.saturating_sub(1000)
-                    };
-                    (FourAppSessionKind::BlueDotCompleted, adj_view_ms)
-                } else {
-                    (FourAppSessionKind::Idle, raw_view_ms)
-                }
-            }
-        };
-
-        candidates.push(FourAppLiveCandidate {
-            place: NavigationPlace::antigravity(cid.clone(), workspace_path),
-            title,
-            phase,
-            watermark,
-            last_modified_ms,
-            last_user_view_ms: effective_view_ms,
-            updated_at_ms: last_modified_ms.max(effective_view_ms),
-        });
-    }
-
-    candidates.sort_by(|a, b| {
-        a.phase
-            .cmp(&b.phase)
-            .then_with(|| b.last_modified_ms.cmp(&a.last_modified_ms))
-            .then_with(|| a.place.target_id().cmp(&b.place.target_id()))
-    });
+    let active_frontmost_cid = suppress_frontmost
+        .then(|| {
+            mi_macos::session_navigation::frontmost_selected_antigravity_conversation(
+                instance.pid,
+                instance.ui_port,
+            )
+        })
+        .flatten();
+    let (candidates, project_ids, frontmost_acknowledged) =
+        classify_antigravity_trajectory_summaries(
+            summaries,
+            active_frontmost_cid.as_deref(),
+            seen_running_ids,
+            completed_transition_watermarks,
+        );
     Some(NavigationCatalog {
         instance,
         observed_at: Instant::now(),
         candidates,
+        project_ids,
+        frontmost_acknowledged,
     })
 }
 

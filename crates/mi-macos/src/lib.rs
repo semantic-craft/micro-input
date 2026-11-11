@@ -32,6 +32,10 @@ pub use scenarios::{
     run_config_write_scenario, run_diagnostic_export_scenario, run_host_execution_scenario,
     run_lighting_control_scenario, DiagnosticRedactor, ScenarioResultSummary,
 };
+pub use session_navigation::{
+    observe_antigravity_sidebar_conversations, SidebarConversationObservation,
+    SidebarRowVisualState,
+};
 pub use status_item::{
     PresetFileEnvelope, RecordingStatusItemHost, StatusIconPrimitive, StatusItemHost,
     StatusItemIconSpec, StatusItemSnapshot, MAX_PRESET_FILE_BYTES,
