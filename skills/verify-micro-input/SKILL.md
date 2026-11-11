@@ -46,12 +46,12 @@ description: End-to-end acceptance and self-verification skill for Micro Input (
 支持两种驱动方式（详细配方见 [`features/README.md`](features/README.md)）：
 
 1. **合成 HID 全链路自动驱动（`MI_SYNTHETIC_SCENARIO=host-execution`）**：
-   - 应用启动后自动连接合成 `0.6.3` 设备、安装五套桌面 Agent 预设与「其他软件」通用兜底预设、开启 `hostExecutionEnabled`；
+   - 应用启动后自动连接合成 `0.6.3` 设备、安装四套桌面 Agent 预设与「其他软件」通用兜底预设、开启 `hostExecutionEnabled`；
    - 依次切换非受保护的四个桌面 Profile（Antigravity、DSH、Herdr、其他软件）；每个注入 AG00，Antigravity 和 DSH 另注入 AG01/AG02/AG03，Antigravity 另注入旋钮 AG13/AG14/ENC_CLK 与摇杆/提交/宏，Herdr 另注入 AG10+AG11 宽键组合与 AG15，并验证跨目标导航后退/前进。共 20 条 simulated 回执。该场景不验证真实应用 UI，不发送文本。
    - 生产模式下（无 `MI_SYNTHETIC_SCENARIO` 且 `MI_AUTO_HOST_READY != "0"`），若检测到唯一已验证 USB `303A:8298` 设备，自动完成连接、身份与配置读取、预设安装并向 `$QA_AUDIT_LOG` 写入 `action_type: "host_ready"` 就绪回执；
    - 宿主执行器将每次派发的脱敏回执实时追加写入 `$QA_AUDIT_LOG`。
 2. **Rust 工作区集成测试驱动**：
-   - 运行 `cargo test --locked -p mi-core -p mi-macos -p mi-bridge` 与 `swift test --package-path app/MicroInput`，通过 `SimulatedHostActionExecutor` 与合成会话验证全套动作派发、八景合成回执与草稿隔离。
+   - 运行 `cargo test --locked -p mi-core -p mi-macos -p mi-bridge` 与 `swift test --package-path app/MicroInput`，通过 `SimulatedHostActionExecutor` 与合成会话验证全套动作派发、六景合成回执与草稿隔离。
 
 ## 4. Evidence
 

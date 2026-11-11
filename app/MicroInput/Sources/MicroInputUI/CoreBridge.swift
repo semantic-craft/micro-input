@@ -85,18 +85,22 @@ public final class CoreStore {
             queue: .main
         ) { [weak self] note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            let bundleId = app?.bundleIdentifier
             MainActor.assumeIsolated {
                 guard let self, self.workspaceObserver != nil else { return }
-                guard bundleId != Bundle.main.bundleIdentifier else { return }
-                guard bundleId != self.lastObservedBundleId else { return }
-                self.lastObservedBundleId = bundleId
-                self.dispatchRaw([
-                    "domain": "foreground_app_changed",
-                    "action": ["bundle_id": (bundleId as Any?) ?? NSNull()]
-                ])
+                self.observeForeground(app?.bundleIdentifier)
             }
         }
+        observeForeground(NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+    }
+
+    private func observeForeground(_ bundleId: String?) {
+        guard bundleId != Bundle.main.bundleIdentifier else { return }
+        guard bundleId != lastObservedBundleId else { return }
+        lastObservedBundleId = bundleId
+        dispatchRaw([
+            "domain": "foreground_app_changed",
+            "action": ["bundle_id": (bundleId as Any?) ?? NSNull()]
+        ])
     }
 
     public func refreshProjection() {
@@ -403,7 +407,6 @@ public final class CoreStore {
                 m.boardLayers.observedStatus = board["observed_status"] as? String ?? "设备层未确认"
                 m.boardLayers.applyBlockReason = board["apply_block_reason"] as? String ?? "六层应用尚未可用"
                 m.boardLayers.canApply = board["can_apply"] as? Bool ?? false
-                m.boardLayers.cindyNativePausedConfirmed = board["cindy_native_paused_confirmed"] as? Bool ?? false
                 m.boardLayers.configurationObserved = board["configuration_observed"] as? Bool ?? false
                 m.boardLayers.keyboardGrabbed = board["keyboard_grabbed"] as? Bool ?? false
                 m.boardLayers.firstEventVerified = board["first_event_verified"] as? Bool ?? false

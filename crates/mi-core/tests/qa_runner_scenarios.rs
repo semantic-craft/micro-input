@@ -8,15 +8,13 @@ use tempfile::TempDir;
 fn synthetic_scenario_9_parses_all_canonical_names_and_rejects_unknown() {
     let expected = [
         ("host-execution", SyntheticScenario9::HostExecution),
-        ("native-ownership", SyntheticScenario9::NativeOwnership),
         ("dsh-navigation", SyntheticScenario9::DshNavigation),
-        ("cindy-navigation", SyntheticScenario9::CindyNavigation),
         ("antigravity-status", SyntheticScenario9::AntigravityStatus),
         ("config-write", SyntheticScenario9::ConfigWrite),
         ("lighting-control", SyntheticScenario9::LightingControl),
         ("diagnostic-export", SyntheticScenario9::DiagnosticExport),
     ];
-    assert_eq!(SyntheticScenario9::ALL.len(), 8);
+    assert_eq!(SyntheticScenario9::ALL.len(), 6);
     for (raw, variant) in expected {
         let parsed = SyntheticScenario9::parse(raw).expect("canonical scenario must parse");
         assert_eq!(parsed, variant);
@@ -48,7 +46,7 @@ fn document_instance_lock_rejects_duplicate_owner_until_released() {
 }
 
 #[test]
-fn qa_runner_executes_all_nine_synthetic_scenarios_with_isolated_evidence() {
+fn qa_runner_executes_all_six_synthetic_scenarios_with_isolated_evidence() {
     for scenario in SyntheticScenario9::ALL {
         let temp = TempDir::new().expect("tempdir");
         let run_dir = temp.path().join(scenario.as_str());
@@ -76,31 +74,9 @@ fn qa_runner_executes_all_nine_synthetic_scenarios_with_isolated_evidence() {
                 let lines = fs::read_to_string(&audit_path).expect("audit.jsonl");
                 assert_eq!(lines.lines().count(), 20);
             }
-            SyntheticScenario9::NativeOwnership => {
-                let ownership: Value =
-                    serde_json::from_slice(&fs::read(evidence_dir.join("ownership.json")).unwrap())
-                        .unwrap();
-                assert_eq!(ownership["status"], "PASS");
-                assert_eq!(ownership["receipt_count"], 3);
-                let lines = fs::read_to_string(&audit_path).expect("audit.jsonl");
-                let rows: Vec<Value> = lines
-                    .lines()
-                    .map(|l| serde_json::from_str(l).unwrap())
-                    .collect();
-                assert_eq!(rows.len(), 3);
-                assert!(rows.iter().all(|r| r["outcome"] == "simulated"));
-            }
             SyntheticScenario9::DshNavigation => {
                 let doc: Value = serde_json::from_slice(
                     &fs::read(evidence_dir.join("dsh-navigation.json")).unwrap(),
-                )
-                .unwrap();
-                assert_eq!(doc["status"], "PASS");
-                assert!(audit_path.is_file());
-            }
-            SyntheticScenario9::CindyNavigation => {
-                let doc: Value = serde_json::from_slice(
-                    &fs::read(evidence_dir.join("cindy-navigation.json")).unwrap(),
                 )
                 .unwrap();
                 assert_eq!(doc["status"], "PASS");

@@ -1,4 +1,3 @@
-use crate::ownership::{NativeOwnershipController, OwnershipState};
 use mi_model::navigation_history::NavigationPlace;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -77,7 +76,6 @@ pub struct FourAppSlotSnapshot {
 #[serde(rename_all = "snake_case")]
 pub enum LightingUpdateResult {
     Applied,
-    YieldedToNative,
     SuspendedByProtectedLayer,
     DeviceBusy,
     Released,
@@ -137,21 +135,6 @@ impl FourAppLightingArbiter {
         }
     }
 
-    pub fn can_send_lighting(
-        &self,
-        ownership: &NativeOwnershipController,
-        is_protected_layer: bool,
-        preview_busy: bool,
-    ) -> bool {
-        if matches!(ownership.state(), OwnershipState::Native { .. }) {
-            return false;
-        }
-        if !ownership.allows_execution() || is_protected_layer || preview_busy {
-            return false;
-        }
-        true
-    }
-
     pub fn is_slot_attention_needed(&self, slot: &FourAppSlotSnapshot) -> bool {
         let Some(place) = &slot.place else {
             return false;
@@ -197,7 +180,6 @@ impl FourAppLightingArbiter {
         &self,
         phase: FourAppAgentPhase,
         dictation_active: bool,
-        native_ownership_active: bool,
     ) -> DualZoneLightingFeedback {
         let idle_hex = self.idle_color_hex.as_str();
         let working_hex = self.working_color_hex.as_str();
@@ -209,9 +191,7 @@ impl FourAppLightingArbiter {
             FourAppAgentPhase::Error => ("#FF2200", "breath", 1.0, 0.9),
             FourAppAgentPhase::BackgroundActive => ("#AA44FF", "breath", 0.7, 0.5),
         };
-        let (ug_color, ug_effect, ug_brightness, ug_speed) = if native_ownership_active {
-            ("#000000", "off", 0.0, 0.0)
-        } else if dictation_active {
+        let (ug_color, ug_effect, ug_brightness, ug_speed) = if dictation_active {
             ("#8800FF", "solid", 1.0, 0.5)
         } else if phase == FourAppAgentPhase::Completed {
             (idle_hex, "breath", 0.95, 0.65)
@@ -444,42 +424,10 @@ impl FourAppLightingArbiter {
         live_phase: FourAppAgentPhase,
         slots: &[FourAppSlotSnapshot],
         dictation_active: bool,
-        ownership: &NativeOwnershipController,
         is_protected_layer: bool,
         preview_busy: bool,
         is_bottom_row_split: bool,
         connected_device_id: Option<&str>,
-        write_hardware: F,
-    ) -> LightingUpdateResult
-    where
-        F: FnMut(&str) -> Result<String, String>,
-    {
-        self.update_feedback_at(
-            live_phase,
-            slots,
-            dictation_active,
-            ownership,
-            is_protected_layer,
-            preview_busy,
-            is_bottom_row_split,
-            connected_device_id,
-            std::time::Instant::now(),
-            write_hardware,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn update_feedback_at<F>(
-        &mut self,
-        live_phase: FourAppAgentPhase,
-        slots: &[FourAppSlotSnapshot],
-        dictation_active: bool,
-        ownership: &NativeOwnershipController,
-        is_protected_layer: bool,
-        preview_busy: bool,
-        is_bottom_row_split: bool,
-        connected_device_id: Option<&str>,
-        now: std::time::Instant,
         mut write_hardware: F,
     ) -> LightingUpdateResult
     where
@@ -494,13 +442,6 @@ impl FourAppLightingArbiter {
         };
         self.active_phase = phase;
 
-        if matches!(ownership.state(), OwnershipState::Native { .. })
-            || !ownership.allows_execution_at(now)
-        {
-            self.release();
-            self.last_update_result = LightingUpdateResult::YieldedToNative;
-            return LightingUpdateResult::YieldedToNative;
-        }
         if is_protected_layer {
             self.release();
             self.last_update_result = LightingUpdateResult::SuspendedByProtectedLayer;
@@ -520,7 +461,7 @@ impl FourAppLightingArbiter {
             slots.iter().filter(|s| self.is_slot_working(s)).collect();
         let has_any_attention = !attention_slots.is_empty();
 
-        let mut dual_zone = self.derive_dual_zone_feedback(phase, dictation_active, false);
+        let mut dual_zone = self.derive_dual_zone_feedback(phase, dictation_active);
         if !self.lighting_enabled {
             dual_zone = DualZoneLightingFeedback {
                 backlight_color: "#000000".into(),
@@ -760,7 +701,6 @@ mod tests {
     #[test]
     fn test_lighting_arbiter_deduplicates_identical_hardware_payload_digest() {
         let mut arbiter = FourAppLightingArbiter::new();
-        let ownership = NativeOwnershipController::new_isolated();
         let slots = vec![FourAppSlotSnapshot {
             app: "antigravity".into(),
             title: "Task 1".into(),
@@ -773,7 +713,6 @@ mod tests {
             FourAppAgentPhase::AwaitingInput,
             &slots,
             false,
-            &ownership,
             false,
             false,
             false,
@@ -788,7 +727,6 @@ mod tests {
             FourAppAgentPhase::AwaitingInput,
             &slots,
             false,
-            &ownership,
             false,
             false,
             false,
@@ -802,7 +740,6 @@ mod tests {
             FourAppAgentPhase::Completed,
             &slots,
             false,
-            &ownership,
             false,
             false,
             false,
@@ -817,7 +754,6 @@ mod tests {
             FourAppAgentPhase::Completed,
             &slots,
             false,
-            &ownership,
             false,
             false,
             false,
@@ -831,7 +767,6 @@ mod tests {
     #[test]
     fn test_antigravity_idle_is_blue_and_in_progress_is_distinct_color_by_default() {
         let mut arbiter = FourAppLightingArbiter::new();
-        let ownership = NativeOwnershipController::new_isolated();
         assert!(arbiter.glow_on_working_sessions);
         assert_eq!(arbiter.idle_color_hex, "#0088FF");
         assert_eq!(arbiter.working_color_hex, "#00FF66");
@@ -847,7 +782,6 @@ mod tests {
             FourAppAgentPhase::Thinking,
             &[running_slot],
             false,
-            &ownership,
             false,
             false,
             false,
@@ -870,7 +804,6 @@ mod tests {
             FourAppAgentPhase::Completed,
             &[completed_slot],
             false,
-            &ownership,
             false,
             false,
             false,

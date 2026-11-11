@@ -2,39 +2,15 @@ use super::*;
 use crate::six_layer_runtime::InstallationStatus;
 use mi_model::apply::AppliedSixLayerPlan;
 
-#[derive(Default)]
-pub(super) struct OwnershipView {
-    pub summary: String,
-    pub native: bool,
-    pub permits_execution: bool,
-}
-
-impl OwnershipView {
-    fn banner(&self, protected: bool) -> OwnershipBannerState {
-        if protected || self.native {
-            OwnershipBannerState::NativeHeld {
-                summary: self.summary.clone(),
-            }
-        } else if self.permits_execution {
-            OwnershipBannerState::Ready {
-                summary: self.summary.clone(),
-            }
-        } else {
-            OwnershipBannerState::Caution {
-                reason: self.summary.clone(),
-            }
-        }
-    }
-}
-
 pub(super) struct SixLayerView {
     pub configuration_observed: bool,
     pub keyboard_grabbed: bool,
     pub first_event_verified: bool,
     pub armed: bool,
-    pub ownership_released: bool,
     pub observed_layer: u8,
     pub failure: Option<String>,
+    pub effective_profile_id: Option<String>,
+    pub foreground_priority_adapter: Option<String>,
 }
 
 pub(super) struct ProjectionInputs<'a> {
@@ -55,6 +31,7 @@ pub(super) struct ProjectionInputs<'a> {
     pub favorite_action_ids: &'a BTreeSet<String>,
     pub favorites_only: bool,
     pub hardware_rpc_verified: bool,
+    pub isolated: bool,
     pub keycap_overrides: &'a BTreeMap<(String, u32), CodexKeycapId>,
     pub keycap_search_query: &'a String,
     pub last_cursor_position: ScreenPoint,
@@ -68,7 +45,6 @@ pub(super) struct ProjectionInputs<'a> {
     pub navigation_history: &'a NavigationHistory,
     pub open_drawers: &'a Vec<InspectorDrawer>,
     pub overlay_controller: &'a OverlayController,
-    pub ownership_view: &'a OwnershipView,
     pub pending_preset_export_scope: Option<PresetExportScope>,
     pub pending_preset_import: &'a Option<PendingPresetImportPreview>,
     pub pinned_favorites: &'a PinnedFavoritesGrid,
@@ -117,7 +93,6 @@ impl ProjectionInputs<'_> {
             CanonicalAgent::Codex => Some("codex".to_string()),
             CanonicalAgent::DeepseekHarness => Some("dsh-desktop".to_string()),
             CanonicalAgent::Herdr => Some("herdr".to_string()),
-            CanonicalAgent::Cindy => Some("cindy".to_string()),
             CanonicalAgent::OtherApps => None,
         }
     }
@@ -150,7 +125,6 @@ impl ProjectionInputs<'_> {
             .cloned()
             .unwrap_or_default();
         let preview = self.document_store.board_preview_selection();
-        let managed_cindy_id = self.managed_cindy_profile_id();
         let mut result = BoardLayersProjection::default();
         result.layers = std::array::from_fn(|i| {
             let layer = BoardLayer::ALL[i];
@@ -164,11 +138,6 @@ impl ProjectionInputs<'_> {
                     Some("方案归属与保存的意图不一致，不能执行".into())
                 }
                 BoardLayerRoute::Native { .. } => Some("由原生应用处理；六层隔离未验证".into()),
-                BoardLayerRoute::HostProfile { profile_id }
-                    if Some(profile_id) == managed_cindy_id.as_ref() =>
-                {
-                    Some("Cindy 托管方案；尚未接管，原生键盘集成状态未确认".into())
-                }
                 _ => None,
             };
             BoardLayerProjection {
@@ -190,9 +159,9 @@ impl ProjectionInputs<'_> {
                         ..
                     } => "Codex",
                     BoardLayerRoute::Native {
-                        owner: NativeLayerOwner::Cindy,
+                        owner: NativeLayerOwner::Retired,
                         ..
-                    } => "Cindy",
+                    } => "Unavailable",
                 }
                 .into(),
                 is_preview_selected: preview == BoardPreviewSelection::Layer(layer),
@@ -1121,8 +1090,7 @@ impl ProjectionInputs<'_> {
                 .layer_order
                 .first()
                 .is_some_and(|lid| doc.is_protected_oai_layer(lid));
-            let canonical_agent = CanonicalAgent::from_profile_name(&profile.name)
-                .filter(|agent| *agent != CanonicalAgent::Cindy || is_protected_oai);
+            let canonical_agent = CanonicalAgent::from_profile_name(&profile.name);
             if canonical_agent.is_none() && !self.show_other_profiles {
                 continue;
             }
@@ -1274,22 +1242,6 @@ impl ProjectionInputs<'_> {
         Some(id.clone())
     }
 
-    pub(super) fn managed_cindy_profile_id(&self) -> Option<String> {
-        self.document_store
-            .host_store()
-            .draft
-            .document
-            .editable
-            .graph
-            .profiles
-            .iter()
-            .find(|(id, p)| {
-                p.name == mi_model::preset::MANAGED_CINDY_PROFILE_NAME
-                    && !self.is_protected_oai_profile(id)
-            })
-            .map(|(id, _)| id.clone())
-    }
-
     pub(super) fn project(&self) -> WorkbenchProjection {
         let rows = self.compute_sidebar_rows();
         let active_host_id = self.document_store.host_active_profile_id();
@@ -1298,7 +1250,32 @@ impl ProjectionInputs<'_> {
             .or(self.selected_profile_id.as_deref())
             .is_some_and(|pid| self.is_protected_oai_profile(pid));
 
-        let ownership_banner = self.ownership_view.banner(is_protected_active);
+        let ownership_banner =
+            if self.six_layer_state.installation.is_some() || self.six_layer_view.is_some() {
+                if let Some(reason) = self
+                    .six_layer_view
+                    .as_ref()
+                    .and_then(|running| running.failure.clone())
+                {
+                    OwnershipBannerState::Caution { reason }
+                } else if self.device_connected {
+                    OwnershipBannerState::Ready {
+                        summary: "六层标准键输入已连接".into(),
+                    }
+                } else {
+                    OwnershipBannerState::Caution {
+                        reason: "六层输入尚未连接".into(),
+                    }
+                }
+            } else if is_protected_active {
+                OwnershipBannerState::NativeHeld {
+                    summary: "原生受保护方案".into(),
+                }
+            } else {
+                OwnershipBannerState::Ready {
+                    summary: "就绪".into(),
+                }
+            };
         let editing_device = self.document_store.editing_device();
         let can_edit_draft =
             !self.document_store.draft.read_only && self.document_store.draft.loaded_format == 2;
@@ -1463,6 +1440,13 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn resolved_active_profile_id(&self) -> Option<String> {
+        if let Some(profile) = self
+            .six_layer_view
+            .as_ref()
+            .and_then(|running| running.effective_profile_id.clone())
+        {
+            return Some(profile);
+        }
         self.document_store.host_active_profile_id().filter(|pid| {
             self.document_store
                 .draft
@@ -1506,7 +1490,9 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn routing_mode_summary_label(&self) -> String {
-        let mode = if !self.auto_follow_enabled {
+        let mode = if self.six_layer_view.is_some() {
+            "托管层前台优先"
+        } else if !self.auto_follow_enabled {
             "手动模式"
         } else if self.manual_override {
             "手动锁定（自动跟随已暂停）"
@@ -1537,31 +1523,42 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn project_six_layer_runtime(&self, result: &mut BoardLayersProjection) {
-        result.cindy_native_paused_confirmed = self.six_layer_state.cindy_native_paused_confirmed;
         result.restore_available =
             self.six_layer_state.installation.is_some() && !self.six_layer_busy;
         result.apply_block_reason = if self.six_layer_busy {
             "六层操作正在进行".into()
-        } else if !result.cindy_native_paused_confirmed {
-            "应用六层前，请确认 Cindy 原生键盘集成已关闭".into()
+        } else if self
+            .six_layer_state
+            .installation
+            .as_ref()
+            .is_some_and(|installation| installation.plan.validate_current().is_err())
+        {
+            "旧六层安装已暂停，请先恢复原设备配置".into()
+        } else if self.isolated {
+            "隔离工作台不能应用实体六层方案".into()
         } else {
             self.compiled_six_layer_plan().err().unwrap_or_default()
         };
         result.can_apply = result.apply_block_reason.is_empty();
         if let Some(running) = &self.six_layer_view {
             result.configuration_observed = running.configuration_observed;
-            result.keyboard_grabbed = running.keyboard_grabbed && running.failure.clone().is_none();
+            result.keyboard_grabbed = running.keyboard_grabbed && running.failure.is_none();
             result.first_event_verified = running.first_event_verified;
             result.runtime_ready = running.armed
-                && running.failure.clone().is_none()
-                && running.ownership_released
+                && running.failure.is_none()
                 && self.document_store.host_execution_enabled();
             result.observed_layer = Some(running.observed_layer);
             result.observed_profile_kind = Some("six_layer_direct".into());
             result.observed_status = running.failure.clone().unwrap_or_else(|| {
+                let priority = running
+                    .foreground_priority_adapter
+                    .as_ref()
+                    .map(|adapter| format!(" · 前台优先 {adapter}"))
+                    .unwrap_or_default();
                 format!(
-                    "六层配置已核验 · 第 {} 层 · {}",
+                    "六层配置已核验 · 最近确认第 {} 层{} · {}",
                     running.observed_layer,
+                    priority,
                     if running.first_event_verified {
                         "实体输入已验证"
                     } else {

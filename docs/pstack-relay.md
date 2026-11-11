@@ -317,7 +317,37 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: MI_AUTO_HOST_READY=0 RUST_TEST_THREADS=1 scripts/verify-offline && swift scripts/verify-app-icon.swift target/AppIcon.iconset && codesign --verify --strict "/Applications/Micro Input.app"
 - **Evidence**: /Applications/Micro Input.app; scripts/verify-offline PASS (eight scenarios); installed ICNS opaque frame 824px
 
-### [x] Slice R18: 分离投影与执行并收敛动作归属和输入边界
+### [x] Slice R17B: 分离投影与执行并收敛动作归属和输入边界
 - **Outcome**: 纯投影读取、明确原生展示同步、原目标动作释放与失败清理；有界硬件输入、可靠断连及可重放时间。
 - **Done Predicate**: 原归属、失败释放、多输入 Fn、输入过载、旧来源隔离和纯投影回归通过；`scripts/verify-offline` 八个隔离场景全量通过。不写设备配置。
 - **Evidence**: 8ebfe13; scripts/verify-offline exit 0, eight isolated scenarios PASS and cleanup confirmed; .scratch/runtime-architecture/verification.json
+
+### [x] Slice R18: 过期按键不再停用后续输入
+- **Outcome**: 保留两秒有效期和所有权检查，仅丢弃过期按键，后续新按键继续执行；未实现的会话动作明确拒绝，设备核验失败显示具体原因。
+- **Done Predicate**: 过期后新输入回归先失败后通过；独立审查及 `scripts/verify-offline` 通过；本机日常版更新。实体按键与会话导航能力分别记录，不以明确拒绝当成导航完成。
+- **Evidence**: a857584; .scratch/antigravity-profile/result.json; scripts/verify-offline eight scenarios PASS; physical verification pending
+
+### [ ] Slice R19: 接通会话键的真实目标导航
+- **Outcome**: 六层和工作台共享动态槽位解析，按完整目标身份切换会话；仅在实际选中被确认后更新已读和导航历史。
+- **Done Predicate**: 覆盖空槽、过期目标、实例换代、导航拒绝与成功回读；在两个真实 Antigravity 会话间完成实体键跳转。打开应用不能代替切换会话。
+- **Evidence**: #84；`integrations/antigravity/live-bridge.py` 的现有打开路径仅激活应用，真实会话导航仍未验收。
+
+### [x] Slice R20: 托管按键跟随前台与分屏焦点
+- **Outcome**: 第 2–4 托管层优先使用当前前台应用的已安装方案，执行器按光标所在分屏选择控件；后台 Codex 不参与目标选择，旧输入不随切换转投新目标。
+- **Done Predicate**: 前台切换与双分屏回归先失败后通过，独立审查及 `scripts/verify-offline` 通过，本机日常版更新。物理层仍按真实观察显示；第 1 层 Codex 原生通道及尚未实现的会话导航分别保留边界。
+- **Evidence**: e5c6e6d; .scratch/antigravity-foreground/result.json; eight offline scenarios PASS; installed; physical input not run
+
+### [x] Slice R21: 六层实体输入与配置 RPC 分离
+- **Outcome**: 首次配置核验完成后关闭共享 RPC reader，六层输入独立依赖 USB/Karabiner 与自身输入代次，不依赖 Cindy 进程或所有权桥。避免无关响应、身份查询超时或编号耗尽停用实体键。配置查询保留严格响应归属与终止原因。
+- **Done Predicate**: 核验后 reader 退出、运行期零 RPC、实体 token 路由、无 Cindy 所有权桥的执行及失效清理回归通过；无关联响应不误完成请求，本请求坏包仍失败；`scripts/verify-offline` 全量通过并更新本机。持续连接和实体动作分别记录，层位仅表述首次核验或最近输入，UNKNOWN-17 保留。
+- **Evidence**: d529820; .scratch/antigravity-session/result.json; eight offline scenarios PASS; installed; 363s connected without Cindy; final physical keys NOT_RUN
+
+### [x] Slice R22: 移除 Cindy 专用支持
+- **Outcome**: 内置应用保留 Antigravity、Herdr、Codex 和 DeepSeek Harness，另有「其他软件」通用方案。删除 Cindy 预设、会话桥、听写、辅助功能适配与原生所有权握手；默认第 4 至 6 层留空。
+- **Done Predicate**: 旧文档与偏好保全，旧三宿主安装记录可读但不执行且恢复信息仍可用；第 4 层输入不执行；DSH 共享传输与 ChatGPT 既有快捷键有回归覆盖；`scripts/verify-offline` 六个隔离场景通过。不改写实体设备映射。
+- **Evidence**: e3ea0c8; .scratch/remove-cindy/result.json; final verify-offline six scenarios PASS; native UI entries verified; no device writes
+
+### [x] Slice R23: 减少托管聚焦的重复 AX 扫描
+- **Outcome**: 保留窗口、分屏和候选歧义检查，用已发现控件的实时路径校验与焦点读回减少按键动作等待，不增加跨动作缓存。
+- **Done Predicate**: 真实 AX 聚焦的匹配构建交替对照成功，范围与失败独立记录；失效路径、控件替换和目标改变回归通过；独立验收与 `scripts/verify-offline` 通过，并更新本机。物理按键完整延迟单独保留边界。
+- **Evidence**: ea3a82f; docs/verification/host-input-latency.json; .scratch/input-latency/result.json; eight offline QA PASS; installed and connected; physical latency NOT_MEASURED

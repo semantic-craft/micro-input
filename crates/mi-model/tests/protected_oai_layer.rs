@@ -227,17 +227,8 @@ fn compact_host_keymap_stays_under_1024_bytes_while_preserving_all_profiles_and_
 {
     let mut draft = Draft::default();
     let profile_ids = preset::install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(profile_ids.len(), 8);
+    assert_eq!(profile_ids.len(), 6);
 
-    let cindy_pid = draft
-        .document
-        .editable
-        .graph
-        .profiles
-        .iter()
-        .find(|(_, p)| p.name == "Cindy")
-        .map(|(id, _)| id.clone())
-        .unwrap();
     let codex_pid = draft
         .document
         .editable
@@ -257,11 +248,8 @@ fn compact_host_keymap_stays_under_1024_bytes_while_preserving_all_profiles_and_
         .map(|(id, _)| id.clone())
         .unwrap();
 
-    let cindy_protected_lid =
-        draft.document.editable.graph.profiles[&cindy_pid].layer_order[0].clone();
     let codex_protected_lid =
         draft.document.editable.graph.profiles[&codex_pid].layer_order[0].clone();
-    assert!(draft.document.is_protected_oai_layer(&cindy_protected_lid));
     assert!(draft.document.is_protected_oai_layer(&codex_protected_lid));
 
     let ag_lid = draft.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
@@ -300,7 +288,7 @@ fn compact_host_keymap_stays_under_1024_bytes_while_preserving_all_profiles_and_
     }
     assert_eq!(draft.macros().len(), 30);
 
-    for (pid, expected_name) in [(&cindy_pid, "Cindy"), (&codex_pid, "Codex")] {
+    for (pid, expected_name) in [(&codex_pid, "Codex")] {
         let compact = draft
             .compile_compact_host_keymap(Some(pid))
             .expect("compile compact host keymap");
@@ -338,11 +326,8 @@ fn compact_host_keymap_stays_under_1024_bytes_while_preserving_all_profiles_and_
     let serialized = serde_json::to_vec(&draft.document).unwrap();
     let reopened = Draft::from_bytes(&serialized).expect("reopen local v2 document");
     assert!(!reopened.read_only);
-    assert_eq!(reopened.config.profiles.len(), 8);
+    assert_eq!(reopened.config.profiles.len(), 6);
     assert_eq!(reopened.macros().len(), 30);
-    assert!(reopened
-        .document
-        .is_protected_oai_layer(&cindy_protected_lid));
     assert!(reopened
         .document
         .is_protected_oai_layer(&codex_protected_lid));

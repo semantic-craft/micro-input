@@ -111,47 +111,6 @@ def quiesce_competing_hid_readers():
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    doc_dir = Path(
-        os.environ.get(
-            "MI_DOCUMENT_DIR",
-            str(Path.home() / "Library" / "Application Support" / "MicroInput"),
-        )
-    )
-    sock_path = doc_dir / "cindy-ownership.sock"
-    fence_path = doc_dir / "cindy-ownership.sock.fence"
-    if sock_path.exists():
-        import socket as py_socket
-
-        client_instance = str(uuid.uuid4())
-        generation = 1
-        if fence_path.is_file():
-            try:
-                fence_data = json.loads(fence_path.read_text(encoding="utf-8"))
-                client_instance = fence_data.get("clientInstance", client_instance)
-                generation = int(fence_data.get("generation", 0)) + 1
-            except (OSError, ValueError):
-                pass
-        req = {
-            "version": 1,
-            "requestId": str(uuid.uuid4()),
-            "clientInstance": client_instance,
-            "generation": generation,
-            "desiredOwner": "micro-input",
-            "microInputDrained": True,
-            "capabilities": ["fenced-release-v1"],
-        }
-        try:
-            with py_socket.socket(py_socket.AF_UNIX, py_socket.SOCK_STREAM) as s:
-                s.settimeout(1.0)
-                s.connect(str(sock_path))
-                s.sendall((json.dumps(req) + "\n").encode("utf-8"))
-                s.recv(4096)
-            fence_path.write_text(
-                json.dumps({"clientInstance": client_instance, "generation": generation}) + "\n",
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
     time.sleep(0.4)
 
 

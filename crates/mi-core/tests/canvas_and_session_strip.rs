@@ -273,7 +273,7 @@ fn mg1_protected_oai_layer_enforces_all_four_hard_isolation_invariants_and_one_c
     let temp = TempDir::new().unwrap();
     let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
 
-    for agent in [CanonicalAgent::Cindy, CanonicalAgent::Codex] {
+    for agent in [CanonicalAgent::Codex] {
         let pid = store.find_canonical_profile_id(agent).unwrap();
         store.select_and_activate_profile(&pid).unwrap();
         assert!(store.is_selected_layer_protected());
@@ -334,10 +334,10 @@ fn mg1_protected_oai_layer_enforces_all_four_hard_isolation_invariants_and_one_c
         );
     }
 
-    let cindy_pid = store
-        .find_canonical_profile_id(CanonicalAgent::Cindy)
+    let codex_pid = store
+        .find_canonical_profile_id(CanonicalAgent::Codex)
         .unwrap();
-    store.select_and_activate_profile(&cindy_pid).unwrap();
+    store.select_and_activate_profile(&codex_pid).unwrap();
     let protected_lid = store.selected_layer_id().unwrap().to_string();
 
     store
@@ -389,9 +389,9 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
     store.select_and_activate_profile(&ag_pid).unwrap();
 
     let place_idle_recent = NavigationPlace::antigravity("conv-idle", "/ws/idle");
-    let place_viewed_done = NavigationPlace::cindy("/ws/cindy-viewed", "sess-viewed");
+    let place_viewed_done = NavigationPlace::session("dsh-desktop", "sess-viewed");
     let place_unread_done = NavigationPlace::antigravity("conv-done", "/ws/done");
-    let place_working = NavigationPlace::cindy("/ws/cindy-work", "sess-working");
+    let place_working = NavigationPlace::session("dsh-desktop", "sess-working");
     let place_attention = NavigationPlace::dsh("sess-attn", "ws-dsh", "host-1");
 
     store.ingest_four_app_candidates(vec![
@@ -424,7 +424,7 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
         },
         FourAppLiveCandidate {
             place: place_working.clone(),
-            title: "Cindy Running Build".into(),
+            title: "Codex Running Build".into(),
             phase: FourAppSessionKind::Working,
             watermark: "wm-work-1".into(),
             last_modified_ms: 7_000,
@@ -478,7 +478,7 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
 
     store.ingest_four_app_candidates(vec![FourAppLiveCandidate {
         place: place_working.clone(),
-        title: "Cindy Running Build Updated".into(),
+        title: "Codex Running Build Updated".into(),
         phase: FourAppSessionKind::Working,
         watermark: "wm-work-2".into(),
         last_modified_ms: 20_000,

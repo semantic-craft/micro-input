@@ -13,7 +13,7 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -42,7 +42,12 @@ pub struct Installation {
 #[serde(deny_unknown_fields)]
 pub struct SavedSixLayerState {
     pub version: u8,
-    pub cindy_native_paused_confirmed: bool,
+    #[serde(
+        default,
+        rename = "cindy_native_paused_confirmed",
+        skip_serializing_if = "Option::is_none"
+    )]
+    legacy_native_paused_confirmation: Option<bool>,
     pub installation: Option<Installation>,
 }
 
@@ -50,7 +55,7 @@ impl Default for SavedSixLayerState {
     fn default() -> Self {
         Self {
             version: 1,
-            cindy_native_paused_confirmed: false,
+            legacy_native_paused_confirmation: None,
             installation: None,
         }
     }
@@ -146,7 +151,7 @@ impl ExecutionPolicy {
 pub struct RunningSixLayer {
     pub receiver: Arc<UserCommandReceiver>,
     pub readiness: Readiness,
-    pub session: Arc<DeviceSession>,
+    session: Arc<DeviceSession>,
     pub candidate: HidCandidate,
     pub installation: Installation,
     pub observed_layer: Arc<AtomicU8>,
@@ -154,65 +159,70 @@ pub struct RunningSixLayer {
     pub armed: bool,
     execution_policy: Arc<ExecutionPolicy>,
     pub receipts: Option<std::sync::mpsc::Receiver<mi_macos::HostActionReceipt>>,
+    foreground: Arc<Mutex<ForegroundContext>>,
     stop: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
     executor: Option<JoinHandle<Result<(), String>>>,
 }
 
-pub struct OwnershipPermit {
-    pub transport: mi_bridge::UnixNativeOwnershipTransport,
-    pub request: mi_bridge::NativeOwnershipRequest,
-    pub native_identity: String,
-    pub min_native_generation: AtomicU64,
-    pub allow_unbridged_drain: bool,
+#[derive(Clone, Debug)]
+struct ForegroundContext {
+    bundle_id: Option<String>,
+    generation: u64,
+    changed_at: Instant,
 }
 
-impl OwnershipPermit {
-    fn check(&self) -> Result<(), String> {
-        let _guard = self.transport.lock_path();
-        let mut request = self.request.clone();
-        if let Some(fence) = self.transport.read_persisted_fence() {
-            request.client_instance = fence.client_instance;
-            request.generation = request.generation.max(fence.generation);
+impl Default for ForegroundContext {
+    fn default() -> Self {
+        Self {
+            bundle_id: None,
+            generation: 0,
+            changed_at: Instant::now(),
         }
-        request.request_id = mi_model::document::new_id()
-            .parse()
-            .map_err(|_| "请求身份生成失败")?;
-        let reply = self
-            .transport
-            .exchange_locked(&request)
-            .map_err(|e| e.to_string())?;
-        let has_fenced_cap = reply
-            .capabilities
-            .as_ref()
-            .is_some_and(|caps| caps.iter().any(|cap| cap == "fenced-release-v1"));
-        let released_ok = (reply.state == "released"
-            && reply.input_drained
-            && reply.ptt_drained
-            && reply.lighting_drained)
-            || (self.allow_unbridged_drain
-                && reply.state == "unknown"
-                && reply.reason == "native_drain_unconfirmed"
-                && reply.lighting_drained);
-        let min_gen = self.min_native_generation.load(Ordering::Acquire);
-        if reply.version != 1
-            || reply.request_id != request.request_id
-            || reply.client_instance != request.client_instance
-            || reply.generation != request.generation
-            || !released_ok
-            || !has_fenced_cap
-            || reply.native_instance.to_string() != self.native_identity
-            || reply.native_generation < min_gen
-        {
-            return Err("Cindy 当前代释放未确认".into());
+    }
+}
+
+impl ForegroundContext {
+    fn update(&mut self, bundle_id: Option<&str>) -> bool {
+        if self.bundle_id.as_deref() == bundle_id {
+            return false;
         }
-        self.min_native_generation
-            .fetch_max(reply.native_generation, Ordering::AcqRel);
-        Ok(())
+        self.bundle_id = bundle_id.map(str::to_owned);
+        self.generation += 1;
+        self.changed_at = Instant::now();
+        true
+    }
+
+    fn host_index(&self, plan: &AppliedSixLayerPlan, physical_layer: u8) -> usize {
+        self.bundle_id
+            .as_deref()
+            .and_then(|bundle| {
+                plan.hosts.iter().position(|host| {
+                    mi_macos::executor::bundle_id_for_adapter(&host.adapter) == Some(bundle)
+                })
+            })
+            .unwrap_or((physical_layer - 2) as usize)
     }
 }
 
 impl RunningSixLayer {
+    pub fn foreground_changed(&self, bundle_id: Option<&str>) -> bool {
+        self.foreground.lock().unwrap().update(bundle_id)
+    }
+
+    pub fn effective_profile_id(&self) -> Option<String> {
+        let layer = self.observed_layer.load(Ordering::Acquire);
+        if !(2..=3).contains(&layer) {
+            return None;
+        }
+        let foreground = self.foreground.lock().unwrap();
+        Some(
+            self.installation.plan.hosts[foreground.host_index(&self.installation.plan, layer)]
+                .profile_id
+                .clone(),
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn isolated(session: Arc<DeviceSession>, directory: &Path) -> Self {
         let mut draft = mi_model::draft::Draft::default();
@@ -233,7 +243,6 @@ impl RunningSixLayer {
             id("Codex"),
             id("Antigravity"),
             id("DeepSeek Coder (DSH)"),
-            id(mi_model::preset::MANAGED_CINDY_PROFILE_NAME),
         );
         let plan = AppliedSixLayerPlan::compile(
             &desired,
@@ -286,10 +295,14 @@ impl RunningSixLayer {
         self.execution_policy.set(enabled, commands, now);
     }
 
-    pub fn start_executor(
+    #[cfg(test)]
+    pub(crate) fn is_execution_enabled(&self) -> bool {
+        self.execution_policy.state.lock().unwrap().enabled
+    }
+
+    pub fn start_executor<D: mi_macos::HostOsDriver + 'static>(
         &mut self,
-        permit: OwnershipPermit,
-        executor: Arc<mi_macos::LiveHostActionExecutor<mi_macos::MacOsSystemDriver>>,
+        executor: Arc<mi_macos::LiveHostActionExecutor<D>>,
     ) {
         let receiver = Arc::clone(&self.receiver);
         let plan = self.installation.plan.clone();
@@ -297,6 +310,7 @@ impl RunningSixLayer {
         let policy = Arc::clone(&self.execution_policy);
         let observed = Arc::clone(&self.observed_layer);
         let first = Arc::clone(&self.first_event_verified);
+        let foreground = Arc::clone(&self.foreground);
         let (tx, rx) = std::sync::mpsc::sync_channel(32);
         self.receipts = Some(rx);
         self.executor = Some(thread::spawn(move || {
@@ -307,9 +321,10 @@ impl RunningSixLayer {
                 &policy,
                 &observed,
                 &first,
+                &foreground,
                 &tx,
                 || receiver.next(),
-                || permit.check(),
+                || receiver.failure().map_or(Ok(()), Err),
                 |profile, binding, action, admission| {
                     executor.execute_when(profile, binding, action, || {
                         !stop.load(Ordering::Acquire)
@@ -351,15 +366,12 @@ impl RunningSixLayer {
         monitor_result.and(executor_result)
     }
 
-    pub fn start_monitor(&mut self, runtime: Arc<tokio::runtime::Runtime>) {
+    pub fn start_monitor(&mut self) {
         let receiver = Arc::clone(&self.receiver);
         let stop = Arc::clone(&self.stop);
         let readiness = self.readiness.clone();
         let patch = self.installation.config.clone();
         let target = self.installation.target.clone();
-        let session = Arc::clone(&self.session);
-        let observed = Arc::clone(&self.observed_layer);
-        let profile_index = self.installation.profile_index;
         self.monitor = Some(thread::spawn(move || {
             let mut wall = SystemTime::now();
             let mut monotonic = Instant::now();
@@ -379,30 +391,9 @@ impl RunningSixLayer {
                     > Duration::from_secs(1);
                 wall = now_wall;
                 monotonic = now_monotonic;
-                if slept || session.is_disconnected() {
-                    receiver.invalidate("系统睡眠或设备连接已变化");
+                if !check_input_connection(&receiver, slept, || readiness.recheck(&patch, &target))
+                {
                     return;
-                }
-                if let Err(error) = readiness.recheck(&patch, &target) {
-                    receiver.invalidate(&error);
-                    return;
-                }
-                match runtime.block_on(async {
-                    tokio::time::timeout(Duration::from_secs(2), session.read_identity_info()).await
-                }) {
-                    Ok(Ok(identity))
-                        if identity.version.as_deref() == Some("0.6.3")
-                            && identity.profile_index == Some(profile_index)
-                            && identity
-                                .layer_index
-                                .is_some_and(|layer| (1..=6).contains(&layer)) =>
-                    {
-                        observed.store(identity.layer_index.unwrap() as u8, Ordering::Release);
-                    }
-                    _ => {
-                        receiver.invalidate("当前设备方案或层位未确认");
-                        return;
-                    }
                 }
             }
         }));
@@ -419,6 +410,26 @@ impl Drop for RunningSixLayer {
     }
 }
 
+// Input liveness belongs to the grabbed keyboard and its Karabiner generation.
+// Vendor RPC is used only while establishing or changing the configuration.
+fn check_input_connection(
+    receiver: &UserCommandReceiver,
+    slept: bool,
+    recheck: impl FnOnce() -> Result<(), String>,
+) -> bool {
+    let result = if slept {
+        Err("检测到系统睡眠，六层输入已暂停".into())
+    } else {
+        recheck()
+    };
+    if let Err(error) = result {
+        receiver.invalidate(&error);
+        false
+    } else {
+        true
+    }
+}
+
 fn execute_clicks(
     receiver: &UserCommandReceiver,
     plan: &AppliedSixLayerPlan,
@@ -426,9 +437,10 @@ fn execute_clicks(
     policy: &ExecutionPolicy,
     observed: &AtomicU8,
     first: &AtomicBool,
+    foreground: &Mutex<ForegroundContext>,
     receipts: &std::sync::mpsc::SyncSender<mi_macos::HostActionReceipt>,
     mut next: impl FnMut() -> Result<Option<mi_transport::Activation>, String>,
-    mut permit: impl FnMut() -> Result<(), String>,
+    mut check_connection: impl FnMut() -> Result<(), String>,
     mut execute: impl FnMut(
         &str,
         &str,
@@ -452,23 +464,34 @@ fn execute_clicks(
         let control = &DIRECT_CONTROLS[event.control as usize];
         observed.store(control.layer, Ordering::Release);
         first.store(true, Ordering::Release);
-        let host = &plan.hosts[(control.layer - 2) as usize];
+        if !(2..=3).contains(&control.layer) {
+            continue;
+        }
+        let context = foreground.lock().unwrap().clone();
+        if context.generation != 0 && event.received_at < context.changed_at {
+            continue;
+        }
+        let Some(host) = plan.hosts.get(context.host_index(plan, control.layer)) else {
+            continue;
+        };
         let Some(action) = &host.actions[control.slot as usize] else {
             continue;
         };
         if !policy.admits(admission, action) {
             continue;
         }
-        if let Err(error) = permit() {
+        if let Err(error) = check_connection() {
             receiver.invalidate(&error);
             return;
         }
         if stop.load(Ordering::Acquire) || receiver.failure().is_some() {
             return;
         }
-        if event.received_at.elapsed() > Duration::from_secs(2) {
-            receiver.invalidate("点击已过期，停止派发积压输入");
-            return;
+        if event.is_expired_at(Instant::now()) {
+            continue;
+        }
+        if foreground.lock().unwrap().generation != context.generation {
+            continue;
         }
         let receipt = execute(
             &host.profile_id,
@@ -511,9 +534,7 @@ pub async fn apply(
     mut saved: SavedSixLayerState,
 ) -> Result<RunningSixLayer, String> {
     let state_path = document_dir.join("six-layer-runtime.json");
-    if !saved.cindy_native_paused_confirmed {
-        return Err("请先确认 Cindy 原生键盘集成已关闭".into());
-    }
+    plan.validate_current()?;
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
     let receiver = Arc::new(UserCommandReceiver::bind().map_err(|e| e.to_string())?);
     let rule = karabiner::rules(&target, &receiver, plan.bottom_row_layout)?;
@@ -526,102 +547,107 @@ pub async fn apply(
     )?;
     let exclusive = MacTransport::exclusive_vendor();
     let (session, _) = connect(&exclusive, &target)?;
-    let prepared = session
-        .prepare_six_layer_write(document_dir)
-        .await
-        .map_err(|e| e.to_string())?;
-    let candidate_bytes = prepared.candidate.clone();
-    let smart = match fs::read(prepared.backup.join("smart_actions.json")) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.to_string()),
-    };
-    let baseline = ReloadBaseline::capture()?;
-    patch.install(&document_dir.join("karabiner-backups"))?;
-    let readiness = match wait_ready(&baseline, &patch, &target) {
-        Ok(ready) => ready,
-        Err(error) => {
-            let rollback = patch.rollback_exact();
-            return Err(format!(
-                "{error}；规则恢复：{}",
-                rollback.map(|_| "已确认".into()).unwrap_or_else(|e| e)
-            ));
-        }
-    };
-    let previous = saved.clone();
-    let mut restoration_config = patch.clone();
-    let backup = if let Some(previous) = &saved.installation {
-        restoration_config.original = previous.config.original.clone();
-        restoration_config.original_device = previous.config.original_device.clone();
-        previous.backup.clone()
-    } else {
-        prepared.backup.clone()
-    };
-    let mut installation = Installation {
-        status: InstallationStatus::Applying,
-        plan,
-        target: target.clone(),
-        profile_index: prepared.profile_index,
-        backup,
-        config: restoration_config,
-    };
-    saved.installation = Some(installation.clone());
-    if let Err(error) = save(&state_path, &saved) {
-        let _ = patch.rollback_exact();
-        return Err(error);
-    }
-    let result = session.apply_six_layer_write(prepared).await;
-    let receipt = match result {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            if error.original_verified {
+    with_verification_session(&session, async {
+        let prepared = session
+            .prepare_six_layer_write(document_dir)
+            .await
+            .map_err(|e| e.to_string())?;
+        let candidate_bytes = prepared.candidate.clone();
+        let smart = match fs::read(prepared.backup.join("smart_actions.json")) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        let baseline = ReloadBaseline::capture()?;
+        patch.install(&document_dir.join("karabiner-backups"))?;
+        let readiness = match wait_ready(&baseline, &patch, &target) {
+            Ok(ready) => ready,
+            Err(error) => {
                 let rollback = patch.rollback_exact();
-                if rollback.is_ok() {
-                    let _ = save(&state_path, &previous);
-                }
                 return Err(format!(
-                    "{}；设备原件已确认；规则恢复：{}",
-                    error.detail,
+                    "{error}；规则恢复：{}",
                     rollback.map(|_| "已确认".into()).unwrap_or_else(|e| e)
                 ));
             }
-            installation.status = InstallationStatus::RecoveryRequired;
-            saved.installation = Some(installation);
-            let _ = save(&state_path, &saved);
-            return Err(format!(
-                "{}；设备恢复未确认，保留吞键规则，停止派发",
-                error.detail
-            ));
+        };
+        let previous = saved.clone();
+        let mut restoration_config = patch.clone();
+        let backup = if let Some(previous) = &saved.installation {
+            restoration_config.original = previous.config.original.clone();
+            restoration_config.original_device = previous.config.original_device.clone();
+            previous.backup.clone()
+        } else {
+            prepared.backup.clone()
+        };
+        let mut installation = Installation {
+            status: InstallationStatus::Applying,
+            plan,
+            target: target.clone(),
+            profile_index: prepared.profile_index,
+            backup,
+            config: restoration_config,
+        };
+        saved.installation = Some(installation.clone());
+        if let Err(error) = save(&state_path, &saved) {
+            let _ = patch.rollback_exact();
+            return Err(error);
         }
-    };
-    session.disconnect();
-    drop(session);
-    drop(exclusive);
-    let (shared, candidate) = match connect(&MacTransport::new(), &target) {
-        Ok(connected) => connected,
-        Err(error) => {
-            installation.status = InstallationStatus::RecoveryRequired;
-            saved.installation = Some(installation);
-            let _ = save(&state_path, &saved);
-            return Err(format!("{error}；保留吞键规则，请恢复设备"));
-        }
-    };
-    let layer = shared
-        .verify_six_layer_files(&candidate_bytes, smart.as_deref(), receipt.profile_index)
+        let result = session.apply_six_layer_write(prepared).await;
+        let receipt = match result {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if error.original_verified {
+                    let rollback = patch.rollback_exact();
+                    if rollback.is_ok() {
+                        let _ = save(&state_path, &previous);
+                    }
+                    return Err(format!(
+                        "{}；设备原件已确认；规则恢复：{}",
+                        error.detail,
+                        rollback.map(|_| "已确认".into()).unwrap_or_else(|e| e)
+                    ));
+                }
+                installation.status = InstallationStatus::RecoveryRequired;
+                saved.installation = Some(installation);
+                let _ = save(&state_path, &saved);
+                return Err(format!(
+                    "{}；设备恢复未确认，保留吞键规则，停止派发",
+                    error.detail
+                ));
+            }
+        };
+        session.shutdown().await;
+        drop(exclusive);
+        let (shared, candidate) = match connect(&MacTransport::new(), &target) {
+            Ok(connected) => connected,
+            Err(error) => {
+                installation.status = InstallationStatus::RecoveryRequired;
+                saved.installation = Some(installation);
+                let _ = save(&state_path, &saved);
+                return Err(format!("{error}；保留吞键规则，请恢复设备"));
+            }
+        };
+        with_verification_session(&shared, async {
+            let layer = shared
+                .verify_six_layer_files(&candidate_bytes, smart.as_deref(), receipt.profile_index)
+                .await
+                .map_err(|e| format!("{e}；保留吞键规则，请恢复设备"))?;
+            readiness.recheck(&patch, &target)?;
+            installation.status = InstallationStatus::Applied;
+            saved.installation = Some(installation.clone());
+            save(&state_path, &saved)?;
+            Ok(new_running(
+                receiver,
+                readiness,
+                shared.clone(),
+                candidate,
+                installation,
+                layer as u8,
+            ))
+        })
         .await
-        .map_err(|e| format!("{e}；保留吞键规则，请恢复设备"))?;
-    readiness.recheck(&patch, &target)?;
-    installation.status = InstallationStatus::Applied;
-    saved.installation = Some(installation.clone());
-    save(&state_path, &saved)?;
-    Ok(new_running(
-        receiver,
-        readiness,
-        shared,
-        candidate,
-        installation,
-        layer as u8,
-    ))
+    })
+    .await
 }
 
 fn new_running(
@@ -643,6 +669,7 @@ fn new_running(
         armed: false,
         execution_policy: Arc::new(ExecutionPolicy::default()),
         receipts: None,
+        foreground: Arc::new(Mutex::new(ForegroundContext::default())),
         stop: Arc::new(AtomicBool::new(false)),
         monitor: None,
         executor: None,
@@ -654,54 +681,65 @@ pub async fn resume(
     document_dir: &Path,
     mut saved: SavedSixLayerState,
 ) -> Result<RunningSixLayer, String> {
-    if !saved.cindy_native_paused_confirmed {
-        return Err("Cindy 原生暂停尚未确认".into());
-    }
     let mut installation = saved
         .installation
         .clone()
         .filter(|installation| installation.status == InstallationStatus::Applied)
         .ok_or("六层记录未完成，需要恢复")?;
+    installation.plan.validate_current()?;
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
     let (session, candidate) = connect(&MacTransport::new(), &target)?;
-    let expected =
-        fs::read(installation.backup.join("planned-keymap.json")).map_err(|e| e.to_string())?;
-    let smart = match fs::read(installation.backup.join("smart_actions.json")) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.to_string()),
-    };
-    let layer = session
-        .verify_six_layer_files(&expected, smart.as_deref(), installation.profile_index)
-        .await
-        .map_err(|e| format!("{e}；未写设备，请显式应用或恢复"))?;
-    let receiver = Arc::new(UserCommandReceiver::bind().map_err(|e| e.to_string())?);
-    let rule = karabiner::rules(&target, &receiver, installation.plan.bottom_row_layout)?;
-    let path = installation.config.path.clone();
-    let patch = karabiner::prepare_config(
-        path.clone(),
-        fs::read(&path).map_err(|e| e.to_string())?,
-        &target,
-        rule,
-    )?;
-    let baseline = ReloadBaseline::capture()?;
-    patch.install(&document_dir.join("karabiner-backups"))?;
-    installation.config.installed = patch.installed.clone();
-    installation.config.installed_device = patch.installed_device.clone();
-    installation.target = target.clone();
-    saved.installation = Some(installation.clone());
-    save(&document_dir.join("six-layer-runtime.json"), &saved)?;
-    // The board is already direct-coded. A failed reload must leave swallowing
-    // rules in place, including when the previous rule had been removed.
-    let readiness = wait_ready(&baseline, &patch, &target)?;
-    Ok(new_running(
-        receiver,
-        readiness,
-        session,
-        candidate,
-        installation,
-        layer as u8,
-    ))
+    with_verification_session(&session, async {
+        let expected =
+            fs::read(installation.backup.join("planned-keymap.json")).map_err(|e| e.to_string())?;
+        let smart = match fs::read(installation.backup.join("smart_actions.json")) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        let layer = session
+            .verify_six_layer_files(&expected, smart.as_deref(), installation.profile_index)
+            .await
+            .map_err(|e| format!("{e}；未写设备，请显式应用或恢复"))?;
+        let receiver = Arc::new(UserCommandReceiver::bind().map_err(|e| e.to_string())?);
+        let rule = karabiner::rules(&target, &receiver, installation.plan.bottom_row_layout)?;
+        let path = installation.config.path.clone();
+        let patch = karabiner::prepare_config(
+            path.clone(),
+            fs::read(&path).map_err(|e| e.to_string())?,
+            &target,
+            rule,
+        )?;
+        let baseline = ReloadBaseline::capture()?;
+        patch.install(&document_dir.join("karabiner-backups"))?;
+        installation.config.installed = patch.installed.clone();
+        installation.config.installed_device = patch.installed_device.clone();
+        installation.target = target.clone();
+        saved.installation = Some(installation.clone());
+        save(&document_dir.join("six-layer-runtime.json"), &saved)?;
+        // The board is already direct-coded. A failed reload must leave swallowing
+        // rules in place, including when the previous rule had been removed.
+        let readiness = wait_ready(&baseline, &patch, &target)?;
+        Ok(new_running(
+            receiver,
+            readiness,
+            session.clone(),
+            candidate,
+            installation,
+            layer as u8,
+        ))
+    })
+    .await
+}
+
+// The vendor reader is an establishment resource, never an input-liveness lease.
+async fn with_verification_session<T>(
+    session: &DeviceSession,
+    operation: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let result = operation.await;
+    session.shutdown().await;
+    result
 }
 
 fn wait_ready(
@@ -721,21 +759,23 @@ fn wait_ready(
 }
 
 pub async fn restore(document_dir: &Path, mut saved: SavedSixLayerState) -> Result<(), String> {
-    let installation = saved.installation.as_ref().ok_or("没有可恢复的六层记录")?;
+    let installation = saved.installation.clone().ok_or("没有可恢复的六层记录")?;
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
     if target.location_id != installation.target.location_id {
         return Err("键盘 USB 位置已变化，未自动恢复".into());
     }
     let transport = MacTransport::exclusive_vendor();
     let (session, _) = connect(&transport, &target)?;
-    session
-        .restore_six_layer_backup(&installation.backup)
-        .await
-        .map_err(|e| format!("{e}；保留吞键规则"))?;
-    installation.config.restore_owned(&target)?;
-    session.disconnect();
-    saved.installation = None;
-    save(&document_dir.join("six-layer-runtime.json"), &saved)
+    with_verification_session(&session, async {
+        session
+            .restore_six_layer_backup(&installation.backup)
+            .await
+            .map_err(|e| format!("{e}；保留吞键规则"))?;
+        installation.config.restore_owned(&target)?;
+        saved.installation = None;
+        save(&document_dir.join("six-layer-runtime.json"), &saved)
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -745,6 +785,121 @@ mod tests {
     use mi_model::host_router::BottomRowLayout;
     use mi_transport::ActivationPayload;
     use std::os::unix::net::UnixDatagram;
+
+    #[test]
+    fn verification_session_is_closed_on_success_and_failure() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for outcome in [Ok(()), Err("readback mismatch".to_string())] {
+            let session = {
+                let _entered = runtime.enter();
+                let (link, _) = mi_transport::MockLink::new();
+                DeviceSession::new(
+                    link,
+                    Box::new(mi_proto::NativeFramer::default()),
+                    Arc::new(mi_session::ReadOnlySchema),
+                    mi_session::SessionConfig::default(),
+                )
+            };
+            let expected = outcome.clone();
+            let result = runtime.block_on(with_verification_session(&session, async { outcome }));
+            assert_eq!(result, expected);
+            assert!(session.is_disconnected());
+        }
+    }
+
+    #[test]
+    fn executor_runs_after_verification_rpc_closes_and_stops_on_input_loss() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let (link, _) = mi_transport::MockLink::new();
+        let session = {
+            let _entered = runtime.enter();
+            DeviceSession::new(
+                link.clone(),
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig::default(),
+            )
+        };
+        let mut running = RunningSixLayer::isolated(session.clone(), directory.path());
+        running.readiness.configuration_observed = true;
+        running.readiness.keyboard_grabbed = true;
+        runtime
+            .block_on(with_verification_session(&session, async { Ok(()) }))
+            .unwrap();
+        assert!(session.is_disconnected());
+        running.receiver.arm().unwrap();
+        running.set_execution_policy(true, true, Instant::now() - Duration::from_secs(1));
+        running.foreground_changed(Some("com.google.antigravity"));
+        let driver = mi_macos::RecordingOsDriver::default();
+        running.start_executor(Arc::new(mi_macos::LiveHostActionExecutor::new(
+            driver.clone(),
+        )));
+        send(&running.receiver, 40);
+        send(&running.receiver, 7);
+        let receipt = running
+            .receipts
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
+        assert_eq!(receipt.outcome, "executed");
+        assert_eq!(receipt.detail, "antigravity/focus-input");
+        assert_eq!(
+            receipt.profile_id,
+            running.installation.plan.hosts[0].profile_id
+        );
+        assert_eq!(
+            driver.events(),
+            vec![
+                mi_macos::executor::RecordedOsEvent::CheckAccessibilityTrusted,
+                mi_macos::executor::RecordedOsEvent::FocusAgentInput("antigravity".into()),
+            ]
+        );
+        assert!(link.writes.lock().unwrap().is_empty());
+        assert!(running.receiver.failure().is_none());
+        assert!(!check_input_connection(&running.receiver, false, || Err(
+            "USB target changed".into()
+        )));
+        send(&running.receiver, 7);
+        running.executor.take().unwrap().join().unwrap().unwrap();
+        assert!(running.receipts.as_ref().unwrap().try_recv().is_err());
+        assert_eq!(driver.events().len(), 2);
+        running.shutdown(&runtime).unwrap();
+    }
+
+    #[test]
+    fn input_monitor_ticks_do_not_need_vendor_rpc_and_fail_closed_on_readiness_loss() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (link, _) = mi_transport::MockLink::new();
+        let session = {
+            let _entered = runtime.enter();
+            DeviceSession::new(
+                link.clone(),
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig::default(),
+            )
+        };
+        runtime.block_on(session.shutdown());
+        let receiver = UserCommandReceiver::bind().unwrap();
+        receiver.arm().unwrap();
+        for _ in 0..1000 {
+            assert!(check_input_connection(&receiver, false, || Ok(())));
+        }
+        assert!(link.writes.lock().unwrap().is_empty());
+        assert!(receiver.failure().is_none());
+        assert!(!check_input_connection(&receiver, false, || Err(
+            "USB target changed".into()
+        )));
+        assert_eq!(receiver.failure().as_deref(), Some("USB target changed"));
+        assert!(receiver.next().is_err());
+        let receiver = UserCommandReceiver::bind().unwrap();
+        assert!(!check_input_connection(&receiver, true, || panic!(
+            "sleep stops before recheck"
+        )));
+        assert!(receiver.failure().unwrap().contains("睡眠"));
+    }
 
     fn send(receiver: &UserCommandReceiver, control: u8) {
         let payload =
@@ -765,33 +920,141 @@ mod tests {
                 .graph
                 .profiles
                 .iter()
-                .find(|(_, p)| p.name == name)
+                .find(|(_, profile)| profile.name == name)
                 .unwrap()
                 .0
                 .clone()
         };
-        let codex_id = id("Codex");
-        let ag_id = id("Antigravity");
-        let dsh_id = id("DeepSeek Coder (DSH)");
-        let cindy_id = id(mi_model::preset::MANAGED_CINDY_PROFILE_NAME);
         let desired =
-            BoardLayerPlan::recommended(codex_id, ag_id.clone(), dsh_id.clone(), cindy_id.clone());
+            BoardLayerPlan::recommended(id("Codex"), id("Antigravity"), id("DeepSeek Coder (DSH)"));
         AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
             .unwrap()
     }
 
     #[test]
-    fn execute_clicks_routes_by_layer_and_stops_on_ownership_loss() {
+    fn foreground_host_overrides_physical_host_without_changing_observed_layer() {
+        let plan = test_plan();
+        let receiver = UserCommandReceiver::bind().unwrap();
+        receiver.arm().unwrap();
+        let foreground = Mutex::new(ForegroundContext::default());
+        foreground
+            .lock()
+            .unwrap()
+            .update(Some("com.google.antigravity"));
+        send(&receiver, 27);
+        let stop = AtomicBool::new(false);
+        let policy = ExecutionPolicy::default();
+        policy.set(true, true, Instant::now() - Duration::from_secs(1));
+        let observed = AtomicU8::new(1);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        thread::scope(|scope| {
+            let (done, wait) = std::sync::mpsc::channel::<()>();
+            let stop_ref = &stop;
+            scope.spawn(move || {
+                if wait.recv_timeout(Duration::from_secs(5)).is_err() {
+                    stop_ref.store(true, Ordering::Release);
+                }
+            });
+            execute_clicks(
+                &receiver,
+                &plan,
+                &stop,
+                &policy,
+                &observed,
+                &AtomicBool::new(false),
+                &foreground,
+                &tx,
+                || receiver.next(),
+                || Ok(()),
+                |profile, binding, action, _| {
+                    stop.store(true, Ordering::Release);
+                    mi_macos::SimulatedHostActionExecutor.execute(profile, binding, action)
+                },
+            );
+            let _ = done.send(());
+        });
+        let receipt = rx.try_recv().unwrap();
+        assert_eq!(receipt.profile_id, plan.hosts[0].profile_id);
+        assert_eq!(receipt.detail, "antigravity/focus-input");
+        assert_eq!(observed.load(Ordering::Acquire), 3);
+        let mut context = foreground.lock().unwrap();
+        context.update(Some("com.openai.codex"));
+        assert_eq!(context.host_index(&plan, 3), 1);
+        context.update(Some("com.apple.finder"));
+        assert_eq!(context.host_index(&plan, 4), 2);
+    }
+
+    #[test]
+    fn foreground_switch_discards_queued_and_waiting_clicks_without_retargeting() {
+        let plan = test_plan();
+        let receiver = UserCommandReceiver::bind().unwrap();
+        receiver.arm().unwrap();
+        let foreground = Mutex::new(ForegroundContext::default());
+        send(&receiver, 7);
+        thread::sleep(Duration::from_millis(30));
+        foreground
+            .lock()
+            .unwrap()
+            .update(Some("com.google.antigravity"));
+        send(&receiver, 27);
+        let stop = AtomicBool::new(false);
+        let policy = ExecutionPolicy::default();
+        policy.set(true, true, Instant::now() - Duration::from_secs(1));
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let mut permits = 0;
+        thread::scope(|scope| {
+            let (done, wait) = std::sync::mpsc::channel::<()>();
+            let stop_ref = &stop;
+            scope.spawn(move || {
+                if wait.recv_timeout(Duration::from_secs(5)).is_err() {
+                    stop_ref.store(true, Ordering::Release);
+                }
+            });
+            execute_clicks(
+                &receiver,
+                &plan,
+                &stop,
+                &policy,
+                &AtomicU8::new(1),
+                &AtomicBool::new(false),
+                &foreground,
+                &tx,
+                || receiver.next(),
+                || {
+                    permits += 1;
+                    if permits == 1 {
+                        foreground.lock().unwrap().update(Some("com.deepseek.dsh"));
+                        send(&receiver, 27);
+                    }
+                    Ok(())
+                },
+                |profile, binding, action, _| {
+                    stop.store(true, Ordering::Release);
+                    mi_macos::SimulatedHostActionExecutor.execute(profile, binding, action)
+                },
+            );
+            let _ = done.send(());
+        });
+        let receipts: Vec<_> = rx.try_iter().collect();
+        assert_eq!(permits, 2);
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].profile_id, plan.hosts[1].profile_id);
+        assert_eq!(receipts[0].detail, "dsh-desktop/browser");
+        assert!(receiver.failure().is_none());
+    }
+
+    #[test]
+    fn execute_clicks_ignores_retired_layer_and_stops_on_connection_loss() {
         let plan = test_plan();
         let ag_id = plan.hosts[0].profile_id.clone();
         let dsh_id = plan.hosts[1].profile_id.clone();
-        let cindy_id = plan.hosts[2].profile_id.clone();
+
         let receiver = Arc::new(UserCommandReceiver::bind().unwrap());
         receiver.arm().unwrap();
         send(&receiver, 0);
         send(&receiver, 20);
         send(&receiver, 40);
-        send(&receiver, 41);
+        send(&receiver, 21);
         thread::sleep(Duration::from_millis(30));
 
         let stop = AtomicBool::new(false);
@@ -810,14 +1073,15 @@ mod tests {
             &policy,
             &observed,
             &first,
+            &Mutex::new(ForegroundContext::default()),
             &tx,
             || receiver.next(),
             || {
                 permit_calls += 1;
-                if permit_calls <= 3 {
+                if permit_calls <= 2 {
                     Ok(())
                 } else {
-                    Err("Cindy 当前代释放未确认".into())
+                    Err("设备连接已结束".into())
                 }
             },
             |profile, binding, _action, _epoch| {
@@ -836,20 +1100,80 @@ mod tests {
         );
 
         assert!(first.load(Ordering::Acquire));
-        assert_eq!(observed.load(Ordering::Acquire), 4);
+        assert_eq!(observed.load(Ordering::Acquire), 3);
         assert_eq!(
             calls,
-            vec![
-                (ag_id, "AG00".into()),
-                (dsh_id, "AG00".into()),
-                (cindy_id, "AG00".into()),
-            ]
+            vec![(ag_id, "AG00".into()), (dsh_id, "AG00".into()),]
         );
-        assert_eq!(rx.try_iter().count(), 3);
-        assert_eq!(
-            receiver.failure().as_deref(),
-            Some("Cindy 当前代释放未确认")
-        );
+        assert_eq!(rx.try_iter().count(), 2);
+        assert_eq!(receiver.failure().as_deref(), Some("设备连接已结束"));
+    }
+
+    #[test]
+    fn a_click_expiring_during_connection_check_does_not_stop_fresh_clicks() {
+        let plan = test_plan();
+        let dsh_id = plan.hosts[1].profile_id.clone();
+
+        let receiver = Arc::new(UserCommandReceiver::bind().unwrap());
+        receiver.arm().unwrap();
+        send(&receiver, 0);
+        thread::sleep(Duration::from_millis(30));
+        let stop = AtomicBool::new(false);
+        let policy = ExecutionPolicy::default();
+        policy.set(true, true, Instant::now() - Duration::from_secs(3));
+        let observed = AtomicU8::new(1);
+        let first = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let mut calls = Vec::new();
+        let mut permit_calls = 0;
+        thread::scope(|scope| {
+            let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
+            let watchdog_stop = &stop;
+            scope.spawn(move || {
+                if cancel_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                    watchdog_stop.store(true, Ordering::Release);
+                }
+            });
+            execute_clicks(
+                &receiver,
+                &plan,
+                &stop,
+                &policy,
+                &observed,
+                &first,
+                &Mutex::new(ForegroundContext::default()),
+                &tx,
+                || receiver.next(),
+                || {
+                    permit_calls += 1;
+                    if permit_calls == 1 {
+                        thread::sleep(Duration::from_millis(2100));
+                        send(&receiver, 20);
+                        thread::sleep(Duration::from_millis(30));
+                    }
+                    Ok(())
+                },
+                |profile, binding, _, _| {
+                    calls.push((profile.to_owned(), binding.to_owned()));
+                    stop.store(true, Ordering::Release);
+                    mi_macos::HostActionReceipt {
+                        action_type: "open_app".into(),
+                        binding_id: binding.into(),
+                        detail: "ok".into(),
+                        outcome: "executed".into(),
+                        profile_id: profile.into(),
+                        target: "test".into(),
+                        text_byte_len: None,
+                        timestamp_ms: 1,
+                    }
+                },
+            );
+            let _ = cancel_tx.send(());
+        });
+        assert_eq!(calls, vec![(dsh_id, "AG00".into())]);
+        assert_eq!(permit_calls, 2);
+        assert_eq!(rx.try_iter().count(), 1);
+        assert!(receiver.failure().is_none());
     }
 
     #[test]
@@ -888,6 +1212,7 @@ mod tests {
                 &worker_policy,
                 &AtomicU8::new(1),
                 &AtomicBool::new(false),
+                &Mutex::new(ForegroundContext::default()),
                 &receipt_tx,
                 || {
                     pending
@@ -970,6 +1295,7 @@ mod tests {
             &policy,
             &AtomicU8::new(1),
             &AtomicBool::new(false),
+            &Mutex::new(ForegroundContext::default()),
             &tx,
             || {
                 pending
@@ -1001,94 +1327,22 @@ mod tests {
     fn saved_state_roundtrips_and_rejects_unsupported_versions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("six-layer-runtime.json");
-        assert!(!load(&path).unwrap().cindy_native_paused_confirmed);
+        assert!(!load(&path)
+            .unwrap()
+            .legacy_native_paused_confirmation
+            .is_some());
         let mut state = SavedSixLayerState::default();
-        state.cindy_native_paused_confirmed = true;
+        state.legacy_native_paused_confirmation = Some(true);
         save(&path, &state).unwrap();
-        assert!(load(&path).unwrap().cindy_native_paused_confirmed);
+        assert!(load(&path)
+            .unwrap()
+            .legacy_native_paused_confirmation
+            .is_some());
         fs::write(
             &path,
             br#"{"version":2,"cindy_native_paused_confirmed":true,"installation":null}"#,
         )
         .unwrap();
         assert!(load(&path).is_err());
-    }
-
-    #[test]
-    fn ownership_permit_accepts_monotonic_unbridged_drain_and_rejects_stale_native_generation() {
-        use std::io::{BufRead, BufReader};
-        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
-
-        let dir = tempfile::Builder::new()
-            .prefix("mi-permit-")
-            .tempdir_in("/tmp")
-            .unwrap();
-        let sock_path = dir.path().join("cindy-ownership.sock");
-        let transport = mi_bridge::UnixNativeOwnershipTransport::new(&sock_path);
-        let client_instance = "c426ac36-354d-4149-a8b7-40b719a9dfff".parse().unwrap();
-        let native_instance = "d1706f6a-dda3-4821-a862-e587e63cc25f";
-        let native_identity = native_instance.to_string();
-        transport
-            .write_persisted_fence(&mi_bridge::PersistedNativeOwnershipFence {
-                client_instance,
-                generation: 40,
-            })
-            .unwrap();
-
-        let listener = UnixListener::bind(&sock_path).unwrap();
-        fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).unwrap();
-
-        let server = thread::spawn(move || {
-            for (expected_gen, native_gen) in [(40u64, 202u64), (41, 203), (41, 201)] {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut line = String::new();
-                BufReader::new(&stream).read_line(&mut line).unwrap();
-                let req: serde_json::Value = serde_json::from_str(&line).unwrap();
-                assert_eq!(req["generation"].as_u64(), Some(expected_gen));
-                let reply = serde_json::json!({
-                    "version": 1,
-                    "requestId": req["requestId"],
-                    "clientInstance": req["clientInstance"],
-                    "generation": req["generation"],
-                    "nativeInstance": native_instance,
-                    "nativeGeneration": native_gen,
-                    "state": "unknown",
-                    "reason": "native_drain_unconfirmed",
-                    "inputDrained": false,
-                    "pttDrained": false,
-                    "lightingDrained": true,
-                    "capabilities": ["fenced-release-v1"]
-                });
-                let mut out = serde_json::to_vec(&reply).unwrap();
-                out.push(b'\n');
-                stream.write_all(&out).unwrap();
-            }
-        });
-
-        let permit = OwnershipPermit {
-            transport: transport.clone(),
-            request: mi_bridge::NativeOwnershipRequest {
-                version: 1,
-                request_id: mi_model::document::new_id().parse().unwrap(),
-                client_instance,
-                generation: 38,
-                desired_owner: "micro-input".into(),
-                micro_drained: true,
-            },
-            native_identity,
-            min_native_generation: AtomicU64::new(202),
-            allow_unbridged_drain: true,
-        };
-
-        assert!(permit.check().is_ok());
-        transport
-            .write_persisted_fence(&mi_bridge::PersistedNativeOwnershipFence {
-                client_instance,
-                generation: 41,
-            })
-            .unwrap();
-        assert!(permit.check().is_ok());
-        assert!(permit.check().is_err());
-        server.join().unwrap();
     }
 }

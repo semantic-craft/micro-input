@@ -14,13 +14,12 @@ pub use ax_dictation::{
     DictationAdapter, DictationOutcome, LockedDictationTarget,
 };
 pub use executor::{
-    antigravity_live_voice_state, is_antigravity_live_voice_control,
     is_antigravity_new_conversation_control, parse_pid_from_lsappinfo_output,
-    select_antigravity_live_voice_target, select_antigravity_new_conversation_target,
-    submit_modifiers_for_adapter, AntigravityLiveVoiceTarget, AntigravityNewConversationTarget,
-    AntigravitySidebarAxNode, ClipboardItemSnapshot, ClipboardSnapshot, DialScrollRequest,
-    HeldInputId, HostActionReceipt, HostOsDriver, LiveHostActionExecutor, MacOsSystemDriver,
-    RecordedOsEvent, RecordingOsDriver, SimulatedHostActionExecutor,
+    select_antigravity_new_conversation_target, submit_modifiers_for_adapter,
+    AntigravityNewConversationTarget, AntigravitySidebarAxNode, ClipboardItemSnapshot,
+    ClipboardSnapshot, DialScrollRequest, HeldInputId, HostActionReceipt, HostOsDriver,
+    LiveHostActionExecutor, MacOsSystemDriver, RecordedOsEvent, RecordingOsDriver,
+    SimulatedHostActionExecutor,
 };
 pub use instance_lock::DocumentInstanceLock;
 pub use passive_panel::{

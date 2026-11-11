@@ -823,7 +823,7 @@ impl DeviceSession {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(SessionError::Config(e.to_string())),
         };
-        mi_model::apply::recognize_six_layer_profile(&candidate, smart.as_deref())
+        mi_model::apply::recognize_six_layer_recovery_candidate(&candidate, smart.as_deref())
             .map_err(SessionError::Config)?
             .ok_or_else(|| SessionError::Config("恢复副本不是六层方案".into()))?;
         self.guarded(async {

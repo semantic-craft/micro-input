@@ -7,51 +7,6 @@ impl WorkbenchStore {
         self.projection_inputs().compiled_six_layer_plan()
     }
 
-    pub(super) fn released_cindy_identity(&self) -> Option<String> {
-        if !self.six_layer_state.cindy_native_paused_confirmed
-            || !self.native_ownership.allows_execution_at(self.update_now)
-        {
-            return None;
-        }
-        if !self.config.isolated
-            && !self
-                .native_ownership
-                .transport()
-                .is_some_and(|transport| transport.socket_exists())
-        {
-            return None;
-        }
-        match self.native_ownership.state() {
-            mi_bridge::OwnershipState::Released { instance, .. } => Some(instance.to_string()),
-            _ => None,
-        }
-    }
-
-    pub(super) fn confirm_cindy_native_paused(
-        &mut self,
-        confirmed: bool,
-    ) -> Result<(), WorkbenchError> {
-        self.require_awake()?;
-        if self.six_layer_job.is_some() {
-            return Err(WorkbenchError::Routing("六层操作正在进行".into()));
-        }
-        let mut next = self.six_layer_state.clone();
-        next.cindy_native_paused_confirmed = confirmed;
-        six_layer_runtime::save(
-            &self.config.document_dir.join("six-layer-runtime.json"),
-            &next,
-        )
-        .map_err(WorkbenchError::Storage)?;
-        self.six_layer_state = next;
-        if !confirmed {
-            if let Some(running) = &self.six_layer_running {
-                running.receiver.invalidate("Cindy 原生暂停确认已撤销");
-            }
-        }
-        self.commit_local_update();
-        Ok(())
-    }
-
     fn suspend_for_six_layer_operation(&mut self) -> Result<(), WorkbenchError> {
         if let Some(running) = self.six_layer_running.take() {
             if let Err(error) = running.shutdown(&self.tokio_runtime) {
@@ -62,7 +17,6 @@ impl WorkbenchStore {
         let stopped = self.live_executor.stop_owned_actions();
         self.finish_host_cleanup(stopped)
             .map_err(WorkbenchError::Routing)?;
-        self.six_layer_ownership_identity = None;
         self.dial_pressed = false;
         self.dial_turned_while_pressed = false;
         self.radial_state.cancel();
@@ -92,11 +46,6 @@ impl WorkbenchStore {
             .map(Ok)
             .unwrap_or_else(|| self.compiled_six_layer_plan())
             .map_err(|e| WorkbenchError::Routing(format!("六层方案：{e}")))?;
-        if !self.six_layer_state.cindy_native_paused_confirmed {
-            return Err(WorkbenchError::Routing(
-                "应用六层前，请先确认 Cindy 原生键盘集成已关闭".into(),
-            ));
-        }
         if self.config.isolated {
             return Err(WorkbenchError::Routing(
                 "隔离工作台不能应用实体六层方案".into(),
@@ -106,20 +55,16 @@ impl WorkbenchStore {
             .six_layer_state
             .installation
             .as_ref()
-            .is_some_and(|installation| installation.status != InstallationStatus::Applied)
+            .is_some_and(|installation| {
+                installation.status != InstallationStatus::Applied
+                    || installation.plan.validate_current().is_err()
+            })
         {
             return Err(WorkbenchError::Routing(
                 "六层恢复记录尚未处理，请先恢复原设备配置".into(),
             ));
         }
-        self.native_ownership
-            .set_desired_owner_at("micro-input", self.update_now);
-        self.native_ownership.poll_once_at(true, self.update_now);
-        if self.released_cindy_identity().is_none() {
-            return Err(WorkbenchError::Ownership(
-                "六层输入需要 Cindy 当前代已释放的回执；无桥或失联时不执行".into(),
-            ));
-        }
+        plan.validate_current().map_err(WorkbenchError::Routing)?;
         self.suspend_for_six_layer_operation()?;
         let dir = self.config.document_dir.clone();
         let saved = self.six_layer_state.clone();
@@ -180,56 +125,18 @@ impl WorkbenchStore {
             }
             match result {
                 Ok(Some(mut running)) => {
-                    self.device_session = Some(Arc::clone(&running.session));
+                    running.foreground_changed(self.foreground_bundle_id.as_deref());
+                    self.device_session = None;
                     self.connected_candidate = Some(running.candidate.clone());
                     self.hardware_rpc_verified = true;
-                    self.native_ownership.poll_once_at(true, self.update_now);
-                    self.six_layer_ownership_checked_at = self.update_now;
-                    self.six_layer_ownership_identity = self.released_cindy_identity();
-                    if self.six_layer_ownership_identity.is_some() {
-                        running.armed = running.receiver.arm().is_ok();
-                        if let Some(transport) = self.native_ownership.transport().cloned() {
-                            let min_native_gen = match self.native_ownership.state() {
-                                mi_bridge::OwnershipState::Released { generation, .. } => {
-                                    *generation
-                                }
-                                _ => 0,
-                            };
-                            let request = mi_bridge::NativeOwnershipRequest {
-                                version: 1,
-                                request_id: mi_model::document::new_id().parse().unwrap(),
-                                client_instance: self.native_ownership.client_instance(),
-                                generation: self.native_ownership.generation(),
-                                desired_owner: "micro-input".into(),
-                                micro_drained: true,
-                            };
-                            running.set_execution_policy(
-                                self.document_store.host_execution_enabled(),
-                                self.command_execution_enabled,
-                                self.update_now,
-                            );
-                            running.start_executor(
-                                six_layer_runtime::OwnershipPermit {
-                                    transport,
-                                    request,
-                                    native_identity: self
-                                        .six_layer_ownership_identity
-                                        .clone()
-                                        .unwrap(),
-                                    min_native_generation: std::sync::atomic::AtomicU64::new(
-                                        min_native_gen,
-                                    ),
-                                    allow_unbridged_drain: self.config.allow_unbridged_desktop,
-                                },
-                                Arc::clone(&self.live_executor),
-                            );
-                        }
-                    } else {
-                        running
-                            .receiver
-                            .invalidate("Cindy 当前代释放未确认，请重新连接");
-                    }
-                    running.start_monitor(Arc::clone(&self.tokio_runtime));
+                    running.armed = running.receiver.arm().is_ok();
+                    running.set_execution_policy(
+                        self.document_store.host_execution_enabled(),
+                        self.command_execution_enabled,
+                        self.update_now,
+                    );
+                    running.start_executor(Arc::clone(&self.live_executor));
+                    running.start_monitor();
                     self.six_layer_running = Some(running);
                     self.status_message = "六层配置已读回，等待首次实体输入验证".into();
                     self.start_mac_usb_discovery_watcher();
@@ -245,27 +152,12 @@ impl WorkbenchStore {
         if self.six_layer_running.is_none() {
             return;
         }
-        if self
-            .update_now
-            .saturating_duration_since(self.six_layer_ownership_checked_at)
-            > Duration::from_secs(2)
-            && !self.native_ownership.has_pending_request()
-        {
-            self.six_layer_ownership_checked_at = self.update_now;
-            self.poll_ownership_fast_or_spawn(true, self.update_now);
-        }
-        let identity = self.released_cindy_identity();
         let running = self.six_layer_running.as_ref().unwrap();
         running.set_execution_policy(
             self.document_store.host_execution_enabled(),
             self.command_execution_enabled,
             self.update_now,
         );
-        if identity.is_none() || identity != self.six_layer_ownership_identity {
-            running
-                .receiver
-                .invalidate("Cindy 原生所有权已变化，六层输入已暂停");
-        }
         let mut receipts = Vec::new();
         if let Some(rx) = &running.receipts {
             for _ in 0..runtime_inbox::INPUT_BATCH {
@@ -295,6 +187,13 @@ impl WorkbenchStore {
                 .is_some_and(|failure| &self.status_message != failure)
             || !receipts.is_empty();
         for receipt in receipts {
+            let detail = match receipt.detail.as_str() {
+                "blocked:ambiguous_or_missing_focused_pane" => {
+                    "无法确定目标分屏，请点击目标会话区域"
+                }
+                "blocked:ambiguous_or_missing_input" => "未找到唯一可编辑输入框",
+                detail => detail,
+            };
             self.status_message = format!(
                 "{} · {}",
                 match receipt.outcome.as_str() {
@@ -302,7 +201,7 @@ impl WorkbenchStore {
                     _ if receipt.succeeded() => "已执行",
                     _ => "未执行",
                 },
-                receipt.detail
+                detail
             );
             self.record_host_action_receipt(receipt);
         }
@@ -321,7 +220,257 @@ impl WorkbenchStore {
             }
         }
         if changed {
+            self.capture_runtime_view();
             self.commit_local_update();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn six_layer_connection_outlives_the_verification_rpc_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let session = mock_session(&store.tokio_runtime);
+        let mut running =
+            six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        running.readiness.configuration_observed = true;
+        running.readiness.keyboard_grabbed = true;
+        store.tokio_runtime.block_on(session.shutdown());
+        store.connected_candidate = Some(running.candidate.clone());
+        store.six_layer_running = Some(running);
+        store.commit_runtime_update();
+        assert!(store.projection.device_connected);
+        assert!(store.device_session.is_none());
+        store.handle_hardware_loop_event(
+            HardwareLoopEvent::Disconnected {
+                session_id: session.id,
+            },
+            Instant::now(),
+        );
+        assert!(store
+            .six_layer_running
+            .as_ref()
+            .unwrap()
+            .receiver
+            .failure()
+            .is_none());
+        store
+            .six_layer_running
+            .as_ref()
+            .unwrap()
+            .receiver
+            .invalidate("USB removed");
+        store.commit_runtime_update();
+        assert!(!store.projection.device_connected);
+        store
+            .six_layer_running
+            .take()
+            .unwrap()
+            .shutdown(&store.tokio_runtime)
+            .unwrap();
+    }
+
+    #[test]
+    fn six_layer_banner_tracks_input_connection_and_user_pause_preserves_receiver() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let session = mock_session(&store.tokio_runtime);
+        let mut running =
+            six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        running.readiness.configuration_observed = true;
+        running.readiness.keyboard_grabbed = true;
+        running.receiver.arm().unwrap();
+        running.armed = true;
+        store.tokio_runtime.block_on(session.shutdown());
+        assert!(session.is_disconnected());
+        store.connected_candidate = Some(running.candidate.clone());
+        store.six_layer_state.installation = Some(running.installation.clone());
+        store.six_layer_running = Some(running);
+        store.set_host_execution_enabled(true).unwrap();
+        store.poll_six_layer_runtime();
+        assert!(store.projection.sidebar.board_layers.runtime_ready);
+        assert_eq!(
+            store.projection.header.banner,
+            OwnershipBannerState::Ready {
+                summary: "六层标准键输入已连接".into(),
+            }
+        );
+        store.set_host_execution_enabled(false).unwrap();
+        store.poll_six_layer_runtime();
+        assert!(!store.projection.sidebar.board_layers.runtime_ready);
+        assert!(!store
+            .six_layer_running
+            .as_ref()
+            .unwrap()
+            .is_execution_enabled());
+        assert!(store
+            .six_layer_running
+            .as_ref()
+            .unwrap()
+            .receiver
+            .failure()
+            .is_none());
+        assert!(matches!(
+            store.projection.header.banner,
+            OwnershipBannerState::Ready { .. }
+        ));
+        store
+            .six_layer_running
+            .as_ref()
+            .unwrap()
+            .receiver
+            .invalidate("USB removed");
+        store.commit_runtime_update();
+        assert_eq!(
+            store.projection.header.banner,
+            OwnershipBannerState::Caution {
+                reason: "USB removed".into(),
+            }
+        );
+        store
+            .six_layer_running
+            .take()
+            .unwrap()
+            .shutdown(&store.tokio_runtime)
+            .unwrap();
+    }
+
+    fn mock_session(runtime: &tokio::runtime::Runtime) -> Arc<DeviceSession> {
+        let _entered = runtime.enter();
+        let (link, _) = mi_transport::MockLink::new();
+        DeviceSession::new(
+            link,
+            Box::new(mi_proto::NativeFramer::default()),
+            Arc::new(mi_session::ReadOnlySchema),
+            mi_session::SessionConfig::default(),
+        )
+    }
+
+    #[test]
+    fn disconnected_six_layer_session_is_not_projected_as_connected() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let (link, _) = mi_transport::MockLink::new();
+        let session = {
+            let _entered = store.tokio_runtime.enter();
+            DeviceSession::new(
+                link,
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig::default(),
+            )
+        };
+        let running =
+            six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        store.connected_candidate = Some(running.candidate.clone());
+        store.device_session = Some(session.clone());
+        drop(running);
+        store.commit_runtime_update();
+        session.disconnect();
+        store.commit_runtime_update();
+        assert!(!store.projection.device_connected);
+        assert!(!format!("{:?}", store.projection.header).contains("小键盘已连接"));
+        store.six_layer_running = None;
+        store.tokio_runtime.block_on(session.shutdown());
+    }
+
+    #[test]
+    fn six_layer_foreground_priority_ignores_legacy_manual_lock_and_keeps_physical_layer() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let (link, _writes) = mi_transport::MockLink::new();
+        let session = {
+            let _entered = store.tokio_runtime.enter();
+            DeviceSession::new(
+                link.clone(),
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig::default(),
+            )
+        };
+        let mut running =
+            six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        running.installation.plan = store.compiled_six_layer_plan().unwrap();
+        let antigravity = running.installation.plan.hosts[0].profile_id.clone();
+        let dsh = running.installation.plan.hosts[1].profile_id.clone();
+        running.observed_layer.store(3, Ordering::Release);
+        store.six_layer_running = Some(running);
+        store.auto_follow_enabled = false;
+        store.manual_override = true;
+        let saved_profile = store.document_store.host_active_profile_id();
+        assert!(store.foreground_changed(Some("com.google.antigravity")));
+        assert_eq!(store.resolved_active_profile_id(), Some(antigravity));
+        assert_eq!(
+            store.projection.sidebar.board_layers.observed_layer,
+            Some(3)
+        );
+        assert!(store
+            .projection
+            .sidebar
+            .board_layers
+            .observed_status
+            .contains("前台优先 antigravity"));
+        assert!(!store.foreground_changed(Some("com.google.antigravity")));
+        assert!(store.foreground_changed(Some("com.openai.codex")));
+        assert_eq!(store.resolved_active_profile_id(), Some(dsh));
+        assert_eq!(store.document_store.host_active_profile_id(), saved_profile);
+        assert!(link.writes.lock().unwrap().is_empty());
+        store.six_layer_running = None;
+        store.tokio_runtime.block_on(session.shutdown());
+    }
+    #[test]
+    fn retired_installation_remains_loadable_recoverable_and_never_starts() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let session = mock_session(&store.tokio_runtime);
+        let running =
+            six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        let mut record = serde_json::json!({
+            "version": 1,
+            "cindy_native_paused_confirmed": true,
+            "installation": running.installation
+        });
+        let mut old_host = record["installation"]["plan"]["hosts"][1].clone();
+        old_host["adapter"] = serde_json::json!("cindy");
+        old_host["profile_id"] = serde_json::json!("saved-cindy");
+        record["installation"]["plan"]["hosts"]
+            .as_array_mut()
+            .unwrap()
+            .push(old_host);
+        record["installation"]["plan"]["desired"]["layers"][3] =
+            serde_json::json!({"kind":"HostProfile","profile_id":"saved-cindy"});
+        let original = serde_json::to_vec_pretty(&record).unwrap();
+        let path = directory.path().join("six-layer-runtime.json");
+        fs::write(&path, &original).unwrap();
+        drop(running);
+        store.tokio_runtime.block_on(session.shutdown());
+        drop(store);
+        let mut reopened = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        assert!(reopened.projection.sidebar.board_layers.restore_available);
+        assert!(!reopened.projection.sidebar.board_layers.runtime_ready);
+        assert!(reopened.six_layer_running.is_none());
+        let plan = reopened
+            .six_layer_state
+            .installation
+            .as_ref()
+            .unwrap()
+            .plan
+            .clone();
+        assert_eq!(plan.hosts[2].adapter, "cindy");
+        assert!(reopened.start_six_layer_apply(Some(plan)).is_err());
+        let result = reopened.tokio_runtime.block_on(six_layer_runtime::resume(
+            directory.path(),
+            reopened.six_layer_state.clone(),
+        ));
+        assert!(matches!(result, Err(error) if error.contains("旧六层安装已暂停")));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let mut invalid = record;
+        invalid["unrecognized"] = serde_json::json!(true);
+        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(six_layer_runtime::load(&path).is_err());
     }
 }

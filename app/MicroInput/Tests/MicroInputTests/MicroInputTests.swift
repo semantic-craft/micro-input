@@ -19,15 +19,10 @@ final class MicroInputTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let store = CoreStore(isolatedDirectory: dir.path)
-        XCTAssertEqual(store.model.sidebarRows.count, 6)
+        XCTAssertEqual(store.model.sidebarRows.count, 5)
         XCTAssertEqual(store.model.selectedDisplayName, "Antigravity")
         XCTAssertEqual(store.model.keycapCells.count, 13)
         XCTAssertNil(store.model.protectedLock)
-
-        let cindyRow = try XCTUnwrap(store.model.sidebarRows.first(where: { $0.rawName == "Cindy" }))
-        XCTAssertTrue(cindyRow.isProtectedOai)
-        store.dispatch("sidebar", ["SelectProfile": cindyRow.profileId])
-        XCTAssertEqual(store.model.selectedDisplayName, "Cindy")
 
         let localCodex = try XCTUnwrap(store.model.sidebarRows.first(where: { $0.displayName == "Codex" }))
         XCTAssertFalse(localCodex.isProtectedOai)
@@ -141,7 +136,7 @@ final class MicroInputTests: XCTestCase {
             "domain": "foreground_app_changed",
             "action": ["bundle_id": NSNull()]
         ])
-        XCTAssertEqual(store.model.sidebarRows.count, 6)
+        XCTAssertEqual(store.model.sidebarRows.count, 5)
 
         store.dispatch("device", "OpenReconnectComparison")
         guard case .reconnectComparison = store.model.activeModal else {
@@ -228,9 +223,9 @@ final class MicroInputTests: XCTestCase {
         let store = CoreStore(isolatedDirectory: dir.path)
         let active = store.sidebar.activeHostProfileId
         XCTAssertEqual(store.sidebar.boardLayers.layers.count, 6)
-        XCTAssertEqual(store.sidebar.boardLayers.layers.map(\.displayName), ["Codex", "Antigravity", "DeepSeek Coder (DSH)", "Cindy · Micro Input", "未分配", "未分配"])
+        XCTAssertEqual(store.sidebar.boardLayers.layers.map(\.displayName), ["Codex", "Antigravity", "DeepSeek Coder (DSH)", "未分配", "未分配", "未分配"])
         XCTAssertEqual(store.sidebar.boardLayers.layers[0].owner, "Codex")
-        XCTAssertEqual(store.sidebar.boardLayers.layers[3].owner, "MicroInput")
+        XCTAssertEqual(store.sidebar.boardLayers.layers[3].owner, "Unassigned")
         for (layer, leds) in [(4, [true,true,false]), (5, [false,true,true]), (6, [true,true,true])] {
             store.dispatch("sidebar", ["PreviewBoardLayer": layer])
             XCTAssertEqual(store.canvas.boardPreviewLayer, layer)
@@ -238,9 +233,9 @@ final class MicroInputTests: XCTestCase {
             XCTAssertEqual(store.sidebar.activeHostProfileId, active)
             XCTAssertNil(store.sidebar.boardLayers.observedLayer)
         }
-        let native = try XCTUnwrap(store.sidebar.boardLayers.profileChoices.first(where: { $0.displayName == "Cindy" }))
+        let native = try XCTUnwrap(store.sidebar.boardLayers.profileChoices.first(where: { $0.displayName == "Codex" }))
         store.dispatch("sidebar", ["SetBoardLayerProfile": ["layer": 5, "profile_id": native.profileId]])
-        XCTAssertEqual(store.sidebar.boardLayers.layers[4].owner, "Cindy")
+        XCTAssertEqual(store.sidebar.boardLayers.layers[4].owner, "Codex")
         XCTAssertTrue(store.sidebar.boardLayers.layers[4].assignmentIssue?.contains("原生") == true)
         store.dispatch("sidebar", ["SetBoardLayerProfile": ["layer": 5, "profile_id": NSNull()]])
         XCTAssertNil(store.sidebar.boardLayers.layers[4].profileId)

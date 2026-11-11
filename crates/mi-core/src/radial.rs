@@ -272,7 +272,6 @@ impl RadialSlotConfig {
 
     pub fn default_app_launcher_slots() -> [Self; RADIAL_SECTOR_COUNT] {
         let agents = [
-            CanonicalAgent::Cindy,
             CanonicalAgent::Codex,
             CanonicalAgent::Herdr,
             CanonicalAgent::Antigravity,
@@ -281,19 +280,20 @@ impl RadialSlotConfig {
         [
             Self::navigate_back("后退", Some("chevron.backward"), Some("#00CCAA")),
             Self::cheat_sheet("按键速查", Some("rectangle.grid.3x2"), Some("#FFFFFF")),
+            Self::open_app("未分配", "", None, None),
             Self::open_app(
                 agents[0].display_name(),
                 agents[0].bundle_id(),
                 Some("app.badge"),
                 None,
             ),
+            Self::navigate_forward("前进", Some("chevron.forward"), Some("#00CCAA")),
             Self::open_app(
                 agents[1].display_name(),
                 agents[1].bundle_id(),
                 Some("app.badge"),
                 None,
             ),
-            Self::navigate_forward("前进", Some("chevron.forward"), Some("#00CCAA")),
             Self::open_app(
                 agents[2].display_name(),
                 agents[2].bundle_id(),
@@ -303,12 +303,6 @@ impl RadialSlotConfig {
             Self::open_app(
                 agents[3].display_name(),
                 agents[3].bundle_id(),
-                Some("app.badge"),
-                None,
-            ),
-            Self::open_app(
-                agents[4].display_name(),
-                agents[4].bundle_id(),
                 Some("app.badge"),
                 None,
             ),

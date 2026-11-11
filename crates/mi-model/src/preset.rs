@@ -72,7 +72,7 @@ pub fn export(draft: &Draft, pid: Option<&str>, lid: Option<&str>) -> Result<Str
                 return Err("层不属于所选配置".into());
             }
             if doc.is_protected_oai_layer(lid) {
-                return Err("受保护宿主层（ChatGPT / Codex / Cindy）不支持导出".into());
+                return Err("受保护宿主层（原生 OAI）不支持导出".into());
             }
             name = doc.editable.graph.layers[lid].name.clone();
             scope = "layer";
@@ -927,104 +927,6 @@ fn legacy_agent_specs() -> Vec<(&'static str, Vec<AgentAssignment>)> {
     ]
 }
 
-pub const MANAGED_CINDY_PROFILE_NAME: &str = "Cindy · Micro Input";
-
-fn managed_cindy_dictation_action() -> crate::draft::Action {
-    crate::draft::Action {
-        id: "desktop-dictation".into(),
-        name: "点击开始 / 停止语音".into(),
-        category: "Agent".into(),
-        detail: "com.xd.cindy".into(),
-        payload: serde_json::json!({"type":"agent_command","adapter":"cindy","command":"toggle-dictation"}),
-    }
-}
-
-/// Upgrade only the unchanged four-action preset on an explicit apply/reset.
-pub fn upgrade_managed_cindy_click_preset(draft: &mut Draft) -> Result<bool, String> {
-    let graph = &draft.document.editable.graph;
-    let Some((pid, profile)) = graph
-        .profiles
-        .iter()
-        .find(|(_, p)| p.name == MANAGED_CINDY_PROFILE_NAME)
-    else {
-        return Ok(false);
-    };
-    if profile.layer_order.len() != 1 {
-        return Ok(false);
-    }
-    let lid = &profile.layer_order[0];
-    let layer = &graph.layers[lid];
-    if layer.lighting.is_some()
-        || layer
-            .controls
-            .values()
-            .filter(|b| b.action_id.is_some())
-            .count()
-            != 4
-        || !layer
-            .control_settings
-            .as_ref()
-            .is_some_and(|s| s.joystick_mode == "logical_sectors" && s.active_sectors == 4)
-    {
-        return Ok(false);
-    }
-    let expected = [
-        (
-            0,
-            "desktop-open",
-            "打开 / 聚焦 Cindy",
-            "应用",
-            serde_json::json!({"type":"open_app","bundle_id":"com.xd.cindy"}),
-        ),
-        (
-            1,
-            "desktop-input",
-            "聚焦当前输入框",
-            "Agent",
-            serde_json::json!({"type":"agent_command","adapter":"cindy","command":"focus-input"}),
-        ),
-        (
-            2,
-            "desktop-search",
-            "搜索任务",
-            "Agent",
-            serde_json::json!({"type":"agent_command","adapter":"cindy","command":"search"}),
-        ),
-        (
-            3,
-            "desktop-new",
-            "新建会话",
-            "Agent",
-            serde_json::json!({"type":"agent_command","adapter":"cindy","command":"new-chat"}),
-        ),
-    ];
-    if !expected.iter().all(|(slot, id, name, category, payload)| {
-        layer
-            .controls
-            .values()
-            .find(|binding| binding.logical_control == format!("logical-{slot}"))
-            .and_then(|binding| binding.action_id.as_ref())
-            .and_then(|aid| graph.actions.get(aid))
-            .is_some_and(|action| {
-                action.id == *id
-                    && action.name == *name
-                    && action.category == *category
-                    && action.detail == "com.xd.cindy"
-                    && action.payload == *payload
-            })
-    }) {
-        return Ok(false);
-    }
-    let (pid, lid) = (pid.clone(), lid.clone());
-    draft.assign(
-        &json!(pid),
-        &json!(lid),
-        11,
-        managed_cindy_dictation_action(),
-    )?;
-    Ok(true)
-}
-
 pub const LOCAL_CODEX_PROFILE_NAME: &str = "Codex · Micro Input";
 
 pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, String> {
@@ -1068,10 +970,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     }
 
     // Desktop targets are bound explicitly; no inferred approval/send shortcuts.
-    for (name, adapter, bundle) in [
-        ("Cindy", "cindy", "com.xd.cindy"),
-        ("Codex", "codex", "com.openai.codex"),
-    ] {
+    for (name, adapter, bundle) in [("Codex", "codex", "com.openai.codex")] {
         let mut assignments = vec![(
             0,
             "desktop-open",
@@ -1095,7 +994,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 },
             ));
         }
-        if ["cindy", "codex"].contains(&adapter) {
+        if ["codex"].contains(&adapter) {
             assignments.push((
                 2,
                 "desktop-search",
@@ -1114,7 +1013,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     legacy_specs.extend(specs.clone());
     for (name, assignments) in &mut specs {
         let adapter = match *name {
-            "Cindy" => "cindy",
             "Codex" => "codex",
             "Antigravity" => "antigravity",
             "DeepSeek Coder (DSH)" => "dsh-desktop",
@@ -1165,17 +1063,14 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     legacy_specs.extend(
         specs
             .iter()
-            .filter(|(name, _)| matches!(*name, "Cindy" | "Codex" | "Antigravity"))
+            .filter(|(name, _)| matches!(*name, "Codex" | "Antigravity"))
             .cloned(),
     );
     for (_, assignments) in &mut specs {
         for (_, _, label, _, _, kind) in assignments {
             if let ActionKind::AgentCommand { adapter, command } = kind {
                 if command == "dictation"
-                    && matches!(
-                        adapter.as_str(),
-                        "cindy" | "codex" | "antigravity" | "dsh-desktop"
-                    )
+                    && matches!(adapter.as_str(), "codex" | "antigravity" | "dsh-desktop")
                 {
                     *command = "push-to-talk".into();
                     *label = "按住说话 · 松开停止";
@@ -1186,17 +1081,11 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
     legacy_specs.extend(
         specs
             .iter()
-            .filter(|(name, _)| {
-                matches!(
-                    *name,
-                    "Cindy" | "Codex" | "Antigravity" | "DeepSeek Coder (DSH)"
-                )
-            })
+            .filter(|(name, _)| matches!(*name, "Codex" | "Antigravity" | "DeepSeek Coder (DSH)"))
             .cloned(),
     );
     for (name, assignments) in &mut specs {
         let adapter = match *name {
-            "Cindy" => "cindy",
             "Codex" => "codex",
             "Antigravity" => "antigravity",
             "DeepSeek Coder (DSH)" => "dsh-desktop",
@@ -1590,66 +1479,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         .clone();
     specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments));
 
-    specs.push((
-        MANAGED_CINDY_PROFILE_NAME,
-        vec![
-            (
-                0,
-                "desktop-open",
-                "打开 / 聚焦 Cindy",
-                "应用",
-                "com.xd.cindy",
-                ActionKind::OpenApp {
-                    bundle_id: "com.xd.cindy".into(),
-                },
-            ),
-            (
-                1,
-                "desktop-input",
-                "聚焦当前输入框",
-                "Agent",
-                "com.xd.cindy",
-                ActionKind::AgentCommand {
-                    adapter: "cindy".into(),
-                    command: "focus-input".into(),
-                },
-            ),
-            (
-                2,
-                "desktop-search",
-                "搜索任务",
-                "Agent",
-                "com.xd.cindy",
-                ActionKind::AgentCommand {
-                    adapter: "cindy".into(),
-                    command: "search".into(),
-                },
-            ),
-            (
-                3,
-                "desktop-new",
-                "新建会话",
-                "Agent",
-                "com.xd.cindy",
-                ActionKind::AgentCommand {
-                    adapter: "cindy".into(),
-                    command: "new-chat".into(),
-                },
-            ),
-            (
-                11,
-                "desktop-dictation",
-                "点击开始 / 停止语音",
-                "Agent",
-                "com.xd.cindy",
-                ActionKind::AgentCommand {
-                    adapter: "cindy".into(),
-                    command: "toggle-dictation".into(),
-                },
-            ),
-        ],
-    ));
-
     let mut work = draft.clone();
     // Retire only unchanged source profiles from the exact bundled fixture, even
     // when other profiles have since been added. Preserve edited and imported data.
@@ -1741,30 +1570,18 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         work.delete_profile(&pid)?;
     }
     for (profile_name, assignments) in specs {
-        let is_native_oai_profile = matches!(profile_name, "Cindy" | "Codex");
+        let is_native_oai_profile = matches!(profile_name, "Codex");
         let existing_id = work
             .document
             .editable
             .graph
             .profiles
             .iter()
-            .find(|(_, p)| {
-                p.name == profile_name
-                    && (profile_name != "Cindy"
-                        || p.layer_order
-                            .first()
-                            .is_some_and(|lid| work.document.is_protected_oai_layer(lid)))
-            })
+            .find(|(_, p)| p.name == profile_name)
             .map(|(id, _)| id.clone());
         let pid = if let Some(pid) = existing_id {
             let p = &work.document.editable.graph.profiles[&pid];
-            if matches!(
-                profile_name,
-                LOCAL_CODEX_PROFILE_NAME | MANAGED_CINDY_PROFILE_NAME
-            ) {
-                if profile_name == MANAGED_CINDY_PROFILE_NAME {
-                    upgrade_managed_cindy_click_preset(&mut work)?;
-                }
+            if matches!(profile_name, LOCAL_CODEX_PROFILE_NAME) {
                 created_ids.push(pid);
                 continue;
             }
@@ -2111,7 +1928,6 @@ pub fn install_four_app_cockpit_preset(
     let adapter = match profile_name.as_str() {
         "Antigravity" => "antigravity",
         "DeepSeek Coder (DSH)" => "dsh-desktop",
-        "Cindy" => "cindy",
         "Codex" => "codex",
         _ => "antigravity",
     };
@@ -2435,9 +2251,9 @@ mod agent_migration_tests {
     fn upgrades_pre_dial_conversational_presets_while_preserving_customized_profiles() {
         let mut draft = Draft::default();
         let ids = install_agent_starter_profiles(&mut draft).unwrap();
-        assert_eq!(ids.len(), 8);
+        assert_eq!(ids.len(), 6);
 
-        for native_name in ["Cindy", "Codex"] {
+        for native_name in ["Codex"] {
             let pid = draft
                 .document
                 .editable

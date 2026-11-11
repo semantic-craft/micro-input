@@ -49,7 +49,8 @@ impl From<BoardLayer> for u8 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum NativeLayerOwner {
     Codex,
-    Cindy,
+    #[serde(rename = "Cindy")]
+    Retired,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -82,12 +83,7 @@ pub struct BoardLayerPlan {
 }
 
 impl BoardLayerPlan {
-    pub fn recommended(
-        native_codex: String,
-        antigravity: String,
-        deepseek: String,
-        managed_cindy: String,
-    ) -> Self {
+    pub fn recommended(native_codex: String, antigravity: String, deepseek: String) -> Self {
         Self {
             layers: [
                 BoardLayerRoute::Native {
@@ -100,9 +96,7 @@ impl BoardLayerPlan {
                 BoardLayerRoute::HostProfile {
                     profile_id: deepseek,
                 },
-                BoardLayerRoute::HostProfile {
-                    profile_id: managed_cindy,
-                },
+                BoardLayerRoute::Unassigned,
                 BoardLayerRoute::Unassigned,
                 BoardLayerRoute::Unassigned,
             ],
@@ -142,7 +136,6 @@ pub fn native_owner(
     }
     match profile.name.as_str() {
         "Codex" => Some(NativeLayerOwner::Codex),
-        "Cindy" => Some(NativeLayerOwner::Cindy),
         _ => None,
     }
 }

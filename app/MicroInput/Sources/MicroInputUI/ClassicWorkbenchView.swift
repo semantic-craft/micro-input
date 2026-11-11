@@ -460,7 +460,7 @@ struct BoardLayersPanel: View {
                 Button("默认") { store.dispatch("sidebar", "ResetBoardLayerPlan") }
                     .buttonStyle(.borderless)
                     .font(UITheme.micro)
-                    .help("Codex 原生、Antigravity、DeepSeek Harness、Cindy 托管，5 / 6 层留空")
+                    .help("Codex 原生、Antigravity、DeepSeek Harness，4 / 5 / 6 层留空")
             }
             ForEach(board.layers) { row in
                 VStack(alignment: .leading, spacing: 3) {
@@ -514,17 +514,6 @@ struct BoardLayersPanel: View {
                 .menuStyle(.borderlessButton)
             }
             Text(board.observedStatus).font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
-            Toggle(
-                "Cindy 原生键盘集成已关闭",
-                isOn: Binding(
-                    get: { board.cindyNativePausedConfirmed },
-                    set: { store.dispatch("sidebar", ["ConfirmCindyNativePaused": ["confirmed": $0]]) }
-                )
-            )
-            .toggleStyle(.checkbox)
-            .controlSize(.small)
-            .font(UITheme.micro)
-            .accessibilityIdentifier("board-cindy-native-paused")
             HStack {
                 Button("应用到键盘") { store.dispatch("sidebar", "ProvisionBoardLayers") }
                     .disabled(!board.canApply)
