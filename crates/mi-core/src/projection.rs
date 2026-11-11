@@ -8,6 +8,7 @@ pub(super) struct SixLayerView {
     pub first_event_verified: bool,
     pub armed: bool,
     pub observed_layer: u8,
+    pub keymap_revision: mi_model::apply::SixLayerKeymapRevision,
     pub failure: Option<String>,
     pub effective_profile_id: Option<String>,
     pub foreground_priority_adapter: Option<String>,
@@ -64,6 +65,7 @@ pub(super) struct ProjectionInputs<'a> {
     pub show_keycap_labels: bool,
     pub show_other_profiles: bool,
     pub six_layer_busy: bool,
+    pub six_layer_running_present: bool,
     pub six_layer_state: &'a crate::six_layer_runtime::SavedSixLayerState,
     pub six_layer_view: &'a Option<SixLayerView>,
     pub slot_role_overrides: &'a BTreeMap<(String, u32), KeycapRole>,
@@ -896,7 +898,8 @@ impl ProjectionInputs<'_> {
             .selected_layer_id
             .as_ref()
             .and_then(|lid| graph.layers.get(lid));
-        let is_protected = self.is_selected_layer_protected();
+        let is_selected_protected = self.is_selected_layer_protected();
+        let is_lighting_protected = self.is_active_lighting_protected();
         let acks = &self.acknowledged_watermarks;
 
         let mut completed_blue_dot_pills = Vec::new();
@@ -972,7 +975,8 @@ impl ProjectionInputs<'_> {
                         || a.payload.get("command").and_then(|v| v.as_str())
                             == Some(&format!("slot-open:{idx}"))
                 });
-            let led_color_hex = if is_protected || !self.lighting_popover.lighting_enabled {
+            let led_color_hex = if is_lighting_protected || !self.lighting_popover.lighting_enabled
+            {
                 "#000000".to_string()
             } else {
                 self.full_keypad_feedback
@@ -1009,7 +1013,7 @@ impl ProjectionInputs<'_> {
         });
 
         let mut lighting_popover = self.lighting_popover.clone();
-        lighting_popover.suspended_by_protected_layer = is_protected;
+        lighting_popover.suspended_by_protected_layer = is_lighting_protected;
 
         SessionStripProjection {
             slots,
@@ -1019,7 +1023,7 @@ impl ProjectionInputs<'_> {
             unread_completed_count,
             working_count,
             top_six_bound_as_session_keys,
-            can_mutate_layout: can_edit_draft && !is_protected,
+            can_mutate_layout: can_edit_draft && !is_selected_protected,
             lighting_popover,
         }
     }
@@ -1220,6 +1224,30 @@ impl ProjectionInputs<'_> {
         self.selected_profile_id
             .as_deref()
             .is_some_and(|pid| self.is_protected_oai_profile(pid))
+    }
+
+    pub(super) fn is_active_lighting_protected(&self) -> bool {
+        if self.six_layer_state.installation.is_some() || self.six_layer_running_present {
+            return false;
+        }
+        let Some(active_pid) = self.resolved_active_profile_id() else {
+            return false;
+        };
+        let doc = &self.document_store.draft.document;
+        let Some(profile) = doc.editable.graph.profiles.get(&active_pid) else {
+            return false;
+        };
+        if self.selected_profile_id.as_deref() == Some(active_pid.as_str()) {
+            if let Some(lid) = &self.selected_layer_id {
+                if profile.layer_order.iter().any(|id| id == lid) {
+                    return doc.is_protected_oai_layer(lid);
+                }
+            }
+        }
+        profile
+            .layer_order
+            .first()
+            .is_some_and(|lid| doc.is_protected_oai_layer(lid))
     }
 
     pub(super) fn legacy_host_profile_id(&self, layer: u8) -> Option<String> {
@@ -1531,6 +1559,13 @@ impl ProjectionInputs<'_> {
             .six_layer_state
             .installation
             .as_ref()
+            .is_some_and(|installation| installation.status != InstallationStatus::Applied)
+        {
+            "六层恢复记录尚未处理，请先恢复原设备配置".into()
+        } else if self
+            .six_layer_state
+            .installation
+            .as_ref()
             .is_some_and(|installation| installation.plan.validate_current().is_err())
         {
             "旧六层安装已暂停，请先恢复原设备配置".into()
@@ -1555,7 +1590,7 @@ impl ProjectionInputs<'_> {
                     .as_ref()
                     .map(|adapter| format!(" · 前台优先 {adapter}"))
                     .unwrap_or_default();
-                format!(
+                let mut status = format!(
                     "六层配置已核验 · 最近确认第 {} 层{} · {}",
                     running.observed_layer,
                     priority,
@@ -1564,7 +1599,13 @@ impl ProjectionInputs<'_> {
                     } else {
                         "等待首次实体输入"
                     }
-                )
+                );
+                if running.keymap_revision
+                    == mi_model::apply::SixLayerKeymapRevision::V1StandardKeys
+                {
+                    status.push_str(" · 旧版按键布局（点击「应用到键盘」升级后启用逐键状态灯）");
+                }
+                status
             });
         } else if let Some(installation) = &self.six_layer_state.installation {
             result.observed_layer = None;

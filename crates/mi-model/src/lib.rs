@@ -534,6 +534,7 @@ pub mod multi;
 pub mod preset;
 
 pub mod apply;
+pub use apply::SixLayerKeymapRevision;
 
 pub mod host_router;
 pub use host_router::{

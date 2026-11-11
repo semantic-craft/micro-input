@@ -1,4 +1,5 @@
 use mi_model::navigation_history::NavigationPlace;
+use mi_proto::lighting_candidate::OaiKeyStatusEntry;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -7,6 +8,18 @@ use std::collections::BTreeMap;
 pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+
+fn parse_hex_rgb(raw: &str) -> Option<u32> {
+    let hex = raw.trim().strip_prefix('#').unwrap_or(raw.trim());
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(hex, 16).ok()
+}
+
+const SIX_LAYER_SESSION_KEYS: [&str; 12] = [
+    "AG06", "AG07", "AG08", "AG09", "AG10", "AG11", "AG12", "AG13", "AG14", "AG15", "AG16", "AG17",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -278,12 +291,6 @@ impl FourAppLightingArbiter {
                 "听写就绪".into()
             },
         });
-        result.push(PerKeyLightingFeedback {
-            binding_id: "ENC_CLK".into(),
-            color: "#FFFFFF".into(),
-            phase: FourAppAgentPhase::Idle,
-            label: "旋钮确认/跳底".into(),
-        });
         result
     }
 
@@ -409,17 +416,10 @@ impl FourAppLightingArbiter {
             phase: active_phase,
             label: "停止听写并提交".into(),
         });
-        entries.push(PerKeyLightingFeedback {
-            binding_id: "ENC_CLK".into(),
-            color: "#FFFFFF".into(),
-            phase: FourAppAgentPhase::Idle,
-            label: "旋钮确认/跳底".into(),
-        });
         entries
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn update_feedback<F>(
+    pub fn recompute_feedback(
         &mut self,
         live_phase: FourAppAgentPhase,
         slots: &[FourAppSlotSnapshot],
@@ -427,12 +427,7 @@ impl FourAppLightingArbiter {
         is_protected_layer: bool,
         preview_busy: bool,
         is_bottom_row_split: bool,
-        connected_device_id: Option<&str>,
-        mut write_hardware: F,
-    ) -> LightingUpdateResult
-    where
-        F: FnMut(&str) -> Result<String, String>,
-    {
+    ) -> LightingUpdateResult {
         let phase = if let Some(manual) = self.manual_preview_phase {
             manual
         } else if !self.session_lighting_linked {
@@ -649,10 +644,41 @@ impl FourAppLightingArbiter {
             "per_key": per_key_json,
         });
         let payload_str = serde_json::to_string(&payload).unwrap_or_default();
-        let digest = format!("{:x}", Sha256::digest(payload_str.as_bytes()));
         self.dual_zone_feedback = Some(dual_zone);
         self.full_keypad_feedback = full_keys;
-        self.last_hardware_sync_json = Some(payload_str.clone());
+        self.last_hardware_sync_json = Some(payload_str);
+        self.last_update_result = LightingUpdateResult::Applied;
+        LightingUpdateResult::Applied
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_feedback<F>(
+        &mut self,
+        live_phase: FourAppAgentPhase,
+        slots: &[FourAppSlotSnapshot],
+        dictation_active: bool,
+        is_protected_layer: bool,
+        preview_busy: bool,
+        is_bottom_row_split: bool,
+        connected_device_id: Option<&str>,
+        mut write_hardware: F,
+    ) -> LightingUpdateResult
+    where
+        F: FnMut(&str) -> Result<String, String>,
+    {
+        let result = self.recompute_feedback(
+            live_phase,
+            slots,
+            dictation_active,
+            is_protected_layer,
+            preview_busy,
+            is_bottom_row_split,
+        );
+        if result != LightingUpdateResult::Applied {
+            return result;
+        }
+        let payload_str = self.last_hardware_sync_json.clone().unwrap_or_default();
+        let digest = format!("{:x}", Sha256::digest(payload_str.as_bytes()));
 
         if let Some(device_id) = connected_device_id {
             let needs_sync = !self.hardware_synced
@@ -668,6 +694,7 @@ impl FourAppLightingArbiter {
                     }
                     _ => {
                         self.hardware_synced = false;
+                        self.last_synced_payload_digest = None;
                     }
                 }
             }
@@ -677,8 +704,147 @@ impl FourAppLightingArbiter {
             self.hardware_synced = false;
         }
 
-        self.last_update_result = LightingUpdateResult::Applied;
         LightingUpdateResult::Applied
+    }
+
+    fn six_layer_off_entries() -> Vec<OaiKeyStatusEntry> {
+        SIX_LAYER_SESSION_KEYS
+            .into_iter()
+            .map(|k| OaiKeyStatusEntry::with_style(k, 0, 0.0, 0, 0.65))
+            .collect()
+    }
+
+    const fn six_layer_phase_effect(phase: FourAppAgentPhase) -> u8 {
+        if matches!(
+            phase,
+            FourAppAgentPhase::Completed
+                | FourAppAgentPhase::AwaitingInput
+                | FourAppAgentPhase::Error
+                | FourAppAgentPhase::Thinking
+        ) {
+            4
+        } else {
+            1
+        }
+    }
+
+    pub fn six_layer_thstatus_entries(&self) -> Vec<OaiKeyStatusEntry> {
+        if !self.lighting_enabled
+            || self.last_update_result == LightingUpdateResult::SuspendedByProtectedLayer
+            || self.brightness_scale <= 0.0
+        {
+            return Self::six_layer_off_entries();
+        }
+        let clamped_scale = self.brightness_scale.clamp(0.15, 1.0);
+        let lit_brightness = (0.85 * clamped_scale).max(0.35);
+        if let Some(preview_phase) = self.manual_preview_phase {
+            let hex = match preview_phase {
+                FourAppAgentPhase::Thinking => self.working_color_hex.as_str(),
+                FourAppAgentPhase::AwaitingInput => "#FFAA00",
+                FourAppAgentPhase::Error => "#FF2200",
+                FourAppAgentPhase::BackgroundActive => "#AA44FF",
+                FourAppAgentPhase::Completed | FourAppAgentPhase::Idle => {
+                    self.idle_color_hex.as_str()
+                }
+            };
+            let color = parse_hex_rgb(hex).unwrap_or(0);
+            if color == 0 {
+                return Self::six_layer_off_entries();
+            }
+            let effect = Self::six_layer_phase_effect(preview_phase);
+            return SIX_LAYER_SESSION_KEYS
+                .into_iter()
+                .map(|key| OaiKeyStatusEntry::with_style(key, color, lit_brightness, effect, 0.65))
+                .collect();
+        }
+        let mut entries = Vec::with_capacity(12);
+        for &layer_offset in &[6u8, 12u8] {
+            for slot_idx in 0..6usize {
+                let key = format!("AG{:02}", layer_offset + slot_idx as u8);
+                let Some(fb) = self.full_keypad_feedback.get(slot_idx) else {
+                    entries.push(OaiKeyStatusEntry::with_style(key, 0, 0.0, 0, 0.65));
+                    continue;
+                };
+                let color = if fb.color == "#000000" || fb.color == "#222222" {
+                    0
+                } else {
+                    parse_hex_rgb(&fb.color).unwrap_or(0)
+                };
+                if color == 0 {
+                    entries.push(OaiKeyStatusEntry::with_style(key, 0, 0.0, 0, 0.65));
+                } else {
+                    entries.push(OaiKeyStatusEntry::with_style(
+                        key,
+                        color,
+                        lit_brightness,
+                        Self::six_layer_phase_effect(fb.phase),
+                        0.65,
+                    ));
+                }
+            }
+        }
+        entries
+    }
+
+    fn apply_six_layer_confirmation(
+        &mut self,
+        digest: &str,
+        confirmed_digest: Option<&str>,
+    ) -> bool {
+        let should_be_lit_active = self.lighting_enabled
+            && self.brightness_scale > 0.0
+            && self.last_update_result != LightingUpdateResult::SuspendedByProtectedLayer;
+
+        if !should_be_lit_active {
+            let mut changed = false;
+            if self.hardware_synced {
+                self.hardware_synced = false;
+                changed = true;
+            }
+            if confirmed_digest == Some(digest)
+                && self.last_synced_payload_digest.as_deref() != Some(digest)
+            {
+                if self.last_synced_payload_digest.is_some() {
+                    self.hardware_write_count += 1;
+                }
+                self.last_synced_payload_digest = Some(digest.to_owned());
+                changed = true;
+            }
+            return changed;
+        }
+
+        if confirmed_digest == Some(digest) {
+            if !self.hardware_synced || self.last_synced_payload_digest.as_deref() != Some(digest) {
+                self.hardware_write_count += 1;
+                self.hardware_synced = true;
+                self.last_synced_payload_digest = Some(digest.to_owned());
+                return true;
+            }
+            false
+        } else if self.hardware_synced || self.last_synced_payload_digest.is_some() {
+            self.hardware_synced = false;
+            self.last_synced_payload_digest = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn sync_six_layer_hardware<F>(&mut self, queue_and_read_confirmed: F) -> bool
+    where
+        F: FnOnce(&str, &[OaiKeyStatusEntry]) -> Result<Option<String>, String>,
+    {
+        let entries = self.six_layer_thstatus_entries();
+        let digest = sha256_hex(&serde_json::to_vec(&entries).unwrap_or_default());
+        let confirmed = queue_and_read_confirmed(&digest, &entries).ok().flatten();
+        self.apply_six_layer_confirmation(&digest, confirmed.as_deref());
+        self.hardware_synced
+    }
+
+    pub fn reconcile_six_layer_confirmed(&mut self, confirmed_digest: Option<&str>) -> bool {
+        let entries = self.six_layer_thstatus_entries();
+        let digest = sha256_hex(&serde_json::to_vec(&entries).unwrap_or_default());
+        self.apply_six_layer_confirmation(&digest, confirmed_digest)
     }
 
     pub fn release(&mut self) {
@@ -814,5 +980,155 @@ mod tests {
         assert_eq!(dz_idle.underglow_color, "#0088FF");
         assert_eq!(dz_idle.backlight_color, "#0088FF");
         assert_eq!(arbiter.full_keypad_feedback[0].color, "#0088FF");
+    }
+
+    #[test]
+    fn six_layer_thstatus_entries_maps_running_green_completed_blue_and_excludes_non_session_keys()
+    {
+        let mut arbiter = FourAppLightingArbiter::new();
+        arbiter.only_glow_on_attention_or_completed = false;
+        let slots = vec![
+            FourAppSlotSnapshot {
+                app: "antigravity".into(),
+                title: "Running".into(),
+                status: "running".into(),
+                place: Some(NavigationPlace::antigravity("conv-run", "/tmp/ws")),
+                watermark: "run:1".into(),
+            },
+            FourAppSlotSnapshot {
+                app: "antigravity".into(),
+                title: "Completed".into(),
+                status: "completed".into(),
+                place: Some(NavigationPlace::antigravity("conv-done", "/tmp/ws")),
+                watermark: "done:1".into(),
+            },
+            FourAppSlotSnapshot {
+                app: "dsh-desktop".into(),
+                title: "Idle".into(),
+                status: "idle".into(),
+                place: Some(NavigationPlace::session("dsh-desktop", "sess-idle")),
+                watermark: "idle:1".into(),
+            },
+        ];
+
+        assert_eq!(
+            arbiter.recompute_feedback(
+                FourAppAgentPhase::Thinking,
+                &slots,
+                false,
+                false,
+                false,
+                false,
+            ),
+            LightingUpdateResult::Applied
+        );
+
+        assert!(arbiter
+            .full_keypad_feedback
+            .iter()
+            .all(|fb| !fb.binding_id.starts_with("ENC_")));
+        assert!(arbiter
+            .per_key_feedback
+            .iter()
+            .all(|fb| !fb.binding_id.starts_with("ENC_")));
+
+        let entries = arbiter.six_layer_thstatus_entries();
+        let keys: Vec<&str> = entries.iter().map(|e| e.k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "AG06", "AG07", "AG08", "AG09", "AG10", "AG11", "AG12", "AG13", "AG14", "AG15",
+                "AG16", "AG17"
+            ]
+        );
+        assert_eq!(entries[0].c, 0x00FF66);
+        assert_eq!(entries[6].c, 0x00FF66);
+        assert_eq!(entries[1].c, 0x0088FF);
+        assert_eq!(entries[7].c, 0x0088FF);
+        assert_eq!(entries[2].c, 0x0088FF);
+        assert_eq!(entries[8].c, 0x0088FF);
+        for empty_idx in [3, 4, 5, 9, 10, 11] {
+            assert_eq!(entries[empty_idx].c, 0);
+            assert_eq!(entries[empty_idx].b, 0.0);
+            assert_eq!(entries[empty_idx].e, 0);
+        }
+    }
+
+    #[test]
+    fn sync_six_layer_hardware_waits_for_wire_ack_and_prevents_stale_replay_on_offline_disable() {
+        let mut arbiter = FourAppLightingArbiter::new();
+        arbiter.manual_preview_phase = Some(FourAppAgentPhase::AwaitingInput);
+        arbiter.recompute_feedback(FourAppAgentPhase::Idle, &[], false, false, false, false);
+        let preview_entries = arbiter.six_layer_thstatus_entries();
+        assert_eq!(preview_entries.len(), 12);
+        assert!(preview_entries
+            .iter()
+            .all(|e| e.c == 0xFFAA00 && e.e == 4 && e.b > 0.0));
+        arbiter.manual_preview_phase = None;
+
+        let slots = vec![FourAppSlotSnapshot {
+            app: "antigravity".into(),
+            title: "Running".into(),
+            status: "running".into(),
+            place: Some(NavigationPlace::antigravity("conv-run", "/tmp/ws")),
+            watermark: "run:1".into(),
+        }];
+        arbiter.recompute_feedback(
+            FourAppAgentPhase::Thinking,
+            &slots,
+            false,
+            false,
+            false,
+            false,
+        );
+
+        let mut queued: Option<(String, Vec<OaiKeyStatusEntry>)> = None;
+        assert!(!arbiter.sync_six_layer_hardware(|digest, entries| {
+            queued = Some((digest.to_owned(), entries.to_vec()));
+            Ok(None)
+        }));
+        assert!(!arbiter.hardware_synced);
+        assert!(arbiter.last_synced_payload_digest.is_none());
+        assert_eq!(arbiter.hardware_write_count, 0);
+        let (lit_digest, lit_entries) = queued.clone().unwrap();
+        assert_eq!(lit_entries[0].c, 0x00FF66);
+        assert_eq!(lit_entries[6].c, 0x00FF66);
+
+        assert!(arbiter.reconcile_six_layer_confirmed(Some(&lit_digest)));
+        assert!(arbiter.hardware_synced);
+        assert_eq!(arbiter.hardware_write_count, 1);
+        assert!(!arbiter.reconcile_six_layer_confirmed(Some(&lit_digest)));
+        assert_eq!(arbiter.hardware_write_count, 1);
+
+        assert!(arbiter.reconcile_six_layer_confirmed(None));
+        assert!(!arbiter.hardware_synced);
+        assert!(arbiter.last_synced_payload_digest.is_none());
+
+        arbiter.lighting_enabled = false;
+        arbiter.recompute_feedback(
+            FourAppAgentPhase::Thinking,
+            &slots,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert!(!arbiter.sync_six_layer_hardware(|digest, entries| {
+            queued = Some((digest.to_owned(), entries.to_vec()));
+            Ok(None)
+        }));
+        let (off_digest, off_entries) = queued.unwrap();
+        assert_ne!(off_digest, lit_digest);
+        assert!(off_entries
+            .iter()
+            .all(|e| e.c == 0 && e.b == 0.0 && e.e == 0));
+        assert!(!arbiter.hardware_synced);
+
+        assert!(arbiter.reconcile_six_layer_confirmed(Some(&off_digest)));
+        assert!(!arbiter.hardware_synced);
+        assert_eq!(
+            arbiter.last_synced_payload_digest.as_deref(),
+            Some(off_digest.as_str())
+        );
     }
 }

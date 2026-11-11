@@ -2226,6 +2226,10 @@ impl WorkbenchStore {
         self.projection_inputs().is_selected_layer_protected()
     }
 
+    pub fn is_active_lighting_protected(&self) -> bool {
+        self.projection_inputs().is_active_lighting_protected()
+    }
+
     pub fn ensure_layer_editable(&self) -> Result<(), WorkbenchError> {
         if self.is_selected_layer_protected() {
             return Err(WorkbenchError::ProtectedLayerLocked);
@@ -2670,7 +2674,9 @@ impl WorkbenchStore {
                 Ok(())
             }
             SessionStripAction::TriggerTestLighting(phase) => {
-                self.ensure_layer_editable()?;
+                if self.is_active_lighting_protected() {
+                    return Err(WorkbenchError::ProtectedLayerLocked);
+                }
                 self.lighting_popover.manual_preview_phase = phase;
                 self.lighting_arbiter.manual_preview_phase = phase;
                 self.refresh_four_app_lighting();
@@ -2687,19 +2693,44 @@ impl WorkbenchStore {
         self.commit_runtime_update();
     }
 
-    fn refresh_four_app_lighting(&mut self) {
+    pub fn refresh_four_app_lighting(&mut self) {
         let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
         let snapshots = self.slot_table.lighting_snapshots(&acks);
         let live_phase = self.derive_live_lighting_phase(&acks);
-        let is_protected = self.is_selected_layer_protected();
+        let is_protected = self.is_active_lighting_protected();
         let is_split = self.current_bottom_row_layout() == BottomRowLayout::Split;
-        let connected_device_id = self.connected_candidate.as_ref().map(|c| c.path.clone());
-        let session_for_lighting =
-            if self.hardware_rpc_verified && self.six_layer_state.installation.is_none() {
-                self.device_session.clone()
-            } else {
-                None
-            };
+        let six_layer_mode =
+            self.six_layer_state.installation.is_some() || self.six_layer_running.is_some();
+        if six_layer_mode {
+            let result = self.lighting_arbiter.recompute_feedback(
+                live_phase,
+                &snapshots,
+                false,
+                is_protected,
+                false,
+                is_split,
+            );
+            if result != mi_bridge::LightingUpdateResult::DeviceBusy {
+                let running = &self.six_layer_running;
+                let _ = self
+                    .lighting_arbiter
+                    .sync_six_layer_hardware(|digest, entries| {
+                        Ok(running
+                            .as_ref()
+                            .and_then(|r| r.queue_session_lighting(digest, entries)))
+                    });
+            }
+            return;
+        }
+        let verified_session = self
+            .device_session
+            .as_ref()
+            .filter(|_| self.hardware_rpc_verified)
+            .filter(|s| !s.is_disconnected())
+            .cloned();
+        let connected_device_id = verified_session
+            .as_ref()
+            .and_then(|_| self.connected_candidate.as_ref().map(|c| c.path.clone()));
         let runtime_for_lighting = Arc::clone(&self.tokio_runtime);
         let _ = self.lighting_arbiter.update_feedback(
             live_phase,
@@ -2710,13 +2741,13 @@ impl WorkbenchStore {
             is_split,
             connected_device_id.as_deref(),
             |payload_str| {
+                let Some(session) = verified_session.clone() else {
+                    return Err("no_verified_device_session".to_string());
+                };
                 let (preview, entries) = parse_hardware_lighting_payload(payload_str)?;
-                if let Some(session) = session_for_lighting.clone() {
-                    runtime_for_lighting.spawn(async move {
-                        let _ =
-                            sync_hardware_lighting_to_session(&session, &preview, &entries).await;
-                    });
-                }
+                runtime_for_lighting.spawn(async move {
+                    let _ = sync_hardware_lighting_to_session(&session, &preview, &entries).await;
+                });
                 Ok("{\"synced\":true}".to_string())
             },
         );
@@ -3018,6 +3049,7 @@ impl WorkbenchStore {
             show_keycap_labels: self.show_keycap_labels,
             show_other_profiles: self.show_other_profiles,
             six_layer_busy: self.six_layer_job.is_some(),
+            six_layer_running_present: self.six_layer_running.is_some(),
             six_layer_state: &self.six_layer_state,
             six_layer_view: &self.six_layer_view,
             slot_role_overrides: &self.slot_role_overrides,
@@ -3057,6 +3089,7 @@ impl WorkbenchStore {
                 keyboard_grabbed: running.readiness.keyboard_grabbed,
                 first_event_verified: running.first_event_verified.load(Ordering::Acquire),
                 observed_layer,
+                keymap_revision: running.keymap_revision,
                 armed: running.armed,
                 failure: running.receiver.failure(),
                 effective_profile_id: running.effective_profile_id(),
@@ -6186,7 +6219,7 @@ fn default_acceptance_lighting_payload() -> (
     };
     let keys = [
         "AG00", "AG01", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10",
-        "AG11", "AG12", "ENC_CLK",
+        "AG11", "AG12",
     ];
     let entries = keys
         .into_iter()

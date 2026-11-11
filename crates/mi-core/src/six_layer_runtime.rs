@@ -2,11 +2,12 @@ use crate::karabiner::{self, ConfigPatch, Readiness, ReloadBaseline};
 use crate::store::session_navigation::{
     NavigationCommand, NavigationDispatch, PhysicalNavigationIntent,
 };
-use mi_model::apply::AppliedSixLayerPlan;
+use mi_model::apply::{AppliedSixLayerPlan, SixLayerKeymapRevision};
 use mi_model::{
     direct_controls::{CONTROL_BINDINGS, DIRECT_CONTROLS},
     host_router::ResolvedHostAction,
 };
+use mi_proto::lighting_candidate::OaiKeyStatusEntry;
 use mi_session::DeviceSession;
 use mi_transport::{HidCandidate, HidTransport, MacTransport, TargetKeyboard, UserCommandReceiver};
 use serde::{Deserialize, Serialize};
@@ -151,12 +152,413 @@ impl ExecutionPolicy {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum WireSyncState {
+    #[default]
+    Unsynced,
+    InFlight(String),
+    Confirmed(String),
+}
+
+async fn open_shared_vendor_session(target: TargetKeyboard) -> Option<Arc<DeviceSession>> {
+    tokio::task::spawn_blocking(move || {
+        mi_transport::discover_target_keyboard()
+            .ok()
+            .filter(|d| d.location_id == target.location_id)
+            .and_then(|d| connect(&MacTransport::new(), &d).ok())
+            .map(|(session, _)| session)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+const THSTATUS_RETRY_BACKOFF: Duration = Duration::from_secs(2);
+
+async fn send_thstatus_bounded(
+    session: &DeviceSession,
+    sync_state: &Mutex<WireSyncState>,
+    retry_not_before: &Mutex<Option<Instant>>,
+    digest: String,
+    entries: &[OaiKeyStatusEntry],
+    session_ok: &mut bool,
+) {
+    *sync_state.lock().unwrap() = WireSyncState::InFlight(digest.clone());
+    match tokio::time::timeout(
+        Duration::from_millis(750),
+        session.send_oai_thstatus(entries),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {
+            *sync_state.lock().unwrap() = WireSyncState::Confirmed(digest);
+            *retry_not_before.lock().unwrap() = None;
+        }
+        Ok(Err(_)) | Err(_) => {
+            *sync_state.lock().unwrap() = WireSyncState::Unsynced;
+            if session.is_disconnected() {
+                *session_ok = false;
+                *retry_not_before.lock().unwrap() = None;
+            } else {
+                *retry_not_before.lock().unwrap() = Some(Instant::now() + THSTATUS_RETRY_BACKOFF);
+            }
+        }
+    }
+}
+
+fn handle_vendor_slot_notification(
+    received: &mi_session::ReceivedNotification,
+    pressed_mask: &mut u8,
+    receiver: &UserCommandReceiver,
+) {
+    if let Some((phys_slot, control, pressed)) =
+        decode_six_layer_vendor_slot(&received.notification)
+    {
+        let mask_bit = 1u8 << phys_slot;
+        if pressed {
+            if (*pressed_mask & mask_bit) == 0 {
+                *pressed_mask |= mask_bit;
+                if let Some(control) = control {
+                    let _ = receiver.push_vendor_activation(control);
+                }
+            }
+        } else {
+            *pressed_mask &= !mask_bit;
+        }
+    }
+}
+
+struct SharedVendorBridge {
+    led_tx: tokio::sync::watch::Sender<Option<(String, Vec<OaiKeyStatusEntry>)>>,
+    stop_tx: tokio::sync::watch::Sender<bool>,
+    connected: Arc<AtomicBool>,
+    sync_state: Arc<Mutex<WireSyncState>>,
+    retry_not_before: Arc<Mutex<Option<Instant>>>,
+    active_session: Arc<Mutex<Option<Arc<DeviceSession>>>>,
+    retired_session: Mutex<Option<Arc<DeviceSession>>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl SharedVendorBridge {
+    fn new(initial_session: Option<Arc<DeviceSession>>) -> Self {
+        let (led_tx, _) = tokio::sync::watch::channel(None);
+        let (stop_tx, _) = tokio::sync::watch::channel(false);
+        Self {
+            led_tx,
+            stop_tx,
+            connected: Arc::new(AtomicBool::new(false)),
+            sync_state: Arc::new(Mutex::new(WireSyncState::Unsynced)),
+            retry_not_before: Arc::new(Mutex::new(None)),
+            active_session: Arc::new(Mutex::new(initial_session)),
+            retired_session: Mutex::new(None),
+            task: None,
+        }
+    }
+
+    fn confirmed_digest(&self) -> Option<String> {
+        match &*self.sync_state.lock().unwrap() {
+            WireSyncState::Confirmed(digest) => Some(digest.clone()),
+            WireSyncState::Unsynced | WireSyncState::InFlight(_) => None,
+        }
+    }
+
+    fn retry_ready(&self) -> bool {
+        self.retry_not_before
+            .lock()
+            .unwrap()
+            .is_none_or(|deadline| Instant::now() >= deadline)
+    }
+
+    fn needs_lighting_sync(&self) -> bool {
+        if !self.connected.load(Ordering::Acquire) {
+            return false;
+        }
+        let sync_state = self.sync_state.lock().unwrap().clone();
+        let queued = self.led_tx.borrow().as_ref().map(|(d, _)| d.clone());
+        match (queued, sync_state) {
+            (None, _) => false,
+            (Some(_), WireSyncState::Unsynced) => self.retry_ready(),
+            (Some(_), WireSyncState::InFlight(_)) => false,
+            (Some(wanted), WireSyncState::Confirmed(confirmed)) => wanted != confirmed,
+        }
+    }
+
+    fn retire(&self) {
+        let _ = self.stop_tx.send(true);
+        self.connected.store(false, Ordering::Release);
+        *self.sync_state.lock().unwrap() = WireSyncState::Unsynced;
+        *self.retry_not_before.lock().unwrap() = None;
+        if let Some(session) = self.active_session.lock().unwrap().take() {
+            session.disconnect();
+            *self.retired_session.lock().unwrap() = Some(session);
+        }
+    }
+
+    fn shutdown(&mut self, runtime: &tokio::runtime::Runtime) {
+        self.retire();
+        if let Some(task) = self.task.take() {
+            let _ = runtime.block_on(task);
+        }
+        if let Some(session) = self.retired_session.lock().unwrap().take() {
+            runtime.block_on(session.shutdown());
+        }
+        if let Some(session) = self.active_session.lock().unwrap().take() {
+            runtime.block_on(session.shutdown());
+        }
+    }
+
+    fn spawn(
+        &mut self,
+        runtime: &tokio::runtime::Runtime,
+        initial_session: Option<Arc<DeviceSession>>,
+        receiver: Arc<UserCommandReceiver>,
+        target: TargetKeyboard,
+        allow_reconnect: bool,
+    ) {
+        self.spawn_with_reopen(
+            runtime,
+            initial_session,
+            receiver,
+            allow_reconnect,
+            move || open_shared_vendor_session(target.clone()),
+        );
+    }
+
+    fn spawn_with_reopen<F, Fut>(
+        &mut self,
+        runtime: &tokio::runtime::Runtime,
+        initial_session: Option<Arc<DeviceSession>>,
+        receiver: Arc<UserCommandReceiver>,
+        allow_reconnect: bool,
+        mut reopen: F,
+    ) where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Option<Arc<DeviceSession>>> + Send,
+    {
+        if self.task.is_some() {
+            self.shutdown(runtime);
+        }
+        if let Some(session) = self.retired_session.lock().unwrap().take() {
+            runtime.block_on(session.shutdown());
+        }
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        self.stop_tx = stop_tx;
+        *self.retry_not_before.lock().unwrap() = None;
+        let mut led_rx = self.led_tx.subscribe();
+        let initial_session = initial_session.filter(|s| !s.is_disconnected());
+        let initial_notif_rx = if let Some(ref s) = initial_session {
+            let rx = s.notifications();
+            *self.active_session.lock().unwrap() = Some(Arc::clone(s));
+            self.connected.store(true, Ordering::Release);
+            Some(rx)
+        } else {
+            *self.active_session.lock().unwrap() = None;
+            self.connected.store(false, Ordering::Release);
+            None
+        };
+        let connected = Arc::clone(&self.connected);
+        let sync_state = Arc::clone(&self.sync_state);
+        let retry_not_before = Arc::clone(&self.retry_not_before);
+        let active_session = Arc::clone(&self.active_session);
+        self.task = Some(runtime.spawn(async move {
+            let mut current_session = initial_session;
+            let mut pending_notif_rx = initial_notif_rx;
+            let mut pressed_mask: u8 = 0;
+            let mut rotated_from_live = false;
+            while !*stop_rx.borrow() {
+                if current_session.is_none() {
+                    pressed_mask = 0;
+                    rotated_from_live = false;
+                    connected.store(false, Ordering::Release);
+                    *sync_state.lock().unwrap() = WireSyncState::Unsynced;
+                    *retry_not_before.lock().unwrap() = None;
+                    if !allow_reconnect {
+                        return;
+                    }
+                    tokio::select! {
+                        _ = stop_rx.changed() => return,
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    }
+                    if *stop_rx.borrow() || receiver.is_retired() {
+                        return;
+                    }
+                    let Some(session) = reopen().await else {
+                        continue;
+                    };
+                    if *stop_rx.borrow() || receiver.is_retired() {
+                        session.shutdown().await;
+                        return;
+                    }
+                    pending_notif_rx = Some(session.notifications());
+                    *active_session.lock().unwrap() = Some(Arc::clone(&session));
+                    connected.store(true, Ordering::Release);
+                    current_session = Some(session);
+                }
+                let session = current_session.take().unwrap();
+                let mut notif_rx = pending_notif_rx
+                    .take()
+                    .unwrap_or_else(|| session.notifications());
+                connected.store(true, Ordering::Release);
+                let mut session_ok = !session.is_disconnected();
+                let needs_initial_flush = !rotated_from_live
+                    || matches!(*sync_state.lock().unwrap(), WireSyncState::Unsynced);
+                rotated_from_live = false;
+                if session_ok && needs_initial_flush {
+                    let initial_payload = { led_rx.borrow_and_update().clone() };
+                    if let Some((digest, entries)) = initial_payload {
+                        send_thstatus_bounded(
+                            &session,
+                            &sync_state,
+                            &retry_not_before,
+                            digest,
+                            &entries,
+                            &mut session_ok,
+                        )
+                        .await;
+                    }
+                }
+                let mut next_rotated = None;
+                let mut already_shut_down = false;
+                while session_ok && !*stop_rx.borrow() {
+                    if allow_reconnect && session.request_count() >= 900 {
+                        while let Ok(received) = notif_rx.try_recv() {
+                            handle_vendor_slot_notification(
+                                &received,
+                                &mut pressed_mask,
+                                &receiver,
+                            );
+                        }
+                        pressed_mask = 0;
+                        let _ = active_session.lock().unwrap().take();
+                        session.shutdown().await;
+                        already_shut_down = true;
+                        if *stop_rx.borrow() || receiver.is_retired() {
+                            break;
+                        }
+                        if let Some(new_session) = reopen().await {
+                            if *stop_rx.borrow() || receiver.is_retired() {
+                                new_session.shutdown().await;
+                                break;
+                            }
+                            let new_notif_rx = new_session.notifications();
+                            *active_session.lock().unwrap() = Some(Arc::clone(&new_session));
+                            connected.store(true, Ordering::Release);
+                            next_rotated = Some((new_session, new_notif_rx));
+                        }
+                        break;
+                    }
+                    tokio::select! {
+                        _ = stop_rx.changed() => break,
+                        _ = session.wait_disconnected() => {
+                            session_ok = false;
+                        }
+                        notif = notif_rx.recv() => {
+                            match notif {
+                                Ok(received) => {
+                                    handle_vendor_slot_notification(
+                                        &received,
+                                        &mut pressed_mask,
+                                        &receiver,
+                                    );
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    pressed_mask = 0;
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    session_ok = false;
+                                }
+                            }
+                        }
+                        changed = led_rx.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
+                            let next_payload = { led_rx.borrow_and_update().clone() };
+                            if let Some((digest, entries)) = next_payload {
+                                send_thstatus_bounded(
+                                    &session,
+                                    &sync_state,
+                                    &retry_not_before,
+                                    digest,
+                                    &entries,
+                                    &mut session_ok,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+                if let Some((new_session, new_notif_rx)) = next_rotated {
+                    current_session = Some(new_session);
+                    pending_notif_rx = Some(new_notif_rx);
+                    rotated_from_live = true;
+                    continue;
+                }
+                pressed_mask = 0;
+                connected.store(false, Ordering::Release);
+                *sync_state.lock().unwrap() = WireSyncState::Unsynced;
+                *retry_not_before.lock().unwrap() = None;
+                let _ = active_session.lock().unwrap().take();
+                if !already_shut_down {
+                    session.shutdown().await;
+                }
+                if *stop_rx.borrow() || !allow_reconnect {
+                    return;
+                }
+            }
+        }));
+    }
+}
+
+fn decode_six_layer_vendor_slot(
+    notification: &mi_proto::HostNotification,
+) -> Option<(u8, Option<u8>, bool)> {
+    let mi_proto::HostNotification::Unknown(raw) = notification else {
+        return None;
+    };
+    if ["id", "i", "result", "error"]
+        .iter()
+        .any(|key| raw.get(key).is_some())
+    {
+        return None;
+    }
+    if raw.get("method").is_some() && raw.get("m").is_some() {
+        return None;
+    }
+    if raw.get("params").is_some() && raw.get("p").is_some() {
+        return None;
+    }
+    let method = raw.get("method").or_else(|| raw.get("m"))?.as_str()?;
+    if method != "v.oai.hid" {
+        return None;
+    }
+    let params = raw.get("params").or_else(|| raw.get("p"))?.as_object()?;
+    let key = params.get("k")?.as_str()?;
+    let act = params.get("act")?.as_i64()?;
+    let pressed = match act {
+        1 => true,
+        0 => false,
+        _ => return None,
+    };
+    let digits = key.strip_prefix("AG")?;
+    if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let ag = digits.parse::<u8>().ok()?;
+    match ag {
+        0..=5 => Some((ag, None, pressed)),
+        6..=11 => Some((ag - 6, Some(ag - 6), pressed)),
+        12..=17 => Some((ag - 12, Some(20 + (ag - 12)), pressed)),
+        _ => None,
+    }
+}
+
 pub struct RunningSixLayer {
     pub receiver: Arc<UserCommandReceiver>,
     pub readiness: Readiness,
-    session: Arc<DeviceSession>,
     pub candidate: HidCandidate,
     pub installation: Installation,
+    pub keymap_revision: SixLayerKeymapRevision,
     pub observed_layer: Arc<AtomicU8>,
     pub first_event_verified: Arc<AtomicBool>,
     pub armed: bool,
@@ -164,6 +566,7 @@ pub struct RunningSixLayer {
     pub receipts: Option<std::sync::mpsc::Receiver<mi_macos::HostActionReceipt>>,
     foreground: Arc<Mutex<ForegroundContext>>,
     pub(crate) navigation: Option<NavigationDispatch>,
+    vendor_bridge: SharedVendorBridge,
     stop: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
     executor: Option<JoinHandle<Result<(), String>>>,
@@ -268,7 +671,7 @@ impl RunningSixLayer {
         new_running(
             Arc::new(UserCommandReceiver::bind().unwrap()),
             Readiness::isolated(),
-            session,
+            Some(session),
             candidate,
             Installation {
                 status: InstallationStatus::Applied,
@@ -292,6 +695,7 @@ impl RunningSixLayer {
                 },
             },
             1,
+            SixLayerKeymapRevision::V2HybridVendorSlots,
         )
     }
 
@@ -306,6 +710,77 @@ impl RunningSixLayer {
             && state
                 .admit_after
                 .is_none_or(|after| admission.received_at >= after)
+    }
+
+    pub fn supports_per_key_led(&self) -> bool {
+        self.keymap_revision == SixLayerKeymapRevision::V2HybridVendorSlots
+    }
+
+    pub fn vendor_bridge_connected(&self) -> bool {
+        self.vendor_bridge.connected.load(Ordering::Acquire)
+    }
+
+    pub fn confirmed_lighting_digest(&self) -> Option<String> {
+        self.vendor_bridge.confirmed_digest()
+    }
+
+    pub fn vendor_bridge_needs_lighting_sync(&self) -> bool {
+        self.supports_per_key_led() && self.vendor_bridge.needs_lighting_sync()
+    }
+
+    pub fn queue_session_lighting(
+        &self,
+        digest: &str,
+        entries: &[OaiKeyStatusEntry],
+    ) -> Option<String> {
+        if !self.supports_per_key_led() {
+            return None;
+        }
+        let connected = self.vendor_bridge.connected.load(Ordering::Acquire);
+        let sync_state = self.vendor_bridge.sync_state.lock().unwrap().clone();
+        let retry_ready = self.vendor_bridge.retry_ready();
+        let confirmed = match &sync_state {
+            WireSyncState::Confirmed(d) => Some(d.clone()),
+            WireSyncState::Unsynced | WireSyncState::InFlight(_) => None,
+        };
+        self.vendor_bridge.led_tx.send_if_modified(|current| {
+            if current.as_ref().map(|(d, _)| d.as_str()) != Some(digest) {
+                *current = Some((digest.to_owned(), entries.to_vec()));
+                true
+            } else {
+                connected && sync_state == WireSyncState::Unsynced && retry_ready
+            }
+        });
+        confirmed
+    }
+
+    pub fn start_vendor_bridge(&mut self, runtime: &tokio::runtime::Runtime) {
+        if !self.supports_per_key_led() {
+            return;
+        }
+        let initial = self.vendor_bridge.active_session.lock().unwrap().take();
+        self.vendor_bridge.spawn(
+            runtime,
+            initial,
+            Arc::clone(&self.receiver),
+            self.installation.target.clone(),
+            true,
+        );
+    }
+
+    pub fn attach_test_vendor_session(
+        &mut self,
+        runtime: &tokio::runtime::Runtime,
+        session: Arc<DeviceSession>,
+    ) {
+        self.keymap_revision = SixLayerKeymapRevision::V2HybridVendorSlots;
+        self.vendor_bridge.spawn(
+            runtime,
+            Some(session),
+            Arc::clone(&self.receiver),
+            self.installation.target.clone(),
+            false,
+        );
     }
 
     #[cfg(test)]
@@ -355,7 +830,7 @@ impl RunningSixLayer {
     pub fn retire(&self) {
         self.receiver.invalidate("运行代次已结束");
         self.stop.store(true, Ordering::Release);
-        self.session.disconnect();
+        self.vendor_bridge.retire();
     }
 
     pub fn is_retired(&self) -> bool {
@@ -368,7 +843,7 @@ impl RunningSixLayer {
 
     pub fn quiesce(&mut self, runtime: &tokio::runtime::Runtime) -> Result<(), String> {
         self.retire();
-        runtime.block_on(self.session.shutdown());
+        self.vendor_bridge.shutdown(runtime);
         let monitor_result = self.monitor.take().map_or(Ok(()), |monitor| {
             monitor.join().map_err(|_| "设备监视清理失败".to_string())
         });
@@ -425,8 +900,6 @@ impl Drop for RunningSixLayer {
     }
 }
 
-// Input liveness belongs to the grabbed keyboard and its Karabiner generation.
-// Vendor RPC is used only while establishing or changing the configuration.
 fn check_input_connection(
     receiver: &UserCommandReceiver,
     slept: bool,
@@ -616,13 +1089,17 @@ pub async fn apply(
         };
         let previous = saved.clone();
         let mut restoration_config = patch.clone();
-        let backup = if let Some(previous) = &saved.installation {
-            restoration_config.original = previous.config.original.clone();
-            restoration_config.original_device = previous.config.original_device.clone();
-            previous.backup.clone()
-        } else {
-            prepared.backup.clone()
-        };
+        if let Some(prev) = &previous.installation {
+            restoration_config.original = prev.config.original.clone();
+            restoration_config.original_device = prev.config.original_device.clone();
+            if let Err(error) = merge_previous_original_into_backup(&prev.backup, &prepared.backup)
+            {
+                let _ = patch.rollback_exact();
+                let _ = fs::remove_dir_all(&prepared.backup);
+                return Err(error);
+            }
+        }
+        let backup = prepared.backup.clone();
         let mut installation = Installation {
             status: InstallationStatus::Applying,
             plan,
@@ -634,6 +1111,13 @@ pub async fn apply(
         saved.installation = Some(installation.clone());
         if let Err(error) = save(&state_path, &saved) {
             let _ = patch.rollback_exact();
+            if previous
+                .installation
+                .as_ref()
+                .is_none_or(|prev| prev.backup != installation.backup)
+            {
+                let _ = fs::remove_dir_all(&installation.backup);
+            }
             return Err(error);
         }
         let result = session.apply_six_layer_write(prepared).await;
@@ -642,14 +1126,28 @@ pub async fn apply(
             Err(error) => {
                 if error.original_verified {
                     let rollback = patch.rollback_exact();
-                    if rollback.is_ok() {
-                        let _ = save(&state_path, &previous);
+                    if rollback.is_ok() && save(&state_path, &previous).is_ok() {
+                        if previous
+                            .installation
+                            .as_ref()
+                            .is_none_or(|prev| prev.backup != installation.backup)
+                        {
+                            let _ = fs::remove_dir_all(&installation.backup);
+                        }
                     }
                     return Err(format!(
                         "{}；设备原件已确认；规则恢复：{}",
                         error.detail,
                         rollback.map(|_| "已确认".into()).unwrap_or_else(|e| e)
                     ));
+                }
+                if let Some(err_backup) = error.backup {
+                    let merged_ok = previous.installation.as_ref().map_or(true, |prev| {
+                        merge_previous_original_into_backup(&prev.backup, &err_backup).is_ok()
+                    });
+                    if merged_ok {
+                        installation.backup = err_backup;
+                    }
                 }
                 installation.status = InstallationStatus::RecoveryRequired;
                 saved.installation = Some(installation);
@@ -660,18 +1158,18 @@ pub async fn apply(
                 ));
             }
         };
+        if let Some(prev) = &previous.installation {
+            merge_previous_original_into_backup(&prev.backup, &receipt.backup)?;
+        }
+        installation.backup = receipt.backup.clone();
+        installation.status = InstallationStatus::RecoveryRequired;
+        saved.installation = Some(installation.clone());
+        save(&state_path, &saved)?;
         session.shutdown().await;
         drop(exclusive);
-        let (shared, candidate) = match connect(&MacTransport::new(), &target) {
-            Ok(connected) => connected,
-            Err(error) => {
-                installation.status = InstallationStatus::RecoveryRequired;
-                saved.installation = Some(installation);
-                let _ = save(&state_path, &saved);
-                return Err(format!("{error}；保留吞键规则，请恢复设备"));
-            }
-        };
-        with_verification_session(&shared, async {
+        let (shared, candidate) = connect(&MacTransport::new(), &target)
+            .map_err(|error| format!("{error}；保留吞键规则，请恢复设备"))?;
+        let verify_outcome: Result<RunningSixLayer, String> = async {
             let layer = shared
                 .verify_six_layer_files(&candidate_bytes, smart.as_deref(), receipt.profile_index)
                 .await
@@ -680,34 +1178,110 @@ pub async fn apply(
             installation.status = InstallationStatus::Applied;
             saved.installation = Some(installation.clone());
             save(&state_path, &saved)?;
+            if let Some(prev) = &previous.installation {
+                if prev.backup != installation.backup {
+                    let _ = fs::remove_dir_all(&prev.backup);
+                }
+            }
             Ok(new_running(
                 receiver,
                 readiness,
-                shared.clone(),
+                Some(shared.clone()),
                 candidate,
                 installation,
                 layer as u8,
+                SixLayerKeymapRevision::V2HybridVendorSlots,
             ))
-        })
-        .await
+        }
+        .await;
+        if verify_outcome.is_err() {
+            shared.shutdown().await;
+        }
+        verify_outcome
     })
     .await
+}
+
+pub(crate) fn merge_previous_original_into_backup(
+    previous_backup: &Path,
+    new_backup: &Path,
+) -> Result<(), String> {
+    if previous_backup == new_backup {
+        return Ok(());
+    }
+    let prev_keymap = previous_backup.join("keymap.json");
+    if !prev_keymap.exists() {
+        return Ok(());
+    }
+    let original_keymap = fs::read(&prev_keymap).map_err(|e| e.to_string())?;
+    write_private_backup_file(&new_backup.join("keymap.json"), &original_keymap)?;
+    let prev_planned_path = previous_backup.join("planned-keymap.json");
+    let prev_planned = if prev_planned_path.exists() {
+        let bytes = fs::read(&prev_planned_path).map_err(|e| e.to_string())?;
+        write_private_backup_file(&new_backup.join("previous-planned-keymap.json"), &bytes)?;
+        Some(bytes)
+    } else {
+        None
+    };
+    let prev_manifest = fs::read(previous_backup.join("manifest.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok());
+    let manifest_path = new_backup.join("manifest.json");
+    if manifest_path.exists() {
+        let raw_manifest = fs::read(&manifest_path).map_err(|e| e.to_string())?;
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&raw_manifest).map_err(|e| e.to_string())?;
+        manifest["keymap_sha256"] =
+            serde_json::Value::String(mi_bridge::lighting_arbiter::sha256_hex(&original_keymap));
+        if let Some(prev_manifest) = &prev_manifest {
+            if let Some(prev_profile) = prev_manifest.get("previous_profile_index") {
+                manifest["previous_profile_index"] = prev_profile.clone();
+            }
+            if let Some(prev_layer) = prev_manifest.get("previous_layer_index") {
+                manifest["previous_layer_index"] = prev_layer.clone();
+            }
+        }
+        if let Some(prev_planned) = &prev_planned {
+            manifest["previous_planned_keymap_sha256"] =
+                serde_json::Value::String(mi_bridge::lighting_arbiter::sha256_hex(prev_planned));
+        }
+        let updated = serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?;
+        write_private_backup_file(&manifest_path, &updated)?;
+    }
+    if let Ok(dir) = fs::File::open(new_backup) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+fn write_private_backup_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|e| e.to_string())
 }
 
 fn new_running(
     receiver: Arc<UserCommandReceiver>,
     readiness: Readiness,
-    session: Arc<DeviceSession>,
+    initial_session: Option<Arc<DeviceSession>>,
     candidate: HidCandidate,
     installation: Installation,
     layer: u8,
+    keymap_revision: SixLayerKeymapRevision,
 ) -> RunningSixLayer {
     RunningSixLayer {
         receiver,
         readiness,
-        session,
         candidate,
         installation,
+        keymap_revision,
         observed_layer: Arc::new(AtomicU8::new(layer)),
         first_event_verified: Arc::new(AtomicBool::new(false)),
         armed: false,
@@ -715,6 +1289,7 @@ fn new_running(
         receipts: None,
         foreground: Arc::new(Mutex::new(ForegroundContext::default())),
         navigation: None,
+        vendor_bridge: SharedVendorBridge::new(initial_session),
         stop: Arc::new(AtomicBool::new(false)),
         monitor: None,
         executor: None,
@@ -734,7 +1309,7 @@ pub async fn resume(
     installation.plan.validate_current()?;
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
     let (session, candidate) = connect(&MacTransport::new(), &target)?;
-    with_verification_session(&session, async {
+    let outcome: Result<RunningSixLayer, String> = async {
         let expected =
             fs::read(installation.backup.join("planned-keymap.json")).map_err(|e| e.to_string())?;
         let smart = match fs::read(installation.backup.join("smart_actions.json")) {
@@ -742,8 +1317,12 @@ pub async fn resume(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.to_string()),
         };
-        let layer = session
-            .verify_six_layer_files(&expected, smart.as_deref(), installation.profile_index)
+        let (layer, revision) = session
+            .verify_six_layer_files_revision(
+                &expected,
+                smart.as_deref(),
+                installation.profile_index,
+            )
             .await
             .map_err(|e| format!("{e}；未写设备，请显式应用或恢复"))?;
         let receiver = Arc::new(UserCommandReceiver::bind().map_err(|e| e.to_string())?);
@@ -765,19 +1344,29 @@ pub async fn resume(
         // The board is already direct-coded. A failed reload must leave swallowing
         // rules in place, including when the previous rule had been removed.
         let readiness = wait_ready(&baseline, &patch, &target)?;
+        let retained_session = if revision == SixLayerKeymapRevision::V1StandardKeys {
+            session.shutdown().await;
+            None
+        } else {
+            Some(session.clone())
+        };
         Ok(new_running(
             receiver,
             readiness,
-            session.clone(),
+            retained_session,
             candidate,
             installation,
             layer as u8,
+            revision,
         ))
-    })
-    .await
+    }
+    .await;
+    if outcome.is_err() {
+        session.shutdown().await;
+    }
+    outcome
 }
 
-// The vendor reader is an establishment resource, never an input-liveness lease.
 async fn with_verification_session<T>(
     session: &DeviceSession,
     operation: impl std::future::Future<Output = Result<T, String>>,
@@ -1395,5 +1984,192 @@ mod tests {
         )
         .unwrap();
         assert!(load(&path).is_err());
+    }
+
+    #[test]
+    fn cross_layer_physical_switch_release_clears_pressed_mask_and_codex_layer_never_emits_host_activation(
+    ) {
+        use mi_proto::Framer;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (link, _) = mi_transport::MockLink::new();
+        let session = {
+            let _entered = runtime.enter();
+            DeviceSession::new(
+                link.clone(),
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig::default(),
+            )
+        };
+        let mut running = RunningSixLayer::isolated(session.clone(), dir.path());
+        running.receiver.arm().unwrap();
+        running.attach_test_vendor_session(&runtime, session);
+
+        let framer = mi_proto::NativeFramer::default();
+        for packet in [
+            r#"{"m":"v.oai.hid","p":{"k":"AG06","act":1}}"#,
+            r#"{"m":"v.oai.hid","p":{"k":"AG12","act":0}}"#,
+            r#"{"m":"v.oai.hid","p":{"k":"AG06","act":1}}"#,
+            r#"{"m":"v.oai.hid","p":{"k":"AG00","act":0}}"#,
+            r#"{"m":"v.oai.hid","p":{"k":"AG00","act":1}}"#,
+            r#"{"m":"v.oai.hid","p":{"k":"AG00","act":0}}"#,
+            r#"{"m":"v.oai.hid","p":{"k":"AG06","act":1}}"#,
+            r#"{"m":"v.oai.hid","p":{"k":"AG06","act":0}}"#,
+        ] {
+            let mut line = packet.to_string();
+            line.push('\n');
+            for frame in framer.encode(line.as_bytes()).unwrap() {
+                link.inject.send(frame).unwrap();
+            }
+        }
+
+        let mut controls = Vec::new();
+        let start = Instant::now();
+        while controls.len() < 3 && start.elapsed() < Duration::from_secs(2) {
+            if let Some(ev) = running.receiver.next().unwrap() {
+                controls.push(ev.control);
+            } else {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+        while let Some(ev) = running.receiver.next().unwrap() {
+            controls.push(ev.control);
+        }
+        assert_eq!(controls, vec![0, 0, 0]);
+        running.shutdown(&runtime).unwrap();
+    }
+
+    #[test]
+    fn shared_vendor_bridge_rotates_after_shutting_down_seized_session_without_sleep_and_retire_takes_session(
+    ) {
+        use mi_proto::Framer;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let make_rpc_session = |rt: &tokio::runtime::Runtime| {
+            let (link, mut writes) = mi_transport::MockLink::new();
+            let inject = link.inject.clone();
+            let session = {
+                let _entered = rt.enter();
+                DeviceSession::new(
+                    link.clone(),
+                    Box::new(mi_proto::NativeFramer::default()),
+                    Arc::new(mi_session::ReadOnlySchema),
+                    mi_session::SessionConfig {
+                        timeout: Duration::from_secs(2),
+                        interval: Duration::ZERO,
+                    },
+                )
+            };
+            rt.spawn(async move {
+                let mut in_framer = mi_proto::NativeFramer::default();
+                let out_framer = mi_proto::NativeFramer::default();
+                while let Some(report) = writes.recv().await {
+                    let Ok(messages) = in_framer.feed(&report) else {
+                        break;
+                    };
+                    for msg in messages {
+                        let Ok(req) = serde_json::from_slice::<serde_json::Value>(&msg) else {
+                            continue;
+                        };
+                        let result_val = if req["method"].as_str() == Some("v.oai.thstatus") {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::json!({"version": "0.6.3", "profile_index": 1, "layer_index": 1})
+                        };
+                        let reply = serde_json::json!({
+                            "id": req["id"],
+                            "result": result_val
+                        });
+                        let mut wire = reply.to_string();
+                        wire.push('\n');
+                        for frame in out_framer.encode(wire.as_bytes()).unwrap() {
+                            let _ = inject.send(frame);
+                        }
+                    }
+                }
+            });
+            (link, session)
+        };
+
+        let (link1, session1) = make_rpc_session(&runtime);
+        runtime.block_on(async {
+            for _ in 0..900 {
+                session1
+                    .request(mi_proto::Method::DeviceStatus, serde_json::Value::Null)
+                    .await
+                    .unwrap();
+            }
+        });
+        assert_eq!(session1.request_count(), 900);
+
+        let (link2, session2) = make_rpc_session(&runtime);
+        let receiver = Arc::new(UserCommandReceiver::bind().unwrap());
+        receiver.arm().unwrap();
+
+        let framer = mi_proto::NativeFramer::default();
+        let mut press_line = r#"{"m":"v.oai.hid","p":{"k":"AG06","act":1}}"#.to_string();
+        press_line.push('\n');
+
+        let mut bridge = SharedVendorBridge::new(Some(session1.clone()));
+
+        let old_for_check = session1.clone();
+        let reopen_session = session2.clone();
+        let reopened_flag = Arc::new(AtomicBool::new(false));
+        let reopened_flag_inner = Arc::clone(&reopened_flag);
+        let rotation_started = Instant::now();
+
+        bridge.spawn_with_reopen(
+            &runtime,
+            Some(session1.clone()),
+            Arc::clone(&receiver),
+            true,
+            move || {
+                assert!(old_for_check.is_disconnected());
+                reopened_flag_inner.store(true, Ordering::Release);
+                let next = reopen_session.clone();
+                async move { Some(next) }
+            },
+        );
+
+        while !reopened_flag.load(Ordering::Acquire)
+            && rotation_started.elapsed() < Duration::from_secs(2)
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(reopened_flag.load(Ordering::Acquire));
+        assert!(rotation_started.elapsed() < Duration::from_millis(500));
+        assert!(session1.is_disconnected());
+        let _ = link1;
+
+        for frame in framer.encode(press_line.as_bytes()).unwrap() {
+            link2.inject.send(frame).unwrap();
+        }
+        let wait_press = Instant::now();
+        let mut observed = Vec::new();
+        while observed.is_empty() && wait_press.elapsed() < Duration::from_secs(1) {
+            while let Some(ev) = receiver.next().unwrap() {
+                observed.push(ev.control);
+            }
+            if observed.is_empty() {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert!(!observed.is_empty());
+
+        let entries = vec![OaiKeyStatusEntry::new("AG06", 0x22c55e)];
+        let _ = bridge.led_tx.send(Some(("digest-backoff".into(), entries)));
+        let wait_backoff = Instant::now();
+        while bridge.retry_not_before.lock().unwrap().is_none()
+            && wait_backoff.elapsed() < Duration::from_secs(1)
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(bridge.retry_not_before.lock().unwrap().is_some());
+        assert!(!bridge.needs_lighting_sync());
+
+        bridge.retire();
+        assert!(bridge.active_session.lock().unwrap().is_none());
+        bridge.shutdown(&runtime);
     }
 }

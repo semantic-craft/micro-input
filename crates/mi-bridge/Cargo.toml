@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 libc = "0.2"
 mi-model = { path = "../mi-model" }
+mi-proto = { path = "../mi-proto" }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "=0.10.9"

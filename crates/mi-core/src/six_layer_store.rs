@@ -126,6 +126,7 @@ impl WorkbenchStore {
             }
             match result {
                 Ok(Some(mut running)) => {
+                    let revision = running.keymap_revision;
                     running.foreground_changed(self.foreground_bundle_id.as_deref());
                     self.device_session = None;
                     self.connected_candidate = Some(running.candidate.clone());
@@ -139,8 +140,19 @@ impl WorkbenchStore {
                     running.navigation = Some(self.session_navigation.dispatch.clone());
                     running.start_executor(Arc::clone(&self.live_executor));
                     running.start_monitor();
+                    if running.supports_per_key_led() {
+                        running.start_vendor_bridge(&self.tokio_runtime);
+                    }
                     self.six_layer_running = Some(running);
-                    self.status_message = "六层配置已读回，等待首次实体输入验证".into();
+                    self.status_message = if revision
+                        == mi_model::apply::SixLayerKeymapRevision::V1StandardKeys
+                    {
+                        "六层旧版布局已连接；点击「应用到键盘」升级后即可启用逐键会话状态灯".into()
+                    } else {
+                        "六层配置已读回，等待首次实体输入验证".into()
+                    };
+                    self.lighting_arbiter.invalidate_hardware_cache();
+                    self.refresh_four_app_lighting();
                     self.start_mac_usb_discovery_watcher();
                 }
                 Ok(None) => {
@@ -153,6 +165,31 @@ impl WorkbenchStore {
         }
         if self.six_layer_running.is_none() {
             return;
+        }
+        let mut lighting_changed = false;
+        let need_lighting_resync = {
+            let running = self.six_layer_running.as_ref().unwrap();
+            if running.supports_per_key_led() {
+                let confirmed = running.confirmed_lighting_digest();
+                lighting_changed = self
+                    .lighting_arbiter
+                    .reconcile_six_layer_confirmed(confirmed.as_deref());
+                running.vendor_bridge_needs_lighting_sync()
+            } else {
+                false
+            }
+        };
+        if need_lighting_resync {
+            let prev_synced = self.lighting_arbiter.hardware_synced;
+            let prev_writes = self.lighting_arbiter.hardware_write_count;
+            let prev_feedback = self.lighting_arbiter.full_keypad_feedback.clone();
+            self.refresh_four_app_lighting();
+            if self.lighting_arbiter.hardware_synced != prev_synced
+                || self.lighting_arbiter.hardware_write_count != prev_writes
+                || self.lighting_arbiter.full_keypad_feedback != prev_feedback
+            {
+                lighting_changed = true;
+            }
         }
         let running = self.six_layer_running.as_ref().unwrap();
         running.set_execution_policy(
@@ -182,7 +219,8 @@ impl WorkbenchStore {
         let first = running.first_event_verified.load(Ordering::Acquire);
         let failure = running.receiver.failure();
         let needs_cleanup = failure.is_some() && !running.is_retired();
-        let changed = self.projection.sidebar.board_layers.observed_layer != Some(observed)
+        let changed = lighting_changed
+            || self.projection.sidebar.board_layers.observed_layer != Some(observed)
             || self.projection.sidebar.board_layers.first_event_verified != first
             || failure
                 .as_ref()
@@ -474,5 +512,773 @@ mod tests {
         invalid["unrecognized"] = serde_json::json!(true);
         fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
         assert!(six_layer_runtime::load(&path).is_err());
+    }
+
+    struct MacMockLink {
+        inner: Arc<mi_transport::MockLink>,
+        exclusive: bool,
+    }
+
+    impl mi_transport::HidLink for MacMockLink {
+        fn backend(&self) -> mi_transport::LinkBackend {
+            mi_transport::LinkBackend::MacHidapi267Numbered
+        }
+        fn is_exclusive_vendor(&self) -> bool {
+            self.exclusive
+        }
+        fn write<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            report: &'life1 [u8],
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), mi_transport::TransportError>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.write(report)
+        }
+        fn read<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Vec<u8>, mi_transport::TransportError>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.read()
+        }
+        fn close(&self) {
+            self.inner.close()
+        }
+    }
+
+    fn spawn_thstatus_mock_session_with_fault(
+        runtime: &tokio::runtime::Runtime,
+        fail_next_rpc: Arc<AtomicBool>,
+    ) -> (
+        Arc<mi_transport::MockLink>,
+        Arc<DeviceSession>,
+        std::sync::mpsc::Receiver<serde_json::Value>,
+    ) {
+        let (link, mut writes) = mi_transport::MockLink::new();
+        let inject = link.inject.clone();
+        let (rpc_tx, rpc_rx) = std::sync::mpsc::channel();
+        let session = {
+            let _entered = runtime.enter();
+            DeviceSession::new(
+                Arc::new(MacMockLink {
+                    inner: link.clone(),
+                    exclusive: false,
+                }),
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig {
+                    timeout: Duration::from_secs(2),
+                    interval: Duration::ZERO,
+                },
+            )
+        };
+        runtime.spawn(async move {
+            use mi_proto::Framer;
+            let mut in_framer = mi_proto::NativeFramer::default();
+            let out_framer = mi_proto::NativeFramer::default();
+            while let Some(report) = writes.recv().await {
+                let Ok(messages) = in_framer.feed(&report) else {
+                    break;
+                };
+                for msg in messages {
+                    let Ok(req) = serde_json::from_slice::<serde_json::Value>(&msg) else {
+                        continue;
+                    };
+                    let _ = rpc_tx.send(req.clone());
+                    let reply = if fail_next_rpc.swap(false, Ordering::AcqRel) {
+                        serde_json::json!({
+                            "id": req["id"],
+                            "error": {"code": -32000, "message": "busy"}
+                        })
+                    } else {
+                        serde_json::json!({
+                            "id": req["id"],
+                            "result": {}
+                        })
+                    };
+                    let mut wire = reply.to_string();
+                    wire.push('\n');
+                    for frame in out_framer.encode(wire.as_bytes()).unwrap() {
+                        let _ = inject.send(frame);
+                    }
+                }
+            }
+        });
+        (link, session, rpc_rx)
+    }
+
+    fn spawn_thstatus_mock_session(
+        runtime: &tokio::runtime::Runtime,
+    ) -> (
+        Arc<mi_transport::MockLink>,
+        Arc<DeviceSession>,
+        std::sync::mpsc::Receiver<serde_json::Value>,
+    ) {
+        spawn_thstatus_mock_session_with_fault(runtime, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn wait_lighting_synced(store: &mut WorkbenchStore, expected: bool) {
+        let wait = Instant::now();
+        while store.lighting_arbiter.hardware_synced != expected
+            && wait.elapsed() < Duration::from_secs(4)
+        {
+            store.poll_six_layer_runtime();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(store.lighting_arbiter.hardware_synced, expected);
+    }
+
+    #[test]
+    fn six_layer_v2_green_and_blue_per_key_sync_without_preview_or_rgbcfg_and_extinguishes_on_disable(
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let (_link, session, rpc_rx) = spawn_thstatus_mock_session(&store.tokio_runtime);
+        let mut running =
+            six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        running.readiness.configuration_observed = true;
+        running.readiness.keyboard_grabbed = true;
+        running.attach_test_vendor_session(&store.tokio_runtime, session);
+        store.connected_candidate = Some(running.candidate.clone());
+        store.six_layer_state.installation = Some(running.installation.clone());
+        store.six_layer_running = Some(running);
+
+        store.ingest_four_app_candidates(vec![
+            FourAppLiveCandidate {
+                place: mi_model::navigation_history::NavigationPlace::antigravity(
+                    "conv-running",
+                    "/ws/run",
+                ),
+                title: "Running Task".into(),
+                phase: FourAppSessionKind::Working,
+                watermark: "wm-run".into(),
+                last_modified_ms: 9_000,
+                last_user_view_ms: 9_000,
+                updated_at_ms: 9_000,
+            },
+            FourAppLiveCandidate {
+                place: mi_model::navigation_history::NavigationPlace::antigravity(
+                    "conv-completed",
+                    "/ws/done",
+                ),
+                title: "Completed Task".into(),
+                phase: FourAppSessionKind::BlueDotCompleted,
+                watermark: "wm-done".into(),
+                last_modified_ms: 8_000,
+                last_user_view_ms: 1_000,
+                updated_at_ms: 8_000,
+            },
+        ]);
+
+        let first_rpc = rpc_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(first_rpc["method"], "v.oai.thstatus");
+        wait_lighting_synced(&mut store, true);
+        let keys = first_rpc["params"].as_array().unwrap();
+        let key_names: Vec<&str> = keys.iter().map(|k| k["k"].as_str().unwrap()).collect();
+        assert_eq!(
+            key_names,
+            vec![
+                "AG06", "AG07", "AG08", "AG09", "AG10", "AG11", "AG12", "AG13", "AG14", "AG15",
+                "AG16", "AG17"
+            ]
+        );
+        assert!(key_names
+            .iter()
+            .all(|k| !matches!(*k, "AG00" | "AG01" | "AG02" | "AG03" | "AG04" | "AG05")));
+        assert_eq!(keys[0]["c"], 0x00FF66);
+        assert_eq!(keys[6]["c"], 0x00FF66);
+        assert_eq!(keys[1]["c"], 0x0088FF);
+        assert_eq!(keys[7]["c"], 0x0088FF);
+        for empty_idx in [2, 3, 4, 5, 8, 9, 10, 11] {
+            assert_eq!(keys[empty_idx]["c"], 0);
+            assert_eq!(keys[empty_idx]["b"], 0.0);
+        }
+
+        store
+            .dispatch_session_strip_action(SessionStripAction::TriggerTestLighting(Some(
+                FourAppAgentPhase::Error,
+            )))
+            .unwrap();
+        let preview_rpc = rpc_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(preview_rpc["method"], "v.oai.thstatus");
+        wait_lighting_synced(&mut store, true);
+        assert!(preview_rpc["params"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["c"] == 0xFF2200));
+
+        store
+            .dispatch_session_strip_action(SessionStripAction::SetLightingEnabled(false))
+            .unwrap();
+        let extinguish_rpc = rpc_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(extinguish_rpc["method"], "v.oai.thstatus");
+        assert!(!store.lighting_arbiter.hardware_synced);
+        let off_keys = extinguish_rpc["params"].as_array().unwrap();
+        assert_eq!(off_keys.len(), 12);
+        assert!(off_keys
+            .iter()
+            .all(|entry| entry["c"] == 0 && entry["b"] == 0.0 && entry["e"] == 0));
+        assert!(rpc_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        store
+            .six_layer_running
+            .take()
+            .unwrap()
+            .shutdown(&store.tokio_runtime)
+            .unwrap();
+    }
+
+    #[test]
+    fn six_layer_v2_vendor_hid_slot_press_routes_through_executor_and_preserves_r21_on_vendor_disconnect(
+    ) {
+        use mi_proto::Framer;
+        let directory = tempfile::tempdir().unwrap();
+        let store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let (link, session, _rpc_rx) = spawn_thstatus_mock_session(&store.tokio_runtime);
+        let mut running =
+            six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        running.installation.plan = store.compiled_six_layer_plan().unwrap();
+        running.readiness.configuration_observed = true;
+        running.readiness.keyboard_grabbed = true;
+        running.receiver.arm().unwrap();
+        running.armed = true;
+        running.set_execution_policy(true, true, Instant::now() - Duration::from_secs(1));
+        running.navigation = Some(store.session_navigation.dispatch.clone());
+        running.start_executor(Arc::clone(&store.live_executor));
+        running.attach_test_vendor_session(&store.tokio_runtime, session.clone());
+
+        let framer = mi_proto::NativeFramer::default();
+        for packet in [
+            r#"{"m":"v.oai.hid","p":{"k":"AG06","act":1}}"#,
+            r#"{"m":"v.oai.hid","p":{"k":"AG06","act":1}}"#,
+            r#"{"m":"v.oai.hid","p":{"k":"AG06","act":0}}"#,
+        ] {
+            let mut line = packet.to_string();
+            line.push('\n');
+            for frame in framer.encode(line.as_bytes()).unwrap() {
+                link.inject.send(frame).unwrap();
+            }
+        }
+
+        let start = Instant::now();
+        while !running.first_event_verified.load(Ordering::Acquire)
+            && start.elapsed() < Duration::from_secs(2)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(running.first_event_verified.load(Ordering::Acquire));
+        assert_eq!(running.observed_layer.load(Ordering::Acquire), 2);
+        assert!(running.receiver.failure().is_none());
+
+        store.tokio_runtime.block_on(session.shutdown());
+        let disconnect_wait = Instant::now();
+        while running.vendor_bridge_connected()
+            && disconnect_wait.elapsed() < Duration::from_secs(2)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!running.vendor_bridge_connected());
+        assert!(running.receiver.failure().is_none());
+
+        running.shutdown(&store.tokio_runtime).unwrap();
+    }
+
+    #[test]
+    fn six_layer_v1_and_disconnected_report_truthful_unsynced_lighting_and_sync_on_v2_attach() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let v1_session = mock_session(&store.tokio_runtime);
+        store.tokio_runtime.block_on(v1_session.shutdown());
+        let mut running =
+            six_layer_runtime::RunningSixLayer::isolated(v1_session, directory.path());
+        running.keymap_revision = mi_model::apply::SixLayerKeymapRevision::V1StandardKeys;
+        running.readiness.configuration_observed = true;
+        running.readiness.keyboard_grabbed = true;
+        store.connected_candidate = Some(running.candidate.clone());
+        store.six_layer_state.installation = Some(running.installation.clone());
+        store.six_layer_running = Some(running);
+
+        store.ingest_four_app_candidates(vec![FourAppLiveCandidate {
+            place: mi_model::navigation_history::NavigationPlace::antigravity(
+                "conv-run", "/ws/run",
+            ),
+            title: "Running Task".into(),
+            phase: FourAppSessionKind::Working,
+            watermark: "wm-1".into(),
+            last_modified_ms: 5_000,
+            last_user_view_ms: 5_000,
+            updated_at_ms: 5_000,
+        }]);
+        assert!(!store.lighting_arbiter.hardware_synced);
+        assert!(store
+            .projection
+            .sidebar
+            .board_layers
+            .observed_status
+            .contains("旧版按键布局（点击「应用到键盘」升级后启用逐键状态灯）"));
+
+        store.six_layer_running.as_mut().unwrap().keymap_revision =
+            mi_model::apply::SixLayerKeymapRevision::V2HybridVendorSlots;
+        store.refresh_four_app_lighting();
+        assert!(!store.lighting_arbiter.hardware_synced);
+
+        let fail_first = Arc::new(AtomicBool::new(true));
+        let (_link, v2_session, rpc_rx) =
+            spawn_thstatus_mock_session_with_fault(&store.tokio_runtime, Arc::clone(&fail_first));
+        store
+            .six_layer_running
+            .as_mut()
+            .unwrap()
+            .attach_test_vendor_session(&store.tokio_runtime, v2_session.clone());
+        let failed_rpc = rpc_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(failed_rpc["method"], "v.oai.thstatus");
+        assert!(!store.lighting_arbiter.hardware_synced);
+        store.poll_six_layer_runtime();
+        let gen_after_failure = store.projection_generation();
+        for _ in 0..5 {
+            store.poll_six_layer_runtime();
+            assert!(rpc_rx.recv_timeout(Duration::from_millis(30)).is_err());
+        }
+        assert_eq!(store.projection_generation(), gen_after_failure);
+
+        wait_lighting_synced(&mut store, true);
+        let synced_rpc = rpc_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(synced_rpc["method"], "v.oai.thstatus");
+        assert_eq!(synced_rpc["params"][0]["c"], 0x00FF66);
+        assert_eq!(synced_rpc["params"][6]["c"], 0x00FF66);
+
+        store.tokio_runtime.block_on(v2_session.shutdown());
+        wait_lighting_synced(&mut store, false);
+        store
+            .dispatch_session_strip_action(SessionStripAction::SetLightingEnabled(false))
+            .unwrap();
+        let (_link2, v2_reconnected, rpc_rx2) = spawn_thstatus_mock_session(&store.tokio_runtime);
+        store
+            .six_layer_running
+            .as_mut()
+            .unwrap()
+            .attach_test_vendor_session(&store.tokio_runtime, v2_reconnected);
+        let reconnect_rpc = rpc_rx2.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(reconnect_rpc["method"], "v.oai.thstatus");
+        assert!(reconnect_rpc["params"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["c"] == 0 && entry["b"] == 0.0));
+
+        store
+            .six_layer_running
+            .take()
+            .unwrap()
+            .shutdown(&store.tokio_runtime)
+            .unwrap();
+    }
+
+    #[test]
+    fn selecting_codex_in_draft_sidebar_keeps_editor_locked_without_suspending_live_six_layer_lighting(
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let (_link, session, rpc_rx) = spawn_thstatus_mock_session(&store.tokio_runtime);
+        let mut running =
+            six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        running.installation.plan = store.compiled_six_layer_plan().unwrap();
+        running.readiness.configuration_observed = true;
+        running.readiness.keyboard_grabbed = true;
+        running.attach_test_vendor_session(&store.tokio_runtime, session);
+        store.connected_candidate = Some(running.candidate.clone());
+        store.six_layer_state.installation = Some(running.installation.clone());
+        store.six_layer_running = Some(running);
+
+        store.ingest_four_app_candidates(vec![
+            FourAppLiveCandidate {
+                place: mi_model::navigation_history::NavigationPlace::antigravity(
+                    "conv-green",
+                    "/ws/green",
+                ),
+                title: "Running Green".into(),
+                phase: FourAppSessionKind::Working,
+                watermark: "wm-green".into(),
+                last_modified_ms: 9_000,
+                last_user_view_ms: 9_000,
+                updated_at_ms: 9_000,
+            },
+            FourAppLiveCandidate {
+                place: mi_model::navigation_history::NavigationPlace::antigravity(
+                    "conv-blue",
+                    "/ws/blue",
+                ),
+                title: "Completed Blue".into(),
+                phase: FourAppSessionKind::BlueDotCompleted,
+                watermark: "wm-blue".into(),
+                last_modified_ms: 8_000,
+                last_user_view_ms: 1_000,
+                updated_at_ms: 8_000,
+            },
+        ]);
+        let initial_rpc = rpc_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(initial_rpc["method"], "v.oai.thstatus");
+        wait_lighting_synced(&mut store, true);
+
+        let codex_pid = store
+            .find_canonical_profile_id(CanonicalAgent::Codex)
+            .unwrap();
+        store
+            .dispatch_sidebar_action(SidebarAction::SelectProfile(codex_pid))
+            .unwrap();
+
+        assert!(store.is_selected_layer_protected());
+        assert!(!store.is_active_lighting_protected());
+        assert!(store.projection().canvas.protected_lock.is_some());
+        assert!(!store.projection().session_strip.can_mutate_layout);
+        assert!(
+            !store
+                .projection()
+                .session_strip
+                .lighting_popover
+                .suspended_by_protected_layer
+        );
+        assert!(store.lighting_arbiter.hardware_synced);
+        assert_eq!(
+            store.projection().session_strip.slots[0].led_color_hex,
+            "#00FF66"
+        );
+        assert_eq!(
+            store.projection().session_strip.slots[1].led_color_hex,
+            "#0088FF"
+        );
+        assert_eq!(
+            store.projection().session_strip.working_pills[0].color_hex,
+            "#00FF66"
+        );
+        assert_eq!(
+            store.projection().session_strip.completed_blue_dot_pills[0].color_hex,
+            "#0088FF"
+        );
+
+        store
+            .six_layer_running
+            .take()
+            .unwrap()
+            .shutdown(&store.tokio_runtime)
+            .unwrap();
+    }
+
+    fn test_b64_encode(bytes: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let b0 = chunk[0];
+            let b1 = *chunk.get(1).unwrap_or(&0);
+            let b2 = *chunk.get(2).unwrap_or(&0);
+            out.push(TABLE[(b0 >> 2) as usize] as char);
+            out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+            out.push(if chunk.len() > 1 {
+                TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                TABLE[(b2 & 0x3f) as usize] as char
+            } else {
+                '='
+            });
+        }
+        out
+    }
+
+    fn test_b64_decode(raw: &str) -> Vec<u8> {
+        let val = |c: u8| -> Option<u8> {
+            match c {
+                b'A'..=b'Z' => Some(c - b'A'),
+                b'a'..=b'z' => Some(c - b'a' + 26),
+                b'0'..=b'9' => Some(c - b'0' + 52),
+                b'+' => Some(62),
+                b'/' => Some(63),
+                _ => None,
+            }
+        };
+        let clean: Vec<u8> = raw.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+        let mut out = Vec::new();
+        for chunk in clean.chunks(4) {
+            let a = val(chunk[0]).unwrap();
+            let b = val(chunk[1]).unwrap();
+            out.push((a << 2) | (b >> 4));
+            if chunk.get(2).copied() != Some(b'=') {
+                if let Some(c) = chunk.get(2).copied().and_then(val) {
+                    out.push((b << 4) | (c >> 2));
+                    if chunk.get(3).copied() != Some(b'=') {
+                        if let Some(d) = chunk.get(3).copied().and_then(val) {
+                            out.push((c << 6) | d);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn six_layer_v1_to_v2_reapply_preserves_original_backup_chain_for_exact_restore() {
+        const SIX_SOURCE: &[u8] =
+            include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+        const SMART: &[u8] =
+            include_bytes!("../../mi-model/fixtures/device/synthetic-smart-actions-object.json");
+        const STALE_V1_SMART: &[u8] = br#"{"smart_actions":[]}"#;
+
+        let v2_template =
+            mi_model::apply::compile_six_layer_profile(SIX_SOURCE, Some(SMART)).unwrap();
+        let mut v1_value: serde_json::Value = serde_json::from_slice(&v2_template.keymap).unwrap();
+        for layer_idx in 1..6 {
+            let tokens: Vec<&str> = if (1..=2).contains(&layer_idx) {
+                mi_model::direct_controls::DIRECT_CONTROLS[(layer_idx - 1) * 20..layer_idx * 20]
+                    .iter()
+                    .map(|c| c.token)
+                    .collect()
+            } else {
+                vec!["KC_NONE"; 20]
+            };
+            let rows = serde_json::json!([
+                &tokens[0..2],
+                &tokens[2..6],
+                &tokens[6..10],
+                &tokens[10..13]
+            ]);
+            let layer_obj = v1_value["profiles"][1]["layers"][layer_idx]
+                .as_object_mut()
+                .unwrap();
+            layer_obj.remove("lights");
+            layer_obj["layout"]["base"] = rows.clone();
+            layer_obj["layout"]["keymap"] = rows;
+            layer_obj["layout"]["encoders"] = serde_json::json!([&tokens[13..16]]);
+            for slot in 0..4 {
+                layer_obj["layout"]["joystick"]["sectors"][slot]["k"] =
+                    serde_json::json!(tokens[16 + slot]);
+            }
+        }
+        let raw_doc: std::collections::BTreeMap<&str, &serde_json::value::RawValue> =
+            serde_json::from_slice(SIX_SOURCE).unwrap();
+        let raw_profiles: Vec<std::collections::BTreeMap<&str, &serde_json::value::RawValue>> =
+            serde_json::from_str(raw_doc["profiles"].get()).unwrap();
+        let raw_layers: Vec<&serde_json::value::RawValue> =
+            serde_json::from_str(raw_profiles[0]["layers"].get()).unwrap();
+        let raw_layer0 = raw_layers[0].get();
+        let v1_managed_strings: Vec<String> = (1..6)
+            .map(|i| serde_json::to_string(&v1_value["profiles"][1]["layers"][i]).unwrap())
+            .collect();
+        let v1_profile = format!(
+            "{{\"id\":1,\"name\":\"{}\",\"layers\":[{},{}]}}",
+            mi_model::apply::SIX_LAYER_PROFILE_NAME,
+            raw_layer0,
+            v1_managed_strings.join(",")
+        );
+        let v1_bytes = std::str::from_utf8(SIX_SOURCE)
+            .unwrap()
+            .replacen("\"activeProfileId\": 0", "\"activeProfileId\": 1", 1)
+            .replacen(
+                "  }] }],\n  \"macros\"",
+                &format!("  }}] }},{v1_profile}],\n  \"macros\""),
+                1,
+            )
+            .into_bytes();
+
+        let dir = tempfile::tempdir().unwrap();
+        let v1_backup = dir.path().join("six-layer-backup-v1");
+        fs::create_dir_all(&v1_backup).unwrap();
+        fs::write(v1_backup.join("keymap.json"), SIX_SOURCE).unwrap();
+        fs::write(v1_backup.join("planned-keymap.json"), &v1_bytes).unwrap();
+        fs::write(v1_backup.join("smart_actions.json"), STALE_V1_SMART).unwrap();
+        fs::write(
+            v1_backup.join("manifest.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "format": "micro-input-three-layer-recovery-v1",
+                "previous_profile_index": 0,
+                "previous_layer_index": 1,
+                "planned_profile_index": 1,
+                "keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(SIX_SOURCE),
+                "planned_keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(&v1_bytes),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            use mi_proto::Framer;
+            let (link, mut requests) = mi_transport::MockLink::new();
+            let inject = link.inject.clone();
+            let session = DeviceSession::new(
+                Arc::new(MacMockLink {
+                    inner: link,
+                    exclusive: true,
+                }),
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig {
+                    timeout: Duration::from_secs(2),
+                    interval: Duration::ZERO,
+                },
+            );
+            let initial_v1 = v1_bytes.clone();
+            let worker = tokio::spawn(async move {
+                let mut incoming = mi_proto::NativeFramer::default();
+                let outbound = mi_proto::NativeFramer::default();
+                let mut active = 1u64;
+                let mut keymap = initial_v1;
+                let mut staged = Vec::new();
+                while let Some(frame) = requests.recv().await {
+                    for bytes in incoming.feed(&frame).unwrap() {
+                        let req: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        let params = &req["params"];
+                        let meta = |name: &str, data: &[u8]| {
+                            let sha1 = mi_model::operation_record::file_value(data)["sha1"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned();
+                            serde_json::json!({"name": name, "size": data.len(), "checksum": sha1})
+                        };
+                        let result = match req["method"].as_str().unwrap() {
+                            "device.status" => serde_json::json!({
+                                "version": "0.6.3",
+                                "profile_index": active,
+                                "layer_index": 2
+                            }),
+                            "fs.list" => serde_json::json!([
+                                meta("keymap.json", &keymap),
+                                meta("smart_actions.json", SMART)
+                            ]),
+                            "fs.readbin" => {
+                                let file_bytes = match params["file"].as_str().unwrap() {
+                                    "keymap.json" => keymap.as_slice(),
+                                    "smart_actions.json" => SMART,
+                                    other => panic!("unexpected file {other}"),
+                                };
+                                let offset = params["offset"].as_u64().unwrap() as usize;
+                                let len = params["len"].as_u64().unwrap() as usize;
+                                let end = (offset + len).min(file_bytes.len());
+                                serde_json::json!({
+                                    "total_size": file_bytes.len(),
+                                    "data": test_b64_encode(&file_bytes[offset..end])
+                                })
+                            }
+                            "fs.txbegin" => serde_json::json!({"tx": 77}),
+                            "fs.writebin" => {
+                                staged.extend(test_b64_decode(params["data"].as_str().unwrap()));
+                                serde_json::Value::Null
+                            }
+                            "fs.txcommit" => {
+                                keymap = std::mem::take(&mut staged);
+                                let parsed: serde_json::Value =
+                                    serde_json::from_slice(&keymap).unwrap();
+                                active = parsed["activeProfileId"].as_u64().unwrap();
+                                serde_json::Value::Null
+                            }
+                            other => panic!("unexpected method {other}"),
+                        };
+                        let reply = serde_json::json!({"id": req["id"], "result": result});
+                        let mut wire = reply.to_string();
+                        wire.push('\n');
+                        for out in outbound.encode(wire.as_bytes()).unwrap() {
+                            let _ = inject.send(out);
+                        }
+                    }
+                }
+                keymap
+            });
+
+            let prepared = session.prepare_six_layer_write(dir.path()).await.unwrap();
+            six_layer_runtime::merge_previous_original_into_backup(&v1_backup, &prepared.backup)
+                .unwrap();
+            let v2_candidate = prepared.candidate.clone();
+            let receipt = session.apply_six_layer_write(prepared).await.unwrap();
+            fs::remove_dir_all(&v1_backup).unwrap();
+
+            assert_eq!(
+                fs::read(receipt.backup.join("keymap.json")).unwrap(),
+                SIX_SOURCE
+            );
+            assert_eq!(
+                fs::read(receipt.backup.join("previous-planned-keymap.json")).unwrap(),
+                v1_bytes
+            );
+            assert_eq!(
+                fs::read(receipt.backup.join("smart_actions.json")).unwrap(),
+                SMART
+            );
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(receipt.backup.join("manifest.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                manifest["keymap_sha256"].as_str(),
+                Some(mi_bridge::lighting_arbiter::sha256_hex(SIX_SOURCE).as_str())
+            );
+            assert_eq!(manifest["previous_profile_index"].as_u64(), Some(0));
+            assert_eq!(manifest["previous_layer_index"].as_u64(), Some(1));
+            assert_eq!(
+                fs::read(receipt.backup.join("planned-keymap.json")).unwrap(),
+                v2_candidate
+            );
+            assert_eq!(
+                session
+                    .verify_six_layer_files(&v2_candidate, Some(SMART), 1)
+                    .await
+                    .unwrap(),
+                2
+            );
+
+            session
+                .restore_six_layer_backup(&receipt.backup)
+                .await
+                .unwrap();
+            session.shutdown().await;
+            drop(session);
+
+            let restored = worker.await.unwrap();
+            assert_eq!(restored, SIX_SOURCE);
+        });
+
+        let proj_dir = tempfile::tempdir().unwrap();
+        let mut config = WorkbenchStoreConfig::isolated(proj_dir.path());
+        config.isolated = false;
+        config.auto_connect_usb = false;
+        let mut store = WorkbenchStore::open(config).unwrap();
+        let dummy_session = mock_session(&store.tokio_runtime);
+        let mut dummy_running =
+            six_layer_runtime::RunningSixLayer::isolated(dummy_session.clone(), proj_dir.path());
+        store.tokio_runtime.block_on(dummy_session.shutdown());
+        dummy_running.installation.plan = store.compiled_six_layer_plan().unwrap();
+        dummy_running.installation.status = InstallationStatus::RecoveryRequired;
+        store.six_layer_state.installation = Some(dummy_running.installation.clone());
+        drop(dummy_running);
+        store.commit_runtime_update();
+        assert!(!store.projection.sidebar.board_layers.can_apply);
+        assert_eq!(
+            store
+                .projection
+                .sidebar
+                .board_layers
+                .apply_block_reason
+                .as_str(),
+            "六层恢复记录尚未处理，请先恢复原设备配置"
+        );
     }
 }

@@ -170,6 +170,7 @@ pub struct DeviceSession {
     snapshot: Arc<Mutex<Option<Snapshot>>>,
     notifications: broadcast::Sender<ReceivedNotification>,
     ingress_sequence: Arc<AtomicU64>,
+    sent_requests: AtomicU64,
 }
 impl DeviceSession {
     pub fn new(
@@ -291,7 +292,15 @@ impl DeviceSession {
             snapshot,
             notifications,
             ingress_sequence,
+            sent_requests: AtomicU64::new(0),
         })
+    }
+
+    pub fn request_count(&self) -> u64 {
+        self.queue
+            .try_lock()
+            .map(|q| u64::from(q.next_id))
+            .unwrap_or_else(|_| self.sent_requests.load(Ordering::Acquire))
     }
     /// R-D07/R-D13: close wakes read; await receiver termination before releasing the session.
     pub async fn shutdown(&self) {
@@ -522,6 +531,8 @@ impl DeviceSession {
         }
         let id = q.next_id;
         q.next_id += 1;
+        self.sent_requests
+            .store(u64::from(q.next_id), Ordering::Release);
         let reports = q.framer.lock().unwrap().encode(&encoded)?;
         if let Some(last) = q.last {
             tokio::time::sleep_until(last + self.config.interval).await;
