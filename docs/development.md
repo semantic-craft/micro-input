@@ -18,7 +18,7 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 
 ## 兼容能力范围
 
-需要逐步覆盖 Profile / Layer、基础按键与旋钮、普通宏、四分支 Multi Action、灯光两区、径向菜单、AppSense、Cheat Sheet，以及宿主执行的 Text / Command / URL / App Smart Action。设备保存的行为与需要宿主常驻的行为分开建模。
+需要逐步覆盖 Profile / Layer、基础按键与旋钮、普通宏、四分支 Multi Action、灯光两区、轮盘菜单、AppSense、Cheat Sheet，以及宿主执行的 Text / Command / URL / App Smart Action。设备保存的行为与需要宿主常驻的行为分开建模。
 
 本机观察版本为 Input 1.1.0、设备固件 0.6.3；不代表其他版本。普通层灯光有 Off/Solid/Snake/Rainbow/Breath/Gradient 六类。AppSense 通过目标应用前台停留 5 秒采集。具体证据和来源见 README 的调研入口。
 
@@ -102,8 +102,8 @@ RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和
 
 原生配置链（E-108）：`ConfigWriter::native` 与合成路径共用计划/记录/恢复；`native_plan_bound_writer_applies_and_restores_but_rejects_another_connection` 离线覆盖真实分支和连接nonce隔离，`multiframe_request_uses_one_transport_batch` 防止长请求回退到逐报告锁竞争。普通RPC出口继续只读。实机最小配置应用与原字节恢复的私有材料在 `.scratch/input-study/hardware-live/`；默认门禁不重跑设备变更。GUI/宿主回归仍使用 `MI_AUTO_HOST_READY=0 scripts/verify-offline`。
 
-## 径向菜单
+## 轮盘菜单
 
 `RadialMenuState` 持有启用、等待回中、选择和确认后等待回中的状态。`RadialMenuRouting` 将冻结的菜单意图送入现有宿主队列及 lease，确认时重验同一会话和路由。原始角度/距离由 `mi-session` 验证并传递至 `mi-core`；连续位置资格独立于按键边沿。没有新硬件订阅或通用 RPC。
 
-菜单默认关闭，本机偏好为 `radialMenuEnabled`。启用或恢复后的旧缓冲回中不能解除隔离。实现与合成原生验收见[径向菜单验证配方](../skills/verify-micro-input/features/radial-menu.md)。当前软件策略的距离阈值和八向手感仍待实体核验，`kb.radial` 没有因此解锁。
+菜单默认关闭，本机偏好为 `radialMenuEnabled`。启用或恢复后的旧缓冲回中不能解除隔离。实现与合成原生验收见[轮盘菜单验证配方](../skills/verify-micro-input/features/radial-menu.md)。当前软件策略的距离阈值和八向手感仍待实体核验，`kb.radial` 没有因此解锁。
