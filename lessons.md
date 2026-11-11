@@ -1,5 +1,12 @@
 # 项目教训
 
+## Antigravity 实时语音须走应用内 Start/End Voice，不得映射成 Ctrl+M 听写
+
+- 出事：`14c0d0b`（2026-11-09 22:10 Asia/Shanghai）复现 Antigravity `live-voice` 被映射为 Ctrl+M（keycode 0x2E）系统听写快捷键；第 6 槽「Gemini Live 实时语音」键帽误用 Term，而不是 Party（5 格波形）。
+- 修复：`b4dc75a`（2026-11-10 02:16 Asia/Shanghai）改为对 Start/End Voice mode 做 AXPress，并恢复 Party 波形键帽。该修复随 `5dbdc51`（#110，2026-11-10 17:42）进入 GitHub 默认分支。
+- Done right: `antigravity_live_voice_does_not_map_to_dictation_shortcut_ctrl_m` 断言 `live-voice` 的 native shortcut 为 `None`，执行时绝不 `PostKeyShortcut` Ctrl+M（0x2E）；`inspector_and_editors` / canvas 断言该槽推断 `CodexKeycapId::Party`。系统听写快捷键只留给明确的 `dictation` 命令，不能冒充应用内语音模式。
+- Seen 1x（2026-11-09）
+
 ## Dock 图标轮廓与系统处理
 
 - 起因与后果：2026-11-10 用户发现 Micro Input 与 Koe 的 Dock 图标偏大；图案占画布 90%，启动时直接挂载原始 ICNS。

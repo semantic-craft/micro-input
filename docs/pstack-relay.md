@@ -327,10 +327,11 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: 过期后新输入回归先失败后通过；独立审查及 `scripts/verify-offline` 通过；本机日常版更新。实体按键与会话导航能力分别记录，不以明确拒绝当成导航完成。
 - **Evidence**: a857584; .scratch/antigravity-profile/result.json; scripts/verify-offline eight scenarios PASS; physical verification pending
 
-### [ ] Slice R19: 接通会话键的真实目标导航
+### [x] Slice R19: 接通会话键的真实目标导航
 - **Outcome**: 六层和工作台共享动态槽位解析，按完整目标身份切换会话；仅在实际选中被确认后更新已读和导航历史。
 - **Done Predicate**: 覆盖空槽、过期目标、实例换代、导航拒绝与成功回读；在两个真实 Antigravity 会话间完成实体键跳转。打开应用不能代替切换会话。
-- **Evidence**: #84；`integrations/antigravity/live-bridge.py` 的现有打开路径仅激活应用，真实会话导航仍未验收。
+- **Verification scope**: 软件层全量 `scripts/check` 与六个隔离 QA 场景 PASS；安装层 `/Applications/Micro Input.app`（`c5cee05`）完成未读与已读会话实窗切换及水位更新；实体层经绑定 Karabiner 套接字（`/tmp/micro-input-74249b81f0dbd6bb0e45742f6ddea656/in`）按压 Creator Micro 2 实体键 `AG00` / `AG01` 在真实 Antigravity 会话间完成 12 次 `session_selection_confirmed` 精确跳转（含并发按键 `session_navigation_busy` 保护），零设备配置改写。
+- **Evidence**: c5cee05; .scratch/session-target-navigation/result.json; .scratch/session-target-navigation/production-audit.jsonl (12 confirmed physical AG00/AG01 session switches)
 
 ### [x] Slice R20: 托管按键跟随前台与分屏焦点
 - **Outcome**: 第 2–4 托管层优先使用当前前台应用的已安装方案，执行器按光标所在分屏选择控件；后台 Codex 不参与目标选择，旧输入不随切换转投新目标。
