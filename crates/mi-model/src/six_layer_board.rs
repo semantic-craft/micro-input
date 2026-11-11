@@ -24,10 +24,38 @@ pub struct AppliedHostLayer {
 pub struct AppliedSixLayerPlan {
     pub desired: BoardLayerPlan,
     pub bottom_row_layout: BottomRowLayout,
-    pub hosts: [AppliedHostLayer; 3],
+    pub hosts: Vec<AppliedHostLayer>,
 }
 
 impl AppliedSixLayerPlan {
+    pub fn validate_current(&self) -> Result<(), String> {
+        if !matches!(
+            self.desired.route(BoardLayer::ALL[0]),
+            BoardLayerRoute::Native {
+                owner: NativeLayerOwner::Codex,
+                ..
+            }
+        ) || self.hosts.len() != 2
+            || [3, 4, 5].iter().any(|&index| {
+                self.desired.route(BoardLayer::ALL[index]) != &BoardLayerRoute::Unassigned
+            })
+        {
+            return Err("旧六层安装已暂停，请先恢复原设备配置".into());
+        }
+        for (index, adapter) in ["antigravity", "dsh-desktop"].iter().enumerate() {
+            let host = &self.hosts[index];
+            if host.adapter != *adapter
+                || self.desired.route(BoardLayer::ALL[index + 1])
+                    != &(BoardLayerRoute::HostProfile {
+                        profile_id: host.profile_id.clone(),
+                    })
+            {
+                return Err("六层托管目标不受支持，请先恢复原设备配置".into());
+            }
+        }
+        Ok(())
+    }
+
     pub fn compile(
         plan: &BoardLayerPlan,
         doc: &LocalDocumentV2,
@@ -44,21 +72,17 @@ impl AppliedSixLayerPlan {
         if crate::board_layers::native_owner(doc, profile_id) != Some(NativeLayerOwner::Codex) {
             return Err("第 1 层未引用受保护的 Codex 原生方案".into());
         }
-        if [4, 5]
+        if [3, 4, 5]
             .iter()
             .any(|&index| plan.route(BoardLayer::ALL[index]) != &BoardLayerRoute::Unassigned)
         {
-            return Err("当前第 5、6 层必须留空，尚无额外输入编码".into());
+            return Err("当前第 4、5、6 层必须留空，尚无额外输入编码".into());
         }
-        let names = [
-            "Antigravity",
-            "DeepSeek Coder (DSH)",
-            crate::preset::MANAGED_CINDY_PROFILE_NAME,
-        ];
-        let adapters = ["antigravity", "dsh-desktop", "cindy"];
-        let bundles = ["com.google.antigravity", "com.deepseek.dsh", "com.xd.cindy"];
+        let names = ["Antigravity", "DeepSeek Coder (DSH)"];
+        let adapters = ["antigravity", "dsh-desktop"];
+        let bundles = ["com.google.antigravity", "com.deepseek.dsh"];
         let mut hosts = Vec::new();
-        for index in 0..3 {
+        for index in 0..2 {
             let BoardLayerRoute::HostProfile { profile_id } =
                 plan.route(BoardLayer::ALL[index + 1])
             else {
@@ -144,7 +168,7 @@ impl AppliedSixLayerPlan {
         Ok(Self {
             desired: plan.clone(),
             bottom_row_layout: layout,
-            hosts: hosts.try_into().unwrap(),
+            hosts,
         })
     }
 }
@@ -170,8 +194,8 @@ fn native_layout(layout: &Value) -> bool {
         && layout["joystick"]["type"] == "VENDOR"
 }
 
-fn managed_layer(index: usize) -> Value {
-    let tokens: Vec<_> = if (1..=3).contains(&index) {
+fn managed_layer(index: usize, retired: bool) -> Value {
+    let tokens: Vec<_> = if (1..=2).contains(&index) || (retired && index == 3) {
         DIRECT_CONTROLS[(index - 1) * 20..index * 20]
             .iter()
             .map(|control| control.token)
@@ -189,10 +213,11 @@ fn managed_layer(index: usize) -> Value {
         "Codex",
         "Antigravity",
         "DeepSeek Harness",
-        "Cindy",
+        "Unassigned 4",
         "Unassigned 5",
         "Unassigned 6",
     ][index];
+    let name = if retired && index == 3 { "Cindy" } else { name };
     json!({"id":index,"name":name, "color":0,
         "layout":{"base":rows,"keymap":rows,"encoders":[&tokens[13..16]],"joystick":{"type":"RADIAL","sectors":[{"k":tokens[16],"a1":0.625,"a2":0.875},{"k":tokens[17],"a1":0.375,"a2":0.625},{"k":tokens[18],"a1":0.125,"a2":0.375},{"k":tokens[19],"a1":0.875,"a2":0.125}]}}})
 }
@@ -211,6 +236,21 @@ pub fn recognize_six_layer_profile(
     keymap: &[u8],
     smart: Option<&[u8]>,
 ) -> Result<Option<u32>, String> {
+    recognize_profile(keymap, smart, false)
+}
+
+pub fn recognize_six_layer_recovery_candidate(
+    keymap: &[u8],
+    smart: Option<&[u8]>,
+) -> Result<Option<u32>, String> {
+    recognize_profile(keymap, smart, true)
+}
+
+fn recognize_profile(
+    keymap: &[u8],
+    smart: Option<&[u8]>,
+    allow_retired: bool,
+) -> Result<Option<u32>, String> {
     let config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
     let profiles = config.raw["profiles"]
         .as_array()
@@ -225,7 +265,10 @@ pub fn recognize_six_layer_profile(
             || profile["id"] != index
             || layers.len() != 6
             || !native_layout(&layers[0]["layout"])
-            || (1..6).any(|i| layers[i] != managed_layer(i))
+            || (1..6).any(|i| {
+                layers[i] != managed_layer(i, false)
+                    && !(allow_retired && i == 3 && layers[i] == managed_layer(i, true))
+            })
         {
             return Err("六层专用方案同名、重复或已修改，原映射保留".into());
         }
@@ -280,7 +323,7 @@ pub fn compile_six_layer_profile(
             return Err("新增 Profile ID 与原方案重复".into());
         }
         let mut layers = vec![native[0].get().to_owned()];
-        layers.extend((1..6).map(|i| managed_layer(i).to_string()));
+        layers.extend((1..6).map(|i| managed_layer(i, false).to_string()));
         let profile = format!(
             "{{\"id\":{index},\"name\":\"{SIX_LAYER_PROFILE_NAME}\",\"layers\":[{}]}}",
             layers.join(",")

@@ -256,7 +256,6 @@ impl<P: ManagedAxProvider> ManagedAxControls<P> {
                 continue;
             }
             let Some(adapter) = [
-                DictationAdapter::Cindy,
                 DictationAdapter::Antigravity,
                 DictationAdapter::Dsh,
                 DictationAdapter::Codex,
@@ -338,7 +337,7 @@ impl<P: ManagedAxProvider> ManagedAxControls<P> {
     pub fn scroll(&self, request: &DialScrollRequest) -> Result<(), String> {
         if !matches!(
             request.target_bundle_id.as_str(),
-            "com.xd.cindy" | "com.google.antigravity" | "com.deepseek.dsh" | "com.openai.codex"
+            "com.google.antigravity" | "com.deepseek.dsh" | "com.openai.codex"
         ) {
             return Err(blocked("unsupported_scroll_target"));
         }
@@ -408,7 +407,6 @@ pub fn managed_adapter(adapter: &str) -> Result<DictationAdapter, String> {
 
 pub fn adapter_bundle(adapter: DictationAdapter) -> &'static str {
     match adapter {
-        DictationAdapter::Cindy => "com.xd.cindy",
         DictationAdapter::Antigravity => "com.google.antigravity",
         DictationAdapter::Dsh => "com.deepseek.dsh",
         DictationAdapter::Codex => "com.openai.codex",

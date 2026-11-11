@@ -1,3 +1,2 @@
-integrations/cindy/*.patch whitespace=-blank-at-eol
 integrations/zcode/*.patch whitespace=-blank-at-eol
 integrations/dsh/*.patch whitespace=-blank-at-eol

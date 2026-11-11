@@ -32,12 +32,11 @@ fn default_true() -> bool {
     true
 }
 
-pub const CANONICAL_DESKTOP_AGENT_PROFILES: [&str; 6] = [
+pub const CANONICAL_DESKTOP_AGENT_PROFILES: [&str; 5] = [
     "Antigravity",
     "Codex",
     "DeepSeek Coder (DSH)",
     "Herdr",
-    "Cindy",
     "其他软件",
 ];
 
@@ -47,8 +46,7 @@ pub fn canonical_desktop_agent_rank(name: &str) -> Option<usize> {
         "Codex" => Some(1),
         "DeepSeek Coder (DSH)" | "DSH" | "DeepSeek Harness" | "Deepseek Harness" => Some(2),
         "Herdr" => Some(3),
-        "Cindy" => Some(4),
-        "其他软件" => Some(5),
+        "其他软件" => Some(4),
         _ => None,
     }
 }
@@ -56,7 +54,6 @@ pub fn canonical_desktop_agent_rank(name: &str) -> Option<usize> {
 pub fn desktop_agent_for_profile_name(name: &str) -> Option<(&'static str, &'static str)> {
     match name.trim() {
         "Antigravity" => Some(("antigravity", "com.google.antigravity")),
-        "Cindy" => Some(("cindy", "com.xd.cindy")),
         "Codex" => Some(("codex", "com.openai.codex")),
         "DeepSeek Coder (DSH)" | "DSH" | "DeepSeek Harness" | "Deepseek Harness" => {
             Some(("dsh-desktop", "com.deepseek.dsh"))
@@ -555,6 +552,9 @@ fn convert_action(
         }),
         ActionKind::ShellCommand { .. } => None,
         ActionKind::AgentCommand { adapter, command } => {
+            if adapter.eq_ignore_ascii_case("cindy") {
+                return None;
+            }
             if let Some(prompt) = command
                 .strip_prefix("prompt:")
                 .or_else(|| command.strip_prefix("submit-prompt:"))
@@ -582,7 +582,7 @@ fn convert_action(
             })
         }
         ActionKind::FocusSession { adapter, session } => {
-            if session == "unselected" {
+            if session == "unselected" || adapter.eq_ignore_ascii_case("cindy") {
                 None
             } else {
                 Some(ResolvedHostAction::FocusSession { adapter, session })

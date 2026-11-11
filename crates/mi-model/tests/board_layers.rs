@@ -133,7 +133,6 @@ fn explicit_empty_slots_are_not_an_absent_plan() {
         "a".into(),
         "b".into(),
         "c".into(),
-        "d".into(),
     ));
     assert_eq!(store.board_layer_plan(), Some(&empty));
     v.as_object_mut().unwrap().remove("hardware_profile_slots");
@@ -240,7 +239,7 @@ fn default_initialization_is_saved_even_when_the_first_edit_is_a_noop() {
     let mut store = DocumentStore::default();
     let path = temp.path().join("workbench.json");
     store.open(path.clone()).unwrap();
-    let plan = BoardLayerPlan::recommended("a".into(), "b".into(), "c".into(), "d".into());
+    let plan = BoardLayerPlan::recommended("a".into(), "b".into(), "c".into());
     store.initialize_board_plan_if_absent(plan.clone());
     assert!(!path.with_extension("preferences.json").exists());
     save(&mut store).unwrap();
@@ -270,4 +269,41 @@ fn a_conflicting_recovery_backup_blocks_migration_without_publishing_changes() {
     assert_eq!(store.board_layer_plan(), plan.as_ref());
     assert_eq!(store.board_preview_selection(), preview);
     assert!(!path.with_extension("pending").exists());
+}
+
+#[test]
+fn retired_native_owner_and_saved_layer_positions_are_preserved_without_rewriting() {
+    let temp = TempDir::new().unwrap();
+    let mut initial = DocumentStore::default();
+    initial.open(temp.path().join("workbench.json")).unwrap();
+    let plan: BoardLayerPlan = serde_json::from_value(json!({"layers":[
+        {"kind":"Native", "owner":"Cindy", "profile_id":"saved-native"},
+        {"kind":"Unassigned"},{"kind":"Unassigned"},
+        {"kind":"HostProfile", "profile_id":"saved-cindy"},
+        {"kind":"Unassigned"},{"kind":"Unassigned"}
+    ]}))
+    .unwrap();
+    initial
+        .save_board_configuration(
+            plan.clone(),
+            BoardPreviewSelection::Layer(BoardLayer::ALL[3]),
+            Some("startup".into()),
+        )
+        .unwrap();
+    let path = temp.path().join("workbench.preferences.json");
+    let original = std::fs::read(&path).unwrap();
+    drop(initial);
+    let mut reopened = DocumentStore::default();
+    reopened.open(temp.path().join("workbench.json")).unwrap();
+    assert_eq!(reopened.board_layer_plan(), Some(&plan));
+    assert_eq!(
+        reopened.board_preview_selection(),
+        BoardPreviewSelection::Layer(BoardLayer::ALL[3])
+    );
+    assert_eq!(reopened.usb_startup_profile_id(), Some("startup"));
+    assert_eq!(
+        serde_json::to_value(reopened.board_layer_plan()).unwrap()["layers"][0]["owner"],
+        "Cindy"
+    );
+    assert_eq!(std::fs::read(path).unwrap(), original);
 }

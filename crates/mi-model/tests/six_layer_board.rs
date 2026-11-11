@@ -38,7 +38,7 @@ fn six_layer_compiler_preserves_original_bytes_and_covers_every_control() {
     );
     let mut usages = std::collections::BTreeSet::new();
     let mut key_codes = std::collections::BTreeSet::new();
-    for layer in 2..=4 {
+    for layer in 2..=3 {
         let layout = &layers[layer - 1]["layout"];
         let tokens: Vec<_> = layout["keymap"]
             .as_array()
@@ -69,7 +69,7 @@ fn six_layer_compiler_preserves_original_bytes_and_covers_every_control() {
             json!({"k":DIRECT_CONTROLS[(layer-2)*20+19].token,"a1":0.875,"a2":0.125})
         );
     }
-    for layer in &layers[4..6] {
+    for layer in &layers[3..6] {
         assert!(!layer.to_string().contains("KV_OAI"));
         assert_eq!(
             layer["layout"]["encoders"],
@@ -127,16 +127,14 @@ fn applied_plan_freezes_routes_and_converts_only_dictation_to_click() {
             .0
             .clone()
     };
-    let mut desired = BoardLayerPlan::recommended(
-        id("Codex"),
-        id("Antigravity"),
-        id("DeepSeek Coder (DSH)"),
-        id(mi_model::preset::MANAGED_CINDY_PROFILE_NAME),
-    );
+    let mut desired =
+        BoardLayerPlan::recommended(id("Codex"), id("Antigravity"), id("DeepSeek Coder (DSH)"));
     let applied =
         AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
             .unwrap();
     assert_eq!(CONTROL_BINDINGS.len(), 20);
+    assert_eq!(applied.hosts.len(), 2);
+    assert!(applied.validate_current().is_ok());
     for host in &applied.hosts[0..2] {
         assert!(host.actions.iter().flatten().any(|a| matches!(a,ResolvedHostAction::AgentCommand{command,..} if command=="toggle-dictation")));
         assert!(!host.actions.iter().flatten().any(

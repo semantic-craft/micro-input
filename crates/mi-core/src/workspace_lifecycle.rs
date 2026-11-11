@@ -33,7 +33,6 @@ impl WorkbenchStore {
         self.system_lifecycle = SystemLifecycle::Sleeping;
         self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
         self.resume_requires_explicit_connect = true;
-        self.native_ownership.stop_at(self.update_now);
         self.ptt_controller.cancel();
         self.dial_pressed = false;
         self.dial_turned_while_pressed = false;
@@ -293,7 +292,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
         let old_epoch = store.lifecycle_epoch.load(Ordering::Acquire);
-        let request = store.native_ownership.begin_request(true);
         store.system_will_sleep();
         store.system_did_wake();
         until(|| {
@@ -378,11 +376,6 @@ mod tests {
             HardwareLoopEvent::Input(input),
             HardwareLoopEvent::Disconnected {
                 session_id: old_session_id,
-            },
-            HardwareLoopEvent::OwnershipReply {
-                epoch: old_epoch,
-                request,
-                reply: None,
             },
             HardwareLoopEvent::DiscoveryChanged { epoch: old_epoch },
         ] {

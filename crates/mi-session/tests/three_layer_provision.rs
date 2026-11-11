@@ -313,6 +313,11 @@ async fn explicit_recovery_is_bound_to_the_successful_write_and_current_lease() 
 
 #[tokio::test]
 async fn six_layer_prepare_apply_readonly_verify_and_restore_roundtrip() {
+    six_layer_roundtrip(false).await;
+    six_layer_roundtrip(true).await;
+}
+
+async fn six_layer_roundtrip(retired: bool) {
     const SIX_SOURCE: &[u8] =
         include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
     let dir = tempfile::tempdir().unwrap();
@@ -327,11 +332,43 @@ async fn six_layer_prepare_apply_readonly_verify_and_restore_roundtrip() {
             interval: Duration::ZERO,
         },
     );
+    let mut old_candidate: Value = serde_json::from_slice(
+        &mi_model::apply::compile_six_layer_profile(SIX_SOURCE, Some(SMART))
+            .unwrap()
+            .keymap,
+    )
+    .unwrap();
+    let old_layer = &mut old_candidate["profiles"][1]["layers"][3];
+    old_layer["name"] = json!("Cindy");
+    let tokens: Vec<_> = mi_model::direct_controls::DIRECT_CONTROLS[40..60]
+        .iter()
+        .map(|c| c.token)
+        .collect();
+    let rows = json!([
+        &tokens[0..2],
+        &tokens[2..6],
+        &tokens[6..10],
+        &tokens[10..13]
+    ]);
+    old_layer["layout"]["base"] = rows.clone();
+    old_layer["layout"]["keymap"] = rows;
+    old_layer["layout"]["encoders"] = json!([&tokens[13..16]]);
+    for slot in 0..4 {
+        old_layer["layout"]["joystick"]["sectors"][slot]["k"] = json!(tokens[16 + slot]);
+    }
+    let old_candidate = serde_json::to_vec(&old_candidate).unwrap();
+    assert!(mi_model::apply::recognize_six_layer_profile(&old_candidate, Some(SMART)).is_err());
+    assert!(mi_model::apply::compile_six_layer_profile(&old_candidate, Some(SMART)).is_err());
+    let initial = if retired {
+        old_candidate.clone()
+    } else {
+        SIX_SOURCE.to_vec()
+    };
     let worker = tokio::spawn(async move {
         let mut incoming = NativeFramer::default();
         let outbound = NativeFramer::default();
-        let mut active = 0u64;
-        let mut keymap = SIX_SOURCE.to_vec();
+        let mut active = u64::from(retired);
+        let mut keymap = initial;
         let mut staged = vec![];
         let mut commits = 0usize;
         while let Some(frame) = requests.recv().await {
@@ -385,23 +422,41 @@ async fn six_layer_prepare_apply_readonly_verify_and_restore_roundtrip() {
         (keymap, commits)
     });
 
-    let prepared = session.prepare_six_layer_write(dir.path()).await.unwrap();
-    let candidate = prepared.candidate.clone();
-    let backup = prepared.backup.clone();
-    let receipt = session.apply_six_layer_write(prepared).await.unwrap();
-    assert_eq!(receipt.profile_index, 1);
-    assert_eq!(receipt.layer_index, 1);
+    let backup = if retired {
+        std::fs::write(dir.path().join("keymap.json"), SIX_SOURCE).unwrap();
+        std::fs::write(dir.path().join("planned-keymap.json"), &old_candidate).unwrap();
+        std::fs::write(dir.path().join("smart_actions.json"), SMART).unwrap();
+        dir.path().to_path_buf()
+    } else {
+        let prepared = session.prepare_six_layer_write(dir.path()).await.unwrap();
+        let candidate = prepared.candidate.clone();
+        let backup = prepared.backup.clone();
+        let receipt = session.apply_six_layer_write(prepared).await.unwrap();
+        assert_eq!(receipt.profile_index, 1);
+        assert_eq!(receipt.layer_index, 1);
+        let verified_layer = session
+            .verify_six_layer_files(&candidate, Some(SMART), receipt.profile_index)
+            .await
+            .unwrap();
+        assert_eq!(verified_layer, 1);
+        backup
+    };
 
-    let verified_layer = session
-        .verify_six_layer_files(&candidate, Some(SMART), receipt.profile_index)
-        .await
+    if retired {
+        let mut altered: Value = serde_json::from_slice(&old_candidate).unwrap();
+        altered["profiles"][1]["layers"][3]["layout"]["keymap"][0][0] = json!("KC_A");
+        std::fs::write(
+            backup.join("planned-keymap.json"),
+            serde_json::to_vec(&altered).unwrap(),
+        )
         .unwrap();
-    assert_eq!(verified_layer, 1);
-
+        assert!(session.restore_six_layer_backup(&backup).await.is_err());
+        std::fs::write(backup.join("planned-keymap.json"), &old_candidate).unwrap();
+    }
     session.restore_six_layer_backup(&backup).await.unwrap();
     session.shutdown().await;
     drop(session);
     let (final_keymap, commits) = worker.await.unwrap();
     assert_eq!(final_keymap, SIX_SOURCE);
-    assert_eq!(commits, 2);
+    assert_eq!(commits, if retired { 1 } else { 2 });
 }

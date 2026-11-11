@@ -1,4 +1,3 @@
-use mi_bridge::{NativeOwnershipController, OwnershipState};
 use mi_model::host_router::canonical_desktop_agent_rank;
 use serde::{Deserialize, Serialize};
 
@@ -9,17 +8,15 @@ pub enum CanonicalAgent {
     Codex = 1,
     DeepseekHarness = 2,
     Herdr = 3,
-    Cindy = 4,
-    OtherApps = 5,
+    OtherApps = 4,
 }
 
 impl CanonicalAgent {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 5] = [
         Self::Antigravity,
         Self::Codex,
         Self::DeepseekHarness,
         Self::Herdr,
-        Self::Cindy,
         Self::OtherApps,
     ];
 
@@ -33,7 +30,6 @@ impl CanonicalAgent {
             Self::Codex => "Codex",
             Self::DeepseekHarness => "DeepSeek Coder (DSH)",
             Self::Herdr => "Herdr",
-            Self::Cindy => "Cindy",
             Self::OtherApps => "其他软件",
         }
     }
@@ -44,7 +40,6 @@ impl CanonicalAgent {
             Self::Codex => "Codex",
             Self::DeepseekHarness => "Deepseek Harness",
             Self::Herdr => "Herdr",
-            Self::Cindy => "Cindy",
             Self::OtherApps => "其他软件",
         }
     }
@@ -55,7 +50,6 @@ impl CanonicalAgent {
             Self::Codex => "com.openai.codex",
             Self::DeepseekHarness => "com.deepseek.dsh",
             Self::Herdr => "dev.herdr.app",
-            Self::Cindy => "com.xd.cindy",
             Self::OtherApps => "*",
         }
     }
@@ -66,7 +60,6 @@ impl CanonicalAgent {
             Self::Codex => "CX",
             Self::DeepseekHarness => "DS",
             Self::Herdr => "HD",
-            Self::Cindy => "CD",
             Self::OtherApps => "通用",
         }
     }
@@ -76,7 +69,7 @@ impl CanonicalAgent {
     }
 
     pub const fn is_native_oai_default(self) -> bool {
-        matches!(self, Self::Codex | Self::Cindy)
+        matches!(self, Self::Codex)
     }
 
     pub fn from_profile_name(name: &str) -> Option<Self> {
@@ -150,21 +143,6 @@ pub enum OwnershipBannerState {
 }
 
 impl OwnershipBannerState {
-    pub fn evaluate(
-        ownership: &NativeOwnershipController,
-        is_protected_active_profile: bool,
-    ) -> Self {
-        let summary = ownership.summary();
-        if is_protected_active_profile || matches!(ownership.state(), OwnershipState::Native { .. })
-        {
-            Self::NativeHeld { summary }
-        } else if ownership.allows_execution() || ownership.is_transient_reconfirming() {
-            Self::Ready { summary }
-        } else {
-            Self::Caution { reason: summary }
-        }
-    }
-
     pub fn is_caution(&self) -> bool {
         matches!(self, Self::Caution { .. })
     }
@@ -224,7 +202,6 @@ pub struct BoardLayersProjection {
     pub observed_status: String,
     pub apply_block_reason: String,
     pub can_apply: bool,
-    pub cindy_native_paused_confirmed: bool,
     pub configuration_observed: bool,
     pub keyboard_grabbed: bool,
     pub first_event_verified: bool,
@@ -253,7 +230,6 @@ impl Default for BoardLayersProjection {
             observed_status: "设备层未确认".into(),
             apply_block_reason: "六层输入与写入协议尚未验证，当前仅保存本地方案".into(),
             can_apply: false,
-            cindy_native_paused_confirmed: false,
             configuration_observed: false,
             keyboard_grabbed: false,
             first_event_verified: false,
@@ -340,9 +316,7 @@ pub enum SidebarAction {
     PreviewBoardLayer(mi_model::board_layers::BoardLayer),
     PreviewUsbStartup,
     ProvisionBoardLayers,
-    ConfirmCindyNativePaused {
-        confirmed: bool,
-    },
+
     RestoreBoardLayers,
     SetBoardLayerProfile {
         layer: mi_model::board_layers::BoardLayer,

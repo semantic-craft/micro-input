@@ -336,13 +336,13 @@ impl AxTreeProvider for MockAxProvider {
         let replace = *self.replace_control_on_stop.lock().unwrap();
         let mut win = self.window.lock().unwrap();
         if let Some(ctrl) = win.controls.iter_mut().find(|c| c.control_id == control_id) {
-            if ctrl.label == "开始语音输入" {
-                ctrl.label = "停止语音输入".to_string();
-            } else if ctrl.label == "停止语音输入" {
+            if ctrl.label == "开始听写" {
+                ctrl.label = "停止听写".to_string();
+            } else if ctrl.label == "停止听写" {
                 if replace {
                     ctrl.control_id = "btn-voice-rebuilt-2".to_string();
                 }
-                ctrl.label = "开始语音输入".to_string();
+                ctrl.label = "开始听写".to_string();
             }
         }
         Ok(())
@@ -365,9 +365,9 @@ impl AxTreeProvider for MockAxProvider {
 
 #[test]
 fn test_ax_dictation_leaf_validation_4tuple_lock_and_replacement_readback() {
-    assert!(DictationAdapter::Cindy.matches_start_label("开始语音输入"));
-    assert!(DictationAdapter::Cindy.matches_stop_label("停止语音输入"));
-    assert!(DictationAdapter::Cindy.matches_stop_label("结束语音输入"));
+    assert!(DictationAdapter::Dsh.matches_start_label("开始听写"));
+    assert!(DictationAdapter::Dsh.matches_stop_label("停止听写"));
+    assert!(DictationAdapter::Dsh.matches_stop_label("停止并识别"));
 
     let leaf_attrs = vec!["AXRole".to_string(), "AXTitle".to_string()];
     let container_attrs = vec![
@@ -391,11 +391,11 @@ fn test_ax_dictation_leaf_validation_4tuple_lock_and_replacement_readback() {
         window: Mutex::new(AxWindowSnapshot {
             pid: 5150,
             window_id: 9001,
-            window_title: "Cindy - 主窗口".to_string(),
+            window_title: "DSH - 主窗口".to_string(),
             controls: vec![AxElementNode {
                 control_id: "btn-voice-1".to_string(),
                 role: "AXButton".to_string(),
-                label: "开始语音输入".to_string(),
+                label: "开始听写".to_string(),
                 parent_chain_to_window: vec![
                     "toolbar-1".to_string(),
                     "root-split".to_string(),
@@ -415,14 +415,14 @@ fn test_ax_dictation_leaf_validation_4tuple_lock_and_replacement_readback() {
     });
 
     let controller = AXDictationController::new(provider.clone());
-    let start = controller.start_dictation(DictationAdapter::Cindy);
+    let start = controller.start_dictation(DictationAdapter::Dsh);
     let locked = match start {
         DictationOutcome::Started(t) => t,
         other => panic!("expected Started, got {:?}", other),
     };
     assert_eq!(locked.pid, 5150);
     assert_eq!(locked.window_id, 9001);
-    assert_eq!(locked.window_title, "Cindy - 主窗口");
+    assert_eq!(locked.window_title, "DSH - 主窗口");
     assert_eq!(locked.control_id, "btn-voice-1");
 
     let stop = controller.stop_dictation();
@@ -865,4 +865,69 @@ fn dropping_executor_releases_its_remaining_fn_output() {
         })
         .collect();
     assert_eq!(flags, vec![true, false]);
+}
+
+#[test]
+fn retired_agent_actions_are_blocked_and_chatgpt_fallback_remains_targeted() {
+    let driver = RecordingOsDriver::new(true);
+    let executor = LiveHostActionExecutor::new(driver.clone());
+    for command in [
+        "focus-input",
+        "search",
+        "new-chat",
+        "submit",
+        "push-to-talk",
+        "toggle-dictation",
+        "approve",
+        "scroll-down",
+        "prompt:test",
+    ] {
+        let receipt = executor.execute(
+            "saved",
+            "AG00",
+            &ResolvedHostAction::AgentCommand {
+                adapter: "cindy".into(),
+                command: command.into(),
+            },
+        );
+        assert_eq!(receipt.outcome, "blocked");
+        assert_eq!(receipt.detail, "unsupported_agent_adapter");
+    }
+    let receipt = executor.execute(
+        "saved",
+        "AG00",
+        &ResolvedHostAction::PasteText {
+            text: "test".into(),
+            adapter: Some("cindy".into()),
+            target_bundle_id: None,
+            no_newline: true,
+            submit: true,
+        },
+    );
+    assert_eq!(receipt.outcome, "blocked");
+    assert!(driver.events().is_empty());
+    assert!(DictationAdapter::parse("cindy").is_none());
+    for command in [
+        "new-chat",
+        "search",
+        "model",
+        "focus-input",
+        "scroll-down",
+        "submit",
+    ] {
+        let receipt = executor.execute(
+            "ChatGPT",
+            "AG00",
+            &ResolvedHostAction::AgentCommand {
+                adapter: "chatgpt".into(),
+                command: command.into(),
+            },
+        );
+        assert_eq!(receipt.outcome, "executed", "{command}: {}", receipt.detail);
+    }
+    assert_eq!(
+        mi_macos::executor::bundle_id_for_adapter("chatgpt"),
+        Some("com.openai.atlas")
+    );
+    assert!(!driver.events().is_empty());
 }

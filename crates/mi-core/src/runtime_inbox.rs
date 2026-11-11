@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 
 pub(super) const INPUT_CAPACITY: usize = 256;
 pub(super) const INPUT_BATCH: usize = 32;
-pub(super) const CONTROL_BATCH: usize = 6;
+pub(super) const CONTROL_BATCH: usize = 5;
 
 #[derive(Default)]
 struct Pending {
@@ -19,7 +19,6 @@ struct Pending {
     gap: Option<HardwareLoopEvent>,
     disconnected: Option<HardwareLoopEvent>,
     discovery: Option<HardwareLoopEvent>,
-    ownership: Option<HardwareLoopEvent>,
     acceptance: Option<HardwareLoopEvent>,
     candidates: Option<HardwareLoopEvent>,
 }
@@ -105,20 +104,6 @@ impl RuntimeInbox {
                     pending.candidates = Some(event);
                 }
             }
-            HardwareLoopEvent::OwnershipReply {
-                epoch,
-                request,
-                reply,
-            } => {
-                let stale = matches!(&pending.ownership, Some(HardwareLoopEvent::OwnershipReply { epoch: old, request: previous, .. }) if (*old, previous.generation) > (epoch, request.generation));
-                if !stale {
-                    pending.ownership = Some(HardwareLoopEvent::OwnershipReply {
-                        epoch,
-                        request,
-                        reply,
-                    });
-                }
-            }
         }
         drop(pending);
         self.ready.notify_one();
@@ -131,7 +116,6 @@ impl RuntimeInbox {
         for event in [
             pending.gap.take(),
             pending.disconnected.take(),
-            pending.ownership.take(),
             pending.acceptance.take(),
             pending.discovery.take(),
             pending.candidates.take(),
@@ -159,7 +143,6 @@ impl RuntimeInbox {
                     .gap
                     .take()
                     .or_else(|| pending.disconnected.take())
-                    .or_else(|| pending.ownership.take())
                     .or_else(|| pending.acceptance.take())
                     .or_else(|| pending.discovery.take())
                     .or_else(|| pending.candidates.take())
@@ -205,14 +188,8 @@ mod tests {
         for _ in 0..INPUT_CAPACITY {
             inbox.send(input(7)).unwrap();
         }
-        let mut owner = mi_bridge::NativeOwnershipController::new_isolated();
-        let request = owner.begin_request(true);
         inbox
-            .send(HardwareLoopEvent::OwnershipReply {
-                epoch: 4,
-                request: request.clone(),
-                reply: None,
-            })
+            .send(HardwareLoopEvent::DiscoveryChanged { epoch: 4 })
             .unwrap();
         inbox.send(input(7)).unwrap();
         inbox
@@ -227,9 +204,10 @@ mod tests {
             batch[1],
             HardwareLoopEvent::Disconnected { session_id: 7 }
         ));
-        assert!(
-            matches!(&batch[2], HardwareLoopEvent::OwnershipReply { request: received, .. } if *received == request)
-        );
+        assert!(matches!(
+            batch[2],
+            HardwareLoopEvent::DiscoveryChanged { epoch: 4 }
+        ));
         inbox.send(input(7)).unwrap();
         assert!(
             inbox.take_batch().is_empty(),

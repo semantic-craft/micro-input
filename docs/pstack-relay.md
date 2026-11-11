@@ -342,6 +342,11 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: 核验后 reader 退出、运行期零 RPC、实体 token 路由、无 Cindy 所有权桥的执行及失效清理回归通过；无关联响应不误完成请求，本请求坏包仍失败；`scripts/verify-offline` 全量通过并更新本机。持续连接和实体动作分别记录，层位仅表述首次核验或最近输入，UNKNOWN-17 保留。
 - **Evidence**: d529820; .scratch/antigravity-session/result.json; eight offline scenarios PASS; installed; 363s connected without Cindy; final physical keys NOT_RUN
 
+### [x] Slice R22: 移除 Cindy 专用支持
+- **Outcome**: 内置应用保留 Antigravity、Herdr、Codex 和 DeepSeek Harness，另有「其他软件」通用方案。删除 Cindy 预设、会话桥、听写、辅助功能适配与原生所有权握手；默认第 4 至 6 层留空。
+- **Done Predicate**: 旧文档与偏好保全，旧三宿主安装记录可读但不执行且恢复信息仍可用；第 4 层输入不执行；DSH 共享传输与 ChatGPT 既有快捷键有回归覆盖；`scripts/verify-offline` 六个隔离场景通过。不改写实体设备映射。
+- **Evidence**: e3ea0c8; .scratch/remove-cindy/result.json; final verify-offline six scenarios PASS; native UI entries verified; no device writes
+
 ### [x] Slice R23: 减少托管聚焦的重复 AX 扫描
 - **Outcome**: 保留窗口、分屏和候选歧义检查，用已发现控件的实时路径校验与焦点读回减少按键动作等待，不增加跨动作缓存。
 - **Done Predicate**: 真实 AX 聚焦的匹配构建交替对照成功，范围与失败独立记录；失效路径、控件替换和目标改变回归通过；独立验收与 `scripts/verify-offline` 通过，并更新本机。物理按键完整延迟单独保留边界。

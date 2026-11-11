@@ -42,7 +42,12 @@ pub struct Installation {
 #[serde(deny_unknown_fields)]
 pub struct SavedSixLayerState {
     pub version: u8,
-    pub cindy_native_paused_confirmed: bool,
+    #[serde(
+        default,
+        rename = "cindy_native_paused_confirmed",
+        skip_serializing_if = "Option::is_none"
+    )]
+    legacy_native_paused_confirmation: Option<bool>,
     pub installation: Option<Installation>,
 }
 
@@ -50,7 +55,7 @@ impl Default for SavedSixLayerState {
     fn default() -> Self {
         Self {
             version: 1,
-            cindy_native_paused_confirmed: false,
+            legacy_native_paused_confirmation: None,
             installation: None,
         }
     }
@@ -207,7 +212,7 @@ impl RunningSixLayer {
 
     pub fn effective_profile_id(&self) -> Option<String> {
         let layer = self.observed_layer.load(Ordering::Acquire);
-        if !(2..=4).contains(&layer) {
+        if !(2..=3).contains(&layer) {
             return None;
         }
         let foreground = self.foreground.lock().unwrap();
@@ -238,7 +243,6 @@ impl RunningSixLayer {
             id("Codex"),
             id("Antigravity"),
             id("DeepSeek Coder (DSH)"),
-            id(mi_model::preset::MANAGED_CINDY_PROFILE_NAME),
         );
         let plan = AppliedSixLayerPlan::compile(
             &desired,
@@ -296,9 +300,9 @@ impl RunningSixLayer {
         self.execution_policy.state.lock().unwrap().enabled
     }
 
-    pub fn start_executor(
+    pub fn start_executor<D: mi_macos::HostOsDriver + 'static>(
         &mut self,
-        executor: Arc<mi_macos::LiveHostActionExecutor<mi_macos::MacOsSystemDriver>>,
+        executor: Arc<mi_macos::LiveHostActionExecutor<D>>,
     ) {
         let receiver = Arc::clone(&self.receiver);
         let plan = self.installation.plan.clone();
@@ -320,7 +324,7 @@ impl RunningSixLayer {
                 &foreground,
                 &tx,
                 || receiver.next(),
-                || Ok(()),
+                || receiver.failure().map_or(Ok(()), Err),
                 |profile, binding, action, admission| {
                     executor.execute_when(profile, binding, action, || {
                         !stop.load(Ordering::Acquire)
@@ -460,6 +464,9 @@ fn execute_clicks(
         let control = &DIRECT_CONTROLS[event.control as usize];
         observed.store(control.layer, Ordering::Release);
         first.store(true, Ordering::Release);
+        if !(2..=3).contains(&control.layer) {
+            continue;
+        }
         let context = foreground.lock().unwrap().clone();
         if context.generation != 0 && event.received_at < context.changed_at {
             continue;
@@ -527,6 +534,7 @@ pub async fn apply(
     mut saved: SavedSixLayerState,
 ) -> Result<RunningSixLayer, String> {
     let state_path = document_dir.join("six-layer-runtime.json");
+    plan.validate_current()?;
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
     let receiver = Arc::new(UserCommandReceiver::bind().map_err(|e| e.to_string())?);
     let rule = karabiner::rules(&target, &receiver, plan.bottom_row_layout)?;
@@ -678,6 +686,7 @@ pub async fn resume(
         .clone()
         .filter(|installation| installation.status == InstallationStatus::Applied)
         .ok_or("六层记录未完成，需要恢复")?;
+    installation.plan.validate_current()?;
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
     let (session, candidate) = connect(&MacTransport::new(), &target)?;
     with_verification_session(&session, async {
@@ -799,6 +808,67 @@ mod tests {
     }
 
     #[test]
+    fn executor_runs_after_verification_rpc_closes_and_stops_on_input_loss() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let (link, _) = mi_transport::MockLink::new();
+        let session = {
+            let _entered = runtime.enter();
+            DeviceSession::new(
+                link.clone(),
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig::default(),
+            )
+        };
+        let mut running = RunningSixLayer::isolated(session.clone(), directory.path());
+        running.readiness.configuration_observed = true;
+        running.readiness.keyboard_grabbed = true;
+        runtime
+            .block_on(with_verification_session(&session, async { Ok(()) }))
+            .unwrap();
+        assert!(session.is_disconnected());
+        running.receiver.arm().unwrap();
+        running.set_execution_policy(true, true, Instant::now() - Duration::from_secs(1));
+        running.foreground_changed(Some("com.google.antigravity"));
+        let driver = mi_macos::RecordingOsDriver::default();
+        running.start_executor(Arc::new(mi_macos::LiveHostActionExecutor::new(
+            driver.clone(),
+        )));
+        send(&running.receiver, 40);
+        send(&running.receiver, 7);
+        let receipt = running
+            .receipts
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
+        assert_eq!(receipt.outcome, "executed");
+        assert_eq!(receipt.detail, "antigravity/focus-input");
+        assert_eq!(
+            receipt.profile_id,
+            running.installation.plan.hosts[0].profile_id
+        );
+        assert_eq!(
+            driver.events(),
+            vec![
+                mi_macos::executor::RecordedOsEvent::CheckAccessibilityTrusted,
+                mi_macos::executor::RecordedOsEvent::FocusAgentInput("antigravity".into()),
+            ]
+        );
+        assert!(link.writes.lock().unwrap().is_empty());
+        assert!(running.receiver.failure().is_none());
+        assert!(!check_input_connection(&running.receiver, false, || Err(
+            "USB target changed".into()
+        )));
+        send(&running.receiver, 7);
+        running.executor.take().unwrap().join().unwrap().unwrap();
+        assert!(running.receipts.as_ref().unwrap().try_recv().is_err());
+        assert_eq!(driver.events().len(), 2);
+        running.shutdown(&runtime).unwrap();
+    }
+
+    #[test]
     fn input_monitor_ticks_do_not_need_vendor_rpc_and_fail_closed_on_readiness_loss() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (link, _) = mi_transport::MockLink::new();
@@ -855,12 +925,8 @@ mod tests {
                 .0
                 .clone()
         };
-        let desired = BoardLayerPlan::recommended(
-            id("Codex"),
-            id("Antigravity"),
-            id("DeepSeek Coder (DSH)"),
-            id(mi_model::preset::MANAGED_CINDY_PROFILE_NAME),
-        );
+        let desired =
+            BoardLayerPlan::recommended(id("Codex"), id("Antigravity"), id("DeepSeek Coder (DSH)"));
         AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
             .unwrap()
     }
@@ -919,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn foreground_switch_discards_queued_clicks_without_retargeting() {
+    fn foreground_switch_discards_queued_and_waiting_clicks_without_retargeting() {
         let plan = test_plan();
         let receiver = UserCommandReceiver::bind().unwrap();
         receiver.arm().unwrap();
@@ -935,6 +1001,7 @@ mod tests {
         let policy = ExecutionPolicy::default();
         policy.set(true, true, Instant::now() - Duration::from_secs(1));
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let mut permits = 0;
         thread::scope(|scope| {
             let (done, wait) = std::sync::mpsc::channel::<()>();
             let stop_ref = &stop;
@@ -953,7 +1020,14 @@ mod tests {
                 &foreground,
                 &tx,
                 || receiver.next(),
-                || Ok(()),
+                || {
+                    permits += 1;
+                    if permits == 1 {
+                        foreground.lock().unwrap().update(Some("com.deepseek.dsh"));
+                        send(&receiver, 27);
+                    }
+                    Ok(())
+                },
                 |profile, binding, action, _| {
                     stop.store(true, Ordering::Release);
                     mi_macos::SimulatedHostActionExecutor.execute(profile, binding, action)
@@ -962,24 +1036,25 @@ mod tests {
             let _ = done.send(());
         });
         let receipts: Vec<_> = rx.try_iter().collect();
+        assert_eq!(permits, 2);
         assert_eq!(receipts.len(), 1);
-        assert_eq!(receipts[0].profile_id, plan.hosts[0].profile_id);
-        assert_eq!(receipts[0].detail, "antigravity/focus-input");
+        assert_eq!(receipts[0].profile_id, plan.hosts[1].profile_id);
+        assert_eq!(receipts[0].detail, "dsh-desktop/browser");
         assert!(receiver.failure().is_none());
     }
 
     #[test]
-    fn execute_clicks_routes_without_cindy_and_stops_on_input_connection_loss() {
+    fn execute_clicks_ignores_retired_layer_and_stops_on_connection_loss() {
         let plan = test_plan();
         let ag_id = plan.hosts[0].profile_id.clone();
         let dsh_id = plan.hosts[1].profile_id.clone();
-        let cindy_id = plan.hosts[2].profile_id.clone();
+
         let receiver = Arc::new(UserCommandReceiver::bind().unwrap());
         receiver.arm().unwrap();
         send(&receiver, 0);
         send(&receiver, 20);
         send(&receiver, 40);
-        send(&receiver, 41);
+        send(&receiver, 21);
         thread::sleep(Duration::from_millis(30));
 
         let stop = AtomicBool::new(false);
@@ -989,6 +1064,7 @@ mod tests {
         let first = AtomicBool::new(false);
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
         let mut calls = Vec::new();
+        let mut permit_calls = 0usize;
 
         execute_clicks(
             &receiver,
@@ -1000,12 +1076,16 @@ mod tests {
             &Mutex::new(ForegroundContext::default()),
             &tx,
             || receiver.next(),
-            || Ok(()),
+            || {
+                permit_calls += 1;
+                if permit_calls <= 2 {
+                    Ok(())
+                } else {
+                    Err("设备连接已结束".into())
+                }
+            },
             |profile, binding, _action, _epoch| {
                 calls.push((profile.to_owned(), binding.to_owned()));
-                if calls.len() == 3 {
-                    receiver.invalidate("USB target changed");
-                }
                 mi_macos::HostActionReceipt {
                     action_type: "open_app".into(),
                     binding_id: binding.into(),
@@ -1020,21 +1100,17 @@ mod tests {
         );
 
         assert!(first.load(Ordering::Acquire));
-        assert_eq!(observed.load(Ordering::Acquire), 4);
+        assert_eq!(observed.load(Ordering::Acquire), 3);
         assert_eq!(
             calls,
-            vec![
-                (ag_id, "AG00".into()),
-                (dsh_id, "AG00".into()),
-                (cindy_id, "AG00".into()),
-            ]
+            vec![(ag_id, "AG00".into()), (dsh_id, "AG00".into()),]
         );
-        assert_eq!(rx.try_iter().count(), 3);
-        assert_eq!(receiver.failure().as_deref(), Some("USB target changed"));
+        assert_eq!(rx.try_iter().count(), 2);
+        assert_eq!(receiver.failure().as_deref(), Some("设备连接已结束"));
     }
 
     #[test]
-    fn expired_clicks_are_dropped_without_stopping_fresh_clicks() {
+    fn a_click_expiring_during_connection_check_does_not_stop_fresh_clicks() {
         let plan = test_plan();
         let dsh_id = plan.hosts[1].profile_id.clone();
 
@@ -1042,8 +1118,6 @@ mod tests {
         receiver.arm().unwrap();
         send(&receiver, 0);
         thread::sleep(Duration::from_millis(30));
-        thread::sleep(Duration::from_millis(2100));
-        send(&receiver, 20);
         let stop = AtomicBool::new(false);
         let policy = ExecutionPolicy::default();
         policy.set(true, true, Instant::now() - Duration::from_secs(3));
@@ -1051,6 +1125,7 @@ mod tests {
         let first = AtomicBool::new(false);
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
         let mut calls = Vec::new();
+        let mut permit_calls = 0;
         thread::scope(|scope| {
             let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
             let watchdog_stop = &stop;
@@ -1069,7 +1144,15 @@ mod tests {
                 &Mutex::new(ForegroundContext::default()),
                 &tx,
                 || receiver.next(),
-                || Ok(()),
+                || {
+                    permit_calls += 1;
+                    if permit_calls == 1 {
+                        thread::sleep(Duration::from_millis(2100));
+                        send(&receiver, 20);
+                        thread::sleep(Duration::from_millis(30));
+                    }
+                    Ok(())
+                },
                 |profile, binding, _, _| {
                     calls.push((profile.to_owned(), binding.to_owned()));
                     stop.store(true, Ordering::Release);
@@ -1088,6 +1171,7 @@ mod tests {
             let _ = cancel_tx.send(());
         });
         assert_eq!(calls, vec![(dsh_id, "AG00".into())]);
+        assert_eq!(permit_calls, 2);
         assert_eq!(rx.try_iter().count(), 1);
         assert!(receiver.failure().is_none());
     }
@@ -1243,11 +1327,17 @@ mod tests {
     fn saved_state_roundtrips_and_rejects_unsupported_versions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("six-layer-runtime.json");
-        assert!(!load(&path).unwrap().cindy_native_paused_confirmed);
+        assert!(!load(&path)
+            .unwrap()
+            .legacy_native_paused_confirmation
+            .is_some());
         let mut state = SavedSixLayerState::default();
-        state.cindy_native_paused_confirmed = true;
+        state.legacy_native_paused_confirmation = Some(true);
         save(&path, &state).unwrap();
-        assert!(load(&path).unwrap().cindy_native_paused_confirmed);
+        assert!(load(&path)
+            .unwrap()
+            .legacy_native_paused_confirmation
+            .is_some());
         fs::write(
             &path,
             br#"{"version":2,"cindy_native_paused_confirmed":true,"installation":null}"#,

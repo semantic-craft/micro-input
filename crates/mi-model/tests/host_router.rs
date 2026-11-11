@@ -182,7 +182,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
     assert_eq!(draft.revision, 0);
     assert_eq!(draft.config.profiles.len(), 2);
     let created = install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(created.len(), 8);
+    assert_eq!(created.len(), 6);
     assert_eq!(
         draft.revision, 1,
         "install_agent_starter_profiles must commit as a single atomic revision"
@@ -194,7 +194,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         "single undo must revert all 8 starter profiles"
     );
     draft.undo(true).unwrap();
-    assert_eq!(draft.config.profiles.len(), 8);
+    assert_eq!(draft.config.profiles.len(), 6);
 
     let ag_pid = &created[0];
     let herdr_pid = &created[1];
@@ -575,13 +575,13 @@ fn host_preferences_persist_active_profile_and_execution_enabled() {
 fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
     let mut draft = Draft::default();
     let ids = install_agent_starter_profiles(&mut draft).unwrap();
-    assert_eq!(draft.config.profiles.len(), 8);
+    assert_eq!(draft.config.profiles.len(), 6);
     assert!(!draft
         .config
         .profiles
         .iter()
         .any(|p| p.name.contains("演示") || p.name.contains("示例")));
-    for name in ["Cindy", "Codex"] {
+    for name in ["Codex"] {
         let pid = draft
             .document
             .editable
@@ -690,7 +690,7 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
         edited.document.editable.graph.profiles[&pid].name,
         "My existing mapping"
     );
-    assert_eq!(edited.config.profiles.len(), 9);
+    assert_eq!(edited.config.profiles.len(), 7);
 }
 
 #[test]

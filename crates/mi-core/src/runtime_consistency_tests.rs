@@ -89,7 +89,6 @@ fn projector_reads_only_captured_facts_and_never_presents_or_normalizes() {
     })));
     let before = store.projection().clone();
     let generation = store.projection_generation();
-    let ownership_generation = store.native_ownership.generation();
     let panel_calls = panels.calls.load(Ordering::SeqCst);
     let status_calls = status.calls.load(Ordering::SeqCst);
     store.update_now = now + Duration::from_secs(10000);
@@ -101,11 +100,10 @@ fn projector_reads_only_captured_facts_and_never_presents_or_normalizes() {
     assert_eq!(panels.calls.load(Ordering::SeqCst), panel_calls);
     assert_eq!(status.calls.load(Ordering::SeqCst), status_calls);
     assert_eq!(store.projection_generation(), generation);
-    assert_eq!(store.native_ownership.generation(), ownership_generation);
-    let cindy = store
-        .find_canonical_profile_id(CanonicalAgent::Cindy)
+    let herdr = store
+        .find_canonical_profile_id(CanonicalAgent::Herdr)
         .unwrap();
-    store.browse_profile(&cindy).unwrap();
+    store.browse_profile(&herdr).unwrap();
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
@@ -113,7 +111,6 @@ fn projector_reads_only_captured_facts_and_never_presents_or_normalizes() {
     );
     assert_eq!(panels.calls.load(Ordering::SeqCst), panel_calls);
     assert_eq!(status.calls.load(Ordering::SeqCst), status_calls);
-    assert_eq!(store.native_ownership.generation(), ownership_generation);
 }
 
 #[test]

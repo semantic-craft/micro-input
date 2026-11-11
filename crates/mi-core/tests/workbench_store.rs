@@ -47,7 +47,7 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
 
     assert!(
         store.has_all_desktop_agent_presets(),
-        "initial isolated store must install all 6 canonical desktop agent presets"
+        "initial isolated store must install all 5 canonical desktop agent presets"
     );
 
     let expected_display_names = [
@@ -55,7 +55,6 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
         "Codex",
         "Deepseek Harness",
         "Herdr",
-        "Cindy",
         "其他软件",
     ];
     let actual_display_names: Vec<&str> = store
@@ -70,7 +69,6 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
         mi_model::preset::LOCAL_CODEX_PROFILE_NAME,
         "DeepSeek Coder (DSH)",
         "Herdr",
-        "Cindy",
         "其他软件",
     ];
     let actual_raw_names: Vec<&str> = store
@@ -91,13 +89,13 @@ fn canonical_sidebar_profiles_preserve_strict_order_and_idempotent_ready_status(
     assert_eq!(
         store.status_message(),
         "已就绪",
-        "prepare_desktop_profiles must be idempotent and never clobber ready status when all 6 presets exist"
+        "prepare_desktop_profiles must be idempotent and never clobber ready status when all 5 presets exist"
     );
     assert_eq!(store.projection().document_revision, rev_before);
 }
 
 #[test]
-fn restoring_cindy_keeps_a_saved_custom_profile_and_application_link() {
+fn retiring_cindy_keeps_a_saved_custom_profile_and_application_link() {
     use mi_model::storage::DocumentStore;
     use serde_json::json;
 
@@ -137,14 +135,6 @@ fn restoring_cindy_keeps_a_saved_custom_profile_and_application_link() {
     })).unwrap()).unwrap();
 
     let mut upgraded = WorkbenchStore::open_isolated(temp.path()).unwrap();
-    let builtin_id = upgraded
-        .find_canonical_profile_id(CanonicalAgent::Cindy)
-        .unwrap();
-    assert_ne!(builtin_id, custom_id);
-    assert!(upgraded
-        .sidebar_rows()
-        .iter()
-        .any(|row| row.profile_id == builtin_id && row.is_protected_oai));
     assert!(
         upgraded.document_store.draft.document.editable.graph.layers[&layer_id] == original_layer
     );
@@ -167,9 +157,9 @@ fn switching_across_all_canonical_profiles_stays_under_two_milliseconds_with_zer
         .iter()
         .map(|row| row.profile_id.clone())
         .collect();
-    assert_eq!(profile_ids.len(), 6);
+    assert_eq!(profile_ids.len(), 5);
 
-    let mut samples_us: Vec<u128> = Vec::with_capacity(42);
+    let mut samples_us: Vec<u128> = Vec::with_capacity(35);
     let mut completed_switches = 0usize;
     let mut error_count = 0usize;
 
@@ -211,12 +201,12 @@ fn switching_across_all_canonical_profiles_stays_under_two_milliseconds_with_zer
     let min_us = samples_us[0];
     let max_us = *samples_us.last().unwrap();
     println!(
-        "BENCHMARK_SWITCH_6_PROFILES rounds=7 switches={completed_switches} errors={error_count} median_us={median_us} range_us={min_us}..={max_us} banner_flashes={}",
+        "BENCHMARK_SWITCH_5_PROFILES rounds=7 switches={completed_switches} errors={error_count} median_us={median_us} range_us={min_us}..={max_us} banner_flashes={}",
         store.banner_flash_count()
     );
 
     assert_eq!(error_count, 0);
-    assert_eq!(completed_switches, 42);
+    assert_eq!(completed_switches, 35);
     assert_eq!(store.banner_flash_count(), 0);
 }
 
@@ -367,223 +357,6 @@ fn custom_profiles_filter_crud_undo_redo_and_preset_roundtrip_work_without_ffi()
         .apply_backup_command(BackupCommand::ImportPreset { text: exported })
         .unwrap();
     assert!(store.has_all_desktop_agent_presets());
-}
-
-#[test]
-fn live_ownership_socket_handshake_reconciles_ready_and_native_held_banners_on_profile_switch() {
-    use mi_core::WorkbenchStoreConfig;
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::net::UnixListener;
-
-    let temp = TempDir::new().unwrap();
-    let sock_path = std::path::PathBuf::from("/tmp").join(format!(
-        "mi-own-{}-{}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&sock_path);
-    let listener = UnixListener::bind(&sock_path).unwrap();
-    std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-    let server_thread = std::thread::spawn(move || {
-        let native_inst = "11111111-2222-3333-4444-555555555555";
-        for stream in listener.incoming().take(3) {
-            let mut stream = stream.unwrap();
-            let mut line = String::new();
-            BufReader::new(&stream).read_line(&mut line).unwrap();
-            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
-            let desired = req["desiredOwner"].as_str().unwrap_or("native");
-            let (state, reason, input_drained, ptt_drained) = if desired == "micro-input" {
-                ("unknown", "native_drain_unconfirmed", false, false)
-            } else {
-                ("native", "desired_native", false, false)
-            };
-            let reply = serde_json::json!({
-                "version": 1,
-                "requestId": req["requestId"],
-                "clientInstance": req["clientInstance"],
-                "generation": req["generation"],
-                "nativeInstance": native_inst,
-                "nativeGeneration": 1,
-                "state": state,
-                "reason": reason,
-                "inputDrained": input_drained,
-                "pttDrained": ptt_drained,
-                "lightingDrained": true,
-                "capabilities": ["fenced-release-v1"]
-            });
-            let mut bytes = serde_json::to_vec(&reply).unwrap();
-            bytes.push(b'\n');
-            stream.write_all(&bytes).unwrap();
-        }
-    });
-
-    let mut cfg = WorkbenchStoreConfig::isolated(temp.path());
-    cfg.isolated = false;
-    cfg.allow_unbridged_desktop = true;
-    cfg.ownership_socket_path = Some(sock_path.clone());
-
-    let mut store = WorkbenchStore::open(cfg).unwrap();
-    assert_eq!(
-        store.projection().header.banner,
-        OwnershipBannerState::Ready {
-            summary: "Cindy 已确认释放".to_string()
-        }
-    );
-
-    let codex_id = store
-        .find_canonical_profile_id(CanonicalAgent::Codex)
-        .unwrap();
-    store.select_and_activate_profile(&codex_id).unwrap();
-    assert_eq!(
-        store.projection().header.banner,
-        OwnershipBannerState::NativeHeld {
-            summary: "Cindy 原生持有，Micro Input 按键、听写与灯光暂停".to_string()
-        }
-    );
-
-    let ag_id = store
-        .find_canonical_profile_id(CanonicalAgent::Antigravity)
-        .unwrap();
-    store.select_and_activate_profile(&ag_id).unwrap();
-    assert_eq!(
-        store.projection().header.banner,
-        OwnershipBannerState::Ready {
-            summary: "Cindy 已确认释放".to_string()
-        }
-    );
-
-    server_thread.join().unwrap();
-    let _ = std::fs::remove_file(&sock_path);
-    let mut fence_os = sock_path.into_os_string();
-    fence_os.push(".fence");
-    let _ = std::fs::remove_file(std::path::PathBuf::from(fence_os));
-}
-
-#[test]
-fn live_ownership_slow_drain_defers_to_background_and_completes_on_poll() {
-    use mi_core::WorkbenchStoreConfig;
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::net::UnixListener;
-    use std::time::{Duration, Instant};
-
-    let temp = TempDir::new().unwrap();
-    let sock_path = std::path::PathBuf::from("/tmp").join(format!(
-        "mi-slow-{}-{}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&sock_path);
-    let listener = UnixListener::bind(&sock_path).unwrap();
-    std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-    let server_thread = std::thread::spawn(move || {
-        let native_inst = "11111111-2222-3333-4444-555555555555";
-        for (idx, stream) in listener.incoming().take(3).enumerate() {
-            let mut stream = stream.unwrap();
-            let mut line = String::new();
-            BufReader::new(&stream).read_line(&mut line).unwrap();
-            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
-            let desired = req["desiredOwner"].as_str().unwrap_or("native");
-            if idx == 2 && desired == "micro-input" {
-                std::thread::sleep(Duration::from_millis(120));
-            }
-            let (state, reason) = if desired == "micro-input" {
-                ("unknown", "native_drain_unconfirmed")
-            } else {
-                ("unknown", "native_state_unconfirmed")
-            };
-            let reply = serde_json::json!({
-                "version": 1,
-                "requestId": req["requestId"],
-                "clientInstance": req["clientInstance"],
-                "generation": req["generation"],
-                "nativeInstance": native_inst,
-                "nativeGeneration": 1,
-                "state": state,
-                "reason": reason,
-                "inputDrained": false,
-                "pttDrained": false,
-                "lightingDrained": desired == "micro-input",
-                "capabilities": ["fenced-release-v1"]
-            });
-            let mut bytes = serde_json::to_vec(&reply).unwrap();
-            bytes.push(b'\n');
-            stream.write_all(&bytes).unwrap();
-        }
-    });
-
-    let mut cfg = WorkbenchStoreConfig::isolated(temp.path());
-    cfg.isolated = false;
-    cfg.allow_unbridged_desktop = true;
-    cfg.ownership_socket_path = Some(sock_path.clone());
-
-    let mut store = WorkbenchStore::open(cfg).unwrap();
-    let codex_id = store
-        .find_canonical_profile_id(CanonicalAgent::Codex)
-        .unwrap();
-    store.select_and_activate_profile(&codex_id).unwrap();
-    assert_eq!(
-        store.projection().header.banner,
-        OwnershipBannerState::NativeHeld {
-            summary: "Cindy 原生持有，Micro Input 按键、听写与灯光暂停".to_string()
-        }
-    );
-
-    let ag_id = store
-        .find_canonical_profile_id(CanonicalAgent::Antigravity)
-        .unwrap();
-    let switch_start = Instant::now();
-    store.select_and_activate_profile(&ag_id).unwrap();
-    let switch_elapsed = switch_start.elapsed();
-    assert!(
-        switch_elapsed < Duration::from_millis(45),
-        "expected fast non-blocking switch (<45ms), got {switch_elapsed:?}"
-    );
-    assert_eq!(
-        store.projection().header.banner,
-        OwnershipBannerState::Ready {
-            summary: "Cindy 已确认释放".to_string()
-        }
-    );
-
-    // Wait for background stream reply and drain hardware events
-    let wait_start = Instant::now();
-    while !store.poll_hardware_events() && wait_start.elapsed() < Duration::from_millis(500) {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(
-        store.projection().header.banner,
-        OwnershipBannerState::Ready {
-            summary: "Cindy 已确认释放".to_string()
-        }
-    );
-
-    // Subsequent switches between micro-input profiles should not re-poll socket
-    let herdr_id = store
-        .find_canonical_profile_id(CanonicalAgent::Herdr)
-        .unwrap();
-    let switch2_start = Instant::now();
-    store.select_and_activate_profile(&herdr_id).unwrap();
-    assert!(
-        switch2_start.elapsed() < Duration::from_millis(5),
-        "steady host switch took {:?}",
-        switch2_start.elapsed()
-    );
-
-    server_thread.join().unwrap();
-    let _ = std::fs::remove_file(&sock_path);
-    let mut fence_os = sock_path.into_os_string();
-    fence_os.push(".fence");
-    let _ = std::fs::remove_file(std::path::PathBuf::from(fence_os));
 }
 
 #[test]
@@ -1351,18 +1124,12 @@ fn six_layer_defaults_and_edits_preserve_running_target_and_empty_slots() {
             "Codex",
             "Antigravity",
             "DeepSeek Coder (DSH)",
-            "Cindy · Micro Input",
+            "未分配",
             "未分配",
             "未分配"
         ]
     );
     assert_eq!(board.layers[0].owner, "Codex");
-    assert_eq!(board.layers[3].owner, "MicroInput");
-    assert!(board.layers[3]
-        .assignment_issue
-        .as_ref()
-        .unwrap()
-        .contains("尚未接管"));
     for layer in BoardLayer::ALL {
         store.preview_board_layer(layer).unwrap();
         assert_eq!(store.projection().canvas.touch_led_states, layer.leds());
@@ -1378,15 +1145,15 @@ fn six_layer_defaults_and_edits_preserve_running_target_and_empty_slots() {
         );
         assert_eq!(store.projection().sidebar.board_layers.observed_layer, None);
     }
-    let cindy = store
-        .find_canonical_profile_id(CanonicalAgent::Cindy)
+    let native = store
+        .find_canonical_profile_id(CanonicalAgent::Codex)
         .unwrap();
     store
-        .assign_board_layer(BoardLayer::ALL[4], Some(cindy))
+        .assign_board_layer(BoardLayer::ALL[4], Some(native))
         .unwrap();
     assert_eq!(
         store.projection().sidebar.board_layers.layers[4].owner,
-        "Cindy"
+        "Codex"
     );
     store.assign_board_layer(BoardLayer::ALL[4], None).unwrap();
     let before = std::fs::read(temp.path().join("workbench.preferences.json")).unwrap();
@@ -1430,19 +1197,10 @@ fn failed_board_edits_leave_projection_preferences_and_host_state_unchanged() {
 
 #[test]
 fn six_layer_preview_cannot_activate_an_unassigned_or_missing_host() {
-    use std::os::unix::{fs::PermissionsExt, net::UnixListener};
     let temp = TempDir::new().unwrap();
-    let socket = temp.path().join("ownership.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
-    listener.set_nonblocking(true).unwrap();
     let mut store = legacy_store(&temp);
     store.document_store.set_host_active_profile(None).unwrap();
     store.config.isolated = false;
-    store.native_ownership = mi_bridge::NativeOwnershipController::new(
-        Some(mi_bridge::UnixNativeOwnershipTransport::new(&socket)),
-        false,
-    );
     store.radial_state.set_enabled(true);
     for layer in [BoardLayer::ALL[0], BoardLayer::ALL[3], BoardLayer::ALL[5]] {
         store.preview_board_layer(layer).unwrap();
@@ -1475,10 +1233,6 @@ fn six_layer_preview_cannot_activate_an_unassigned_or_missing_host() {
         assert!(store
             .consume_physical_input_event(radial, Instant::now())
             .is_none());
-        assert_eq!(
-            listener.accept().unwrap_err().kind(),
-            std::io::ErrorKind::WouldBlock
-        );
         assert!(!store.ptt_controller.is_active);
         assert!(store.dispatched_receipts().is_empty());
     }
@@ -1491,7 +1245,6 @@ fn six_layer_preview_cannot_activate_an_unassigned_or_missing_host() {
         .unwrap();
     assert_eq!(store.selected_profile_id(), None);
     store.set_status_message("normal reconciliation positive control with an empty editor");
-    assert!(listener.accept().is_ok());
 }
 
 fn board_test_event(binding: &str, kind: mi_session::InputEventKind) -> mi_session::InputEvent {
@@ -1524,7 +1277,6 @@ fn desired_board_edits_leave_held_ptt_for_the_original_release() {
         Instant::now(),
     );
     assert!(store.ptt_controller.is_active);
-    let generation = store.native_ownership.generation();
     let receipts = store.dispatched_receipts().len();
     store.reset_board_layer_plan().unwrap();
     let native = store
@@ -1536,7 +1288,6 @@ fn desired_board_edits_leave_held_ptt_for_the_original_release() {
     store.preview_board_layer(BoardLayer::ALL[0]).unwrap();
     assert!(store.ptt_controller.is_active);
     assert_eq!(store.active_host_profile_id(), active);
-    assert_eq!(store.native_ownership.generation(), generation);
     assert_eq!(store.dispatched_receipts().len(), receipts);
     store.consume_physical_input_event(
         board_test_event("AG11", mi_session::InputEventKind::Released),
@@ -1549,7 +1300,7 @@ fn desired_board_edits_leave_held_ptt_for_the_original_release() {
 fn a_forged_host_route_does_not_grant_execution_to_native_profiles() {
     let temp = TempDir::new().unwrap();
     let mut store = legacy_store(&temp);
-    for agent in [CanonicalAgent::Codex, CanonicalAgent::Cindy] {
+    for agent in [CanonicalAgent::Codex] {
         let id = store.find_canonical_profile_id(agent).unwrap();
         let mut plan = store.document_store.board_layer_plan().unwrap().clone();
         plan.replace(
@@ -1572,14 +1323,12 @@ fn a_forged_host_route_does_not_grant_execution_to_native_profiles() {
             .as_ref()
             .unwrap()
             .contains("不一致"));
-        let generation = store.native_ownership.generation();
         assert!(store
             .consume_physical_input_event(
                 board_test_event("AG00", mi_session::InputEventKind::Pressed),
                 Instant::now()
             )
             .is_none());
-        assert_eq!(store.native_ownership.generation(), generation);
         assert!(!store.ptt_controller.is_active);
         assert!(store.dispatched_receipts().is_empty());
     }
@@ -1621,7 +1370,7 @@ fn opening_missing_board_references_preserves_them_and_all_unrelated_preferences
 }
 
 #[test]
-#[ignore = "requires live Creator Micro 2 (303A:8298), Karabiner 16.3.0, and Cindy ownership socket"]
+#[ignore = "requires live Creator Micro 2 (303A:8298), Karabiner 16.3.0"]
 fn live_six_layer_hardware_and_karabiner_acceptance() {
     use mi_core::WorkbenchStoreConfig;
     use mi_transport::HidTransport;
@@ -1690,22 +1439,8 @@ fn live_six_layer_hardware_and_karabiner_acceptance() {
         .dispatch_sidebar_action(SidebarAction::ResetBoardLayerPlan)
         .unwrap();
     store
-        .dispatch_sidebar_action(SidebarAction::ConfirmCindyNativePaused { confirmed: true })
+        .dispatch_sidebar_action(SidebarAction::ProvisionBoardLayers)
         .unwrap();
-    assert!(
-        store
-            .projection()
-            .sidebar
-            .board_layers
-            .cindy_native_paused_confirmed
-    );
-
-    if let Err(err) = store.dispatch_sidebar_action(SidebarAction::ProvisionBoardLayers) {
-        panic!(
-            "ProvisionBoardLayers err={err:?} ownership_state={:?}",
-            store.native_ownership.state()
-        );
-    }
     wait_for(
         &mut store,
         &|s| {
@@ -1918,12 +1653,9 @@ fn board_layer_preview_browses_assigned_profile_and_clears_empty_editor() {
         .unwrap();
     assert_eq!(
         store.projection().sidebar.selected_display_name.as_deref(),
-        Some("Cindy · Micro Input")
+        None
     );
-    assert_eq!(
-        store.projection().canvas.profile_display_name,
-        "Cindy · Micro Input"
-    );
+    assert_eq!(store.projection().canvas.profile_display_name, "");
     assert_eq!(store.active_host_profile_id(), active);
 
     store

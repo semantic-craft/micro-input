@@ -460,7 +460,7 @@ struct BoardLayersPanel: View {
                 Button("默认") { store.dispatch("sidebar", "ResetBoardLayerPlan") }
                     .buttonStyle(.borderless)
                     .font(UITheme.micro)
-                    .help("Codex 原生、Antigravity、DeepSeek Harness、Cindy 托管，5 / 6 层留空")
+                    .help("Codex 原生、Antigravity、DeepSeek Harness，4 / 5 / 6 层留空")
             }
             ForEach(board.layers) { row in
                 VStack(alignment: .leading, spacing: 3) {

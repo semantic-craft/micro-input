@@ -33,6 +33,4 @@
 
 - [径向菜单](radial-menu.md)：八向选择、冻结目标、一次确认与回中取消；合成输入和实体手感分开验收。
 
-- [Cindy 既有任务目录与导航确认](cindy-navigation.md)：受限工作区既有任务元数据桥、同名会话精确区分、账号/实例换代失效、`cindy://session/<sessionId>` 深链 `delivered` 与渲染端路由回读 `confirmed` 严格分离、不放宽 Local Agent API 隔离。
-
 - [Antigravity 官方桌面扩展与状态事件](antigravity-status.md)：安装版 2.29.0 只读契约核对、隔离测试工作区 Lifecycle Hooks 元数据事件归并、两会话隔离、去重、`Stop` `fullyIdle=false` 不报完成、断流标 `stale`、不读 `transcriptPath`。

@@ -548,7 +548,6 @@ mod macos {
             };
             let relevant_button = button
                 && ([
-                    crate::ax_dictation::DictationAdapter::Cindy,
                     crate::ax_dictation::DictationAdapter::Antigravity,
                     crate::ax_dictation::DictationAdapter::Dsh,
                 ]

@@ -325,10 +325,10 @@ mod tests {
     }
 
     #[test]
-    fn cheat_sheet_hud_displays_all_8_agent_presets_dial_joystick_and_redacts_custom_text() {
+    fn cheat_sheet_hud_displays_all_6_agent_presets_dial_joystick_and_redacts_custom_text() {
         let mut store = DocumentStore::default();
         let ids = crate::preset::install_agent_starter_profiles(&mut store.draft).unwrap();
-        assert_eq!(ids.len(), 8);
+        assert_eq!(ids.len(), 6);
 
         for pid in &ids {
             let sel = request(&store, json!({"kind":"select","profile_id":pid}));
@@ -348,7 +348,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("missing {b} in {profile_name}"))
             };
 
-            if matches!(profile_name.as_str(), "Cindy" | "Codex") {
+            if matches!(profile_name.as_str(), "Codex") {
                 assert_eq!(by_id("AG00")["available"], false);
                 assert_eq!(by_id("AG00")["label"], "不可用 / 未配置");
                 continue;
@@ -367,13 +367,7 @@ mod tests {
                 .unwrap()
                 .starts_with("打开 "));
 
-            if profile_name == crate::preset::MANAGED_CINDY_PROFILE_NAME {
-                assert_eq!(by_id("AG01")["available"], true);
-                assert_eq!(by_id("AG02")["available"], true);
-                assert_eq!(by_id("AG03")["available"], true);
-                assert_eq!(by_id("AG13")["available"], false);
-                assert_eq!(by_id("ENC_CLK")["available"], false);
-            } else if profile_name == "Herdr" {
+            if profile_name == "Herdr" {
                 assert_eq!(by_id("AG01")["label"], "选择 Space / Tab (command p)");
                 assert_eq!(by_id("ENC_CLK")["label"], "显示 / 隐藏侧栏 (command b)");
                 assert_eq!(by_id("AG15")["label"], "聚焦上方面板 (command+option Up)");

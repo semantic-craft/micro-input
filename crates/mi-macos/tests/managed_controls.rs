@@ -78,9 +78,6 @@ impl Provider {
             after_focus: None,
         })))
     }
-    fn cindy() -> Self {
-        Self::with_target("com.xd.cindy", "开始语音输入")
-    }
     fn dsh() -> Self {
         Self::with_target("com.deepseek.dsh", "开始听写")
     }
@@ -114,7 +111,7 @@ impl ManagedAxProvider for Provider {
             return Err(error.clone());
         }
         let mut window = state.window.clone();
-        if state.enforce_target_cache && bundle == "com.deepseek.dsh" {
+        if state.enforce_target_cache && bundle == "com.google.antigravity" {
             window.identity.bundle_id = bundle.into();
             window.identity.pid = 200;
             window.identity.window_id = 2;
@@ -160,10 +157,10 @@ impl ManagedAxProvider for Provider {
         match effect {
             PressEffect::Toggle | PressEffect::Replace => {
                 control.label = match control.label.as_str() {
-                    "开始语音输入" => "停止语音输入",
+                    "开始听写" => "停止听写",
                     "Start Voice mode" => "End Voice mode",
                     "End Voice mode" => "Start Voice mode",
-                    _ => "开始语音输入",
+                    _ => "开始听写",
                 }
                 .into();
                 if matches!(effect, PressEffect::Replace) {
@@ -232,7 +229,7 @@ impl ManagedAxProvider for Provider {
         let mut state = self.0.lock().unwrap();
         assert_eq!(*target, state.window.identity);
         assert!(!state.window.controls.iter().any(|control| [
-            "停止语音输入",
+            "停止听写",
             "停止并识别",
             "Stop and transcribe"
         ]
@@ -244,21 +241,21 @@ impl ManagedAxProvider for Provider {
 
 #[test]
 fn toggle_observes_mouse_changes_and_replacement_controls() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     let controls = provider.controls();
     assert_eq!(
-        controls.toggle_dictation("cindy").unwrap(),
+        controls.toggle_dictation("dsh-desktop").unwrap(),
         ObservedDictationState::Recording
     );
     // A user stopped recording externally; the next click must start again.
-    provider.0.lock().unwrap().window.controls[0].label = "开始语音输入".into();
+    provider.0.lock().unwrap().window.controls[0].label = "开始听写".into();
     provider.0.lock().unwrap().effect = PressEffect::Replace;
     assert_eq!(
-        controls.toggle_dictation("cindy").unwrap(),
+        controls.toggle_dictation("dsh-desktop").unwrap(),
         ObservedDictationState::Recording
     );
     assert_eq!(
-        controls.toggle_dictation("cindy").unwrap(),
+        controls.toggle_dictation("dsh-desktop").unwrap(),
         ObservedDictationState::Idle
     );
     assert_eq!(
@@ -274,7 +271,7 @@ fn toggle_observes_mouse_changes_and_replacement_controls() {
 #[test]
 fn missing_disabled_or_ambiguous_dictation_controls_never_press() {
     for case in 0..5 {
-        let provider = Provider::cindy();
+        let provider = Provider::dsh();
         {
             let mut state = provider.0.lock().unwrap();
             match case {
@@ -291,14 +288,14 @@ fn missing_disabled_or_ambiguous_dictation_controls_never_press() {
                 _ => {
                     let mut extra = state.window.controls[0].clone();
                     extra.id = 8;
-                    extra.label = "停止语音输入".into();
+                    extra.label = "停止听写".into();
                     state.window.controls.push(extra);
                 }
             }
         }
         assert!(provider
             .controls()
-            .toggle_dictation("cindy")
+            .toggle_dictation("dsh-desktop")
             .unwrap_err()
             .starts_with("blocked:"));
         assert!(!provider.events().iter().any(|e| e.starts_with("press:")));
@@ -308,7 +305,7 @@ fn missing_disabled_or_ambiguous_dictation_controls_never_press() {
 #[test]
 fn target_pid_or_bundle_mismatch_never_press() {
     for at_capture in [true, false] {
-        let provider = Provider::cindy();
+        let provider = Provider::dsh();
         if at_capture {
             provider.0.lock().unwrap().window.identity.bundle_id = "com.openai.codex".into();
         } else {
@@ -316,7 +313,7 @@ fn target_pid_or_bundle_mismatch_never_press() {
         }
         assert!(provider
             .controls()
-            .toggle_dictation("cindy")
+            .toggle_dictation("dsh-desktop")
             .unwrap_err()
             .starts_with("blocked:"));
         assert!(!provider.events().iter().any(|e| e.starts_with("press:")));
@@ -330,10 +327,13 @@ fn missing_or_ambiguous_windows_propagate_without_actions() {
         "blocked:ambiguous_or_missing_target_window",
         "blocked:accessibility_untrusted",
     ] {
-        let provider = Provider::cindy();
+        let provider = Provider::dsh();
         provider.0.lock().unwrap().capture_error = Some(error.into());
         assert_eq!(
-            provider.controls().toggle_dictation("cindy").unwrap_err(),
+            provider
+                .controls()
+                .toggle_dictation("dsh-desktop")
+                .unwrap_err(),
             error
         );
         assert_eq!(provider.events().len(), 1);
@@ -343,15 +343,15 @@ fn missing_or_ambiguous_windows_propagate_without_actions() {
 #[test]
 fn unconfirmed_press_is_not_retried_and_never_submits() {
     for effect in [PressEffect::NoChange, PressEffect::LoseTarget] {
-        let provider = Provider::cindy();
+        let provider = Provider::dsh();
         {
             let mut state = provider.0.lock().unwrap();
             state.effect = effect;
-            state.window.controls[0].label = "停止语音输入".into();
+            state.window.controls[0].label = "停止听写".into();
         }
         assert!(provider
             .controls()
-            .submit("cindy", None)
+            .submit("dsh-desktop", None)
             .unwrap_err()
             .starts_with("unconfirmed:"));
         let events = provider.events();
@@ -364,17 +364,17 @@ fn unconfirmed_press_is_not_retried_and_never_submits() {
 
 #[test]
 fn submit_stops_then_focuses_and_sends_in_one_captured_window() {
-    let provider = Provider::cindy();
-    provider.0.lock().unwrap().window.controls[0].label = "停止语音输入".into();
+    let provider = Provider::dsh();
+    provider.0.lock().unwrap().window.controls[0].label = "停止听写".into();
     provider
         .controls()
-        .submit("cindy", Some("test prompt"))
+        .submit("dsh-desktop", Some("test prompt"))
         .unwrap();
     assert_eq!(
         provider.events(),
         [
-            "capture:com.xd.cindy",
-            "press:停止语音输入",
+            "capture:com.deepseek.dsh",
+            "press:停止听写",
             "focus:3",
             "insert:test prompt",
             "submit"
@@ -385,7 +385,7 @@ fn submit_stops_then_focuses_and_sends_in_one_captured_window() {
 #[test]
 fn missing_or_ambiguous_or_unconfirmed_input_cannot_submit_or_send_shortcuts() {
     for case in 0..3 {
-        let provider = Provider::cindy();
+        let provider = Provider::dsh();
         {
             let mut state = provider.0.lock().unwrap();
             match case {
@@ -400,10 +400,10 @@ fn missing_or_ambiguous_or_unconfirmed_input_cannot_submit_or_send_shortcuts() {
                 _ => state.focus_confirmed = false,
             }
         }
-        assert!(provider.controls().submit("cindy", None).is_err());
+        assert!(provider.controls().submit("dsh-desktop", None).is_err());
         assert!(provider
             .controls()
-            .shortcut("cindy", 0x2d, &["command".into()])
+            .shortcut("dsh-desktop", 0x2d, &["command".into()])
             .is_err());
         assert!(!provider
             .events()
@@ -414,7 +414,7 @@ fn missing_or_ambiguous_or_unconfirmed_input_cannot_submit_or_send_shortcuts() {
 
 #[test]
 fn focused_input_is_selected_when_another_pane_has_an_input() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     {
         let mut state = provider.0.lock().unwrap();
         let mut second = state.window.controls[1].clone();
@@ -422,8 +422,8 @@ fn focused_input_is_selected_when_another_pane_has_an_input() {
         second.focused = true;
         state.window.controls.push(second);
     }
-    provider.controls().focus_input("cindy").unwrap();
-    assert_eq!(provider.events(), ["capture:com.xd.cindy", "focus:8"]);
+    provider.controls().focus_input("dsh-desktop").unwrap();
+    assert_eq!(provider.events(), ["capture:com.deepseek.dsh", "focus:8"]);
 }
 
 #[test]
@@ -495,13 +495,13 @@ fn unconfirmed_focus_never_inserts_text() {
 
 #[test]
 fn recording_cannot_migrate_to_another_pane_in_the_same_window() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     provider.0.lock().unwrap().window.identity.scope_id = 10;
     let controls = provider.controls();
-    controls.start_dictation("cindy").unwrap();
+    controls.start_dictation("dsh-desktop").unwrap();
     provider.0.lock().unwrap().window.identity.scope_id = 11;
     assert_eq!(
-        controls.stop_dictation("cindy").unwrap_err(),
+        controls.stop_dictation("dsh-desktop").unwrap_err(),
         "blocked:uncleared_dictation_target_changed"
     );
     assert!(controls
@@ -520,9 +520,9 @@ fn recording_cannot_migrate_to_another_pane_in_the_same_window() {
 
 #[test]
 fn changed_window_title_leaves_owned_recording_unconfirmed_without_another_press() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     let controls = provider.controls();
-    controls.start_dictation("cindy").unwrap();
+    controls.start_dictation("dsh-desktop").unwrap();
     provider.0.lock().unwrap().window.identity.title = "Different conversation".into();
     assert!(controls
         .stop_owned_dictations()
@@ -541,7 +541,7 @@ fn changed_window_title_leaves_owned_recording_unconfirmed_without_another_press
 #[test]
 fn live_voice_uses_the_captured_pane_and_never_retries_after_scope_loss() {
     for lost in [false, true] {
-        let provider = Provider::cindy();
+        let provider = Provider::dsh();
         {
             let mut state = provider.0.lock().unwrap();
             state.window.identity.bundle_id = "com.google.antigravity".into();
@@ -569,7 +569,7 @@ fn live_voice_uses_the_captured_pane_and_never_retries_after_scope_loss() {
 
 #[test]
 fn ambiguous_live_voice_buttons_never_press_either_pane() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     {
         let mut state = provider.0.lock().unwrap();
         state.window.identity.bundle_id = "com.google.antigravity".into();
@@ -590,11 +590,11 @@ fn ambiguous_live_voice_buttons_never_press_either_pane() {
 
 #[test]
 fn bottom_scroll_and_shortcut_remain_on_captured_target() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     provider
         .controls()
         .scroll(&DialScrollRequest {
-            target_bundle_id: "com.xd.cindy".into(),
+            target_bundle_id: "com.deepseek.dsh".into(),
             delta_lines: 0,
             jump_to_bottom: true,
             sidebar: false,
@@ -602,15 +602,15 @@ fn bottom_scroll_and_shortcut_remain_on_captured_target() {
         .unwrap();
     provider
         .controls()
-        .shortcut("cindy", 0x2d, &["command".into()])
+        .shortcut("dsh-desktop", 0x2d, &["command".into()])
         .unwrap();
     assert_eq!(
         provider.events(),
         [
-            "capture:com.xd.cindy",
+            "capture:com.deepseek.dsh",
             "scroll",
             "focus:3",
-            "capture:com.xd.cindy",
+            "capture:com.deepseek.dsh",
             "focus:3",
             "targeted_shortcut"
         ]
@@ -619,7 +619,7 @@ fn bottom_scroll_and_shortcut_remain_on_captured_target() {
 
 #[test]
 fn rapid_clicks_serialize_observation_press_and_readback() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     let controls = Arc::new(provider.controls());
     let barrier = Arc::new(Barrier::new(3));
     let threads: Vec<_> = (0..2)
@@ -628,7 +628,7 @@ fn rapid_clicks_serialize_observation_press_and_readback() {
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                controls.toggle_dictation("cindy").unwrap()
+                controls.toggle_dictation("dsh-desktop").unwrap()
             })
         })
         .collect();
@@ -642,10 +642,10 @@ fn rapid_clicks_serialize_observation_press_and_readback() {
     assert_eq!(
         provider.events(),
         [
-            "capture:com.xd.cindy",
-            "press:开始语音输入",
-            "capture:com.xd.cindy",
-            "press:停止语音输入"
+            "capture:com.deepseek.dsh",
+            "press:开始听写",
+            "capture:com.deepseek.dsh",
+            "press:停止听写"
         ]
     );
 }
@@ -710,13 +710,13 @@ impl HostOsDriver for Driver {
 
 #[test]
 fn live_executor_reports_confirmed_toggle_and_explicit_failure() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     let executor = LiveHostActionExecutor::new(Driver {
         controls: provider.controls(),
         trusted: true,
     });
     let action = ResolvedHostAction::AgentCommand {
-        adapter: "cindy".into(),
+        adapter: "dsh-desktop".into(),
         command: "toggle-dictation".into(),
     };
     let receipt = executor.execute("test", "button", &action);
@@ -735,8 +735,8 @@ fn live_executor_reports_confirmed_toggle_and_explicit_failure() {
 
 #[test]
 fn live_executor_blocks_unknown_native_and_untrusted_adapters_before_actions() {
-    for (adapter, trusted) in [("unknown", true), ("codex", true), ("cindy", false)] {
-        let provider = Provider::cindy();
+    for (adapter, trusted) in [("unknown", true), ("codex", true), ("dsh-desktop", false)] {
+        let provider = Provider::dsh();
         let executor = LiveHostActionExecutor::new(Driver {
             controls: provider.controls(),
             trusted,
@@ -756,7 +756,7 @@ fn live_executor_blocks_unknown_native_and_untrusted_adapters_before_actions() {
 
 #[test]
 fn live_executor_uses_targeted_paths_for_submit_and_ordinary_shortcuts() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     let executor = LiveHostActionExecutor::new(Driver {
         controls: provider.controls(),
         trusted: true,
@@ -766,7 +766,7 @@ fn live_executor_uses_targeted_paths_for_submit_and_ordinary_shortcuts() {
             "test",
             "button",
             &ResolvedHostAction::AgentCommand {
-                adapter: "cindy".into(),
+                adapter: "dsh-desktop".into(),
                 command: command.into(),
             },
         );
@@ -787,9 +787,8 @@ fn shortcut_and_paste_action_types_never_use_global_input_for_managed_targets() 
     for (bundle, adapter) in [
         ("com.google.antigravity", "antigravity"),
         ("com.deepseek.dsh", "dsh-desktop"),
-        ("com.xd.cindy", "cindy"),
     ] {
-        let provider = Provider::cindy();
+        let provider = Provider::dsh();
         provider.0.lock().unwrap().window.identity.bundle_id = bundle.into();
         let executor = LiveHostActionExecutor::new(Driver {
             controls: provider.controls(),
@@ -843,14 +842,14 @@ fn shortcut_and_paste_action_types_never_use_global_input_for_managed_targets() 
 
 #[test]
 fn conflicting_paste_target_and_adapter_do_not_touch_either_app() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     let executor = LiveHostActionExecutor::new(Driver {
         controls: provider.controls(),
         trusted: true,
     });
     for (target, adapter) in [
-        ("com.google.antigravity", "cindy"),
-        ("com.apple.TextEdit", "cindy"),
+        ("com.google.antigravity", "dsh-desktop"),
+        ("com.apple.TextEdit", "dsh-desktop"),
     ] {
         let receipt = executor.execute(
             "test",
@@ -871,15 +870,15 @@ fn conflicting_paste_target_and_adapter_do_not_touch_either_app() {
 
 #[test]
 fn absent_voice_capability_does_not_block_submit_but_uncleared_recording_does() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     let controls = provider.controls();
     let voice = provider.0.lock().unwrap().window.controls.remove(0);
-    controls.submit("cindy", None).unwrap();
+    controls.submit("dsh-desktop", None).unwrap();
     provider.0.lock().unwrap().window.controls.insert(0, voice);
-    controls.toggle_dictation("cindy").unwrap();
+    controls.toggle_dictation("dsh-desktop").unwrap();
     provider.0.lock().unwrap().window.controls.remove(0);
     assert!(controls
-        .submit("cindy", None)
+        .submit("dsh-desktop", None)
         .unwrap_err()
         .starts_with("blocked:"));
     assert_eq!(
@@ -894,16 +893,16 @@ fn absent_voice_capability_does_not_block_submit_but_uncleared_recording_does() 
 
 #[test]
 fn an_uncleared_recording_cannot_be_stopped_or_submitted_in_a_replacement_window() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     let controls = provider.controls();
-    controls.toggle_dictation("cindy").unwrap();
+    controls.toggle_dictation("dsh-desktop").unwrap();
     provider.0.lock().unwrap().window.identity.window_id = 20;
     assert_eq!(
-        controls.submit("cindy", None).unwrap_err(),
+        controls.submit("dsh-desktop", None).unwrap_err(),
         "blocked:uncleared_dictation_target_changed"
     );
     assert_eq!(
-        controls.toggle_dictation("cindy").unwrap_err(),
+        controls.toggle_dictation("dsh-desktop").unwrap_err(),
         "blocked:uncleared_dictation_target_changed"
     );
     assert_eq!(
@@ -919,19 +918,19 @@ fn an_uncleared_recording_cannot_be_stopped_or_submitted_in_a_replacement_window
 #[test]
 fn restarted_app_recovers_only_after_the_previous_process_is_confirmed_exited() {
     for effect in [PressEffect::Toggle, PressEffect::NoChange] {
-        let provider = Provider::cindy();
+        let provider = Provider::dsh();
         let controls = provider.controls();
         provider.0.lock().unwrap().effect = effect;
-        let _ = controls.toggle_dictation("cindy");
+        let _ = controls.toggle_dictation("dsh-desktop");
         {
             let mut state = provider.0.lock().unwrap();
             state.window.identity.pid = 200;
             state.window.identity.window_id = 2;
-            state.window.controls[0].label = "开始语音输入".into();
+            state.window.controls[0].label = "开始听写".into();
             state.effect = PressEffect::Toggle;
         }
         assert_eq!(
-            controls.toggle_dictation("cindy").unwrap_err(),
+            controls.toggle_dictation("dsh-desktop").unwrap_err(),
             "blocked:uncleared_dictation_target_changed"
         );
         assert_eq!(
@@ -944,11 +943,11 @@ fn restarted_app_recovers_only_after_the_previous_process_is_confirmed_exited() 
         );
         provider.0.lock().unwrap().exited_pids.push(100);
         assert_eq!(
-            controls.toggle_dictation("cindy").unwrap(),
+            controls.toggle_dictation("dsh-desktop").unwrap(),
             ObservedDictationState::Recording
         );
         assert_eq!(
-            controls.toggle_dictation("cindy").unwrap(),
+            controls.toggle_dictation("dsh-desktop").unwrap(),
             ObservedDictationState::Idle
         );
         assert_eq!(
@@ -964,18 +963,18 @@ fn restarted_app_recovers_only_after_the_previous_process_is_confirmed_exited() 
 
 #[test]
 fn stopping_after_a_confirmed_process_exit_does_not_press_the_new_idle_window() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     let controls = provider.controls();
-    controls.toggle_dictation("cindy").unwrap();
+    controls.toggle_dictation("dsh-desktop").unwrap();
     {
         let mut state = provider.0.lock().unwrap();
         state.window.identity.pid = 200;
         state.window.identity.window_id = 2;
-        state.window.controls[0].label = "开始语音输入".into();
+        state.window.controls[0].label = "开始听写".into();
         state.exited_pids.push(100);
     }
-    assert!(!controls.stop_dictation("cindy").unwrap());
-    controls.submit("cindy", None).unwrap();
+    assert!(!controls.stop_dictation("dsh-desktop").unwrap());
+    controls.submit("dsh-desktop", None).unwrap();
     assert_eq!(
         provider
             .events()
@@ -1020,10 +1019,7 @@ fn manual_managed_ax_control() {
     use mi_macos::MacOsSystemDriver;
     assert_eq!(std::env::var("MI_LIVE_AX_VERIFY").as_deref(), Ok("1"));
     let adapter = std::env::var("MI_LIVE_AX_ADAPTER").expect("MI_LIVE_AX_ADAPTER is required");
-    assert!(matches!(
-        adapter.as_str(),
-        "cindy" | "antigravity" | "dsh-desktop"
-    ));
+    assert!(matches!(adapter.as_str(), "antigravity" | "dsh-desktop"));
     let action = std::env::var("MI_LIVE_AX_ACTION").unwrap_or_else(|_| "inspect".into());
     let driver = MacOsSystemDriver::default();
     match action.as_str() {
@@ -1074,9 +1070,9 @@ fn manual_managed_ax_control() {
 
 #[test]
 fn owned_dictation_cleanup_reads_the_original_target_without_capturing_frontmost() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     let controls = provider.controls();
-    controls.start_dictation("cindy").unwrap();
+    controls.start_dictation("dsh-desktop").unwrap();
     provider.0.lock().unwrap().capture_error = Some("frontmost changed".into());
     controls.stop_owned_dictations().unwrap();
     controls.stop_owned_dictations().unwrap();
@@ -1098,15 +1094,15 @@ fn owned_dictation_cleanup_reads_the_original_target_without_capturing_frontmost
     );
     assert_eq!(
         provider.0.lock().unwrap().window.controls[0].label,
-        "开始语音输入"
+        "开始听写"
     );
 }
 
 #[test]
 fn owned_dictation_cleanup_keeps_failed_target_and_refuses_replacement() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     let controls = provider.controls();
-    controls.start_dictation("cindy").unwrap();
+    controls.start_dictation("dsh-desktop").unwrap();
     provider.0.lock().unwrap().read_pid = Some(999);
     assert!(controls.stop_owned_dictations().is_err());
     assert_eq!(
@@ -1127,17 +1123,17 @@ fn owned_dictation_cleanup_keeps_failed_target_and_refuses_replacement() {
     controls.stop_owned_dictations().unwrap();
     assert_eq!(
         provider.0.lock().unwrap().window.controls[0].label,
-        "开始语音输入"
+        "开始听写"
     );
 }
 
 #[test]
 fn rejected_owned_start_never_claims_user_recording_or_unsupported_adapter() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     let controls = provider.controls();
-    provider.0.lock().unwrap().window.controls[0].label = "停止语音输入".into();
+    provider.0.lock().unwrap().window.controls[0].label = "停止听写".into();
     assert!(controls
-        .start_dictation("cindy")
+        .start_dictation("dsh-desktop")
         .unwrap_err()
         .starts_with("blocked:"));
     assert!(controls
@@ -1153,42 +1149,42 @@ fn rejected_owned_start_never_claims_user_recording_or_unsupported_adapter() {
 
 #[test]
 fn uncertain_start_keeps_original_target_until_release_and_zero_press_failure_does_not() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     let controls = provider.controls();
     provider.0.lock().unwrap().read_pid = Some(999);
     assert!(controls
-        .start_dictation("cindy")
+        .start_dictation("dsh-desktop")
         .unwrap_err()
         .starts_with("blocked:"));
     provider.0.lock().unwrap().read_pid = None;
-    provider.0.lock().unwrap().window.controls[0].label = "停止语音输入".into();
+    provider.0.lock().unwrap().window.controls[0].label = "停止听写".into();
     controls.stop_owned_dictations().unwrap();
     assert!(!provider
         .events()
         .iter()
         .any(|event| event.starts_with("press:")));
-    provider.0.lock().unwrap().window.controls[0].label = "开始语音输入".into();
+    provider.0.lock().unwrap().window.controls[0].label = "开始听写".into();
     provider.0.lock().unwrap().effect = PressEffect::NoChange;
     assert!(controls
-        .start_dictation("cindy")
+        .start_dictation("dsh-desktop")
         .unwrap_err()
         .starts_with("unconfirmed:"));
-    provider.0.lock().unwrap().window.controls[0].label = "停止语音输入".into();
+    provider.0.lock().unwrap().window.controls[0].label = "停止听写".into();
     provider.0.lock().unwrap().effect = PressEffect::Toggle;
     controls.stop_owned_dictations().unwrap();
     assert_eq!(
         provider.0.lock().unwrap().window.controls[0].label,
-        "开始语音输入"
+        "开始听写"
     );
 }
 
 #[test]
 fn owned_dictation_survives_another_apps_capture_and_releases_its_native_target() {
-    let provider = Provider::cindy();
+    let provider = Provider::dsh();
     provider.0.lock().unwrap().enforce_target_cache = true;
     let controls = provider.controls();
-    controls.start_dictation("cindy").unwrap();
-    controls.inspect("dsh").unwrap();
+    controls.start_dictation("dsh-desktop").unwrap();
+    controls.inspect("antigravity").unwrap();
     assert_eq!(
         provider
             .0
@@ -1203,7 +1199,7 @@ fn owned_dictation_survives_another_apps_capture_and_releases_its_native_target(
     controls.stop_owned_dictations().unwrap();
     assert_eq!(
         provider.0.lock().unwrap().window.controls[0].label,
-        "开始语音输入"
+        "开始听写"
     );
     assert!(provider.0.lock().unwrap().retained_targets.is_empty());
     assert_eq!(

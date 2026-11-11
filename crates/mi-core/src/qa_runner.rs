@@ -1,4 +1,3 @@
-use mi_macos::SimulatedHostActionExecutor;
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -7,9 +6,7 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyntheticScenario9 {
     HostExecution,
-    NativeOwnership,
     DshNavigation,
-    CindyNavigation,
     AntigravityStatus,
     ConfigWrite,
     LightingControl,
@@ -17,11 +14,9 @@ pub enum SyntheticScenario9 {
 }
 
 impl SyntheticScenario9 {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 6] = [
         Self::HostExecution,
-        Self::NativeOwnership,
         Self::DshNavigation,
-        Self::CindyNavigation,
         Self::AntigravityStatus,
         Self::ConfigWrite,
         Self::LightingControl,
@@ -31,9 +26,7 @@ impl SyntheticScenario9 {
     pub fn parse(raw: &str) -> Result<Self, String> {
         match raw.trim() {
             "host-execution" => Ok(Self::HostExecution),
-            "native-ownership" => Ok(Self::NativeOwnership),
             "dsh-navigation" => Ok(Self::DshNavigation),
-            "cindy-navigation" => Ok(Self::CindyNavigation),
             "antigravity-status" => Ok(Self::AntigravityStatus),
             "config-write" => Ok(Self::ConfigWrite),
             "lighting-control" => Ok(Self::LightingControl),
@@ -45,9 +38,7 @@ impl SyntheticScenario9 {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::HostExecution => "host-execution",
-            Self::NativeOwnership => "native-ownership",
             Self::DshNavigation => "dsh-navigation",
-            Self::CindyNavigation => "cindy-navigation",
             Self::AntigravityStatus => "antigravity-status",
             Self::ConfigWrite => "config-write",
             Self::LightingControl => "lighting-control",
@@ -167,54 +158,12 @@ pub fn run_synthetic_scenario(
             }
             Ok(())
         }
-        SyntheticScenario9::NativeOwnership => {
-            let audit_path = env.resolved_audit_log_path()?;
-            let peer_socket = non_empty_path(env::var("MI_OWNERSHIP_SOCKET").ok().as_deref());
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| e.to_string())?;
-            let report = rt.block_on(mi_bridge::run_native_ownership_scenario(
-                peer_socket.as_deref(),
-                Some(&audit_path),
-            ))?;
-            if report.status != "PASS" {
-                return Err(format!(
-                    "native-ownership scenario returned status {}",
-                    report.status
-                ));
-            }
-            let _ = fs::remove_file(&audit_path);
-            let simulator = SimulatedHostActionExecutor::new();
-            for receipt in &report.receipts {
-                simulator
-                    .execute_and_record(
-                        &receipt.profile_id,
-                        &receipt.binding_id,
-                        &receipt.action,
-                        &audit_path,
-                    )
-                    .map_err(|e| e.to_string())?;
-            }
-            Ok(())
-        }
         SyntheticScenario9::DshNavigation => {
             let audit_path = env.resolved_audit_log_path()?;
             let report = mi_bridge::run_dsh_navigation_scenario(Some(&audit_path))?;
             if report.status != "PASS" {
                 return Err(format!(
                     "dsh-navigation scenario returned status {}",
-                    report.status
-                ));
-            }
-            Ok(())
-        }
-        SyntheticScenario9::CindyNavigation => {
-            let audit_path = env.resolved_audit_log_path()?;
-            let report = mi_bridge::run_cindy_navigation_scenario(Some(&audit_path))?;
-            if report.status != "PASS" {
-                return Err(format!(
-                    "cindy-navigation scenario returned status {}",
                     report.status
                 ));
             }

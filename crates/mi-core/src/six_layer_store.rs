@@ -7,26 +7,6 @@ impl WorkbenchStore {
         self.projection_inputs().compiled_six_layer_plan()
     }
 
-    pub(super) fn confirm_cindy_native_paused(
-        &mut self,
-        confirmed: bool,
-    ) -> Result<(), WorkbenchError> {
-        self.require_awake()?;
-        if self.six_layer_job.is_some() {
-            return Err(WorkbenchError::Routing("六层操作正在进行".into()));
-        }
-        let mut next = self.six_layer_state.clone();
-        next.cindy_native_paused_confirmed = confirmed;
-        six_layer_runtime::save(
-            &self.config.document_dir.join("six-layer-runtime.json"),
-            &next,
-        )
-        .map_err(WorkbenchError::Storage)?;
-        self.six_layer_state = next;
-        self.commit_local_update();
-        Ok(())
-    }
-
     fn suspend_for_six_layer_operation(&mut self) -> Result<(), WorkbenchError> {
         if let Some(running) = self.six_layer_running.take() {
             if let Err(error) = running.shutdown(&self.tokio_runtime) {
@@ -75,12 +55,16 @@ impl WorkbenchStore {
             .six_layer_state
             .installation
             .as_ref()
-            .is_some_and(|installation| installation.status != InstallationStatus::Applied)
+            .is_some_and(|installation| {
+                installation.status != InstallationStatus::Applied
+                    || installation.plan.validate_current().is_err()
+            })
         {
             return Err(WorkbenchError::Routing(
                 "六层恢复记录尚未处理，请先恢复原设备配置".into(),
             ));
         }
+        plan.validate_current().map_err(WorkbenchError::Routing)?;
         self.suspend_for_six_layer_operation()?;
         let dir = self.config.document_dir.clone();
         let saved = self.six_layer_state.clone();
@@ -291,11 +275,9 @@ mod tests {
     }
 
     #[test]
-    fn six_layer_ready_and_user_pause_are_independent_of_native_ownership() {
+    fn six_layer_banner_tracks_input_connection_and_user_pause_preserves_receiver() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
-        store.native_ownership = NativeOwnershipController::new(None, false);
-        assert!(!store.native_ownership.allows_execution());
         let session = mock_session(&store.tokio_runtime);
         let mut running =
             six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
@@ -304,15 +286,19 @@ mod tests {
         running.receiver.arm().unwrap();
         running.armed = true;
         store.tokio_runtime.block_on(session.shutdown());
+        assert!(session.is_disconnected());
         store.connected_candidate = Some(running.candidate.clone());
         store.six_layer_state.installation = Some(running.installation.clone());
         store.six_layer_running = Some(running);
         store.set_host_execution_enabled(true).unwrap();
         store.poll_six_layer_runtime();
         assert!(store.projection.sidebar.board_layers.runtime_ready);
-        assert!(!format!("{:?}", store.projection.header).contains("原生所有权未知"));
-        store.confirm_cindy_native_paused(false).unwrap();
-        assert!(store.projection.sidebar.board_layers.runtime_ready);
+        assert_eq!(
+            store.projection.header.banner,
+            OwnershipBannerState::Ready {
+                summary: "六层标准键输入已连接".into(),
+            }
+        );
         store.set_host_execution_enabled(false).unwrap();
         store.poll_six_layer_runtime();
         assert!(!store.projection.sidebar.board_layers.runtime_ready);
@@ -328,6 +314,23 @@ mod tests {
             .receiver
             .failure()
             .is_none());
+        assert!(matches!(
+            store.projection.header.banner,
+            OwnershipBannerState::Ready { .. }
+        ));
+        store
+            .six_layer_running
+            .as_ref()
+            .unwrap()
+            .receiver
+            .invalidate("USB removed");
+        store.commit_runtime_update();
+        assert_eq!(
+            store.projection.header.banner,
+            OwnershipBannerState::Caution {
+                reason: "USB removed".into(),
+            }
+        );
         store
             .six_layer_running
             .take()
@@ -418,5 +421,56 @@ mod tests {
         assert!(link.writes.lock().unwrap().is_empty());
         store.six_layer_running = None;
         store.tokio_runtime.block_on(session.shutdown());
+    }
+    #[test]
+    fn retired_installation_remains_loadable_recoverable_and_never_starts() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let session = mock_session(&store.tokio_runtime);
+        let running =
+            six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        let mut record = serde_json::json!({
+            "version": 1,
+            "cindy_native_paused_confirmed": true,
+            "installation": running.installation
+        });
+        let mut old_host = record["installation"]["plan"]["hosts"][1].clone();
+        old_host["adapter"] = serde_json::json!("cindy");
+        old_host["profile_id"] = serde_json::json!("saved-cindy");
+        record["installation"]["plan"]["hosts"]
+            .as_array_mut()
+            .unwrap()
+            .push(old_host);
+        record["installation"]["plan"]["desired"]["layers"][3] =
+            serde_json::json!({"kind":"HostProfile","profile_id":"saved-cindy"});
+        let original = serde_json::to_vec_pretty(&record).unwrap();
+        let path = directory.path().join("six-layer-runtime.json");
+        fs::write(&path, &original).unwrap();
+        drop(running);
+        store.tokio_runtime.block_on(session.shutdown());
+        drop(store);
+        let mut reopened = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        assert!(reopened.projection.sidebar.board_layers.restore_available);
+        assert!(!reopened.projection.sidebar.board_layers.runtime_ready);
+        assert!(reopened.six_layer_running.is_none());
+        let plan = reopened
+            .six_layer_state
+            .installation
+            .as_ref()
+            .unwrap()
+            .plan
+            .clone();
+        assert_eq!(plan.hosts[2].adapter, "cindy");
+        assert!(reopened.start_six_layer_apply(Some(plan)).is_err());
+        let result = reopened.tokio_runtime.block_on(six_layer_runtime::resume(
+            directory.path(),
+            reopened.six_layer_state.clone(),
+        ));
+        assert!(matches!(result, Err(error) if error.contains("旧六层安装已暂停")));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let mut invalid = record;
+        invalid["unrecognized"] = serde_json::json!(true);
+        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(six_layer_runtime::load(&path).is_err());
     }
 }
