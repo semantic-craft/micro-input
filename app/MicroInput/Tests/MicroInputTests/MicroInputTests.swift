@@ -323,8 +323,6 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(store.inspector.editableInspector?.actionSearchQuery, "保存文件")
         let firstAction = try XCTUnwrap(store.inspector.editableInspector?.filteredActions.first)
 
-        // Simulate a physical key press on AG00 while inspector search is active:
-        // must not hijack selectedSurface / selectedLogicalSlot or wipe actionSearchQuery.
         store.dispatch("device", [
             "SimulateKeyPress": ["binding_id": "AG00"]
         ])
@@ -335,7 +333,6 @@ final class MicroInputTests: XCTestCase {
         store.dispatch("inspector", ["AssignCatalogAction": firstAction.actionId])
         XCTAssertEqual(store.inspector.editableInspector?.boundActionId, firstAction.actionId)
 
-        // Once search query is cleared, physical key press on AG00 does follow to Key0 (slot 0).
         store.dispatch("inspector", ["SetActionSearchQuery": ""])
         store.dispatch("device", [
             "SimulateKeyPress": ["binding_id": "AG00"]

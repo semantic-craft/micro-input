@@ -14,163 +14,204 @@ public struct StatusMenuPopoverView: View {
         let _ = ViewRenderTelemetry.record("StatusMenuPopoverView")
         let sm = store.statusMenu
         let ss = store.sessionStrip
+
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
+            HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(sm.activeProfileName)
-                        .font(.headline)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(UITheme.textPrimary)
                     Text(sm.routingModeSummary)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 12.5, weight: .regular))
+                        .foregroundStyle(UITheme.textSecondary)
                 }
-                Spacer()
+                Spacer(minLength: 8)
                 Toggle(
-                    "键盘控制",
+                    "",
                     isOn: Binding(
                         get: { sm.hostExecutionEnabled },
                         set: { store.dispatch("status_menu", ["SetHostExecutionEnabled": $0]) }
                     )
                 )
-                .toggleStyle(.switch)
-                .controlSize(.small)
+                .labelsHidden()
+                .toggleStyle(NeutralSwitchToggleStyle())
             }
 
-            Divider()
+            Rectangle().fill(UITheme.rowDivider).frame(height: 1)
 
-            HStack {
+            HStack(spacing: 8) {
+                Text("自动跟随前台软件")
+                    .font(UITheme.captionMedium)
+                    .foregroundStyle(UITheme.textPrimary)
+                if sm.manualOverride {
+                    Button("恢复自动") {
+                        store.dispatch("status_menu", "ResumeAutoFollow")
+                    }
+                    .surfaceButton(.ghost)
+                }
+                Spacer()
                 Toggle(
-                    "自动跟随前台软件",
+                    "",
                     isOn: Binding(
                         get: { sm.autoFollowEnabled },
                         set: { store.dispatch("status_menu", ["SetAutoFollowEnabled": $0]) }
                     )
                 )
-                .font(.caption)
-                Spacer()
-                if sm.manualOverride {
-                    Button("恢复自动") {
-                        store.dispatch("status_menu", "ResumeAutoFollow")
-                    }
-                    .controlSize(.mini)
-                }
+                .labelsHidden()
+                .toggleStyle(NeutralSwitchToggleStyle())
             }
 
-            Text("常用软件磁贴 (2×2)")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("常用软件")
+                    .font(UITheme.micro)
+                    .foregroundStyle(UITheme.textSecondary)
 
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 6) {
-                ForEach(sm.favorites2x2) { fav in
-                    Button {
-                        store.dispatch("status_menu", ["ActivateFavoriteSlot": fav.slotIndex])
-                    } label: {
-                        HStack(spacing: 8) {
-                            AgentBadge(name: fav.title, size: 20)
-                            Text(DesktopAgent.displayName(fav.title))
-                                .font(.caption.weight(.semibold))
-                                .lineLimit(1)
-                            Spacer(minLength: 2)
-                            if fav.isActive {
-                                Circle().fill(UITheme.accent).frame(width: 6, height: 6)
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
+                    ForEach(sm.favorites2x2) { fav in
+                        Button {
+                            store.dispatch("status_menu", ["ActivateFavoriteSlot": fav.slotIndex])
+                        } label: {
+                            HStack(spacing: 8) {
+                                AgentBadge(name: fav.title, size: 18)
+                                Text(DesktopAgent.displayName(fav.title))
+                                    .font(.system(size: 12.5, weight: fav.isActive ? .semibold : .medium))
+                                    .foregroundStyle(UITheme.textPrimary)
+                                    .lineLimit(1)
+                                Spacer(minLength: 2)
+                                if fav.isActive {
+                                    Circle()
+                                        .fill(UITheme.statusSuccess)
+                                        .frame(width: 6, height: 6)
+                                }
                             }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(UITheme.surface))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(fav.isActive ? UITheme.textPrimary : UITheme.hairlineBorder, lineWidth: fav.isActive ? 1.5 : 1)
+                            )
+                            .contentShape(Rectangle())
                         }
-                        .padding(8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(fav.isActive ? UITheme.accentSoft : UITheme.subtleSurface)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(fav.isActive ? UITheme.accent : UITheme.border, lineWidth: 1)
-                        )
-                        .contentShape(Rectangle())
+                        .buttonStyle(.plain)
+                        .focusEffectDisabled()
                     }
-                    .buttonStyle(.plain)
                 }
             }
 
-            Text("活跃会话槽位 (AG00–AG05)")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("活跃会话槽位")
+                    .font(UITheme.micro)
+                    .foregroundStyle(UITheme.textSecondary)
 
-            VStack(spacing: 4) {
-                ForEach(ss.sessionSlots.prefix(6)) { slot in
-                    Button {
-                        store.dispatch("session_strip", ["ActivateSlot": slot.slotIndex])
-                    } label: {
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(Color(hex: slot.ledColorHex))
-                                .frame(width: 7, height: 7)
-                            Text(slot.keyBindingId)
-                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                            Text(slot.title.isEmpty ? "空闲槽位" : slot.title)
-                                .font(.caption)
-                                .lineLimit(1)
-                            Spacer()
-                            if slot.isUnreadBlueDot {
-                                Text("未读")
-                                    .font(.caption2.weight(.bold))
-                                    .foregroundStyle(.green)
+                VStack(spacing: 4) {
+                    ForEach(ss.sessionSlots.prefix(6)) { slot in
+                        Button {
+                            store.dispatch("session_strip", ["ActivateSlot": slot.slotIndex])
+                        } label: {
+                            let isOffLed = slot.title.isEmpty || slot.ledColorHex.uppercased() == "#000000"
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(isOffLed ? UITheme.switchOffFill : Color(hex: slot.ledColorHex))
+                                    .frame(width: 7, height: 7)
+                                Text(slot.keyBindingId)
+                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(UITheme.textMuted)
+                                Text(slot.title.isEmpty ? "空闲槽位" : slot.title)
+                                    .font(UITheme.caption)
+                                    .foregroundStyle(slot.title.isEmpty ? UITheme.textMuted : UITheme.textPrimary)
+                                    .lineLimit(1)
+                                Spacer(minLength: 4)
+                                if slot.isUnreadBlueDot {
+                                    Text("未读")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(UITheme.textPrimary)
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 2)
+                                        .background(Capsule().fill(UITheme.subtleSurface))
+                                        .overlay(Capsule().stroke(UITheme.hairlineBorder, lineWidth: 1))
+                                }
                             }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(UITheme.surface))
+                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
+                            .contentShape(Rectangle())
                         }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor)))
-                        .contentShape(Rectangle())
+                        .buttonStyle(.plain)
+                        .focusEffectDisabled()
                     }
-                    .buttonStyle(.plain)
                 }
             }
 
-            Divider()
+            Rectangle().fill(UITheme.rowDivider).frame(height: 1)
 
-            HStack(spacing: 10) {
-                Toggle(
-                    "轮盘菜单",
-                    isOn: Binding(
-                        get: { sm.radialMenuEnabled },
-                        set: { store.dispatch("status_menu", ["SetRadialMenuEnabled": $0]) }
+            VStack(spacing: 8) {
+                HStack {
+                    Text("轮盘菜单")
+                        .font(UITheme.captionMedium)
+                        .foregroundStyle(UITheme.textPrimary)
+                    Spacer()
+                    Toggle(
+                        "",
+                        isOn: Binding(
+                            get: { sm.radialMenuEnabled },
+                            set: { store.dispatch("status_menu", ["SetRadialMenuEnabled": $0]) }
+                        )
                     )
-                )
-                .font(.caption)
+                    .labelsHidden()
+                    .toggleStyle(NeutralSwitchToggleStyle())
+                }
 
-                Toggle(
-                    "状态灯效",
-                    isOn: Binding(
-                        get: { ss.simpleLighting.lightingEnabled },
-                        set: { store.dispatch("session_strip", ["SetLightingEnabled": $0]) }
+                HStack {
+                    Text("状态灯效")
+                        .font(UITheme.captionMedium)
+                        .foregroundStyle(UITheme.textPrimary)
+                    Spacer()
+                    Toggle(
+                        "",
+                        isOn: Binding(
+                            get: { ss.simpleLighting.lightingEnabled },
+                            set: { store.dispatch("session_strip", ["SetLightingEnabled": $0]) }
+                        )
                     )
-                )
-                .font(.caption)
+                    .labelsHidden()
+                    .toggleStyle(NeutralSwitchToggleStyle())
+                }
+            }
 
-                Spacer()
+            Rectangle().fill(UITheme.rowDivider).frame(height: 1)
 
-                Button(sm.cheatSheetVisible ? "隐藏速查" : "按键速查") {
+            VStack(spacing: 2) {
+                PopoverActionRow(
+                    icon: "square.grid.2x2",
+                    title: sm.cheatSheetVisible ? "隐藏按键速查" : "按键速查",
+                    shortcut: "⌘/"
+                ) {
                     store.dispatch("status_menu", "ToggleCheatSheet")
                 }
-                .controlSize(.mini)
-            }
 
-            HStack {
-                Button("打开主配置台") {
+                PopoverActionRow(
+                    icon: "macwindow",
+                    title: "打开主配置台"
+                ) {
                     store.dispatch("status_menu", "OpenMainWorkbenchWindow")
                     onOpenMainWindow()
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
 
-                Spacer()
-
-                Button("退出") {
+                PopoverActionRow(
+                    icon: "power",
+                    title: "退出 Micro Input",
+                    shortcut: "⌘Q"
+                ) {
                     NSApplication.shared.terminate(nil)
                 }
-                .controlSize(.small)
             }
         }
         .padding(14)
-        .frame(width: 340)
+        .frame(width: 348)
+        .background(UITheme.pageBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -205,117 +246,133 @@ struct MacroEditorSheet: View {
     @State private var bindOnSave: Bool = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text(model.macroId == nil ? "新建键盘宏序列" : "编辑键盘宏序列")
-                    .font(.headline)
+                    .font(UITheme.heading)
+                    .foregroundStyle(UITheme.textPrimary)
                 Spacer()
-                Button("关闭") {
+                Button {
                     store.dispatch("editor", "CloseModal")
+                } label: {
+                    Image(systemName: "xmark")
                 }
+                .surfaceButton(.icon)
             }
 
-            HStack {
-                Text("宏名称：")
-                TextField(
-                    "输入宏名称…",
-                    text: Binding(
-                        get: { model.name },
-                        set: { store.dispatch("editor", ["MacroSetName": $0]) }
+            SettingsCard {
+                SettingsRow("宏名称", showsDivider: true) {
+                    TextField(
+                        "输入宏名称…",
+                        text: Binding(
+                            get: { model.name },
+                            set: { store.dispatch("editor", ["MacroSetName": $0]) }
+                        )
                     )
-                )
-                .textFieldStyle(.roundedBorder)
-            }
-
-            HStack(spacing: 8) {
-                Text("步骤键名：")
-                TextField(
-                    "如 a, return, space",
-                    text: Binding(
-                        get: { model.draftKeyInput },
-                        set: { store.dispatch("editor", ["MacroSetDraftKeyInput": $0]) }
-                    )
-                )
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 120)
-
-                Text("间隔 (ms)：")
-                TextField(
-                    "30",
-                    value: Binding(
-                        get: { model.draftDelayMs },
-                        set: { store.dispatch("editor", ["MacroSetDraftDelayMs": max(1, $0)]) }
-                    ),
-                    format: .number
-                )
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 70)
-
-                Button("+ 添加单击步骤") {
-                    store.dispatch("editor", [
-                        "MacroAddTapKey": [
-                            "key": model.draftKeyInput,
-                            "delay_ms": model.draftDelayMs
-                        ]
-                    ])
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 240)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                SettingsRow("添加单击步骤", subtitle: "输入键名（如 a, return, space）与间隔毫秒数") {
+                    HStack(spacing: 8) {
+                        TextField(
+                            "键名",
+                            text: Binding(
+                                get: { model.draftKeyInput },
+                                set: { store.dispatch("editor", ["MacroSetDraftKeyInput": $0]) }
+                            )
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 96)
 
-                Button("清空全部") {
-                    store.dispatch("editor", "MacroClearSteps")
-                }
-                .controlSize(.small)
-            }
+                        TextField(
+                            "30",
+                            value: Binding(
+                                get: { model.draftDelayMs },
+                                set: { store.dispatch("editor", ["MacroSetDraftDelayMs": max(1, $0)]) }
+                            ),
+                            format: .number
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
 
-            List {
-                ForEach(model.steps) { step in
-                    HStack {
-                        Text("#\(step.index + 1)")
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                        Text(step.summaryLabel)
-                            .font(.subheadline)
-                        Spacer()
-                        if step.index > 0 {
-                            Button("↑") {
-                                store.dispatch("editor", ["MacroMoveStep": ["from": step.index, "to": step.index - 1]])
-                            }
-                            .controlSize(.mini)
+                        Button("+ 添加") {
+                            store.dispatch("editor", [
+                                "MacroAddTapKey": ["key": model.draftKeyInput, "delay_ms": model.draftDelayMs]
+                            ])
                         }
-                        if step.index + 1 < model.steps.count {
-                            Button("↓") {
-                                store.dispatch("editor", ["MacroMoveStep": ["from": step.index, "to": step.index + 1]])
-                            }
-                            .controlSize(.mini)
+                        .surfaceButton(.secondary)
+
+                        Button("清空") {
+                            store.dispatch("editor", "MacroClearSteps")
                         }
-                        Button("删除", role: .destructive) {
-                            store.dispatch("editor", ["MacroRemoveStep": step.index])
-                        }
-                        .controlSize(.mini)
+                        .surfaceButton(.ghost)
                     }
                 }
             }
-            .frame(height: 200)
+
+            ScrollView {
+                SettingsCard {
+                    if model.steps.isEmpty {
+                        SettingsRow("尚未添加步骤", subtitle: "在上方输入键名后点击「添加」生成敲击与等待序列")
+                    } else {
+                        ForEach(Array(model.steps.enumerated()), id: \.element.id) { idx, step in
+                            SettingsRow(
+                                step.summaryLabel,
+                                subtitle: "步骤 #\(step.index + 1)",
+                                showsDivider: idx + 1 < model.steps.count
+                            ) {
+                                HStack(spacing: 6) {
+                                    if step.index > 0 {
+                                        Button {
+                                            store.dispatch("editor", ["MacroMoveStep": ["from": step.index, "to": step.index - 1]])
+                                        } label: {
+                                            Image(systemName: "arrow.up")
+                                        }
+                                        .surfaceButton(.icon)
+                                    }
+                                    if step.index + 1 < model.steps.count {
+                                        Button {
+                                            store.dispatch("editor", ["MacroMoveStep": ["from": step.index, "to": step.index + 1]])
+                                        } label: {
+                                            Image(systemName: "arrow.down")
+                                        }
+                                        .surfaceButton(.icon)
+                                    }
+                                    Button("删除") {
+                                        store.dispatch("editor", ["MacroRemoveStep": step.index])
+                                    }
+                                    .surfaceButton(.ghost)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(height: 210)
 
             if let err = model.validationError {
-                Text(err).font(.caption).foregroundStyle(.red)
+                Text(err)
+                    .font(UITheme.caption)
+                    .foregroundStyle(.red)
             }
 
             HStack {
                 Toggle("保存后立即绑定到当前选中按键", isOn: $bindOnSave)
+                    .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true))
                 Spacer()
                 Button("取消") {
                     store.dispatch("editor", "CloseModal")
                 }
+                .surfaceButton(.ghost)
                 Button("保存宏序列") {
                     store.dispatch("editor", ["MacroSave": ["bind_to_selected_slot": bindOnSave]])
                 }
-                .buttonStyle(.borderedProminent)
+                .surfaceButton(.primary)
             }
         }
-        .padding(18)
-        .frame(width: 560)
+        .padding(20)
+        .frame(width: 600)
+        .background(UITheme.pageBackground)
     }
 }
 
@@ -324,108 +381,120 @@ struct MultiEditorSheet: View {
     let model: MultiEditorModel
     @State private var bindOnSave: Bool = true
 
+    private var branchOptions: [SelectOption<String>] {
+        var opts: [SelectOption<String>] = [
+            .init(value: "__none__", title: "不设置", subtitle: "清空此触发分支动作")
+        ]
+        for (actId, actName) in model.availableActions.prefix(24) {
+            opts.append(.init(value: "action:\(actId)", title: actName))
+        }
+        for (macId, macName) in model.availableMacros {
+            opts.append(.init(value: "macro:\(macId)", title: "宏：\(macName)"))
+        }
+        return opts
+    }
+
+    private func selectedValue(for branch: MultiBranchModel) -> String {
+        guard let kind = branch.targetKind, let id = branch.targetId else { return "__none__" }
+        if kind == "Action" { return "action:\(id)" }
+        if kind == "Macro" { return "macro:\(id)" }
+        return "__none__"
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let options = branchOptions
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text(model.multiId == nil ? "新建四分支复用动作 (Multi)" : "编辑四分支复用动作 (Multi)")
-                    .font(.headline)
+                Text(model.multiId == nil ? "新建四分支复用动作" : "编辑四分支复用动作")
+                    .font(UITheme.heading)
+                    .foregroundStyle(UITheme.textPrimary)
                 Spacer()
-                Button("关闭") {
+                Button {
                     store.dispatch("editor", "CloseModal")
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .surfaceButton(.icon)
+            }
+
+            SettingsCard {
+                SettingsRow("动作名称", showsDivider: true) {
+                    TextField(
+                        "四分支动作名称…",
+                        text: Binding(
+                            get: { model.name },
+                            set: { store.dispatch("editor", ["MultiSetName": $0]) }
+                        )
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 220)
+                }
+                SettingsRow("双击判定窗口 (ms)", subtitle: "区分单击与连续双击的时间窗口") {
+                    TextField(
+                        "200",
+                        value: Binding(
+                            get: { model.termMs },
+                            set: { store.dispatch("editor", ["MultiSetTermMs": max(50, $0)]) }
+                        ),
+                        format: .number
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 84)
                 }
             }
 
-            HStack(spacing: 12) {
-                Text("名称：")
-                TextField(
-                    "四分支动作名称…",
-                    text: Binding(
-                        get: { model.name },
-                        set: { store.dispatch("editor", ["MultiSetName": $0]) }
-                    )
-                )
-                .textFieldStyle(.roundedBorder)
-
-                Text("双击判定窗口 (ms)：")
-                TextField(
-                    "200",
-                    value: Binding(
-                        get: { model.termMs },
-                        set: { store.dispatch("editor", ["MultiSetTermMs": max(50, $0)]) }
-                    ),
-                    format: .number
-                )
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 80)
-            }
-
-            ForEach(model.branches) { br in
-                HStack {
-                    Text(br.title)
-                        .font(.subheadline.weight(.semibold))
-                        .frame(width: 170, alignment: .leading)
-                    Text(br.targetDisplayName)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Menu("选择动作…") {
-                        Button("不设置（清空此分支）") {
-                            store.dispatch("editor", [
-                                "MultiSetBranch": [
-                                    "branch": br.branch,
-                                    "target": NSNull()
-                                ]
-                            ])
-                        }
-                        Divider()
-                        ForEach(model.availableActions.prefix(24), id: \.0) { actId, actName in
-                            Button(actName) {
+            SettingsCard {
+                ForEach(Array(model.branches.enumerated()), id: \.element.id) { idx, br in
+                    SettingsRow(br.title, subtitle: br.targetDisplayName, showsDivider: idx + 1 < model.branches.count) {
+                        SelectDropdown(
+                            options: options,
+                            selection: selectedValue(for: br),
+                            overrideLabel: br.targetDisplayName,
+                            minTriggerWidth: 164
+                        ) { chosen in
+                            if chosen == "__none__" {
                                 store.dispatch("editor", [
-                                    "MultiSetBranch": [
-                                        "branch": br.branch,
-                                        "target": ["Action": ["action_id": actId]]
-                                    ]
+                                    "MultiSetBranch": ["branch": br.branch, "target": NSNull()]
+                                ])
+                            } else if chosen.hasPrefix("action:") {
+                                let actId = String(chosen.dropFirst("action:".count))
+                                store.dispatch("editor", [
+                                    "MultiSetBranch": ["branch": br.branch, "target": ["Action": ["action_id": actId]]]
+                                ])
+                            } else if chosen.hasPrefix("macro:") {
+                                let macId = String(chosen.dropFirst("macro:".count))
+                                store.dispatch("editor", [
+                                    "MultiSetBranch": ["branch": br.branch, "target": ["Macro": ["action_id": macId]]]
                                 ])
                             }
                         }
-                        if !model.availableMacros.isEmpty {
-                            Divider()
-                            ForEach(model.availableMacros, id: \.0) { macId, macName in
-                                Button("宏：\(macName)") {
-                                    store.dispatch("editor", [
-                                        "MultiSetBranch": [
-                                            "branch": br.branch,
-                                            "target": ["Macro": ["action_id": macId]]
-                                        ]
-                                    ])
-                                }
-                            }
-                        }
                     }
-                    .frame(width: 160)
                 }
-                .padding(8)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
             }
 
             if let err = model.validationError {
-                Text(err).font(.caption).foregroundStyle(.red)
+                Text(err)
+                    .font(UITheme.caption)
+                    .foregroundStyle(.red)
             }
 
             HStack {
                 Toggle("保存后立即绑定到当前按键", isOn: $bindOnSave)
+                    .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true))
                 Spacer()
                 Button("取消") {
                     store.dispatch("editor", "CloseModal")
                 }
+                .surfaceButton(.ghost)
                 Button("保存四分支动作") {
                     store.dispatch("editor", ["MultiSave": ["bind_to_selected_slot": bindOnSave]])
                 }
-                .buttonStyle(.borderedProminent)
+                .surfaceButton(.primary)
             }
         }
-        .padding(18)
-        .frame(width: 580)
+        .padding(20)
+        .frame(width: 600)
+        .background(UITheme.pageBackground)
     }
 }
 
@@ -433,139 +502,168 @@ struct LightingEditorSheet: View {
     let store: CoreStore
     let model: LightingEditorModel
 
+    private static let effectOptions: [SelectOption<String>] = [
+        .init(value: "off", title: "关闭 (Off)", subtitle: "完全熄灭当前分区的硬件 LED"),
+        .init(value: "solid", title: "常亮 (Solid)", subtitle: "保持均匀稳定的静态单色背光"),
+        .init(value: "gradient", title: "渐变 (Gradient)", subtitle: "柔和过渡的环境双色渐变光效"),
+        .init(value: "snake", title: "追光 (Snake)", subtitle: "沿键位轨迹依次流动的动态光效"),
+        .init(value: "rainbow", title: "光谱 (Rainbow)", subtitle: "连续循环的全彩柔和色相过渡"),
+        .init(value: "breath", title: "呼吸 (Breath)", subtitle: "随节奏明暗起伏的低干扰呼吸光"),
+    ]
+
+    private static let presetColors = ["#FFFFFF", "#3B82F6", "#14C76B", "#FFAA00", "#EF4444", "#A855F7"]
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("按键层双区 RGB 灯效编辑 · \(model.layerName)")
-                    .font(.headline)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Text("按键层双区 RGB 灯效 · \(model.layerName)")
+                    .font(UITheme.heading)
+                    .foregroundStyle(UITheme.textPrimary)
                 Spacer()
                 Toggle(
-                    "同步应用到当前方案所有可编辑层",
+                    "同步应用到所有可编辑层",
                     isOn: Binding(
                         get: { model.applyToAllLayers },
                         set: { store.dispatch("editor", ["LightingSetApplyToAllLayers": $0]) }
                     )
                 )
-                .font(.caption)
-                Button("关闭") {
+                .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true))
+                Button {
                     store.dispatch("editor", "CloseModal")
+                } label: {
+                    Image(systemName: "xmark")
                 }
+                .surfaceButton(.icon)
             }
 
             if !model.hasLighting {
-                HStack {
-                    Text("当前按键层尚未启用自定义硬件 RGB 配置。")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("初始化默认双区灯效") {
-                        store.dispatch("editor", "LightingAddDefault")
+                SettingsCard {
+                    SettingsRow(
+                        "尚未启用自定义硬件 RGB 配置",
+                        subtitle: "初始化后可独立配置当前层的键帽背光与底盘环绕光效。"
+                    ) {
+                        Button("初始化默认双区灯效") {
+                            store.dispatch("editor", "LightingAddDefault")
+                        }
+                        .surfaceButton(.primary)
                     }
-                    .buttonStyle(.borderedProminent)
                 }
-                .padding(12)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
             } else {
-                HStack(alignment: .top, spacing: 14) {
-                    if let bl = model.backlight {
-                        zoneCard(zone: bl)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        if let bl = model.backlight {
+                            zoneCard(zone: bl)
+                        }
+                        if let ug = model.underglow {
+                            zoneCard(zone: ug)
+                        }
                     }
-                    if let ug = model.underglow {
-                        zoneCard(zone: ug)
-                    }
+                    .padding(.vertical, 2)
                 }
+                .frame(maxHeight: 480)
             }
 
             if let err = model.validationError {
-                Text(err).font(.caption).foregroundStyle(.red)
+                Text(err)
+                    .font(UITheme.caption)
+                    .foregroundStyle(.red)
             }
 
-            HStack {
+            HStack(spacing: 8) {
                 Button("重置当前层灯效") {
                     store.dispatch("editor", "LightingResetLayer")
                 }
+                .surfaceButton(.ghost)
+
                 if model.previewActive {
                     Button("结束 30s 硬件预览 (\(model.previewRemainingSecs)s)") {
                         store.dispatch("editor", "LightingEndPreview")
                     }
+                    .surfaceButton(.secondary)
                 } else {
                     Button("开始 30s 硬件预览") {
                         store.dispatch("editor", "LightingBeginPreview")
                     }
+                    .surfaceButton(.secondary)
                 }
                 Spacer()
-                Button("完成") {
-                    store.dispatch("editor", "CloseModal")
+                if model.hasLighting {
+                    Button("完成") {
+                        store.dispatch("editor", "CloseModal")
+                    }
+                    .surfaceButton(.primary)
+                } else {
+                    Button("关闭") {
+                        store.dispatch("editor", "CloseModal")
+                    }
+                    .surfaceButton(.secondary)
                 }
-                .buttonStyle(.borderedProminent)
             }
         }
-        .padding(18)
-        .frame(width: 660)
+        .padding(20)
+        .frame(width: 640)
+        .background(UITheme.pageBackground)
     }
 
     @ViewBuilder
     private func zoneCard(zone: LightingZoneModel) -> some View {
-        let effects: [(String, String)] = [
-            ("off", "关闭 (Off)"),
-            ("solid", "常亮 (Solid)"),
-            ("gradient", "渐变 (Gradient)"),
-            ("snake", "贪吃蛇 (Snake)"),
-            ("rainbow", "彩虹 (Rainbow)"),
-            ("breath", "呼吸 (Breath)"),
-        ]
-        let presetColors = ["#FFFFFF", "#3B82F6", "#14C76B", "#FFAA00", "#EF4444", "#A855F7"]
-
-        GroupBox(zone.zoneTitle) {
-            VStack(alignment: .leading, spacing: 10) {
-                Picker(
-                    "灯效模式",
-                    selection: Binding(
-                        get: { zone.effect },
-                        set: { newEff in
-                            store.dispatch("editor", [
-                                "LightingEditEffect": [
-                                    "zone": zone.zone,
-                                    "effect": newEff,
-                                    "all_layers": model.applyToAllLayers
-                                ]
-                            ])
-                        }
+        VStack(alignment: .leading, spacing: 10) {
+            SettingsSectionHeader(zone.zoneTitle)
+            SettingsCard {
+                SettingsRow("灯效模式", subtitle: "选择此分区的发光方式", showsDivider: true) {
+                    SelectDropdown(
+                        options: Self.effectOptions,
+                        selection: Binding(
+                            get: { zone.effect },
+                            set: { newEff in
+                                store.dispatch("editor", [
+                                    "LightingEditEffect": [
+                                        "zone": zone.zone,
+                                        "effect": newEff,
+                                        "all_layers": model.applyToAllLayers
+                                    ]
+                                ])
+                            }
+                        ),
+                        minTriggerWidth: 148
                     )
-                ) {
-                    ForEach(effects, id: \.0) { code, label in
-                        Text(label).tag(code)
-                    }
                 }
 
-                HStack(spacing: 6) {
-                    Text("颜色：").font(.caption)
-                    ForEach(presetColors, id: \.self) { hex in
-                        Button {
-                            store.dispatch("editor", [
-                                "LightingEditColorHex": [
-                                    "zone": zone.zone,
-                                    "color_hex": hex,
-                                    "all_layers": model.applyToAllLayers
-                                ]
-                            ])
-                        } label: {
-                            Circle()
-                                .fill(Color(hex: hex))
-                                .frame(width: 18, height: 18)
-                                .overlay(
-                                    Circle().strokeBorder(zone.colorHex.uppercased() == hex ? Color.primary : Color.clear, lineWidth: 2)
-                                )
-                                .contentShape(Rectangle())
+                SettingsRow("颜色", subtitle: "选择静态背光或动态呼吸主色", showsDivider: true) {
+                    HStack(spacing: 8) {
+                        ForEach(Self.presetColors, id: \.self) { hex in
+                            let isSelected = zone.colorHex.uppercased() == hex
+                            Button {
+                                store.dispatch("editor", [
+                                    "LightingEditColorHex": [
+                                        "zone": zone.zone,
+                                        "color_hex": hex,
+                                        "all_layers": model.applyToAllLayers
+                                    ]
+                                ])
+                            } label: {
+                                Circle()
+                                    .fill(Color(hex: hex))
+                                    .frame(width: 20, height: 20)
+                                    .overlay(
+                                        Circle()
+                                            .strokeBorder(
+                                                isSelected ? UITheme.textPrimary : UITheme.hairlineBorder,
+                                                lineWidth: isSelected ? 2 : 1
+                                            )
+                                    )
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .focusEffectDisabled()
+                            .disabled(!zone.canEditColor)
+                            .opacity(zone.canEditColor ? 1.0 : 0.38)
                         }
-                        .buttonStyle(.plain)
-                        .disabled(!zone.canEditColor)
                     }
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("亮度：\(zone.brightnessPercent)%").font(.caption)
-                    Slider(
+                SettingsRow("亮度", subtitle: "调节此分区的整体发光亮度", showsDivider: true) {
+                    NeutralTrackSlider(
                         value: Binding(
                             get: { Double(zone.brightnessPercent) },
                             set: { val in
@@ -583,9 +681,8 @@ struct LightingEditorSheet: View {
                     .disabled(!zone.canEditBrightness)
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("速度：\(zone.speedPercent)%").font(.caption)
-                    Slider(
+                SettingsRow("速度", subtitle: "调节呼吸或追光灯效的循环速率", showsDivider: true) {
+                    NeutralTrackSlider(
                         value: Binding(
                             get: { Double(zone.speedPercent) },
                             set: { val in
@@ -603,9 +700,8 @@ struct LightingEditorSheet: View {
                     .disabled(!zone.canEditSpeed)
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("动态参数 (Magic)：\(zone.magicPercent)%").font(.caption)
-                    Slider(
+                SettingsRow("动态参数", subtitle: "调节渐变跨度与动态光效细节") {
+                    NeutralTrackSlider(
                         value: Binding(
                             get: { Double(zone.magicPercent) },
                             set: { val in
@@ -623,7 +719,6 @@ struct LightingEditorSheet: View {
                     .disabled(!zone.canEditMagic)
                 }
             }
-            .padding(8)
         }
     }
 }
@@ -633,64 +728,73 @@ struct ReconnectComparisonSheet: View {
     let model: ReconnectComparisonModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let needsIdentityConfirm = model.identityConfirmationRequired && !model.identityUserConfirmed
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("设备重连三方比较（基线 vs 本地草稿 vs 设备配置）")
-                    .font(.headline)
+                Text("设备重连三方比较")
+                    .font(UITheme.heading)
+                    .foregroundStyle(UITheme.textPrimary)
                 Spacer()
-                Button("关闭") {
+                Button {
                     store.dispatch("editor", "CloseModal")
+                } label: {
+                    Image(systemName: "xmark")
                 }
+                .surfaceButton(.icon)
             }
 
-            if model.identityConfirmationRequired && !model.identityUserConfirmed {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text("检测到 USB 接口路径变化，请先确认该设备与原基线为同一台小键盘。")
-                        .font(.caption)
-                    Spacer()
-                    Button("确认是同一台设备") {
-                        store.dispatch("device", "ConfirmComparisonIdentity")
+            if needsIdentityConfirm {
+                SettingsCard {
+                    SettingsRow("检测到 USB 接口路径变化", subtitle: "请先确认当前连接设备与原基线为同一台 Creator Micro。") {
+                        Button("确认是同一台设备") {
+                            store.dispatch("device", "ConfirmComparisonIdentity")
+                        }
+                        .surfaceButton(.primary)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
                 }
-                .padding(10)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.14)))
             }
 
-            List(model.rows) { row in
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(row.label).font(.subheadline.weight(.semibold))
-                        Text("基线：\(row.baseSummary) → 本地：\(row.localSummary) ｜ 设备：\(row.deviceSummary)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+            ScrollView {
+                SettingsCard {
+                    if model.rows.isEmpty {
+                        SettingsRow("配置完全一致", subtitle: "基线、本地草稿与设备端配置无差异")
+                    } else {
+                        ForEach(Array(model.rows.enumerated()), id: \.element.id) { idx, row in
+                            SettingsRow(
+                                row.label,
+                                subtitle: "基线：\(row.baseSummary) → 本地：\(row.localSummary) ｜ 设备：\(row.deviceSummary)",
+                                showsDivider: idx + 1 < model.rows.count
+                            ) {
+                                Text(row.resultBadge)
+                                    .font(UITheme.micro)
+                                    .foregroundStyle(row.isConflict ? Color.red : UITheme.statusSuccess)
+                            }
+                        }
                     }
-                    Spacer()
-                    Text(row.resultBadge)
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(row.isConflict ? .red : .green)
                 }
             }
-            .frame(height: 220)
+            .frame(height: 230)
 
-            HStack {
-                Button("保留本地草稿 (KeepLocal)") {
+            HStack(spacing: 8) {
+                Button("保留本地草稿") {
                     store.dispatch("device", ["ResolveComparison": "KeepLocal"])
                 }
-                Button("采用设备配置 (UseDevice)") {
+                .surfaceButton(.secondary)
+                Button("采用设备配置") {
                     store.dispatch("device", ["ResolveComparison": "UseDevice"])
                 }
-                Button("三方无冲突自动合并 (Merge)") {
+                .surfaceButton(.secondary)
+                Spacer()
+                Button("自动合并") {
                     store.dispatch("device", ["ResolveComparison": "Merge"])
                 }
-                .buttonStyle(.borderedProminent)
+                .surfaceButton(needsIdentityConfirm ? .secondary : .primary)
                 .disabled(!model.canMerge)
             }
         }
-        .padding(18)
+        .padding(20)
         .frame(width: 620)
+        .background(UITheme.pageBackground)
     }
 }
 
@@ -699,52 +803,63 @@ struct ApplyPreparationSheet: View {
     let model: ApplyPreparationModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("配置应用预检与备份（只读门禁核验）")
-                    .font(.headline)
+                Text("配置应用预检与备份")
+                    .font(UITheme.heading)
+                    .foregroundStyle(UITheme.textPrimary)
                 Spacer()
-                Button("取消并关闭") {
+                Button {
                     store.dispatch("device", "CancelApplyPreview")
+                } label: {
+                    Image(systemName: "xmark")
                 }
+                .surfaceButton(.icon)
             }
 
             Text("变更前：\(model.beforeSummary) → 变更后：\(model.afterSummary)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(UITheme.caption)
+                .foregroundStyle(UITheme.textSecondary)
 
-            List(model.changes) { ch in
-                HStack {
-                    Text(ch.locationLabel).font(.subheadline.weight(.semibold))
-                    Spacer()
-                    Text("\(ch.before) → \(ch.after)")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
+            ScrollView {
+                SettingsCard {
+                    if model.changes.isEmpty {
+                        SettingsRow("暂无待应用变更", subtitle: "当前本地草稿与基线一致")
+                    } else {
+                        ForEach(Array(model.changes.enumerated()), id: \.element.id) { idx, ch in
+                            SettingsRow(ch.locationLabel, showsDivider: idx + 1 < model.changes.count) {
+                                Text("\(ch.before) → \(ch.after)")
+                                    .font(UITheme.monoBadge)
+                                    .foregroundStyle(UITheme.textSecondary)
+                            }
+                        }
+                    }
                 }
             }
-            .frame(height: 180)
+            .frame(height: 200)
 
             if let path = model.backupPath {
                 Text("已生成本地回滚备份：\(path)")
-                    .font(.caption2)
-                    .foregroundStyle(.green)
+                    .font(UITheme.micro)
+                    .foregroundStyle(UITheme.statusSuccess)
             }
             if let opId = model.candidateOperationId {
                 Text("已确认写入候选记录：\(opId)（\(model.unavailableReason)）")
-                    .font(.caption2)
-                    .foregroundStyle(.blue)
+                    .font(UITheme.micro)
+                    .foregroundStyle(UITheme.textSecondary)
             }
 
-            HStack {
+            HStack(spacing: 8) {
                 Button("1. 生成本地回滚备份") {
                     store.dispatch("device", "PrepareApplyBackup")
                 }
+                .surfaceButton(.secondary)
                 .disabled(model.backupPrepared)
 
                 Button("2. 确认候选配置") {
                     store.dispatch("device", "TakePreparedCandidate")
                 }
-                .buttonStyle(.borderedProminent)
+                .surfaceButton(.primary)
                 .disabled(!model.backupPrepared || model.candidateTaken)
 
                 Spacer()
@@ -752,9 +867,11 @@ struct ApplyPreparationSheet: View {
                 Button("完成") {
                     store.dispatch("device", "CancelApplyPreview")
                 }
+                .surfaceButton(.ghost)
             }
         }
-        .padding(18)
+        .padding(20)
         .frame(width: 620)
+        .background(UITheme.pageBackground)
     }
 }
