@@ -1,5 +1,12 @@
 # 项目教训
 
+## Antigravity 实时语音须走应用内 Start/End Voice，不得映射成 Ctrl+M 听写
+
+- 出事：`14c0d0b`（2026-11-09 22:10 Asia/Shanghai）复现 Antigravity `live-voice` 被映射为 Ctrl+M（keycode 0x2E）系统听写快捷键；第 6 槽「Gemini Live 实时语音」键帽误用 Term，而不是 Party（5 格波形）。
+- 修复：`b4dc75a`（2026-11-10 02:16 Asia/Shanghai）改为对 Start/End Voice mode 做 AXPress，并恢复 Party 波形键帽。该修复随 `5dbdc51`（#110，2026-11-10 17:42）进入 GitHub 默认分支。
+- Done right: `antigravity_live_voice_does_not_map_to_dictation_shortcut_ctrl_m` 断言 `live-voice` 的 native shortcut 为 `None`，执行时绝不 `PostKeyShortcut` Ctrl+M（0x2E）；`inspector_and_editors` / canvas 断言该槽推断 `CodexKeycapId::Party`。系统听写快捷键只留给明确的 `dictation` 命令，不能冒充应用内语音模式。
+- Seen 1x（2026-11-09）
+
 ## Dock 图标轮廓与系统处理
 
 - 起因与后果：2026-11-10 用户发现 Micro Input 与 Koe 的 Dock 图标偏大；图案占画布 90%，启动时直接挂载原始 ICNS。
@@ -340,3 +347,20 @@
 - 起因与后果：真实按键采样显示聚焦输入重复遍历 AX 树。捕获和选择后，执行前校验与焦点读回仍完整扫描，单次等待还会阻塞后续按键。
 - 修复：保留完整发现与输入歧义判断，只对已选控件做实时路径校验和焦点确认。首次实测证明一个 AXScrollArea 的 AXParent 与 AXChildren 不互逆，因此使用最近一次完整选择扫描记录的向下路径，逐段检查当前子节点、原 scope、PID、窗口及可见性；不信任旧属性，也不转向替代控件。
 - 验证点：`exact_control_membership_rejects_removed_or_replaced_path_edges`、`exact_control_membership_requires_the_original_scope`、`input_added_after_capture_is_rejected_before_focus` 和焦点确认期间的替换/身份变化回归。成功的真实 AX 对照与拒绝分别计数，物理开关延迟不能由测试进程时长推算。见 `docs/designs/host-input-latency.md`。Seen 1x（2026-11-10）。
+
+## 会话确认不能由目录或应用激活代替
+
+- 起因与后果：旧导航路径只打开应用就记录已读和历史；Python 桥也曾自行把请求目标写作 selected。目录存在与应用打开都不能证明实际选中。
+- 修复：工作台和实体键共享带版本的槽位解析，完整目标和运行实例分别建模；原窗口 AX URL 回读及目录身份复核后才提交请求时的水位和历史。旧 Python 桥无生产消费者，直接删除，不增加辅助进程维护第二条导航路径。
+- 验证点：`session_navigation` 覆盖空槽、过期目标、实例换代、拒绝、迟到成功与较新已读状态；真实应用和实体按键另留回执。普通文件路径中的百分号必须保持原值，仅 file URI 解码。Seen 1x（2026-11-10）。
+
+## AX 观察缺失与执行后不确定必须分开
+
+- 观察超时或 IPC 失败不是属性不存在；截断的树不能据此宣布唯一目标。托管控件与会话导航共用有界批读，只有完整观察才能进入匹配。
+- 动作成功送达后回读失败，结果是未确认；不能返回表示未执行的 blocked。`native_ax` 的错误槽与部分树回归负责守住观察边界，原窗口和分屏目标仍须在动作前后核验。Seen 1x（2026-11-10）。
+
+## HID 全局管理器不能归临时操作线程所有
+
+- 起因与后果：恢复设备配置后，下一次应用在 `CFRunLoopAddSource` 崩溃。hidapi 的进程级管理器绑定首次初始化线程的 RunLoop；每次短生命周期任务新建 HidApi 会在原线程退出后重新枚举该管理器。
+- 修复：一个随进程存活的 HID 打开线程初始化并复用上下文，串行完成独占选项设置、打开与选项恢复。设备发现仍由现有 IOKit 实现负责，不额外维护一份枚举缓存。
+- 验证点：`hid_open_owner_survives_short_lived_callers_and_failed_opens` 与 `abandoned_hid_open_reply_releases_handle_and_keeps_owner_available` 自动回归；`native_usb_reopens_after_request_threads_exit` 在三个短线程请求间真实开关同一设备，零报告读写。应用层仍需实际恢复、应用与完整读回。Seen 1x（2026-11-10）。

@@ -497,12 +497,12 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
     store
         .dispatch_session_strip_action(SessionStripAction::JumpToSession(place_working.clone()))
         .unwrap();
-    assert_eq!(store.navigation_history().current(), Some(&place_working));
+    assert_eq!(store.navigation_history().current(), None);
 
     store
         .dispatch_session_strip_action(SessionStripAction::ActivateSlot(0))
         .unwrap();
-    assert_eq!(store.navigation_history().current(), Some(&pinned_place));
+    assert_eq!(store.navigation_history().current(), None);
 
     store.ingest_four_app_candidates(vec![FourAppLiveCandidate {
         place: place_unread_done.clone(),

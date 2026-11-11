@@ -1,8 +1,19 @@
-# Antigravity 官方桌面扩展契约、既有会话目录与状态导航桥
+# Antigravity 会话目录与原生导航
 
-本目录记录安装版 `/Applications/Antigravity.app`（`com.google.antigravity` `2.29.0`，`language_server` `Built at CL: 1013060670`）只读静态与 REA 协议核对结果，并提供实时连接 Antigravity `language_server` 与会话目录的 Unix 域套接字桥 [`live-bridge.py`](live-bridge.py)。
+当前生产路径由 Rust 工作台直接读取 hub 会话目录，再经原生 AX 切换会话。旧 Python Unix socket 桥已退役；下方 K3/L3 契约记录与 `mi-bridge` 合成回归保留为历史协议证据，不代表当前工作台已接入这些操作。
 
-## 安装版官方接口、只读 REA 契约与能力分区
+## 当前管线
+
+- [`mi-core/session_navigation.rs`](../../crates/mi-core/src/session_navigation.rs) 统一工作台与六层输入的槽位解析。稳定目标包含应用、工作区和会话，执行租约另绑定进程及 hub 实例。目录过期、身份变化或输入退役时拒绝执行。
+- [`mi-macos/native_ax.rs`](../../crates/mi-macos/src/native_ax.rs) 为托管控件和会话导航提供共同的原窗口观察。按用途批读属性，观察不完整时不发布唯一目标。
+- [`mi-macos/session_navigation.rs`](../../crates/mi-macos/src/session_navigation.rs) 通过原生 Search Conversations 输入完整会话 UUID，在同一搜索对话框内核对结果的专用 UUID 字段，选择一次，再读取原窗口文档 URL。此路径不依赖项目展开或侧栏最近列表；目录存在或应用打开不构成选中确认。
+- 搜索结果按安装版已观察的标题、项目、UUID、时间字段识别；标题或项目名相同不能替代 UUID，未知结构拒绝选择。确认后才提交请求时的未读水位和导航历史。迟到结果不能覆盖后来明确的已读操作，也不能移到其他窗口或替代实例。
+
+采用 [agent-desktop 的按需批读设计](https://github.com/vercel-labs/agent-desktop/blob/ab7dfb218cddc1594aa1d87a5bfcd0ac76da2276/crates/macos/src/tree/properties/node_attribute_fetch.rs)，保持项目现有 Rust 内核与薄原生壳边界。该版本公开观察模型没有导航必需的 `AXURL`，因此没有引入整套自动化引擎或另留 URL 读取旁路。此选择基于接口适配与代码收敛，不代表已测得性能提升。
+
+目录工作区解析交叉核对摘要与 metadata 中的工作区字段；存在冲突或多个工作区时拒绝。字段组织参考 [Lagrange 的 MetaF/SummaryF](https://github.com/varungupta3009/Lagrange/blob/552ac178618453bd7b62f004ef2fb728e71f83c4/lagrange.py#L467-L497)，并以安装版实际目录核验。不使用其离线迁移或会话正文读取。
+
+## 历史安装版接口与协议核对（K3/L3）
 
 对安装版包体、ASAR 头部文件完整性哈希、`language_server --stamp`、只读 protobuf 符号契约、`agentapi --help` 与 `~/.gemini/antigravity/lib/node_modules/sidecar_sdk` 的只读核对结论如下：
 
@@ -33,7 +44,7 @@
 
 ## 状态与导航桥不变量及隐私边界
 
-- **两阶段边界剥离（零读取 `transcriptPath` 与 Token）**：`live-bridge.py` 仅转发会话摘要、工作区路径、运行状态与未读水位，绝不读取或落盘用户 Token、Cookie、状态库或 `transcriptPath` 正文（`transcriptReads == 0`、`tokenReads == 0`）。
+- **两阶段边界剥离（零读取 `transcriptPath` 与 Token）**：历史桥仅转发会话摘要、工作区路径、运行状态与未读水位，绝不读取或落盘用户 Token、Cookie、状态库或 `transcriptPath` 正文（`transcriptReads == 0`、`tokenReads == 0`）。
 - **复合主键与同名跨工作区隔离**：会话身份固定为 `AntigravitySessionKey(conversationId, workspacePath)`，并校验 `workspacePath` 属于 `allowedWorkspaces`；两个不同工作区下的同名会话（相同 `title` / `summary`）互不覆盖、互不串台。
 - **精确聚焦与 UI 选中回读确认**：`open` 请求必须携带 `schemaVersion: "antigravity-catalog-nav-v1"` 与完整目标 `(conversationId, workspacePath)`；仅当回读的 `selected` 与请求目标 `(conversationId, workspacePath)` 完全一致时才返回 `.confirmed`（写入 `antigravity_open` `confirmed` 审计回执）；若 UI 选中回读不一致或目标已删除，返回 `.unconfirmed`，绝不重定向到同名跨工作区会话。
 - **`agentapi` 创建/发送目标门控与超时对账不重发（Slice K3）**：`create`、`send`、`query` 请求必须携带 `schemaVersion: "antigravity-agentapi-v1"` 与 `requestId`；提示词与消息正文在桥接层校验后立即在内存丢弃，绝不落盘、绝不回显，审计日志 `audit.jsonl` 保持 `text_byte_len == nil`。`send` 强制要求 `selected == target`（两会话仅修改当前选中目标）；不存在或已删除目标返回 `.unconfirmed`（`guard.targetNotFound`），零重定向、零新建会话；超时或 `unknown` 回执锁定原 `requestId` 并通过 `query` 对账，绝不盲目重发。

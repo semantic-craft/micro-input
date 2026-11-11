@@ -14,7 +14,7 @@ swift scripts/verify-app-icon.swift target/AppIcon.iconset
 iconutil -c icns target/AppIcon.iconset -o "$bundle/Contents/Resources/AppIcon.icns"
 cp app/MicroInput/.build/debug/MicroInput "$bundle/Contents/MacOS/MicroInput"
 cp app/MicroInput/Info.plist "$bundle/Contents/Info.plist"
-cp integrations/antigravity/live-bridge.py "$bundle/Contents/Resources/live-bridge.py"
+rm -f "$bundle/Contents/Resources/live-bridge.py" "$bundle/Contents/MacOS/mi-session-navigation"
 sign_id="${MI_CODESIGN_IDENTITY:-}"
 if [[ -z "$sign_id" ]]; then
   sign_id="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -n 1 || true)"

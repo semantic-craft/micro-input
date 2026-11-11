@@ -521,6 +521,87 @@ impl HidTransport for MacTransport {
 }
 
 #[cfg(target_os = "macos")]
+struct HidOpenRequest<D> {
+    path: std::ffi::CString,
+    exclusive: bool,
+    reply: std::sync::mpsc::SyncSender<Result<D, TransportError>>,
+}
+
+/// hidapi's process-global IOHIDManager is scheduled on its initializing thread's
+/// CFRunLoop. Restore/apply workers are short lived, so they must never own it.
+/// The static production sender keeps this one opening thread alive for the
+/// process; discovery and each HidDevice's reader retain their existing owners.
+#[cfg(target_os = "macos")]
+struct HidOpenOwner<D> {
+    requests: std::sync::mpsc::SyncSender<HidOpenRequest<D>>,
+}
+
+#[cfg(target_os = "macos")]
+impl<D: Send + 'static> HidOpenOwner<D> {
+    fn start(
+        mut open: impl FnMut(&std::ffi::CStr, bool) -> Result<D, TransportError> + Send + 'static,
+    ) -> Result<Self, TransportError> {
+        let (requests, pending) = std::sync::mpsc::sync_channel::<HidOpenRequest<D>>(1);
+        std::thread::Builder::new()
+            .name("mi-hid-open".into())
+            .spawn(move || {
+                while let Ok(request) = pending.recv() {
+                    // A dropped requester also drops its returned handle here.
+                    let _ = request.reply.send(open(&request.path, request.exclusive));
+                }
+            })
+            .map_err(|e| TransportError::Unavailable(e.to_string()))?;
+        Ok(Self { requests })
+    }
+
+    fn open(&self, path: std::ffi::CString, exclusive: bool) -> Result<D, TransportError> {
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        self.requests
+            .send(HidOpenRequest {
+                path,
+                exclusive,
+                reply,
+            })
+            .map_err(|_| TransportError::Unavailable("HID 打开线程已退出".into()))?;
+        result
+            .recv()
+            .map_err(|_| TransportError::Unavailable("HID 打开结果未返回".into()))?
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_hid_device(
+    path: std::ffi::CString,
+    exclusive: bool,
+) -> Result<hidapi::HidDevice, TransportError> {
+    static OWNER: std::sync::OnceLock<Result<HidOpenOwner<hidapi::HidDevice>, TransportError>> =
+        std::sync::OnceLock::new();
+    OWNER
+        .get_or_init(|| {
+            let mut api = None;
+            HidOpenOwner::start(move |path, exclusive| {
+                if api.is_none() {
+                    api = Some(
+                        hidapi::HidApi::new()
+                            .map_err(|e| TransportError::Unavailable(e.to_string()))?,
+                    );
+                }
+                let api = api.as_ref().unwrap();
+                // Darwin's open option is global; this owner serializes the
+                // option/open/restore sequence, including unsuccessful opens.
+                let previous = api.get_open_exclusive();
+                api.set_open_exclusive(exclusive);
+                let device = api.open_path(path);
+                api.set_open_exclusive(previous);
+                device.map_err(|e| TransportError::Unavailable(e.to_string()))
+            })
+        })
+        .as_ref()
+        .map_err(Clone::clone)?
+        .open(path, exclusive)
+}
+
+#[cfg(target_os = "macos")]
 struct MacLink {
     device: Arc<Mutex<Option<hidapi::HidDevice>>>,
     exclusive: bool,
@@ -529,19 +610,9 @@ struct MacLink {
 #[cfg(target_os = "macos")]
 impl MacLink {
     fn open(id: &str, exclusive: bool) -> Result<Self, TransportError> {
-        // hidapi's Darwin option is process-wide; each handle copies it when opened.
-        static OPEN_LOCK: Mutex<()> = Mutex::new(());
         let path =
             std::ffi::CString::new(id).map_err(|e| TransportError::Unavailable(e.to_string()))?;
-        let _open = OPEN_LOCK
-            .lock()
-            .map_err(|_| TransportError::Unavailable("HID 打开状态不可用".into()))?;
-        let api = hidapi::HidApi::new().map_err(|e| TransportError::Unavailable(e.to_string()))?;
-        let previous = api.get_open_exclusive();
-        api.set_open_exclusive(exclusive);
-        let device = api.open_path(&path);
-        api.set_open_exclusive(previous);
-        let device = device.map_err(|e| TransportError::Unavailable(e.to_string()))?;
+        let device = open_hid_device(path, exclusive)?;
         let opened_exclusive = device
             .is_open_exclusive()
             .map_err(|e| TransportError::Unavailable(e.to_string()))?;
@@ -717,6 +788,77 @@ mod tests {
     use super::*;
 
     #[cfg(target_os = "macos")]
+    #[test]
+    fn hid_open_owner_survives_short_lived_callers_and_failed_opens() {
+        let owner = Arc::new(
+            HidOpenOwner::start(|path, exclusive| {
+                if path.to_bytes() == b"reject" {
+                    return Err(TransportError::Unavailable("open rejected".into()));
+                }
+                Ok((std::thread::current().id(), path.to_owned(), exclusive))
+            })
+            .unwrap(),
+        );
+        let mut worker = None;
+        for (path, exclusive) in [("restore", true), ("reject", false), ("apply", true)] {
+            let owner = owner.clone();
+            let (caller, opened) = std::thread::spawn(move || {
+                (
+                    std::thread::current().id(),
+                    owner.open(std::ffi::CString::new(path).unwrap(), exclusive),
+                )
+            })
+            .join()
+            .unwrap();
+            if path == "reject" {
+                assert!(
+                    matches!(opened, Err(TransportError::Unavailable(reason)) if reason == "open rejected")
+                );
+                continue;
+            }
+            let (actual_worker, actual_path, actual_exclusive) = opened.unwrap();
+            assert_ne!(actual_worker, caller);
+            assert_eq!(*worker.get_or_insert(actual_worker), actual_worker);
+            assert_eq!(actual_path.to_bytes(), path.as_bytes());
+            assert_eq!(actual_exclusive, exclusive);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn abandoned_hid_open_reply_releases_handle_and_keeps_owner_available() {
+        struct Opened(std::sync::mpsc::Sender<()>);
+        impl Drop for Opened {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let (closed, observed) = std::sync::mpsc::channel();
+        let owner = HidOpenOwner::start(move |_, _| Ok(Opened(closed.clone()))).unwrap();
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        drop(result);
+        owner
+            .requests
+            .send(HidOpenRequest {
+                path: std::ffi::CString::new("abandoned").unwrap(),
+                exclusive: true,
+                reply,
+            })
+            .unwrap();
+        observed
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        drop(
+            owner
+                .open(std::ffi::CString::new("next").unwrap(), true)
+                .unwrap(),
+        );
+        observed
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
     fn test_vendor_link(_: &str) -> Result<Arc<MacLink>, TransportError> {
         Ok(Arc::new(MacLink {
             device: Arc::new(Mutex::new(None)),
@@ -854,6 +996,28 @@ mod tests {
             "MI_USB_CANDIDATES_JSON={}",
             serde_json::to_string(&candidates).unwrap()
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires idle Creator Micro 2 on USB; opens/closes only, no report I/O"]
+    fn native_usb_reopens_after_request_threads_exit() {
+        let devices = MacTransport::new().enumerate().unwrap();
+        let path = unique_vendor(&devices)
+            .expect("expected exactly one Creator Micro 2 USB vendor interface")
+            .path
+            .clone();
+        for _ in 0..3 {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let transport = MacTransport::exclusive_vendor();
+                let link = transport.open(&path).unwrap();
+                assert!(link.is_exclusive_vendor());
+                link.close();
+            })
+            .join()
+            .unwrap();
+        }
     }
 
     #[cfg(target_os = "macos")]

@@ -6,6 +6,7 @@ pub mod managed_controls;
 mod native_ax;
 pub mod passive_panel;
 pub mod scenarios;
+pub mod session_navigation;
 pub mod status_item;
 
 pub use app_cache::{AppBundleCache, AppBundleInfo, OTHER_APPS_WILDCARD_BUNDLE_ID};

@@ -30,6 +30,8 @@ impl WorkbenchStore {
             }
             return;
         }
+        self.cancel_session_navigation();
+        self.session_navigation.catalog = None;
         self.system_lifecycle = SystemLifecycle::Sleeping;
         self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
         self.resume_requires_explicit_connect = true;

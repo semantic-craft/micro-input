@@ -8,6 +8,7 @@ impl WorkbenchStore {
     }
 
     fn suspend_for_six_layer_operation(&mut self) -> Result<(), WorkbenchError> {
+        self.cancel_session_navigation();
         if let Some(running) = self.six_layer_running.take() {
             if let Err(error) = running.shutdown(&self.tokio_runtime) {
                 self.system_lifecycle = SystemLifecycle::CleanupFailed(error.clone());
@@ -135,6 +136,7 @@ impl WorkbenchStore {
                         self.command_execution_enabled,
                         self.update_now,
                     );
+                    running.navigation = Some(self.session_navigation.dispatch.clone());
                     running.start_executor(Arc::clone(&self.live_executor));
                     running.start_monitor();
                     self.six_layer_running = Some(running);
