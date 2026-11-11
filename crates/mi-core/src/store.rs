@@ -380,8 +380,7 @@ pub struct WorkbenchStore {
             Result<Option<crate::six_layer_runtime::RunningSixLayer>, String>,
         >,
     >,
-    six_layer_ownership_identity: Option<String>,
-    six_layer_ownership_checked_at: Instant,
+    foreground_bundle_id: Option<String>,
     tokio_runtime: Arc<tokio::runtime::Runtime>,
     hardware_event_tx: RuntimeInbox,
     ownership_in_flight: Option<mi_bridge::NativeOwnershipRequest>,
@@ -546,8 +545,7 @@ impl WorkbenchStore {
             six_layer_state,
             six_layer_running: None,
             six_layer_job: None,
-            six_layer_ownership_identity: None,
-            six_layer_ownership_checked_at: now,
+            foreground_bundle_id: None,
             selected_profile_id: None,
             selected_layer_id: None,
             selected_binding_slot: Some(0),
@@ -777,7 +775,7 @@ impl WorkbenchStore {
                     "schema_version": 1,
                     "product": "Creator Micro 2",
                     "vid_pid": "303A:8298",
-                    "connected": self.device_session.is_some(),
+                    "connected": self.device_session_connected(),
                     "document_revision": self.document_store.draft.revision,
                     "host_revision": self.document_store.host_revision(),
                     "ownership_summary": self.native_ownership.summary_at(self.update_now),
@@ -1212,7 +1210,7 @@ impl WorkbenchStore {
                     self.hardware_rpc_verified = false;
                     self.lighting_arbiter.invalidate_hardware_cache();
                 }
-                if !self.config.isolated && self.device_session.is_none() {
+                if !self.config.isolated && !self.device_session_connected() {
                     let _ = self.connect_default_usb_with_execution(false);
                 }
                 None
@@ -1892,10 +1890,18 @@ impl WorkbenchStore {
     }
 
     pub fn foreground_changed(&mut self, bundle_id: Option<&str>) -> bool {
-        let Some(bundle) = bundle_id
+        let bundle_id = bundle_id
             .map(str::trim)
-            .filter(|s| !s.is_empty() && *s != "*")
-        else {
+            .filter(|bundle| !bundle.is_empty() && *bundle != "*");
+        self.foreground_bundle_id = bundle_id.map(str::to_owned);
+        if let Some(running) = &self.six_layer_running {
+            let changed = running.foreground_changed(bundle_id);
+            if changed {
+                self.commit_runtime_update();
+            }
+            return changed;
+        }
+        let Some(bundle) = bundle_id else {
             return false;
         };
         if self.board_routing.is_managed() || !self.auto_follow_enabled || self.manual_override {
@@ -3076,8 +3082,11 @@ impl WorkbenchStore {
     }
 
     fn reconcile_ownership_for_profile(&mut self, profile_id: &str, now: Instant) {
+        if self.six_layer_state.installation.is_some() {
+            return;
+        }
         let is_protected = self.is_protected_oai_profile(profile_id);
-        let desired = if is_protected && self.six_layer_state.installation.is_none() {
+        let desired = if is_protected {
             "native"
         } else {
             "micro-input"
@@ -3095,6 +3104,9 @@ impl WorkbenchStore {
     }
 
     fn ensure_live_ownership_fresh(&mut self) {
+        if self.six_layer_state.installation.is_some() {
+            return;
+        }
         if self.system_lifecycle != SystemLifecycle::Awake
             || self.config.isolated
             || (self.selected_profile_id.is_none()
@@ -3156,11 +3168,12 @@ impl WorkbenchStore {
             busy: self.busy,
             command_execution_enabled: self.command_execution_enabled,
             connected_candidate: &self.connected_candidate,
-            device_connected: self.device_session.is_some(),
+            device_connected: self.device_session_connected(),
             document_store: &self.document_store,
             favorite_action_ids: &self.favorite_action_ids,
             favorites_only: self.favorites_only,
             hardware_rpc_verified: self.hardware_rpc_verified,
+            isolated: self.config.isolated,
             keycap_overrides: &self.keycap_overrides,
             keycap_search_query: &self.keycap_search_query,
             last_cursor_position: self.last_cursor_position,
@@ -3227,15 +3240,40 @@ impl WorkbenchStore {
             self.applications
                 .insert(bundle.clone(), self.app_cache.resolve(&bundle).installed);
         }
-        self.six_layer_view = self.six_layer_running.as_ref().map(|running| SixLayerView {
-            configuration_observed: running.readiness.configuration_observed,
-            keyboard_grabbed: running.readiness.keyboard_grabbed,
-            first_event_verified: running.first_event_verified.load(Ordering::Acquire),
-            observed_layer: running.observed_layer.load(Ordering::Acquire),
-            armed: running.armed,
-            ownership_released: self.released_cindy_identity().is_some(),
-            failure: running.receiver.failure(),
+        self.six_layer_view = self.six_layer_running.as_ref().map(|running| {
+            let observed_layer = running.observed_layer.load(Ordering::Acquire);
+            let foreground_priority_adapter = self
+                .foreground_bundle_id
+                .as_deref()
+                .filter(|_| (2..=4).contains(&observed_layer))
+                .and_then(|bundle| {
+                    running.installation.plan.hosts.iter().find(|host| {
+                        mi_macos::executor::bundle_id_for_adapter(&host.adapter) == Some(bundle)
+                    })
+                })
+                .map(|host| host.adapter.clone());
+            SixLayerView {
+                configuration_observed: running.readiness.configuration_observed,
+                keyboard_grabbed: running.readiness.keyboard_grabbed,
+                first_event_verified: running.first_event_verified.load(Ordering::Acquire),
+                observed_layer,
+                armed: running.armed,
+                failure: running.receiver.failure(),
+                effective_profile_id: running.effective_profile_id(),
+                foreground_priority_adapter,
+            }
         });
+    }
+
+    fn device_session_connected(&self) -> bool {
+        if let Some(running) = &self.six_layer_running {
+            return running.readiness.configuration_observed
+                && running.readiness.keyboard_grabbed
+                && running.receiver.failure().is_none();
+        }
+        self.device_session
+            .as_ref()
+            .is_some_and(|session| !session.is_disconnected())
     }
 
     fn reconcile_presentation(&mut self) {

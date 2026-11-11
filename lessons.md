@@ -299,3 +299,38 @@
 
 - 完整会话标题不能放入固定高度键帽后强制不限高度换行。键帽显示编号与短状态，完整标题由自然高度列表承载。
 - 布局验收必须覆盖真实投影格式、长中英文标题与所有状态。`SessionKeycapLayoutTests` 已覆盖内容区高度、全文行高及 JSON null 空槽；仍需在原生运行界面检查对应关系。
+
+## 过期按键与连接失效分别处理
+
+- 起因与后果：六层输入排队后还需核验 Cindy 所有权。实机观察到一次事件核验前已等待 1617 毫秒，核验另用 1156 毫秒；超过两秒有效期后，原实现永久停用整个接收器，后续新按键也没有反应。
+- 修复：`Activation::is_expired_at` 统一有效期，接收与执行阶段只淘汰过期事件。所有权拒绝、断连、代次终止及溢出继续停止执行。
+- 验证点：`expired_clicks_do_not_disable_new_clicks`、`reads_preserve_fresh_clicks_after_an_expired_prefix` 和 `a_click_expiring_during_ownership_check_does_not_stop_fresh_clicks`。必须证明旧动作没有执行，同一代次的后续新动作仍会执行。Seen 1x（2026-11-10）。
+- 同轮发现：底层执行器不支持的会话导航曾返回成功而无系统动作。`unsupported_` 回归以真实执行器和记录型系统驱动验证明确拒绝，并用受支持的聚焦输入动作作正对照。明确拒绝不代表导航能力已实现。
+
+## 前台应用与分屏必须分别确定目标
+
+- 起因与后果：六层独立执行器只读取物理层，已有前台通知不能改变它的目标；Antigravity 两个分屏的输入框和语音按钮又被展平成整窗列表，触发 `ambiguous_or_missing_dictation_control`。应用同时运行与控件歧义不能混为同一个原因。
+- 修复：第 2–4 托管层在已安装方案中优先匹配前台应用，切换时淘汰旧队列及等待权限核验的事件；AX 捕获保留祖先路径，以唯一焦点分支确定分屏，后续执行和读回固定到同一目标。实时语音复用该路径，不再维护整窗选择器。第 1 层 Codex 原生通道不在此规则控制范围。
+- 验证点：`foreground_switch_discards_queued_and_waiting_clicks_without_retargeting`、`split_panes_resolve_only_the_focused_branch`、`recording_cannot_migrate_to_another_pane_in_the_same_window`。多分屏无明确焦点时拒绝；窗口标题变化时旧录音清理仍可能拒绝，不能仅凭 AX 分屏引用宣称会话身份未变。Seen 1x（2026-11-10）。
+
+## 配置查询不能成为实体输入的常驻依赖
+
+- 起因与后果：六层输入已经通过 Karabiner 专用键码携带层位，却仍每 500 毫秒查询共享 Vendor RPC。持续实机验证先后捕获协议响应错误与两秒查询超时，每次都会永久停用输入；持续查询还必然耗尽单会话 999 个编号。
+- 修复：首次完整核验配置后关闭 RPC reader，运行期只检查真实 USB、Karabiner、输入代次与睡眠边界；实体事件负责更新最近输入层。删除本轮一度增加的自动重连逻辑，不为多余轮询维护恢复状态机。连接投影依据实际输入通道，不能把已关闭的配置会话当成断开的键盘。
+- 验证点：核验后 reader 已退出，多个监视周期零 RPC、输入仍可执行；USB/readiness/输入代次失效仍停用，睡眠和迟到任务仍清理。保留 mi-session 终止原因与延迟 reader 退出回归：可取消的请求 future 不能取走 JoinHandle 后等待。层位文案区分首次核验与最近输入；不承诺实时发现外部工具静默改写设备 Profile。Seen 1x（2026-11-10）。
+
+## 共享响应先判断归属，再检查本请求契约
+
+- 起因与后果：实体聚焦输入成功后，持续连接验证捕获 `invalid response id`。接收器在 pending 归属判断前要求所有 result/error 消息都有合法数字 ID；无法关联的响应能直接终止会话。
+- 修复与验证：先分类无法关联响应、通知与本请求响应，再严格解码本请求。回归覆盖缺失/null/字符串 ID、不匹配 ID、匹配别名冲突，以及只有无关联响应时仍超时。无法关联不等于已证实来自 Codex；同 ID 跨客户端歧义仍属 UNKNOWN-17，不能以忽略非本请求响应宣称完全隔离。Seen 1x（2026-11-10）。
+
+## 专用托管按键不依赖无关应用的原生租约
+
+- 起因与后果：六层专用标准键由 Karabiner 抓取，却继承了 Cindy 原生 Vendor 通道的释放回执门禁。用户退出且不再使用 Cindy 后，Antigravity 仍无法连接。
+- 修复与验证：六层输入只检查它实际使用的 USB/Karabiner、输入代次、前台目标及用户执行开关，不依赖 Cindy 进程或 socket。第 1 层原生 OAI 映射不变，传统 Vendor 通道的所有权机制单独保留。回归覆盖无所有权桥仍执行、新旧输入代次隔离及真实输入条件失效；不为不再使用的应用新增进程探测框架。Seen 1x（2026-11-10）。
+
+## 已选控件的确认不需要重新发现整棵树
+
+- 起因与后果：真实按键采样显示聚焦输入重复遍历 AX 树。捕获和选择后，执行前校验与焦点读回仍完整扫描，单次等待还会阻塞后续按键。
+- 修复：保留完整发现与输入歧义判断，只对已选控件做实时路径校验和焦点确认。首次实测证明一个 AXScrollArea 的 AXParent 与 AXChildren 不互逆，因此使用最近一次完整选择扫描记录的向下路径，逐段检查当前子节点、原 scope、PID、窗口及可见性；不信任旧属性，也不转向替代控件。
+- 验证点：`exact_control_membership_rejects_removed_or_replaced_path_edges`、`exact_control_membership_requires_the_original_scope`、`input_added_after_capture_is_rejected_before_focus` 和焦点确认期间的替换/身份变化回归。成功的真实 AX 对照与拒绝分别计数，物理开关延迟不能由测试进程时长推算。见 `docs/designs/host-input-latency.md`。Seen 1x（2026-11-10）。

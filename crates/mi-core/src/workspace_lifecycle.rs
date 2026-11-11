@@ -75,7 +75,6 @@ impl WorkbenchStore {
             running.retire();
         }
         let pending = self.six_layer_job.take();
-        self.six_layer_ownership_identity = None;
         if let Some(transport) = self.mac_watcher_transport.take() {
             mi_transport::HidTransport::stop_discovery(transport.as_ref());
         }

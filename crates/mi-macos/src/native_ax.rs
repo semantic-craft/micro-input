@@ -54,6 +54,67 @@ mod macos {
     const MAX_DEPTH: usize = 48;
     const UTF8: u32 = 0x0800_0100;
 
+    #[derive(Clone)]
+    struct ControlNode<E> {
+        pid: Option<i32>,
+        role: Option<String>,
+        hidden: bool,
+        window: Option<E>,
+        children: Vec<E>,
+    }
+
+    fn validate_control_membership<E>(
+        path: &[E],
+        scope: &E,
+        window: &E,
+        pid: i32,
+        deadline: Instant,
+        same: impl Fn(&E, &E) -> bool,
+        mut read_node: impl FnMut(&E) -> Result<ControlNode<E>, String>,
+    ) -> Result<(), String> {
+        if path.first().is_none_or(|first| !same(first, scope)) {
+            return Err(blocked("ax_control_scope_changed"));
+        }
+        if path.len() > MAX_DEPTH + 1 {
+            return Err(blocked("ax_tree_limit"));
+        }
+        for (index, current) in path.iter().enumerate() {
+            if Instant::now() >= deadline {
+                return Err(blocked("ax_control_validation_timeout"));
+            }
+            if path[..index].iter().any(|old| same(old, current)) {
+                return Err(blocked("ax_control_ancestry_cycle"));
+            }
+            let node = read_node(current)?;
+            if Instant::now() >= deadline {
+                return Err(blocked("ax_control_validation_timeout"));
+            }
+            if node.pid != Some(pid) {
+                return Err(blocked("control_pid_mismatch"));
+            }
+            if node.role.is_none() {
+                return Err(blocked("ax_role_unavailable"));
+            }
+            if node.hidden {
+                return Err(blocked("ax_control_hidden"));
+            }
+            if node
+                .window
+                .as_ref()
+                .is_some_and(|owner| !same(owner, window))
+            {
+                return Err(blocked("ax_control_window_changed"));
+            }
+            if path
+                .get(index + 1)
+                .is_some_and(|next| !node.children.iter().any(|child| same(child, next)))
+            {
+                return Err(blocked("ax_control_removed"));
+            }
+        }
+        Ok(())
+    }
+
     #[repr(C)]
     #[derive(Clone, Copy, Debug, Default)]
     struct Point {
@@ -225,6 +286,15 @@ mod macos {
             }
             unsafe { Self::from_create(value) }
         }
+        fn optional_attr(&self, name: &str) -> Result<Option<Self>, String> {
+            let name = Self::text(name);
+            let mut value = std::ptr::null();
+            match unsafe { AXUIElementCopyAttributeValue(self.0, name.0, &mut value) } {
+                0 => Ok(unsafe { Self::from_create(value) }),
+                -25205 | -25212 => Ok(None),
+                code => Err(format!("blocked:ax_attribute_{code}")),
+            }
+        }
         fn string(&self) -> Option<String> {
             if unsafe { CFGetTypeID(self.0) != CFStringGetTypeID() } {
                 return None;
@@ -361,6 +431,7 @@ mod macos {
         identity: ManagedWindowIdentity,
         application: Owned,
         window: Owned,
+        scope: Owned,
     }
 
     #[derive(Debug, Default)]
@@ -371,6 +442,8 @@ mod macos {
         windows: Vec<(String, Owned, u64)>,
         next_window_id: u64,
         cached_controls: Vec<ManagedControl>,
+        control_paths: Vec<(u64, Vec<u64>)>,
+        next_scope_id: u64,
     }
 
     impl NativeAxProvider {
@@ -430,14 +503,39 @@ mod macos {
             {
                 return Err(blocked("target_window_changed"));
             }
+            if !self.is_descendant(&target.scope, &target.window) {
+                return Err(blocked("target_scope_changed"));
+            }
             Ok((target.application.clone(), target.window.clone()))
+        }
+        fn is_descendant(&self, element: &Owned, ancestor: &Owned) -> bool {
+            let deadline = Instant::now() + Duration::from_millis(300);
+            let mut current = element.clone();
+            for _ in 0..MAX_DEPTH {
+                if unsafe { CFEqual(current.0, ancestor.0) } != 0 {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                let Some(parent) = current.attr("AXParent") else {
+                    return false;
+                };
+                current = parent;
+            }
+            false
         }
         fn metadata(&self, element: &Owned, id: u64, role: String) -> Option<ManagedControl> {
             let editable = matches!(role.as_str(), "AXTextArea" | "AXTextField")
                 && element.settable("AXValue");
             let button = matches!(
                 role.as_str(),
-                "AXButton" | "AXCheckBox" | "AXRadioButton" | "AXSwitch" | "AXToggleButton"
+                "AXButton"
+                    | "AXCheckBox"
+                    | "AXRadioButton"
+                    | "AXSwitch"
+                    | "AXToggleButton"
+                    | "AXLink"
             );
             let label = if button || role == "AXHeading" {
                 element
@@ -457,19 +555,21 @@ mod macos {
                 .iter()
                 .any(|adapter| {
                     adapter.matches_start_label(&label) || adapter.matches_stop_label(&label)
-                }) || matches!(
-                    label.trim(),
-                    "Jump to bottom"
-                        | "Scroll to bottom"
-                        | "跳到底部"
-                        | "滚动到底部"
-                        | "Send"
-                        | "Send message"
-                        | "Submit"
-                        | "发送"
-                        | "发送消息"
-                        | "提交"
-                ));
+                }) || crate::executor::is_antigravity_live_voice_start_label(&label)
+                    || crate::executor::is_antigravity_live_voice_end_label(&label)
+                    || matches!(
+                        label.trim(),
+                        "Jump to bottom"
+                            | "Scroll to bottom"
+                            | "跳到底部"
+                            | "滚动到底部"
+                            | "Send"
+                            | "Send message"
+                            | "Submit"
+                            | "发送"
+                            | "发送消息"
+                            | "提交"
+                    ));
             let chat_heading = role == "AXHeading"
                 && label == "Conversation Log"
                 && self
@@ -496,6 +596,7 @@ mod macos {
             depth: usize,
             visited: &mut usize,
             controls: &mut Vec<ManagedControl>,
+            path: &mut Vec<u64>,
             deadline: Instant,
         ) -> Result<(), String> {
             if Instant::now() >= deadline {
@@ -514,15 +615,18 @@ mod macos {
             if element.bool_attr("AXHidden") == Some(true) {
                 return Ok(());
             }
-            if let Some(mut control) = self.metadata(&element, 0, role.clone()) {
-                control.id = self.register(&element)?;
+            let id = self.register(&element)?;
+            path.push(id);
+            if let Some(control) = self.metadata(&element, id, role.clone()) {
+                self.control_paths.push((id, path.clone()));
                 controls.push(control);
             }
             if !matches!(role.as_str(), "AXTextArea" | "AXTextField") {
                 for child in element.children()? {
-                    self.walk(child, depth + 1, visited, controls, deadline)?;
+                    self.walk(child, depth + 1, visited, controls, path, deadline)?;
                 }
             }
+            path.pop();
             Ok(())
         }
         fn refresh_controls(&self, window: &Owned) -> Option<Vec<ManagedControl>> {
@@ -537,6 +641,7 @@ mod macos {
                     if element.pid() != window.pid()
                         || unsafe { CFEqual(owner.0, window.0) } == 0
                         || element.bool_attr("AXHidden") == Some(true)
+                        || !self.is_descendant(&element, &self.target.as_ref()?.scope)
                     {
                         return None;
                     }
@@ -561,14 +666,104 @@ mod macos {
             }
             Ok((control, element))
         }
+        fn checked_exact_control(
+            &self,
+            target: &ManagedWindowIdentity,
+            id: u64,
+        ) -> Result<(ManagedControl, Owned), String> {
+            let deadline = Instant::now() + Duration::from_millis(300);
+            let current = self
+                .target
+                .as_ref()
+                .filter(|current| current.identity == *target)
+                .ok_or_else(|| blocked("target_identity_changed"))?;
+            let (_, window) = self.validate(target)?;
+            let element = self.element(id)?;
+            let (_, path) = self
+                .control_paths
+                .iter()
+                .find(|(control, path)| *control == id && path.last() == Some(&id))
+                .ok_or_else(|| blocked("ax_control_path_missing"))?;
+            let path = path
+                .iter()
+                .map(|id| self.element(*id))
+                .collect::<Result<Vec<_>, _>>()?;
+            let same = |left: &Owned, right: &Owned| unsafe { CFEqual(left.0, right.0) } != 0;
+            validate_control_membership(
+                &path,
+                &current.scope,
+                &window,
+                target.pid,
+                deadline,
+                same,
+                |node| {
+                    let hidden = node
+                        .optional_attr("AXHidden")?
+                        .map(|value| {
+                            if unsafe { CFGetTypeID(value.0) == CFBooleanGetTypeID() } {
+                                Ok(unsafe { CFBooleanGetValue(value.0) } != 0)
+                            } else {
+                                value
+                                    .number()
+                                    .map(|n| n != 0.0)
+                                    .ok_or_else(|| blocked("ax_hidden_unavailable"))
+                            }
+                        })
+                        .transpose()?
+                        .unwrap_or(false);
+                    let children = if same(node, &element) {
+                        Vec::new()
+                    } else {
+                        node.attr("AXChildren")
+                            .ok_or_else(|| blocked("ax_control_removed"))?
+                            .array()?
+                    };
+                    Ok(ControlNode {
+                        pid: node.pid(),
+                        role: node.string_attr("AXRole"),
+                        hidden,
+                        window: node.optional_attr("AXWindow")?,
+                        children,
+                    })
+                },
+            )?;
+            let role = element
+                .string_attr("AXRole")
+                .ok_or_else(|| blocked("ax_role_unavailable"))?;
+            let metadata = self
+                .metadata(&element, id, role)
+                .ok_or_else(|| blocked("ax_control_removed"))?;
+            self.validate(target)?;
+            if Instant::now() >= deadline {
+                return Err(blocked("ax_control_validation_timeout"));
+            }
+            Ok((metadata, element))
+        }
     }
 
     impl NativeAxProvider {
-        fn capture_window(
+        fn scope_identity(
             &mut self,
-            bundle_id: &str,
-            reuse_controls: bool,
-        ) -> Result<ManagedWindow, String> {
+            pid: i32,
+            window_id: u64,
+            scope: &Owned,
+            previous: Option<&Target>,
+        ) -> Result<u64, String> {
+            if let Some(target) = self.retained_targets.iter().chain(previous).find(|target| {
+                target.identity.pid == pid
+                    && target.identity.window_id == window_id
+                    && unsafe { CFEqual(target.scope.0, scope.0) } != 0
+            }) {
+                return Ok(target.identity.scope_id);
+            }
+            self.next_scope_id = self
+                .next_scope_id
+                .checked_add(1)
+                .ok_or_else(|| blocked("ax_scope_identity_exhausted"))?;
+            Ok(self.next_scope_id)
+        }
+
+        fn capture_window(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
             if !unsafe { AXIsProcessTrusted() } {
                 return Err(blocked("accessibility_untrusted"));
             }
@@ -602,15 +797,8 @@ mod macos {
             if window.pid() != Some(pid) {
                 return Err(blocked("target_pid_mismatch"));
             }
-            let same_window = self.target.as_ref().is_some_and(|old| {
-                old.identity.pid == pid
-                    && old.identity.bundle_id == bundle_id
-                    && unsafe { CFEqual(old.window.0, window.0) } != 0
-            });
-            if !reuse_controls || !same_window {
-                self.cached_controls.clear();
-                self.elements.clear();
-            }
+            self.cached_controls.clear();
+            self.elements.clear();
             let window_id = if let Some((_, _, id)) =
                 self.windows.iter().find(|(bundle, old, _)| {
                     bundle == bundle_id && unsafe { CFEqual(old.0, window.0) } != 0
@@ -627,18 +815,75 @@ mod macos {
                 bundle_id: bundle_id.to_owned(),
                 pid,
                 window_id,
+                scope_id: 0,
                 title: window.string_attr("AXTitle").unwrap_or_default(),
             };
+            let previous_target = self.target.clone();
             self.target = Some(Target {
                 identity: identity.clone(),
                 application,
                 window: window.clone(),
+                scope: window.clone(),
             });
-            if reuse_controls {
-                self.read_for_scroll(&identity)
-            } else {
-                self.read(&identity)
+            let snapshot = self.read(&identity)?;
+            let input_paths: Vec<_> = snapshot
+                .controls
+                .iter()
+                .filter(|control| {
+                    control.enabled && control.editable && control.role == "AXTextArea"
+                })
+                .filter_map(|control| {
+                    self.control_paths
+                        .iter()
+                        .find(|(id, _)| *id == control.id)
+                        .map(|(_, path)| path.clone())
+                })
+                .collect();
+            let mut focus_path = Vec::new();
+            if input_paths.len() > 1 {
+                let mut focused = self
+                    .target
+                    .as_ref()
+                    .and_then(|target| target.application.attr("AXFocusedUIElement"));
+                let deadline = Instant::now() + Duration::from_millis(300);
+                for _ in 0..MAX_DEPTH {
+                    let Some(element) = focused else {
+                        break;
+                    };
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    focus_path.push(self.register(&element)?);
+                    if unsafe { CFEqual(element.0, window.0) } != 0 {
+                        break;
+                    }
+                    focused = element.attr("AXParent");
+                }
+                focus_path.reverse();
             }
+            let Some(scope_element_id) =
+                crate::managed_controls::select_input_scope(&input_paths, &focus_path)?
+            else {
+                return Ok(snapshot);
+            };
+            let scope = self.element(scope_element_id)?;
+            let scope_id = self.scope_identity(pid, window_id, &scope, previous_target.as_ref())?;
+            let mut identity = identity;
+            identity.scope_id = scope_id;
+            let target = self.target.as_mut().unwrap();
+            target.identity = identity.clone();
+            target.scope = scope;
+            let controls: Vec<_> = snapshot
+                .controls
+                .into_iter()
+                .filter(|control| {
+                    self.control_paths
+                        .iter()
+                        .any(|(id, path)| *id == control.id && path.contains(&scope_element_id))
+                })
+                .collect();
+            self.cached_controls = controls.clone();
+            Ok(ManagedWindow { identity, controls })
         }
 
         fn read_for_scroll(
@@ -810,13 +1055,13 @@ mod macos {
                 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
         }
         fn capture(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
-            self.capture_window(bundle_id, false)
+            self.capture_window(bundle_id)
         }
         fn capture_for_scroll(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
-            self.capture_window(bundle_id, true)
+            self.capture_window(bundle_id)
         }
         fn read(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String> {
-            let (_, window) = self.validate(target)?;
+            self.validate(target)?;
             if self
                 .target
                 .as_ref()
@@ -826,12 +1071,19 @@ mod macos {
                 self.elements.clear();
                 self.cached_controls.clear();
             }
+            let scope = self
+                .target_for(target)
+                .ok_or_else(|| blocked("ax_target_missing"))?
+                .scope
+                .clone();
             let mut controls = Vec::new();
+            self.control_paths.clear();
             self.walk(
-                window,
+                scope,
                 0,
                 &mut 0,
                 &mut controls,
+                &mut Vec::new(),
                 Instant::now() + Duration::from_millis(500),
             )?;
             self.cached_controls = controls.clone();
@@ -849,8 +1101,16 @@ mod macos {
             self.cached_controls.clear();
             element.action("AXPress")
         }
+        fn read_control(
+            &mut self,
+            target: &ManagedWindowIdentity,
+            control: u64,
+        ) -> Result<ManagedControl, String> {
+            self.checked_exact_control(target, control)
+                .map(|(metadata, _)| metadata)
+        }
         fn focus(&mut self, target: &ManagedWindowIdentity, control: u64) -> Result<(), String> {
-            let (metadata, element) = self.checked_control(target, control)?;
+            let (metadata, element) = self.checked_exact_control(target, control)?;
             if !metadata.enabled || !metadata.editable || !element.settable("AXFocused") {
                 return Err(blocked("ax_input_not_focusable"));
             }
@@ -1147,10 +1407,12 @@ mod macos {
                     bundle_id: bundle.into(),
                     pid: 123,
                     window_id: id,
+                    scope_id: 0,
                     title: format!("window-{id}"),
                 },
                 application: Owned::text(&format!("app-{bundle}")),
                 window: Owned::text(&format!("window-{id}")),
+                scope: Owned::text(&format!("window-{id}")),
             };
             let original = target("com.google.antigravity", 1);
             let identity = original.identity.clone();
@@ -1161,6 +1423,10 @@ mod macos {
             };
             provider.retain_target(&identity).unwrap();
             provider.target = Some(target("com.deepseek.dsh", 2));
+            assert_eq!(
+                provider.checked_exact_control(&identity, 1).unwrap_err(),
+                "blocked:target_identity_changed"
+            );
             assert_eq!(
                 provider.target_for(&identity).unwrap().window.0,
                 original_window.0
@@ -1173,6 +1439,206 @@ mod macos {
             provider.release_target(&identity);
             assert!(provider.target_for(&identity).is_none());
             assert!(provider.retained_targets.is_empty());
+        }
+
+        #[test]
+        fn retained_scope_survives_switching_panes_in_the_same_window() {
+            let window = Owned::text("window");
+            let target = Target {
+                identity: ManagedWindowIdentity {
+                    bundle_id: "com.google.antigravity".into(),
+                    pid: 123,
+                    window_id: 1,
+                    scope_id: 10,
+                    title: "window".into(),
+                },
+                application: Owned::text("app"),
+                window,
+                scope: Owned::text("left-pane"),
+            };
+            let original = target.identity.clone();
+            let original_scope = target.scope.clone();
+            let mut provider = NativeAxProvider {
+                target: Some(target.clone()),
+                ..Default::default()
+            };
+            provider.retain_target(&original).unwrap();
+            let mut right = target;
+            right.identity.scope_id = 11;
+            right.scope = Owned::text("right-pane");
+            provider.target = Some(right);
+            assert_eq!(
+                provider.checked_exact_control(&original, 1).unwrap_err(),
+                "blocked:target_identity_changed"
+            );
+            assert_eq!(
+                provider.target_for(&original).unwrap().scope.0,
+                original_scope.0
+            );
+            provider.release_target(&original);
+            assert!(provider.target_for(&original).is_none());
+        }
+
+        #[test]
+        fn rebuilt_panes_do_not_accumulate_scope_handles_or_exhaust_a_cache() {
+            let mut provider = NativeAxProvider::default();
+            let mut last = 0;
+            for index in 0..256 {
+                let scope = Owned::text(&format!("pane-{index}"));
+                let id = provider.scope_identity(123, 1, &scope, None).unwrap();
+                assert!(id > last);
+                last = id;
+            }
+            assert!(provider.retained_targets.is_empty());
+            assert!(provider.target.is_none());
+        }
+
+        fn control_nodes(count: usize) -> Vec<ControlNode<usize>> {
+            (0..count)
+                .map(|index| ControlNode {
+                    pid: Some(123),
+                    role: Some(
+                        if index + 1 == count {
+                            "AXTextArea"
+                        } else {
+                            "AXGroup"
+                        }
+                        .into(),
+                    ),
+                    hidden: false,
+                    window: Some(count),
+                    children: if index + 1 < count {
+                        vec![index + 1]
+                    } else {
+                        Vec::new()
+                    },
+                })
+                .collect()
+        }
+
+        fn check_path(nodes: &[ControlNode<usize>], path: &[usize]) -> Result<(), String> {
+            validate_control_membership(
+                path,
+                &0,
+                &nodes.len(),
+                123,
+                Instant::now() + Duration::from_secs(1),
+                |left, right| left == right,
+                |node| {
+                    nodes
+                        .get(*node)
+                        .cloned()
+                        .ok_or_else(|| blocked("ax_control_removed"))
+                },
+            )
+        }
+
+        #[test]
+        fn exact_control_membership_accepts_live_path_with_optional_window() {
+            let mut nodes = control_nodes(3);
+            check_path(&nodes, &[0, 1, 2]).unwrap();
+            for node in &mut nodes {
+                node.window = None;
+            }
+            check_path(&nodes, &[0, 1, 2]).unwrap();
+        }
+
+        #[test]
+        fn exact_control_membership_rejects_removed_or_replaced_path_edges() {
+            for index in 0..2 {
+                for children in [vec![], vec![8]] {
+                    let mut nodes = control_nodes(3);
+                    nodes[index].children = children;
+                    assert_eq!(
+                        check_path(&nodes, &[0, 1, 2]).unwrap_err(),
+                        "blocked:ax_control_removed"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn exact_control_membership_requires_the_original_scope() {
+            let nodes = control_nodes(3);
+            for path in [vec![], vec![1, 2]] {
+                assert_eq!(
+                    check_path(&nodes, &path).unwrap_err(),
+                    "blocked:ax_control_scope_changed"
+                );
+            }
+        }
+
+        #[test]
+        fn exact_control_membership_rejects_hidden_or_invalid_path_nodes() {
+            for index in 0..3 {
+                let mut nodes = control_nodes(3);
+                nodes[index].hidden = true;
+                assert_eq!(
+                    check_path(&nodes, &[0, 1, 2]).unwrap_err(),
+                    "blocked:ax_control_hidden"
+                );
+                nodes[index].hidden = false;
+                nodes[index].role = None;
+                assert_eq!(
+                    check_path(&nodes, &[0, 1, 2]).unwrap_err(),
+                    "blocked:ax_role_unavailable"
+                );
+                nodes[index].role = Some("AXGroup".into());
+                nodes[index].pid = Some(999);
+                assert_eq!(
+                    check_path(&nodes, &[0, 1, 2]).unwrap_err(),
+                    "blocked:control_pid_mismatch"
+                );
+                nodes[index].pid = Some(123);
+                nodes[index].window = Some(9);
+                assert_eq!(
+                    check_path(&nodes, &[0, 1, 2]).unwrap_err(),
+                    "blocked:ax_control_window_changed"
+                );
+            }
+        }
+
+        #[test]
+        fn exact_control_membership_rejects_cyclic_or_overlong_paths() {
+            let mut nodes = control_nodes(3);
+            nodes[1].children = vec![0];
+            assert_eq!(
+                check_path(&nodes, &[0, 1, 0]).unwrap_err(),
+                "blocked:ax_control_ancestry_cycle"
+            );
+            let nodes = control_nodes(MAX_DEPTH + 2);
+            let path: Vec<_> = (0..nodes.len()).collect();
+            assert_eq!(
+                check_path(&nodes, &path).unwrap_err(),
+                "blocked:ax_tree_limit"
+            );
+        }
+
+        #[test]
+        fn exact_control_membership_rejects_read_errors_and_expired_budget() {
+            let read_error = validate_control_membership(
+                &[0, 1, 2],
+                &0,
+                &3,
+                123,
+                Instant::now() + Duration::from_secs(1),
+                |left, right| left == right,
+                |_| Err(blocked("ax_attribute_failed")),
+            );
+            assert_eq!(read_error.unwrap_err(), "blocked:ax_attribute_failed");
+            let expired = validate_control_membership(
+                &[0, 1, 2],
+                &0,
+                &3,
+                123,
+                Instant::now(),
+                |left, right| left == right,
+                |_| panic!("expired validation must not read AX"),
+            );
+            assert_eq!(
+                expired.unwrap_err(),
+                "blocked:ax_control_validation_timeout"
+            );
         }
 
         fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {

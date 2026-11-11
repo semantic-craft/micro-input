@@ -9,6 +9,7 @@ pub struct ManagedWindowIdentity {
     pub bundle_id: String,
     pub pid: i32,
     pub window_id: u64,
+    pub scope_id: u64,
     pub title: String,
 }
 
@@ -55,6 +56,17 @@ pub trait ManagedAxProvider: Send {
         self.capture(bundle_id)
     }
     fn read(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String>;
+    fn read_control(
+        &mut self,
+        target: &ManagedWindowIdentity,
+        control: u64,
+    ) -> Result<ManagedControl, String> {
+        read(self, target)?
+            .controls
+            .into_iter()
+            .find(|item| item.id == control)
+            .ok_or_else(|| blocked("ax_control_removed"))
+    }
     fn press(&mut self, target: &ManagedWindowIdentity, control: u64) -> Result<(), String>;
     fn focus(&mut self, target: &ManagedWindowIdentity, control: u64) -> Result<(), String>;
     fn scroll(
@@ -155,6 +167,31 @@ impl<P: ManagedAxProvider> ManagedAxControls<P> {
         }
         result?;
         Ok(desired)
+    }
+
+    pub fn toggle_live_voice(&self, adapter: &str) -> Result<(), String> {
+        if managed_adapter(adapter)? != DictationAdapter::Antigravity {
+            return Err(blocked("unsupported_live_voice_adapter"));
+        }
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let window = capture(&mut *provider, DictationAdapter::Antigravity)?;
+        let (active, control) = live_voice_control(&window)?;
+        provider.press(&window.identity, control)?;
+        let deadline = Instant::now() + self.readback_timeout;
+        loop {
+            let current = read(&mut *provider, &window.identity)
+                .map_err(|error| format!("unconfirmed:{error}"))?;
+            if live_voice_control(&current).is_ok_and(|(now_active, _)| now_active != active) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err("unconfirmed:live_voice_readback".into());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 
     pub fn stop_dictation(&self, adapter: &str) -> Result<bool, String> {
@@ -399,7 +436,7 @@ fn capture<P: ManagedAxProvider>(
     Ok(window)
 }
 
-fn read<P: ManagedAxProvider>(
+fn read<P: ManagedAxProvider + ?Sized>(
     provider: &mut P,
     target: &ManagedWindowIdentity,
 ) -> Result<ManagedWindow, String> {
@@ -408,6 +445,66 @@ fn read<P: ManagedAxProvider>(
         return Err(blocked("target_identity_changed"));
     }
     Ok(window)
+}
+
+pub(crate) fn select_input_scope(
+    input_paths: &[Vec<u64>],
+    focus_path: &[u64],
+) -> Result<Option<u64>, String> {
+    if input_paths.len() <= 1 {
+        return Ok(None);
+    }
+    let common =
+        |left: &[u64], right: &[u64]| left.iter().zip(right).take_while(|(a, b)| a == b).count();
+    let scores: Vec<_> = input_paths
+        .iter()
+        .map(|path| common(path, focus_path))
+        .collect();
+    let maximum = scores.iter().copied().max().unwrap_or(0);
+    let selected: Vec<_> = scores
+        .iter()
+        .enumerate()
+        .filter(|(_, score)| **score == maximum)
+        .collect();
+    let [(selected, _)] = selected.as_slice() else {
+        return Err(blocked("ambiguous_or_missing_focused_pane"));
+    };
+    let path = &input_paths[*selected];
+    let boundary = input_paths
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != *selected)
+        .map(|(_, other)| common(path, other))
+        .max()
+        .unwrap_or(0);
+    if maximum <= boundary || boundary >= path.len().saturating_sub(1) {
+        return Err(blocked("ambiguous_or_missing_focused_pane"));
+    }
+    Ok(Some(path[boundary]))
+}
+
+fn live_voice_control(window: &ManagedWindow) -> Result<(bool, u64), String> {
+    let controls: Vec<_> = window
+        .controls
+        .iter()
+        .filter_map(|control| {
+            let active = if crate::executor::is_antigravity_live_voice_start_label(&control.label) {
+                false
+            } else if crate::executor::is_antigravity_live_voice_end_label(&control.label) {
+                true
+            } else {
+                return None;
+            };
+            Some((active, control))
+        })
+        .collect();
+    let [(active, control)] = controls.as_slice() else {
+        return Err(blocked("ambiguous_or_missing_live_voice_control"));
+    };
+    if !control.enabled || !control.pressable {
+        return Err(blocked("live_voice_control_unavailable"));
+    }
+    Ok((*active, control.id))
 }
 
 fn dictation_control(
@@ -508,19 +605,24 @@ fn focus_in_window<P: ManagedAxProvider>(
         .iter()
         .filter(|control| control.enabled && control.editable && control.role == "AXTextArea")
         .collect();
-    let [control] = candidates.as_slice() else {
-        return Err(blocked("ambiguous_or_missing_input"));
+    let focused: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|control| control.focused)
+        .collect();
+    let control = match (focused.as_slice(), candidates.as_slice()) {
+        ([control], _) => *control,
+        ([], [control]) => *control,
+        _ => return Err(blocked("ambiguous_or_missing_input")),
     };
     let id = control.id;
     provider.focus(target, id)?;
     let deadline = Instant::now() + timeout;
     loop {
-        let window = read(provider, target).map_err(|error| format!("unconfirmed:{error}"))?;
-        if window
-            .controls
-            .iter()
-            .any(|control| control.id == id && control.editable && control.focused)
-        {
+        let control = provider
+            .read_control(target, id)
+            .map_err(|error| format!("unconfirmed:{error}"))?;
+        if control.id == id && control.editable && control.focused {
             return Ok(id);
         }
         if Instant::now() >= deadline {
@@ -572,7 +674,19 @@ fn validate_uncleared_target<P: ManagedAxProvider>(
 
 #[cfg(test)]
 mod tests {
-    use super::insert_at_utf16_selection;
+    use super::{insert_at_utf16_selection, select_input_scope};
+
+    #[test]
+    fn split_panes_resolve_only_the_focused_branch() {
+        let inputs = vec![vec![1, 2, 3, 4], vec![1, 2, 5, 6]];
+        assert_eq!(select_input_scope(&inputs, &[1, 2, 5, 6]).unwrap(), Some(5));
+        assert_eq!(select_input_scope(&inputs, &[1, 2, 3, 9]).unwrap(), Some(3));
+        for focus in [vec![], vec![1], vec![1, 2], vec![10, 11]] {
+            assert!(select_input_scope(&inputs, &focus).is_err());
+        }
+        assert_eq!(select_input_scope(&[vec![1, 2, 3]], &[]).unwrap(), None);
+        assert!(select_input_scope(&[vec![1, 2], vec![1, 3]], &[1, 2]).is_err());
+    }
 
     #[test]
     fn prompt_insertion_preserves_utf16_selection_and_existing_text() {

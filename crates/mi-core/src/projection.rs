@@ -32,9 +32,10 @@ pub(super) struct SixLayerView {
     pub keyboard_grabbed: bool,
     pub first_event_verified: bool,
     pub armed: bool,
-    pub ownership_released: bool,
     pub observed_layer: u8,
     pub failure: Option<String>,
+    pub effective_profile_id: Option<String>,
+    pub foreground_priority_adapter: Option<String>,
 }
 
 pub(super) struct ProjectionInputs<'a> {
@@ -55,6 +56,7 @@ pub(super) struct ProjectionInputs<'a> {
     pub favorite_action_ids: &'a BTreeSet<String>,
     pub favorites_only: bool,
     pub hardware_rpc_verified: bool,
+    pub isolated: bool,
     pub keycap_overrides: &'a BTreeMap<(String, u32), CodexKeycapId>,
     pub keycap_search_query: &'a String,
     pub last_cursor_position: ScreenPoint,
@@ -1298,7 +1300,26 @@ impl ProjectionInputs<'_> {
             .or(self.selected_profile_id.as_deref())
             .is_some_and(|pid| self.is_protected_oai_profile(pid));
 
-        let ownership_banner = self.ownership_view.banner(is_protected_active);
+        let ownership_banner =
+            if self.six_layer_state.installation.is_some() || self.six_layer_view.is_some() {
+                if let Some(reason) = self
+                    .six_layer_view
+                    .as_ref()
+                    .and_then(|running| running.failure.clone())
+                {
+                    OwnershipBannerState::Caution { reason }
+                } else if self.device_connected {
+                    OwnershipBannerState::Ready {
+                        summary: "六层标准键输入已连接".into(),
+                    }
+                } else {
+                    OwnershipBannerState::Caution {
+                        reason: "六层输入尚未连接".into(),
+                    }
+                }
+            } else {
+                self.ownership_view.banner(is_protected_active)
+            };
         let editing_device = self.document_store.editing_device();
         let can_edit_draft =
             !self.document_store.draft.read_only && self.document_store.draft.loaded_format == 2;
@@ -1463,6 +1484,13 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn resolved_active_profile_id(&self) -> Option<String> {
+        if let Some(profile) = self
+            .six_layer_view
+            .as_ref()
+            .and_then(|running| running.effective_profile_id.clone())
+        {
+            return Some(profile);
+        }
         self.document_store.host_active_profile_id().filter(|pid| {
             self.document_store
                 .draft
@@ -1506,7 +1534,9 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn routing_mode_summary_label(&self) -> String {
-        let mode = if !self.auto_follow_enabled {
+        let mode = if self.six_layer_view.is_some() {
+            "托管层前台优先"
+        } else if !self.auto_follow_enabled {
             "手动模式"
         } else if self.manual_override {
             "手动锁定（自动跟随已暂停）"
@@ -1542,26 +1572,31 @@ impl ProjectionInputs<'_> {
             self.six_layer_state.installation.is_some() && !self.six_layer_busy;
         result.apply_block_reason = if self.six_layer_busy {
             "六层操作正在进行".into()
-        } else if !result.cindy_native_paused_confirmed {
-            "应用六层前，请确认 Cindy 原生键盘集成已关闭".into()
+        } else if self.isolated {
+            "隔离工作台不能应用实体六层方案".into()
         } else {
             self.compiled_six_layer_plan().err().unwrap_or_default()
         };
         result.can_apply = result.apply_block_reason.is_empty();
         if let Some(running) = &self.six_layer_view {
             result.configuration_observed = running.configuration_observed;
-            result.keyboard_grabbed = running.keyboard_grabbed && running.failure.clone().is_none();
+            result.keyboard_grabbed = running.keyboard_grabbed && running.failure.is_none();
             result.first_event_verified = running.first_event_verified;
             result.runtime_ready = running.armed
-                && running.failure.clone().is_none()
-                && running.ownership_released
+                && running.failure.is_none()
                 && self.document_store.host_execution_enabled();
             result.observed_layer = Some(running.observed_layer);
             result.observed_profile_kind = Some("six_layer_direct".into());
             result.observed_status = running.failure.clone().unwrap_or_else(|| {
+                let priority = running
+                    .foreground_priority_adapter
+                    .as_ref()
+                    .map(|adapter| format!(" · 前台优先 {adapter}"))
+                    .unwrap_or_default();
                 format!(
-                    "六层配置已核验 · 第 {} 层 · {}",
+                    "六层配置已核验 · 最近确认第 {} 层{} · {}",
                     running.observed_layer,
+                    priority,
                     if running.first_event_verified {
                         "实体输入已验证"
                     } else {

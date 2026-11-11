@@ -88,7 +88,7 @@ async fn malformed_timeout_disconnect_and_new_connection() {
     assert!(matches!(f.await.unwrap(), Err(SessionError::Protocol(_))));
     assert!(matches!(
         s.request(Method::FsList, json!({"checksum":true})).await,
-        Err(SessionError::Disconnected)
+        Err(SessionError::Protocol(_))
     ));
     let (s, l, _rx) = setup(25);
     assert!(matches!(
@@ -301,17 +301,78 @@ async fn exhausted_request_ids_end_the_session_and_require_reconnect() {
     for _ in 0..999 {
         s.request(Method::SysVersion, Value::Null).await.unwrap();
     }
-    let exhausted = s
-        .request(Method::SysVersion, Value::Null)
-        .await
-        .unwrap_err();
+    let exhausted = s.read_identity_info().await.unwrap_err();
     assert!(exhausted.to_string().contains("exhausted"));
+    assert!(matches!(exhausted, SessionError::RequestIdExhausted));
+    let identity_error = s.read_identity_info().await.unwrap_err();
+    assert!(
+        identity_error.to_string().contains("exhausted"),
+        "identity query lost terminal failure: {identity_error}"
+    );
+    assert!(matches!(identity_error, SessionError::RequestIdExhausted));
     assert!(matches!(
-        s.request(Method::SysVersion, Value::Null).await,
-        Err(SessionError::Disconnected)
+        s.terminal_failure(),
+        Some(SessionError::RequestIdExhausted)
     ));
+    assert_eq!(link.writes.lock().unwrap().len(), 999);
     s.shutdown().await;
     server.abort();
+}
+
+#[tokio::test]
+async fn exhausted_request_preserves_reader_join_for_lifecycle_shutdown() {
+    struct DelayedReaderClose {
+        link: Arc<MockLink>,
+        started: Notify,
+        release: Notify,
+    }
+    #[async_trait::async_trait]
+    impl HidLink for DelayedReaderClose {
+        async fn write(&self, report: &[u8]) -> Result<(), TransportError> {
+            self.link.write(report).await
+        }
+        async fn read(&self) -> Result<Vec<u8>, TransportError> {
+            self.started.notify_one();
+            let result = self.link.read().await;
+            self.release.notified().await;
+            result
+        }
+        fn close(&self) {
+            self.link.close();
+        }
+    }
+    let (link, _) = MockLink::new();
+    let delayed = Arc::new(DelayedReaderClose {
+        link,
+        started: Notify::new(),
+        release: Notify::new(),
+    });
+    let session = DeviceSession::new(
+        delayed.clone(),
+        Box::new(TestFramer),
+        Arc::new(ReadOnlySchema),
+        SessionConfig::default(),
+    );
+    delayed.started.notified().await;
+    // The full 999-request boundary is covered separately; isolate cleanup here.
+    session.queue.lock().await.next_id = 999;
+    assert!(matches!(
+        session.read_identity_info().await,
+        Err(SessionError::RequestIdExhausted)
+    ));
+    let closing = session.clone();
+    let mut shutdown = tokio::spawn(async move { closing.shutdown().await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut shutdown)
+            .await
+            .is_err(),
+        "shutdown returned before the reader exited"
+    );
+    delayed.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), shutdown)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]
@@ -603,10 +664,18 @@ async fn foreign_response_echo_does_not_kill_reader_or_satisfy_current_request()
         SessionConfig::default(),
     );
     let mut notices = s.notifications();
-    for value in [
+    let unmatched = [
         json!({"id":1000,"method":"synthetic.foreign","params":{},"result":{}}),
-        json!({"method":"kb.radial"}),
-    ] {
+        json!({"method":"synthetic.foreign","result":{}}),
+        json!({"id":null,"result":{}}),
+        json!({"id":"0","result":{}}),
+        json!({"id":-1,"error":{"code":1,"message":"synthetic"}}),
+        json!({"i":true,"result":{}}),
+    ];
+    for value in unmatched
+        .iter()
+        .chain([json!({"method":"kb.radial"})].iter())
+    {
         for report in mi_proto::NativeFramer::default()
             .encode(value.to_string().as_bytes())
             .unwrap()
@@ -614,20 +683,22 @@ async fn foreign_response_echo_does_not_kill_reader_or_satisfy_current_request()
             link.inject.send(report).unwrap();
         }
     }
-    tokio::time::timeout(Duration::from_secs(1), notices.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let notice = tokio::time::timeout(Duration::from_secs(1), notices.recv()).await;
+    assert!(notice.is_ok(), "reader stopped: {:?}", s.terminal_failure());
+    notice.unwrap().unwrap();
     let session = s.clone();
     let task =
         tokio::spawn(async move { session.request(Method::DeviceStatus, Value::Null).await });
     let report = requests.recv().await.unwrap();
     let request: Value = serde_json::from_slice(&report[3..3 + report[2] as usize]).unwrap();
-    for value in [
-        json!({"id":1000,"method":"synthetic.foreign","params":{},"result":{}}),
-        json!({"id":request["id"],"method":"sys.version","result":{"version":"wrong-method"}}),
-        json!({"id":request["id"],"method":"device.status","result":{"version":"owned"}}),
-    ] {
+    for value in unmatched.iter().chain(
+        [
+            json!({"id":request["id"],"method":"synthetic.foreign","params":{},"result":{}}),
+            json!({"id":request["id"],"method":"sys.version","result":{"version":"wrong-method"}}),
+            json!({"id":request["id"],"method":"device.status","result":{"version":"owned"}}),
+        ]
+        .iter(),
+    ) {
         for report in mi_proto::NativeFramer::default()
             .encode(value.to_string().as_bytes())
             .unwrap()
@@ -641,32 +712,59 @@ async fn foreign_response_echo_does_not_kill_reader_or_satisfy_current_request()
 }
 
 #[tokio::test]
-async fn owned_malformed_response_remains_an_error_after_routing() {
-    let (link, mut requests) = MockLink::new();
-    let s = DeviceSession::new(
-        link.clone(),
-        Box::new(mi_proto::NativeFramer::default()),
-        Arc::new(ReadOnlySchema),
-        SessionConfig::default(),
-    );
-    let session = s.clone();
+async fn unassociated_response_cannot_complete_request_or_become_notification() {
+    let (session, link, mut requests) = setup(25);
+    let mut notices = session.notifications();
+    let pending = session.clone();
     let task =
-        tokio::spawn(async move { session.request(Method::DeviceStatus, Value::Null).await });
-    let report = requests.recv().await.unwrap();
-    let request: Value = serde_json::from_slice(&report[3..3 + report[2] as usize]).unwrap();
-    let value = json!({"id":request["id"],"method":"device.status","params":{},"result":{}});
-    for report in mi_proto::NativeFramer::default()
-        .encode(value.to_string().as_bytes())
-        .unwrap()
-    {
-        link.inject.send(report).unwrap();
+        tokio::spawn(async move { pending.request(Method::DeviceStatus, Value::Null).await });
+    requests.recv().await.unwrap();
+    link.inject
+        .send(
+            json!({"method":"kb.radial","result":{}})
+                .to_string()
+                .into_bytes(),
+        )
+        .unwrap();
+    assert!(matches!(task.await.unwrap(), Err(SessionError::Timeout)));
+    assert!(notices.try_recv().is_err());
+    assert!(session.terminal_failure().is_none());
+    session.shutdown().await;
+}
+
+#[tokio::test]
+async fn owned_malformed_response_remains_an_error_after_routing() {
+    for damage in 0..3 {
+        let (link, mut requests) = MockLink::new();
+        let s = DeviceSession::new(
+            link.clone(),
+            Box::new(mi_proto::NativeFramer::default()),
+            Arc::new(ReadOnlySchema),
+            SessionConfig::default(),
+        );
+        let session = s.clone();
+        let task =
+            tokio::spawn(async move { session.request(Method::DeviceStatus, Value::Null).await });
+        let report = requests.recv().await.unwrap();
+        let request: Value = serde_json::from_slice(&report[3..3 + report[2] as usize]).unwrap();
+        let value = match damage {
+            0 => json!({"id":request["id"],"method":"device.status","params":{},"result":{}}),
+            1 => json!({"id":request["id"],"i":1000,"method":"synthetic.other","result":{}}),
+            _ => json!({"id":1000,"i":request["id"],"result":{}}),
+        };
+        for report in mi_proto::NativeFramer::default()
+            .encode(value.to_string().as_bytes())
+            .unwrap()
+        {
+            link.inject.send(report).unwrap();
+        }
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(SessionError::Protocol(_))
+        ));
+        assert!(s.terminal_failure().is_some());
+        s.shutdown().await;
     }
-    assert!(matches!(
-        task.await.unwrap(),
-        Err(SessionError::Protocol(_))
-    ));
-    assert!(s.terminal_failure().is_some());
-    s.shutdown().await;
 }
 
 #[tokio::test]
@@ -756,7 +854,7 @@ async fn stalled_report_write_is_bounded_and_requires_a_new_session() {
     assert!(matches!(result, Ok(Err(SessionError::Timeout))));
     assert!(matches!(
         session.request(Method::SysVersion, Value::Null).await,
-        Err(SessionError::Disconnected)
+        Err(SessionError::Timeout)
     ));
     session.shutdown().await;
 }

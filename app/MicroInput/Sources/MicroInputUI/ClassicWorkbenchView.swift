@@ -514,17 +514,6 @@ struct BoardLayersPanel: View {
                 .menuStyle(.borderlessButton)
             }
             Text(board.observedStatus).font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
-            Toggle(
-                "Cindy 原生键盘集成已关闭",
-                isOn: Binding(
-                    get: { board.cindyNativePausedConfirmed },
-                    set: { store.dispatch("sidebar", ["ConfirmCindyNativePaused": ["confirmed": $0]]) }
-                )
-            )
-            .toggleStyle(.checkbox)
-            .controlSize(.small)
-            .font(UITheme.micro)
-            .accessibilityIdentifier("board-cindy-native-paused")
             HStack {
                 Button("应用到键盘") { store.dispatch("sidebar", "ProvisionBoardLayers") }
                     .disabled(!board.canApply)
