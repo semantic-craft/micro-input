@@ -256,4 +256,28 @@ for view_path in sorted((root / 'app/MicroInput/Sources/MicroInputUI').glob('*.s
                 f'R-C09 violation in {rel_view}:{idx + 1}: every .buttonStyle(.plain) control must attach .focusEffectDisabled()'
             )
 
+forbidden_radial_copy = ('径向菜单', '摇杆菜单', '摇杆径向菜单')
+ui_and_core_paths = (
+    sorted((root / 'app/MicroInput/Sources/MicroInputUI').glob('*.swift'))
+    + sorted((root / 'crates/mi-macos/src').rglob('*.rs'))
+    + sorted((root / 'crates/mi-core/src').rglob('*.rs'))
+)
+for src_path in ui_and_core_paths:
+    src_text = src_path.read_text(encoding='utf-8')
+    for term in forbidden_radial_copy:
+        assert term not in src_text, (
+            f'R-C10 violation in {src_path.relative_to(root)}: forbidden legacy term {term!r}; '
+            'use single-source 轮盘菜单 naming (WorkbenchDestination.radial / PassivePanelFrameSpec::RADIAL_TITLE)'
+        )
+classic_workbench_src = (root / 'app/MicroInput/Sources/MicroInputUI/ClassicWorkbenchView.swift').read_text(encoding='utf-8')
+status_menu_src = (root / 'app/MicroInput/Sources/MicroInputUI/ModalsAndStatusMenuView.swift').read_text(encoding='utf-8')
+assert 'case radial = "轮盘菜单"' in classic_workbench_src, (
+    'R-C10 violation in app/MicroInput/Sources/MicroInputUI/ClassicWorkbenchView.swift: '
+    'WorkbenchDestination.radial must declare rawValue "轮盘菜单"'
+)
+assert 'WorkbenchDestination.radial.rawValue' in status_menu_src, (
+    'R-C10 violation in app/MicroInput/Sources/MicroInputUI/ModalsAndStatusMenuView.swift: '
+    'StatusMenuPopoverView must reference WorkbenchDestination.radial.rawValue as single source of truth'
+)
+
 print('UNKNOWN inventory and read-only/no-send boundaries: PASS')

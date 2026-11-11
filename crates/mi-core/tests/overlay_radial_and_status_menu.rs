@@ -171,6 +171,16 @@ fn radial_8_way_selection_and_four_app_prompt_preview() {
     let radial_panel = panel_host
         .visible_panel(PassivePanelRole::RadialMenu)
         .expect("radial panel presented on host");
+    assert_eq!(radial_panel.title, "Micro Input 轮盘菜单");
+    assert_eq!(
+        store
+            .projection()
+            .radial
+            .panel_spec
+            .as_ref()
+            .map(|p| p.title.as_str()),
+        Some("Micro Input 轮盘菜单")
+    );
     assert_eq!(radial_panel.frame, ScreenRect::new(0.0, 0.0, 500.0, 500.0));
     assert!(radial_panel.style.nonactivating_panel);
     assert!(radial_panel.style.can_join_all_spaces);

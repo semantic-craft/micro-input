@@ -873,12 +873,7 @@ impl ProjectionInputs<'_> {
         let visible_session = self.radial_state.session().cloned();
         let panel_spec = visible_session
             .as_ref()
-            .map(|session| PassivePanelFrameSpec {
-                role: PassivePanelRole::RadialMenu,
-                title: "Micro Input 径向菜单".to_string(),
-                frame: session.anchor_frame,
-                style: mi_macos::PassivePanelStyleSpec::for_role(PassivePanelRole::RadialMenu),
-            });
+            .map(|session| PassivePanelFrameSpec::for_radial_frame(session.anchor_frame));
         RadialOverlayProjection {
             enabled: self.radial_state.enabled(),
             readiness: *self.radial_readiness,

@@ -570,7 +570,7 @@ enum WorkbenchDestination: String, CaseIterable, Identifiable {
     case device = "设备与连接"
     case profiles = "应用方案"
     case library = "动作库"
-    case radial = "径向菜单"
+    case radial = "轮盘菜单"
     case general = "通用"
 
     var id: String { rawValue }
@@ -778,10 +778,10 @@ private struct WorkbenchSettingsPage: View {
                     let slots = store.statusMenu.radialSlots
                     let directions = ["右", "右下", "下", "左下", "左", "左上", "上", "右上"]
                     VStack(alignment: .leading, spacing: 10) {
-                        SettingsSectionHeader("摇杆菜单")
+                        SettingsSectionHeader("八向轮盘")
                         SettingsCard {
                             SettingsRow(
-                                "启用径向菜单",
+                                "启用轮盘菜单",
                                 subtitle: store.statusMenu.radialConfirmMode == "spring_back"
                                     ? "移动摇杆选择，回到中心确认。"
                                     : "移动摇杆选择，按下旋钮确认；回到中心取消。",
