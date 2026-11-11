@@ -321,6 +321,38 @@ final class DesignSystemVerificationTests: XCTestCase {
     }
 
     @MainActor
+    func testWheelMenuCopyUnificationAndToggleContract() throws {
+        XCTAssertEqual(WorkbenchDestination.radial.rawValue, "轮盘菜单")
+
+        let dir = try makeIsolatedTempDir("wheel-menu")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        XCTAssertFalse(store.statusMenu.radialMenuEnabled)
+        XCTAssertEqual(store.statusMenu.radialSlots.count, 8)
+
+        store.dispatch("status_menu", ["SetRadialMenuEnabled": true])
+        XCTAssertTrue(store.statusMenu.radialMenuEnabled)
+        store.dispatch("status_menu", ["SetRadialMenuEnabled": false])
+        XCTAssertFalse(store.statusMenu.radialMenuEnabled)
+
+        let (workbenchWindow, workbenchHost) = makeHostedWindow(
+            ClassicWorkbenchView(store: store),
+            width: 960,
+            fixedHeight: 680
+        )
+        defer { workbenchWindow.orderOut(nil) }
+        XCTAssertGreaterThan(workbenchHost.bounds.height, 0)
+
+        let (popoverWindow, popoverHost) = makeHostedWindow(
+            StatusMenuPopoverView(store: store, onOpenMainWindow: {}),
+            width: 348
+        )
+        defer { popoverWindow.orderOut(nil) }
+        XCTAssertGreaterThan(popoverHost.bounds.height, 0)
+    }
+
+    @MainActor
     func testExportVisualDesignSystemSnapshots() throws {
         guard let outputPath = ProcessInfo.processInfo.environment["MI_LAYOUT_OUTPUT"], !outputPath.isEmpty else {
             return

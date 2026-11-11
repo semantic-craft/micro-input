@@ -148,7 +148,7 @@ public struct StatusMenuPopoverView: View {
 
             VStack(spacing: 8) {
                 HStack {
-                    Text("轮盘菜单")
+                    Text(WorkbenchDestination.radial.rawValue)
                         .font(UITheme.captionMedium)
                         .foregroundStyle(UITheme.textPrimary)
                     Spacer()

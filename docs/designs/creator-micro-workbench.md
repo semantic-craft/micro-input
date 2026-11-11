@@ -1,6 +1,6 @@
 # Creator Micro 原生工作台
 
-工作台采用固定侧栏和内容页：Creator Micro、灯光、设备与连接、应用方案、动作库、径向菜单和通用。所有业务状态继续来自 Rust，经 CoreStore 的 Equatable 域切片投影；Swift 只维护页面选择和弹层显示。
+工作台采用固定侧栏和内容页：Creator Micro、灯光、设备与连接、应用方案、动作库、轮盘菜单和通用。所有业务状态继续来自 Rust，经 CoreStore 的 Equatable 域切片投影；Swift 只维护页面选择和弹层显示。
 
 ## 浏览与控制
 

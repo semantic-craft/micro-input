@@ -154,6 +154,7 @@ pub struct PassivePanelFrameSpec {
 }
 
 impl PassivePanelFrameSpec {
+    pub const RADIAL_TITLE: &'static str = "Micro Input 轮盘菜单";
     pub const RADIAL_SIZE: ScreenSize = ScreenSize::new(500.0, 500.0);
     pub const NOTICE_SIZE: ScreenSize = ScreenSize::new(280.0, 76.0);
     pub const CHEAT_SHEET_SIZE: ScreenSize = ScreenSize::new(400.0, 610.0);
@@ -187,14 +188,22 @@ impl PassivePanelFrameSpec {
         ScreenRect::new(x, y, width, height)
     }
 
-    pub fn for_radial(cursor: ScreenPoint, screen: &ScreenGeometry) -> Self {
-        let visible = screen.visible_frame_for_cursor(cursor);
+    pub fn for_radial_frame(frame: ScreenRect) -> Self {
         Self {
             role: PassivePanelRole::RadialMenu,
-            title: "Micro Input 径向菜单".to_string(),
-            frame: Self::cursor_centered_radial_frame(Self::RADIAL_SIZE, cursor, visible),
+            title: Self::RADIAL_TITLE.to_string(),
+            frame,
             style: PassivePanelStyleSpec::for_role(PassivePanelRole::RadialMenu),
         }
+    }
+
+    pub fn for_radial(cursor: ScreenPoint, screen: &ScreenGeometry) -> Self {
+        let visible = screen.visible_frame_for_cursor(cursor);
+        Self::for_radial_frame(Self::cursor_centered_radial_frame(
+            Self::RADIAL_SIZE,
+            cursor,
+            visible,
+        ))
     }
 
     pub fn for_notice(cursor: ScreenPoint, screen: &ScreenGeometry) -> Self {
@@ -315,6 +324,7 @@ mod tests {
     fn radial_and_hud_frames_clamp_and_inset_correctly() {
         let screen = ScreenGeometry::single(ScreenRect::new(0.0, 0.0, 1440.0, 900.0));
         let radial = PassivePanelFrameSpec::for_radial(ScreenPoint::new(50.0, 60.0), &screen);
+        assert_eq!(radial.title, "Micro Input 轮盘菜单");
         assert_eq!(radial.frame, ScreenRect::new(0.0, 0.0, 500.0, 500.0));
         assert!(radial.style.nonactivating_panel);
         assert!(radial.style.ignores_mouse_events);

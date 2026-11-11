@@ -31,6 +31,6 @@
 | [三大 Coding Agent 预设与切换 (`agent-presets`)](agent-presets.md) | 安装 Coding Agent 预设 → 菜单栏切换 `Antigravity` / `Herdr` / `DeepSeek Coder (DSH)` → 触发按键、旋钮与摇杆 | 3 套 Profile 覆盖 20 槽位中的 19 个有效动作槽（含 `logical-15` `ENC_CLK` 按压与 `logical-16..19` 摇杆扇区），切换后同一按键路由至对应 Agent | `Herdr` / `DSH` 真实 CLI 调用视本机是否安装对应二进制而定 |
 | [2U 宽键合并防抖与透传层健康检查 (`wide-key-and-passthrough`)](wide-key-and-passthrough.md) | 底部宽键双开关 (`AG10`+`AG11` / `ACT10`+`ACT11`) 先后按下/释放；检查 `KV_OAI_AG*` / `KV_OAI_ACT*` 透传层状态 | 宽键重叠按压仅触发 1 次动作且 `logical-10`↔`logical-11` 对称回退；非透传层返回 `LayerDriftWarning` | 电容触摸切层的实机通知形态需连接实机核验 |
 
-- [径向菜单](radial-menu.md)：八向选择、冻结目标、一次确认与回中取消；合成输入和实体手感分开验收。
+- [轮盘菜单](radial-menu.md)：八向选择、冻结目标、一次确认与回中取消；合成输入和实体手感分开验收。
 
 - [Antigravity 官方桌面扩展与状态事件](antigravity-status.md)：安装版 2.29.0 只读契约核对、隔离测试工作区 Lifecycle Hooks 元数据事件归并、两会话隔离、去重、`Stop` `fullyIdle=false` 不报完成、断流标 `stale`、不读 `transcriptPath`。
