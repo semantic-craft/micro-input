@@ -16,6 +16,8 @@ pub struct NavigationCatalog {
     pub instance: AntigravityInstance,
     pub observed_at: Instant,
     pub candidates: Vec<FourAppLiveCandidate>,
+    pub project_ids: BTreeMap<String, String>,
+    pub frontmost_acknowledged: Option<(NavigationPlace, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -233,10 +235,39 @@ impl WorkbenchStore {
                 .map(|(_, candidate)| candidate.clone())
                 .collect::<Vec<_>>()
         });
+        let mut ack_changed = false;
+        if let Some((place, watermark)) = catalog
+            .as_ref()
+            .and_then(|c| c.frontmost_acknowledged.as_ref())
+        {
+            let target_in_flight = self
+                .session_navigation
+                .pending
+                .as_ref()
+                .is_some_and(|p| &p.place == place);
+            if !target_in_flight
+                && !watermark.is_empty()
+                && self
+                    .lighting_arbiter
+                    .acknowledged_watermarks
+                    .get(&place.target_id())
+                    != Some(watermark)
+            {
+                self.lighting_arbiter
+                    .acknowledge_slot(place, watermark.clone());
+                ack_changed = true;
+            }
+        }
         self.session_navigation.catalog = catalog;
         if let Some(candidates) = candidates {
             if self.slot_table.candidates() != candidates.as_slice() {
                 self.ingest_four_app_candidates(candidates);
+            } else if ack_changed {
+                let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
+                self.slot_table.refresh_with_watermarks(&acks);
+                self.refresh_navigation_revision();
+                self.refresh_four_app_lighting();
+                self.commit_runtime_update();
             } else {
                 self.refresh_navigation_revision();
             }
@@ -325,6 +356,26 @@ impl WorkbenchStore {
         profile: String,
         binding: String,
     ) {
+        let fn_unconfirmed = self.live_executor.has_unconfirmed_apple_fn_release();
+        self.begin_session_navigation_checked(
+            place,
+            history,
+            input_generation,
+            profile,
+            binding,
+            fn_unconfirmed,
+        );
+    }
+
+    fn begin_session_navigation_checked(
+        &mut self,
+        place: NavigationPlace,
+        history: NavigationHistory,
+        input_generation: Option<NavigationInputLease>,
+        profile: String,
+        binding: String,
+        fn_unconfirmed: bool,
+    ) {
         if self.config.isolated && !self.has_navigation_test_worker() {
             self.navigation_rejected(
                 &profile,
@@ -352,6 +403,10 @@ impl WorkbenchStore {
             self.navigation_rejected(&profile, &binding, "blocked:session_input_retired");
             return;
         }
+        if fn_unconfirmed {
+            self.navigation_rejected(&profile, &binding, "blocked:unconfirmed_apple_fn_release");
+            return;
+        }
         let watermark = self
             .session_navigation
             .catalog
@@ -364,6 +419,17 @@ impl WorkbenchStore {
             .catalog
             .as_ref()
             .map(|c| c.instance.clone());
+        let project_id = match &place {
+            NavigationPlace::Antigravity {
+                conversation_id, ..
+            } => self
+                .session_navigation
+                .catalog
+                .as_ref()
+                .and_then(|c| c.project_ids.get(conversation_id))
+                .cloned(),
+            _ => None,
+        };
         let cancelled = Arc::new(AtomicBool::new(false));
         let (tx, result) = mpsc::sync_channel(1);
         self.session_navigation.pending = Some(PendingNavigation {
@@ -388,8 +454,21 @@ impl WorkbenchStore {
             worker(place, tx);
             return;
         }
+        let executor = Arc::clone(&self.live_executor);
         std::thread::spawn(move || {
-            let result = execute_navigation(&place, instance.as_ref(), &cancelled).map(|()| place);
+            let result = executor.with_serialized_host_effect(
+                || !cancelled.load(Ordering::Acquire),
+                |driver| {
+                    execute_navigation(
+                        driver,
+                        &place,
+                        instance.as_ref(),
+                        project_id.as_deref(),
+                        &cancelled,
+                    )
+                    .map(|()| place.clone())
+                },
+            );
             let _ = tx.send(result);
         });
         self.status_message = "正在切换会话，等待目标回读…".into();
@@ -549,18 +628,21 @@ fn navigation_receipt(
 }
 
 fn execute_navigation(
+    driver: &impl HostOsDriver,
     place: &NavigationPlace,
     instance: Option<&AntigravityInstance>,
+    project_id: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Result<(), String> {
     if cancelled.load(Ordering::Acquire) {
         return Err("blocked:session_navigation_retired".into());
     }
     if let NavigationPlace::App { bundle_id } = place {
-        return MacOsSystemDriver::default().open_application(bundle_id);
+        return driver.open_application(bundle_id);
     }
     let NavigationPlace::Antigravity {
-        conversation_id, ..
+        conversation_id,
+        workspace_path,
     } = place
     else {
         return Err("blocked:session_navigation_unsupported".into());
@@ -570,9 +652,12 @@ fn execute_navigation(
         if cancelled.load(Ordering::Acquire) {
             return Err("blocked:session_navigation_retired".into());
         }
-        let catalog =
-            poll_antigravity_daemon_candidates(&mut BTreeSet::new(), &mut BTreeMap::new())
-                .ok_or("blocked:session_catalog_unavailable")?;
+        let catalog = poll_antigravity_daemon_candidates_with_frontmost(
+            &mut BTreeSet::new(),
+            &mut BTreeMap::new(),
+            false,
+        )
+        .ok_or("blocked:session_catalog_unavailable")?;
         if &catalog.instance != instance
             || !catalog.candidates.iter().any(|row| &row.place == place)
         {
@@ -584,11 +669,13 @@ fn execute_navigation(
         Ok(())
     };
     validate()?;
-    MacOsSystemDriver::default().open_application("com.google.antigravity")?;
+    driver.open_application("com.google.antigravity")?;
     mi_macos::session_navigation::navigate_antigravity_session(
         instance.pid,
         instance.ui_port,
         conversation_id,
+        workspace_path,
+        project_id,
         validate,
         || !cancelled.load(Ordering::Acquire),
     )
@@ -673,6 +760,8 @@ mod tests {
             },
             observed_at: Instant::now(),
             candidates,
+            project_ids: BTreeMap::new(),
+            frontmost_acknowledged: None,
         }
     }
     fn store() -> (tempfile::TempDir, WorkbenchStore) {
@@ -1038,7 +1127,15 @@ mod tests {
             poll_antigravity_daemon_candidates(&mut BTreeSet::new(), &mut BTreeMap::new())
                 .expect("live catalog");
         let place = catalog.candidates.iter().find(|c| matches!(&c.place, NavigationPlace::Antigravity { conversation_id, .. } if conversation_id == &conversation)).expect("exact catalog target").place.clone();
-        execute_navigation(&place, Some(&catalog.instance), &AtomicBool::new(false)).unwrap();
+        let project_id = catalog.project_ids.get(&conversation).map(String::as_str);
+        execute_navigation(
+            &MacOsSystemDriver::default(),
+            &place,
+            Some(&catalog.instance),
+            project_id,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1204,5 +1301,245 @@ mod tests {
             store.dispatched_receipts.last().unwrap().detail,
             "blocked:session_slots_changed"
         );
+    }
+
+    #[test]
+    fn classify_antigravity_trajectories_matches_jetski_web_pk_rk_and_qcb_rules() {
+        let payload = json!({
+            "busy-status": {
+                "summary": "Busy Run",
+                "status": "CASCADE_RUN_STATUS_BUSY",
+                "lastModifiedTime": "2026-04-19T12:00:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}],
+                "trajectoryMetadata": {"projectId": "  proj-1  "}
+            },
+            "running-subagents": {
+                "summary": "Delegating",
+                "status": "CASCADE_RUN_STATUS_IDLE",
+                "hasRunningSubagents": true,
+                "lastModifiedTime": "2026-04-19T12:01:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "not-fully-idle": {
+                "summary": "Draining",
+                "status": "CASCADE_RUN_STATUS_IDLE",
+                "notFullyIdle": true,
+                "lastModifiedTime": "2026-04-19T12:02:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "waiting-steps": {
+                "summary": "Needs Approval",
+                "status": "CASCADE_RUN_STATUS_RUNNING",
+                "waitingSteps": [{"stepIndex": 4}],
+                "lastModifiedTime": "2026-04-19T12:03:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "stale-unviewed-blue-dot": {
+                "summary": "Finished Two Hours Ago",
+                "status": "CASCADE_RUN_STATUS_IDLE",
+                "latestExecutorTerminationReason": "EXECUTOR_TERMINATION_REASON_USER_STOPPED",
+                "lastModifiedTime": "2026-04-19T08:00:00Z",
+                "annotations": {"lastUserViewTime": "2026-04-19T07:30:00Z"},
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "marked-unread": {
+                "summary": "Explicitly Unread",
+                "status": "CASCADE_RUN_STATUS_IDLE",
+                "lastModifiedTime": "2026-04-19T09:00:00Z",
+                "annotations": {
+                    "lastUserViewTime": "2026-04-19T09:30:00Z",
+                    "markedAsUnread": true
+                },
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "frontmost-open": {
+                "summary": "Currently Viewed In Antigravity",
+                "status": "CASCADE_RUN_STATUS_IDLE",
+                "lastModifiedTime": "2026-04-19T11:59:00Z",
+                "annotations": {"lastUserViewTime": "2026-04-19T10:00:00Z"},
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "errored-term": {
+                "summary": "Executor Error",
+                "status": "CASCADE_RUN_STATUS_IDLE",
+                "latestExecutorTerminationReason": "EXECUTOR_TERMINATION_REASON_INTERNAL_ERROR",
+                "lastModifiedTime": "2026-04-19T11:00:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "killed-running": {
+                "summary": "Killed Run Viewed",
+                "status": "CASCADE_RUN_STATUS_RUNNING",
+                "killed": true,
+                "lastModifiedTime": "2026-04-19T10:00:00Z",
+                "annotations": {"lastUserViewTime": "2026-04-19T10:01:00Z"},
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "archived-conv": {
+                "summary": "Archived",
+                "status": "CASCADE_RUN_STATUS_IDLE",
+                "lastModifiedTime": "2026-04-19T12:00:00Z",
+                "annotations": {"archived": true},
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "battle-fork": {
+                "summary": "Arena Fork",
+                "status": "CASCADE_RUN_STATUS_RUNNING",
+                "lastModifiedTime": "2026-04-19T12:00:00Z",
+                "trajectoryMetadata": {"isBattleModeFork": true},
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "side-question": {
+                "summary": "Quick Side Question",
+                "status": "CASCADE_RUN_STATUS_IDLE",
+                "trajectoryType": "TRAJECTORY_TYPE_SIDE_QUESTION",
+                "lastModifiedTime": "2026-04-19T12:00:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "commit-gen": {
+                "summary": "Commit Message",
+                "status": "CASCADE_RUN_STATUS_IDLE",
+                "trajectoryMetadata": {"trajectoryType": "CASCADE_COMMIT_MESSAGE_GENERATION"},
+                "lastModifiedTime": "2026-04-19T12:00:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "hidden-source": {
+                "summary": "Hidden Automation",
+                "status": "CASCADE_RUN_STATUS_IDLE",
+                "trajectoryMetadata": {"sourceMetadata": {"hideFromConversationList": true}},
+                "lastModifiedTime": "2026-04-19T12:00:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            },
+            "subagent-spec": {
+                "summary": "Worker",
+                "status": "CASCADE_RUN_STATUS_RUNNING",
+                "trajectoryMetadata": {"subagentSpec": {"role": "builder"}},
+                "lastModifiedTime": "2026-04-19T12:00:00Z",
+                "workspaces": [{"workspaceFolderAbsolutePath": "/work/repo"}]
+            }
+        });
+
+        let mut seen_running = BTreeSet::new();
+        let mut completed_watermarks = BTreeMap::new();
+        let (candidates, project_ids, frontmost_ack) = classify_antigravity_trajectory_summaries(
+            payload.as_object().unwrap(),
+            Some("frontmost-open"),
+            &mut seen_running,
+            &mut completed_watermarks,
+        );
+        assert_eq!(
+            frontmost_ack,
+            Some((
+                NavigationPlace::antigravity("frontmost-open", "/work/repo"),
+                "CASCADE_RUN_STATUS_IDLE:2026-04-19T11:59:00Z:".to_string(),
+            ))
+        );
+
+        assert_eq!(
+            project_ids.get("busy-status").map(String::as_str),
+            Some("proj-1")
+        );
+        let by_id: BTreeMap<String, &FourAppLiveCandidate> = candidates
+            .iter()
+            .filter_map(|c| match &c.place {
+                NavigationPlace::Antigravity {
+                    conversation_id, ..
+                } => Some((conversation_id.clone(), c)),
+                _ => None,
+            })
+            .collect();
+
+        for excluded in [
+            "archived-conv",
+            "battle-fork",
+            "side-question",
+            "commit-gen",
+            "hidden-source",
+            "subagent-spec",
+        ] {
+            assert!(!by_id.contains_key(excluded), "{excluded} must be excluded");
+        }
+
+        assert_eq!(by_id["busy-status"].phase, FourAppSessionKind::Working);
+        assert_eq!(
+            by_id["running-subagents"].phase,
+            FourAppSessionKind::Working
+        );
+        assert_eq!(by_id["not-fully-idle"].phase, FourAppSessionKind::Working);
+        assert_eq!(
+            by_id["waiting-steps"].phase,
+            FourAppSessionKind::NeedsAttention
+        );
+        assert_eq!(by_id["errored-term"].phase, FourAppSessionKind::Error);
+        assert_eq!(by_id["killed-running"].phase, FourAppSessionKind::Idle);
+
+        let stale = by_id["stale-unviewed-blue-dot"];
+        assert_eq!(stale.phase, FourAppSessionKind::BlueDotCompleted);
+        assert!(stale.is_unread_blue_dot(&BTreeMap::new()));
+
+        let unread = by_id["marked-unread"];
+        assert_eq!(unread.phase, FourAppSessionKind::BlueDotCompleted);
+        assert!(unread.is_unread_blue_dot(&BTreeMap::new()));
+
+        let frontmost = by_id["frontmost-open"];
+        assert_eq!(frontmost.phase, FourAppSessionKind::Idle);
+        assert!(!frontmost.is_unread_blue_dot(&BTreeMap::new()));
+
+        let (_, _, unread_frontmost_ack) = classify_antigravity_trajectory_summaries(
+            payload.as_object().unwrap(),
+            Some("marked-unread"),
+            &mut BTreeSet::new(),
+            &mut BTreeMap::new(),
+        );
+        assert!(unread_frontmost_ack.is_none());
+
+        let (_dir, mut store) = store();
+        let mut viewed_cat = catalog(candidates.clone(), "/tmp/hub");
+        viewed_cat.frontmost_acknowledged = frontmost_ack;
+        store.update_navigation_catalog(Some(viewed_cat));
+
+        let (away_candidates, _, away_ack) = classify_antigravity_trajectory_summaries(
+            payload.as_object().unwrap(),
+            None,
+            &mut BTreeSet::new(),
+            &mut BTreeMap::new(),
+        );
+        assert!(away_ack.is_none());
+        let away_frontmost = away_candidates
+            .iter()
+            .find(|c| c.place == NavigationPlace::antigravity("frontmost-open", "/work/repo"))
+            .unwrap()
+            .clone();
+        assert_eq!(away_frontmost.phase, FourAppSessionKind::BlueDotCompleted);
+        store.update_navigation_catalog(Some(catalog(away_candidates, "/tmp/hub")));
+        assert!(!away_frontmost.is_unread_blue_dot(&store.lighting_arbiter.acknowledged_watermarks));
+        assert!(!store
+            .projection()
+            .session_strip
+            .completed_blue_dot_pills
+            .iter()
+            .any(|p| p.title == "Currently Viewed"));
+    }
+
+    #[test]
+    fn begin_session_navigation_rejects_when_unconfirmed_apple_fn_release_is_pending() {
+        let (_dir, mut store) = store();
+        let row = candidate("conv-fn", "wm-fn");
+        store.update_navigation_catalog(Some(catalog(vec![row.clone()], "/tmp/hub")));
+        worker(&mut store);
+
+        let mut history = store.navigation_history.clone();
+        history.visit(row.place.clone());
+        store.begin_session_navigation_checked(
+            row.place.clone(),
+            history,
+            None,
+            "workbench".into(),
+            "session-strip".into(),
+            true,
+        );
+        assert!(store.session_navigation.pending.is_none());
+        assert!(store
+            .status_message
+            .contains("blocked:unconfirmed_apple_fn_release"));
     }
 }

@@ -29,53 +29,56 @@ struct CreatorMicroInlineInspectorView: View {
         }()
 
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
-                VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
                     Text(titleForSlot(slot: slot, isSplit: insp.bottomRowLayout == "split"))
                         .font(UITheme.heading)
                         .foregroundStyle(UITheme.textPrimary)
+                    Spacer(minLength: 4)
                     Text("\(insp.selectedDisplayName) · \(insp.inspectorLayerName)")
                         .font(UITheme.micro)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(UITheme.accentSoft))
-                        .foregroundStyle(UITheme.accent)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(UITheme.subtleSurface))
+                        .overlay(Capsule().stroke(UITheme.hairlineBorder, lineWidth: 1))
+                        .foregroundStyle(UITheme.textPrimary)
                     Text(insp.isProtectedLayer ? "原生直通" : (isTaskRole ? "会话键" : "动作键"))
                         .font(UITheme.micro)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
                         .background(Capsule().fill(UITheme.subtleSurface))
                         .foregroundStyle(UITheme.textSecondary)
                 }
                 Text(boundSummaryText(insp: insp, slot: slot))
-                    .font(UITheme.heading)
-                    .foregroundStyle(UITheme.accent)
+                    .font(UITheme.bodyMedium)
+                    .foregroundStyle(UITheme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(14)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
             .id("inspector-header-\(layerIdentity)")
 
-            Rectangle().fill(UITheme.border).frame(height: 1)
+            Rectangle().fill(UITheme.hairlineBorder).frame(height: 1)
 
             if let lock = insp.protectedLock {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("\(lock.ownerClientName) · \(lock.lockBadgeText)")
-                        .font(UITheme.bodySemibold)
-                        .foregroundStyle(UITheme.caution)
-                    Text(lock.explanationText)
-                        .font(UITheme.caption)
-                        .foregroundStyle(UITheme.textSecondary)
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(lock.ownerClientName) · \(lock.lockBadgeText)")
+                            .font(UITheme.bodySemibold)
+                            .foregroundStyle(UITheme.textPrimary)
+                        Text(lock.explanationText)
+                            .font(UITheme.caption)
+                            .foregroundStyle(UITheme.textSecondary)
+                    }
+                    Spacer(minLength: 8)
                     Button(lock.unlockButtonTitle) {
                         store.dispatch("canvas", "UnlockBySwitchingOrCreatingCustomLayer")
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(UITheme.accent)
-                    .controlSize(.small)
+                    .surfaceButton(.primary)
                 }
                 .padding(14)
-                .background(UITheme.cautionSoft)
-                Rectangle().fill(UITheme.border).frame(height: 1)
+                .background(UITheme.subtleSurface)
+                Rectangle().fill(UITheme.hairlineBorder).frame(height: 1)
             }
 
             let edit = insp.editableInspector ?? EditableInspectorModel()
@@ -128,7 +131,7 @@ struct CreatorMicroInlineInspectorView: View {
                         .opacity(showActionControls ? 1 : 0)
                         .allowsHitTesting(showActionControls)
                     }
-                    .padding(14)
+                    .padding(16)
                 }
                 .onChange(of: layerIdentity) { _, _ in
                     scrollProxy.scrollTo("inspector-scroll-top", anchor: .top)
@@ -137,24 +140,23 @@ struct CreatorMicroInlineInspectorView: View {
             .opacity(hasEditable || insp.isProtectedLayer ? 1 : 0)
             .allowsHitTesting(hasEditable || insp.isProtectedLayer)
 
-            Rectangle().fill(UITheme.border).frame(height: 1)
+            Rectangle().fill(UITheme.hairlineBorder).frame(height: 1)
 
             HStack(spacing: 8) {
                 Button("更多动作…") {
                     onOpenFullActionLibrary()
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .surfaceButton(.secondary)
 
                 Button("绑定宏…") {
                     onOpenMacroLibrary()
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .surfaceButton(.secondary)
 
                 Spacer()
             }
-            .padding(12)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
             .background(UITheme.surface)
         }
     }
@@ -213,9 +215,7 @@ struct CreatorMicroInlineInspectorView: View {
                     "按键用途",
                     selection: Binding(
                         get: { isTaskRole ? "TaskKey" : "ActionKey" },
-                        set: { role in
-                            store.dispatch("inspector", ["SetSlotRole": role])
-                        }
+                        set: { store.dispatch("inspector", ["SetSlotRole": $0]) }
                     )
                 ) {
                     Text("会话键（自动跟灯）").tag("TaskKey")
@@ -225,19 +225,15 @@ struct CreatorMicroInlineInspectorView: View {
                 .labelsHidden()
             }
         } else if slot == 10 || slot == 11 {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 10) {
                 Toggle(
                     "拆分为两个按键（1U + 1U）",
                     isOn: Binding(
                         get: { insp.bottomRowLayout == "split" },
-                        set: { isSplit in
-                            store.dispatch("canvas", ["SetBottomRowLayout": isSplit ? "split" : "merged"])
-                        }
+                        set: { store.dispatch("canvas", ["SetBottomRowLayout": $0 ? "split" : "merged"]) }
                     )
                 )
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .font(UITheme.captionMedium)
+                .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true))
 
                 if insp.bottomRowLayout == "split" {
                     Picker(
@@ -273,15 +269,15 @@ struct CreatorMicroInlineInspectorView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
 
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     Button("切活跃/蓝点会话") {
                         store.dispatch("canvas", ["ApplyKnobJoystickPreset": "CycleWorkingAndBlueDot"])
                     }
-                    .controlSize(.mini)
+                    .surfaceButton(.secondary)
                     Button("双滚轮预设") {
                         store.dispatch("canvas", ["ApplyKnobJoystickPreset": "DualScrollProjectsAndChat"])
                     }
-                    .controlSize(.mini)
+                    .surfaceButton(.secondary)
                 }
             }
         } else if (16...19).contains(slot) || insp.selectedSurface == "Joystick" {
@@ -293,9 +289,7 @@ struct CreatorMicroInlineInspectorView: View {
                     "摇杆方向",
                     selection: Binding(
                         get: { insp.selectedJoystickDirection },
-                        set: {
-                            store.dispatch("canvas", ["SelectJoystickDirection": $0])
-                        }
+                        set: { store.dispatch("canvas", ["SelectJoystickDirection": $0]) }
                     )
                 ) {
                     Text("上").tag("North")
@@ -306,11 +300,11 @@ struct CreatorMicroInlineInspectorView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
 
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     Button("滚对话 + 左右切会话") {
                         store.dispatch("canvas", ["ApplyKnobJoystickPreset": "DualScrollProjectsAndChat"])
                     }
-                    .controlSize(.mini)
+                    .surfaceButton(.secondary)
                 }
             }
         }
@@ -318,7 +312,7 @@ struct CreatorMicroInlineInspectorView: View {
 
     private func customShortcutInspectorCard(edit: EditableInspectorModel) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("自定义快捷键映射")
                     .font(UITheme.captionMedium)
                     .foregroundStyle(UITheme.textSecondary)
@@ -326,43 +320,42 @@ struct CreatorMicroInlineInspectorView: View {
                 Button("设为 Fn 听写键") {
                     store.dispatch("inspector", "BindAppleFnKey")
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
+                .surfaceButton(.secondary)
 
                 Button("设为空键") {
                     store.dispatch("inspector", "UnassignSelectedSlot")
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
+                .surfaceButton(.ghost)
             }
 
             if edit.shortcutRecorder.isRecording {
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     Text("录制：")
-                        .font(UITheme.caption)
-                        .foregroundStyle(UITheme.accent)
+                        .font(UITheme.captionMedium)
+                        .foregroundStyle(UITheme.textPrimary)
                     ForEach([("r", "⌘R"), ("k", "⌘K"), ("l", "⌘L")], id: \.0) { key, label in
                         Button(label) {
                             store.dispatch("inspector", [
-                                "CaptureShortcutChord": [
-                                    "key": key,
-                                    "modifiers": ["Command"]
-                                ]
+                                "CaptureShortcutChord": ["key": key, "modifiers": ["Command"]]
                             ])
                             store.dispatch("inspector", "CommitRecordedShortcut")
                         }
-                        .controlSize(.mini)
+                        .surfaceButton(.secondary)
                     }
                     Spacer()
                     Button("取消") {
                         store.dispatch("inspector", "CancelShortcutRecording")
                     }
-                    .controlSize(.mini)
+                    .surfaceButton(.ghost)
                 }
-                .padding(8)
+                .padding(10)
                 .background(
-                    RoundedRectangle(cornerRadius: UITheme.controlCornerRadius, style: .continuous)
-                        .fill(UITheme.accentSoft)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(UITheme.subtleSurface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(UITheme.hairlineBorder, lineWidth: 1)
                 )
             } else {
                 Button {
@@ -380,26 +373,27 @@ struct CreatorMicroInlineInspectorView: View {
                         .foregroundStyle(UITheme.textPrimary)
                         Spacer()
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
                     .background(
-                        RoundedRectangle(cornerRadius: UITheme.controlCornerRadius, style: .continuous)
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
                             .fill(UITheme.subtleSurface)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: UITheme.controlCornerRadius, style: .continuous)
-                            .stroke(UITheme.border, lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(UITheme.hairlineBorder, lineWidth: 1)
                     )
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .focusEffectDisabled()
             }
         }
     }
 
     private func sessionSlotExplanationCard(slot: Int, ss: SessionStripSliceModel) -> some View {
         let sessionSlot = ss.sessionSlots.first(where: { $0.slotIndex == slot })
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: 10) {
             Text("实时会话槽位（自动跟灯）")
                 .font(UITheme.bodySemibold)
                 .foregroundStyle(UITheme.textPrimary)
@@ -410,27 +404,24 @@ struct CreatorMicroInlineInspectorView: View {
                 Button("立即跳转到此会话") {
                     store.dispatch("session_strip", ["ActivateSlot": slot])
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(UITheme.accent)
-                .controlSize(.small)
+                .surfaceButton(.primary)
 
                 if sessionSlot?.isUnreadBlueDot == true {
                     Button("标为已读熄灯") {
                         store.dispatch("session_strip", "AcknowledgeAllCompleted")
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .surfaceButton(.secondary)
                 }
             }
         }
-        .padding(12)
+        .padding(14)
         .background(
-            RoundedRectangle(cornerRadius: UITheme.cardCornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(UITheme.subtleSurface)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: UITheme.cardCornerRadius, style: .continuous)
-                .stroke(UITheme.border, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(UITheme.hairlineBorder, lineWidth: 1)
         )
     }
 }
@@ -468,7 +459,7 @@ private struct KeycapGlyphGridSectionView: View, Equatable {
                 )
                 .textFieldStyle(.roundedBorder)
                 .controlSize(.small)
-                .frame(width: 120)
+                .frame(width: 128)
                 .onSubmit {
                     if let first = filteredKeycaps.first {
                         store.dispatch("inspector", [
@@ -486,12 +477,8 @@ private struct KeycapGlyphGridSectionView: View, Equatable {
                 spacing: 6
             ) {
                 ForEach(filteredKeycaps) { item in
-                    KeycapGlyphCellButton(
-                        store: store,
-                        item: item,
-                        bindDefaultAction: bindDefaultAction
-                    )
-                    .equatable()
+                    KeycapGlyphCellButton(store: store, item: item, bindDefaultAction: bindDefaultAction)
+                        .equatable()
                 }
             }
         }
@@ -511,22 +498,15 @@ private struct KeycapGlyphCellButton: View, Equatable {
         let cap = CodexKeycapId(rustVariant: item.keycapId)
         Button {
             store.dispatch("inspector", [
-                "ApplyKeycapIcon": [
-                    "keycap": item.keycapId,
-                    "bind_default_action": bindDefaultAction
-                ]
+                "ApplyKeycapIcon": ["keycap": item.keycapId, "bind_default_action": bindDefaultAction]
             ])
         } label: {
             VStack(spacing: 4) {
-                CodexKeycapGlyphView(
-                    keycap: cap,
-                    size: 17,
-                    color: item.isSelected ? UITheme.accent : UITheme.textPrimary
-                )
-                .equatable()
+                CodexKeycapGlyphView(keycap: cap, size: 17, color: UITheme.textPrimary)
+                    .equatable()
                 Text(item.shortLabel)
                     .font(UITheme.caption)
-                    .foregroundStyle(item.isSelected ? UITheme.accent : UITheme.textSecondary)
+                    .foregroundStyle(item.isSelected ? UITheme.textPrimary : UITheme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity)
@@ -537,11 +517,12 @@ private struct KeycapGlyphCellButton: View, Equatable {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(item.isSelected ? UITheme.accent : UITheme.border, lineWidth: 1)
+                    .stroke(item.isSelected ? UITheme.textPrimary : UITheme.hairlineBorder, lineWidth: item.isSelected ? 1.5 : 1)
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled()
         .help(item.chineseHint)
     }
 }
@@ -622,25 +603,27 @@ private struct ActionCatalogRowButton: View, Equatable {
                 if isBound {
                     Text("已启用")
                         .font(UITheme.micro)
-                        .padding(.horizontal, 6)
+                        .padding(.horizontal, 7)
                         .padding(.vertical, 2)
-                        .background(Capsule().fill(UITheme.accentSoft))
-                        .foregroundStyle(UITheme.accent)
+                        .background(Capsule().fill(UITheme.surface))
+                        .overlay(Capsule().stroke(UITheme.hairlineBorder, lineWidth: 1))
+                        .foregroundStyle(UITheme.textPrimary)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             .background(
-                RoundedRectangle(cornerRadius: UITheme.controlCornerRadius, style: .continuous)
-                    .fill(isBound ? UITheme.accentSoft.opacity(0.55) : UITheme.subtleSurface)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isBound ? UITheme.accentSoft : UITheme.subtleSurface)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: UITheme.controlCornerRadius, style: .continuous)
-                    .stroke(isBound ? UITheme.accent : UITheme.border, lineWidth: 1)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(isBound ? UITheme.textPrimary : UITheme.hairlineBorder, lineWidth: isBound ? 1.5 : 1)
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .focusEffectDisabled()
     }
 }
 
@@ -653,16 +636,23 @@ struct ClassicActionLibrarySheet: View {
     var body: some View {
         let edit = store.inspector.editableInspector
         let selectedDisplayName = store.sidebar.selectedDisplayName
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("全部可用动作库 · \(selectedDisplayName)")
-                    .font(UITheme.title)
+                    .font(UITheme.heading)
+                    .foregroundStyle(UITheme.textPrimary)
                 Spacer()
-                Button("关闭") { dismiss() }
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .surfaceButton(.icon)
             }
 
             if let edit {
-                HStack(spacing: 8) {
+                let categories = ["全部"] + edit.availableCategories.filter { $0 != "全部" }
+                HStack(spacing: 10) {
                     TextField(
                         "搜索动作名称…",
                         text: Binding(
@@ -672,45 +662,39 @@ struct ClassicActionLibrarySheet: View {
                     )
                     .textFieldStyle(.roundedBorder)
 
-                    Picker(
-                        "分类",
+                    SelectDropdown(
+                        options: categories.map { SelectOption(value: $0, title: $0) },
                         selection: Binding(
                             get: { edit.actionCategoryFilter },
-                            set: { val in
-                                store.dispatch("inspector", ["SetActionCategoryFilter": val])
-                            }
-                        )
-                    ) {
-                        ForEach(["全部"] + edit.availableCategories.filter { $0 != "全部" }, id: \.self) { cat in
-                            Text(cat).tag(cat)
-                        }
-                    }
-                    .frame(width: 180)
+                            set: { store.dispatch("inspector", ["SetActionCategoryFilter": $0]) }
+                        ),
+                        minTriggerWidth: 132
+                    )
                 }
 
-                List(edit.filteredActions) { act in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(act.name).font(UITheme.bodySemibold)
-                            Text("\(act.category) · \(act.detail)")
-                                .font(UITheme.caption)
-                                .foregroundStyle(.secondary)
+                ScrollView {
+                    SettingsCard {
+                        ForEach(Array(edit.filteredActions.enumerated()), id: \.element.id) { idx, act in
+                            SettingsRow(
+                                act.name,
+                                subtitle: "\(act.category) · \(act.detail)",
+                                showsDivider: idx + 1 < edit.filteredActions.count
+                            ) {
+                                Button(act.isCurrentlyBound ? "已绑定" : "绑定") {
+                                    store.dispatch("inspector", ["AssignCatalogAction": act.actionId])
+                                    dismiss()
+                                }
+                                .surfaceButton(act.isCurrentlyBound ? .ghost : .secondary)
+                            }
                         }
-                        Spacer()
-                        Button(act.isCurrentlyBound ? "已绑定" : "绑定到当前按键") {
-                            store.dispatch("inspector", ["AssignCatalogAction": act.actionId])
-                            dismiss()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(UITheme.accent)
-                        .controlSize(.small)
                     }
                 }
-                .frame(height: 340)
+                .frame(height: 360)
             }
         }
         .padding(20)
-        .frame(width: 600)
+        .frame(width: 620)
+        .background(UITheme.pageBackground)
     }
 }
 
@@ -720,79 +704,99 @@ struct ClassicMacroAndMultiLibrarySheet: View {
 
     var body: some View {
         let edit = store.inspector.editableInspector
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("键盘宏与四分支动作 (Multi)")
-                    .font(UITheme.title)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Text("键盘宏与四分支动作")
+                    .font(UITheme.heading)
+                    .foregroundStyle(UITheme.textPrimary)
                 Spacer()
                 Button("+ 新建宏…") {
                     dismiss()
                     store.dispatch("editor", ["OpenMacroEditor": ["macro_id": NSNull()]])
                 }
+                .surfaceButton(.secondary)
                 Button("+ 新建四分支…") {
                     dismiss()
                     store.dispatch("editor", ["OpenMultiEditor": ["multi_id": NSNull()]])
                 }
-                Button("关闭") { dismiss() }
+                .surfaceButton(.secondary)
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .surfaceButton(.icon)
             }
 
             if let edit {
-                List {
-                    Section("键盘宏序列") {
-                        ForEach(edit.macros) { mac in
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(mac.name).font(UITheme.bodySemibold)
-                                    Text("\(mac.stepOrBranchSummary) · \(mac.referenceSummary)")
-                                        .font(UITheme.caption)
-                                        .foregroundStyle(.secondary)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            SettingsSectionHeader("键盘宏序列")
+                            SettingsCard {
+                                if edit.macros.isEmpty {
+                                    SettingsRow("暂无已保存的键盘宏", subtitle: "点击右上角「新建宏」录制或编写按键序列")
+                                } else {
+                                    ForEach(Array(edit.macros.enumerated()), id: \.element.id) { idx, mac in
+                                        SettingsRow(
+                                            mac.name,
+                                            subtitle: "\(mac.stepOrBranchSummary) · \(mac.referenceSummary)",
+                                            showsDivider: idx + 1 < edit.macros.count
+                                        ) {
+                                            HStack(spacing: 6) {
+                                                Button("编辑") {
+                                                    dismiss()
+                                                    store.dispatch("editor", ["OpenMacroEditor": ["macro_id": mac.id]])
+                                                }
+                                                .surfaceButton(.ghost)
+                                                Button("绑定") {
+                                                    store.dispatch("editor", ["MacroBindExisting": ["macro_id": mac.id]])
+                                                    dismiss()
+                                                }
+                                                .surfaceButton(.secondary)
+                                            }
+                                        }
+                                    }
                                 }
-                                Spacer()
-                                Button("编辑") {
-                                    dismiss()
-                                    store.dispatch("editor", ["OpenMacroEditor": ["macro_id": mac.id]])
-                                }
-                                .controlSize(.small)
-                                Button("绑定") {
-                                    store.dispatch("editor", ["MacroBindExisting": ["macro_id": mac.id]])
-                                    dismiss()
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(UITheme.accent)
-                                .controlSize(.small)
                             }
                         }
-                    }
-                    Section("四分支复用动作 (Multi)") {
-                        ForEach(edit.multis) { mul in
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(mul.name).font(UITheme.bodySemibold)
-                                    Text("\(mul.stepOrBranchSummary) · \(mul.referenceSummary)")
-                                        .font(UITheme.caption)
-                                        .foregroundStyle(.secondary)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            SettingsSectionHeader("四分支复用动作 (Multi)")
+                            SettingsCard {
+                                if edit.multis.isEmpty {
+                                    SettingsRow("暂无四分支复用动作", subtitle: "支持同一按键区分单击、双击、长按与单击后按住")
+                                } else {
+                                    ForEach(Array(edit.multis.enumerated()), id: \.element.id) { idx, mul in
+                                        SettingsRow(
+                                            mul.name,
+                                            subtitle: "\(mul.stepOrBranchSummary) · \(mul.referenceSummary)",
+                                            showsDivider: idx + 1 < edit.multis.count
+                                        ) {
+                                            HStack(spacing: 6) {
+                                                Button("编辑") {
+                                                    dismiss()
+                                                    store.dispatch("editor", ["OpenMultiEditor": ["multi_id": mul.id]])
+                                                }
+                                                .surfaceButton(.ghost)
+                                                Button("绑定") {
+                                                    store.dispatch("editor", ["MultiBindExisting": ["multi_id": mul.id]])
+                                                    dismiss()
+                                                }
+                                                .surfaceButton(.secondary)
+                                            }
+                                        }
+                                    }
                                 }
-                                Spacer()
-                                Button("编辑") {
-                                    dismiss()
-                                    store.dispatch("editor", ["OpenMultiEditor": ["multi_id": mul.id]])
-                                }
-                                .controlSize(.small)
-                                Button("绑定") {
-                                    store.dispatch("editor", ["MultiBindExisting": ["multi_id": mul.id]])
-                                    dismiss()
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(UITheme.accent)
-                                .controlSize(.small)
                             }
                         }
                     }
                 }
-                .frame(height: 320)
+                .frame(height: 360)
             }
         }
         .padding(20)
-        .frame(width: 600)
+        .frame(width: 620)
+        .background(UITheme.pageBackground)
     }
 }

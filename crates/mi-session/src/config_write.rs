@@ -785,18 +785,24 @@ impl DeviceSession {
         }
     }
 
-    pub async fn verify_six_layer_files(
+    pub async fn verify_six_layer_files_revision(
         &self,
         candidate: &[u8],
         smart: Option<&[u8]>,
         profile_index: u32,
-    ) -> Result<u32, SessionError> {
+    ) -> Result<(u32, mi_model::apply::SixLayerKeymapRevision), SessionError> {
         self.guarded(async {
             let mut queue = self.queue.lock().await;
             let current = self.read_files_locked(&mut queue).await?;
             if !exact_files(&current, candidate, smart) {
                 return Err(SessionError::Config("六层读回与已应用快照不符".into()));
             }
+            let revision = mi_model::apply::verify_active_six_layer_profile_revision(
+                &current.keymap.bytes,
+                smart_bytes(&current),
+                profile_index,
+            )
+            .map_err(SessionError::Config)?;
             let response = self
                 .exchange(&mut queue, Method::DeviceStatus, Value::Null)
                 .await?;
@@ -808,9 +814,26 @@ impl DeviceSession {
             if result["version"] != "0.6.3" || result["profile_index"] != profile_index {
                 return Err(SessionError::Config("六层固件或方案身份不符".into()));
             }
-            Ok(layer as u32)
+            Ok((layer as u32, revision))
         })
         .await
+    }
+
+    pub async fn verify_six_layer_files(
+        &self,
+        candidate: &[u8],
+        smart: Option<&[u8]>,
+        profile_index: u32,
+    ) -> Result<u32, SessionError> {
+        let (layer, revision) = self
+            .verify_six_layer_files_revision(candidate, smart, profile_index)
+            .await?;
+        if revision != mi_model::apply::SixLayerKeymapRevision::V2HybridVendorSlots {
+            return Err(SessionError::Config(
+                "六层方案尚未升级到 V2 混合键位".into(),
+            ));
+        }
+        Ok(layer)
     }
 
     pub async fn restore_six_layer_backup(&self, backup: &Path) -> Result<(), SessionError> {
@@ -818,6 +841,11 @@ impl DeviceSession {
             .map_err(|e| SessionError::Config(e.to_string()))?;
         let candidate = std::fs::read(backup.join("planned-keymap.json"))
             .map_err(|e| SessionError::Config(e.to_string()))?;
+        let previous_candidate = match std::fs::read(backup.join("previous-planned-keymap.json")) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(SessionError::Config(e.to_string())),
+        };
         let smart = match std::fs::read(backup.join("smart_actions.json")) {
             Ok(bytes) => Some(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -826,6 +854,11 @@ impl DeviceSession {
         mi_model::apply::recognize_six_layer_recovery_candidate(&candidate, smart.as_deref())
             .map_err(SessionError::Config)?
             .ok_or_else(|| SessionError::Config("恢复副本不是六层方案".into()))?;
+        if let Some(prev_cand) = previous_candidate.as_deref() {
+            mi_model::apply::recognize_six_layer_recovery_candidate(prev_cand, smart.as_deref())
+                .map_err(SessionError::Config)?
+                .ok_or_else(|| SessionError::Config("旧版恢复副本不是六层方案".into()))?;
+        }
         self.guarded(async {
             let mut queue = self.queue.lock().await;
             self.three_layer_position(&mut queue).await?;
@@ -833,7 +866,11 @@ impl DeviceSession {
             if exact_files(&current, &original, smart.as_deref()) {
                 return Ok(());
             }
-            if !exact_files(&current, &candidate, smart.as_deref()) {
+            let matches_known_candidate = exact_files(&current, &candidate, smart.as_deref())
+                || previous_candidate
+                    .as_deref()
+                    .is_some_and(|prev| exact_files(&current, prev, smart.as_deref()));
+            if !matches_known_candidate {
                 return Err(SessionError::Config(
                     "设备与本次候选不符，拒绝覆盖恢复".into(),
                 ));

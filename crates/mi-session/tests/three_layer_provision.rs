@@ -460,3 +460,358 @@ async fn six_layer_roundtrip(retired: bool) {
     assert_eq!(final_keymap, SIX_SOURCE);
     assert_eq!(commits, if retired { 1 } else { 2 });
 }
+
+#[tokio::test]
+async fn six_layer_v1_upgrades_in_place_to_v2_at_same_profile_index_preserving_layer_zero_bytes() {
+    const SIX_SOURCE: &[u8] =
+        include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+    let v2_template = mi_model::apply::compile_six_layer_profile(SIX_SOURCE, Some(SMART)).unwrap();
+    let mut v1_value: Value = serde_json::from_slice(&v2_template.keymap).unwrap();
+    for layer_idx in 1..6 {
+        let tokens: Vec<&str> = if (1..=2).contains(&layer_idx) {
+            mi_model::direct_controls::DIRECT_CONTROLS[(layer_idx - 1) * 20..layer_idx * 20]
+                .iter()
+                .map(|c| c.token)
+                .collect()
+        } else {
+            vec!["KC_NONE"; 20]
+        };
+        let rows = json!([
+            &tokens[0..2],
+            &tokens[2..6],
+            &tokens[6..10],
+            &tokens[10..13]
+        ]);
+        let layer_obj = v1_value["profiles"][1]["layers"][layer_idx]
+            .as_object_mut()
+            .unwrap();
+        layer_obj.remove("lights");
+        layer_obj["layout"]["base"] = rows.clone();
+        layer_obj["layout"]["keymap"] = rows;
+        layer_obj["layout"]["encoders"] = json!([&tokens[13..16]]);
+        for slot in 0..4 {
+            layer_obj["layout"]["joystick"]["sectors"][slot]["k"] = json!(tokens[16 + slot]);
+        }
+    }
+    use serde_json::value::RawValue;
+    use std::collections::BTreeMap;
+    let raw_doc: BTreeMap<&str, &RawValue> = serde_json::from_slice(SIX_SOURCE).unwrap();
+    let raw_profiles: Vec<BTreeMap<&str, &RawValue>> =
+        serde_json::from_str(raw_doc["profiles"].get()).unwrap();
+    let raw_layers: Vec<&RawValue> = serde_json::from_str(raw_profiles[0]["layers"].get()).unwrap();
+    let raw_layer0 = raw_layers[0].get();
+    let raw_source_text = std::str::from_utf8(SIX_SOURCE).unwrap();
+    let v1_managed_strings: Vec<String> = (1..6)
+        .map(|i| serde_json::to_string(&v1_value["profiles"][1]["layers"][i]).unwrap())
+        .collect();
+    let v1_profile = format!(
+        "{{\"id\":1,\"name\":\"{}\",\"layers\":[{},{}]}}",
+        mi_model::apply::SIX_LAYER_PROFILE_NAME,
+        raw_layer0,
+        v1_managed_strings.join(",")
+    );
+    let v1_bytes = raw_source_text
+        .replacen("\"activeProfileId\": 0", "\"activeProfileId\": 1", 1)
+        .replacen(
+            "  }] }],\n  \"macros\"",
+            &format!("  }}] }},{v1_profile}],\n  \"macros\""),
+            1,
+        )
+        .into_bytes();
+
+    assert_eq!(
+        mi_model::apply::recognize_six_layer_profile_revision(&v1_bytes, Some(SMART)).unwrap(),
+        Some((1, mi_model::apply::SixLayerKeymapRevision::V1StandardKeys))
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let (link, mut requests) = MockLink::new();
+    let inject = link.inject.clone();
+    let session = DeviceSession::new(
+        Arc::new(ExclusiveFixture(link)),
+        Box::<NativeFramer>::default(),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_secs(2),
+            interval: Duration::ZERO,
+        },
+    );
+    let v1_initial = v1_bytes.clone();
+    let worker = tokio::spawn(async move {
+        let mut incoming = NativeFramer::default();
+        let outbound = NativeFramer::default();
+        let mut active = 1u64;
+        let mut keymap = v1_initial;
+        let mut staged = vec![];
+        while let Some(frame) = requests.recv().await {
+            for bytes in incoming.feed(&frame).unwrap() {
+                let request: Value = serde_json::from_slice(&bytes).unwrap();
+                let params = &request["params"];
+                let result = match request["method"].as_str().unwrap() {
+                    "device.status" => {
+                        json!({"version":"0.6.3","profile_index":active,"layer_index":2})
+                    }
+                    "fs.list" => json!([
+                        metadata("keymap.json", &keymap),
+                        metadata("smart_actions.json", SMART)
+                    ]),
+                    "fs.readbin" => {
+                        let bytes = match params["file"].as_str().unwrap() {
+                            "keymap.json" => keymap.as_slice(),
+                            "smart_actions.json" => SMART,
+                            file => panic!("unexpected read {file}"),
+                        };
+                        let offset = params["offset"].as_u64().unwrap() as usize;
+                        let limit = params["len"].as_u64().unwrap() as usize;
+                        json!({"total_size":bytes.len(),"data":STANDARD.encode(&bytes[offset..(offset+limit).min(bytes.len())])})
+                    }
+                    "fs.txbegin" => json!({"tx":31}),
+                    "fs.writebin" => {
+                        staged.extend(STANDARD.decode(params["data"].as_str().unwrap()).unwrap());
+                        Value::Null
+                    }
+                    "fs.txcommit" => {
+                        keymap = std::mem::take(&mut staged);
+                        let applied: Value = serde_json::from_slice(&keymap).unwrap();
+                        active = applied["activeProfileId"].as_u64().unwrap();
+                        Value::Null
+                    }
+                    method => panic!("unexpected method {method}"),
+                };
+                let response = json!({"id":request["id"],"result":result});
+                let mut wire = response.to_string();
+                wire.push('\n');
+                for frame in outbound.encode(wire.as_bytes()).unwrap() {
+                    inject.send(frame).unwrap();
+                }
+            }
+        }
+        keymap
+    });
+
+    assert_eq!(
+        session
+            .verify_six_layer_files_revision(&v1_bytes, Some(SMART), 1)
+            .await
+            .unwrap(),
+        (2, mi_model::apply::SixLayerKeymapRevision::V1StandardKeys)
+    );
+    assert!(session
+        .verify_six_layer_files(&v1_bytes, Some(SMART), 1)
+        .await
+        .is_err());
+
+    let prepared = session.prepare_six_layer_write(dir.path()).await.unwrap();
+    assert_eq!(prepared.profile_index, 1);
+    let candidate = prepared.candidate.clone();
+    let receipt = session.apply_six_layer_write(prepared).await.unwrap();
+    assert_eq!(receipt.profile_index, 1);
+    assert_eq!(receipt.layer_index, 2);
+    assert_eq!(
+        session
+            .verify_six_layer_files(&candidate, Some(SMART), 1)
+            .await
+            .unwrap(),
+        2
+    );
+
+    session.shutdown().await;
+    drop(session);
+    let final_keymap = worker.await.unwrap();
+    let final_text = std::str::from_utf8(&final_keymap).unwrap();
+    assert!(final_text.contains(raw_layer0));
+    let final_json: Value = serde_json::from_slice(&final_keymap).unwrap();
+    assert_eq!(final_json["profiles"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        final_json["profiles"][1]["layers"][1]["layout"]["keymap"][0][0],
+        "KV_OAI_AG06"
+    );
+    assert_eq!(
+        final_json["profiles"][1]["layers"][2]["layout"]["keymap"][0][0],
+        "KV_OAI_AG12"
+    );
+}
+
+#[tokio::test]
+async fn six_layer_v1_to_v2_mid_write_failure_recovers_original_via_previous_planned_keymap() {
+    const SIX_SOURCE: &[u8] =
+        include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+    let v2_template = mi_model::apply::compile_six_layer_profile(SIX_SOURCE, Some(SMART)).unwrap();
+    let mut v1_value: Value = serde_json::from_slice(&v2_template.keymap).unwrap();
+    for layer_idx in 1..6 {
+        let tokens: Vec<&str> = if (1..=2).contains(&layer_idx) {
+            mi_model::direct_controls::DIRECT_CONTROLS[(layer_idx - 1) * 20..layer_idx * 20]
+                .iter()
+                .map(|c| c.token)
+                .collect()
+        } else {
+            vec!["KC_NONE"; 20]
+        };
+        let rows = json!([
+            &tokens[0..2],
+            &tokens[2..6],
+            &tokens[6..10],
+            &tokens[10..13]
+        ]);
+        let layer_obj = v1_value["profiles"][1]["layers"][layer_idx]
+            .as_object_mut()
+            .unwrap();
+        layer_obj.remove("lights");
+        layer_obj["layout"]["base"] = rows.clone();
+        layer_obj["layout"]["keymap"] = rows;
+        layer_obj["layout"]["encoders"] = json!([&tokens[13..16]]);
+        for slot in 0..4 {
+            layer_obj["layout"]["joystick"]["sectors"][slot]["k"] = json!(tokens[16 + slot]);
+        }
+    }
+    use serde_json::value::RawValue;
+    use std::collections::BTreeMap;
+    let raw_doc: BTreeMap<&str, &RawValue> = serde_json::from_slice(SIX_SOURCE).unwrap();
+    let raw_profiles: Vec<BTreeMap<&str, &RawValue>> =
+        serde_json::from_str(raw_doc["profiles"].get()).unwrap();
+    let raw_layers: Vec<&RawValue> = serde_json::from_str(raw_profiles[0]["layers"].get()).unwrap();
+    let raw_layer0 = raw_layers[0].get();
+    let v1_managed_strings: Vec<String> = (1..6)
+        .map(|i| serde_json::to_string(&v1_value["profiles"][1]["layers"][i]).unwrap())
+        .collect();
+    let v1_profile = format!(
+        "{{\"id\":1,\"name\":\"{}\",\"layers\":[{},{}]}}",
+        mi_model::apply::SIX_LAYER_PROFILE_NAME,
+        raw_layer0,
+        v1_managed_strings.join(",")
+    );
+    let v1_bytes = std::str::from_utf8(SIX_SOURCE)
+        .unwrap()
+        .replacen("\"activeProfileId\": 0", "\"activeProfileId\": 1", 1)
+        .replacen(
+            "  }] }],\n  \"macros\"",
+            &format!("  }}] }},{v1_profile}],\n  \"macros\""),
+            1,
+        )
+        .into_bytes();
+
+    let dir = tempfile::tempdir().unwrap();
+    let (prep_link, mut prep_reqs) = MockLink::new();
+    let prep_inject = prep_link.inject.clone();
+    let prep_session = DeviceSession::new(
+        Arc::new(ExclusiveFixture(prep_link)),
+        Box::<NativeFramer>::default(),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_secs(2),
+            interval: Duration::ZERO,
+        },
+    );
+    let prep_v1 = v1_bytes.clone();
+    let prep_worker = tokio::spawn(async move {
+        let mut incoming = NativeFramer::default();
+        let outbound = NativeFramer::default();
+        while let Some(frame) = prep_reqs.recv().await {
+            for bytes in incoming.feed(&frame).unwrap() {
+                let request: Value = serde_json::from_slice(&bytes).unwrap();
+                let params = &request["params"];
+                let result = match request["method"].as_str().unwrap() {
+                    "device.status" => json!({"version":"0.6.3","profile_index":1,"layer_index":1}),
+                    "fs.list" => json!([
+                        metadata("keymap.json", &prep_v1),
+                        metadata("smart_actions.json", SMART)
+                    ]),
+                    "fs.readbin" => {
+                        let bytes = match params["file"].as_str().unwrap() {
+                            "keymap.json" => prep_v1.as_slice(),
+                            "smart_actions.json" => SMART,
+                            file => panic!("unexpected read {file}"),
+                        };
+                        let offset = params["offset"].as_u64().unwrap() as usize;
+                        let limit = params["len"].as_u64().unwrap() as usize;
+                        json!({"total_size":bytes.len(),"data":STANDARD.encode(&bytes[offset..(offset+limit).min(bytes.len())])})
+                    }
+                    method => panic!("unexpected method {method}"),
+                };
+                let response = json!({"id":request["id"],"result":result});
+                let mut wire = response.to_string();
+                wire.push('\n');
+                for frame in outbound.encode(wire.as_bytes()).unwrap() {
+                    prep_inject.send(frame).unwrap();
+                }
+            }
+        }
+    });
+
+    let prepared = prep_session
+        .prepare_six_layer_write(dir.path())
+        .await
+        .unwrap();
+    let backup = prepared.backup.clone();
+    prep_session.shutdown().await;
+    drop(prep_session);
+    prep_worker.await.unwrap();
+
+    std::fs::write(backup.join("keymap.json"), SIX_SOURCE).unwrap();
+    std::fs::write(backup.join("previous-planned-keymap.json"), &v1_bytes).unwrap();
+
+    let (rec_link, mut rec_reqs) = MockLink::new();
+    let rec_inject = rec_link.inject.clone();
+    let rec_session = DeviceSession::new(
+        Arc::new(ExclusiveFixture(rec_link)),
+        Box::<NativeFramer>::default(),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_secs(2),
+            interval: Duration::ZERO,
+        },
+    );
+    let still_v1 = v1_bytes.clone();
+    let rec_worker = tokio::spawn(async move {
+        let mut incoming = NativeFramer::default();
+        let outbound = NativeFramer::default();
+        let mut keymap = still_v1;
+        let mut staged = Vec::new();
+        while let Some(frame) = rec_reqs.recv().await {
+            for bytes in incoming.feed(&frame).unwrap() {
+                let request: Value = serde_json::from_slice(&bytes).unwrap();
+                let params = &request["params"];
+                let result = match request["method"].as_str().unwrap() {
+                    "device.status" => json!({"version":"0.6.3","profile_index":1,"layer_index":1}),
+                    "fs.list" => json!([
+                        metadata("keymap.json", &keymap),
+                        metadata("smart_actions.json", SMART)
+                    ]),
+                    "fs.readbin" => {
+                        let bytes = match params["file"].as_str().unwrap() {
+                            "keymap.json" => keymap.as_slice(),
+                            "smart_actions.json" => SMART,
+                            file => panic!("unexpected read {file}"),
+                        };
+                        let offset = params["offset"].as_u64().unwrap() as usize;
+                        let limit = params["len"].as_u64().unwrap() as usize;
+                        json!({"total_size":bytes.len(),"data":STANDARD.encode(&bytes[offset..(offset+limit).min(bytes.len())])})
+                    }
+                    "fs.txbegin" => json!({"tx":41}),
+                    "fs.writebin" => {
+                        staged.extend(STANDARD.decode(params["data"].as_str().unwrap()).unwrap());
+                        Value::Null
+                    }
+                    "fs.txcommit" => {
+                        keymap = std::mem::take(&mut staged);
+                        Value::Null
+                    }
+                    method => panic!("unexpected method {method}"),
+                };
+                let response = json!({"id":request["id"],"result":result});
+                let mut wire = response.to_string();
+                wire.push('\n');
+                for frame in outbound.encode(wire.as_bytes()).unwrap() {
+                    rec_inject.send(frame).unwrap();
+                }
+            }
+        }
+        keymap
+    });
+
+    rec_session.restore_six_layer_backup(&backup).await.unwrap();
+    rec_session.shutdown().await;
+    drop(rec_session);
+    let final_keymap = rec_worker.await.unwrap();
+    assert_eq!(final_keymap, SIX_SOURCE);
+}

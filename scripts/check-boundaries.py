@@ -232,4 +232,28 @@ assert 'executor.execute_when(' in six_layer_runtime_src and 'executor.execute('
     'R-C08 violation: six-layer admission must be checked inside the executor effect lock'
 )
 
+assert (root / 'docs/designs/DESIGN.md').is_file(), (
+    'R-C09 violation: docs/designs/DESIGN.md must exist as the canonical visual design contract'
+)
+for view_path in sorted((root / 'app/MicroInput/Sources/MicroInputUI').glob('*.swift')):
+    rel_view = view_path.relative_to(root)
+    lines = view_path.read_text(encoding='utf-8').splitlines()
+    for idx, line in enumerate(lines):
+        assert '.controlSize(.mini)' not in line, (
+            f'R-C09 violation in {rel_view}:{idx + 1}: .controlSize(.mini) is forbidden; use SurfaceButtonStyle or SelectDropdown'
+        )
+        assert '.buttonStyle(.borderedProminent)' not in line and '.buttonStyle(.bordered)' not in line, (
+            f'R-C09 violation in {rel_view}:{idx + 1}: system .bordered/.borderedProminent button styles are forbidden; use SurfaceButtonStyle'
+        )
+        if re.search(r'\bPicker\s*\(', line):
+            picker_window = '\n'.join(lines[idx : min(len(lines), idx + 21)])
+            assert '.pickerStyle(.segmented)' in picker_window, (
+                f'R-C09 violation in {rel_view}:{idx + 1}: non-segmented Picker is forbidden; use SelectDropdown'
+            )
+        if '.buttonStyle(.plain)' in line:
+            focus_window = '\n'.join(lines[max(0, idx - 5) : min(len(lines), idx + 6)])
+            assert '.focusEffectDisabled(' in focus_window, (
+                f'R-C09 violation in {rel_view}:{idx + 1}: every .buttonStyle(.plain) control must attach .focusEffectDisabled()'
+            )
+
 print('UNKNOWN inventory and read-only/no-send boundaries: PASS')

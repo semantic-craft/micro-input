@@ -38,7 +38,10 @@ fn six_layer_compiler_preserves_original_bytes_and_covers_every_control() {
     );
     let mut usages = std::collections::BTreeSet::new();
     let mut key_codes = std::collections::BTreeSet::new();
+    let mut vendor_slots = std::collections::BTreeSet::new();
     for layer in 2..=3 {
+        assert_eq!(layers[layer - 1]["lights"]["backlight"]["effect"], "off");
+        assert_eq!(layers[layer - 1]["lights"]["underglow"]["effect"], "off");
         let layout = &layers[layer - 1]["layout"];
         let tokens: Vec<_> = layout["keymap"]
             .as_array()
@@ -57,19 +60,27 @@ fn six_layer_compiler_preserves_original_bytes_and_covers_every_control() {
             .collect();
         assert_eq!(tokens.len(), 20);
         for (slot, token) in tokens.into_iter().enumerate() {
-            let control = DIRECT_CONTROLS[(layer - 2) * 20 + slot];
-            assert_eq!(control.token, token);
-            assert!(usages.insert(control.usage));
-            assert!(key_codes.insert(control.key_code));
+            if slot < 6 {
+                let expected_ag = format!("KV_OAI_AG{:02}", 6 + (layer - 2) * 6 + slot);
+                assert_eq!(token, expected_ag);
+                assert!(vendor_slots.insert(token.to_owned()));
+            } else {
+                let control = DIRECT_CONTROLS[(layer - 2) * 20 + slot];
+                assert_eq!(control.token, token);
+                assert!(usages.insert(control.usage));
+                assert!(key_codes.insert(control.key_code));
+            }
         }
-        assert!(!layout.to_string().contains("KV_OAI"));
         assert_eq!(layout["joystick"]["type"], "RADIAL");
         assert_eq!(
             layout["joystick"]["sectors"][3],
             json!({"k":DIRECT_CONTROLS[(layer-2)*20+19].token,"a1":0.875,"a2":0.125})
         );
     }
+    assert_eq!(vendor_slots.len(), 12);
     for layer in &layers[3..6] {
+        assert_eq!(layer["lights"]["backlight"]["effect"], "off");
+        assert_eq!(layer["lights"]["underglow"]["effect"], "off");
         assert!(!layer.to_string().contains("KV_OAI"));
         assert_eq!(
             layer["layout"]["encoders"],

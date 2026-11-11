@@ -207,6 +207,29 @@ impl UserCommandReceiver {
         invalidate(&self.queue, reason);
     }
 
+    pub fn is_retired(&self) -> bool {
+        self.stop.load(Ordering::Acquire) || self.queue.lock().unwrap().failure.is_some()
+    }
+
+    pub fn push_vendor_activation(&self, control: u8) -> bool {
+        if control >= 60 || self.stop.load(Ordering::Acquire) {
+            return false;
+        }
+        let mut pending = self.queue.lock().unwrap();
+        if !pending.armed || pending.failure.is_some() || pending.events.len() >= MAX_PENDING {
+            return false;
+        }
+        pending.sequence += 1;
+        let received_sequence = pending.sequence;
+        pending.events.push_back(Activation {
+            control,
+            generation: self.generation.clone(),
+            received_sequence,
+            received_at: Instant::now(),
+        });
+        true
+    }
+
     pub fn failure(&self) -> Option<String> {
         self.queue.lock().unwrap().failure.clone()
     }

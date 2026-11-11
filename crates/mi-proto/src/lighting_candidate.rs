@@ -130,25 +130,11 @@ impl OaiKeyStatusEntry {
     }
 
     pub fn firmware_key_id(&self) -> Option<u8> {
-        match self.k.as_str() {
-            "AG00" => Some(0),
-            "AG01" => Some(1),
-            "AG02" => Some(2),
-            "AG03" => Some(3),
-            "AG04" => Some(4),
-            "AG05" => Some(5),
-            "AG06" => Some(6),
-            "AG07" => Some(7),
-            "AG08" => Some(8),
-            "AG09" => Some(9),
-            "AG10" => Some(10),
-            "AG11" => Some(11),
-            "AG12" => Some(12),
-            "ENC_CLK" => Some(13),
-            "ENC_CC" => Some(14),
-            "ENC_CW" => Some(15),
-            _ => None,
-        }
+        self.k
+            .strip_prefix("AG")
+            .filter(|digits| digits.len() == 2 && digits.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|digits| digits.parse::<u8>().ok())
+            .filter(|&id| id < 20)
     }
 
     fn validate(&self) -> Result<(), ProtoError> {
@@ -175,9 +161,9 @@ pub fn encode_oai_thstatus_candidate(
     if id >= 999 {
         return Err(ProtoError::Invalid("id must be < 999".into()));
     }
-    if entries.is_empty() || entries.len() > 16 {
+    if entries.is_empty() || entries.len() > 20 {
         return Err(ProtoError::Invalid(
-            "v.oai.thstatus requires between 1 and 16 key entries".into(),
+            "v.oai.thstatus supports 1..=20 key status entries".into(),
         ));
     }
     #[derive(Serialize)]
@@ -406,8 +392,6 @@ mod tests {
         }
         assert_eq!(lines, vec![bytes]);
 
-        // Borrowing a read-only method's variant cannot smuggle the two-zone
-        // params through the production parameter validator either.
         let borrowed_method = RpcRequest::new(
             Method::DeviceStatus,
             serde_json::to_value(params).unwrap(),
@@ -465,6 +449,45 @@ mod tests {
                     "ambient": {"e": 4, "b": 0.95, "s": 0.75, "m": 0.5, "c": 0xFFB800}
                 }
             })
+        );
+    }
+
+    #[test]
+    fn oai_thstatus_accepts_ag00_through_ag19_and_rejects_non_led_or_overflow_entries() {
+        assert_eq!(OaiKeyStatusEntry::new("AG00", 0).firmware_key_id(), Some(0));
+        assert_eq!(
+            OaiKeyStatusEntry::new("AG19", 0).firmware_key_id(),
+            Some(19)
+        );
+        assert_eq!(OaiKeyStatusEntry::new("AG20", 0).firmware_key_id(), None);
+        assert_eq!(OaiKeyStatusEntry::new("AG+1", 0).firmware_key_id(), None);
+        assert_eq!(OaiKeyStatusEntry::new("ENC_CLK", 0).firmware_key_id(), None);
+        assert_eq!(OaiKeyStatusEntry::new("ENC_CC", 0).firmware_key_id(), None);
+        assert_eq!(OaiKeyStatusEntry::new("ENC_CW", 0).firmware_key_id(), None);
+
+        let twenty: Vec<OaiKeyStatusEntry> = (0..20)
+            .map(|id| OaiKeyStatusEntry::new(format!("AG{id:02}"), 0x00FF66))
+            .collect();
+        let bytes = encode_oai_thstatus_candidate(&twenty, 42).unwrap();
+        let decoded: Value = serde_json::from_slice(&bytes).unwrap();
+        let params = decoded["params"].as_array().unwrap();
+        assert_eq!(params.len(), 20);
+        assert_eq!(params[0]["id"], 0);
+        assert_eq!(params[0]["k"], "AG00");
+        assert_eq!(params[19]["id"], 19);
+        assert_eq!(params[19]["k"], "AG19");
+
+        let mut twenty_one = twenty.clone();
+        twenty_one.push(OaiKeyStatusEntry::new("AG00", 0));
+        let err = encode_oai_thstatus_candidate(&twenty_one, 42)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("1..=20"), "{err}");
+
+        assert!(encode_oai_thstatus_candidate(&[], 42).is_err());
+        assert!(
+            encode_oai_thstatus_candidate(&[OaiKeyStatusEntry::new("ENC_CLK", 0xFFFFFF)], 42)
+                .is_err()
         );
     }
 }
