@@ -30,12 +30,19 @@ public struct StatusMenuPopoverView: View {
         let _ = ViewRenderTelemetry.record("StatusMenuPopoverView")
         let sm = store.statusMenu
 
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(sm.activeProfileName)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(UITheme.textPrimary)
+                    HStack(spacing: 6) {
+                        Text(sm.activeProfileName)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(UITheme.textPrimary)
+                        if sm.isProfileLocked {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(UITheme.textPrimary)
+                        }
+                    }
                     Text(sm.routingModeSummary)
                         .font(.system(size: 12.5, weight: .regular))
                         .foregroundStyle(UITheme.textSecondary)
@@ -52,28 +59,65 @@ public struct StatusMenuPopoverView: View {
                 .toggleStyle(NeutralSwitchToggleStyle())
             }
 
+            if !sm.accessibilityTrusted {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(UITheme.textSecondary)
+                    Text("缺少 macOS 辅助功能权限，按键动作已被系统拦截")
+                        .font(UITheme.micro)
+                        .foregroundStyle(UITheme.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button("打开辅助功能设置") { store.dispatch("status_menu", "OpenAccessibilitySettings") }
+                        .surfaceButton(.primary)
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(UITheme.subtleSurface))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
+            }
+
             Rectangle().fill(UITheme.rowDivider).frame(height: 1)
 
-            HStack(spacing: 8) {
-                Text("自动跟随前台软件")
-                    .font(UITheme.captionMedium)
-                    .foregroundStyle(UITheme.textPrimary)
-                if sm.manualOverride {
-                    Button("恢复自动") {
-                        store.dispatch("status_menu", "ResumeAutoFollow")
+            VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        Text("锁定当前方案")
+                            .font(UITheme.captionMedium)
+                            .foregroundStyle(UITheme.textPrimary)
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { sm.isProfileLocked },
+                            set: { store.dispatch("status_menu", ["SetProfileLocked": $0]) }
+                        ))
+                        .labelsHidden()
+                        .toggleStyle(NeutralSwitchToggleStyle())
                     }
-                    .surfaceButton(.ghost)
+                    if let notice = sm.competingHostNotice {
+                        Text(notice).font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
+                    } else if sm.isProfileLocked {
+                        Text("固定响应当前方案，屏蔽前台切换与层漂移").font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
+                    }
                 }
-                Spacer()
-                Toggle(
-                    "",
-                    isOn: Binding(
+
+                HStack(spacing: 8) {
+                    Text("自动跟随前台软件")
+                        .font(UITheme.captionMedium)
+                        .foregroundStyle(UITheme.textPrimary)
+                    if sm.manualOverride || sm.isProfileLocked {
+                        Button("恢复自动") { store.dispatch("status_menu", "ResumeAutoFollow") }
+                            .surfaceButton(.ghost)
+                    }
+                    Spacer()
+                    Toggle("", isOn: Binding(
                         get: { sm.autoFollowEnabled },
                         set: { store.dispatch("status_menu", ["SetAutoFollowEnabled": $0]) }
-                    )
-                )
-                .labelsHidden()
-                .toggleStyle(NeutralSwitchToggleStyle())
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(NeutralSwitchToggleStyle())
+                    .disabled(sm.isProfileLocked)
+                    .opacity(sm.isProfileLocked ? 0.45 : 1.0)
+                }
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -127,7 +171,7 @@ public struct StatusMenuPopoverView: View {
 
             Rectangle().fill(UITheme.rowDivider).frame(height: 1)
 
-            VStack(spacing: 8) {
+            VStack(spacing: 6) {
                 HStack {
                     Text(WorkbenchDestination.radial.rawValue)
                         .font(UITheme.captionMedium)
@@ -208,7 +252,8 @@ public struct StatusMenuPopoverView: View {
                 }
             }
         }
-        .padding(14)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
         .frame(width: 348)
         .fixedSize(horizontal: false, vertical: true)
         .background(UITheme.pageBackground)
@@ -735,60 +780,30 @@ struct LightingEditorSheet: View {
                 }
 
                 SettingsRow("亮度", subtitle: "调节此分区的整体发光亮度", showsDivider: true) {
-                    NeutralTrackSlider(
-                        value: Binding(
-                            get: { Double(zone.brightnessPercent) },
-                            set: { val in
-                                store.dispatch("editor", [
-                                    "LightingEditBrightness": [
-                                        "zone": zone.zone,
-                                        "brightness_percent": Int(val.rounded()),
-                                        "all_layers": model.applyToAllLayers
-                                    ]
-                                ])
-                            }
-                        ),
-                        in: 0...100
-                    )
-                    .disabled(!zone.canEditBrightness)
+                    NeutralTrackSlider(value: Binding(
+                        get: { Double(zone.brightnessPercent) },
+                        set: { val in
+                            store.dispatch("editor", ["LightingEditBrightness": ["zone": zone.zone, "brightness_percent": Int(val.rounded()), "all_layers": model.applyToAllLayers]])
+                        }
+                    ), in: 0...100).disabled(!zone.canEditBrightness)
                 }
 
                 SettingsRow("速度", subtitle: "调节呼吸或追光灯效的循环速率", showsDivider: true) {
-                    NeutralTrackSlider(
-                        value: Binding(
-                            get: { Double(zone.speedPercent) },
-                            set: { val in
-                                store.dispatch("editor", [
-                                    "LightingEditSpeed": [
-                                        "zone": zone.zone,
-                                        "speed_percent": Int(val.rounded()),
-                                        "all_layers": model.applyToAllLayers
-                                    ]
-                                ])
-                            }
-                        ),
-                        in: 0...100
-                    )
-                    .disabled(!zone.canEditSpeed)
+                    NeutralTrackSlider(value: Binding(
+                        get: { Double(zone.speedPercent) },
+                        set: { val in
+                            store.dispatch("editor", ["LightingEditSpeed": ["zone": zone.zone, "speed_percent": Int(val.rounded()), "all_layers": model.applyToAllLayers]])
+                        }
+                    ), in: 0...100).disabled(!zone.canEditSpeed)
                 }
 
                 SettingsRow("动态参数", subtitle: "调节渐变跨度与动态光效细节") {
-                    NeutralTrackSlider(
-                        value: Binding(
-                            get: { Double(zone.magicPercent) },
-                            set: { val in
-                                store.dispatch("editor", [
-                                    "LightingEditMagic": [
-                                        "zone": zone.zone,
-                                        "magic_percent": Int(val.rounded()),
-                                        "all_layers": model.applyToAllLayers
-                                    ]
-                                ])
-                            }
-                        ),
-                        in: 0...100
-                    )
-                    .disabled(!zone.canEditMagic)
+                    NeutralTrackSlider(value: Binding(
+                        get: { Double(zone.magicPercent) },
+                        set: { val in
+                            store.dispatch("editor", ["LightingEditMagic": ["zone": zone.zone, "magic_percent": Int(val.rounded()), "all_layers": model.applyToAllLayers]])
+                        }
+                    ), in: 0...100).disabled(!zone.canEditMagic)
                 }
             }
         }

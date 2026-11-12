@@ -376,3 +376,11 @@
 - 起因与后果：恢复设备配置后，下一次应用在 `CFRunLoopAddSource` 崩溃。hidapi 的进程级管理器绑定首次初始化线程的 RunLoop；每次短生命周期任务新建 HidApi 会在原线程退出后重新枚举该管理器。
 - 修复：一个随进程存活的 HID 打开线程初始化并复用上下文，串行完成独占选项设置、打开与选项恢复。设备发现仍由现有 IOKit 实现负责，不额外维护一份枚举缓存。
 - 验证点：`hid_open_owner_survives_short_lived_callers_and_failed_opens` 与 `abandoned_hid_open_reply_releases_handle_and_keeps_owner_available` 自动回归；`native_usb_reopens_after_request_threads_exit` 在三个短线程请求间真实开关同一设备，零报告读写。应用层仍需实际恢复、应用与完整读回。Seen 1x（2026-11-10）。
+
+## 六层运行期路由须与方案锁定合一且稳态监控禁用子进程轮询
+
+- 标签：#设备 #macOS #架构 #可靠性
+- 起因与后果：一是 `RunningSixLayer` 仅读取前台应用与物理层 `(layer - 2)`，忽略菜单栏点选方案与关闭自动跟随，当 `input.app` 发送 `host.focused_app` 改层或切到浏览器时按键全部失效；二是单次 Electron/AX 动作读回 `unconfirmed` 即吊销整个六层接收器，系统睡眠唤醒与换口重连也不自动恢复只读监听；三是 `start_monitor` 每 500 毫秒拉起 4 个子进程并重读完整 Karabiner 日志，日志超 1 MiB 或轮转即自毁；四是同 bundle ID 在 `Apple Development` 与 `Developer ID Application` 不同 Team ID 间切换覆盖安装会使 macOS TCC 辅助功能权限静默失效。
+- 修复与证据：引入 `HostPreferences.locked_profile_id` 与 `SixLayerRoutingMode::{Locked, ManualPinned, AutoFollow}`，锁定或手动固定时将第 2 至 4 层 60 个按键及第 1 层 OAI 厂商通知统一路由到目标方案实时 20 槽动作表，忽略前台切换与时间戳抖动；仅在按住态（`apple_fn` 或自有听写）清理未确认时熔断接收器；唤醒与设备重枚举自动执行最多 3 次只读重连；稳态监控改为 2 秒零子进程轻量检查并兼容大日志尾部读取；界面实时投影 `AXIsProcessTrusted()` 状态与原版 `input.app` 竞争提示。
+- 验证点：`locked_mode_routes_layers_two_through_four_and_ignores_foreground_switches`、`manual_pinned_mode_routes_selected_profile_when_other_app_is_frontmost`、`one_shot_unconfirmed_receipt_keeps_six_layer_alive_while_held_fn_fences`、`check_log_readiness_handles_logs_larger_than_one_megabyte_and_log_rotation` 与 `scripts/verify-offline`。Seen 2x（2026-11-12）。
+

@@ -198,7 +198,9 @@ impl WorkbenchStore {
     }
 
     pub(super) fn navigation_foreground_changed(&mut self, bundle: Option<&str>) {
-        if self.foreground_bundle_id.as_deref() == bundle {
+        if self.document_store.locked_profile_id().is_some()
+            || self.foreground_bundle_id.as_deref() == bundle
+        {
             return;
         }
         let expected = self
@@ -314,7 +316,21 @@ impl WorkbenchStore {
                 .slot_table()
                 .slots()
                 .get(index)
-                .and_then(|s| s.place.clone()),
+                .and_then(|s| s.place.clone())
+                .or_else(|| {
+                    if self.config.isolated {
+                        return None;
+                    }
+                    let agent = self.projection_inputs().active_canonical_agent()?;
+                    match agent {
+                        CanonicalAgent::Antigravity
+                        | CanonicalAgent::DeepseekHarness
+                        | CanonicalAgent::Herdr => {
+                            Some(NavigationPlace::app(agent.bundle_id().to_string()))
+                        }
+                        _ => None,
+                    }
+                }),
             NavigationCommand::Back => history.back(|p| self.navigation_available(p)),
             NavigationCommand::Forward => history.forward(|p| self.navigation_available(p)),
         };

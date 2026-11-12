@@ -13,9 +13,16 @@ pub struct RoutingRequest {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RoutingOperation {
+    #[serde(alias = "select_profile")]
     Select {
         profile_id: String,
     },
+    #[serde(alias = "lock")]
+    LockProfile {
+        #[serde(default)]
+        profile_id: Option<String>,
+    },
+    #[serde(alias = "set_auto_follow_enabled")]
     Enable {
         enabled: bool,
     },
@@ -25,6 +32,7 @@ pub enum RoutingOperation {
     CommandExecution {
         enabled: bool,
     },
+    #[serde(alias = "resume_auto_follow")]
     Resume,
     Upsert {
         bundle_id: String,
@@ -56,9 +64,12 @@ impl DocumentStore {
         is_pressed: bool,
     ) -> Option<crate::host_router::ResolvedHostAction> {
         let host = self.host_store();
+        let active_id = host
+            .locked_profile_id()
+            .or_else(|| host.preferences.value.host_active_profile_id.clone());
         crate::host_router::resolve_host_action_with_layout(
             &host.draft.document,
-            host.preferences.value.host_active_profile_id.as_deref(),
+            active_id.as_deref(),
             binding_id,
             is_pressed,
             host.preferences.value.command_execution_enabled,
@@ -72,10 +83,9 @@ impl DocumentStore {
         let p = &self.preferences.value;
         let layout = p.bottom_row_layout;
         let graph = &self.draft.document.editable.graph;
-        let profile = p
-            .host_active_profile_id
-            .as_ref()
-            .and_then(|id| graph.profiles.get(id));
+        let locked = self.locked_profile_id();
+        let active_profile_id = locked.as_ref().or(p.host_active_profile_id.as_ref());
+        let profile = active_profile_id.and_then(|id| graph.profiles.get(id));
         let split_bindings = [
             "AG00", "AG01", "AG02", "AG03", "AG04", "AG05", "AG06", "AG07", "AG08", "AG09", "AG10",
             "AG11", "AG12", "AG13", "AG14", "ENC_CLK", "AG15", "AG16", "AG17", "AG18",
@@ -93,7 +103,7 @@ impl DocumentStore {
             use crate::host_router::ResolvedHostAction::*;
             let action = crate::host_router::resolve_host_action_with_layout(
                 &self.draft.document,
-                p.host_active_profile_id.as_deref(),
+                active_profile_id.map(String::as_str),
                 binding,
                 true,
                 p.command_execution_enabled,
@@ -193,6 +203,7 @@ impl DocumentStore {
         }).collect();
         json!({"document_id":self.draft.document_id,"document_revision":self.draft.revision,
             "host_state_revision":self.host_state_revision,"profile_id":p.host_active_profile_id,
+            "locked_profile_id":locked,
             "profile_name":profile.map(|p| &p.name),"execution_enabled":p.host_execution_enabled,
             "command_execution_enabled":p.command_execution_enabled,
             "auto_follow_enabled":p.auto_follow_enabled,"manual_override":p.manual_override,
@@ -218,15 +229,36 @@ impl DocumentStore {
                 if !valid(&profile_id) {
                     return Err("Profile 不存在".into());
                 }
+                if next.locked_profile_id.is_some() {
+                    next.locked_profile_id = Some(profile_id.clone());
+                }
                 next.host_active_profile_id = Some(profile_id);
                 next.manual_override = true;
             }
+            RoutingOperation::LockProfile { profile_id } => match profile_id {
+                Some(pid) => {
+                    if !valid(&pid) {
+                        return Err(format!("Profile 不存在: {pid}"));
+                    }
+                    next.locked_profile_id = Some(pid.clone());
+                    next.host_active_profile_id = Some(pid);
+                    next.manual_override = true;
+                }
+                None => {
+                    next.locked_profile_id = None;
+                    next.manual_override = !next.auto_follow_enabled;
+                }
+            },
             RoutingOperation::Enable { enabled } => next.auto_follow_enabled = enabled,
             RoutingOperation::Execution { enabled } => next.host_execution_enabled = enabled,
             RoutingOperation::CommandExecution { enabled } => {
                 next.command_execution_enabled = enabled
             }
-            RoutingOperation::Resume => next.manual_override = false,
+            RoutingOperation::Resume => {
+                next.locked_profile_id = None;
+                next.auto_follow_enabled = true;
+                next.manual_override = false;
+            }
             RoutingOperation::Upsert {
                 bundle_id,
                 profile_id,
@@ -240,7 +272,10 @@ impl DocumentStore {
                 next.app_profile_links.remove(&bundle_id);
             }
             RoutingOperation::Follow { bundle_id } => {
-                if next.auto_follow_enabled && !next.manual_override {
+                if next.locked_profile_id.is_none()
+                    && next.auto_follow_enabled
+                    && !next.manual_override
+                {
                     if let Some(id) = next
                         .app_profile_links
                         .get(&bundle_id)
@@ -263,6 +298,19 @@ impl DocumentStore {
             self.host_state_revision += 1;
         }
         Ok(())
+    }
+
+    pub fn apply_routing_operation(&mut self, operation: RoutingOperation) -> Result<(), String> {
+        if let Some(host) = &mut self.host {
+            return host.apply_routing_operation(operation);
+        }
+        let request = RoutingRequest {
+            document_id: self.draft.document_id.clone(),
+            document_revision: self.draft.revision,
+            host_state_revision: self.host_state_revision,
+            operation,
+        };
+        self.update_routing(request)
     }
 }
 
@@ -587,6 +635,145 @@ mod tests {
             PopoverPreviewMode::CheatSheet
         );
 
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn profile_lock_blocks_follow_switches_on_select_unlocks_on_resume_and_clears_on_delete() {
+        let dir = std::env::temp_dir().join(format!("mi-lock-pref-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc_path = dir.join("workbench.json");
+        std::fs::write(
+            doc_path.with_extension("preferences.json"),
+            r#"{"schema_version":2,"favorites":[],"usb_startup_profile_id":null,"board_layer_plan":null,"preview_selection":"UsbStartup","legacy_three_bindings":null}"#,
+        )
+        .unwrap();
+
+        let mut store = DocumentStore::default();
+        store.open(doc_path.clone()).unwrap();
+        assert_eq!(store.locked_profile_id(), None);
+        assert_eq!(store.routing_state()["locked_profile_id"], Value::Null);
+
+        let mut ids = Vec::new();
+        store
+            .update(|draft| {
+                ids = crate::preset::install_agent_starter_profiles(draft)?;
+                Ok(())
+            })
+            .unwrap();
+        let ag_id = ids
+            .iter()
+            .find(|id| store.draft.document.editable.graph.profiles[*id].name == "Antigravity")
+            .unwrap()
+            .clone();
+        let herdr_id = ids
+            .iter()
+            .find(|id| store.draft.document.editable.graph.profiles[*id].name == "Herdr")
+            .unwrap()
+            .clone();
+        let claude_id = ids
+            .iter()
+            .find(|id| *id != &ag_id && *id != &herdr_id)
+            .unwrap()
+            .clone();
+
+        for (bundle, pid) in [
+            ("com.google.antigravity", ag_id.as_str()),
+            ("com.anthropic.claudefordesktop", claude_id.as_str()),
+        ] {
+            let upsert = request(
+                &store,
+                json!({"kind":"upsert","bundle_id":bundle,"profile_id":pid}),
+            );
+            store.update_routing(upsert).unwrap();
+        }
+        store
+            .update_routing(request(&store, json!({"kind":"enable","enabled":true})))
+            .unwrap();
+
+        assert!(store
+            .update_routing(request(
+                &store,
+                json!({"kind":"lock_profile","profile_id":"missing-profile-id"})
+            ))
+            .is_err());
+
+        store
+            .update_routing(request(
+                &store,
+                json!({"kind":"lock_profile","profile_id":ag_id}),
+            ))
+            .unwrap();
+        assert_eq!(store.locked_profile_id(), Some(ag_id.clone()));
+        assert_eq!(store.host_active_profile_id(), Some(ag_id.clone()));
+        assert_eq!(store.routing_state()["locked_profile_id"], ag_id);
+        assert_eq!(store.routing_state()["manual_override"], true);
+
+        let rev_before_follow = store.host_revision();
+        store
+            .update_routing(request(
+                &store,
+                json!({"kind":"follow","bundle_id":"com.anthropic.claudefordesktop"}),
+            ))
+            .unwrap();
+        assert_eq!(store.host_revision(), rev_before_follow);
+        assert_eq!(store.locked_profile_id(), Some(ag_id.clone()));
+        assert_eq!(store.host_active_profile_id(), Some(ag_id.clone()));
+        assert_eq!(store.routing_state()["manual_override"], true);
+
+        store
+            .update_routing(request(
+                &store,
+                json!({"kind":"select","profile_id":herdr_id}),
+            ))
+            .unwrap();
+        assert_eq!(store.locked_profile_id(), Some(herdr_id.clone()));
+        assert_eq!(store.host_active_profile_id(), Some(herdr_id.clone()));
+
+        store
+            .update_routing(request(&store, json!({"kind":"enable","enabled":false})))
+            .unwrap();
+        assert_eq!(store.locked_profile_id(), Some(herdr_id.clone()));
+
+        store
+            .update_routing(request(
+                &store,
+                json!({"kind":"lock_profile","profile_id":null}),
+            ))
+            .unwrap();
+        assert_eq!(store.locked_profile_id(), None);
+        assert_eq!(store.host_active_profile_id(), Some(herdr_id.clone()));
+        assert_eq!(store.routing_state()["manual_override"], true);
+
+        store
+            .update_routing(request(
+                &store,
+                json!({"kind":"lock_profile","profile_id":claude_id}),
+            ))
+            .unwrap();
+        store
+            .update_routing(request(&store, json!({"kind":"resume"})))
+            .unwrap();
+        assert_eq!(store.locked_profile_id(), None);
+        assert_eq!(store.routing_state()["auto_follow_enabled"], true);
+        assert_eq!(store.routing_state()["manual_override"], false);
+
+        store
+            .update_routing(request(
+                &store,
+                json!({"kind":"lock_profile","profile_id":herdr_id}),
+            ))
+            .unwrap();
+        assert_eq!(store.locked_profile_id(), Some(herdr_id.clone()));
+        store
+            .update(|draft| draft.delete_profile(&herdr_id))
+            .unwrap();
+        assert_eq!(store.locked_profile_id(), None);
+        assert_eq!(store.routing_state()["locked_profile_id"], Value::Null);
+
+        let mut reopened = DocumentStore::default();
+        reopened.open(doc_path).unwrap();
+        assert_eq!(reopened.locked_profile_id(), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

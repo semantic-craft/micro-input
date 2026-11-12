@@ -103,12 +103,24 @@ pub struct FavoriteSlotCardProjection {
     pub is_active: bool,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusMenuProjection {
     pub icon: StatusItemIconSpec,
     pub active_profile_id: Option<String>,
     pub active_profile_name: String,
     pub routing_mode_summary: String,
+    #[serde(default)]
+    pub is_profile_locked: bool,
+    #[serde(default)]
+    pub locked_profile_id: Option<String>,
+    #[serde(default = "default_true")]
+    pub accessibility_trusted: bool,
+    #[serde(default)]
+    pub competing_host_notice: Option<String>,
     pub favorites_2x2: [FavoriteSlotCardProjection; FAVORITE_SLOT_COUNT],
     pub host_execution_enabled: bool,
     pub auto_follow_enabled: bool,
@@ -133,6 +145,10 @@ impl Default for StatusMenuProjection {
             active_profile_id: None,
             active_profile_name: "未选择方案".to_string(),
             routing_mode_summary: "手动模式".to_string(),
+            is_profile_locked: false,
+            locked_profile_id: None,
+            accessibility_trusted: true,
+            competing_host_notice: None,
             favorites_2x2: std::array::from_fn(|idx| FavoriteSlotCardProjection {
                 slot: FavoriteSlotIndex::ALL[idx],
                 profile_id: None,
@@ -165,7 +181,9 @@ pub enum StatusMenuAction {
         profile_id: String,
     },
     SelectProfile(String),
+    SetProfileLocked(bool),
     SetHostExecutionEnabled(bool),
+    OpenAccessibilitySettings,
     SetAutoFollowEnabled(bool),
     ResumeAutoFollow,
     SetRadialMenuEnabled(bool),

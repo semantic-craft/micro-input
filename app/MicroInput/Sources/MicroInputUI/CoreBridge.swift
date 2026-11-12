@@ -218,6 +218,7 @@ public final class CoreStore {
             m.showConnectButton = header["show_connect_button"] as? Bool ?? true
             m.showReturnToHostButton = header["show_return_to_host_button"] as? Bool ?? false
             m.hostExecutionEnabled = header["host_execution_enabled"] as? Bool ?? false
+            m.accessibilityTrusted = header["accessibility_trusted"] as? Bool ?? true
             m.canEditDraft = header["can_edit_draft"] as? Bool ?? true
             m.canUndo = header["can_undo"] as? Bool ?? false
             m.canRedo = header["can_redo"] as? Bool ?? false
@@ -229,6 +230,11 @@ public final class CoreStore {
             m.selectedDisplayName = sidebar["selected_display_name"] as? String ?? "未选择方案"
             m.activeHostProfileId = sidebar["active_host_profile_id"] as? String
             m.autoSwitchState = sidebar["auto_switch"] as? String ?? "Active"
+            m.isProfileLocked = sidebar["is_profile_locked"] as? Bool ?? false
+            m.lockedProfileId = sidebar["locked_profile_id"] as? String
+            if let trusted = sidebar["accessibility_trusted"] as? Bool {
+                m.accessibilityTrusted = trusted
+            }
             m.showOtherProfiles = sidebar["show_other_profiles"] as? Bool ?? false
             m.editingDevice = sidebar["editing_device"] as? Bool ?? false
             m.canMoveUp = sidebar["can_move_up"] as? Bool ?? false
@@ -432,6 +438,12 @@ public final class CoreStore {
             m.routingModeSummary = sm["routing_mode_summary"] as? String ?? "手动模式"
             m.autoFollowEnabled = sm["auto_follow_enabled"] as? Bool ?? false
             m.manualOverride = sm["manual_override"] as? Bool ?? false
+            m.isProfileLocked = sm["is_profile_locked"] as? Bool ?? m.isProfileLocked
+            m.lockedProfileId = (sm["locked_profile_id"] as? String) ?? m.lockedProfileId
+            if let trusted = sm["accessibility_trusted"] as? Bool {
+                m.accessibilityTrusted = trusted
+            }
+            m.competingHostNotice = sm["competing_host_notice"] as? String
             m.radialMenuEnabled = sm["radial_menu_enabled"] as? Bool ?? false
             m.radialConfirmMode = sm["radial_confirm_mode"] as? String ?? "encoder_press"
             m.lightingEnabled = sm["lighting_enabled"] as? Bool ?? true

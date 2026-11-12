@@ -77,6 +77,23 @@ impl AppBundleCache {
         resolved
     }
 
+    pub fn is_installed(&self, bundle_id: &str) -> bool {
+        let trimmed = bundle_id.trim();
+        if trimmed == OTHER_APPS_WILDCARD_BUNDLE_ID {
+            return true;
+        }
+        if let Some(found) = self
+            .entries
+            .read()
+            .expect("app cache read lock")
+            .get(trimmed)
+        {
+            self.cache_hits.fetch_add(1, Ordering::SeqCst);
+            return found.installed;
+        }
+        self.resolve(trimmed).installed
+    }
+
     pub fn invalidate(&self, bundle_id: &str) {
         self.entries
             .write()

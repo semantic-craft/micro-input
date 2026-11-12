@@ -171,6 +171,21 @@ impl WorkbenchStore {
             "系统已唤醒 · USB 发现尚未开始"
         }
         .into();
+        if !self.config.isolated
+            && self.config.auto_connect_usb
+            && self
+                .six_layer_state
+                .installation
+                .as_ref()
+                .is_some_and(|inst| {
+                    inst.status == crate::six_layer_runtime::InstallationStatus::Applied
+                        && inst.plan.validate_current().is_ok()
+                })
+        {
+            self.six_layer_auto_resume_attempts = 0;
+            self.six_layer_next_auto_resume_at = None;
+            self.try_auto_resume_six_layer(self.update_now);
+        }
         self.commit_runtime_update();
     }
 }

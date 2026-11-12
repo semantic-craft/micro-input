@@ -501,6 +501,7 @@ public struct HeaderSliceModel: Equatable {
     public var showConnectButton: Bool = true
     public var showReturnToHostButton: Bool = false
     public var hostExecutionEnabled: Bool = false
+    public var accessibilityTrusted: Bool = true
     public var canEditDraft: Bool = true
     public var canUndo: Bool = false
     public var canRedo: Bool = false
@@ -521,6 +522,7 @@ public struct HeaderSliceModel: Equatable {
         self.showConnectButton = m.showConnectButton
         self.showReturnToHostButton = m.showReturnToHostButton
         self.hostExecutionEnabled = m.hostExecutionEnabled
+        self.accessibilityTrusted = m.accessibilityTrusted
         self.canEditDraft = m.canEditDraft
         self.canUndo = m.canUndo
         self.canRedo = m.canRedo
@@ -541,6 +543,9 @@ public struct SidebarSliceModel: Equatable {
     public var activeHostProfileId: String? = nil
     public var autoSwitchState: String = "Active"
     public var autoFollowEnabled: Bool = true
+    public var isProfileLocked: Bool = false
+    public var lockedProfileId: String? = nil
+    public var accessibilityTrusted: Bool = true
     public var showOtherProfiles: Bool = false
     public var editingDevice: Bool = false
     public var canMoveUp: Bool = false
@@ -561,6 +566,9 @@ public struct SidebarSliceModel: Equatable {
         self.activeHostProfileId = m.activeHostProfileId
         self.autoSwitchState = m.autoSwitchState
         self.autoFollowEnabled = m.autoFollowEnabled
+        self.isProfileLocked = m.isProfileLocked
+        self.lockedProfileId = m.lockedProfileId
+        self.accessibilityTrusted = m.accessibilityTrusted
         self.showOtherProfiles = m.showOtherProfiles
         self.editingDevice = m.editingDevice
         self.canMoveUp = m.canMoveUp
@@ -710,6 +718,10 @@ public struct StatusMenuSliceModel: Equatable {
     public var hostExecutionEnabled: Bool = false
     public var autoFollowEnabled: Bool = true
     public var manualOverride: Bool = false
+    public var isProfileLocked: Bool = false
+    public var lockedProfileId: String? = nil
+    public var accessibilityTrusted: Bool = true
+    public var competingHostNotice: String? = nil
     public var radialMenuEnabled: Bool = false
     public var radialConfirmMode: String = "encoder_press"
     public var radialReadiness: String = "Ready"
@@ -731,6 +743,10 @@ public struct StatusMenuSliceModel: Equatable {
         self.hostExecutionEnabled = m.hostExecutionEnabled
         self.autoFollowEnabled = m.autoFollowEnabled
         self.manualOverride = m.manualOverride
+        self.isProfileLocked = m.isProfileLocked
+        self.lockedProfileId = m.lockedProfileId
+        self.accessibilityTrusted = m.accessibilityTrusted
+        self.competingHostNotice = m.competingHostNotice
         self.radialMenuEnabled = m.radialMenuEnabled
         self.radialConfirmMode = m.radialConfirmMode
         self.radialReadiness = m.radialReadiness
@@ -782,6 +798,7 @@ public struct ProjectionModel: Equatable {
     public var showConnectButton: Bool = true
     public var showReturnToHostButton: Bool = false
     public var hostExecutionEnabled: Bool = false
+    public var accessibilityTrusted: Bool = true
     public var canEditDraft: Bool = true
     public var canUndo: Bool = false
     public var canRedo: Bool = false
@@ -793,6 +810,9 @@ public struct ProjectionModel: Equatable {
     public var selectedDisplayName: String = "未选择方案"
     public var activeHostProfileId: String? = nil
     public var autoSwitchState: String = "Active"
+    public var isProfileLocked: Bool = false
+    public var lockedProfileId: String? = nil
+    public var competingHostNotice: String? = nil
     public var showOtherProfiles: Bool = false
     public var editingDevice: Bool = false
     public var canMoveUp: Bool = false
