@@ -310,3 +310,189 @@ struct CheatSheetOverlayView: View {
         }
     }
 }
+
+public struct PopoverMiniCheatSheetView: View {
+    public let sheet: CheatSheetModel
+
+    private let unitWidth: CGFloat = 72
+    private let unitHeight: CGFloat = 56
+    private let gridSpacing: CGFloat = 5
+
+    public init(sheet: CheatSheetModel) {
+        self.sheet = sheet
+    }
+
+    public var body: some View {
+        let _ = ViewRenderTelemetry.record("PopoverMiniCheatSheetView")
+        let layout = CheatSheetSpatialLayout(sheet: sheet)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("按键速查")
+                    .font(UITheme.micro)
+                    .foregroundStyle(UITheme.textSecondary)
+                Spacer(minLength: 4)
+                Text("\(DesktopAgent.displayName(sheet.profileName)) · 4×4")
+                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                    .foregroundStyle(UITheme.textMuted)
+                    .lineLimit(1)
+            }
+
+            VStack(spacing: gridSpacing) {
+                ForEach(Array(layout.rows.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: gridSpacing) {
+                        ForEach(row) { item in
+                            miniSpatialCell(item)
+                        }
+                    }
+                }
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(UITheme.subtleSurface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(UITheme.hairlineBorder, lineWidth: 1)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func miniSpatialCell(_ item: CheatSheetSpatialCell) -> some View {
+        switch item {
+        case .rotaryEncoder(let ccw, let cw, let press):
+            VStack(alignment: .leading, spacing: 1.5) {
+                HStack(spacing: 3) {
+                    Image(systemName: "dial.low")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundStyle(UITheme.textMuted)
+                    Text("旋钮")
+                        .font(.system(size: 8.5, weight: .medium))
+                        .foregroundStyle(UITheme.textSecondary)
+                    Spacer(minLength: 0)
+                }
+                miniRotaryRow(prefix: "↺", cell: ccw)
+                miniRotaryRow(prefix: "↻", cell: cw)
+                miniRotaryRow(prefix: "⏺", cell: press)
+            }
+            .padding(.horizontal, 5)
+            .padding(.vertical, 3.5)
+            .frame(width: unitWidth, height: unitHeight, alignment: .topLeading)
+            .background(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).fill(UITheme.surface))
+            .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).stroke(UITheme.strongBorder, lineWidth: 1))
+
+        case .joystick(let north, let west, let south, let east):
+            VStack(spacing: 2) {
+                HStack(spacing: 2) {
+                    miniJoystickQuadrant(arrow: "↑", cell: north)
+                    miniJoystickQuadrant(arrow: "↓", cell: south)
+                }
+                HStack(spacing: 2) {
+                    miniJoystickQuadrant(arrow: "←", cell: west)
+                    miniJoystickQuadrant(arrow: "→", cell: east)
+                }
+            }
+            .padding(3)
+            .frame(width: unitWidth, height: unitHeight)
+            .background(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).fill(UITheme.surface))
+            .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).stroke(UITheme.strongBorder, lineWidth: 1))
+
+        case .key(let cell, let bindingId, _, let spanCols):
+            let cellWidth = spanCols == 2 ? (unitWidth * 2 + gridSpacing) : unitWidth
+            let isAvailable = cell?.available ?? false
+            let title = (cell?.shortLabel.isEmpty == false) ? cell!.shortLabel : "未绑定"
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 3) {
+                    Text(bindingId)
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(UITheme.textMuted)
+                    if spanCols == 2 {
+                        Spacer(minLength: 2)
+                        Text("2U")
+                            .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                            .foregroundStyle(UITheme.textMuted)
+                    }
+                }
+                Spacer(minLength: 0)
+                Text(title)
+                    .font(.system(size: 10.5, weight: isAvailable ? .medium : .regular))
+                    .foregroundStyle(isAvailable ? UITheme.textPrimary : UITheme.textMuted)
+                    .lineLimit(2)
+                    .lineSpacing(0)
+                    .minimumScaleFactor(0.82)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
+            .frame(width: cellWidth, height: unitHeight, alignment: .topLeading)
+            .background(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).fill(UITheme.surface))
+            .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
+
+        case .statusCluster(let profileName, _):
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 3.5) {
+                    ForEach(0..<3, id: \.self) { _ in
+                        Circle()
+                            .fill(UITheme.textPrimary)
+                            .frame(width: 4, height: 4)
+                    }
+                    Spacer(minLength: 2)
+                    Text("4×4")
+                        .font(.system(size: 8.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(UITheme.textMuted)
+                }
+                Spacer(minLength: 0)
+                Text(DesktopAgent.displayName(profileName))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(UITheme.textPrimary)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.82)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
+            .frame(width: unitWidth, height: unitHeight, alignment: .topLeading)
+            .background(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).fill(UITheme.mutedSurface.opacity(0.65)))
+            .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
+        }
+    }
+
+    private func miniRotaryRow(prefix: String, cell: CheatSheetCellModel?) -> some View {
+        let isAvailable = cell?.available ?? false
+        let text = (isAvailable && cell?.shortLabel.isEmpty == false) ? cell!.shortLabel : "—"
+        return HStack(spacing: 2.5) {
+            Text(prefix)
+                .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(UITheme.textMuted)
+            Text(text)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(isAvailable ? UITheme.textPrimary : UITheme.textMuted)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func miniJoystickQuadrant(arrow: String, cell: CheatSheetCellModel?) -> some View {
+        let isAvailable = cell?.available ?? false
+        let text = (isAvailable && cell?.shortLabel.isEmpty == false) ? cell!.shortLabel : "—"
+        return HStack(alignment: .top, spacing: 1.5) {
+            Text(arrow)
+                .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                .foregroundStyle(UITheme.textMuted)
+            Text(text)
+                .font(.system(size: 8, weight: .medium))
+                .foregroundStyle(isAvailable ? UITheme.textPrimary : UITheme.textMuted)
+                .lineLimit(2)
+                .lineSpacing(-1)
+                .minimumScaleFactor(0.75)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 2)
+        .padding(.vertical, 1.5)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(UITheme.subtleSurface.opacity(0.7)))
+    }
+}

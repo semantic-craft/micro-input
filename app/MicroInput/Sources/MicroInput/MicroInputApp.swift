@@ -115,13 +115,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         self.statusItem = item
 
-        popover.behavior = .transient
-        popover.contentSize = NSSize(width: 340, height: 480)
-        popover.contentViewController = NSHostingController(
+        let hosting = NSHostingController(
             rootView: StatusMenuPopoverView(store: store) { [weak self] in
                 self?.popover.performClose(nil)
                 self?.openMainWindow()
             }
+        )
+        hosting.sizingOptions = [.preferredContentSize]
+        popover.behavior = .transient
+        popover.contentViewController = hosting
+        syncPopoverContentSize()
+    }
+
+    private func syncPopoverContentSize() {
+        guard let hosting = popover.contentViewController as? NSHostingController<StatusMenuPopoverView> else {
+            return
+        }
+        hosting.view.layoutSubtreeIfNeeded()
+        popover.contentSize = hosting.sizeThatFits(
+            in: NSSize(width: CGFloat(348), height: .greatestFiniteMagnitude)
         )
     }
 
@@ -130,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if popover.isShown {
             popover.performClose(sender)
         } else {
+            syncPopoverContentSize()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }

@@ -1,4 +1,5 @@
 import AppKit
+import Foundation
 import SwiftUI
 
 public enum UITheme {
@@ -918,5 +919,24 @@ public enum AgentProfileKind: String {
         case .herdr: return "终端工作区全动作键模式，直控标签、分栏与面板焦点"
         case .custom: return "其他软件与通用快捷键映射（默认底排麦克风键触发苹果 Fn 语音输入）"
         }
+    }
+}
+
+public extension Color {
+    init(hex: String) {
+        let cleaned = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var val: UInt64 = 0
+        Scanner(string: cleaned).scanHexInt64(&val)
+        let r, g, b: Double
+        if cleaned.count == 6 {
+            r = Double((val >> 16) & 0xFF) / 255.0
+            g = Double((val >> 8) & 0xFF) / 255.0
+            b = Double(val & 0xFF) / 255.0
+        } else {
+            r = 0.23
+            g = 0.51
+            b = 0.96
+        }
+        self.init(red: r, green: g, blue: b)
     }
 }
