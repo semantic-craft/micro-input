@@ -11,15 +11,6 @@ use serde_json::{json, value::RawValue, Value};
 
 pub const SIX_LAYER_PROFILE_NAME: &str = "Micro Input Six Layers";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SixLayerKeymapRevision {
-    #[default]
-    V2HybridVendorSlots,
-    V1StandardKeys,
-    RetiredCindy,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AppliedHostLayer {
@@ -203,7 +194,7 @@ fn native_layout(layout: &Value) -> bool {
         && layout["joystick"]["type"] == "VENDOR"
 }
 
-const V2_LAYER2_VENDOR_SLOTS: [&str; 6] = [
+const LAYER2_VENDOR_SLOTS: [&str; 6] = [
     "KV_OAI_AG06",
     "KV_OAI_AG07",
     "KV_OAI_AG08",
@@ -212,7 +203,7 @@ const V2_LAYER2_VENDOR_SLOTS: [&str; 6] = [
     "KV_OAI_AG11",
 ];
 
-const V2_LAYER3_VENDOR_SLOTS: [&str; 6] = [
+const LAYER3_VENDOR_SLOTS: [&str; 6] = [
     "KV_OAI_AG12",
     "KV_OAI_AG13",
     "KV_OAI_AG14",
@@ -242,11 +233,11 @@ fn managed_lights_off() -> Value {
 
 fn managed_layer(index: usize) -> Value {
     let tokens: Vec<&str> = match index {
-        1 => V2_LAYER2_VENDOR_SLOTS
+        1 => LAYER2_VENDOR_SLOTS
             .into_iter()
             .chain(DIRECT_CONTROLS[6..20].iter().map(|control| control.token))
             .collect(),
-        2 => V2_LAYER3_VENDOR_SLOTS
+        2 => LAYER3_VENDOR_SLOTS
             .into_iter()
             .chain(DIRECT_CONTROLS[26..40].iter().map(|control| control.token))
             .collect(),
@@ -288,44 +279,6 @@ fn managed_layer(index: usize) -> Value {
     })
 }
 
-fn managed_layer_v1(index: usize, retired: bool) -> Value {
-    let tokens: Vec<_> = if (1..=2).contains(&index) || (retired && index == 3) {
-        DIRECT_CONTROLS[(index - 1) * 20..index * 20]
-            .iter()
-            .map(|control| control.token)
-            .collect()
-    } else {
-        vec!["KC_NONE"; 20]
-    };
-    let rows = [
-        &tokens[0..2],
-        &tokens[2..6],
-        &tokens[6..10],
-        &tokens[10..13],
-    ];
-    let name = [
-        "Codex",
-        "Antigravity",
-        "DeepSeek Harness",
-        "Unassigned 4",
-        "Unassigned 5",
-        "Unassigned 6",
-    ][index];
-    let name = if retired && index == 3 { "Cindy" } else { name };
-    json!({"id":index,"name":name, "color":0,
-        "layout":{"base":rows,"keymap":rows,"encoders":[&tokens[13..16]],"joystick":{"type":"RADIAL","sectors":[{"k":tokens[16],"a1":0.625,"a2":0.875},{"k":tokens[17],"a1":0.375,"a2":0.625},{"k":tokens[18],"a1":0.125,"a2":0.375},{"k":tokens[19],"a1":0.875,"a2":0.125}]}}})
-}
-
-fn is_retired_cindy_layer_3(layer: &Value) -> bool {
-    let v1_cindy = managed_layer_v1(3, true);
-    if layer == &v1_cindy {
-        return true;
-    }
-    let mut v2_cindy = v1_cindy;
-    v2_cindy["lights"] = managed_lights_off();
-    layer == &v2_cindy
-}
-
 fn offset(input: &[u8], raw: &RawValue) -> Result<usize, String> {
     let start = (raw.get().as_ptr() as usize)
         .checked_sub(input.as_ptr() as usize)
@@ -336,60 +289,75 @@ fn offset(input: &[u8], raw: &RawValue) -> Result<usize, String> {
     Ok(start)
 }
 
-pub fn recognize_six_layer_profile_revision(
-    keymap: &[u8],
-    smart: Option<&[u8]>,
-) -> Result<Option<(u32, SixLayerKeymapRevision)>, String> {
-    let config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
-    recognize_profile_revision_in_config(&config, false)
+fn is_allowed_managed_vendor_token(
+    layer_index: usize,
+    row_index: usize,
+    col_index: usize,
+    token: &str,
+) -> bool {
+    let in_top_six = (row_index == 0 && col_index < 2) || (row_index == 1 && col_index < 4);
+    in_top_six
+        && ((layer_index == 1 && LAYER2_VENDOR_SLOTS.contains(&token))
+            || (layer_index == 2 && LAYER3_VENDOR_SLOTS.contains(&token)))
 }
 
-pub fn verify_active_six_layer_profile_revision(
-    keymap: &[u8],
-    smart: Option<&[u8]>,
-    profile_index: u32,
-) -> Result<SixLayerKeymapRevision, String> {
-    let config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
-    let (recognized_index, revision) = recognize_profile_revision_in_config(&config, false)?
-        .ok_or_else(|| "六层专用方案缺失".to_string())?;
-    if recognized_index != profile_index
-        || config.raw["activeProfileId"].as_u64() != Some(u64::from(profile_index))
+fn grid_has_conflicting_vendor_token(grid: &Value, allow_top_six_for_layer: Option<usize>) -> bool {
+    let Some(rows) = grid.as_array() else {
+        return false;
+    };
+    for (row_index, row) in rows.iter().enumerate() {
+        if let Some(cols) = row.as_array() {
+            for (col_index, cell) in cols.iter().enumerate() {
+                if let Some(token) = cell.as_str() {
+                    if token.starts_with("KV_OAI_")
+                        && !allow_top_six_for_layer.is_some_and(|layer_index| {
+                            is_allowed_managed_vendor_token(
+                                layer_index,
+                                row_index,
+                                col_index,
+                                token,
+                            )
+                        })
+                    {
+                        return true;
+                    }
+                }
+            }
+        } else if row
+            .as_str()
+            .is_some_and(|token| token.starts_with("KV_OAI_"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn managed_layer_has_conflict(layer_index: usize, layer: &Value) -> bool {
+    if layer["name"] == "Cindy" {
+        return true;
+    }
+    let layout = &layer["layout"];
+    if layout["joystick"]["type"] == "VENDOR" {
+        return true;
+    }
+    if grid_has_conflicting_vendor_token(&layout["keymap"], Some(layer_index))
+        || grid_has_conflicting_vendor_token(&layout["base"], Some(layer_index))
+        || grid_has_conflicting_vendor_token(&layout["encoders"], None)
     {
-        return Err("六层活动方案索引不符".into());
+        return true;
     }
-    Ok(revision)
+    layout["joystick"]["sectors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|sector| sector["k"].as_str())
+        .any(|token| token.starts_with("KV_OAI_"))
 }
 
-pub fn recognize_six_layer_profile(
-    keymap: &[u8],
-    smart: Option<&[u8]>,
-) -> Result<Option<u32>, String> {
-    match recognize_six_layer_profile_revision(keymap, smart)? {
-        Some((index, SixLayerKeymapRevision::V2HybridVendorSlots)) => Ok(Some(index)),
-        Some(_) => Err("六层专用方案同名、重复或已修改，原映射保留".into()),
-        None => Ok(None),
-    }
-}
-
-pub fn recognize_six_layer_recovery_revision(
-    keymap: &[u8],
-    smart: Option<&[u8]>,
-) -> Result<Option<(u32, SixLayerKeymapRevision)>, String> {
-    let config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
-    recognize_profile_revision_in_config(&config, true)
-}
-
-pub fn recognize_six_layer_recovery_candidate(
-    keymap: &[u8],
-    smart: Option<&[u8]>,
-) -> Result<Option<u32>, String> {
-    Ok(recognize_six_layer_recovery_revision(keymap, smart)?.map(|(index, _)| index))
-}
-
-fn recognize_profile_revision_in_config(
+fn recognize_six_layer_recovery_candidate_in_config(
     config: &crate::DeviceConfig,
-    allow_retired: bool,
-) -> Result<Option<(u32, SixLayerKeymapRevision)>, String> {
+) -> Result<Option<u32>, String> {
     let profiles = config.raw["profiles"]
         .as_array()
         .ok_or("Profile 列表缺失")?;
@@ -398,31 +366,68 @@ fn recognize_profile_revision_in_config(
         if profile["name"] != SIX_LAYER_PROFILE_NAME {
             continue;
         }
-        let layers = profile["layers"].as_array().ok_or("六层数组缺失")?;
+        let layers = profile["layers"]
+            .as_array()
+            .ok_or("六层专用方案同名、重复或已修改，原映射保留")?;
         if found.is_some()
             || profile["id"] != index
+            || profiles.iter().filter(|p| p["id"] == index).count() != 1
             || layers.len() != 6
             || !native_layout(&layers[0]["layout"])
         {
             return Err("六层专用方案同名、重复或已修改，原映射保留".into());
         }
-        let revision = if (1..6).all(|i| layers[i] == managed_layer(i)) {
-            SixLayerKeymapRevision::V2HybridVendorSlots
-        } else if (1..6).all(|i| layers[i] == managed_layer_v1(i, false)) {
-            SixLayerKeymapRevision::V1StandardKeys
-        } else if allow_retired
-            && is_retired_cindy_layer_3(&layers[3])
-            && [1, 2, 4, 5]
-                .into_iter()
-                .all(|i| layers[i] == managed_layer_v1(i, false) || layers[i] == managed_layer(i))
-        {
-            SixLayerKeymapRevision::RetiredCindy
-        } else {
-            return Err("六层专用方案同名、重复或已修改，原映射保留".into());
-        };
-        found = Some((index as u32, revision));
+        found = Some(index as u32);
     }
     Ok(found)
+}
+
+fn recognize_six_layer_profile_in_config(
+    config: &crate::DeviceConfig,
+) -> Result<Option<u32>, String> {
+    let Some(index) = recognize_six_layer_recovery_candidate_in_config(config)? else {
+        return Ok(None);
+    };
+    let layers = config.raw["profiles"][index as usize]["layers"]
+        .as_array()
+        .ok_or("六层专用方案同名、重复或已修改，原映射保留")?;
+    if (1..6).all(|i| layers[i] == managed_layer(i)) {
+        Ok(Some(index))
+    } else {
+        Err("六层专用方案同名、重复或已修改，原映射保留".into())
+    }
+}
+
+pub fn recognize_six_layer_profile(
+    keymap: &[u8],
+    smart: Option<&[u8]>,
+) -> Result<Option<u32>, String> {
+    let config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
+    recognize_six_layer_profile_in_config(&config)
+}
+
+pub fn verify_active_six_layer_profile(
+    keymap: &[u8],
+    smart: Option<&[u8]>,
+    profile_index: u32,
+) -> Result<(), String> {
+    let config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
+    let recognized_index = recognize_six_layer_profile_in_config(&config)?
+        .ok_or_else(|| "六层专用方案缺失".to_string())?;
+    if recognized_index != profile_index
+        || config.raw["activeProfileId"].as_u64() != Some(u64::from(profile_index))
+    {
+        return Err("六层活动方案索引不符".into());
+    }
+    Ok(())
+}
+
+pub fn recognize_six_layer_recovery_candidate(
+    keymap: &[u8],
+    smart: Option<&[u8]>,
+) -> Result<Option<u32>, String> {
+    let config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
+    recognize_six_layer_recovery_candidate_in_config(&config)
 }
 
 pub fn compile_six_layer_profile(
@@ -430,7 +435,7 @@ pub fn compile_six_layer_profile(
     smart: Option<&[u8]>,
 ) -> Result<CompiledSixLayerProfile, String> {
     let config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
-    let known = recognize_profile_revision_in_config(&config, false)?;
+    let existing = recognize_six_layer_recovery_candidate_in_config(&config)?;
     let profiles = config.raw["profiles"]
         .as_array()
         .ok_or("Profile 列表缺失")?;
@@ -445,29 +450,35 @@ pub fn compile_six_layer_profile(
     let profiles_raw = field(&fields, "profiles")?;
     let originals = array(profiles_raw)?;
     let mut edits = Vec::new();
-    let index = match known {
-        Some((index, SixLayerKeymapRevision::V2HybridVendorSlots)) => index,
-        Some((index, SixLayerKeymapRevision::V1StandardKeys)) => {
-            let target_profile = originals
-                .get(index as usize)
-                .copied()
-                .ok_or("六层 Profile 原字节缺失")?;
-            let profile_fields = object(target_profile)?;
-            let layers_raw = field(&profile_fields, "layers")?;
-            let raw_layers = array(layers_raw)?;
-            let codex_raw = raw_layers.first().copied().ok_or("第 1 层原字节缺失")?;
-            let mut upgraded_layers = vec![codex_raw.get().to_owned()];
-            upgraded_layers.extend((1..6).map(|i| managed_layer(i).to_string()));
-            let start = offset(keymap, layers_raw)?;
-            edits.push((
-                start,
-                start + layers_raw.get().len(),
-                format!("[{}]", upgraded_layers.join(",")).into_bytes(),
-            ));
+    let index = match existing {
+        Some(index) => {
+            let layers = profiles[index as usize]["layers"]
+                .as_array()
+                .ok_or("六层数组缺失")?;
+            let has_conflict = (1..6)
+                .any(|layer_index| managed_layer_has_conflict(layer_index, &layers[layer_index]));
+            if has_conflict {
+                return Err("六层专用方案同名、重复或已修改，原映射保留".into());
+            }
+            if !(1..6).all(|i| layers[i] == managed_layer(i)) {
+                let target_profile = originals
+                    .get(index as usize)
+                    .copied()
+                    .ok_or("六层 Profile 原字节缺失")?;
+                let profile_fields = object(target_profile)?;
+                let layers_raw = field(&profile_fields, "layers")?;
+                let raw_layers = array(layers_raw)?;
+                let codex_raw = raw_layers.first().copied().ok_or("第 1 层原字节缺失")?;
+                let mut upgraded_layers = vec![codex_raw.get().to_owned()];
+                upgraded_layers.extend((1..6).map(|i| managed_layer(i).to_string()));
+                let start = offset(keymap, layers_raw)?;
+                edits.push((
+                    start,
+                    start + layers_raw.get().len(),
+                    format!("[{}]", upgraded_layers.join(",")).into_bytes(),
+                ));
+            }
             index
-        }
-        Some((_, SixLayerKeymapRevision::RetiredCindy)) => {
-            return Err("六层专用方案同名、重复或已修改，原映射保留".into());
         }
         None => {
             let mut native = Vec::new();
@@ -534,7 +545,10 @@ mod unit_tests {
 
     const SOURCE: &[u8] = include_bytes!("../fixtures/device/synthetic-six-layer-source.json");
 
-    fn build_v1_keymap(source: &[u8]) -> Vec<u8> {
+    fn build_outdated_keymap(
+        source: &[u8],
+        customize_layer: impl Fn(usize, &mut Value),
+    ) -> Vec<u8> {
         let root: &RawValue = serde_json::from_slice(source).unwrap();
         let fields = object(root).unwrap();
         let profiles_raw = field(&fields, "profiles").unwrap();
@@ -542,7 +556,11 @@ mod unit_tests {
         let profile0_fields = object(originals[0]).unwrap();
         let raw_layers = array(field(&profile0_fields, "layers").unwrap()).unwrap();
         let mut layers = vec![raw_layers[0].get().to_owned()];
-        layers.extend((1..6).map(|i| managed_layer_v1(i, false).to_string()));
+        for i in 1..6 {
+            let mut layer = managed_layer(i);
+            customize_layer(i, &mut layer);
+            layers.push(layer.to_string());
+        }
         let profile = format!(
             "{{\"id\":1,\"name\":\"{SIX_LAYER_PROFILE_NAME}\",\"layers\":[{}]}}",
             layers.join(",")
@@ -571,11 +589,21 @@ mod unit_tests {
     }
 
     #[test]
-    fn v2_managed_layers_encode_hybrid_vendor_slots_and_lights_off() {
+    fn managed_layers_encode_hybrid_vendor_slots_and_lights_off() {
+        assert_eq!(recognize_six_layer_profile(SOURCE, None).unwrap(), None);
+        assert_eq!(
+            verify_active_six_layer_profile(SOURCE, None, 1).unwrap_err(),
+            "六层专用方案缺失"
+        );
         let compiled = compile_six_layer_profile(SOURCE, None).unwrap();
         assert_eq!(
-            recognize_six_layer_profile_revision(&compiled.keymap, None).unwrap(),
-            Some((1, SixLayerKeymapRevision::V2HybridVendorSlots))
+            recognize_six_layer_profile(&compiled.keymap, None).unwrap(),
+            Some(1)
+        );
+        verify_active_six_layer_profile(&compiled.keymap, None, 1).unwrap();
+        assert_eq!(
+            verify_active_six_layer_profile(&compiled.keymap, None, 0).unwrap_err(),
+            "六层活动方案索引不符"
         );
         let parsed: Value = serde_json::from_slice(&compiled.keymap).unwrap();
         let layers = parsed["profiles"][1]["layers"].as_array().unwrap();
@@ -604,56 +632,117 @@ mod unit_tests {
     }
 
     #[test]
-    fn v1_standard_keys_upgrades_in_place_to_v2_preserving_codex_layer_zero_bytes() {
-        let v1 = build_v1_keymap(SOURCE);
+    fn outdated_managed_layers_destructively_upgrade_in_place_preserving_codex_layer_zero_bytes() {
+        let outdated = build_outdated_keymap(SOURCE, |index, layer| {
+            layer.as_object_mut().unwrap().remove("lights");
+            if index == 1 {
+                layer["layout"]["keymap"][0] = json!(["KC_F13", "KC_F14"]);
+            } else if index == 4 {
+                layer["name"] = json!("Old Slot 5");
+                layer["layout"]["keymap"][0] = json!(["KC_A", "KC_B"]);
+            }
+        });
+        assert!(recognize_six_layer_profile(&outdated, None).is_err());
+        assert!(verify_active_six_layer_profile(&outdated, None, 1).is_err());
         assert_eq!(
-            recognize_six_layer_profile_revision(&v1, None).unwrap(),
-            Some((1, SixLayerKeymapRevision::V1StandardKeys))
-        );
-        assert!(recognize_six_layer_profile(&v1, None).is_err());
-        assert_eq!(
-            recognize_six_layer_recovery_revision(&v1, None).unwrap(),
-            Some((1, SixLayerKeymapRevision::V1StandardKeys))
+            recognize_six_layer_recovery_candidate(&outdated, None).unwrap(),
+            Some(1)
         );
 
-        let upgraded = compile_six_layer_profile(&v1, None).unwrap();
+        let upgraded = compile_six_layer_profile(&outdated, None).unwrap();
         assert_eq!(upgraded.profile_index, 1);
         let parsed: Value = serde_json::from_slice(&upgraded.keymap).unwrap();
         assert_eq!(parsed["profiles"].as_array().unwrap().len(), 2);
         assert_eq!(parsed["activeProfileId"], 1);
         assert_eq!(
-            recognize_six_layer_profile_revision(&upgraded.keymap, None).unwrap(),
-            Some((1, SixLayerKeymapRevision::V2HybridVendorSlots))
+            recognize_six_layer_profile(&upgraded.keymap, None).unwrap(),
+            Some(1)
         );
+        verify_active_six_layer_profile(&upgraded.keymap, None, 1).unwrap();
 
-        let v1_root: &RawValue = serde_json::from_slice(&v1).unwrap();
-        let v1_profiles = array(field(&object(v1_root).unwrap(), "profiles").unwrap()).unwrap();
-        let v1_l0 = array(field(&object(v1_profiles[1]).unwrap(), "layers").unwrap()).unwrap()[0];
+        let old_root: &RawValue = serde_json::from_slice(&outdated).unwrap();
+        let old_profiles = array(field(&object(old_root).unwrap(), "profiles").unwrap()).unwrap();
+        let old_l0 = array(field(&object(old_profiles[1]).unwrap(), "layers").unwrap()).unwrap()[0];
 
-        let v2_root: &RawValue = serde_json::from_slice(&upgraded.keymap).unwrap();
-        let v2_profiles = array(field(&object(v2_root).unwrap(), "profiles").unwrap()).unwrap();
-        let v2_l0 = array(field(&object(v2_profiles[1]).unwrap(), "layers").unwrap()).unwrap()[0];
+        let new_root: &RawValue = serde_json::from_slice(&upgraded.keymap).unwrap();
+        let new_profiles = array(field(&object(new_root).unwrap(), "profiles").unwrap()).unwrap();
+        let new_l0 = array(field(&object(new_profiles[1]).unwrap(), "layers").unwrap()).unwrap()[0];
 
-        assert_eq!(v2_l0.get(), v1_l0.get());
-        assert!(v2_l0.get().contains("\"unknownNativeField\": 1.00"));
+        assert_eq!(new_l0.get(), old_l0.get());
+        assert!(new_l0.get().contains("\"unknownNativeField\": 1.00"));
     }
 
     #[test]
-    fn retired_cindy_is_recognized_for_recovery_only_and_rejected_by_compiler() {
-        let v1 = build_v1_keymap(SOURCE);
-        let mut cindy_val: Value = serde_json::from_slice(&v1).unwrap();
-        cindy_val["profiles"][1]["layers"][3] = managed_layer_v1(3, true);
-        let cindy_bytes = serde_json::to_vec(&cindy_val).unwrap();
-
-        assert!(recognize_six_layer_profile_revision(&cindy_bytes, None).is_err());
+    fn retired_cindy_and_conflicting_native_tokens_are_recoverable_but_rejected_by_compiler() {
+        let cindy_bytes = build_outdated_keymap(SOURCE, |index, layer| {
+            if index == 3 {
+                layer["name"] = json!("Cindy");
+            }
+        });
         assert!(recognize_six_layer_profile(&cindy_bytes, None).is_err());
         assert!(compile_six_layer_profile(&cindy_bytes, None).is_err());
         assert_eq!(
-            recognize_six_layer_recovery_revision(&cindy_bytes, None).unwrap(),
-            Some((1, SixLayerKeymapRevision::RetiredCindy))
-        );
-        assert_eq!(
             recognize_six_layer_recovery_candidate(&cindy_bytes, None).unwrap(),
+            Some(1)
+        );
+
+        let act_conflict = build_outdated_keymap(SOURCE, |index, layer| {
+            if index == 2 {
+                layer["layout"]["keymap"][2][0] = json!("KV_OAI_ACT06");
+            }
+        });
+        assert!(recognize_six_layer_profile(&act_conflict, None).is_err());
+        assert!(compile_six_layer_profile(&act_conflict, None).is_err());
+        assert_eq!(
+            recognize_six_layer_recovery_candidate(&act_conflict, None).unwrap(),
+            Some(1)
+        );
+
+        let ag00_conflict = build_outdated_keymap(SOURCE, |index, layer| {
+            if index == 2 {
+                layer["layout"]["keymap"][0][0] = json!("KV_OAI_AG00");
+            }
+        });
+        assert!(recognize_six_layer_profile(&ag00_conflict, None).is_err());
+        assert!(compile_six_layer_profile(&ag00_conflict, None).is_err());
+        assert_eq!(
+            recognize_six_layer_recovery_candidate(&ag00_conflict, None).unwrap(),
+            Some(1)
+        );
+
+        let vendor_joystick_conflict = build_outdated_keymap(SOURCE, |index, layer| {
+            if index == 2 {
+                layer["layout"]["joystick"]["type"] = json!("VENDOR");
+            }
+        });
+        assert!(recognize_six_layer_profile(&vendor_joystick_conflict, None).is_err());
+        assert!(compile_six_layer_profile(&vendor_joystick_conflict, None).is_err());
+        assert_eq!(
+            recognize_six_layer_recovery_candidate(&vendor_joystick_conflict, None).unwrap(),
+            Some(1)
+        );
+
+        let mut dup_id_doc: Value =
+            serde_json::from_slice(&compile_six_layer_profile(SOURCE, None).unwrap().keymap)
+                .unwrap();
+        dup_id_doc["profiles"][0]["id"] = json!(1);
+        let dup_id_bytes = serde_json::to_vec(&dup_id_doc).unwrap();
+        assert!(recognize_six_layer_recovery_candidate(&dup_id_bytes, None).is_err());
+        assert!(recognize_six_layer_profile(&dup_id_bytes, None).is_err());
+        assert!(compile_six_layer_profile(&dup_id_bytes, None).is_err());
+
+        let benign_name = build_outdated_keymap(SOURCE, |index, layer| {
+            if index == 2 {
+                layer["name"] = json!("My KV_OAI_ACT Layer");
+            }
+        });
+        assert_eq!(
+            recognize_six_layer_recovery_candidate(&benign_name, None).unwrap(),
+            Some(1)
+        );
+        let upgraded_benign = compile_six_layer_profile(&benign_name, None).unwrap();
+        assert_eq!(
+            recognize_six_layer_profile(&upgraded_benign.keymap, None).unwrap(),
             Some(1)
         );
     }

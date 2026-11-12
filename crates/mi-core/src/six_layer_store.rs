@@ -322,7 +322,6 @@ impl WorkbenchStore {
             }
             match result {
                 Ok(Some(mut running)) => {
-                    let revision = running.keymap_revision;
                     self.six_layer_auto_resume_attempts = 0;
                     self.six_layer_next_auto_resume_at = None;
                     self.device_session = None;
@@ -337,18 +336,10 @@ impl WorkbenchStore {
                     running.navigation = Some(self.session_navigation.dispatch.clone());
                     running.start_executor(Arc::clone(&self.live_executor));
                     running.start_monitor();
-                    if running.supports_per_key_led() {
-                        running.start_vendor_bridge(&self.tokio_runtime);
-                    }
+                    running.start_vendor_bridge(&self.tokio_runtime);
                     self.six_layer_running = Some(running);
                     self.sync_six_layer_routing_context();
-                    self.status_message = if revision
-                        == mi_model::apply::SixLayerKeymapRevision::V1StandardKeys
-                    {
-                        "六层旧版布局已连接；点击「应用到键盘」升级后即可启用逐键会话状态灯".into()
-                    } else {
-                        "六层配置已读回，等待首次实体输入验证".into()
-                    };
+                    self.status_message = "六层配置已读回，等待首次实体输入验证".into();
                     self.lighting_arbiter.invalidate_hardware_cache();
                     self.refresh_four_app_lighting();
                     self.start_mac_usb_discovery_watcher();
@@ -365,18 +356,13 @@ impl WorkbenchStore {
             self.try_auto_resume_six_layer(self.update_now);
             return;
         }
-        let mut lighting_changed = false;
-        let need_lighting_resync = {
+        let (mut lighting_changed, need_lighting_resync) = {
             let running = self.six_layer_running.as_ref().unwrap();
-            if running.supports_per_key_led() {
-                let confirmed = running.confirmed_lighting_digest();
-                lighting_changed = self
-                    .lighting_arbiter
-                    .reconcile_six_layer_confirmed(confirmed.as_deref());
-                running.vendor_bridge_needs_lighting_sync()
-            } else {
-                false
-            }
+            let confirmed = running.confirmed_lighting_digest();
+            let changed = self
+                .lighting_arbiter
+                .reconcile_six_layer_confirmed(confirmed.as_deref());
+            (changed, running.vendor_bridge_needs_lighting_sync())
         };
         if need_lighting_resync {
             let prev_synced = self.lighting_arbiter.hardware_synced;
@@ -1000,14 +986,14 @@ mod tests {
     }
 
     #[test]
-    fn six_layer_v1_and_disconnected_report_truthful_unsynced_lighting_and_sync_on_v2_attach() {
+    fn six_layer_disconnected_and_faulty_bridge_report_truthful_unsynced_lighting_until_confirmed()
+    {
         let directory = tempfile::tempdir().unwrap();
         let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
-        let v1_session = mock_session(&store.tokio_runtime);
-        store.tokio_runtime.block_on(v1_session.shutdown());
+        let closed_session = mock_session(&store.tokio_runtime);
+        store.tokio_runtime.block_on(closed_session.shutdown());
         let mut running =
-            six_layer_runtime::RunningSixLayer::isolated(v1_session, directory.path());
-        running.keymap_revision = mi_model::apply::SixLayerKeymapRevision::V1StandardKeys;
+            six_layer_runtime::RunningSixLayer::isolated(closed_session, directory.path());
         running.readiness.configuration_observed = true;
         running.readiness.keyboard_grabbed = true;
         store.connected_candidate = Some(running.candidate.clone());
@@ -1026,26 +1012,19 @@ mod tests {
             updated_at_ms: 5_000,
         }]);
         assert!(!store.lighting_arbiter.hardware_synced);
-        assert!(store
-            .projection
-            .sidebar
-            .board_layers
-            .observed_status
-            .contains("旧版按键布局（点击「应用到键盘」升级后启用逐键状态灯）"));
-
-        store.six_layer_running.as_mut().unwrap().keymap_revision =
-            mi_model::apply::SixLayerKeymapRevision::V2HybridVendorSlots;
-        store.refresh_four_app_lighting();
-        assert!(!store.lighting_arbiter.hardware_synced);
+        assert_eq!(
+            store.projection.sidebar.board_layers.observed_status,
+            "六层配置已核验 · 最近确认第 1 层 · 等待首次实体输入"
+        );
 
         let fail_first = Arc::new(AtomicBool::new(true));
-        let (_link, v2_session, rpc_rx) =
+        let (_link, vendor_session, rpc_rx) =
             spawn_thstatus_mock_session_with_fault(&store.tokio_runtime, Arc::clone(&fail_first));
         store
             .six_layer_running
             .as_mut()
             .unwrap()
-            .attach_test_vendor_session(&store.tokio_runtime, v2_session.clone());
+            .attach_test_vendor_session(&store.tokio_runtime, vendor_session.clone());
         let failed_rpc = rpc_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(failed_rpc["method"], "v.oai.thstatus");
         assert!(!store.lighting_arbiter.hardware_synced);
@@ -1063,17 +1042,18 @@ mod tests {
         assert_eq!(synced_rpc["params"][0]["c"], 0x00FF66);
         assert_eq!(synced_rpc["params"][6]["c"], 0x00FF66);
 
-        store.tokio_runtime.block_on(v2_session.shutdown());
+        store.tokio_runtime.block_on(vendor_session.shutdown());
         wait_lighting_synced(&mut store, false);
         store
             .dispatch_session_strip_action(SessionStripAction::SetLightingEnabled(false))
             .unwrap();
-        let (_link2, v2_reconnected, rpc_rx2) = spawn_thstatus_mock_session(&store.tokio_runtime);
+        let (_link2, vendor_reconnected, rpc_rx2) =
+            spawn_thstatus_mock_session(&store.tokio_runtime);
         store
             .six_layer_running
             .as_mut()
             .unwrap()
-            .attach_test_vendor_session(&store.tokio_runtime, v2_reconnected);
+            .attach_test_vendor_session(&store.tokio_runtime, vendor_reconnected);
         let reconnect_rpc = rpc_rx2.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(reconnect_rpc["method"], "v.oai.thstatus");
         assert!(reconnect_rpc["params"]
@@ -1180,63 +1160,10 @@ mod tests {
             .unwrap();
     }
 
-    fn test_b64_encode(bytes: &[u8]) -> String {
-        const TABLE: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-        for chunk in bytes.chunks(3) {
-            let b0 = chunk[0];
-            let b1 = *chunk.get(1).unwrap_or(&0);
-            let b2 = *chunk.get(2).unwrap_or(&0);
-            out.push(TABLE[(b0 >> 2) as usize] as char);
-            out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-            out.push(if chunk.len() > 1 {
-                TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
-            } else {
-                '='
-            });
-            out.push(if chunk.len() > 2 {
-                TABLE[(b2 & 0x3f) as usize] as char
-            } else {
-                '='
-            });
-        }
-        out
-    }
-
-    fn test_b64_decode(raw: &str) -> Vec<u8> {
-        let val = |c: u8| -> Option<u8> {
-            match c {
-                b'A'..=b'Z' => Some(c - b'A'),
-                b'a'..=b'z' => Some(c - b'a' + 26),
-                b'0'..=b'9' => Some(c - b'0' + 52),
-                b'+' => Some(62),
-                b'/' => Some(63),
-                _ => None,
-            }
-        };
-        let clean: Vec<u8> = raw.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-        let mut out = Vec::new();
-        for chunk in clean.chunks(4) {
-            let a = val(chunk[0]).unwrap();
-            let b = val(chunk[1]).unwrap();
-            out.push((a << 2) | (b >> 4));
-            if chunk.get(2).copied() != Some(b'=') {
-                if let Some(c) = chunk.get(2).copied().and_then(val) {
-                    out.push((b << 4) | (c >> 2));
-                    if chunk.get(3).copied() != Some(b'=') {
-                        if let Some(d) = chunk.get(3).copied().and_then(val) {
-                            out.push((c << 6) | d);
-                        }
-                    }
-                }
-            }
-        }
-        out
-    }
+    use crate::six_layer_runtime::{test_b64_decode, test_b64_encode};
 
     #[test]
-    fn six_layer_v1_to_v2_reapply_preserves_original_backup_chain_for_exact_restore() {
+    fn six_layer_breaking_upgrade_preserves_original_backup_chain_for_exact_restore() {
         const SIX_SOURCE: &[u8] =
             include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
         const SMART: &[u8] =

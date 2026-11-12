@@ -8,7 +8,6 @@ pub(super) struct SixLayerView {
     pub first_event_verified: bool,
     pub armed: bool,
     pub observed_layer: u8,
-    pub keymap_revision: mi_model::apply::SixLayerKeymapRevision,
     pub failure: Option<String>,
     pub effective_profile_id: Option<String>,
     pub foreground_priority_adapter: Option<String>,
@@ -1774,7 +1773,7 @@ impl ProjectionInputs<'_> {
                     .as_ref()
                     .map(|adapter| format!(" · 前台优先 {adapter}"))
                     .unwrap_or_default();
-                let mut status = format!(
+                format!(
                     "六层配置已核验 · 最近确认第 {} 层{} · {}",
                     running.observed_layer,
                     priority,
@@ -1783,13 +1782,7 @@ impl ProjectionInputs<'_> {
                     } else {
                         "等待首次实体输入"
                     }
-                );
-                if running.keymap_revision
-                    == mi_model::apply::SixLayerKeymapRevision::V1StandardKeys
-                {
-                    status.push_str(" · 旧版按键布局（点击「应用到键盘」升级后启用逐键状态灯）");
-                }
-                status
+                )
             });
         } else if let Some(installation) = &self.six_layer_state.installation {
             result.observed_layer = None;

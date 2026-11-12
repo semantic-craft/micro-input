@@ -107,19 +107,32 @@ fn six_layer_compiler_preserves_original_bytes_and_covers_every_control() {
 }
 
 #[test]
-fn ambiguous_or_modified_native_and_dedicated_profiles_are_rejected() {
+fn ambiguous_or_conflicting_profiles_are_rejected_while_outdated_managed_layers_upgrade_in_place() {
     let mut value: Value = serde_json::from_slice(ORIGINAL).unwrap();
     let mut duplicate = value["profiles"][0].clone();
     duplicate["id"] = json!(1);
     value["profiles"].as_array_mut().unwrap().push(duplicate);
     assert!(compile_six_layer_profile(&serde_json::to_vec(&value).unwrap(), None).is_err());
+
     let mut value: Value = serde_json::from_slice(ORIGINAL).unwrap();
     value["profiles"][0]["layers"][0]["layout"]["keymap"][0][0] = json!("KV_OAI_ACT00");
     assert!(compile_six_layer_profile(&serde_json::to_vec(&value).unwrap(), None).is_err());
-    let mut value: Value =
-        serde_json::from_slice(&compile_six_layer_profile(ORIGINAL, None).unwrap().keymap).unwrap();
-    value["profiles"][1]["layers"][3]["layout"]["encoders"][0][0] = json!("KV_OAI_ENC_CC");
-    assert!(compile_six_layer_profile(&serde_json::to_vec(&value).unwrap(), None).is_err());
+
+    let canonical = compile_six_layer_profile(ORIGINAL, None).unwrap().keymap;
+    let mut enc_conflict: Value = serde_json::from_slice(&canonical).unwrap();
+    enc_conflict["profiles"][1]["layers"][3]["layout"]["encoders"][0][0] = json!("KV_OAI_ENC_CC");
+    assert!(compile_six_layer_profile(&serde_json::to_vec(&enc_conflict).unwrap(), None).is_err());
+
+    let mut outdated: Value = serde_json::from_slice(&canonical).unwrap();
+    outdated["profiles"][1]["layers"][1]["layout"]["keymap"][0][0] = json!("KC_F13");
+    let outdated_bytes = serde_json::to_vec(&outdated).unwrap();
+    assert!(recognize_six_layer_profile(&outdated_bytes, None).is_err());
+    let upgraded = compile_six_layer_profile(&outdated_bytes, None).unwrap();
+    assert_eq!(upgraded.profile_index, 1);
+    assert_eq!(
+        recognize_six_layer_profile(&upgraded.keymap, None).unwrap(),
+        Some(1)
+    );
 }
 
 #[test]
