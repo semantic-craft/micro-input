@@ -21,6 +21,7 @@ pub struct CheatSheetKeyCellProjection {
     pub binding_id: String,
     pub control_name: String,
     pub label: String,
+    pub short_label: String,
     pub available: bool,
 }
 

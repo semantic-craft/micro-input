@@ -32,7 +32,7 @@ pub use inspector::{
     KeycapDescriptor, KeycapRole, MacroLibraryRowProjection, ShortcutModifier,
     ShortcutRecorderState, INSPECTOR_WIDTH,
 };
-pub use mi_model::host_router::BottomRowLayout;
+pub use mi_model::host_router::{BottomRowLayout, PopoverPreviewMode};
 pub use overlay::{
     ActiveHudContent, CheatSheetKeyCellProjection, CheatSheetProjection, HostOverlayAction,
     HostOverlayProjection, HudVisibilityState, OverlayController, TargetAgentStatusCardProjection,
@@ -64,6 +64,7 @@ pub use status_menu::{
     PresetExportScope, StatusMenuAction, StatusMenuProjection, FAVORITE_SLOT_COUNT,
 };
 pub use store::{
-    DeviceWorkflowAction, HardwareAutoAcceptanceReceipt, HardwareLoopEvent, WorkbenchCommand,
-    WorkbenchError, WorkbenchProjection, WorkbenchStore, WorkbenchStoreConfig,
+    format_popover_cheat_label, DeviceWorkflowAction, HardwareAutoAcceptanceReceipt,
+    HardwareLoopEvent, WorkbenchCommand, WorkbenchError, WorkbenchProjection, WorkbenchStore,
+    WorkbenchStoreConfig,
 };

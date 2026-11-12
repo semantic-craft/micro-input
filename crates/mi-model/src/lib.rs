@@ -539,6 +539,7 @@ pub use apply::SixLayerKeymapRevision;
 pub mod host_router;
 pub use host_router::{
     resolve_host_action_with_layout, verified_physical_mapping_for_layout, BottomRowLayout,
+    PopoverPreviewMode,
 };
 
 pub mod lighting;

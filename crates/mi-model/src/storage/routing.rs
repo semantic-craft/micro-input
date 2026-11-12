@@ -39,6 +39,9 @@ pub enum RoutingOperation {
     BottomRowLayout {
         layout: crate::host_router::BottomRowLayout,
     },
+    PopoverPreviewMode {
+        mode: crate::host_router::PopoverPreviewMode,
+    },
 }
 impl DocumentStore {
     pub fn host_revision(&self) -> u64 {
@@ -194,6 +197,7 @@ impl DocumentStore {
             "command_execution_enabled":p.command_execution_enabled,
             "auto_follow_enabled":p.auto_follow_enabled,"manual_override":p.manual_override,
             "bottom_row_layout":layout,
+            "popover_preview_mode":p.popover_preview_mode,
             "app_profile_links":p.app_profile_links,"keys":keys})
     }
     pub fn update_routing(&mut self, request: RoutingRequest) -> Result<(), String> {
@@ -249,6 +253,9 @@ impl DocumentStore {
             }
             RoutingOperation::BottomRowLayout { layout } => {
                 next.bottom_row_layout = layout;
+            }
+            RoutingOperation::PopoverPreviewMode { mode } => {
+                next.popover_preview_mode = mode;
             }
         }
         if next != self.preferences.value {
@@ -469,5 +476,117 @@ mod tests {
         assert_eq!(label_of("AG17"), "前进到下一个打开目标");
         assert_eq!(label_of("AG12"), "停止听写并提交");
         assert_eq!(label_of("AG09"), "粘贴文本");
+    }
+
+    #[test]
+    fn popover_preview_mode_backcompat_migration_and_atomic_persistence() {
+        use crate::host_router::PopoverPreviewMode;
+        let dir = std::env::temp_dir().join(format!("mi-popover-pref-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let v1_missing_path = dir.join("v1-missing.json");
+        std::fs::write(
+            v1_missing_path.with_extension("preferences.json"),
+            r#"{"schema_version":1,"favorites":[],"host_execution_enabled":false}"#,
+        )
+        .unwrap();
+        let mut store_v1_missing = DocumentStore::default();
+        store_v1_missing.open(v1_missing_path).unwrap();
+        assert!(store_v1_missing.favorite_actions().is_ok());
+        assert_eq!(
+            store_v1_missing.popover_preview_mode(),
+            PopoverPreviewMode::SessionPreview
+        );
+        assert_eq!(
+            store_v1_missing.routing_state()["popover_preview_mode"],
+            "session_preview"
+        );
+
+        let v2_missing_path = dir.join("v2-missing.json");
+        std::fs::write(
+            v2_missing_path.with_extension("preferences.json"),
+            r#"{"schema_version":2,"favorites":[],"usb_startup_profile_id":null,"board_layer_plan":null,"preview_selection":"UsbStartup","legacy_three_bindings":null}"#,
+        )
+        .unwrap();
+        let mut store_v2_missing = DocumentStore::default();
+        store_v2_missing.open(v2_missing_path.clone()).unwrap();
+        assert!(store_v2_missing.favorite_actions().is_ok());
+        assert_eq!(
+            store_v2_missing.popover_preview_mode(),
+            PopoverPreviewMode::SessionPreview
+        );
+
+        let v1_cheat_path = dir.join("v1-cheat.json");
+        std::fs::write(
+            v1_cheat_path.with_extension("preferences.json"),
+            r#"{"schema_version":1,"favorites":[],"popover_preview_mode":"cheat_sheet"}"#,
+        )
+        .unwrap();
+        let mut store_v1_cheat = DocumentStore::default();
+        store_v1_cheat.open(v1_cheat_path.clone()).unwrap();
+        assert_eq!(
+            store_v1_cheat.popover_preview_mode(),
+            PopoverPreviewMode::CheatSheet
+        );
+        store_v1_cheat
+            .save_board_configuration(Default::default(), Default::default(), None)
+            .unwrap();
+        let mut reopened_migrated = DocumentStore::default();
+        reopened_migrated.open(v1_cheat_path).unwrap();
+        assert_eq!(
+            reopened_migrated.popover_preview_mode(),
+            PopoverPreviewMode::CheatSheet
+        );
+
+        let prefs_path = v2_missing_path.with_extension("preferences.json");
+        let lock_path = prefs_path.with_extension("lock");
+        let pending_path = prefs_path.with_extension("pending");
+
+        std::fs::write(&pending_path, b"stale").unwrap();
+        let blocked_req = request(
+            &store_v2_missing,
+            json!({"kind":"popover_preview_mode","mode":"cheat_sheet"}),
+        );
+        assert!(store_v2_missing.update_routing(blocked_req).is_err());
+        assert_eq!(
+            store_v2_missing.popover_preview_mode(),
+            PopoverPreviewMode::SessionPreview
+        );
+        std::fs::remove_file(&pending_path).unwrap();
+
+        std::fs::write(&lock_path, b"locked").unwrap();
+        let locked_req = request(
+            &store_v2_missing,
+            json!({"kind":"popover_preview_mode","mode":"cheat_sheet"}),
+        );
+        assert!(store_v2_missing.update_routing(locked_req).is_err());
+        std::fs::remove_file(&lock_path).unwrap();
+
+        let rev_before = store_v2_missing.host_revision();
+        let ok_req = request(
+            &store_v2_missing,
+            json!({"kind":"popover_preview_mode","mode":"cheat_sheet"}),
+        );
+        store_v2_missing.update_routing(ok_req).unwrap();
+        assert_eq!(store_v2_missing.host_revision(), rev_before + 1);
+        assert_eq!(
+            store_v2_missing.popover_preview_mode(),
+            PopoverPreviewMode::CheatSheet
+        );
+        assert_eq!(
+            store_v2_missing.routing_state()["popover_preview_mode"],
+            "cheat_sheet"
+        );
+        assert!(!lock_path.exists());
+        assert!(!pending_path.exists());
+
+        let mut reopened = DocumentStore::default();
+        reopened.open(v2_missing_path).unwrap();
+        assert_eq!(
+            reopened.popover_preview_mode(),
+            PopoverPreviewMode::CheatSheet
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
