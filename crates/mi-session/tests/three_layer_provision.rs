@@ -462,7 +462,8 @@ async fn six_layer_roundtrip(retired: bool) {
 }
 
 #[tokio::test]
-async fn six_layer_v1_upgrades_in_place_to_v2_at_same_profile_index_preserving_layer_zero_bytes() {
+async fn six_layer_outdated_layout_upgrades_in_place_at_same_profile_index_preserving_layer_zero_bytes(
+) {
     const SIX_SOURCE: &[u8] =
         include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
     let v2_template = mi_model::apply::compile_six_layer_profile(SIX_SOURCE, Some(SMART)).unwrap();
@@ -519,9 +520,10 @@ async fn six_layer_v1_upgrades_in_place_to_v2_at_same_profile_index_preserving_l
         )
         .into_bytes();
 
+    assert!(mi_model::apply::recognize_six_layer_profile(&v1_bytes, Some(SMART)).is_err());
     assert_eq!(
-        mi_model::apply::recognize_six_layer_profile_revision(&v1_bytes, Some(SMART)).unwrap(),
-        Some((1, mi_model::apply::SixLayerKeymapRevision::V1StandardKeys))
+        mi_model::apply::recognize_six_layer_recovery_candidate(&v1_bytes, Some(SMART)).unwrap(),
+        Some(1)
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -591,10 +593,24 @@ async fn six_layer_v1_upgrades_in_place_to_v2_at_same_profile_index_preserving_l
 
     assert_eq!(
         session
-            .verify_six_layer_files_revision(&v1_bytes, Some(SMART), 1)
+            .matches_six_layer_snapshot(&v1_bytes, Some(SMART), 1)
             .await
             .unwrap(),
-        (2, mi_model::apply::SixLayerKeymapRevision::V1StandardKeys)
+        mi_session::SixLayerSnapshotCheck::Matched
+    );
+    assert_eq!(
+        session
+            .matches_six_layer_snapshot(&v1_bytes, Some(SMART), 0)
+            .await
+            .unwrap(),
+        mi_session::SixLayerSnapshotCheck::StatusNotReady
+    );
+    assert_eq!(
+        session
+            .matches_six_layer_snapshot(SIX_SOURCE, Some(SMART), 1)
+            .await
+            .unwrap(),
+        mi_session::SixLayerSnapshotCheck::FilesDiverged
     );
     assert!(session
         .verify_six_layer_files(&v1_bytes, Some(SMART), 1)
@@ -633,7 +649,7 @@ async fn six_layer_v1_upgrades_in_place_to_v2_at_same_profile_index_preserving_l
 }
 
 #[tokio::test]
-async fn six_layer_v1_to_v2_mid_write_failure_recovers_original_via_previous_planned_keymap() {
+async fn six_layer_upgrade_mid_write_failure_recovers_original_via_previous_planned_keymap() {
     const SIX_SOURCE: &[u8] =
         include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
     let v2_template = mi_model::apply::compile_six_layer_profile(SIX_SOURCE, Some(SMART)).unwrap();

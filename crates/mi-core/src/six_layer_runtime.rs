@@ -2,7 +2,7 @@ use crate::karabiner::{self, ConfigPatch, Readiness, ReloadBaseline};
 use crate::store::session_navigation::{
     NavigationCommand, NavigationDispatch, PhysicalNavigationIntent,
 };
-use mi_model::apply::{AppliedSixLayerPlan, SixLayerKeymapRevision};
+use mi_model::apply::AppliedSixLayerPlan;
 use mi_model::{
     direct_controls::{CONTROL_BINDINGS, DIRECT_CONTROLS},
     host_router::ResolvedHostAction,
@@ -725,7 +725,6 @@ pub struct RunningSixLayer {
     pub readiness: Readiness,
     pub candidate: HidCandidate,
     pub installation: Installation,
-    pub keymap_revision: SixLayerKeymapRevision,
     pub observed_layer: Arc<AtomicU8>,
     pub first_event_verified: Arc<AtomicBool>,
     pub armed: bool,
@@ -1029,7 +1028,6 @@ impl RunningSixLayer {
                 },
             },
             1,
-            SixLayerKeymapRevision::V2HybridVendorSlots,
         )
     }
 
@@ -1046,10 +1044,6 @@ impl RunningSixLayer {
                 .is_none_or(|after| admission.received_at >= after)
     }
 
-    pub fn supports_per_key_led(&self) -> bool {
-        self.keymap_revision == SixLayerKeymapRevision::V2HybridVendorSlots
-    }
-
     pub fn vendor_bridge_connected(&self) -> bool {
         self.vendor_bridge.connected.load(Ordering::Acquire)
     }
@@ -1059,7 +1053,7 @@ impl RunningSixLayer {
     }
 
     pub fn vendor_bridge_needs_lighting_sync(&self) -> bool {
-        self.supports_per_key_led() && self.vendor_bridge.needs_lighting_sync()
+        self.vendor_bridge.needs_lighting_sync()
     }
 
     pub fn queue_session_lighting(
@@ -1067,9 +1061,6 @@ impl RunningSixLayer {
         digest: &str,
         entries: &[OaiKeyStatusEntry],
     ) -> Option<String> {
-        if !self.supports_per_key_led() {
-            return None;
-        }
         let connected = self.vendor_bridge.connected.load(Ordering::Acquire);
         let sync_state = self.vendor_bridge.sync_state.lock().unwrap().clone();
         let retry_ready = self.vendor_bridge.retry_ready();
@@ -1089,9 +1080,6 @@ impl RunningSixLayer {
     }
 
     pub fn start_vendor_bridge(&mut self, runtime: &tokio::runtime::Runtime) {
-        if !self.supports_per_key_led() {
-            return;
-        }
         let initial = self.vendor_bridge.active_session.lock().unwrap().take();
         self.vendor_bridge.spawn(
             runtime,
@@ -1108,7 +1096,6 @@ impl RunningSixLayer {
         runtime: &tokio::runtime::Runtime,
         session: Arc<DeviceSession>,
     ) {
-        self.keymap_revision = SixLayerKeymapRevision::V2HybridVendorSlots;
         self.vendor_bridge.spawn(
             runtime,
             Some(session),
@@ -1417,6 +1404,31 @@ fn connect(
     Ok((session, candidate))
 }
 
+fn prepare_apply_karabiner_patch(
+    saved: &SavedSixLayerState,
+    target: &TargetKeyboard,
+    receiver: &UserCommandReceiver,
+    layout: mi_model::host_router::BottomRowLayout,
+) -> Result<ConfigPatch, String> {
+    let rule = karabiner::rules(target, receiver, layout)?;
+    let path = match &saved.installation {
+        Some(prev) => prev.config.path.clone(),
+        None => karabiner::config_path()?,
+    };
+    let patch = karabiner::prepare_config(
+        path.clone(),
+        fs::read(&path).map_err(|e| e.to_string())?,
+        target,
+        rule,
+    )?;
+    if let Some(prev) = &saved.installation {
+        if patch.profile_name != prev.config.profile_name {
+            return Err("原 Karabiner 方案身份已变化；请先恢复原键盘配置后再应用".into());
+        }
+    }
+    Ok(patch)
+}
+
 pub async fn apply(
     document_dir: &Path,
     plan: AppliedSixLayerPlan,
@@ -1426,14 +1438,7 @@ pub async fn apply(
     plan.validate_current()?;
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
     let receiver = Arc::new(UserCommandReceiver::bind_default().map_err(|e| e.to_string())?);
-    let rule = karabiner::rules(&target, &receiver, plan.bottom_row_layout)?;
-    let path = karabiner::config_path()?;
-    let patch = karabiner::prepare_config(
-        path.clone(),
-        fs::read(&path).map_err(|e| e.to_string())?,
-        &target,
-        rule,
-    )?;
+    let patch = prepare_apply_karabiner_patch(&saved, &target, &receiver, plan.bottom_row_layout)?;
     let exclusive = MacTransport::exclusive_vendor();
     let (session, _) = connect(&exclusive, &target)?;
     with_verification_session(&session, async {
@@ -1530,9 +1535,6 @@ pub async fn apply(
                 ));
             }
         };
-        if let Some(prev) = &previous.installation {
-            merge_previous_original_into_backup(&prev.backup, &receipt.backup)?;
-        }
         installation.backup = receipt.backup.clone();
         installation.status = InstallationStatus::RecoveryRequired;
         saved.installation = Some(installation.clone());
@@ -1562,7 +1564,6 @@ pub async fn apply(
                 candidate,
                 installation,
                 layer as u8,
-                SixLayerKeymapRevision::V2HybridVendorSlots,
             ))
         }
         .await;
@@ -1585,8 +1586,19 @@ pub(crate) fn merge_previous_original_into_backup(
     if !prev_keymap.exists() {
         return Ok(());
     }
+    let pre_write_path = new_backup.join("pre-write-keymap.json");
+    let new_keymap_path = new_backup.join("keymap.json");
+    let pre_write_bytes = if pre_write_path.exists() {
+        Some(fs::read(&pre_write_path).map_err(|e| e.to_string())?)
+    } else if new_keymap_path.exists() {
+        let bytes = fs::read(&new_keymap_path).map_err(|e| e.to_string())?;
+        write_private_backup_file(&pre_write_path, &bytes)?;
+        Some(bytes)
+    } else {
+        None
+    };
     let original_keymap = fs::read(&prev_keymap).map_err(|e| e.to_string())?;
-    write_private_backup_file(&new_backup.join("keymap.json"), &original_keymap)?;
+    write_private_backup_file(&new_keymap_path, &original_keymap)?;
     let prev_planned_path = previous_backup.join("planned-keymap.json");
     let prev_planned = if prev_planned_path.exists() {
         let bytes = fs::read(&prev_planned_path).map_err(|e| e.to_string())?;
@@ -1605,6 +1617,10 @@ pub(crate) fn merge_previous_original_into_backup(
             serde_json::from_slice(&raw_manifest).map_err(|e| e.to_string())?;
         manifest["keymap_sha256"] =
             serde_json::Value::String(mi_bridge::lighting_arbiter::sha256_hex(&original_keymap));
+        if let Some(pre_write) = &pre_write_bytes {
+            manifest["pre_write_keymap_sha256"] =
+                serde_json::Value::String(mi_bridge::lighting_arbiter::sha256_hex(pre_write));
+        }
         if let Some(prev_manifest) = &prev_manifest {
             if let Some(prev_profile) = prev_manifest.get("previous_profile_index") {
                 manifest["previous_profile_index"] = prev_profile.clone();
@@ -1646,14 +1662,12 @@ fn new_running(
     candidate: HidCandidate,
     installation: Installation,
     layer: u8,
-    keymap_revision: SixLayerKeymapRevision,
 ) -> RunningSixLayer {
     RunningSixLayer {
         receiver,
         readiness,
         candidate,
         installation,
-        keymap_revision,
         observed_layer: Arc::new(AtomicU8::new(layer)),
         first_event_verified: Arc::new(AtomicBool::new(false)),
         armed: false,
@@ -1668,7 +1682,50 @@ fn new_running(
     }
 }
 
-/// Reconnection never selects a profile or writes device configuration.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ResumeSnapshotAction {
+    VerifyReady { layer: u8 },
+    UpgradeInPlace,
+}
+
+pub(crate) async fn inspect_resume_snapshot(
+    session: &DeviceSession,
+    expected: &[u8],
+    smart: Option<&[u8]>,
+    profile_index: u32,
+) -> Result<ResumeSnapshotAction, String> {
+    if mi_model::apply::recognize_six_layer_profile(expected, smart) == Ok(Some(profile_index)) {
+        let layer = session
+            .verify_six_layer_files(expected, smart, profile_index)
+            .await
+            .map_err(|e| format!("{e}；未写设备，请显式应用或恢复"))?;
+        Ok(ResumeSnapshotAction::VerifyReady { layer: layer as u8 })
+    } else {
+        let compiled = mi_model::apply::compile_six_layer_profile(expected, smart)
+            .map_err(|e| format!("{e}；未写设备，请显式应用或恢复"))?;
+        if compiled.profile_index != profile_index {
+            return Err("六层活动方案索引不符；未写设备，请显式应用或恢复".into());
+        }
+        match session
+            .matches_six_layer_snapshot(expected, smart, profile_index)
+            .await
+        {
+            Ok(mi_session::SixLayerSnapshotCheck::Matched) => {
+                Ok(ResumeSnapshotAction::UpgradeInPlace)
+            }
+            Ok(mi_session::SixLayerSnapshotCheck::FilesDiverged) => Err(
+                "旧版六层快照与当前设备不符，未自动覆盖；请显式点击「应用到键盘」或「恢复原键盘配置」"
+                    .into(),
+            ),
+            Ok(mi_session::SixLayerSnapshotCheck::StatusNotReady) => {
+                Err("六层固件、方案身份或层位未就绪；未写设备，请显式应用或恢复".into())
+            }
+            Err(e) => Err(format!("{e}；未写设备，请显式应用或恢复")),
+        }
+    }
+}
+
+/// Reconnection fast-paths on current snapshots and upgrades unmodified outdated six-layer layouts in place.
 pub async fn resume(
     document_dir: &Path,
     mut saved: SavedSixLayerState,
@@ -1679,24 +1736,35 @@ pub async fn resume(
         .filter(|installation| installation.status == InstallationStatus::Applied)
         .ok_or("六层记录未完成，需要恢复")?;
     installation.plan.validate_current()?;
+    let expected =
+        fs::read(installation.backup.join("planned-keymap.json")).map_err(|e| e.to_string())?;
+    let smart = match fs::read(installation.backup.join("smart_actions.json")) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
     let (session, candidate) = connect(&MacTransport::new(), &target)?;
+    let layer = match inspect_resume_snapshot(
+        &session,
+        &expected,
+        smart.as_deref(),
+        installation.profile_index,
+    )
+    .await
+    {
+        Ok(ResumeSnapshotAction::VerifyReady { layer }) => layer,
+        Ok(ResumeSnapshotAction::UpgradeInPlace) => {
+            session.shutdown().await;
+            drop(session);
+            return apply(document_dir, installation.plan.clone(), saved).await;
+        }
+        Err(error) => {
+            session.shutdown().await;
+            return Err(error);
+        }
+    };
     let outcome: Result<RunningSixLayer, String> = async {
-        let expected =
-            fs::read(installation.backup.join("planned-keymap.json")).map_err(|e| e.to_string())?;
-        let smart = match fs::read(installation.backup.join("smart_actions.json")) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.to_string()),
-        };
-        let (layer, revision) = session
-            .verify_six_layer_files_revision(
-                &expected,
-                smart.as_deref(),
-                installation.profile_index,
-            )
-            .await
-            .map_err(|e| format!("{e}；未写设备，请显式应用或恢复"))?;
         let receiver = Arc::new(UserCommandReceiver::bind_default().map_err(|e| e.to_string())?);
         let rule = karabiner::rules(&target, &receiver, installation.plan.bottom_row_layout)?;
         let path = installation.config.path.clone();
@@ -1716,20 +1784,13 @@ pub async fn resume(
         // The board is already direct-coded. A failed reload must leave swallowing
         // rules in place, including when the previous rule had been removed.
         let readiness = wait_ready(&baseline, &patch, &target)?;
-        let retained_session = if revision == SixLayerKeymapRevision::V1StandardKeys {
-            session.shutdown().await;
-            None
-        } else {
-            Some(session.clone())
-        };
         Ok(new_running(
             receiver,
             readiness,
-            retained_session,
+            Some(session.clone()),
             candidate,
             installation,
-            layer as u8,
-            revision,
+            layer,
         ))
     }
     .await;
@@ -2726,4 +2787,613 @@ mod tests {
         );
         assert_eq!(manual_dispatched, vec![(ag_id, "AG00".into())]);
     }
+
+    struct MockVendorLink {
+        inner: Arc<mi_transport::MockLink>,
+        exclusive: bool,
+    }
+
+    impl mi_transport::HidLink for MockVendorLink {
+        fn backend(&self) -> mi_transport::LinkBackend {
+            mi_transport::LinkBackend::MacHidapi267Numbered
+        }
+        fn is_exclusive_vendor(&self) -> bool {
+            self.exclusive
+        }
+        fn write<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            report: &'life1 [u8],
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), mi_transport::TransportError>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.write(report)
+        }
+        fn read<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Vec<u8>, mi_transport::TransportError>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.read()
+        }
+        fn close(&self) {
+            self.inner.close()
+        }
+    }
+
+    use super::{test_b64_decode as b64_decode, test_b64_encode as b64_encode};
+
+    #[test]
+    fn outdated_snapshot_auto_upgrades_when_device_matches_and_refuses_when_modified_externally() {
+        const SIX_SOURCE: &[u8] =
+            include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+        const SMART: &[u8] =
+            include_bytes!("../../mi-model/fixtures/device/synthetic-smart-actions-object.json");
+
+        let canonical_template =
+            mi_model::apply::compile_six_layer_profile(SIX_SOURCE, Some(SMART)).unwrap();
+        let mut outdated_val: serde_json::Value =
+            serde_json::from_slice(&canonical_template.keymap).unwrap();
+        for layer_idx in 1..6 {
+            let layer_obj = outdated_val["profiles"][1]["layers"][layer_idx]
+                .as_object_mut()
+                .unwrap();
+            layer_obj.remove("lights");
+            if layer_idx == 1 {
+                layer_obj["layout"]["keymap"][0] = serde_json::json!(["KC_F13", "KC_F14"]);
+            }
+        }
+        let raw_doc: std::collections::BTreeMap<&str, &serde_json::value::RawValue> =
+            serde_json::from_slice(SIX_SOURCE).unwrap();
+        let raw_profiles: Vec<std::collections::BTreeMap<&str, &serde_json::value::RawValue>> =
+            serde_json::from_str(raw_doc["profiles"].get()).unwrap();
+        let raw_layers: Vec<&serde_json::value::RawValue> =
+            serde_json::from_str(raw_profiles[0]["layers"].get()).unwrap();
+        let raw_layer0 = raw_layers[0].get();
+        let outdated_layers: Vec<String> = (1..6)
+            .map(|i| serde_json::to_string(&outdated_val["profiles"][1]["layers"][i]).unwrap())
+            .collect();
+        let outdated_profile = format!(
+            "{{\"id\":1,\"name\":\"{}\",\"layers\":[{},{}]}}",
+            mi_model::apply::SIX_LAYER_PROFILE_NAME,
+            raw_layer0,
+            outdated_layers.join(",")
+        );
+        let outdated_bytes = std::str::from_utf8(SIX_SOURCE)
+            .unwrap()
+            .replacen("\"activeProfileId\": 0", "\"activeProfileId\": 1", 1)
+            .replacen(
+                "  }] }],\n  \"macros\"",
+                &format!("  }}] }},{outdated_profile}],\n  \"macros\""),
+                1,
+            )
+            .into_bytes();
+        assert!(
+            mi_model::apply::recognize_six_layer_profile(&outdated_bytes, Some(SMART)).is_err()
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let old_backup = dir.path().join("six-layer-backup-old");
+        fs::create_dir_all(&old_backup).unwrap();
+        fs::write(old_backup.join("keymap.json"), SIX_SOURCE).unwrap();
+        fs::write(old_backup.join("planned-keymap.json"), &outdated_bytes).unwrap();
+        fs::write(old_backup.join("smart_actions.json"), SMART).unwrap();
+        fs::write(
+            old_backup.join("manifest.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "format": "micro-input-three-layer-recovery-v1",
+                "previous_profile_index": 0,
+                "previous_layer_index": 1,
+                "planned_profile_index": 1,
+                "keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(SIX_SOURCE),
+                "planned_keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(&outdated_bytes),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let device_state = Arc::new(Mutex::new((0u64, outdated_bytes.clone(), 0usize)));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let open_mock_session = |exclusive: bool| {
+            let state = Arc::clone(&device_state);
+            let (link, mut requests) = mi_transport::MockLink::new();
+            let inject = link.inject.clone();
+            let session = {
+                let _entered = runtime.enter();
+                DeviceSession::new(
+                    Arc::new(MockVendorLink {
+                        inner: link,
+                        exclusive,
+                    }),
+                    Box::new(mi_proto::NativeFramer::default()),
+                    Arc::new(mi_session::ReadOnlySchema),
+                    mi_session::SessionConfig {
+                        timeout: Duration::from_secs(2),
+                        interval: Duration::ZERO,
+                    },
+                )
+            };
+            runtime.spawn(async move {
+                use mi_proto::Framer;
+                let mut incoming = mi_proto::NativeFramer::default();
+                let outbound = mi_proto::NativeFramer::default();
+                let mut staged = Vec::new();
+                while let Some(frame) = requests.recv().await {
+                    let Ok(messages) = incoming.feed(&frame) else {
+                        break;
+                    };
+                    for bytes in messages {
+                        let req: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        let params = &req["params"];
+                        let meta = |name: &str, data: &[u8]| {
+                            let sha1 = mi_model::operation_record::file_value(data)["sha1"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned();
+                            serde_json::json!({"name": name, "size": data.len(), "checksum": sha1})
+                        };
+                        let result = match req["method"].as_str().unwrap() {
+                            "device.status" => {
+                                let guard = state.lock().unwrap();
+                                serde_json::json!({
+                                    "version": "0.6.3",
+                                    "profile_index": guard.0,
+                                    "layer_index": 2
+                                })
+                            }
+                            "fs.list" => {
+                                let guard = state.lock().unwrap();
+                                serde_json::json!([
+                                    meta("keymap.json", &guard.1),
+                                    meta("smart_actions.json", SMART)
+                                ])
+                            }
+                            "fs.readbin" => {
+                                let guard = state.lock().unwrap();
+                                let file_bytes = match params["file"].as_str().unwrap() {
+                                    "keymap.json" => guard.1.as_slice(),
+                                    "smart_actions.json" => SMART,
+                                    other => panic!("unexpected file {other}"),
+                                };
+                                let offset = params["offset"].as_u64().unwrap() as usize;
+                                let len = params["len"].as_u64().unwrap() as usize;
+                                let end = (offset + len).min(file_bytes.len());
+                                serde_json::json!({
+                                    "total_size": file_bytes.len(),
+                                    "data": b64_encode(&file_bytes[offset..end])
+                                })
+                            }
+                            "fs.txbegin" => serde_json::json!({"tx": 91}),
+                            "fs.writebin" => {
+                                staged.extend(b64_decode(params["data"].as_str().unwrap()));
+                                serde_json::Value::Null
+                            }
+                            "fs.txcommit" => {
+                                let next_keymap = std::mem::take(&mut staged);
+                                let parsed: serde_json::Value =
+                                    serde_json::from_slice(&next_keymap).unwrap();
+                                let mut guard = state.lock().unwrap();
+                                guard.0 = parsed["activeProfileId"].as_u64().unwrap();
+                                guard.1 = next_keymap;
+                                guard.2 += 1;
+                                serde_json::Value::Null
+                            }
+                            other => panic!("unexpected method {other}"),
+                        };
+                        let reply = serde_json::json!({"id": req["id"], "result": result});
+                        let mut wire = reply.to_string();
+                        wire.push('\n');
+                        for out in outbound.encode(wire.as_bytes()).unwrap() {
+                            let _ = inject.send(out);
+                        }
+                    }
+                }
+            });
+            session
+        };
+
+        runtime.block_on(async {
+            let mut cindy_val: serde_json::Value =
+                serde_json::from_slice(&canonical_template.keymap).unwrap();
+            cindy_val["profiles"][1]["layers"][3]["name"] = serde_json::json!("Cindy");
+            let cindy_bytes = serde_json::to_vec(&cindy_val).unwrap();
+            let cindy_session = open_mock_session(false);
+            let cindy_err = inspect_resume_snapshot(&cindy_session, &cindy_bytes, Some(SMART), 1)
+                .await
+                .unwrap_err();
+            assert_eq!(cindy_session.request_count(), 0);
+            cindy_session.shutdown().await;
+            assert!(
+                cindy_err.contains("未写设备，请显式应用或恢复"),
+                "{cindy_err}"
+            );
+
+            let mismatch_profile_session = open_mock_session(false);
+            let mismatch_err =
+                inspect_resume_snapshot(&mismatch_profile_session, &outdated_bytes, Some(SMART), 1)
+                    .await
+                    .unwrap_err();
+            mismatch_profile_session.shutdown().await;
+            assert!(
+                mismatch_err.contains("六层固件、方案身份或层位未就绪；未写设备，请显式应用或恢复"),
+                "{mismatch_err}"
+            );
+            assert_eq!(device_state.lock().unwrap().2, 0);
+
+            {
+                let mut guard = device_state.lock().unwrap();
+                guard.0 = 1;
+                guard.1 = SIX_SOURCE.to_vec();
+            }
+            let mismatch_bytes_session = open_mock_session(false);
+            let mismatch_bytes_err =
+                inspect_resume_snapshot(&mismatch_bytes_session, &outdated_bytes, Some(SMART), 1)
+                    .await
+                    .unwrap_err();
+            mismatch_bytes_session.shutdown().await;
+            assert!(mismatch_bytes_err.contains("旧版六层快照与当前设备不符，未自动覆盖"));
+            assert_eq!(device_state.lock().unwrap().2, 0);
+
+            {
+                let mut guard = device_state.lock().unwrap();
+                guard.0 = 1;
+                guard.1 = outdated_bytes.clone();
+            }
+            let probe_session = open_mock_session(false);
+            assert_eq!(
+                inspect_resume_snapshot(&probe_session, &outdated_bytes, Some(SMART), 1)
+                    .await
+                    .unwrap(),
+                ResumeSnapshotAction::UpgradeInPlace
+            );
+            probe_session.shutdown().await;
+            assert!(probe_session.is_disconnected());
+            assert_eq!(device_state.lock().unwrap().2, 0);
+
+            let exclusive_session = open_mock_session(true);
+            let prepared = exclusive_session
+                .prepare_six_layer_write(dir.path())
+                .await
+                .unwrap();
+            merge_previous_original_into_backup(&old_backup, &prepared.backup).unwrap();
+            let upgraded_candidate = prepared.candidate.clone();
+            let receipt = exclusive_session
+                .apply_six_layer_write(prepared)
+                .await
+                .unwrap();
+            exclusive_session.shutdown().await;
+            fs::remove_dir_all(&old_backup).unwrap();
+
+            assert_eq!(device_state.lock().unwrap().2, 1);
+            assert_eq!(
+                mi_model::apply::recognize_six_layer_profile(&upgraded_candidate, Some(SMART))
+                    .unwrap(),
+                Some(1)
+            );
+            assert_eq!(
+                fs::read(receipt.backup.join("keymap.json")).unwrap(),
+                SIX_SOURCE
+            );
+            assert_eq!(
+                fs::read(receipt.backup.join("planned-keymap.json")).unwrap(),
+                upgraded_candidate
+            );
+
+            let fast_resume_session = open_mock_session(false);
+            assert_eq!(
+                inspect_resume_snapshot(&fast_resume_session, &upgraded_candidate, Some(SMART), 1)
+                    .await
+                    .unwrap(),
+                ResumeSnapshotAction::VerifyReady { layer: 2 }
+            );
+            fast_resume_session.shutdown().await;
+            assert_eq!(device_state.lock().unwrap().2, 1);
+
+            let restore_session = open_mock_session(true);
+            restore_session
+                .restore_six_layer_backup(&receipt.backup)
+                .await
+                .unwrap();
+            restore_session.shutdown().await;
+            assert_eq!(device_state.lock().unwrap().2, 2);
+            assert_eq!(device_state.lock().unwrap().1, SIX_SOURCE);
+        });
+    }
+
+    #[test]
+    fn external_edit_mid_write_abort_recovers_factory_original_via_pre_write_backup() {
+        const SIX_SOURCE: &[u8] =
+            include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+        const SMART: &[u8] =
+            include_bytes!("../../mi-model/fixtures/device/synthetic-smart-actions-object.json");
+
+        let canonical =
+            mi_model::apply::compile_six_layer_profile(SIX_SOURCE, Some(SMART)).unwrap();
+        let mut external_edit_val: serde_json::Value =
+            serde_json::from_slice(&canonical.keymap).unwrap();
+        external_edit_val["profiles"][1]["layers"][1]["layout"]["keymap"][0][0] =
+            serde_json::json!("KC_F13");
+        let external_edit_bytes = serde_json::to_vec(&external_edit_val).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let prev_backup = dir.path().join("six-layer-backup-prev");
+        fs::create_dir_all(&prev_backup).unwrap();
+        fs::write(prev_backup.join("keymap.json"), SIX_SOURCE).unwrap();
+        fs::write(prev_backup.join("planned-keymap.json"), &canonical.keymap).unwrap();
+        fs::write(prev_backup.join("smart_actions.json"), SMART).unwrap();
+        fs::write(
+            prev_backup.join("manifest.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "format": "micro-input-three-layer-recovery-v1",
+                "previous_profile_index": 0,
+                "previous_layer_index": 1,
+                "planned_profile_index": 1,
+                "keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(SIX_SOURCE),
+                "planned_keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(&canonical.keymap),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let device_state = Arc::new(Mutex::new((1u64, external_edit_bytes.clone(), 0usize)));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let open_exclusive = || {
+            let state = Arc::clone(&device_state);
+            let (link, mut requests) = mi_transport::MockLink::new();
+            let inject = link.inject.clone();
+            let session = {
+                let _entered = runtime.enter();
+                DeviceSession::new(
+                    Arc::new(MockVendorLink {
+                        inner: link,
+                        exclusive: true,
+                    }),
+                    Box::new(mi_proto::NativeFramer::default()),
+                    Arc::new(mi_session::ReadOnlySchema),
+                    mi_session::SessionConfig {
+                        timeout: Duration::from_secs(2),
+                        interval: Duration::ZERO,
+                    },
+                )
+            };
+            runtime.spawn(async move {
+                use mi_proto::Framer;
+                let mut incoming = mi_proto::NativeFramer::default();
+                let outbound = mi_proto::NativeFramer::default();
+                let mut staged = Vec::new();
+                while let Some(frame) = requests.recv().await {
+                    let Ok(messages) = incoming.feed(&frame) else {
+                        break;
+                    };
+                    for bytes in messages {
+                        let req: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        let params = &req["params"];
+                        let meta = |name: &str, data: &[u8]| {
+                            let sha1 = mi_model::operation_record::file_value(data)["sha1"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned();
+                            serde_json::json!({"name": name, "size": data.len(), "checksum": sha1})
+                        };
+                        let result = match req["method"].as_str().unwrap() {
+                            "device.status" => {
+                                let guard = state.lock().unwrap();
+                                serde_json::json!({
+                                    "version": "0.6.3",
+                                    "profile_index": guard.0,
+                                    "layer_index": 2
+                                })
+                            }
+                            "fs.list" => {
+                                let guard = state.lock().unwrap();
+                                serde_json::json!([
+                                    meta("keymap.json", &guard.1),
+                                    meta("smart_actions.json", SMART)
+                                ])
+                            }
+                            "fs.readbin" => {
+                                let guard = state.lock().unwrap();
+                                let file_bytes = match params["file"].as_str().unwrap() {
+                                    "keymap.json" => guard.1.as_slice(),
+                                    "smart_actions.json" => SMART,
+                                    other => panic!("unexpected file {other}"),
+                                };
+                                let offset = params["offset"].as_u64().unwrap() as usize;
+                                let len = params["len"].as_u64().unwrap() as usize;
+                                let end = (offset + len).min(file_bytes.len());
+                                serde_json::json!({
+                                    "total_size": file_bytes.len(),
+                                    "data": b64_encode(&file_bytes[offset..end])
+                                })
+                            }
+                            "fs.txbegin" => serde_json::json!({"tx": 99}),
+                            "fs.writebin" => {
+                                staged.extend(b64_decode(params["data"].as_str().unwrap()));
+                                serde_json::Value::Null
+                            }
+                            "fs.txcommit" => {
+                                let next_keymap = std::mem::take(&mut staged);
+                                let parsed: serde_json::Value =
+                                    serde_json::from_slice(&next_keymap).unwrap();
+                                let mut guard = state.lock().unwrap();
+                                guard.0 = parsed["activeProfileId"].as_u64().unwrap();
+                                guard.1 = next_keymap;
+                                guard.2 += 1;
+                                serde_json::Value::Null
+                            }
+                            other => panic!("unexpected method {other}"),
+                        };
+                        let reply = serde_json::json!({"id": req["id"], "result": result});
+                        let mut wire = reply.to_string();
+                        wire.push('\n');
+                        for out in outbound.encode(wire.as_bytes()).unwrap() {
+                            let _ = inject.send(out);
+                        }
+                    }
+                }
+            });
+            session
+        };
+
+        runtime.block_on(async {
+            let prep_session = open_exclusive();
+            let prepared = prep_session
+                .prepare_six_layer_write(dir.path())
+                .await
+                .unwrap();
+            merge_previous_original_into_backup(&prev_backup, &prepared.backup).unwrap();
+            let aborted_backup = prepared.backup.clone();
+            prep_session.shutdown().await;
+            drop(prepared);
+
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(aborted_backup.join("manifest.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                manifest["pre_write_keymap_sha256"].as_str(),
+                Some(mi_bridge::lighting_arbiter::sha256_hex(&external_edit_bytes).as_str())
+            );
+            assert_eq!(device_state.lock().unwrap().1, external_edit_bytes);
+
+            let restore_session = open_exclusive();
+            restore_session
+                .restore_six_layer_backup(&aborted_backup)
+                .await
+                .unwrap();
+            restore_session.shutdown().await;
+            assert_eq!(device_state.lock().unwrap().1, SIX_SOURCE);
+        });
+    }
+
+    #[test]
+    fn reapply_uses_previous_karabiner_path_and_rejects_profile_name_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let karabiner_path = dir.path().join("isolated-karabiner.json");
+        let target = TargetKeyboard {
+            vendor_id: 0x303a,
+            product_id: 0x8298,
+            location_id: 0x0110_0000,
+            usb_parent: 0x1000_0001,
+            vendor_path: "isolated-vendor".into(),
+        };
+        let receiver = UserCommandReceiver::bind().unwrap();
+        let initial_karabiner = serde_json::to_vec_pretty(&serde_json::json!({
+            "profiles": [
+                {"name": "Default", "selected": true, "complex_modifications": {"rules": []}, "devices": []},
+                {"name": "Work", "selected": false, "complex_modifications": {"rules": []}, "devices": []}
+            ]
+        }))
+        .unwrap();
+        fs::write(&karabiner_path, &initial_karabiner).unwrap();
+        let rule = karabiner::rules(&target, &receiver, BottomRowLayout::Split).unwrap();
+        let prev_patch =
+            karabiner::prepare_config(karabiner_path.clone(), initial_karabiner, &target, rule)
+                .unwrap();
+        fs::write(&karabiner_path, &prev_patch.installed).unwrap();
+
+        let saved = SavedSixLayerState {
+            installation: Some(Installation {
+                status: InstallationStatus::Applied,
+                plan: test_plan(),
+                target: target.clone(),
+                profile_index: 1,
+                backup: dir.path().join("backup"),
+                config: prev_patch,
+            }),
+            ..SavedSixLayerState::default()
+        };
+
+        let same_profile =
+            prepare_apply_karabiner_patch(&saved, &target, &receiver, BottomRowLayout::Split)
+                .unwrap();
+        assert_eq!(same_profile.path, karabiner_path);
+        assert_eq!(same_profile.profile_name, "Default");
+
+        let drifted_karabiner = serde_json::to_vec_pretty(&serde_json::json!({
+            "profiles": [
+                {"name": "Default", "selected": false, "complex_modifications": {"rules": []}, "devices": []},
+                {"name": "Work", "selected": true, "complex_modifications": {"rules": []}, "devices": []}
+            ]
+        }))
+        .unwrap();
+        fs::write(&karabiner_path, &drifted_karabiner).unwrap();
+        let err = prepare_apply_karabiner_patch(&saved, &target, &receiver, BottomRowLayout::Split)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "原 Karabiner 方案身份已变化；请先恢复原键盘配置后再应用"
+        );
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_b64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(b2 & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+pub(crate) fn test_b64_decode(raw: &str) -> Vec<u8> {
+    let val = |c: u8| -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+    let clean: Vec<u8> = raw.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let mut out = Vec::new();
+    for chunk in clean.chunks(4) {
+        let a = val(chunk[0]).unwrap();
+        let b = val(chunk[1]).unwrap();
+        out.push((a << 2) | (b >> 4));
+        if chunk.get(2).copied() != Some(b'=') {
+            if let Some(c) = chunk.get(2).copied().and_then(val) {
+                out.push((b << 4) | (c >> 2));
+                if chunk.get(3).copied() != Some(b'=') {
+                    if let Some(d) = chunk.get(3).copied().and_then(val) {
+                        out.push((c << 6) | d);
+                    }
+                }
+            }
+        }
+    }
+    out
 }

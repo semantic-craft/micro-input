@@ -800,5 +800,6 @@ mod tests;
 mod file_tests;
 
 pub mod config_write;
+pub use config_write::SixLayerSnapshotCheck;
 
 pub mod lighting_preview;

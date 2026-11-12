@@ -3432,7 +3432,6 @@ impl WorkbenchStore {
                 keyboard_grabbed: running.readiness.keyboard_grabbed,
                 first_event_verified: running.first_event_verified.load(Ordering::Acquire),
                 observed_layer,
-                keymap_revision: running.keymap_revision,
                 armed: running.armed,
                 failure: running.receiver.failure(),
                 effective_profile_id: running.effective_profile_id(),
