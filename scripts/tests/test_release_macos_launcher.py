@@ -46,9 +46,15 @@ class ReleaseMacOSTests(unittest.TestCase):
 
     def test_validate_release_metadata_matches_worktree_and_rejects_version_drift(self):
         repo_root = Path(__file__).resolve().parents[2]
-        short_ver, build_ver = release_mod.validate_release_metadata(repo_root, 'v0.5.0')
-        self.assertEqual(short_ver, '0.5.0')
-        self.assertEqual(build_ver, '5')
+        with (repo_root / 'app/MicroInput/Info.plist').open('rb') as handle:
+            plist = plistlib.load(handle)
+        expected_short = str(plist['CFBundleShortVersionString']).strip()
+        expected_build = str(plist['CFBundleVersion']).strip()
+        short_ver, build_ver = release_mod.validate_release_metadata(
+            repo_root, f'v{expected_short}'
+        )
+        self.assertEqual(short_ver, expected_short)
+        self.assertEqual(build_ver, expected_build)
 
         with tempfile.TemporaryDirectory(prefix='mi-release-meta-') as tmp:
             fake_root = Path(tmp).resolve()
@@ -56,6 +62,11 @@ class ReleaseMacOSTests(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 release_mod.validate_release_metadata(fake_root, 'v0.5.0')
             self.assertIn('CFBundleShortVersionString=0.5.0', str(ctx.exception))
+
+            self._make_repo(fake_root, short_version='0.5.0', build_version='five')
+            with self.assertRaises(ValueError) as build_ctx:
+                release_mod.validate_release_metadata(fake_root, 'v0.5.0')
+            self.assertIn('CFBundleVersion must be a numeric build string', str(build_ctx.exception))
 
     def test_extract_unsafe_rpaths_and_user_path_detector(self):
         prefix = '/Us' + 'ers/builder/work/app/.build/out/Products/Release/PackageFrameworks'
