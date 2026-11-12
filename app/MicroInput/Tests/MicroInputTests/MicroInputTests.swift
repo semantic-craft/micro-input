@@ -372,4 +372,186 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(store.inspector.selectedLogicalSlot, 0)
         XCTAssertEqual(store.inspector.selectedSurface, "Key0")
     }
+
+    @MainActor
+    func testUpdateLaunchPolicyAndSoftwareUpdateControllerLifecycle() throws {
+        let validKey = "lwr8Uv2vLk5q4IOem6pjd3V5/EF9aHb2kx/4pzIfKJc="
+        let validFeed = "https://github.com/semantic-craft/micro-input/releases/latest/download/appcast.xml"
+        let prodIdentity = AppReleaseIdentity(
+            marketingVersion: "0.5.0",
+            buildVersion: "5",
+            bundleIdentifier: "craft.semantic.micro-input.dev",
+            feedURLString: validFeed,
+            publicEDKey: validKey,
+            automaticallyChecksDefault: true
+        )
+        XCTAssertEqual(prodIdentity.displayVersionLabel, "v0.5.0 (5)")
+
+        XCTAssertEqual(
+            UpdateLaunchPolicy.evaluate(
+                identity: prodIdentity,
+                bundlePath: "/Applications/Micro Input.app",
+                environment: [:]
+            ),
+            .ready
+        )
+
+        if case .isolated = UpdateLaunchPolicy.evaluate(
+            identity: prodIdentity,
+            bundlePath: "/Applications/Micro Input.app",
+            environment: ["MI_DISABLE_UPDATER": "1"]
+        ) {} else {
+            XCTFail("Expected MI_DISABLE_UPDATER=1 to isolate updater")
+        }
+
+        if case .isolated = UpdateLaunchPolicy.evaluate(
+            identity: prodIdentity,
+            bundlePath: "/Applications/Micro Input.app",
+            environment: ["MI_SYNTHETIC_SCENARIO": "host-execution"]
+        ) {} else {
+            XCTFail("Expected MI_SYNTHETIC_SCENARIO to isolate updater")
+        }
+
+        if case .isolated = UpdateLaunchPolicy.evaluate(
+            identity: prodIdentity,
+            bundlePath: "/Applications/Micro Input.app",
+            environment: ["XCTestConfigurationFilePath": "/tmp/test.xctestconfiguration"]
+        ) {} else {
+            XCTFail("Expected XCTestConfigurationFilePath to isolate updater")
+        }
+
+        let qaIdentity = AppReleaseIdentity(
+            marketingVersion: "0.5.0",
+            buildVersion: "5",
+            bundleIdentifier: "com.semanticcraft.microinput.qa.99",
+            feedURLString: validFeed,
+            publicEDKey: validKey
+        )
+        if case .isolated = UpdateLaunchPolicy.evaluate(
+            identity: qaIdentity,
+            bundlePath: "/Applications/Micro Input QA.app",
+            environment: [:]
+        ) {} else {
+            XCTFail("Expected QA bundle id to isolate updater")
+        }
+
+        for badBundlePath in [
+            "/private/var/folders/xx/AppTranslocation/123/d/Micro Input.app",
+            "/Volumes/Micro Input/Micro Input.app",
+            "/tmp/MicroInput",
+        ] {
+            if case .unavailable = UpdateLaunchPolicy.evaluate(
+                identity: prodIdentity,
+                bundlePath: badBundlePath,
+                environment: [:]
+            ) {} else {
+                XCTFail("Expected \(badBundlePath) to mark updater unavailable")
+            }
+        }
+
+        let insecureFeedIdentity = AppReleaseIdentity(
+            marketingVersion: "0.5.0",
+            buildVersion: "5",
+            bundleIdentifier: "craft.semantic.micro-input.dev",
+            feedURLString: "http://example.com/appcast.xml",
+            publicEDKey: validKey
+        )
+        if case .unavailable = UpdateLaunchPolicy.evaluate(
+            identity: insecureFeedIdentity,
+            bundlePath: "/Applications/Micro Input.app",
+            environment: [:]
+        ) {} else {
+            XCTFail("Expected non-HTTPS feed URL to mark updater unavailable")
+        }
+
+        let badKeyIdentity = AppReleaseIdentity(
+            marketingVersion: "0.5.0",
+            buildVersion: "5",
+            bundleIdentifier: "craft.semantic.micro-input.dev",
+            feedURLString: validFeed,
+            publicEDKey: "c2hvcnQ="
+        )
+        if case .unavailable = UpdateLaunchPolicy.evaluate(
+            identity: badKeyIdentity,
+            bundlePath: "/Applications/Micro Input.app",
+            environment: [:]
+        ) {} else {
+            XCTFail("Expected short Ed25519 key to mark updater unavailable")
+        }
+
+        var factoryCalls = 0
+        let fakeDriver = FakeSoftwareUpdateDriver()
+        let isolatedController = SoftwareUpdateController(
+            identity: prodIdentity,
+            bundlePath: "/Applications/Micro Input.app",
+            environment: ["MI_DISABLE_UPDATER": "1"],
+            driverFactory: {
+                factoryCalls += 1
+                return fakeDriver
+            }
+        )
+        isolatedController.startIfPermitted()
+        isolatedController.setAutomaticallyChecks(true)
+        isolatedController.checkForUpdates()
+        XCTAssertEqual(factoryCalls, 0)
+        XCTAssertFalse(isolatedController.canCheckForUpdates)
+        XCTAssertFalse(isolatedController.automaticallyChecksForUpdates)
+
+        let readyController = SoftwareUpdateController(
+            identity: prodIdentity,
+            bundlePath: "/Applications/Micro Input.app",
+            environment: [:],
+            driverFactory: {
+                factoryCalls += 1
+                return fakeDriver
+            }
+        )
+        XCTAssertEqual(readyController.serviceStatus, .ready)
+        XCTAssertEqual(factoryCalls, 0)
+
+        readyController.startIfPermitted()
+        readyController.startIfPermitted()
+        XCTAssertEqual(factoryCalls, 1)
+        XCTAssertEqual(fakeDriver.startCalls, 1)
+        XCTAssertTrue(readyController.canCheckForUpdates)
+        XCTAssertTrue(readyController.automaticallyChecksForUpdates)
+
+        readyController.setAutomaticallyChecks(false)
+        XCTAssertFalse(fakeDriver.automaticallyChecksForUpdates)
+        XCTAssertFalse(readyController.automaticallyChecksForUpdates)
+
+        let fixedDate = Date(timeIntervalSince1970: 1_762_000_000)
+        fakeDriver.lastUpdateCheckDate = fixedDate
+        readyController.checkForUpdates()
+        XCTAssertEqual(fakeDriver.checkCalls, 1)
+        XCTAssertEqual(readyController.lastUpdateCheckDate, fixedDate)
+        XCTAssertTrue(readyController.lastCheckSummary.hasPrefix("上次检查："))
+
+        let nav = WorkbenchNavigationModel()
+        XCTAssertEqual(nav.destination, .keyboard)
+        nav.openGeneral()
+        XCTAssertEqual(nav.destination, .general)
+
+        let dir = try makeIsolatedTempDir("engine-version")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = CoreStore(isolatedDirectory: dir.path)
+        XCTAssertEqual(store.header.engineVersion, "0.2.0")
+    }
+}
+
+@MainActor
+private final class FakeSoftwareUpdateDriver: SoftwareUpdateDriver {
+    var canCheckForUpdates: Bool = true
+    var automaticallyChecksForUpdates: Bool = true
+    var lastUpdateCheckDate: Date? = nil
+    private(set) var startCalls: Int = 0
+    private(set) var checkCalls: Int = 0
+
+    func startUpdater() {
+        startCalls += 1
+    }
+
+    func checkForUpdates() {
+        checkCalls += 1
+    }
 }

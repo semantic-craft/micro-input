@@ -618,8 +618,9 @@ impl WorkbenchStore {
         let previous_profile = self.document_store.host_active_profile_id();
         let result = self.dispatch_at(command, started);
         if self.document_store.host_active_profile_id() != previous_profile {
-            self.last_switch_duration = started.elapsed();
-            self.commit_local_update();
+            let elapsed = started.elapsed();
+            self.last_switch_duration = elapsed;
+            self.projection.last_switch_duration = elapsed;
         }
         result
     }
@@ -1774,8 +1775,9 @@ impl WorkbenchStore {
     pub fn select_and_activate_profile(&mut self, profile_id: &str) -> Result<(), WorkbenchError> {
         let started = Instant::now();
         let result = self.select_and_activate_profile_at(profile_id, started, true);
-        self.last_switch_duration = started.elapsed();
-        self.commit_local_update();
+        let elapsed = started.elapsed();
+        self.last_switch_duration = elapsed;
+        self.projection.last_switch_duration = elapsed;
         result
     }
 

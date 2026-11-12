@@ -1,0 +1,529 @@
+#!/usr/bin/env python3
+"""Build, Developer-ID sign, notarize, staple, generate Sparkle appcast, and optionally publish a macOS release."""
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import shutil
+import subprocess
+import sys
+import time
+import xml.etree.ElementTree as ET
+
+REPO_SLUG = 'semantic-craft/micro-input'
+EXPECTED_BUNDLE_ID = 'craft.semantic.micro-input.dev'
+SPARKLE_NS = 'http://www.andymatuschak.org/xml-namespaces/sparkle'
+HOME_BYTES_PATTERN = re.compile(rb'/Users/(?!(?:Shared)(?:/|\x00|$))[A-Za-z0-9._-]+')
+
+
+def redact_sensitive(text: str, extra_secrets: list[str] | None = None) -> str:
+    cleaned = text
+    for secret in extra_secrets or []:
+        if secret and secret != '-':
+            cleaned = cleaned.replace(secret, '<REDACTED>')
+    cleaned = re.sub(r'Developer ID Application:[^\n"]+', 'Developer ID Application: <REDACTED>', cleaned)
+    cleaned = re.sub(r'\b[0-9A-F]{40}\b', '<REDACTED_SHA1>', cleaned)
+    cleaned = re.sub(r'\([A-Z0-9]{10}\)', '(<REDACTED_TEAM>)', cleaned)
+    cleaned = re.sub(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', '<REDACTED_EMAIL>', cleaned)
+    return cleaned
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog='scripts/release-macos', description=__doc__, allow_abbrev=False)
+    parser.add_argument('tag', help='Release tag in vX.Y.Z format')
+    parser.add_argument('--publish', action='store_true', help='Create or update GitHub Release and upload assets')
+    args = parser.parse_args(argv)
+    if not re.fullmatch(r'v\d+\.\d+\.\d+', args.tag):
+        parser.error(f'Release tag must match vX.Y.Z, got: {args.tag}')
+    return args
+
+
+def validate_release_metadata(root: Path, tag: str) -> tuple[str, str]:
+    version = tag[1:]
+    license_path = root / 'LICENSE'
+    if not license_path.is_file():
+        raise ValueError('Missing root LICENSE file')
+    notes_path = root / 'docs/releases' / f'{tag}.md'
+    if not notes_path.is_file() or not notes_path.read_text(encoding='utf-8').strip():
+        raise ValueError(f'Missing or empty release notes: docs/releases/{tag}.md')
+
+    info_path = root / 'app/MicroInput/Info.plist'
+    with info_path.open('rb') as handle:
+        info = plistlib.load(handle)
+
+    bundle_id = str(info.get('CFBundleIdentifier', '')).strip()
+    if bundle_id != EXPECTED_BUNDLE_ID:
+        raise ValueError(f'Info.plist CFBundleIdentifier must be {EXPECTED_BUNDLE_ID}, got {bundle_id}')
+
+    short_version = str(info.get('CFBundleShortVersionString', '')).strip()
+    if short_version != version:
+        raise ValueError(
+            f'Tag {tag} requires CFBundleShortVersionString={version}, got {short_version}'
+        )
+
+    build_version = str(info.get('CFBundleVersion', '')).strip()
+    if not build_version or not build_version.isdigit():
+        raise ValueError(f'CFBundleVersion must be a numeric build string, got {build_version!r}')
+
+    feed_url = str(info.get('SUFeedURL', '')).strip()
+    if not feed_url.startswith('https://'):
+        raise ValueError('Info.plist SUFeedURL must use https://')
+
+    ed_key = str(info.get('SUPublicEDKey', '')).strip()
+    try:
+        decoded_key = base64.b64decode(ed_key, validate=True)
+    except Exception as exc:
+        raise ValueError('Info.plist SUPublicEDKey is not valid base64') from exc
+    if len(decoded_key) != 32:
+        raise ValueError(f'Info.plist SUPublicEDKey must decode to 32 bytes, got {len(decoded_key)}')
+
+    return short_version, build_version
+
+
+def resolve_release_signing_identity() -> str:
+    explicit = os.environ.get('MI_RELEASE_SIGN_IDENTITY', '').strip()
+    if explicit:
+        return explicit
+    out = subprocess.check_output(
+        ['security', 'find-identity', '-v', '-p', 'codesigning'],
+        text=True,
+        stderr=subprocess.DEVNULL,
+    )
+    match = re.search(r'"(Developer ID Application:[^"]+)"', out)
+    if not match:
+        raise RuntimeError('No valid Developer ID Application signing identity found in Keychain')
+    return match.group(1)
+
+
+def locate_generate_appcast(root: Path) -> Path:
+    override = os.environ.get('SPARKLE_GENERATE_APPCAST', '').strip()
+    if override:
+        candidate = Path(override)
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+        raise RuntimeError('SPARKLE_GENERATE_APPCAST does not point to an executable binary')
+
+    artifact_bin = root / 'app/MicroInput/.build/artifacts/sparkle/Sparkle/bin/generate_appcast'
+    if artifact_bin.is_file() and os.access(artifact_bin, os.X_OK):
+        return artifact_bin
+
+    found = shutil.which('generate_appcast')
+    if found:
+        return Path(found)
+    raise RuntimeError('Unable to locate Sparkle generate_appcast binary')
+
+
+def extract_unsafe_rpaths(otool_output: str) -> list[str]:
+    rpaths: list[str] = []
+    lines = otool_output.splitlines()
+    for idx, line in enumerate(lines):
+        if line.strip() == 'cmd LC_RPATH':
+            for sub in lines[idx + 1 : idx + 5]:
+                stripped = sub.strip()
+                if stripped.startswith('path '):
+                    raw_path = stripped[len('path ') :].split(' (offset ', 1)[0].strip()
+                    if (
+                        raw_path.startswith('/Users/')
+                        or raw_path.startswith('/private/')
+                        or '/.build/' in raw_path
+                    ):
+                        rpaths.append(raw_path)
+                    break
+    return rpaths
+
+
+def scrub_macho_build_rpaths(binary_path: Path) -> None:
+    out = subprocess.check_output(['otool', '-l', str(binary_path)], text=True)
+    seen: set[str] = set()
+    for rpath in extract_unsafe_rpaths(out):
+        if rpath in seen:
+            continue
+        seen.add(rpath)
+        subprocess.run(
+            ['install_name_tool', '-delete_rpath', rpath, str(binary_path)],
+            check=True,
+        )
+
+
+def assert_binary_free_of_user_paths(binary_path: Path) -> None:
+    data = binary_path.read_bytes()
+    if HOME_BYTES_PATTERN.search(data):
+        raise RuntimeError(
+            f'Binary {binary_path.name} still contains a host home directory path string after prefix remapping'
+        )
+
+
+def validate_appcast_xml(
+    appcast_path: Path,
+    expected_short_version: str,
+    expected_build_version: str,
+    expected_download_url: str,
+) -> None:
+    tree = ET.parse(appcast_path)
+    channel = tree.getroot().find('channel')
+    if channel is None:
+        raise ValueError('Generated appcast.xml missing <channel>')
+    item = channel.find('item')
+    if item is None:
+        raise ValueError('Generated appcast.xml missing <item>')
+    enclosure = item.find('enclosure')
+    if enclosure is None:
+        raise ValueError('Generated appcast.xml missing <enclosure>')
+
+    actual_url = enclosure.attrib.get('url', '')
+    if actual_url != expected_download_url:
+        raise ValueError(f'Appcast enclosure url mismatch: expected {expected_download_url}, got {actual_url}')
+
+    ed_sig = enclosure.attrib.get(f'{{{SPARKLE_NS}}}edSignature', '').strip()
+    if not ed_sig:
+        raise ValueError('Appcast enclosure missing sparkle:edSignature')
+
+    short_ver = (
+        enclosure.attrib.get(f'{{{SPARKLE_NS}}}shortVersionString')
+        or item.findtext(f'{{{SPARKLE_NS}}}shortVersionString')
+        or ''
+    ).strip()
+    if short_ver != expected_short_version:
+        raise ValueError(
+            f'Appcast shortVersionString mismatch: expected {expected_short_version}, got {short_ver}'
+        )
+
+    build_ver = (
+        enclosure.attrib.get(f'{{{SPARKLE_NS}}}version')
+        or item.findtext(f'{{{SPARKLE_NS}}}version')
+        or ''
+    ).strip()
+    if build_ver != expected_build_version:
+        raise ValueError(f'Appcast version mismatch: expected {expected_build_version}, got {build_ver}')
+
+
+def write_sha256sums(out_dir: Path, filenames: list[str]) -> Path:
+    lines: list[str] = []
+    for name in filenames:
+        digest = hashlib.sha256((out_dir / name).read_bytes()).hexdigest()
+        lines.append(f'{digest}  {name}')
+    sums_path = out_dir / 'SHA256SUMS'
+    sums_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    return sums_path
+
+
+def run_checked(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None, secrets: list[str] | None = None) -> str:
+    proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
+    if proc.returncode != 0:
+        combined = redact_sensitive((proc.stderr or '') + '\n' + (proc.stdout or ''), secrets)
+        raise RuntimeError(f'Command {cmd[0]} failed (exit {proc.returncode}): {combined.strip()}')
+    return proc.stdout
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+    root = Path(__file__).resolve().parent.parent
+    tag = args.tag
+    short_version, build_version = validate_release_metadata(root, tag)
+
+    if args.publish:
+        status_out = subprocess.check_output(['git', 'status', '--porcelain'], cwd=root, text=True).strip()
+        if status_out:
+            raise RuntimeError('Working tree has uncommitted changes; commit cleanly before --publish')
+        run_checked(['gh', 'auth', 'status'], cwd=root)
+
+    sign_identity = resolve_release_signing_identity()
+    notary_profile = os.environ.get('MI_NOTARY_PROFILE', 'xw-notary').strip() or 'xw-notary'
+    secrets = [sign_identity, notary_profile]
+    print('Pre-flight metadata and signing credentials check: OK', flush=True)
+
+    home_dir = str(Path.home())
+    cargo_home = os.environ.get('CARGO_HOME', str(Path.home() / '.cargo'))
+    rustup_home = os.environ.get('RUSTUP_HOME', str(Path.home() / '.rustup'))
+    remap_flags = [
+        f'--remap-path-prefix={root}=/workspace',
+        f'--remap-path-prefix={cargo_home}=/cargo',
+        f'--remap-path-prefix={rustup_home}=/rustup',
+        f'--remap-path-prefix={home_dir}=/home',
+    ]
+    existing_rustflags = os.environ.get('RUSTFLAGS', '').strip()
+    combined_rustflags = (' '.join([existing_rustflags, *remap_flags])).strip()
+
+    build_env = os.environ.copy()
+    build_env['MACOSX_DEPLOYMENT_TARGET'] = '14.0'
+    build_env['MI_RUST_PROFILE'] = 'release'
+    build_env['RUSTFLAGS'] = combined_rustflags
+
+    print('[1/6] Building release Rust kernel and Swift shell with path remapping...', flush=True)
+    run_checked(['cargo', 'build', '--locked', '--release', '-p', 'mi-model', '--bin', 'mi'], cwd=root, env=build_env)
+    run_checked(['cargo', 'build', '--locked', '--release', '-p', 'mi-ffi'], cwd=root, env=build_env)
+    (root / 'target/release/libmi_ffi.dylib').unlink(missing_ok=True)
+
+    swift_flags = [
+        '--package-path', 'app/MicroInput',
+        '-c', 'release',
+        '-Xswiftc', '-file-prefix-map', '-Xswiftc', f'{root}=/workspace',
+        '-Xswiftc', '-file-prefix-map', '-Xswiftc', f'{home_dir}=/home',
+        '-Xcc', f'-ffile-prefix-map={root}=/workspace',
+        '-Xcc', f'-ffile-prefix-map={home_dir}=/home',
+    ]
+    run_checked(['swift', 'build', *swift_flags], cwd=root, env=build_env)
+    swift_bin_dir = Path(
+        run_checked(['swift', 'build', *swift_flags, '--show-bin-path'], cwd=root, env=build_env).strip()
+    )
+
+    work_dir = root / 'target/release-dist' / tag
+    stage_dir = work_dir / 'stage'
+    appcast_src_dir = work_dir / 'appcast-src'
+    out_dir = work_dir / 'out'
+    stage_app = stage_dir / 'Micro Input.app'
+
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    for d in (stage_dir, appcast_src_dir, out_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    try:
+        print('[2/6] Staging Micro Input.app and verifying architecture and path hygiene...', flush=True)
+        for sub in ('Contents/MacOS', 'Contents/Resources', 'Contents/Frameworks'):
+            (stage_app / sub).mkdir(parents=True, exist_ok=True)
+
+        run_checked(['swift', 'scripts/generate-app-icon.swift'], cwd=root, env=build_env)
+        run_checked(['swift', 'scripts/verify-app-icon.swift', 'target/AppIcon.iconset'], cwd=root, env=build_env)
+        run_checked(
+            ['iconutil', '-c', 'icns', 'target/AppIcon.iconset', '-o', str(stage_app / 'Contents/Resources/AppIcon.icns')],
+            cwd=root,
+            env=build_env,
+        )
+
+        staged_bin = stage_app / 'Contents/MacOS/MicroInput'
+        shutil.copy2(swift_bin_dir / 'MicroInput', staged_bin)
+        shutil.copy2(root / 'app/MicroInput/Info.plist', stage_app / 'Contents/Info.plist')
+
+        sparkle_candidates = [
+            swift_bin_dir / 'Sparkle.framework',
+            root / 'app/MicroInput/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework',
+        ]
+        sparkle_src = next((c for c in sparkle_candidates if c.is_dir()), None)
+        if sparkle_src is None:
+            raise RuntimeError('Unable to locate Sparkle.framework in SwiftPM release build')
+        run_checked(
+            ['/usr/bin/ditto', str(sparkle_src), str(stage_app / 'Contents/Frameworks/Sparkle.framework')],
+            cwd=root,
+        )
+
+        scrub_macho_build_rpaths(staged_bin)
+        run_checked(['/usr/bin/strip', '-x', str(staged_bin)], cwd=root)
+        archs = run_checked(['lipo', '-archs', str(staged_bin)], cwd=root).split()
+        if 'arm64' not in archs:
+            raise RuntimeError(f'Expected arm64 slice in staged binary, got {archs}')
+        assert_binary_free_of_user_paths(staged_bin)
+
+        print('[3/6] Signing Micro Input.app inside-out with Hardened Runtime...', flush=True)
+        run_checked(
+            [
+                sys.executable,
+                'scripts/sign_bundle.py',
+                str(stage_app),
+                '--mode',
+                'release',
+                '--identity',
+                sign_identity,
+                '--unregister-ls',
+            ],
+            cwd=root,
+            secrets=secrets,
+        )
+        run_checked(['codesign', '--verify', '--deep', '--strict', '--verbose=2', str(stage_app)], cwd=root, secrets=secrets)
+
+        print('[4/6] Submitting to Apple Notary Service and stapling ticket...', flush=True)
+        notary_zip = work_dir / 'notary-submit.zip'
+        run_checked(
+            ['/usr/bin/ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(stage_app), str(notary_zip)],
+            cwd=root,
+        )
+        submit_raw = run_checked(
+            [
+                'xcrun',
+                'notarytool',
+                'submit',
+                str(notary_zip),
+                '--keychain-profile',
+                notary_profile,
+                '--output-format',
+                'json',
+            ],
+            cwd=root,
+            secrets=secrets,
+        )
+        submit_json = json.loads(submit_raw)
+        submission_id = str(submit_json.get('id', '')).strip()
+        if not submission_id:
+            raise RuntimeError('Notary submission did not return a submission id')
+        print(f'      Submitted for notarization (id={submission_id}); polling status...', flush=True)
+
+        notary_status = 'In Progress'
+        for _attempt in range(180):
+            info_raw = run_checked(
+                [
+                    'xcrun',
+                    'notarytool',
+                    'info',
+                    submission_id,
+                    '--keychain-profile',
+                    notary_profile,
+                    '--output-format',
+                    'json',
+                ],
+                cwd=root,
+                secrets=secrets,
+            )
+            notary_status = str(json.loads(info_raw).get('status', '')).strip()
+            if notary_status == 'Accepted':
+                break
+            if notary_status not in ('In Progress', ''):
+                log_proc = subprocess.run(
+                    ['xcrun', 'notarytool', 'log', submission_id, '--keychain-profile', notary_profile],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                )
+                redacted_log = redact_sensitive((log_proc.stdout or log_proc.stderr or '')[:2000], secrets)
+                raise RuntimeError(f'Notarization failed with status={notary_status} (id={submission_id}): {redacted_log}')
+            time.sleep(15)
+        if notary_status != 'Accepted':
+            raise RuntimeError(f'Notarization timed out with status={notary_status} (id={submission_id})')
+        print(f'      Notarization Accepted (id={submission_id})', flush=True)
+
+        run_checked(['xcrun', 'stapler', 'staple', str(stage_app)], cwd=root, secrets=secrets)
+        run_checked(['xcrun', 'stapler', 'validate', str(stage_app)], cwd=root, secrets=secrets)
+        run_checked(['spctl', '--assess', '--type', 'execute', '--verbose=4', str(stage_app)], cwd=root, secrets=secrets)
+        run_checked(['codesign', '--verify', '--deep', '--strict', str(stage_app)], cwd=root, secrets=secrets)
+
+        print('[5/6] Packaging release archive, Sparkle appcast.xml, and SHA256SUMS...', flush=True)
+        archive_name = f'Micro-Input-{tag}-macos-arm64.zip'
+        archive_path = out_dir / archive_name
+        run_checked(
+            ['/usr/bin/ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(stage_app), str(archive_path)],
+            cwd=root,
+        )
+
+        shutil.copy2(archive_path, appcast_src_dir / archive_name)
+        shutil.copy2(root / 'docs/releases' / f'{tag}.md', appcast_src_dir / f'Micro-Input-{tag}-macos-arm64.md')
+
+        gen_appcast = locate_generate_appcast(root)
+        download_prefix = f'https://github.com/{REPO_SLUG}/releases/download/{tag}/'
+        expected_download_url = f'{download_prefix}{archive_name}'
+        appcast_path = out_dir / 'appcast.xml'
+
+        appcast_cmd = [
+            str(gen_appcast),
+            '--download-url-prefix',
+            download_prefix,
+            '--embed-release-notes',
+            '--full-release-notes-url',
+            f'https://github.com/{REPO_SLUG}/releases',
+            '--link',
+            f'https://github.com/{REPO_SLUG}/releases/tag/{tag}',
+            '--maximum-deltas',
+            '0',
+            '-o',
+            str(appcast_path),
+        ]
+        ed_key_file = os.environ.get('SPARKLE_ED_KEY_FILE', '').strip()
+        if ed_key_file:
+            appcast_cmd.extend(['--ed-key-file', ed_key_file])
+        else:
+            account = os.environ.get('SPARKLE_KEYCHAIN_ACCOUNT', '').strip()
+            if account:
+                appcast_cmd.extend(['--account', account])
+        appcast_cmd.append(str(appcast_src_dir))
+
+        run_checked(appcast_cmd, cwd=root, secrets=secrets)
+        validate_appcast_xml(appcast_path, short_version, build_version, expected_download_url)
+        sums_path = write_sha256sums(out_dir, [archive_name, 'appcast.xml'])
+
+        print(f'      Archive:  {archive_path.relative_to(root)}', flush=True)
+        print(f'      Appcast:  {appcast_path.relative_to(root)}', flush=True)
+        print(f'      Checksums:{sums_path.relative_to(root)}', flush=True)
+
+        if args.publish:
+            print(f'[6/6] Publishing {tag} to GitHub Releases ({REPO_SLUG})...', flush=True)
+            notes_file = str(root / 'docs/releases' / f'{tag}.md')
+            exists = subprocess.run(
+                ['gh', 'release', 'view', tag, '--repo', REPO_SLUG],
+                cwd=root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode == 0
+            if exists:
+                run_checked(
+                    [
+                        'gh',
+                        'release',
+                        'upload',
+                        tag,
+                        str(archive_path),
+                        str(appcast_path),
+                        str(sums_path),
+                        '--clobber',
+                        '--repo',
+                        REPO_SLUG,
+                    ],
+                    cwd=root,
+                )
+                run_checked(
+                    [
+                        'gh',
+                        'release',
+                        'edit',
+                        tag,
+                        '--title',
+                        f'Micro Input {tag}',
+                        '--notes-file',
+                        notes_file,
+                        '--latest',
+                        '--repo',
+                        REPO_SLUG,
+                    ],
+                    cwd=root,
+                )
+            else:
+                run_checked(
+                    [
+                        'gh',
+                        'release',
+                        'create',
+                        tag,
+                        str(archive_path),
+                        str(appcast_path),
+                        str(sums_path),
+                        '--title',
+                        f'Micro Input {tag}',
+                        '--notes-file',
+                        notes_file,
+                        '--latest',
+                        '--repo',
+                        REPO_SLUG,
+                    ],
+                    cwd=root,
+                )
+            print(f'Published https://github.com/{REPO_SLUG}/releases/tag/{tag}', flush=True)
+        else:
+            print('[6/6] Dry-package complete (pass --publish to upload to GitHub Releases).', flush=True)
+    finally:
+        if stage_app.exists():
+            subprocess.run(
+                [sys.executable, 'scripts/sign_bundle.py', str(stage_app), '--unregister-only'],
+                cwd=root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
