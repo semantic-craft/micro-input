@@ -1,9 +1,10 @@
 use mi_core::{
-    ActiveHudContent, BackupCommand, CanonicalAgent, FavoriteSlotIndex, FourAppLiveCandidate,
-    FourAppSessionKind, HostOverlayAction, HudVisibilityState, PresetExportScope,
-    RadialConfirmMode, RadialInputEvent, RadialIntent, RadialPhase, RadialPositionSample,
-    RadialPresetKind, RadialSlotConfig, SectorIndex, StatusMenuAction, WorkbenchStore,
-    ESCAPE_KEY_CODE, PASSIVE_NOTICE_DURATION,
+    format_popover_cheat_label, ActiveHudContent, BackupCommand, BottomRowLayout, CanonicalAgent,
+    CanvasAction, FavoriteSlotIndex, FourAppLiveCandidate, FourAppSessionKind, HostOverlayAction,
+    HudVisibilityState, PopoverPreviewMode, PresetExportScope, RadialConfirmMode, RadialInputEvent,
+    RadialIntent, RadialPhase, RadialPositionSample, RadialPresetKind, RadialSlotConfig,
+    SectorIndex, SidebarAction, StatusMenuAction, WorkbenchCommand, WorkbenchStore,
+    WorkbenchStoreConfig, ESCAPE_KEY_CODE, PASSIVE_NOTICE_DURATION,
 };
 use mi_macos::{
     PassivePanelFrameSpec, PassivePanelHost, PassivePanelRole, PresetFileEnvelope,
@@ -690,4 +691,172 @@ fn status_menu_quick_switch_2x2_favorites_swap_and_icon_and_preset_bounds() {
         .dispatch_status_menu_action(StatusMenuAction::ConfirmPresetExport)
         .expect("confirm export");
     assert!(store.last_exported_preset().is_some());
+}
+
+#[test]
+fn popover_cheat_sheet_preview_tracks_active_profile_merges_wide_key_and_isolates_live_sessions() {
+    assert_eq!(format_popover_cheat_label(""), "未绑定");
+    assert_eq!(format_popover_cheat_label("   "), "未绑定");
+    assert_eq!(format_popover_cheat_label("()"), "未绑定");
+    assert_eq!(format_popover_cheat_label("(command k)"), "command k");
+    assert_eq!(format_popover_cheat_label("（常用）运行测试"), "运行测试");
+    assert_eq!(
+        format_popover_cheat_label("命令 · (make test)"),
+        "make test"
+    );
+    assert_eq!(format_popover_cheat_label("粘贴文本 · /review"), "/review");
+    assert_eq!(
+        format_popover_cheat_label("按住说话 · 松开停止"),
+        "按住说话"
+    );
+    assert_eq!(
+        format_popover_cheat_label("打开 Antigravity"),
+        "Antigravity"
+    );
+    assert_eq!(
+        format_popover_cheat_label("上一会话（侧栏轮转）"),
+        "上一会话"
+    );
+    assert_eq!(
+        format_popover_cheat_label("历史后退 (command [)"),
+        "历史后退"
+    );
+    assert_eq!(
+        format_popover_cheat_label("打开 DeepSeek Harness"),
+        "DeepSeek Harness"
+    );
+    assert_eq!(
+        format_popover_cheat_label("自定义超长自动化脚本动作名称测试"),
+        "自定义超长自动…"
+    );
+
+    let dir = tempdir().expect("tempdir");
+    let mut cfg = WorkbenchStoreConfig::isolated(dir.path());
+    cfg.isolated = false;
+    let mut store = WorkbenchStore::open(cfg.clone()).expect("open persistent temp store");
+    store
+        .set_host_execution_enabled(true)
+        .expect("enable host execution");
+    let antigravity_id = store
+        .find_canonical_profile_id(CanonicalAgent::Antigravity)
+        .expect("Antigravity");
+    let herdr_id = store
+        .find_canonical_profile_id(CanonicalAgent::Herdr)
+        .expect("Herdr");
+    store
+        .select_and_activate_profile(&antigravity_id)
+        .expect("activate Antigravity");
+
+    assert_eq!(
+        store.projection().status_menu.popover_preview_mode,
+        PopoverPreviewMode::SessionPreview
+    );
+    assert!(store.projection().status_menu.cheat_sheet_preview.is_none());
+    assert!(store.projection().status_menu.lighting_enabled);
+
+    store
+        .dispatch_status_menu_action(StatusMenuAction::SetPopoverPreviewMode(
+            PopoverPreviewMode::CheatSheet,
+        ))
+        .expect("set cheat sheet preview mode");
+    assert_eq!(
+        store.projection().status_menu.popover_preview_mode,
+        PopoverPreviewMode::CheatSheet
+    );
+
+    let split_sheet = store
+        .projection()
+        .status_menu
+        .cheat_sheet_preview
+        .clone()
+        .expect("cheat sheet preview populated");
+    assert_eq!(split_sheet.profile_name, "Antigravity");
+    assert!(split_sheet.target_agent_card.is_none());
+    assert_eq!(split_sheet.key_cells.len(), 20);
+    let ag10_split = split_sheet
+        .key_cells
+        .iter()
+        .find(|c| c.binding_id == "AG10")
+        .expect("AG10 cell");
+    let ag11_split = split_sheet
+        .key_cells
+        .iter()
+        .find(|c| c.binding_id == "AG11")
+        .expect("AG11 cell");
+    assert_eq!(ag10_split.short_label, "项目新建");
+    assert_eq!(ag11_split.short_label, "按住说话");
+
+    store
+        .dispatch_command(WorkbenchCommand::Sidebar(SidebarAction::BrowseProfile(
+            herdr_id.clone(),
+        )))
+        .expect("browse Herdr in sidebar without activating");
+    assert_eq!(store.selected_profile_id(), Some(herdr_id.as_str()));
+    assert_eq!(
+        store.projection().status_menu.cheat_sheet_preview.as_ref(),
+        Some(&split_sheet),
+        "browsing an inactive sidebar profile must never alter popover cheat_sheet_preview"
+    );
+
+    store
+        .dispatch_command(WorkbenchCommand::Canvas(CanvasAction::SetBottomRowLayout(
+            BottomRowLayout::Merged,
+        )))
+        .expect("switch to merged 2U bottom row");
+    let merged_sheet = store
+        .projection()
+        .status_menu
+        .cheat_sheet_preview
+        .clone()
+        .expect("merged cheat sheet preview");
+    assert_eq!(merged_sheet.key_cells.len(), 19);
+    assert!(merged_sheet
+        .key_cells
+        .iter()
+        .all(|c| c.binding_id != "AG11"));
+    let ag10_merged = merged_sheet
+        .key_cells
+        .iter()
+        .find(|c| c.binding_id == "AG10")
+        .expect("2U AG10 cell");
+    assert_eq!(ag10_merged.short_label, "按住说话");
+
+    let status_before_live = store.projection().status_menu.clone();
+    store.ingest_four_app_candidates(vec![
+        FourAppLiveCandidate {
+            place: NavigationPlace::antigravity("agy-live-1", "workspace-a"),
+            title: "Streaming Subagent Build".to_string(),
+            phase: FourAppSessionKind::Working,
+            watermark: "wm-live-1".to_string(),
+            last_modified_ms: 5000,
+            last_user_view_ms: 1000,
+            updated_at_ms: 5000,
+        },
+        FourAppLiveCandidate {
+            place: NavigationPlace::antigravity("agy-live-2", "workspace-b"),
+            title: "Completed PR Review".to_string(),
+            phase: FourAppSessionKind::BlueDotCompleted,
+            watermark: "wm-live-2".to_string(),
+            last_modified_ms: 6000,
+            last_user_view_ms: 2000,
+            updated_at_ms: 6000,
+        },
+    ]);
+    assert_eq!(
+        store.projection().status_menu,
+        status_before_live,
+        "live session candidate updates must leave StatusMenuProjection strictly unchanged in CheatSheet mode"
+    );
+
+    drop(store);
+    let reopened = WorkbenchStore::open(cfg).expect("reopen persistent temp store");
+    assert_eq!(
+        reopened.projection().status_menu.popover_preview_mode,
+        PopoverPreviewMode::CheatSheet
+    );
+    assert!(reopened
+        .projection()
+        .status_menu
+        .cheat_sheet_preview
+        .is_some());
 }

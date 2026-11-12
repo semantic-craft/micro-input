@@ -214,6 +214,38 @@ final class MicroInputTests: XCTestCase {
             ViewRenderTelemetry.counts.isEmpty,
             "No-op dispatches and idle hardware polls must trigger 0 JSON decodes and 0 SwiftUI body evaluations, got \(ViewRenderTelemetry.counts)"
         )
+
+        store.dispatch("status_menu", ["SetPopoverPreviewMode": PopoverPreviewMode.cheatSheet.rawValue])
+        mainHosting.layoutSubtreeIfNeeded()
+        statusHosting.layoutSubtreeIfNeeded()
+        XCTAssertEqual(store.statusMenu.popoverPreviewMode, .cheatSheet)
+        XCTAssertNotNil(store.statusMenu.cheatSheetPreview)
+
+        ViewRenderTelemetry.reset()
+        store.dispatch("session_strip", ["TriggerTestLighting": "thinking"])
+        store.dispatch("session_strip", ["TriggerTestLighting": "completed"])
+        store.dispatch("session_strip", ["TriggerTestLighting": NSNull()])
+        store.dispatch("inspector", ["SetActionSearchQuery": "会话"])
+        store.dispatch("inspector", ["SetActionSearchQuery": ""])
+        store.dispatch("canvas", ["SelectLogicalSlot": 3])
+        store.dispatch("overlay", "ToggleCheatSheet")
+        XCTAssertTrue(store.overlay.cheatSheetVisible)
+        mainHosting.layoutSubtreeIfNeeded()
+        statusHosting.layoutSubtreeIfNeeded()
+        store.dispatch("overlay", "CloseCheatSheet")
+        XCTAssertFalse(store.overlay.cheatSheetVisible)
+        mainHosting.layoutSubtreeIfNeeded()
+        statusHosting.layoutSubtreeIfNeeded()
+        XCTAssertEqual(
+            ViewRenderTelemetry.count("StatusMenuPopoverView"),
+            0,
+            "CheatSheet popover mode must trigger 0 StatusMenuPopoverView renders during live session strip, canvas selection, inspector search, or main overlay cheat-sheet toggles, got \(ViewRenderTelemetry.counts)"
+        )
+        XCTAssertEqual(
+            ViewRenderTelemetry.count("PopoverMiniCheatSheetView"),
+            0,
+            "CheatSheet popover grid must remain completely static across live session and main overlay updates, got \(ViewRenderTelemetry.counts)"
+        )
     }
 
     @MainActor

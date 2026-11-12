@@ -13,7 +13,6 @@ public struct StatusMenuPopoverView: View {
     public var body: some View {
         let _ = ViewRenderTelemetry.record("StatusMenuPopoverView")
         let sm = store.statusMenu
-        let ss = store.sessionStrip
 
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center, spacing: 12) {
@@ -99,48 +98,14 @@ public struct StatusMenuPopoverView: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("活跃会话槽位")
-                    .font(UITheme.micro)
-                    .foregroundStyle(UITheme.textSecondary)
-
-                VStack(spacing: 4) {
-                    ForEach(ss.sessionSlots.prefix(6)) { slot in
-                        Button {
-                            store.dispatch("session_strip", ["ActivateSlot": slot.slotIndex])
-                        } label: {
-                            let isOffLed = slot.title.isEmpty || slot.ledColorHex.uppercased() == "#000000"
-                            HStack(spacing: 8) {
-                                Circle()
-                                    .fill(isOffLed ? UITheme.switchOffFill : Color(hex: slot.ledColorHex))
-                                    .frame(width: 7, height: 7)
-                                Text(slot.keyBindingId)
-                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(UITheme.textMuted)
-                                Text(slot.title.isEmpty ? "空闲槽位" : slot.title)
-                                    .font(UITheme.caption)
-                                    .foregroundStyle(slot.title.isEmpty ? UITheme.textMuted : UITheme.textPrimary)
-                                    .lineLimit(1)
-                                Spacer(minLength: 4)
-                                if slot.isUnreadBlueDot {
-                                    Text("未读")
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(UITheme.textPrimary)
-                                        .padding(.horizontal, 7)
-                                        .padding(.vertical, 2)
-                                        .background(Capsule().fill(UITheme.subtleSurface))
-                                        .overlay(Capsule().stroke(UITheme.hairlineBorder, lineWidth: 1))
-                                }
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(UITheme.surface))
-                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .focusEffectDisabled()
-                    }
+            switch sm.popoverPreviewMode {
+            case .sessionPreview:
+                PopoverSessionPreviewSection(store: store)
+            case .cheatSheet:
+                if let sheet = sm.cheatSheetPreview {
+                    PopoverMiniCheatSheetView(sheet: sheet)
+                } else {
+                    PopoverCheatSheetEmptyCard()
                 }
             }
 
@@ -171,7 +136,7 @@ public struct StatusMenuPopoverView: View {
                     Toggle(
                         "",
                         isOn: Binding(
-                            get: { ss.simpleLighting.lightingEnabled },
+                            get: { sm.lightingEnabled },
                             set: { store.dispatch("session_strip", ["SetLightingEnabled": $0]) }
                         )
                     )
@@ -183,14 +148,6 @@ public struct StatusMenuPopoverView: View {
             Rectangle().fill(UITheme.rowDivider).frame(height: 1)
 
             VStack(spacing: 2) {
-                PopoverActionRow(
-                    icon: "square.grid.2x2",
-                    title: sm.cheatSheetVisible ? "隐藏按键速查" : "按键速查",
-                    shortcut: "⌘/"
-                ) {
-                    store.dispatch("status_menu", "ToggleCheatSheet")
-                }
-
                 PopoverActionRow(
                     icon: "macwindow",
                     title: "打开主配置台"
@@ -210,8 +167,80 @@ public struct StatusMenuPopoverView: View {
         }
         .padding(14)
         .frame(width: 348)
+        .fixedSize(horizontal: false, vertical: true)
         .background(UITheme.pageBackground)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+}
+
+private struct PopoverSessionPreviewSection: View {
+    let store: CoreStore
+
+    var body: some View {
+        let _ = ViewRenderTelemetry.record("PopoverSessionPreviewSection")
+        let ss = store.sessionStrip
+        VStack(alignment: .leading, spacing: 6) {
+            Text("活跃会话槽位")
+                .font(UITheme.micro)
+                .foregroundStyle(UITheme.textSecondary)
+
+            VStack(spacing: 4) {
+                ForEach(ss.sessionSlots.prefix(6)) { slot in
+                    Button {
+                        store.dispatch("session_strip", ["ActivateSlot": slot.slotIndex])
+                    } label: {
+                        let isOffLed = slot.title.isEmpty || slot.ledColorHex.uppercased() == "#000000"
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(isOffLed ? UITheme.switchOffFill : Color(hex: slot.ledColorHex))
+                                .frame(width: 7, height: 7)
+                            Text(slot.keyBindingId)
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundStyle(UITheme.textMuted)
+                            Text(slot.title.isEmpty ? "空闲槽位" : slot.title)
+                                .font(UITheme.caption)
+                                .foregroundStyle(slot.title.isEmpty ? UITheme.textMuted : UITheme.textPrimary)
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            if slot.isUnreadBlueDot {
+                                Text("未读")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(UITheme.textPrimary)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(UITheme.subtleSurface))
+                                    .overlay(Capsule().stroke(UITheme.hairlineBorder, lineWidth: 1))
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(UITheme.surface))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .focusEffectDisabled()
+                }
+            }
+        }
+    }
+}
+
+private struct PopoverCheatSheetEmptyCard: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("按键速查")
+                .font(UITheme.micro)
+                .foregroundStyle(UITheme.textSecondary)
+            Text("当前未选择可展示的应用方案")
+                .font(UITheme.caption)
+                .foregroundStyle(UITheme.textMuted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 14)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(UITheme.surface))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
+        }
     }
 }
 

@@ -300,6 +300,190 @@ final class DesignSystemVerificationTests: XCTestCase {
     }
 
     @MainActor
+    private func hasScrollView(in root: NSView) -> Bool {
+        if root is NSScrollView {
+            return true
+        }
+        return root.subviews.contains { hasScrollView(in: $0) }
+    }
+
+    @MainActor
+    func testPopoverPreviewModeSettingsAndCheatSheetGeometryWithoutClipping() throws {
+        let dir = try makeIsolatedTempDir("popover-preview-mode")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        XCTAssertEqual(store.statusMenu.popoverPreviewMode, .sessionPreview)
+        XCTAssertNil(store.statusMenu.cheatSheetPreview)
+        XCTAssertEqual(PopoverPreviewMode.dropdownOptions.map(\.title), ["会话预览", "按键速查"])
+
+        ViewRenderTelemetry.isEnabled = true
+        defer { ViewRenderTelemetry.isEnabled = false }
+        ViewRenderTelemetry.reset()
+        let (sessionWin, sessionHost) = makeHostedWindow(
+            StatusMenuPopoverView(store: store, onOpenMainWindow: {}),
+            width: 348
+        )
+        let initialSessionHeight = sessionHost.fittingSize.height
+        XCTAssertEqual(sessionHost.fittingSize.width, 348, accuracy: 1.0)
+        XCTAssertLessThan(initialSessionHeight, 640)
+        XCTAssertFalse(hasScrollView(in: sessionHost), "StatusMenuPopoverView must never embed NSScrollView")
+        XCTAssertGreaterThanOrEqual(ViewRenderTelemetry.count("PopoverSessionPreviewSection"), 1)
+        XCTAssertEqual(ViewRenderTelemetry.count("PopoverMiniCheatSheetView"), 0)
+        sessionWin.contentView = nil
+        sessionWin.orderOut(nil)
+
+        store.dispatch("canvas", ["SetBottomRowLayout": "split"])
+        store.dispatch("status_menu", ["SetPopoverPreviewMode": PopoverPreviewMode.cheatSheet.rawValue])
+        XCTAssertEqual(store.statusMenu.popoverPreviewMode, .cheatSheet)
+        let splitPreview = try XCTUnwrap(store.statusMenu.cheatSheetPreview)
+        XCTAssertEqual(splitPreview.keyCells.count, 20)
+        XCTAssertEqual(Set(splitPreview.keyCells.map(\.bindingId)).count, 20)
+
+        let miniHost = NSHostingView(rootView: PopoverMiniCheatSheetView(sheet: splitPreview).frame(width: 320))
+        miniHost.layoutSubtreeIfNeeded()
+        XCTAssertLessThanOrEqual(miniHost.fittingSize.width, 320.5)
+        XCTAssertLessThan(miniHost.fittingSize.height, 300)
+
+        ViewRenderTelemetry.reset()
+        let (splitWin, splitHost) = makeHostedWindow(
+            StatusMenuPopoverView(store: store, onOpenMainWindow: {}),
+            width: 348
+        )
+        defer { splitWin.orderOut(nil) }
+        XCTAssertEqual(splitHost.fittingSize.width, 348, accuracy: 1.0)
+        XCTAssertLessThan(splitHost.fittingSize.height, 700)
+        XCTAssertGreaterThan(splitHost.fittingSize.height, initialSessionHeight + 30)
+        XCTAssertFalse(hasScrollView(in: splitHost), "StatusMenuPopoverView in cheatSheet mode must never embed NSScrollView")
+        XCTAssertEqual(ViewRenderTelemetry.count("PopoverSessionPreviewSection"), 0)
+        XCTAssertGreaterThanOrEqual(ViewRenderTelemetry.count("PopoverMiniCheatSheetView"), 1)
+
+        let splitBitmap = try XCTUnwrap(splitHost.bitmapImageRepForCachingDisplay(in: splitHost.bounds))
+        splitHost.cacheDisplay(in: splitHost.bounds, to: splitBitmap)
+        XCTAssertNotNil(splitBitmap.representation(using: .png, properties: [:]))
+
+        let splitLayout = CheatSheetSpatialLayout(sheet: splitPreview)
+        XCTAssertTrue(splitLayout.isSplitBottomRow)
+        XCTAssertEqual(splitLayout.rows.count, 4)
+        for cell in splitPreview.keyCells {
+            XCTAssertFalse(cell.shortLabel.isEmpty)
+            XCTAssertFalse(cell.shortLabel.contains("…"), "Canonical split cheat-sheet shortLabel must not truncate with ellipsis: \(cell.shortLabel)")
+            if ["AG13", "AG14", "ENC_CLK"].contains(cell.bindingId) {
+                let w = (cell.shortLabel as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 9 * 0.75, weight: .medium)]).width
+                XCTAssertLessThanOrEqual(w, 52, "Rotary shortLabel \(cell.shortLabel) must fit 1U rotary row")
+            } else if ["AG15", "AG16", "AG17", "AG18"].contains(cell.bindingId) {
+                let h = (cell.shortLabel as NSString).boundingRect(
+                    with: NSSize(width: CGFloat(22), height: .greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: [.font: NSFont.systemFont(ofSize: 8 * 0.75, weight: .medium)]
+                ).height
+                XCTAssertLessThanOrEqual(h, 24, "Joystick shortLabel \(cell.shortLabel) must fit 2x2 quadrant height")
+            } else {
+                let h = (cell.shortLabel as NSString).boundingRect(
+                    with: NSSize(width: CGFloat(60), height: .greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: [.font: NSFont.systemFont(ofSize: 10.5 * 0.82, weight: .medium)]
+                ).height
+                XCTAssertLessThanOrEqual(h, 34, "1U key shortLabel \(cell.shortLabel) must fit 2-line budget")
+            }
+        }
+
+        store.dispatch("canvas", ["SetBottomRowLayout": "merged"])
+        let mergedPreview = try XCTUnwrap(store.statusMenu.cheatSheetPreview)
+        XCTAssertEqual(mergedPreview.keyCells.count, 19)
+        XCTAssertFalse(mergedPreview.keyCells.map(\.bindingId).contains("AG11"), "Merged 2U layout must omit AG11")
+        let mergedAg10 = try XCTUnwrap(mergedPreview.keyCells.first(where: { $0.bindingId == "AG10" }))
+        XCTAssertEqual(mergedAg10.shortLabel, "按住说话")
+        for cell in mergedPreview.keyCells {
+            XCTAssertFalse(cell.shortLabel.contains("…"), "Canonical merged cheat-sheet shortLabel must not contain ellipsis: \(cell.shortLabel)")
+        }
+
+        let (mergedWin, mergedHost) = makeHostedWindow(
+            StatusMenuPopoverView(store: store, onOpenMainWindow: {}),
+            width: 348
+        )
+        defer { mergedWin.orderOut(nil) }
+        XCTAssertEqual(mergedHost.fittingSize.width, 348, accuracy: 1.0)
+        XCTAssertLessThan(mergedHost.fittingSize.height, 700)
+
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let statusMenuSrc = try String(
+            contentsOf: repoRoot.appendingPathComponent("app/MicroInput/Sources/MicroInputUI/ModalsAndStatusMenuView.swift"),
+            encoding: .utf8
+        )
+        let workbenchSrc = try String(
+            contentsOf: repoRoot.appendingPathComponent("app/MicroInput/Sources/MicroInputUI/ClassicWorkbenchView.swift"),
+            encoding: .utf8
+        )
+        XCTAssertFalse(statusMenuSrc.contains("ToggleCheatSheet"), "Broken bottom 按键速查 action row must be removed from StatusMenuPopoverView")
+        XCTAssertFalse(statusMenuSrc.contains("隐藏按键速查"))
+        XCTAssertTrue(workbenchSrc.contains("菜单栏弹层内容"))
+        XCTAssertTrue(workbenchSrc.contains("popover-preview-mode-dropdown"))
+        XCTAssertTrue(workbenchSrc.contains("SetPopoverPreviewMode"))
+
+        store.dispatch("overlay", "ToggleCheatSheet")
+        XCTAssertTrue(store.overlay.cheatSheetVisible)
+        store.dispatch("overlay", "CloseCheatSheet")
+        XCTAssertFalse(store.overlay.cheatSheetVisible)
+        XCTAssertEqual(store.statusMenu.popoverPreviewMode, .cheatSheet)
+
+        let anchorWindow = NSWindow(
+            contentRect: NSRect(x: 100, y: 500, width: 80, height: 28),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        anchorWindow.isReleasedWhenClosed = false
+        let anchorButton = NSButton(frame: NSRect(x: 0, y: 0, width: 40, height: 24))
+        anchorWindow.contentView = anchorButton
+        anchorWindow.orderFrontRegardless()
+        defer {
+            anchorWindow.orderOut(nil)
+            anchorWindow.close()
+        }
+
+        let persistentPopover = NSPopover()
+        persistentPopover.animates = false
+        let hc = NSHostingController(
+            rootView: StatusMenuPopoverView(store: store, onOpenMainWindow: {})
+        )
+        hc.sizingOptions = [.preferredContentSize]
+        persistentPopover.contentViewController = hc
+        defer {
+            if persistentPopover.isShown {
+                persistentPopover.performClose(nil)
+            }
+        }
+
+        store.dispatch("status_menu", ["SetPopoverPreviewMode": PopoverPreviewMode.sessionPreview.rawValue])
+        hc.view.layoutSubtreeIfNeeded()
+        let size1 = hc.sizeThatFits(in: NSSize(width: CGFloat(348), height: .greatestFiniteMagnitude))
+        persistentPopover.contentSize = size1
+        persistentPopover.show(relativeTo: anchorButton.bounds, of: anchorButton, preferredEdge: .minY)
+        let h1 = persistentPopover.contentSize.height
+        XCTAssertEqual(size1.width, 348, accuracy: 1.0)
+        XCTAssertLessThan(h1, 640)
+        persistentPopover.performClose(nil)
+
+        store.dispatch("canvas", ["SetBottomRowLayout": "split"])
+        store.dispatch("status_menu", ["SetPopoverPreviewMode": PopoverPreviewMode.cheatSheet.rawValue])
+        hc.view.layoutSubtreeIfNeeded()
+        let size2 = hc.sizeThatFits(in: NSSize(width: CGFloat(348), height: .greatestFiniteMagnitude))
+        persistentPopover.contentSize = size2
+        persistentPopover.show(relativeTo: anchorButton.bounds, of: anchorButton, preferredEdge: .minY)
+        let h2 = persistentPopover.contentSize.height
+        XCTAssertEqual(size2.width, 348, accuracy: 1.0)
+        XCTAssertGreaterThan(h2, h1 + 30)
+        XCTAssertEqual(hc.view.frame.height, size2.height, accuracy: 2.0)
+        persistentPopover.performClose(nil)
+    }
+
+    @MainActor
     func testCheatSheetSpatialLayoutDeduplicatesRepeatedBindingIdsKeepingFirstEntry() {
         let sheet = CheatSheetModel(
             profileName: "Antigravity",
@@ -467,21 +651,48 @@ final class DesignSystemVerificationTests: XCTestCase {
             to: outputDir.appendingPathComponent("lighting-editor-slider.png")
         )
 
-        let statusPopover = VStack {
-            StatusMenuPopoverView(store: store, onOpenMainWindow: {})
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(UITheme.surface)
-                        .shadow(color: Color.black.opacity(0.10), radius: 14, x: 0, y: 6)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(UITheme.hairlineBorder, lineWidth: 1)
-                )
+        let makePopoverCard = {
+            VStack {
+                StatusMenuPopoverView(store: store, onOpenMainWindow: {})
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(UITheme.surface)
+                            .shadow(color: Color.black.opacity(0.10), radius: 14, x: 0, y: 6)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(UITheme.hairlineBorder, lineWidth: 1)
+                    )
+            }
+            .padding(20)
+            .background(UITheme.pageBackground)
         }
-        .padding(20)
+        store.dispatch("status_menu", ["SetPopoverPreviewMode": PopoverPreviewMode.sessionPreview.rawValue])
+        try saveSnapshot(makePopoverCard(), width: 388, to: outputDir.appendingPathComponent("status-menu-popover.png"))
+        try saveSnapshot(makePopoverCard(), width: 388, to: outputDir.appendingPathComponent("status-menu-popover-sessions.png"))
+
+        store.dispatch("canvas", ["SetBottomRowLayout": "split"])
+        store.dispatch("status_menu", ["SetPopoverPreviewMode": PopoverPreviewMode.cheatSheet.rawValue])
+        try saveSnapshot(makePopoverCard(), width: 388, to: outputDir.appendingPathComponent("status-menu-popover-cheatsheet.png"))
+
+        store.dispatch("canvas", ["SetBottomRowLayout": "merged"])
+        try saveSnapshot(makePopoverCard(), width: 388, to: outputDir.appendingPathComponent("status-menu-popover-cheatsheet-merged.png"))
+
+        let previewModeDropdownMenu = VStack {
+            DropdownMenuCardView(
+                options: PopoverPreviewMode.dropdownOptions,
+                selectedValue: .cheatSheet,
+                minWidth: 280,
+                hostedInPanel: true
+            ) { _ in }
+        }
+        .padding(12)
         .background(UITheme.pageBackground)
-        try saveSnapshot(statusPopover, width: 388, to: outputDir.appendingPathComponent("status-menu-popover.png"))
+        try saveSnapshot(
+            previewModeDropdownMenu,
+            width: 340,
+            to: outputDir.appendingPathComponent("popover-preview-mode-dropdown.png")
+        )
 
         store.dispatch("canvas", ["SetBottomRowLayout": "split"])
         store.dispatch("overlay", "ToggleCheatSheet")

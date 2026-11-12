@@ -421,12 +421,50 @@ public enum ActiveModalModel: Identifiable, Equatable {
     }
 }
 
+public enum PopoverPreviewMode: String, CaseIterable, Hashable, Equatable {
+    case sessionPreview = "session_preview"
+    case cheatSheet = "cheat_sheet"
+
+    public var title: String {
+        switch self {
+        case .sessionPreview: return "会话预览"
+        case .cheatSheet: return "按键速查"
+        }
+    }
+
+    public var subtitle: String {
+        switch self {
+        case .sessionPreview: return "显示 6 个活跃会话槽位（AG00–AG05）与未读完成提醒"
+        case .cheatSheet: return "显示当前生效方案的静态 4×4 物理坐标按键速查"
+        }
+    }
+
+    public static var dropdownOptions: [SelectOption<PopoverPreviewMode>] {
+        allCases.map { SelectOption(value: $0, title: $0.title, subtitle: $0.subtitle) }
+    }
+}
+
 public struct CheatSheetCellModel: Identifiable, Equatable {
     public var id: String { bindingId }
     public let bindingId: String
     public let controlName: String
     public let label: String
+    public let shortLabel: String
     public let available: Bool
+
+    public init(
+        bindingId: String,
+        controlName: String,
+        label: String,
+        shortLabel: String? = nil,
+        available: Bool
+    ) {
+        self.bindingId = bindingId
+        self.controlName = controlName
+        self.label = label
+        self.shortLabel = shortLabel ?? label
+        self.available = available
+    }
 }
 
 public struct CheatSheetModel: Equatable {
@@ -436,6 +474,22 @@ public struct CheatSheetModel: Equatable {
     public var agentPhaseLabel: String? = nil
     public var agentVoiceSummary: String? = nil
     public var keyCells: [CheatSheetCellModel] = []
+
+    public init(
+        profileName: String = "",
+        routingSummary: String = "",
+        agentName: String? = nil,
+        agentPhaseLabel: String? = nil,
+        agentVoiceSummary: String? = nil,
+        keyCells: [CheatSheetCellModel] = []
+    ) {
+        self.profileName = profileName
+        self.routingSummary = routingSummary
+        self.agentName = agentName
+        self.agentPhaseLabel = agentPhaseLabel
+        self.agentVoiceSummary = agentVoiceSummary
+        self.keyCells = keyCells
+    }
 }
 
 public struct HeaderSliceModel: Equatable {
@@ -456,6 +510,25 @@ public struct HeaderSliceModel: Equatable {
     public var documentRevision: Int = 0
     public var hostRevision: Int = 0
     public init() {}
+
+    public init(from m: ProjectionModel) {
+        self.readyKind = m.readyKind
+        self.readyText = m.readyText
+        self.bannerKind = m.bannerKind
+        self.bannerText = m.bannerText
+        self.showConnectButton = m.showConnectButton
+        self.showReturnToHostButton = m.showReturnToHostButton
+        self.hostExecutionEnabled = m.hostExecutionEnabled
+        self.canEditDraft = m.canEditDraft
+        self.canUndo = m.canUndo
+        self.canRedo = m.canRedo
+        self.busy = m.busy
+        self.cheatSheetVisible = m.cheatSheetVisible
+        self.deviceConnected = m.deviceConnected
+        self.deviceSummary = m.deviceSummary
+        self.documentRevision = m.documentRevision
+        self.hostRevision = m.hostRevision
+    }
 }
 
 public struct SidebarSliceModel: Equatable {
@@ -477,6 +550,26 @@ public struct SidebarSliceModel: Equatable {
     public var isProtectedLayer: Bool = false
     public var lastExportedPreset: String? = nil
     public init() {}
+
+    public init(from m: ProjectionModel) {
+        self.sidebarRows = m.sidebarRows
+        self.boardLayers = m.boardLayers
+        self.selectedProfileId = m.selectedProfileId
+        self.selectedDisplayName = m.selectedDisplayName
+        self.activeHostProfileId = m.activeHostProfileId
+        self.autoSwitchState = m.autoSwitchState
+        self.autoFollowEnabled = m.autoFollowEnabled
+        self.showOtherProfiles = m.showOtherProfiles
+        self.editingDevice = m.editingDevice
+        self.canMoveUp = m.canMoveUp
+        self.canMoveDown = m.canMoveDown
+        self.canDelete = m.canDelete
+        self.selectedLayerId = m.selectedLayerId
+        self.layerTabs = m.layerTabs
+        self.inspectorLayerName = m.inspectorLayerName
+        self.isProtectedLayer = m.isProtectedLayer
+        self.lastExportedPreset = m.lastExportedPreset
+    }
 
     public var selectedRawName: String {
         sidebarRows.first(where: { $0.isSelected })?.rawName ?? selectedDisplayName
@@ -515,6 +608,39 @@ public struct CanvasSliceModel: Equatable {
     public var deviceConnected: Bool = false
     public var hostExecutionEnabled: Bool = false
     public init() {}
+
+    public init(from m: ProjectionModel) {
+        self.selectedProfileId = m.selectedProfileId
+        self.selectedDisplayName = m.selectedDisplayName
+        self.selectedLayerId = m.selectedLayerId
+        self.selectedSurface = m.selectedSurface
+        self.selectedLogicalSlot = m.selectedLogicalSlot
+        self.selectedJoystickDirection = m.selectedJoystickDirection
+        self.bottomRowLayout = m.bottomRowLayout
+        self.showKeycapIcons = m.showKeycapIcons
+        self.showKeycapLabels = m.showKeycapLabels
+        self.encoderCcwLabel = m.encoderCcwLabel
+        self.encoderCwLabel = m.encoderCwLabel
+        self.encoderPressLabel = m.encoderPressLabel
+        self.encoderSelectedSlot = m.encoderSelectedSlot
+        self.encoderRingGlowHex = m.encoderRingGlowHex
+        self.joystickModeLabel = m.joystickModeLabel
+        self.joystickActiveDirection = m.joystickActiveDirection
+        self.joystickIsSelected = m.joystickIsSelected
+        self.joystickSectors = m.joystickSectors
+        self.keycapCells = m.keycapCells
+        self.statusLedHex = m.statusLedHex
+        self.underglowHex = m.underglowHex
+        self.boardPreviewLayer = m.boardPreviewLayer
+        self.touchLedStates = m.touchLedStates
+        self.boardPreviewLabel = m.boardPreviewLabel
+        self.protectedLock = m.protectedLock
+        self.canEditBindings = m.canEditBindings
+        self.canAddLighting = m.canAddLighting
+        self.canExportOrCopyLayer = m.canExportOrCopyLayer
+        self.deviceConnected = m.deviceConnected
+        self.hostExecutionEnabled = m.hostExecutionEnabled
+    }
 }
 
 public struct SessionStripSliceModel: Equatable {
@@ -528,6 +654,18 @@ public struct SessionStripSliceModel: Equatable {
     public var canMutateSessionLayout: Bool = true
     public var simpleLighting: SimpleLightingModel = SimpleLightingModel()
     public init() {}
+
+    public init(from m: ProjectionModel) {
+        self.sessionSlots = m.sessionSlots
+        self.completedPills = m.completedPills
+        self.workingPills = m.workingPills
+        self.attentionPills = m.attentionPills
+        self.unreadCompletedCount = m.unreadCompletedCount
+        self.workingCount = m.workingCount
+        self.topSixBoundAsSessionKeys = m.topSixBoundAsSessionKeys
+        self.canMutateSessionLayout = m.canMutateSessionLayout
+        self.simpleLighting = m.simpleLighting
+    }
 }
 
 public struct InspectorSliceModel: Equatable {
@@ -543,6 +681,23 @@ public struct InspectorSliceModel: Equatable {
     public var protectedLock: ProtectedLockModel? = nil
     public var editableInspector: EditableInspectorModel? = EditableInspectorModel()
     public init() {}
+
+    public init(from m: ProjectionModel) {
+        self.selectedProfileId = m.selectedProfileId
+        self.selectedDisplayName = m.selectedDisplayName
+        self.selectedLogicalSlot = m.selectedLogicalSlot
+        self.selectedSurface = m.selectedSurface
+        self.selectedJoystickDirection = m.selectedJoystickDirection
+        self.bottomRowLayout = m.bottomRowLayout
+        let slotCell = m.keycapCells.first(where: {
+            $0.primarySlot == m.selectedLogicalSlot || $0.effectiveSlot == m.selectedLogicalSlot
+        })
+        self.selectedSlotRole = slotCell?.slotRole ?? m.editableInspector?.slotRole ?? "ActionKey"
+        self.inspectorLayerName = m.inspectorLayerName
+        self.isProtectedLayer = m.isProtectedLayer
+        self.protectedLock = m.protectedLock
+        self.editableInspector = m.editableInspector
+    }
 }
 
 public struct StatusMenuSliceModel: Equatable {
@@ -557,12 +712,35 @@ public struct StatusMenuSliceModel: Equatable {
     public var radialConfirmMode: String = "encoder_press"
     public var radialReadiness: String = "Ready"
     public var radialSlots: [RadialSlotConfigModel] = []
-    public var cheatSheetVisible: Bool = false
+    public var lightingEnabled: Bool = true
+    public var popoverPreviewMode: PopoverPreviewMode = .sessionPreview
+    public var cheatSheetPreview: CheatSheetModel? = nil
     public var pendingImportName: String? = nil
     public var pendingImportSummary: String? = nil
     public var pendingExportScope: String? = nil
     public var presetError: String? = nil
     public init() {}
+
+    public init(from m: ProjectionModel) {
+        self.statusMenuIconTitle = m.statusMenuIconTitle
+        self.activeProfileName = m.activeProfileName
+        self.routingModeSummary = m.routingModeSummary
+        self.favorites2x2 = m.favorites2x2
+        self.hostExecutionEnabled = m.hostExecutionEnabled
+        self.autoFollowEnabled = m.autoFollowEnabled
+        self.manualOverride = m.manualOverride
+        self.radialMenuEnabled = m.radialMenuEnabled
+        self.radialConfirmMode = m.radialConfirmMode
+        self.radialReadiness = m.radialReadiness
+        self.radialSlots = m.radialSlots
+        self.lightingEnabled = m.lightingEnabled
+        self.popoverPreviewMode = m.popoverPreviewMode
+        self.cheatSheetPreview = m.cheatSheetPreview
+        self.pendingImportName = m.pendingImportName
+        self.pendingImportSummary = m.pendingImportSummary
+        self.pendingExportScope = m.pendingExportScope
+        self.presetError = m.presetError
+    }
 }
 
 public struct OverlaySliceModel: Equatable {
@@ -571,6 +749,13 @@ public struct OverlaySliceModel: Equatable {
     public var passiveToastTitle: String? = nil
     public var passiveToastSubtitle: String? = nil
     public init() {}
+
+    public init(from m: ProjectionModel) {
+        self.cheatSheetVisible = m.cheatSheetVisible
+        self.cheatSheet = m.cheatSheet
+        self.passiveToastTitle = m.passiveToastTitle
+        self.passiveToastSubtitle = m.passiveToastSubtitle
+    }
 }
 
 public struct FooterSliceModel: Equatable {
@@ -578,6 +763,12 @@ public struct FooterSliceModel: Equatable {
     public var footerStatusText: String = "就绪"
     public var footerLimitText: String = "长按说话上限 120 秒，响应超时 8 秒"
     public init() {}
+
+    public init(from m: ProjectionModel) {
+        self.statusMessage = m.statusMessage
+        self.footerStatusText = m.footerStatusText
+        self.footerLimitText = m.footerLimitText
+    }
 }
 
 public struct ProjectionModel: Equatable {
@@ -659,6 +850,9 @@ public struct ProjectionModel: Equatable {
     public var radialConfirmMode: String = "encoder_press"
     public var radialReadiness: String = "Ready"
     public var radialSlots: [RadialSlotConfigModel] = []
+    public var lightingEnabled: Bool = true
+    public var popoverPreviewMode: PopoverPreviewMode = .sessionPreview
+    public var cheatSheetPreview: CheatSheetModel? = nil
     public var cheatSheetVisible: Bool = false
     public var cheatSheet: CheatSheetModel? = nil
     public var passiveToastTitle: String? = nil

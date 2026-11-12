@@ -153,158 +153,31 @@ public final class CoreStore {
     }
 
     private func commitDomainSlices(from m: ProjectionModel) {
-        var nextHeader = HeaderSliceModel()
-        nextHeader.readyKind = m.readyKind
-        nextHeader.readyText = m.readyText
-        nextHeader.bannerKind = m.bannerKind
-        nextHeader.bannerText = m.bannerText
-        nextHeader.showConnectButton = m.showConnectButton
-        nextHeader.showReturnToHostButton = m.showReturnToHostButton
-        nextHeader.hostExecutionEnabled = m.hostExecutionEnabled
-        nextHeader.canEditDraft = m.canEditDraft
-        nextHeader.canUndo = m.canUndo
-        nextHeader.canRedo = m.canRedo
-        nextHeader.busy = m.busy
-        nextHeader.cheatSheetVisible = m.cheatSheetVisible
-        nextHeader.deviceConnected = m.deviceConnected
-        nextHeader.deviceSummary = m.deviceSummary
-        nextHeader.documentRevision = m.documentRevision
-        nextHeader.hostRevision = m.hostRevision
-        if self.header != nextHeader {
-            self.header = nextHeader
-        }
+        let nextHeader = HeaderSliceModel(from: m)
+        if self.header != nextHeader { self.header = nextHeader }
 
-        var nextSidebar = SidebarSliceModel()
-        nextSidebar.sidebarRows = m.sidebarRows
-        nextSidebar.boardLayers = m.boardLayers
-        nextSidebar.selectedProfileId = m.selectedProfileId
-        nextSidebar.selectedDisplayName = m.selectedDisplayName
-        nextSidebar.activeHostProfileId = m.activeHostProfileId
-        nextSidebar.autoSwitchState = m.autoSwitchState
-        nextSidebar.autoFollowEnabled = m.autoFollowEnabled
-        nextSidebar.showOtherProfiles = m.showOtherProfiles
-        nextSidebar.editingDevice = m.editingDevice
-        nextSidebar.canMoveUp = m.canMoveUp
-        nextSidebar.canMoveDown = m.canMoveDown
-        nextSidebar.canDelete = m.canDelete
-        nextSidebar.selectedLayerId = m.selectedLayerId
-        nextSidebar.layerTabs = m.layerTabs
-        nextSidebar.inspectorLayerName = m.inspectorLayerName
-        nextSidebar.isProtectedLayer = m.isProtectedLayer
-        nextSidebar.lastExportedPreset = m.lastExportedPreset
-        if self.sidebar != nextSidebar {
-            self.sidebar = nextSidebar
-        }
+        let nextSidebar = SidebarSliceModel(from: m)
+        if self.sidebar != nextSidebar { self.sidebar = nextSidebar }
 
-        var nextCanvas = CanvasSliceModel()
-        nextCanvas.selectedProfileId = m.selectedProfileId
-        nextCanvas.selectedDisplayName = m.selectedDisplayName
-        nextCanvas.selectedLayerId = m.selectedLayerId
-        nextCanvas.selectedSurface = m.selectedSurface
-        nextCanvas.selectedLogicalSlot = m.selectedLogicalSlot
-        nextCanvas.selectedJoystickDirection = m.selectedJoystickDirection
-        nextCanvas.bottomRowLayout = m.bottomRowLayout
-        nextCanvas.showKeycapIcons = m.showKeycapIcons
-        nextCanvas.showKeycapLabels = m.showKeycapLabels
-        nextCanvas.encoderCcwLabel = m.encoderCcwLabel
-        nextCanvas.encoderCwLabel = m.encoderCwLabel
-        nextCanvas.encoderPressLabel = m.encoderPressLabel
-        nextCanvas.encoderSelectedSlot = m.encoderSelectedSlot
-        nextCanvas.encoderRingGlowHex = m.encoderRingGlowHex
-        nextCanvas.joystickModeLabel = m.joystickModeLabel
-        nextCanvas.joystickActiveDirection = m.joystickActiveDirection
-        nextCanvas.joystickIsSelected = m.joystickIsSelected
-        nextCanvas.joystickSectors = m.joystickSectors
-        nextCanvas.keycapCells = m.keycapCells
-        nextCanvas.statusLedHex = m.statusLedHex
-        nextCanvas.underglowHex = m.underglowHex
-        nextCanvas.boardPreviewLayer = m.boardPreviewLayer
-        nextCanvas.touchLedStates = m.touchLedStates
-        nextCanvas.boardPreviewLabel = m.boardPreviewLabel
-        nextCanvas.protectedLock = m.protectedLock
-        nextCanvas.canEditBindings = m.canEditBindings
-        nextCanvas.canAddLighting = m.canAddLighting
-        nextCanvas.canExportOrCopyLayer = m.canExportOrCopyLayer
-        nextCanvas.deviceConnected = m.deviceConnected
-        nextCanvas.hostExecutionEnabled = m.hostExecutionEnabled
-        if self.canvas != nextCanvas {
-            self.canvas = nextCanvas
-        }
+        let nextCanvas = CanvasSliceModel(from: m)
+        if self.canvas != nextCanvas { self.canvas = nextCanvas }
 
-        var nextSessionStrip = SessionStripSliceModel()
-        nextSessionStrip.sessionSlots = m.sessionSlots
-        nextSessionStrip.completedPills = m.completedPills
-        nextSessionStrip.workingPills = m.workingPills
-        nextSessionStrip.attentionPills = m.attentionPills
-        nextSessionStrip.unreadCompletedCount = m.unreadCompletedCount
-        nextSessionStrip.workingCount = m.workingCount
-        nextSessionStrip.topSixBoundAsSessionKeys = m.topSixBoundAsSessionKeys
-        nextSessionStrip.canMutateSessionLayout = m.canMutateSessionLayout
-        nextSessionStrip.simpleLighting = m.simpleLighting
-        if self.sessionStrip != nextSessionStrip {
-            self.sessionStrip = nextSessionStrip
-        }
+        let nextSessionStrip = SessionStripSliceModel(from: m)
+        if self.sessionStrip != nextSessionStrip { self.sessionStrip = nextSessionStrip }
 
-        var nextInspector = InspectorSliceModel()
-        nextInspector.selectedProfileId = m.selectedProfileId
-        nextInspector.selectedDisplayName = m.selectedDisplayName
-        nextInspector.selectedLogicalSlot = m.selectedLogicalSlot
-        nextInspector.selectedSurface = m.selectedSurface
-        nextInspector.selectedJoystickDirection = m.selectedJoystickDirection
-        nextInspector.bottomRowLayout = m.bottomRowLayout
-        let slotCell = m.keycapCells.first(where: {
-            $0.primarySlot == m.selectedLogicalSlot || $0.effectiveSlot == m.selectedLogicalSlot
-        })
-        nextInspector.selectedSlotRole = slotCell?.slotRole ?? m.editableInspector?.slotRole ?? "ActionKey"
-        nextInspector.inspectorLayerName = m.inspectorLayerName
-        nextInspector.isProtectedLayer = m.isProtectedLayer
-        nextInspector.protectedLock = m.protectedLock
-        nextInspector.editableInspector = m.editableInspector
-        if self.inspector != nextInspector {
-            self.inspector = nextInspector
-        }
+        let nextInspector = InspectorSliceModel(from: m)
+        if self.inspector != nextInspector { self.inspector = nextInspector }
 
-        var nextStatusMenu = StatusMenuSliceModel()
-        nextStatusMenu.statusMenuIconTitle = m.statusMenuIconTitle
-        nextStatusMenu.activeProfileName = m.activeProfileName
-        nextStatusMenu.routingModeSummary = m.routingModeSummary
-        nextStatusMenu.favorites2x2 = m.favorites2x2
-        nextStatusMenu.hostExecutionEnabled = m.hostExecutionEnabled
-        nextStatusMenu.autoFollowEnabled = m.autoFollowEnabled
-        nextStatusMenu.manualOverride = m.manualOverride
-        nextStatusMenu.radialMenuEnabled = m.radialMenuEnabled
-        nextStatusMenu.radialConfirmMode = m.radialConfirmMode
-        nextStatusMenu.radialReadiness = m.radialReadiness
-        nextStatusMenu.radialSlots = m.radialSlots
-        nextStatusMenu.cheatSheetVisible = m.cheatSheetVisible
-        nextStatusMenu.pendingImportName = m.pendingImportName
-        nextStatusMenu.pendingImportSummary = m.pendingImportSummary
-        nextStatusMenu.pendingExportScope = m.pendingExportScope
-        nextStatusMenu.presetError = m.presetError
-        if self.statusMenu != nextStatusMenu {
-            self.statusMenu = nextStatusMenu
-        }
+        let nextStatusMenu = StatusMenuSliceModel(from: m)
+        if self.statusMenu != nextStatusMenu { self.statusMenu = nextStatusMenu }
 
-        var nextOverlay = OverlaySliceModel()
-        nextOverlay.cheatSheetVisible = m.cheatSheetVisible
-        nextOverlay.cheatSheet = m.cheatSheet
-        nextOverlay.passiveToastTitle = m.passiveToastTitle
-        nextOverlay.passiveToastSubtitle = m.passiveToastSubtitle
-        if self.overlay != nextOverlay {
-            self.overlay = nextOverlay
-        }
+        let nextOverlay = OverlaySliceModel(from: m)
+        if self.overlay != nextOverlay { self.overlay = nextOverlay }
 
-        var nextFooter = FooterSliceModel()
-        nextFooter.statusMessage = m.statusMessage
-        nextFooter.footerStatusText = m.footerStatusText
-        nextFooter.footerLimitText = m.footerLimitText
-        if self.footer != nextFooter {
-            self.footer = nextFooter
-        }
+        let nextFooter = FooterSliceModel(from: m)
+        if self.footer != nextFooter { self.footer = nextFooter }
 
-        if self.activeModal != m.activeModal {
-            self.activeModal = m.activeModal
-        }
+        if self.activeModal != m.activeModal { self.activeModal = m.activeModal }
     }
 
     private static func parseProjection(_ root: [String: Any]) -> ProjectionModel {
@@ -560,6 +433,9 @@ public final class CoreStore {
             m.manualOverride = sm["manual_override"] as? Bool ?? false
             m.radialMenuEnabled = sm["radial_menu_enabled"] as? Bool ?? false
             m.radialConfirmMode = sm["radial_confirm_mode"] as? String ?? "encoder_press"
+            m.lightingEnabled = sm["lighting_enabled"] as? Bool ?? true
+            m.popoverPreviewMode = (sm["popover_preview_mode"] as? String).flatMap(PopoverPreviewMode.init(rawValue:)) ?? .sessionPreview
+            m.cheatSheetPreview = (sm["cheat_sheet_preview"] as? [String: Any]).map(parseCheatSheet)
             m.cheatSheetVisible = sm["cheat_sheet_visible"] as? Bool ?? false
             m.presetError = sm["preset_error"] as? String
             m.pendingExportScope = sm["pending_export_scope"] as? String
@@ -752,6 +628,7 @@ public final class CoreStore {
                     bindingId: c["binding_id"] as? String ?? "",
                     controlName: c["control_name"] as? String ?? "",
                     label: c["label"] as? String ?? "",
+                    shortLabel: c["short_label"] as? String,
                     available: c["available"] as? Bool ?? true
                 )
             }
@@ -919,25 +796,6 @@ public final class CoreStore {
             canEditSpeed: z["can_edit_speed"] as? Bool ?? false,
             canEditMagic: z["can_edit_magic"] as? Bool ?? false
         )
-    }
-}
-
-public extension Color {
-    init(hex: String) {
-        let cleaned = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        var val: UInt64 = 0
-        Scanner(string: cleaned).scanHexInt64(&val)
-        let r, g, b: Double
-        if cleaned.count == 6 {
-            r = Double((val >> 16) & 0xFF) / 255.0
-            g = Double((val >> 8) & 0xFF) / 255.0
-            b = Double(val & 0xFF) / 255.0
-        } else {
-            r = 0.23
-            g = 0.51
-            b = 0.96
-        }
-        self.init(red: r, green: g, blue: b)
     }
 }
 

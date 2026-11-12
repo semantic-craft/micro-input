@@ -63,7 +63,7 @@ use mi_model::{
     document::{LayerNode, LocalDocumentV2},
     draft::{Action, ActionKind, Draft},
     host_router::{
-        resolve_host_action_with_layout, BottomRowLayout, ResolvedHostAction,
+        resolve_host_action_with_layout, BottomRowLayout, PopoverPreviewMode, ResolvedHostAction,
         CANONICAL_DESKTOP_AGENT_PROFILES,
     },
     lighting::{Edit as LightingEdit, Effect as LightingEffect, Lighting, Zone as LightingZone},
@@ -103,6 +103,7 @@ use session_navigation::{
 use workspace_lifecycle::SystemLifecycle;
 #[path = "projection.rs"]
 mod projection;
+pub use projection::format_popover_cheat_label;
 use projection::{ProjectionInputs, SixLayerView};
 #[path = "runtime_inbox.rs"]
 mod runtime_inbox;
@@ -1381,7 +1382,14 @@ impl WorkbenchStore {
     }
 
     pub fn ensure_default_pinned_favorites(&mut self) {
-        let profiles = &self.document_store.draft.document.editable.graph.profiles;
+        let profiles = &self
+            .document_store
+            .host_store()
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles;
         for (idx, agent) in PinnedFavoritesGrid::DEFAULT_AGENTS.into_iter().enumerate() {
             let valid_existing = self.pinned_favorites.slots[idx]
                 .as_ref()
@@ -2214,11 +2222,31 @@ impl WorkbenchStore {
     }
 
     fn default_host_profile_id(&self, agent: CanonicalAgent) -> Option<String> {
+        let profiles = &self
+            .document_store
+            .host_store()
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles;
+        let canonical_match = || {
+            profiles
+                .iter()
+                .find(|(_, p)| {
+                    p.name != mi_model::preset::LOCAL_CODEX_PROFILE_NAME
+                        && CanonicalAgent::from_profile_name(&p.name) == Some(agent)
+                })
+                .map(|(pid, _)| pid.clone())
+        };
         if agent == CanonicalAgent::Codex {
-            self.local_codex_profile_id()
-                .or_else(|| self.find_canonical_profile_id(agent))
+            profiles
+                .iter()
+                .find(|(_, p)| p.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
+                .map(|(pid, _)| pid.clone())
+                .or_else(canonical_match)
         } else {
-            self.find_canonical_profile_id(agent)
+            canonical_match()
         }
     }
 
@@ -3687,6 +3715,11 @@ impl WorkbenchStore {
             }
             StatusMenuAction::ApplyRadialPreset(preset) => {
                 self.apply_radial_preset(preset);
+                Ok(())
+            }
+            StatusMenuAction::SetPopoverPreviewMode(mode) => {
+                self.apply_routing_operation(RoutingOperation::PopoverPreviewMode { mode })?;
+                self.commit_runtime_update();
                 Ok(())
             }
             StatusMenuAction::ToggleCheatSheet => {
@@ -6727,3 +6760,96 @@ fn poll_antigravity_daemon_candidates_with_frontmost(
 #[cfg(test)]
 #[path = "runtime_consistency_tests.rs"]
 mod runtime_consistency_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_menu_cheat_sheet_retains_host_profile_during_device_editing_and_clears_when_unselected(
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = WorkbenchStoreConfig::isolated(dir.path());
+        cfg.isolated = false;
+        let mut store = WorkbenchStore::open(cfg).expect("open store");
+        let antigravity_id = store
+            .find_canonical_profile_id(CanonicalAgent::Antigravity)
+            .expect("Antigravity profile");
+        store
+            .select_and_activate_profile(&antigravity_id)
+            .expect("activate Antigravity");
+        store
+            .dispatch_status_menu_action(StatusMenuAction::SetPopoverPreviewMode(
+                PopoverPreviewMode::CheatSheet,
+            ))
+            .expect("enable cheat sheet preview");
+
+        let host_sheet = store
+            .projection()
+            .status_menu
+            .cheat_sheet_preview
+            .clone()
+            .expect("host cheat sheet preview");
+        assert_eq!(
+            store.projection().status_menu.active_profile_name,
+            "Antigravity"
+        );
+        assert_eq!(host_sheet.profile_name, "Antigravity");
+        assert!(host_sheet
+            .key_cells
+            .iter()
+            .any(|c| c.available && c.short_label != "未绑定"));
+
+        let mut raw_demo = mi_model::demo().expect("demo config").raw;
+        raw_demo["version"] = json!(1);
+        let keymap_bytes = serde_json::to_vec(&raw_demo).expect("keymap bytes");
+        let keymap_file = mi_model::operation_record::file_value(&keymap_bytes);
+        let sha1 = keymap_file["sha1"].as_str().unwrap_or_default().to_string();
+        let baseline = json!({
+            "firmware": "0.6.3",
+            "device_identity": {
+                "confidence": "verified-serial",
+                "serial": "creator-micro-2-local",
+                "session_id": 1
+            },
+            "keymap": keymap_file,
+            "smart_actions": { "state": "missing" },
+            "files": [{
+                "name": "keymap",
+                "state": "present",
+                "size": keymap_bytes.len(),
+                "sha1": sha1
+            }]
+        });
+        let device_cfg =
+            mi_model::parse_device_files(&keymap_bytes, None).expect("parse device keymap");
+        store
+            .document_store
+            .begin_device_editing(device_cfg, baseline)
+            .expect("enter device editing");
+        assert!(store.document_store.editing_device());
+        store.commit_runtime_update();
+
+        let device_editing_menu = &store.projection().status_menu;
+        assert_eq!(device_editing_menu.active_profile_name, "Antigravity");
+        assert_eq!(device_editing_menu.favorites_2x2[0].title, "Antigravity");
+        assert!(device_editing_menu.favorites_2x2[0].is_active);
+        assert_eq!(
+            device_editing_menu.cheat_sheet_preview.as_ref(),
+            Some(&host_sheet)
+        );
+
+        store.document_store.return_to_host();
+        store
+            .document_store
+            .set_host_active_profile(None)
+            .expect("clear active host profile");
+        store.commit_runtime_update();
+
+        assert_eq!(
+            store.projection().status_menu.active_profile_name,
+            "未选择方案"
+        );
+        assert!(store.projection().status_menu.cheat_sheet_preview.is_none());
+    }
+}

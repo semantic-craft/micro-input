@@ -834,6 +834,16 @@ private struct WorkbenchSettingsPage: View {
                                 .labelsHidden()
                                 .toggleStyle(NeutralSwitchToggleStyle())
                             }
+                            SettingsRow("菜单栏弹层内容", subtitle: "预设点击菜单栏图标时中部展示活跃会话槽位或静态 4×4 按键速查", showsDivider: true) {
+                                SelectDropdown(
+                                    options: PopoverPreviewMode.dropdownOptions,
+                                    selection: store.statusMenu.popoverPreviewMode,
+                                    minTriggerWidth: 132
+                                ) { chosen in
+                                    store.dispatch("status_menu", ["SetPopoverPreviewMode": chosen.rawValue])
+                                }
+                                .accessibilityIdentifier("popover-preview-mode-dropdown")
+                            }
                             SettingsRow("按键速查浮层", subtitle: "查看当前方案 4×4 物理坐标按键绑定") {
                                 Button("查看按键速查") {
                                     store.dispatch("overlay", "ToggleCheatSheet")

@@ -79,6 +79,7 @@ impl ProjectionInputs<'_> {
         let pid = self.resolved_active_profile_id()?;
         let profile = self
             .document_store
+            .host_store()
             .draft
             .document
             .editable
@@ -105,6 +106,7 @@ impl ProjectionInputs<'_> {
         };
         let Some(profile) = self
             .document_store
+            .host_store()
             .draft
             .document
             .editable
@@ -522,8 +524,8 @@ impl ProjectionInputs<'_> {
         }
     }
 
-    pub(super) fn build_cheat_sheet_projection(&self) -> CheatSheetProjection {
-        let doc = &self.document_store.draft.document;
+    pub(super) fn build_static_cheat_sheet_projection(&self) -> CheatSheetProjection {
+        let doc = &self.document_store.host_store().draft.document;
         let graph = &doc.editable.graph;
         let pid_opt = self.resolved_active_profile_id();
         let layer = pid_opt
@@ -533,7 +535,7 @@ impl ProjectionInputs<'_> {
             .and_then(|lid| graph.layers.get(lid));
 
         let is_split = self.current_bottom_row_layout() == BottomRowLayout::Split;
-        let slot_defs: [(u32, &str, &str); 19] = [
+        let slot_defs: [(u32, &str, &str); 20] = [
             (0, "AG00", "左上键"),
             (1, "AG01", "右上键"),
             (2, "AG02", "按键 03"),
@@ -561,6 +563,7 @@ impl ProjectionInputs<'_> {
             (16, "AG15", "摇杆（上）"),
             (17, "AG16", "摇杆（左）"),
             (18, "AG17", "摇杆（下）"),
+            (19, "AG18", "摇杆（右）"),
         ];
 
         let mut key_cells = Vec::with_capacity(20);
@@ -568,23 +571,33 @@ impl ProjectionInputs<'_> {
             if slot == 11 && !is_split {
                 continue;
             }
-            let (label, act_opt) = resolve_slot_action_info(doc, layer, slot);
+            let effective_slot = if !is_split && slot == 10 {
+                resolve_merged_bottom_slot(doc, layer)
+            } else {
+                slot
+            };
+            let (label, act_opt) = resolve_slot_action_info(doc, layer, effective_slot);
+            let short_label = format_popover_cheat_label(&label);
             key_cells.push(CheatSheetKeyCellProjection {
                 binding_id: binding_id.to_string(),
                 control_name: control_name.to_string(),
                 label,
+                short_label,
                 available: act_opt.is_some(),
             });
         }
-        let (label_right, act_right) = resolve_slot_action_info(doc, layer, 19);
-        key_cells.push(CheatSheetKeyCellProjection {
-            binding_id: "AG18".to_string(),
-            control_name: "摇杆（右）".to_string(),
-            label: label_right,
-            available: act_right.is_some(),
-        });
 
-        let target_agent_card = self.active_desktop_agent_adapter().map(|adapter| {
+        CheatSheetProjection {
+            profile_name: self.active_profile_display_name(),
+            routing_summary: self.routing_mode_summary_label(),
+            target_agent_card: None,
+            key_cells,
+        }
+    }
+
+    pub(super) fn build_cheat_sheet_projection(&self) -> CheatSheetProjection {
+        let mut sheet = self.build_static_cheat_sheet_projection();
+        sheet.target_agent_card = self.active_desktop_agent_adapter().map(|adapter| {
             let agent_name = self
                 .active_canonical_agent()
                 .map(|a| a.display_name().to_string())
@@ -615,13 +628,7 @@ impl ProjectionInputs<'_> {
                 confirm_mode: self.radial_state.confirm_mode(),
             }
         });
-
-        CheatSheetProjection {
-            profile_name: self.active_profile_display_name(),
-            routing_summary: self.routing_mode_summary_label(),
-            target_agent_card,
-            key_cells,
-        }
+        sheet
     }
 
     pub(super) fn build_inspector_projection(
@@ -1027,7 +1034,14 @@ impl ProjectionInputs<'_> {
         &self,
         can_edit_draft: bool,
     ) -> StatusMenuProjection {
-        let profiles = &self.document_store.draft.document.editable.graph.profiles;
+        let profiles = &self
+            .document_store
+            .host_store()
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles;
         let active_pid = self.resolved_active_profile_id();
         let favorites_2x2: [FavoriteSlotCardProjection; FAVORITE_SLOT_COUNT] =
             std::array::from_fn(|idx| {
@@ -1052,6 +1066,13 @@ impl ProjectionInputs<'_> {
             });
 
         let is_protected = self.is_selected_layer_protected();
+        let popover_preview_mode = self.document_store.popover_preview_mode();
+        let cheat_sheet_preview = match (popover_preview_mode, active_pid.is_some()) {
+            (PopoverPreviewMode::CheatSheet, true) => {
+                Some(self.build_static_cheat_sheet_projection())
+            }
+            _ => None,
+        };
         StatusMenuProjection {
             icon: StatusItemIconSpec::canonical(),
             active_profile_id: active_pid,
@@ -1063,6 +1084,9 @@ impl ProjectionInputs<'_> {
             manual_override: self.manual_override,
             radial_menu_enabled: self.radial_state.enabled(),
             radial_confirm_mode: self.radial_state.confirm_mode(),
+            lighting_enabled: self.lighting_popover.lighting_enabled,
+            popover_preview_mode,
+            cheat_sheet_preview,
             cheat_sheet_visible: self.overlay_controller.is_cheat_sheet_visible(),
             can_export_profile: can_edit_draft && self.selected_profile_id.is_some(),
             can_export_layer: can_edit_draft && !is_protected && self.selected_layer_id.is_some(),
@@ -1472,6 +1496,7 @@ impl ProjectionInputs<'_> {
         }
         self.document_store.host_active_profile_id().filter(|pid| {
             self.document_store
+                .host_store()
                 .draft
                 .document
                 .editable
@@ -1622,5 +1647,154 @@ impl ProjectionInputs<'_> {
             self.current_bottom_row_layout(),
             self.command_execution_enabled,
         )
+    }
+}
+
+fn strip_popover_parens(mut s: &str) -> &str {
+    loop {
+        s = s.trim();
+        let Some(first) = s.chars().next() else {
+            return "";
+        };
+        if first != '(' && first != '（' {
+            let base = s.split(['(', '（']).next().unwrap_or(s).trim();
+            return if base.is_empty() { s } else { base };
+        }
+
+        let mut depth = 0usize;
+        let mut close_end = None;
+        for (idx, ch) in s.char_indices() {
+            match ch {
+                '(' | '（' => depth += 1,
+                ')' | '）' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        close_end = Some(idx + ch.len_utf8());
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        match close_end {
+            Some(end) if end < s.len() => {
+                let after = s[end..].trim();
+                if !after.is_empty() {
+                    s = after;
+                    continue;
+                }
+                return s;
+            }
+            Some(end) => {
+                let last_len = s.chars().next_back().map_or(0, char::len_utf8);
+                s = &s[first.len_utf8()..end.saturating_sub(last_len)];
+            }
+            None => {
+                let rest = s[first.len_utf8()..].trim();
+                return if rest.is_empty() { s } else { rest };
+            }
+        }
+    }
+}
+
+pub fn format_popover_cheat_label(raw_label: &str) -> String {
+    let trimmed = raw_label.trim();
+    if trimmed.is_empty() {
+        return "未绑定".to_string();
+    }
+
+    let dot_selected = if let Some((left, right)) = trimmed.split_once('·') {
+        let left_trim = left.trim();
+        let right_trim = right.trim();
+        if right_trim.starts_with("松开停止")
+            || right_trim.starts_with("AG")
+            || right_trim == "ENC_CLK"
+            || right_trim.is_empty()
+        {
+            left_trim
+        } else if left_trim.is_empty() || left_trim == "粘贴文本" || left_trim == "命令" {
+            right_trim
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+
+    let segment = strip_popover_parens(dot_selected);
+    if segment.is_empty() {
+        return "未绑定".to_string();
+    }
+
+    let stripped = if let Some(rest) = segment
+        .strip_prefix("打开 ")
+        .map(str::trim)
+        .filter(|r| !r.is_empty() && !r.starts_with('/'))
+    {
+        rest
+    } else {
+        segment
+    };
+
+    let normalized = match stripped {
+        "打开 / 聚焦应用" => "聚焦应用",
+        "不可用 / 未配置" => "未配置",
+        "聚焦当前输入框" => "聚焦输入框",
+        "向上滚动对话" => "向上滚动",
+        "向下滚动对话" => "向下滚动",
+        "在项目中向上滚动" => "项目上滚",
+        "在项目中向下滚动" => "项目下滚",
+        "跳到底部并聚焦输入" => "跳到底部",
+        "显示 / 隐藏侧栏" => "显隐侧栏",
+        "选择 Space / Tab" => "Space/Tab",
+        "选项目 / 新建项目" => "选/建项目",
+        "项目工作区快切" => "工作区快切",
+        "在项目中新建会话" => "项目新建",
+        "Gemini Live 实时语音" => "实时语音",
+        "停止听写并提交" => "停止提交",
+        "快速向右分栏" => "向右分栏",
+        "打开内置浏览器" => "内置浏览器",
+        "打开终端面板" => "终端面板",
+        "新建 Tab / 终端" => "新建 Tab",
+        "放大 / 还原面板" => "缩放面板",
+        "聚焦上方面板" => "上方面板",
+        "聚焦下方面板" => "下方面板",
+        "聚焦左方面板" => "左方面板",
+        "聚焦右方面板" => "右方面板",
+        "向上切分屏焦点" | "北向分屏焦点" => "上方分屏",
+        "向下切分屏焦点" | "南向分屏焦点" => "下方分屏",
+        "向左切分屏焦点" | "西向分屏焦点" => "左方分屏",
+        "向右切分屏焦点" | "东向分屏焦点" => "右方分屏",
+        other => other,
+    };
+
+    if normalized.is_empty() {
+        return "未绑定".to_string();
+    }
+
+    let width_units: usize = normalized
+        .chars()
+        .map(|c| if c.is_ascii() { 1 } else { 2 })
+        .sum();
+    if width_units <= 16 {
+        return normalized.to_string();
+    }
+
+    let mut acc = String::new();
+    let mut used = 0usize;
+    for ch in normalized.chars() {
+        let w = if ch.is_ascii() { 1 } else { 2 };
+        if used + w > 14 {
+            break;
+        }
+        acc.push(ch);
+        used += w;
+    }
+    let compact = acc.trim_end();
+    if compact.is_empty() {
+        "未绑定".to_string()
+    } else {
+        format!("{compact}…")
     }
 }
