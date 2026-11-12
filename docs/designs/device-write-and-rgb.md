@@ -3,7 +3,7 @@
 - **Author:** semantic-craft
 - **Status:** Implemented in part — 用户已授权实机验收；配置应用/同连接原字节恢复已接线并取得最小 RGB 配置读回证据（E-108），即时预览和实体效果仍未验收
 - **Date:** 2026-11-03
-- **Context:** [本机 REA 调查与实施建议](../../.scratch/input-study/rea-s3-rgb-20261103/implementation-plan.md)（本地研究材料，未随 Git 分发；正式协议与模块依据见文末）
+- **Context:** 本机 REA 调查与实施建议 `.scratch/input-study/rea-s3-rgb-20261103/implementation-plan.md`（本地研究材料，未随 Git 分发；正式协议与模块依据见文末）
 
 ## 当前原生预览契约（2026-11-04）
 

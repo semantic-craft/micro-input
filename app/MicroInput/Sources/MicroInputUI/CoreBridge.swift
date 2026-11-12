@@ -190,6 +190,7 @@ public final class CoreStore {
         m.hostRevision = root["host_revision"] as? Int ?? 0
 
         if let header = root["header"] as? [String: Any] {
+            m.engineVersion = header["engine_version"] as? String ?? "0.2.0"
             if let rs = header["ready_state"] as? [String: [String: Any]] {
                 if let r = rs["Ready"] {
                     m.readyKind = "Ready"

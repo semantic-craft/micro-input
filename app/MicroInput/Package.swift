@@ -4,7 +4,20 @@ import PackageDescription
 
 let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
 let repoRoot = packageDir.deletingLastPathComponent().deletingLastPathComponent().path
-let rustLibDir = ProcessInfo.processInfo.environment["CARGO_TARGET_DIR"].map { "\($0)/debug" } ?? "\(repoRoot)/target/debug"
+let rustProfile: String = {
+    let raw = ProcessInfo.processInfo.environment["MI_RUST_PROFILE"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    switch raw {
+    case "", "debug":
+        return "debug"
+    case "release":
+        return "release"
+    default:
+        fatalError("Unsupported MI_RUST_PROFILE: \(raw)")
+    }
+}()
+let rustLibDir = ProcessInfo.processInfo.environment["CARGO_TARGET_DIR"]
+    .map { "\($0)/\(rustProfile)" } ?? "\(repoRoot)/target/\(rustProfile)"
 
 let commonLinkerSettings: [LinkerSetting] = [
     .unsafeFlags(["-L\(rustLibDir)", "-lmi_ffi"]),
@@ -16,12 +29,19 @@ let commonLinkerSettings: [LinkerSetting] = [
     .linkedFramework("Security"),
 ]
 
+let executableLinkerSettings: [LinkerSetting] = commonLinkerSettings + [
+    .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
+]
+
 let package = Package(
     name: "MicroInput",
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "MicroInputUI", targets: ["MicroInputUI"]),
         .executable(name: "MicroInput", targets: ["MicroInput"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.4"),
     ],
     targets: [
         .systemLibrary(
@@ -37,10 +57,14 @@ let package = Package(
         ),
         .executableTarget(
             name: "MicroInput",
-            dependencies: ["MicroInputUI", "MicroInputCoreFFI"],
+            dependencies: [
+                "MicroInputUI",
+                "MicroInputCoreFFI",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
             path: "Sources/MicroInput",
             swiftSettings: [.unsafeFlags(["-O"])],
-            linkerSettings: commonLinkerSettings
+            linkerSettings: executableLinkerSettings
         ),
         .testTarget(
             name: "MicroInputTests",

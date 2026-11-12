@@ -2,27 +2,65 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export MACOSX_DEPLOYMENT_TARGET=14.0
-cargo build --locked -p mi-model --bin mi
-cargo build --locked -p mi-ffi
-rm -f target/debug/libmi_ffi.dylib
-swift build --package-path app/MicroInput
-touch target/.metadata_never_index 2>/dev/null || true
+
+profile="debug"
+for arg in "$@"; do
+  case "$arg" in
+    --release)
+      profile="release"
+      ;;
+    --synthetic)
+      ;;
+    *)
+      echo "Unknown argument: $arg" >&2
+      exit 2
+      ;;
+  esac
+done
+
+cargo_flags=()
+swift_flags=()
+if [[ "$profile" == "release" ]]; then
+  cargo_flags=(--release)
+  swift_flags=(-c release)
+fi
+
+export MI_RUST_PROFILE="$profile"
+cargo build --locked ${cargo_flags[@]+"${cargo_flags[@]}"} -p mi-model --bin mi
+cargo build --locked ${cargo_flags[@]+"${cargo_flags[@]}"} -p mi-ffi
+rm -f "target/$profile/libmi_ffi.dylib"
+swift build --package-path app/MicroInput ${swift_flags[@]+"${swift_flags[@]}"}
+swift_bin_dir="$(swift build --package-path app/MicroInput ${swift_flags[@]+"${swift_flags[@]}"} --show-bin-path)"
+touch target/.metadata_never_index app/MicroInput/.build/.metadata_never_index 2>/dev/null || true
+
 bundle=target/MicroInput.app
-mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
+mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$bundle/Contents/Frameworks"
 swift scripts/generate-app-icon.swift
 swift scripts/verify-app-icon.swift target/AppIcon.iconset
 iconutil -c icns target/AppIcon.iconset -o "$bundle/Contents/Resources/AppIcon.icns"
-cp app/MicroInput/.build/debug/MicroInput "$bundle/Contents/MacOS/MicroInput"
+cp "$swift_bin_dir/MicroInput" "$bundle/Contents/MacOS/MicroInput"
 cp app/MicroInput/Info.plist "$bundle/Contents/Info.plist"
-rm -f "$bundle/Contents/Resources/live-bridge.py" "$bundle/Contents/MacOS/mi-session-navigation"
-sign_id="${MI_CODESIGN_IDENTITY:-}"
-if [[ -z "$sign_id" ]]; then
-  sign_id="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -n 1 || true)"
+
+sparkle_src=""
+if [[ -d "$swift_bin_dir/Sparkle.framework" ]]; then
+  sparkle_src="$swift_bin_dir/Sparkle.framework"
+elif [[ -d "app/MicroInput/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework" ]]; then
+  sparkle_src="app/MicroInput/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+else
+  echo "Unable to locate Sparkle.framework in SwiftPM build output" >&2
+  exit 1
 fi
-codesign --force --sign "${sign_id:--}" "$bundle"
+rm -rf "$bundle/Contents/Frameworks/Sparkle.framework"
+/usr/bin/ditto "$sparkle_src" "$bundle/Contents/Frameworks/Sparkle.framework"
+
+rm -f "$bundle/Contents/Resources/live-bridge.py" "$bundle/Contents/MacOS/mi-session-navigation"
+python3 scripts/sign_bundle.py "$bundle" --mode dev --unregister-ls
+
 lsreg="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 if [[ -x "$lsreg" ]]; then
-  "$lsreg" -u "$PWD/$bundle" >/dev/null 2>&1 || true
+  while IFS= read -r nested_updater; do
+    [[ -n "$nested_updater" ]] && "$lsreg" -u "$PWD/$nested_updater" >/dev/null 2>&1 || true
+  done < <(find app/MicroInput/.build -name "Updater.app" 2>/dev/null || true)
   if [[ -d "/Applications/Micro Input.app" ]]; then
     "$lsreg" -f "/Applications/Micro Input.app" >/dev/null 2>&1 || true
   fi

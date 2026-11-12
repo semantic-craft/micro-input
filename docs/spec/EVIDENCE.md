@@ -2,7 +2,7 @@
 
 > E-001～E-048 保留早期调查的自撰摘要及定位，属于历史证据，不是全部结论的最新状态。本轮只核对项目文档与 GitHub 状态，没有重读厂商代码、资源或用户数据。后到证据与冲突裁决见下文；待确认项统一在 [UNKNOWNS](UNKNOWNS.md)。
 
-- 日期：2026-11-02（Asia/Shanghai）。对象：Helios `/Applications/input.app`（Input 1.1.0，bundle `it.focusense.input-app`）及 `~/Projects/micro-input` 调研原件。
+- 日期：2026-11-02（Asia/Shanghai）。对象：macOS 宿主 `/Applications/input.app`（Input 1.1.0，bundle `it.focusense.input-app`）及 `~/Projects/micro-input` 调研原件。
 - 方法：只读的便宜工具（`plutil`、`codesign`、`otool -L`、`nm`、`file`、内存中解析 asar 头并对 main/preload/worker/renderer 做符号与字符串计数、读取 kit 的 JSDoc 注释与枚举名）。未解包到磁盘、未反编译、未动态跟踪、未抓包、未读 TCC 数据库、未连接或操作设备。
 - 级别：**SEEN**＝本轮或既有调研直接观察；**INFERRED**＝由 SEEN 推断；**UNKNOWN**＝证据不足。
 - clean-room 说明：下表只记路径、模块／符号／枚举名、通道名、版本号和用自己话写的行为摘要；不含厂商代码片段、资源或大段文案。

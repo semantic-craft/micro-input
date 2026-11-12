@@ -1,6 +1,9 @@
+import base64
 from pathlib import Path
+import plistlib
 import re
 import subprocess
+from urllib.parse import urlparse
 root = Path(__file__).resolve().parent.parent
 sources = list((root / 'crates').rglob('*.rs'))
 found = set()
@@ -40,12 +43,18 @@ expected_swift_ui_files = [
     'KeycapGlyphView.swift',
     'ModalsAndStatusMenuView.swift',
     'ProjectionModels.swift',
+    'SoftwareUpdate.swift',
     'UITheme.swift',
     'WorkbenchRootView.swift',
 ]
 assert swift_ui_files == expected_swift_ui_files, (
     f'app/MicroInput/Sources/MicroInputUI must only contain canonical thin SwiftUI files {expected_swift_ui_files}, found: {swift_ui_files}'
 )
+for ui_file in (root / 'app/MicroInput/Sources/MicroInputUI').glob('*.swift'):
+    ui_text = ui_file.read_text(encoding='utf-8')
+    assert not re.search(r'^\s*import\s+Sparkle\b', ui_text, re.MULTILINE), (
+        f'{ui_file.relative_to(root)} must not import Sparkle; keep Sparkle confined to host target MicroInput'
+    )
 for swift_file in (root / 'app/MicroInput/Sources').rglob('*.swift'):
     line_count = len(swift_file.read_text(encoding='utf-8').splitlines())
     assert line_count < 1000, f'{swift_file.relative_to(root)} exceeds 1000-line ceiling ({line_count} lines)'
@@ -108,9 +117,10 @@ assert (
     and '__CFBundleIdentifier' in run_src
     and "'--verify' in sys.argv" not in run_src
     and "'-u', str(app)" in run_src
+    and 'symlinks=True' in run_src
 ), (
     'R-C05 violation in scripts/run: use argparse.ArgumentParser(allow_abbrev=False) with --list/--kill, strip __CFBundleIdentifier, '
-    'and unregister QA app bundles from LaunchServices on cleanup'
+    'copy app bundles with symlinks=True, and unregister QA app bundles from LaunchServices on cleanup'
 )
 swift_app_src = (root / 'app/MicroInput/Sources/MicroInput/MicroInputApp.swift').read_text(encoding='utf-8')
 swift_lock_pos = swift_app_src.find('mi_core_acquire_instance_lock(')
@@ -142,6 +152,7 @@ for view_name in (
     'CreatorMicroBoardView.swift',
     'InlineInspectorView.swift',
     'ModalsAndStatusMenuView.swift',
+    'SoftwareUpdate.swift',
 ):
     view_src = (root / 'app/MicroInput/Sources/MicroInputUI' / view_name).read_text(encoding='utf-8')
     assert (
@@ -208,6 +219,21 @@ info_plist_src = (root / 'app/MicroInput/Info.plist').read_text(encoding='utf-8'
 build_src = (root / 'scripts/build').read_text(encoding='utf-8')
 assert '<key>CFBundleIconFile</key>' in info_plist_src and '<string>AppIcon</string>' in info_plist_src and 'AppIcon.icns' in build_src, (
     'R-C07 violation: app/MicroInput/Info.plist and scripts/build must package and declare AppIcon.icns'
+)
+info_plist_data = plistlib.loads(info_plist_src.encode('utf-8'))
+assert info_plist_data.get('CFBundleIdentifier') == 'craft.semantic.micro-input.dev', (
+    'Info.plist CFBundleIdentifier must remain craft.semantic.micro-input.dev to preserve macOS TCC grants'
+)
+parsed_feed = urlparse(str(info_plist_data.get('SUFeedURL', '')))
+assert parsed_feed.scheme == 'https' and bool(parsed_feed.netloc), (
+    'Info.plist SUFeedURL must declare an HTTPS appcast feed URL with non-empty host'
+)
+decoded_ed_key = base64.b64decode(str(info_plist_data.get('SUPublicEDKey', '')), validate=True)
+assert len(decoded_ed_key) == 32, (
+    'Info.plist SUPublicEDKey must be a valid 32-byte base64 Ed25519 public key'
+)
+assert (root / 'LICENSE').is_file() and 'MIT License' in (root / 'LICENSE').read_text(encoding='utf-8'), (
+    'Repository root must contain MIT LICENSE file'
 )
 
 projection_src = (root / 'crates/mi-core/src/projection.rs').read_text(encoding='utf-8')

@@ -3,17 +3,30 @@ import SwiftUI
 
 public struct WorkbenchRootView: View {
     let store: CoreStore
+    private let injectedNavigation: WorkbenchNavigationModel?
+    private let injectedUpdater: SoftwareUpdateController?
+    @State private var fallbackNavigation = WorkbenchNavigationModel()
+    @State private var fallbackUpdater = SoftwareUpdateController()
 
-    public init(store: CoreStore) {
+    @MainActor
+    public init(
+        store: CoreStore,
+        navigation: WorkbenchNavigationModel? = nil,
+        updater: SoftwareUpdateController? = nil
+    ) {
         self.store = store
+        self.injectedNavigation = navigation
+        self.injectedUpdater = updater
     }
 
     public var body: some View {
         let _ = ViewRenderTelemetry.record("WorkbenchRootView")
+        let navigation = injectedNavigation ?? fallbackNavigation
+        let updater = injectedUpdater ?? fallbackUpdater
         let overlay = store.overlay
         let modal = store.activeModal
         ZStack {
-            ClassicWorkbenchView(store: store)
+            ClassicWorkbenchView(store: store, navigation: navigation, updater: updater)
 
             if overlay.cheatSheetVisible, let cs = overlay.cheatSheet {
                 CheatSheetOverlayView(store: store, sheet: cs)

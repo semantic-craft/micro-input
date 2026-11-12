@@ -1,6 +1,6 @@
 # Micro Input 宿主实时接管、多 Coding Agent 切换与自验证闭环推进计划
 
-*   **Author:** Xianwei Zhang / Antigravity
+*   **Author:** semantic-craft
 *   **Status:** Approved for Implementation
 *   **Date:** 2026-11-03
 

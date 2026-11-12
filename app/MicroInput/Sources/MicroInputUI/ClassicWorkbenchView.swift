@@ -3,7 +3,8 @@ import SwiftUI
 
 public struct ClassicWorkbenchView: View {
     let store: CoreStore
-    @State private var destination: WorkbenchDestination = .keyboard
+    @Bindable var navigation: WorkbenchNavigationModel
+    let updater: SoftwareUpdateController
     @State private var showFullActionLibrarySheet = false
     @State private var showMacroLibrarySheet = false
     @State private var showNewProfileDialog = false
@@ -15,15 +16,23 @@ public struct ClassicWorkbenchView: View {
     @State private var showRenameLayerDialog = false
     @State private var renameLayerDraftName = ""
 
-    public init(store: CoreStore) {
+    @MainActor
+    public init(
+        store: CoreStore,
+        navigation: WorkbenchNavigationModel? = nil,
+        updater: SoftwareUpdateController? = nil
+    ) {
         self.store = store
+        self.navigation = navigation ?? WorkbenchNavigationModel()
+        self.updater = updater ?? SoftwareUpdateController()
     }
 
     public var body: some View {
         let _ = ViewRenderTelemetry.record("ClassicWorkbenchView")
+        let destination = navigation.destination
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                WorkbenchNavigationView(selection: $destination)
+                WorkbenchNavigationView(selection: $navigation.destination, versionLabel: updater.identity.displayVersionLabel)
                     .frame(width: UITheme.Layout.sidebarWidth)
                 Rectangle().fill(UITheme.hairlineBorder).frame(width: 1)
                 VStack(spacing: 0) {
@@ -34,10 +43,7 @@ public struct ClassicWorkbenchView: View {
                             store: store,
                             onOpenFullActionLibrary: { showFullActionLibrarySheet = true },
                             onOpenMacroLibrary: { showMacroLibrarySheet = true },
-                            onPromptNewLayer: {
-                                newLayerDraftName = ""
-                                showNewLayerDialog = true
-                            },
+                            onPromptNewLayer: { newLayerDraftName = ""; showNewLayerDialog = true },
                             onPromptRenameLayer: {
                                 renameLayerDraftName = store.sidebar.inspectorLayerName
                                 showRenameLayerDialog = true
@@ -46,12 +52,10 @@ public struct ClassicWorkbenchView: View {
                     } else if destination == .profiles {
                         ScrollView {
                             VStack(alignment: .leading, spacing: 24) {
-                                Text("应用方案")
-                                    .font(UITheme.title)
-                                    .foregroundStyle(UITheme.textPrimary)
+                                Text("应用方案").font(UITheme.title).foregroundStyle(UITheme.textPrimary)
                                 WorkbenchSidebarView(
                                     store: store,
-                                    onBrowseProfile: { destination = .keyboard },
+                                    onBrowseProfile: { navigation.destination = .keyboard },
                                     onPromptNewProfile: { newProfileDraftName = ""; showNewProfileDialog = true },
                                     onPromptRenameProfile: {
                                         renameProfileDraftName = store.sidebar.selectedRawName
@@ -66,6 +70,7 @@ public struct ClassicWorkbenchView: View {
                     } else {
                         WorkbenchSettingsPage(
                             store: store,
+                            updater: updater,
                             destination: destination,
                             onActions: { showFullActionLibrarySheet = true },
                             onMacros: { showMacroLibrarySheet = true }
@@ -564,7 +569,7 @@ struct BoardLayersPanel: View {
     }
 }
 
-enum WorkbenchDestination: String, CaseIterable, Identifiable {
+public enum WorkbenchDestination: String, CaseIterable, Identifiable {
     case keyboard = "Creator Micro"
     case lighting = "灯光"
     case device = "设备与连接"
@@ -573,8 +578,8 @@ enum WorkbenchDestination: String, CaseIterable, Identifiable {
     case radial = "轮盘菜单"
     case general = "通用"
 
-    var id: String { rawValue }
-    var symbol: String {
+    public var id: String { rawValue }
+    public var symbol: String {
         switch self {
         case .keyboard: return "keyboard"
         case .lighting: return "lightbulb"
@@ -589,6 +594,7 @@ enum WorkbenchDestination: String, CaseIterable, Identifiable {
 
 private struct WorkbenchNavigationView: View {
     @Binding var selection: WorkbenchDestination
+    let versionLabel: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -600,6 +606,20 @@ private struct WorkbenchNavigationView: View {
             navigationGroup("自定义", [.profiles, .library, .radial])
             navigationGroup("Micro Input", [.general])
             Spacer(minLength: 0)
+            Button { selection = .general } label: {
+                HStack(spacing: 6) {
+                    Text("版本").font(UITheme.micro).foregroundStyle(UITheme.textMuted)
+                    Spacer(minLength: 4)
+                    Text(versionLabel).font(UITheme.monoBadge).foregroundStyle(UITheme.textSecondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selection == .general ? UITheme.surface : Color.clear))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .focusEffectDisabled()
+            .accessibilityIdentifier("navigation-version-badge")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 24)
@@ -653,6 +673,7 @@ private struct WorkbenchNavigationView: View {
 
 private struct WorkbenchSettingsPage: View {
     let store: CoreStore
+    let updater: SoftwareUpdateController
     let destination: WorkbenchDestination
     var onActions: () -> Void
     var onMacros: () -> Void
@@ -809,28 +830,23 @@ private struct WorkbenchSettingsPage: View {
                     }
 
                 case .general:
+                    AboutAndUpdatesSettingsSection(updater: updater, engineVersion: store.header.engineVersion)
                     VStack(alignment: .leading, spacing: 10) {
                         SettingsSectionHeader("按键控制")
                         SettingsCard {
                             SettingsRow("允许键盘控制应用", subtitle: "开启后由 Micro Input 接管并路由物理按键动作", showsDivider: true) {
-                                Toggle(
-                                    "",
-                                    isOn: Binding(
-                                        get: { store.header.hostExecutionEnabled },
-                                        set: { store.dispatch("header", ["SetExecutionEnabled": $0]) }
-                                    )
-                                )
+                                Toggle("", isOn: Binding(
+                                    get: { store.header.hostExecutionEnabled },
+                                    set: { store.dispatch("header", ["SetExecutionEnabled": $0]) }
+                                ))
                                 .labelsHidden()
                                 .toggleStyle(NeutralSwitchToggleStyle())
                             }
                             SettingsRow("跟随前台应用切换方案", subtitle: "切换活跃窗口时自动加载对应软件方案", showsDivider: true) {
-                                Toggle(
-                                    "",
-                                    isOn: Binding(
-                                        get: { store.sidebar.autoFollowEnabled },
-                                        set: { store.dispatch("sidebar", ["SetAutoFollow": $0]) }
-                                    )
-                                )
+                                Toggle("", isOn: Binding(
+                                    get: { store.sidebar.autoFollowEnabled },
+                                    set: { store.dispatch("sidebar", ["SetAutoFollow": $0]) }
+                                ))
                                 .labelsHidden()
                                 .toggleStyle(NeutralSwitchToggleStyle())
                             }
@@ -845,10 +861,8 @@ private struct WorkbenchSettingsPage: View {
                                 .accessibilityIdentifier("popover-preview-mode-dropdown")
                             }
                             SettingsRow("按键速查浮层", subtitle: "查看当前方案 4×4 物理坐标按键绑定") {
-                                Button("查看按键速查") {
-                                    store.dispatch("overlay", "ToggleCheatSheet")
-                                }
-                                .surfaceButton(.secondary)
+                                Button("查看按键速查") { store.dispatch("overlay", "ToggleCheatSheet") }
+                                    .surfaceButton(.secondary)
                             }
                         }
                     }

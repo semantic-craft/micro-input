@@ -326,7 +326,7 @@ final class DesignSystemVerificationTests: XCTestCase {
         )
         let initialSessionHeight = sessionHost.fittingSize.height
         XCTAssertEqual(sessionHost.fittingSize.width, 348, accuracy: 1.0)
-        XCTAssertLessThan(initialSessionHeight, 640)
+        XCTAssertLessThan(initialSessionHeight, 700)
         XCTAssertFalse(hasScrollView(in: sessionHost), "StatusMenuPopoverView must never embed NSScrollView")
         XCTAssertGreaterThanOrEqual(ViewRenderTelemetry.count("PopoverSessionPreviewSection"), 1)
         XCTAssertEqual(ViewRenderTelemetry.count("PopoverMiniCheatSheetView"), 0)
@@ -352,7 +352,7 @@ final class DesignSystemVerificationTests: XCTestCase {
         )
         defer { splitWin.orderOut(nil) }
         XCTAssertEqual(splitHost.fittingSize.width, 348, accuracy: 1.0)
-        XCTAssertLessThan(splitHost.fittingSize.height, 700)
+        XCTAssertLessThan(splitHost.fittingSize.height, 760)
         XCTAssertGreaterThan(splitHost.fittingSize.height, initialSessionHeight + 30)
         XCTAssertFalse(hasScrollView(in: splitHost), "StatusMenuPopoverView in cheatSheet mode must never embed NSScrollView")
         XCTAssertEqual(ViewRenderTelemetry.count("PopoverSessionPreviewSection"), 0)
@@ -404,7 +404,7 @@ final class DesignSystemVerificationTests: XCTestCase {
         )
         defer { mergedWin.orderOut(nil) }
         XCTAssertEqual(mergedHost.fittingSize.width, 348, accuracy: 1.0)
-        XCTAssertLessThan(mergedHost.fittingSize.height, 700)
+        XCTAssertLessThan(mergedHost.fittingSize.height, 760)
 
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -467,7 +467,7 @@ final class DesignSystemVerificationTests: XCTestCase {
         persistentPopover.show(relativeTo: anchorButton.bounds, of: anchorButton, preferredEdge: .minY)
         let h1 = persistentPopover.contentSize.height
         XCTAssertEqual(size1.width, 348, accuracy: 1.0)
-        XCTAssertLessThan(h1, 640)
+        XCTAssertLessThan(h1, 700)
         persistentPopover.performClose(nil)
 
         store.dispatch("canvas", ["SetBottomRowLayout": "split"])
@@ -534,6 +534,68 @@ final class DesignSystemVerificationTests: XCTestCase {
         )
         defer { popoverWindow.orderOut(nil) }
         XCTAssertGreaterThan(popoverHost.bounds.height, 0)
+    }
+
+    @MainActor
+    func testGeneralSettingsAboutAndSoftwareUpdateLayoutFitsSupportedWidths() throws {
+        let dir = try makeIsolatedTempDir("general-about-layout")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = CoreStore(isolatedDirectory: dir.path)
+
+        let identity = AppReleaseIdentity(
+            marketingVersion: "0.5.0",
+            buildVersion: "5",
+            bundleIdentifier: "craft.semantic.micro-input.dev",
+            feedURLString: "https://github.com/semantic-craft/micro-input/releases/latest/download/appcast.xml",
+            publicEDKey: "lwr8Uv2vLk5q4IOem6pjd3V5/EF9aHb2kx/4pzIfKJc="
+        )
+        let updater = SoftwareUpdateController(
+            identity: identity,
+            bundlePath: "/Applications/Micro Input.app",
+            environment: ["MI_DISABLE_UPDATER": "1"]
+        )
+
+        var openedURLs: [URL] = []
+        let section = AboutAndUpdatesSettingsSection(
+            updater: updater,
+            engineVersion: store.header.engineVersion,
+            openURLHandler: { openedURLs.append($0) }
+        )
+        .padding(28)
+        .frame(width: 720)
+        let (sectionWin, sectionHost) = makeHostedWindow(section, width: 720)
+        defer { sectionWin.orderOut(nil) }
+        XCTAssertGreaterThan(sectionHost.bounds.height, 180)
+        XCTAssertLessThanOrEqual(sectionHost.fittingSize.width, 720.5)
+        XCTAssertTrue(openedURLs.isEmpty)
+
+        for (width, height) in [(CGFloat(820), CGFloat(640)), (CGFloat(1180), CGFloat(740))] {
+            let nav = WorkbenchNavigationModel(destination: .general)
+            let (win, host) = makeHostedWindow(
+                ClassicWorkbenchView(store: store, navigation: nav, updater: updater),
+                width: width,
+                fixedHeight: height
+            )
+            defer { win.orderOut(nil) }
+            XCTAssertEqual(host.bounds.width, width, accuracy: 0.5)
+            XCTAssertEqual(host.bounds.height, height, accuracy: 0.5)
+        }
+
+        var settingsOpened = false
+        let (popWin, popHost) = makeHostedWindow(
+            StatusMenuPopoverView(
+                store: store,
+                updater: updater,
+                onOpenMainWindow: {},
+                onOpenSettings: { settingsOpened = true },
+                onCheckForUpdates: {}
+            ),
+            width: 348
+        )
+        defer { popWin.orderOut(nil) }
+        XCTAssertGreaterThan(popHost.bounds.height, 260)
+        XCTAssertLessThanOrEqual(popHost.bounds.height, 760)
+        XCTAssertFalse(settingsOpened)
     }
 
     @MainActor
@@ -708,6 +770,34 @@ final class DesignSystemVerificationTests: XCTestCase {
             fixedHeight: 640,
             to: outputDir.appendingPathComponent("cheat-sheet-4x4-spatial.png")
         )
+
+        let snapIdentity = AppReleaseIdentity(
+            marketingVersion: "0.5.0",
+            buildVersion: "5",
+            bundleIdentifier: "craft.semantic.micro-input.dev",
+            feedURLString: "https://github.com/semantic-craft/micro-input/releases/latest/download/appcast.xml",
+            publicEDKey: "lwr8Uv2vLk5q4IOem6pjd3V5/EF9aHb2kx/4pzIfKJc="
+        )
+        let snapDriver = SnapshotReadyUpdateDriver()
+        let snapUpdater = SoftwareUpdateController(
+            identity: snapIdentity,
+            bundlePath: "/Applications/Micro Input.app",
+            environment: [:],
+            arguments: [],
+            driverFactory: { snapDriver }
+        )
+        snapUpdater.startIfPermitted()
+        let generalWorkbench = ClassicWorkbenchView(
+            store: store,
+            navigation: WorkbenchNavigationModel(destination: .general),
+            updater: snapUpdater
+        )
+        try saveSnapshot(
+            generalWorkbench,
+            width: 1180,
+            fixedHeight: 740,
+            to: outputDir.appendingPathComponent("general-settings-version-autoupdate.png")
+        )
     }
 
     @MainActor
@@ -724,4 +814,13 @@ final class DesignSystemVerificationTests: XCTestCase {
         let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
         try data.write(to: url)
     }
+}
+
+@MainActor
+private final class SnapshotReadyUpdateDriver: SoftwareUpdateDriver {
+    var canCheckForUpdates: Bool = true
+    var automaticallyChecksForUpdates: Bool = true
+    var lastUpdateCheckDate: Date? = Date(timeIntervalSince1970: 1_762_900_800)
+    func startUpdater() {}
+    func checkForUpdates() {}
 }

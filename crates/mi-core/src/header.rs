@@ -18,6 +18,7 @@ impl HeaderReadyState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeaderProjection {
+    pub engine_version: String,
     pub ready_state: HeaderReadyState,
     pub banner: OwnershipBannerState,
     pub show_connect_button: bool,
@@ -32,6 +33,7 @@ pub struct HeaderProjection {
 impl Default for HeaderProjection {
     fn default() -> Self {
         Self {
+            engine_version: env!("CARGO_PKG_VERSION").to_string(),
             ready_state: HeaderReadyState::Ready {
                 text: "已就绪".to_string(),
             },

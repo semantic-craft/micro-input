@@ -4,6 +4,10 @@ resolver = "2"
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/semantic-craft/micro-input"
+homepage = "https://github.com/semantic-craft/micro-input"
+description = "Native macOS workbench and host controller for Work Louder Creator Micro 2"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }

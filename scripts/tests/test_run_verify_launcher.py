@@ -293,6 +293,55 @@ class RunVerifyLauncherTests(unittest.TestCase):
         self.assertNotIn('__CFBundleIdentifier', captured_env)
         self.assertNotIn('XPC_SERVICE_NAME', captured_env)
 
+    def test_verify_preserves_framework_symlinks_and_disables_updater(self):
+        root = self._prepare_checkout()
+        script = root / 'scripts/run'
+        fw = root / 'target/MicroInput.app/Contents/Frameworks/Sparkle.framework'
+        ver_b = fw / 'Versions/B'
+        (ver_b / 'Updater.app/Contents/MacOS').mkdir(parents=True)
+        (ver_b / 'Sparkle').write_text('macho', encoding='utf-8')
+        (fw / 'Versions/Current').symlink_to('B')
+        (fw / 'Sparkle').symlink_to('Versions/Current/Sparkle')
+        (fw / 'Updater.app').symlink_to('Versions/Current/Updater.app')
+
+        child = FakeVerifyChild([0])
+        captured = {}
+
+        def fake_spawn(command, **kwargs):
+            app_root = Path(command[0]).parent.parent.parent
+            copied_fw = app_root / 'Contents/Frameworks/Sparkle.framework'
+            captured['current_is_symlink'] = (copied_fw / 'Versions/Current').is_symlink()
+            captured['top_sparkle_is_symlink'] = (copied_fw / 'Sparkle').is_symlink()
+            captured['env'] = kwargs.get('env', {})
+            with (app_root / 'Contents/Info.plist').open('rb') as handle:
+                captured['plist'] = plistlib.load(handle)
+            return child
+
+        run_calls = []
+
+        def fake_run(cmd, **kwargs):
+            run_calls.append([str(c) for c in cmd])
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        with patch.object(sys, 'argv', [str(script), '--verify', '--timeout=10']), \
+                patch('pathlib.Path.home', return_value=root / 'fake_home'), \
+                patch('subprocess.Popen', side_effect=fake_spawn), \
+                patch('subprocess.run', side_effect=fake_run), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 0)
+
+        self.assertTrue(captured['current_is_symlink'])
+        self.assertTrue(captured['top_sparkle_is_symlink'])
+        self.assertIs(captured['plist']['SUEnableAutomaticChecks'], False)
+        self.assertEqual(captured['env'].get('MI_DISABLE_UPDATER'), '1')
+        unregistered_targets = [cmd[-1] for cmd in run_calls if len(cmd) >= 3 and cmd[-2] == '-u']
+        self.assertTrue(
+            any(target.endswith('Sparkle.framework/Versions/B/Updater.app') for target in unregistered_targets),
+            f'Expected nested Updater.app unregistration in {unregistered_targets}',
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

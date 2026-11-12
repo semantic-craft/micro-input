@@ -3,11 +3,27 @@ import SwiftUI
 
 public struct StatusMenuPopoverView: View {
     let store: CoreStore
+    var updater: SoftwareUpdateController?
     var onOpenMainWindow: () -> Void
+    var onOpenSettings: (() -> Void)?
+    var onCheckForUpdates: (() -> Void)?
+    var canCheckForUpdates: Bool
 
-    public init(store: CoreStore, onOpenMainWindow: @escaping () -> Void) {
+    @MainActor
+    public init(
+        store: CoreStore,
+        updater: SoftwareUpdateController? = nil,
+        onOpenMainWindow: @escaping () -> Void,
+        onOpenSettings: (() -> Void)? = nil,
+        onCheckForUpdates: (() -> Void)? = nil,
+        canCheckForUpdates: Bool = false
+    ) {
         self.store = store
+        self.updater = updater
         self.onOpenMainWindow = onOpenMainWindow
+        self.onOpenSettings = onOpenSettings
+        self.onCheckForUpdates = onCheckForUpdates
+        self.canCheckForUpdates = canCheckForUpdates
     }
 
     public var body: some View {
@@ -155,6 +171,33 @@ public struct StatusMenuPopoverView: View {
                     store.dispatch("status_menu", "OpenMainWorkbenchWindow")
                     onOpenMainWindow()
                 }
+
+                PopoverActionRow(
+                    icon: "gearshape",
+                    title: "通用设置…",
+                    shortcut: "⌘,"
+                ) {
+                    if let onOpenSettings {
+                        onOpenSettings()
+                    } else {
+                        store.dispatch("status_menu", "OpenMainWorkbenchWindow")
+                        onOpenMainWindow()
+                    }
+                }
+
+                let effectiveCanCheck = updater?.canCheckForUpdates ?? canCheckForUpdates
+                PopoverActionRow(
+                    icon: "arrow.triangle.2.circlepath",
+                    title: "检查更新…"
+                ) {
+                    if let onCheckForUpdates {
+                        onCheckForUpdates()
+                    } else {
+                        updater?.checkForUpdates()
+                    }
+                }
+                .disabled(!effectiveCanCheck)
+                .opacity(effectiveCanCheck ? 1.0 : 0.45)
 
                 PopoverActionRow(
                     icon: "power",

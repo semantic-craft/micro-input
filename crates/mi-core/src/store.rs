@@ -618,8 +618,9 @@ impl WorkbenchStore {
         let previous_profile = self.document_store.host_active_profile_id();
         let result = self.dispatch_at(command, started);
         if self.document_store.host_active_profile_id() != previous_profile {
-            self.last_switch_duration = started.elapsed();
-            self.commit_local_update();
+            let elapsed = started.elapsed();
+            self.last_switch_duration = elapsed;
+            self.projection.last_switch_duration = elapsed;
         }
         result
     }
@@ -1774,8 +1775,9 @@ impl WorkbenchStore {
     pub fn select_and_activate_profile(&mut self, profile_id: &str) -> Result<(), WorkbenchError> {
         let started = Instant::now();
         let result = self.select_and_activate_profile_at(profile_id, started, true);
-        self.last_switch_duration = started.elapsed();
-        self.commit_local_update();
+        let elapsed = started.elapsed();
+        self.last_switch_duration = elapsed;
+        self.projection.last_switch_duration = elapsed;
         result
     }
 
@@ -5625,13 +5627,19 @@ impl Drop for WorkbenchStore {
     }
 }
 
+fn matches_logical_slot(logical_control: &str, slot: u32) -> bool {
+    logical_control
+        .strip_prefix("logical-")
+        .and_then(|s| s.parse::<u32>().ok())
+        == Some(slot)
+}
+
 fn resolve_slot_graph_action_id(layer: Option<&LayerNode>, slot: u32) -> Option<String> {
     let layer = layer?;
-    let logical = format!("logical-{slot}");
     layer
         .controls
         .values()
-        .find(|b| b.logical_control == logical)
+        .find(|b| matches_logical_slot(&b.logical_control, slot))
         .and_then(|b| b.action_id.clone())
 }
 
@@ -5913,11 +5921,10 @@ fn resolve_slot_action_info<'a>(
     let Some(layer) = layer else {
         return ("未绑定".to_string(), None);
     };
-    let logical = format!("logical-{slot}");
     let Some(binding) = layer
         .controls
         .values()
-        .find(|b| b.logical_control == logical)
+        .find(|b| matches_logical_slot(&b.logical_control, slot))
     else {
         return ("未绑定".to_string(), None);
     };

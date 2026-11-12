@@ -493,6 +493,7 @@ public struct CheatSheetModel: Equatable {
 }
 
 public struct HeaderSliceModel: Equatable {
+    public var engineVersion: String = "0.2.0"
     public var readyKind: String = "Ready"
     public var readyText: String = "已就绪"
     public var bannerKind: String = "Ready"
@@ -512,6 +513,7 @@ public struct HeaderSliceModel: Equatable {
     public init() {}
 
     public init(from m: ProjectionModel) {
+        self.engineVersion = m.engineVersion
         self.readyKind = m.readyKind
         self.readyText = m.readyText
         self.bannerKind = m.bannerKind
@@ -772,6 +774,7 @@ public struct FooterSliceModel: Equatable {
 }
 
 public struct ProjectionModel: Equatable {
+    public var engineVersion: String = "0.2.0"
     public var readyKind: String = "Ready"
     public var readyText: String = "已就绪"
     public var bannerKind: String = "Ready"
