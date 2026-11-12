@@ -8,6 +8,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -147,6 +148,23 @@ pub fn parse_pid_from_lsappinfo_output(text: &str) -> Option<i32> {
         }
     }
     None
+}
+
+pub fn is_bundle_running(bundle_id: &str) -> bool {
+    let trimmed = bundle_id.trim();
+    if trimmed.is_empty() || trimmed == "*" {
+        return false;
+    }
+    let Ok(output) = Command::new("/usr/bin/lsappinfo")
+        .args(["info", "-only", "pid", trimmed])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    parse_pid_from_lsappinfo_output(&String::from_utf8_lossy(&output.stdout)).is_some()
 }
 
 pub fn submit_modifiers_for_adapter(adapter: &str) -> Vec<String> {
@@ -622,7 +640,12 @@ impl DialScrollRequest {
 }
 
 pub trait HostOsDriver: Send + Sync {
-    fn is_accessibility_trusted(&self) -> bool;
+    fn is_accessibility_trusted(&self) -> bool {
+        true
+    }
+    fn open_accessibility_settings(&self) -> Result<(), String> {
+        Ok(())
+    }
     fn open_application(&self, bundle_id: &str) -> Result<(), String>;
     fn post_key_shortcut(
         &self,
@@ -688,6 +711,18 @@ impl HostOsDriver for MacOsSystemDriver {
         #[cfg(not(target_os = "macos"))]
         {
             false
+        }
+    }
+
+    fn open_accessibility_settings(&self) -> Result<(), String> {
+        let status = Command::new("/usr/bin/open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("open accessibility settings exited with {status}"))
         }
     }
 
@@ -1093,7 +1128,6 @@ pub enum RecordedOsEvent {
 
 #[derive(Debug)]
 struct RecordingState {
-    trusted: bool,
     dictation_active: bool,
     clipboard: ClipboardSnapshot,
     events: Vec<RecordedOsEvent>,
@@ -1101,6 +1135,7 @@ struct RecordingState {
 
 #[derive(Debug, Clone)]
 pub struct RecordingOsDriver {
+    accessibility_trusted: Arc<AtomicBool>,
     state: Arc<Mutex<RecordingState>>,
 }
 
@@ -1113,8 +1148,8 @@ impl Default for RecordingOsDriver {
 impl RecordingOsDriver {
     pub fn new(trusted: bool) -> Self {
         Self {
+            accessibility_trusted: Arc::new(AtomicBool::new(trusted)),
             state: Arc::new(Mutex::new(RecordingState {
-                trusted,
                 dictation_active: false,
                 clipboard: ClipboardSnapshot {
                     change_count: 1,
@@ -1126,7 +1161,7 @@ impl RecordingOsDriver {
     }
 
     pub fn set_accessibility_trusted(&self, trusted: bool) {
-        self.state.lock().unwrap().trusted = trusted;
+        self.accessibility_trusted.store(trusted, Ordering::SeqCst);
     }
 
     pub fn set_dictation_active(&self, active: bool) {
@@ -1154,7 +1189,18 @@ impl HostOsDriver for RecordingOsDriver {
     fn is_accessibility_trusted(&self) -> bool {
         let mut st = self.state.lock().unwrap();
         st.events.push(RecordedOsEvent::CheckAccessibilityTrusted);
-        st.trusted
+        self.accessibility_trusted.load(Ordering::SeqCst)
+    }
+
+    fn open_accessibility_settings(&self) -> Result<(), String> {
+        self.state
+            .lock()
+            .unwrap()
+            .events
+            .push(RecordedOsEvent::OpenApplication(
+                "com.apple.systempreferences.accessibility".to_string(),
+            ));
+        Ok(())
     }
 
     fn open_application(&self, bundle_id: &str) -> Result<(), String> {
@@ -1173,7 +1219,7 @@ impl HostOsDriver for RecordingOsDriver {
         key_down: bool,
     ) -> Result<(), String> {
         let mut st = self.state.lock().unwrap();
-        if !st.trusted {
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
             return Err("accessibility_untrusted".to_string());
         }
         st.events.push(RecordedOsEvent::PostKeyShortcut {
@@ -1186,7 +1232,7 @@ impl HostOsDriver for RecordingOsDriver {
 
     fn post_apple_fn_flags(&self, key_down: bool) -> Result<(), String> {
         let mut st = self.state.lock().unwrap();
-        if !st.trusted {
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
             return Err("accessibility_untrusted".to_string());
         }
         let flags = if key_down {
@@ -1292,7 +1338,7 @@ impl HostOsDriver for RecordingOsDriver {
 
     fn new_conversation_in_project(&self, adapter: &str) -> Result<(), String> {
         let mut st = self.state.lock().unwrap();
-        if !st.trusted {
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
             return Err("accessibility_untrusted".to_string());
         }
         st.events.push(RecordedOsEvent::NewConversationInProject(
@@ -1303,7 +1349,7 @@ impl HostOsDriver for RecordingOsDriver {
 
     fn toggle_live_voice(&self, adapter: &str) -> Result<(), String> {
         let mut st = self.state.lock().unwrap();
-        if !st.trusted {
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
             return Err("accessibility_untrusted".to_string());
         }
         st.events
@@ -1497,6 +1543,14 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
             execution_lock: Mutex::new(()),
             held_apple_fn_bindings: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn is_accessibility_trusted(&self) -> bool {
+        self.driver.is_accessibility_trusted()
+    }
+
+    pub fn open_accessibility_settings(&self) -> Result<(), String> {
+        self.driver.open_accessibility_settings()
     }
 
     pub fn has_unconfirmed_apple_fn_release(&self) -> bool {

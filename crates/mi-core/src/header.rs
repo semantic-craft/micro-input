@@ -16,6 +16,10 @@ impl HeaderReadyState {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeaderProjection {
     pub engine_version: String,
@@ -24,6 +28,8 @@ pub struct HeaderProjection {
     pub show_connect_button: bool,
     pub show_return_to_host_button: bool,
     pub host_execution_enabled: bool,
+    #[serde(default = "default_true")]
+    pub accessibility_trusted: bool,
     pub can_edit_draft: bool,
     pub can_undo: bool,
     pub can_redo: bool,
@@ -43,6 +49,7 @@ impl Default for HeaderProjection {
             show_connect_button: true,
             show_return_to_host_button: false,
             host_execution_enabled: false,
+            accessibility_trusted: true,
             can_edit_draft: false,
             can_undo: false,
             can_redo: false,
@@ -56,6 +63,7 @@ pub enum HeaderAction {
     ConnectKeyboard,
     ReturnToHostDocument,
     SetExecutionEnabled(bool),
+    OpenAccessibilitySettings,
     Undo,
     Redo,
     OpenSettings,

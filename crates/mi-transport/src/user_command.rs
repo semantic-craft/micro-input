@@ -4,7 +4,7 @@ use std::{
     fs::{self, DirBuilder, File},
     io::{self, Read},
     os::unix::{
-        fs::{DirBuilderExt, PermissionsExt},
+        fs::{DirBuilderExt, MetadataExt, PermissionsExt},
         net::UnixDatagram,
     },
     path::{Path, PathBuf},
@@ -80,6 +80,16 @@ pub struct UserCommandReceiver {
 }
 
 impl UserCommandReceiver {
+    pub fn bind_default() -> io::Result<Self> {
+        let receiver = Self::bind()?;
+        sweep_empty_socket_dirs_in(
+            Path::new("/tmp"),
+            receiver.path.parent(),
+            Duration::from_secs(5),
+        );
+        Ok(receiver)
+    }
+
     pub fn bind() -> io::Result<Self> {
         let mut random = [0_u8; 16];
         File::open("/dev/urandom")?.read_exact(&mut random)?;
@@ -270,6 +280,51 @@ impl UserCommandReceiver {
     }
 }
 
+fn current_euid() -> u32 {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: POSIX `geteuid` takes no arguments and is always safe to call.
+    unsafe { geteuid() }
+}
+
+fn sweep_empty_socket_dirs_in(root: &Path, skip: Option<&Path>, min_age: Duration) {
+    let uid = current_euid();
+    let now = std::time::SystemTime::now();
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if skip.is_some_and(|s| s == path.as_path()) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("micro-input-") {
+            continue;
+        }
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_dir() || meta.uid() != uid {
+            continue;
+        }
+        if !min_age.is_zero() {
+            let old_enough = meta
+                .modified()
+                .ok()
+                .and_then(|m| now.duration_since(m).ok())
+                .is_some_and(|age| age >= min_age);
+            if !old_enough {
+                continue;
+            }
+        }
+        let _ = fs::remove_dir(&path);
+    }
+}
+
 fn invalidate(queue: &Mutex<Queue>, reason: &str) {
     let mut queue = queue.lock().unwrap();
     queue.events.clear();
@@ -420,5 +475,36 @@ mod tests {
             assert!(receiver.next().unwrap().is_none());
             assert!(receiver.failure().is_none());
         }
+    }
+
+    #[test]
+    fn drop_and_bind_sweep_remove_empty_socket_dirs_without_touching_live_receivers() {
+        let root =
+            std::env::temp_dir().join(format!("mi-socket-sweep-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let empty_stale = root.join("micro-input-stale-empty");
+        let non_empty_live = root.join("micro-input-live");
+        let unrelated_empty = root.join("other-empty");
+        fs::create_dir_all(&empty_stale).unwrap();
+        fs::create_dir_all(&non_empty_live).unwrap();
+        fs::write(non_empty_live.join("in"), b"live").unwrap();
+        fs::create_dir_all(&unrelated_empty).unwrap();
+
+        sweep_empty_socket_dirs_in(&root, None, Duration::from_secs(60));
+        assert!(empty_stale.exists());
+
+        sweep_empty_socket_dirs_in(&root, None, Duration::ZERO);
+        assert!(!empty_stale.exists());
+        assert!(non_empty_live.exists());
+        assert!(unrelated_empty.exists());
+        let _ = fs::remove_dir_all(&root);
+
+        let receiver = UserCommandReceiver::bind_default().unwrap();
+        let parent = receiver.path().parent().unwrap().to_path_buf();
+        assert!(parent.exists());
+        drop(receiver);
+        assert!(!parent.exists());
     }
 }

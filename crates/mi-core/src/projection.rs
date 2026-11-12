@@ -14,7 +14,15 @@ pub(super) struct SixLayerView {
     pub foreground_priority_adapter: Option<String>,
 }
 
+pub(super) struct ReusableInspectorCatalogs {
+    pub keycaps: Option<Vec<KeycapCatalogItemProjection>>,
+    pub categories: Option<Vec<String>>,
+    pub actions: Option<Vec<ActionLibraryRowProjection>>,
+}
+
 pub(super) struct ProjectionInputs<'a> {
+    pub accessibility_trusted: bool,
+    pub reusable_catalogs: ReusableInspectorCatalogs,
     pub action_category_filter: &'a String,
     pub action_search_query: &'a String,
     pub active_modal: &'a Option<EditorModalProjection>,
@@ -26,6 +34,7 @@ pub(super) struct ProjectionInputs<'a> {
     pub bottom_row_layout: BottomRowLayout,
     pub busy: bool,
     pub command_execution_enabled: bool,
+    pub competing_input_app_running: bool,
     pub connected_candidate: &'a Option<mi_transport::HidCandidate>,
     pub device_connected: bool,
     pub document_store: &'a DocumentStore,
@@ -286,6 +295,7 @@ impl ProjectionInputs<'_> {
         };
 
         let step = KEY_1U_SIZE + KEY_GAP;
+        let indexed_controls = index_layer_controls(layer);
         let encoder_bounds =
             CanvasRect::new(CANVAS_PADDING, CANVAS_PADDING, KEY_1U_SIZE, KEY_1U_SIZE);
         let encoder = EncoderDialProjection {
@@ -298,9 +308,11 @@ impl ProjectionInputs<'_> {
                 KEY_1U_SIZE,
             ),
             press_bounds: CanvasRect::new(CANVAS_PADDING + 22.0, CANVAS_PADDING + 22.0, 24.0, 24.0),
-            ccw_label: resolve_slot_title(doc, layer, 13),
-            cw_label: resolve_slot_title(doc, layer, 14),
-            press_label: format_concise_keycap_caption(&resolve_slot_title(doc, layer, 15)),
+            ccw_label: resolve_indexed_slot(doc, &indexed_controls, 13).0,
+            cw_label: resolve_indexed_slot(doc, &indexed_controls, 14).0,
+            press_label: format_concise_keycap_caption(
+                &resolve_indexed_slot(doc, &indexed_controls, 15).0,
+            ),
             selected_slot: match self.selected_surface {
                 ControlSurfaceId::EncoderCcw => Some(13),
                 ControlSurfaceId::EncoderCw => Some(14),
@@ -325,7 +337,7 @@ impl ProjectionInputs<'_> {
                 let bx = jcx + ux * 24.0;
                 let by = jcy + uy * 24.0;
                 let logical_slot = dir.logical_sector_slot();
-                let full_title = resolve_slot_title(doc, layer, logical_slot);
+                let full_title = resolve_indexed_slot(doc, &indexed_controls, logical_slot).0;
                 JoystickDirectionBadge {
                     direction: dir,
                     logical_slot,
@@ -386,16 +398,22 @@ impl ProjectionInputs<'_> {
             let effective_slot = if surface == ControlSurfaceId::Key10
                 && bottom_row_layout == BottomRowLayout::Merged
             {
-                resolve_merged_bottom_slot(doc, layer)
+                resolve_indexed_merged_bottom_slot(doc, &indexed_controls)
             } else {
                 primary_slot
             };
             let (full_action_title, action_obj) =
-                resolve_slot_action_info(doc, layer, effective_slot);
-            let silkscreen_icon = Some(
+                resolve_indexed_slot(doc, &indexed_controls, effective_slot);
+            let override_keycap = if !self.keycap_overrides.is_empty() {
                 self.selected_profile_id
                     .as_ref()
                     .and_then(|pid| self.keycap_overrides.get(&(pid.clone(), effective_slot)))
+                    .copied()
+            } else {
+                None
+            };
+            let silkscreen_icon = Some(
+                override_keycap
                     .map(|k| k.glyph_symbol().to_string())
                     .unwrap_or_else(|| resolve_silkscreen_icon(effective_slot, action_obj)),
             );
@@ -403,21 +421,21 @@ impl ProjectionInputs<'_> {
             let is_session_slot = (0..6u32)
                 .contains(&primary_slot)
                 .then_some(primary_slot as usize)
-                .filter(|slot_idx| {
-                    action_obj.is_some_and(|a| {
-                        a.id == format!("slot-open-{slot_idx}")
-                            || a.id == format!("cockpit-slot-{slot_idx}")
-                            || a.payload.get("command").and_then(|v| v.as_str())
-                                == Some(&format!("slot-open:{slot_idx}"))
-                    })
+                .filter(|&slot_idx| {
+                    action_obj.is_some_and(|a| is_session_slot_action(a, slot_idx))
                 });
-            let keycap_enum = self.selected_keycap(effective_slot);
+            let keycap_enum = override_keycap
+                .unwrap_or_else(|| CodexKeycapId::infer_for_slot(effective_slot, action_obj));
             let keycap_id = format!("{keycap_enum:?}");
             let cell_role = if !(0..6u32).contains(&primary_slot) {
                 KeycapRole::ActionKey
             } else if is_protected {
                 KeycapRole::TaskKey
-            } else if let Some(pid) = &self.selected_profile_id {
+            } else if let Some(pid) = self
+                .selected_profile_id
+                .as_ref()
+                .filter(|_| !self.slot_role_overrides.is_empty())
+            {
                 self.slot_role_overrides
                     .get(&(pid.clone(), primary_slot))
                     .copied()
@@ -632,7 +650,7 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn build_inspector_projection(
-        &self,
+        &mut self,
         can_edit_draft: bool,
         canvas: &CanvasProjection,
     ) -> InspectorProjection {
@@ -700,119 +718,232 @@ impl ProjectionInputs<'_> {
 
         let is_apple_fn_bound = action_obj.is_some_and(|a| {
             a.id == "apple-fn-key"
-                || matches!(
-                    serde_json::from_value::<ActionKind>(a.payload.clone()),
-                    Ok(ActionKind::Shortcut { key, modifiers, .. })
-                        if key.eq_ignore_ascii_case("fn") && modifiers.is_empty()
-                )
+                || (a.payload.get("type").and_then(|v| v.as_str()) == Some("shortcut")
+                    && a.payload
+                        .get("key")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|k| k.eq_ignore_ascii_case("fn"))
+                    && a.payload
+                        .get("modifiers")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(Vec::is_empty))
         });
 
         let selected_keycap = self.selected_keycap(slot);
-        let filtered_keycaps: Vec<KeycapCatalogItemProjection> = CodexKeycapId::ALL_34
-            .into_iter()
-            .filter(|k| k.matches_query(&self.keycap_search_query))
-            .map(|k| KeycapCatalogItemProjection {
-                id: k,
-                silk_code: k.silk_code().to_string(),
-                short_label: k.short_label().to_string(),
-                chinese_hint: k.chinese_hint().to_string(),
-                glyph_symbol: k.glyph_symbol().to_string(),
-                default_action_id: k.default_action_id().map(str::to_string),
-                is_selected: k == selected_keycap,
-            })
-            .collect();
-
-        static AVAILABLE_CATEGORIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-        let available_categories = AVAILABLE_CATEGORIES
-            .get_or_init(|| {
-                let all_catalog = mi_model::draft::actions();
-                let mut categories = vec!["全部".to_string()];
-                for act in &all_catalog {
-                    if !categories.contains(&act.category) {
-                        categories.push(act.category.clone());
+        static ALL_KEYCAP_ITEMS: std::sync::OnceLock<Vec<KeycapCatalogItemProjection>> =
+            std::sync::OnceLock::new();
+        let filtered_keycaps: Vec<KeycapCatalogItemProjection> =
+            if let Some(mut rows) = self.reusable_catalogs.keycaps.take() {
+                for row in &mut rows {
+                    row.is_selected = row.id == selected_keycap;
+                }
+                rows
+            } else if self.keycap_search_query.trim().is_empty() {
+                let mut rows = ALL_KEYCAP_ITEMS
+                    .get_or_init(|| {
+                        CodexKeycapId::ALL_34
+                            .into_iter()
+                            .map(|k| KeycapCatalogItemProjection {
+                                id: k,
+                                silk_code: k.silk_code().to_string(),
+                                short_label: k.short_label().to_string(),
+                                chinese_hint: k.chinese_hint().to_string(),
+                                glyph_symbol: k.glyph_symbol().to_string(),
+                                default_action_id: k.default_action_id().map(str::to_string),
+                                is_selected: false,
+                            })
+                            .collect()
+                    })
+                    .clone();
+                for row in &mut rows {
+                    if row.id == selected_keycap {
+                        row.is_selected = true;
+                        break;
                     }
                 }
-                categories
-            })
-            .clone();
+                rows
+            } else {
+                CodexKeycapId::ALL_34
+                    .into_iter()
+                    .filter(|k| k.matches_query(&self.keycap_search_query))
+                    .map(|k| KeycapCatalogItemProjection {
+                        id: k,
+                        silk_code: k.silk_code().to_string(),
+                        short_label: k.short_label().to_string(),
+                        chinese_hint: k.chinese_hint().to_string(),
+                        glyph_symbol: k.glyph_symbol().to_string(),
+                        default_action_id: k.default_action_id().map(str::to_string),
+                        is_selected: k == selected_keycap,
+                    })
+                    .collect()
+            };
 
-        let entries = action_library::search(
-            &self.action_search_query,
-            &self.action_category_filter,
-            self.favorites_only,
-            &self.favorite_action_ids,
-            self.command_execution_enabled,
-        );
-        let filtered_actions: Vec<ActionLibraryRowProjection> = entries
-            .into_iter()
-            .map(|entry| {
-                let is_currently_bound =
-                    bound_action_id.as_deref() == Some(entry.action.id.as_str());
-                ActionLibraryRowProjection {
-                    action_id: entry.action.id,
-                    name: entry.action.name,
-                    category: entry.action.category,
-                    detail: entry.action.detail,
-                    target_summary: entry.capability.target,
-                    execution_available: entry.capability.execution_available,
-                    unavailable_reason: entry.capability.unavailable_reason,
-                    is_favorite: entry.favorite,
-                    is_currently_bound,
-                }
-            })
-            .collect();
+        static AVAILABLE_CATEGORIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        let available_categories = self.reusable_catalogs.categories.take().unwrap_or_else(|| {
+            AVAILABLE_CATEGORIES
+                .get_or_init(|| {
+                    let all_catalog = mi_model::draft::actions();
+                    let mut categories = vec!["全部".to_string()];
+                    for act in &all_catalog {
+                        if !categories.contains(&act.category) {
+                            categories.push(act.category.clone());
+                        }
+                    }
+                    categories
+                })
+                .clone()
+        });
 
-        let macros: Vec<MacroLibraryRowProjection> = self
-            .document_store
-            .draft
-            .macros()
-            .into_iter()
-            .map(|m| {
-                let is_currently_bound = bound_graph_action_id.as_deref() == Some(m.id.as_str())
-                    || bound_action_id.as_deref() == Some(m.id.as_str());
-                let event_count = m
-                    .action
-                    .payload
-                    .get("macro_sequence")
-                    .and_then(|s| s.get("events"))
-                    .and_then(|e| e.as_array())
-                    .map(Vec::len)
-                    .unwrap_or(0);
-                let reference_count = m.references.len();
-                let reference_summary = format_macro_references(&m.references);
-                MacroLibraryRowProjection {
-                    id: m.id,
-                    name: m.action.name,
-                    is_multi: false,
-                    step_or_branch_summary: format!("{event_count} 步"),
-                    reference_count,
-                    reference_summary,
-                    is_currently_bound,
+        static DEFAULT_ACTION_ROWS: std::sync::OnceLock<(
+            Vec<ActionLibraryRowProjection>,
+            Vec<ActionLibraryRowProjection>,
+        )> = std::sync::OnceLock::new();
+        let filtered_actions: Vec<ActionLibraryRowProjection> = if let Some(mut rows) =
+            self.reusable_catalogs.actions.take()
+        {
+            for row in &mut rows {
+                row.is_currently_bound = bound_action_id.as_deref() == Some(row.action_id.as_str());
+            }
+            rows
+        } else if self.action_search_query.trim().is_empty()
+            && self.action_category_filter == "全部"
+            && !self.favorites_only
+            && self.favorite_action_ids.is_empty()
+        {
+            let (enabled_rows, disabled_rows) = DEFAULT_ACTION_ROWS.get_or_init(|| {
+                let empty_favs = BTreeSet::new();
+                let build_for = |exec_enabled: bool| {
+                    action_library::search("", "全部", false, &empty_favs, exec_enabled)
+                        .into_iter()
+                        .map(|entry| ActionLibraryRowProjection {
+                            action_id: entry.action.id,
+                            name: entry.action.name,
+                            category: entry.action.category,
+                            detail: entry.action.detail,
+                            target_summary: entry.capability.target,
+                            execution_available: entry.capability.execution_available,
+                            unavailable_reason: entry.capability.unavailable_reason,
+                            is_favorite: false,
+                            is_currently_bound: false,
+                        })
+                        .collect()
+                };
+                (build_for(true), build_for(false))
+            });
+            let mut rows = if self.command_execution_enabled {
+                enabled_rows.clone()
+            } else {
+                disabled_rows.clone()
+            };
+            if let Some(bound_id) = bound_action_id.as_deref() {
+                for row in &mut rows {
+                    if row.action_id == bound_id {
+                        row.is_currently_bound = true;
+                        break;
+                    }
                 }
-            })
-            .collect();
+            }
+            rows
+        } else {
+            let entries = action_library::search(
+                &self.action_search_query,
+                &self.action_category_filter,
+                self.favorites_only,
+                &self.favorite_action_ids,
+                self.command_execution_enabled,
+            );
+            entries
+                .into_iter()
+                .map(|entry| {
+                    let is_currently_bound =
+                        bound_action_id.as_deref() == Some(entry.action.id.as_str());
+                    ActionLibraryRowProjection {
+                        action_id: entry.action.id,
+                        name: entry.action.name,
+                        category: entry.action.category,
+                        detail: entry.action.detail,
+                        target_summary: entry.capability.target,
+                        execution_available: entry.capability.execution_available,
+                        unavailable_reason: entry.capability.unavailable_reason,
+                        is_favorite: entry.favorite,
+                        is_currently_bound,
+                    }
+                })
+                .collect()
+        };
 
-        let multis: Vec<MacroLibraryRowProjection> = self
-            .document_store
-            .draft
-            .multis()
-            .into_iter()
-            .map(|m| {
-                let is_currently_bound = bound_graph_action_id.as_deref() == Some(m.id.as_str())
-                    || bound_action_id.as_deref() == Some(m.id.as_str());
-                let reference_count = m.references.len();
-                let reference_summary = format_macro_references(&m.references);
-                MacroLibraryRowProjection {
-                    id: m.id,
-                    name: m.action.name,
-                    is_multi: true,
-                    step_or_branch_summary: "四分支 Multi".to_string(),
-                    reference_count,
-                    reference_summary,
-                    is_currently_bound,
-                }
-            })
-            .collect();
+        let mut has_local_macro = false;
+        let mut has_local_multi = false;
+        for act in graph.actions.values() {
+            match act.payload.get("type").and_then(|v| v.as_str()) {
+                Some("local_macro") => has_local_macro = true,
+                Some("local_multi") => has_local_multi = true,
+                _ => {}
+            }
+            if has_local_macro && has_local_multi {
+                break;
+            }
+        }
+
+        let macros: Vec<MacroLibraryRowProjection> = if !has_local_macro {
+            Vec::new()
+        } else {
+            self.document_store
+                .draft
+                .macros()
+                .into_iter()
+                .map(|m| {
+                    let is_currently_bound = bound_graph_action_id.as_deref()
+                        == Some(m.id.as_str())
+                        || bound_action_id.as_deref() == Some(m.id.as_str());
+                    let event_count = m
+                        .action
+                        .payload
+                        .get("macro_sequence")
+                        .and_then(|s| s.get("events"))
+                        .and_then(|e| e.as_array())
+                        .map(Vec::len)
+                        .unwrap_or(0);
+                    let reference_count = m.references.len();
+                    let reference_summary = format_macro_references(&m.references);
+                    MacroLibraryRowProjection {
+                        id: m.id,
+                        name: m.action.name,
+                        is_multi: false,
+                        step_or_branch_summary: format!("{event_count} 步"),
+                        reference_count,
+                        reference_summary,
+                        is_currently_bound,
+                    }
+                })
+                .collect()
+        };
+
+        let multis: Vec<MacroLibraryRowProjection> = if !has_local_multi {
+            Vec::new()
+        } else {
+            self.document_store
+                .draft
+                .multis()
+                .into_iter()
+                .map(|m| {
+                    let is_currently_bound = bound_graph_action_id.as_deref()
+                        == Some(m.id.as_str())
+                        || bound_action_id.as_deref() == Some(m.id.as_str());
+                    let reference_count = m.references.len();
+                    let reference_summary = format_macro_references(&m.references);
+                    MacroLibraryRowProjection {
+                        id: m.id,
+                        name: m.action.name,
+                        is_multi: true,
+                        step_or_branch_summary: "四分支 Multi".to_string(),
+                        reference_count,
+                        reference_summary,
+                        is_currently_bound,
+                    }
+                })
+                .collect()
+        };
 
         let can_add_lighting = self
             .selected_layer_id
@@ -941,15 +1072,11 @@ impl ProjectionInputs<'_> {
         let unread_completed_count = completed_blue_dot_pills.len();
         let working_count = working_pills.len();
 
+        let indexed_controls = index_layer_controls(layer);
         let top_six_bound_as_session_keys = (0..6u32).all(|slot| {
-            resolve_slot_action_info(doc, layer, slot)
+            resolve_indexed_slot(doc, &indexed_controls, slot)
                 .1
-                .is_some_and(|a| {
-                    a.id == format!("slot-open-{slot}")
-                        || a.id == format!("cockpit-slot-{slot}")
-                        || a.payload.get("command").and_then(|v| v.as_str())
-                            == Some(&format!("slot-open:{slot}"))
-                })
+                .is_some_and(|a| is_session_slot_action(a, slot as usize))
         });
 
         let binding_ids = ["AG00", "AG01", "AG02", "AG03", "AG04", "AG05"];
@@ -969,14 +1096,9 @@ impl ProjectionInputs<'_> {
                 .unwrap_or_default();
             let is_unread_blue_dot = cand.is_some_and(|c| c.is_unread_blue_dot(acks));
             let is_working_animated = kind == FourAppSessionKind::Working;
-            let is_bound_to_top_key = resolve_slot_action_info(doc, layer, idx as u32)
+            let is_bound_to_top_key = resolve_indexed_slot(doc, &indexed_controls, idx as u32)
                 .1
-                .is_some_and(|a| {
-                    a.id == format!("slot-open-{idx}")
-                        || a.id == format!("cockpit-slot-{idx}")
-                        || a.payload.get("command").and_then(|v| v.as_str())
-                            == Some(&format!("slot-open:{idx}"))
-                });
+                .is_some_and(|a| is_session_slot_action(a, idx));
             let led_color_hex = if is_lighting_protected || !self.lighting_popover.lighting_enabled
             {
                 "#000000".to_string()
@@ -1073,6 +1195,15 @@ impl ProjectionInputs<'_> {
             }
             _ => None,
         };
+        let locked_profile_id = self.document_store.locked_profile_id();
+        let is_profile_locked = locked_profile_id.is_some();
+        let competing_host_notice = self.competing_input_app_running.then(|| {
+            if is_profile_locked {
+                "检测到原版 Input 正在后台运行，已由方案锁定隔离干扰".to_string()
+            } else {
+                "检测到原版 Input 正在后台抢占层切换，建议开启「锁定当前方案」".to_string()
+            }
+        });
         StatusMenuProjection {
             icon: StatusItemIconSpec::canonical(),
             active_profile_id: active_pid,
@@ -1082,6 +1213,10 @@ impl ProjectionInputs<'_> {
             host_execution_enabled: self.document_store.host_execution_enabled(),
             auto_follow_enabled: self.auto_follow_enabled,
             manual_override: self.manual_override,
+            is_profile_locked,
+            locked_profile_id,
+            accessibility_trusted: self.accessibility_trusted,
+            competing_host_notice,
             radial_menu_enabled: self.radial_state.enabled(),
             radial_confirm_mode: self.radial_state.confirm_mode(),
             lighting_enabled: self.lighting_popover.lighting_enabled,
@@ -1289,7 +1424,7 @@ impl ProjectionInputs<'_> {
         Some(id.clone())
     }
 
-    pub(super) fn project(&self) -> WorkbenchProjection {
+    pub(super) fn project(mut self) -> WorkbenchProjection {
         let rows = self.compute_sidebar_rows();
         let active_host_id = self.document_store.host_active_profile_id();
         let is_protected_active = active_host_id
@@ -1297,32 +1432,41 @@ impl ProjectionInputs<'_> {
             .or(self.selected_profile_id.as_deref())
             .is_some_and(|pid| self.is_protected_oai_profile(pid));
 
-        let ownership_banner =
-            if self.six_layer_state.installation.is_some() || self.six_layer_view.is_some() {
-                if let Some(reason) = self
-                    .six_layer_view
-                    .as_ref()
-                    .and_then(|running| running.failure.clone())
-                {
-                    OwnershipBannerState::Caution { reason }
-                } else if self.device_connected {
-                    OwnershipBannerState::Ready {
-                        summary: "六层标准键输入已连接".into(),
-                    }
-                } else {
-                    OwnershipBannerState::Caution {
-                        reason: "六层输入尚未连接".into(),
-                    }
-                }
-            } else if is_protected_active {
-                OwnershipBannerState::NativeHeld {
-                    summary: "原生受保护方案".into(),
+        let locked_profile_id = self.document_store.locked_profile_id();
+        let is_profile_locked = locked_profile_id.is_some();
+        let host_execution_enabled = self.document_store.host_execution_enabled();
+        let untrusted_exec = !self.accessibility_trusted && host_execution_enabled;
+
+        let ownership_banner = if untrusted_exec {
+            OwnershipBannerState::Caution {
+                reason: "缺少 macOS 辅助功能权限，按键动作已被系统拦截，请打开辅助功能设置授权"
+                    .to_string(),
+            }
+        } else if self.six_layer_state.installation.is_some() || self.six_layer_view.is_some() {
+            if let Some(reason) = self
+                .six_layer_view
+                .as_ref()
+                .and_then(|running| running.failure.clone())
+            {
+                OwnershipBannerState::Caution { reason }
+            } else if self.device_connected {
+                OwnershipBannerState::Ready {
+                    summary: "六层标准键输入已连接".into(),
                 }
             } else {
-                OwnershipBannerState::Ready {
-                    summary: "就绪".into(),
+                OwnershipBannerState::Caution {
+                    reason: "六层输入尚未连接".into(),
                 }
-            };
+            }
+        } else if is_protected_active {
+            OwnershipBannerState::NativeHeld {
+                summary: "原生受保护方案".into(),
+            }
+        } else {
+            OwnershipBannerState::Ready {
+                summary: "就绪".into(),
+            }
+        };
         let editing_device = self.document_store.editing_device();
         let can_edit_draft =
             !self.document_store.draft.read_only && self.document_store.draft.loaded_format == 2;
@@ -1330,6 +1474,10 @@ impl ProjectionInputs<'_> {
         let ready_state = if editing_device {
             HeaderReadyState::ModeNotice {
                 text: "硬件布局草稿模式 · 返回后继续管理软件方案".to_string(),
+            }
+        } else if untrusted_exec {
+            HeaderReadyState::Caution {
+                text: "待授权辅助功能".to_string(),
             }
         } else if ownership_banner.is_caution() {
             HeaderReadyState::Caution {
@@ -1386,7 +1534,8 @@ impl ProjectionInputs<'_> {
             banner: ownership_banner.clone(),
             show_connect_button: !self.device_connected,
             show_return_to_host_button: editing_device,
-            host_execution_enabled: self.document_store.host_execution_enabled(),
+            host_execution_enabled,
+            accessibility_trusted: self.accessibility_trusted,
             can_edit_draft,
             can_undo: self.document_store.draft.can_undo,
             can_redo: self.document_store.draft.can_redo,
@@ -1400,6 +1549,9 @@ impl ProjectionInputs<'_> {
             selected_profile_id: self.selected_profile_id.clone(),
             selected_display_name,
             active_host_profile_id: active_host_id,
+            is_profile_locked,
+            locked_profile_id,
+            accessibility_trusted: self.accessibility_trusted,
             auto_switch,
             show_other_profiles: self.show_other_profiles,
             can_edit_draft,
@@ -1488,6 +1640,21 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn resolved_active_profile_id(&self) -> Option<String> {
+        let profiles = &self
+            .document_store
+            .host_store()
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles;
+        if let Some(locked) = self
+            .document_store
+            .locked_profile_id()
+            .filter(|pid| profiles.contains_key(pid))
+        {
+            return Some(locked);
+        }
         if let Some(profile) = self
             .six_layer_view
             .as_ref()
@@ -1495,16 +1662,9 @@ impl ProjectionInputs<'_> {
         {
             return Some(profile);
         }
-        self.document_store.host_active_profile_id().filter(|pid| {
-            self.document_store
-                .host_store()
-                .draft
-                .document
-                .editable
-                .graph
-                .profiles
-                .contains_key(pid)
-        })
+        self.document_store
+            .host_active_profile_id()
+            .filter(|pid| profiles.contains_key(pid))
     }
 
     pub(super) fn route_for_profile(
@@ -1539,6 +1699,9 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn routing_mode_summary_label(&self) -> String {
+        if self.document_store.locked_profile_id().is_some() {
+            return "已锁定 · 忽略前台切换与外部干扰".to_string();
+        }
         let mode = if self.six_layer_view.is_some() {
             "托管层前台优先"
         } else if !self.auto_follow_enabled {
@@ -1798,4 +1961,100 @@ pub fn format_popover_cheat_label(raw_label: &str) -> String {
     } else {
         format!("{compact}…")
     }
+}
+
+fn index_layer_controls<'a>(
+    layer: Option<&'a LayerNode>,
+) -> [Option<&'a mi_model::document::BindingNode>; 20] {
+    let mut slots = [None; 20];
+    let Some(layer) = layer else {
+        return slots;
+    };
+    for binding in layer.controls.values() {
+        if let Some(idx) = binding
+            .logical_control
+            .strip_prefix("logical-")
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&idx| idx < 20)
+        {
+            slots[idx] = Some(binding);
+        }
+    }
+    slots
+}
+
+fn resolve_indexed_slot<'a>(
+    doc: &'a LocalDocumentV2,
+    indexed: &[Option<&'a mi_model::document::BindingNode>; 20],
+    slot: u32,
+) -> (String, Option<&'a Action>) {
+    let Some(binding) = indexed.get(slot as usize).and_then(|b| *b) else {
+        return ("未绑定".to_string(), None);
+    };
+    if let Some(aid) = &binding.action_id {
+        if let Some(action) = doc.editable.graph.actions.get(aid) {
+            return (action.name.clone(), Some(action));
+        }
+    }
+    if let Some(raw_token) = binding.original.as_str() {
+        if raw_token != "Empty" && !raw_token.is_empty() {
+            return (raw_token.to_string(), None);
+        }
+    }
+    ("未绑定".to_string(), None)
+}
+
+fn resolve_indexed_merged_bottom_slot(
+    doc: &LocalDocumentV2,
+    indexed: &[Option<&mi_model::document::BindingNode>; 20],
+) -> u32 {
+    let (_, act10) = resolve_indexed_slot(doc, indexed, 10);
+    let (_, act11) = resolve_indexed_slot(doc, indexed, 11);
+    let cmd10 = act10.and_then(|a| a.payload.get("command").and_then(|v| v.as_str()));
+    let cmd11 = act11.and_then(|a| a.payload.get("command").and_then(|v| v.as_str()));
+    if matches!(cmd10, Some("focus-input" | "new-conversation-in-project"))
+        && matches!(cmd11, Some("push-to-talk" | "dictation"))
+    {
+        return 11;
+    }
+    if act10.is_some() {
+        return 10;
+    }
+    if act11.is_some() {
+        return 11;
+    }
+    10
+}
+
+fn is_session_slot_action(action: &Action, slot_idx: usize) -> bool {
+    const SLOT_OPEN_IDS: [&str; 6] = [
+        "slot-open-0",
+        "slot-open-1",
+        "slot-open-2",
+        "slot-open-3",
+        "slot-open-4",
+        "slot-open-5",
+    ];
+    const COCKPIT_SLOT_IDS: [&str; 6] = [
+        "cockpit-slot-0",
+        "cockpit-slot-1",
+        "cockpit-slot-2",
+        "cockpit-slot-3",
+        "cockpit-slot-4",
+        "cockpit-slot-5",
+    ];
+    const SLOT_OPEN_CMDS: [&str; 6] = [
+        "slot-open:0",
+        "slot-open:1",
+        "slot-open:2",
+        "slot-open:3",
+        "slot-open:4",
+        "slot-open:5",
+    ];
+    let Some(&open_id) = SLOT_OPEN_IDS.get(slot_idx) else {
+        return false;
+    };
+    action.id == open_id
+        || action.id == COCKPIT_SLOT_IDS[slot_idx]
+        || action.payload.get("command").and_then(|v| v.as_str()) == Some(SLOT_OPEN_CMDS[slot_idx])
 }

@@ -104,7 +104,7 @@ use workspace_lifecycle::SystemLifecycle;
 #[path = "projection.rs"]
 mod projection;
 pub use projection::format_popover_cheat_label;
-use projection::{ProjectionInputs, SixLayerView};
+use projection::{ProjectionInputs, ReusableInspectorCatalogs, SixLayerView};
 #[path = "runtime_inbox.rs"]
 mod runtime_inbox;
 use runtime_inbox::RuntimeInbox;
@@ -372,6 +372,13 @@ pub struct WorkbenchStore {
             Result<Option<crate::six_layer_runtime::RunningSixLayer>, String>,
         >,
     >,
+    six_layer_auto_resume_attempts: u8,
+    six_layer_next_auto_resume_at: Option<Instant>,
+    last_synced_six_layer_revs: (u64, u64),
+    accessibility_trusted: bool,
+    accessibility_trusted_override: Option<bool>,
+    last_accessibility_check_at: Instant,
+    last_competing_app_check_at: Instant,
     foreground_bundle_id: Option<String>,
     tokio_runtime: Arc<tokio::runtime::Runtime>,
     hardware_event_tx: RuntimeInbox,
@@ -465,13 +472,27 @@ impl WorkbenchStore {
         let app_cache = config.app_cache.clone();
         let panel_host = config.panel_host.clone();
         let status_item_host = config.status_item_host.clone();
-        let tokio_runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()
-                .map_err(|e| WorkbenchError::Storage(format!("创建异步运行时失败：{e}")))?,
-        );
+        let tokio_runtime = if config.isolated {
+            static ISOLATED_RUNTIME: std::sync::OnceLock<Arc<tokio::runtime::Runtime>> =
+                std::sync::OnceLock::new();
+            Arc::clone(ISOLATED_RUNTIME.get_or_init(|| {
+                Arc::new(
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(4)
+                        .enable_all()
+                        .build()
+                        .expect("isolated tokio runtime"),
+                )
+            }))
+        } else {
+            Arc::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .map_err(|e| WorkbenchError::Storage(format!("创建异步运行时失败：{e}")))?,
+            )
+        };
         let hardware_event_tx = RuntimeInbox::default();
         let merge_wide_key = Arc::new(AtomicBool::new(false));
 
@@ -523,6 +544,13 @@ impl WorkbenchStore {
             six_layer_state,
             six_layer_running: None,
             six_layer_job: None,
+            six_layer_auto_resume_attempts: 0,
+            six_layer_next_auto_resume_at: None,
+            last_synced_six_layer_revs: (0, 0),
+            accessibility_trusted: true,
+            accessibility_trusted_override: None,
+            last_accessibility_check_at: now,
+            last_competing_app_check_at: now,
             foreground_bundle_id: None,
             selected_profile_id: None,
             selected_layer_id: None,
@@ -586,9 +614,148 @@ impl WorkbenchStore {
             store.start_antigravity_live_poller();
             let _ = store.connect_default_usb_with_execution(false);
         }
+        store.last_synced_six_layer_revs = (
+            store.document_store.draft.revision,
+            store.document_store.host_revision(),
+        );
+        store.refresh_accessibility_trusted();
+        store.refresh_competing_input_app_running(true);
         store.refresh_four_app_lighting();
         store.commit_runtime_update();
         Ok(store)
+    }
+
+    pub fn set_accessibility_trusted_for_test(&mut self, trusted: Option<bool>) {
+        self.accessibility_trusted_override = trusted;
+        self.refresh_accessibility_trusted();
+        self.commit_runtime_update();
+    }
+
+    pub fn set_competing_input_app_running_for_test(&mut self, running: bool) {
+        self.applications
+            .insert("com.worklouder.input".to_string(), running);
+        self.commit_runtime_update();
+    }
+
+    fn refresh_accessibility_trusted(&mut self) {
+        self.accessibility_trusted = if let Some(override_val) = self.accessibility_trusted_override
+        {
+            override_val
+        } else if !self.config.isolated && self.config.auto_connect_usb {
+            self.live_executor.is_accessibility_trusted()
+        } else {
+            true
+        };
+    }
+
+    fn refresh_competing_input_app_running(&mut self, force: bool) {
+        if self.config.isolated || !self.config.auto_connect_usb {
+            return;
+        }
+        if !force
+            && self
+                .update_now
+                .saturating_duration_since(self.last_competing_app_check_at)
+                < Duration::from_secs(5)
+        {
+            return;
+        }
+        self.last_competing_app_check_at = self.update_now;
+        let running = mi_macos::is_bundle_running("com.worklouder.input");
+        self.applications
+            .insert("com.worklouder.input".to_string(), running);
+    }
+
+    pub fn open_accessibility_settings(&mut self) {
+        self.refresh_accessibility_trusted();
+        let (outcome, detail) = if !self.config.isolated && self.config.auto_connect_usb {
+            match self.live_executor.open_accessibility_settings() {
+                Ok(()) => ("executed", "已打开 macOS 辅助功能权限设置".to_string()),
+                Err(error) => ("failed", format!("打开辅助功能设置失败 ({error})")),
+            }
+        } else {
+            ("simulated", "已打开 macOS 辅助功能权限设置".to_string())
+        };
+        let profile_id = self.resolved_active_profile_id().unwrap_or_default();
+        let receipt = HostActionReceipt {
+            action_type: "open_accessibility_settings".to_string(),
+            binding_id: "accessibility-settings".to_string(),
+            profile_id,
+            target: "com.apple.systempreferences.accessibility".to_string(),
+            outcome: outcome.to_string(),
+            detail: detail.clone(),
+            text_byte_len: None,
+            timestamp_ms: 0,
+        };
+        self.status_message = detail;
+        self.record_host_action_receipt(receipt);
+        self.commit_runtime_update();
+    }
+
+    pub fn set_profile_locked(
+        &mut self,
+        locked: bool,
+        prefer_selected: bool,
+    ) -> Result<(), WorkbenchError> {
+        if locked {
+            let profiles = &self
+                .document_store
+                .host_store()
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles;
+            let selected_valid = self
+                .selected_profile_id
+                .clone()
+                .filter(|pid| profiles.contains_key(pid));
+            let active_valid = self
+                .resolved_active_profile_id()
+                .filter(|pid| profiles.contains_key(pid));
+            let target_pid = if prefer_selected {
+                selected_valid.or(active_valid)
+            } else {
+                active_valid.or(selected_valid)
+            }
+            .or_else(|| self.find_canonical_profile_id(CanonicalAgent::Antigravity))
+            .or_else(|| {
+                self.document_store
+                    .host_store()
+                    .draft
+                    .document
+                    .editable
+                    .graph
+                    .profile_order
+                    .first()
+                    .cloned()
+            })
+            .ok_or_else(|| WorkbenchError::Routing("没有可锁定的方案".to_string()))?;
+
+            let first_layer_id = profiles
+                .get(&target_pid)
+                .and_then(|p| p.layer_order.first().cloned());
+
+            self.apply_routing_operation(RoutingOperation::LockProfile {
+                profile_id: Some(target_pid.clone()),
+            })?;
+            self.manual_override = true;
+            if prefer_selected || self.selected_profile_id.is_none() {
+                self.selected_profile_id = Some(target_pid);
+                self.selected_layer_id = first_layer_id;
+                self.normalize_surface_for_current_layer();
+            }
+            let name = self.active_profile_display_name();
+            self.status_message = format!("已锁定方案「{name}」");
+        } else {
+            self.apply_routing_operation(RoutingOperation::LockProfile { profile_id: None })?;
+            self.manual_override = !self.auto_follow_enabled;
+            self.status_message = "已解除方案锁定".to_string();
+        }
+        self.sync_six_layer_routing_context();
+        self.refresh_four_app_lighting();
+        self.commit_runtime_update();
+        Ok(())
     }
 
     pub fn poll_hardware_events(&mut self) -> bool {
@@ -598,6 +765,12 @@ impl WorkbenchStore {
     pub fn poll_at(&mut self, now: Instant) -> bool {
         self.update_now = now;
         let before_gen = self.projection_generation;
+        if now.saturating_duration_since(self.last_accessibility_check_at) >= Duration::from_secs(1)
+        {
+            self.last_accessibility_check_at = now;
+            self.refresh_accessibility_trusted();
+        }
+        self.refresh_competing_input_app_running(false);
         self.poll_workspace_lifecycle();
         if self.system_lifecycle == SystemLifecycle::Awake {
             self.poll_six_layer_runtime();
@@ -1151,6 +1324,21 @@ impl WorkbenchStore {
                 if epoch != self.lifecycle_epoch.load(Ordering::Acquire) {
                     return None;
                 }
+                if !self.config.isolated
+                    && self.config.auto_connect_usb
+                    && self
+                        .six_layer_state
+                        .installation
+                        .as_ref()
+                        .is_some_and(|inst| {
+                            inst.status == crate::six_layer_runtime::InstallationStatus::Applied
+                                && inst.plan.validate_current().is_ok()
+                        })
+                {
+                    self.resume_requires_explicit_connect = false;
+                    self.six_layer_auto_resume_attempts = 0;
+                    self.six_layer_next_auto_resume_at = None;
+                }
                 if self.resume_requires_explicit_connect {
                     return None;
                 }
@@ -1494,7 +1682,13 @@ impl WorkbenchStore {
         {
             return None;
         }
-        if self.six_layer_state.installation.is_some() || self.six_layer_job.is_some() {
+        if self.six_layer_job.is_some() || self.six_layer_running.is_some() {
+            return None;
+        }
+        if self.six_layer_state.installation.is_some() {
+            if self.document_store.locked_profile_id().is_some() && event.action_eligible {
+                return self.consume_physical_input_event(event, now);
+            }
             return None;
         }
         if self.board_routing == BoardRouting::WaitingForFirstLayer {
@@ -1808,6 +2002,7 @@ impl WorkbenchStore {
         self.selected_profile_id = Some(profile_id.to_string());
         self.selected_layer_id = first_layer_id;
         self.normalize_surface_for_current_layer();
+        self.sync_six_layer_routing_context();
         self.refresh_four_app_lighting();
         if emit_hud_notice && !self.overlay_controller.is_cheat_sheet_visible() {
             let profile_name = self.active_profile_display_name();
@@ -1833,6 +2028,13 @@ impl WorkbenchStore {
         let bundle_id = bundle_id
             .map(str::trim)
             .filter(|bundle| !bundle.is_empty() && *bundle != "*");
+        self.refresh_accessibility_trusted();
+        if bundle_id == Some("com.worklouder.input") {
+            self.applications
+                .insert("com.worklouder.input".to_string(), true);
+        } else {
+            self.refresh_competing_input_app_running(false);
+        }
         self.navigation_foreground_changed(bundle_id);
         self.foreground_bundle_id = bundle_id.map(str::to_owned);
         if let Some(running) = &self.six_layer_running {
@@ -1841,6 +2043,12 @@ impl WorkbenchStore {
                 self.commit_runtime_update();
             }
             return changed;
+        }
+        if self.document_store.locked_profile_id().is_some() {
+            if bundle_id == Some("com.worklouder.input") {
+                self.commit_runtime_update();
+            }
+            return false;
         }
         let Some(bundle) = bundle_id else {
             return false;
@@ -1924,10 +2132,11 @@ impl WorkbenchStore {
     pub fn set_auto_follow(&mut self, enabled: bool) -> Result<(), WorkbenchError> {
         self.apply_routing_operation(RoutingOperation::Enable { enabled })?;
         self.auto_follow_enabled = enabled;
-        if enabled && self.manual_override {
+        if enabled && self.manual_override && self.document_store.locked_profile_id().is_none() {
             self.apply_routing_operation(RoutingOperation::Resume)?;
             self.manual_override = false;
         }
+        self.sync_six_layer_routing_context();
         self.commit_runtime_update();
         Ok(())
     }
@@ -1936,9 +2145,10 @@ impl WorkbenchStore {
         if !self.auto_follow_enabled {
             return self.set_auto_follow(true);
         }
-        if self.manual_override {
+        if self.manual_override || self.document_store.locked_profile_id().is_some() {
             self.apply_routing_operation(RoutingOperation::Resume)?;
             self.manual_override = false;
+            self.auto_follow_enabled = true;
         } else if let Some(pid) = self
             .selected_profile_id
             .clone()
@@ -1947,6 +2157,7 @@ impl WorkbenchStore {
             self.apply_routing_operation(RoutingOperation::Select { profile_id: pid })?;
             self.manual_override = true;
         }
+        self.sync_six_layer_routing_context();
         self.commit_runtime_update();
         Ok(())
     }
@@ -1963,6 +2174,7 @@ impl WorkbenchStore {
             .map_err(WorkbenchError::Storage)?;
         self.ensure_selected_profile_visible();
         self.normalize_surface_for_current_layer();
+        self.sync_six_layer_routing_context();
         self.commit_runtime_update();
         Ok(())
     }
@@ -2061,6 +2273,7 @@ impl WorkbenchStore {
                 if self.selected_profile_id.as_deref() == Some(profile_id.as_str()) {
                     self.selected_profile_id = None;
                 }
+                self.sync_routing_snapshot();
                 self.ensure_selected_profile_visible();
                 self.status_message = "已删除方案".to_string();
             }
@@ -2074,6 +2287,7 @@ impl WorkbenchStore {
                 self.status_message = "已恢复默认软件方案".to_string();
             }
         }
+        self.sync_six_layer_routing_context();
         self.commit_runtime_update();
         Ok(())
     }
@@ -2149,7 +2363,13 @@ impl WorkbenchStore {
             HeaderAction::SetExecutionEnabled(enabled) => self.set_host_execution_enabled(enabled),
             HeaderAction::Undo => self.undo_draft(false),
             HeaderAction::Redo => self.undo_draft(true),
+            HeaderAction::OpenAccessibilitySettings => {
+                self.open_accessibility_settings();
+                Ok(())
+            }
             HeaderAction::OpenSettings => {
+                self.refresh_accessibility_trusted();
+                self.refresh_competing_input_app_running(true);
                 self.status_menu_open = !self.status_menu_open;
                 self.status_message = if self.status_menu_open {
                     "已打开高级设置".to_string()
@@ -2182,6 +2402,7 @@ impl WorkbenchStore {
             }
             SidebarAction::ResetBoardLayerPlan => self.reset_board_layer_plan(),
             SidebarAction::SetAutoFollow(enabled) => self.set_auto_follow(enabled),
+            SidebarAction::SetProfileLocked(locked) => self.set_profile_locked(locked, true),
             SidebarAction::ToggleAutoFollowPause => self.toggle_auto_follow_pause(),
             SidebarAction::SetShowOtherProfiles(show) => {
                 self.set_show_other_profiles(show);
@@ -2889,6 +3110,7 @@ impl WorkbenchStore {
                 }
             }
         }
+        self.sync_six_layer_routing_context();
     }
 
     fn apply_routing_operation(
@@ -3020,15 +3242,94 @@ impl WorkbenchStore {
 
     fn commit_local_update(&mut self) {
         self.normalize_view_state();
-        let next = self.projection_inputs().project();
-        if self.projection_generation == 0 || self.projection != next {
-            self.projection = next;
+        let mut reused_keycaps = false;
+        let mut reused_categories = false;
+        let mut reused_actions = false;
+        let mut reusable = ReusableInspectorCatalogs {
+            keycaps: None,
+            categories: None,
+            actions: None,
+        };
+        if self.projection_generation > 0 {
+            if let InspectorBodyProjection::Editable(prev) = &mut self.projection.inspector.body {
+                if self.keycap_search_query.trim().is_empty()
+                    && prev.keycap_search_query.trim().is_empty()
+                    && prev.filtered_keycaps.len() == CodexKeycapId::ALL_34.len()
+                {
+                    reusable.keycaps = Some(std::mem::take(&mut prev.filtered_keycaps));
+                    reused_keycaps = true;
+                }
+                if !prev.available_categories.is_empty() {
+                    reusable.categories = Some(std::mem::take(&mut prev.available_categories));
+                    reused_categories = true;
+                }
+                if self.action_search_query.trim().is_empty()
+                    && prev.action_search_query.trim().is_empty()
+                    && self.action_category_filter == "全部"
+                    && prev.action_category_filter == "全部"
+                    && !self.favorites_only
+                    && !prev.favorites_only
+                    && self.favorite_action_ids.is_empty()
+                    && self.command_execution_enabled == prev.command_execution_enabled
+                    && !prev.filtered_actions.is_empty()
+                    && !prev.filtered_actions.iter().any(|r| r.is_favorite)
+                {
+                    reusable.actions = Some(std::mem::take(&mut prev.filtered_actions));
+                    reused_actions = true;
+                }
+            }
+        }
+        let mut next = self.projection_inputs_with(reusable).project();
+        let changed = if self.projection_generation == 0 {
+            true
+        } else if (reused_keycaps || reused_categories || reused_actions)
+            && matches!(next.inspector.body, InspectorBodyProjection::Editable(_))
+        {
+            let (held_k, held_c, held_a) = match &mut next.inspector.body {
+                InspectorBodyProjection::Editable(nb) => (
+                    reused_keycaps.then(|| std::mem::take(&mut nb.filtered_keycaps)),
+                    reused_categories.then(|| std::mem::take(&mut nb.available_categories)),
+                    reused_actions.then(|| std::mem::take(&mut nb.filtered_actions)),
+                ),
+                InspectorBodyProjection::ProtectedLocked(_) => (None, None, None),
+            };
+            let diff = self.projection != next;
+            if let InspectorBodyProjection::Editable(nb) = &mut next.inspector.body {
+                if let Some(k) = held_k {
+                    nb.filtered_keycaps = k;
+                }
+                if let Some(c) = held_c {
+                    nb.available_categories = c;
+                }
+                if let Some(a) = held_a {
+                    nb.filtered_actions = a;
+                }
+            }
+            diff
+        } else {
+            self.projection != next
+        };
+        self.projection = next;
+        if changed {
             self.projection_generation = self.projection_generation.wrapping_add(1);
         }
     }
 
     fn projection_inputs(&self) -> ProjectionInputs<'_> {
+        self.projection_inputs_with(ReusableInspectorCatalogs {
+            keycaps: None,
+            categories: None,
+            actions: None,
+        })
+    }
+
+    fn projection_inputs_with(
+        &self,
+        reusable_catalogs: ReusableInspectorCatalogs,
+    ) -> ProjectionInputs<'_> {
         ProjectionInputs {
+            accessibility_trusted: self.accessibility_trusted,
+            reusable_catalogs,
             action_category_filter: &self.action_category_filter,
             action_search_query: &self.action_search_query,
             active_modal: &self.active_modal,
@@ -3040,6 +3341,11 @@ impl WorkbenchStore {
             bottom_row_layout: self.bottom_row_layout,
             busy: self.busy,
             command_execution_enabled: self.command_execution_enabled,
+            competing_input_app_running: self
+                .applications
+                .get("com.worklouder.input")
+                .copied()
+                .unwrap_or(false),
             connected_candidate: &self.connected_candidate,
             device_connected: self.device_session_connected(),
             document_store: &self.document_store,
@@ -3090,30 +3396,37 @@ impl WorkbenchStore {
     }
 
     fn capture_runtime_view(&mut self) {
-        let bundles = CanonicalAgent::ALL
-            .into_iter()
-            .map(|agent| agent.bundle_id().to_owned())
-            .chain(
-                self.radial_slot_configs
-                    .iter()
-                    .filter_map(|slot| slot.bundle_id.clone()),
-            );
-        for bundle in bundles {
-            self.applications
-                .insert(bundle.clone(), self.app_cache.resolve(&bundle).installed);
+        for agent in CanonicalAgent::ALL {
+            let bundle = agent.bundle_id();
+            let installed = self.app_cache.is_installed(bundle);
+            if let Some(slot) = self.applications.get_mut(bundle) {
+                *slot = installed;
+            } else {
+                self.applications.insert(bundle.to_owned(), installed);
+            }
+        }
+        for slot_cfg in &self.radial_slot_configs {
+            if let Some(bundle) = slot_cfg.bundle_id.as_deref() {
+                let installed = self.app_cache.is_installed(bundle);
+                if let Some(slot) = self.applications.get_mut(bundle) {
+                    *slot = installed;
+                } else {
+                    self.applications.insert(bundle.to_owned(), installed);
+                }
+            }
+        }
+        let current_revs = (
+            self.document_store.draft.revision,
+            self.document_store.host_revision(),
+        );
+        if self.last_synced_six_layer_revs != current_revs {
+            self.last_synced_six_layer_revs = current_revs;
+            if self.six_layer_running.is_some() {
+                self.sync_six_layer_routing_context();
+            }
         }
         self.six_layer_view = self.six_layer_running.as_ref().map(|running| {
             let observed_layer = running.observed_layer.load(Ordering::Acquire);
-            let foreground_priority_adapter = self
-                .foreground_bundle_id
-                .as_deref()
-                .filter(|_| (2..=3).contains(&observed_layer))
-                .and_then(|bundle| {
-                    running.installation.plan.hosts.iter().find(|host| {
-                        mi_macos::executor::bundle_id_for_adapter(&host.adapter) == Some(bundle)
-                    })
-                })
-                .map(|host| host.adapter.clone());
             SixLayerView {
                 configuration_observed: running.readiness.configuration_observed,
                 keyboard_grabbed: running.readiness.keyboard_grabbed,
@@ -3123,7 +3436,7 @@ impl WorkbenchStore {
                 armed: running.armed,
                 failure: running.receiver.failure(),
                 effective_profile_id: running.effective_profile_id(),
-                foreground_priority_adapter,
+                foreground_priority_adapter: running.foreground_priority_adapter(),
             }
         });
     }
@@ -3694,16 +4007,23 @@ impl WorkbenchStore {
             StatusMenuAction::SetHostExecutionEnabled(enabled) => {
                 self.set_host_execution_enabled(enabled)
             }
+            StatusMenuAction::SetProfileLocked(locked) => self.set_profile_locked(locked, false),
+            StatusMenuAction::OpenAccessibilitySettings => {
+                self.open_accessibility_settings();
+                Ok(())
+            }
             StatusMenuAction::SetAutoFollowEnabled(enabled) => self.set_auto_follow(enabled),
             StatusMenuAction::ResumeAutoFollow => {
-                if self.manual_override {
+                if self.manual_override || self.document_store.locked_profile_id().is_some() {
                     self.apply_routing_operation(RoutingOperation::Resume)?;
                     self.manual_override = false;
+                    self.auto_follow_enabled = true;
                 }
                 if !self.auto_follow_enabled {
                     self.apply_routing_operation(RoutingOperation::Enable { enabled: true })?;
                     self.auto_follow_enabled = true;
                 }
+                self.sync_six_layer_routing_context();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -5939,10 +6259,6 @@ fn resolve_slot_action_info<'a>(
         }
     }
     ("未绑定".to_string(), None)
-}
-
-fn resolve_slot_title(doc: &LocalDocumentV2, layer: Option<&LayerNode>, slot: u32) -> String {
-    resolve_slot_action_info(doc, layer, slot).0
 }
 
 fn resolve_merged_bottom_slot(doc: &LocalDocumentV2, layer: Option<&LayerNode>) -> u32 {

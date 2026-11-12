@@ -577,6 +577,52 @@ final class MicroInputTests: XCTestCase {
         let store = CoreStore(isolatedDirectory: dir.path)
         XCTAssertEqual(store.header.engineVersion, "0.2.0")
     }
+
+    @MainActor
+    func testProfileLockAndAccessibilitySlicesRoundtrip() throws {
+        let dir = try makeIsolatedTempDir("profile-lock-slices")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = CoreStore(isolatedDirectory: dir.path)
+
+        XCTAssertFalse(store.sidebar.isProfileLocked)
+        XCTAssertNil(store.sidebar.lockedProfileId)
+        XCTAssertTrue(store.header.accessibilityTrusted)
+        XCTAssertTrue(store.statusMenu.accessibilityTrusted)
+
+        let rows = store.sidebar.sidebarRows
+        XCTAssertGreaterThanOrEqual(rows.count, 2)
+        let firstId = rows[0].profileId
+        let secondId = rows[1].profileId
+
+        store.dispatch("sidebar", ["BrowseProfile": firstId])
+        store.dispatch("sidebar", ["SetProfileLocked": true])
+        XCTAssertTrue(store.sidebar.isProfileLocked)
+        XCTAssertTrue(store.statusMenu.isProfileLocked)
+        XCTAssertEqual(store.sidebar.lockedProfileId, firstId)
+        XCTAssertEqual(store.statusMenu.lockedProfileId, firstId)
+        XCTAssertEqual(store.statusMenu.routingModeSummary, "已锁定 · 忽略前台切换与外部干扰")
+
+        store.dispatch("sidebar", ["SelectProfile": secondId])
+        XCTAssertTrue(store.sidebar.isProfileLocked)
+        XCTAssertEqual(store.sidebar.lockedProfileId, secondId)
+        XCTAssertEqual(store.statusMenu.lockedProfileId, secondId)
+
+        store.dispatch("status_menu", "ResumeAutoFollow")
+        XCTAssertFalse(store.sidebar.isProfileLocked)
+        XCTAssertFalse(store.statusMenu.isProfileLocked)
+        XCTAssertNil(store.statusMenu.lockedProfileId)
+        XCTAssertTrue(store.statusMenu.autoFollowEnabled)
+
+        store.dispatch("status_menu", ["SetProfileLocked": true])
+        XCTAssertTrue(store.statusMenu.isProfileLocked)
+        store.dispatch("status_menu", ["SetProfileLocked": false])
+        XCTAssertFalse(store.statusMenu.isProfileLocked)
+
+        store.dispatch("status_menu", "OpenAccessibilitySettings")
+        XCTAssertEqual(store.footer.statusMessage, "已打开 macOS 辅助功能权限设置")
+        store.dispatch("header", "OpenAccessibilitySettings")
+        XCTAssertEqual(store.footer.statusMessage, "已打开 macOS 辅助功能权限设置")
+    }
 }
 
 @MainActor

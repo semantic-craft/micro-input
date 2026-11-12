@@ -206,25 +206,83 @@ async fn send_thstatus_bounded(
     }
 }
 
+pub const SLOTS_PER_LAYER: usize = 20;
+pub type HostAction = ResolvedHostAction;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedProfilePlan {
+    pub profile_id: String,
+    pub bundle_id: Option<String>,
+    pub actions: [Option<HostAction>; SLOTS_PER_LAYER],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SixLayerRoutingMode {
+    Locked(PinnedProfilePlan),
+    ManualPinned(PinnedProfilePlan),
+    AutoFollow {
+        dynamic_hosts: Vec<PinnedProfilePlan>,
+    },
+}
+
+impl Default for SixLayerRoutingMode {
+    fn default() -> Self {
+        Self::AutoFollow {
+            dynamic_hosts: Vec::new(),
+        }
+    }
+}
+
+enum VendorSlotDecode {
+    Edge {
+        phys_slot: u8,
+        control: Option<u8>,
+        pressed: bool,
+    },
+    Step(u8),
+    RadialSector(u8),
+    RadialRelease,
+}
+
 fn handle_vendor_slot_notification(
     received: &mi_session::ReceivedNotification,
-    pressed_mask: &mut u8,
+    pressed_mask: &mut u32,
     receiver: &UserCommandReceiver,
+    layer1_fallback: bool,
 ) {
-    if let Some((phys_slot, control, pressed)) =
-        decode_six_layer_vendor_slot(&received.notification)
-    {
-        let mask_bit = 1u8 << phys_slot;
-        if pressed {
-            if (*pressed_mask & mask_bit) == 0 {
-                *pressed_mask |= mask_bit;
-                if let Some(control) = control {
-                    let _ = receiver.push_vendor_activation(control);
+    match decode_six_layer_vendor_slot(&received.notification, layer1_fallback) {
+        Some(VendorSlotDecode::Edge {
+            phys_slot,
+            control,
+            pressed,
+        }) => {
+            let mask_bit = 1u32 << phys_slot;
+            if pressed {
+                if (*pressed_mask & mask_bit) == 0 {
+                    *pressed_mask |= mask_bit;
+                    if let Some(control) = control {
+                        let _ = receiver.push_vendor_activation(control);
+                    }
                 }
+            } else {
+                *pressed_mask &= !mask_bit;
             }
-        } else {
-            *pressed_mask &= !mask_bit;
         }
+        Some(VendorSlotDecode::Step(control)) => {
+            let _ = receiver.push_vendor_activation(control);
+        }
+        Some(VendorSlotDecode::RadialSector(slot)) => {
+            let radial_bits = 0b1111u32 << 16;
+            let bit = 1u32 << slot;
+            if (*pressed_mask & radial_bits) == 0 {
+                *pressed_mask |= bit;
+                let _ = receiver.push_vendor_activation(slot);
+            }
+        }
+        Some(VendorSlotDecode::RadialRelease) => {
+            *pressed_mask &= !(0b1111u32 << 16);
+        }
+        None => {}
     }
 }
 
@@ -312,6 +370,7 @@ impl SharedVendorBridge {
         runtime: &tokio::runtime::Runtime,
         initial_session: Option<Arc<DeviceSession>>,
         receiver: Arc<UserCommandReceiver>,
+        routing: Arc<Mutex<RoutingContext>>,
         target: TargetKeyboard,
         allow_reconnect: bool,
     ) {
@@ -319,6 +378,7 @@ impl SharedVendorBridge {
             runtime,
             initial_session,
             receiver,
+            routing,
             allow_reconnect,
             move || open_shared_vendor_session(target.clone()),
         );
@@ -329,6 +389,7 @@ impl SharedVendorBridge {
         runtime: &tokio::runtime::Runtime,
         initial_session: Option<Arc<DeviceSession>>,
         receiver: Arc<UserCommandReceiver>,
+        routing: Arc<Mutex<RoutingContext>>,
         allow_reconnect: bool,
         mut reopen: F,
     ) where
@@ -363,7 +424,7 @@ impl SharedVendorBridge {
         self.task = Some(runtime.spawn(async move {
             let mut current_session = initial_session;
             let mut pending_notif_rx = initial_notif_rx;
-            let mut pressed_mask: u8 = 0;
+            let mut pressed_mask: u32 = 0;
             let mut rotated_from_live = false;
             while !*stop_rx.borrow() {
                 if current_session.is_none() {
@@ -422,10 +483,13 @@ impl SharedVendorBridge {
                 while session_ok && !*stop_rx.borrow() {
                     if allow_reconnect && session.request_count() >= 900 {
                         while let Ok(received) = notif_rx.try_recv() {
+                            let layer1_fallback =
+                                routing.lock().unwrap().accepts_layer1_vendor_fallback();
                             handle_vendor_slot_notification(
                                 &received,
                                 &mut pressed_mask,
                                 &receiver,
+                                layer1_fallback,
                             );
                         }
                         pressed_mask = 0;
@@ -455,10 +519,13 @@ impl SharedVendorBridge {
                         notif = notif_rx.recv() => {
                             match notif {
                                 Ok(received) => {
+                                    let layer1_fallback =
+                                        routing.lock().unwrap().accepts_layer1_vendor_fallback();
                                     handle_vendor_slot_notification(
                                         &received,
                                         &mut pressed_mask,
                                         &receiver,
+                                        layer1_fallback,
                                     );
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -512,7 +579,8 @@ impl SharedVendorBridge {
 
 fn decode_six_layer_vendor_slot(
     notification: &mi_proto::HostNotification,
-) -> Option<(u8, Option<u8>, bool)> {
+    layer1_fallback: bool,
+) -> Option<VendorSlotDecode> {
     let mi_proto::HostNotification::Unknown(raw) = notification else {
         return None;
     };
@@ -529,26 +597,125 @@ fn decode_six_layer_vendor_slot(
         return None;
     }
     let method = raw.get("method").or_else(|| raw.get("m"))?.as_str()?;
-    if method != "v.oai.hid" {
-        return None;
-    }
     let params = raw.get("params").or_else(|| raw.get("p"))?.as_object()?;
-    let key = params.get("k")?.as_str()?;
-    let act = params.get("act")?.as_i64()?;
-    let pressed = match act {
-        1 => true,
-        0 => false,
-        _ => return None,
-    };
-    let digits = key.strip_prefix("AG")?;
-    if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let ag = digits.parse::<u8>().ok()?;
-    match ag {
-        0..=5 => Some((ag, None, pressed)),
-        6..=11 => Some((ag - 6, Some(ag - 6), pressed)),
-        12..=17 => Some((ag - 12, Some(20 + (ag - 12)), pressed)),
+    match method {
+        "v.oai.hid" => {
+            let key = params.get("k")?.as_str()?;
+            let act = params.get("act")?.as_i64()?;
+            if let Some(digits) = key.strip_prefix("AG") {
+                if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                let pressed = match act {
+                    1 => true,
+                    0 => false,
+                    _ => return None,
+                };
+                let ag = digits.parse::<u8>().ok()?;
+                return match ag {
+                    0..=5 => Some(VendorSlotDecode::Edge {
+                        phys_slot: ag,
+                        control: layer1_fallback.then_some(ag),
+                        pressed,
+                    }),
+                    6..=11 => Some(VendorSlotDecode::Edge {
+                        phys_slot: ag - 6,
+                        control: Some(ag - 6),
+                        pressed,
+                    }),
+                    12..=17 => Some(VendorSlotDecode::Edge {
+                        phys_slot: ag - 12,
+                        control: Some(20 + (ag - 12)),
+                        pressed,
+                    }),
+                    _ => None,
+                };
+            }
+            if !layer1_fallback {
+                return None;
+            }
+            if let Some(digits) = key.strip_prefix("ACT") {
+                if digits.len() == 2 && digits.bytes().all(|b| b.is_ascii_digit()) {
+                    let slot = digits.parse::<u8>().ok()?;
+                    if (6..=12).contains(&slot) {
+                        let pressed = match act {
+                            1 => true,
+                            0 => false,
+                            _ => return None,
+                        };
+                        return Some(VendorSlotDecode::Edge {
+                            phys_slot: slot,
+                            control: Some(slot),
+                            pressed,
+                        });
+                    }
+                }
+                return None;
+            }
+            match (key, act) {
+                ("ENC_CC", 2) => Some(VendorSlotDecode::Step(13)),
+                ("ENC_CW", 2) => Some(VendorSlotDecode::Step(14)),
+                ("ENC_CC", 1) => Some(VendorSlotDecode::Edge {
+                    phys_slot: 13,
+                    control: Some(13),
+                    pressed: true,
+                }),
+                ("ENC_CC", 0) => Some(VendorSlotDecode::Edge {
+                    phys_slot: 13,
+                    control: Some(13),
+                    pressed: false,
+                }),
+                ("ENC_CW", 1) => Some(VendorSlotDecode::Edge {
+                    phys_slot: 14,
+                    control: Some(14),
+                    pressed: true,
+                }),
+                ("ENC_CW", 0) => Some(VendorSlotDecode::Edge {
+                    phys_slot: 14,
+                    control: Some(14),
+                    pressed: false,
+                }),
+                ("ENC_CLK", 1) => Some(VendorSlotDecode::Edge {
+                    phys_slot: 15,
+                    control: Some(15),
+                    pressed: true,
+                }),
+                ("ENC_CLK", 0) => Some(VendorSlotDecode::Edge {
+                    phys_slot: 15,
+                    control: Some(15),
+                    pressed: false,
+                }),
+                _ => None,
+            }
+        }
+        "v.oai.rad" if layer1_fallback => {
+            let angle = params.get("a")?.as_f64()?;
+            let distance = params.get("d")?.as_f64()?;
+            if !angle.is_finite()
+                || !distance.is_finite()
+                || !(0.0..=1.0).contains(&angle)
+                || !(0.0..=1.0).contains(&distance)
+            {
+                return None;
+            }
+            if distance >= 0.5 {
+                let norm = angle.rem_euclid(1.0);
+                let slot = if (0.625..0.875).contains(&norm) {
+                    16
+                } else if (0.375..0.625).contains(&norm) {
+                    17
+                } else if (0.125..0.375).contains(&norm) {
+                    18
+                } else {
+                    19
+                };
+                Some(VendorSlotDecode::RadialSector(slot))
+            } else if distance < 0.35 {
+                Some(VendorSlotDecode::RadialRelease)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -564,7 +731,7 @@ pub struct RunningSixLayer {
     pub armed: bool,
     execution_policy: Arc<ExecutionPolicy>,
     pub receipts: Option<std::sync::mpsc::Receiver<mi_macos::HostActionReceipt>>,
-    foreground: Arc<Mutex<ForegroundContext>>,
+    routing: Arc<Mutex<RoutingContext>>,
     pub(crate) navigation: Option<NavigationDispatch>,
     vendor_bridge: SharedVendorBridge,
     stop: Arc<AtomicBool>,
@@ -573,15 +740,17 @@ pub struct RunningSixLayer {
 }
 
 #[derive(Clone, Debug)]
-struct ForegroundContext {
-    bundle_id: Option<String>,
-    generation: u64,
-    changed_at: Instant,
+pub(crate) struct RoutingContext {
+    pub mode: SixLayerRoutingMode,
+    pub bundle_id: Option<String>,
+    pub generation: u64,
+    pub changed_at: Instant,
 }
 
-impl Default for ForegroundContext {
+impl Default for RoutingContext {
     fn default() -> Self {
         Self {
+            mode: SixLayerRoutingMode::default(),
             bundle_id: None,
             generation: 0,
             changed_at: Instant::now(),
@@ -589,45 +758,210 @@ impl Default for ForegroundContext {
     }
 }
 
-impl ForegroundContext {
+impl RoutingContext {
     fn update(&mut self, bundle_id: Option<&str>) -> bool {
         if self.bundle_id.as_deref() == bundle_id {
             return false;
         }
         self.bundle_id = bundle_id.map(str::to_owned);
-        self.generation += 1;
-        self.changed_at = Instant::now();
-        true
+        match self.mode {
+            SixLayerRoutingMode::Locked(_) | SixLayerRoutingMode::ManualPinned(_) => false,
+            SixLayerRoutingMode::AutoFollow { .. } => {
+                self.generation += 1;
+                self.changed_at = Instant::now();
+                true
+            }
+        }
     }
 
+    fn set_routing(&mut self, mode: SixLayerRoutingMode, bundle_id: Option<&str>) -> bool {
+        let mut changed = false;
+        if self.bundle_id.as_deref() != bundle_id {
+            self.bundle_id = bundle_id.map(str::to_owned);
+            if matches!(mode, SixLayerRoutingMode::AutoFollow { .. }) {
+                self.generation += 1;
+                self.changed_at = Instant::now();
+                changed = true;
+            }
+        }
+        if self.mode != mode {
+            if matches!(mode, SixLayerRoutingMode::AutoFollow { .. })
+                && !matches!(self.mode, SixLayerRoutingMode::AutoFollow { .. })
+            {
+                self.generation += 1;
+                self.changed_at = Instant::now();
+            }
+            self.mode = mode;
+            changed = true;
+        }
+        changed
+    }
+
+    fn accepts_layer1_vendor_fallback(&self) -> bool {
+        match &self.mode {
+            SixLayerRoutingMode::Locked(pinned) => pinned.actions.iter().any(Option::is_some),
+            SixLayerRoutingMode::ManualPinned(pinned) => {
+                pinned.bundle_id.as_deref() != Some("com.openai.codex")
+                    && pinned.actions.iter().any(Option::is_some)
+            }
+            SixLayerRoutingMode::AutoFollow { .. } => false,
+        }
+    }
+
+    fn effective_profile_id(
+        &self,
+        plan: &AppliedSixLayerPlan,
+        physical_layer: u8,
+    ) -> Option<String> {
+        match &self.mode {
+            SixLayerRoutingMode::Locked(pinned) => Some(pinned.profile_id.clone()),
+            SixLayerRoutingMode::ManualPinned(pinned) => {
+                if pinned.bundle_id.as_deref() == Some("com.openai.codex")
+                    && pinned.actions.iter().all(Option::is_none)
+                {
+                    None
+                } else {
+                    Some(pinned.profile_id.clone())
+                }
+            }
+            SixLayerRoutingMode::AutoFollow { dynamic_hosts } => {
+                if !(2..=3).contains(&physical_layer) {
+                    return None;
+                }
+                if let Some(bundle) = self.bundle_id.as_deref() {
+                    if let Some(host) = plan.hosts.iter().find(|host| {
+                        mi_macos::executor::bundle_id_for_adapter(&host.adapter) == Some(bundle)
+                    }) {
+                        return Some(host.profile_id.clone());
+                    }
+                    if let Some(dyn_host) = dynamic_hosts
+                        .iter()
+                        .find(|h| h.bundle_id.as_deref() == Some(bundle))
+                    {
+                        return Some(dyn_host.profile_id.clone());
+                    }
+                }
+                plan.hosts
+                    .get((physical_layer - 2) as usize)
+                    .map(|h| h.profile_id.clone())
+            }
+        }
+    }
+
+    fn foreground_priority_adapter(
+        &self,
+        plan: &AppliedSixLayerPlan,
+        physical_layer: u8,
+    ) -> Option<String> {
+        if !matches!(self.mode, SixLayerRoutingMode::AutoFollow { .. })
+            || !(2..=3).contains(&physical_layer)
+        {
+            return None;
+        }
+        let bundle = self.bundle_id.as_deref()?;
+        if let Some(host) = plan
+            .hosts
+            .iter()
+            .find(|host| mi_macos::executor::bundle_id_for_adapter(&host.adapter) == Some(bundle))
+        {
+            return Some(host.adapter.clone());
+        }
+        if let SixLayerRoutingMode::AutoFollow { dynamic_hosts } = &self.mode {
+            if dynamic_hosts
+                .iter()
+                .any(|h| h.bundle_id.as_deref() == Some(bundle))
+            {
+                return match bundle {
+                    "com.google.antigravity" => Some("antigravity".into()),
+                    "com.deepseek.dsh" => Some("dsh-desktop".into()),
+                    "dev.herdr.app" => Some("herdr".into()),
+                    _ => None,
+                };
+            }
+        }
+        None
+    }
+
+    fn resolve_control<'a>(
+        &'a self,
+        plan: &'a AppliedSixLayerPlan,
+        control_layer: u8,
+        slot: usize,
+    ) -> Option<(&'a str, &'a ResolvedHostAction)> {
+        match &self.mode {
+            SixLayerRoutingMode::Locked(pinned) | SixLayerRoutingMode::ManualPinned(pinned) => {
+                if !(2..=4).contains(&control_layer) {
+                    return None;
+                }
+                let action = pinned.actions.get(slot)?.as_ref()?;
+                Some((pinned.profile_id.as_str(), action))
+            }
+            SixLayerRoutingMode::AutoFollow { dynamic_hosts } => {
+                if !(2..=3).contains(&control_layer) {
+                    return None;
+                }
+                if let Some(bundle) = self.bundle_id.as_deref() {
+                    if let Some(host) = plan.hosts.iter().find(|host| {
+                        mi_macos::executor::bundle_id_for_adapter(&host.adapter) == Some(bundle)
+                    }) {
+                        let action = host.actions.get(slot)?.as_ref()?;
+                        return Some((host.profile_id.as_str(), action));
+                    }
+                    if let Some(dyn_host) = dynamic_hosts
+                        .iter()
+                        .find(|h| h.bundle_id.as_deref() == Some(bundle))
+                    {
+                        let action = dyn_host.actions.get(slot)?.as_ref()?;
+                        return Some((dyn_host.profile_id.as_str(), action));
+                    }
+                }
+                let host = plan.hosts.get((control_layer - 2) as usize)?;
+                let action = host.actions.get(slot)?.as_ref()?;
+                Some((host.profile_id.as_str(), action))
+            }
+        }
+    }
+
+    #[cfg(test)]
     fn host_index(&self, plan: &AppliedSixLayerPlan, physical_layer: u8) -> usize {
-        self.bundle_id
-            .as_deref()
-            .and_then(|bundle| {
-                plan.hosts.iter().position(|host| {
-                    mi_macos::executor::bundle_id_for_adapter(&host.adapter) == Some(bundle)
-                })
-            })
-            .unwrap_or((physical_layer - 2) as usize)
+        if let Some(bundle) = self.bundle_id.as_deref() {
+            if let Some(index) = plan.hosts.iter().position(|host| {
+                mi_macos::executor::bundle_id_for_adapter(&host.adapter) == Some(bundle)
+            }) {
+                return index;
+            }
+        }
+        (physical_layer.saturating_sub(2)) as usize
     }
 }
 
 impl RunningSixLayer {
     pub fn foreground_changed(&self, bundle_id: Option<&str>) -> bool {
-        self.foreground.lock().unwrap().update(bundle_id)
+        self.routing.lock().unwrap().update(bundle_id)
+    }
+
+    pub fn set_routing_context(&self, mode: SixLayerRoutingMode, bundle_id: Option<&str>) -> bool {
+        self.routing.lock().unwrap().set_routing(mode, bundle_id)
+    }
+
+    pub fn routing_mode(&self) -> SixLayerRoutingMode {
+        self.routing.lock().unwrap().mode.clone()
+    }
+
+    pub fn foreground_priority_adapter(&self) -> Option<String> {
+        let layer = self.observed_layer.load(Ordering::Acquire);
+        self.routing
+            .lock()
+            .unwrap()
+            .foreground_priority_adapter(&self.installation.plan, layer)
     }
 
     pub fn effective_profile_id(&self) -> Option<String> {
         let layer = self.observed_layer.load(Ordering::Acquire);
-        if !(2..=3).contains(&layer) {
-            return None;
-        }
-        let foreground = self.foreground.lock().unwrap();
-        Some(
-            self.installation.plan.hosts[foreground.host_index(&self.installation.plan, layer)]
-                .profile_id
-                .clone(),
-        )
+        self.routing
+            .lock()
+            .unwrap()
+            .effective_profile_id(&self.installation.plan, layer)
     }
 
     #[cfg(test)]
@@ -763,6 +1097,7 @@ impl RunningSixLayer {
             runtime,
             initial,
             Arc::clone(&self.receiver),
+            Arc::clone(&self.routing),
             self.installation.target.clone(),
             true,
         );
@@ -778,6 +1113,7 @@ impl RunningSixLayer {
             runtime,
             Some(session),
             Arc::clone(&self.receiver),
+            Arc::clone(&self.routing),
             self.installation.target.clone(),
             false,
         );
@@ -798,7 +1134,7 @@ impl RunningSixLayer {
         let policy = Arc::clone(&self.execution_policy);
         let observed = Arc::clone(&self.observed_layer);
         let first = Arc::clone(&self.first_event_verified);
-        let foreground = Arc::clone(&self.foreground);
+        let routing = Arc::clone(&self.routing);
         let navigation = self.navigation.clone();
         let (tx, rx) = std::sync::mpsc::sync_channel(32);
         self.receipts = Some(rx);
@@ -810,7 +1146,7 @@ impl RunningSixLayer {
                 &policy,
                 &observed,
                 &first,
-                &foreground,
+                &routing,
                 &tx,
                 navigation.as_ref(),
                 || receiver.next(),
@@ -859,18 +1195,19 @@ impl RunningSixLayer {
     pub fn start_monitor(&mut self) {
         let receiver = Arc::clone(&self.receiver);
         let stop = Arc::clone(&self.stop);
-        let readiness = self.readiness.clone();
-        let patch = self.installation.config.clone();
+        let patch_path = self.installation.config.path.clone();
+        let endpoint_marker = self.receiver.path().to_string_lossy().into_owned();
         let target = self.installation.target.clone();
         self.monitor = Some(thread::spawn(move || {
             let mut wall = SystemTime::now();
             let mut monotonic = Instant::now();
+            let mut last_patch_stamp: Option<(Option<SystemTime>, u64)> = None;
             while !stop.load(Ordering::Acquire) {
                 for _ in 0..10 {
                     if stop.load(Ordering::Acquire) {
                         return;
                     }
-                    thread::sleep(Duration::from_millis(50));
+                    thread::sleep(Duration::from_millis(200));
                 }
                 let now_wall = SystemTime::now();
                 let now_monotonic = Instant::now();
@@ -881,13 +1218,54 @@ impl RunningSixLayer {
                     > Duration::from_secs(1);
                 wall = now_wall;
                 monotonic = now_monotonic;
-                if !check_input_connection(&receiver, slept, || readiness.recheck(&patch, &target))
-                {
+                if !check_input_connection(&receiver, slept, || {
+                    steady_state_recheck(
+                        &target,
+                        receiver.path(),
+                        &patch_path,
+                        &endpoint_marker,
+                        &mut last_patch_stamp,
+                    )
+                }) {
                     return;
                 }
             }
         }));
     }
+}
+
+fn steady_state_recheck(
+    target: &TargetKeyboard,
+    receiver_path: &Path,
+    patch_path: &Path,
+    endpoint_marker: &str,
+    last_patch_stamp: &mut Option<(Option<SystemTime>, u64)>,
+) -> Result<(), String> {
+    match mi_transport::discover_target_keyboard() {
+        Ok(found) => {
+            if found.location_id != target.location_id {
+                return Err("键盘 USB 端口位置已变更，等待自动重连".into());
+            }
+            if found != *target {
+                return Err("目标 USB 设备已变化".into());
+            }
+        }
+        Err(_) => return Err("目标 USB 设备已变化".into()),
+    }
+    if !receiver_path.exists() {
+        return Err("输入接收器已断开".into());
+    }
+    let meta = fs::metadata(patch_path).map_err(|_| "Karabiner 配置已变化".to_string())?;
+    let stamp = (meta.modified().ok(), meta.len());
+    if last_patch_stamp.as_ref() != Some(&stamp) {
+        let bytes = fs::read(patch_path).map_err(|_| "Karabiner 配置已变化".to_string())?;
+        let text = String::from_utf8_lossy(&bytes);
+        if !text.contains(endpoint_marker) {
+            return Err("Karabiner 配置已变化".into());
+        }
+        *last_patch_stamp = Some(stamp);
+    }
+    Ok(())
 }
 
 impl Drop for RunningSixLayer {
@@ -925,7 +1303,7 @@ fn execute_clicks(
     policy: &ExecutionPolicy,
     observed: &AtomicU8,
     first: &AtomicBool,
-    foreground: &Mutex<ForegroundContext>,
+    routing: &Mutex<RoutingContext>,
     receipts: &std::sync::mpsc::SyncSender<mi_macos::HostActionReceipt>,
     navigation: Option<&NavigationDispatch>,
     mut next: impl FnMut() -> Result<Option<mi_transport::Activation>, String>,
@@ -953,17 +1331,14 @@ fn execute_clicks(
         let control = &DIRECT_CONTROLS[event.control as usize];
         observed.store(control.layer, Ordering::Release);
         first.store(true, Ordering::Release);
-        if !(2..=3).contains(&control.layer) {
+        let context = routing.lock().unwrap().clone();
+        let is_auto_follow = matches!(context.mode, SixLayerRoutingMode::AutoFollow { .. });
+        if is_auto_follow && context.generation != 0 && event.received_at < context.changed_at {
             continue;
         }
-        let context = foreground.lock().unwrap().clone();
-        if context.generation != 0 && event.received_at < context.changed_at {
-            continue;
-        }
-        let Some(host) = plan.hosts.get(context.host_index(plan, control.layer)) else {
-            continue;
-        };
-        let Some(action) = &host.actions[control.slot as usize] else {
+        let Some((profile_id, action)) =
+            context.resolve_control(plan, control.layer, control.slot as usize)
+        else {
             continue;
         };
         if !policy.admits(admission, action) {
@@ -979,7 +1354,7 @@ fn execute_clicks(
         if event.is_expired_at(Instant::now()) {
             continue;
         }
-        if foreground.lock().unwrap().generation != context.generation {
+        if is_auto_follow && routing.lock().unwrap().generation != context.generation {
             continue;
         }
         if let (Some(command), Some(dispatch)) =
@@ -989,9 +1364,6 @@ fn execute_clicks(
                 continue;
             }
             let snapshot = dispatch.slots.lock().unwrap().clone();
-            if event.received_at < snapshot.changed_at {
-                continue;
-            }
             if dispatch
                 .tx
                 .try_send(PhysicalNavigationIntent {
@@ -1000,7 +1372,7 @@ fn execute_clicks(
                     input_generation: event.generation.clone(),
                     admission,
                     received_at: event.received_at,
-                    profile: host.profile_id.clone(),
+                    profile: profile_id.to_owned(),
                     binding: CONTROL_BINDINGS[control.slot as usize].into(),
                 })
                 .is_err()
@@ -1011,7 +1383,7 @@ fn execute_clicks(
             continue;
         }
         let receipt = execute(
-            &host.profile_id,
+            profile_id,
             CONTROL_BINDINGS[control.slot as usize],
             action,
             admission,
@@ -1053,7 +1425,7 @@ pub async fn apply(
     let state_path = document_dir.join("six-layer-runtime.json");
     plan.validate_current()?;
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
-    let receiver = Arc::new(UserCommandReceiver::bind().map_err(|e| e.to_string())?);
+    let receiver = Arc::new(UserCommandReceiver::bind_default().map_err(|e| e.to_string())?);
     let rule = karabiner::rules(&target, &receiver, plan.bottom_row_layout)?;
     let path = karabiner::config_path()?;
     let patch = karabiner::prepare_config(
@@ -1287,7 +1659,7 @@ fn new_running(
         armed: false,
         execution_policy: Arc::new(ExecutionPolicy::default()),
         receipts: None,
-        foreground: Arc::new(Mutex::new(ForegroundContext::default())),
+        routing: Arc::new(Mutex::new(RoutingContext::default())),
         navigation: None,
         vendor_bridge: SharedVendorBridge::new(initial_session),
         stop: Arc::new(AtomicBool::new(false)),
@@ -1325,7 +1697,7 @@ pub async fn resume(
             )
             .await
             .map_err(|e| format!("{e}；未写设备，请显式应用或恢复"))?;
-        let receiver = Arc::new(UserCommandReceiver::bind().map_err(|e| e.to_string())?);
+        let receiver = Arc::new(UserCommandReceiver::bind_default().map_err(|e| e.to_string())?);
         let rule = karabiner::rules(&target, &receiver, installation.plan.bottom_row_layout)?;
         let path = installation.config.path.clone();
         let patch = karabiner::prepare_config(
@@ -1570,7 +1942,7 @@ mod tests {
         let plan = test_plan();
         let receiver = UserCommandReceiver::bind().unwrap();
         receiver.arm().unwrap();
-        let foreground = Mutex::new(ForegroundContext::default());
+        let foreground = Mutex::new(RoutingContext::default());
         foreground
             .lock()
             .unwrap()
@@ -1624,7 +1996,7 @@ mod tests {
         let plan = test_plan();
         let receiver = UserCommandReceiver::bind().unwrap();
         receiver.arm().unwrap();
-        let foreground = Mutex::new(ForegroundContext::default());
+        let foreground = Mutex::new(RoutingContext::default());
         send(&receiver, 7);
         thread::sleep(Duration::from_millis(30));
         foreground
@@ -1709,7 +2081,7 @@ mod tests {
             &policy,
             &observed,
             &first,
-            &Mutex::new(ForegroundContext::default()),
+            &Mutex::new(RoutingContext::default()),
             &tx,
             None,
             || receiver.next(),
@@ -1778,7 +2150,7 @@ mod tests {
                 &policy,
                 &observed,
                 &first,
-                &Mutex::new(ForegroundContext::default()),
+                &Mutex::new(RoutingContext::default()),
                 &tx,
                 None,
                 || receiver.next(),
@@ -1850,7 +2222,7 @@ mod tests {
                 &worker_policy,
                 &AtomicU8::new(1),
                 &AtomicBool::new(false),
-                &Mutex::new(ForegroundContext::default()),
+                &Mutex::new(RoutingContext::default()),
                 &receipt_tx,
                 None,
                 || {
@@ -1934,7 +2306,7 @@ mod tests {
             &policy,
             &AtomicU8::new(1),
             &AtomicBool::new(false),
-            &Mutex::new(ForegroundContext::default()),
+            &Mutex::new(RoutingContext::default()),
             &tx,
             None,
             || {
@@ -2119,10 +2491,12 @@ mod tests {
         let reopened_flag_inner = Arc::clone(&reopened_flag);
         let rotation_started = Instant::now();
 
+        let routing = Arc::new(Mutex::new(RoutingContext::default()));
         bridge.spawn_with_reopen(
             &runtime,
             Some(session1.clone()),
             Arc::clone(&receiver),
+            routing,
             true,
             move || {
                 assert!(old_for_check.is_disconnected());
@@ -2171,5 +2545,185 @@ mod tests {
         bridge.retire();
         assert!(bridge.active_session.lock().unwrap().is_none());
         bridge.shutdown(&runtime);
+    }
+
+    #[test]
+    fn locked_and_manual_pinned_modes_route_layers_two_to_four_and_layer_one_vendor_fallback() {
+        use mi_proto::Framer;
+
+        let plan = test_plan();
+        let ag_id = plan.hosts[0].profile_id.clone();
+        let pinned_actions = plan.hosts[0].actions.clone();
+        assert!(pinned_actions[0].is_some());
+        assert!(pinned_actions[7].is_some());
+        assert!(pinned_actions[15].is_some());
+        let expected_slot15_binding = CONTROL_BINDINGS[15].to_string();
+        let pinned = PinnedProfilePlan {
+            profile_id: ag_id.clone(),
+            bundle_id: Some("com.google.antigravity".into()),
+            actions: pinned_actions,
+        };
+
+        let routing = Arc::new(Mutex::new(RoutingContext::default()));
+        {
+            let mut ctx = routing.lock().unwrap();
+            ctx.set_routing(
+                SixLayerRoutingMode::Locked(pinned.clone()),
+                Some("com.google.antigravity"),
+            );
+            assert!(!ctx.update(Some("com.openai.codex")));
+            assert!(!ctx.update(Some("com.deepseek.dsh")));
+            assert_eq!(
+                ctx.effective_profile_id(&plan, 1).as_deref(),
+                Some(ag_id.as_str())
+            );
+            assert_eq!(
+                ctx.effective_profile_id(&plan, 3).as_deref(),
+                Some(ag_id.as_str())
+            );
+        }
+
+        let receiver = Arc::new(UserCommandReceiver::bind().unwrap());
+        receiver.arm().unwrap();
+        send(&receiver, 0);
+        send(&receiver, 27);
+        send(&receiver, 55);
+        thread::sleep(Duration::from_millis(30));
+
+        let stop = AtomicBool::new(false);
+        let policy = ExecutionPolicy::default();
+        policy.set(true, true, Instant::now() - Duration::from_secs(1));
+        let observed = AtomicU8::new(1);
+        let first = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let mut dispatched = Vec::new();
+
+        execute_clicks(
+            &receiver,
+            &plan,
+            &stop,
+            &policy,
+            &observed,
+            &first,
+            &routing,
+            &tx,
+            None,
+            || {
+                let next = receiver.next();
+                if matches!(&next, Ok(None)) {
+                    stop.store(true, Ordering::Release);
+                }
+                next
+            },
+            || Ok(()),
+            |profile, binding, _action, _epoch| {
+                dispatched.push((profile.to_owned(), binding.to_owned()));
+                mi_macos::HostActionReceipt {
+                    action_type: "open_app".into(),
+                    binding_id: binding.into(),
+                    detail: "ok".into(),
+                    outcome: "executed".into(),
+                    profile_id: profile.into(),
+                    target: "com.google.antigravity".into(),
+                    text_byte_len: None,
+                    timestamp_ms: 1,
+                }
+            },
+        );
+
+        assert_eq!(
+            dispatched,
+            vec![
+                (ag_id.clone(), "AG00".into()),
+                (ag_id.clone(), "AG07".into()),
+                (ag_id.clone(), expected_slot15_binding),
+            ]
+        );
+        assert_eq!(rx.try_iter().count(), 3);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (link, _writes) = mi_transport::MockLink::new();
+        let session = {
+            let _entered = runtime.enter();
+            DeviceSession::new(
+                link.clone(),
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig {
+                    timeout: Duration::from_secs(1),
+                    interval: Duration::ZERO,
+                },
+            )
+        };
+        let mut bridge = SharedVendorBridge::new(Some(session.clone()));
+        bridge.spawn_with_reopen(
+            &runtime,
+            Some(session),
+            Arc::clone(&receiver),
+            Arc::clone(&routing),
+            true,
+            || async { None },
+        );
+        let framer = mi_proto::NativeFramer::default();
+        let mut oai_press = r#"{"m":"v.oai.hid","p":{"k":"AG00","act":1}}"#.to_string();
+        oai_press.push('\n');
+        for frame in framer.encode(oai_press.as_bytes()).unwrap() {
+            link.inject.send(frame).unwrap();
+        }
+        let wait = Instant::now();
+        let mut vendor_controls = Vec::new();
+        while vendor_controls.is_empty() && wait.elapsed() < Duration::from_secs(1) {
+            while let Some(ev) = receiver.next().unwrap() {
+                vendor_controls.push(ev.control);
+            }
+            if vendor_controls.is_empty() {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert_eq!(vendor_controls, vec![0]);
+        bridge.retire();
+        bridge.shutdown(&runtime);
+
+        routing.lock().unwrap().set_routing(
+            SixLayerRoutingMode::ManualPinned(pinned),
+            Some("com.deepseek.dsh"),
+        );
+        send(&receiver, 20);
+        thread::sleep(Duration::from_millis(30));
+        stop.store(false, Ordering::Release);
+        let mut manual_dispatched = Vec::new();
+        execute_clicks(
+            &receiver,
+            &plan,
+            &stop,
+            &policy,
+            &observed,
+            &first,
+            &routing,
+            &tx,
+            None,
+            || {
+                let next = receiver.next();
+                if matches!(&next, Ok(None)) {
+                    stop.store(true, Ordering::Release);
+                }
+                next
+            },
+            || Ok(()),
+            |profile, binding, _action, _epoch| {
+                manual_dispatched.push((profile.to_owned(), binding.to_owned()));
+                mi_macos::HostActionReceipt {
+                    action_type: "open_app".into(),
+                    binding_id: binding.into(),
+                    detail: "ok".into(),
+                    outcome: "executed".into(),
+                    profile_id: profile.into(),
+                    target: "com.google.antigravity".into(),
+                    text_byte_len: None,
+                    timestamp_ms: 1,
+                }
+            },
+        );
+        assert_eq!(manual_dispatched, vec![(ag_id, "AG00".into())]);
     }
 }

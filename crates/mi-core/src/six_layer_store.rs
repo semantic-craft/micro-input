@@ -7,6 +7,202 @@ impl WorkbenchStore {
         self.projection_inputs().compiled_six_layer_plan()
     }
 
+    pub(crate) fn compile_profile_twenty_slots(
+        &self,
+        profile_id: &str,
+    ) -> Option<six_layer_runtime::PinnedProfilePlan> {
+        let doc = &self.document_store.host_store().draft.document;
+        let profile = doc.editable.graph.profiles.get(profile_id)?;
+        let canonical = CanonicalAgent::from_profile_name(&profile.name);
+        let bundle_id = canonical
+            .map(CanonicalAgent::bundle_id)
+            .filter(|bundle| *bundle != "*")
+            .map(str::to_owned)
+            .or_else(|| {
+                self.app_profile_links
+                    .iter()
+                    .find(|(bundle, pid)| bundle.as_str() != "*" && pid.as_str() == profile_id)
+                    .map(|(bundle, _)| bundle.clone())
+            });
+        let adapter_name = match canonical {
+            Some(CanonicalAgent::Antigravity) => Some("antigravity"),
+            Some(CanonicalAgent::Codex) => Some("codex"),
+            Some(CanonicalAgent::DeepseekHarness) => Some("dsh-desktop"),
+            Some(CanonicalAgent::Herdr) => Some("herdr"),
+            _ => None,
+        };
+        let is_protected_oai = profile
+            .layer_order
+            .iter()
+            .any(|lid| doc.is_protected_oai_layer(lid));
+        if is_protected_oai {
+            return Some(six_layer_runtime::PinnedProfilePlan {
+                profile_id: profile_id.to_string(),
+                bundle_id,
+                actions: std::array::from_fn(|_| None),
+            });
+        }
+        let layout = self.current_bottom_row_layout();
+        let command_execution = self.command_execution_enabled;
+        let actions = std::array::from_fn(|slot| {
+            let mut action = resolve_host_action_with_layout(
+                doc,
+                Some(profile_id),
+                mi_model::direct_controls::CONTROL_BINDINGS[slot],
+                true,
+                command_execution,
+                layout,
+            )?;
+            if matches!(
+                action,
+                ResolvedHostAction::MacroSequence { .. }
+                    | ResolvedHostAction::Shortcut { key_code: 0x3f, .. }
+            ) {
+                return None;
+            }
+            if let ResolvedHostAction::AgentCommand { adapter, command } = &mut action {
+                if adapter == "host" {
+                    if let Some(target_adapter) = adapter_name {
+                        *adapter = target_adapter.into();
+                    }
+                }
+                if matches!(command.as_str(), "push-to-talk" | "dictation") {
+                    *command = "toggle-dictation".into();
+                }
+            }
+            match &mut action {
+                ResolvedHostAction::Shortcut {
+                    target_bundle_id, ..
+                } => {
+                    if target_bundle_id.is_none() {
+                        *target_bundle_id = bundle_id.clone();
+                    }
+                }
+                ResolvedHostAction::PasteText {
+                    target_bundle_id,
+                    adapter,
+                    ..
+                } => {
+                    if target_bundle_id.is_none() {
+                        *target_bundle_id = bundle_id.clone();
+                    }
+                    if adapter.is_none() {
+                        *adapter = adapter_name.map(str::to_owned);
+                    }
+                }
+                _ => {}
+            }
+            Some(action)
+        });
+        Some(six_layer_runtime::PinnedProfilePlan {
+            profile_id: profile_id.to_string(),
+            bundle_id,
+            actions,
+        })
+    }
+
+    pub(crate) fn build_six_layer_routing_mode(&self) -> six_layer_runtime::SixLayerRoutingMode {
+        if let Some(locked_id) = self.document_store.locked_profile_id() {
+            if let Some(plan) = self.compile_profile_twenty_slots(&locked_id) {
+                return six_layer_runtime::SixLayerRoutingMode::Locked(plan);
+            }
+        }
+        if !self.auto_follow_enabled || self.manual_override {
+            if let Some(active_id) = self.document_store.host_active_profile_id() {
+                if let Some(plan) = self.compile_profile_twenty_slots(&active_id) {
+                    return six_layer_runtime::SixLayerRoutingMode::ManualPinned(plan);
+                }
+            }
+        }
+        let mut dynamic_hosts = Vec::new();
+        let mut seen_bundles = BTreeSet::new();
+        for (bundle, pid) in &self.app_profile_links {
+            if bundle == "*" || bundle == "com.openai.codex" || !seen_bundles.insert(bundle.clone())
+            {
+                continue;
+            }
+            if let Some(mut plan) = self.compile_profile_twenty_slots(pid) {
+                plan.bundle_id = Some(bundle.clone());
+                if plan.actions.iter().any(Option::is_some) {
+                    dynamic_hosts.push(plan);
+                }
+            }
+        }
+        for agent in [
+            CanonicalAgent::Antigravity,
+            CanonicalAgent::DeepseekHarness,
+            CanonicalAgent::Herdr,
+        ] {
+            let bundle = agent.bundle_id();
+            if !seen_bundles.insert(bundle.to_string()) {
+                continue;
+            }
+            if let Some(pid) = self.find_canonical_profile_id(agent) {
+                if let Some(mut plan) = self.compile_profile_twenty_slots(&pid) {
+                    plan.bundle_id = Some(bundle.to_string());
+                    if plan.actions.iter().any(Option::is_some) {
+                        dynamic_hosts.push(plan);
+                    }
+                }
+            }
+        }
+        six_layer_runtime::SixLayerRoutingMode::AutoFollow { dynamic_hosts }
+    }
+
+    pub(crate) fn sync_six_layer_routing_context(&mut self) {
+        self.last_synced_six_layer_revs = (
+            self.document_store.draft.revision,
+            self.document_store.host_revision(),
+        );
+        if self.six_layer_running.is_none() {
+            return;
+        }
+        let mode = self.build_six_layer_routing_mode();
+        let bundle = self.foreground_bundle_id.clone();
+        if let Some(running) = &self.six_layer_running {
+            running.set_routing_context(mode, bundle.as_deref());
+        }
+    }
+
+    pub(super) fn try_auto_resume_six_layer(&mut self, now: Instant) {
+        if self.config.isolated
+            || !self.config.auto_connect_usb
+            || self.system_lifecycle != SystemLifecycle::Awake
+            || self.six_layer_job.is_some()
+            || self
+                .six_layer_running
+                .as_ref()
+                .is_some_and(|running| running.receiver.failure().is_none())
+        {
+            return;
+        }
+        let Some(plan) = self
+            .six_layer_state
+            .installation
+            .as_ref()
+            .filter(|inst| {
+                inst.status == InstallationStatus::Applied && inst.plan.validate_current().is_ok()
+            })
+            .map(|inst| inst.plan.clone())
+        else {
+            return;
+        };
+        if self.six_layer_auto_resume_attempts >= 3
+            || self
+                .six_layer_next_auto_resume_at
+                .is_some_and(|ready_at| now < ready_at)
+        {
+            return;
+        }
+        if mi_transport::discover_target_keyboard().is_err() {
+            return;
+        }
+        self.six_layer_auto_resume_attempts += 1;
+        self.six_layer_next_auto_resume_at = Some(now + Duration::from_secs(3));
+        self.resume_requires_explicit_connect = false;
+        let _ = self.start_six_layer_apply(Some(plan));
+    }
+
     fn suspend_for_six_layer_operation(&mut self) -> Result<(), WorkbenchError> {
         self.cancel_session_navigation();
         if let Some(running) = self.six_layer_running.take() {
@@ -127,7 +323,8 @@ impl WorkbenchStore {
             match result {
                 Ok(Some(mut running)) => {
                     let revision = running.keymap_revision;
-                    running.foreground_changed(self.foreground_bundle_id.as_deref());
+                    self.six_layer_auto_resume_attempts = 0;
+                    self.six_layer_next_auto_resume_at = None;
                     self.device_session = None;
                     self.connected_candidate = Some(running.candidate.clone());
                     self.hardware_rpc_verified = true;
@@ -144,6 +341,7 @@ impl WorkbenchStore {
                         running.start_vendor_bridge(&self.tokio_runtime);
                     }
                     self.six_layer_running = Some(running);
+                    self.sync_six_layer_routing_context();
                     self.status_message = if revision
                         == mi_model::apply::SixLayerKeymapRevision::V1StandardKeys
                     {
@@ -164,6 +362,7 @@ impl WorkbenchStore {
             self.commit_runtime_update();
         }
         if self.six_layer_running.is_none() {
+            self.try_auto_resume_six_layer(self.update_now);
             return;
         }
         let mut lighting_changed = false;
@@ -207,9 +406,7 @@ impl WorkbenchStore {
             }
         }
         if self.live_executor.has_unconfirmed_apple_fn_release()
-            || receipts
-                .iter()
-                .any(|receipt| receipt.outcome == "unconfirmed")
+            || !self.ptt_controller.cleanup_confirmed
         {
             running
                 .receiver
@@ -237,7 +434,7 @@ impl WorkbenchStore {
             self.status_message = format!(
                 "{} · {}",
                 match receipt.outcome.as_str() {
-                    "unconfirmed" => "结果未确认",
+                    "unconfirmed" => "动作读回未确认",
                     _ if receipt.succeeded() => "已执行",
                     _ => "未执行",
                 },
@@ -263,6 +460,7 @@ impl WorkbenchStore {
             self.capture_runtime_view();
             self.commit_local_update();
         }
+        self.try_auto_resume_six_layer(self.update_now);
     }
 }
 
@@ -1280,5 +1478,156 @@ mod tests {
                 .as_str(),
             "六层恢复记录尚未处理，请先恢复原设备配置"
         );
+    }
+
+    #[test]
+    fn one_shot_unconfirmed_receipt_preserves_six_layer_while_unconfirmed_cleanup_fences_receiver()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+        let session = mock_session(&store.tokio_runtime);
+        let mut running = six_layer_runtime::RunningSixLayer::isolated(session, dir.path());
+        running.readiness.configuration_observed = true;
+        running.readiness.keyboard_grabbed = true;
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        running.receipts = Some(rx);
+        store.six_layer_running = Some(running);
+
+        tx.send(mi_macos::HostActionReceipt {
+            action_type: "voice_start".into(),
+            binding_id: "AG10".into(),
+            profile_id: "ag".into(),
+            target: "com.google.antigravity".into(),
+            outcome: "unconfirmed".into(),
+            detail: "live_voice_readback_timeout".into(),
+            text_byte_len: None,
+            timestamp_ms: 1,
+        })
+        .unwrap();
+
+        store.poll_six_layer_runtime();
+        assert!(store
+            .six_layer_running
+            .as_ref()
+            .unwrap()
+            .receiver
+            .failure()
+            .is_none());
+        assert_eq!(
+            store.status_message,
+            "动作读回未确认 · live_voice_readback_timeout"
+        );
+
+        store.ptt_controller.cleanup_confirmed = false;
+        store.poll_six_layer_runtime();
+        assert!(store.six_layer_running.as_ref().unwrap().is_retired());
+        assert_eq!(store.status_message, "宿主动作清理未确认，输入已暂停");
+    }
+
+    #[test]
+    fn profile_lock_accessibility_caution_and_competing_host_notice_work_end_to_end() {
+        let driver = mi_macos::RecordingOsDriver::new(true);
+        let executor = mi_macos::LiveHostActionExecutor::new(driver.clone());
+        assert!(executor.is_accessibility_trusted());
+        driver.set_accessibility_trusted(false);
+        assert!(!executor.is_accessibility_trusted());
+        executor.open_accessibility_settings().unwrap();
+        assert!(driver.events().iter().any(|ev| matches!(
+            ev,
+            mi_macos::RecordedOsEvent::OpenApplication(target)
+                if target == "com.apple.systempreferences.accessibility"
+        )));
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+        store.set_host_execution_enabled(true).unwrap();
+        store.set_accessibility_trusted_for_test(Some(false));
+        assert!(!store.projection.header.accessibility_trusted);
+        assert!(!store.projection.status_menu.accessibility_trusted);
+        assert_eq!(
+            store.projection.header.ready_state,
+            crate::header::HeaderReadyState::Caution {
+                text: "待授权辅助功能".to_string()
+            }
+        );
+        assert_eq!(
+            store.projection.header.banner,
+            crate::OwnershipBannerState::Caution {
+                reason: "缺少 macOS 辅助功能权限，按键动作已被系统拦截，请打开辅助功能设置授权"
+                    .to_string()
+            }
+        );
+        store
+            .dispatch_status_menu_action(
+                crate::status_menu::StatusMenuAction::OpenAccessibilitySettings,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .last_host_action_receipt
+                .as_ref()
+                .map(|r| r.action_type.as_str()),
+            Some("open_accessibility_settings")
+        );
+
+        store.set_accessibility_trusted_for_test(Some(true));
+        store.set_competing_input_app_running_for_test(true);
+        assert_eq!(
+            store
+                .projection
+                .status_menu
+                .competing_host_notice
+                .as_deref(),
+            Some("检测到原版 Input 正在后台抢占层切换，建议开启「锁定当前方案」")
+        );
+
+        let ag_id = store
+            .find_canonical_profile_id(crate::CanonicalAgent::Antigravity)
+            .unwrap();
+        let dsh_id = store
+            .find_canonical_profile_id(crate::CanonicalAgent::DeepseekHarness)
+            .unwrap();
+        store.browse_profile(&ag_id).unwrap();
+        store
+            .dispatch_sidebar_action(crate::sidebar::SidebarAction::SetProfileLocked(true))
+            .unwrap();
+        assert!(store.projection.sidebar.is_profile_locked);
+        assert_eq!(
+            store.projection.sidebar.locked_profile_id.as_deref(),
+            Some(ag_id.as_str())
+        );
+        assert_eq!(
+            store.projection.status_menu.routing_mode_summary,
+            "已锁定 · 忽略前台切换与外部干扰"
+        );
+        assert_eq!(
+            store
+                .projection
+                .status_menu
+                .competing_host_notice
+                .as_deref(),
+            Some("检测到原版 Input 正在后台运行，已由方案锁定隔离干扰")
+        );
+
+        assert!(!store.foreground_changed(Some("com.deepseek.dsh")));
+        assert_eq!(
+            store.resolved_active_profile_id().as_deref(),
+            Some(ag_id.as_str())
+        );
+
+        store
+            .dispatch_sidebar_action(crate::sidebar::SidebarAction::SelectProfile(dsh_id.clone()))
+            .unwrap();
+        assert_eq!(
+            store.projection.sidebar.locked_profile_id.as_deref(),
+            Some(dsh_id.as_str())
+        );
+
+        store
+            .dispatch_status_menu_action(crate::status_menu::StatusMenuAction::ResumeAutoFollow)
+            .unwrap();
+        assert!(!store.projection.status_menu.is_profile_locked);
+        assert!(store.projection.status_menu.locked_profile_id.is_none());
+        assert!(store.projection.status_menu.auto_follow_enabled);
     }
 }

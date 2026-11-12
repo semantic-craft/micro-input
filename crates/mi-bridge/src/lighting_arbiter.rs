@@ -589,6 +589,14 @@ impl FourAppLightingArbiter {
                 .collect();
         }
 
+        if self.dual_zone_feedback.as_ref() == Some(&dual_zone)
+            && self.full_keypad_feedback == full_keys
+            && self.last_hardware_sync_json.is_some()
+        {
+            self.last_update_result = LightingUpdateResult::Applied;
+            return LightingUpdateResult::Applied;
+        }
+
         let per_key_json: Vec<serde_json::Value> = full_keys
             .iter()
             .map(|item| {
@@ -677,15 +685,14 @@ impl FourAppLightingArbiter {
         if result != LightingUpdateResult::Applied {
             return result;
         }
-        let payload_str = self.last_hardware_sync_json.clone().unwrap_or_default();
-        let digest = format!("{:x}", Sha256::digest(payload_str.as_bytes()));
-
         if let Some(device_id) = connected_device_id {
+            let payload_str = self.last_hardware_sync_json.as_deref().unwrap_or_default();
+            let digest = format!("{:x}", Sha256::digest(payload_str.as_bytes()));
             let needs_sync = !self.hardware_synced
                 || self.last_synced_payload_digest.as_deref() != Some(digest.as_str())
                 || self.last_synced_device_id.as_deref() != Some(device_id);
             if needs_sync {
-                match write_hardware(&payload_str) {
+                match write_hardware(payload_str) {
                     Ok(resp) if resp.contains("\"synced\":true") => {
                         self.last_synced_payload_digest = Some(digest);
                         self.last_synced_device_id = Some(device_id.to_owned());

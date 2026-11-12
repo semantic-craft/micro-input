@@ -15,7 +15,7 @@ pub use ax_dictation::{
     DictationAdapter, DictationOutcome, LockedDictationTarget,
 };
 pub use executor::{
-    is_antigravity_new_conversation_control, parse_pid_from_lsappinfo_output,
+    is_antigravity_new_conversation_control, is_bundle_running, parse_pid_from_lsappinfo_output,
     select_antigravity_new_conversation_target, submit_modifiers_for_adapter,
     AntigravityNewConversationTarget, AntigravitySidebarAxNode, ClipboardItemSnapshot,
     ClipboardSnapshot, DialScrollRequest, HeldInputId, HostActionReceipt, HostOsDriver,

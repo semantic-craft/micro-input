@@ -66,6 +66,13 @@ struct CreatorMicroStageView: View {
                             }
                             .surfaceButton(.primary)
                         }
+                        if s.selectedProfileId != nil {
+                            let isLockedToSelected = s.isProfileLocked && s.lockedProfileId == s.selectedProfileId
+                            Button(isLockedToSelected ? "已锁定（点击解锁）" : "锁定此方案") {
+                                store.dispatch("sidebar", ["SetProfileLocked": !isLockedToSelected])
+                            }
+                            .surfaceButton(isLockedToSelected ? .primary : .secondary)
+                        }
                         if let agent = DesktopAgent.named(s.selectedRawName), !agent.isGeneralFallback {
                             Button("打开应用") {
                                 if let url = DesktopAgent.cachedAppURL(for: agent.bundleID) {
@@ -118,6 +125,12 @@ struct CreatorMicroStageView: View {
                 .foregroundStyle(UITheme.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
+            if !h.accessibilityTrusted {
+                Button("授权辅助功能") {
+                    store.dispatch("header", "OpenAccessibilitySettings")
+                }
+                .surfaceButton(.primary)
+            }
             if !h.deviceConnected {
                 Button("重新检测键盘") {
                     store.dispatch("header", "ConnectKeyboard")

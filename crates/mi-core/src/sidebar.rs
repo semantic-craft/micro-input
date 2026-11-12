@@ -239,6 +239,10 @@ impl Default for BoardLayersProjection {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SidebarProjection {
     pub section_title: String,
@@ -247,6 +251,12 @@ pub struct SidebarProjection {
     pub selected_profile_id: Option<String>,
     pub selected_display_name: Option<String>,
     pub active_host_profile_id: Option<String>,
+    #[serde(default)]
+    pub is_profile_locked: bool,
+    #[serde(default)]
+    pub locked_profile_id: Option<String>,
+    #[serde(default = "default_true")]
+    pub accessibility_trusted: bool,
     pub auto_switch: AutoSwitchState,
     pub show_other_profiles: bool,
     pub can_edit_draft: bool,
@@ -269,6 +279,9 @@ impl Default for SidebarProjection {
             selected_profile_id: None,
             selected_display_name: None,
             active_host_profile_id: None,
+            is_profile_locked: false,
+            locked_profile_id: None,
+            accessibility_trusted: true,
             auto_switch: AutoSwitchState::Unloaded,
             show_other_profiles: false,
             can_edit_draft: false,
@@ -324,6 +337,7 @@ pub enum SidebarAction {
     },
     SetUsbStartupProfile(Option<String>),
     ResetBoardLayerPlan,
+    SetProfileLocked(bool),
     SetAutoFollow(bool),
     ToggleAutoFollowPause,
     SetShowOtherProfiles(bool),

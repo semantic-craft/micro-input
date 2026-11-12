@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -17,6 +17,7 @@ pub const RULE_MARKER: &str = "Micro Input — six layers v1";
 const CLI: &str = "/Library/Application Support/org.pqrs/Karabiner-Elements/bin/karabiner_cli";
 const LOG: &str = "/var/log/karabiner/core_service.log";
 const OUTPUT_LIMIT: u64 = 2 * 1024 * 1024;
+const MAX_LOG_READ_BYTES: u64 = 1024 * 1024;
 
 pub fn rules(
     target: &TargetKeyboard,
@@ -488,27 +489,58 @@ impl ReloadBaseline {
         let devices: Value = serde_json::from_slice(&run(CLI, &["--list-connected-devices"])?)
             .map_err(|e| e.to_string())?;
         let id = keyboard_device_id(&devices, target)?;
-        let meta = fs::metadata(LOG).map_err(|e| e.to_string())?;
-        if meta.ino() != self.inode || meta.len() < self.offset || meta.len() > 16 * OUTPUT_LIMIT {
-            return Err("Karabiner 日志已轮转或证据不完整".into());
-        }
-        let bytes = fs::read(LOG).map_err(|e| e.to_string())?;
-        let log = String::from_utf8_lossy(&bytes);
-        let new = String::from_utf8_lossy(&bytes[self.offset as usize..]);
-        if !new.lines().any(|line| {
-            line.contains("Load ") && line.contains(patch.path.to_string_lossy().as_ref())
-        }) || !new.contains("core_configuration is updated.")
-            || new.contains("karabiner.json error:")
-        {
-            return Err("尚未观测到 Karabiner 成功载入本次配置".into());
-        }
-        validate_grabbed(&log, id)?;
+        check_log_readiness(Path::new(LOG), self.inode, self.offset, &patch.path, id)?;
         Ok(Readiness {
             baseline: self.clone(),
             configuration_observed: true,
             keyboard_grabbed: true,
         })
     }
+}
+
+fn read_log_tail(path: &Path, start_offset: u64) -> Result<Vec<u8>, String> {
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let len = file.metadata().map_err(|e| e.to_string())?.len();
+    let tail_start = len.saturating_sub(MAX_LOG_READ_BYTES).max(start_offset);
+    file.seek(SeekFrom::Start(tail_start))
+        .map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_LOG_READ_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+fn check_log_readiness(
+    log_path: &Path,
+    expected_inode: u64,
+    baseline_offset: u64,
+    patch_path: &Path,
+    device_id: u64,
+) -> Result<(), String> {
+    let meta = fs::metadata(log_path).map_err(|e| e.to_string())?;
+    let tail_bytes = read_log_tail(log_path, 0)?;
+    let tail_log = String::from_utf8_lossy(&tail_bytes);
+    if tail_log.contains("karabiner.json error:") {
+        return Err("尚未观测到 Karabiner 成功载入本次配置".into());
+    }
+    if meta.ino() != expected_inode || meta.len() < baseline_offset {
+        if tail_log.contains(&format!("(device_id:{device_id})")) {
+            validate_grabbed(&tail_log, device_id)?;
+        }
+        return Ok(());
+    }
+    let new_bytes = read_log_tail(log_path, baseline_offset)?;
+    let new = String::from_utf8_lossy(&new_bytes);
+    if !new
+        .lines()
+        .any(|line| line.contains("Load ") && line.contains(patch_path.to_string_lossy().as_ref()))
+        || !new.contains("core_configuration is updated.")
+        || new.contains("karabiner.json error:")
+    {
+        return Err("尚未观测到 Karabiner 成功载入本次配置".into());
+    }
+    validate_grabbed(&tail_log, device_id)
 }
 
 pub fn validate_grabbed(log: &str, id: u64) -> Result<(), String> {
@@ -714,5 +746,33 @@ mod tests {
             17
         )
         .is_err());
+    }
+
+    #[test]
+    fn check_log_readiness_handles_logs_larger_than_one_megabyte_and_log_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("core_service.log");
+        let patch_path = dir.path().join("karabiner.json");
+        fs::write(&patch_path, b"{}").unwrap();
+
+        let padding = "x".repeat(1_200_000) + "\n";
+        fs::write(&log_path, &padding).unwrap();
+        let meta = fs::metadata(&log_path).unwrap();
+        let baseline_inode = meta.ino();
+        let baseline_offset = meta.len();
+
+        let post_reload = format!(
+            "keyboard (device_id:17) hid device events monitor is started (grabbed).\nLoad {}\ncore_configuration is updated.\n",
+            patch_path.display()
+        );
+        let mut f = OpenOptions::new().append(true).open(&log_path).unwrap();
+        f.write_all(post_reload.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+
+        check_log_readiness(&log_path, baseline_inode, baseline_offset, &patch_path, 17).unwrap();
+
+        let rotated = "keyboard (device_id:17) hid device events monitor is started (grabbed).\n";
+        fs::write(&log_path, rotated).unwrap();
+        check_log_readiness(&log_path, baseline_inode, baseline_offset, &patch_path, 17).unwrap();
     }
 }

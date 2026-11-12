@@ -314,6 +314,24 @@ impl DocumentStore {
         }
         self.preferences.value.host_active_profile_id.clone()
     }
+    pub fn locked_profile_id(&self) -> Option<String> {
+        if let Some(host) = &self.host {
+            return host.locked_profile_id();
+        }
+        self.preferences
+            .value
+            .locked_profile_id
+            .as_ref()
+            .filter(|id| {
+                self.draft
+                    .document
+                    .editable
+                    .graph
+                    .profiles
+                    .contains_key(*id)
+            })
+            .cloned()
+    }
     pub fn host_execution_enabled(&self) -> bool {
         if let Some(host) = &self.host {
             return host.host_execution_enabled();
@@ -670,6 +688,21 @@ impl DocumentStore {
         }
         next.loaded_format = 2;
         self.draft = next;
+        if self.host.is_none()
+            && self.preferences.error.is_none()
+            && self
+                .preferences
+                .value
+                .locked_profile_id
+                .as_ref()
+                .is_some_and(|id| !self.draft.document.editable.graph.profiles.contains_key(id))
+        {
+            let mut next_prefs = self.preferences.value.clone();
+            next_prefs.locked_profile_id = None;
+            if self.preferences.save(next_prefs).is_ok() {
+                self.host_state_revision += 1;
+            }
+        }
         Ok(())
     }
 }
@@ -708,6 +741,8 @@ struct HostPreferences {
     #[serde(default)]
     host_active_profile_id: Option<String>,
     #[serde(default)]
+    pub locked_profile_id: Option<String>,
+    #[serde(default)]
     host_execution_enabled: bool,
     #[serde(default)]
     command_execution_enabled: bool,
@@ -732,6 +767,7 @@ impl Default for HostPreferences {
             schema_version: 2,
             favorites: Default::default(),
             host_active_profile_id: None,
+            locked_profile_id: None,
             host_execution_enabled: false,
             command_execution_enabled: false,
             auto_follow_enabled: false,
@@ -802,6 +838,7 @@ impl HostPreferencesStore {
                                 schema_version: 2,
                                 favorites: old.favorites,
                                 host_active_profile_id: old.host_active_profile_id,
+                                locked_profile_id: None,
                                 host_execution_enabled: old.host_execution_enabled,
                                 command_execution_enabled: old.command_execution_enabled,
                                 auto_follow_enabled: old.auto_follow_enabled,

@@ -1846,16 +1846,68 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 active_sectors: 4,
             },
         )?;
-        for (slot, id, name, category, detail, kind) in assignments {
-            let action = crate::draft::Action {
-                id: id.into(),
-                name: name.into(),
-                category: category.into(),
-                detail: detail.into(),
-                payload: serde_json::to_value(kind).map_err(|e| e.to_string())?,
-            };
-            work.assign(&json!(pid), &json!(lid), slot, action)?;
-        }
+        work.mutate(|doc| {
+            let p = doc
+                .editable
+                .graph
+                .profiles
+                .get(&pid)
+                .ok_or_else(|| "配置不存在".to_owned())?;
+            if !p.layer_order.iter().any(|id| id == &lid) {
+                return Err("层不属于所选配置".into());
+            }
+            if doc.is_protected_oai_layer(&lid) {
+                return Err("受保护宿主层（原生 OAI）不支持修改按键映射".into());
+            }
+            for (slot, id, name, category, detail, kind) in assignments {
+                let action = crate::draft::Action {
+                    id: id.into(),
+                    name: name.into(),
+                    category: category.into(),
+                    detail: detail.into(),
+                    payload: serde_json::to_value(kind).map_err(|e| e.to_string())?,
+                };
+                action.validate()?;
+                let layer = doc
+                    .editable
+                    .graph
+                    .layers
+                    .get_mut(&lid)
+                    .ok_or_else(|| "层不存在".to_owned())?;
+                let logical = format!("logical-{slot}");
+                let binding = layer
+                    .controls
+                    .values_mut()
+                    .find(|b| b.logical_control == logical)
+                    .ok_or_else(|| "控件不存在".to_owned())?;
+                if binding
+                    .action_id
+                    .as_ref()
+                    .and_then(|aid| doc.editable.graph.actions.get(aid))
+                    == Some(&action)
+                {
+                    continue;
+                }
+                let new_aid = crate::document::new_id();
+                let old = binding.action_id.replace(new_aid.clone());
+                doc.editable.graph.actions.insert(new_aid, action);
+                if let Some(old) = old {
+                    if !doc.editable.graph.actions.get(&old).is_some_and(|a| {
+                        crate::macro_library::is_local_macro(a) || crate::multi::is_local_multi(a)
+                    }) && crate::multi::parent_references(doc, &old).is_empty()
+                        && !doc.editable.graph.layers.values().any(|l| {
+                            l.controls
+                                .values()
+                                .any(|b| b.action_id.as_ref() == Some(&old))
+                        })
+                    {
+                        doc.editable.graph.actions.remove(&old);
+                        doc.editable.source_refs.remove(&old);
+                    }
+                }
+            }
+            Ok(())
+        })?;
         created_ids.push(pid);
     }
     draft.mutate(|doc| {
