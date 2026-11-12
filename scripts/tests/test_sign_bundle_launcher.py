@@ -81,6 +81,15 @@ class SignBundleTests(unittest.TestCase):
         )
         _copy_macho(downloader_xpc / 'Contents/MacOS/Downloader')
 
+        installer_xpc = ver_b / 'XPCServices/Installer.xpc'
+        _write_plist(
+            installer_xpc / 'Contents/Info.plist',
+            'org.sparkle-project.Sparkle.Installer',
+            'Installer',
+            'XPC!',
+        )
+        _copy_macho(installer_xpc / 'Contents/MacOS/Installer')
+
         (fw / 'Sparkle').symlink_to('Versions/Current/Sparkle')
         (fw / 'Resources').symlink_to('Versions/Current/Resources')
         (fw / 'Autoupdate').symlink_to('Versions/Current/Autoupdate')
@@ -94,16 +103,23 @@ class SignBundleTests(unittest.TestCase):
             app = self._build_nested_bundle(Path(tmp).resolve())
             targets = sign_bundle_mod.collect_sign_targets(app)
             rels = [str(p.relative_to(app)) for p in targets]
+            downloader_rel = 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc'
+            installer_rel = 'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc'
+            framework_rel = 'Contents/Frameworks/Sparkle.framework'
             self.assertEqual(
                 rels,
                 [
-                    'Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc',
+                    downloader_rel,
+                    installer_rel,
                     'Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate',
                     'Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app',
-                    'Contents/Frameworks/Sparkle.framework',
+                    framework_rel,
                     '.',
                 ],
             )
+            for xpc_rel in (downloader_rel, installer_rel):
+                self.assertLess(rels.index(xpc_rel), rels.index(framework_rel))
+                self.assertLess(rels.index(xpc_rel), rels.index('.'))
 
     def test_rejects_materialized_or_broken_framework_symlinks(self):
         with tempfile.TemporaryDirectory(prefix='mi-sign-symlink-') as tmp:

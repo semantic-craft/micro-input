@@ -3,8 +3,10 @@ import SwiftUI
 
 public struct WorkbenchRootView: View {
     let store: CoreStore
-    let navigation: WorkbenchNavigationModel
-    let updater: SoftwareUpdateController
+    private let injectedNavigation: WorkbenchNavigationModel?
+    private let injectedUpdater: SoftwareUpdateController?
+    @State private var fallbackNavigation = WorkbenchNavigationModel()
+    @State private var fallbackUpdater = SoftwareUpdateController()
 
     @MainActor
     public init(
@@ -13,12 +15,14 @@ public struct WorkbenchRootView: View {
         updater: SoftwareUpdateController? = nil
     ) {
         self.store = store
-        self.navigation = navigation ?? WorkbenchNavigationModel()
-        self.updater = updater ?? SoftwareUpdateController()
+        self.injectedNavigation = navigation
+        self.injectedUpdater = updater
     }
 
     public var body: some View {
         let _ = ViewRenderTelemetry.record("WorkbenchRootView")
+        let navigation = injectedNavigation ?? fallbackNavigation
+        let updater = injectedUpdater ?? fallbackUpdater
         let overlay = store.overlay
         let modal = store.activeModal
         ZStack {

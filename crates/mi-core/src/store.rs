@@ -5627,13 +5627,19 @@ impl Drop for WorkbenchStore {
     }
 }
 
+fn matches_logical_slot(logical_control: &str, slot: u32) -> bool {
+    logical_control
+        .strip_prefix("logical-")
+        .and_then(|s| s.parse::<u32>().ok())
+        == Some(slot)
+}
+
 fn resolve_slot_graph_action_id(layer: Option<&LayerNode>, slot: u32) -> Option<String> {
     let layer = layer?;
-    let logical = format!("logical-{slot}");
     layer
         .controls
         .values()
-        .find(|b| b.logical_control == logical)
+        .find(|b| matches_logical_slot(&b.logical_control, slot))
         .and_then(|b| b.action_id.clone())
 }
 
@@ -5915,11 +5921,10 @@ fn resolve_slot_action_info<'a>(
     let Some(layer) = layer else {
         return ("未绑定".to_string(), None);
     };
-    let logical = format!("logical-{slot}");
     let Some(binding) = layer
         .controls
         .values()
-        .find(|b| b.logical_control == logical)
+        .find(|b| matches_logical_slot(&b.logical_control, slot))
     else {
         return ("未绑定".to_string(), None);
     };

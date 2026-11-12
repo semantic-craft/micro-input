@@ -7,7 +7,14 @@ let repoRoot = packageDir.deletingLastPathComponent().deletingLastPathComponent(
 let rustProfile: String = {
     let raw = ProcessInfo.processInfo.environment["MI_RUST_PROFILE"]?
         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    return raw == "release" ? "release" : "debug"
+    switch raw {
+    case "", "debug":
+        return "debug"
+    case "release":
+        return "release"
+    default:
+        fatalError("Unsupported MI_RUST_PROFILE: \(raw)")
+    }
 }()
 let rustLibDir = ProcessInfo.processInfo.environment["CARGO_TARGET_DIR"]
     .map { "\($0)/\(rustProfile)" } ?? "\(repoRoot)/target/\(rustProfile)"

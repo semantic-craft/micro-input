@@ -415,6 +415,45 @@ final class MicroInputTests: XCTestCase {
         if case .isolated = UpdateLaunchPolicy.evaluate(
             identity: prodIdentity,
             bundlePath: "/Applications/Micro Input.app",
+            environment: ["MI_DOCUMENT_DIR": "/tmp/mi-isolated-docs"]
+        ) {} else {
+            XCTFail("Expected MI_DOCUMENT_DIR to isolate updater")
+        }
+
+        if case .isolated = UpdateLaunchPolicy.evaluate(
+            identity: prodIdentity,
+            bundlePath: "/Applications/Micro Input.app",
+            environment: [:],
+            arguments: ["/Applications/Micro Input.app/Contents/MacOS/MicroInput", "--isolated"]
+        ) {} else {
+            XCTFail("Expected --isolated argument to isolate updater")
+        }
+
+        if case .isolated = UpdateLaunchPolicy.evaluate(
+            identity: prodIdentity,
+            bundlePath: "/Applications/Micro Input.app",
+            environment: [:],
+            arguments: ["/Applications/Micro Input.app/Contents/MacOS/MicroInput", "--verify"]
+        ) {} else {
+            XCTFail("Expected --verify argument to isolate updater")
+        }
+
+        for buildBundlePath in [
+            "/workspace/micro-input/target/MicroInput.app",
+            "/workspace/micro-input/app/MicroInput/.build/release/MicroInput.app",
+        ] {
+            if case .isolated = UpdateLaunchPolicy.evaluate(
+                identity: prodIdentity,
+                bundlePath: buildBundlePath,
+                environment: [:]
+            ) {} else {
+                XCTFail("Expected \(buildBundlePath) to isolate updater")
+            }
+        }
+
+        if case .isolated = UpdateLaunchPolicy.evaluate(
+            identity: prodIdentity,
+            bundlePath: "/Applications/Micro Input.app",
             environment: ["XCTestConfigurationFilePath": "/tmp/test.xctestconfiguration"]
         ) {} else {
             XCTFail("Expected XCTestConfigurationFilePath to isolate updater")
@@ -501,6 +540,7 @@ final class MicroInputTests: XCTestCase {
             identity: prodIdentity,
             bundlePath: "/Applications/Micro Input.app",
             environment: [:],
+            arguments: [],
             driverFactory: {
                 factoryCalls += 1
                 return fakeDriver

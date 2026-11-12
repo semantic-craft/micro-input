@@ -87,7 +87,8 @@ public enum UpdateLaunchPolicy {
     public static func evaluate(
         identity: AppReleaseIdentity,
         bundlePath: String,
-        environment: [String: String]
+        environment: [String: String],
+        arguments: [String] = []
     ) -> UpdateServiceStatus {
         if environment["MI_DISABLE_UPDATER"] == "1" {
             return .isolated(reason: "当前会话已通过环境变量停用软件更新")
@@ -95,11 +96,20 @@ public enum UpdateLaunchPolicy {
         if environment["MI_SYNTHETIC_SCENARIO"] != nil {
             return .isolated(reason: "合成验收场景下已停用软件更新")
         }
+        if environment["MI_DOCUMENT_DIR"] != nil {
+            return .isolated(reason: "隔离数据目录会话下已停用软件更新")
+        }
         if environment["XCTestConfigurationFilePath"] != nil {
             return .isolated(reason: "单元测试环境下已停用软件更新")
         }
+        if arguments.contains("--isolated") || arguments.contains("--verify") {
+            return .isolated(reason: "隔离或验收启动模式下已停用软件更新")
+        }
         if identity.bundleIdentifier.hasPrefix("com.semanticcraft.microinput.qa") {
             return .isolated(reason: "QA 隔离副本不连接外部更新源")
+        }
+        if bundlePath.contains("/target/") || bundlePath.contains("/.build/") {
+            return .isolated(reason: "本地构建目录副本不连接外部更新源")
         }
         if bundlePath.contains("/AppTranslocation/") {
             return .unavailable(reason: "应用处于系统隔离运行路径，请移至「应用程序」文件夹后检查更新")
@@ -161,13 +171,15 @@ public final class SoftwareUpdateController {
         identity: AppReleaseIdentity = .fromBundle(),
         bundlePath: String = Bundle.main.bundlePath,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        arguments: [String] = CommandLine.arguments,
         driverFactory: (@MainActor () -> SoftwareUpdateDriver)? = nil
     ) {
         self.identity = identity
         let status = UpdateLaunchPolicy.evaluate(
             identity: identity,
             bundlePath: bundlePath,
-            environment: environment
+            environment: environment,
+            arguments: arguments
         )
         self.serviceStatus = status
         self.automaticallyChecksForUpdates = (status == .ready) ? identity.automaticallyChecksDefault : false

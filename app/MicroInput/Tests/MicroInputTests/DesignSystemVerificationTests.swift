@@ -783,6 +783,7 @@ final class DesignSystemVerificationTests: XCTestCase {
             identity: snapIdentity,
             bundlePath: "/Applications/Micro Input.app",
             environment: [:],
+            arguments: [],
             driverFactory: { snapDriver }
         )
         snapUpdater.startIfPermitted()

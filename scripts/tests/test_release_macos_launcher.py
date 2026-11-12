@@ -59,6 +59,8 @@ class ReleaseMacOSTests(unittest.TestCase):
 
     def test_extract_unsafe_rpaths_and_user_path_detector(self):
         prefix = '/Us' + 'ers/builder/work/app/.build/out/Products/Release/PackageFrameworks'
+        cryptexd_rpath = '/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/lib/swift'
+        xcode_rpath = '/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx'
         sample_otool = f"""
 Load command 18
           cmd LC_RPATH
@@ -70,10 +72,25 @@ Load command 19
          path {prefix} (offset 12)
 Load command 20
           cmd LC_RPATH
+      cmdsize 96
+         path {cryptexd_rpath} (offset 12)
+Load command 21
+          cmd LC_RPATH
+      cmdsize 128
+         path {xcode_rpath} (offset 12)
+Load command 22
+          cmd LC_RPATH
+      cmdsize 32
+         path @loader_path (offset 12)
+Load command 23
+          cmd LC_RPATH
       cmdsize 48
          path @executable_path/../Frameworks (offset 12)
 """
-        self.assertEqual(release_mod.extract_unsafe_rpaths(sample_otool), [prefix])
+        self.assertEqual(
+            release_mod.extract_unsafe_rpaths(sample_otool),
+            [prefix, cryptexd_rpath, xcode_rpath, '@loader_path'],
+        )
 
         with tempfile.TemporaryDirectory(prefix='mi-release-bin-') as tmp:
             root = Path(tmp).resolve()

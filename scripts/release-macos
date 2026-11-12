@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,7 @@ REPO_SLUG = 'semantic-craft/micro-input'
 EXPECTED_BUNDLE_ID = 'craft.semantic.micro-input.dev'
 SPARKLE_NS = 'http://www.andymatuschak.org/xml-namespaces/sparkle'
 HOME_BYTES_PATTERN = re.compile(rb'/Users/(?!(?:Shared)(?:/|\x00|$))[A-Za-z0-9._-]+')
+ALLOWED_RELEASE_RPATHS = {'/usr/lib/swift', '@executable_path/../Frameworks'}
 
 
 def redact_sensitive(text: str, extra_secrets: list[str] | None = None) -> str:
@@ -127,12 +129,8 @@ def extract_unsafe_rpaths(otool_output: str) -> list[str]:
             for sub in lines[idx + 1 : idx + 5]:
                 stripped = sub.strip()
                 if stripped.startswith('path '):
-                    raw_path = stripped[len('path ') :].split(' (offset ', 1)[0].strip()
-                    if (
-                        raw_path.startswith('/Users/')
-                        or raw_path.startswith('/private/')
-                        or '/.build/' in raw_path
-                    ):
+                    raw_path = stripped[len('path ') :].rsplit(' (offset ', 1)[0].strip()
+                    if raw_path not in ALLOWED_RELEASE_RPATHS:
                         rpaths.append(raw_path)
                     break
     return rpaths
@@ -242,18 +240,21 @@ def main(argv: list[str] | None = None) -> int:
     cargo_home = os.environ.get('CARGO_HOME', str(Path.home() / '.cargo'))
     rustup_home = os.environ.get('RUSTUP_HOME', str(Path.home() / '.rustup'))
     remap_flags = [
-        f'--remap-path-prefix={root}=/workspace',
-        f'--remap-path-prefix={cargo_home}=/cargo',
-        f'--remap-path-prefix={rustup_home}=/rustup',
         f'--remap-path-prefix={home_dir}=/home',
+        f'--remap-path-prefix={rustup_home}=/rustup',
+        f'--remap-path-prefix={cargo_home}=/cargo',
+        f'--remap-path-prefix={root}=/workspace',
     ]
-    existing_rustflags = os.environ.get('RUSTFLAGS', '').strip()
-    combined_rustflags = (' '.join([existing_rustflags, *remap_flags])).strip()
+    if 'CARGO_ENCODED_RUSTFLAGS' in os.environ:
+        existing_rustflags = [f for f in os.environ['CARGO_ENCODED_RUSTFLAGS'].split('\x1f') if f]
+    else:
+        existing_rustflags = shlex.split(os.environ.get('RUSTFLAGS', ''))
 
     build_env = os.environ.copy()
     build_env['MACOSX_DEPLOYMENT_TARGET'] = '14.0'
     build_env['MI_RUST_PROFILE'] = 'release'
-    build_env['RUSTFLAGS'] = combined_rustflags
+    build_env.pop('RUSTFLAGS', None)
+    build_env['CARGO_ENCODED_RUSTFLAGS'] = '\x1f'.join([*existing_rustflags, *remap_flags])
 
     print('[1/6] Building release Rust kernel and Swift shell with path remapping...', flush=True)
     run_checked(['cargo', 'build', '--locked', '--release', '-p', 'mi-model', '--bin', 'mi'], cwd=root, env=build_env)
@@ -490,6 +491,7 @@ def main(argv: list[str] | None = None) -> int:
                     cwd=root,
                 )
             else:
+                head_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
                 run_checked(
                     [
                         'gh',
@@ -499,6 +501,8 @@ def main(argv: list[str] | None = None) -> int:
                         str(archive_path),
                         str(appcast_path),
                         str(sums_path),
+                        '--target',
+                        head_sha,
                         '--title',
                         f'Micro Input {tag}',
                         '--notes-file',
