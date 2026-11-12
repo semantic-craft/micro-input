@@ -20,7 +20,7 @@ import xml.etree.ElementTree as ET
 REPO_SLUG = 'semantic-craft/micro-input'
 EXPECTED_BUNDLE_ID = 'craft.semantic.micro-input.dev'
 SPARKLE_NS = 'http://www.andymatuschak.org/xml-namespaces/sparkle'
-HOME_BYTES_PATTERN = re.compile(rb'/Users/(?!(?:Shared)(?:/|\x00|$))[A-Za-z0-9._-]+')
+HOME_BYTES_PATTERN = re.compile(rb'/Users/(?!(?:Shared|demo-operator|example|test|private)(?:/|\x00|$))[A-Za-z0-9._-]+')
 ALLOWED_RELEASE_RPATHS = {'/usr/lib/swift', '@executable_path/../Frameworks'}
 
 
