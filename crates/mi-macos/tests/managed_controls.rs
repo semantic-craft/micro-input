@@ -1900,6 +1900,39 @@ fn codex_toggle_fast_mode_unconfirmed_flip_fails_closed_and_closes_popover() {
     let err = controls
         .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::ToggleFastMode)
         .unwrap_err();
-    assert_eq!(err, "blocked:fast_mode_toggle_unconfirmed");
+    assert_eq!(err, "unconfirmed:fast_mode_toggle_readback");
     assert!(provider.events().contains(&"window_key:escape".to_string()));
+}
+
+#[test]
+fn codex_fast_mode_requires_positive_readback_after_press() {
+    for effect in [
+        PressEffect::LoseTarget,
+        PressEffect::LoseScope,
+        PressEffect::Hide,
+    ] {
+        let provider = Provider::codex();
+        {
+            let mut state = provider.0.lock().unwrap();
+            state.effect = effect;
+            state.window.controls = vec![ManagedControl {
+                id: 1002,
+                role: "AXMenuItem".into(),
+                label: "Enable fast mode".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+            }];
+        }
+        let error = provider
+            .controls()
+            .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::ToggleFastMode)
+            .unwrap_err();
+        assert_eq!(error, "unconfirmed:fast_mode_toggle_readback");
+        assert_eq!(
+            provider.events(),
+            vec!["capture:com.openai.codex", "press:Enable fast mode"]
+        );
+    }
 }

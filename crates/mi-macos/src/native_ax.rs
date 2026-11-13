@@ -2746,11 +2746,11 @@ mod macos {
         fn scroll_with_targeted_event(
             &mut self,
             target: &ManagedWindowIdentity,
-            input: Option<Rect>,
+            input: Rect,
             controls: &[ManagedControl],
             request: &DialScrollRequest,
         ) -> Result<(), String> {
-            if request.sidebar {
+            if request.sidebar || request.jump_to_bottom {
                 return Err(blocked("target_scrollbar_or_bottom_control_unavailable"));
             }
             let (app, window) = self.validate(target)?;
@@ -2773,21 +2773,7 @@ mod macos {
                 None
             };
             let deadline = Instant::now() + Duration::from_millis(400);
-            let mut candidate_points = input
-                .map(|inp| scroll_candidate_points(bounds, inp, preferred))
-                .unwrap_or_default();
-            if candidate_points.is_empty() {
-                candidate_points = [0.5, 0.4, 0.6, 0.3, 0.7]
-                    .into_iter()
-                    .flat_map(|y| {
-                        [0.5, 0.4, 0.6].into_iter().map(move |x| Point {
-                            x: bounds.origin.x + bounds.size.width * x,
-                            y: bounds.origin.y + bounds.size.height * y,
-                        })
-                    })
-                    .collect();
-            }
-            let point = candidate_points
+            let point = scroll_candidate_points(bounds, input, preferred)
                 .into_iter()
                 .find(|point| {
                     self.hit_is_passive_target(&app, &window, target.pid, *point, deadline)
@@ -2823,7 +2809,7 @@ mod macos {
                 return Err(blocked("scroll_target_changed"));
             }
             unsafe { CGEventPostToPid(target.pid, event.0.cast_mut()) };
-            Ok(())
+            Err("unconfirmed:scroll_dispatched".into())
         }
     }
 
@@ -2956,43 +2942,44 @@ mod macos {
                     control.role == "AXTextArea" && control.editable && control.enabled
                 })
                 .collect();
-            let input_rect = match inputs.as_slice() {
-                [input] => self.element(input.id)?.rect()?,
-                _ => None,
+            let [input] = inputs.as_slice() else {
+                return Err(blocked("ambiguous_or_missing_input"));
             };
+            let input_rect = self
+                .element(input.id)?
+                .rect()?
+                .ok_or_else(|| blocked("input_geometry_unavailable"))?;
             let mut candidates: Vec<Owned> = Vec::new();
-            if let Some(input_rect) = input_rect {
-                for control in snapshot
-                    .controls
-                    .iter()
-                    .filter(|control| control.role == "AXScrollArea")
+            for control in snapshot
+                .controls
+                .iter()
+                .filter(|control| control.role == "AXScrollArea")
+            {
+                let area = self.element(control.id)?;
+                let Some(rect) = area.rect()? else {
+                    continue;
+                };
+                let overlap = (rect.origin.x + rect.size.width)
+                    .min(input_rect.origin.x + input_rect.size.width)
+                    - rect.origin.x.max(input_rect.origin.x);
+                let matches_region = if request.sidebar {
+                    rect.origin.x + rect.size.width <= input_rect.origin.x
+                        && rect.size.height > input_rect.size.height
+                } else {
+                    overlap >= input_rect.size.width * 0.75
+                };
+                if !matches_region {
+                    continue;
+                }
+                let Some(bar) = area.attr("AXVerticalScrollBar")? else {
+                    continue;
+                };
+                if bar.settable("AXValue")?
+                    && !candidates
+                        .iter()
+                        .any(|old| unsafe { CFEqual(old.0, bar.0) } != 0)
                 {
-                    let area = self.element(control.id)?;
-                    let Some(rect) = area.rect()? else {
-                        continue;
-                    };
-                    let overlap = (rect.origin.x + rect.size.width)
-                        .min(input_rect.origin.x + input_rect.size.width)
-                        - rect.origin.x.max(input_rect.origin.x);
-                    let matches_region = if request.sidebar {
-                        rect.origin.x + rect.size.width <= input_rect.origin.x
-                            && rect.size.height > input_rect.size.height
-                    } else {
-                        overlap >= input_rect.size.width * 0.75
-                    };
-                    if !matches_region {
-                        continue;
-                    }
-                    let Some(bar) = area.attr("AXVerticalScrollBar")? else {
-                        continue;
-                    };
-                    if bar.settable("AXValue")?
-                        && !candidates
-                            .iter()
-                            .any(|old| unsafe { CFEqual(old.0, bar.0) } != 0)
-                    {
-                        candidates.push(bar);
-                    }
+                    candidates.push(bar);
                 }
             }
             if candidates.is_empty() {

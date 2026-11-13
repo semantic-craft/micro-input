@@ -751,10 +751,10 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
                     }
                 };
                 let initial_label = fast_item.label.trim().to_lowercase();
-                let target_keyword = if initial_label.contains("fast") {
-                    "standard"
+                let target_label = if initial_label == "enable fast mode" {
+                    "enable standard mode"
                 } else {
-                    "fast"
+                    "enable fast mode"
                 };
 
                 if let Err(e) = provider.press(&window.identity, fast_item.id) {
@@ -766,41 +766,32 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
                 }
 
                 let deadline = Instant::now() + Duration::from_millis(350);
-                let mut still_open = false;
                 let mut flipped = false;
                 while Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(25));
-                    let read_result = read(&mut *provider, &window.identity);
-                    let Ok(cur_window) = read_result else {
-                        still_open = false;
+                    let Ok(cur_window) = read(&mut *provider, &window.identity) else {
                         break;
                     };
                     if !is_popover_visible(&cur_window) {
-                        still_open = false;
+                        self.set_codex_popover_owned(false);
                         break;
                     }
-                    still_open = true;
                     if cur_window.controls.iter().any(|c| {
-                        c.role == "AXMenuItem"
-                            && c.label.trim().to_lowercase().contains(target_keyword)
+                        c.role == "AXMenuItem" && c.label.trim().eq_ignore_ascii_case(target_label)
                     }) {
                         flipped = true;
                         break;
                     }
                 }
-                if still_open && !flipped {
+                if !flipped {
                     if popover_owned {
                         let _ = provider.send_window_key(&window.identity, 0x35, &[]);
                         self.set_codex_popover_owned(false);
                     }
-                    return Err(blocked("fast_mode_toggle_unconfirmed"));
+                    return Err("unconfirmed:fast_mode_toggle_readback".into());
                 }
-                if !still_open {
-                    self.set_codex_popover_owned(false);
-                } else if flipped && still_open {
-                    if popover_owned {
-                        self.schedule_auto_dismiss(&window.identity);
-                    }
+                if popover_owned {
+                    self.schedule_auto_dismiss(&window.identity);
                 }
                 Ok(())
             }
