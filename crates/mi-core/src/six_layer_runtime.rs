@@ -289,7 +289,7 @@ fn handle_vendor_slot_notification(
     }
 }
 
-struct SharedVendorBridge {
+struct VendorBridge {
     led_tx: tokio::sync::watch::Sender<Option<(String, Vec<OaiKeyStatusEntry>)>>,
     stop_tx: tokio::sync::watch::Sender<bool>,
     connected: Arc<AtomicBool>,
@@ -300,7 +300,7 @@ struct SharedVendorBridge {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl SharedVendorBridge {
+impl VendorBridge {
     fn new(initial_session: Option<Arc<DeviceSession>>) -> Self {
         let (led_tx, _) = tokio::sync::watch::channel(None);
         let (stop_tx, _) = tokio::sync::watch::channel(false);
@@ -739,7 +739,7 @@ pub struct RunningSixLayer {
     pub receipts: Option<std::sync::mpsc::Receiver<mi_macos::HostActionReceipt>>,
     routing: Arc<Mutex<RoutingContext>>,
     pub(crate) navigation: Option<NavigationDispatch>,
-    vendor_bridge: SharedVendorBridge,
+    vendor_bridge: VendorBridge,
     transport: Option<Arc<MacTransport>>,
     stop: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
@@ -1698,7 +1698,7 @@ fn new_running(
         receipts: None,
         routing: Arc::new(Mutex::new(RoutingContext::default())),
         navigation: None,
-        vendor_bridge: SharedVendorBridge::new(initial_session),
+        vendor_bridge: VendorBridge::new(initial_session),
         transport: None,
         stop: Arc::new(AtomicBool::new(false)),
         monitor: None,
@@ -2099,7 +2099,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .set_routing(mode, Some("com.openai.codex"));
-            let mut bridge = SharedVendorBridge::new(Some(session.clone()));
+            let mut bridge = VendorBridge::new(Some(session.clone()));
             bridge.spawn_with_reopen(
                 &runtime,
                 Some(session.clone()),
@@ -2755,7 +2755,7 @@ mod tests {
         let mut press_line = r#"{"m":"v.oai.hid","p":{"k":"AG06","act":1}}"#.to_string();
         press_line.push('\n');
 
-        let mut bridge = SharedVendorBridge::new(Some(session1.clone()));
+        let mut bridge = VendorBridge::new(Some(session1.clone()));
 
         let old_for_check = session1.clone();
         let reopen_session = session2.clone();
@@ -2927,7 +2927,7 @@ mod tests {
                 },
             )
         };
-        let mut bridge = SharedVendorBridge::new(Some(session.clone()));
+        let mut bridge = VendorBridge::new(Some(session.clone()));
         bridge.spawn_with_reopen(
             &runtime,
             Some(session),
