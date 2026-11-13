@@ -463,7 +463,7 @@ struct BoardLayersPanel: View {
                     store.dispatch("sidebar", "ResetBoardLayerPlan")
                 }
                 .surfaceButton(.ghost)
-                .help("Codex 原生、Antigravity、DeepSeek Harness，4 / 5 / 6 层留空")
+                .help("第 1 层保留 OAI 映射，USB 独占后由 Micro Input 当前方案控制；第 2 / 3 层为 Antigravity / DeepSeek Harness，4 / 5 / 6 层留空")
             }
 
             SettingsCard {

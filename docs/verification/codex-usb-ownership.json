@@ -1,0 +1,57 @@
+{
+  "status": "PASS_WITH_NOTES",
+  "implementation_commit": "a90fdf2551bedd819194c8bee2e44a4f13816d5d",
+  "pull_request": "https://github.com/semantic-craft/micro-input/pull/124",
+  "offline": {
+    "full": "PASS",
+    "swift_tests": 28,
+    "isolated_app_scenarios": 6,
+    "independent_verifier": "https://github.com/semantic-craft/micro-input/pull/124#issuecomment-6854718745"
+  },
+  "real_usb": {
+    "existing_shared_client_after_seize": "DENIED",
+    "new_shared_client_after_seize": "DENIED",
+    "logical_session_rotation_keeps_exclusive": true,
+    "explicit_release_restores_shared_access": true,
+    "codex_process_restart": "NOT_RUN; same nonexclusive HID access order tested using actual USB competitors"
+  },
+  "physical": {
+    "single_confirmed_press": {
+      "expected": 1,
+      "executed": 1
+    },
+    "replug_fixed_five_second_wait": {
+      "expected": 3,
+      "executed": 2,
+      "readiness_at_first_press": "NOT_OBSERVED",
+      "cause": "UNKNOWN"
+    },
+    "after_connection_confirmed": {
+      "expected": 3,
+      "executed": 3,
+      "duplicate_receipts": 0
+    },
+    "target": "Codex · Micro Input",
+    "remaining_scope": "No claim for every physical key or inputs before connection readiness"
+  },
+  "device_config": {
+    "readback": "PASS",
+    "keymap_unchanged": true,
+    "smart_actions_unchanged": true,
+    "keymap_sha256": "f886db46a30c7317ba2f8df69f73deb0275144847e3390d438446d394457fd09",
+    "configuration_writes": 0
+  },
+  "installed": {
+    "path": "/Applications/Micro Input.app",
+    "binary_sha256": "6478a13fd6f908fb69da8b522d02b6836f32524fe609110c849454467eac64d6",
+    "signature": "PASS",
+    "single_process": true,
+    "connected_ui": true,
+    "custom_profile_persisted": true
+  },
+  "evidence": {
+    "audit": ".scratch/codex-profile-ownership/physical-audit.jsonl",
+    "mapping": ".scratch/codex-profile-ownership/mapping-readback.log",
+    "offline": "independent final worktree .scratch/ownership-quality/final-1794577301/result.json"
+  }
+}

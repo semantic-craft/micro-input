@@ -160,12 +160,15 @@ enum WireSyncState {
     Confirmed(String),
 }
 
-async fn open_shared_vendor_session(target: TargetKeyboard) -> Option<Arc<DeviceSession>> {
+async fn open_vendor_session(
+    transport: Arc<MacTransport>,
+    target: TargetKeyboard,
+) -> Option<Arc<DeviceSession>> {
     tokio::task::spawn_blocking(move || {
         mi_transport::discover_target_keyboard()
             .ok()
             .filter(|d| d.location_id == target.location_id)
-            .and_then(|d| connect(&MacTransport::new(), &d).ok())
+            .and_then(|d| connect(transport.as_ref(), &d).ok())
             .map(|(session, _)| session)
     })
     .await
@@ -286,7 +289,7 @@ fn handle_vendor_slot_notification(
     }
 }
 
-struct SharedVendorBridge {
+struct VendorBridge {
     led_tx: tokio::sync::watch::Sender<Option<(String, Vec<OaiKeyStatusEntry>)>>,
     stop_tx: tokio::sync::watch::Sender<bool>,
     connected: Arc<AtomicBool>,
@@ -297,7 +300,7 @@ struct SharedVendorBridge {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl SharedVendorBridge {
+impl VendorBridge {
     fn new(initial_session: Option<Arc<DeviceSession>>) -> Self {
         let (led_tx, _) = tokio::sync::watch::channel(None);
         let (stop_tx, _) = tokio::sync::watch::channel(false);
@@ -372,6 +375,7 @@ impl SharedVendorBridge {
         receiver: Arc<UserCommandReceiver>,
         routing: Arc<Mutex<RoutingContext>>,
         target: TargetKeyboard,
+        transport: Option<Arc<MacTransport>>,
         allow_reconnect: bool,
     ) {
         self.spawn_with_reopen(
@@ -380,7 +384,11 @@ impl SharedVendorBridge {
             receiver,
             routing,
             allow_reconnect,
-            move || open_shared_vendor_session(target.clone()),
+            move || {
+                let transport = transport.clone();
+                let target = target.clone();
+                async move { open_vendor_session(transport?, target).await }
+            },
         );
     }
 
@@ -463,7 +471,6 @@ impl SharedVendorBridge {
                 let mut session_ok = !session.is_disconnected();
                 let needs_initial_flush = !rotated_from_live
                     || matches!(*sync_state.lock().unwrap(), WireSyncState::Unsynced);
-                rotated_from_live = false;
                 if session_ok && needs_initial_flush {
                     let initial_payload = { led_rx.borrow_and_update().clone() };
                     if let Some((digest, entries)) = initial_payload {
@@ -561,7 +568,6 @@ impl SharedVendorBridge {
                     rotated_from_live = true;
                     continue;
                 }
-                pressed_mask = 0;
                 connected.store(false, Ordering::Release);
                 *sync_state.lock().unwrap() = WireSyncState::Unsynced;
                 *retry_not_before.lock().unwrap() = None;
@@ -569,9 +575,10 @@ impl SharedVendorBridge {
                 if !already_shut_down {
                     session.shutdown().await;
                 }
-                if *stop_rx.borrow() || !allow_reconnect {
-                    return;
+                if !*stop_rx.borrow() && allow_reconnect {
+                    receiver.invalidate("USB 独占会话已失效，输入已暂停");
                 }
+                return;
             }
         }));
     }
@@ -732,7 +739,8 @@ pub struct RunningSixLayer {
     pub receipts: Option<std::sync::mpsc::Receiver<mi_macos::HostActionReceipt>>,
     routing: Arc<Mutex<RoutingContext>>,
     pub(crate) navigation: Option<NavigationDispatch>,
-    vendor_bridge: SharedVendorBridge,
+    vendor_bridge: VendorBridge,
+    transport: Option<Arc<MacTransport>>,
     stop: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
     executor: Option<JoinHandle<Result<(), String>>>,
@@ -798,12 +806,13 @@ impl RoutingContext {
 
     fn accepts_layer1_vendor_fallback(&self) -> bool {
         match &self.mode {
-            SixLayerRoutingMode::Locked(pinned) => pinned.actions.iter().any(Option::is_some),
-            SixLayerRoutingMode::ManualPinned(pinned) => {
-                pinned.bundle_id.as_deref() != Some("com.openai.codex")
-                    && pinned.actions.iter().any(Option::is_some)
+            SixLayerRoutingMode::Locked(pinned) | SixLayerRoutingMode::ManualPinned(pinned) => {
+                pinned.actions.iter().any(Option::is_some)
             }
-            SixLayerRoutingMode::AutoFollow { .. } => false,
+            SixLayerRoutingMode::AutoFollow { dynamic_hosts } => dynamic_hosts.iter().any(|host| {
+                host.bundle_id.as_deref() == self.bundle_id.as_deref()
+                    && host.actions.iter().any(Option::is_some)
+            }),
         }
     }
 
@@ -824,7 +833,7 @@ impl RoutingContext {
                 }
             }
             SixLayerRoutingMode::AutoFollow { dynamic_hosts } => {
-                if !(2..=3).contains(&physical_layer) {
+                if !(1..=3).contains(&physical_layer) {
                     return None;
                 }
                 if let Some(bundle) = self.bundle_id.as_deref() {
@@ -841,7 +850,7 @@ impl RoutingContext {
                     }
                 }
                 plan.hosts
-                    .get((physical_layer - 2) as usize)
+                    .get(physical_layer.checked_sub(2)? as usize)
                     .map(|h| h.profile_id.clone())
             }
         }
@@ -853,7 +862,7 @@ impl RoutingContext {
         physical_layer: u8,
     ) -> Option<String> {
         if !matches!(self.mode, SixLayerRoutingMode::AutoFollow { .. })
-            || !(2..=3).contains(&physical_layer)
+            || !(1..=3).contains(&physical_layer)
         {
             return None;
         }
@@ -871,6 +880,7 @@ impl RoutingContext {
                 .any(|h| h.bundle_id.as_deref() == Some(bundle))
             {
                 return match bundle {
+                    "com.openai.codex" => Some("codex".into()),
                     "com.google.antigravity" => Some("antigravity".into()),
                     "com.deepseek.dsh" => Some("dsh-desktop".into()),
                     "dev.herdr.app" => Some("herdr".into()),
@@ -889,14 +899,14 @@ impl RoutingContext {
     ) -> Option<(&'a str, &'a ResolvedHostAction)> {
         match &self.mode {
             SixLayerRoutingMode::Locked(pinned) | SixLayerRoutingMode::ManualPinned(pinned) => {
-                if !(2..=4).contains(&control_layer) {
+                if !(1..=4).contains(&control_layer) {
                     return None;
                 }
                 let action = pinned.actions.get(slot)?.as_ref()?;
                 Some((pinned.profile_id.as_str(), action))
             }
             SixLayerRoutingMode::AutoFollow { dynamic_hosts } => {
-                if !(2..=3).contains(&control_layer) {
+                if !(1..=3).contains(&control_layer) {
                     return None;
                 }
                 if let Some(bundle) = self.bundle_id.as_deref() {
@@ -914,7 +924,7 @@ impl RoutingContext {
                         return Some((dyn_host.profile_id.as_str(), action));
                     }
                 }
-                let host = plan.hosts.get((control_layer - 2) as usize)?;
+                let host = plan.hosts.get(control_layer.checked_sub(2)? as usize)?;
                 let action = host.actions.get(slot)?.as_ref()?;
                 Some((host.profile_id.as_str(), action))
             }
@@ -1087,6 +1097,7 @@ impl RunningSixLayer {
             Arc::clone(&self.receiver),
             Arc::clone(&self.routing),
             self.installation.target.clone(),
+            self.transport.clone(),
             true,
         );
     }
@@ -1102,6 +1113,7 @@ impl RunningSixLayer {
             Arc::clone(&self.receiver),
             Arc::clone(&self.routing),
             self.installation.target.clone(),
+            None,
             false,
         );
     }
@@ -1123,6 +1135,7 @@ impl RunningSixLayer {
         let first = Arc::clone(&self.first_event_verified);
         let routing = Arc::clone(&self.routing);
         let navigation = self.navigation.clone();
+        let transport = self.transport.clone();
         let (tx, rx) = std::sync::mpsc::sync_channel(32);
         self.receipts = Some(rx);
         self.executor = Some(thread::spawn(move || {
@@ -1137,11 +1150,22 @@ impl RunningSixLayer {
                 &tx,
                 navigation.as_ref(),
                 || receiver.next(),
-                || receiver.failure().map_or(Ok(()), Err),
+                || {
+                    if transport
+                        .as_ref()
+                        .is_some_and(|transport| !transport.has_vendor_lease())
+                    {
+                        return Err("USB 专用接口独占已丢失".into());
+                    }
+                    receiver.failure().map_or(Ok(()), Err)
+                },
                 |profile, binding, action, admission| {
                     executor.execute_when(profile, binding, action, || {
                         !stop.load(Ordering::Acquire)
                             && receiver.failure().is_none()
+                            && transport
+                                .as_ref()
+                                .is_none_or(|transport| transport.has_vendor_lease())
                             && policy.admits(admission, action)
                     })
                 },
@@ -1395,6 +1419,10 @@ fn connect(
         })
         .ok_or("已确认的专用接口已消失")?;
     let link = transport.open(&candidate.path).map_err(|e| e.to_string())?;
+    if !link.is_exclusive_vendor() {
+        link.close();
+        return Err("未取得 USB 专用接口独占".into());
+    }
     let session = DeviceSession::new(
         link,
         Box::new(mi_proto::NativeFramer::default()),
@@ -1433,15 +1461,15 @@ pub async fn apply(
     document_dir: &Path,
     plan: AppliedSixLayerPlan,
     mut saved: SavedSixLayerState,
+    transport: Arc<MacTransport>,
 ) -> Result<RunningSixLayer, String> {
     let state_path = document_dir.join("six-layer-runtime.json");
     plan.validate_current()?;
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
     let receiver = Arc::new(UserCommandReceiver::bind_default().map_err(|e| e.to_string())?);
     let patch = prepare_apply_karabiner_patch(&saved, &target, &receiver, plan.bottom_row_layout)?;
-    let exclusive = MacTransport::exclusive_vendor();
-    let (session, _) = connect(&exclusive, &target)?;
-    with_verification_session(&session, async {
+    let (session, candidate) = connect(transport.as_ref(), &target)?;
+    let outcome: Result<RunningSixLayer, String> = async {
         let prepared = session
             .prepare_six_layer_write(document_dir)
             .await
@@ -1539,40 +1567,35 @@ pub async fn apply(
         installation.status = InstallationStatus::RecoveryRequired;
         saved.installation = Some(installation.clone());
         save(&state_path, &saved)?;
-        session.shutdown().await;
-        drop(exclusive);
-        let (shared, candidate) = connect(&MacTransport::new(), &target)
-            .map_err(|error| format!("{error}；保留吞键规则，请恢复设备"))?;
-        let verify_outcome: Result<RunningSixLayer, String> = async {
-            let layer = shared
-                .verify_six_layer_files(&candidate_bytes, smart.as_deref(), receipt.profile_index)
-                .await
-                .map_err(|e| format!("{e}；保留吞键规则，请恢复设备"))?;
-            readiness.recheck(&patch, &target)?;
-            installation.status = InstallationStatus::Applied;
-            saved.installation = Some(installation.clone());
-            save(&state_path, &saved)?;
-            if let Some(prev) = &previous.installation {
-                if prev.backup != installation.backup {
-                    let _ = fs::remove_dir_all(&prev.backup);
-                }
+        let layer = session
+            .verify_six_layer_files(&candidate_bytes, smart.as_deref(), receipt.profile_index)
+            .await
+            .map_err(|e| format!("{e}；保留吞键规则，请恢复设备"))?;
+        readiness.recheck(&patch, &target)?;
+        installation.status = InstallationStatus::Applied;
+        saved.installation = Some(installation.clone());
+        save(&state_path, &saved)?;
+        if let Some(prev) = &previous.installation {
+            if prev.backup != installation.backup {
+                let _ = fs::remove_dir_all(&prev.backup);
             }
-            Ok(new_running(
-                receiver,
-                readiness,
-                Some(shared.clone()),
-                candidate,
-                installation,
-                layer as u8,
-            ))
         }
-        .await;
-        if verify_outcome.is_err() {
-            shared.shutdown().await;
-        }
-        verify_outcome
-    })
-    .await
+        let mut running = new_running(
+            receiver,
+            readiness,
+            Some(session.clone()),
+            candidate,
+            installation,
+            layer as u8,
+        );
+        running.transport = Some(transport);
+        Ok(running)
+    }
+    .await;
+    if outcome.is_err() {
+        session.shutdown().await;
+    }
+    outcome
 }
 
 pub(crate) fn merge_previous_original_into_backup(
@@ -1675,7 +1698,8 @@ fn new_running(
         receipts: None,
         routing: Arc::new(Mutex::new(RoutingContext::default())),
         navigation: None,
-        vendor_bridge: SharedVendorBridge::new(initial_session),
+        vendor_bridge: VendorBridge::new(initial_session),
+        transport: None,
         stop: Arc::new(AtomicBool::new(false)),
         monitor: None,
         executor: None,
@@ -1685,7 +1709,7 @@ fn new_running(
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ResumeSnapshotAction {
     VerifyReady { layer: u8 },
-    UpgradeInPlace,
+    RequiresExplicitApply,
 }
 
 pub(crate) async fn inspect_resume_snapshot(
@@ -1711,7 +1735,7 @@ pub(crate) async fn inspect_resume_snapshot(
             .await
         {
             Ok(mi_session::SixLayerSnapshotCheck::Matched) => {
-                Ok(ResumeSnapshotAction::UpgradeInPlace)
+                Ok(ResumeSnapshotAction::RequiresExplicitApply)
             }
             Ok(mi_session::SixLayerSnapshotCheck::FilesDiverged) => Err(
                 "旧版六层快照与当前设备不符，未自动覆盖；请显式点击「应用到键盘」或「恢复原键盘配置」"
@@ -1725,10 +1749,10 @@ pub(crate) async fn inspect_resume_snapshot(
     }
 }
 
-/// Reconnection fast-paths on current snapshots and upgrades unmodified outdated six-layer layouts in place.
 pub async fn resume(
     document_dir: &Path,
     mut saved: SavedSixLayerState,
+    transport: Arc<MacTransport>,
 ) -> Result<RunningSixLayer, String> {
     let mut installation = saved
         .installation
@@ -1744,7 +1768,7 @@ pub async fn resume(
         Err(error) => return Err(error.to_string()),
     };
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
-    let (session, candidate) = connect(&MacTransport::new(), &target)?;
+    let (session, candidate) = connect(transport.as_ref(), &target)?;
     let layer = match inspect_resume_snapshot(
         &session,
         &expected,
@@ -1754,10 +1778,9 @@ pub async fn resume(
     .await
     {
         Ok(ResumeSnapshotAction::VerifyReady { layer }) => layer,
-        Ok(ResumeSnapshotAction::UpgradeInPlace) => {
+        Ok(ResumeSnapshotAction::RequiresExplicitApply) => {
             session.shutdown().await;
-            drop(session);
-            return apply(document_dir, installation.plan.clone(), saved).await;
+            return Err("旧版六层布局需要显式应用；重连未写设备".into());
         }
         Err(error) => {
             session.shutdown().await;
@@ -1784,14 +1807,16 @@ pub async fn resume(
         // The board is already direct-coded. A failed reload must leave swallowing
         // rules in place, including when the previous rule had been removed.
         let readiness = wait_ready(&baseline, &patch, &target)?;
-        Ok(new_running(
+        let mut running = new_running(
             receiver,
             readiness,
             Some(session.clone()),
             candidate,
             installation,
             layer,
-        ))
+        );
+        running.transport = Some(transport);
+        Ok(running)
     }
     .await;
     if outcome.is_err() {
@@ -1825,14 +1850,17 @@ fn wait_ready(
     }
 }
 
-pub async fn restore(document_dir: &Path, mut saved: SavedSixLayerState) -> Result<(), String> {
+pub async fn restore(
+    document_dir: &Path,
+    mut saved: SavedSixLayerState,
+    transport: Arc<MacTransport>,
+) -> Result<(), String> {
     let installation = saved.installation.clone().ok_or("没有可恢复的六层记录")?;
     let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
     if target.location_id != installation.target.location_id {
         return Err("键盘 USB 位置已变化，未自动恢复".into());
     }
-    let transport = MacTransport::exclusive_vendor();
-    let (session, _) = connect(&transport, &target)?;
+    let (session, _) = connect(transport.as_ref(), &target)?;
     with_verification_session(&session, async {
         session
             .restore_six_layer_backup(&installation.backup)
@@ -1996,6 +2024,189 @@ mod tests {
             BoardLayerPlan::recommended(id("Codex"), id("Antigravity"), id("DeepSeek Coder (DSH)"));
         AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
             .unwrap()
+    }
+
+    #[test]
+    fn custom_codex_routes_layer_one_vendor_in_manual_and_auto_follow_modes() {
+        let plan = test_plan();
+        let custom = PinnedProfilePlan {
+            profile_id: "local-codex".into(),
+            bundle_id: Some("com.openai.codex".into()),
+            actions: plan.hosts[0].actions.clone(),
+        };
+        for mode in [
+            SixLayerRoutingMode::ManualPinned(custom.clone()),
+            SixLayerRoutingMode::AutoFollow {
+                dynamic_hosts: vec![custom.clone()],
+            },
+        ] {
+            let mut context = RoutingContext::default();
+            context.set_routing(mode, Some("com.openai.codex"));
+            assert!(context.accepts_layer1_vendor_fallback());
+            assert_eq!(
+                context.effective_profile_id(&plan, 1).as_deref(),
+                Some("local-codex")
+            );
+            assert_eq!(
+                context.resolve_control(&plan, 1, 0).map(|(id, _)| id),
+                Some("local-codex")
+            );
+        }
+    }
+
+    #[test]
+    fn custom_codex_vendor_dispatches_in_each_mode_and_stops_when_exclusive_session_is_lost() {
+        use mi_proto::Framer;
+        use mi_transport::HidLink;
+
+        let plan = test_plan();
+        let custom = PinnedProfilePlan {
+            profile_id: "local-codex".into(),
+            bundle_id: Some("com.openai.codex".into()),
+            actions: std::array::from_fn(|slot| {
+                (slot == 0).then(|| ResolvedHostAction::AgentCommand {
+                    adapter: "codex".into(),
+                    command: "focus-input".into(),
+                })
+            }),
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for mode in [
+            SixLayerRoutingMode::Locked(custom.clone()),
+            SixLayerRoutingMode::ManualPinned(custom.clone()),
+            SixLayerRoutingMode::AutoFollow {
+                dynamic_hosts: vec![custom.clone()],
+            },
+        ] {
+            let (link, _writes) = mi_transport::MockLink::new();
+            let session = {
+                let _entered = runtime.enter();
+                DeviceSession::new(
+                    Arc::new(MockVendorLink {
+                        inner: link.clone(),
+                        exclusive: true,
+                    }),
+                    Box::new(mi_proto::NativeFramer::default()),
+                    Arc::new(mi_session::ReadOnlySchema),
+                    mi_session::SessionConfig::default(),
+                )
+            };
+            assert!(session.has_exclusive_vendor_link());
+            let receiver = Arc::new(UserCommandReceiver::bind().unwrap());
+            receiver.arm().unwrap();
+            let routing = Arc::new(Mutex::new(RoutingContext::default()));
+            routing
+                .lock()
+                .unwrap()
+                .set_routing(mode, Some("com.openai.codex"));
+            let mut bridge = VendorBridge::new(Some(session.clone()));
+            bridge.spawn_with_reopen(
+                &runtime,
+                Some(session.clone()),
+                receiver.clone(),
+                routing.clone(),
+                true,
+                || async { None },
+            );
+            let wire = b"{\"m\":\"v.oai.hid\",\"p\":{\"k\":\"AG00\",\"act\":1}}\n";
+            for frame in mi_proto::NativeFramer::default().encode(wire).unwrap() {
+                link.inject.send(frame).unwrap();
+            }
+            let until = Instant::now() + Duration::from_secs(1);
+            let mut event = loop {
+                if let Some(event) = receiver.next().unwrap() {
+                    break Some(event);
+                }
+                assert!(
+                    Instant::now() < until,
+                    "Codex vendor press was not delivered"
+                );
+                thread::yield_now();
+            };
+            let stop = AtomicBool::new(false);
+            let policy = ExecutionPolicy::default();
+            policy.set(true, true, Instant::now() - Duration::from_secs(1));
+            let (tx, rx) = std::sync::mpsc::sync_channel(2);
+            execute_clicks(
+                &receiver,
+                &plan,
+                &stop,
+                &policy,
+                &AtomicU8::new(1),
+                &AtomicBool::new(false),
+                &routing,
+                &tx,
+                None,
+                || {
+                    let next = event.take();
+                    if next.is_none() {
+                        stop.store(true, Ordering::Release);
+                    }
+                    Ok(next)
+                },
+                || {
+                    session
+                        .has_exclusive_vendor_link()
+                        .then_some(())
+                        .ok_or_else(|| "exclusive ownership missing".into())
+                },
+                |profile, binding, action, _| {
+                    mi_macos::SimulatedHostActionExecutor.execute(profile, binding, action)
+                },
+            );
+            let receipt = rx.try_recv().unwrap();
+            assert_eq!(receipt.profile_id, "local-codex");
+            assert_eq!(receipt.detail, "codex/focus-input");
+            assert_eq!(receipt.outcome, "simulated");
+            link.close();
+            let until = Instant::now() + Duration::from_secs(1);
+            while receiver.failure().is_none() {
+                assert!(Instant::now() < until, "lost owner must retire input");
+                thread::yield_now();
+            }
+            assert!(receiver.next().is_err());
+            assert!(rx.try_recv().is_err());
+            bridge.shutdown(&runtime);
+        }
+        let mut context = RoutingContext::default();
+        let protected = PinnedProfilePlan {
+            actions: std::array::from_fn(|_| None),
+            ..custom
+        };
+        for mode in [
+            SixLayerRoutingMode::Locked(protected.clone()),
+            SixLayerRoutingMode::ManualPinned(protected),
+        ] {
+            context.set_routing(mode, Some("com.openai.codex"));
+            assert!(!context.accepts_layer1_vendor_fallback());
+            assert!(context.resolve_control(&plan, 1, 0).is_none());
+        }
+    }
+
+    #[test]
+    fn six_layer_connection_rejects_a_shared_vendor_link() {
+        let (link, _writes) = mi_transport::MockLink::new();
+        let transport = mi_transport::MockTransport::new(link);
+        let target = TargetKeyboard {
+            vendor_id: 0x303a,
+            product_id: 0x8298,
+            location_id: 1,
+            usb_parent: 1,
+            vendor_path: "synthetic".into(),
+        };
+        transport.set_devices(vec![HidCandidate {
+            path: target.vendor_path.clone(),
+            vid: target.vendor_id,
+            pid: target.product_id,
+            product: "Synthetic".into(),
+            usage_page: 0xff00,
+            usage: 1,
+            usage_pairs: vec![],
+            transport_hint: mi_transport::TransportHint::Usb,
+        }]);
+        assert!(
+            matches!(connect(&transport, &target), Err(error) if error.contains("未取得 USB 专用接口独占"))
+        );
     }
 
     #[test]
@@ -2544,7 +2755,7 @@ mod tests {
         let mut press_line = r#"{"m":"v.oai.hid","p":{"k":"AG06","act":1}}"#.to_string();
         press_line.push('\n');
 
-        let mut bridge = SharedVendorBridge::new(Some(session1.clone()));
+        let mut bridge = VendorBridge::new(Some(session1.clone()));
 
         let old_for_check = session1.clone();
         let reopen_session = session2.clone();
@@ -2716,7 +2927,7 @@ mod tests {
                 },
             )
         };
-        let mut bridge = SharedVendorBridge::new(Some(session.clone()));
+        let mut bridge = VendorBridge::new(Some(session.clone()));
         bridge.spawn_with_reopen(
             &runtime,
             Some(session),
@@ -2840,7 +3051,7 @@ mod tests {
     use super::{test_b64_decode as b64_decode, test_b64_encode as b64_encode};
 
     #[test]
-    fn outdated_snapshot_auto_upgrades_when_device_matches_and_refuses_when_modified_externally() {
+    fn outdated_snapshot_requires_explicit_apply_and_refuses_external_modifications() {
         const SIX_SOURCE: &[u8] =
             include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
         const SMART: &[u8] =
@@ -3060,7 +3271,7 @@ mod tests {
                 inspect_resume_snapshot(&probe_session, &outdated_bytes, Some(SMART), 1)
                     .await
                     .unwrap(),
-                ResumeSnapshotAction::UpgradeInPlace
+                ResumeSnapshotAction::RequiresExplicitApply
             );
             probe_session.shutdown().await;
             assert!(probe_session.is_disconnected());

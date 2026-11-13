@@ -224,55 +224,72 @@ enum MacHidAccess {
 #[cfg(target_os = "macos")]
 #[derive(Default)]
 struct VendorLease {
-    staged: Option<(String, Arc<MacLink>)>,
-    active: Option<(String, std::sync::Weak<MacLink>)>,
+    owner: Option<(String, Arc<MacDeviceOwner>)>,
+    active: Option<std::sync::Weak<MacLink>>,
 }
 
 #[cfg(target_os = "macos")]
 impl VendorLease {
     fn retain_stage(&mut self, path: Option<&str>) {
         if self
-            .staged
+            .owner
             .as_ref()
             .is_some_and(|(id, _)| Some(id.as_str()) != path)
         {
-            self.staged = None;
+            self.release();
+        }
+    }
+
+    fn release(&mut self) {
+        if let Some((_, owner)) = self.owner.take() {
+            owner.release();
+        }
+        if let Some(link) = self.active.take().and_then(|link| link.upgrade()) {
+            link.close();
         }
     }
 
     fn stage(
         &mut self,
         path: Option<&str>,
-        open: impl FnOnce(&str) -> Result<Arc<MacLink>, TransportError>,
+        open: impl FnOnce(&str) -> Result<Arc<MacDeviceOwner>, TransportError>,
     ) -> Result<(), TransportError> {
         self.retain_stage(path);
         let Some(path) = path else { return Ok(()) };
-        if self.staged.is_some()
-            || self.active.as_ref().is_some_and(|(id, link)| {
-                id == path
-                    && link
-                        .upgrade()
-                        .is_some_and(|link| !link.closed.load(Ordering::Acquire))
-            })
-        {
-            return Ok(());
+        if self.owner.is_none() {
+            self.owner = Some((path.to_owned(), open(path)?));
         }
-        self.staged = Some((path.to_owned(), open(path)?));
         Ok(())
     }
 
     fn handoff(
         &mut self,
         path: &str,
-        open: impl FnOnce(&str) -> Result<Arc<MacLink>, TransportError>,
+        open: impl FnOnce(&str) -> Result<Arc<MacDeviceOwner>, TransportError>,
     ) -> Result<Arc<MacLink>, TransportError> {
         self.stage(Some(path), open)?;
-        let (id, link) = self
-            .staged
-            .take()
-            .ok_or_else(|| TransportError::Unavailable("USB 专用接口已由当前会话持有".into()))?;
-        self.active = Some((id, Arc::downgrade(&link)));
+        if self
+            .active
+            .as_ref()
+            .and_then(|link| link.upgrade())
+            .is_some_and(|link| !link.closed.load(Ordering::Acquire))
+        {
+            return Err(TransportError::Unavailable(
+                "USB 专用接口已由当前会话持有".into(),
+            ));
+        }
+        let owner = self.owner.as_ref().unwrap().1.clone();
+        owner.drain_queued_reports()?;
+        let link = Arc::new(MacLink::new(owner));
+        self.active = Some(Arc::downgrade(&link));
         Ok(link)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for VendorLease {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -295,6 +312,28 @@ impl MacTransport {
 
     pub fn exclusive_vendor() -> Self {
         Self::with_access(MacHidAccess::ExclusiveVendor)
+    }
+
+    pub fn is_exclusive_vendor(&self) -> bool {
+        self.access == MacHidAccess::ExclusiveVendor
+    }
+
+    pub fn has_vendor_lease(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.vendor_lease.as_ref().is_some_and(|lease| {
+                lease
+                    .lock()
+                    .unwrap()
+                    .owner
+                    .as_ref()
+                    .is_some_and(|(_, owner)| owner.device.lock().unwrap().is_some())
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
     }
 
     fn with_access(access: MacHidAccess) -> Self {
@@ -377,7 +416,7 @@ impl MacTransport {
         }
         #[cfg(target_os = "macos")]
         if let Some(lease) = &self.vendor_lease {
-            lease.lock().unwrap().staged = None;
+            lease.lock().unwrap().release();
         }
     }
 }
@@ -406,8 +445,8 @@ fn unique_vendor(devices: &[HidCandidate]) -> Option<&HidCandidate> {
 }
 
 #[cfg(target_os = "macos")]
-fn open_vendor(path: &str) -> Result<Arc<MacLink>, TransportError> {
-    MacLink::open(path, true).map(Arc::new)
+fn open_vendor(path: &str) -> Result<Arc<MacDeviceOwner>, TransportError> {
+    MacDeviceOwner::open(path, true).map(Arc::new)
 }
 
 #[cfg(target_os = "macos")]
@@ -602,13 +641,31 @@ fn open_hid_device(
 }
 
 #[cfg(target_os = "macos")]
-struct MacLink {
-    device: Arc<Mutex<Option<hidapi::HidDevice>>>,
-    exclusive: bool,
-    closed: AtomicBool,
+trait HidDeviceIo: Send {
+    fn write(&self, report: &[u8]) -> Result<usize, TransportError>;
+    fn read_timeout(&self, report: &mut [u8], timeout_ms: i32) -> Result<usize, TransportError>;
 }
+
 #[cfg(target_os = "macos")]
-impl MacLink {
+impl HidDeviceIo for hidapi::HidDevice {
+    fn write(&self, report: &[u8]) -> Result<usize, TransportError> {
+        hidapi::HidDevice::write(self, report)
+            .map_err(|error| TransportError::Unavailable(error.to_string()))
+    }
+    fn read_timeout(&self, report: &mut [u8], timeout_ms: i32) -> Result<usize, TransportError> {
+        hidapi::HidDevice::read_timeout(self, report, timeout_ms)
+            .map_err(|error| TransportError::Unavailable(error.to_string()))
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct MacDeviceOwner {
+    device: Mutex<Option<Box<dyn HidDeviceIo>>>,
+    exclusive: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl MacDeviceOwner {
     fn open(id: &str, exclusive: bool) -> Result<Self, TransportError> {
         let path =
             std::ffi::CString::new(id).map_err(|e| TransportError::Unavailable(e.to_string()))?;
@@ -622,10 +679,48 @@ impl MacLink {
             ));
         }
         Ok(Self {
-            device: Arc::new(Mutex::new(Some(device))),
+            device: Mutex::new(Some(Box::new(device))),
             exclusive: opened_exclusive,
-            closed: AtomicBool::new(false),
         })
+    }
+
+    fn release(&self) {
+        self.device.lock().unwrap().take();
+    }
+
+    fn drain_queued_reports(&self) -> Result<(), TransportError> {
+        let device = self.device.lock().unwrap();
+        let device = device.as_ref().ok_or(TransportError::Disconnected)?;
+        drain_queued_reports(|report| device.read_timeout(report, 0))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn drain_queued_reports(
+    mut read: impl FnMut(&mut [u8]) -> Result<usize, TransportError>,
+) -> Result<(), TransportError> {
+    let mut report = [0; 256];
+    while read(&mut report)? != 0 {}
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+struct MacLink {
+    owner: Arc<MacDeviceOwner>,
+    closed: Arc<AtomicBool>,
+}
+
+#[cfg(target_os = "macos")]
+impl MacLink {
+    fn new(owner: Arc<MacDeviceOwner>) -> Self {
+        Self {
+            owner,
+            closed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn open(id: &str, exclusive: bool) -> Result<Self, TransportError> {
+        Ok(Self::new(Arc::new(MacDeviceOwner::open(id, exclusive)?)))
     }
 }
 
@@ -637,24 +732,26 @@ impl HidLink for MacLink {
     }
 
     fn is_exclusive_vendor(&self) -> bool {
-        self.exclusive
+        self.owner.exclusive
     }
 
     async fn write(&self, report: &[u8]) -> Result<(), TransportError> {
         self.write_batch(&[report.to_vec()]).await
     }
     async fn write_batch(&self, reports: &[Vec<u8>]) -> Result<(), TransportError> {
-        let d = self.device.clone();
+        let owner = Arc::clone(&self.owner);
+        let closed = Arc::clone(&self.closed);
         let reports = reports.to_vec();
         tokio::task::spawn_blocking(move || {
             // A read_timeout holds this same mutex. Acquire it once for the whole
             // RPC so the 20ms reader cannot insert gaps between 61-byte pieces.
-            let guard = d.lock().unwrap();
+            let guard = owner.device.lock().unwrap();
+            if closed.load(Ordering::Acquire) {
+                return Err(TransportError::Disconnected);
+            }
             let dev = guard.as_ref().ok_or(TransportError::Disconnected)?;
             for bytes in reports {
-                let sent = dev
-                    .write(&bytes)
-                    .map_err(|e| TransportError::Unavailable(e.to_string()))?;
+                let sent = dev.write(&bytes)?;
                 if sent != bytes.len() {
                     return Err(TransportError::Unavailable(
                         "short numbered report send".into(),
@@ -668,14 +765,16 @@ impl HidLink for MacLink {
     }
     async fn read(&self) -> Result<Vec<u8>, TransportError> {
         loop {
-            let d = self.device.clone();
+            let owner = Arc::clone(&self.owner);
+            let closed = Arc::clone(&self.closed);
             let bytes = tokio::task::spawn_blocking(move || {
-                let guard = d.lock().unwrap();
+                let guard = owner.device.lock().unwrap();
+                if closed.load(Ordering::Acquire) {
+                    return Err(TransportError::Disconnected);
+                }
                 let dev = guard.as_ref().ok_or(TransportError::Disconnected)?;
                 let mut b = [0; 256];
-                let n = dev
-                    .read_timeout(&mut b, 20)
-                    .map_err(|e| TransportError::Unavailable(e.to_string()))?;
+                let n = dev.read_timeout(&mut b, 20)?;
                 Ok::<_, TransportError>(b[..n].to_vec())
             })
             .await
@@ -686,8 +785,11 @@ impl HidLink for MacLink {
         }
     }
     fn close(&self) {
-        self.device.lock().unwrap().take();
+        let mut device = self.owner.device.lock().unwrap();
         self.closed.store(true, Ordering::Release);
+        if !self.owner.exclusive {
+            device.take();
+        }
     }
 }
 /// R-N04: programmable mock, never an alternate physical wire implementation.
@@ -859,12 +961,53 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    fn test_vendor_link(_: &str) -> Result<Arc<MacLink>, TransportError> {
-        Ok(Arc::new(MacLink {
-            device: Arc::new(Mutex::new(None)),
+    #[derive(Default)]
+    struct QueuedHidDevice {
+        reports: Mutex<std::collections::VecDeque<Vec<u8>>>,
+        writes: Mutex<Vec<Vec<u8>>>,
+        drops: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(target_os = "macos")]
+    struct TestHidDevice(Arc<QueuedHidDevice>);
+
+    #[cfg(target_os = "macos")]
+    impl Drop for TestHidDevice {
+        fn drop(&mut self) {
+            self.0.drops.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl HidDeviceIo for TestHidDevice {
+        fn write(&self, report: &[u8]) -> Result<usize, TransportError> {
+            self.0.writes.lock().unwrap().push(report.to_vec());
+            Ok(report.len())
+        }
+        fn read_timeout(&self, report: &mut [u8], _: i32) -> Result<usize, TransportError> {
+            let queued = self
+                .0
+                .reports
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_default();
+            report[..queued.len()].copy_from_slice(&queued);
+            Ok(queued.len())
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn test_vendor_link(_: &str) -> Result<Arc<MacDeviceOwner>, TransportError> {
+        Ok(test_vendor_owner(Arc::new(QueuedHidDevice::default())))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn test_vendor_owner(device: Arc<QueuedHidDevice>) -> Arc<MacDeviceOwner> {
+        Arc::new(MacDeviceOwner {
+            device: Mutex::new(Some(Box::new(TestHidDevice(device)))),
             exclusive: true,
-            closed: AtomicBool::new(false),
-        }))
+        })
     }
 
     #[cfg(target_os = "macos")]
@@ -878,7 +1021,7 @@ mod tests {
         let handed_off = lease
             .handoff("device-a", |_| panic!("must reuse the staged link"))
             .unwrap();
-        assert!(Arc::ptr_eq(&first, &handed_off));
+        assert!(Arc::ptr_eq(&first, &handed_off.owner));
         lease
             .stage(Some("device-a"), |_| {
                 panic!("must leave the session link held")
@@ -888,8 +1031,12 @@ mod tests {
             .handoff("device-a", |_| panic!("must not seize a second time"))
             .is_err());
         handed_off.close();
-        let replacement = lease.handoff("device-a", test_vendor_link).unwrap();
-        assert!(!Arc::ptr_eq(&first, &replacement));
+        let replacement = lease
+            .handoff("device-a", |_| panic!("must retain the seized handle"))
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &replacement.owner));
+        handed_off.close();
+        assert!(!replacement.closed.load(Ordering::Acquire));
     }
 
     #[cfg(target_os = "macos")]
@@ -897,7 +1044,7 @@ mod tests {
     fn missing_or_ambiguous_vendor_invalidates_the_staged_link() {
         let mut lease = VendorLease::default();
         lease.stage(Some("device-a"), test_vendor_link).unwrap();
-        let old = Arc::downgrade(&lease.staged.as_ref().unwrap().1);
+        let old = Arc::downgrade(&lease.owner.as_ref().unwrap().1);
         lease
             .stage(None, |_| panic!("must not open an unverified device"))
             .unwrap();
@@ -907,6 +1054,116 @@ mod tests {
             .handoff("device-b", |_| panic!("must use only the new USB instance"))
             .unwrap()
             .is_exclusive_vendor());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn vendor_rotation_discards_queued_responses_and_partial_reports_without_releasing_owner()
+    {
+        let device = Arc::new(QueuedHidDevice::default());
+        let owner = test_vendor_owner(device.clone());
+        let mut lease = VendorLease::default();
+        let old = lease.handoff("a", |_| Ok(owner.clone())).unwrap();
+        old.close();
+        device.reports.lock().unwrap().extend([
+            b"{\"id\":0,\"result\":\"old\"}\n".to_vec(),
+            b"{\"id\":0,\"result\":".to_vec(),
+        ]);
+        let next = lease
+            .handoff("a", |_| panic!("must retain USB ownership"))
+            .unwrap();
+        assert!(device.reports.lock().unwrap().is_empty());
+        assert_eq!(device.drops.load(Ordering::Acquire), 0);
+        assert!(old.write(b"old request").await.is_err());
+        assert!(old.read().await.is_err());
+        old.close();
+        device
+            .reports
+            .lock()
+            .unwrap()
+            .push_back(b"new report".to_vec());
+        assert_eq!(next.read().await.unwrap(), b"new report");
+        next.write(b"new request").await.unwrap();
+        assert_eq!(
+            *device.writes.lock().unwrap(),
+            vec![b"new request".to_vec()]
+        );
+        drop(lease);
+        assert_eq!(device.drops.load(Ordering::Acquire), 1);
+        assert!(next.write(b"released").await.is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn removing_a_vendor_generation_cannot_release_its_replacement() {
+        let first = Arc::new(QueuedHidDevice::default());
+        let second = Arc::new(QueuedHidDevice::default());
+        let mut lease = VendorLease::default();
+        let old = lease
+            .handoff("a", |_| Ok(test_vendor_owner(first.clone())))
+            .unwrap();
+        let replacement = lease
+            .handoff("b", |_| Ok(test_vendor_owner(second.clone())))
+            .unwrap();
+        assert_eq!(first.drops.load(Ordering::Acquire), 1);
+        assert_eq!(second.drops.load(Ordering::Acquire), 0);
+        old.close();
+        drop(old);
+        replacement.write(b"new generation").await.unwrap();
+        assert_eq!(second.drops.load(Ordering::Acquire), 0);
+        lease
+            .stage(None, |_| panic!("missing device must not open"))
+            .unwrap();
+        assert_eq!(second.drops.load(Ordering::Acquire), 1);
+        assert!(replacement.read().await.is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn queued_old_io_cannot_consume_reports_after_logical_close() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let device = Arc::new(QueuedHidDevice::default());
+        let mut lease = VendorLease::default();
+        let old = lease
+            .handoff("a", |_| Ok(test_vendor_owner(device.clone())))
+            .unwrap();
+        let (occupied, wait_occupied) = std::sync::mpsc::channel();
+        let (release, wait_release) = std::sync::mpsc::channel();
+        let blocker = runtime.spawn_blocking(move || {
+            occupied.send(()).unwrap();
+            wait_release.recv().unwrap();
+        });
+        wait_occupied.recv().unwrap();
+        let (polled, wait_polled) = std::sync::mpsc::channel();
+        let read = old.clone();
+        let reader = runtime.spawn(async move {
+            let mut future = read.read();
+            std::future::poll_fn(|context| {
+                let result = future.as_mut().poll(context);
+                let _ = polled.send(());
+                result
+            })
+            .await
+        });
+        wait_polled.recv().unwrap();
+        old.close();
+        let next = lease.handoff("a", |_| panic!("must not reopen")).unwrap();
+        device
+            .reports
+            .lock()
+            .unwrap()
+            .push_back(b"new generation".to_vec());
+        release.send(()).unwrap();
+        runtime.block_on(blocker).unwrap();
+        assert!(matches!(
+            runtime.block_on(reader).unwrap(),
+            Err(TransportError::Disconnected)
+        ));
+        assert_eq!(runtime.block_on(next.read()).unwrap(), b"new generation");
     }
 
     #[test]
@@ -1043,13 +1300,22 @@ mod tests {
             frame
         };
         contender.write(&request(8401)).await.unwrap();
-        let owner = MacTransport::exclusive_vendor().open(&device.path).unwrap();
+        let exclusive = MacTransport::exclusive_vendor();
+        let owner = exclusive.open(&device.path).unwrap();
         assert!(owner.is_exclusive_vendor());
         assert!(contender.write(&request(8402)).await.is_err());
         assert!(shared.open(&device.path).is_err());
         owner.write(&request(8403)).await.unwrap();
         owner.close();
-        contender.write(&request(8404)).await.unwrap();
+        assert!(contender.write(&request(8404)).await.is_err());
+        assert!(shared.open(&device.path).is_err());
+        let replacement = exclusive.open(&device.path).unwrap();
+        assert!(owner.write(&request(8405)).await.is_err());
+        owner.close();
+        replacement.write(&request(8406)).await.unwrap();
+        exclusive.stop_discovery();
+        assert!(replacement.write(&request(8407)).await.is_err());
+        contender.write(&request(8408)).await.unwrap();
         contender.close();
     }
 }

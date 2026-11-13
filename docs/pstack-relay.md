@@ -352,3 +352,9 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Outcome**: 保留窗口、分屏和候选歧义检查，用已发现控件的实时路径校验与焦点读回减少按键动作等待，不增加跨动作缓存。
 - **Done Predicate**: 真实 AX 聚焦的匹配构建交替对照成功，范围与失败独立记录；失效路径、控件替换和目标改变回归通过；独立验收与 `scripts/verify-offline` 通过，并更新本机。物理按键完整延迟单独保留边界。
 - **Evidence**: ea3a82f; docs/verification/host-input-latency.json; .scratch/input-latency/result.json; eight offline QA PASS; installed and connected; physical latency NOT_MEASURED
+
+
+### [x] Slice R24: Codex 自定义控制与六层 USB 独占
+- **Outcome**: 六层恢复和 RPC 会话轮换保持 Micro Input 独占 Vendor 接口，使用「Codex · Micro Input」自定义方案，保留当前设备映射。
+- **Done Predicate**: Codex 自动/手动路由、生命周期与去重回归和 `scripts/verify-offline` 通过；真实 USB 启动竞争、插拔、动作次数和设备配置读回分别留证；通过后更新本机日常版。
+- **Evidence**: a90fdf2; docs/verification/codex-usb-ownership.json; offline and native USB PASS; physical 1/1 and 3/3 after readiness; initial fixed-wait 2/3 retained; installed
