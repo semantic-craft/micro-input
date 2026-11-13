@@ -1,4 +1,6 @@
-use crate::managed_controls::{ManagedAxControls, ManagedControlReadiness, ObservedDictationState};
+use crate::managed_controls::{
+    CodexReasoningAction, ManagedAxControls, ManagedControlReadiness, ObservedDictationState,
+};
 use crate::native_ax::NativeAxProvider;
 use mi_model::host_router::{ResolvedHostAction, ResolvedMacroEvent};
 use serde::{Deserialize, Serialize};
@@ -690,6 +692,9 @@ pub trait HostOsDriver: Send + Sync {
     fn scroll_window(&self, req: &DialScrollRequest) -> Result<(), String>;
     fn new_conversation_in_project(&self, adapter: &str) -> Result<(), String>;
     fn toggle_live_voice(&self, adapter: &str) -> Result<(), String>;
+    fn codex_reasoning(&self, _action: CodexReasoningAction) -> Result<(), String> {
+        Err("blocked:codex_reasoning_unavailable".into())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1121,6 +1126,10 @@ impl HostOsDriver for MacOsSystemDriver {
         }
         self.managed_controls.toggle_live_voice(adapter)
     }
+
+    fn codex_reasoning(&self, action: CodexReasoningAction) -> Result<(), String> {
+        self.managed_controls.codex_reasoning(action)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1152,6 +1161,7 @@ pub enum RecordedOsEvent {
     ScrollWindow(DialScrollRequest),
     NewConversationInProject(String),
     ToggleLiveVoice(String),
+    CodexReasoning(CodexReasoningAction),
 }
 
 #[derive(Debug)]
@@ -1382,6 +1392,15 @@ impl HostOsDriver for RecordingOsDriver {
         }
         st.events
             .push(RecordedOsEvent::ToggleLiveVoice(adapter.to_string()));
+        Ok(())
+    }
+
+    fn codex_reasoning(&self, action: CodexReasoningAction) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
+            return Err("accessibility_untrusted".to_string());
+        }
+        st.events.push(RecordedOsEvent::CodexReasoning(action));
         Ok(())
     }
 }
@@ -2031,6 +2050,25 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     match self.driver.toggle_live_voice(adapter) {
                         Ok(()) => make_receipt("executed", desc.detail),
                         Err(err) => make_receipt("failed", err),
+                    }
+                } else if adapter == "codex"
+                    && matches!(
+                        command.as_str(),
+                        "effort-down" | "effort-up" | "toggle-fast-mode"
+                    )
+                {
+                    if !self.driver.is_accessibility_trusted() {
+                        return make_receipt("blocked", "accessibility_untrusted".to_string());
+                    }
+                    let reasoning_action = match command.as_str() {
+                        "effort-down" => CodexReasoningAction::DecreaseEffort,
+                        "effort-up" => CodexReasoningAction::IncreaseEffort,
+                        "toggle-fast-mode" => CodexReasoningAction::ToggleFastMode,
+                        _ => unreachable!(),
+                    };
+                    match self.driver.codex_reasoning(reasoning_action) {
+                        Ok(()) => make_receipt("executed", desc.detail),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }
                 } else if let Some((key_code, modifiers)) =
                     native_shortcut_for_agent_command(adapter, command)

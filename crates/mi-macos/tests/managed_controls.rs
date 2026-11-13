@@ -2,14 +2,14 @@ use mi_macos::executor::{
     ClipboardSnapshot, DialScrollRequest, HostOsDriver, LiveHostActionExecutor,
 };
 use mi_macos::managed_controls::{
-    ManagedAxControls, ManagedAxProvider, ManagedControl, ManagedWindow, ManagedWindowIdentity,
-    ObservedDictationState,
+    blocked, ManagedAxControls, ManagedAxProvider, ManagedControl, ManagedWindow,
+    ManagedWindowIdentity, ObservedDictationState,
 };
 use mi_model::host_router::ResolvedHostAction;
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PressEffect {
     Toggle,
     NoChange,
@@ -33,6 +33,7 @@ struct Fixture {
     after_capture: Option<fn(&mut Fixture)>,
     after_focus: Option<fn(&mut Fixture)>,
     finish_reads_remaining: Option<usize>,
+    include_fast_mode: bool,
 }
 #[derive(Clone)]
 struct Provider(Arc<Mutex<Fixture>>);
@@ -80,6 +81,7 @@ impl Provider {
             after_capture: None,
             after_focus: None,
             finish_reads_remaining: None,
+            include_fast_mode: true,
         })))
     }
     fn dsh() -> Self {
@@ -90,6 +92,9 @@ impl Provider {
     }
     fn controls(&self) -> ManagedAxControls<Self> {
         ManagedAxControls::with_readback_timeout(self.clone(), Duration::ZERO)
+    }
+    fn controls_with_delay(&self, delay: Duration) -> ManagedAxControls<Self> {
+        ManagedAxControls::with_timeouts(self.clone(), Duration::ZERO, delay)
     }
     fn events(&self) -> Vec<String> {
         self.0.lock().unwrap().events.clone()
@@ -170,38 +175,76 @@ impl ManagedAxProvider for Provider {
         let mut state = self.0.lock().unwrap();
         assert_eq!(*target, state.window.identity);
         let effect = state.effect;
-        let control = state
-            .window
-            .controls
-            .iter_mut()
-            .find(|c| c.id == control)
-            .unwrap();
-        let old_label = control.label.clone();
-        let control_id = control.id;
+        let (old_label, control_id, control_role) = {
+            let control = state
+                .window
+                .controls
+                .iter_mut()
+                .find(|c| c.id == control)
+                .unwrap();
+            let old_label = control.label.clone();
+            let control_id = control.id;
+            let control_role = control.role.clone();
+            match effect {
+                PressEffect::Toggle | PressEffect::Replace
+                    if control_role != "AXMenuItem" && control_role != "AXPopUpButton" =>
+                {
+                    control.label = match control.label.as_str() {
+                        "开始听写" => "停止听写",
+                        "Dictate" => "Stop dictation",
+                        "Stop dictation" => "Dictate",
+                        "Start Voice mode" => "End Voice mode",
+                        "End Voice mode" => "Start Voice mode",
+                        _ => "开始听写",
+                    }
+                    .into();
+                    if matches!(effect, PressEffect::Replace) {
+                        control.id += 10;
+                    }
+                }
+                PressEffect::Finish => {
+                    control.label = "Finishing dictation".into();
+                    control.enabled = false;
+                    control.pressable = false;
+                }
+                _ => {}
+            }
+            if control_role == "AXMenuItem" && effect != PressEffect::NoChange {
+                if control.label.contains("fast") {
+                    control.label = "Enable standard mode".into();
+                } else if control.label.contains("standard") {
+                    control.label = "Enable fast mode".into();
+                }
+            }
+            (old_label, control_id, control_role)
+        };
         match effect {
-            PressEffect::Toggle | PressEffect::Replace => {
-                control.label = match control.label.as_str() {
-                    "开始听写" => "停止听写",
-                    "Dictate" => "Stop dictation",
-                    "Stop dictation" => "Dictate",
-                    "Start Voice mode" => "End Voice mode",
-                    "End Voice mode" => "Start Voice mode",
-                    _ => "开始听写",
-                }
-                .into();
-                if matches!(effect, PressEffect::Replace) {
-                    control.id += 10;
-                }
-            }
-            PressEffect::Finish => {
-                control.label = "Finishing dictation".into();
-                control.enabled = false;
-                control.pressable = false;
-            }
             PressEffect::Hide => state.window.controls.retain(|item| item.id != control_id),
             PressEffect::LoseTarget => state.read_pid = Some(999),
             PressEffect::LoseScope => state.window.identity.scope_id += 1,
-            PressEffect::NoChange => {}
+            _ => {}
+        }
+        if control_role == "AXPopUpButton" {
+            state.window.controls.push(ManagedControl {
+                id: 1001,
+                role: "AXMenuItem".into(),
+                label: "Select model".into(),
+                enabled: true,
+                pressable: true,
+                editable: false,
+                focused: false,
+            });
+            if state.include_fast_mode {
+                state.window.controls.push(ManagedControl {
+                    id: 1002,
+                    role: "AXMenuItem".into(),
+                    label: "Enable fast mode".into(),
+                    enabled: true,
+                    pressable: true,
+                    editable: false,
+                    focused: false,
+                });
+            }
         }
         state.events.push(format!("press:{old_label}"));
         Ok(())
@@ -231,7 +274,36 @@ impl ManagedAxProvider for Provider {
         let mut state = self.0.lock().unwrap();
         assert_eq!(*target, state.window.identity);
         assert_eq!(request.target_bundle_id, target.bundle_id);
+        if request.sidebar
+            && !state
+                .window
+                .controls
+                .iter()
+                .any(|c| c.role == "AXScrollArea")
+        {
+            return Err(blocked("target_scrollbar_or_bottom_control_unavailable"));
+        }
         state.events.push("scroll".into());
+        Ok(())
+    }
+    fn send_window_key(
+        &mut self,
+        target: &ManagedWindowIdentity,
+        key_code: u16,
+        _: &[String],
+    ) -> Result<(), String> {
+        let mut state = self.0.lock().unwrap();
+        assert_eq!(*target, state.window.identity);
+        if key_code == 0x35 {
+            state.window.controls.retain(|c| c.role != "AXMenuItem");
+            state.events.push("window_key:escape".into());
+        } else if key_code == 0x7B {
+            state.events.push("window_key:arrow_left".into());
+        } else if key_code == 0x7C {
+            state.events.push("window_key:arrow_right".into());
+        } else {
+            state.events.push(format!("window_key:{key_code:x}"));
+        }
         Ok(())
     }
     fn insert_text(
@@ -1443,4 +1515,391 @@ fn codex_stop_does_not_treat_a_disappeared_control_as_completion() {
         2
     );
     assert!(!provider.events().iter().any(|event| event == "submit"));
+}
+
+#[test]
+fn codex_reasoning_effort_opens_popover_sends_arrow_and_auto_dismisses() {
+    let provider = Provider::codex();
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 10,
+            role: "AXPopUpButton".into(),
+            label: "o3-mini Medium".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        });
+    let controls = provider.controls_with_delay(Duration::from_millis(60));
+    controls
+        .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::DecreaseEffort)
+        .unwrap();
+
+    let events = provider.events();
+    assert!(events.contains(&"press:o3-mini Medium".to_string()));
+    assert!(events.contains(&"window_key:arrow_left".to_string()));
+    assert!(!events.contains(&"window_key:escape".to_string()));
+
+    std::thread::sleep(Duration::from_millis(100));
+    let events = provider.events();
+    assert!(events.contains(&"window_key:escape".to_string()));
+}
+
+#[test]
+fn codex_reasoning_effort_repeat_turn_cancels_previous_auto_dismiss() {
+    let provider = Provider::codex();
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 10,
+            role: "AXPopUpButton".into(),
+            label: "Select effort".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        });
+    let controls = provider.controls_with_delay(Duration::from_millis(70));
+    controls
+        .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::IncreaseEffort)
+        .unwrap();
+
+    std::thread::sleep(Duration::from_millis(30));
+    controls
+        .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::IncreaseEffort)
+        .unwrap();
+
+    std::thread::sleep(Duration::from_millis(50));
+    let escape_count = provider
+        .events()
+        .iter()
+        .filter(|e| *e == "window_key:escape")
+        .count();
+    assert_eq!(
+        escape_count, 0,
+        "turn 1 auto-dismiss must be cancelled by turn 2"
+    );
+
+    std::thread::sleep(Duration::from_millis(50));
+    let escape_count = provider
+        .events()
+        .iter()
+        .filter(|e| *e == "window_key:escape")
+        .count();
+    assert_eq!(escape_count, 1, "turn 2 auto-dismiss must fire once");
+}
+
+#[test]
+fn codex_reasoning_effort_no_op_when_popover_already_closed() {
+    let provider = Provider::codex();
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 10,
+            role: "AXPopUpButton".into(),
+            label: "Select model".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        });
+    let controls = provider.controls_with_delay(Duration::from_millis(60));
+    controls
+        .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::DecreaseEffort)
+        .unwrap();
+
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .retain(|c| c.role != "AXMenuItem");
+
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !provider.events().contains(&"window_key:escape".to_string()),
+        "auto-dismiss must not send Escape if popover was already closed"
+    );
+}
+
+#[test]
+fn codex_reasoning_fails_closed_when_trigger_missing_or_ambiguous() {
+    let provider = Provider::codex();
+    let controls = provider.controls();
+    let err = controls
+        .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::DecreaseEffort)
+        .unwrap_err();
+    assert_eq!(err, "blocked:reasoning_control_unavailable");
+
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 10,
+            role: "AXPopUpButton".into(),
+            label: "o1 High".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        });
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 11,
+            role: "AXPopUpButton".into(),
+            label: "o3-mini Medium".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        });
+    let err = controls
+        .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::IncreaseEffort)
+        .unwrap_err();
+    assert_eq!(err, "blocked:reasoning_control_unavailable");
+}
+
+#[test]
+fn codex_toggle_fast_mode_flips_label_and_schedules_auto_dismiss() {
+    let provider = Provider::codex();
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 10,
+            role: "AXPopUpButton".into(),
+            label: "GPT-4o Standard".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        });
+    let controls = provider.controls_with_delay(Duration::from_millis(60));
+    controls
+        .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::ToggleFastMode)
+        .unwrap();
+
+    let events = provider.events();
+    assert!(events.contains(&"press:GPT-4o Standard".to_string()));
+    assert!(events.contains(&"press:Enable fast mode".to_string()));
+
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(provider.events().contains(&"window_key:escape".to_string()));
+}
+
+#[test]
+fn codex_toggle_fast_mode_missing_item_closes_popover_and_fails() {
+    let provider = Provider::codex();
+    provider.0.lock().unwrap().include_fast_mode = false;
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 10,
+            role: "AXPopUpButton".into(),
+            label: "Auto Standard".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        });
+    let controls = provider.controls();
+    let err = controls
+        .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::ToggleFastMode)
+        .unwrap_err();
+    assert_eq!(err, "blocked:fast_mode_unavailable");
+    assert!(provider.events().contains(&"window_key:escape".to_string()));
+}
+
+#[test]
+fn codex_targeted_scroll_without_ax_scroll_area_succeeds_and_rejects_sidebar() {
+    let provider = Provider::codex();
+    let controls = provider.controls();
+
+    controls
+        .scroll(&DialScrollRequest {
+            target_bundle_id: "com.openai.codex".into(),
+            delta_lines: -4,
+            jump_to_bottom: false,
+            sidebar: false,
+        })
+        .unwrap();
+
+    controls
+        .scroll(&DialScrollRequest {
+            target_bundle_id: "com.openai.codex".into(),
+            delta_lines: 4,
+            jump_to_bottom: false,
+            sidebar: false,
+        })
+        .unwrap();
+
+    controls
+        .scroll(&DialScrollRequest {
+            target_bundle_id: "com.openai.codex".into(),
+            delta_lines: 120,
+            jump_to_bottom: true,
+            sidebar: false,
+        })
+        .unwrap();
+
+    let err = controls
+        .scroll(&DialScrollRequest {
+            target_bundle_id: "com.openai.codex".into(),
+            delta_lines: 4,
+            jump_to_bottom: false,
+            sidebar: true,
+        })
+        .unwrap_err();
+    assert_eq!(
+        err,
+        "blocked:target_scrollbar_or_bottom_control_unavailable"
+    );
+}
+
+#[test]
+fn codex_reasoning_prefers_explicit_effort_over_fallback_and_ignores_non_effort_controls() {
+    let provider = Provider::codex();
+    provider.0.lock().unwrap().window.controls.extend([
+        ManagedControl {
+            id: 10,
+            role: "AXPopUpButton".into(),
+            label: "Select effort".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        },
+        ManagedControl {
+            id: 11,
+            role: "AXPopUpButton".into(),
+            label: "GPT-6 Astra".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        },
+        ManagedControl {
+            id: 12,
+            role: "AXPopUpButton".into(),
+            label: "Codex Settings".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        },
+        ManagedControl {
+            id: 13,
+            role: "AXPopUpButton".into(),
+            label: "Auto approve".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        },
+    ]);
+    let controls = provider.controls_with_delay(Duration::from_millis(60));
+    controls
+        .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::IncreaseEffort)
+        .unwrap();
+
+    let events = provider.events();
+    assert!(events.contains(&"press:Select effort".to_string()));
+    assert!(!events.contains(&"press:GPT-6 Astra".to_string()));
+    assert!(!events.contains(&"press:Codex Settings".to_string()));
+    assert!(!events.contains(&"press:Auto approve".to_string()));
+}
+
+#[test]
+fn codex_reasoning_manually_opened_popover_does_not_schedule_auto_dismiss() {
+    let provider = Provider::codex();
+    provider.0.lock().unwrap().window.controls.extend([
+        ManagedControl {
+            id: 1001,
+            role: "AXMenuItem".into(),
+            label: "Select model".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        },
+        ManagedControl {
+            id: 1002,
+            role: "AXMenuItem".into(),
+            label: "Enable fast mode".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        },
+    ]);
+    let controls = provider.controls_with_delay(Duration::from_millis(60));
+    controls
+        .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::DecreaseEffort)
+        .unwrap();
+
+    let events = provider.events();
+    assert!(events.contains(&"window_key:arrow_left".to_string()));
+
+    std::thread::sleep(Duration::from_millis(100));
+    let events = provider.events();
+    assert!(
+        !events.contains(&"window_key:escape".to_string()),
+        "manually opened popover must not send escape after auto-dismiss delay"
+    );
+}
+
+#[test]
+fn codex_toggle_fast_mode_unconfirmed_flip_fails_closed_and_closes_popover() {
+    let provider = Provider::codex();
+    provider.0.lock().unwrap().effect = PressEffect::NoChange;
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 10,
+            role: "AXPopUpButton".into(),
+            label: "o3-mini Medium".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        });
+    let controls = provider.controls();
+    let err = controls
+        .codex_reasoning(mi_macos::managed_controls::CodexReasoningAction::ToggleFastMode)
+        .unwrap_err();
+    assert_eq!(err, "blocked:fast_mode_toggle_unconfirmed");
+    assert!(provider.events().contains(&"window_key:escape".to_string()));
 }

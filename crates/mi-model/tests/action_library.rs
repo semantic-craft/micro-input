@@ -168,3 +168,25 @@ fn prompt_slots_and_submit_control_actions_report_paste_only_vs_explicit_submit_
         assert!(entry.capability.result_semantics.contains("先停"));
     }
 }
+
+#[test]
+fn codex_dial_actions_are_executable_and_reported_in_action_library() {
+    let codex_entries = action_library::search("Codex", "Agent", false, &BTreeSet::new(), false);
+    let expected_ids = [
+        "codex-scroll-up",
+        "codex-scroll-down",
+        "codex-scroll-to-bottom",
+        "codex-effort-down",
+        "codex-effort-up",
+        "codex-toggle-fast-mode",
+    ];
+    for id in expected_ids {
+        let entry = codex_entries
+            .iter()
+            .find(|e| e.action.id == id)
+            .unwrap_or_else(|| panic!("missing {id} in action library"));
+        assert!(entry.capability.host_required);
+        assert!(entry.capability.execution_available);
+        assert!(entry.capability.unavailable_reason.is_empty());
+    }
+}

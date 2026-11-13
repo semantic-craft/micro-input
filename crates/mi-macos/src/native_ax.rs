@@ -37,6 +37,14 @@ impl ManagedAxProvider for NativeAxProvider {
     fn submit(&mut self, _: &ManagedWindowIdentity, _: u64) -> Result<(), String> {
         Err(blocked("macos_required"))
     }
+    fn send_window_key(
+        &mut self,
+        _: &ManagedWindowIdentity,
+        _: u16,
+        _: &[String],
+    ) -> Result<(), String> {
+        Err(blocked("macos_required"))
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2319,6 +2327,18 @@ mod macos {
             false
         }
         fn control_from_node_data(&self, id: u64, data: NodeData) -> Option<ManagedControl> {
+            let is_codex = self
+                .target
+                .as_ref()
+                .is_some_and(|target| target.identity.bundle_id == "com.openai.codex");
+            let codex_reasoning_trigger = is_codex
+                && data.role == "AXPopUpButton"
+                && data.pressable
+                && crate::managed_controls::is_codex_reasoning_trigger(&data.label);
+            let codex_popover_item = is_codex
+                && data.role == "AXMenuItem"
+                && crate::managed_controls::is_codex_popover_menu_item(&data.label);
+
             let relevant_button = data.pressable
                 && ([
                     crate::ax_dictation::DictationAdapter::Antigravity,
@@ -2359,15 +2379,24 @@ mod macos {
                 && !codex_dictation
                 && !chat_heading
                 && data.role != "AXScrollArea"
+                && !codex_reasoning_trigger
+                && !codex_popover_item
             {
                 return None;
             }
+            let pressable = if codex_popover_item {
+                data.pressable
+            } else if codex_reasoning_trigger {
+                true
+            } else {
+                relevant_button
+            };
             Some(ManagedControl {
                 id,
                 role: data.role,
                 label: data.label,
                 enabled: data.enabled,
-                pressable: relevant_button,
+                pressable,
                 editable: data.editable,
                 focused: data.focused,
             })
@@ -2398,6 +2427,8 @@ mod macos {
                     | "AXSwitch"
                     | "AXToggleButton"
                     | "AXLink"
+                    | "AXPopUpButton"
+                    | "AXMenuItem"
             );
             let mut data = NodeData {
                 role,
@@ -2715,11 +2746,11 @@ mod macos {
         fn scroll_with_targeted_event(
             &mut self,
             target: &ManagedWindowIdentity,
-            input: Rect,
+            input: Option<Rect>,
             controls: &[ManagedControl],
             request: &DialScrollRequest,
         ) -> Result<(), String> {
-            if request.sidebar || request.jump_to_bottom {
+            if request.sidebar {
                 return Err(blocked("target_scrollbar_or_bottom_control_unavailable"));
             }
             let (app, window) = self.validate(target)?;
@@ -2742,7 +2773,21 @@ mod macos {
                 None
             };
             let deadline = Instant::now() + Duration::from_millis(400);
-            let point = scroll_candidate_points(bounds, input, preferred)
+            let mut candidate_points = input
+                .map(|inp| scroll_candidate_points(bounds, inp, preferred))
+                .unwrap_or_default();
+            if candidate_points.is_empty() {
+                candidate_points = [0.5, 0.4, 0.6, 0.3, 0.7]
+                    .into_iter()
+                    .flat_map(|y| {
+                        [0.5, 0.4, 0.6].into_iter().map(move |x| Point {
+                            x: bounds.origin.x + bounds.size.width * x,
+                            y: bounds.origin.y + bounds.size.height * y,
+                        })
+                    })
+                    .collect();
+            }
+            let point = candidate_points
                 .into_iter()
                 .find(|point| {
                     self.hit_is_passive_target(&app, &window, target.pid, *point, deadline)
@@ -2778,7 +2823,7 @@ mod macos {
                 return Err(blocked("scroll_target_changed"));
             }
             unsafe { CGEventPostToPid(target.pid, event.0.cast_mut()) };
-            Err("unconfirmed:scroll_dispatched".into())
+            Ok(())
         }
     }
 
@@ -2911,44 +2956,43 @@ mod macos {
                     control.role == "AXTextArea" && control.editable && control.enabled
                 })
                 .collect();
-            let [input] = inputs.as_slice() else {
-                return Err(blocked("ambiguous_or_missing_input"));
+            let input_rect = match inputs.as_slice() {
+                [input] => self.element(input.id)?.rect()?,
+                _ => None,
             };
-            let input_rect = self
-                .element(input.id)?
-                .rect()?
-                .ok_or_else(|| blocked("input_geometry_unavailable"))?;
             let mut candidates: Vec<Owned> = Vec::new();
-            for control in snapshot
-                .controls
-                .iter()
-                .filter(|control| control.role == "AXScrollArea")
-            {
-                let area = self.element(control.id)?;
-                let Some(rect) = area.rect()? else {
-                    continue;
-                };
-                let overlap = (rect.origin.x + rect.size.width)
-                    .min(input_rect.origin.x + input_rect.size.width)
-                    - rect.origin.x.max(input_rect.origin.x);
-                let matches_region = if request.sidebar {
-                    rect.origin.x + rect.size.width <= input_rect.origin.x
-                        && rect.size.height > input_rect.size.height
-                } else {
-                    overlap >= input_rect.size.width * 0.75
-                };
-                if !matches_region {
-                    continue;
-                }
-                let Some(bar) = area.attr("AXVerticalScrollBar")? else {
-                    continue;
-                };
-                if bar.settable("AXValue")?
-                    && !candidates
-                        .iter()
-                        .any(|old| unsafe { CFEqual(old.0, bar.0) } != 0)
+            if let Some(input_rect) = input_rect {
+                for control in snapshot
+                    .controls
+                    .iter()
+                    .filter(|control| control.role == "AXScrollArea")
                 {
-                    candidates.push(bar);
+                    let area = self.element(control.id)?;
+                    let Some(rect) = area.rect()? else {
+                        continue;
+                    };
+                    let overlap = (rect.origin.x + rect.size.width)
+                        .min(input_rect.origin.x + input_rect.size.width)
+                        - rect.origin.x.max(input_rect.origin.x);
+                    let matches_region = if request.sidebar {
+                        rect.origin.x + rect.size.width <= input_rect.origin.x
+                            && rect.size.height > input_rect.size.height
+                    } else {
+                        overlap >= input_rect.size.width * 0.75
+                    };
+                    if !matches_region {
+                        continue;
+                    }
+                    let Some(bar) = area.attr("AXVerticalScrollBar")? else {
+                        continue;
+                    };
+                    if bar.settable("AXValue")?
+                        && !candidates
+                            .iter()
+                            .any(|old| unsafe { CFEqual(old.0, bar.0) } != 0)
+                    {
+                        candidates.push(bar);
+                    }
                 }
             }
             if candidates.is_empty() {
@@ -3125,6 +3169,38 @@ mod macos {
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
+        }
+        fn send_window_key(
+            &mut self,
+            target: &ManagedWindowIdentity,
+            key_code: u16,
+            modifiers: &[String],
+        ) -> Result<(), String> {
+            self.validate(target)?;
+            let down = unsafe {
+                Owned::from_create(CGEventCreateKeyboardEvent(
+                    std::ptr::null_mut(),
+                    key_code,
+                    true,
+                ))
+            }
+            .ok_or_else(|| blocked("keyboard_event_unavailable"))?;
+            let up = unsafe {
+                Owned::from_create(CGEventCreateKeyboardEvent(
+                    std::ptr::null_mut(),
+                    key_code,
+                    false,
+                ))
+            }
+            .ok_or_else(|| blocked("keyboard_event_unavailable"))?;
+            let flags = crate::executor::modifiers_to_cg_flags(modifiers);
+            unsafe {
+                CGEventSetFlags(down.0.cast_mut(), flags);
+                CGEventSetFlags(up.0.cast_mut(), flags);
+                CGEventPostToPid(target.pid, down.0.cast_mut());
+                CGEventPostToPid(target.pid, up.0.cast_mut());
+            }
+            Ok(())
         }
     }
 
