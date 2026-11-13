@@ -907,8 +907,6 @@ mod macos {
             return Ok(());
         }
         if !read_bool("AXEnhancedUserInterface")?.unwrap_or(false) {
-            // Electron/Antigravity 2.31.2 ignores AXManualAccessibility silently and returns
-            // kAXErrorNotImplemented (-25208) on AXEnhancedUserInterface while enabling the tree.
             let enhanced_code = set_true("AXEnhancedUserInterface");
             if enhanced_code != 0 && enhanced_code != -25208 {
                 return Err(format!("unconfirmed:ax_set_{enhanced_code}"));
@@ -1792,12 +1790,16 @@ mod macos {
         let sidebar_matches: Vec<_> = matches
             .into_iter()
             .filter(|&idx| {
-                let upper = (idx + 6).min(observation.nodes.len());
-                observation.nodes[(idx + 1)..upper]
+                let Some(parent) = observation.nodes[idx].parent else {
+                    return false;
+                };
+                let end = subtree_end(&observation.nodes, parent);
+                observation.nodes[(idx + 1)..end]
                     .iter()
                     .take_while(|next| next.data.role != "AXButton")
                     .any(|next| {
-                        next.data.role == "AXLink"
+                        next.parent == Some(parent)
+                            && next.data.role == "AXLink"
                             && (next.data.label.contains("New Conversation")
                                 || next.data.url.as_deref().is_some_and(|u| {
                                     crate::session_navigation::app_document_path(u, port)
