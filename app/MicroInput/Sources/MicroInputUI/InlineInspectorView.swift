@@ -270,14 +270,25 @@ struct CreatorMicroInlineInspectorView: View {
                 .labelsHidden()
 
                 HStack(spacing: 8) {
-                    Button("切活跃/蓝点会话") {
-                        store.dispatch("canvas", ["ApplyKnobJoystickPreset": "CycleWorkingAndBlueDot"])
+                    if agentKind == .codex {
+                        Button("滚动对话预设") {
+                            store.dispatch("canvas", ["ApplyKnobJoystickPreset": "CodexScrollChatAndBottom"])
+                        }
+                        .surfaceButton(.secondary)
+                        Button("调整推理档位") {
+                            store.dispatch("canvas", ["ApplyKnobJoystickPreset": "CodexReasoningEffortAndSpeed"])
+                        }
+                        .surfaceButton(.secondary)
+                    } else if agentKind == .antigravity {
+                        Button("切活跃/蓝点会话") {
+                            store.dispatch("canvas", ["ApplyKnobJoystickPreset": "CycleWorkingAndBlueDot"])
+                        }
+                        .surfaceButton(.secondary)
+                        Button("双滚轮预设") {
+                            store.dispatch("canvas", ["ApplyKnobJoystickPreset": "DualScrollProjectsAndChat"])
+                        }
+                        .surfaceButton(.secondary)
                     }
-                    .surfaceButton(.secondary)
-                    Button("双滚轮预设") {
-                        store.dispatch("canvas", ["ApplyKnobJoystickPreset": "DualScrollProjectsAndChat"])
-                    }
-                    .surfaceButton(.secondary)
                 }
             }
         } else if (16...19).contains(slot) || insp.selectedSurface == "Joystick" {
@@ -300,11 +311,13 @@ struct CreatorMicroInlineInspectorView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
 
-                HStack(spacing: 8) {
-                    Button("滚对话 + 左右切会话") {
-                        store.dispatch("canvas", ["ApplyKnobJoystickPreset": "DualScrollProjectsAndChat"])
+                if agentKind == .antigravity {
+                    HStack(spacing: 8) {
+                        Button("滚对话 + 左右切会话") {
+                            store.dispatch("canvas", ["ApplyKnobJoystickPreset": "DualScrollProjectsAndChat"])
+                        }
+                        .surfaceButton(.secondary)
                     }
-                    .surfaceButton(.secondary)
                 }
             }
         }
