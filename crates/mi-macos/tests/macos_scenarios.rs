@@ -988,3 +988,46 @@ fn retired_agent_actions_are_blocked_and_chatgpt_fallback_remains_targeted() {
     );
     assert!(!driver.events().is_empty());
 }
+
+#[test]
+fn codex_dial_reasoning_and_fast_mode_actions_route_through_live_host_action_executor() {
+    let driver = RecordingOsDriver::new(true);
+    let executor = LiveHostActionExecutor::new(driver.clone());
+
+    for (command, expected_action) in [
+        (
+            "effort-down",
+            mi_macos::CodexReasoningAction::DecreaseEffort,
+        ),
+        ("effort-up", mi_macos::CodexReasoningAction::IncreaseEffort),
+        (
+            "toggle-fast-mode",
+            mi_macos::CodexReasoningAction::ToggleFastMode,
+        ),
+    ] {
+        let action = ResolvedHostAction::AgentCommand {
+            adapter: "codex".to_string(),
+            command: command.to_string(),
+        };
+        let receipt = executor.execute("Codex", "AG00", &action);
+        assert_eq!(
+            receipt.outcome, "executed",
+            "{command} receipt detail: {}",
+            receipt.detail
+        );
+        assert_eq!(receipt.detail, format!("codex/{command}"));
+        assert!(driver
+            .events()
+            .contains(&RecordedOsEvent::CodexReasoning(expected_action)));
+    }
+
+    let untrusted_driver = RecordingOsDriver::new(false);
+    let untrusted_executor = LiveHostActionExecutor::new(untrusted_driver);
+    let action = ResolvedHostAction::AgentCommand {
+        adapter: "codex".to_string(),
+        command: "effort-down".to_string(),
+    };
+    let receipt = untrusted_executor.execute("Codex", "AG00", &action);
+    assert_eq!(receipt.outcome, "blocked");
+    assert_eq!(receipt.detail, "accessibility_untrusted");
+}

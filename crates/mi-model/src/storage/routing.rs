@@ -199,6 +199,9 @@ impl DocumentStore {
                     "new-tab" => "新建标签页",
                     "cycle-workspace-layout" => "内置浏览器 · 布局",
                     "toggle-dictation" => "点击听写",
+                    "effort-down" => "降低推理档位",
+                    "effort-up" => "提高推理档位",
+                    "toggle-fast-mode" => "切换 Fast 模式",
                     c if c.starts_with("submit-prompt:") => "粘贴指令并提交",
                     c if c.starts_with("prompt:") => "粘贴工程指令",
                     _ => "Agent 动作",
@@ -551,6 +554,39 @@ mod tests {
         assert_eq!(label_of("AG17"), "前进到下一个打开目标");
         assert_eq!(label_of("AG12"), "停止听写并提交");
         assert_eq!(label_of("AG09"), "粘贴文本");
+
+        store
+            .draft
+            .assign(
+                &json!(ag_pid),
+                &json!(lid),
+                1,
+                find_cat("codex-effort-down"),
+            )
+            .unwrap();
+        store
+            .draft
+            .assign(&json!(ag_pid), &json!(lid), 2, find_cat("codex-effort-up"))
+            .unwrap();
+        store
+            .draft
+            .assign(
+                &json!(ag_pid),
+                &json!(lid),
+                3,
+                find_cat("codex-toggle-fast-mode"),
+            )
+            .unwrap();
+        let state = store.routing_state();
+        let keys = state["keys"].as_array().unwrap();
+        let label_of = |b: &str| {
+            keys.iter().find(|k| k["binding_id"] == b).unwrap()["label"]
+                .as_str()
+                .unwrap()
+        };
+        assert_eq!(label_of("AG01"), "降低推理档位");
+        assert_eq!(label_of("AG02"), "提高推理档位");
+        assert_eq!(label_of("AG03"), "切换 Fast 模式");
     }
 
     #[test]

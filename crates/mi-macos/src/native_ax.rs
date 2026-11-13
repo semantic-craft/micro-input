@@ -37,6 +37,14 @@ impl ManagedAxProvider for NativeAxProvider {
     fn submit(&mut self, _: &ManagedWindowIdentity, _: u64) -> Result<(), String> {
         Err(blocked("macos_required"))
     }
+    fn send_window_key(
+        &mut self,
+        _: &ManagedWindowIdentity,
+        _: u16,
+        _: &[String],
+    ) -> Result<(), String> {
+        Err(blocked("macos_required"))
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2378,6 +2386,18 @@ mod macos {
             false
         }
         fn control_from_node_data(&self, id: u64, data: NodeData) -> Option<ManagedControl> {
+            let is_codex = self
+                .target
+                .as_ref()
+                .is_some_and(|target| target.identity.bundle_id == "com.openai.codex");
+            let codex_reasoning_trigger = is_codex
+                && data.role == "AXPopUpButton"
+                && data.pressable
+                && crate::managed_controls::is_codex_reasoning_trigger(&data.label);
+            let codex_popover_item = is_codex
+                && data.role == "AXMenuItem"
+                && crate::managed_controls::is_codex_popover_menu_item(&data.label);
+
             let relevant_button = data.pressable
                 && ([
                     crate::ax_dictation::DictationAdapter::Antigravity,
@@ -2418,15 +2438,24 @@ mod macos {
                 && !codex_dictation
                 && !chat_heading
                 && data.role != "AXScrollArea"
+                && !codex_reasoning_trigger
+                && !codex_popover_item
             {
                 return None;
             }
+            let pressable = if codex_popover_item {
+                data.pressable
+            } else if codex_reasoning_trigger {
+                true
+            } else {
+                relevant_button
+            };
             Some(ManagedControl {
                 id,
                 role: data.role,
                 label: data.label,
                 enabled: data.enabled,
-                pressable: relevant_button,
+                pressable,
                 editable: data.editable,
                 focused: data.focused,
             })
@@ -2457,6 +2486,8 @@ mod macos {
                     | "AXSwitch"
                     | "AXToggleButton"
                     | "AXLink"
+                    | "AXPopUpButton"
+                    | "AXMenuItem"
             );
             let mut data = NodeData {
                 role,
@@ -3184,6 +3215,38 @@ mod macos {
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
+        }
+        fn send_window_key(
+            &mut self,
+            target: &ManagedWindowIdentity,
+            key_code: u16,
+            modifiers: &[String],
+        ) -> Result<(), String> {
+            self.validate(target)?;
+            let down = unsafe {
+                Owned::from_create(CGEventCreateKeyboardEvent(
+                    std::ptr::null_mut(),
+                    key_code,
+                    true,
+                ))
+            }
+            .ok_or_else(|| blocked("keyboard_event_unavailable"))?;
+            let up = unsafe {
+                Owned::from_create(CGEventCreateKeyboardEvent(
+                    std::ptr::null_mut(),
+                    key_code,
+                    false,
+                ))
+            }
+            .ok_or_else(|| blocked("keyboard_event_unavailable"))?;
+            let flags = crate::executor::modifiers_to_cg_flags(modifiers);
+            unsafe {
+                CGEventSetFlags(down.0.cast_mut(), flags);
+                CGEventSetFlags(up.0.cast_mut(), flags);
+                CGEventPostToPid(target.pid, down.0.cast_mut());
+                CGEventPostToPid(target.pid, up.0.cast_mut());
+            }
+            Ok(())
         }
     }
 

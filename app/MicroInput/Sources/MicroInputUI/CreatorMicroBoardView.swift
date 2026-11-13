@@ -425,6 +425,15 @@ struct CreatorMicroBoardView: View {
                         store.dispatch("canvas", ["ApplyKnobJoystickPreset": "DualScrollProjectsAndChat"])
                     }
                 }
+                if agentKind == .codex {
+                    Divider()
+                    Button("旋钮滚动对话") {
+                        store.dispatch("canvas", ["ApplyKnobJoystickPreset": "CodexScrollChatAndBottom"])
+                    }
+                    Button("旋钮调整推理档位") {
+                        store.dispatch("canvas", ["ApplyKnobJoystickPreset": "CodexReasoningEffortAndSpeed"])
+                    }
+                }
                 if !ss.sessionSlots.isEmpty {
                     Divider()
                     ForEach(ss.sessionSlots) { slot in

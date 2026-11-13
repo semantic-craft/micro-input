@@ -691,3 +691,145 @@ fn four_app_six_slot_session_strip_sorting_pinning_mark_read_lighting_and_quick_
             .top_six_bound_as_session_keys
     );
 }
+
+#[test]
+fn codex_dial_preset_switching_and_slot_preservation() {
+    let temp = TempDir::new().unwrap();
+    let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+
+    let pid = store
+        .find_canonical_profile_id(CanonicalAgent::Codex)
+        .unwrap();
+    store.select_and_activate_profile(&pid).unwrap();
+    store
+        .dispatch_canvas_action(CanvasAction::UnlockBySwitchingOrCreatingCustomLayer)
+        .unwrap();
+
+    let initial_cells: Vec<_> = store
+        .projection()
+        .canvas
+        .keycap_cells
+        .iter()
+        .map(|c| (c.primary_slot, c.full_action_title.clone()))
+        .collect();
+    let initial_joystick: Vec<_> = store
+        .projection()
+        .canvas
+        .joystick
+        .sectors
+        .iter()
+        .map(|s| (s.logical_slot, s.concise_label.clone()))
+        .collect();
+
+    store
+        .dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
+            KnobJoystickPreset::CodexReasoningEffortAndSpeed,
+        ))
+        .unwrap();
+
+    let proj = store.projection();
+    assert_eq!(proj.canvas.encoder.ccw_label, "Codex · 降低推理档位");
+    assert_eq!(proj.canvas.encoder.cw_label, "Codex · 提高推理档位");
+    assert_eq!(proj.canvas.encoder.press_label, "Fast");
+
+    let cells_after_effort: Vec<_> = proj
+        .canvas
+        .keycap_cells
+        .iter()
+        .map(|c| (c.primary_slot, c.full_action_title.clone()))
+        .collect();
+    assert_eq!(
+        initial_cells, cells_after_effort,
+        "keys 0..12 must be preserved when dial preset changes"
+    );
+
+    let joystick_after_effort: Vec<_> = proj
+        .canvas
+        .joystick
+        .sectors
+        .iter()
+        .map(|s| (s.logical_slot, s.concise_label.clone()))
+        .collect();
+    assert_eq!(
+        initial_joystick, joystick_after_effort,
+        "joystick slots 16..19 must be preserved when dial preset changes"
+    );
+
+    store
+        .dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
+            KnobJoystickPreset::CodexScrollChatAndBottom,
+        ))
+        .unwrap();
+
+    let proj2 = store.projection();
+    assert_eq!(proj2.canvas.encoder.ccw_label, "Codex · 向上滚动对话");
+    assert_eq!(proj2.canvas.encoder.cw_label, "Codex · 向下滚动对话");
+    assert_eq!(proj2.canvas.encoder.press_label, "跳到底部");
+
+    let cells_after_scroll: Vec<_> = proj2
+        .canvas
+        .keycap_cells
+        .iter()
+        .map(|c| (c.primary_slot, c.full_action_title.clone()))
+        .collect();
+    assert_eq!(
+        initial_cells, cells_after_scroll,
+        "keys 0..12 must remain preserved when switching back to scroll preset"
+    );
+
+    let joystick_after_scroll: Vec<_> = proj2
+        .canvas
+        .joystick
+        .sectors
+        .iter()
+        .map(|s| (s.logical_slot, s.concise_label.clone()))
+        .collect();
+    assert_eq!(
+        initial_joystick, joystick_after_scroll,
+        "joystick slots 16..19 must remain preserved when switching back to scroll preset"
+    );
+
+    let err_on_codex = store
+        .dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
+            KnobJoystickPreset::DualScrollProjectsAndChat,
+        ))
+        .unwrap_err();
+    assert!(matches!(err_on_codex, WorkbenchError::Preset(_)));
+
+    let ag_pid = store
+        .find_canonical_profile_id(CanonicalAgent::Antigravity)
+        .unwrap();
+    store.select_and_activate_profile(&ag_pid).unwrap();
+    let err_on_ag = store
+        .dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
+            KnobJoystickPreset::CodexScrollChatAndBottom,
+        ))
+        .unwrap_err();
+    assert!(matches!(err_on_ag, WorkbenchError::Preset(_)));
+
+    assert_eq!(
+        format_concise_keycap_caption("Codex · 降低推理档位"),
+        "降推理"
+    );
+    assert_eq!(
+        format_concise_keycap_caption("Codex · 提高推理档位"),
+        "升推理"
+    );
+    assert_eq!(
+        format_concise_keycap_caption("Codex · 切换 Fast 模式"),
+        "Fast"
+    );
+    assert_eq!(
+        format_concise_keycap_caption("Codex · 向上滚动对话"),
+        "向上滚动"
+    );
+    assert_eq!(
+        format_concise_keycap_caption("Codex · 向下滚动对话"),
+        "向下滚动"
+    );
+    assert_eq!(
+        format_concise_keycap_caption("Codex · 跳到底部并聚焦输入"),
+        "跳到底部"
+    );
+    assert_eq!(format_concise_keycap_caption("滚动到对话底部"), "跳到底部");
+}

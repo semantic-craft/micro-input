@@ -581,11 +581,23 @@ impl CodexKeycapId {
             if a.id.contains("back") {
                 return Self::Time;
             }
-            if a.id.contains("completed-next") {
+            if a.id.contains("completed-next")
+                || a.id.contains("effort-up")
+                || cmd == Some("effort-up")
+            {
                 return Self::MindPlus;
             }
-            if a.id.contains("completed-prev") {
+            if a.id.contains("completed-prev")
+                || a.id.contains("effort-down")
+                || cmd == Some("effort-down")
+            {
                 return Self::MindMinus;
+            }
+            if a.id.contains("toggle-fast-mode") || cmd == Some("toggle-fast-mode") {
+                return Self::Fast;
+            }
+            if a.id.contains("scroll-to-bottom") || cmd == Some("scroll-to-bottom") {
+                return Self::Download;
             }
             if let Some(found) = Self::ALL_34
                 .into_iter()

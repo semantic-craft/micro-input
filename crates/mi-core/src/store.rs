@@ -2790,8 +2790,29 @@ impl WorkbenchStore {
             CanvasAction::ApplyKnobJoystickPreset(preset) => {
                 self.ensure_layer_editable()?;
                 let (pid, lid) = self.require_selected_profile_and_layer()?;
-                let pairs: [(u32, &str); 7] = match preset {
-                    KnobJoystickPreset::CycleWorkingAndBlueDot => [
+                if let Some(profile) = self
+                    .document_store
+                    .draft
+                    .document
+                    .editable
+                    .graph
+                    .profiles
+                    .get(&pid)
+                {
+                    let agent = CanonicalAgent::from_profile_name(&profile.name);
+                    if agent == Some(CanonicalAgent::Codex) && !preset.is_codex() {
+                        return Err(WorkbenchError::Preset(
+                            "Codex 方案不支持 Antigravity 旋钮与摇杆预设".into(),
+                        ));
+                    }
+                    if agent == Some(CanonicalAgent::Antigravity) && preset.is_codex() {
+                        return Err(WorkbenchError::Preset(
+                            "Antigravity 方案不支持 Codex 旋钮预设".into(),
+                        ));
+                    }
+                }
+                let pairs: &[(u32, &str)] = match preset {
+                    KnobJoystickPreset::CycleWorkingAndBlueDot => &[
                         (13, "ag-cycle-attention-prev"),
                         (14, "ag-cycle-attention-next"),
                         (15, "four-app-attention"),
@@ -2800,7 +2821,7 @@ impl WorkbenchStore {
                         (18, "ag-cycle-completed-prev"),
                         (19, "ag-cycle-completed-next"),
                     ],
-                    KnobJoystickPreset::DualScrollProjectsAndChat => [
+                    KnobJoystickPreset::DualScrollProjectsAndChat => &[
                         (13, "ag-sidebar-scroll-up"),
                         (14, "ag-sidebar-scroll-down"),
                         (15, "agent-submit"),
@@ -2809,11 +2830,21 @@ impl WorkbenchStore {
                         (18, "ag-prev-project"),
                         (19, "ag-next-project"),
                     ],
+                    KnobJoystickPreset::CodexScrollChatAndBottom => &[
+                        (13, "codex-scroll-up"),
+                        (14, "codex-scroll-down"),
+                        (15, "codex-scroll-to-bottom"),
+                    ],
+                    KnobJoystickPreset::CodexReasoningEffortAndSpeed => &[
+                        (13, "codex-effort-down"),
+                        (14, "codex-effort-up"),
+                        (15, "codex-toggle-fast-mode"),
+                    ],
                 };
                 let catalog = mi_model::draft::actions();
                 self.document_store
                     .update(|draft| {
-                        for (slot, action_id) in pairs {
+                        for &(slot, action_id) in pairs {
                             let action = catalog
                                 .iter()
                                 .find(|a| a.id == action_id)

@@ -637,6 +637,32 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(custom, .custom)
         XCTAssertFalse(custom.supportsLiveSessionSlots)
     }
+
+    @MainActor
+    func testCodexDialPresetsAndGlyphInference() throws {
+        let dir = try makeIsolatedTempDir("codex-dial")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        let codexRow = try XCTUnwrap(store.model.sidebarRows.first(where: { $0.displayName == "Codex" }))
+        store.dispatch("sidebar", ["SelectProfile": codexRow.profileId])
+        store.dispatch("canvas", "UnlockBySwitchingOrCreatingCustomLayer")
+
+        store.dispatch("canvas", ["ApplyKnobJoystickPreset": "CodexReasoningEffortAndSpeed"])
+        XCTAssertEqual(store.canvas.encoderCcwLabel, "Codex · 降低推理档位")
+        XCTAssertEqual(store.canvas.encoderCwLabel, "Codex · 提高推理档位")
+        XCTAssertEqual(store.canvas.encoderPressLabel, "Fast")
+
+        store.dispatch("canvas", ["ApplyKnobJoystickPreset": "CodexScrollChatAndBottom"])
+        XCTAssertEqual(store.canvas.encoderCcwLabel, "Codex · 向上滚动对话")
+        XCTAssertEqual(store.canvas.encoderCwLabel, "Codex · 向下滚动对话")
+        XCTAssertEqual(store.canvas.encoderPressLabel, "跳到底部")
+
+        XCTAssertEqual(CodexKeycapId(rustVariant: "MindPlus"), .mindPlus)
+        XCTAssertEqual(CodexKeycapId(rustVariant: "MindMinus"), .mindMinus)
+        XCTAssertEqual(CodexKeycapId(rustVariant: "Fast"), .fast)
+        XCTAssertEqual(CodexKeycapId(rustVariant: "Download"), .download)
+    }
 }
 
 @MainActor
