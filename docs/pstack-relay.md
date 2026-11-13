@@ -358,3 +358,13 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Outcome**: 六层恢复和 RPC 会话轮换保持 Micro Input 独占 Vendor 接口，使用「Codex · Micro Input」自定义方案，保留当前设备映射。
 - **Done Predicate**: Codex 自动/手动路由、生命周期与去重回归和 `scripts/verify-offline` 通过；真实 USB 启动竞争、插拔、动作次数和设备配置读回分别留证；通过后更新本机日常版。
 - **Evidence**: a90fdf2; docs/verification/codex-usb-ownership.json; offline and native USB PASS; physical 1/1 and 3/3 after readiness; initial fixed-wait 2/3 retained; installed
+
+### [x] Slice R25: Codex 底部七键对齐与点击听写
+- **Outcome**: 本机 Codex 方案底部七键对应实时语音、输入、终端、布局、新建、点击听写和发送；旧默认方案升级，自定义内容与设备映射保留。
+- **Done Predicate**: 快捷键、启动迁移、目标输入与听写停止回归和 `scripts/verify-offline` 通过；更新本机日常版。真实 Codex AX 和物理按键未验收时明确标注，不把快捷键派发当作界面回读。
+- **Evidence**: docs/verification/codex-controls.json; final verify-offline PASS; daily installed; native Codex and physical NOT_RUN
+
+### [ ] Slice R26: Codex 前六键按会话状态筛选
+- **Outcome**: 六个按键按选定状态筛选 Codex 会话，键位显示、灯光和导航使用同一会话身份。
+- **Done Predicate**: 核验真实会话身份、状态来源与选中回读；筛选、空槽、目标失效和旧输入回归及离线验收通过。最近六个会话快捷键不能代替状态筛选。
+- **Blocker**: 当前界面工具禁止检查 Codex；安装包静态 DOM 标记尚不能证明真实 AX 身份与导航回读。

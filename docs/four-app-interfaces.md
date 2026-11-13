@@ -14,3 +14,11 @@
 [六层编译器](../crates/mi-model/src/six_layer_board.rs)保存已应用的固定路由；[Karabiner 规则](../crates/mi-core/src/karabiner.rs)和[用户命令接收器](../crates/mi-transport/src/user_command.rs)处理设备专属输入。点击听写、输入聚焦和定向滚动由[宿主控件状态机](../crates/mi-macos/src/managed_controls.rs)通过[原生辅助功能适配](../crates/mi-macos/src/native_ax.rs)执行。
 
 设备输入映射沿用 Input IA-06/10/13/14 的已核对范围。修改应用适配不解锁新协议或设备写入。
+
+## Codex 本机方案
+
+「Codex · Micro Input」底部七键依次为实时语音、聚焦输入、终端、轮换工作区布局、新建聊天、听写和提交。实时语音、终端、布局和新建采用[官方快捷键](https://learn.chatgpt.com/docs/reference/commands)。语音是否可用取决于应用；布局轮换不等于固定向右分栏，新建聊天尚未保证项目归属。
+
+聚焦、听写和提交复用宿主控件状态机。听写使用目标窗口内的控件和停止读回；转写尚未完成时不发送。控件文案依据本机桌面包静态资源，合成测试不代表实际 Codex 无障碍树已经验收。
+
+前六键按状态筛选仍缺少经过核验的桌面会话观察和选择确认。公开 Codex app-server 的线程状态属于连接的运行实例，不能代替桌面当前会话目录。Cindy 的[会话槽位实现](https://github.com/makecindy/cindy/blob/f58aada0e2c5202009e3ba5c3572c88baf3d5ead/apps/desktop/src/main/worklouder-codex/taskSlots.ts)可参考筛选和槽位共用身份的设计，但不是 Codex 桌面外部接口。

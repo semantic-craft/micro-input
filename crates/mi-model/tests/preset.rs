@@ -8,6 +8,277 @@ use mi_model::{
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, fs};
 
+fn local_codex_ids(draft: &Draft) -> (String, String) {
+    let (pid, profile) = draft
+        .document
+        .editable
+        .graph
+        .profiles
+        .iter()
+        .find(|(_, profile)| profile.name == preset::LOCAL_CODEX_PROFILE_NAME)
+        .unwrap();
+    (pid.clone(), profile.layer_order[0].clone())
+}
+
+fn previous_local_codex_starter() -> Draft {
+    let mut draft = Draft::default();
+    preset::install_agent_starter_profiles(&mut draft).unwrap();
+    let (pid, lid) = local_codex_ids(&draft);
+    for slot in 6..=12 {
+        draft.unassign(&json!(pid), &json!(lid), slot).unwrap();
+    }
+    for (slot, id, name, payload) in [
+        (
+            6,
+            "desktop-dictation",
+            "按住说话 · 松开停止",
+            json!({
+                "type": "agent_command", "adapter": "codex", "command": "push-to-talk"
+            }),
+        ),
+        (
+            7,
+            "desktop-browser",
+            "打开内置浏览器",
+            json!({
+                "type": "shortcut", "key": "T", "modifiers": ["command"], "target": "com.openai.codex"
+            }),
+        ),
+        (
+            8,
+            "desktop-terminal",
+            "打开终端面板",
+            json!({
+                "type": "shortcut", "key": "`", "modifiers": ["control"], "target": "com.openai.codex"
+            }),
+        ),
+    ] {
+        draft
+            .assign(
+                &json!(pid),
+                &json!(lid),
+                slot,
+                Action {
+                    id: id.into(),
+                    name: name.into(),
+                    category: "Agent".into(),
+                    detail: "目标应用的原生控件；未提供时明确提示".into(),
+                    payload,
+                },
+            )
+            .unwrap();
+    }
+    draft
+}
+
+#[test]
+fn local_codex_bottom_seven_route_to_distinct_commands() {
+    use mi_model::host_router::{resolve_host_action, ResolvedHostAction};
+    let mut draft = Draft::default();
+    preset::install_agent_starter_profiles(&mut draft).unwrap();
+    let (pid, lid) = local_codex_ids(&draft);
+    for (slot, command) in [
+        (6, "live-voice"),
+        (7, "focus-input"),
+        (8, "terminal"),
+        (9, "cycle-workspace-layout"),
+        (10, "new-chat"),
+        (11, "toggle-dictation"),
+        (12, "submit"),
+    ] {
+        assert_eq!(
+            resolve_host_action(&draft.document, Some(&pid), &format!("AG{slot:02}"), true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "codex".into(),
+                command: command.into(),
+            })
+        );
+        let layer = &draft.document.editable.graph.layers[&lid];
+        let binding = layer
+            .controls
+            .values()
+            .find(|binding| binding.logical_control == format!("logical-{slot}"))
+            .unwrap();
+        let action = &draft.document.editable.graph.actions[binding.action_id.as_ref().unwrap()];
+        assert!(
+            mi_model::action_library::capability(action, false).execution_available,
+            "{command}"
+        );
+        if slot == 11 {
+            assert_eq!(action.name, "点击听写");
+            assert_eq!(action.detail, "按一次开始听写，再按一次停止");
+        }
+    }
+}
+
+#[test]
+fn unchanged_local_codex_starter_migrates_once_preserving_top_six_and_native_profile() {
+    use mi_model::host_router::resolve_host_action;
+    let mut draft = previous_local_codex_starter();
+    let (pid, _) = local_codex_ids(&draft);
+    assert!(preset::local_codex_profile_needs_starter_slot_migration(
+        &draft.document,
+        &pid
+    ));
+    let top_six = (0..6)
+        .map(|slot| resolve_host_action(&draft.document, Some(&pid), &format!("AG{slot:02}"), true))
+        .collect::<Vec<_>>();
+    let native_pid = draft
+        .document
+        .editable
+        .graph
+        .profiles
+        .iter()
+        .find(|(_, profile)| profile.name == "Codex")
+        .unwrap()
+        .0
+        .clone();
+    let native_lid = draft.document.editable.graph.profiles[&native_pid].layer_order[0].clone();
+    let native_before =
+        serde_json::to_value(&draft.document.editable.graph.layers[&native_lid]).unwrap();
+    let before = draft.document.editable.clone();
+    preset::install_agent_starter_profiles(&mut draft).unwrap();
+    assert!(draft.document.editable != before);
+    assert_eq!(
+        (0..6)
+            .map(|slot| resolve_host_action(
+                &draft.document,
+                Some(&pid),
+                &format!("AG{slot:02}"),
+                true
+            ))
+            .collect::<Vec<_>>(),
+        top_six
+    );
+    assert_eq!(
+        serde_json::to_value(&draft.document.editable.graph.layers[&native_lid]).unwrap(),
+        native_before
+    );
+    for (slot, command) in [
+        (6, "live-voice"),
+        (7, "focus-input"),
+        (9, "cycle-workspace-layout"),
+        (10, "new-chat"),
+        (11, "toggle-dictation"),
+        (12, "submit"),
+    ] {
+        assert_eq!(
+            resolve_host_action(&draft.document, Some(&pid), &format!("AG{slot:02}"), true),
+            Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+                adapter: "codex".into(),
+                command: command.into()
+            })
+        );
+    }
+    assert!(!preset::local_codex_profile_needs_starter_slot_migration(
+        &draft.document,
+        &pid
+    ));
+    let migrated = draft.document.editable.clone();
+    preset::install_agent_starter_profiles(&mut draft).unwrap();
+    assert!(draft.document.editable == migrated);
+    draft.undo(false).unwrap();
+    assert!(draft.document.editable == before);
+}
+
+#[test]
+fn customized_local_codex_assignments_are_never_migrated() {
+    for slot in [0, 6, 7, 9] {
+        let mut draft = previous_local_codex_starter();
+        let (pid, lid) = local_codex_ids(&draft);
+        draft.assign(&json!(pid), &json!(lid), slot, Action {
+            id: "my-shortcut".into(), name: "我的动作".into(), category: "快捷键".into(), detail: "custom".into(),
+            payload: json!({"type": "shortcut", "key": "X", "modifiers": ["command"], "target": "com.openai.codex"}),
+        }).unwrap();
+        let before = draft.document.editable.clone();
+        assert!(!preset::local_codex_profile_needs_starter_slot_migration(
+            &draft.document,
+            &pid
+        ));
+        preset::install_agent_starter_profiles(&mut draft).unwrap();
+        assert!(draft.document.editable == before, "customized slot {slot}");
+    }
+}
+
+#[test]
+fn local_codex_migration_preserves_customized_profile_structure_and_action_metadata() {
+    for customization in [
+        "layer-name",
+        "extra-layer",
+        "joystick-mode",
+        "sector-count",
+        "lighting",
+        "action-id",
+        "action-name",
+        "action-category",
+        "action-detail",
+    ] {
+        let mut draft = previous_local_codex_starter();
+        let (pid, lid) = local_codex_ids(&draft);
+        match customization {
+            "layer-name" => draft.rename_layer(&lid, "我的层").unwrap(),
+            "extra-layer" => {
+                draft.create_layer(&pid, "第二层").unwrap();
+            }
+            "joystick-mode" | "sector-count" => draft
+                .set_control_settings(
+                    &pid,
+                    &lid,
+                    mi_model::control_settings::ControlSettings {
+                        joystick_mode: if customization == "joystick-mode" {
+                            "source"
+                        } else {
+                            "logical_sectors"
+                        }
+                        .into(),
+                        active_sectors: if customization == "sector-count" {
+                            8
+                        } else {
+                            4
+                        },
+                    },
+                )
+                .unwrap(),
+            _ => draft
+                .mutate(|doc| {
+                    let layer = doc.editable.graph.layers.get_mut(&lid).unwrap();
+                    if customization == "lighting" {
+                        layer.lighting = Some(mi_model::lighting::Lighting {
+                            backlight: json!({"mode":"off"}),
+                            underglow: json!({"mode":"off"}),
+                        });
+                    } else {
+                        let aid = layer
+                            .controls
+                            .values()
+                            .find(|b| b.logical_control == "logical-6")
+                            .unwrap()
+                            .action_id
+                            .clone()
+                            .unwrap();
+                        let action = doc.editable.graph.actions.get_mut(&aid).unwrap();
+                        match customization {
+                            "action-id" => action.id = "my-dictation".into(),
+                            "action-name" => action.name = "我的听写".into(),
+                            "action-category" => action.category = "我的分类".into(),
+                            "action-detail" => action.detail = "我的说明".into(),
+                            _ => unreachable!(),
+                        }
+                    }
+                    Ok(())
+                })
+                .unwrap(),
+        }
+        assert!(
+            !preset::local_codex_profile_needs_starter_slot_migration(&draft.document, &pid),
+            "{customization}"
+        );
+        let before = draft.document.editable.clone();
+        preset::install_agent_starter_profiles(&mut draft).unwrap();
+        assert!(draft.document.editable == before, "{customization}");
+    }
+}
+
 fn fixture() -> Draft {
     let mut d = Draft::default();
     let p = d.config.profiles[0].id.clone();

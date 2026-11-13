@@ -238,6 +238,7 @@ unsafe extern "C" {
     fn CGEventSetType(event: CGEventRef, event_type: u32);
     fn CGEventSetFlags(event: CGEventRef, flags: u64);
     fn CGEventPost(tap: u32, event: CGEventRef);
+    fn CGEventPostToPid(pid: i32, event: CGEventRef);
     fn CFStringCreateWithBytes(
         alloc: CFTypeRef,
         bytes: *const u8,
@@ -488,6 +489,9 @@ pub fn native_shortcut_for_agent_command(
         ("dsh-desktop", "browser") => Some((0x11, mods(&["command"]))),
         ("codex", "new-chat" | "new-or-stop") => Some((0x2D, mods(&["command"]))),
         ("codex", "search") => Some((0x28, mods(&["command"]))),
+        ("codex", "live-voice") => Some((0x09, mods(&["control", "shift"]))),
+        ("codex", "terminal") => Some((0x32, mods(&["control"]))),
+        ("codex", "cycle-workspace-layout") => Some((0x0B, mods(&["command", "shift"]))),
         ("chatgpt", "new-chat") => Some((0x2D, mods(&["command"]))),
         ("chatgpt", "search") => Some((0x03, mods(&["command"]))),
         ("chatgpt", "model") => Some((0x30, mods(&["shift"]))),
@@ -915,14 +919,37 @@ impl HostOsDriver for MacOsSystemDriver {
     }
 
     fn agent_shortcut(&self, adapter: &str, key: u16, modifiers: &[String]) -> Result<(), String> {
-        if is_managed_adapter(adapter) {
+        if is_composer_shortcut_adapter(adapter) {
             return self.managed_controls.shortcut(adapter, key, modifiers);
         }
-        if let Some(bundle) = bundle_id_for_adapter(adapter) {
-            let _ = self.open_application(bundle);
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
         }
-        self.post_key_shortcut(key, modifiers, true)?;
-        self.post_key_shortcut(key, modifiers, false)
+        let bundle = bundle_id_for_adapter(adapter)
+            .ok_or_else(|| "blocked:unsupported_agent_adapter".to_string())?;
+        self.open_application(bundle)?;
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let pid = find_pid_for_bundle_id(bundle)
+                .ok_or_else(|| "blocked:agent_process_not_found".to_string())?;
+            let down = CGEventCreateKeyboardEvent(std::ptr::null_mut(), key, true);
+            if down.is_null() {
+                return Err("cg_keyboard_event_null".to_string());
+            }
+            let up = CGEventCreateKeyboardEvent(std::ptr::null_mut(), key, false);
+            if up.is_null() {
+                CFRelease(down);
+                return Err("cg_keyboard_event_null".to_string());
+            }
+            let flags = modifiers_to_cg_flags(modifiers);
+            CGEventSetFlags(down, flags);
+            CGEventSetFlags(up, flags);
+            CGEventPostToPid(pid, down);
+            CGEventPostToPid(pid, up);
+            CFRelease(down);
+            CFRelease(up);
+        }
+        Ok(())
     }
 
     fn scroll_window(&self, req: &DialScrollRequest) -> Result<(), String> {
@@ -1081,7 +1108,7 @@ impl HostOsDriver for MacOsSystemDriver {
             }
         }
         let cmd = vec!["command".to_string()];
-        if !is_managed_adapter(adapter) {
+        if !is_composer_shortcut_adapter(adapter) {
             return Err("blocked:unsupported_project_navigation".into());
         }
         self.managed_controls.shortcut(adapter, KEY_CODE_N, &cmd)
@@ -1788,6 +1815,7 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 if let Some(adapter) = target_bundle_id
                     .as_deref()
                     .and_then(managed_adapter_for_bundle)
+                    .filter(|adapter| is_composer_shortcut_adapter(adapter))
                 {
                     return match self.driver.agent_shortcut(adapter, *key_code, modifiers) {
                         Ok(()) => make_receipt("executed", desc.detail),
@@ -1935,13 +1963,7 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
-                    if !matches!(
-                        crate::ax_dictation::DictationAdapter::parse(adapter),
-                        Some(
-                            crate::ax_dictation::DictationAdapter::Antigravity
-                                | crate::ax_dictation::DictationAdapter::Dsh
-                        )
-                    ) {
+                    if !is_managed_adapter(adapter) {
                         return make_receipt("blocked", "unsupported_dictation_adapter".into());
                     }
                     match self.driver.toggle_dictation(adapter) {
@@ -2001,7 +2023,7 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                         Ok(()) => make_receipt("executed", desc.detail),
                         Err(err) => make_receipt("failed", err),
                     }
-                } else if command == "live-voice" {
+                } else if command == "live-voice" && adapter != "codex" {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
@@ -2159,6 +2181,16 @@ fn is_managed_adapter(adapter: &str) -> bool {
     crate::managed_controls::managed_adapter(adapter).is_ok()
 }
 
+fn is_composer_shortcut_adapter(adapter: &str) -> bool {
+    matches!(
+        crate::ax_dictation::DictationAdapter::parse(adapter),
+        Some(
+            crate::ax_dictation::DictationAdapter::Antigravity
+                | crate::ax_dictation::DictationAdapter::Dsh
+        )
+    )
+}
+
 fn is_managed_bundle(bundle: &str) -> bool {
     managed_adapter_for_bundle(bundle).is_some()
 }
@@ -2167,6 +2199,7 @@ fn managed_adapter_for_bundle(bundle: &str) -> Option<&'static str> {
     match bundle {
         "com.google.antigravity" => Some("antigravity"),
         "com.deepseek.dsh" => Some("dsh-desktop"),
+        "com.openai.codex" => Some("codex"),
         _ => None,
     }
 }
@@ -2174,6 +2207,39 @@ fn managed_adapter_for_bundle(bundle: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod serialized_effect_tests {
     use super::*;
+
+    #[test]
+    fn codex_managed_controls_do_not_redirect_official_shortcuts_through_the_composer() {
+        assert!(is_managed_adapter("codex"));
+        assert!(!is_composer_shortcut_adapter("codex"));
+        assert!(is_composer_shortcut_adapter("antigravity"));
+        assert!(is_composer_shortcut_adapter("dsh-desktop"));
+        let driver = RecordingOsDriver::new(true);
+        let executor = LiveHostActionExecutor::new(driver.clone());
+        let receipt = executor.execute(
+            "test",
+            "button",
+            &ResolvedHostAction::Shortcut {
+                key: "terminal".into(),
+                key_code: 0x11,
+                modifiers: vec!["command".into()],
+                target_bundle_id: Some("com.openai.codex".into()),
+            },
+        );
+        assert_eq!(receipt.outcome, "executed");
+        assert!(driver.events().iter().any(|event| matches!(
+            event,
+            RecordedOsEvent::PostKeyShortcut {
+                key_code: 0x11,
+                key_down: true,
+                ..
+            }
+        )));
+        assert!(!driver
+            .events()
+            .iter()
+            .any(|event| matches!(event, RecordedOsEvent::FocusAgentInput(_))));
+    }
 
     #[test]
     fn with_serialized_host_effect_enforces_lock_admission_and_unconfirmed_apple_fn_gate() {
