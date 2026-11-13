@@ -20,9 +20,71 @@ fn local_codex_ids(draft: &Draft) -> (String, String) {
     (pid.clone(), profile.layer_order[0].clone())
 }
 
-fn previous_local_codex_starter() -> Draft {
+fn r25_local_codex_starter() -> Draft {
     let mut draft = Draft::default();
     preset::install_agent_starter_profiles(&mut draft).unwrap();
+    let (pid, lid) = local_codex_ids(&draft);
+    for slot in 0..=5 {
+        draft.unassign(&json!(pid), &json!(lid), slot).unwrap();
+    }
+    for (slot, id, name, detail, payload) in [
+        (
+            0,
+            "desktop-open",
+            "打开 / 聚焦应用",
+            "com.openai.codex",
+            json!({"type": "open_app", "bundle_id": "com.openai.codex"}),
+        ),
+        (
+            1,
+            "desktop-input",
+            "聚焦当前输入框",
+            "com.openai.codex",
+            json!({"type": "agent_command", "adapter": "codex", "command": "focus-input"}),
+        ),
+        (
+            2,
+            "desktop-search",
+            "搜索任务",
+            "com.openai.codex",
+            json!({"type": "agent_command", "adapter": "codex", "command": "search"}),
+        ),
+        (
+            4,
+            "desktop-model",
+            "选择模型",
+            "目标应用的原生控件；未提供时明确提示",
+            json!({"type": "shortcut", "key": "M", "modifiers": ["control", "shift"], "target": "com.openai.codex"}),
+        ),
+        (
+            5,
+            "desktop-effort",
+            "调整思考力度",
+            "目标应用的原生控件；未提供时明确提示",
+            json!({"type": "shortcut", "key": "M", "modifiers": ["control", "shift"], "target": "com.openai.codex"}),
+        ),
+    ] {
+        let category = if slot == 0 { "应用" } else { "Agent" };
+        draft
+            .assign(
+                &json!(pid),
+                &json!(lid),
+                slot,
+                Action {
+                    id: id.into(),
+                    name: name.into(),
+                    category: category.into(),
+                    detail: detail.into(),
+                    payload,
+                },
+            )
+            .unwrap();
+    }
+    draft
+}
+
+fn previous_local_codex_starter() -> Draft {
+    let mut draft = r25_local_codex_starter();
     let (pid, lid) = local_codex_ids(&draft);
     for slot in 6..=12 {
         draft.unassign(&json!(pid), &json!(lid), slot).unwrap();
@@ -72,6 +134,34 @@ fn previous_local_codex_starter() -> Draft {
 }
 
 #[test]
+fn local_codex_top_six_route_to_session_slot_commands() {
+    use mi_model::host_router::{resolve_host_action, ResolvedHostAction};
+    let mut draft = Draft::default();
+    preset::install_agent_starter_profiles(&mut draft).unwrap();
+    let (pid, lid) = local_codex_ids(&draft);
+    let layer = &draft.document.editable.graph.layers[&lid];
+    for slot in 0..6u32 {
+        assert_eq!(
+            resolve_host_action(&draft.document, Some(&pid), &format!("AG{slot:02}"), true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "four-app".into(),
+                command: format!("slot-open:{slot}"),
+            })
+        );
+        let binding = layer
+            .controls
+            .values()
+            .find(|binding| binding.logical_control == format!("logical-{slot}"))
+            .unwrap();
+        let action = &draft.document.editable.graph.actions[binding.action_id.as_ref().unwrap()];
+        assert_eq!(action.id, format!("slot-open-{slot}"));
+        assert_eq!(action.name, format!("会话 {}", slot + 1));
+        assert_eq!(action.category, "Codex 会话");
+        assert_eq!(action.detail, "切换并回读对应状态的 Codex 会话");
+    }
+}
+
+#[test]
 fn local_codex_bottom_seven_route_to_distinct_commands() {
     use mi_model::host_router::{resolve_host_action, ResolvedHostAction};
     let mut draft = Draft::default();
@@ -112,91 +202,91 @@ fn local_codex_bottom_seven_route_to_distinct_commands() {
 }
 
 #[test]
-fn unchanged_local_codex_starter_migrates_once_preserving_top_six_and_native_profile() {
-    use mi_model::host_router::resolve_host_action;
-    let mut draft = previous_local_codex_starter();
-    let (pid, _) = local_codex_ids(&draft);
-    assert!(preset::local_codex_profile_needs_starter_slot_migration(
-        &draft.document,
-        &pid
-    ));
-    let top_six = (0..6)
-        .map(|slot| resolve_host_action(&draft.document, Some(&pid), &format!("AG{slot:02}"), true))
-        .collect::<Vec<_>>();
-    let native_pid = draft
-        .document
-        .editable
-        .graph
-        .profiles
-        .iter()
-        .find(|(_, profile)| profile.name == "Codex")
-        .unwrap()
-        .0
-        .clone();
-    let native_lid = draft.document.editable.graph.profiles[&native_pid].layer_order[0].clone();
-    let native_before =
-        serde_json::to_value(&draft.document.editable.graph.layers[&native_lid]).unwrap();
-    let before = draft.document.editable.clone();
-    preset::install_agent_starter_profiles(&mut draft).unwrap();
-    assert!(draft.document.editable != before);
-    assert_eq!(
-        (0..6)
-            .map(|slot| resolve_host_action(
-                &draft.document,
-                Some(&pid),
-                &format!("AG{slot:02}"),
-                true
-            ))
-            .collect::<Vec<_>>(),
-        top_six
-    );
-    assert_eq!(
-        serde_json::to_value(&draft.document.editable.graph.layers[&native_lid]).unwrap(),
-        native_before
-    );
-    for (slot, command) in [
-        (6, "live-voice"),
-        (7, "focus-input"),
-        (9, "cycle-workspace-layout"),
-        (10, "new-chat"),
-        (11, "toggle-dictation"),
-        (12, "submit"),
-    ] {
-        assert_eq!(
-            resolve_host_action(&draft.document, Some(&pid), &format!("AG{slot:02}"), true),
-            Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
-                adapter: "codex".into(),
-                command: command.into()
-            })
-        );
-    }
-    assert!(!preset::local_codex_profile_needs_starter_slot_migration(
-        &draft.document,
-        &pid
-    ));
-    let migrated = draft.document.editable.clone();
-    preset::install_agent_starter_profiles(&mut draft).unwrap();
-    assert!(draft.document.editable == migrated);
-    draft.undo(false).unwrap();
-    assert!(draft.document.editable == before);
-}
-
-#[test]
-fn customized_local_codex_assignments_are_never_migrated() {
-    for slot in [0, 6, 7, 9] {
-        let mut draft = previous_local_codex_starter();
-        let (pid, lid) = local_codex_ids(&draft);
-        draft.assign(&json!(pid), &json!(lid), slot, Action {
-            id: "my-shortcut".into(), name: "我的动作".into(), category: "快捷键".into(), detail: "custom".into(),
-            payload: json!({"type": "shortcut", "key": "X", "modifiers": ["command"], "target": "com.openai.codex"}),
-        }).unwrap();
+fn unchanged_local_codex_starters_migrate_top_six_and_bottom_seven_preserving_native_profile() {
+    use mi_model::host_router::{resolve_host_action, ResolvedHostAction};
+    for mut draft in [r25_local_codex_starter(), previous_local_codex_starter()] {
+        let (pid, _) = local_codex_ids(&draft);
+        assert!(preset::local_codex_profile_needs_starter_slot_migration(
+            &draft.document,
+            &pid
+        ));
+        let native_pid = draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, profile)| profile.name == "Codex")
+            .unwrap()
+            .0
+            .clone();
+        let native_lid = draft.document.editable.graph.profiles[&native_pid].layer_order[0].clone();
+        let native_before =
+            serde_json::to_value(&draft.document.editable.graph.layers[&native_lid]).unwrap();
         let before = draft.document.editable.clone();
+        preset::install_agent_starter_profiles(&mut draft).unwrap();
+        assert!(draft.document.editable != before);
+        for slot in 0..6u32 {
+            assert_eq!(
+                resolve_host_action(&draft.document, Some(&pid), &format!("AG{slot:02}"), true),
+                Some(ResolvedHostAction::AgentCommand {
+                    adapter: "four-app".into(),
+                    command: format!("slot-open:{slot}"),
+                })
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&draft.document.editable.graph.layers[&native_lid]).unwrap(),
+            native_before
+        );
+        for (slot, command) in [
+            (6, "live-voice"),
+            (7, "focus-input"),
+            (8, "terminal"),
+            (9, "cycle-workspace-layout"),
+            (10, "new-chat"),
+            (11, "toggle-dictation"),
+            (12, "submit"),
+        ] {
+            assert_eq!(
+                resolve_host_action(&draft.document, Some(&pid), &format!("AG{slot:02}"), true),
+                Some(ResolvedHostAction::AgentCommand {
+                    adapter: "codex".into(),
+                    command: command.into()
+                })
+            );
+        }
         assert!(!preset::local_codex_profile_needs_starter_slot_migration(
             &draft.document,
             &pid
         ));
+        let migrated = draft.document.editable.clone();
         preset::install_agent_starter_profiles(&mut draft).unwrap();
-        assert!(draft.document.editable == before, "customized slot {slot}");
+        assert!(draft.document.editable == migrated);
+        draft.undo(false).unwrap();
+        assert!(draft.document.editable == before);
+    }
+}
+
+#[test]
+fn customized_local_codex_assignments_are_never_migrated() {
+    for mut draft in [r25_local_codex_starter(), previous_local_codex_starter()] {
+        for slot in [0, 3, 6, 7, 9] {
+            let mut copy = draft.clone();
+            let (pid, lid) = local_codex_ids(&copy);
+            copy.assign(&json!(pid), &json!(lid), slot, Action {
+                id: "my-shortcut".into(), name: "我的动作".into(), category: "快捷键".into(), detail: "custom".into(),
+                payload: json!({"type": "shortcut", "key": "X", "modifiers": ["command"], "target": "com.openai.codex"}),
+            }).unwrap();
+            let before = copy.document.editable.clone();
+            assert!(!preset::local_codex_profile_needs_starter_slot_migration(
+                &copy.document,
+                &pid
+            ));
+            preset::install_agent_starter_profiles(&mut copy).unwrap();
+            assert!(copy.document.editable == before, "customized slot {slot}");
+        }
+        let _ = &mut draft;
     }
 }
 

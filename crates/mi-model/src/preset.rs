@@ -1543,6 +1543,29 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
             },
         ));
     }
+    legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments.clone()));
+    codex_assignments.retain(|(slot, ..)| !(0..=5).contains(slot));
+    for (slot, id, label, command) in [
+        (0, "slot-open-0", "会话 1", "slot-open:0"),
+        (1, "slot-open-1", "会话 2", "slot-open:1"),
+        (2, "slot-open-2", "会话 3", "slot-open:2"),
+        (3, "slot-open-3", "会话 4", "slot-open:3"),
+        (4, "slot-open-4", "会话 5", "slot-open:4"),
+        (5, "slot-open-5", "会话 6", "slot-open:5"),
+    ] {
+        codex_assignments.push((
+            slot,
+            id,
+            label,
+            "Codex 会话",
+            "切换并回读对应状态的 Codex 会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: command.into(),
+            },
+        ));
+    }
+    codex_assignments.sort_by_key(|(slot, ..)| *slot);
     specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments));
     (specs, legacy_specs)
 }

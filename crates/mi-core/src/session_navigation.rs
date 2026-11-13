@@ -11,9 +11,24 @@ pub struct AntigravityInstance {
     pub ui_port: u16,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CatalogInstance {
+    Antigravity(AntigravityInstance),
+    Codex { codex_home: PathBuf },
+}
+
+impl CatalogInstance {
+    pub(crate) fn source(&self) -> LiveSessionSource {
+        match self {
+            Self::Antigravity(_) => LiveSessionSource::Antigravity,
+            Self::Codex { .. } => LiveSessionSource::Codex,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NavigationCatalog {
-    pub instance: AntigravityInstance,
+    pub instance: CatalogInstance,
     pub observed_at: Instant,
     pub candidates: Vec<FourAppLiveCandidate>,
     pub project_ids: BTreeMap<String, String>,
@@ -51,7 +66,7 @@ pub(crate) struct SlotRevision {
     pub revision: u64,
     pub changed_at: Instant,
     targets: Vec<Option<NavigationPlace>>,
-    instance: Option<AntigravityInstance>,
+    instance: Option<CatalogInstance>,
 }
 impl Default for SlotRevision {
     fn default() -> Self {
@@ -88,7 +103,7 @@ struct PendingNavigation {
     place: NavigationPlace,
     watermark: String,
     acknowledged_at_request: Option<String>,
-    instance: Option<AntigravityInstance>,
+    instance: Option<CatalogInstance>,
     history: NavigationHistory,
     history_base: NavigationHistory,
     input_generation: Option<NavigationInputLease>,
@@ -284,7 +299,10 @@ impl WorkbenchStore {
         }
         self.session_navigation.catalog.as_ref().is_some_and(|c| {
             c.observed_at.elapsed() <= CATALOG_TTL
-                && matches!(place, NavigationPlace::Antigravity { .. })
+                && matches!(
+                    place,
+                    NavigationPlace::Antigravity { .. } | NavigationPlace::Codex { .. }
+                )
                 && c.candidates.iter().any(|row| &row.place == place)
         })
     }
@@ -646,55 +664,83 @@ fn navigation_receipt(
 fn execute_navigation(
     driver: &impl HostOsDriver,
     place: &NavigationPlace,
-    instance: Option<&AntigravityInstance>,
+    instance: Option<&CatalogInstance>,
     project_id: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Result<(), String> {
     if cancelled.load(Ordering::Acquire) {
         return Err("blocked:session_navigation_retired".into());
     }
-    if let NavigationPlace::App { bundle_id } = place {
-        return driver.open_application(bundle_id);
+    match place {
+        NavigationPlace::App { bundle_id } => driver.open_application(bundle_id),
+        NavigationPlace::Antigravity {
+            conversation_id,
+            workspace_path,
+        } => {
+            let Some(CatalogInstance::Antigravity(instance)) = instance else {
+                return Err("blocked:session_catalog_unavailable".into());
+            };
+            let validate = || {
+                if cancelled.load(Ordering::Acquire) {
+                    return Err("blocked:session_navigation_retired".into());
+                }
+                let catalog = poll_antigravity_daemon_candidates_with_frontmost(
+                    &mut BTreeSet::new(),
+                    &mut BTreeMap::new(),
+                    false,
+                )
+                .ok_or("blocked:session_catalog_unavailable")?;
+                if catalog.instance != CatalogInstance::Antigravity(instance.clone())
+                    || !catalog.candidates.iter().any(|row| &row.place == place)
+                {
+                    return Err("blocked:session_instance_or_workspace_changed".into());
+                }
+                if cancelled.load(Ordering::Acquire) {
+                    return Err("blocked:session_navigation_retired".into());
+                }
+                Ok(())
+            };
+            validate()?;
+            driver.open_application("com.google.antigravity")?;
+            mi_macos::session_navigation::navigate_antigravity_session(
+                instance.pid,
+                instance.ui_port,
+                conversation_id,
+                workspace_path,
+                project_id,
+                validate,
+                || !cancelled.load(Ordering::Acquire),
+            )
+        }
+        NavigationPlace::Codex {
+            thread_id, host_id, ..
+        } => {
+            let _ = driver;
+            let Some(CatalogInstance::Codex { codex_home }) = instance else {
+                return Err("blocked:session_catalog_unavailable".into());
+            };
+            let validate = || {
+                if cancelled.load(Ordering::Acquire) {
+                    return Err("blocked:session_navigation_retired".into());
+                }
+                let observations = mi_macos::observe_codex_threads(codex_home, 64)
+                    .map_err(|err| format!("blocked:session_catalog_unavailable:{err}"))?;
+                let catalog = codex_observations_to_catalog(codex_home.clone(), &observations);
+                if !catalog.candidates.iter().any(|row| &row.place == place) {
+                    return Err("blocked:session_instance_or_workspace_changed".into());
+                }
+                if cancelled.load(Ordering::Acquire) {
+                    return Err("blocked:session_navigation_retired".into());
+                }
+                Ok(())
+            };
+            validate()?;
+            mi_macos::navigate_codex_session(codex_home, thread_id, host_id, validate, || {
+                !cancelled.load(Ordering::Acquire)
+            })
+        }
+        _ => Err("blocked:session_navigation_unsupported".into()),
     }
-    let NavigationPlace::Antigravity {
-        conversation_id,
-        workspace_path,
-    } = place
-    else {
-        return Err("blocked:session_navigation_unsupported".into());
-    };
-    let instance = instance.ok_or("blocked:session_catalog_unavailable")?;
-    let validate = || {
-        if cancelled.load(Ordering::Acquire) {
-            return Err("blocked:session_navigation_retired".into());
-        }
-        let catalog = poll_antigravity_daemon_candidates_with_frontmost(
-            &mut BTreeSet::new(),
-            &mut BTreeMap::new(),
-            false,
-        )
-        .ok_or("blocked:session_catalog_unavailable")?;
-        if &catalog.instance != instance
-            || !catalog.candidates.iter().any(|row| &row.place == place)
-        {
-            return Err("blocked:session_instance_or_workspace_changed".into());
-        }
-        if cancelled.load(Ordering::Acquire) {
-            return Err("blocked:session_navigation_retired".into());
-        }
-        Ok(())
-    };
-    validate()?;
-    driver.open_application("com.google.antigravity")?;
-    mi_macos::session_navigation::navigate_antigravity_session(
-        instance.pid,
-        instance.ui_port,
-        conversation_id,
-        workspace_path,
-        project_id,
-        validate,
-        || !cancelled.load(Ordering::Acquire),
-    )
 }
 
 pub(super) fn workspace_from_summary(summary: &Value) -> Option<String> {
@@ -769,11 +815,11 @@ mod tests {
     }
     fn catalog(candidates: Vec<FourAppLiveCandidate>, hub: &str) -> NavigationCatalog {
         NavigationCatalog {
-            instance: AntigravityInstance {
+            instance: CatalogInstance::Antigravity(AntigravityInstance {
                 hub: hub.into(),
                 pid: 1,
                 ui_port: 12,
-            },
+            }),
             observed_at: Instant::now(),
             candidates,
             project_ids: BTreeMap::new(),
@@ -1557,5 +1603,621 @@ mod tests {
         assert!(store
             .status_message
             .contains("blocked:unconfirmed_apple_fn_release"));
+    }
+
+    fn codex_obs(
+        thread_id: &str,
+        host_id: &str,
+        title: &str,
+        status: mi_macos::CodexObservedStatus,
+        updated_at_ms: u64,
+        watermark: &str,
+    ) -> mi_macos::CodexThreadObservation {
+        mi_macos::CodexThreadObservation {
+            thread_id: thread_id.to_string(),
+            host_id: host_id.to_string(),
+            display_title: title.to_string(),
+            workspace_path: "/work/codex-repo".to_string(),
+            status,
+            updated_at_ms,
+            watermark: watermark.to_string(),
+        }
+    }
+
+    #[test]
+    fn codex_observations_to_catalog_excludes_unknown_prioritizes_active_and_shares_one_slot_table()
+    {
+        let observations = vec![
+            codex_obs(
+                "idle-new",
+                "local",
+                "Idle New",
+                mi_macos::CodexObservedStatus::Idle,
+                9_000,
+                "w1",
+            ),
+            codex_obs(
+                "idle-mid",
+                "local",
+                "Idle Mid",
+                mi_macos::CodexObservedStatus::Idle,
+                8_000,
+                "w2",
+            ),
+            codex_obs(
+                "idle-old",
+                "local",
+                "Idle Old",
+                mi_macos::CodexObservedStatus::Idle,
+                7_000,
+                "w3",
+            ),
+            codex_obs(
+                "idle-drop",
+                "local",
+                "Idle Drop",
+                mi_macos::CodexObservedStatus::Idle,
+                6_000,
+                "w4",
+            ),
+            codex_obs(
+                "working-1",
+                "local",
+                "Working Task",
+                mi_macos::CodexObservedStatus::Working,
+                2_000,
+                "w5",
+            ),
+            codex_obs(
+                "error-1",
+                "local",
+                "Error Task",
+                mi_macos::CodexObservedStatus::Error,
+                1_500,
+                "w6",
+            ),
+            codex_obs(
+                "unread-1",
+                "local",
+                "Unread Task",
+                mi_macos::CodexObservedStatus::Unread,
+                1_000,
+                "w7",
+            ),
+            codex_obs(
+                "unknown-1",
+                "local",
+                "Unknown Task",
+                mi_macos::CodexObservedStatus::Unknown("paused".into()),
+                99_000,
+                "w8",
+            ),
+        ];
+        let catalog =
+            codex_observations_to_catalog(PathBuf::from("/tmp/codex-home"), &observations);
+        assert_eq!(catalog.candidates.len(), 7);
+        let phase_by_id: BTreeMap<&str, FourAppSessionKind> = catalog
+            .candidates
+            .iter()
+            .filter_map(|c| match &c.place {
+                NavigationPlace::Codex { thread_id, .. } => Some((thread_id.as_str(), c.phase)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            phase_by_id.get("working-1"),
+            Some(&FourAppSessionKind::Working)
+        );
+        assert_eq!(phase_by_id.get("error-1"), Some(&FourAppSessionKind::Error));
+        assert_eq!(
+            phase_by_id.get("unread-1"),
+            Some(&FourAppSessionKind::BlueDotCompleted)
+        );
+        assert_eq!(phase_by_id.get("idle-new"), Some(&FourAppSessionKind::Idle));
+        assert!(!phase_by_id.contains_key("unknown-1"));
+
+        let (_dir, mut store) = store();
+        let codex_pid = store.local_codex_profile_id().unwrap();
+        store.select_and_activate_profile(&codex_pid).unwrap();
+        store.update_navigation_catalog(Some(catalog));
+
+        let strip_titles: Vec<&str> = store
+            .projection()
+            .session_strip
+            .slots
+            .iter()
+            .filter(|s| s.place.is_some())
+            .map(|s| s.title.as_str())
+            .collect();
+        assert_eq!(
+            strip_titles,
+            vec![
+                "Working Task",
+                "Error Task",
+                "Unread Task",
+                "Idle New",
+                "Idle Mid",
+                "Idle Old",
+            ]
+        );
+        let slot_targets: Vec<Option<NavigationPlace>> = store
+            .slot_table
+            .slot_table()
+            .slots()
+            .iter()
+            .map(|s| s.place.clone())
+            .collect();
+        let rev_targets: Vec<Option<NavigationPlace>> = store
+            .session_navigation
+            .dispatch
+            .slots
+            .lock()
+            .unwrap()
+            .targets
+            .clone();
+        assert_eq!(rev_targets, slot_targets);
+        let lighting = store
+            .slot_table
+            .lighting_snapshots(&store.lighting_arbiter.acknowledged_watermarks);
+        assert_eq!(lighting[0].status, "running");
+        assert_eq!(lighting[1].status, "error");
+        assert_eq!(lighting[2].status, "completed");
+        assert_eq!(lighting[3].status, "idle");
+    }
+
+    #[test]
+    fn codex_empty_slot_open_rejects_without_app_or_recent_fallback() {
+        let (_dir, mut store) = store();
+        let codex_pid = store.local_codex_profile_id().unwrap();
+        store.select_and_activate_profile(&codex_pid).unwrap();
+        let observations = vec![
+            codex_obs(
+                "t1",
+                "local",
+                "One",
+                mi_macos::CodexObservedStatus::Working,
+                2_000,
+                "w1",
+            ),
+            codex_obs(
+                "t2",
+                "local",
+                "Two",
+                mi_macos::CodexObservedStatus::Idle,
+                1_000,
+                "w2",
+            ),
+        ];
+        store.update_navigation_catalog(Some(codex_observations_to_catalog(
+            PathBuf::from("/tmp/codex-home"),
+            &observations,
+        )));
+        let _rx = worker(&mut store);
+
+        store.request_navigation_command(
+            NavigationCommand::Slot(5),
+            None,
+            None,
+            "workbench".into(),
+            "AG05".into(),
+        );
+        assert!(store.session_navigation.pending.is_none());
+        assert!(store.navigation_history.is_empty());
+        assert!(store
+            .status_message
+            .contains("blocked:session_target_unavailable"));
+        let receipt = store.last_host_action_receipt().unwrap();
+        assert!(!receipt.succeeded());
+        assert!(receipt
+            .detail
+            .contains("blocked:session_target_unavailable"));
+    }
+
+    #[test]
+    fn codex_duplicate_titles_preserve_distinct_navigation_places_and_target_ids() {
+        let (_dir, mut store) = store();
+        let codex_pid = store.local_codex_profile_id().unwrap();
+        store.select_and_activate_profile(&codex_pid).unwrap();
+        let observations = vec![
+            codex_obs(
+                "thread-a",
+                "local",
+                "Fix Bug",
+                mi_macos::CodexObservedStatus::Working,
+                2_000,
+                "wa",
+            ),
+            codex_obs(
+                "thread-b",
+                "remote-1",
+                "Fix Bug",
+                mi_macos::CodexObservedStatus::Working,
+                1_000,
+                "wb",
+            ),
+        ];
+        store.update_navigation_catalog(Some(codex_observations_to_catalog(
+            PathBuf::from("/tmp/codex-home"),
+            &observations,
+        )));
+
+        let rx = worker(&mut store);
+        store.request_navigation_command(
+            NavigationCommand::Slot(0),
+            None,
+            None,
+            "workbench".into(),
+            "AG00".into(),
+        );
+        let (place0, tx0) = rx.recv().unwrap();
+        assert_eq!(place0.target_id(), "codex:local:thread-a");
+        tx0.send(Ok(place0)).unwrap();
+        store.poll_session_navigation();
+
+        let rx = worker(&mut store);
+        store.request_navigation_command(
+            NavigationCommand::Slot(1),
+            None,
+            None,
+            "workbench".into(),
+            "AG01".into(),
+        );
+        let (place1, tx1) = rx.recv().unwrap();
+        assert_eq!(place1.target_id(), "codex:remote-1:thread-b");
+        tx1.send(Ok(place1)).unwrap();
+        store.poll_session_navigation();
+        assert_eq!(store.navigation_history.len(), 2);
+    }
+
+    #[test]
+    fn codex_disappeared_or_stale_revision_fails_closed_without_mutating_history_or_acks() {
+        let missing_home = tempfile::tempdir().unwrap();
+        let place = NavigationPlace::codex("missing-thread", "local", "/work/codex-repo");
+        let cancelled = AtomicBool::new(false);
+        let (_dir, mut store) = store();
+        let driver = mi_macos::RecordingOsDriver::default();
+        let err = execute_navigation(
+            &driver,
+            &place,
+            Some(&CatalogInstance::Codex {
+                codex_home: missing_home.path().to_path_buf(),
+            }),
+            None,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert!(err.contains("blocked:session_catalog_unavailable"));
+        assert!(driver.events().is_empty());
+
+        let codex_pid = store.local_codex_profile_id().unwrap();
+        store.select_and_activate_profile(&codex_pid).unwrap();
+        let initial = codex_observations_to_catalog(
+            missing_home.path().to_path_buf(),
+            &[codex_obs(
+                "t-stale",
+                "local",
+                "Unread One",
+                mi_macos::CodexObservedStatus::Unread,
+                5_000,
+                "wm-stale",
+            )],
+        );
+        store.update_navigation_catalog(Some(initial));
+        let stale_rev = {
+            let guard = store.session_navigation.dispatch.slots.lock().unwrap();
+            (guard.revision, guard.targets[0].clone().unwrap())
+        };
+        let replacement = codex_observations_to_catalog(
+            missing_home.path().to_path_buf(),
+            &[codex_obs(
+                "t-other",
+                "local",
+                "Other",
+                mi_macos::CodexObservedStatus::Working,
+                6_000,
+                "wm-other",
+            )],
+        );
+        store.update_navigation_catalog(Some(replacement));
+
+        let _rx = worker(&mut store);
+        store.request_navigation_command(
+            NavigationCommand::Slot(0),
+            Some(stale_rev.0),
+            None,
+            "workbench".into(),
+            "AG00".into(),
+        );
+        assert!(store.session_navigation.pending.is_none());
+        assert!(store.navigation_history.is_empty());
+        assert!(store.lighting_arbiter.acknowledged_watermarks.is_empty());
+        assert!(store
+            .status_message
+            .contains("blocked:session_slots_changed"));
+    }
+
+    #[test]
+    fn codex_confirmed_navigation_commits_history_and_acknowledges_unread_watermark() {
+        let (_dir, mut store) = store();
+        let codex_pid = store.local_codex_profile_id().unwrap();
+        store.select_and_activate_profile(&codex_pid).unwrap();
+        let catalog = codex_observations_to_catalog(
+            PathBuf::from("/tmp/codex-home"),
+            &[codex_obs(
+                "t-unread",
+                "local",
+                "Completed Thread",
+                mi_macos::CodexObservedStatus::Unread,
+                5_000,
+                "wm-codex-1",
+            )],
+        );
+        let expected_place = catalog.candidates[0].place.clone();
+        store.update_navigation_catalog(Some(catalog));
+        assert_eq!(
+            store
+                .projection()
+                .session_strip
+                .completed_blue_dot_pills
+                .len(),
+            1
+        );
+
+        let rx = worker(&mut store);
+        store.request_navigation_command(
+            NavigationCommand::Slot(0),
+            None,
+            None,
+            "workbench".into(),
+            "AG00".into(),
+        );
+        let (place, tx) = rx.recv().unwrap();
+        assert_eq!(place, expected_place);
+        tx.send(Ok(place.clone())).unwrap();
+        store.poll_session_navigation();
+
+        assert_eq!(store.navigation_history.current(), Some(&expected_place));
+        assert_eq!(
+            store
+                .lighting_arbiter
+                .acknowledged_watermarks
+                .get(&expected_place.target_id())
+                .map(String::as_str),
+            Some("wm-codex-1")
+        );
+        assert!(store
+            .projection()
+            .session_strip
+            .completed_blue_dot_pills
+            .is_empty());
+    }
+
+    #[test]
+    fn switching_between_antigravity_and_local_codex_clears_foreign_slots_and_discards_stale_updates(
+    ) {
+        let (_dir, mut store) = store();
+        let ag_pid = store
+            .find_canonical_profile_id(CanonicalAgent::Antigravity)
+            .unwrap();
+        let codex_pid = store.local_codex_profile_id().unwrap();
+        let native_codex_pid = store
+            .find_canonical_profile_id(CanonicalAgent::Codex)
+            .unwrap();
+
+        store.select_and_activate_profile(&ag_pid).unwrap();
+        assert_eq!(
+            store.desired_live_session_source(),
+            super::LiveSessionSource::Antigravity
+        );
+        let ag_row = candidate("ag-1", "wm-ag");
+        store.update_navigation_catalog(Some(catalog(vec![ag_row.clone()], "/tmp/hub")));
+        let acks = store.lighting_arbiter.acknowledged_watermarks.clone();
+        store
+            .slot_table
+            .pin_slot(0, ag_row.place.clone(), ag_row.title.clone(), 1000, &acks)
+            .unwrap();
+        assert_eq!(
+            store.slot_table.slot_table().slots()[0].place.as_ref(),
+            Some(&ag_row.place)
+        );
+
+        store.select_and_activate_profile(&codex_pid).unwrap();
+        assert_eq!(
+            store.desired_live_session_source(),
+            super::LiveSessionSource::Codex
+        );
+        assert!(store.session_navigation.catalog.is_none());
+        assert!(store
+            .slot_table
+            .slot_table()
+            .slots()
+            .iter()
+            .all(|s| s.place.is_none()));
+
+        store.handle_hardware_loop_event(
+            HardwareLoopEvent::LiveCandidatesUpdated {
+                epoch: store.lifecycle_epoch.load(Ordering::Acquire),
+                catalog: Some(catalog(vec![ag_row], "/tmp/hub")),
+            },
+            Instant::now(),
+        );
+        assert!(store.session_navigation.catalog.is_none());
+        assert!(store
+            .slot_table
+            .slot_table()
+            .slots()
+            .iter()
+            .all(|s| s.place.is_none()));
+
+        let codex_cat = codex_observations_to_catalog(
+            PathBuf::from("/tmp/codex-home"),
+            &[codex_obs(
+                "codex-1",
+                "local",
+                "Codex One",
+                mi_macos::CodexObservedStatus::Working,
+                3_000,
+                "wm-c1",
+            )],
+        );
+        store.handle_hardware_loop_event(
+            HardwareLoopEvent::LiveCandidatesUpdated {
+                epoch: store.lifecycle_epoch.load(Ordering::Acquire),
+                catalog: Some(codex_cat),
+            },
+            Instant::now(),
+        );
+        assert_eq!(
+            store.slot_table.slot_table().slots()[0].place,
+            Some(NavigationPlace::codex(
+                "codex-1",
+                "local",
+                "/work/codex-repo"
+            ))
+        );
+
+        store
+            .select_and_activate_profile(&native_codex_pid)
+            .unwrap();
+        assert_eq!(
+            store.desired_live_session_source(),
+            super::LiveSessionSource::Antigravity
+        );
+        assert!(store
+            .slot_table
+            .slot_table()
+            .slots()
+            .iter()
+            .all(|s| s.place.is_none()));
+    }
+
+    #[test]
+    fn browse_profile_preserves_locked_and_active_codex_slots_lighting_and_activation() {
+        let (_dir, mut store) = store();
+        let ag_pid = store
+            .find_canonical_profile_id(CanonicalAgent::Antigravity)
+            .unwrap();
+        let codex_pid = store.local_codex_profile_id().unwrap();
+
+        store.select_and_activate_profile(&codex_pid).unwrap();
+        store
+            .dispatch_sidebar_action(crate::sidebar::SidebarAction::SetProfileLocked(true))
+            .unwrap();
+        let codex_cat = codex_observations_to_catalog(
+            PathBuf::from("/tmp/codex-home"),
+            &[codex_obs(
+                "codex-locked-1",
+                "local",
+                "Locked Codex Thread",
+                mi_macos::CodexObservedStatus::Working,
+                4_000,
+                "wm-locked-1",
+            )],
+        );
+        store.update_navigation_catalog(Some(codex_cat));
+
+        let expected_place = NavigationPlace::codex("codex-locked-1", "local", "/work/codex-repo");
+        let before_rev = store
+            .session_navigation
+            .dispatch
+            .slots
+            .lock()
+            .unwrap()
+            .revision;
+        let before_lighting = store
+            .slot_table
+            .lighting_snapshots(&store.lighting_arbiter.acknowledged_watermarks);
+        assert_eq!(
+            store.slot_table.slot_table().slots()[0].place.as_ref(),
+            Some(&expected_place)
+        );
+        assert_eq!(before_lighting[0].status, "running");
+
+        store
+            .dispatch_sidebar_action(crate::sidebar::SidebarAction::BrowseProfile(ag_pid.clone()))
+            .unwrap();
+        store.poll_at(Instant::now());
+
+        assert_eq!(store.selected_profile_id(), Some(ag_pid.as_str()));
+        assert_eq!(
+            store.desired_live_session_source(),
+            super::LiveSessionSource::Codex
+        );
+        assert_eq!(
+            store.slot_table.slot_table().slots()[0].place.as_ref(),
+            Some(&expected_place)
+        );
+        assert_eq!(
+            store
+                .session_navigation
+                .dispatch
+                .slots
+                .lock()
+                .unwrap()
+                .revision,
+            before_rev
+        );
+        assert_eq!(
+            store
+                .slot_table
+                .lighting_snapshots(&store.lighting_arbiter.acknowledged_watermarks),
+            before_lighting
+        );
+
+        let rx = worker(&mut store);
+        store
+            .dispatch_session_strip_action(SessionStripAction::ActivateSlot(0))
+            .unwrap();
+        let (requested, reply) = rx.recv().unwrap();
+        assert_eq!(requested, expected_place);
+        reply.send(Ok(requested.clone())).unwrap();
+        store.poll_session_navigation();
+        assert_eq!(store.navigation_history.current(), Some(&expected_place));
+
+        store
+            .dispatch_sidebar_action(crate::sidebar::SidebarAction::SetProfileLocked(false))
+            .unwrap();
+        store
+            .dispatch_sidebar_action(crate::sidebar::SidebarAction::BrowseProfile(ag_pid.clone()))
+            .unwrap();
+        store.poll_at(Instant::now());
+
+        assert_eq!(
+            store.active_host_profile_id().as_deref(),
+            Some(codex_pid.as_str())
+        );
+        assert_eq!(
+            store.desired_live_session_source(),
+            super::LiveSessionSource::Codex
+        );
+        assert_eq!(
+            store.slot_table.slot_table().slots()[0].place.as_ref(),
+            Some(&expected_place)
+        );
+        assert_eq!(
+            store
+                .session_navigation
+                .dispatch
+                .slots
+                .lock()
+                .unwrap()
+                .revision,
+            before_rev
+        );
+        assert_eq!(
+            store
+                .slot_table
+                .lighting_snapshots(&store.lighting_arbiter.acknowledged_watermarks),
+            before_lighting
+        );
+
+        let rx = worker(&mut store);
+        store
+            .dispatch_session_strip_action(SessionStripAction::ActivateSlot(0))
+            .unwrap();
+        let (requested_unlocked, reply_unlocked) = rx.recv().unwrap();
+        assert_eq!(requested_unlocked, expected_place);
+        reply_unlocked.send(Ok(requested_unlocked)).unwrap();
+        store.poll_session_navigation();
     }
 }
