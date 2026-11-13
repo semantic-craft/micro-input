@@ -493,6 +493,10 @@ pub fn format_concise_keycap_caption(raw_label: &str) -> String {
 
     let without_paren = trimmed.split(['(', '（']).next().unwrap_or(trimmed).trim();
 
+    if without_paren == "内置浏览器 · 布局" {
+        return "浏览器".to_string();
+    }
+
     let segment = if let Some((left, right)) = without_paren.split_once('·') {
         let left_trim = left.trim();
         let right_trim = right.trim();
@@ -512,6 +516,9 @@ pub fn format_concise_keycap_caption(raw_label: &str) -> String {
     }
     if segment == "聚焦当前输入框" {
         return "聚焦输入".to_string();
+    }
+    if segment == "新建标签页" {
+        return "新标签页".to_string();
     }
     if segment == "Gemini Live 实时语音" || segment == "Live 实时语音" {
         return "实时语音".to_string();

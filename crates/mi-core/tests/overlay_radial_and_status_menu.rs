@@ -729,6 +729,11 @@ fn popover_cheat_sheet_preview_tracks_active_profile_merges_wide_key_and_isolate
         format_popover_cheat_label("自定义超长自动化脚本动作名称测试"),
         "自定义超长自动…"
     );
+    assert_eq!(format_popover_cheat_label("新建标签页"), "新标签页");
+    assert_eq!(
+        format_popover_cheat_label("内置浏览器 · 布局"),
+        "浏览器/布局"
+    );
 
     let dir = tempdir().expect("tempdir");
     let mut cfg = WorkbenchStoreConfig::isolated(dir.path());

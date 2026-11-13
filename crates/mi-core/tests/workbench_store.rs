@@ -202,7 +202,7 @@ fn opening_saved_desktop_presets_migrates_unchanged_local_codex_once() {
     for (slot, command) in [
         (6, "live-voice"),
         (7, "focus-input"),
-        (8, "terminal"),
+        (8, "new-tab"),
         (9, "cycle-workspace-layout"),
         (10, "new-chat"),
         (11, "toggle-dictation"),
@@ -229,6 +229,165 @@ fn opening_saved_desktop_presets_migrates_unchanged_local_codex_once() {
     assert_eq!(
         std::fs::read(temp.path().join("workbench.json")).unwrap(),
         migrated_bytes
+    );
+}
+
+fn restore_r26_local_codex_starter(store: &mut WorkbenchStore) -> (String, String) {
+    use mi_model::draft::Action;
+    use serde_json::json;
+
+    let (pid, profile) = store
+        .document_store
+        .draft
+        .document
+        .editable
+        .graph
+        .profiles
+        .iter()
+        .find(|(_, profile)| profile.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
+        .unwrap();
+    let pid = pid.clone();
+    let lid = profile.layer_order[0].clone();
+    store
+        .document_store
+        .update(|draft| {
+            for slot in [8, 9, 10] {
+                draft.unassign(&json!(pid), &json!(lid), slot)?;
+            }
+            for (slot, id, name, detail, command) in [
+                (
+                    8,
+                    "desktop-terminal",
+                    "显示 / 隐藏终端",
+                    "显示或隐藏终端（Ctrl+`）",
+                    "terminal",
+                ),
+                (
+                    9,
+                    "desktop-workspace-layout",
+                    "轮换工作区布局",
+                    "轮换完整视图、分屏与隐藏标签页（Cmd+Shift+B）",
+                    "cycle-workspace-layout",
+                ),
+                (
+                    10,
+                    "desktop-new",
+                    "新建聊天",
+                    "新建聊天（Cmd+N）",
+                    "new-chat",
+                ),
+            ] {
+                draft.assign(
+                    &json!(pid),
+                    &json!(lid),
+                    slot,
+                    Action {
+                        id: id.into(),
+                        name: name.into(),
+                        category: "Agent".into(),
+                        detail: detail.into(),
+                        payload: json!({"type": "agent_command", "adapter": "codex", "command": command}),
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    (pid, lid)
+}
+
+#[test]
+fn opening_saved_r26_desktop_presets_migrates_unchanged_codex_and_preserves_custom_edits() {
+    use mi_model::draft::Action;
+    use mi_model::host_router::{resolve_host_action, ResolvedHostAction};
+    use serde_json::json;
+
+    let temp = TempDir::new().unwrap();
+    let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    let (pid, _lid) = restore_r26_local_codex_starter(&mut store);
+    let revision_before = store.document_store.draft.revision;
+    std::fs::write(
+        temp.path().join("workbench.json"),
+        serde_json::to_vec(&store.document_store.draft.document).unwrap(),
+    )
+    .unwrap();
+    drop(store);
+
+    let mut reopened = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert!(reopened.has_all_desktop_agent_presets());
+    assert_eq!(reopened.document_store.draft.revision, revision_before + 1);
+    let doc = &reopened.document_store.draft.document;
+    for (slot, command) in [
+        (6, "live-voice"),
+        (7, "focus-input"),
+        (8, "new-tab"),
+        (9, "cycle-workspace-layout"),
+        (10, "new-chat"),
+        (11, "toggle-dictation"),
+        (12, "submit"),
+    ] {
+        assert_eq!(
+            resolve_host_action(doc, Some(&pid), &format!("AG{slot:02}"), true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "codex".into(),
+                command: command.into()
+            })
+        );
+    }
+    let migrated_bytes = std::fs::read(temp.path().join("workbench.json")).unwrap();
+    let migrated_revision = reopened.document_store.draft.revision;
+    reopened.set_status_message("已就绪");
+    reopened.prepare_desktop_profiles().unwrap();
+    assert_eq!(reopened.status_message(), "已就绪");
+    assert_eq!(reopened.document_store.draft.revision, migrated_revision);
+    drop(reopened);
+
+    let reopened = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert_eq!(reopened.document_store.draft.revision, migrated_revision);
+    assert_eq!(
+        std::fs::read(temp.path().join("workbench.json")).unwrap(),
+        migrated_bytes
+    );
+
+    let temp_custom = TempDir::new().unwrap();
+    let mut store_custom = WorkbenchStore::open_isolated(temp_custom.path()).unwrap();
+    let (cpid, clid) = restore_r26_local_codex_starter(&mut store_custom);
+    store_custom
+        .document_store
+        .update(|draft| {
+            draft.assign(
+                &json!(cpid),
+                &json!(clid),
+                8,
+                Action {
+                    id: "custom-slot-8".into(),
+                    name: "自定义 Slot 8".into(),
+                    category: "快捷键".into(),
+                    detail: "custom slot 8".into(),
+                    payload: json!({
+                        "type": "shortcut",
+                        "key": "K",
+                        "modifiers": ["command"],
+                        "target": "com.openai.codex"
+                    }),
+                },
+            )
+        })
+        .unwrap();
+    let custom_before = serde_json::to_vec(&store_custom.document_store.draft.document).unwrap();
+    std::fs::write(temp_custom.path().join("workbench.json"), &custom_before).unwrap();
+    let custom_rev = store_custom.document_store.draft.revision;
+    drop(store_custom);
+
+    let mut reopened_custom = WorkbenchStore::open_isolated(temp_custom.path()).unwrap();
+    assert!(reopened_custom.has_all_desktop_agent_presets());
+    reopened_custom.set_status_message("已就绪");
+    reopened_custom.prepare_desktop_profiles().unwrap();
+    assert_eq!(reopened_custom.status_message(), "已就绪");
+    assert_eq!(reopened_custom.document_store.draft.revision, custom_rev);
+    assert_eq!(
+        std::fs::read(temp_custom.path().join("workbench.json")).unwrap(),
+        custom_before
     );
 }
 

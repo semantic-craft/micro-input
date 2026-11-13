@@ -20,9 +20,56 @@ fn local_codex_ids(draft: &Draft) -> (String, String) {
     (pid.clone(), profile.layer_order[0].clone())
 }
 
-fn r25_local_codex_starter() -> Draft {
+fn r26_local_codex_starter() -> Draft {
     let mut draft = Draft::default();
     preset::install_agent_starter_profiles(&mut draft).unwrap();
+    let (pid, lid) = local_codex_ids(&draft);
+    for slot in [8, 9, 10] {
+        draft.unassign(&json!(pid), &json!(lid), slot).unwrap();
+    }
+    for (slot, id, name, detail, command) in [
+        (
+            8,
+            "desktop-terminal",
+            "显示 / 隐藏终端",
+            "显示或隐藏终端（Ctrl+`）",
+            "terminal",
+        ),
+        (
+            9,
+            "desktop-workspace-layout",
+            "轮换工作区布局",
+            "轮换完整视图、分屏与隐藏标签页（Cmd+Shift+B）",
+            "cycle-workspace-layout",
+        ),
+        (
+            10,
+            "desktop-new",
+            "新建聊天",
+            "新建聊天（Cmd+N）",
+            "new-chat",
+        ),
+    ] {
+        draft
+            .assign(
+                &json!(pid),
+                &json!(lid),
+                slot,
+                Action {
+                    id: id.into(),
+                    name: name.into(),
+                    category: "Agent".into(),
+                    detail: detail.into(),
+                    payload: json!({"type": "agent_command", "adapter": "codex", "command": command}),
+                },
+            )
+            .unwrap();
+    }
+    draft
+}
+
+fn r25_local_codex_starter() -> Draft {
+    let mut draft = r26_local_codex_starter();
     let (pid, lid) = local_codex_ids(&draft);
     for slot in 0..=5 {
         draft.unassign(&json!(pid), &json!(lid), slot).unwrap();
@@ -170,7 +217,7 @@ fn local_codex_bottom_seven_route_to_distinct_commands() {
     for (slot, command) in [
         (6, "live-voice"),
         (7, "focus-input"),
-        (8, "terminal"),
+        (8, "new-tab"),
         (9, "cycle-workspace-layout"),
         (10, "new-chat"),
         (11, "toggle-dictation"),
@@ -194,6 +241,21 @@ fn local_codex_bottom_seven_route_to_distinct_commands() {
             mi_model::action_library::capability(action, false).execution_available,
             "{command}"
         );
+        if slot == 8 {
+            assert_eq!(action.id, "desktop-new-tab");
+            assert_eq!(action.name, "新建标签页");
+            assert_eq!(action.detail, "在当前窗口新建标签页（Cmd+T）");
+        }
+        if slot == 9 {
+            assert_eq!(action.id, "desktop-workspace-layout");
+            assert_eq!(action.name, "内置浏览器 · 布局");
+            assert_eq!(action.detail, "切换内置浏览器与工作区布局（Cmd+Shift+B）");
+        }
+        if slot == 10 {
+            assert_eq!(action.id, "desktop-new");
+            assert_eq!(action.name, "新建聊天");
+            assert_eq!(action.detail, "在当前项目中新建对话（Cmd+N）");
+        }
         if slot == 11 {
             assert_eq!(action.name, "点击听写");
             assert_eq!(action.detail, "按一次开始听写，再按一次停止");
@@ -204,7 +266,11 @@ fn local_codex_bottom_seven_route_to_distinct_commands() {
 #[test]
 fn unchanged_local_codex_starters_migrate_top_six_and_bottom_seven_preserving_native_profile() {
     use mi_model::host_router::{resolve_host_action, ResolvedHostAction};
-    for mut draft in [r25_local_codex_starter(), previous_local_codex_starter()] {
+    for mut draft in [
+        r26_local_codex_starter(),
+        r25_local_codex_starter(),
+        previous_local_codex_starter(),
+    ] {
         let (pid, _) = local_codex_ids(&draft);
         assert!(preset::local_codex_profile_needs_starter_slot_migration(
             &draft.document,
@@ -242,7 +308,7 @@ fn unchanged_local_codex_starters_migrate_top_six_and_bottom_seven_preserving_na
         for (slot, command) in [
             (6, "live-voice"),
             (7, "focus-input"),
-            (8, "terminal"),
+            (8, "new-tab"),
             (9, "cycle-workspace-layout"),
             (10, "new-chat"),
             (11, "toggle-dictation"),
@@ -270,8 +336,12 @@ fn unchanged_local_codex_starters_migrate_top_six_and_bottom_seven_preserving_na
 
 #[test]
 fn customized_local_codex_assignments_are_never_migrated() {
-    for mut draft in [r25_local_codex_starter(), previous_local_codex_starter()] {
-        for slot in [0, 3, 6, 7, 9] {
+    for mut draft in [
+        r26_local_codex_starter(),
+        r25_local_codex_starter(),
+        previous_local_codex_starter(),
+    ] {
+        for slot in [0, 3, 6, 7, 8, 9] {
             let mut copy = draft.clone();
             let (pid, lid) = local_codex_ids(&copy);
             copy.assign(&json!(pid), &json!(lid), slot, Action {

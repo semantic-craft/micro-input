@@ -490,6 +490,7 @@ pub fn native_shortcut_for_agent_command(
         ("codex", "new-chat" | "new-or-stop") => Some((0x2D, mods(&["command"]))),
         ("codex", "search") => Some((0x28, mods(&["command"]))),
         ("codex", "live-voice") => Some((0x09, mods(&["control", "shift"]))),
+        ("codex", "new-tab") => Some((0x11, mods(&["command"]))),
         ("codex", "terminal") => Some((0x32, mods(&["control"]))),
         ("codex", "cycle-workspace-layout") => Some((0x0B, mods(&["command", "shift"]))),
         ("chatgpt", "new-chat") => Some((0x2D, mods(&["command"]))),
