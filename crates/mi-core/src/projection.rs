@@ -149,7 +149,9 @@ impl ProjectionInputs<'_> {
                 _ if id.and_then(|id| self.route_for_profile(id).ok()).as_ref() != Some(route) => {
                     Some("方案归属与保存的意图不一致，不能执行".into())
                 }
-                BoardLayerRoute::Native { .. } => Some("由原生应用处理；六层隔离未验证".into()),
+                BoardLayerRoute::Native { .. } => {
+                    Some("保留 OAI 映射；USB 独占后由 Micro Input 当前方案控制".into())
+                }
                 _ => None,
             };
             BoardLayerProjection {
@@ -283,9 +285,9 @@ impl ProjectionInputs<'_> {
                 layer_id: lid,
                 layer_name,
                 owner_client_name,
-                lock_badge_text: "只读保护层 · 原生直通 (KV_OAI_*)".to_string(),
+                lock_badge_text: "只读保护层 · 保留原生映射 (KV_OAI_*)".to_string(),
                 explanation_text:
-                    "当前层由宿主原生固件协议接管，按键映射、预设覆盖与灯光效果均已锁定隔离。"
+                    "保留此层的 OAI 固件映射；USB 独占后由 Micro Input 当前方案处理输入。按键映射、预设覆盖与灯光编辑保持只读保护。"
                         .to_string(),
                 unlock_button_title: "新建并切换到自定义层".to_string(),
             })
