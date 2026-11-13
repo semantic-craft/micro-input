@@ -117,14 +117,33 @@ impl WorkbenchStore {
         let mut dynamic_hosts = Vec::new();
         let mut seen_bundles = BTreeSet::new();
         for (bundle, pid) in &self.app_profile_links {
-            if bundle == "*" || bundle == "com.openai.codex" || !seen_bundles.insert(bundle.clone())
-            {
+            if bundle == "*" || !seen_bundles.insert(bundle.clone()) {
                 continue;
             }
             if let Some(mut plan) = self.compile_profile_twenty_slots(pid) {
                 plan.bundle_id = Some(bundle.clone());
                 if plan.actions.iter().any(Option::is_some) {
                     dynamic_hosts.push(plan);
+                }
+            }
+        }
+        if !seen_bundles.contains("com.openai.codex") {
+            if let Some((pid, _)) = self
+                .document_store
+                .host_store()
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, profile)| profile.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
+            {
+                if let Some(plan) = self.compile_profile_twenty_slots(pid) {
+                    if plan.actions.iter().any(Option::is_some) {
+                        seen_bundles.insert("com.openai.codex".into());
+                        dynamic_hosts.push(plan);
+                    }
                 }
             }
         }
@@ -220,9 +239,6 @@ impl WorkbenchStore {
         if let Some(session) = self.device_session.take() {
             self.tokio_runtime.block_on(session.shutdown());
         }
-        if let Some(transport) = self.mac_watcher_transport.take() {
-            mi_transport::HidTransport::stop_discovery(transport.as_ref());
-        }
         self.connected_candidate = None;
         self.hardware_rpc_verified = false;
         self.board_decoder.store(false, Ordering::Release);
@@ -263,15 +279,16 @@ impl WorkbenchStore {
         }
         plan.validate_current().map_err(WorkbenchError::Routing)?;
         self.suspend_for_six_layer_operation()?;
+        let transport = self.exclusive_usb_transport();
         let dir = self.config.document_dir.clone();
         let saved = self.six_layer_state.clone();
         let runtime = Arc::clone(&self.tokio_runtime);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = if reconnecting {
-                runtime.block_on(six_layer_runtime::resume(&dir, saved))
+                runtime.block_on(six_layer_runtime::resume(&dir, saved, transport))
             } else {
-                runtime.block_on(six_layer_runtime::apply(&dir, plan, saved))
+                runtime.block_on(six_layer_runtime::apply(&dir, plan, saved, transport))
             };
             let _ = tx.send(result.map(Some));
         });
@@ -292,13 +309,14 @@ impl WorkbenchStore {
             ));
         }
         self.suspend_for_six_layer_operation()?;
+        let transport = self.exclusive_usb_transport();
         let dir = self.config.document_dir.clone();
         let saved = self.six_layer_state.clone();
         let runtime = Arc::clone(&self.tokio_runtime);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = runtime
-                .block_on(six_layer_runtime::restore(&dir, saved))
+                .block_on(six_layer_runtime::restore(&dir, saved, transport))
                 .map(|_| None);
             let _ = tx.send(result);
         });
@@ -504,11 +522,30 @@ mod tests {
         let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
         store.auto_follow_enabled = true;
         store.manual_override = false;
-        let six_layer_runtime::SixLayerRoutingMode::AutoFollow { dynamic_hosts } = store.build_six_layer_routing_mode() else {
+        let six_layer_runtime::SixLayerRoutingMode::AutoFollow { dynamic_hosts } =
+            store.build_six_layer_routing_mode()
+        else {
             panic!("expected auto-follow");
         };
-        let custom = dynamic_hosts.iter().find(|plan| plan.bundle_id.as_deref() == Some("com.openai.codex"));
+        let custom = dynamic_hosts
+            .iter()
+            .find(|plan| plan.bundle_id.as_deref() == Some("com.openai.codex"));
         assert!(custom.is_some_and(|plan| plan.actions.iter().any(Option::is_some)));
+    }
+
+    #[test]
+    fn resuming_promotes_descriptor_discovery_and_reuses_the_exclusive_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let descriptor = Arc::new(mi_transport::MacTransport::new());
+        store.mac_watcher_transport = Some(descriptor.clone());
+        store.resume_requires_explicit_connect = true;
+        let exclusive = store.exclusive_usb_transport();
+        assert!(exclusive.is_exclusive_vendor());
+        assert!(!Arc::ptr_eq(&descriptor, &exclusive));
+        assert!(!store.resume_requires_explicit_connect);
+        let repeated = store.exclusive_usb_transport();
+        assert!(Arc::ptr_eq(&exclusive, &repeated));
     }
 
     #[test]
@@ -516,8 +553,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
         let session = mock_session(&store.tokio_runtime);
-        let running = six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        let running =
+            six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
         store.six_layer_state.installation = Some(running.installation.clone());
+        let (link, _writes) = mi_transport::MockLink::new();
+        let transport = mi_transport::MockTransport::new(link.clone());
+        assert!(store.connect_with_transport(&transport, true).is_err());
+        assert!(link.writes.lock().unwrap().is_empty());
         assert!(!store.discovery_is_descriptor_only());
         store.resume_requires_explicit_connect = true;
         assert!(store.discovery_is_descriptor_only());
@@ -716,6 +758,7 @@ mod tests {
         let result = reopened.tokio_runtime.block_on(six_layer_runtime::resume(
             directory.path(),
             reopened.six_layer_state.clone(),
+            Arc::new(mi_transport::MacTransport::exclusive_vendor()),
         ));
         assert!(matches!(result, Err(error) if error.contains("旧六层安装已暂停")));
         assert_eq!(fs::read(&path).unwrap(), original);

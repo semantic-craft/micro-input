@@ -1065,14 +1065,25 @@ impl WorkbenchStore {
 
     pub fn connect_default_usb(&mut self) -> Result<bool, WorkbenchError> {
         self.require_awake()?;
-        if self.resume_requires_explicit_connect {
+        self.exclusive_usb_transport();
+        self.connect_default_usb_with_execution(true)
+    }
+
+    fn exclusive_usb_transport(&mut self) -> Arc<mi_transport::MacTransport> {
+        self.resume_requires_explicit_connect = false;
+        if self
+            .mac_watcher_transport
+            .as_ref()
+            .is_some_and(|transport| !transport.is_exclusive_vendor())
+        {
             if let Some(transport) = self.mac_watcher_transport.take() {
                 mi_transport::HidTransport::stop_discovery(transport.as_ref());
             }
-            self.resume_requires_explicit_connect = false;
-            self.start_mac_usb_discovery_watcher();
         }
-        self.connect_default_usb_with_execution(true)
+        self.start_mac_usb_discovery_watcher();
+        self.mac_watcher_transport
+            .get_or_insert_with(|| Arc::new(mi_transport::MacTransport::exclusive_vendor()))
+            .clone()
     }
 
     fn connect_default_usb_with_execution(
@@ -1092,10 +1103,7 @@ impl WorkbenchStore {
             }
             return Ok(self.six_layer_running.is_some());
         }
-        let transport = self
-            .mac_watcher_transport
-            .clone()
-            .unwrap_or_else(|| Arc::new(mi_transport::MacTransport::exclusive_vendor()));
+        let transport = self.exclusive_usb_transport();
         let result = self.connect_with_transport(transport.as_ref(), enable_execution_on_connect);
         if let Err(error) = &result {
             self.set_status_message(error.to_string());
@@ -1109,6 +1117,14 @@ impl WorkbenchStore {
         enable_execution_on_connect: bool,
     ) -> Result<bool, WorkbenchError> {
         self.require_awake()?;
+        if self.six_layer_state.installation.is_some()
+            || self.six_layer_running.is_some()
+            || self.six_layer_job.is_some()
+        {
+            return Err(WorkbenchError::Routing(
+                "六层运行独占 USB，普通连接不能启动第二个读取器".into(),
+            ));
+        }
         if self
             .device_session
             .as_ref()

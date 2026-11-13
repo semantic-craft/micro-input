@@ -10,7 +10,7 @@ pub(super) enum SystemLifecycle {
 
 impl WorkbenchStore {
     pub(super) fn discovery_is_descriptor_only(&self) -> bool {
-        self.resume_requires_explicit_connect || self.six_layer_state.installation.is_some()
+        self.resume_requires_explicit_connect
     }
 
     pub(super) fn require_awake(&self) -> Result<(), WorkbenchError> {
