@@ -25,6 +25,7 @@ use tempfile::TempDir;
 fn codex_official_commands_emit_the_documented_shortcuts() {
     for (command, key_code, modifiers) in [
         ("live-voice", 0x09, vec!["control".into(), "shift".into()]),
+        ("new-tab", 0x11, vec!["command".into()]),
         ("terminal", 0x32, vec!["control".into()]),
         (
             "cycle-workspace-layout",

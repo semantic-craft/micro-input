@@ -1566,6 +1566,32 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
         ));
     }
     codex_assignments.sort_by_key(|(slot, ..)| *slot);
+    legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments.clone()));
+    for item in codex_assignments.iter_mut() {
+        match item.0 {
+            8 => {
+                *item = (
+                    8,
+                    "desktop-new-tab",
+                    "新建标签页",
+                    "Agent",
+                    "在当前窗口新建标签页（Cmd+T）",
+                    ActionKind::AgentCommand {
+                        adapter: "codex".into(),
+                        command: "new-tab".into(),
+                    },
+                );
+            }
+            9 => {
+                item.2 = "内置浏览器 · 布局";
+                item.4 = "切换内置浏览器与工作区布局（Cmd+Shift+B）";
+            }
+            10 => {
+                item.4 = "在当前项目中新建对话（Cmd+N）";
+            }
+            _ => {}
+        }
+    }
     specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments));
     (specs, legacy_specs)
 }

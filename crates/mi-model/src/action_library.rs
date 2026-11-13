@@ -260,7 +260,10 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                         || (adapter == "codex"
                             && matches!(
                                 command.as_str(),
-                                "live-voice" | "cycle-workspace-layout" | "toggle-dictation"
+                                "live-voice"
+                                    | "new-tab"
+                                    | "cycle-workspace-layout"
+                                    | "toggle-dictation"
                             ))
                         || (adapter == "antigravity"
                             && matches!(

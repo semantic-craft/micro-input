@@ -196,7 +196,8 @@ impl DocumentStore {
                     "slot-open:3" => "会话 4",
                     "slot-open:4" => "会话 5",
                     "slot-open:5" => "会话 6",
-                    "cycle-workspace-layout" => "轮换工作区布局",
+                    "new-tab" => "新建标签页",
+                    "cycle-workspace-layout" => "内置浏览器 · 布局",
                     "toggle-dictation" => "点击听写",
                     c if c.starts_with("submit-prompt:") => "粘贴指令并提交",
                     c if c.starts_with("prompt:") => "粘贴工程指令",
@@ -431,8 +432,8 @@ mod tests {
                 }
                 assert_eq!(by_id("AG06")["label"], "Gemini Live 实时语音");
                 assert_eq!(by_id("AG07")["label"], "聚焦输入框");
-                assert_eq!(by_id("AG08")["label"], "打开终端面板");
-                assert_eq!(by_id("AG09")["label"], "轮换工作区布局");
+                assert_eq!(by_id("AG08")["label"], "新建标签页");
+                assert_eq!(by_id("AG09")["label"], "内置浏览器 · 布局");
                 assert_eq!(by_id("AG10")["label"], "新建会话");
                 assert_eq!(by_id("AG11")["label"], "点击听写");
                 assert_eq!(by_id("AG12")["label"], "停止听写并提交");

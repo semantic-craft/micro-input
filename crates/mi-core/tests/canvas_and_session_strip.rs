@@ -266,6 +266,8 @@ fn bottom_row_2u_wide_key_merge_split_and_silkscreen_icon_label_toggles() {
         format_concise_keycap_caption("Antigravity · Gemini Live 实时语音"),
         "实时语音"
     );
+    assert_eq!(format_concise_keycap_caption("新建标签页"), "新标签页");
+    assert_eq!(format_concise_keycap_caption("内置浏览器 · 布局"), "浏览器");
 }
 
 #[test]
