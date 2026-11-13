@@ -22,6 +22,62 @@ use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 #[test]
+fn codex_official_commands_emit_the_documented_shortcuts() {
+    for (command, key_code, modifiers) in [
+        ("live-voice", 0x09, vec!["control".into(), "shift".into()]),
+        ("terminal", 0x32, vec!["control".into()]),
+        (
+            "cycle-workspace-layout",
+            0x0B,
+            vec!["command".into(), "shift".into()],
+        ),
+        ("new-chat", 0x2D, vec!["command".into()]),
+    ] {
+        let action = ResolvedHostAction::AgentCommand {
+            adapter: "codex".into(),
+            command: command.into(),
+        };
+        let driver = RecordingOsDriver::new(true);
+        let executor = LiveHostActionExecutor::new(driver.clone());
+        assert_eq!(
+            executor
+                .execute("Codex · Micro Input", "AG06", &action)
+                .outcome,
+            "executed",
+            "{command}"
+        );
+        assert_eq!(
+            driver.events(),
+            vec![
+                RecordedOsEvent::CheckAccessibilityTrusted,
+                RecordedOsEvent::OpenApplication("com.openai.codex".into()),
+                RecordedOsEvent::PostKeyShortcut {
+                    key_code,
+                    modifiers: modifiers.clone(),
+                    key_down: true
+                },
+                RecordedOsEvent::PostKeyShortcut {
+                    key_code,
+                    modifiers,
+                    key_down: false
+                },
+            ],
+            "{command}"
+        );
+
+        let denied_driver = RecordingOsDriver::new(false);
+        let denied_executor = LiveHostActionExecutor::new(denied_driver.clone());
+        let denied = denied_executor.execute("Codex · Micro Input", "AG06", &action);
+        assert_eq!(denied.outcome, "blocked");
+        assert_eq!(denied.detail, "accessibility_untrusted");
+        assert_eq!(
+            denied_driver.events(),
+            vec![RecordedOsEvent::CheckAccessibilityTrusted]
+        );
+    }
+}
+
+#[test]
 fn unsupported_session_navigation_does_not_report_success() {
     for action in [
         ResolvedHostAction::AgentCommand {

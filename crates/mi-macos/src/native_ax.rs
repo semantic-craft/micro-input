@@ -2010,6 +2010,7 @@ mod macos {
                 && ([
                     crate::ax_dictation::DictationAdapter::Antigravity,
                     crate::ax_dictation::DictationAdapter::Dsh,
+                    crate::ax_dictation::DictationAdapter::Codex,
                 ]
                 .iter()
                 .any(|adapter| {
@@ -2036,7 +2037,16 @@ mod macos {
                     .target
                     .as_ref()
                     .is_some_and(|target| target.identity.bundle_id == "com.google.antigravity");
-            if !data.editable && !relevant_button && !chat_heading && data.role != "AXScrollArea" {
+            let codex = crate::ax_dictation::DictationAdapter::Codex;
+            let codex_dictation = codex.matches_start_label(&data.label)
+                || codex.matches_stop_label(&data.label)
+                || codex.matches_finishing_label(&data.label);
+            if !data.editable
+                && !relevant_button
+                && !codex_dictation
+                && !chat_heading
+                && data.role != "AXScrollArea"
+            {
                 return None;
             }
             Some(ManagedControl {
@@ -2781,6 +2791,7 @@ mod macos {
                 {
                     return Err(blocked("input_focus_changed"));
                 }
+                crate::managed_controls::validate_codex_submit(&window)?;
                 let buttons: Vec<_> = window
                     .controls
                     .iter()
@@ -2810,6 +2821,81 @@ mod macos {
         use crate::session_navigation::{
             SessionNavigationWindow, SidebarConversationObservation, SidebarRowVisualState,
         };
+
+        #[test]
+        fn codex_dictation_controls_remain_observed_when_disabled() {
+            let provider = NativeAxProvider::default();
+            for label in [
+                "Dictate",
+                "听写",
+                "Stop dictation",
+                "停止听写",
+                "Finishing dictation",
+                "正在完成听写",
+            ] {
+                let control = provider
+                    .control_from_node_data(
+                        1,
+                        NodeData {
+                            role: "AXButton".into(),
+                            label: label.into(),
+                            enabled: false,
+                            pressable: false,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(control.label, label);
+                assert!(!control.enabled);
+                assert!(!control.pressable);
+            }
+        }
+
+        #[test]
+        fn codex_native_submit_rejects_observed_recording_or_finishing_controls() {
+            let mut window = ManagedWindow {
+                identity: ManagedWindowIdentity {
+                    bundle_id: "com.openai.codex".into(),
+                    pid: 100,
+                    window_id: 1,
+                    scope_id: 0,
+                    title: "Test".into(),
+                },
+                controls: vec![],
+            };
+            assert!(crate::managed_controls::validate_codex_submit(&window).is_ok());
+            for (label, enabled, pressable, allowed) in [
+                ("Dictate", true, true, true),
+                ("听写", true, true, true),
+                ("Dictate", false, true, false),
+                ("Stop dictation", true, true, false),
+                ("Finishing dictation", false, false, false),
+                ("正在完成听写", false, false, false),
+            ] {
+                window.controls = vec![ManagedControl {
+                    id: 2,
+                    role: "AXButton".into(),
+                    label: label.into(),
+                    enabled,
+                    pressable,
+                    editable: false,
+                    focused: false,
+                }];
+                assert_eq!(
+                    crate::managed_controls::validate_codex_submit(&window).is_ok(),
+                    allowed,
+                    "{label}"
+                );
+            }
+            window.controls[0].label = "Dictate".into();
+            window.controls[0].enabled = true;
+            window.controls[0].pressable = true;
+            window.controls.push(ManagedControl {
+                id: 3,
+                ..window.controls[0].clone()
+            });
+            assert!(crate::managed_controls::validate_codex_submit(&window).is_err());
+        }
 
         fn node(
             id: &str,

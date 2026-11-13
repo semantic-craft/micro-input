@@ -13,6 +13,8 @@ use std::time::Duration;
 enum PressEffect {
     Toggle,
     NoChange,
+    Finish,
+    Hide,
     Replace,
     LoseTarget,
     LoseScope,
@@ -30,6 +32,7 @@ struct Fixture {
     retained_targets: Vec<ManagedWindowIdentity>,
     after_capture: Option<fn(&mut Fixture)>,
     after_focus: Option<fn(&mut Fixture)>,
+    finish_reads_remaining: Option<usize>,
 }
 #[derive(Clone)]
 struct Provider(Arc<Mutex<Fixture>>);
@@ -76,10 +79,14 @@ impl Provider {
             retained_targets: Vec::new(),
             after_capture: None,
             after_focus: None,
+            finish_reads_remaining: None,
         })))
     }
     fn dsh() -> Self {
         Self::with_target("com.deepseek.dsh", "开始听写")
+    }
+    fn codex() -> Self {
+        Self::with_target("com.openai.codex", "Dictate")
     }
     fn controls(&self) -> ManagedAxControls<Self> {
         ManagedAxControls::with_readback_timeout(self.clone(), Duration::ZERO)
@@ -124,7 +131,23 @@ impl ManagedAxProvider for Provider {
         Ok(window)
     }
     fn read(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String> {
-        let state = self.0.lock().unwrap();
+        let mut state = self.0.lock().unwrap();
+        if state
+            .window
+            .controls
+            .first()
+            .is_some_and(|control| control.label == "Finishing dictation")
+        {
+            if let Some(remaining) = state.finish_reads_remaining.as_mut() {
+                if *remaining == 0 {
+                    state.window.controls[0].label = "Dictate".into();
+                    state.window.controls[0].enabled = true;
+                    state.window.controls[0].pressable = true;
+                } else {
+                    *remaining -= 1;
+                }
+            }
+        }
         if state.enforce_target_cache
             && state.latest_target.as_ref() != Some(target)
             && !state.retained_targets.contains(target)
@@ -154,10 +177,13 @@ impl ManagedAxProvider for Provider {
             .find(|c| c.id == control)
             .unwrap();
         let old_label = control.label.clone();
+        let control_id = control.id;
         match effect {
             PressEffect::Toggle | PressEffect::Replace => {
                 control.label = match control.label.as_str() {
                     "开始听写" => "停止听写",
+                    "Dictate" => "Stop dictation",
+                    "Stop dictation" => "Dictate",
                     "Start Voice mode" => "End Voice mode",
                     "End Voice mode" => "Start Voice mode",
                     _ => "开始听写",
@@ -167,6 +193,12 @@ impl ManagedAxProvider for Provider {
                     control.id += 10;
                 }
             }
+            PressEffect::Finish => {
+                control.label = "Finishing dictation".into();
+                control.enabled = false;
+                control.pressable = false;
+            }
+            PressEffect::Hide => state.window.controls.retain(|item| item.id != control_id),
             PressEffect::LoseTarget => state.read_pid = Some(999),
             PressEffect::LoseScope => state.window.identity.scope_id += 1,
             PressEffect::NoChange => {}
@@ -231,7 +263,10 @@ impl ManagedAxProvider for Provider {
         assert!(!state.window.controls.iter().any(|control| [
             "停止听写",
             "停止并识别",
-            "Stop and transcribe"
+            "Stop and transcribe",
+            "Stop dictation",
+            "Finishing dictation",
+            "正在完成听写"
         ]
         .contains(&control.label.as_str())));
         state.events.push("submit".into());
@@ -735,7 +770,7 @@ fn live_executor_reports_confirmed_toggle_and_explicit_failure() {
 
 #[test]
 fn live_executor_blocks_unknown_native_and_untrusted_adapters_before_actions() {
-    for (adapter, trusted) in [("unknown", true), ("codex", true), ("dsh-desktop", false)] {
+    for (adapter, trusted) in [("unknown", true), ("herdr", true), ("dsh-desktop", false)] {
         let provider = Provider::dsh();
         let executor = LiveHostActionExecutor::new(Driver {
             controls: provider.controls(),
@@ -1210,4 +1245,202 @@ fn owned_dictation_survives_another_apps_capture_and_releases_its_native_target(
             .count(),
         2
     );
+}
+
+#[test]
+fn codex_owned_start_release_and_submit_wait_for_transcription_completion() {
+    let provider = Provider::codex();
+    let controls =
+        ManagedAxControls::with_readback_timeout(provider.clone(), Duration::from_millis(100));
+    controls.focus_input("codex").unwrap();
+    controls.start_dictation("codex").unwrap();
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.effect = PressEffect::Finish;
+        state.finish_reads_remaining = Some(1);
+        state.capture_error = Some("frontmost changed".into());
+    }
+    controls.stop_owned_dictations().unwrap();
+    assert!(provider.0.lock().unwrap().retained_targets.is_empty());
+    assert!(!provider.events().iter().any(|event| event == "submit"));
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.capture_error = None;
+        state.effect = PressEffect::Toggle;
+    }
+    controls.start_dictation("codex").unwrap();
+    {
+        let mut state = provider.0.lock().unwrap();
+        state.effect = PressEffect::Finish;
+        state.finish_reads_remaining = Some(1);
+    }
+    controls.submit("codex", Some("message")).unwrap();
+    assert_eq!(
+        provider
+            .events()
+            .iter()
+            .filter(|event| *event == "submit")
+            .count(),
+        1
+    );
+    assert_eq!(
+        provider
+            .events()
+            .iter()
+            .filter(|event| *event == "press:Stop dictation")
+            .count(),
+        2
+    );
+    assert_eq!(
+        provider.0.lock().unwrap().window.controls[0].label,
+        "Dictate"
+    );
+}
+
+#[test]
+fn codex_finishing_or_missing_owned_control_never_sends_or_represses() {
+    for pending in ["Finishing dictation", "正在完成听写", ""] {
+        let provider = Provider::codex();
+        let controls = provider.controls();
+        controls.start_dictation("codex").unwrap();
+        {
+            let mut state = provider.0.lock().unwrap();
+            if pending.is_empty() {
+                state.window.controls.remove(0);
+            } else {
+                state.window.controls[0].label = pending.into();
+                state.window.controls[0].enabled = false;
+                state.window.controls[0].pressable = false;
+            }
+        }
+        assert_eq!(
+            controls.submit("codex", None).unwrap_err(),
+            "unconfirmed:dictation_readback"
+        );
+        assert!(controls.stop_owned_dictations().is_err());
+        assert!(!provider.0.lock().unwrap().retained_targets.is_empty());
+        assert_eq!(
+            provider
+                .events()
+                .iter()
+                .filter(|event| event.starts_with("press:"))
+                .count(),
+            1
+        );
+        assert!(!provider.events().iter().any(|event| event == "submit"));
+    }
+}
+
+#[test]
+fn codex_ambiguous_input_or_dictation_and_changed_target_never_send() {
+    let provider = Provider::codex();
+    let controls = provider.controls();
+    let input = provider.0.lock().unwrap().window.controls[1].clone();
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl { id: 4, ..input });
+    assert_eq!(
+        controls.submit("codex", None).unwrap_err(),
+        "blocked:ambiguous_or_missing_input"
+    );
+    provider.0.lock().unwrap().window.controls.pop();
+    let voice = provider.0.lock().unwrap().window.controls[0].clone();
+    provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl { id: 5, ..voice });
+    assert!(controls.start_dictation("codex").is_err());
+    provider.0.lock().unwrap().window.controls.pop();
+    controls.start_dictation("codex").unwrap();
+    provider.0.lock().unwrap().window.identity.scope_id = 2;
+    assert_eq!(
+        controls.submit("codex", None).unwrap_err(),
+        "blocked:uncleared_dictation_target_changed"
+    );
+    assert!(!provider.events().iter().any(|event| event == "submit"));
+}
+
+#[test]
+fn codex_toggle_and_prompt_actions_use_confirmed_managed_controls() {
+    let provider = Provider::codex();
+    let executor = LiveHostActionExecutor::new(Driver {
+        controls: provider.controls(),
+        trusted: true,
+    });
+    for command in ["focus-input", "toggle-dictation", "submit-prompt:message"] {
+        let receipt = executor.execute(
+            "test",
+            "button",
+            &ResolvedHostAction::AgentCommand {
+                adapter: "codex".into(),
+                command: command.into(),
+            },
+        );
+        assert_eq!(receipt.outcome, "executed", "{command}: {}", receipt.detail);
+    }
+    assert_eq!(
+        provider
+            .events()
+            .iter()
+            .filter(|event| *event == "submit")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn codex_missing_unowned_dictation_control_does_not_block_prompt_submission() {
+    let provider = Provider::codex();
+    provider.0.lock().unwrap().window.controls.remove(0);
+    let executor = LiveHostActionExecutor::new(Driver {
+        controls: provider.controls(),
+        trusted: true,
+    });
+    let receipt = executor.execute(
+        "test",
+        "button",
+        &ResolvedHostAction::PasteText {
+            text: "message".into(),
+            target_bundle_id: Some("com.openai.codex".into()),
+            adapter: None,
+            no_newline: true,
+            submit: true,
+        },
+    );
+    assert_eq!(receipt.outcome, "executed", "{}", receipt.detail);
+    assert!(provider
+        .events()
+        .iter()
+        .any(|event| event == "insert:message"));
+    assert!(provider.events().iter().any(|event| event == "submit"));
+}
+
+#[test]
+fn codex_stop_does_not_treat_a_disappeared_control_as_completion() {
+    let provider = Provider::codex();
+    let controls = provider.controls();
+    controls.start_dictation("codex").unwrap();
+    provider.0.lock().unwrap().effect = PressEffect::Hide;
+    assert_eq!(
+        controls.submit("codex", None).unwrap_err(),
+        "unconfirmed:dictation_readback"
+    );
+    assert!(controls.stop_owned_dictations().is_err());
+    assert!(!provider.0.lock().unwrap().retained_targets.is_empty());
+    assert_eq!(
+        provider
+            .events()
+            .iter()
+            .filter(|event| event.starts_with("press:"))
+            .count(),
+        2
+    );
+    assert!(!provider.events().iter().any(|event| event == "submit"));
 }

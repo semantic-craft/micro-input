@@ -1510,7 +1510,11 @@ impl WorkbenchStore {
     pub fn has_all_desktop_agent_presets(&self) -> bool {
         let doc = &self.document_store.draft.document;
         let profiles = &doc.editable.graph.profiles;
-        if self.local_codex_profile_id().is_none() {
+        let Some(local_codex_id) = self.local_codex_profile_id() else {
+            return false;
+        };
+        if mi_model::preset::local_codex_profile_needs_starter_slot_migration(doc, &local_codex_id)
+        {
             return false;
         }
         CANONICAL_DESKTOP_AGENT_PROFILES
