@@ -1,0 +1,30 @@
+{
+  "date": "2026-11-14",
+  "scope": "Slice R26: Codex top six status-filtered session navigation, lighting, and AX readback",
+  "offline": {
+    "command": "MI_AUTO_HOST_READY=0 python3 scripts/verify-offline",
+    "exit_code": 0,
+    "scenarios": 6,
+    "swift_tests": "29 passed, 0 failed",
+    "python_tests": "57 passed, 0 failed"
+  },
+  "live_codex": {
+    "bundle_id": "com.openai.codex",
+    "app_path": "/Applications/ChatGPT.app",
+    "cua_driver_access": "ALLOWED (list_windows & get_window_state observed pid=24848 window_id=11827)",
+    "sqlite_observation": "PASS (observe_codex_threads_live(12) returned 12 threads; Working/Unread/Idle/Error mapped cleanly and Unknown preserved)",
+    "navigation_and_readback": {
+      "NAV_A (01a1c5b2-d0fd-7001-96e4-f8395067a8f0)": "Ok(())",
+      "NAV_B (01a1c5a6-96fc-78e1-8e0c-690c1de8c3c8, duplicate title)": "Ok(())",
+      "NAV_A_AGAIN (01a1c5b2-d0fd-7001-96e4-f8395067a8f0, reverse switch)": "Ok(())",
+      "NAV_MISSING (00000000-0000-4000-8000-000000000000)": "Err(blocked:codex_thread_missing)",
+      "NAV_STALE (is_current=false)": "Err(blocked:session_navigation_retired)",
+      "NAV_RESTORE (01a1d403-87df-7301-a216-457bf9c2a844)": "Ok(())"
+    }
+  },
+  "physical_keys": "NOT_RUN (left for user hardware verification after daily bundle install)",
+  "device_configuration_writes": 0,
+  "other_profiles_unchanged": true,
+  "persisted_device_config_unchanged": true,
+  "status_filtered_first_six": "VERIFIED_OFFLINE_AND_LIVE_APP"
+}

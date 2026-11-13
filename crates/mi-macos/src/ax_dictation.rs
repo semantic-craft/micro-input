@@ -34,6 +34,10 @@ impl DictationAdapter {
         }
     }
 
+    pub fn matches_finishing_label(&self, label: &str) -> bool {
+        *self == Self::Codex && matches!(label.trim(), "Finishing dictation" | "正在完成听写")
+    }
+
     pub fn matches_stop_label(&self, label: &str) -> bool {
         let trimmed = label.trim();
         match self {

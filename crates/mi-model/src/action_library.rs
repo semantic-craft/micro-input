@@ -256,8 +256,15 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                             ))
                         || command == "focus-input"
                         || command == "search"
-                        || (command == "new-chat"
-                            && matches!(adapter.as_str(), "antigravity" | "dsh-desktop"))
+                        || command == "new-chat"
+                        || (adapter == "codex"
+                            && matches!(
+                                command.as_str(),
+                                "live-voice"
+                                    | "new-tab"
+                                    | "cycle-workspace-layout"
+                                    | "toggle-dictation"
+                            ))
                         || (adapter == "antigravity"
                             && matches!(
                                 command.as_str(),

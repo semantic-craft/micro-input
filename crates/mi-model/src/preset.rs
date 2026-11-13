@@ -275,7 +275,9 @@ type AgentAssignment = (
     &'static str,
     ActionKind,
 );
-fn legacy_agent_specs() -> Vec<(&'static str, Vec<AgentAssignment>)> {
+type AgentProfileSpec = (&'static str, Vec<AgentAssignment>);
+
+fn legacy_agent_specs() -> Vec<AgentProfileSpec> {
     vec![
         (
             "Antigravity",
@@ -929,8 +931,7 @@ fn legacy_agent_specs() -> Vec<(&'static str, Vec<AgentAssignment>)> {
 
 pub const LOCAL_CODEX_PROFILE_NAME: &str = "Codex · Micro Input";
 
-pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, String> {
-    let mut created_ids = Vec::new();
+fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
     // Retain the exact old built-ins only as migration fingerprints.
     let mut legacy_specs = legacy_agent_specs();
     let mut specs = legacy_specs.clone();
@@ -1471,14 +1472,133 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         )],
     ));
 
-    let codex_assignments = specs
+    let mut codex_assignments = specs
         .iter()
         .find(|(name, _)| *name == "Codex")
         .expect("Codex starter assignments")
         .1
         .clone();
+    legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments.clone()));
+    codex_assignments.retain(|(slot, ..)| !(6..=12).contains(slot));
+    for (slot, id, label, detail, command) in [
+        (
+            6,
+            "desktop-live-voice",
+            "实时语音",
+            "启动语音聊天（Ctrl+Shift+V），需应用提供语音功能",
+            "live-voice",
+        ),
+        (
+            7,
+            "desktop-input",
+            "聚焦当前输入框",
+            "com.openai.codex",
+            "focus-input",
+        ),
+        (
+            8,
+            "desktop-terminal",
+            "显示 / 隐藏终端",
+            "显示或隐藏终端（Ctrl+`）",
+            "terminal",
+        ),
+        (
+            9,
+            "desktop-workspace-layout",
+            "轮换工作区布局",
+            "轮换完整视图、分屏与隐藏标签页（Cmd+Shift+B）",
+            "cycle-workspace-layout",
+        ),
+        (
+            10,
+            "desktop-new",
+            "新建聊天",
+            "新建聊天（Cmd+N）",
+            "new-chat",
+        ),
+        (
+            11,
+            "desktop-dictation",
+            "点击听写",
+            "按一次开始听写，再按一次停止",
+            "toggle-dictation",
+        ),
+        (
+            12,
+            "desktop-submit",
+            "提交当前输入",
+            "若听写激活则先停并确认停止，再聚焦输入区提交",
+            "submit",
+        ),
+    ] {
+        codex_assignments.push((
+            slot,
+            id,
+            label,
+            "Agent",
+            detail,
+            ActionKind::AgentCommand {
+                adapter: "codex".into(),
+                command: command.into(),
+            },
+        ));
+    }
+    legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments.clone()));
+    codex_assignments.retain(|(slot, ..)| !(0..=5).contains(slot));
+    for (slot, id, label, command) in [
+        (0, "slot-open-0", "会话 1", "slot-open:0"),
+        (1, "slot-open-1", "会话 2", "slot-open:1"),
+        (2, "slot-open-2", "会话 3", "slot-open:2"),
+        (3, "slot-open-3", "会话 4", "slot-open:3"),
+        (4, "slot-open-4", "会话 5", "slot-open:4"),
+        (5, "slot-open-5", "会话 6", "slot-open:5"),
+    ] {
+        codex_assignments.push((
+            slot,
+            id,
+            label,
+            "Codex 会话",
+            "切换并回读对应状态的 Codex 会话",
+            ActionKind::AgentCommand {
+                adapter: "four-app".into(),
+                command: command.into(),
+            },
+        ));
+    }
+    codex_assignments.sort_by_key(|(slot, ..)| *slot);
+    legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments.clone()));
+    for item in codex_assignments.iter_mut() {
+        match item.0 {
+            8 => {
+                *item = (
+                    8,
+                    "desktop-new-tab",
+                    "新建标签页",
+                    "Agent",
+                    "在当前窗口新建标签页（Cmd+T）",
+                    ActionKind::AgentCommand {
+                        adapter: "codex".into(),
+                        command: "new-tab".into(),
+                    },
+                );
+            }
+            9 => {
+                item.2 = "内置浏览器 · 布局";
+                item.4 = "切换内置浏览器与工作区布局（Cmd+Shift+B）";
+            }
+            10 => {
+                item.4 = "在当前项目中新建对话（Cmd+N）";
+            }
+            _ => {}
+        }
+    }
     specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments));
+    (specs, legacy_specs)
+}
 
+pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, String> {
+    let (specs, legacy_specs) = agent_starter_specs();
+    let mut created_ids = Vec::new();
     let mut work = draft.clone();
     // Retire only unchanged source profiles from the exact bundled fixture, even
     // when other profiles have since been added. Preserve edited and imported data.
@@ -1581,10 +1701,6 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             .map(|(id, _)| id.clone());
         let pid = if let Some(pid) = existing_id {
             let p = &work.document.editable.graph.profiles[&pid];
-            if matches!(profile_name, LOCAL_CODEX_PROFILE_NAME) {
-                created_ids.push(pid);
-                continue;
-            }
             if is_native_oai_profile
                 && p.layer_order
                     .iter()
@@ -1593,42 +1709,23 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                 created_ids.push(pid);
                 continue;
             }
-            let can_upgrade = p.layer_order.len() == 1
-                && ((is_native_oai_profile
-                    && work.document.editable.graph.layers[&p.layer_order[0]].name == "基础层")
-                    || legacy_specs
-                        .iter()
-                        .filter(|(name, _)| *name == profile_name)
-                        .any(|(_, old)| {
-                            let layer = &work.document.editable.graph.layers[&p.layer_order[0]];
-                            layer.lighting.is_none()
-                                && layer.control_settings.as_ref().is_some_and(|settings| {
-                                    settings.joystick_mode == "logical_sectors"
-                                        && settings.active_sectors == 4
-                                })
-                                && layer
-                                    .controls
-                                    .values()
-                                    .filter(|b| b.action_id.is_some())
-                                    .count()
-                                    == old.len()
-                                && old.iter().all(|(slot, id, name, category, detail, kind)| {
-                                    layer
-                                        .controls
-                                        .values()
-                                        .find(|b| b.logical_control == format!("logical-{slot}"))
-                                        .and_then(|b| b.action_id.as_ref())
-                                        .and_then(|id| work.document.editable.graph.actions.get(id))
-                                        .is_some_and(|a| {
-                                            a.id == *id
-                                                && a.name == *name
-                                                && a.category == *category
-                                                && a.detail == *detail
-                                                && serde_json::to_value(kind).ok().as_ref()
-                                                    == Some(&a.payload)
-                                        })
-                                })
-                        }));
+            let can_upgrade = if profile_name == LOCAL_CODEX_PROFILE_NAME {
+                local_codex_profile_needs_starter_slot_migration(&work.document, &pid)
+            } else {
+                p.layer_order.len() == 1
+                    && ((is_native_oai_profile
+                        && work.document.editable.graph.layers[&p.layer_order[0]].name == "基础层")
+                        || legacy_specs
+                            .iter()
+                            .filter(|(name, _)| *name == profile_name)
+                            .any(|(_, old)| {
+                                layer_matches_starter_assignments(
+                                    &work.document,
+                                    &work.document.editable.graph.layers[&p.layer_order[0]],
+                                    old,
+                                )
+                            }))
+            };
             if !can_upgrade {
                 if profile_name == "Antigravity" && !p.layer_order.is_empty() {
                     let lid = p.layer_order[0].clone();
@@ -1914,6 +2011,61 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
         doc.editable = work.document.editable;
         Ok(created_ids)
     })
+}
+
+fn layer_matches_starter_assignments(
+    doc: &LocalDocumentV2,
+    layer: &crate::document::LayerNode,
+    assignments: &[AgentAssignment],
+) -> bool {
+    layer.lighting.is_none()
+        && layer.control_settings.as_ref().is_some_and(|settings| {
+            settings.joystick_mode == "logical_sectors" && settings.active_sectors == 4
+        })
+        && layer
+            .controls
+            .values()
+            .filter(|b| b.action_id.is_some())
+            .count()
+            == assignments.len()
+        && assignments
+            .iter()
+            .all(|(slot, id, name, category, detail, kind)| {
+                layer
+                    .controls
+                    .values()
+                    .find(|b| b.logical_control == format!("logical-{slot}"))
+                    .and_then(|b| b.action_id.as_ref())
+                    .and_then(|aid| doc.editable.graph.actions.get(aid))
+                    .is_some_and(|action| {
+                        action.id == *id
+                            && action.name == *name
+                            && action.category == *category
+                            && action.detail == *detail
+                            && serde_json::to_value(kind).ok().as_ref() == Some(&action.payload)
+                    })
+            })
+}
+
+pub fn local_codex_profile_needs_starter_slot_migration(
+    doc: &LocalDocumentV2,
+    profile_id: &str,
+) -> bool {
+    let Some(profile) = doc.editable.graph.profiles.get(profile_id) else {
+        return false;
+    };
+    if profile.name != LOCAL_CODEX_PROFILE_NAME || profile.layer_order.len() != 1 {
+        return false;
+    }
+    let Some(layer) = doc.editable.graph.layers.get(&profile.layer_order[0]) else {
+        return false;
+    };
+    layer.name == "基础层"
+        && agent_starter_specs()
+            .1
+            .iter()
+            .filter(|(name, _)| *name == LOCAL_CODEX_PROFILE_NAME)
+            .any(|(_, assignments)| layer_matches_starter_assignments(doc, layer, assignments))
 }
 
 pub fn antigravity_layer_needs_starter_slot_migration(

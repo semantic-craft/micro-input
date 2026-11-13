@@ -400,9 +400,7 @@ impl<P: ManagedAxProvider + Default> Default for ManagedAxControls<P> {
 }
 
 pub fn managed_adapter(adapter: &str) -> Result<DictationAdapter, String> {
-    DictationAdapter::parse(adapter)
-        .filter(|adapter| *adapter != DictationAdapter::Codex)
-        .ok_or_else(|| blocked("unsupported_adapter"))
+    DictationAdapter::parse(adapter).ok_or_else(|| blocked("unsupported_adapter"))
 }
 
 pub fn adapter_bundle(adapter: DictationAdapter) -> &'static str {
@@ -509,6 +507,13 @@ fn dictation_control(
     window: &ManagedWindow,
     adapter: DictationAdapter,
 ) -> Result<(ObservedDictationState, u64), String> {
+    if window
+        .controls
+        .iter()
+        .any(|control| adapter.matches_finishing_label(&control.label))
+    {
+        return Err(blocked("dictation_finishing"));
+    }
     let controls: Vec<_> = window
         .controls
         .iter()
@@ -532,6 +537,24 @@ fn dictation_control(
     Ok((*state, control.id))
 }
 
+pub(crate) fn validate_codex_submit(window: &ManagedWindow) -> Result<(), String> {
+    if window.identity.bundle_id != adapter_bundle(DictationAdapter::Codex) {
+        return Ok(());
+    }
+    let adapter = DictationAdapter::Codex;
+    if !window.controls.iter().any(|control| {
+        adapter.matches_start_label(&control.label)
+            || adapter.matches_stop_label(&control.label)
+            || adapter.matches_finishing_label(&control.label)
+    }) {
+        return Ok(());
+    }
+    match dictation_control(window, adapter)? {
+        (ObservedDictationState::Idle, _) => Ok(()),
+        _ => Err(blocked("dictation_still_recording")),
+    }
+}
+
 fn press_and_confirm<P: ManagedAxProvider>(
     provider: &mut P,
     target: &ManagedWindowIdentity,
@@ -546,6 +569,16 @@ fn press_and_confirm<P: ManagedAxProvider>(
         return Err(blocked("dictation_changed_before_press"));
     }
     provider.press(target, control)?;
+    confirm_dictation_state(provider, target, adapter, desired, timeout)
+}
+
+fn confirm_dictation_state<P: ManagedAxProvider>(
+    provider: &mut P,
+    target: &ManagedWindowIdentity,
+    adapter: DictationAdapter,
+    desired: ObservedDictationState,
+    timeout: Duration,
+) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     loop {
         let current = read(provider, target).map_err(|error| format!("unconfirmed:{error}"))?;
@@ -569,12 +602,29 @@ fn stop_in_window<P: ManagedAxProvider>(
     allow_absent: bool,
 ) -> Result<bool, String> {
     let current = read(provider, &window.identity)?;
-    if allow_absent
-        && !current.controls.iter().any(|control| {
-            adapter.matches_start_label(&control.label)
-                || adapter.matches_stop_label(&control.label)
-        })
+    let has_dictation = current.controls.iter().any(|control| {
+        adapter.matches_start_label(&control.label)
+            || adapter.matches_stop_label(&control.label)
+            || adapter.matches_finishing_label(&control.label)
+    });
+    if adapter == DictationAdapter::Codex && !has_dictation && !allow_absent {
+        return Err("unconfirmed:dictation_readback".into());
+    }
+    if current
+        .controls
+        .iter()
+        .any(|control| adapter.matches_finishing_label(&control.label))
     {
+        confirm_dictation_state(
+            provider,
+            &window.identity,
+            adapter,
+            ObservedDictationState::Idle,
+            timeout,
+        )?;
+        return Ok(true);
+    }
+    if allow_absent && !has_dictation {
         return Ok(false);
     }
     let (state, control) = dictation_control(&current, adapter)?;

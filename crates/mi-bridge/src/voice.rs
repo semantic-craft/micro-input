@@ -7,6 +7,7 @@ pub fn place_target_app(place: &NavigationPlace) -> &str {
     match place {
         NavigationPlace::Antigravity { .. } => "antigravity",
         NavigationPlace::Dsh { .. } => "dsh-desktop",
+        NavigationPlace::Codex { .. } => "codex",
         NavigationPlace::App { bundle_id } => bundle_id.as_str(),
         NavigationPlace::Session { adapter, .. } => adapter.as_str(),
     }
@@ -23,6 +24,17 @@ pub fn place_display_label(place: &NavigationPlace) -> String {
             workspace_id,
             ..
         } => format!("{session_id}@{workspace_id}"),
+        NavigationPlace::Codex {
+            thread_id,
+            host_id,
+            workspace_path,
+        } => {
+            if workspace_path.is_empty() {
+                format!("{host_id}:{thread_id}")
+            } else {
+                format!("{host_id}:{thread_id}@{workspace_path}")
+            }
+        }
         NavigationPlace::App { bundle_id } => bundle_id.clone(),
         NavigationPlace::Session { adapter, session } => format!("{adapter}:{session}"),
     }

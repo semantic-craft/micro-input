@@ -85,7 +85,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Condvar, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -97,8 +97,8 @@ mod six_layer_store;
 #[path = "workspace_lifecycle.rs"]
 mod workspace_lifecycle;
 use session_navigation::{
-    AntigravityInstance, NavigationCatalog, NavigationCommand, NavigationInputLease,
-    SessionNavigation,
+    AntigravityInstance, CatalogInstance, NavigationCatalog, NavigationCommand,
+    NavigationInputLease, SessionNavigation,
 };
 use workspace_lifecycle::SystemLifecycle;
 #[path = "projection.rs"]
@@ -133,6 +133,27 @@ pub struct HardwareAutoAcceptanceReceipt {
     pub lighting_preview_synced: bool,
     pub lighting_thstatus_synced: bool,
     pub timestamp_ms: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LiveSessionSource {
+    Antigravity,
+    Codex,
+}
+
+impl LiveSessionSource {
+    fn agent(self) -> CanonicalAgent {
+        match self {
+            Self::Antigravity => CanonicalAgent::Antigravity,
+            Self::Codex => CanonicalAgent::Codex,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LiveSessionSourceState {
+    source: LiveSessionSource,
+    generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -391,6 +412,7 @@ pub struct WorkbenchStore {
     resume_requires_explicit_connect: bool,
     pub navigation_history: NavigationHistory,
     session_navigation: SessionNavigation,
+    live_session_source: Arc<(Mutex<LiveSessionSourceState>, Condvar)>,
     pub radial_state: RadialMenuState,
     pub radial_readiness: RadialInputReadiness,
     pub radial_slot_configs: [RadialSlotConfig; RADIAL_SECTOR_COUNT],
@@ -522,6 +544,13 @@ impl WorkbenchStore {
             resume_requires_explicit_connect: false,
             navigation_history: NavigationHistory::new(),
             session_navigation: SessionNavigation::default(),
+            live_session_source: Arc::new((
+                Mutex::new(LiveSessionSourceState {
+                    source: LiveSessionSource::Antigravity,
+                    generation: 0,
+                }),
+                Condvar::new(),
+            )),
             radial_state: RadialMenuState::new(),
             radial_readiness: RadialInputReadiness::Ready,
             radial_slot_configs: RadialSlotConfig::default_app_launcher_slots(),
@@ -610,9 +639,12 @@ impl WorkbenchStore {
             store.lighting_popover.only_glow_on_attention_or_completed = false;
             store.lighting_arbiter.only_glow_on_attention_or_completed = false;
             store.initialize_auto_host_ready(preserve_saved_host_state);
+            store.sync_live_session_source();
             store.start_mac_usb_discovery_watcher();
             store.start_antigravity_live_poller();
             let _ = store.connect_default_usb_with_execution(false);
+        } else {
+            store.sync_live_session_source();
         }
         store.last_synced_six_layer_revs = (
             store.document_store.draft.revision,
@@ -753,6 +785,7 @@ impl WorkbenchStore {
             self.status_message = "已解除方案锁定".to_string();
         }
         self.sync_six_layer_routing_context();
+        self.sync_live_session_source();
         self.refresh_four_app_lighting();
         self.commit_runtime_update();
         Ok(())
@@ -775,6 +808,7 @@ impl WorkbenchStore {
         if self.system_lifecycle == SystemLifecycle::Awake {
             self.poll_six_layer_runtime();
         }
+        self.sync_live_session_source();
         self.drain_pending_hardware_events(now);
         self.poll_session_navigation();
         self.overlay_controller.expire_notice_if_due(now);
@@ -1037,28 +1071,130 @@ impl WorkbenchStore {
         self.mac_watcher_transport = Some(transport);
     }
 
+    fn effective_resolved_active_profile_id(&self) -> Option<String> {
+        let profiles = &self
+            .document_store
+            .host_store()
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles;
+        if let Some(locked) = self
+            .document_store
+            .locked_profile_id()
+            .filter(|pid| profiles.contains_key(pid))
+        {
+            return Some(locked);
+        }
+        if let Some(profile) = self
+            .six_layer_running
+            .as_ref()
+            .and_then(|running| running.effective_profile_id())
+            .or_else(|| {
+                self.six_layer_view
+                    .as_ref()
+                    .and_then(|running| running.effective_profile_id.clone())
+            })
+        {
+            return Some(profile);
+        }
+        self.document_store
+            .host_active_profile_id()
+            .filter(|pid| profiles.contains_key(pid))
+    }
+
+    pub(crate) fn desired_live_session_source(&self) -> LiveSessionSource {
+        let profiles = &self
+            .document_store
+            .host_store()
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles;
+        let profile_name = |pid: &str| profiles.get(pid).map(|p| p.name.as_str());
+        let active_name = self
+            .effective_resolved_active_profile_id()
+            .as_deref()
+            .and_then(profile_name)
+            .or_else(|| self.selected_profile_id.as_deref().and_then(profile_name));
+        if active_name == Some(mi_model::preset::LOCAL_CODEX_PROFILE_NAME) {
+            LiveSessionSource::Codex
+        } else {
+            LiveSessionSource::Antigravity
+        }
+    }
+
+    pub(crate) fn sync_live_session_source(&mut self) -> bool {
+        let desired = self.desired_live_session_source();
+        let changed = {
+            let (lock, cvar) = &*self.live_session_source;
+            let mut guard = lock.lock().unwrap();
+            if guard.source == desired {
+                false
+            } else {
+                guard.source = desired;
+                guard.generation = guard.generation.wrapping_add(1);
+                cvar.notify_all();
+                true
+            }
+        };
+        if !changed {
+            return false;
+        }
+        let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
+        self.update_navigation_catalog(None);
+        self.slot_table.retain_agent_slots(desired.agent(), &acks);
+        self.refresh_navigation_revision();
+        self.refresh_four_app_lighting();
+        self.commit_runtime_update();
+        true
+    }
+
     pub fn start_antigravity_live_poller(&self) {
         if self.config.isolated {
             return;
         }
         let tx = self.hardware_event_tx.clone();
         let epoch_source = Arc::clone(&self.lifecycle_epoch);
+        let live_source = Arc::clone(&self.live_session_source);
         std::thread::spawn(move || {
             let mut seen_running_ids = BTreeSet::new();
             let mut completed_transition_watermarks = BTreeMap::new();
             loop {
+                let (source, source_gen) = {
+                    let (lock, _) = &*live_source;
+                    let guard = lock.lock().unwrap();
+                    (guard.source, guard.generation)
+                };
                 let epoch = epoch_source.load(Ordering::Acquire);
-                let catalog = poll_antigravity_daemon_candidates(
-                    &mut seen_running_ids,
-                    &mut completed_transition_watermarks,
-                );
+                let catalog = match source {
+                    LiveSessionSource::Antigravity => poll_antigravity_daemon_candidates(
+                        &mut seen_running_ids,
+                        &mut completed_transition_watermarks,
+                    ),
+                    LiveSessionSource::Codex => poll_codex_session_candidates(),
+                };
+                let still_current = {
+                    let (lock, _) = &*live_source;
+                    let guard = lock.lock().unwrap();
+                    guard.source == source && guard.generation == source_gen
+                };
+                if !still_current {
+                    continue;
+                }
                 if tx
                     .send(HardwareLoopEvent::LiveCandidatesUpdated { epoch, catalog })
                     .is_err()
                 {
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(1500));
+                let (lock, cvar) = &*live_source;
+                let guard = lock.lock().unwrap();
+                if guard.generation == source_gen {
+                    let _ = cvar.wait_timeout(guard, Duration::from_millis(1500));
+                }
             }
         });
     }
@@ -1432,6 +1568,13 @@ impl WorkbenchStore {
                 if epoch != self.lifecycle_epoch.load(Ordering::Acquire) {
                     return None;
                 }
+                let desired = self.desired_live_session_source();
+                if catalog
+                    .as_ref()
+                    .is_some_and(|c| c.instance.source() != desired)
+                {
+                    return None;
+                }
                 self.update_navigation_catalog(catalog);
                 None
             }
@@ -1510,7 +1653,11 @@ impl WorkbenchStore {
     pub fn has_all_desktop_agent_presets(&self) -> bool {
         let doc = &self.document_store.draft.document;
         let profiles = &doc.editable.graph.profiles;
-        if self.local_codex_profile_id().is_none() {
+        let Some(local_codex_id) = self.local_codex_profile_id() else {
+            return false;
+        };
+        if mi_model::preset::local_codex_profile_needs_starter_slot_migration(doc, &local_codex_id)
+        {
             return false;
         }
         CANONICAL_DESKTOP_AGENT_PROFILES
@@ -2019,6 +2166,7 @@ impl WorkbenchStore {
         self.selected_layer_id = first_layer_id;
         self.normalize_surface_for_current_layer();
         self.sync_six_layer_routing_context();
+        self.sync_live_session_source();
         self.refresh_four_app_lighting();
         if emit_hud_notice && !self.overlay_controller.is_cheat_sheet_visible() {
             let profile_name = self.active_profile_display_name();
@@ -2041,6 +2189,12 @@ impl WorkbenchStore {
     }
 
     pub fn foreground_changed(&mut self, bundle_id: Option<&str>) -> bool {
+        let changed = self.apply_foreground_changed_routing(bundle_id);
+        self.sync_live_session_source();
+        changed
+    }
+
+    fn apply_foreground_changed_routing(&mut self, bundle_id: Option<&str>) -> bool {
         let bundle_id = bundle_id
             .map(str::trim)
             .filter(|bundle| !bundle.is_empty() && *bundle != "*");
@@ -2153,6 +2307,7 @@ impl WorkbenchStore {
             self.manual_override = false;
         }
         self.sync_six_layer_routing_context();
+        self.sync_live_session_source();
         self.commit_runtime_update();
         Ok(())
     }
@@ -2174,6 +2329,7 @@ impl WorkbenchStore {
             self.manual_override = true;
         }
         self.sync_six_layer_routing_context();
+        self.sync_live_session_source();
         self.commit_runtime_update();
         Ok(())
     }
@@ -2304,6 +2460,7 @@ impl WorkbenchStore {
             }
         }
         self.sync_six_layer_routing_context();
+        self.sync_live_session_source();
         self.commit_runtime_update();
         Ok(())
     }
@@ -4039,6 +4196,7 @@ impl WorkbenchStore {
                     self.auto_follow_enabled = true;
                 }
                 self.sync_six_layer_routing_context();
+                self.sync_live_session_source();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -7087,12 +7245,92 @@ fn poll_antigravity_daemon_candidates_with_frontmost(
             completed_transition_watermarks,
         );
     Some(NavigationCatalog {
-        instance,
+        instance: CatalogInstance::Antigravity(instance),
         observed_at: Instant::now(),
         candidates,
         project_ids,
         frontmost_acknowledged,
     })
+}
+
+pub fn codex_observations_to_catalog(
+    codex_home: std::path::PathBuf,
+    observations: &[mi_macos::CodexThreadObservation],
+) -> NavigationCatalog {
+    let mut candidates = Vec::new();
+
+    for obs in observations {
+        let (phase, last_modified_ms, last_user_view_ms) = match &obs.status {
+            mi_macos::CodexObservedStatus::Working => (
+                FourAppSessionKind::Working,
+                obs.updated_at_ms,
+                obs.updated_at_ms,
+            ),
+            mi_macos::CodexObservedStatus::Error => (
+                FourAppSessionKind::Error,
+                obs.updated_at_ms,
+                obs.updated_at_ms,
+            ),
+            mi_macos::CodexObservedStatus::Unread => (
+                FourAppSessionKind::BlueDotCompleted,
+                obs.updated_at_ms.max(1000),
+                0,
+            ),
+            mi_macos::CodexObservedStatus::Idle => (
+                FourAppSessionKind::Idle,
+                obs.updated_at_ms,
+                obs.updated_at_ms,
+            ),
+            mi_macos::CodexObservedStatus::Unknown(_) => continue,
+        };
+
+        let workspace_path = obs.workspace_path.trim().to_string();
+        let title = if obs.display_title.trim().is_empty() {
+            obs.thread_id.clone()
+        } else {
+            obs.display_title.trim().to_string()
+        };
+        let watermark = if obs.watermark.is_empty() {
+            obs.updated_at_ms.to_string()
+        } else {
+            obs.watermark.clone()
+        };
+
+        candidates.push(FourAppLiveCandidate {
+            place: NavigationPlace::codex(
+                obs.thread_id.clone(),
+                obs.host_id.clone(),
+                workspace_path,
+            ),
+            title,
+            phase,
+            watermark,
+            last_modified_ms,
+            last_user_view_ms,
+            updated_at_ms: obs.updated_at_ms,
+        });
+    }
+
+    candidates.sort_by(|a, b| {
+        a.phase
+            .cmp(&b.phase)
+            .then_with(|| b.updated_at_ms.cmp(&a.updated_at_ms))
+            .then_with(|| a.place.target_id().cmp(&b.place.target_id()))
+    });
+
+    NavigationCatalog {
+        instance: CatalogInstance::Codex { codex_home },
+        observed_at: Instant::now(),
+        candidates,
+        project_ids: BTreeMap::new(),
+        frontmost_acknowledged: None,
+    }
+}
+
+fn poll_codex_session_candidates() -> Option<NavigationCatalog> {
+    let codex_home = mi_macos::default_codex_home()?;
+    let observations = mi_macos::observe_codex_threads(&codex_home, 64).ok()?;
+    Some(codex_observations_to_catalog(codex_home, &observations))
 }
 
 #[cfg(test)]

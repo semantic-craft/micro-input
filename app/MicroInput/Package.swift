@@ -27,6 +27,7 @@ let commonLinkerSettings: [LinkerSetting] = [
     .linkedFramework("CoreFoundation"),
     .linkedFramework("CoreGraphics"),
     .linkedFramework("Security"),
+    .linkedLibrary("sqlite3"),
 ]
 
 let executableLinkerSettings: [LinkerSetting] = commonLinkerSettings + [
