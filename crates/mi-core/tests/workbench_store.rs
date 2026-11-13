@@ -115,20 +115,30 @@ fn restore_previous_local_codex_starter(store: &mut WorkbenchStore) -> (String, 
     let pid = pid.clone();
     let lid = profile.layer_order[0].clone();
     store.document_store.update(|draft| {
-        for slot in 6..=12 {
+        for slot in 0..=12 {
             draft.unassign(&json!(pid), &json!(lid), slot)?;
         }
-        for (slot, id, name, payload) in [
-            (6, "desktop-dictation", "按住说话 · 松开停止",
+        for (slot, id, name, category, detail, payload) in [
+            (0, "desktop-open", "打开 / 聚焦应用", "应用", "com.openai.codex",
+                json!({"type":"open_app", "bundle_id":"com.openai.codex"})),
+            (1, "desktop-input", "聚焦当前输入框", "Agent", "com.openai.codex",
+                json!({"type":"agent_command", "adapter":"codex", "command":"focus-input"})),
+            (2, "desktop-search", "搜索任务", "Agent", "com.openai.codex",
+                json!({"type":"agent_command", "adapter":"codex", "command":"search"})),
+            (4, "desktop-model", "选择模型", "Agent", "目标应用的原生控件；未提供时明确提示",
+                json!({"type":"shortcut", "key":"M", "modifiers":["control", "shift"], "target":"com.openai.codex"})),
+            (5, "desktop-effort", "调整思考力度", "Agent", "目标应用的原生控件；未提供时明确提示",
+                json!({"type":"shortcut", "key":"M", "modifiers":["control", "shift"], "target":"com.openai.codex"})),
+            (6, "desktop-dictation", "按住说话 · 松开停止", "Agent", "目标应用的原生控件；未提供时明确提示",
                 json!({"type":"agent_command", "adapter":"codex", "command":"push-to-talk"})),
-            (7, "desktop-browser", "打开内置浏览器",
+            (7, "desktop-browser", "打开内置浏览器", "Agent", "目标应用的原生控件；未提供时明确提示",
                 json!({"type":"shortcut", "key":"T", "modifiers":["command"], "target":"com.openai.codex"})),
-            (8, "desktop-terminal", "打开终端面板",
+            (8, "desktop-terminal", "打开终端面板", "Agent", "目标应用的原生控件；未提供时明确提示",
                 json!({"type":"shortcut", "key":"`", "modifiers":["control"], "target":"com.openai.codex"})),
         ] {
             draft.assign(&json!(pid), &json!(lid), slot, Action {
-                id: id.into(), name: name.into(), category: "Agent".into(),
-                detail: "目标应用的原生控件；未提供时明确提示".into(), payload,
+                id: id.into(), name: name.into(), category: category.into(),
+                detail: detail.into(), payload,
             })?;
         }
         Ok(())
@@ -144,9 +154,6 @@ fn opening_saved_desktop_presets_migrates_unchanged_local_codex_once() {
     let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
     let (pid, lid) = restore_previous_local_codex_starter(&mut store);
     let doc = &store.document_store.draft.document;
-    let top_six = (0..6)
-        .map(|slot| resolve_host_action(doc, Some(&pid), &format!("AG{slot:02}"), true))
-        .collect::<Vec<_>>();
     let native = doc
         .editable
         .graph
@@ -183,12 +190,15 @@ fn opening_saved_desktop_presets_migrates_unchanged_local_codex_once() {
         serde_json::to_value(&doc.editable.graph.layers[&native_lid]).unwrap(),
         native_before
     );
-    assert_eq!(
-        (0..6)
-            .map(|slot| resolve_host_action(doc, Some(&pid), &format!("AG{slot:02}"), true))
-            .collect::<Vec<_>>(),
-        top_six
-    );
+    for slot in 0..6u32 {
+        assert_eq!(
+            resolve_host_action(doc, Some(&pid), &format!("AG{slot:02}"), true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "four-app".into(),
+                command: format!("slot-open:{slot}"),
+            })
+        );
+    }
     for (slot, command) in [
         (6, "live-voice"),
         (7, "focus-input"),
@@ -1204,11 +1214,11 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32, case: UsbRoutingCas
     if initial_layer != 1 {
         send("ACT00");
     }
-    for (step, (slot, token, target)) in [
-        (1, "AG00", "com.google.antigravity"),
-        (2, "ACT00", "com.openai.codex"),
-        (3, "AG13", "com.deepseek.dsh"),
-        (1, "AG00", "com.google.antigravity"),
+    for (step, (slot, managed_token, unmanaged_token, target)) in [
+        (1, "AG00", "AG00", "com.google.antigravity"),
+        (2, "ACT07", "AG07", "codex"),
+        (3, "AG13", "AG00", "com.deepseek.dsh"),
+        (1, "AG00", "AG00", "com.google.antigravity"),
     ]
     .into_iter()
     .enumerate()
@@ -1221,7 +1231,11 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32, case: UsbRoutingCas
         }
         assert!(!store.is_selected_layer_protected());
         let count = store.dispatched_receipts().len();
-        send(if managed { token } else { "AG00" });
+        send(if managed {
+            managed_token
+        } else {
+            unmanaged_token
+        });
         let start = Instant::now();
         while store.dispatched_receipts().len() == count && start.elapsed() < Duration::from_secs(2)
         {

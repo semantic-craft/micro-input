@@ -39,10 +39,15 @@ impl ManagedAxProvider for NativeAxProvider {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn observe_codex_window_state() -> Result<crate::codex_sessions::CodexWindowSnapshot, String> {
+    Err(blocked("macos_required"))
+}
+
 #[cfg(target_os = "macos")]
 pub use macos::{
     frontmost_selected_antigravity_conversation, observe_antigravity_sidebar_conversations,
-    NativeAxProvider, NativeSessionNavigation,
+    observe_codex_window_state, NativeAxProvider, NativeSessionNavigation,
 };
 
 #[cfg(target_os = "macos")]
@@ -233,6 +238,7 @@ mod macos {
             external: u8,
         ) -> Ref;
         fn CFStringGetLength(value: Ref) -> isize;
+        fn CFStringCreateWithSubstring(allocator: Ref, string: Ref, range: Range) -> Ref;
         fn CFStringGetMaximumSizeForEncoding(length: isize, encoding: u32) -> isize;
         fn CFStringGetCString(
             value: Ref,
@@ -543,6 +549,30 @@ mod macos {
                 }
             })
             .transpose()
+    }
+    fn optional_codex_text_attribute(value: Option<Owned>) -> Option<String> {
+        let value = value?;
+        if unsafe { CFGetTypeID(value.0) != CFStringGetTypeID() } {
+            return None;
+        }
+        let len = unsafe { CFStringGetLength(value.0) };
+        if len <= 0 {
+            return Some(String::new());
+        }
+        if len > 2048 {
+            let sub = unsafe {
+                Owned::from_create(CFStringCreateWithSubstring(
+                    std::ptr::null(),
+                    value.0,
+                    Range {
+                        location: 0,
+                        length: 2048,
+                    },
+                ))
+            };
+            return sub.and_then(|s| s.string());
+        }
+        value.string()
     }
     fn lenient_url_attribute(value: Owned) -> Result<String, String> {
         if unsafe { CFGetTypeID(value.0) == CFURLGetTypeID() } {
@@ -1285,6 +1315,289 @@ mod macos {
         nav.capture(pid)?;
         let observation = nav.observe_until(pid, Instant::now() + Duration::from_secs(2))?;
         Ok(observe_sidebar_conversations(&observation, port))
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct CodexAxNodeData {
+        role: String,
+        title: String,
+        description: String,
+        value: String,
+        aria_current: Option<String>,
+        children: Vec<Owned>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct CodexObservedNode {
+        parent: Option<usize>,
+        role: String,
+        title: String,
+        description: String,
+        value: String,
+        aria_current: Option<String>,
+    }
+
+    fn read_codex_ax_node(
+        mut attributes: impl FnMut(&[&str]) -> Result<Vec<Option<Owned>>, String>,
+    ) -> Result<Option<CodexAxNodeData>, String> {
+        let mut base = attributes(&["AXRole", "AXHidden", "AXChildren"])?.into_iter();
+        let role =
+            text_attribute(base.next().flatten())?.ok_or_else(|| blocked("ax_role_unavailable"))?;
+        let hidden = bool_attribute(base.next().flatten())?.unwrap_or(false);
+        let raw_children = base.next().flatten();
+        if hidden {
+            return Ok(None);
+        }
+        let children = if role == "AXStaticText" {
+            Vec::new()
+        } else {
+            raw_children
+                .map(|value| value.array())
+                .transpose()?
+                .unwrap_or_default()
+        };
+        let names: &[&str] = match role.as_str() {
+            "AXToolbar" | "AXList" => &["AXDescription", "AXTitle"],
+            "AXImage" => &["AXDescription", "AXTitle", "AXValue"],
+            "AXButton" => &["AXDescription", "AXTitle", "AXARIACurrent"],
+            "AXStaticText" | "AXHeading" | "AXLink" => &["AXValue", "AXTitle", "AXDescription"],
+            _ => &[],
+        };
+        let mut extra = if names.is_empty() {
+            Vec::new()
+        } else {
+            attributes(names)?
+        }
+        .into_iter();
+        let mut data = CodexAxNodeData {
+            role: role.clone(),
+            children,
+            ..Default::default()
+        };
+        match role.as_str() {
+            "AXToolbar" | "AXList" => {
+                data.description =
+                    optional_codex_text_attribute(extra.next().flatten()).unwrap_or_default();
+                data.title =
+                    optional_codex_text_attribute(extra.next().flatten()).unwrap_or_default();
+            }
+            "AXImage" => {
+                data.description =
+                    optional_codex_text_attribute(extra.next().flatten()).unwrap_or_default();
+                data.title =
+                    optional_codex_text_attribute(extra.next().flatten()).unwrap_or_default();
+                data.value =
+                    optional_codex_text_attribute(extra.next().flatten()).unwrap_or_default();
+            }
+            "AXButton" => {
+                data.description =
+                    optional_codex_text_attribute(extra.next().flatten()).unwrap_or_default();
+                data.title =
+                    optional_codex_text_attribute(extra.next().flatten()).unwrap_or_default();
+                data.aria_current = optional_codex_text_attribute(extra.next().flatten());
+            }
+            "AXStaticText" | "AXHeading" | "AXLink" => {
+                data.value =
+                    optional_codex_text_attribute(extra.next().flatten()).unwrap_or_default();
+                data.title =
+                    optional_codex_text_attribute(extra.next().flatten()).unwrap_or_default();
+                data.description =
+                    optional_codex_text_attribute(extra.next().flatten()).unwrap_or_default();
+            }
+            _ => {}
+        }
+        Ok(Some(data))
+    }
+
+    fn collect_codex_nodes(
+        root: Owned,
+        deadline: Instant,
+        mut read_node: impl FnMut(&Owned) -> Result<Option<CodexAxNodeData>, String>,
+    ) -> Result<Vec<CodexObservedNode>, String> {
+        loop {
+            let mut nodes = Vec::new();
+            let mut pending = vec![(root.clone(), None, 0usize)];
+            let mut visited = 0usize;
+            let mut retry_invalid = false;
+            while let Some((element, parent, depth)) = pending.pop() {
+                visited += 1;
+                if visited > MAX_NODES || depth > MAX_DEPTH {
+                    return Err(blocked("ax_tree_limit"));
+                }
+                if Instant::now() >= deadline {
+                    return Err(blocked("ax_snapshot_timeout"));
+                }
+                let mut data = match read_node(&element) {
+                    Ok(Some(data)) => data,
+                    Ok(None) => continue,
+                    Err(error) if invalid_ax_observation(&error) => {
+                        retry_invalid = true;
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                };
+                if Instant::now() >= deadline {
+                    return Err(blocked("ax_snapshot_timeout"));
+                }
+                if visited + pending.len() + data.children.len() > MAX_NODES {
+                    return Err(blocked("ax_tree_limit"));
+                }
+                let index = nodes.len();
+                for child in std::mem::take(&mut data.children).into_iter().rev() {
+                    pending.push((child, Some(index), depth + 1));
+                }
+                nodes.push(CodexObservedNode {
+                    parent,
+                    role: data.role,
+                    title: data.title,
+                    description: data.description,
+                    value: data.value,
+                    aria_current: data.aria_current,
+                });
+            }
+            if retry_invalid {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or_else(|| blocked("ax_snapshot_timeout"))?;
+                std::thread::sleep(remaining.min(Duration::from_millis(10)));
+                continue;
+            }
+            return Ok(nodes);
+        }
+    }
+
+    fn codex_subtree_end(nodes: &[CodexObservedNode], root: usize) -> usize {
+        let mut index = root + 1;
+        while index < nodes.len() && nodes[index].parent.is_some_and(|parent| parent >= root) {
+            index += 1;
+        }
+        index
+    }
+
+    fn codex_node_text(node: &CodexObservedNode) -> Option<String> {
+        [&node.value, &node.title, &node.description]
+            .into_iter()
+            .map(|s| s.trim())
+            .find(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+
+    fn summarize_codex_window(
+        window_title: String,
+        nodes: &[CodexObservedNode],
+    ) -> crate::codex_sessions::CodexWindowSnapshot {
+        let mut in_toolbar = vec![false; nodes.len()];
+        let mut in_web_area = vec![false; nodes.len()];
+        let mut is_sidebar_list = vec![false; nodes.len()];
+        let mut in_sidebar_list = vec![false; nodes.len()];
+        let mut in_active_sidebar_button = vec![false; nodes.len()];
+
+        for i in 0..nodes.len() {
+            let parent_toolbar = nodes[i].parent.is_some_and(|p| in_toolbar[p]);
+            let parent_web = nodes[i].parent.is_some_and(|p| in_web_area[p]);
+            in_toolbar[i] = parent_toolbar
+                || (nodes[i].role == "AXToolbar"
+                    && (nodes[i].description.trim() == "Chat toolbar"
+                        || nodes[i].title.trim() == "Chat toolbar"));
+            in_web_area[i] = parent_web || nodes[i].role == "AXWebArea";
+        }
+
+        for i in 0..nodes.len() {
+            if in_web_area[i] && nodes[i].role == "AXList" {
+                let end = codex_subtree_end(nodes, i);
+                let has_list_marker = nodes[(i + 1)..end]
+                    .iter()
+                    .any(|child| child.role == "AXListMarker");
+                if !has_list_marker {
+                    is_sidebar_list[i] = true;
+                }
+            }
+        }
+
+        for i in 0..nodes.len() {
+            let parent_sidebar = nodes[i].parent.is_some_and(|p| in_sidebar_list[p]);
+            in_sidebar_list[i] = parent_sidebar || is_sidebar_list[i];
+
+            let parent_active_btn = nodes[i].parent.is_some_and(|p| in_active_sidebar_button[p]);
+            let is_active_btn = in_sidebar_list[i]
+                && nodes[i].role == "AXButton"
+                && nodes[i]
+                    .aria_current
+                    .as_deref()
+                    .is_some_and(|v| v.trim() == "page");
+            in_active_sidebar_button[i] = parent_active_btn || is_active_btn;
+        }
+
+        let mut toolbar_project = None;
+        let mut active_sidebar_texts = Vec::new();
+        let mut main_pane_texts = Vec::new();
+        let mut saw_failed_to_resume = false;
+        let mut saw_no_rollout = false;
+
+        for (i, node) in nodes.iter().enumerate() {
+            if toolbar_project.is_none() && in_toolbar[i] && node.role == "AXImage" {
+                for raw in [&node.description, &node.title, &node.value] {
+                    if let Some(proj) = raw.trim().strip_prefix("Project:") {
+                        let proj = proj.trim();
+                        if !proj.is_empty() {
+                            toolbar_project = Some(proj.to_owned());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if !in_web_area[i] {
+                continue;
+            }
+            let Some(text) = codex_node_text(node) else {
+                continue;
+            };
+            if text.contains("Failed to resume chat") {
+                saw_failed_to_resume = true;
+            }
+            if text
+                .to_ascii_lowercase()
+                .contains("no rollout found for thread id")
+            {
+                saw_no_rollout = true;
+            }
+            if in_active_sidebar_button[i] {
+                if matches!(
+                    node.role.as_str(),
+                    "AXStaticText" | "AXButton" | "AXHeading" | "AXLink"
+                ) && !active_sidebar_texts.contains(&text)
+                {
+                    active_sidebar_texts.push(text);
+                }
+            } else if !in_sidebar_list[i]
+                && matches!(node.role.as_str(), "AXStaticText" | "AXHeading" | "AXLink")
+            {
+                main_pane_texts.push(text);
+            }
+        }
+
+        let has_resume_error = saw_failed_to_resume
+            && (window_title.trim() == "ChatGPT" || (saw_no_rollout && main_pane_texts.len() <= 6));
+
+        crate::codex_sessions::CodexWindowSnapshot {
+            window_title,
+            toolbar_project,
+            active_sidebar_texts,
+            main_pane_texts,
+            has_resume_error,
+        }
+    }
+
+    pub fn observe_codex_window_state() -> Result<crate::codex_sessions::CodexWindowSnapshot, String>
+    {
+        let window = CapturedWindow::capture("com.openai.codex", true)?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let nodes = collect_codex_nodes(window.element.clone(), deadline, |element| {
+            read_codex_ax_node(|names| element.attributes(names, deadline))
+        })?;
+        window.validate(None)?;
+        Ok(summarize_codex_window(window.title, &nodes))
     }
 
     fn find_sidebar_conversation_link(
@@ -4489,6 +4802,123 @@ mod macos {
                 ),
                 Some(2)
             );
+        }
+
+        #[test]
+        fn codex_window_snapshot_separates_sidebar_active_row_main_pane_and_resume_errors() {
+            let n = |parent: Option<usize>,
+                     role: &str,
+                     title: &str,
+                     desc: &str,
+                     val: &str,
+                     aria: Option<&str>| CodexObservedNode {
+                parent,
+                role: role.into(),
+                title: title.into(),
+                description: desc.into(),
+                value: val.into(),
+                aria_current: aria.map(str::to_owned),
+            };
+            let nodes = vec![
+                n(None, "AXWindow", "Same Title", "", "", None),
+                n(Some(0), "AXToolbar", "", "Chat toolbar", "", None),
+                n(Some(1), "AXImage", "", "Project: micro-input", "", None),
+                n(Some(0), "AXWebArea", "", "", "", None),
+                n(Some(3), "AXList", "", "Threads", "", None),
+                n(Some(4), "AXButton", "Same Title", "", "", Some("page")),
+                n(Some(5), "AXStaticText", "", "", "Active row subtitle", None),
+                n(Some(4), "AXButton", "Same Title", "", "", None),
+                n(
+                    Some(7),
+                    "AXStaticText",
+                    "",
+                    "",
+                    "Inactive sibling row text",
+                    None,
+                ),
+                n(Some(3), "AXGroup", "", "Main", "", None),
+                n(
+                    Some(9),
+                    "AXStaticText",
+                    "",
+                    "",
+                    "Main pane target message",
+                    None,
+                ),
+                n(Some(9), "AXList", "", "", "", None),
+                n(Some(11), "AXListMarker", "", "", "•", None),
+                n(
+                    Some(11),
+                    "AXStaticText",
+                    "",
+                    "",
+                    "Bullet item inside main pane",
+                    None,
+                ),
+            ];
+            let snap = summarize_codex_window("Same Title".into(), &nodes);
+            assert_eq!(snap.window_title, "Same Title");
+            assert_eq!(snap.toolbar_project.as_deref(), Some("micro-input"));
+            assert_eq!(
+                snap.active_sidebar_texts,
+                vec!["Same Title".to_string(), "Active row subtitle".to_string()]
+            );
+            assert_eq!(
+                snap.main_pane_texts,
+                vec![
+                    "Main pane target message".to_string(),
+                    "Bullet item inside main pane".to_string()
+                ]
+            );
+            assert!(!snap.has_resume_error);
+
+            let err_nodes = vec![
+                n(None, "AXWindow", "ChatGPT", "", "", None),
+                n(Some(0), "AXWebArea", "", "", "", None),
+                n(
+                    Some(1),
+                    "AXStaticText",
+                    "",
+                    "",
+                    "Failed to resume chat: no rollout found for thread id 0000",
+                    None,
+                ),
+            ];
+            let err_snap = summarize_codex_window("ChatGPT".into(), &err_nodes);
+            assert!(err_snap.has_resume_error);
+
+            let short_err_snap = summarize_codex_window("Other Title".into(), &err_nodes);
+            assert!(short_err_snap.has_resume_error);
+
+            let normal_chat_nodes = vec![
+                n(None, "AXWindow", "Debug chat", "", "", None),
+                n(Some(0), "AXWebArea", "", "", "", None),
+                n(
+                    Some(1),
+                    "AXStaticText",
+                    "",
+                    "",
+                    "Why did it say Failed to resume chat?",
+                    None,
+                ),
+            ];
+            let normal_snap = summarize_codex_window("Debug chat".into(), &normal_chat_nodes);
+            assert!(!normal_snap.has_resume_error);
+        }
+
+        #[test]
+        fn codex_ax_traversal_enforces_depth_and_node_caps() {
+            let leaf = Owned::text("leaf");
+            assert!(collect_codex_nodes(
+                Owned::text("wide"),
+                Instant::now() + Duration::from_secs(1),
+                |_| Ok(Some(CodexAxNodeData {
+                    role: "AXGroup".into(),
+                    children: vec![leaf.clone(); MAX_NODES],
+                    ..Default::default()
+                }))
+            )
+            .is_err());
         }
     }
 }

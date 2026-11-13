@@ -25,6 +25,11 @@ pub enum NavigationPlace {
         workspace_id: String,
         host_id: String,
     },
+    Codex {
+        thread_id: String,
+        host_id: String,
+        workspace_path: String,
+    },
 }
 
 impl NavigationPlace {
@@ -63,6 +68,18 @@ impl NavigationPlace {
         }
     }
 
+    pub fn codex(
+        thread_id: impl Into<String>,
+        host_id: impl Into<String>,
+        workspace_path: impl Into<String>,
+    ) -> Self {
+        Self::Codex {
+            thread_id: thread_id.into(),
+            host_id: host_id.into(),
+            workspace_path: workspace_path.into(),
+        }
+    }
+
     pub fn target_id(&self) -> String {
         match self {
             Self::App { bundle_id } => bundle_id.clone(),
@@ -76,6 +93,9 @@ impl NavigationPlace {
                 workspace_id,
                 host_id,
             } => format!("dsh:{host_id}:{workspace_id}:{session_id}"),
+            Self::Codex {
+                thread_id, host_id, ..
+            } => format!("codex:{host_id}:{thread_id}"),
         }
     }
 }
@@ -339,5 +359,49 @@ mod tests {
         assert_eq!(history.back(|_| true), Some(dsh_ws1));
         assert_eq!(history.back(|_| true), Some(ag_ws2));
         assert_eq!(history.back(|_| true), Some(ag_ws1));
+    }
+
+    #[test]
+    fn codex_places_stay_distinct_across_host_id_and_thread_id_even_in_same_workspace() {
+        let mut history = NavigationHistory::new();
+        let same_ws_a = NavigationPlace::codex(
+            "01a1c5b2-d0fd-7001-96e4-f8395067a8f0",
+            "local",
+            "/workspace/shared-title",
+        );
+        let same_ws_b = NavigationPlace::codex(
+            "01a1c5a6-96fc-78e1-8e0c-690c1de8c3c8",
+            "local",
+            "/workspace/shared-title",
+        );
+        let remote_a = NavigationPlace::codex(
+            "01a1c5b2-d0fd-7001-96e4-f8395067a8f0",
+            "remote-ssh-discovered:devbox",
+            "/workspace/shared-title",
+        );
+
+        assert_ne!(same_ws_a, same_ws_b);
+        assert_ne!(same_ws_a, remote_a);
+        assert_ne!(same_ws_a.target_id(), same_ws_b.target_id());
+        assert_ne!(same_ws_a.target_id(), remote_a.target_id());
+        assert_eq!(
+            same_ws_a.target_id(),
+            "codex:local:01a1c5b2-d0fd-7001-96e4-f8395067a8f0"
+        );
+        assert_eq!(
+            remote_a.target_id(),
+            "codex:remote-ssh-discovered:devbox:01a1c5b2-d0fd-7001-96e4-f8395067a8f0"
+        );
+
+        history.visit(same_ws_a.clone());
+        history.visit(same_ws_b.clone());
+        history.visit(remote_a.clone());
+
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.current(), Some(&remote_a));
+        assert_eq!(history.back(|_| true), Some(same_ws_b.clone()));
+        assert_eq!(history.back(|_| true), Some(same_ws_a));
+        assert_eq!(history.forward(|_| true), Some(same_ws_b));
+        assert_eq!(history.forward(|_| true), Some(remote_a));
     }
 }

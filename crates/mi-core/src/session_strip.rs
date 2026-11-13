@@ -159,6 +159,23 @@ impl FourAppSlotTable {
         self.refresh_with_watermarks(acknowledged_watermarks);
     }
 
+    pub fn retain_agent_slots(
+        &mut self,
+        agent: CanonicalAgent,
+        acknowledged_watermarks: &BTreeMap<String, String>,
+    ) {
+        self.candidates
+            .retain(|c| agent_for_place(&c.place) == agent);
+        for (idx, slot) in self.inner.slots_mut().iter_mut().enumerate() {
+            if let Some(place) = &slot.place {
+                if agent_for_place(place) != agent {
+                    *slot = mi_model::slot_table::SlotEntry::empty(idx);
+                }
+            }
+        }
+        self.refresh_with_watermarks(acknowledged_watermarks);
+    }
+
     pub fn refresh_with_watermarks(&mut self, acknowledged_watermarks: &BTreeMap<String, String>) {
         let mut sorted = self.candidates.clone();
         sorted.sort_by(|a, b| {
@@ -173,6 +190,7 @@ impl FourAppSlotTable {
             b_prio
                 .cmp(&a_prio)
                 .then_with(|| b.updated_at_ms.cmp(&a.updated_at_ms))
+                .then_with(|| a.place.target_id().cmp(&b.place.target_id()))
         });
         self.candidates = sorted;
 
@@ -251,6 +269,7 @@ impl FourAppSlotTable {
 pub fn agent_for_place(place: &NavigationPlace) -> CanonicalAgent {
     match place {
         NavigationPlace::Antigravity { .. } => CanonicalAgent::Antigravity,
+        NavigationPlace::Codex { .. } => CanonicalAgent::Codex,
         NavigationPlace::Dsh { .. } => CanonicalAgent::DeepseekHarness,
         NavigationPlace::App { bundle_id } => {
             CanonicalAgent::from_bundle_id(bundle_id).unwrap_or(CanonicalAgent::Antigravity)

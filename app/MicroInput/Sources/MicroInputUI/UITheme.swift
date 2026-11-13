@@ -900,6 +900,7 @@ public enum AgentProfileKind: String {
 
     public static func from(profileName: String?) -> AgentProfileKind {
         guard let name = profileName else { return .custom }
+        if name == "Codex · Micro Input" || name == "Codex · 原生" { return .codex }
         if name == "Deepseek Harness" || name == "DeepSeek Harness" || name == "DSH" { return .dsh }
         return AgentProfileKind(rawValue: name) ?? .custom
     }

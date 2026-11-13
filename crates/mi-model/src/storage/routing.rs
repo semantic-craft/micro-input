@@ -190,6 +190,14 @@ impl DocumentStore {
                     "forward" | "navigate-forward" => "前进到下一个打开目标",
                     "next-attention" => "下一个需要我",
                     "submit" => "停止听写并提交",
+                    "slot-open:0" => "会话 1",
+                    "slot-open:1" => "会话 2",
+                    "slot-open:2" => "会话 3",
+                    "slot-open:3" => "会话 4",
+                    "slot-open:4" => "会话 5",
+                    "slot-open:5" => "会话 6",
+                    "cycle-workspace-layout" => "轮换工作区布局",
+                    "toggle-dictation" => "点击听写",
                     c if c.starts_with("submit-prompt:") => "粘贴指令并提交",
                     c if c.starts_with("prompt:") => "粘贴工程指令",
                     _ => "Agent 动作",
@@ -413,6 +421,24 @@ mod tests {
                 assert_eq!(by_id("AG00")["label"], "不可用 / 未配置");
                 assert_eq!(by_id("AG11")["available"], true);
                 assert_eq!(by_id("AG11")["label"], "苹果 Fn 键（语音输入） (fn)");
+                continue;
+            }
+            if profile_name == crate::preset::LOCAL_CODEX_PROFILE_NAME {
+                for slot in 0..6 {
+                    let binding = format!("AG{slot:02}");
+                    assert_eq!(by_id(&binding)["available"], true);
+                    assert_eq!(by_id(&binding)["label"], format!("会话 {}", slot + 1));
+                }
+                assert_eq!(by_id("AG06")["label"], "Gemini Live 实时语音");
+                assert_eq!(by_id("AG07")["label"], "聚焦输入框");
+                assert_eq!(by_id("AG08")["label"], "打开终端面板");
+                assert_eq!(by_id("AG09")["label"], "轮换工作区布局");
+                assert_eq!(by_id("AG10")["label"], "新建会话");
+                assert_eq!(by_id("AG11")["label"], "点击听写");
+                assert_eq!(by_id("AG12")["label"], "停止听写并提交");
+                assert_eq!(by_id("AG13")["label"], "向上滚动对话");
+                assert_eq!(by_id("AG14")["label"], "向下滚动对话");
+                assert_eq!(by_id("ENC_CLK")["label"], "跳到底部并聚焦输入");
                 continue;
             }
 

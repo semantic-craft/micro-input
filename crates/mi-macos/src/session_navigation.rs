@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +218,161 @@ pub fn navigate_antigravity_session(
     )
 }
 
+pub fn default_codex_home() -> Option<PathBuf> {
+    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
+        if !codex_home.is_empty() {
+            return Some(PathBuf::from(codex_home));
+        }
+    }
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join(".codex"))
+}
+
+pub fn codex_process_id() -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::executor::find_pid_for_bundle_id("com.openai.codex")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+pub fn observe_codex_threads_live(
+    limit: usize,
+) -> Result<Vec<crate::codex_sessions::CodexThreadObservation>, String> {
+    let codex_home =
+        default_codex_home().ok_or_else(|| "blocked:codex_home_unavailable".to_string())?;
+    crate::codex_sessions::observe_codex_threads(&codex_home, limit)
+}
+
+#[cfg(target_os = "macos")]
+fn open_codex_deeplink(deeplink: &str) -> Result<(), String> {
+    let status = std::process::Command::new("/usr/bin/open")
+        .args(["-b", "com.openai.codex", deeplink])
+        .status()
+        .map_err(|error| format!("blocked:codex_open_failed:{error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("blocked:codex_open_exited:{status}"))
+    }
+}
+
+fn is_fatal_codex_ax_error(error: &str) -> bool {
+    matches!(
+        error,
+        "blocked:accessibility_untrusted" | "blocked:macos_required"
+    )
+}
+
+fn navigate_codex_session_with(
+    codex_home: &Path,
+    thread_id: &str,
+    host_id: &str,
+    mut validate_lease: impl FnMut() -> Result<(), String>,
+    is_current: impl Fn() -> bool,
+    mut open_deeplink: impl FnMut(&str) -> Result<(), String>,
+    mut observe_window: impl FnMut() -> Result<crate::codex_sessions::CodexWindowSnapshot, String>,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<(), String> {
+    validate_lease()?;
+    if !is_current() {
+        return Err("blocked:session_navigation_retired".into());
+    }
+    let fingerprint =
+        crate::codex_sessions::read_codex_thread_fingerprint(codex_home, thread_id, host_id)?;
+    let deeplink = crate::codex_sessions::build_codex_thread_deeplink(thread_id, host_id)?;
+    validate_lease()?;
+    if !is_current() {
+        return Err("blocked:session_navigation_retired".into());
+    }
+    open_deeplink(&deeplink)?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !is_current() {
+            return Err("blocked:session_navigation_retired".into());
+        }
+        let last_error = match observe_window() {
+            Ok(snapshot) => {
+                match crate::codex_sessions::verify_codex_window_readback(&fingerprint, &snapshot) {
+                    Ok(()) => {
+                        validate_lease()?;
+                        if !is_current() {
+                            return Err("blocked:session_navigation_retired".into());
+                        }
+                        match observe_window() {
+                            Ok(final_snapshot) => {
+                                match crate::codex_sessions::verify_codex_window_readback(
+                                    &fingerprint,
+                                    &final_snapshot,
+                                ) {
+                                    Ok(()) => {
+                                        if !is_current() {
+                                            return Err("blocked:session_navigation_retired".into());
+                                        }
+                                        return Ok(());
+                                    }
+                                    Err(error) => error,
+                                }
+                            }
+                            Err(error) => {
+                                if is_fatal_codex_ax_error(&error) {
+                                    return Err(error);
+                                }
+                                format!("unconfirmed:codex_final_readback:{error}")
+                            }
+                        }
+                    }
+                    Err(error) => error,
+                }
+            }
+            Err(error) => {
+                if is_fatal_codex_ax_error(&error) {
+                    return Err(error);
+                }
+                error
+            }
+        };
+        if Instant::now() >= deadline {
+            return Err(last_error);
+        }
+        std::thread::sleep(poll_interval);
+    }
+}
+
+pub fn navigate_codex_session(
+    codex_home: &Path,
+    thread_id: &str,
+    host_id: &str,
+    validate_lease: impl FnMut() -> Result<(), String>,
+    is_current: impl Fn() -> bool,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        navigate_codex_session_with(
+            codex_home,
+            thread_id,
+            host_id,
+            validate_lease,
+            is_current,
+            open_codex_deeplink,
+            crate::native_ax::observe_codex_window_state,
+            Duration::from_secs(4),
+            Duration::from_millis(100),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (codex_home, thread_id, host_id, validate_lease, is_current);
+        Err("blocked:macos_required".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +525,131 @@ mod tests {
         let mut p = fake();
         p.readback.selected_urls = vec!["https://127.0.0.1:45/c/a?project=workspace".into()];
         assert_eq!(selected_conversation(&p.readback, 45).as_deref(), Ok("a"));
+    }
+
+    #[test]
+    fn codex_navigation_polls_until_verified_and_respects_lease_and_retirement() {
+        use crate::codex_sessions::{test_support, CodexWindowSnapshot};
+        let dir = tempfile::TempDir::new().unwrap();
+        test_support::create_codex_fixture(dir.path());
+
+        let mut opened = Vec::new();
+        let mut polls = 0usize;
+        navigate_codex_session_with(
+            dir.path(),
+            test_support::UUID_A,
+            "local",
+            || Ok(()),
+            || true,
+            |url| {
+                opened.push(url.to_owned());
+                Ok(())
+            },
+            || {
+                polls += 1;
+                if polls == 1 {
+                    Ok(CodexWindowSnapshot {
+                        window_title: "ChatGPT".into(),
+                        toolbar_project: None,
+                        active_sidebar_texts: vec![],
+                        main_pane_texts: vec![],
+                        has_resume_error: false,
+                    })
+                } else {
+                    Ok(CodexWindowSnapshot {
+                        window_title: "Same Title".into(),
+                        toolbar_project: Some("micro-input".into()),
+                        active_sidebar_texts: vec!["Same Title".into()],
+                        main_pane_texts: vec!["Alpha unique reply from thread A".into()],
+                        has_resume_error: false,
+                    })
+                }
+            },
+            Duration::from_millis(200),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(
+            opened,
+            vec![format!("codex://threads/{}", test_support::UUID_A)]
+        );
+        assert_eq!(polls, 3);
+
+        let mut opened_on_stale = false;
+        let err = navigate_codex_session_with(
+            dir.path(),
+            test_support::UUID_A,
+            "local",
+            || Err("blocked:session_input_retired".into()),
+            || true,
+            |_| {
+                opened_on_stale = true;
+                Ok(())
+            },
+            || unreachable!("should not poll when lease fails"),
+            Duration::from_millis(50),
+            Duration::from_millis(1),
+        )
+        .unwrap_err();
+        assert_eq!(err, "blocked:session_input_retired");
+        assert!(!opened_on_stale);
+
+        let err_sibling = navigate_codex_session_with(
+            dir.path(),
+            test_support::UUID_A,
+            "local",
+            || Ok(()),
+            || true,
+            |_| Ok(()),
+            || {
+                Ok(CodexWindowSnapshot {
+                    window_title: "Same Title".into(),
+                    toolbar_project: Some("micro-input".into()),
+                    active_sidebar_texts: vec![],
+                    main_pane_texts: vec!["Beta conflicting sibling reply".into()],
+                    has_resume_error: false,
+                })
+            },
+            Duration::from_millis(20),
+            Duration::from_millis(1),
+        )
+        .unwrap_err();
+        assert!(err_sibling.contains("codex_conflicting_sibling_detected"));
+    }
+
+    #[test]
+    fn codex_navigation_retries_transient_second_readback_failure_before_deadline() {
+        use crate::codex_sessions::{test_support, CodexWindowSnapshot};
+        let dir = tempfile::TempDir::new().unwrap();
+        test_support::create_codex_fixture(dir.path());
+
+        let good = || CodexWindowSnapshot {
+            window_title: "Same Title".into(),
+            toolbar_project: Some("micro-input".into()),
+            active_sidebar_texts: vec!["Same Title".into()],
+            main_pane_texts: vec!["Alpha unique reply from thread A".into()],
+            has_resume_error: false,
+        };
+        let mut polls = 0usize;
+        navigate_codex_session_with(
+            dir.path(),
+            test_support::UUID_A,
+            "local",
+            || Ok(()),
+            || true,
+            |_| Ok(()),
+            || {
+                polls += 1;
+                if polls == 2 {
+                    Err("blocked:ax_snapshot_timeout".into())
+                } else {
+                    Ok(good())
+                }
+            },
+            Duration::from_millis(200),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(polls, 4);
     }
 }

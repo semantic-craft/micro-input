@@ -625,6 +625,18 @@ final class MicroInputTests: XCTestCase {
         store.dispatch("header", "OpenAccessibilitySettings")
         XCTAssertEqual(store.footer.statusMessage, "已打开 macOS 辅助功能权限设置")
     }
+
+    func testAgentProfileKindMapsCodexVariantsToLiveSessionSlots() {
+        for name in ["Codex", "Codex · Micro Input", "Codex · 原生"] {
+            let kind = AgentProfileKind.from(profileName: name)
+            XCTAssertEqual(kind, .codex)
+            XCTAssertTrue(kind.supportsLiveSessionSlots)
+        }
+
+        let custom = AgentProfileKind.from(profileName: "Custom")
+        XCTAssertEqual(custom, .custom)
+        XCTAssertFalse(custom.supportsLiveSessionSlots)
+    }
 }
 
 @MainActor

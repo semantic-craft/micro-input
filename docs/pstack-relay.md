@@ -364,7 +364,7 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: 快捷键、启动迁移、目标输入与听写停止回归和 `scripts/verify-offline` 通过；更新本机日常版。真实 Codex AX 和物理按键未验收时明确标注，不把快捷键派发当作界面回读。
 - **Evidence**: docs/verification/codex-controls.json; final verify-offline PASS; daily installed; native Codex and physical NOT_RUN
 
-### [ ] Slice R26: Codex 前六键按会话状态筛选
+### [x] Slice R26: Codex 前六键按会话状态筛选
 - **Outcome**: 六个按键按选定状态筛选 Codex 会话，键位显示、灯光和导航使用同一会话身份。
 - **Done Predicate**: 核验真实会话身份、状态来源与选中回读；筛选、空槽、目标失效和旧输入回归及离线验收通过。最近六个会话快捷键不能代替状态筛选。
-- **Blocker**: 当前界面工具禁止检查 Codex；安装包静态 DOM 标记尚不能证明真实 AX 身份与导航回读。
+- **Evidence**: docs/verification/codex-controls.json; verify-offline PASS (6 QA scenarios); live ChatGPT.app duplicate-title switch PASS
