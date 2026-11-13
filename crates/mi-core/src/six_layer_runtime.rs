@@ -1999,6 +1999,26 @@ mod tests {
     }
 
     #[test]
+    fn custom_codex_routes_layer_one_vendor_in_manual_and_auto_follow_modes() {
+        let plan = test_plan();
+        let custom = PinnedProfilePlan {
+            profile_id: "local-codex".into(),
+            bundle_id: Some("com.openai.codex".into()),
+            actions: plan.hosts[0].actions.clone(),
+        };
+        for mode in [
+            SixLayerRoutingMode::ManualPinned(custom.clone()),
+            SixLayerRoutingMode::AutoFollow { dynamic_hosts: vec![custom.clone()] },
+        ] {
+            let mut context = RoutingContext::default();
+            context.set_routing(mode, Some("com.openai.codex"));
+            assert!(context.accepts_layer1_vendor_fallback());
+            assert_eq!(context.effective_profile_id(&plan, 1).as_deref(), Some("local-codex"));
+            assert_eq!(context.resolve_control(&plan, 1, 0).map(|(id, _)| id), Some("local-codex"));
+        }
+    }
+
+    #[test]
     fn foreground_host_overrides_physical_host_without_changing_observed_layer() {
         let plan = test_plan();
         let receiver = UserCommandReceiver::bind().unwrap();

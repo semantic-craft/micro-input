@@ -499,6 +499,33 @@ mod tests {
     }
 
     #[test]
+    fn custom_codex_is_available_to_six_layer_auto_follow() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        store.auto_follow_enabled = true;
+        store.manual_override = false;
+        let six_layer_runtime::SixLayerRoutingMode::AutoFollow { dynamic_hosts } = store.build_six_layer_routing_mode() else {
+            panic!("expected auto-follow");
+        };
+        let custom = dynamic_hosts.iter().find(|plan| plan.bundle_id.as_deref() == Some("com.openai.codex"));
+        assert!(custom.is_some_and(|plan| plan.actions.iter().any(Option::is_some)));
+    }
+
+    #[test]
+    fn installed_six_layer_keeps_exclusive_discovery_until_sleep() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let session = mock_session(&store.tokio_runtime);
+        let running = six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
+        store.six_layer_state.installation = Some(running.installation.clone());
+        assert!(!store.discovery_is_descriptor_only());
+        store.resume_requires_explicit_connect = true;
+        assert!(store.discovery_is_descriptor_only());
+        drop(running);
+        store.tokio_runtime.block_on(session.shutdown());
+    }
+
+    #[test]
     fn six_layer_banner_tracks_input_connection_and_user_pause_preserves_receiver() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
