@@ -394,7 +394,7 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 ### [x] Slice FW2: 固件更新未来兼容解锁与 0.7.0-rc.16 鼠标能力同步
 - **Outcome**: 解锁 `0.6.3` 与 `0.7.x+` 固件后续进入引导模式的软件限制，让 `PrepareDevice` 在未连接时实时识别有线 USB 或既有 bootloader 串口并自动轮询端口；同步 `v0.7.0-rc.16` 的 19 个 `MS_*` 硬件鼠标令牌与摇杆 `MOUSE`/`SCROLL` 模式，并新增 Mac 宿主 CoreGraphics 光标移动、左/右/中点击、四向滚轮、三档速度切换与通用预设「摇杆鼠标 + 旋钮滚轮」，随后以安装版 App 完成 `0.6.3 -> 0.6.3` 与 `0.6.3 -> 0.7.0-rc.16` 两阶段真机刷写验证。
 - **Done Predicate**: semver/bootloader 门禁、USB 发现与端口轮询、`apply` `MS_*`/`MOUSE`/`SCROLL` 兼容性校验、三处运行时 `"host"` 鼠标直通测试、CoreGraphics 鼠标测试与 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 全部通过；随后真机两阶段刷写完成并确认 16 MB 备份、`operation.json` `verified` 及重连 `0.7.0-rc.16` 自检回执。
-- **Evidence**: docs/firmware-update.md; verify-offline PASS (pending Stage A 0.6.3->0.6.3 and Stage B 0.6.3->0.7.0-rc.16 live flash receipts)
+- **Evidence**: PR #135 (b336b42), PR #136 (816351e), PR #137 (1bed7c4); Stage A 0.6.3->0.6.3 live flash verified (16MB flash-before.bin sha256:2d4c9583); Stage B 0.6.3->0.7.0-rc.16 live flash verified (16MB flash-before.bin sha256:b833e97e + HID Mouse UsagePage=1/Usage=2 + live 0.7.0-rc.16 six-layer readback)
 
 ### [ ] Slice FW3: 0.7.0 进阶硬件能力（速度曲线、无刷切换层与休眠电量看板）
 - **Outcome**: 在 `0.7.0-rc.16+` 真机基础上接入 `mouse.config` 指针与滚轮速度档/摇杆死区调参、`kb.pl`/`kb.pl.set` 无写 Flash 实时切层、`pm.config`/`pm.state`/`usb.host` 休眠跟随与电量状态显示，以及 `device.name` 与 `kb.sa.rgb` 动态灯光支持。
