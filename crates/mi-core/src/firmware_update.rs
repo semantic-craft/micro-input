@@ -1,7 +1,346 @@
 use crate::firmware_catalog::{self, DownloadedFirmware, FirmwareChannel, FirmwareRelease};
 use crate::firmware_flash::{self, BootloaderPort};
+use mi_proto::v070_capabilities::{
+    DeviceNameInfo, JoystickDeadzone, MouseConfig, MouseSpeedPreset, PmConfig, PmState,
+    SaRgbEffect, MAX_DEVICE_NAME_LEN,
+};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::mpsc};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct V070MouseConfigProjection {
+    pub preset: String,
+    pub delay_ms: u16,
+    pub interval_ms: u16,
+    pub move_delta: u16,
+    pub max_speed: u16,
+    pub time_to_max: u16,
+    pub wheel_delay_ms: u16,
+    pub wheel_interval_ms: u16,
+    pub wheel_delta: u16,
+    pub wheel_max_speed: u16,
+    pub wheel_time_to_max: u16,
+    pub stick_speed: u16,
+    pub stick_regulator: u16,
+    pub stick_scroll: u16,
+    pub deadzone: f64,
+}
+
+impl Default for V070MouseConfigProjection {
+    fn default() -> Self {
+        Self::from_mouse_config(&MouseConfig::default(), JoystickDeadzone::DEFAULT)
+    }
+}
+
+impl V070MouseConfigProjection {
+    pub fn from_mouse_config(cfg: &MouseConfig, deadzone: f64) -> Self {
+        let preset = cfg
+            .matching_preset()
+            .map(MouseSpeedPreset::as_str)
+            .unwrap_or("custom")
+            .to_string();
+        let safe_deadzone = if deadzone.is_finite() {
+            deadzone
+        } else {
+            JoystickDeadzone::DEFAULT
+        };
+        Self {
+            preset,
+            delay_ms: cfg.delay_ms,
+            interval_ms: cfg.interval_ms,
+            move_delta: cfg.move_delta,
+            max_speed: cfg.max_speed,
+            time_to_max: cfg.time_to_max,
+            wheel_delay_ms: cfg.wheel_delay_ms,
+            wheel_interval_ms: cfg.wheel_interval_ms,
+            wheel_delta: cfg.wheel_delta,
+            wheel_max_speed: cfg.wheel_max_speed,
+            wheel_time_to_max: cfg.wheel_time_to_max,
+            stick_speed: cfg.stick_speed,
+            stick_regulator: cfg.stick_regulator,
+            stick_scroll: cfg.stick_scroll,
+            deadzone: safe_deadzone,
+        }
+    }
+
+    pub fn to_mouse_config(&self) -> MouseConfig {
+        MouseConfig {
+            delay_ms: self.delay_ms,
+            interval_ms: self.interval_ms,
+            move_delta: self.move_delta,
+            max_speed: self.max_speed,
+            time_to_max: self.time_to_max,
+            wheel_delay_ms: self.wheel_delay_ms,
+            wheel_interval_ms: self.wheel_interval_ms,
+            wheel_delta: self.wheel_delta,
+            wheel_max_speed: self.wheel_max_speed,
+            wheel_time_to_max: self.wheel_time_to_max,
+            stick_speed: self.stick_speed,
+            stick_regulator: self.stick_regulator,
+            stick_scroll: self.stick_scroll,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct V070PmConfigProjection {
+    pub auto_sleep: bool,
+    pub host_sleep: bool,
+    pub sleep_after_min: u16,
+}
+
+impl Default for V070PmConfigProjection {
+    fn default() -> Self {
+        let defaults = PmConfig::default();
+        Self::from_pm_config(&defaults)
+    }
+}
+
+impl V070PmConfigProjection {
+    pub fn from_pm_config(cfg: &PmConfig) -> Self {
+        Self {
+            auto_sleep: cfg.auto_sleep,
+            host_sleep: cfg.host_sleep,
+            sleep_after_min: cfg.sleep_after_min,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct V070PmStateHoldProjection {
+    pub owner: String,
+    pub floor: String,
+    pub age_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct V070PmStateProjection {
+    pub state: String,
+    pub floor: String,
+    pub base_floor: String,
+    pub line_powered: bool,
+    pub auto_sleep: bool,
+    pub sleep_after_s: u32,
+    pub idle_s: u32,
+    pub standby_s: u32,
+    pub credit_s: u32,
+    pub usb_host_hold: bool,
+    pub holds: Vec<V070PmStateHoldProjection>,
+}
+
+impl V070PmStateProjection {
+    pub fn from_pm_state(state: &PmState) -> Self {
+        Self {
+            state: state.state.clone(),
+            floor: state.floor.clone(),
+            base_floor: state.base_floor.clone(),
+            line_powered: state.line_powered,
+            auto_sleep: state.auto_sleep,
+            sleep_after_s: state.sleep_after_s,
+            idle_s: state.idle_s,
+            standby_s: state.standby_s,
+            credit_s: state.credit_s,
+            usb_host_hold: state.usb_host_hold().is_some(),
+            holds: state
+                .holds
+                .iter()
+                .map(|h| V070PmStateHoldProjection {
+                    owner: h.owner.clone(),
+                    floor: h.floor.clone(),
+                    age_ms: h.age_ms,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct V070DeviceNameProjection {
+    pub name: String,
+    pub factory_name: String,
+    pub max_length: usize,
+}
+
+impl Default for V070DeviceNameProjection {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            factory_name: String::new(),
+            max_length: MAX_DEVICE_NAME_LEN,
+        }
+    }
+}
+
+impl V070DeviceNameProjection {
+    pub fn from_device_name_info(info: &DeviceNameInfo) -> Self {
+        Self {
+            name: info.name.clone(),
+            factory_name: info.factory_name.clone(),
+            max_length: info.max_length,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct V070SaRgbProjection {
+    pub sa: Option<u32>,
+    pub color_hex: String,
+    pub brightness: f64,
+    pub speed: f64,
+    pub effect: u8,
+}
+
+impl Default for V070SaRgbProjection {
+    fn default() -> Self {
+        Self {
+            sa: None,
+            color_hex: "#FFFFFF".into(),
+            brightness: 1.0,
+            speed: 0.5,
+            effect: SaRgbEffect::Solid.as_u8(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct V070HardwareProjection {
+    pub supported: bool,
+    pub busy: bool,
+    pub synced: bool,
+    pub active_profile: Option<u8>,
+    pub active_layer: Option<u8>,
+    pub battery_percent: Option<u8>,
+    pub is_charging: Option<bool>,
+    pub host_sleep_status: String,
+    pub status_message: String,
+    pub last_error: Option<String>,
+    pub mouse: V070MouseConfigProjection,
+    pub pm_config: V070PmConfigProjection,
+    pub pm_state: V070PmStateProjection,
+    pub device_name: V070DeviceNameProjection,
+    pub sa_rgb: V070SaRgbProjection,
+}
+
+impl Default for V070HardwareProjection {
+    fn default() -> Self {
+        Self {
+            supported: false,
+            busy: false,
+            synced: false,
+            active_profile: None,
+            active_layer: None,
+            battery_percent: None,
+            is_charging: None,
+            host_sleep_status: "awake".into(),
+            status_message: "需连接 0.7.0-rc.16+ 独占固件设备".into(),
+            last_error: None,
+            mouse: V070MouseConfigProjection::default(),
+            pm_config: V070PmConfigProjection::default(),
+            pm_state: V070PmStateProjection::default(),
+            device_name: V070DeviceNameProjection::default(),
+            sa_rgb: V070SaRgbProjection::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct V070SnapshotPayload {
+    pub session_id: u64,
+    pub version: String,
+    pub active_profile: Option<u8>,
+    pub active_layer: Option<u8>,
+    pub battery_percent: Option<u8>,
+    pub is_charging: Option<bool>,
+    pub mouse: MouseConfig,
+    pub deadzone: f64,
+    pub pm_config: PmConfig,
+    pub pm_state: PmState,
+    pub device_name: DeviceNameInfo,
+}
+
+#[derive(Debug, Clone)]
+pub enum V070BridgeOutcome {
+    Snapshot(V070SnapshotPayload),
+    ProfileLayer {
+        profile_index: Option<u8>,
+        layer_index: u8,
+    },
+    MouseUpdated {
+        mouse: MouseConfig,
+        deadzone: f64,
+    },
+    PmConfigUpdated {
+        pm_config: PmConfig,
+    },
+    DeviceRenamed {
+        device_name: DeviceNameInfo,
+    },
+    SaRgbApplied {
+        sa: u32,
+        color_hex: String,
+        brightness: f64,
+        speed: f64,
+        effect: u8,
+    },
+    SaRgbReset {
+        sa: u32,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum V070HardwareAction {
+    Refresh,
+    SelectLayer {
+        layer: u8,
+    },
+    ApplyMousePreset {
+        preset: String,
+    },
+    ApplyMouseConfig {
+        move_delta: u16,
+        max_speed: u16,
+        wheel_delta: u16,
+        wheel_max_speed: u16,
+        stick_speed: u16,
+        stick_scroll: u16,
+        deadzone: f64,
+    },
+    ApplyPmConfig {
+        auto_sleep: bool,
+        host_sleep: bool,
+        sleep_after_min: u16,
+    },
+    RenameDevice {
+        name: String,
+    },
+    ApplySaRgb {
+        sa: u32,
+        color_hex: String,
+        brightness: f64,
+        speed: f64,
+        effect: u8,
+    },
+    ResetSaRgb {
+        sa: u32,
+    },
+}
+
+pub(crate) fn parse_hex_color(raw: &str) -> Result<u32, String> {
+    let trimmed = raw
+        .trim()
+        .strip_prefix('#')
+        .or_else(|| raw.trim().strip_prefix("0x"))
+        .or_else(|| raw.trim().strip_prefix("0X"))
+        .unwrap_or(raw.trim());
+    if trimmed.len() != 6 || !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("RGB 颜色必须为 6 位十六进制（例如 #33AAFF）".into());
+    }
+    u32::from_str_radix(trimmed, 16).map_err(|_| "RGB 颜色格式无效".into())
+}
+
+pub(crate) fn format_hex_color(rgb: u32) -> String {
+    format!("#{:06X}", rgb & 0xFF_FFFF)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FirmwareAction {
@@ -12,6 +351,7 @@ pub enum FirmwareAction {
     SelectPort { path: String },
     Install,
     Finish,
+    V070Hardware(V070HardwareAction),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -30,6 +370,8 @@ pub struct FirmwareProjection {
     pub selected_port: Option<String>,
     pub progress: Option<f64>,
     pub backup_path: Option<String>,
+    #[serde(default)]
+    pub v070: V070HardwareProjection,
 }
 impl Default for FirmwareProjection {
     fn default() -> Self {
@@ -48,6 +390,7 @@ impl Default for FirmwareProjection {
             selected_port: None,
             progress: None,
             backup_path: None,
+            v070: V070HardwareProjection::default(),
         }
     }
 }

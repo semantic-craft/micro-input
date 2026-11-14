@@ -89,6 +89,8 @@ pub struct IdentityInfo {
     pub version: Option<String>,
     pub profile_index: Option<u32>,
     pub layer_index: Option<u32>,
+    pub battery: Option<u8>,
+    pub is_charging: Option<bool>,
     pub source_method: String,
     pub raw: Value,
 }
@@ -167,6 +169,9 @@ pub struct DeviceSession {
     config: SessionConfig,
     read_gate: AsyncMutex<()>,
     firmware: Mutex<Option<String>>,
+    battery_status: Mutex<(Option<u8>, Option<bool>)>,
+    profile_layer: Arc<Mutex<Option<(u8, u8)>>>,
+    device_name_max_length: Mutex<Option<usize>>,
     schema: Arc<dyn DeviceSchema>,
     snapshot: Arc<Mutex<Option<Snapshot>>>,
     notifications: broadcast::Sender<ReceivedNotification>,
@@ -189,10 +194,11 @@ impl DeviceSession {
         let pending = Arc::new(Mutex::new(None::<Pending>));
         let terminal = Arc::new(Mutex::new(None));
         let snapshot = Arc::new(Mutex::new(None::<Snapshot>));
+        let profile_layer = Arc::new(Mutex::new(None::<(u8, u8)>));
         let reader = {
             let terminal = terminal.clone();
             let ingress_sequence = ingress_sequence.clone();
-            let (link, framer, invalid, changed, pending, notifications, snapshot) = (
+            let (link, framer, invalid, changed, pending, notifications, snapshot, profile_layer) = (
                 link.clone(),
                 framer.clone(),
                 invalid.clone(),
@@ -200,6 +206,7 @@ impl DeviceSession {
                 pending.clone(),
                 notifications.clone(),
                 snapshot.clone(),
+                profile_layer.clone(),
             );
             tokio::spawn(async move {
                 let outcome: Result<(), SessionError> = async {
@@ -242,9 +249,17 @@ impl DeviceSession {
                                 Incoming::Notification(n) => {
                                     let sequence =
                                         ingress_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                                    let host_notif = HostNotification::from(n);
+                                    if let HostNotification::ProfileLayer(ref raw) = host_notif {
+                                        if let Some((p, l)) =
+                                            mi_proto::v070_capabilities::parse_profile_layer_notification(raw)
+                                        {
+                                            *profile_layer.lock().unwrap() = Some((p, l));
+                                        }
+                                    }
                                     let _ = notifications.send(ReceivedNotification {
                                         ingress_sequence: sequence,
-                                        notification: n.into(),
+                                        notification: host_notif,
                                     });
                                 }
                             }
@@ -290,6 +305,9 @@ impl DeviceSession {
             config,
             read_gate: AsyncMutex::new(()),
             firmware: Mutex::new(None),
+            battery_status: Mutex::new((None, None)),
+            profile_layer,
+            device_name_max_length: Mutex::new(None),
             schema,
             snapshot,
             notifications,
@@ -517,10 +535,34 @@ impl DeviceSession {
                     | "sys.bootloader"
             )
             && self.link.backend() == mi_transport::LinkBackend::MacHidapi267Numbered;
+        let is_v070_method = matches!(
+            method,
+            "mouse.config"
+                | "joystick.deadzone"
+                | "kb.pl.set"
+                | "pm.config"
+                | "pm.state"
+                | "device.name"
+                | "kb.sa.rgb"
+        );
+        let v070_capability = is_v070_method
+            && mutation == Some(method)
+            && self.link.is_exclusive_vendor()
+            && self.link.backend() == mi_transport::LinkBackend::MacHidapi267Numbered
+            && self
+                .observed_firmware_version()
+                .as_deref()
+                .is_some_and(mi_model::supports_v070_hardware_capabilities);
+        if is_v070_method && !v070_capability {
+            return Err(ProtoError::Unverified(
+                "0.7.0 hardware capabilities require exclusive 267-byte vendor link on >= 0.7.0-rc.16 firmware",
+            )
+            .into());
+        }
         if native_mutation && method == "sys.bootloader" {
             self.validate_firmware_bootloader_request(q.next_id, &encoded)?;
         }
-        if !synthetic && !native_mutation {
+        if !synthetic && !native_mutation && !v070_capability {
             let request: Value = serde_json::from_slice(&encoded)
                 .map_err(|_| ProtoError::Invalid("invalid encoded request".into()))?;
             let readonly = match method {
@@ -584,10 +626,29 @@ impl DeviceSession {
             }
         }
         q.last = Some(tokio::time::Instant::now());
-        tokio::time::timeout_at(deadline, receiver)
+        let reply = tokio::time::timeout_at(deadline, receiver)
             .await
             .map_err(|_| SessionError::Timeout)?
-            .map_err(|_| self.disconnection_error())?
+            .map_err(|_| self.disconnection_error())??;
+        if v070_capability {
+            if let Some(m) = reply.get("method").or_else(|| reply.get("m")) {
+                if m.as_str() != Some(method) {
+                    return Err(ProtoError::Invalid(format!(
+                        "unexpected reply method {m} for {method}"
+                    ))
+                    .into());
+                }
+            }
+            if let Some(error) = reply.get("error").filter(|v| !v.is_null()) {
+                let detail = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| error.to_string());
+                return Err(ProtoError::Invalid(format!("{method} rpc error: {detail}")).into());
+            }
+        }
+        Ok(reply)
     }
 
     async fn guarded<T>(
@@ -612,6 +673,8 @@ impl DeviceSession {
     /// E-053/R-D09: identity reads never invoke the configuration schema or file service.
     pub async fn read_identity_info(&self) -> Result<IdentityInfo, SessionError> {
         *self.firmware.lock().unwrap() = None;
+        *self.battery_status.lock().unwrap() = (None, None);
+        *self.profile_layer.lock().unwrap() = None;
         self.guarded(async {
             let mut q = self.queue.lock().await;
             let status = self
@@ -649,12 +712,30 @@ impl DeviceSession {
                     .and_then(Value::as_u64)
                     .and_then(|n| u32::try_from(n).ok())
             };
+            let profile_index = index("profile_index");
+            let layer_index = index("layer_index");
+            let battery = status_value
+                .as_ref()
+                .and_then(|v| v.get("battery"))
+                .and_then(Value::as_u64)
+                .and_then(|n| u8::try_from(n).ok())
+                .filter(|&b| b <= 100);
+            let is_charging = status_value
+                .as_ref()
+                .and_then(|v| v.get("is_charging"))
+                .and_then(Value::as_bool);
             *self.firmware.lock().unwrap() = version.clone();
+            *self.battery_status.lock().unwrap() = (battery, is_charging);
+            *self.profile_layer.lock().unwrap() = profile_index
+                .and_then(|p| u8::try_from(p).ok())
+                .zip(layer_index.and_then(|l| u8::try_from(l).ok()));
             Ok(IdentityInfo {
                 session_id: self.id,
                 version,
-                profile_index: index("profile_index"),
-                layer_index: index("layer_index"),
+                profile_index,
+                layer_index,
+                battery,
+                is_charging,
                 source_method: source_method.into(),
                 raw,
             })
@@ -824,3 +905,4 @@ pub mod config_write;
 pub use config_write::SixLayerSnapshotCheck;
 
 pub mod lighting_preview;
+pub mod v070_hardware;

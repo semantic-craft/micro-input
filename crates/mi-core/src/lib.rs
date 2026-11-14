@@ -28,6 +28,11 @@ pub use editors::{
     MacroEditorModalProjection, MacroStepDraft, MultiBranchKind, MultiBranchSlotProjection,
     MultiBranchTarget, MultiEditorModalProjection, ReconnectComparisonModalProjection,
 };
+pub use firmware_update::{
+    FirmwareAction, FirmwareProjection, V070DeviceNameProjection, V070HardwareAction,
+    V070HardwareProjection, V070MouseConfigProjection, V070PmConfigProjection,
+    V070PmStateHoldProjection, V070PmStateProjection, V070SaRgbProjection,
+};
 pub use header::{HeaderAction, HeaderProjection, HeaderReadyState};
 pub use inspector::{
     ActionLibraryRowProjection, CodexKeycapId, EditableSlotInspectorProjection, InspectorAction,

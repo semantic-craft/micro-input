@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum SystemLifecycle {
+pub(crate) enum SystemLifecycle {
     Awake,
     Sleeping,
     Waking,
@@ -33,6 +33,8 @@ impl WorkbenchStore {
         self.cancel_session_navigation();
         self.session_navigation.catalog = None;
         self.system_lifecycle = SystemLifecycle::Sleeping;
+        self.v070_hardware.on_disconnected();
+        self.v070_hardware.set_host_sleep_status("sleeping");
         self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
         self.resume_requires_explicit_connect = true;
         self.ptt_controller.cancel();
@@ -126,6 +128,7 @@ impl WorkbenchStore {
     pub fn system_did_wake(&mut self) {
         if self.system_lifecycle == SystemLifecycle::Sleeping {
             self.system_lifecycle = SystemLifecycle::Waking;
+            self.v070_hardware.set_host_sleep_status("waking");
             self.status_message = "系统已唤醒 · 等待旧会话释放".into();
             self.commit_runtime_update();
         }
@@ -160,6 +163,7 @@ impl WorkbenchStore {
         }
         self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
         self.system_lifecycle = SystemLifecycle::Awake;
+        self.v070_hardware.set_host_sleep_status("awake");
         self.status_message = if self.discovery_enabled {
             self.start_mac_usb_discovery_watcher();
             self.discovery_refresh_count += 1;
@@ -171,6 +175,9 @@ impl WorkbenchStore {
             "系统已唤醒 · USB 发现尚未开始"
         }
         .into();
+        if self.has_active_v070_device() && !self.v070_hardware.projection.busy {
+            let _ = self.schedule_v070_refresh();
+        }
         if !self.config.isolated
             && self.config.auto_connect_usb
             && self

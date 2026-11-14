@@ -6,6 +6,23 @@ impl WorkbenchStore {
         &mut self,
         action: FirmwareAction,
     ) -> Result<(), WorkbenchError> {
+        if let FirmwareAction::V070Hardware(v070_action) = action {
+            let result = self
+                .require_awake()
+                .map_err(|e| e.to_string())
+                .and_then(|()| {
+                    if self.firmware_update.projection.busy {
+                        return Err("固件操作正在进行，请等待完成".into());
+                    }
+                    self.dispatch_v070_hardware_action(v070_action)
+                });
+            if let Err(error) = &result {
+                self.v070_hardware.projection.last_error = Some(error.clone());
+                self.v070_hardware.projection.status_message = error.clone();
+            }
+            self.commit_runtime_update();
+            return result.map_err(WorkbenchError::Routing);
+        }
         let result = self.apply_firmware_action(action);
         if let Err(error) = &result {
             self.firmware_update.projection.message = error.clone();
@@ -234,6 +251,7 @@ impl WorkbenchStore {
                 self.resume_requires_explicit_connect = true;
                 self.config.auto_connect_usb = false;
             }
+            FirmwareAction::V070Hardware(_) => {}
         }
         Ok(())
     }

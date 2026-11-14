@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 
 pub(super) const INPUT_CAPACITY: usize = 256;
 pub(super) const INPUT_BATCH: usize = 32;
-pub(super) const CONTROL_BATCH: usize = 5;
+pub(super) const CONTROL_BATCH: usize = 7;
 
 #[derive(Default)]
 struct Pending {
@@ -21,10 +21,12 @@ struct Pending {
     discovery: Option<HardwareLoopEvent>,
     acceptance: Option<HardwareLoopEvent>,
     candidates: Option<HardwareLoopEvent>,
+    v070_capability: Option<HardwareLoopEvent>,
+    v070_profile_layer: Option<HardwareLoopEvent>,
 }
 
 #[derive(Clone, Default)]
-pub(super) struct RuntimeInbox {
+pub(crate) struct RuntimeInbox {
     pending: Arc<Mutex<Pending>>,
     ready: Arc<Notify>,
 }
@@ -37,6 +39,8 @@ impl RuntimeInbox {
         pending.gap = None;
         pending.disconnected = None;
         pending.acceptance = None;
+        pending.v070_capability = None;
+        pending.v070_profile_layer = None;
         pending.source_closed = false;
     }
 
@@ -54,7 +58,7 @@ impl RuntimeInbox {
         self.ready.notify_waiters();
     }
 
-    pub(super) fn send(&self, event: HardwareLoopEvent) -> Result<(), ()> {
+    pub(crate) fn send(&self, event: HardwareLoopEvent) -> Result<(), ()> {
         let mut pending = self.pending.lock().unwrap();
         if pending.closed {
             return Err(());
@@ -104,6 +108,20 @@ impl RuntimeInbox {
                     pending.candidates = Some(event);
                 }
             }
+            event @ HardwareLoopEvent::V070CapabilityOutcome { seq, .. } => {
+                let replace = match &pending.v070_capability {
+                    Some(HardwareLoopEvent::V070CapabilityOutcome { seq: old, .. }) => {
+                        *old == 0 || (seq != 0 && seq >= *old)
+                    }
+                    _ => true,
+                };
+                if replace {
+                    pending.v070_capability = Some(event);
+                }
+            }
+            event @ HardwareLoopEvent::V070ProfileLayerChanged { .. } => {
+                pending.v070_profile_layer = Some(event);
+            }
         }
         drop(pending);
         self.ready.notify_one();
@@ -119,6 +137,8 @@ impl RuntimeInbox {
             pending.acceptance.take(),
             pending.discovery.take(),
             pending.candidates.take(),
+            pending.v070_capability.take(),
+            pending.v070_profile_layer.take(),
         ]
         .into_iter()
         .flatten()
@@ -146,6 +166,8 @@ impl RuntimeInbox {
                     .or_else(|| pending.acceptance.take())
                     .or_else(|| pending.discovery.take())
                     .or_else(|| pending.candidates.take())
+                    .or_else(|| pending.v070_capability.take())
+                    .or_else(|| pending.v070_profile_layer.take())
                     .or_else(|| pending.input.pop_front())
                 {
                     return event;
@@ -268,5 +290,45 @@ mod tests {
             inbox.send(input(2)).is_err(),
             "background publishers terminate after owner teardown"
         );
+    }
+
+    #[test]
+    fn v070_capability_coalescing_preserves_command_outcomes_over_snapshots() {
+        let inbox = RuntimeInbox::default();
+        let outcome = |seq| HardwareLoopEvent::V070CapabilityOutcome {
+            session_id: 1,
+            seq,
+            result: Ok(crate::firmware_update::V070BridgeOutcome::ProfileLayer {
+                profile_index: Some(1),
+                layer_index: 2,
+            }),
+        };
+
+        inbox.send(outcome(1)).unwrap();
+        inbox.send(outcome(0)).unwrap();
+        let batch = inbox.take_batch();
+        assert_eq!(batch.len(), 1);
+        assert!(matches!(
+            batch[0],
+            HardwareLoopEvent::V070CapabilityOutcome { seq: 1, .. }
+        ));
+
+        inbox.send(outcome(1)).unwrap();
+        inbox.send(outcome(2)).unwrap();
+        let batch = inbox.take_batch();
+        assert_eq!(batch.len(), 1);
+        assert!(matches!(
+            batch[0],
+            HardwareLoopEvent::V070CapabilityOutcome { seq: 2, .. }
+        ));
+
+        inbox.send(outcome(0)).unwrap();
+        inbox.send(outcome(1)).unwrap();
+        let batch = inbox.take_batch();
+        assert_eq!(batch.len(), 1);
+        assert!(matches!(
+            batch[0],
+            HardwareLoopEvent::V070CapabilityOutcome { seq: 1, .. }
+        ));
     }
 }

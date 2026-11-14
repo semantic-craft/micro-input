@@ -835,6 +835,9 @@ private struct WorkbenchSettingsPage: View {
                         model: store.firmware,
                         onConnectKeyboard: { store.dispatch("header", "ConnectKeyboard") }
                     ) { store.dispatch("firmware", $0) }
+                    V070HardwareSettingsSection(model: store.firmware.v070) {
+                        store.dispatch("firmware", $0)
+                    }
                     VStack(alignment: .leading, spacing: 10) {
                         SettingsSectionHeader("按键控制")
                         SettingsCard {

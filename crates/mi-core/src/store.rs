@@ -94,19 +94,21 @@ mod firmware_store;
 pub(crate) mod session_navigation;
 #[path = "six_layer_store.rs"]
 mod six_layer_store;
+#[path = "v070_hardware_store.rs"]
+pub(crate) mod v070_hardware_store;
 #[path = "workspace_lifecycle.rs"]
 mod workspace_lifecycle;
 use session_navigation::{
     AntigravityInstance, CatalogInstance, NavigationCatalog, NavigationCommand,
     NavigationInputLease, SessionNavigation,
 };
-use workspace_lifecycle::SystemLifecycle;
+pub(crate) use workspace_lifecycle::SystemLifecycle;
 #[path = "projection.rs"]
 mod projection;
 pub use projection::format_popover_cheat_label;
 use projection::{ProjectionInputs, ReusableInspectorCatalogs, SixLayerView};
 #[path = "runtime_inbox.rs"]
-mod runtime_inbox;
+pub(crate) mod runtime_inbox;
 use runtime_inbox::RuntimeInbox;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +175,16 @@ pub enum HardwareLoopEvent {
     LiveCandidatesUpdated {
         epoch: u64,
         catalog: Option<NavigationCatalog>,
+    },
+    V070CapabilityOutcome {
+        session_id: u64,
+        seq: u64,
+        result: Result<crate::firmware_update::V070BridgeOutcome, String>,
+    },
+    V070ProfileLayerChanged {
+        session_id: u64,
+        profile_index: u8,
+        layer_index: u8,
     },
 }
 
@@ -399,6 +411,7 @@ pub struct WorkbenchStore {
     six_layer_auto_resume_attempts: u8,
     six_layer_next_auto_resume_at: Option<Instant>,
     last_synced_six_layer_revs: (u64, u64),
+    v070_hardware: v070_hardware_store::V070HardwareController,
     accessibility_trusted: bool,
     accessibility_trusted_override: Option<bool>,
     last_accessibility_check_at: Instant,
@@ -579,6 +592,7 @@ impl WorkbenchStore {
             six_layer_auto_resume_attempts: 0,
             six_layer_next_auto_resume_at: None,
             last_synced_six_layer_revs: (0, 0),
+            v070_hardware: v070_hardware_store::V070HardwareController::default(),
             accessibility_trusted: true,
             accessibility_trusted_override: None,
             last_accessibility_check_at: now,
@@ -1479,6 +1493,7 @@ impl WorkbenchStore {
                     let previous = self.connected_candidate.take();
                     self.hardware_rpc_verified = false;
                     self.lighting_arbiter.invalidate_hardware_cache();
+                    self.v070_hardware.on_disconnected();
                     self.status_message = "小键盘已断开连接（等待重新插入）".to_string();
                     self.commit_runtime_update();
                     if self.config.auto_connect_usb && !self.config.isolated {
@@ -1590,6 +1605,14 @@ impl WorkbenchStore {
                     self.last_hardware_auto_acceptance = Some(receipt);
                     self.lighting_arbiter.invalidate_hardware_cache();
                     self.refresh_four_app_lighting();
+                    if let Some(session) = self
+                        .device_session
+                        .as_ref()
+                        .filter(|s| s.id == session_id)
+                        .map(Arc::clone)
+                    {
+                        self.trigger_v070_session_snapshot_if_supported(&session);
+                    }
                     self.commit_runtime_update();
                 }
                 None
@@ -1606,6 +1629,22 @@ impl WorkbenchStore {
                     return None;
                 }
                 self.update_navigation_catalog(catalog);
+                None
+            }
+            HardwareLoopEvent::V070CapabilityOutcome {
+                session_id,
+                seq,
+                result,
+            } => {
+                self.handle_v070_capability_outcome(session_id, seq, result);
+                None
+            }
+            HardwareLoopEvent::V070ProfileLayerChanged {
+                session_id,
+                profile_index,
+                layer_index,
+            } => {
+                self.handle_v070_profile_layer_changed(session_id, profile_index, layer_index);
                 None
             }
         }
@@ -3535,6 +3574,7 @@ impl WorkbenchStore {
         }
         let mut next = self.projection_inputs_with(reusable).project();
         next.firmware = self.firmware_update.projection.clone();
+        next.firmware.v070 = self.v070_hardware.projection.clone();
         next.firmware.current_version = self
             .last_hardware_auto_acceptance
             .as_ref()
