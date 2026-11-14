@@ -1189,13 +1189,9 @@ impl ProjectionInputs<'_> {
             });
 
         let is_protected = self.is_selected_layer_protected();
-        let popover_preview_mode = self.document_store.popover_preview_mode();
-        let cheat_sheet_preview = match (popover_preview_mode, active_pid.is_some()) {
-            (PopoverPreviewMode::CheatSheet, true) => {
-                Some(self.build_static_cheat_sheet_projection())
-            }
-            _ => None,
-        };
+        let cheat_sheet_preview = active_pid
+            .as_ref()
+            .map(|_| self.build_static_cheat_sheet_projection());
         let locked_profile_id = self.document_store.locked_profile_id();
         let is_profile_locked = locked_profile_id.is_some();
         let competing_host_notice = self.competing_input_app_running.then(|| {
@@ -1221,7 +1217,6 @@ impl ProjectionInputs<'_> {
             radial_menu_enabled: self.radial_state.enabled(),
             radial_confirm_mode: self.radial_state.confirm_mode(),
             lighting_enabled: self.lighting_popover.lighting_enabled,
-            popover_preview_mode,
             cheat_sheet_preview,
             cheat_sheet_visible: self.overlay_controller.is_cheat_sheet_visible(),
             can_export_profile: can_edit_draft && self.selected_profile_id.is_some(),

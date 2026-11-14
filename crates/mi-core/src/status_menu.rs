@@ -2,7 +2,6 @@ use crate::overlay::CheatSheetProjection;
 use crate::radial::{RadialConfirmMode, RadialPresetKind};
 use crate::sidebar::CanonicalAgent;
 use mi_macos::StatusItemIconSpec;
-use mi_model::host_router::PopoverPreviewMode;
 use serde::{Deserialize, Serialize};
 
 pub const FAVORITE_SLOT_COUNT: usize = 4;
@@ -128,7 +127,6 @@ pub struct StatusMenuProjection {
     pub radial_menu_enabled: bool,
     pub radial_confirm_mode: RadialConfirmMode,
     pub lighting_enabled: bool,
-    pub popover_preview_mode: PopoverPreviewMode,
     pub cheat_sheet_preview: Option<CheatSheetProjection>,
     pub cheat_sheet_visible: bool,
     pub can_export_profile: bool,
@@ -161,7 +159,6 @@ impl Default for StatusMenuProjection {
             radial_menu_enabled: false,
             radial_confirm_mode: RadialConfirmMode::EncoderPress,
             lighting_enabled: true,
-            popover_preview_mode: PopoverPreviewMode::SessionPreview,
             cheat_sheet_preview: None,
             cheat_sheet_visible: false,
             can_export_profile: false,
@@ -189,7 +186,6 @@ pub enum StatusMenuAction {
     SetRadialMenuEnabled(bool),
     SetRadialConfirmMode(RadialConfirmMode),
     ApplyRadialPreset(RadialPresetKind),
-    SetPopoverPreviewMode(PopoverPreviewMode),
     ToggleCheatSheet,
     StagePresetImportBytes(Vec<u8>),
     ConfirmStagedPresetImport,

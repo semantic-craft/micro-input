@@ -61,7 +61,7 @@ use mi_model::{
     document::{LayerNode, LocalDocumentV2},
     draft::{Action, ActionKind, Draft},
     host_router::{
-        resolve_host_action_with_layout, BottomRowLayout, PopoverPreviewMode, ResolvedHostAction,
+        resolve_host_action_with_layout, BottomRowLayout, ResolvedHostAction,
         CANONICAL_DESKTOP_AGENT_PROFILES,
     },
     lighting::{Edit as LightingEdit, Effect as LightingEffect, Lighting, Zone as LightingZone},
@@ -4240,11 +4240,6 @@ impl WorkbenchStore {
                 self.apply_radial_preset(preset);
                 Ok(())
             }
-            StatusMenuAction::SetPopoverPreviewMode(mode) => {
-                self.apply_routing_operation(RoutingOperation::PopoverPreviewMode { mode })?;
-                self.commit_runtime_update();
-                Ok(())
-            }
             StatusMenuAction::ToggleCheatSheet => {
                 self.dispatch_overlay_action(HostOverlayAction::ToggleCheatSheet)
             }
@@ -7386,11 +7381,6 @@ mod tests {
         store
             .select_and_activate_profile(&antigravity_id)
             .expect("activate Antigravity");
-        store
-            .dispatch_status_menu_action(StatusMenuAction::SetPopoverPreviewMode(
-                PopoverPreviewMode::CheatSheet,
-            ))
-            .expect("enable cheat sheet preview");
 
         let host_sheet = store
             .projection()

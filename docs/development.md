@@ -65,6 +65,8 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 
 菜单栏由 `StatusItemIcon.swift` 绘制 20 × 18 pt 的键盘与旋钮符号，设置 `isTemplate`，由系统处理深浅色及选中着色。尺寸是本项目选择，不是 Apple 强制尺寸。遵循 [Apple 菜单栏规范](https://developer.apple.com/design/human-interface-guidelines/the-menu-bar) 的黑色/透明符号建议及 [NSImage.isTemplate](https://developer.apple.com/documentation/appkit/nsimage/istemplate) 的模板语义。
 
+菜单栏弹层固定显示当前生效方案的静态按键速查，复用原生 `NSPopover` 与 4×4 物理拓扑。旋钮显示左旋、右旋和按下，摇杆显示四方向用途；悬停可查看完整动作名称。浏览工作台中的其他方案不改变速查，实际切换生效方案才更新。会话标题、未读状态与灯效更新不参与速查投影。旧偏好文件的 `popover_preview_mode` 只在加载时丢弃，其他字段继续严格校验；之后保存不再输出该字段。
+
 ## 有界只读输入观测
 
 `scripts/observe-input`（或 `--dry-run`）默认只跑合成测试，原生测试保持 ignored。需要一次由操作者配合的物理观测时，显式运行 `scripts/observe-input --observe-once`。只复用生产 `MicroInput` / `DeviceSession` 的描述符、身份、完整性校验配置读取及唯一 reader 输入订阅；不激活 Profile/Layer、不写配置、不执行宿主动作、不申请权限或终止其他应用。

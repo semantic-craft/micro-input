@@ -439,7 +439,6 @@ public final class CoreStore {
             m.radialMenuEnabled = sm["radial_menu_enabled"] as? Bool ?? false
             m.radialConfirmMode = sm["radial_confirm_mode"] as? String ?? "encoder_press"
             m.lightingEnabled = sm["lighting_enabled"] as? Bool ?? true
-            m.popoverPreviewMode = (sm["popover_preview_mode"] as? String).flatMap(PopoverPreviewMode.init(rawValue:)) ?? .sessionPreview
             m.cheatSheetPreview = (sm["cheat_sheet_preview"] as? [String: Any]).map(parseCheatSheet)
             m.cheatSheetVisible = sm["cheat_sheet_visible"] as? Bool ?? false
             if let favs = sm["favorites_2x2"] as? [[String: Any]] {

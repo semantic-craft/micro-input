@@ -32,7 +32,7 @@ pub use inspector::{
     KeycapDescriptor, KeycapRole, MacroLibraryRowProjection, ShortcutModifier,
     ShortcutRecorderState, INSPECTOR_WIDTH,
 };
-pub use mi_model::host_router::{BottomRowLayout, PopoverPreviewMode};
+pub use mi_model::host_router::BottomRowLayout;
 pub use overlay::{
     ActiveHudContent, CheatSheetKeyCellProjection, CheatSheetProjection, HostOverlayAction,
     HostOverlayProjection, HudVisibilityState, OverlayController, TargetAgentStatusCardProjection,

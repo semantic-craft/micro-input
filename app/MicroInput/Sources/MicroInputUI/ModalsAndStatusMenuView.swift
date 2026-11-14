@@ -158,15 +158,10 @@ public struct StatusMenuPopoverView: View {
                 }
             }
 
-            switch sm.popoverPreviewMode {
-            case .sessionPreview:
-                PopoverSessionPreviewSection(store: store)
-            case .cheatSheet:
-                if let sheet = sm.cheatSheetPreview {
-                    PopoverMiniCheatSheetView(sheet: sheet)
-                } else {
-                    PopoverCheatSheetEmptyCard()
-                }
+            if let sheet = sm.cheatSheetPreview {
+                PopoverMiniCheatSheetView(sheet: sheet)
+            } else {
+                PopoverCheatSheetEmptyCard()
             }
 
             Rectangle().fill(UITheme.rowDivider).frame(height: 1)
@@ -258,59 +253,6 @@ public struct StatusMenuPopoverView: View {
         .fixedSize(horizontal: false, vertical: true)
         .background(UITheme.pageBackground)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-}
-
-private struct PopoverSessionPreviewSection: View {
-    let store: CoreStore
-
-    var body: some View {
-        let _ = ViewRenderTelemetry.record("PopoverSessionPreviewSection")
-        let ss = store.sessionStrip
-        VStack(alignment: .leading, spacing: 6) {
-            Text("活跃会话槽位")
-                .font(UITheme.micro)
-                .foregroundStyle(UITheme.textSecondary)
-
-            VStack(spacing: 4) {
-                ForEach(ss.sessionSlots.prefix(6)) { slot in
-                    Button {
-                        store.dispatch("session_strip", ["ActivateSlot": slot.slotIndex])
-                    } label: {
-                        let isOffLed = slot.title.isEmpty || slot.ledColorHex.uppercased() == "#000000"
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(isOffLed ? UITheme.switchOffFill : Color(hex: slot.ledColorHex))
-                                .frame(width: 7, height: 7)
-                            Text(slot.keyBindingId)
-                                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                .foregroundStyle(UITheme.textMuted)
-                            Text(slot.title.isEmpty ? "空闲槽位" : slot.title)
-                                .font(UITheme.caption)
-                                .foregroundStyle(slot.title.isEmpty ? UITheme.textMuted : UITheme.textPrimary)
-                                .lineLimit(1)
-                            Spacer(minLength: 4)
-                            if slot.isUnreadBlueDot {
-                                Text("未读")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundStyle(UITheme.textPrimary)
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 2)
-                                    .background(Capsule().fill(UITheme.subtleSurface))
-                                    .overlay(Capsule().stroke(UITheme.hairlineBorder, lineWidth: 1))
-                            }
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(UITheme.surface))
-                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .focusEffectDisabled()
-                }
-            }
-        }
     }
 }
 
