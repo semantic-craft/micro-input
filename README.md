@@ -4,7 +4,9 @@
 
 ## 当前开发状态
 
-当前已发布版本为 [v0.7.0](https://github.com/semantic-craft/micro-input/releases/tag/v0.7.0)。后续源码已接入 Codex 本机控制、按状态筛选的前六个会话键，以及旋钮的对话滚动和推理档位预设。内置适配为 Antigravity、Herdr、Codex、DeepSeek Harness，另有通用快捷键方案。六层听写采用点击开关，不合入已停止的按住说话试验。
+当前已发布版本为 [v0.8.0](https://github.com/semantic-craft/micro-input/releases/tag/v0.8.0)。本版支持 Codex 本机控制、按状态筛选的前六个会话键，以及旋钮的对话滚动和推理档位预设。内置适配为 Antigravity、Herdr、Codex、DeepSeek Harness，另有通用快捷键方案。六层听写采用点击开关，不合入已停止的按住说话试验。
+
+灯光编辑器的预览入口当前只更新界面状态，尚未接入设备预览。
 
 源码实现、离线自动验收、日常安装和实体效果分别记录在[接力队列](docs/pstack-relay.md)。[完整产品验收 #44](https://github.com/semantic-craft/micro-input/issues/44) 仍未完成，不能由已合并 PR 或合成回执代替。Fast 模式只有读回反向菜单标签才确认成功；没有滚动位置读回的定向滚轮派发保留未确认结果。
 
