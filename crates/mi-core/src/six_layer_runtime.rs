@@ -164,7 +164,7 @@ async fn open_vendor_session(
     transport: Arc<MacTransport>,
     target: TargetKeyboard,
 ) -> Option<Arc<DeviceSession>> {
-    tokio::task::spawn_blocking(move || {
+    let session = tokio::task::spawn_blocking(move || {
         mi_transport::discover_target_keyboard()
             .ok()
             .filter(|d| d.location_id == target.location_id)
@@ -173,7 +173,9 @@ async fn open_vendor_session(
     })
     .await
     .ok()
-    .flatten()
+    .flatten()?;
+    let _ = tokio::time::timeout(Duration::from_millis(750), session.read_identity_info()).await;
+    Some(session)
 }
 
 const THSTATUS_RETRY_BACKOFF: Duration = Duration::from_secs(2);
@@ -289,6 +291,62 @@ fn handle_vendor_slot_notification(
     }
 }
 
+fn forward_v070_profile_layer_notification(
+    received: &mi_session::ReceivedNotification,
+    session_id: u64,
+    observed_layer: &AtomicU8,
+    v070_observed_profile_layer: &Mutex<Option<(u8, u8)>>,
+    v070_inbox: &Mutex<Option<crate::store::runtime_inbox::RuntimeInbox>>,
+) {
+    if let mi_proto::HostNotification::ProfileLayer(ref raw) = received.notification {
+        if let Some((profile_index, layer_index)) =
+            mi_proto::v070_capabilities::parse_profile_layer_notification(raw)
+        {
+            if (1..=6).contains(&layer_index) {
+                observed_layer.store(layer_index, Ordering::Release);
+            }
+            *v070_observed_profile_layer.lock().unwrap() = Some((profile_index, layer_index));
+            if let Some(inbox) = v070_inbox.lock().unwrap().as_ref().cloned() {
+                let _ = inbox.send(crate::store::HardwareLoopEvent::V070ProfileLayerChanged {
+                    session_id,
+                    profile_index,
+                    layer_index,
+                });
+            }
+        }
+    }
+}
+
+fn record_v070_bridge_observation(
+    outcome: &crate::firmware_update::V070BridgeOutcome,
+    observed_layer: &AtomicU8,
+    v070_observed_profile_layer: &Mutex<Option<(u8, u8)>>,
+) {
+    match outcome {
+        crate::firmware_update::V070BridgeOutcome::Snapshot(snap) => {
+            if let Some(layer) = snap.active_layer.filter(|l| (1..=6).contains(l)) {
+                observed_layer.store(layer, Ordering::Release);
+            }
+            if let Some((p, l)) = snap.active_profile.zip(snap.active_layer) {
+                *v070_observed_profile_layer.lock().unwrap() = Some((p, l));
+            }
+        }
+        crate::firmware_update::V070BridgeOutcome::ProfileLayer {
+            profile_index,
+            layer_index,
+        } => {
+            if (1..=6).contains(layer_index) {
+                observed_layer.store(*layer_index, Ordering::Release);
+            }
+            let mut guard = v070_observed_profile_layer.lock().unwrap();
+            if let Some(p) = profile_index.or_else(|| guard.map(|(p, _)| p)) {
+                *guard = Some((p, *layer_index));
+            }
+        }
+        _ => {}
+    }
+}
+
 struct VendorBridge {
     led_tx: tokio::sync::watch::Sender<Option<(String, Vec<OaiKeyStatusEntry>)>>,
     stop_tx: tokio::sync::watch::Sender<bool>,
@@ -297,6 +355,14 @@ struct VendorBridge {
     retry_not_before: Arc<Mutex<Option<Instant>>>,
     active_session: Arc<Mutex<Option<Arc<DeviceSession>>>>,
     retired_session: Mutex<Option<Arc<DeviceSession>>>,
+    observed_layer: Arc<AtomicU8>,
+    v070_cmd_tx: Arc<
+        Mutex<
+            Option<tokio::sync::mpsc::Sender<crate::store::v070_hardware_store::V070BridgeCommand>>,
+        >,
+    >,
+    v070_inbox: Arc<Mutex<Option<crate::store::runtime_inbox::RuntimeInbox>>>,
+    v070_observed_profile_layer: Arc<Mutex<Option<(u8, u8)>>>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -312,6 +378,10 @@ impl VendorBridge {
             retry_not_before: Arc::new(Mutex::new(None)),
             active_session: Arc::new(Mutex::new(initial_session)),
             retired_session: Mutex::new(None),
+            observed_layer: Arc::new(AtomicU8::new(1)),
+            v070_cmd_tx: Arc::new(Mutex::new(None)),
+            v070_inbox: Arc::new(Mutex::new(None)),
+            v070_observed_profile_layer: Arc::new(Mutex::new(None)),
             task: None,
         }
     }
@@ -349,6 +419,7 @@ impl VendorBridge {
         self.connected.store(false, Ordering::Release);
         *self.sync_state.lock().unwrap() = WireSyncState::Unsynced;
         *self.retry_not_before.lock().unwrap() = None;
+        *self.v070_cmd_tx.lock().unwrap() = None;
         if let Some(session) = self.active_session.lock().unwrap().take() {
             session.disconnect();
             *self.retired_session.lock().unwrap() = Some(session);
@@ -429,11 +500,19 @@ impl VendorBridge {
         let sync_state = Arc::clone(&self.sync_state);
         let retry_not_before = Arc::clone(&self.retry_not_before);
         let active_session = Arc::clone(&self.active_session);
+        let observed_layer = Arc::clone(&self.observed_layer);
+        let v070_inbox = Arc::clone(&self.v070_inbox);
+        let v070_observed_profile_layer = Arc::clone(&self.v070_observed_profile_layer);
+        let (v070_cmd_tx, mut v070_cmd_rx) =
+            tokio::sync::mpsc::channel::<crate::store::v070_hardware_store::V070BridgeCommand>(16);
+        *self.v070_cmd_tx.lock().unwrap() = Some(v070_cmd_tx);
+        let v070_cmd_tx_slot = Arc::clone(&self.v070_cmd_tx);
         self.task = Some(runtime.spawn(async move {
             let mut current_session = initial_session;
             let mut pending_notif_rx = initial_notif_rx;
             let mut pressed_mask: u32 = 0;
             let mut rotated_from_live = false;
+            let mut last_v070_snapshot_session: Option<u64> = None;
             while !*stop_rx.borrow() {
                 if current_session.is_none() {
                     pressed_mask = 0;
@@ -485,6 +564,46 @@ impl VendorBridge {
                         .await;
                     }
                 }
+                if session_ok
+                    && session.request_count() < 900
+                    && session.has_exclusive_vendor_link()
+                    && session
+                        .observed_firmware_version()
+                        .as_deref()
+                        .is_some_and(mi_model::supports_v070_hardware_capabilities)
+                    && last_v070_snapshot_session != Some(session.id)
+                {
+                    last_v070_snapshot_session = Some(session.id);
+                    let snap_session = Arc::clone(&session);
+                    let snap_observed_layer = Arc::clone(&observed_layer);
+                    let snap_v070_pl = Arc::clone(&v070_observed_profile_layer);
+                    let snap_inbox = Arc::clone(&v070_inbox);
+                    tokio::spawn(async move {
+                        let outcome =
+                            crate::store::v070_hardware_store::fetch_v070_snapshot_on_session(
+                                &snap_session,
+                                false,
+                            )
+                            .await
+                            .map(crate::firmware_update::V070BridgeOutcome::Snapshot);
+                        if let Ok(ref bridge_outcome) = outcome {
+                            record_v070_bridge_observation(
+                                bridge_outcome,
+                                &snap_observed_layer,
+                                &snap_v070_pl,
+                            );
+                        }
+                        if let Some(inbox) = snap_inbox.lock().unwrap().as_ref().cloned() {
+                            let _ = inbox.send(
+                                crate::store::HardwareLoopEvent::V070CapabilityOutcome {
+                                    session_id: snap_session.id,
+                                    seq: 0,
+                                    result: outcome,
+                                },
+                            );
+                        }
+                    });
+                }
                 let mut next_rotated = None;
                 let mut already_shut_down = false;
                 while session_ok && !*stop_rx.borrow() {
@@ -497,6 +616,13 @@ impl VendorBridge {
                                 &mut pressed_mask,
                                 &receiver,
                                 layer1_fallback,
+                            );
+                            forward_v070_profile_layer_notification(
+                                &received,
+                                session.id,
+                                &observed_layer,
+                                &v070_observed_profile_layer,
+                                &v070_inbox,
                             );
                         }
                         pressed_mask = 0;
@@ -534,12 +660,45 @@ impl VendorBridge {
                                         &receiver,
                                         layer1_fallback,
                                     );
+                                    forward_v070_profile_layer_notification(
+                                        &received,
+                                        session.id,
+                                        &observed_layer,
+                                        &v070_observed_profile_layer,
+                                        &v070_inbox,
+                                    );
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                                     pressed_mask = 0;
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                     session_ok = false;
+                                }
+                            }
+                        }
+                        cmd_opt = v070_cmd_rx.recv() => {
+                            if let Some(cmd) = cmd_opt {
+                                let seq = cmd.seq;
+                                let result = crate::store::v070_hardware_store::execute_v070_command_on_session(
+                                    &session, &cmd,
+                                )
+                                .await;
+                                if let Ok(ref bridge_outcome) = result {
+                                    record_v070_bridge_observation(
+                                        bridge_outcome,
+                                        &observed_layer,
+                                        &v070_observed_profile_layer,
+                                    );
+                                }
+                                if session.is_disconnected() {
+                                    session_ok = false;
+                                }
+                                if let Some(inbox) = v070_inbox.lock().unwrap().as_ref().cloned() {
+                                    let _ = inbox.send(crate::store::HardwareLoopEvent::V070CapabilityOutcome {
+                                        session_id: session.id,
+                                        seq,
+                                        result,
+                                    });
                                 }
                             }
                         }
@@ -571,6 +730,16 @@ impl VendorBridge {
                 connected.store(false, Ordering::Release);
                 *sync_state.lock().unwrap() = WireSyncState::Unsynced;
                 *retry_not_before.lock().unwrap() = None;
+                *v070_cmd_tx_slot.lock().unwrap() = None;
+                while let Ok(cmd) = v070_cmd_rx.try_recv() {
+                    if let Some(inbox) = v070_inbox.lock().unwrap().as_ref().cloned() {
+                        let _ = inbox.send(crate::store::HardwareLoopEvent::V070CapabilityOutcome {
+                            session_id: session.id,
+                            seq: cmd.seq,
+                            result: Err("USB 会话已断开".into()),
+                        });
+                    }
+                }
                 let _ = active_session.lock().unwrap().take();
                 if !already_shut_down {
                     session.shutdown().await;
@@ -1070,6 +1239,42 @@ impl RunningSixLayer {
 
     pub fn vendor_bridge_connected(&self) -> bool {
         self.vendor_bridge.connected.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_v070_inbox(&self, inbox: crate::store::runtime_inbox::RuntimeInbox) {
+        *self.vendor_bridge.v070_inbox.lock().unwrap() = Some(inbox);
+    }
+
+    pub(crate) fn vendor_session_id(&self) -> Option<u64> {
+        self.vendor_bridge
+            .active_session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|session| session.id)
+    }
+
+    pub(crate) fn send_v070_command(
+        &self,
+        cmd: crate::store::v070_hardware_store::V070BridgeCommand,
+    ) -> Result<(), String> {
+        let tx = self
+            .vendor_bridge
+            .v070_cmd_tx
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "USB 专用桥接尚未就绪".to_string())?;
+        tx.try_send(cmd)
+            .map_err(|_| "USB 专用桥接指令队列繁忙或已关闭".to_string())
+    }
+
+    pub(crate) fn observed_v070_profile_layer(&self) -> Option<(u8, u8)> {
+        *self
+            .vendor_bridge
+            .v070_observed_profile_layer
+            .lock()
+            .unwrap()
     }
 
     pub fn confirmed_lighting_digest(&self) -> Option<String> {
@@ -1706,19 +1911,22 @@ fn new_running(
     let firmware_version = initial_session
         .as_ref()
         .and_then(|s| s.observed_firmware_version());
+    let observed_layer = Arc::new(AtomicU8::new(layer));
+    let mut vendor_bridge = VendorBridge::new(initial_session);
+    vendor_bridge.observed_layer = Arc::clone(&observed_layer);
     RunningSixLayer {
         receiver,
         readiness,
         candidate,
         installation,
-        observed_layer: Arc::new(AtomicU8::new(layer)),
+        observed_layer,
         first_event_verified: Arc::new(AtomicBool::new(false)),
         armed: false,
         execution_policy: Arc::new(ExecutionPolicy::default()),
         receipts: None,
         routing: Arc::new(Mutex::new(RoutingContext::default())),
         navigation: None,
-        vendor_bridge: VendorBridge::new(initial_session),
+        vendor_bridge,
         firmware_version,
         transport: None,
         stop: Arc::new(AtomicBool::new(false)),
@@ -3867,6 +4075,34 @@ mod tests {
         assert!(!running_invalidate.is_retired());
         assert_eq!(running_invalidate.observed_firmware_version(), None);
         running_invalidate.shutdown(&runtime).unwrap();
+    }
+
+    #[test]
+    fn v070_profile_layer_outcome_retains_existing_profile_when_omitted() {
+        let observed_layer = AtomicU8::new(1);
+        let observed_pl = Mutex::new(Some((3_u8, 1_u8)));
+
+        record_v070_bridge_observation(
+            &crate::firmware_update::V070BridgeOutcome::ProfileLayer {
+                profile_index: None,
+                layer_index: 4,
+            },
+            &observed_layer,
+            &observed_pl,
+        );
+        assert_eq!(observed_layer.load(Ordering::Acquire), 4);
+        assert_eq!(*observed_pl.lock().unwrap(), Some((3, 4)));
+
+        record_v070_bridge_observation(
+            &crate::firmware_update::V070BridgeOutcome::ProfileLayer {
+                profile_index: Some(2),
+                layer_index: 5,
+            },
+            &observed_layer,
+            &observed_pl,
+        );
+        assert_eq!(observed_layer.load(Ordering::Acquire), 5);
+        assert_eq!(*observed_pl.lock().unwrap(), Some((2, 5)));
     }
 }
 

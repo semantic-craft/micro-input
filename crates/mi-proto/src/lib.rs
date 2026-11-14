@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 pub mod lighting_candidate;
 pub mod mutation;
 mod native;
+pub mod v070_capabilities;
 pub use native::{validate_read_only, NativeFramer};
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ProtoError {
@@ -162,6 +163,13 @@ impl RpcCodec for JsonCodec {
                 "lights.preview",
                 "v.oai.thstatus",
                 "v.oai.rgbcfg",
+                "mouse.config",
+                "joystick.deadzone",
+                "kb.pl.set",
+                "pm.config",
+                "pm.state",
+                "device.name",
+                "kb.sa.rgb",
             ]
             .contains(&method.as_str())
                 || v.get("params").is_some()
@@ -234,6 +242,7 @@ pub enum HostNotification {
     CheatSheetShow(Value),
     CheatSheetHide(Value),
     CheatSheetToggle(Value),
+    ProfileLayer(Value),
     Unknown(Value),
 }
 impl From<Notification> for HostNotification {
@@ -247,6 +256,7 @@ impl From<Notification> for HostNotification {
             "kb.cs.show" => Self::CheatSheetShow(n.raw),
             "kb.cs.hide" => Self::CheatSheetHide(n.raw),
             "kb.cs.toggle" => Self::CheatSheetToggle(n.raw),
+            "kb.pl" => Self::ProfileLayer(n.raw),
             _ => Self::Unknown(n.raw),
         }
     }

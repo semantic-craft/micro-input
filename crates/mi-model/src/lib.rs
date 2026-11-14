@@ -519,6 +519,11 @@ pub fn is_supported_bootloader_firmware(version: &str) -> bool {
     (v.major == 0 && v.minor >= 7) || v.major >= 1
 }
 
+/// Returns `true` when `version` supports `0.7.0-rc.16+` hardware capabilities (`mouse.config`, `joystick.deadzone`, `kb.pl.set`, `pm.config`, `pm.state`, `device.name`, `kb.sa.rgb`).
+pub fn supports_v070_hardware_capabilities(version: &str) -> bool {
+    supports_v070_mouse_tokens(version)
+}
+
 /// Returns `true` when `version` supports `0.7.0-rc.16` `MS_*` hardware tokens and `MOUSE`/`SCROLL` joystick modes.
 pub fn supports_v070_mouse_tokens(version: &str) -> bool {
     let Some(v) = parse_strict_semver(version) else {
@@ -628,6 +633,10 @@ mod firmware_and_mouse_tests {
                 supports_v070_mouse_tokens(v),
                 "v070 mouse tokens should be supported on {v}"
             );
+            assert!(
+                supports_v070_hardware_capabilities(v),
+                "v070 hardware capabilities should be supported on {v}"
+            );
         }
         for v in [
             "0.6.3",
@@ -641,6 +650,10 @@ mod firmware_and_mouse_tests {
             assert!(
                 !supports_v070_mouse_tokens(v),
                 "v070 mouse tokens should be rejected on {v}"
+            );
+            assert!(
+                !supports_v070_hardware_capabilities(v),
+                "v070 hardware capabilities should be rejected on {v}"
             );
         }
     }

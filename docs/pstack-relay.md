@@ -396,7 +396,7 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: semver/bootloader 门禁、USB 发现与端口轮询、`apply` `MS_*`/`MOUSE`/`SCROLL` 兼容性校验、三处运行时 `"host"` 鼠标直通测试、CoreGraphics 鼠标测试与 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 全部通过；随后真机两阶段刷写完成并确认 16 MB 备份、`operation.json` `verified` 及重连 `0.7.0-rc.16` 自检回执。
 - **Evidence**: PR #135 (b336b42), PR #136 (816351e), PR #137 (1bed7c4); Stage A 0.6.3->0.6.3 live flash verified (16MB flash-before.bin sha256:2d4c9583); Stage B 0.6.3->0.7.0-rc.16 live flash verified (16MB flash-before.bin sha256:b833e97e + HID Mouse UsagePage=1/Usage=2 + live 0.7.0-rc.16 six-layer readback)
 
-### [ ] Slice FW3: 0.7.0 进阶硬件能力（速度曲线、无刷切换层与休眠电量看板）
+### [x] Slice FW3: 0.7.0 进阶硬件能力（速度曲线、无刷切换层与休眠电量看板）
 - **Outcome**: 在 `0.7.0-rc.16+` 真机基础上接入 `mouse.config` 指针与滚轮速度档/摇杆死区调参、`kb.pl`/`kb.pl.set` 无写 Flash 实时切层、`pm.config`/`pm.state`/`usb.host` 休眠跟随与电量状态显示，以及 `device.name` 与 `kb.sa.rgb` 动态灯光支持。
 - **Done Predicate**: 完成相关 `.rodata` 与真机 RPC 只读/受控抓包确认（每项均写入 `docs/` 契约并过 `scripts/check`）；工作台新增控制项与 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 全量通过。
-- **Evidence**: PENDING
+- **Evidence**: verify-offline 6 QA PASS (.scratch/qa-runs/1794640685530-23470..1794640692201-20201); live 0.7.0-rc.16 probe (fw3-rpc-probe.json, keymap.json unchanged); release MicroInput.app (sha256 122229d4)

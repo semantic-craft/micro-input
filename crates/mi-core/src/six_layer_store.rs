@@ -266,6 +266,7 @@ impl WorkbenchStore {
             self.tokio_runtime.block_on(session.shutdown());
         }
         self.connected_candidate = None;
+        self.v070_hardware.on_disconnected();
         self.hardware_rpc_verified = false;
         self.board_decoder.store(false, Ordering::Release);
         self.board_routing = BoardRouting::Unverified;
@@ -390,6 +391,20 @@ impl WorkbenchStore {
                     running.navigation = Some(self.session_navigation.dispatch.clone());
                     running.start_executor(Arc::clone(&self.live_executor));
                     running.start_monitor();
+                    running.set_v070_inbox(self.hardware_event_tx.clone());
+                    if let Some(version) = running
+                        .observed_firmware_version()
+                        .filter(|v| mi_model::supports_v070_hardware_capabilities(v))
+                    {
+                        let pl = running.observed_v070_profile_layer();
+                        self.v070_hardware.mark_supported(
+                            &version,
+                            pl.map(|(p, _)| p),
+                            pl.map(|(_, l)| l),
+                            None,
+                            None,
+                        );
+                    }
                     running.start_vendor_bridge(&self.tokio_runtime);
                     self.six_layer_running = Some(running);
                     self.sync_six_layer_routing_context();
@@ -401,6 +416,7 @@ impl WorkbenchStore {
                 Ok(None) => {
                     self.status_message = "原设备配置及 Karabiner 设置已恢复".into();
                     self.board_routing = BoardRouting::Legacy;
+                    self.v070_hardware.on_disconnected();
                 }
                 Err(error) => self.status_message = error,
             }
@@ -410,14 +426,33 @@ impl WorkbenchStore {
             self.try_auto_resume_six_layer(self.update_now);
             return;
         }
-        let (mut lighting_changed, need_lighting_resync) = {
+        let (mut lighting_changed, need_lighting_resync, v070_pl, v070_ver) = {
             let running = self.six_layer_running.as_ref().unwrap();
             let confirmed = running.confirmed_lighting_digest();
             let changed = self
                 .lighting_arbiter
                 .reconcile_six_layer_confirmed(confirmed.as_deref());
-            (changed, running.vendor_bridge_needs_lighting_sync())
+            (
+                changed,
+                running.vendor_bridge_needs_lighting_sync(),
+                running.observed_v070_profile_layer(),
+                running.observed_firmware_version(),
+            )
         };
+        let mut v070_changed = false;
+        if let Some(version) = v070_ver.filter(|v| mi_model::supports_v070_hardware_capabilities(v))
+        {
+            if !self.v070_hardware.projection.supported {
+                self.v070_hardware.mark_supported(
+                    &version,
+                    v070_pl.map(|(p, _)| p),
+                    v070_pl.map(|(_, l)| l),
+                    None,
+                    None,
+                );
+                v070_changed = true;
+            }
+        }
         if need_lighting_resync {
             let prev_synced = self.lighting_arbiter.hardware_synced;
             let prev_writes = self.lighting_arbiter.hardware_write_count;
@@ -457,6 +492,7 @@ impl WorkbenchStore {
         let failure = running.receiver.failure();
         let needs_cleanup = failure.is_some() && !running.is_retired();
         let changed = lighting_changed
+            || v070_changed
             || self.projection.sidebar.board_layers.observed_layer != Some(observed)
             || self.projection.sidebar.board_layers.first_event_verified != first
             || failure
