@@ -660,6 +660,11 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(CodexKeycapId(rustVariant: "MindMinus"), .mindMinus)
         XCTAssertEqual(CodexKeycapId(rustVariant: "Fast"), .fast)
         XCTAssertEqual(CodexKeycapId(rustVariant: "Download"), .download)
+
+        store.dispatch("canvas", ["ApplyKnobJoystickPreset": "MousePointerAndScroll"])
+        XCTAssertEqual(store.canvas.encoderCcwLabel, "鼠标滚轮向上")
+        XCTAssertEqual(store.canvas.encoderCwLabel, "鼠标滚轮向下")
+        XCTAssertEqual(store.canvas.encoderPressLabel, "切换档位")
     }
 }
 

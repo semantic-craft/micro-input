@@ -61,3 +61,18 @@ REA 定向分析原始 Evidence：`ev_454c0751f8555478d99f149372ad4c2a2e0b26b680
 ## 验证边界
 
 本轮研究没有启动 Input、打开串口、发送 bootloader 或刷写命令。离线验证可覆盖 release 选择、下载校验、镜像布局、状态转换和失败结果；不能替代以下实机事项：实际 bootloader 关联、刷写与重启、版本读回、原键位及宿主行为保留、失败后的恢复。新版固件支持的配置协议仍须单独核验，不因能刷写就放开现有配置读写门禁。
+
+## 2026-11-14 FW2 演进记录（未来固件兼容与 v0.7.0-rc.16 鼠标能力同步）
+
+### 参考、影响与验证记录
+
+- **参考**：Work Louder 官方发布 API（`v0.6.3` 与 `v0.7.0-rc.16` 镜像头、`0x8000` 分区表及 `.rodata` 只读对照）与 Input 1.1.0 协议既有研究结论（[protocol-readonly.md](protocol-readonly.md)、[agents/research-context.md](agents/research-context.md)）。
+  - `firmware_0.7.0-rc.16_merged.bin` 长度 `1,806,784` 字节，摘要 `sha256:9f429866986b2be640b4668d527e84df7e517e0f30559f287ba911dc2a67dab7`，镜像头 offset 12 芯片标识同样为 ESP32-S3（`9`），覆盖 `[0, 0x1ba000)`，不覆盖 `nvs`（`0x810000`）、`fs`（`0x830000`）与 `coredump`（`0xa30000`）。
+  - `.rodata` 对照显示 `v0.7.0-rc.16` 保留 `0.6.3` 既有全部键值与 RPC 方法，新增 `MS_UP`/`MS_DOWN`/`MS_LEFT`/`MS_RGHT`、`MS_BTN1`..`MS_BTN8`、`MS_WHLU`/`D`/`L`/`R`、`MS_ACL0`..`2`（共 19 个鼠标令牌），摇杆 `layout.joystick.type` 新增 `"MOUSE"` / `"SCROLL"`，以及 `mouse.config`、`device.name`、`pm.config`、`pm.state`、`usb.host`、`kb.pl`/`kb.pl.set`、`kb.sa.rgb`、`kb.cs.*` 等 RPC。
+- **影响**：
+  - `crates/mi-model`：新增严格 semver 解析与分域门禁（`is_supported_native_firmware`、`is_supported_config_firmware`、`is_supported_bootloader_firmware`、`supports_v070_mouse_tokens`、`is_host_mouse_command`）；新增 `FIRMWARE_V070_MOUSE_TOKENS`（19 项）并将 `DEVICE_KEY_TOKENS` 扩至 281 项；`ControlSettings` 与 S3 `Pending::prepare` 支持 `"mouse"` / `"scroll"` 与 `"source"` 恢复，并将 `MS_*` 与 `MOUSE`/`SCROLL` S3 写入严格限制在 `supports_v070_mouse_tokens` 固件基线；新增 15 条 Mac 宿主 `host-mouse-*` 动作与 3 条 `device-ms-btn1..3` 模板。
+  - `crates/mi-session`：解锁 `>= 0.6.3` 含 `0.7.x+` 合法版本的 `enter_firmware_bootloader` 入口（避免升级 `0.7.0-rc.16` 后锁死后续升级），并将配置快照读取、六层校验、`config_write` 与灯光预览放行范围拓展到 `is_supported_native_firmware`。
+  - `crates/mi-core` 与 `crates/mi-macos`：`PrepareDevice` 在未连接状态下改为实时枚举有线 USB 独占接口或既有 bootloader 串口，进入 bootloader 后自动轮询串口最多 10×350ms 并保持手动确认选择；`FirmwareUpdate.swift` 新增未连线时的「连接有线键盘」按钮；`LiveHostActionExecutor` 新增 CoreGraphics 指针移动（含多屏活动边界钳位）、左/右/中点击（含 `kCGMouseEventClickState = 1`）、四向滚轮与三档步进倍率；物理输入直连与六层编译路径对 `is_host_mouse_command` 保留 `adapter = "host"`，配合通用预设 `KnobJoystickPreset::MousePointerAndScroll` 直接用于日常档与各 Agent 方案。
+- **验证与缺口**：
+  - 本次文档合并时尚处于离线验证阶段：`MI_AUTO_HOST_READY=0 ./scripts/verify-offline`（边界检查、`cargo test`、`swift test`、6 个合成隔离场景）全量通过，证明版本号门禁、`PrepareDevice` 端口发现、`apply` 兼容性隔离、CoreGraphics 鼠标动作状态机与六层直通路由均无回归。
+  - **已知实机缺口（待合并后两阶段真机刷机验证）**：`0.7.0-rc.16` 的 `device.status`、`fs.readbin`、`nvs`/`fs` 分区配置跨版本保留、`MOUSE`/`SCROLL` 原生板载写入及 CoreGraphics 真机光标/滚轮手感尚无真机抓包回归，须以合并后的 `/Applications/Micro Input.app` 分阶段实机验证（Stage A `0.6.3 -> 0.6.3`，Stage B `0.6.3 -> 0.7.0-rc.16`）补齐实机回执。

@@ -220,14 +220,16 @@ pub enum KnobJoystickPreset {
     DualScrollProjectsAndChat,
     CodexScrollChatAndBottom,
     CodexReasoningEffortAndSpeed,
+    MousePointerAndScroll,
 }
 
 impl KnobJoystickPreset {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::CycleWorkingAndBlueDot,
         Self::DualScrollProjectsAndChat,
         Self::CodexScrollChatAndBottom,
         Self::CodexReasoningEffortAndSpeed,
+        Self::MousePointerAndScroll,
     ];
 
     pub const fn title(self) -> &'static str {
@@ -236,6 +238,7 @@ impl KnobJoystickPreset {
             Self::DualScrollProjectsAndChat => "旋钮+摇杆双滚轮",
             Self::CodexScrollChatAndBottom => "旋钮滚动对话",
             Self::CodexReasoningEffortAndSpeed => "旋钮调整推理档位",
+            Self::MousePointerAndScroll => "摇杆鼠标 + 旋钮滚轮",
         }
     }
 
@@ -244,6 +247,10 @@ impl KnobJoystickPreset {
             self,
             Self::CodexScrollChatAndBottom | Self::CodexReasoningEffortAndSpeed
         )
+    }
+
+    pub const fn is_universal(self) -> bool {
+        matches!(self, Self::MousePointerAndScroll)
     }
 }
 
@@ -509,6 +516,18 @@ pub(crate) fn concise_dial_caption_alias(label: &str) -> Option<&'static str> {
         "在项目中新建会话" => Some("项目新建"),
         "新建标签页" => Some("新标签页"),
         "Gemini Live 实时语音" | "Live 实时语音" => Some("实时语音"),
+        "鼠标指针上移" => Some("指针上移"),
+        "鼠标指针下移" => Some("指针下移"),
+        "鼠标指针左移" => Some("指针左移"),
+        "鼠标指针右移" => Some("指针右移"),
+        "鼠标左键点击" => Some("左键点击"),
+        "鼠标右键点击" => Some("右键点击"),
+        "鼠标中键点击" => Some("中键点击"),
+        "鼠标滚轮向上" => Some("滚轮向上"),
+        "鼠标滚轮向下" => Some("滚轮向下"),
+        "鼠标滚轮向左" => Some("滚轮向左"),
+        "鼠标滚轮向右" => Some("滚轮向右"),
+        "循环切换鼠标速度档位" | "循环指针速度档" => Some("切换档位"),
         _ => None,
     }
 }

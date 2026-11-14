@@ -65,6 +65,7 @@ public struct FirmwareSliceModel: Equatable {
 
 public struct FirmwareUpdateSettingsSection: View {
     let model: FirmwareSliceModel
+    let onConnectKeyboard: (() -> Void)?
     let dispatch: (Any) -> Void
     @State private var confirmation: Confirmation?
     private enum Confirmation: String, Identifiable {
@@ -82,8 +83,13 @@ public struct FirmwareUpdateSettingsSection: View {
         }
     }
 
-    public init(model: FirmwareSliceModel, dispatch: @escaping (Any) -> Void) {
+    public init(
+        model: FirmwareSliceModel,
+        onConnectKeyboard: (() -> Void)? = nil,
+        dispatch: @escaping (Any) -> Void
+    ) {
         self.model = model
+        self.onConnectKeyboard = onConnectKeyboard
         self.dispatch = dispatch
     }
 
@@ -92,10 +98,17 @@ public struct FirmwareUpdateSettingsSection: View {
             SettingsSectionHeader("设备固件")
             SettingsCard {
                 SettingsRow("Creator Micro 2", subtitle: "当前固件：\(model.currentVersionLabel)", showsDivider: true) {
-                    Button("检查固件更新") { dispatch(["Check": ["channel": model.channel]]) }
-                        .surfaceButton(.secondary)
-                        .disabled(!model.canCheck)
-                        .accessibilityIdentifier("firmware-check")
+                    HStack(spacing: 8) {
+                        if !model.deviceReserved && model.currentVersion == nil, let onConnectKeyboard {
+                            Button("连接有线键盘") { onConnectKeyboard() }
+                                .surfaceButton(.secondary)
+                                .accessibilityIdentifier("firmware-connect")
+                        }
+                        Button("检查固件更新") { dispatch(["Check": ["channel": model.channel]]) }
+                            .surfaceButton(.secondary)
+                            .disabled(!model.canCheck)
+                            .accessibilityIdentifier("firmware-check")
+                    }
                 }
                 SettingsRow("更新通道", subtitle: model.channel == "prerelease" ? "预发布固件与现有键位和配置协议的兼容性尚未验证。" : "只检查官方稳定版。", showsDivider: true) {
                     SelectDropdown(

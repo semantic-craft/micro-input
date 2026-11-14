@@ -1,6 +1,6 @@
 use mi_model::{
     control_settings::ControlSettings,
-    draft::{actions, Action, Draft},
+    draft::{actions, Draft},
     is_protected_oai_layer,
     lighting::{Edit, Effect, Lighting, Zone},
     official_chatgpt_layer, preset, Binding, Joystick, Layer, Lights, Token,

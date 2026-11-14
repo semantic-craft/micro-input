@@ -311,8 +311,9 @@ pub const FIRMWARE_V063_TOKENS: [&str; 304] = [
     "KV_OAI_ENC_CW",
 ];
 
-/// Non-OAI firmware v0.6.3 tokens (260 entries) plus legacy aliases ("KC_ENTER", "KC_SPACE").
-pub const DEVICE_KEY_TOKENS: [&str; 262] = [
+/// Non-OAI firmware v0.6.3 tokens (260 entries) plus legacy aliases ("KC_ENTER", "KC_SPACE")
+/// and firmware 0.7.0-rc.16+ MS_* mouse tokens (19 entries).
+pub const DEVICE_KEY_TOKENS: [&str; 281] = [
     "ENC_CC",
     "ENC_CLK",
     "ENC_CW",
@@ -575,6 +576,32 @@ pub const DEVICE_KEY_TOKENS: [&str; 262] = [
     "KI_PS9",
     "KV_FRAMER_AI",
     "KV_FRAMER_PUBLISH",
+    "MS_ACL0",
+    "MS_ACL1",
+    "MS_ACL2",
+    "MS_BTN1",
+    "MS_BTN2",
+    "MS_BTN3",
+    "MS_BTN4",
+    "MS_BTN5",
+    "MS_BTN6",
+    "MS_BTN7",
+    "MS_BTN8",
+    "MS_DOWN",
+    "MS_LEFT",
+    "MS_RGHT",
+    "MS_UP",
+    "MS_WHLD",
+    "MS_WHLL",
+    "MS_WHLR",
+    "MS_WHLU",
+];
+
+/// Firmware 0.7.0-rc.16+ QMK mouse key tokens (19 entries, sorted ASCII order).
+pub const FIRMWARE_V070_MOUSE_TOKENS: [&str; 19] = [
+    "MS_ACL0", "MS_ACL1", "MS_ACL2", "MS_BTN1", "MS_BTN2", "MS_BTN3", "MS_BTN4", "MS_BTN5",
+    "MS_BTN6", "MS_BTN7", "MS_BTN8", "MS_DOWN", "MS_LEFT", "MS_RGHT", "MS_UP", "MS_WHLD",
+    "MS_WHLL", "MS_WHLR", "MS_WHLU",
 ];
 
 pub fn canonical_firmware_token(token: &str) -> &str {
@@ -587,6 +614,10 @@ pub fn canonical_firmware_token(token: &str) -> &str {
 
 pub fn is_valid_firmware_v063_token(token: &str) -> bool {
     FIRMWARE_V063_TOKENS.binary_search(&token).is_ok()
+}
+
+pub fn is_valid_firmware_v070_token(token: &str) -> bool {
+    is_valid_firmware_v063_token(token) || FIRMWARE_V070_MOUSE_TOKENS.binary_search(&token).is_ok()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -766,6 +797,24 @@ pub fn actions() -> Vec<Action> {
                 ("codex-effort-down", "Codex · 降低推理档位", "Agent", "后台打开 Codex 推理档位浮层并向左降低一档，停手约 1.5 秒自动收起", json!({"type":"agent_command","adapter":"codex","command":"effort-down"})),
                 ("codex-effort-up", "Codex · 提高推理档位", "Agent", "后台打开 Codex 推理档位浮层并向右提高一档，停手约 1.5 秒自动收起", json!({"type":"agent_command","adapter":"codex","command":"effort-up"})),
                 ("codex-toggle-fast-mode", "Codex · 切换 Fast 模式", "Agent", "后台打开 Codex 推理浮层并切换 Fast / Standard 响应速度", json!({"type":"agent_command","adapter":"codex","command":"toggle-fast-mode"})),
+                ("host-mouse-move-up", "鼠标指针上移", "鼠标控制", "按当前速度档位向上移动系统鼠标指针（CGEvent）", json!({"type":"agent_command","adapter":"host","command":"mouse-move:up"})),
+                ("host-mouse-move-down", "鼠标指针下移", "鼠标控制", "按当前速度档位向下移动系统鼠标指针（CGEvent）", json!({"type":"agent_command","adapter":"host","command":"mouse-move:down"})),
+                ("host-mouse-move-left", "鼠标指针左移", "鼠标控制", "按当前速度档位向左移动系统鼠标指针（CGEvent）", json!({"type":"agent_command","adapter":"host","command":"mouse-move:left"})),
+                ("host-mouse-move-right", "鼠标指针右移", "鼠标控制", "按当前速度档位向右移动系统鼠标指针（CGEvent）", json!({"type":"agent_command","adapter":"host","command":"mouse-move:right"})),
+                ("host-mouse-click-left", "鼠标左键点击", "鼠标控制", "在当前光标位置发送左键按下与抬起（CGEvent）", json!({"type":"agent_command","adapter":"host","command":"mouse-click:left"})),
+                ("host-mouse-click-right", "鼠标右键点击", "鼠标控制", "在当前光标位置发送右键按下与抬起（CGEvent）", json!({"type":"agent_command","adapter":"host","command":"mouse-click:right"})),
+                ("host-mouse-click-middle", "鼠标中键点击", "鼠标控制", "在当前光标位置发送中键按下与抬起（CGEvent）", json!({"type":"agent_command","adapter":"host","command":"mouse-click:middle"})),
+                ("host-mouse-scroll-up", "鼠标滚轮向上", "鼠标控制", "在当前光标处垂直向上滚动（CGEvent）", json!({"type":"agent_command","adapter":"host","command":"mouse-scroll:up"})),
+                ("host-mouse-scroll-down", "鼠标滚轮向下", "鼠标控制", "在当前光标处垂直向下滚动（CGEvent）", json!({"type":"agent_command","adapter":"host","command":"mouse-scroll:down"})),
+                ("host-mouse-scroll-left", "鼠标滚轮向左", "鼠标控制", "在当前光标处水平向左滚动（CGEvent）", json!({"type":"agent_command","adapter":"host","command":"mouse-scroll:left"})),
+                ("host-mouse-scroll-right", "鼠标滚轮向右", "鼠标控制", "在当前光标处水平向右滚动（CGEvent）", json!({"type":"agent_command","adapter":"host","command":"mouse-scroll:right"})),
+                ("host-mouse-speed-0", "鼠标速度档位 0 · 精细", "鼠标控制", "切换鼠标移动与滚轮精细低速档（8px / 2行）", json!({"type":"agent_command","adapter":"host","command":"mouse-speed:0"})),
+                ("host-mouse-speed-1", "鼠标速度档位 1 · 标准", "鼠标控制", "切换鼠标移动与滚轮标准中速档（22px / 4行）", json!({"type":"agent_command","adapter":"host","command":"mouse-speed:1"})),
+                ("host-mouse-speed-2", "鼠标速度档位 2 · 快速", "鼠标控制", "切换鼠标移动与滚轮快速高速档（52px / 9行）", json!({"type":"agent_command","adapter":"host","command":"mouse-speed:2"})),
+                ("host-mouse-speed-cycle", "循环切换鼠标速度档位", "鼠标控制", "在精细(0)、标准(1)、快速(2) 之间循环切换鼠标速度档位", json!({"type":"agent_command","adapter":"host","command":"mouse-speed:cycle"})),
+                ("device-ms-btn1", "板载鼠标左键 · MS_BTN1", "设备按键", "固件 0.7.0-rc.16+ 原生板载鼠标左键硬件令牌", json!({"type":"device_key","token":"MS_BTN1"})),
+                ("device-ms-btn2", "板载鼠标右键 · MS_BTN2", "设备按键", "固件 0.7.0-rc.16+ 原生板载鼠标右键硬件令牌", json!({"type":"device_key","token":"MS_BTN2"})),
+                ("device-ms-btn3", "板载鼠标中键 · MS_BTN3", "设备按键", "固件 0.7.0-rc.16+ 原生板载鼠标中键硬件令牌", json!({"type":"device_key","token":"MS_BTN3"})),
             ]
             .into_iter()
             .map(|(id, name, category, detail, payload)| Action {

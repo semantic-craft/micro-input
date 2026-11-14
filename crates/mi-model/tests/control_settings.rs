@@ -192,3 +192,58 @@ fn unknown_control_fields_make_document_read_only() {
         )
         .is_err());
 }
+
+#[test]
+fn mouse_and_scroll_joystick_modes_preserve_dormant_slots_and_reject_unknown_modes() {
+    let mut draft = Draft::default();
+    let pid = draft.config.profiles[0].id.as_str().unwrap().to_owned();
+    let lid = draft.config.profiles[0].layers[0]
+        .id
+        .as_str()
+        .unwrap()
+        .to_owned();
+    draft
+        .set_control_settings(
+            &pid,
+            &lid,
+            ControlSettings {
+                joystick_mode: "logical_sectors".into(),
+                active_sectors: 4,
+            },
+        )
+        .unwrap();
+    let before_count = draft.document.editable.graph.layers[&lid]
+        .control_order
+        .len();
+    assert_eq!(before_count, 20);
+
+    for mode in ["mouse", "scroll"] {
+        draft
+            .set_control_settings(
+                &pid,
+                &lid,
+                ControlSettings {
+                    joystick_mode: mode.into(),
+                    active_sectors: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            draft.document.editable.graph.layers[&lid]
+                .control_order
+                .len(),
+            before_count
+        );
+    }
+
+    assert!(draft
+        .set_control_settings(
+            &pid,
+            &lid,
+            ControlSettings {
+                joystick_mode: "future-mode".into(),
+                active_sectors: 0,
+            },
+        )
+        .is_err());
+}

@@ -434,6 +434,10 @@ struct CreatorMicroBoardView: View {
                         store.dispatch("canvas", ["ApplyKnobJoystickPreset": "CodexReasoningEffortAndSpeed"])
                     }
                 }
+                Divider()
+                Button("摇杆鼠标 + 旋钮滚轮") {
+                    store.dispatch("canvas", ["ApplyKnobJoystickPreset": "MousePointerAndScroll"])
+                }
                 if !ss.sessionSlots.isEmpty {
                     Divider()
                     ForEach(ss.sessionSlots) { slot in

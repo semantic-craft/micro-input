@@ -56,7 +56,7 @@ pub(crate) enum UpdateEvent {
     Release(Result<FirmwareRelease, String>),
     Download(Result<DownloadedFirmware, String>),
     Ports(Result<Vec<BootloaderPort>, String>),
-    Bootloader(Result<(), String>),
+    Bootloader(Result<Vec<BootloaderPort>, String>),
     Progress(firmware_flash::FlashProgress),
     Flashed(Result<firmware_flash::FlashReceipt, String>),
 }
@@ -213,13 +213,24 @@ impl FirmwareUpdater {
             }
             UpdateEvent::Bootloader(result) => {
                 self.projection.busy = false;
-                self.projection.phase = "bootloader_requested".into();
-                self.projection.message = match result {
-                    Ok(()) => "已请求进入引导模式，请查找并选择设备串口".into(),
-                    Err(error) => format!(
-                        "引导模式请求结果未确认：{error}。请查找串口确认设备状态；不会自动重发。"
-                    ),
-                };
+                match result {
+                    Ok(ports) => {
+                        self.projection.message = if ports.is_empty() {
+                            "已请求进入引导模式，暂未自动发现串口，请点击「查找串口」确认".into()
+                        } else {
+                            "已进入引导模式并发现以下串口，请核对并手动选择设备串口".into()
+                        };
+                        self.projection.ports = ports;
+                        self.projection.selected_port = None;
+                        self.projection.phase = "select_port".into();
+                    }
+                    Err(error) => {
+                        self.projection.phase = "bootloader_requested".into();
+                        self.projection.message = format!(
+                            "引导模式请求结果未确认：{error}。请查找串口确认设备状态；不会自动重发。"
+                        );
+                    }
+                }
             }
             UpdateEvent::Progress(progress) => {
                 if let Some(path) = progress.backup_dir {
@@ -277,5 +288,30 @@ mod tests {
         assert!(updater.projection.selected_port.is_none());
         assert!(updater.install(Path::new("unused")).is_err());
         assert_eq!(updater.projection.channel, FirmwareChannel::Stable);
+    }
+
+    #[test]
+    fn bootloader_discovery_populates_ports_without_auto_selecting() {
+        let mut updater = FirmwareUpdater::default();
+        updater.projection.device_reserved = true;
+        updater.projection.busy = true;
+        updater.projection.selected_port = Some("/dev/cu.stale".into());
+        let port = BootloaderPort {
+            path: "/dev/cu.usbmodem101".into(),
+            vid: 0x303a,
+            pid: 0x1001,
+            serial_number: Some("ABC123".into()),
+            manufacturer: Some("Espressif".into()),
+            product: Some("USB JTAG".into()),
+        };
+        updater.accept(UpdateEvent::Bootloader(Ok(vec![port.clone()])));
+        assert!(!updater.projection.busy);
+        assert_eq!(updater.projection.phase, "select_port");
+        assert!(updater.projection.selected_port.is_none());
+        assert_eq!(updater.projection.ports, vec![port]);
+
+        updater.accept(UpdateEvent::Bootloader(Err("timeout".into())));
+        assert_eq!(updater.projection.phase, "bootloader_requested");
+        assert!(updater.projection.message.contains("timeout"));
     }
 }

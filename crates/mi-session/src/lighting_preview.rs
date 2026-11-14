@@ -134,7 +134,11 @@ impl Preview {
             .read_identity_info()
             .await
             .map_err(|e| e.to_string())?;
-        if info.version.as_deref() != Some("0.6.3") {
+        if !info
+            .version
+            .as_deref()
+            .is_some_and(mi_model::is_supported_native_firmware)
+        {
             return Err("unsupported preview firmware".into());
         }
         Self::begin_native_task(session, lights).await

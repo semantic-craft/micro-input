@@ -832,4 +832,102 @@ fn codex_dial_preset_switching_and_slot_preservation() {
         "跳到底部"
     );
     assert_eq!(format_concise_keycap_caption("滚动到对话底部"), "跳到底部");
+
+    // Universal mouse pointer + dial scroll preset applies cleanly on both Antigravity and Codex.
+    assert!(KnobJoystickPreset::MousePointerAndScroll.is_universal());
+    for target_agent in [CanonicalAgent::Antigravity, CanonicalAgent::Codex] {
+        let target_pid = store.find_canonical_profile_id(target_agent).unwrap();
+        store.select_and_activate_profile(&target_pid).unwrap();
+        store
+            .dispatch_canvas_action(CanvasAction::UnlockBySwitchingOrCreatingCustomLayer)
+            .unwrap();
+        store
+            .dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
+                KnobJoystickPreset::MousePointerAndScroll,
+            ))
+            .unwrap();
+        let mouse_proj = store.projection();
+        assert_eq!(mouse_proj.canvas.encoder.ccw_label, "鼠标滚轮向上");
+        assert_eq!(mouse_proj.canvas.encoder.cw_label, "鼠标滚轮向下");
+        assert_eq!(mouse_proj.canvas.encoder.press_label, "切换档位");
+        assert_eq!(mouse_proj.canvas.joystick.sectors.len(), 8);
+        for (slot, expected_label) in [
+            (16, "指针上移"),
+            (17, "指针下移"),
+            (18, "指针左移"),
+            (19, "指针右移"),
+        ] {
+            assert!(mouse_proj
+                .canvas
+                .joystick
+                .sectors
+                .iter()
+                .any(|s| s.logical_slot == slot && s.concise_label == expected_label));
+        }
+    }
+}
+
+#[test]
+fn host_mouse_commands_preserve_host_adapter_and_execute_cleanly_in_physical_dispatch() {
+    for target_agent in [CanonicalAgent::Antigravity, CanonicalAgent::Codex] {
+        let temp = TempDir::new().unwrap();
+        let mut cfg = mi_core::WorkbenchStoreConfig::isolated(temp.path());
+        cfg.isolated = false;
+        let mut store = WorkbenchStore::open(cfg).unwrap();
+        store.set_host_execution_enabled(true).unwrap();
+
+        let target_pid = store.find_canonical_profile_id(target_agent).unwrap();
+        if target_agent == CanonicalAgent::Codex {
+            let local_codex = store
+                .document_store
+                .host_store()
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, p)| p.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
+                .map(|(id, _)| id.clone())
+                .unwrap();
+            store.select_and_activate_profile(&local_codex).unwrap();
+            store
+                .dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
+                    KnobJoystickPreset::MousePointerAndScroll,
+                ))
+                .unwrap();
+        }
+        store.select_and_activate_profile(&target_pid).unwrap();
+        if target_agent == CanonicalAgent::Antigravity {
+            store
+                .dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
+                    KnobJoystickPreset::MousePointerAndScroll,
+                ))
+                .unwrap();
+        }
+
+        let event = mi_session::InputEvent {
+            session_id: 1,
+            board_layer: None,
+            sequence: 1,
+            ingress_sequence: 1,
+            radial_center: None,
+            radial_position: None,
+            timestamp_ms: 0,
+            kind: mi_session::InputEventKind::Pressed,
+            logical_switch: None,
+            binding_id: Some("ENC_CLK".into()),
+            physical_control: None,
+            keycap_group: None,
+            action_role: None,
+            lost_count: 0,
+            action_eligible: true,
+        };
+        let receipt = store
+            .consume_physical_input_event(event, std::time::Instant::now())
+            .expect("host mouse speed cycle must emit receipt");
+        assert_eq!(receipt.target, "host", "{target_agent:?}");
+        assert_eq!(receipt.outcome, "executed", "{target_agent:?}");
+        assert_eq!(receipt.detail, "mouse-speed:2", "{target_agent:?}");
+    }
 }

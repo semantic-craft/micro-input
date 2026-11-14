@@ -502,7 +502,11 @@ async fn identity(session: &DeviceSession) -> Result<(Option<u32>, Option<u32>)>
         .read_identity_info()
         .await
         .map_err(|_| "identity_failed")?;
-    if identity.version.as_deref() != Some("0.6.3") {
+    if !identity
+        .version
+        .as_deref()
+        .is_some_and(mi_model::is_supported_native_firmware)
+    {
         return Err("unsupported_firmware");
     }
     Ok((identity.profile_index, identity.layer_index))

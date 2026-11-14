@@ -405,3 +405,194 @@ fn firmware_v063_304_tokens_2d_encoders_and_joystick_sector_splicing_work_end_to
         mi_model::Binding::Basic(mi_model::Token("KC_ENT".into()))
     );
 }
+
+#[test]
+fn v070_mouse_tokens_and_joystick_modes_gate_on_firmware_and_apply_cleanly() {
+    assert_eq!(mi_model::draft::FIRMWARE_V070_MOUSE_TOKENS.len(), 19);
+    assert!(mi_model::draft::FIRMWARE_V070_MOUSE_TOKENS
+        .windows(2)
+        .all(|w| w[0] < w[1]));
+    assert!(mi_model::draft::DEVICE_KEY_TOKENS
+        .windows(2)
+        .all(|w| w[0] < w[1]));
+    assert!(mi_model::draft::is_valid_firmware_v070_token("MS_BTN1"));
+    assert!(!mi_model::draft::is_valid_firmware_v063_token("MS_BTN1"));
+
+    let raw_v070 = r#"{ "version":1, "profiles":[{"id":"p","name":"P","layers":[{"id":7,"name":"L","layout":{"keymap":[["KC_A","KC_A"],[null,null,null,null],[null,null,null,null],[null,null,null]],"encoders":[null,null,null],"joystick":{"type":"JOYSTICK","sectors":["KC_UP","KC_DOWN","KC_LEFT","KC_RGHT"]}}}]}]}"#;
+    let config = mi_model::parse_device_files(raw_v070.as_bytes(), None).unwrap();
+    let baseline_063 = json!({
+        "device_identity":{"confidence":"observed-interface","interface":"synthetic","session_id":4},
+        "firmware":"0.6.3",
+        "keymap":{"state":"present","size":raw_v070.len(),"sha1":format!("{:x}",sha1::Sha1::digest(raw_v070.as_bytes())),"bytes":raw_v070.as_bytes()},
+        "smart_actions":{"state":"missing"},
+        "active_indices":{"profile":9,"layer":null}
+    });
+    let mut baseline_070 = baseline_063.clone();
+    baseline_070["firmware"] = json!("0.7.0-rc.16");
+
+    let prepare = |fw_baseline: &serde_json::Value, token: &str, mode: Option<&str>| {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workbench.json");
+        let doc = mi_model::document::LocalDocumentV2::from_config(
+            &config,
+            Some(fw_baseline.clone()),
+            "device-snapshot",
+        )
+        .unwrap();
+        std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+        let mut store = DocumentStore::default();
+        store.open(path).unwrap();
+        let p = store.draft.document.editable.graph.profile_order[0].clone();
+        let l = store.draft.document.editable.graph.profiles[&p].layer_order[0].clone();
+        store
+            .update(|d| {
+                d.assign(
+                    &json!(p),
+                    &json!(l),
+                    0,
+                    Action {
+                        id: format!("ms-{token}"),
+                        name: "鼠标测试".into(),
+                        category: "设备按键".into(),
+                        detail: "测试".into(),
+                        payload: json!({"type": "device_key", "token": token}),
+                    },
+                )?;
+                if let Some(joystick_mode) = mode {
+                    d.set_control_settings(
+                        &p,
+                        &l,
+                        mi_model::control_settings::ControlSettings {
+                            joystick_mode: joystick_mode.into(),
+                            active_sectors: 0,
+                        },
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        store
+            .preview_apply(fw_baseline)
+            .and_then(|preview| {
+                store.prepare_apply_backup(&preview.token, fw_baseline)?;
+                store.take_prepared_candidate(&preview.token, fw_baseline)
+            })
+            .map(|candidate| (dir, candidate))
+    };
+
+    assert!(prepare(&baseline_063, "MS_BTN1", None)
+        .err()
+        .unwrap()
+        .contains("0.7.0-rc.16"));
+    assert!(prepare(&baseline_063, "KC_A", Some("mouse"))
+        .err()
+        .unwrap()
+        .contains("0.7.0-rc.16"));
+
+    let (_mouse_dir, candidate_mouse) = prepare(&baseline_070, "MS_BTN1", Some("mouse")).unwrap();
+    assert_eq!(
+        candidate_mouse.preview().unwrap().after,
+        "1 个键位、1 个摇杆模式、0 个灯光字段"
+    );
+    let reparsed_mouse = mi_model::parse_device_files(candidate_mouse.candidate(), None).unwrap();
+    assert_eq!(
+        reparsed_mouse.profiles[0].layers[0].keys[0],
+        mi_model::Binding::Basic(mi_model::Token("MS_BTN1".into()))
+    );
+    assert_eq!(
+        reparsed_mouse.profiles[0].layers[0].joystick.kind["type"],
+        json!("MOUSE")
+    );
+
+    let (_scroll_dir, candidate_scroll) =
+        prepare(&baseline_070, "MS_WHLU", Some("scroll")).unwrap();
+    assert_eq!(
+        candidate_scroll.preview().unwrap().after,
+        "1 个键位、1 个摇杆模式、0 个灯光字段"
+    );
+    let reparsed_scroll = mi_model::parse_device_files(candidate_scroll.candidate(), None).unwrap();
+    assert_eq!(
+        reparsed_scroll.profiles[0].layers[0].keys[0],
+        mi_model::Binding::Basic(mi_model::Token("MS_WHLU".into()))
+    );
+    assert_eq!(
+        reparsed_scroll.profiles[0].layers[0].joystick.kind["type"],
+        json!("SCROLL")
+    );
+
+    // Selecting "source" (including after switching away from "mouse") normalizes cleanly to retain baseline joystick mode.
+    for (fw_label, fw_baseline) in [("0.6.3", &baseline_063), ("0.7.0-rc.16", &baseline_070)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workbench.json");
+        let doc = mi_model::document::LocalDocumentV2::from_config(
+            &config,
+            Some(fw_baseline.clone()),
+            "device-snapshot",
+        )
+        .unwrap();
+        std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+        let mut store = DocumentStore::default();
+        store.open(path).unwrap();
+        let p = store.draft.document.editable.graph.profile_order[0].clone();
+        let l = store.draft.document.editable.graph.profiles[&p].layer_order[0].clone();
+        store
+            .update(|d| {
+                d.set_control_settings(
+                    &p,
+                    &l,
+                    mi_model::control_settings::ControlSettings {
+                        joystick_mode: "mouse".into(),
+                        active_sectors: 0,
+                    },
+                )?;
+                d.set_control_settings(
+                    &p,
+                    &l,
+                    mi_model::control_settings::ControlSettings {
+                        joystick_mode: "source".into(),
+                        active_sectors: 0,
+                    },
+                )?;
+                d.assign(
+                    &json!(p),
+                    &json!(l),
+                    0,
+                    Action {
+                        id: "kc-ent".into(),
+                        name: "回车".into(),
+                        category: "设备按键".into(),
+                        detail: "KC_ENT".into(),
+                        payload: json!({"type": "device_key", "token": "KC_ENT"}),
+                    },
+                )?;
+                d.assign(
+                    &json!(p),
+                    &json!(l),
+                    1,
+                    Action {
+                        id: "kc-esc".into(),
+                        name: "ESC".into(),
+                        category: "设备按键".into(),
+                        detail: "KC_ESC".into(),
+                        payload: json!({"type": "device_key", "token": "KC_ESC"}),
+                    },
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let preview = store.preview_apply(fw_baseline).expect(fw_label);
+        assert_eq!(preview.after, "2 个键位、0 个灯光字段", "{fw_label}");
+        store
+            .prepare_apply_backup(&preview.token, fw_baseline)
+            .unwrap();
+        let candidate = store
+            .take_prepared_candidate(&preview.token, fw_baseline)
+            .unwrap();
+        let reparsed = mi_model::parse_device_files(candidate.candidate(), None).unwrap();
+        assert_eq!(
+            reparsed.profiles[0].layers[0].joystick.kind["type"],
+            json!("JOYSTICK"),
+            "{fw_label}"
+        );
+    }
+}

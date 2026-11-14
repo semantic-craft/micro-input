@@ -22,7 +22,7 @@ pub use executor::{
     select_antigravity_new_conversation_target, submit_modifiers_for_adapter,
     AntigravityNewConversationTarget, AntigravitySidebarAxNode, ClipboardItemSnapshot,
     ClipboardSnapshot, DialScrollRequest, HeldInputId, HostActionReceipt, HostOsDriver,
-    LiveHostActionExecutor, MacOsSystemDriver, RecordedOsEvent, RecordingOsDriver,
+    LiveHostActionExecutor, MacOsSystemDriver, MouseButtonKind, RecordedOsEvent, RecordingOsDriver,
     SimulatedHostActionExecutor,
 };
 pub use instance_lock::DocumentInstanceLock;

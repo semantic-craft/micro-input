@@ -1,5 +1,6 @@
 use mi_macos::executor::{
-    ClipboardSnapshot, DialScrollRequest, HostOsDriver, LiveHostActionExecutor, APPLE_FN_KEY_CODE,
+    ClipboardSnapshot, DialScrollRequest, HostOsDriver, LiveHostActionExecutor, MouseButtonKind,
+    APPLE_FN_KEY_CODE,
 };
 use mi_model::host_router::ResolvedHostAction;
 use std::sync::{mpsc, Arc, Mutex};
@@ -60,6 +61,15 @@ impl HostOsDriver for BlockingDriver {
         unreachable!()
     }
     fn scroll_window(&self, _: &DialScrollRequest) -> Result<(), String> {
+        unreachable!()
+    }
+    fn move_cursor_by(&self, _: f64, _: f64) -> Result<(), String> {
+        unreachable!()
+    }
+    fn click_mouse_button(&self, _: MouseButtonKind) -> Result<(), String> {
+        unreachable!()
+    }
+    fn scroll_cursor_wheel(&self, _: i32, _: i32) -> Result<(), String> {
         unreachable!()
     }
     fn new_conversation_in_project(&self, _: &str) -> Result<(), String> {

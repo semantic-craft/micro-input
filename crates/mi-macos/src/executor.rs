@@ -10,7 +10,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -194,6 +194,60 @@ type CFIndex = isize;
 #[cfg(target_os = "macos")]
 type AXError = i32;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButtonKind {
+    Left,
+    Right,
+    Middle,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct CGSize {
+    width: f64,
+    height: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct CGRect {
+    origin: CGPoint,
+    size: CGSize,
+}
+
+#[cfg(target_os = "macos")]
+const K_CG_MOUSE_EVENT_CLICK_STATE: u32 = 1;
+#[cfg(target_os = "macos")]
+const CG_EVENT_LEFT_MOUSE_DOWN: u32 = 1;
+#[cfg(target_os = "macos")]
+const CG_EVENT_LEFT_MOUSE_UP: u32 = 2;
+#[cfg(target_os = "macos")]
+const CG_EVENT_RIGHT_MOUSE_DOWN: u32 = 3;
+#[cfg(target_os = "macos")]
+const CG_EVENT_RIGHT_MOUSE_UP: u32 = 4;
+#[cfg(target_os = "macos")]
+const CG_EVENT_MOUSE_MOVED: u32 = 5;
+#[cfg(target_os = "macos")]
+const CG_EVENT_OTHER_MOUSE_DOWN: u32 = 25;
+#[cfg(target_os = "macos")]
+const CG_EVENT_OTHER_MOUSE_UP: u32 = 26;
+#[cfg(target_os = "macos")]
+const CG_MOUSE_BUTTON_LEFT: u32 = 0;
+#[cfg(target_os = "macos")]
+const CG_MOUSE_BUTTON_RIGHT: u32 = 1;
+#[cfg(target_os = "macos")]
+const CG_MOUSE_BUTTON_CENTER: u32 = 2;
+
 #[cfg(target_os = "macos")]
 const CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE: i32 = 1;
 #[cfg(target_os = "macos")]
@@ -224,6 +278,14 @@ unsafe extern "C" {
     fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
     static kCFBooleanTrue: CFTypeRef;
     fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
+    fn CGEventCreate(source: CGEventSourceRef) -> CGEventRef;
+    fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
+    fn CGEventCreateMouseEvent(
+        source: CGEventSourceRef,
+        mouse_type: u32,
+        mouse_cursor_position: CGPoint,
+        mouse_button: u32,
+    ) -> CGEventRef;
     fn CGEventCreateKeyboardEvent(
         source: CGEventSourceRef,
         virtual_key: u16,
@@ -239,8 +301,15 @@ unsafe extern "C" {
     ) -> CGEventRef;
     fn CGEventSetType(event: CGEventRef, event_type: u32);
     fn CGEventSetFlags(event: CGEventRef, flags: u64);
+    fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
     fn CGEventPost(tap: u32, event: CGEventRef);
     fn CGEventPostToPid(pid: i32, event: CGEventRef);
+    fn CGGetActiveDisplayList(
+        max_displays: u32,
+        active_displays: *mut u32,
+        display_count: *mut u32,
+    ) -> i32;
+    fn CGDisplayBounds(display: u32) -> CGRect;
     fn CFStringCreateWithBytes(
         alloc: CFTypeRef,
         bytes: *const u8,
@@ -690,11 +759,43 @@ pub trait HostOsDriver: Send + Sync {
         self.post_key_shortcut(key, modifiers, false)
     }
     fn scroll_window(&self, req: &DialScrollRequest) -> Result<(), String>;
+    fn move_cursor_by(&self, dx: f64, dy: f64) -> Result<(), String>;
+    fn click_mouse_button(&self, button: MouseButtonKind) -> Result<(), String>;
+    fn scroll_cursor_wheel(&self, dx_lines: i32, dy_lines: i32) -> Result<(), String>;
     fn new_conversation_in_project(&self, adapter: &str) -> Result<(), String>;
     fn toggle_live_voice(&self, adapter: &str) -> Result<(), String>;
     fn codex_reasoning(&self, _action: CodexReasoningAction) -> Result<(), String> {
         Err("blocked:codex_reasoning_unavailable".into())
     }
+}
+
+fn clamp_point_to_rects(point: (f64, f64), rects: &[(f64, f64, f64, f64)]) -> (f64, f64) {
+    let mut best: Option<((f64, f64), f64)> = None;
+    for &(ox, oy, width, height) in rects {
+        if !ox.is_finite()
+            || !oy.is_finite()
+            || !width.is_finite()
+            || !height.is_finite()
+            || width <= 0.0
+            || height <= 0.0
+        {
+            continue;
+        }
+        let max_x = (ox + width - 1.0).max(ox);
+        let max_y = (oy + height - 1.0).max(oy);
+        let cx = point.0.clamp(ox, max_x);
+        let cy = point.1.clamp(oy, max_y);
+        let dx = cx - point.0;
+        let dy = cy - point.1;
+        let dist_sq = dx * dx + dy * dy;
+        if dist_sq == 0.0 {
+            return (cx, cy);
+        }
+        if best.is_none_or(|(_, best_dist)| dist_sq < best_dist) {
+            best = Some(((cx, cy), dist_sq));
+        }
+    }
+    best.map_or(point, |(clamped, _)| clamped)
 }
 
 #[derive(Debug, Default)]
@@ -1021,6 +1122,159 @@ impl HostOsDriver for MacOsSystemDriver {
         Ok(())
     }
 
+    fn move_cursor_by(&self, dx: f64, dy: f64) -> Result<(), String> {
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        if !dx.is_finite() || !dy.is_finite() {
+            return Err("invalid_cursor_delta".to_string());
+        }
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let source = CGEventSourceCreate(CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE);
+            if source.is_null() {
+                return Err("cg_event_source_null".to_string());
+            }
+            let probe = CGEventCreate(std::ptr::null_mut());
+            if probe.is_null() {
+                CFRelease(source);
+                return Err("cg_cursor_probe_null".to_string());
+            }
+            let current = CGEventGetLocation(probe);
+            CFRelease(probe);
+            let raw_next = CGPoint {
+                x: current.x + dx,
+                y: current.y + dy,
+            };
+            let mut displays = [0u32; 32];
+            let mut display_count: u32 = 0;
+            let mut rects = Vec::new();
+            if CGGetActiveDisplayList(
+                displays.len() as u32,
+                displays.as_mut_ptr(),
+                &mut display_count,
+            ) == 0
+                && display_count > 0
+            {
+                let count = (display_count as usize).min(displays.len());
+                for &display in &displays[..count] {
+                    let bounds = CGDisplayBounds(display);
+                    rects.push((
+                        bounds.origin.x,
+                        bounds.origin.y,
+                        bounds.size.width,
+                        bounds.size.height,
+                    ));
+                }
+            }
+            let (clamped_x, clamped_y) = clamp_point_to_rects((raw_next.x, raw_next.y), &rects);
+            let next = CGPoint {
+                x: clamped_x,
+                y: clamped_y,
+            };
+            let event =
+                CGEventCreateMouseEvent(source, CG_EVENT_MOUSE_MOVED, next, CG_MOUSE_BUTTON_LEFT);
+            if event.is_null() {
+                CFRelease(source);
+                return Err("cg_mouse_move_event_null".to_string());
+            }
+            CGEventPost(CG_HID_EVENT_TAP, event);
+            CFRelease(event);
+            CFRelease(source);
+        }
+        Ok(())
+    }
+
+    fn click_mouse_button(&self, button: MouseButtonKind) -> Result<(), String> {
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let source = CGEventSourceCreate(CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE);
+            if source.is_null() {
+                return Err("cg_event_source_null".to_string());
+            }
+            let probe = CGEventCreate(std::ptr::null_mut());
+            if probe.is_null() {
+                CFRelease(source);
+                return Err("cg_cursor_probe_null".to_string());
+            }
+            let loc = CGEventGetLocation(probe);
+            CFRelease(probe);
+            let (down_type, up_type, cg_button) = match button {
+                MouseButtonKind::Left => (
+                    CG_EVENT_LEFT_MOUSE_DOWN,
+                    CG_EVENT_LEFT_MOUSE_UP,
+                    CG_MOUSE_BUTTON_LEFT,
+                ),
+                MouseButtonKind::Right => (
+                    CG_EVENT_RIGHT_MOUSE_DOWN,
+                    CG_EVENT_RIGHT_MOUSE_UP,
+                    CG_MOUSE_BUTTON_RIGHT,
+                ),
+                MouseButtonKind::Middle => (
+                    CG_EVENT_OTHER_MOUSE_DOWN,
+                    CG_EVENT_OTHER_MOUSE_UP,
+                    CG_MOUSE_BUTTON_CENTER,
+                ),
+            };
+            let down = CGEventCreateMouseEvent(source, down_type, loc, cg_button);
+            let up = CGEventCreateMouseEvent(source, up_type, loc, cg_button);
+            if down.is_null() || up.is_null() {
+                if !down.is_null() {
+                    CFRelease(down);
+                }
+                if !up.is_null() {
+                    CFRelease(up);
+                }
+                CFRelease(source);
+                return Err("cg_mouse_click_event_null".to_string());
+            }
+            CGEventSetIntegerValueField(down, K_CG_MOUSE_EVENT_CLICK_STATE, 1);
+            CGEventSetIntegerValueField(up, K_CG_MOUSE_EVENT_CLICK_STATE, 1);
+            CGEventPost(CG_HID_EVENT_TAP, down);
+            CGEventPost(CG_HID_EVENT_TAP, up);
+            CFRelease(down);
+            CFRelease(up);
+            CFRelease(source);
+        }
+        Ok(())
+    }
+
+    fn scroll_cursor_wheel(&self, dx_lines: i32, dy_lines: i32) -> Result<(), String> {
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        if dx_lines == 0 && dy_lines == 0 {
+            return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let source = CGEventSourceCreate(CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE);
+            if source.is_null() {
+                return Err("cg_event_source_null".to_string());
+            }
+            // Per NSEvent.h, horizontal deltaX uses + for left and - for right.
+            let event = CGEventCreateScrollWheelEvent2(
+                source,
+                CG_SCROLL_EVENT_UNIT_LINE,
+                2,
+                dy_lines,
+                -dx_lines,
+                0,
+            );
+            if event.is_null() {
+                CFRelease(source);
+                return Err("cg_mouse_scroll_event_null".to_string());
+            }
+            CGEventPost(CG_HID_EVENT_TAP, event);
+            CFRelease(event);
+            CFRelease(source);
+        }
+        Ok(())
+    }
+
     fn new_conversation_in_project(&self, adapter: &str) -> Result<(), String> {
         if !self.is_accessibility_trusted() {
             return Err("accessibility_untrusted".to_string());
@@ -1165,6 +1419,15 @@ pub enum RecordedOsEvent {
     FocusAgentInput(String),
     StopActiveDictation(String),
     ScrollWindow(DialScrollRequest),
+    MoveCursorBy {
+        dx: i32,
+        dy: i32,
+    },
+    ClickMouseButton(MouseButtonKind),
+    ScrollCursorWheel {
+        dx_lines: i32,
+        dy_lines: i32,
+    },
     NewConversationInProject(String),
     ToggleLiveVoice(String),
     CodexReasoning(CodexReasoningAction),
@@ -1380,6 +1643,37 @@ impl HostOsDriver for RecordingOsDriver {
         Ok(())
     }
 
+    fn move_cursor_by(&self, dx: f64, dy: f64) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
+            return Err("accessibility_untrusted".to_string());
+        }
+        st.events.push(RecordedOsEvent::MoveCursorBy {
+            dx: dx.round() as i32,
+            dy: dy.round() as i32,
+        });
+        Ok(())
+    }
+
+    fn click_mouse_button(&self, button: MouseButtonKind) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
+            return Err("accessibility_untrusted".to_string());
+        }
+        st.events.push(RecordedOsEvent::ClickMouseButton(button));
+        Ok(())
+    }
+
+    fn scroll_cursor_wheel(&self, dx_lines: i32, dy_lines: i32) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
+            return Err("accessibility_untrusted".to_string());
+        }
+        st.events
+            .push(RecordedOsEvent::ScrollCursorWheel { dx_lines, dy_lines });
+        Ok(())
+    }
+
     fn new_conversation_in_project(&self, adapter: &str) -> Result<(), String> {
         let mut st = self.state.lock().unwrap();
         if !self.accessibility_trusted.load(Ordering::SeqCst) {
@@ -1579,6 +1873,7 @@ pub struct LiveHostActionExecutor<D: HostOsDriver = MacOsSystemDriver> {
     driver: D,
     execution_lock: Mutex<()>,
     held_apple_fn_bindings: Mutex<HashMap<FnHoldKey, FnOwner>>,
+    mouse_speed_tier: AtomicU8,
 }
 
 impl<D: HostOsDriver> Drop for LiveHostActionExecutor<D> {
@@ -1595,6 +1890,70 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
             driver,
             execution_lock: Mutex::new(()),
             held_apple_fn_bindings: Mutex::new(HashMap::new()),
+            mouse_speed_tier: AtomicU8::new(1),
+        }
+    }
+
+    fn mouse_step_and_scroll(tier: u8) -> (f64, i32) {
+        match tier {
+            0 => (8.0, 2),
+            2 => (52.0, 9),
+            _ => (22.0, 4),
+        }
+    }
+
+    fn execute_host_mouse_command(
+        &self,
+        command: &str,
+        make_receipt: &impl Fn(&str, String) -> HostActionReceipt,
+    ) -> HostActionReceipt {
+        match command {
+            "mouse-speed:0" => {
+                self.mouse_speed_tier.store(0, Ordering::SeqCst);
+                return make_receipt("executed", "mouse-speed:0".into());
+            }
+            "mouse-speed:1" => {
+                self.mouse_speed_tier.store(1, Ordering::SeqCst);
+                return make_receipt("executed", "mouse-speed:1".into());
+            }
+            "mouse-speed:2" => {
+                self.mouse_speed_tier.store(2, Ordering::SeqCst);
+                return make_receipt("executed", "mouse-speed:2".into());
+            }
+            "mouse-speed:cycle" => {
+                let next = self
+                    .mouse_speed_tier
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+                        Some((cur + 1) % 3)
+                    })
+                    .map(|prev| (prev + 1) % 3)
+                    .unwrap_or(1);
+                return make_receipt("executed", format!("mouse-speed:{next}"));
+            }
+            _ => {}
+        }
+        if !self.driver.is_accessibility_trusted() {
+            return make_receipt("blocked", "accessibility_untrusted".to_string());
+        }
+        let (move_px, scroll_lines) =
+            Self::mouse_step_and_scroll(self.mouse_speed_tier.load(Ordering::SeqCst));
+        let result = match command {
+            "mouse-move:up" => self.driver.move_cursor_by(0.0, -move_px),
+            "mouse-move:down" => self.driver.move_cursor_by(0.0, move_px),
+            "mouse-move:left" => self.driver.move_cursor_by(-move_px, 0.0),
+            "mouse-move:right" => self.driver.move_cursor_by(move_px, 0.0),
+            "mouse-click:left" => self.driver.click_mouse_button(MouseButtonKind::Left),
+            "mouse-click:right" => self.driver.click_mouse_button(MouseButtonKind::Right),
+            "mouse-click:middle" => self.driver.click_mouse_button(MouseButtonKind::Middle),
+            "mouse-scroll:up" => self.driver.scroll_cursor_wheel(0, scroll_lines),
+            "mouse-scroll:down" => self.driver.scroll_cursor_wheel(0, -scroll_lines),
+            "mouse-scroll:left" => self.driver.scroll_cursor_wheel(-scroll_lines, 0),
+            "mouse-scroll:right" => self.driver.scroll_cursor_wheel(scroll_lines, 0),
+            _ => Err("unsupported_mouse_command".to_string()),
+        };
+        match result {
+            Ok(()) => make_receipt("executed", format!("host/{command}")),
+            Err(err) => make_receipt("failed", err),
         }
     }
 
@@ -1979,6 +2338,9 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 }
             }
             ResolvedHostAction::AgentCommand { adapter, command } => {
+                if adapter == "host" && mi_model::is_host_mouse_command(command) {
+                    return self.execute_host_mouse_command(command, &make_receipt);
+                }
                 if adapter == "four-app" && command.starts_with("slot-open:") {
                     return make_receipt("blocked", "session_navigation_unavailable".into());
                 }
@@ -2366,5 +2728,109 @@ mod serialized_effect_tests {
                 "com.openai.codex".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn host_mouse_commands_move_click_scroll_and_respect_speed_gears_and_trust() {
+        let driver = RecordingOsDriver::new(true);
+        let executor = LiveHostActionExecutor::new(driver.clone());
+        let run = |command: &str| {
+            executor.execute(
+                "prof",
+                "btn",
+                &ResolvedHostAction::AgentCommand {
+                    adapter: "host".into(),
+                    command: command.into(),
+                },
+            )
+        };
+
+        // Default speed tier 1 -> 22px move, 4 scroll lines.
+        assert_eq!(run("mouse-move:up").outcome, "executed");
+        assert_eq!(run("mouse-click:left").outcome, "executed");
+        assert_eq!(run("mouse-click:right").outcome, "executed");
+        assert_eq!(run("mouse-click:middle").outcome, "executed");
+        assert_eq!(run("mouse-scroll:down").outcome, "executed");
+        assert_eq!(run("mouse-scroll:left").outcome, "executed");
+
+        // Switch to fine tier 0 (8px / 2 lines), then fast tier 2 (52px / 9 lines), then cycle -> 0.
+        assert_eq!(run("mouse-speed:0").detail, "mouse-speed:0");
+        assert_eq!(run("mouse-move:right").outcome, "executed");
+        assert_eq!(run("mouse-speed:2").detail, "mouse-speed:2");
+        assert_eq!(run("mouse-scroll:up").outcome, "executed");
+        assert_eq!(run("mouse-speed:cycle").detail, "mouse-speed:0");
+        assert_eq!(run("mouse-move:left").outcome, "executed");
+
+        let mouse_events: Vec<_> = driver
+            .events()
+            .into_iter()
+            .filter(|ev| !matches!(ev, RecordedOsEvent::CheckAccessibilityTrusted))
+            .collect();
+        assert_eq!(
+            mouse_events,
+            vec![
+                RecordedOsEvent::MoveCursorBy { dx: 0, dy: -22 },
+                RecordedOsEvent::ClickMouseButton(MouseButtonKind::Left),
+                RecordedOsEvent::ClickMouseButton(MouseButtonKind::Right),
+                RecordedOsEvent::ClickMouseButton(MouseButtonKind::Middle),
+                RecordedOsEvent::ScrollCursorWheel {
+                    dx_lines: 0,
+                    dy_lines: -4
+                },
+                RecordedOsEvent::ScrollCursorWheel {
+                    dx_lines: -4,
+                    dy_lines: 0
+                },
+                RecordedOsEvent::MoveCursorBy { dx: 8, dy: 0 },
+                RecordedOsEvent::ScrollCursorWheel {
+                    dx_lines: 0,
+                    dy_lines: 9
+                },
+                RecordedOsEvent::MoveCursorBy { dx: -8, dy: 0 },
+            ]
+        );
+
+        driver.set_accessibility_trusted(false);
+        let blocked = run("mouse-move:down");
+        assert_eq!(blocked.outcome, "blocked");
+        assert_eq!(blocked.detail, "accessibility_untrusted");
+    }
+
+    #[test]
+    fn clamp_point_to_rects_handles_negative_multimonitor_and_offscreen_bounds() {
+        let displays = [(-1920.0, 0.0, 1920.0, 1080.0), (0.0, 0.0, 2560.0, 1440.0)];
+
+        // Points inside primary or negative-x secondary monitor stay unchanged.
+        assert_eq!(
+            clamp_point_to_rects((500.0, 400.0), &displays),
+            (500.0, 400.0)
+        );
+        assert_eq!(
+            clamp_point_to_rects((-100.0, 300.0), &displays),
+            (-100.0, 300.0)
+        );
+
+        // Offscreen beyond secondary left edge clamps to [-1920, -1] x [0, 1079].
+        assert_eq!(
+            clamp_point_to_rects((-2400.0, 300.0), &displays),
+            (-1920.0, 300.0)
+        );
+        assert_eq!(
+            clamp_point_to_rects((-500.0, -40.0), &displays),
+            (-500.0, 0.0)
+        );
+        assert_eq!(
+            clamp_point_to_rects((-500.0, 1200.0), &displays),
+            (-500.0, 1079.0)
+        );
+
+        // Offscreen beyond primary right/bottom clamps to [0, 2559] x [0, 1439].
+        assert_eq!(
+            clamp_point_to_rects((3000.0, 1600.0), &displays),
+            (2559.0, 1439.0)
+        );
+
+        // Empty display list falls back to the input point unchanged.
+        assert_eq!(clamp_point_to_rects((-30.0, 40.0), &[]), (-30.0, 40.0));
     }
 }

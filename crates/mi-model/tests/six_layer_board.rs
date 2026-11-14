@@ -181,3 +181,61 @@ fn applied_plan_freezes_routes_and_converts_only_dictation_to_click() {
             .is_err()
     );
 }
+
+#[test]
+fn host_mouse_commands_preserve_host_adapter_in_applied_six_layer_plan() {
+    let mut draft = mi_model::draft::Draft::default();
+    mi_model::preset::install_agent_starter_profiles(&mut draft).unwrap();
+    let id = |name: &str| {
+        draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == name)
+            .unwrap()
+            .0
+            .clone()
+    };
+    let ag_id = id("Antigravity");
+    let codex_id = id("Codex");
+    let dsh_id = id("DeepSeek Coder (DSH)");
+    let ag_layer = draft.document.editable.graph.profiles[&ag_id].layer_order[0].clone();
+    let catalog = mi_model::draft::actions();
+    let cycle_action = catalog
+        .iter()
+        .find(|a| a.id == "host-mouse-speed-cycle")
+        .unwrap()
+        .clone();
+    let move_up_action = catalog
+        .iter()
+        .find(|a| a.id == "host-mouse-move-up")
+        .unwrap()
+        .clone();
+    draft
+        .assign(&json!(ag_id), &json!(ag_layer), 15, cycle_action)
+        .unwrap();
+    draft
+        .assign(&json!(ag_id), &json!(ag_layer), 16, move_up_action)
+        .unwrap();
+
+    let desired = BoardLayerPlan::recommended(codex_id, ag_id, dsh_id);
+    let applied =
+        AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
+            .unwrap();
+    assert_eq!(
+        applied.hosts[0].actions[15],
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "mouse-speed:cycle".into(),
+        })
+    );
+    assert_eq!(
+        applied.hosts[0].actions[16],
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "mouse-move:up".into(),
+        })
+    );
+}

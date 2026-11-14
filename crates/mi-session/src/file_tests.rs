@@ -245,3 +245,55 @@ async fn cancelled_read_keeps_old_snapshot_and_releases_queue_for_a_later_attemp
     assert!(session.snapshot().unwrap().stale);
     server.abort();
 }
+
+#[tokio::test]
+async fn config_snapshot_accepts_v070_rc16_identity_read() {
+    let (link, mut requests) = MockLink::new();
+    let session = DeviceSession::new(
+        link.clone(),
+        Box::<mi_proto::NativeFramer>::default(),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_secs(1),
+            interval: Duration::ZERO,
+        },
+    );
+    let inject = link.inject.clone();
+    let server = tokio::spawn(async move {
+        let bytes = include_bytes!("../../mi-model/fixtures/device/synthetic-keymap-numeric.json");
+        let mut framer = mi_proto::NativeFramer::default();
+        while let Some(report) = requests.recv().await {
+            for line in framer.feed(&report).unwrap() {
+                let r: Value = serde_json::from_slice(&line).unwrap();
+                let result = match r["method"].as_str().unwrap() {
+                    "device.status" => json!({"version": "0.7.0-rc.16"}),
+                    "fs.list" => json!([meta("keymap.json", bytes)]),
+                    "fs.readbin" => {
+                        let offset = r["params"]["offset"].as_u64().unwrap() as usize;
+                        let len = r["params"]["len"].as_u64().unwrap() as usize;
+                        json!({"total_size": bytes.len(), "data": STANDARD.encode(&bytes[offset..offset + len])})
+                    }
+                    _ => panic!("forbidden method"),
+                };
+                for report in mi_proto::NativeFramer::default()
+                    .encode(
+                        json!({"id": r["id"], "result": result})
+                            .to_string()
+                            .as_bytes(),
+                    )
+                    .unwrap()
+                {
+                    if inject.send(report).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    let identity = session.read_identity_info().await.unwrap();
+    assert_eq!(identity.version.as_deref(), Some("0.7.0-rc.16"));
+    session.read_config_snapshot().await.unwrap();
+    assert!(!session.snapshot().unwrap().stale);
+    session.shutdown().await;
+    server.abort();
+}

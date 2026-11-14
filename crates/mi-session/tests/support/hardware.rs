@@ -147,7 +147,9 @@ impl Wire {
     async fn status(&mut self) -> Result<Value> {
         let reply = self.rpc(Request::Status).await?;
         let value = &reply["result"];
-        if value["version"] != "0.6.3"
+        if !value["version"]
+            .as_str()
+            .is_some_and(mi_model::is_supported_native_firmware)
             || value["profile_index"].as_u64().is_none()
             || value["layer_index"].as_u64().is_none()
         {
