@@ -401,11 +401,11 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: 完成相关 `.rodata` 与真机 RPC 只读/受控抓包确认（每项均写入 `docs/` 契约并过 `scripts/check`）；工作台新增控制项与 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 全量通过。
 - **Evidence**: verify-offline 6 QA PASS (.scratch/qa-runs/1794640685530-23470..1794640692201-20201); live 0.7.0-rc.16 probe (fw3-rpc-probe.json, keymap.json unchanged); release MicroInput.app (sha256 122229d4)
 
-### [ ] Slice FW4: 物理速查 kb.cs.* 连线、全量 MS_*/KI_CS_* 动作与摇杆双模滑块化
+### [x] Slice FW4: 物理速查 kb.cs.* 连线、全量 MS_*/KI_CS_* 动作与摇杆双模滑块化
 - **Playbook**: `Feature` + `Verify-Micro-Input`
 - **Outcome**: 打通 `DeviceSession` 与 `SharedVendorBridge` 双路径 `kb.cs.show/hide/toggle` 到 `OverlayController`（保序队列与会话序号去重），在 `mi-model` 动作库公开全部 19 个 `MS_*` 与 4 个 `KI_CS_*` 板载键码及能力说明，在右侧检视器提供摇杆「宿主四向 / 硬件指针 / 硬件滚轮 / 原层保留」分段切换与互斥提示，并将 `mouse.config` 6 项常用参数升级为单色 `NeutralTrackSlider` 滑块。
 - **Done Predicate**: `./scripts/check` 与 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 六场景全绿通过，所有 Swift 文件严格 `< 1000` 行且满足 `R-C06`..`R-C10`。
-- **Evidence**: PENDING
+- **Evidence**: PR #140; verify-offline 6 QA PASS (.scratch/qa-runs/1794644961407-93313..1794644968913-88524)
 
 ### [ ] Slice FW5: 顶栏电量与电源模式常驻状态、多设备序列号优选及安全层同步
 - **Playbook**: `Feature` + `Verify-Micro-Input`
