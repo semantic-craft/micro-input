@@ -1114,11 +1114,13 @@ impl WorkbenchStore {
             .graph
             .profiles;
         let profile_name = |pid: &str| profiles.get(pid).map(|p| p.name.as_str());
-        let active_name = self
+        let active_id = self
             .effective_resolved_active_profile_id()
+            .or_else(|| self.selected_profile_id.clone());
+        let active_name = active_id
             .as_deref()
-            .and_then(profile_name)
-            .or_else(|| self.selected_profile_id.as_deref().and_then(profile_name));
+            .and_then(|id| self.runtime_action_profile_id(id))
+            .and_then(profile_name);
         if active_name == Some(mi_model::preset::LOCAL_CODEX_PROFILE_NAME) {
             LiveSessionSource::Codex
         } else {
@@ -4413,7 +4415,7 @@ impl WorkbenchStore {
         binding_id: &str,
         layout: BottomRowLayout,
     ) -> Option<ResolvedHostAction> {
-        let source_id = self.runtime_action_profile_id(profile_id, binding_id)?;
+        let source_id = self.runtime_action_profile_id(profile_id)?;
         let doc = &self.document_store.host_store().draft.document;
         if let Some(resolved) = resolve_host_action_with_layout(
             doc,
@@ -4455,13 +4457,9 @@ impl WorkbenchStore {
         }
         let profile_id = self.resolved_active_profile_id();
         if event.kind != InputEventKind::Released
-            && profile_id.as_ref().is_none_or(|id| {
-                self.is_protected_oai_profile(id)
-                    && event
-                        .binding_id
-                        .as_deref()
-                        .is_none_or(|binding| self.runtime_action_profile_id(id, binding).is_none())
-            })
+            && profile_id
+                .as_ref()
+                .is_none_or(|id| self.runtime_action_profile_id(id).is_none())
         {
             return None;
         }

@@ -472,7 +472,7 @@ fn native_codex_all_controls_keep_existing_actions_in_locked_and_manual_routes()
 }
 
 #[test]
-fn native_codex_lower_rows_preserve_custom_actions_unbound_slots_and_other_owners() {
+fn native_codex_preserves_custom_actions_unbound_slots_and_other_owners() {
     let (_dir, mut store, now) = active_store();
     let native = store
         .find_canonical_profile_id(CanonicalAgent::Codex)
@@ -498,12 +498,14 @@ fn native_codex_lower_rows_preserve_custom_actions_unbound_slots_and_other_owner
         .action_id
         .clone()
         .unwrap();
-    layer
-        .controls
-        .values_mut()
-        .find(|c| c.logical_control == "logical-12")
-        .unwrap()
-        .action_id = None;
+    for slot in [0, 12] {
+        layer
+            .controls
+            .values_mut()
+            .find(|c| c.logical_control == format!("logical-{slot}"))
+            .unwrap()
+            .action_id = None;
+    }
     graph.actions.get_mut(&custom_id).unwrap().payload = serde_json::json!({
         "type": "open_url", "url": "https://example.com/custom-action"
     });
@@ -518,12 +520,13 @@ fn native_codex_lower_rows_preserve_custom_actions_unbound_slots_and_other_owner
             url: "https://example.com/custom-action".into(),
         })
     );
+    assert!(plan.actions[0].is_none());
     assert!(plan.actions[12].is_none());
     for (binding, expected) in [
         ("ACT08", true),
-        ("AG12", false),
         ("AG00", false),
-        ("AG13", false),
+        ("AG12", false),
+        ("AG13", true),
     ] {
         let mut event = input(9, InputEventKind::Pressed);
         event.binding_id = Some(binding.into());
@@ -613,11 +616,51 @@ fn native_codex_all_controls_dispatch_custom_local_actions_without_rewriting_map
                 .route_board_input(event, now)
                 .expect("local custom action");
             assert_eq!(receipt.profile_id, native);
-            assert_eq!(receipt.target, url);
+            assert_eq!(receipt.target, "default-browser");
+            assert_eq!(receipt.detail, "example.com");
+            assert_eq!(receipt.text_byte_len, Some(url.len()));
         }
         assert_eq!(
             serde_json::to_value(&store.document_store.draft.document).unwrap(),
             before
         );
+    }
+}
+
+#[test]
+fn native_codex_accepts_radial_positions_without_a_binding_and_unknown_owners_stay_closed() {
+    let (_dir, mut store, now) = active_store();
+    let native = store
+        .find_canonical_profile_id(CanonicalAgent::Codex)
+        .unwrap();
+    store
+        .select_and_activate_profile_at(&native, now, false)
+        .unwrap();
+    for recognized in [true, false] {
+        if !recognized {
+            store
+                .document_store
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .get_mut(&native)
+                .unwrap()
+                .name = "Other protected owner".into();
+        }
+        store.set_radial_menu_enabled(false);
+        store.set_radial_menu_enabled(true);
+        for (sequence, distance) in [(1, 0.0), (2, 0.8)] {
+            let mut event = input(9, InputEventKind::UnknownNotification);
+            event.binding_id = None;
+            event.ingress_sequence = sequence;
+            event.radial_position = Some(mi_session::RadialPosition {
+                angle_turns: 0.0,
+                distance,
+            });
+            assert!(store.route_board_input(event, now).is_none());
+        }
+        assert_eq!(store.radial_state().session().is_some(), recognized);
     }
 }

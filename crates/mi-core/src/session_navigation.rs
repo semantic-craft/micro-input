@@ -1993,6 +1993,137 @@ mod tests {
     }
 
     #[test]
+    fn native_codex_top_six_receiver_controls_navigate_our_catalog_with_native_identity() {
+        use mi_transport::ActivationPayload;
+        use std::os::unix::net::UnixDatagram;
+
+        for locked in [false, true] {
+            let (dir, mut store) = store();
+            let native = store
+                .find_canonical_profile_id(CanonicalAgent::Codex)
+                .unwrap();
+            store.select_and_activate_profile(&native).unwrap();
+            store.auto_follow_enabled = false;
+            store.manual_override = true;
+            store.set_host_execution_enabled(true).unwrap();
+            if locked {
+                store
+                    .dispatch_sidebar_action(crate::sidebar::SidebarAction::SetProfileLocked(true))
+                    .unwrap();
+            }
+            assert_eq!(
+                store.desired_live_session_source(),
+                LiveSessionSource::Codex
+            );
+            let observations = (0..6)
+                .map(|slot| {
+                    codex_obs(
+                        &format!("native-{slot}"),
+                        "local",
+                        &format!("Thread {slot}"),
+                        mi_macos::CodexObservedStatus::Working,
+                        6000 - slot,
+                        &format!("wm-{slot}"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            store.update_navigation_catalog(Some(codex_observations_to_catalog(
+                dir.path().join("codex-home"),
+                &observations,
+            )));
+            let acks = store.lighting_arbiter.acknowledged_watermarks.clone();
+            for slot in 0..6 {
+                store
+                    .slot_table
+                    .pin_slot(
+                        slot,
+                        NavigationPlace::codex(
+                            format!("native-{slot}"),
+                            "local",
+                            "/work/codex-repo",
+                        ),
+                        format!("Thread {slot}"),
+                        1000,
+                        &acks,
+                    )
+                    .unwrap();
+            }
+            store.refresh_navigation_revision();
+            let session = {
+                let _entered = store.tokio_runtime.enter();
+                let (link, _) = mi_transport::MockLink::new();
+                DeviceSession::new(
+                    link,
+                    Box::new(mi_proto::NativeFramer::default()),
+                    Arc::new(mi_session::ReadOnlySchema),
+                    mi_session::SessionConfig::default(),
+                )
+            };
+            let mut running =
+                crate::six_layer_runtime::RunningSixLayer::isolated(session, dir.path());
+            running.installation.plan =
+                store.projection_inputs().compiled_six_layer_plan().unwrap();
+            running.set_routing_context(
+                store.build_six_layer_routing_mode(),
+                Some("com.openai.codex"),
+            );
+            running.navigation = Some(store.session_navigation.dispatch.clone());
+            running.receiver.arm().unwrap();
+            running.set_execution_policy(true, true, Instant::now() - Duration::from_secs(1));
+            let receiver = running.receiver.clone();
+            running.start_executor(Arc::clone(&store.live_executor));
+            store.six_layer_running = Some(running);
+            for slot in 0..6 {
+                let rx = worker(&mut store);
+                let payload =
+                    serde_json::to_vec(&ActivationPayload::new(receiver.generation(), slot))
+                        .unwrap();
+                UnixDatagram::unbound()
+                    .unwrap()
+                    .send_to(&payload, receiver.path())
+                    .unwrap();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while store.session_navigation.pending.is_none() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "slot {slot} navigation was not delivered"
+                    );
+                    store.poll_session_navigation();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let pending = store.session_navigation.pending.as_ref().unwrap();
+                assert_eq!(pending.profile, native);
+                assert_eq!(pending.binding, format!("AG{slot:02}"));
+                let (place, reply) = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+                assert_eq!(
+                    place,
+                    NavigationPlace::codex(format!("native-{slot}"), "local", "/work/codex-repo")
+                );
+                reply.send(Ok(place.clone())).unwrap();
+                store.poll_session_navigation();
+                assert_eq!(store.navigation_history.current(), Some(&place));
+                assert_eq!(store.last_host_action_receipt().unwrap().profile_id, native);
+            }
+            assert_eq!(store.navigation_history.len(), 6);
+            assert!(store
+                .six_layer_running
+                .as_ref()
+                .unwrap()
+                .receipts
+                .as_ref()
+                .unwrap()
+                .try_recv()
+                .is_err());
+            store
+                .six_layer_running
+                .take()
+                .unwrap()
+                .shutdown(&store.tokio_runtime)
+                .unwrap();
+        }
+    }
+
+    #[test]
     fn switching_between_antigravity_and_local_codex_clears_foreign_slots_and_discards_stale_updates(
     ) {
         let (_dir, mut store) = store();

@@ -2027,9 +2027,40 @@ mod tests {
     }
 
     #[test]
-    fn native_codex_lower_rows_dispatch_compiled_actions_and_pause_without_events() {
+    fn native_codex_all_controls_dispatch_compiled_actions_and_pause_without_events() {
         let directory = tempfile::tempdir().unwrap();
-        let store = crate::WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let mut store = crate::WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let local = store
+            .document_store
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, profile)| profile.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
+            .unwrap()
+            .0
+            .clone();
+        let graph = &mut store.document_store.draft.document.editable.graph;
+        let layer_id = graph.profiles[&local].layer_order[0].clone();
+        let template = graph.actions.values().next().unwrap().clone();
+        for binding in graph
+            .layers
+            .get_mut(&layer_id)
+            .unwrap()
+            .controls
+            .values_mut()
+        {
+            let slot = binding.logical_control.strip_prefix("logical-").unwrap();
+            let id = format!("receiver-control-{slot}");
+            let mut action = template.clone();
+            action.payload = serde_json::json!({
+                "type": "open_url", "url": format!("https://example.com/control/{slot}")
+            });
+            graph.actions.insert(id.clone(), action);
+            binding.action_id = Some(id);
+        }
         let native = store
             .find_canonical_profile_id(crate::CanonicalAgent::Codex)
             .unwrap();
@@ -2081,37 +2112,29 @@ mod tests {
                     },
                     || Ok(()),
                     |profile, binding, action, _| {
-                        dispatched.push((profile.to_owned(), binding.to_owned()));
+                        dispatched.push((profile.to_owned(), binding.to_owned(), action.clone()));
                         mi_macos::SimulatedHostActionExecutor.execute(profile, binding, action)
                     },
                 );
                 let expected = if enabled {
-                    (6..=12)
-                        .map(|slot| (native.clone(), format!("AG{slot:02}")))
+                    (0..20)
+                        .map(|slot| {
+                            (
+                                native.clone(),
+                                mi_model::direct_controls::CONTROL_BINDINGS[slot].into(),
+                                ResolvedHostAction::OpenUrl {
+                                    url: format!("https://example.com/control/{slot}"),
+                                },
+                            )
+                        })
                         .collect()
                 } else {
                     Vec::new()
                 };
                 assert_eq!(dispatched, expected);
-                let receipts: Vec<_> = rx.try_iter().map(|r| r.detail).collect();
-                assert_eq!(
-                    receipts,
-                    if enabled {
-                        [
-                            "live-voice",
-                            "focus-input",
-                            "new-tab",
-                            "cycle-workspace-layout",
-                            "new-chat",
-                            "toggle-dictation",
-                            "submit",
-                        ]
-                        .map(|command| format!("codex/{command}"))
-                        .to_vec()
-                    } else {
-                        Vec::new()
-                    }
-                );
+                let receipts: Vec<_> = rx.try_iter().collect();
+                assert_eq!(receipts.len(), if enabled { 20 } else { 0 });
+                assert!(receipts.iter().all(|r| r.outcome == "simulated"));
                 assert!(receiver.failure().is_none());
             }
         }
