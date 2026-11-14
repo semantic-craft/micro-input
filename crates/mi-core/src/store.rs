@@ -7375,12 +7375,12 @@ mod tests {
         let mut cfg = WorkbenchStoreConfig::isolated(dir.path());
         cfg.isolated = false;
         let mut store = WorkbenchStore::open(cfg).expect("open store");
-        let antigravity_id = store
-            .find_canonical_profile_id(CanonicalAgent::Antigravity)
-            .expect("Antigravity profile");
+        let codex_id = store
+            .find_canonical_profile_id(CanonicalAgent::Codex)
+            .expect("Codex profile");
         store
-            .select_and_activate_profile(&antigravity_id)
-            .expect("activate Antigravity");
+            .select_and_activate_profile(&codex_id)
+            .expect("activate Codex");
 
         let host_sheet = store
             .projection()
@@ -7388,11 +7388,12 @@ mod tests {
             .cheat_sheet_preview
             .clone()
             .expect("host cheat sheet preview");
+        let host_favorites = store.projection().status_menu.favorites_2x2.clone();
         assert_eq!(
             store.projection().status_menu.active_profile_name,
-            "Antigravity"
+            "Codex"
         );
-        assert_eq!(host_sheet.profile_name, "Antigravity");
+        assert_eq!(host_sheet.profile_name, "Codex");
         assert!(host_sheet
             .key_cells
             .iter()
@@ -7429,9 +7430,8 @@ mod tests {
         store.commit_runtime_update();
 
         let device_editing_menu = &store.projection().status_menu;
-        assert_eq!(device_editing_menu.active_profile_name, "Antigravity");
-        assert_eq!(device_editing_menu.favorites_2x2[0].title, "Antigravity");
-        assert!(device_editing_menu.favorites_2x2[0].is_active);
+        assert_eq!(device_editing_menu.active_profile_name, "Codex");
+        assert_eq!(device_editing_menu.favorites_2x2, host_favorites);
         assert_eq!(
             device_editing_menu.cheat_sheet_preview.as_ref(),
             Some(&host_sheet)
