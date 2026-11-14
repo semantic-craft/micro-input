@@ -368,3 +368,9 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Outcome**: 六个按键按选定状态筛选 Codex 会话，键位显示、灯光和导航使用同一会话身份。
 - **Done Predicate**: 核验真实会话身份、状态来源与选中回读；筛选、空槽、目标失效和旧输入回归及离线验收通过。最近六个会话快捷键不能代替状态筛选。
 - **Evidence**: docs/verification/codex-controls.json; verify-offline PASS (6 QA scenarios); live ChatGPT.app duplicate-title switch PASS
+
+### [~] Slice R27: 收口有效改动与开发现场
+- **Outcome**: 整合 Codex 旋钮预设和 Antigravity 侧栏导航修复，修正 Fast 模式读回失败误报成功；旧工作区只保留有效实现，清理已合并副本及取消的按住说话试验。
+- **Done Predicate**: 原始改动逐项核对，Fast 模式错误回读回归先失败后通过，独立核验与 `scripts/verify-offline` 六景通过；有效改动提交、推送并合入主线，工作区干净，移除无运行依赖的旧副本。不写设备配置；不把安装、实体按键或视觉效果记为本轮通过。
+- **Evidence**: .scratch/integration-cleanup-20261114; PR #128; scripts/verify-offline
+- **Verification scope**: 本轮只做软件交付与开发现场清理；最新发布仍为 v0.7.0。#44 的安装升级、实体输入、灯光视觉及完整产品验收继续保留原门槛。#71 的旧六层按住方案与当前点击开关契约不同，不据此恢复旧草稿。

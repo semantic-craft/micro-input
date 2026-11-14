@@ -4,7 +4,11 @@
 
 ## 当前开发状态
 
-首轮原生离线工作台：纯 Rust 七核心模块（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）+ 薄 C-ABI 边界（`mi-ffi`）+ 原生 SwiftUI 界面（`app/MicroInput`）。支持配置浏览、动作搜索/分类、结构化动作参数、Profile/Layer新建/复制/改名/排序/删除、本地普通宏按下/释放/延时步骤编辑与共享引用管理、四分支 Multi 的本地时序与共享动作引用编辑、本地草稿持久化、结构与动作差异及整次撤销/重做。动作库按名称、分类和目标搜索，收藏作为独立本机偏好保存；动作条目显示目标、前提与执行不可用原因，应用意图通过系统选择器选择目标。主窗和菜单栏共享状态；关闭主窗保留菜单栏，退出结束会话。⇧⌘M打开菜单栏面板，⌘E搜索动作，⌘[/⌘]选择控件，⌘D查看差异。
+当前已发布版本为 [v0.7.0](https://github.com/semantic-craft/micro-input/releases/tag/v0.7.0)。后续源码已接入 Codex 本机控制、按状态筛选的前六个会话键，以及旋钮的对话滚动和推理档位预设。内置适配为 Antigravity、Herdr、Codex、DeepSeek Harness，另有通用快捷键方案。六层听写采用点击开关，不合入已停止的按住说话试验。
+
+源码实现、离线自动验收、日常安装和实体效果分别记录在[接力队列](docs/pstack-relay.md)。[完整产品验收 #44](https://github.com/semantic-craft/micro-input/issues/44) 仍未完成，不能由已合并 PR 或合成回执代替。Fast 模式只有读回反向菜单标签才确认成功；没有滚动位置读回的定向滚轮派发保留未确认结果。
+
+原生工作台与宿主服务采用纯 Rust 七核心模块（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）+ 薄 C-ABI 边界（`mi-ffi`）+ 原生 SwiftUI 界面（`app/MicroInput`）。支持配置浏览、动作搜索/分类、结构化动作参数、Profile/Layer新建/复制/改名/排序/删除、本地普通宏按下/释放/延时步骤编辑与共享引用管理、四分支 Multi 的本地时序与共享动作引用编辑、本地草稿持久化、结构与动作差异及整次撤销/重做。动作库按名称、分类和目标搜索，收藏作为独立本机偏好保存；动作条目显示目标、前提与执行不可用原因，应用意图通过系统选择器选择目标。主窗和菜单栏共享状态；关闭主窗保留菜单栏，退出结束会话。⇧⌘M打开菜单栏面板，⌘E搜索动作，⌘[/⌘]选择控件，⌘D查看差异。
 
 ```sh
 scripts/verify-offline # 全量检查 + 六个隔离合成应用场景 + 自动回执/清理核对；不连接真实设备
