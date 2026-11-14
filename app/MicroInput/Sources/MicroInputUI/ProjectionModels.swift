@@ -726,6 +726,7 @@ public struct FooterSliceModel: Equatable {
 }
 
 public struct ProjectionModel: Equatable {
+    public var firmware = FirmwareSliceModel()
     public var engineVersion: String = "0.2.0"
     public var readyKind: String = "Ready"
     public var readyText: String = "已就绪"

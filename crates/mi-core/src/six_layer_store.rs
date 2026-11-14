@@ -209,7 +209,8 @@ impl WorkbenchStore {
     }
 
     pub(super) fn try_auto_resume_six_layer(&mut self, now: Instant) {
-        if self.config.isolated
+        if self.firmware_update.reserved()
+            || self.config.isolated
             || !self.config.auto_connect_usb
             || self.system_lifecycle != SystemLifecycle::Awake
             || self.six_layer_job.is_some()
@@ -247,7 +248,7 @@ impl WorkbenchStore {
         let _ = self.start_six_layer_apply(Some(plan));
     }
 
-    fn suspend_for_six_layer_operation(&mut self) -> Result<(), WorkbenchError> {
+    pub(super) fn suspend_for_six_layer_operation(&mut self) -> Result<(), WorkbenchError> {
         self.cancel_session_navigation();
         if let Some(running) = self.six_layer_running.take() {
             if let Err(error) = running.shutdown(&self.tokio_runtime) {
@@ -276,6 +277,11 @@ impl WorkbenchStore {
         resume: Option<AppliedSixLayerPlan>,
     ) -> Result<(), WorkbenchError> {
         self.require_awake()?;
+        if self.firmware_update.reserved() {
+            return Err(WorkbenchError::Routing(
+                "固件更新期间不能恢复六层控制".into(),
+            ));
+        }
         if self.six_layer_job.is_some() {
             return Err(WorkbenchError::Routing("六层操作正在进行".into()));
         }
@@ -325,6 +331,11 @@ impl WorkbenchStore {
 
     pub(super) fn start_six_layer_restore(&mut self) -> Result<(), WorkbenchError> {
         self.require_awake()?;
+        if self.firmware_update.reserved() {
+            return Err(WorkbenchError::Routing(
+                "固件更新期间不能写入六层配置".into(),
+            ));
+        }
         if self.six_layer_job.is_some()
             || self.six_layer_state.installation.is_none()
             || self.config.isolated

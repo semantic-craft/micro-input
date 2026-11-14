@@ -1589,6 +1589,7 @@ impl ProjectionInputs<'_> {
         };
 
         WorkbenchProjection {
+            firmware: Default::default(),
             header,
             sidebar,
             canvas,

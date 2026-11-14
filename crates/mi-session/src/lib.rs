@@ -1,4 +1,5 @@
 //! R-D07/R-C01/R-N01: one serialized queue per connection, cancellation and atomic snapshots.
+mod firmware;
 mod input;
 pub use input::*;
 use mi_model::{DeviceConfig, Source};
@@ -171,6 +172,7 @@ pub struct DeviceSession {
     notifications: broadcast::Sender<ReceivedNotification>,
     ingress_sequence: Arc<AtomicU64>,
     sent_requests: AtomicU64,
+    firmware_bootloader_requested: AtomicBool,
 }
 impl DeviceSession {
     pub fn new(
@@ -293,6 +295,7 @@ impl DeviceSession {
             notifications,
             ingress_sequence,
             sent_requests: AtomicU64::new(0),
+            firmware_bootloader_requested: AtomicBool::new(false),
         })
     }
 
@@ -330,6 +333,14 @@ impl DeviceSession {
     }
     pub fn is_disconnected(&self) -> bool {
         self.invalid.load(Ordering::SeqCst)
+    }
+    pub fn observed_firmware_version(&self) -> Option<String> {
+        let version = self.firmware.lock().unwrap().clone();
+        if self.is_disconnected() {
+            None
+        } else {
+            version
+        }
     }
     pub fn has_exclusive_vendor_link(&self) -> bool {
         !self.is_disconnected() && self.link.is_exclusive_vendor()
@@ -503,8 +514,12 @@ impl DeviceSession {
                     | "lights.preview"
                     | "v.oai.thstatus"
                     | "v.oai.rgbcfg"
+                    | "sys.bootloader"
             )
             && self.link.backend() == mi_transport::LinkBackend::MacHidapi267Numbered;
+        if native_mutation && method == "sys.bootloader" {
+            self.validate_firmware_bootloader_request(q.next_id, &encoded)?;
+        }
         if !synthetic && !native_mutation {
             let request: Value = serde_json::from_slice(&encoded)
                 .map_err(|_| ProtoError::Invalid("invalid encoded request".into()))?;

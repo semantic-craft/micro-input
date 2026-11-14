@@ -39,6 +39,7 @@ expected_swift_ui_files = [
     'ClassicWorkbenchView.swift',
     'CoreBridge.swift',
     'CreatorMicroBoardView.swift',
+    'FirmwareUpdate.swift',
     'InlineInspectorView.swift',
     'KeycapGlyphView.swift',
     'ModalsAndStatusMenuView.swift',

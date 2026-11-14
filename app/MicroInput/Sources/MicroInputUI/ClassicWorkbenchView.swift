@@ -831,6 +831,7 @@ private struct WorkbenchSettingsPage: View {
 
                 case .general:
                     AboutAndUpdatesSettingsSection(updater: updater, engineVersion: store.header.engineVersion)
+                    FirmwareUpdateSettingsSection(model: store.firmware) { store.dispatch("firmware", $0) }
                     VStack(alignment: .leading, spacing: 10) {
                         SettingsSectionHeader("按键控制")
                         SettingsCard {

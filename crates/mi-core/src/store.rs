@@ -88,6 +88,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "firmware_store.rs"]
+mod firmware_store;
 #[path = "session_navigation.rs"]
 pub(crate) mod session_navigation;
 #[path = "six_layer_store.rs"]
@@ -280,6 +282,7 @@ pub enum DeviceWorkflowAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "domain", content = "action", rename_all = "snake_case")]
 pub enum WorkbenchCommand {
+    Firmware(crate::firmware_update::FirmwareAction),
     SystemWillSleep,
     SystemDidWake,
     Header(HeaderAction),
@@ -306,6 +309,7 @@ pub enum WorkbenchCommand {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkbenchProjection {
+    pub firmware: crate::firmware_update::FirmwareProjection,
     pub header: HeaderProjection,
     pub sidebar: SidebarProjection,
     pub canvas: CanvasProjection,
@@ -333,6 +337,7 @@ pub struct WorkbenchProjection {
 impl Default for WorkbenchProjection {
     fn default() -> Self {
         Self {
+            firmware: Default::default(),
             header: HeaderProjection::default(),
             sidebar: SidebarProjection::default(),
             canvas: CanvasProjection::default(),
@@ -367,6 +372,7 @@ struct HeldDictation {
 }
 
 pub struct WorkbenchStore {
+    pub(crate) firmware_update: crate::firmware_update::FirmwareUpdater,
     pub config: WorkbenchStoreConfig,
     pub document_store: DocumentStore,
     pub ptt_controller: PushToTalkController,
@@ -516,6 +522,7 @@ impl WorkbenchStore {
         let merge_wide_key = Arc::new(AtomicBool::new(false));
 
         let mut store = Self {
+            firmware_update: Default::default(),
             config,
             document_store,
             ptt_controller: PushToTalkController::new_simulated(),
@@ -794,6 +801,7 @@ impl WorkbenchStore {
     pub fn poll_at(&mut self, now: Instant) -> bool {
         self.update_now = now;
         let before_gen = self.projection_generation;
+        self.firmware_update.poll();
         if now.saturating_duration_since(self.last_accessibility_check_at) >= Duration::from_secs(1)
         {
             self.last_accessibility_check_at = now;
@@ -801,7 +809,7 @@ impl WorkbenchStore {
         }
         self.refresh_competing_input_app_running(false);
         self.poll_workspace_lifecycle();
-        if self.system_lifecycle == SystemLifecycle::Awake {
+        if self.system_lifecycle == SystemLifecycle::Awake && !self.firmware_update.reserved() {
             self.poll_six_layer_runtime();
         }
         self.sync_live_session_source();
@@ -834,7 +842,22 @@ impl WorkbenchStore {
         now: Instant,
     ) -> Result<(), WorkbenchError> {
         self.update_now = now;
+        if self.firmware_update.reserved()
+            && !matches!(
+                command,
+                WorkbenchCommand::Firmware(_)
+                    | WorkbenchCommand::SystemWillSleep
+                    | WorkbenchCommand::SystemDidWake
+                    | WorkbenchCommand::ForegroundAppChanged { .. }
+                    | WorkbenchCommand::MainWindowActiveChanged { .. }
+            )
+        {
+            return Err(WorkbenchError::Routing(
+                "固件更新期间设备控制已暂停；请先结束固件更新流程".into(),
+            ));
+        }
         match command {
+            WorkbenchCommand::Firmware(action) => self.dispatch_firmware(action),
             WorkbenchCommand::SystemWillSleep => {
                 self.system_will_sleep();
                 Ok(())
@@ -1199,6 +1222,12 @@ impl WorkbenchStore {
 
     pub fn connect_default_usb(&mut self) -> Result<bool, WorkbenchError> {
         self.require_awake()?;
+        if self.firmware_update.reserved() {
+            return Err(WorkbenchError::Routing("固件更新期间设备控制已暂停".into()));
+        }
+        if let Some(previous) = self.firmware_update.resume_auto_connect.take() {
+            self.config.auto_connect_usb = previous;
+        }
         self.exclusive_usb_transport();
         self.connect_default_usb_with_execution(true)
     }
@@ -1471,6 +1500,9 @@ impl WorkbenchStore {
                 None
             }
             HardwareLoopEvent::DiscoveryChanged { epoch } => {
+                if self.firmware_update.reserved() {
+                    return None;
+                }
                 if epoch != self.lifecycle_epoch.load(Ordering::Acquire) {
                     return None;
                 }
@@ -3481,6 +3513,39 @@ impl WorkbenchStore {
             }
         }
         let mut next = self.projection_inputs_with(reusable).project();
+        next.firmware = self.firmware_update.projection.clone();
+        next.firmware.current_version = self
+            .last_hardware_auto_acceptance
+            .as_ref()
+            .filter(|_| self.hardware_rpc_verified && self.device_session_connected())
+            .map(|receipt| receipt.firmware_version.clone())
+            .or_else(|| {
+                self.six_layer_running
+                    .as_ref()
+                    .and_then(|running| running.observed_firmware_version())
+            })
+            .or_else(|| {
+                self.device_session
+                    .as_ref()
+                    .and_then(|session| session.observed_firmware_version())
+            });
+        next.firmware.version_status =
+            match (&next.firmware.current_version, &next.firmware.release) {
+                (Some(current), Some(release)) => {
+                    match crate::firmware_catalog::compare_versions(current, &release.version) {
+                        Ok(std::cmp::Ordering::Less) => "有较新的固件可用".into(),
+                        Ok(std::cmp::Ordering::Equal) => {
+                            "当前已是此通道最新版本；再次安装将重刷相同版本".into()
+                        }
+                        Ok(std::cmp::Ordering::Greater) => {
+                            "所选版本低于当前版本；安装将降级，配置兼容性未确认".into()
+                        }
+                        Err(error) => error,
+                    }
+                }
+                (None, _) => "当前运行版本尚未读取".into(),
+                _ => "尚未检查官方固件".into(),
+            };
         let changed = if self.projection_generation == 0 {
             true
         } else if (reused_keycaps || reused_categories || reused_actions)

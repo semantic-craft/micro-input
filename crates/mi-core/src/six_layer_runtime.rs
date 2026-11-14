@@ -1054,6 +1054,15 @@ impl RunningSixLayer {
                 .is_none_or(|after| admission.received_at >= after)
     }
 
+    pub fn observed_firmware_version(&self) -> Option<String> {
+        self.vendor_bridge
+            .active_session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|session| session.observed_firmware_version())
+    }
+
     pub fn vendor_bridge_connected(&self) -> bool {
         self.vendor_bridge.connected.load(Ordering::Acquire)
     }
