@@ -402,11 +402,11 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: `./scripts/check` 与 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 六场景全绿通过，所有 Swift 文件严格 `< 1000` 行且满足 `R-C06`..`R-C10`。
 - **Evidence**: PR #140; verify-offline 6 QA PASS (.scratch/qa-runs/1794644961407-93313..1794644968913-88524)
 
-### [ ] Slice FW5: 顶栏电量与电源模式常驻状态、多设备序列号优选及安全层同步
+### [x] Slice FW5: 顶栏电量与电源模式常驻状态、多设备序列号优选及安全层同步
 - **Playbook**: `Feature` + `Verify-Micro-Input`
 - **Outcome**: 在工作台顶栏与菜单栏展示 `pm.state` 电量百分比/充电态与 `usb.host` 电源模式摘要，接入 `CandidateDevice.serial_number` 持久化记住上次连接设备并在多机并存时提供选择器，增加显式受用户开关门禁的 `kb.pl.set` 前台切层联动实验开关（默认关闭以保护原生 OAI 层）。
 - **Done Predicate**: 多设备优选与顶栏电源切片单元测试、`./scripts/check` 及 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 全绿通过。
-- **Evidence**: PENDING
+- **Evidence**: PR #141; verify-offline 6 QA PASS (.scratch/qa-runs/1794650304936-44098..1794650311899-42165)
 
 ### [ ] Slice FW6: kb.sa.rgb AI 会话状态自动映灯、节流防抖与退出复原闭环
 - **Playbook**: `Feature` + `Verify-Micro-Input`
