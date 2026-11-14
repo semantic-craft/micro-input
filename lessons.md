@@ -3,8 +3,8 @@
 ## 原生 Codex 的保护范围不能吞掉下排宿主动作
 
 - 起因与后果：锁定原生 Codex 后，界面仍显示本机下排动作，但运行期把受保护方案编成二十个空槽，旧输入入口也提前拒绝；七次下排触发没有动作回执。另有双窗口捕获忽略焦点，以及 `open -b` 把快捷键目标切到另一已有窗口。
-- 修复：所选方案身份与动作来源分开，仅将原生 Codex 的 6–12 槽交给现有本机方案；保留自定义动作、空槽和其他原生槽位。Codex 使用当前焦点窗口，激活后核对同一窗口再发键，不通过重开应用改变目标。
-- 验证点：`native_codex_lower_rows_keep_existing_actions_in_locked_and_manual_routes`、`native_codex_lower_rows_preserve_custom_actions_unbound_slots_and_other_owners` 和 `native_codex_lower_rows_dispatch_compiled_actions_and_pause_without_events` 覆盖路由。交付包还须在原生 Codex 多窗口中读回聚焦与新标签页效果，不能只看 `executed`。Seen 1x（2026-11-14）。
+- 修复：所选方案身份与动作来源分开，按独立接管目标将原生 Codex 的全部二十槽交给现有本机方案，并让会话目录使用同一来源；保留自定义动作、空槽和设备原始文件。Codex 使用当前焦点窗口，激活后核对同一窗口再发键，不通过重开应用改变目标。
+- 验证点：`native_codex_all_controls_keep_existing_actions_in_locked_and_manual_routes`、`native_codex_preserves_custom_actions_unbound_slots_and_other_owners` 和 `native_codex_all_controls_dispatch_compiled_actions_and_pause_without_events` 覆盖路由。交付包还须在原生 Codex 多窗口中读回聚焦与新标签页效果，不能只看 `executed`。Seen 1x（2026-11-14）。
 
 ## 六层恢复与会话轮换必须保留 USB 独占归属
 
