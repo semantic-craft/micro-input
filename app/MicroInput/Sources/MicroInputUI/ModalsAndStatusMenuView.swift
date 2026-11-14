@@ -86,44 +86,23 @@ public struct StatusMenuPopoverView: View {
 
             Rectangle().fill(UITheme.rowDivider).frame(height: 1)
 
-            VStack(alignment: .leading, spacing: 6) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 8) {
-                        Text("锁定当前方案")
-                            .font(UITheme.captionMedium)
-                            .foregroundStyle(UITheme.textPrimary)
-                        Spacer()
-                        Toggle("", isOn: Binding(
-                            get: { sm.isProfileLocked },
-                            set: { store.dispatch("status_menu", ["SetProfileLocked": $0]) }
-                        ))
-                        .labelsHidden()
-                        .toggleStyle(NeutralSwitchToggleStyle())
-                    }
-                    if let notice = sm.competingHostNotice {
-                        Text(notice).font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
-                    } else if sm.isProfileLocked {
-                        Text("固定响应当前方案，屏蔽前台切换与层漂移").font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
-                    }
-                }
-
+            VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) {
-                    Text("自动跟随前台软件")
+                    Text("锁定当前方案")
                         .font(UITheme.captionMedium)
                         .foregroundStyle(UITheme.textPrimary)
-                    if sm.manualOverride || sm.isProfileLocked {
-                        Button("恢复自动") { store.dispatch("status_menu", "ResumeAutoFollow") }
-                            .surfaceButton(.ghost)
-                    }
                     Spacer()
                     Toggle("", isOn: Binding(
-                        get: { sm.autoFollowEnabled },
-                        set: { store.dispatch("status_menu", ["SetAutoFollowEnabled": $0]) }
+                        get: { sm.isProfileLocked },
+                        set: { store.dispatch("status_menu", ["SetProfileLocked": $0]) }
                     ))
                     .labelsHidden()
                     .toggleStyle(NeutralSwitchToggleStyle())
-                    .disabled(sm.isProfileLocked)
-                    .opacity(sm.isProfileLocked ? 0.45 : 1.0)
+                }
+                if let notice = sm.competingHostNotice {
+                    Text(notice).font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
+                } else if sm.isProfileLocked {
+                    Text("固定响应当前方案，屏蔽前台切换与层漂移").font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
                 }
             }
 

@@ -293,4 +293,79 @@ assert 'WorkbenchDestination.radial.rawValue' in status_menu_src, (
     'StatusMenuPopoverView must reference WorkbenchDestination.radial.rawValue as single source of truth'
 )
 
+forbidden_ui_auto_follow = (
+    '跟随前台应用切换方案',
+    '切换软件时自动切换方案',
+    '自动跟随前台软件',
+    'SetAutoFollow',
+    'SetAutoFollowEnabled',
+    'ResumeAutoFollow',
+    'ToggleAutoFollowPause',
+    'AppProfileLink',
+    'EnsureDefaultAgentLinks',
+    'autoFollowEnabled',
+    'manualOverride',
+    'autoSwitchState',
+    '手动模式',
+    '暂停自动切换',
+    '恢复自动跟随',
+    '跟随前台应用',
+)
+for swift_dir in ('app/MicroInput/Sources', 'app/MicroInput/Tests'):
+    for view_path in sorted((root / swift_dir).rglob('*.swift')):
+        view_text = view_path.read_text(encoding='utf-8')
+        for term in forbidden_ui_auto_follow:
+            assert term not in view_text, (
+                f'R-C11 violation in {view_path.relative_to(root)}: retired foreground auto-follow symbol/copy {term!r}'
+            )
+
+forbidden_rust_auto_follow = (
+    'AutoSwitchState',
+    'AutoFollow',
+    'SetAutoFollow',
+    'SetAutoFollowEnabled',
+    'ResumeAutoFollow',
+    'ToggleAutoFollowPause',
+    'AppProfileLink',
+    'EnsureDefaultAgentLinks',
+    'ensure_default_agent_links',
+    'auto_follow_enabled',
+    'manual_override',
+    'app_profile_links',
+    '跟随前台应用',
+    '暂停自动切换',
+    '恢复自动跟随',
+)
+for rust_dir in ('crates/mi-core/src', 'crates/mi-macos/src', 'crates/mi-ffi/src', 'crates/mi-model/src'):
+    for rust_path in sorted((root / rust_dir).rglob('*.rs')):
+        rel = rust_path.relative_to(root).as_posix()
+        if rel == 'crates/mi-model/src/storage.rs':
+            continue
+        rust_text = rust_path.read_text(encoding='utf-8')
+        if rel == 'crates/mi-model/src/storage/routing.rs':
+            rust_text = rust_text.split('#[cfg(test)]', 1)[0]
+        for term in forbidden_rust_auto_follow:
+            assert term not in rust_text, (
+                f'R-C11 violation in {rel}: retired foreground auto-follow symbol/field {term!r}'
+            )
+
+storage_src = (root / 'crates/mi-model/src/storage.rs').read_text(encoding='utf-8')
+assert 'fn discard_retired_preference_field' in storage_src and '#[serde(deny_unknown_fields)]' in storage_src, (
+    'R-C11 violation in crates/mi-model/src/storage.rs: '
+    'must retain discard_retired_preference_field and #[serde(deny_unknown_fields)] for legacy workbench.preferences.json'
+)
+serde_attrs = re.findall(r'#\[serde\(([^]]+)\)\]', storage_src)
+for retired_field in ('auto_follow_enabled', 'manual_override', 'app_profile_links'):
+    assert sum(
+        1
+        for attr in serde_attrs
+        if f'rename = "{retired_field}"' in attr
+        and 'deserialize_with = "discard_retired_preference_field"' in attr
+        and 'skip_serializing' in attr
+    ) >= 2, (
+        f'R-C11 violation in crates/mi-model/src/storage.rs: '
+        f'retired preference field {retired_field!r} must retain skip_serializing and discard_retired_preference_field '
+        'on both HostPreferencesV1 and HostPreferences so legacy workbench.preferences.json loads without failing #[serde(deny_unknown_fields)]'
+    )
+
 print('UNKNOWN inventory and read-only/no-send boundaries: PASS')

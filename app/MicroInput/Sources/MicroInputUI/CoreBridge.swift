@@ -261,7 +261,6 @@ public final class CoreStore {
             m.selectedProfileId = sidebar["selected_profile_id"] as? String
             m.selectedDisplayName = sidebar["selected_display_name"] as? String ?? "未选择方案"
             m.activeHostProfileId = sidebar["active_host_profile_id"] as? String
-            m.autoSwitchState = sidebar["auto_switch"] as? String ?? "Active"
             m.isProfileLocked = sidebar["is_profile_locked"] as? Bool ?? false
             m.lockedProfileId = sidebar["locked_profile_id"] as? String
             if let trusted = sidebar["accessibility_trusted"] as? Bool {
@@ -459,9 +458,7 @@ public final class CoreStore {
 
         if let sm = root["status_menu"] as? [String: Any] {
             m.activeProfileName = sm["active_profile_name"] as? String ?? "未选择方案"
-            m.routingModeSummary = sm["routing_mode_summary"] as? String ?? "手动模式"
-            m.autoFollowEnabled = sm["auto_follow_enabled"] as? Bool ?? false
-            m.manualOverride = sm["manual_override"] as? Bool ?? false
+            m.routingModeSummary = sm["routing_mode_summary"] as? String ?? "手动选择方案"
             m.isProfileLocked = sm["is_profile_locked"] as? Bool ?? m.isProfileLocked
             m.lockedProfileId = (sm["locked_profile_id"] as? String) ?? m.lockedProfileId
             if let trusted = sm["accessibility_trusted"] as? Bool {

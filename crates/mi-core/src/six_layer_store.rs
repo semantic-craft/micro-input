@@ -50,13 +50,7 @@ impl WorkbenchStore {
         let bundle_id = canonical
             .map(CanonicalAgent::bundle_id)
             .filter(|bundle| *bundle != "*")
-            .map(str::to_owned)
-            .or_else(|| {
-                self.app_profile_links
-                    .iter()
-                    .find(|(bundle, pid)| bundle.as_str() != "*" && pid.as_str() == profile_id)
-                    .map(|(bundle, _)| bundle.clone())
-            });
+            .map(str::to_owned);
         let adapter_name = match canonical {
             Some(CanonicalAgent::Antigravity) => Some("antigravity"),
             Some(CanonicalAgent::Codex) => Some("codex"),
@@ -132,65 +126,26 @@ impl WorkbenchStore {
                 return six_layer_runtime::SixLayerRoutingMode::Locked(plan);
             }
         }
-        if !self.auto_follow_enabled || self.manual_override {
+        if self.six_layer_user_pinned {
             if let Some(active_id) = self.document_store.host_active_profile_id() {
                 if let Some(plan) = self.compile_profile_twenty_slots(&active_id) {
                     return six_layer_runtime::SixLayerRoutingMode::ManualPinned(plan);
                 }
             }
         }
-        let mut dynamic_hosts = Vec::new();
-        let mut seen_bundles = BTreeSet::new();
-        for (bundle, pid) in &self.app_profile_links {
-            if bundle == "*" || !seen_bundles.insert(bundle.clone()) {
-                continue;
-            }
-            if let Some(mut plan) = self.compile_profile_twenty_slots(pid) {
-                plan.bundle_id = Some(bundle.clone());
-                if plan.actions.iter().any(Option::is_some) {
-                    dynamic_hosts.push(plan);
-                }
-            }
-        }
-        if !seen_bundles.contains("com.openai.codex") {
-            if let Some((pid, _)) = self
-                .document_store
-                .host_store()
-                .draft
-                .document
-                .editable
-                .graph
-                .profiles
-                .iter()
-                .find(|(_, profile)| profile.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
-            {
-                if let Some(plan) = self.compile_profile_twenty_slots(pid) {
-                    if plan.actions.iter().any(Option::is_some) {
-                        seen_bundles.insert("com.openai.codex".into());
-                        dynamic_hosts.push(plan);
-                    }
-                }
-            }
-        }
-        for agent in [
-            CanonicalAgent::Antigravity,
-            CanonicalAgent::DeepseekHarness,
-            CanonicalAgent::Herdr,
-        ] {
-            let bundle = agent.bundle_id();
-            if !seen_bundles.insert(bundle.to_string()) {
-                continue;
-            }
-            if let Some(pid) = self.find_canonical_profile_id(agent) {
-                if let Some(mut plan) = self.compile_profile_twenty_slots(&pid) {
-                    plan.bundle_id = Some(bundle.to_string());
-                    if plan.actions.iter().any(Option::is_some) {
-                        dynamic_hosts.push(plan);
-                    }
-                }
-            }
-        }
-        six_layer_runtime::SixLayerRoutingMode::AutoFollow { dynamic_hosts }
+        let layer_one = self
+            .document_store
+            .host_store()
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, profile)| profile.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
+            .and_then(|(pid, _)| self.compile_profile_twenty_slots(pid))
+            .filter(|plan| plan.actions.iter().any(Option::is_some));
+        six_layer_runtime::SixLayerRoutingMode::BoardLayers { layer_one }
     }
 
     pub(crate) fn sync_six_layer_routing_context(&mut self) {
@@ -426,6 +381,7 @@ impl WorkbenchStore {
                     }
                     running.start_vendor_bridge(&self.tokio_runtime);
                     self.six_layer_running = Some(running);
+                    self.six_layer_user_pinned = false;
                     self.sync_six_layer_routing_context();
                     self.status_message = "六层配置已读回，等待首次实体输入验证".into();
                     self.lighting_arbiter.invalidate_hardware_cache();
@@ -615,20 +571,47 @@ mod tests {
     }
 
     #[test]
-    fn custom_codex_is_available_to_six_layer_auto_follow() {
+    fn custom_codex_is_available_to_six_layer_board_layers() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
-        store.auto_follow_enabled = true;
-        store.manual_override = false;
-        let six_layer_runtime::SixLayerRoutingMode::AutoFollow { dynamic_hosts } =
+        let selected_id = store
+            .document_store
+            .host_active_profile_id()
+            .expect("default active profile");
+        let six_layer_runtime::SixLayerRoutingMode::BoardLayers { layer_one } =
             store.build_six_layer_routing_mode()
         else {
-            panic!("expected auto-follow");
+            panic!("expected fresh store to start in board-layers mode");
         };
-        let custom = dynamic_hosts
-            .iter()
-            .find(|plan| plan.bundle_id.as_deref() == Some("com.openai.codex"));
-        assert!(custom.is_some_and(|plan| plan.actions.iter().any(Option::is_some)));
+        let custom = layer_one.expect("local Codex populates layer_one");
+        assert_eq!(custom.bundle_id.as_deref(), Some("com.openai.codex"));
+        assert!(custom.actions.iter().any(Option::is_some));
+
+        store.select_and_activate_profile(&selected_id).unwrap();
+        let six_layer_runtime::SixLayerRoutingMode::ManualPinned(manual) =
+            store.build_six_layer_routing_mode()
+        else {
+            panic!("expected manual pinned after explicit profile selection");
+        };
+        assert_eq!(manual.profile_id, selected_id);
+
+        store
+            .dispatch_sidebar_action(crate::sidebar::SidebarAction::SetProfileLocked(true))
+            .unwrap();
+        let six_layer_runtime::SixLayerRoutingMode::Locked(locked) =
+            store.build_six_layer_routing_mode()
+        else {
+            panic!("expected locked mode");
+        };
+        assert_eq!(locked.profile_id, selected_id);
+
+        store
+            .dispatch_sidebar_action(crate::sidebar::SidebarAction::SetProfileLocked(false))
+            .unwrap();
+        assert!(matches!(
+            store.build_six_layer_routing_mode(),
+            six_layer_runtime::SixLayerRoutingMode::BoardLayers { layer_one: Some(_) }
+        ));
     }
 
     #[test]
@@ -770,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn six_layer_foreground_priority_ignores_legacy_manual_lock_and_keeps_physical_layer() {
+    fn six_layer_board_layer_keeps_physical_layer_across_foreground_changes() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
         let (link, _writes) = mi_transport::MockLink::new();
@@ -786,25 +769,23 @@ mod tests {
         let mut running =
             six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
         running.installation.plan = store.compiled_six_layer_plan().unwrap();
-        let antigravity = running.installation.plan.hosts[0].profile_id.clone();
         let dsh = running.installation.plan.hosts[1].profile_id.clone();
         running.observed_layer.store(3, Ordering::Release);
         store.six_layer_running = Some(running);
-        store.auto_follow_enabled = false;
-        store.manual_override = true;
+        store.sync_six_layer_routing_context();
         let saved_profile = store.document_store.host_active_profile_id();
         assert!(store.foreground_changed(Some("com.google.antigravity")));
-        assert_eq!(store.resolved_active_profile_id(), Some(antigravity));
+        assert_eq!(store.resolved_active_profile_id(), Some(dsh.clone()));
         assert_eq!(
             store.projection.sidebar.board_layers.observed_layer,
             Some(3)
         );
-        assert!(store
+        assert!(!store
             .projection
             .sidebar
             .board_layers
             .observed_status
-            .contains("前台优先 antigravity"));
+            .contains("前台优先"));
         assert!(!store.foreground_changed(Some("com.google.antigravity")));
         assert!(store.foreground_changed(Some("com.openai.codex")));
         assert_eq!(store.resolved_active_profile_id(), Some(dsh));
@@ -1727,11 +1708,12 @@ mod tests {
         );
 
         store
-            .dispatch_status_menu_action(crate::status_menu::StatusMenuAction::ResumeAutoFollow)
+            .dispatch_status_menu_action(crate::status_menu::StatusMenuAction::SetProfileLocked(
+                false,
+            ))
             .unwrap();
         assert!(!store.projection.status_menu.is_profile_locked);
         assert!(store.projection.status_menu.locked_profile_id.is_none());
-        assert!(store.projection.status_menu.auto_follow_enabled);
     }
 
     #[test]

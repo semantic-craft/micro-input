@@ -22,27 +22,11 @@ pub enum RoutingOperation {
         #[serde(default)]
         profile_id: Option<String>,
     },
-    #[serde(alias = "set_auto_follow_enabled")]
-    Enable {
-        enabled: bool,
-    },
     Execution {
         enabled: bool,
     },
     CommandExecution {
         enabled: bool,
-    },
-    #[serde(alias = "resume_auto_follow")]
-    Resume,
-    Upsert {
-        bundle_id: String,
-        profile_id: String,
-    },
-    Remove {
-        bundle_id: String,
-    },
-    Follow {
-        bundle_id: String,
     },
     BottomRowLayout {
         layout: crate::host_router::BottomRowLayout,
@@ -230,9 +214,8 @@ impl DocumentStore {
             "locked_profile_id":locked,
             "profile_name":profile.map(|p| &p.name),"execution_enabled":p.host_execution_enabled,
             "command_execution_enabled":p.command_execution_enabled,
-            "auto_follow_enabled":p.auto_follow_enabled,"manual_override":p.manual_override,
             "bottom_row_layout":layout,
-            "app_profile_links":p.app_profile_links,"keys":keys})
+            "keys":keys})
     }
     pub fn update_routing(&mut self, request: RoutingRequest) -> Result<(), String> {
         if let Some(host) = &mut self.host {
@@ -256,7 +239,6 @@ impl DocumentStore {
                     next.locked_profile_id = Some(profile_id.clone());
                 }
                 next.host_active_profile_id = Some(profile_id);
-                next.manual_override = true;
             }
             RoutingOperation::LockProfile { profile_id } => match profile_id {
                 Some(pid) => {
@@ -265,49 +247,14 @@ impl DocumentStore {
                     }
                     next.locked_profile_id = Some(pid.clone());
                     next.host_active_profile_id = Some(pid);
-                    next.manual_override = true;
                 }
                 None => {
                     next.locked_profile_id = None;
-                    next.manual_override = !next.auto_follow_enabled;
                 }
             },
-            RoutingOperation::Enable { enabled } => next.auto_follow_enabled = enabled,
             RoutingOperation::Execution { enabled } => next.host_execution_enabled = enabled,
             RoutingOperation::CommandExecution { enabled } => {
                 next.command_execution_enabled = enabled
-            }
-            RoutingOperation::Resume => {
-                next.locked_profile_id = None;
-                next.auto_follow_enabled = true;
-                next.manual_override = false;
-            }
-            RoutingOperation::Upsert {
-                bundle_id,
-                profile_id,
-            } => {
-                if bundle_id.trim().is_empty() || !valid(&profile_id) {
-                    return Err("应用或 Profile 无效".into());
-                }
-                next.app_profile_links.insert(bundle_id, profile_id);
-            }
-            RoutingOperation::Remove { bundle_id } => {
-                next.app_profile_links.remove(&bundle_id);
-            }
-            RoutingOperation::Follow { bundle_id } => {
-                if next.locked_profile_id.is_none()
-                    && next.auto_follow_enabled
-                    && !next.manual_override
-                {
-                    if let Some(id) = next
-                        .app_profile_links
-                        .get(&bundle_id)
-                        .or_else(|| next.app_profile_links.get("*"))
-                        .filter(|id| valid(id))
-                    {
-                        next.host_active_profile_id = Some(id.clone());
-                    }
-                }
             }
             RoutingOperation::BottomRowLayout { layout } => {
                 next.bottom_row_layout = layout;
@@ -341,16 +288,13 @@ mod tests {
         serde_json::from_value(json!({"document_id":store.draft.document_id,"document_revision":store.draft.revision,"host_state_revision":store.host_revision(),"operation":operation})).unwrap()
     }
     #[test]
-    fn defaults_atomic_selection_stale_guard_and_missing_link() {
+    fn defaults_atomic_selection_and_stale_guard() {
         let mut store = DocumentStore::default();
         let ids = crate::preset::install_agent_starter_profiles(&mut store.draft).unwrap();
-        assert_eq!(store.routing_state()["auto_follow_enabled"], false);
-        assert_eq!(store.routing_state()["manual_override"], false);
-        let old = request(&store, json!({"kind":"resume"}));
+        let old = request(&store, json!({"kind":"execution","enabled":true}));
         let select = request(&store, json!({"kind":"select","profile_id":ids[0]}));
         store.update_routing(select).unwrap();
         assert_eq!(store.host_revision(), 1);
-        assert_eq!(store.routing_state()["manual_override"], true);
         // The HUD must keep physical left-to-right order, not the former inverted IDs.
         let keys = store.routing_state()["keys"].as_array().unwrap().clone();
         assert_eq!(keys[0]["binding_id"], "AG00");
@@ -361,16 +305,7 @@ mod tests {
         let same = request(&store, json!({"kind":"select","profile_id":ids[0]}));
         store.update_routing(same).unwrap();
         assert_eq!(store.host_revision(), 1);
-        for op in [
-            json!({"kind":"enable","enabled":true}),
-            json!({"kind":"resume"}),
-            json!({"kind":"follow","bundle_id":"unmapped"}),
-        ] {
-            let request = request(&store, op);
-            store.update_routing(request).unwrap();
-        }
         assert_eq!(store.host_active_profile_id(), Some(ids[0].clone()));
-        assert_eq!(store.routing_state()["manual_override"], false);
         assert!(!store.host_execution_enabled());
         let command = request(&store, json!({"kind":"command_execution","enabled":true}));
         store.update_routing(command).unwrap();
@@ -378,7 +313,7 @@ mod tests {
         assert_eq!(store.command_execution_enabled(), true);
     }
     #[test]
-    fn legacy_defaults_and_failed_save_do_not_change_profile_or_override() {
+    fn legacy_defaults_and_failed_save_do_not_change_profile() {
         let dir = std::env::temp_dir().join(format!("mi-routing-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("workbench.json");
@@ -390,7 +325,6 @@ mod tests {
         let mut store = DocumentStore::default();
         store.open(path.clone()).unwrap();
         let id = store.draft.document.editable.graph.profile_order[0].clone();
-        assert_eq!(store.routing_state()["manual_override"], false);
         let before = store.routing_state();
         std::fs::write(path.with_extension("preferences.json"), "external change").unwrap();
         let req = request(&store, json!({"kind":"select","profile_id":id}));
@@ -630,10 +564,10 @@ mod tests {
                 let state = store.routing_state();
                 assert_eq!(state["execution_enabled"], true);
                 assert_eq!(state["command_execution_enabled"], true);
-                assert_eq!(state["auto_follow_enabled"], true);
-                assert_eq!(state["manual_override"], true);
                 assert_eq!(state["bottom_row_layout"], "merged");
-                assert_eq!(state["app_profile_links"], original["app_profile_links"]);
+                assert!(state.get("auto_follow_enabled").is_none());
+                assert!(state.get("manual_override").is_none());
+                assert!(state.get("app_profile_links").is_none());
                 assert!(state.get("popover_preview_mode").is_none());
                 assert_eq!(std::fs::read(&prefs_path).unwrap(), original_bytes);
 
@@ -654,12 +588,14 @@ mod tests {
                 let saved: Value =
                     serde_json::from_slice(&std::fs::read(&prefs_path).unwrap()).unwrap();
                 assert!(saved.get("popover_preview_mode").is_none());
+                assert!(saved.get("auto_follow_enabled").is_none());
+                assert!(saved.get("manual_override").is_none());
+                assert!(saved.get("app_profile_links").is_none());
                 assert_eq!(saved["favorites"], original["favorites"]);
                 assert_eq!(
                     saved["host_active_profile_id"],
                     original["host_active_profile_id"]
                 );
-                assert_eq!(saved["app_profile_links"], original["app_profile_links"]);
                 assert_eq!(saved["bottom_row_layout"], "merged");
                 if version == 1 {
                     assert_eq!(
@@ -703,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_lock_blocks_follow_switches_on_select_unlocks_on_resume_and_clears_on_delete() {
+    fn profile_lock_switches_on_select_unlocks_and_clears_on_delete() {
         let dir = std::env::temp_dir().join(format!("mi-lock-pref-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let doc_path = dir.join("workbench.json");
@@ -735,25 +671,6 @@ mod tests {
             .find(|id| store.draft.document.editable.graph.profiles[*id].name == "Herdr")
             .unwrap()
             .clone();
-        let claude_id = ids
-            .iter()
-            .find(|id| *id != &ag_id && *id != &herdr_id)
-            .unwrap()
-            .clone();
-
-        for (bundle, pid) in [
-            ("com.google.antigravity", ag_id.as_str()),
-            ("com.anthropic.claudefordesktop", claude_id.as_str()),
-        ] {
-            let upsert = request(
-                &store,
-                json!({"kind":"upsert","bundle_id":bundle,"profile_id":pid}),
-            );
-            store.update_routing(upsert).unwrap();
-        }
-        store
-            .update_routing(request(&store, json!({"kind":"enable","enabled":true})))
-            .unwrap();
 
         assert!(store
             .update_routing(request(
@@ -771,19 +688,6 @@ mod tests {
         assert_eq!(store.locked_profile_id(), Some(ag_id.clone()));
         assert_eq!(store.host_active_profile_id(), Some(ag_id.clone()));
         assert_eq!(store.routing_state()["locked_profile_id"], ag_id);
-        assert_eq!(store.routing_state()["manual_override"], true);
-
-        let rev_before_follow = store.host_revision();
-        store
-            .update_routing(request(
-                &store,
-                json!({"kind":"follow","bundle_id":"com.anthropic.claudefordesktop"}),
-            ))
-            .unwrap();
-        assert_eq!(store.host_revision(), rev_before_follow);
-        assert_eq!(store.locked_profile_id(), Some(ag_id.clone()));
-        assert_eq!(store.host_active_profile_id(), Some(ag_id.clone()));
-        assert_eq!(store.routing_state()["manual_override"], true);
 
         store
             .update_routing(request(
@@ -795,11 +699,6 @@ mod tests {
         assert_eq!(store.host_active_profile_id(), Some(herdr_id.clone()));
 
         store
-            .update_routing(request(&store, json!({"kind":"enable","enabled":false})))
-            .unwrap();
-        assert_eq!(store.locked_profile_id(), Some(herdr_id.clone()));
-
-        store
             .update_routing(request(
                 &store,
                 json!({"kind":"lock_profile","profile_id":null}),
@@ -807,20 +706,6 @@ mod tests {
             .unwrap();
         assert_eq!(store.locked_profile_id(), None);
         assert_eq!(store.host_active_profile_id(), Some(herdr_id.clone()));
-        assert_eq!(store.routing_state()["manual_override"], true);
-
-        store
-            .update_routing(request(
-                &store,
-                json!({"kind":"lock_profile","profile_id":claude_id}),
-            ))
-            .unwrap();
-        store
-            .update_routing(request(&store, json!({"kind":"resume"})))
-            .unwrap();
-        assert_eq!(store.locked_profile_id(), None);
-        assert_eq!(store.routing_state()["auto_follow_enabled"], true);
-        assert_eq!(store.routing_state()["manual_override"], false);
 
         store
             .update_routing(request(

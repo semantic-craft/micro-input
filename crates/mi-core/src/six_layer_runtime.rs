@@ -226,16 +226,14 @@ pub struct PinnedProfilePlan {
 pub enum SixLayerRoutingMode {
     Locked(PinnedProfilePlan),
     ManualPinned(PinnedProfilePlan),
-    AutoFollow {
-        dynamic_hosts: Vec<PinnedProfilePlan>,
+    BoardLayers {
+        layer_one: Option<PinnedProfilePlan>,
     },
 }
 
 impl Default for SixLayerRoutingMode {
     fn default() -> Self {
-        Self::AutoFollow {
-            dynamic_hosts: Vec::new(),
-        }
+        Self::BoardLayers { layer_one: None }
     }
 }
 
@@ -243,6 +241,7 @@ enum VendorSlotDecode {
     Edge {
         phys_slot: u8,
         control: Option<u8>,
+        layer1: bool,
         pressed: bool,
     },
     Step(u8),
@@ -252,7 +251,7 @@ enum VendorSlotDecode {
 
 fn handle_vendor_slot_notification(
     received: &mi_session::ReceivedNotification,
-    pressed_mask: &mut u32,
+    pressed_mask: &mut u64,
     receiver: &UserCommandReceiver,
     layer1_fallback: bool,
 ) {
@@ -260,33 +259,38 @@ fn handle_vendor_slot_notification(
         Some(VendorSlotDecode::Edge {
             phys_slot,
             control,
+            layer1,
             pressed,
         }) => {
-            let mask_bit = 1u32 << phys_slot;
+            let bit = 1u64 << phys_slot;
             if pressed {
-                if (*pressed_mask & mask_bit) == 0 {
-                    *pressed_mask |= mask_bit;
+                if (*pressed_mask & bit) == 0 {
+                    *pressed_mask |= bit;
                     if let Some(control) = control {
-                        let _ = receiver.push_vendor_activation(control);
+                        let _ = if layer1 {
+                            receiver.push_layer1_vendor_activation(control)
+                        } else {
+                            receiver.push_vendor_activation(control)
+                        };
                     }
                 }
             } else {
-                *pressed_mask &= !mask_bit;
+                *pressed_mask &= !bit;
             }
         }
         Some(VendorSlotDecode::Step(control)) => {
-            let _ = receiver.push_vendor_activation(control);
+            let _ = receiver.push_layer1_vendor_activation(control);
         }
         Some(VendorSlotDecode::RadialSector(slot)) => {
-            let radial_bits = 0b1111u32 << 16;
-            let bit = 1u32 << slot;
+            let radial_bits = 0b1111u64 << 28;
+            let bit = 1u64 << (28 + (slot - 16));
             if (*pressed_mask & radial_bits) == 0 {
                 *pressed_mask |= bit;
-                let _ = receiver.push_vendor_activation(slot);
+                let _ = receiver.push_layer1_vendor_activation(slot);
             }
         }
         Some(VendorSlotDecode::RadialRelease) => {
-            *pressed_mask &= !(0b1111u32 << 16);
+            *pressed_mask &= !(0b1111u64 << 28);
         }
         None => {}
     }
@@ -535,7 +539,7 @@ impl VendorBridge {
         self.task = Some(runtime.spawn(async move {
             let mut current_session = initial_session;
             let mut pending_notif_rx = initial_notif_rx;
-            let mut pressed_mask: u32 = 0;
+            let mut pressed_mask: u64 = 0;
             let mut rotated_from_live = false;
             let mut last_v070_snapshot_session: Option<u64> = None;
             while !*stop_rx.borrow() {
@@ -827,16 +831,19 @@ fn decode_six_layer_vendor_slot(
                     0..=5 => Some(VendorSlotDecode::Edge {
                         phys_slot: ag,
                         control: layer1_fallback.then_some(ag),
+                        layer1: true,
                         pressed,
                     }),
                     6..=11 => Some(VendorSlotDecode::Edge {
-                        phys_slot: ag - 6,
+                        phys_slot: ag,
                         control: Some(ag - 6),
+                        layer1: false,
                         pressed,
                     }),
                     12..=17 => Some(VendorSlotDecode::Edge {
-                        phys_slot: ag - 12,
+                        phys_slot: ag,
                         control: Some(20 + (ag - 12)),
+                        layer1: false,
                         pressed,
                     }),
                     _ => None,
@@ -855,8 +862,9 @@ fn decode_six_layer_vendor_slot(
                             _ => return None,
                         };
                         return Some(VendorSlotDecode::Edge {
-                            phys_slot: slot,
+                            phys_slot: 18 + (slot - 6),
                             control: Some(slot),
+                            layer1: true,
                             pressed,
                         });
                     }
@@ -867,33 +875,39 @@ fn decode_six_layer_vendor_slot(
                 ("ENC_CC", 2) => Some(VendorSlotDecode::Step(13)),
                 ("ENC_CW", 2) => Some(VendorSlotDecode::Step(14)),
                 ("ENC_CC", 1) => Some(VendorSlotDecode::Edge {
-                    phys_slot: 13,
+                    phys_slot: 25,
                     control: Some(13),
+                    layer1: true,
                     pressed: true,
                 }),
                 ("ENC_CC", 0) => Some(VendorSlotDecode::Edge {
-                    phys_slot: 13,
+                    phys_slot: 25,
                     control: Some(13),
+                    layer1: true,
                     pressed: false,
                 }),
                 ("ENC_CW", 1) => Some(VendorSlotDecode::Edge {
-                    phys_slot: 14,
+                    phys_slot: 26,
                     control: Some(14),
+                    layer1: true,
                     pressed: true,
                 }),
                 ("ENC_CW", 0) => Some(VendorSlotDecode::Edge {
-                    phys_slot: 14,
+                    phys_slot: 26,
                     control: Some(14),
+                    layer1: true,
                     pressed: false,
                 }),
                 ("ENC_CLK", 1) => Some(VendorSlotDecode::Edge {
-                    phys_slot: 15,
+                    phys_slot: 27,
                     control: Some(15),
+                    layer1: true,
                     pressed: true,
                 }),
                 ("ENC_CLK", 0) => Some(VendorSlotDecode::Edge {
-                    phys_slot: 15,
+                    phys_slot: 27,
                     control: Some(15),
+                    layer1: true,
                     pressed: false,
                 }),
                 _ => None,
@@ -951,23 +965,10 @@ pub struct RunningSixLayer {
     executor: Option<JoinHandle<Result<(), String>>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct RoutingContext {
     pub mode: SixLayerRoutingMode,
     pub bundle_id: Option<String>,
-    pub generation: u64,
-    pub changed_at: Instant,
-}
-
-impl Default for RoutingContext {
-    fn default() -> Self {
-        Self {
-            mode: SixLayerRoutingMode::default(),
-            bundle_id: None,
-            generation: 0,
-            changed_at: Instant::now(),
-        }
-    }
 }
 
 impl RoutingContext {
@@ -976,33 +977,16 @@ impl RoutingContext {
             return false;
         }
         self.bundle_id = bundle_id.map(str::to_owned);
-        match self.mode {
-            SixLayerRoutingMode::Locked(_) | SixLayerRoutingMode::ManualPinned(_) => false,
-            SixLayerRoutingMode::AutoFollow { .. } => {
-                self.generation += 1;
-                self.changed_at = Instant::now();
-                true
-            }
-        }
+        matches!(self.mode, SixLayerRoutingMode::BoardLayers { .. })
     }
 
     fn set_routing(&mut self, mode: SixLayerRoutingMode, bundle_id: Option<&str>) -> bool {
         let mut changed = false;
         if self.bundle_id.as_deref() != bundle_id {
             self.bundle_id = bundle_id.map(str::to_owned);
-            if matches!(mode, SixLayerRoutingMode::AutoFollow { .. }) {
-                self.generation += 1;
-                self.changed_at = Instant::now();
-                changed = true;
-            }
+            changed = true;
         }
         if self.mode != mode {
-            if matches!(mode, SixLayerRoutingMode::AutoFollow { .. })
-                && !matches!(self.mode, SixLayerRoutingMode::AutoFollow { .. })
-            {
-                self.generation += 1;
-                self.changed_at = Instant::now();
-            }
             self.mode = mode;
             changed = true;
         }
@@ -1014,10 +998,9 @@ impl RoutingContext {
             SixLayerRoutingMode::Locked(pinned) | SixLayerRoutingMode::ManualPinned(pinned) => {
                 pinned.actions.iter().any(Option::is_some)
             }
-            SixLayerRoutingMode::AutoFollow { dynamic_hosts } => dynamic_hosts.iter().any(|host| {
-                host.bundle_id.as_deref() == self.bundle_id.as_deref()
-                    && host.actions.iter().any(Option::is_some)
-            }),
+            SixLayerRoutingMode::BoardLayers { layer_one } => layer_one
+                .as_ref()
+                .is_some_and(|p| p.actions.iter().any(Option::is_some)),
         }
     }
 
@@ -1037,63 +1020,18 @@ impl RoutingContext {
                     Some(pinned.profile_id.clone())
                 }
             }
-            SixLayerRoutingMode::AutoFollow { dynamic_hosts } => {
-                if !(1..=3).contains(&physical_layer) {
-                    return None;
+            SixLayerRoutingMode::BoardLayers { layer_one } => {
+                if physical_layer == 1 {
+                    layer_one.as_ref().map(|p| p.profile_id.clone())
+                } else if (2..=3).contains(&physical_layer) {
+                    plan.hosts
+                        .get((physical_layer - 2) as usize)
+                        .map(|h| h.profile_id.clone())
+                } else {
+                    None
                 }
-                if let Some(bundle) = self.bundle_id.as_deref() {
-                    if let Some(host) = plan.hosts.iter().find(|host| {
-                        mi_macos::executor::bundle_id_for_adapter(&host.adapter) == Some(bundle)
-                    }) {
-                        return Some(host.profile_id.clone());
-                    }
-                    if let Some(dyn_host) = dynamic_hosts
-                        .iter()
-                        .find(|h| h.bundle_id.as_deref() == Some(bundle))
-                    {
-                        return Some(dyn_host.profile_id.clone());
-                    }
-                }
-                plan.hosts
-                    .get(physical_layer.checked_sub(2)? as usize)
-                    .map(|h| h.profile_id.clone())
             }
         }
-    }
-
-    fn foreground_priority_adapter(
-        &self,
-        plan: &AppliedSixLayerPlan,
-        physical_layer: u8,
-    ) -> Option<String> {
-        if !matches!(self.mode, SixLayerRoutingMode::AutoFollow { .. })
-            || !(1..=3).contains(&physical_layer)
-        {
-            return None;
-        }
-        let bundle = self.bundle_id.as_deref()?;
-        if let Some(host) = plan
-            .hosts
-            .iter()
-            .find(|host| mi_macos::executor::bundle_id_for_adapter(&host.adapter) == Some(bundle))
-        {
-            return Some(host.adapter.clone());
-        }
-        if let SixLayerRoutingMode::AutoFollow { dynamic_hosts } = &self.mode {
-            if dynamic_hosts
-                .iter()
-                .any(|h| h.bundle_id.as_deref() == Some(bundle))
-            {
-                return match bundle {
-                    "com.openai.codex" => Some("codex".into()),
-                    "com.google.antigravity" => Some("antigravity".into()),
-                    "com.deepseek.dsh" => Some("dsh-desktop".into()),
-                    "dev.herdr.app" => Some("herdr".into()),
-                    _ => None,
-                };
-            }
-        }
-        None
     }
 
     fn resolve_control<'a>(
@@ -1110,42 +1048,20 @@ impl RoutingContext {
                 let action = pinned.actions.get(slot)?.as_ref()?;
                 Some((pinned.profile_id.as_str(), action))
             }
-            SixLayerRoutingMode::AutoFollow { dynamic_hosts } => {
-                if !(1..=3).contains(&control_layer) {
+            SixLayerRoutingMode::BoardLayers { layer_one } => {
+                if control_layer == 1 {
+                    let layer1 = layer_one.as_ref()?;
+                    let action = layer1.actions.get(slot)?.as_ref()?;
+                    return Some((layer1.profile_id.as_str(), action));
+                }
+                if !(2..=3).contains(&control_layer) {
                     return None;
                 }
-                if let Some(bundle) = self.bundle_id.as_deref() {
-                    if let Some(host) = plan.hosts.iter().find(|host| {
-                        mi_macos::executor::bundle_id_for_adapter(&host.adapter) == Some(bundle)
-                    }) {
-                        let action = host.actions.get(slot)?.as_ref()?;
-                        return Some((host.profile_id.as_str(), action));
-                    }
-                    if let Some(dyn_host) = dynamic_hosts
-                        .iter()
-                        .find(|h| h.bundle_id.as_deref() == Some(bundle))
-                    {
-                        let action = dyn_host.actions.get(slot)?.as_ref()?;
-                        return Some((dyn_host.profile_id.as_str(), action));
-                    }
-                }
-                let host = plan.hosts.get(control_layer.checked_sub(2)? as usize)?;
+                let host = plan.hosts.get((control_layer - 2) as usize)?;
                 let action = host.actions.get(slot)?.as_ref()?;
                 Some((host.profile_id.as_str(), action))
             }
         }
-    }
-
-    #[cfg(test)]
-    fn host_index(&self, plan: &AppliedSixLayerPlan, physical_layer: u8) -> usize {
-        if let Some(bundle) = self.bundle_id.as_deref() {
-            if let Some(index) = plan.hosts.iter().position(|host| {
-                mi_macos::executor::bundle_id_for_adapter(&host.adapter) == Some(bundle)
-            }) {
-                return index;
-            }
-        }
-        (physical_layer.saturating_sub(2)) as usize
     }
 }
 
@@ -1160,14 +1076,6 @@ impl RunningSixLayer {
 
     pub fn routing_mode(&self) -> SixLayerRoutingMode {
         self.routing.lock().unwrap().mode.clone()
-    }
-
-    pub fn foreground_priority_adapter(&self) -> Option<String> {
-        let layer = self.observed_layer.load(Ordering::Acquire);
-        self.routing
-            .lock()
-            .unwrap()
-            .foreground_priority_adapter(&self.installation.plan, layer)
     }
 
     pub fn effective_profile_id(&self) -> Option<String> {
@@ -1616,15 +1524,12 @@ fn execute_clicks(
             continue;
         }
         let control = &DIRECT_CONTROLS[event.control as usize];
-        observed.store(control.layer, Ordering::Release);
-        first.store(true, Ordering::Release);
         let context = routing.lock().unwrap().clone();
-        let is_auto_follow = matches!(context.mode, SixLayerRoutingMode::AutoFollow { .. });
-        if is_auto_follow && context.generation != 0 && event.received_at < context.changed_at {
-            continue;
-        }
+        let control_layer = event.layer_override.unwrap_or(control.layer);
+        observed.store(control_layer, Ordering::Release);
+        first.store(true, Ordering::Release);
         let Some((profile_id, action)) =
-            context.resolve_control(plan, control.layer, control.slot as usize)
+            context.resolve_control(plan, control_layer, control.slot as usize)
         else {
             continue;
         };
@@ -1639,9 +1544,6 @@ fn execute_clicks(
             return;
         }
         if event.is_expired_at(Instant::now()) {
-            continue;
-        }
-        if is_auto_follow && routing.lock().unwrap().generation != context.generation {
             continue;
         }
         if let (Some(command), Some(dispatch)) =
@@ -2444,7 +2346,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_codex_routes_layer_one_vendor_in_manual_and_auto_follow_modes() {
+    fn custom_codex_routes_layer_one_vendor_in_manual_and_board_layer_modes() {
         let plan = test_plan();
         let custom = PinnedProfilePlan {
             profile_id: "local-codex".into(),
@@ -2453,12 +2355,12 @@ mod tests {
         };
         for mode in [
             SixLayerRoutingMode::ManualPinned(custom.clone()),
-            SixLayerRoutingMode::AutoFollow {
-                dynamic_hosts: vec![custom.clone()],
+            SixLayerRoutingMode::BoardLayers {
+                layer_one: Some(custom.clone()),
             },
         ] {
             let mut context = RoutingContext::default();
-            context.set_routing(mode, Some("com.openai.codex"));
+            context.set_routing(mode, Some("com.apple.Safari"));
             assert!(context.accepts_layer1_vendor_fallback());
             assert_eq!(
                 context.effective_profile_id(&plan, 1).as_deref(),
@@ -2491,8 +2393,8 @@ mod tests {
         for mode in [
             SixLayerRoutingMode::Locked(custom.clone()),
             SixLayerRoutingMode::ManualPinned(custom.clone()),
-            SixLayerRoutingMode::AutoFollow {
-                dynamic_hosts: vec![custom.clone()],
+            SixLayerRoutingMode::BoardLayers {
+                layer_one: Some(custom.clone()),
             },
         ] {
             let (link, _writes) = mi_transport::MockLink::new();
@@ -2628,21 +2530,32 @@ mod tests {
     }
 
     #[test]
-    fn foreground_host_overrides_physical_host_without_changing_observed_layer() {
+    fn board_layers_route_by_physical_layer_regardless_of_foreground_app() {
         let plan = test_plan();
         let receiver = UserCommandReceiver::bind().unwrap();
         receiver.arm().unwrap();
-        let foreground = Mutex::new(RoutingContext::default());
-        foreground
-            .lock()
-            .unwrap()
-            .update(Some("com.google.antigravity"));
+        let layer_one = PinnedProfilePlan {
+            profile_id: "local-codex".into(),
+            bundle_id: Some("com.openai.codex".into()),
+            actions: std::array::from_fn(|_| None),
+        };
+        let routing = Mutex::new(RoutingContext::default());
+        routing.lock().unwrap().set_routing(
+            SixLayerRoutingMode::BoardLayers {
+                layer_one: Some(layer_one),
+            },
+            Some("com.google.antigravity"),
+        );
         send(&receiver, 27);
+        thread::sleep(Duration::from_millis(30));
+        routing.lock().unwrap().update(Some("com.deepseek.dsh"));
+        send(&receiver, 7);
         let stop = AtomicBool::new(false);
         let policy = ExecutionPolicy::default();
         policy.set(true, true, Instant::now() - Duration::from_secs(1));
         let observed = AtomicU8::new(1);
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let mut dispatched = 0;
         thread::scope(|scope| {
             let (done, wait) = std::sync::mpsc::channel::<()>();
             let stop_ref = &stop;
@@ -2658,87 +2571,43 @@ mod tests {
                 &policy,
                 &observed,
                 &AtomicBool::new(false),
-                &foreground,
+                &routing,
                 &tx,
                 None,
                 || receiver.next(),
                 || Ok(()),
                 |profile, binding, action, _| {
-                    stop.store(true, Ordering::Release);
-                    mi_macos::SimulatedHostActionExecutor.execute(profile, binding, action)
-                },
-            );
-            let _ = done.send(());
-        });
-        let receipt = rx.try_recv().unwrap();
-        assert_eq!(receipt.profile_id, plan.hosts[0].profile_id);
-        assert_eq!(receipt.detail, "antigravity/focus-input");
-        assert_eq!(observed.load(Ordering::Acquire), 3);
-        let mut context = foreground.lock().unwrap();
-        context.update(Some("com.openai.codex"));
-        assert_eq!(context.host_index(&plan, 3), 1);
-        context.update(Some("com.apple.finder"));
-        assert_eq!(context.host_index(&plan, 4), 2);
-    }
-
-    #[test]
-    fn foreground_switch_discards_queued_and_waiting_clicks_without_retargeting() {
-        let plan = test_plan();
-        let receiver = UserCommandReceiver::bind().unwrap();
-        receiver.arm().unwrap();
-        let foreground = Mutex::new(RoutingContext::default());
-        send(&receiver, 7);
-        thread::sleep(Duration::from_millis(30));
-        foreground
-            .lock()
-            .unwrap()
-            .update(Some("com.google.antigravity"));
-        send(&receiver, 27);
-        let stop = AtomicBool::new(false);
-        let policy = ExecutionPolicy::default();
-        policy.set(true, true, Instant::now() - Duration::from_secs(1));
-        let (tx, rx) = std::sync::mpsc::sync_channel(8);
-        let mut permits = 0;
-        thread::scope(|scope| {
-            let (done, wait) = std::sync::mpsc::channel::<()>();
-            let stop_ref = &stop;
-            scope.spawn(move || {
-                if wait.recv_timeout(Duration::from_secs(5)).is_err() {
-                    stop_ref.store(true, Ordering::Release);
-                }
-            });
-            execute_clicks(
-                &receiver,
-                &plan,
-                &stop,
-                &policy,
-                &AtomicU8::new(1),
-                &AtomicBool::new(false),
-                &foreground,
-                &tx,
-                None,
-                || receiver.next(),
-                || {
-                    permits += 1;
-                    if permits == 1 {
-                        foreground.lock().unwrap().update(Some("com.deepseek.dsh"));
-                        send(&receiver, 27);
+                    dispatched += 1;
+                    if dispatched == 2 {
+                        stop.store(true, Ordering::Release);
                     }
-                    Ok(())
-                },
-                |profile, binding, action, _| {
-                    stop.store(true, Ordering::Release);
                     mi_macos::SimulatedHostActionExecutor.execute(profile, binding, action)
                 },
             );
             let _ = done.send(());
         });
         let receipts: Vec<_> = rx.try_iter().collect();
-        assert_eq!(permits, 2);
-        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts.len(), 2);
         assert_eq!(receipts[0].profile_id, plan.hosts[1].profile_id);
         assert_eq!(receipts[0].detail, "dsh-desktop/browser");
-        assert!(receiver.failure().is_none());
+        assert_eq!(receipts[1].profile_id, plan.hosts[0].profile_id);
+        assert_eq!(receipts[1].detail, "antigravity/focus-input");
+        assert_eq!(observed.load(Ordering::Acquire), 2);
+        let mut ctx = routing.lock().unwrap();
+        ctx.update(Some("com.apple.finder"));
+        assert_eq!(
+            ctx.effective_profile_id(&plan, 1).as_deref(),
+            Some("local-codex")
+        );
+        assert_eq!(
+            ctx.effective_profile_id(&plan, 2).as_deref(),
+            Some(plan.hosts[0].profile_id.as_str())
+        );
+        assert_eq!(
+            ctx.effective_profile_id(&plan, 3).as_deref(),
+            Some(plan.hosts[1].profile_id.as_str())
+        );
+        assert!(ctx.effective_profile_id(&plan, 4).is_none());
     }
 
     #[test]
@@ -2900,6 +2769,7 @@ mod tests {
             let stop = AtomicBool::new(false);
             let event = mi_transport::Activation {
                 control: 0,
+                layer_override: None,
                 generation: receiver.generation().into(),
                 received_sequence: 1,
                 received_at: now,
@@ -2970,12 +2840,14 @@ mod tests {
         let mut pending = std::collections::VecDeque::from([
             mi_transport::Activation {
                 control: 0,
+                layer_override: None,
                 generation: receiver.generation().into(),
                 received_sequence: 1,
                 received_at: now,
             },
             mi_transport::Activation {
                 control: 0,
+                layer_override: None,
                 generation: receiver.generation().into(),
                 received_sequence: 2,
                 received_at: now + Duration::from_millis(3),
@@ -3049,7 +2921,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_layer_physical_switch_release_clears_pressed_mask_and_codex_layer_never_emits_host_activation(
+    fn disjoint_pressed_mask_ignores_other_layer_releases_and_codex_layer_never_emits_host_activation(
     ) {
         use mi_proto::Framer;
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -3076,6 +2948,7 @@ mod tests {
             r#"{"m":"v.oai.hid","p":{"k":"AG00","act":0}}"#,
             r#"{"m":"v.oai.hid","p":{"k":"AG00","act":1}}"#,
             r#"{"m":"v.oai.hid","p":{"k":"AG00","act":0}}"#,
+            r#"{"m":"v.oai.hid","p":{"k":"AG06","act":0}}"#,
             r#"{"m":"v.oai.hid","p":{"k":"AG06","act":1}}"#,
             r#"{"m":"v.oai.hid","p":{"k":"AG06","act":0}}"#,
         ] {
@@ -3088,7 +2961,7 @@ mod tests {
 
         let mut controls = Vec::new();
         let start = Instant::now();
-        while controls.len() < 3 && start.elapsed() < Duration::from_secs(2) {
+        while controls.len() < 2 && start.elapsed() < Duration::from_secs(2) {
             if let Some(ev) = running.receiver.next().unwrap() {
                 controls.push(ev.control);
             } else {
@@ -3099,7 +2972,7 @@ mod tests {
         while let Some(ev) = running.receiver.next().unwrap() {
             controls.push(ev.control);
         }
-        assert_eq!(controls, vec![0, 0, 0]);
+        assert_eq!(controls, vec![0, 0]);
         running.shutdown(&runtime).unwrap();
     }
 
@@ -4178,6 +4051,180 @@ mod tests {
         );
         assert_eq!(observed_layer.load(Ordering::Acquire), 5);
         assert_eq!(*observed_pl.lock().unwrap(), Some((2, 5)));
+    }
+
+    #[test]
+    fn interleaved_karabiner_l2_and_vendor_l1_and_expired_l1_never_misroute() {
+        let plan = test_plan();
+        let ag_id = plan.hosts[0].profile_id.clone();
+        let custom_codex = PinnedProfilePlan {
+            profile_id: "local-codex".into(),
+            bundle_id: Some("com.openai.codex".into()),
+            actions: std::array::from_fn(|i| {
+                (i == 0).then(|| ResolvedHostAction::OpenApp {
+                    bundle_id: "com.openai.codex".into(),
+                })
+            }),
+        };
+        let routing = Mutex::new(RoutingContext {
+            mode: SixLayerRoutingMode::BoardLayers {
+                layer_one: Some(custom_codex),
+            },
+            bundle_id: None,
+        });
+
+        let receiver = UserCommandReceiver::bind().unwrap();
+        receiver.arm().unwrap();
+        assert!(!receiver.push_layer1_vendor_activation(20));
+
+        let mut received_events = Vec::new();
+        send(&receiver, 0);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while received_events.is_empty() && Instant::now() < deadline {
+            if let Some(ev) = receiver.next().unwrap() {
+                received_events.push(ev);
+            } else {
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+        assert_eq!(received_events.len(), 1);
+        assert_eq!(received_events[0].control, 0);
+        assert_eq!(received_events[0].layer_override, None);
+
+        let mut mask = 0u64;
+        let ag00 = mi_session::ReceivedNotification {
+            ingress_sequence: 1,
+            notification: mi_proto::HostNotification::Unknown(
+                serde_json::from_str(r#"{"m":"v.oai.hid","p":{"k":"AG00","act":1}}"#).unwrap(),
+            ),
+        };
+        handle_vendor_slot_notification(&ag00, &mut mask, &receiver, true);
+        let l1_event = receiver
+            .next()
+            .unwrap()
+            .expect("AG00 vendor notification must queue L1 activation");
+        assert_eq!(l1_event.control, 0);
+        assert_eq!(l1_event.layer_override, Some(1));
+
+        let now = Instant::now();
+        let policy = ExecutionPolicy::default();
+        policy.set(true, true, now);
+        let expired_l1 = mi_transport::Activation {
+            control: 0,
+            layer_override: Some(1),
+            generation: receiver.generation().into(),
+            received_sequence: 3,
+            received_at: now - Duration::from_secs(1),
+        };
+        let fresh_l2 = mi_transport::Activation {
+            control: 0,
+            layer_override: None,
+            generation: receiver.generation().into(),
+            received_sequence: 4,
+            received_at: now + Duration::from_millis(1),
+        };
+        let mut queue = std::collections::VecDeque::from([
+            mi_transport::Activation {
+                received_at: now,
+                ..received_events.remove(0)
+            },
+            mi_transport::Activation {
+                received_at: now,
+                ..l1_event
+            },
+            expired_l1,
+            fresh_l2,
+        ]);
+
+        let stop = AtomicBool::new(false);
+        let observed = AtomicU8::new(1);
+        let first = AtomicBool::new(false);
+        let (tx, _rx) = std::sync::mpsc::sync_channel(8);
+        let mut calls = Vec::new();
+        execute_clicks(
+            &receiver,
+            &plan,
+            &stop,
+            &policy,
+            &observed,
+            &first,
+            &routing,
+            &tx,
+            None,
+            || match queue.pop_front() {
+                Some(ev) => Ok(Some(ev)),
+                None => {
+                    stop.store(true, Ordering::Release);
+                    Ok(None)
+                }
+            },
+            || Ok(()),
+            |profile, binding, _action, _admission| {
+                calls.push((profile.to_owned(), binding.to_owned()));
+                mi_macos::HostActionReceipt {
+                    action_type: "open_app".into(),
+                    binding_id: binding.into(),
+                    detail: "ok".into(),
+                    outcome: "executed".into(),
+                    profile_id: profile.into(),
+                    target: "test".into(),
+                    text_byte_len: None,
+                    timestamp_ms: 1,
+                }
+            },
+        );
+        assert_eq!(
+            calls,
+            vec![
+                (ag_id.clone(), "AG00".into()),
+                ("local-codex".into(), "AG00".into()),
+                (ag_id, "AG00".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn vendor_pressed_mask_keeps_ag00_ag06_act06_and_radial_disjoint() {
+        let receiver = UserCommandReceiver::bind().unwrap();
+        receiver.arm().unwrap();
+        let mut mask = 0u64;
+        let mut send_vendor = |json: &str| {
+            let received = mi_session::ReceivedNotification {
+                ingress_sequence: 1,
+                notification: mi_proto::HostNotification::Unknown(
+                    serde_json::from_str(json).unwrap(),
+                ),
+            };
+            handle_vendor_slot_notification(&received, &mut mask, &receiver, true);
+        };
+
+        send_vendor(r#"{"m":"v.oai.hid","p":{"k":"AG00","act":1}}"#);
+        send_vendor(r#"{"m":"v.oai.hid","p":{"k":"AG06","act":1}}"#);
+        send_vendor(r#"{"m":"v.oai.hid","p":{"k":"ACT06","act":1}}"#);
+        send_vendor(r#"{"m":"v.oai.hid","p":{"k":"AG06","act":0}}"#);
+        send_vendor(r#"{"m":"v.oai.hid","p":{"k":"AG00","act":1}}"#);
+        send_vendor(r#"{"m":"v.oai.hid","p":{"k":"AG00","act":0}}"#);
+        send_vendor(r#"{"m":"v.oai.hid","p":{"k":"AG00","act":1}}"#);
+        send_vendor(r#"{"m":"v.oai.rad","p":{"a":0.75,"d":0.8}}"#);
+        send_vendor(r#"{"m":"v.oai.rad","p":{"a":0.25,"d":0.8}}"#);
+        send_vendor(r#"{"m":"v.oai.rad","p":{"a":0.25,"d":0.1}}"#);
+        send_vendor(r#"{"m":"v.oai.rad","p":{"a":0.25,"d":0.8}}"#);
+
+        let mut events = Vec::new();
+        while let Some(ev) = receiver.next().unwrap() {
+            events.push((ev.control, ev.layer_override));
+        }
+        assert_eq!(
+            events,
+            vec![
+                (0, Some(1)),
+                (0, None),
+                (6, Some(1)),
+                (0, Some(1)),
+                (16, Some(1)),
+                (18, Some(1)),
+            ]
+        );
     }
 }
 

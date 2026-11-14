@@ -50,6 +50,7 @@ impl ActivationPayload {
 #[derive(Clone, Debug)]
 pub struct Activation {
     pub control: u8,
+    pub layer_override: Option<u8>,
     pub generation: String,
     /// Receiver order, not a HID sequence number.
     pub received_sequence: u64,
@@ -178,6 +179,7 @@ impl UserCommandReceiver {
                     let received_sequence = pending.sequence;
                     pending.events.push_back(Activation {
                         control: payload.control,
+                        layer_override: None,
                         generation: generation.clone(),
                         received_sequence,
                         received_at: Instant::now(),
@@ -222,7 +224,21 @@ impl UserCommandReceiver {
     }
 
     pub fn push_vendor_activation(&self, control: u8) -> bool {
-        if control >= 60 || self.stop.load(Ordering::Acquire) {
+        if control >= 60 {
+            return false;
+        }
+        self.push_activation(control, None)
+    }
+
+    pub fn push_layer1_vendor_activation(&self, slot: u8) -> bool {
+        if slot >= 20 {
+            return false;
+        }
+        self.push_activation(slot, Some(1))
+    }
+
+    fn push_activation(&self, control: u8, layer_override: Option<u8>) -> bool {
+        if self.stop.load(Ordering::Acquire) {
             return false;
         }
         let mut pending = self.queue.lock().unwrap();
@@ -233,6 +249,7 @@ impl UserCommandReceiver {
         let received_sequence = pending.sequence;
         pending.events.push_back(Activation {
             control,
+            layer_override,
             generation: self.generation.clone(),
             received_sequence,
             received_at: Instant::now(),

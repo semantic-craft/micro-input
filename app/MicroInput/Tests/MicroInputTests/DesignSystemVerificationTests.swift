@@ -456,7 +456,7 @@ final class DesignSystemVerificationTests: XCTestCase {
     func testCheatSheetSpatialLayoutDeduplicatesRepeatedBindingIdsKeepingFirstEntry() {
         let sheet = CheatSheetModel(
             profileName: "Antigravity",
-            routingSummary: "自动跟随",
+            routingSummary: "手动选择方案",
             keyCells: [
                 CheatSheetCellModel(bindingId: "AG00", controlName: "左上键", label: "首选动作", available: true),
                 CheatSheetCellModel(bindingId: "AG00", controlName: "左上键", label: "重复动作", available: false),

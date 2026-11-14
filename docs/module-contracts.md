@@ -21,7 +21,7 @@
 | 配置写入与分块传输 | [config_write.rs](../crates/mi-session/src/config_write.rs) | `ConfigWriter` 的计划绑定应用与恢复，合成构造受 feature 限制 |
 | 灯光即时预览 | [lighting_preview.rs](../crates/mi-session/src/lighting_preview.rs) | 原生 `Preview::begin_native` 与合成 `Preview::begin` |
 | 宿主动作与透传路由 | [host_router.rs](../crates/mi-model/src/host_router.rs) | `check_passthrough_health`、`resolve_host_action` 纯函数路由 |
-| 偏好与关联存储 | [routing.rs](../crates/mi-model/src/storage/routing.rs) | 宿主自动跟随与前台关联持久化 |
+| 偏好与路由存储 | [routing.rs](../crates/mi-model/src/storage/routing.rs) | 宿主启用状态、手动选择/锁定方案、常用置顶与旧偏好字段静默退役 |
 | 变更候选生成 | [apply.rs](../crates/mi-model/src/apply.rs) | `Pending`、`Preview` 与一次消费的 `PreparedCandidate` |
 | 持久操作与恢复记录 | [operation_record.rs](../crates/mi-model/src/operation_record.rs) | 失败安全与原子落盘操作记录 |
 | 草稿与设备工作区 | [draft.rs](../crates/mi-model/src/draft.rs)、[storage.rs](../crates/mi-model/src/storage.rs) | 稳定身份、原子保存、宿主文档与设备草稿隔离 |
@@ -101,11 +101,11 @@ RGB 编辑由 [Draft](../crates/mi-model/src/draft.rs) 与 [mi-model::lighting](
 `mi-session::lighting_preview::Preview::begin`（[lighting_preview.rs](../crates/mi-session/src/lighting_preview.rs)）只在 synthetic-backend 编译并拒绝非合成连接；使用明确标记的 `synthetic.lights.read/set` 测试协议，而非臆造官方预览 ACK/目标绑定规则。可变合成文件另存运行态和活动目标；目标及最后一次已确认运行态同时匹配的原子 set 才改变运行态，文件保持原字节。原生 `begin_native` 按文末契约单独发送，不复用这些合成消息。
 
 一个有界任务持有同一会话队列和唯一 reader，watch 槽只保留最新待发状态，80 ms 合并更新；不会取消已在途交换。队列持有期内其他读取不消耗 ID，更新始终为结束恢复和独立运行态读回保留两个 ID，30 秒自动结束。结束先停更新，再恢复、读回；切层或同层外部改色均拒绝覆盖更新和恢复，失败/断连为 Unknown 且断开旧会话，不自动重连/重试。配置操作与预览互斥，未知恢复结果保持关闭。合成运行态成功不证明真实灯光视觉效果。
-## S5 宿主跟随与输入边界
+## S5 宿主路由与输入边界
 
-- `storage::routing` 在工作台偏好文件中原子保存选择、手动保持、自动开关和 bundle ID 关联；严格解析保留，失败不发布新 revision。
+- `storage::routing` 在工作台偏好文件中原子保存活动选择、锁定方案、`host_execution_enabled`、常用置顶顺序及底行布局；严格解析（`#[serde(deny_unknown_fields)]`）保留，旧版前台自动跟随偏好字段（`auto_follow_enabled`、`manual_override`、`app_profile_links`）在反序列化时静默丢弃且不写回；失败不发布新 revision。
 - `mi-session` 唯一 reader 在广播前分配 ingress sequence，消费者的 sequence 只作诊断。摇杆回中/离中状态即使没有动作边沿也向上交付。
-- [host_router.rs](../crates/mi-model/src/host_router.rs) 负责纯函数路由；[store.rs](../crates/mi-core/src/store.rs) 与 [six_layer_store.rs](../crates/mi-core/src/six_layer_store.rs) 持有运行选择和动作来源，设备会话与文档身份互不替代。
+- [host_router.rs](../crates/mi-model/src/host_router.rs) 负责纯函数路由；[store.rs](../crates/mi-core/src/store.rs) 与 [six_layer_store.rs](../crates/mi-core/src/six_layer_store.rs) 持有运行选择（含 `SixLayerRoutingMode::BoardLayers` / `ManualPinned` / `Locked` 与 V070 前台层同步）和动作来源，设备会话与文档身份互不替代。
 - [runtime_inbox.rs](../crates/mi-core/src/runtime_inbox.rs) 接收硬件事件，`WorkbenchStore::poll_hardware_events` 消费事件并核对代次与门禁。`InputStreamGap` 停止原目标动作并封锁旧输入会话，重新连接后才接收新输入。旧 Swift `HostRouting` 的 FIFO 与 lease 数字是历史设计，不能套用为当前实现参数。
 - [projection.rs](../crates/mi-core/src/projection.rs) 生成实际运行配置投影；[passive_panel.rs](../crates/mi-macos/src/passive_panel.rs) 显示被动面板。Swift `CoreBridge.swift` 的 `WorkspaceLifecycle` 转发睡眠和唤醒，Rust [workspace_lifecycle.rs](../crates/mi-core/src/workspace_lifecycle.rs) 退役并等待旧任务。旧 `HostOverlay` 和 `WorkspaceSleepObserver` 是历史 owner。
 

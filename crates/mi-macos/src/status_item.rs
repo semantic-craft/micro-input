@@ -195,8 +195,6 @@ pub struct StatusItemSnapshot {
     pub active_profile_name: String,
     pub routing_mode_label: String,
     pub host_execution_enabled: bool,
-    pub auto_follow_enabled: bool,
-    pub manual_override: bool,
     pub radial_menu_enabled: bool,
     pub cheat_sheet_visible: bool,
     pub pinned_favorite_ids: [Option<String>; 4],

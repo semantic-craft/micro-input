@@ -627,19 +627,27 @@ fn status_menu_quick_switch_2x2_favorites_swap_and_icon_and_preset_bounds() {
     assert!(!store.projection().status_menu.host_execution_enabled);
 
     store
-        .dispatch_status_menu_action(StatusMenuAction::SetAutoFollowEnabled(true))
-        .expect("enable auto follow");
-    assert!(store.projection().status_menu.auto_follow_enabled);
+        .dispatch_status_menu_action(StatusMenuAction::SetProfileLocked(true))
+        .expect("lock profile");
+    assert!(store.projection().status_menu.is_profile_locked);
+    assert_eq!(
+        store.projection().status_menu.locked_profile_id.as_deref(),
+        Some(deepseek_id.as_str())
+    );
 
     store
         .dispatch_status_menu_action(StatusMenuAction::SelectProfile(antigravity_id.clone()))
-        .expect("manual select profile sets manual override");
-    assert!(store.projection().status_menu.manual_override);
+        .expect("select profile switches locked profile");
+    assert_eq!(
+        store.projection().status_menu.locked_profile_id.as_deref(),
+        Some(antigravity_id.as_str())
+    );
 
     store
-        .dispatch_status_menu_action(StatusMenuAction::ResumeAutoFollow)
-        .expect("resume auto follow");
-    assert!(!store.projection().status_menu.manual_override);
+        .dispatch_status_menu_action(StatusMenuAction::SetProfileLocked(false))
+        .expect("unlock profile");
+    assert!(!store.projection().status_menu.is_profile_locked);
+    assert!(store.projection().status_menu.locked_profile_id.is_none());
 
     store
         .dispatch_status_menu_action(StatusMenuAction::SetRadialMenuEnabled(true))
@@ -650,7 +658,6 @@ fn status_menu_quick_switch_2x2_favorites_swap_and_icon_and_preset_bounds() {
         .latest_snapshot()
         .expect("status item host synced");
     assert!(snapshot.radial_menu_enabled);
-    assert!(snapshot.auto_follow_enabled);
     assert!(!snapshot.host_execution_enabled);
 
     let oversized = vec![b' '; MAX_PRESET_FILE_BYTES + 1];
@@ -892,7 +899,7 @@ fn overlay_hide_cheat_sheet_only_closes_active_cheat_sheet_without_clobbering_to
         .expect("cheat sheet preview");
     store.overlay_controller.request_profile_switch_notice(
         "Antigravity".to_string(),
-        "自动跟随".to_string(),
+        "手动选择方案".to_string(),
         &preview,
         &screen,
         cursor,

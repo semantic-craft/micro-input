@@ -102,12 +102,16 @@ fn v1_migration_preserves_all_preferences_missing_ids_order_and_recovery_bytes()
         "host_active_profile_id",
         "host_execution_enabled",
         "command_execution_enabled",
-        "auto_follow_enabled",
-        "manual_override",
         "bottom_row_layout",
-        "app_profile_links",
     ] {
         assert_eq!(saved[key], value[key], "{key}");
+    }
+    for retired in [
+        "auto_follow_enabled",
+        "manual_override",
+        "app_profile_links",
+    ] {
+        assert!(saved.get(retired).is_none(), "{retired}");
     }
     let mut reopened = DocumentStore::default();
     reopened.open(temp.path().join("workbench.json")).unwrap();

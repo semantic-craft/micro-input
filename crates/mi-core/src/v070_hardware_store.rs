@@ -785,16 +785,26 @@ impl WorkbenchStore {
             return None;
         }
         if !self.document_store.host_execution_enabled()
-            || !self.auto_follow_enabled
-            || self.manual_override
             || self.document_store.locked_profile_id().is_some()
+            || self.six_layer_user_pinned
         {
             return None;
         }
-        let active_pid = self.effective_resolved_active_profile_id()?;
-        if self.is_protected_oai_profile(&active_pid) {
-            return None;
-        }
+        let fg = self.foreground_bundle_id.as_deref()?;
+        let doc = &self.document_store.host_store().draft.document;
+        let graph = &doc.editable.graph;
+        let target_pid = graph.profile_order.iter().find(|pid| {
+            let Some(profile) = graph.profiles.get(*pid) else {
+                return false;
+            };
+            let is_protected = profile
+                .layer_order
+                .iter()
+                .any(|lid| doc.is_protected_oai_layer(lid));
+            !is_protected
+                && mi_model::host_router::desktop_agent_for_profile_name(&profile.name)
+                    .is_some_and(|(_, b)| b == fg)
+        })?;
         let plan = self.document_store.board_layer_plan()?;
         let installed_plan = self
             .six_layer_running
@@ -804,7 +814,7 @@ impl WorkbenchStore {
             let plan_matches = matches!(
                 plan.route(layer),
                 mi_model::board_layers::BoardLayerRoute::HostProfile { profile_id }
-                    if profile_id == &active_pid
+                    if profile_id == target_pid
             );
             if !plan_matches {
                 continue;
@@ -813,7 +823,7 @@ impl WorkbenchStore {
                 let desired_matches = matches!(
                     desired.route(layer),
                     mi_model::board_layers::BoardLayerRoute::HostProfile { profile_id }
-                        if profile_id == &active_pid
+                        if profile_id == target_pid
                 );
                 if !desired_matches {
                     continue;
@@ -1058,6 +1068,13 @@ impl WorkbenchStore {
             .consume_expected_layer_echo(layer_index, self.update_now);
         self.v070_hardware
             .apply_profile_layer_notification(profile_index, layer_index);
+        if !is_expected_echo
+            && self.document_store.locked_profile_id().is_none()
+            && self.six_layer_user_pinned
+        {
+            self.six_layer_user_pinned = false;
+            self.sync_six_layer_routing_context();
+        }
         if is_expected_echo {
             self.v070_hardware.projection.status_message =
                 format!("前台联动已切至 P{profile_index} · 第 {layer_index} 层（RAM 零擦写）");
@@ -1691,7 +1708,7 @@ mod tests {
 
             store.overlay_controller.request_profile_switch_notice(
                 "Antigravity".to_string(),
-                "自动跟随".to_string(),
+                "手动选择方案".to_string(),
                 &crate::CheatSheetProjection::default(),
                 &store.screen_geometry,
                 store.last_cursor_position,
@@ -1867,10 +1884,11 @@ mod tests {
                 .0
                 .clone()
         };
+        let dsh_id = profile_id("DeepSeek Coder (DSH)");
         let desired = mi_model::board_layers::BoardLayerPlan::recommended(
             profile_id("Codex"),
             profile_id("Antigravity"),
-            profile_id("DeepSeek Coder (DSH)"),
+            dsh_id.clone(),
         );
         let compiled = mi_model::apply::AppliedSixLayerPlan::compile(
             &desired,
@@ -1899,7 +1917,6 @@ mod tests {
         assert_eq!(reopened.projection().status_menu.power_status, Some(badge));
 
         reopened.set_host_execution_enabled(true).unwrap();
-        reopened.set_auto_follow(true).unwrap();
         assert!(reopened.foreground_changed(Some("com.deepseek.dsh")));
         assert!(
             !sent_methods
@@ -1928,7 +1945,6 @@ mod tests {
         poll_until(&mut reopened, |s| {
             s.v070_hardware.expected_layer_echo.is_none()
         });
-        assert!(!reopened.projection().status_menu.manual_override);
 
         let kb_pl_set_before_codex = sent_methods
             .lock()
@@ -2006,6 +2022,111 @@ mod tests {
                 .count(),
             kb_pl_set_while_disabled + 1,
             "re-enabling host_execution_enabled must immediately sync to mapped foreground layer"
+        );
+        link.push_wire(json!({"m": "kb.pl", "p": {"p": 3, "l": 3}}));
+        poll_until(&mut reopened, |s| {
+            s.v070_hardware.expected_layer_echo.is_none()
+        });
+
+        reopened
+            .dispatch_command(WorkbenchCommand::Sidebar(
+                crate::sidebar::SidebarAction::SetProfileLocked(true),
+            ))
+            .unwrap();
+        let kb_pl_set_while_locked = sent_methods
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.as_str() == "kb.pl.set")
+            .count();
+        assert!(!reopened.foreground_changed(Some("com.google.antigravity")));
+        assert!(!reopened.projection().firmware.v070.busy);
+        assert_eq!(
+            sent_methods
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.as_str() == "kb.pl.set")
+                .count(),
+            kb_pl_set_while_locked,
+            "SetProfileLocked(true) must suppress kb.pl.set"
+        );
+
+        reopened
+            .dispatch_command(WorkbenchCommand::Sidebar(
+                crate::sidebar::SidebarAction::SetProfileLocked(false),
+            ))
+            .unwrap();
+        poll_until(&mut reopened, |s| {
+            !s.projection().firmware.v070.busy
+                && s.projection().firmware.v070.active_layer == Some(2)
+        });
+        assert_eq!(
+            sent_methods
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.as_str() == "kb.pl.set")
+                .count(),
+            kb_pl_set_while_locked + 1,
+            "SetProfileLocked(false) must restore BoardLayers and emit kb.pl.set"
+        );
+        link.push_wire(json!({"m": "kb.pl", "p": {"p": 3, "l": 2}}));
+        poll_until(&mut reopened, |s| {
+            s.v070_hardware.expected_layer_echo.is_none()
+        });
+
+        reopened.select_and_activate_profile(&dsh_id).unwrap();
+        assert!(matches!(
+            reopened.build_six_layer_routing_mode(),
+            crate::six_layer_runtime::SixLayerRoutingMode::ManualPinned(_)
+        ));
+        let kb_pl_set_while_manual = sent_methods
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.as_str() == "kb.pl.set")
+            .count();
+        assert!(!reopened.foreground_changed(Some("com.deepseek.dsh")));
+        assert!(!reopened.projection().firmware.v070.busy);
+        assert_eq!(
+            sent_methods
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.as_str() == "kb.pl.set")
+                .count(),
+            kb_pl_set_while_manual,
+            "select_and_activate_profile (ManualPinned) must suppress kb.pl.set"
+        );
+
+        reopened
+            .dispatch_command(WorkbenchCommand::Sidebar(
+                crate::sidebar::SidebarAction::SetProfileLocked(true),
+            ))
+            .unwrap();
+        reopened
+            .dispatch_command(WorkbenchCommand::Sidebar(
+                crate::sidebar::SidebarAction::SetProfileLocked(false),
+            ))
+            .unwrap();
+        poll_until(&mut reopened, |s| {
+            !s.projection().firmware.v070.busy
+                && s.projection().firmware.v070.active_layer == Some(3)
+        });
+        assert!(matches!(
+            reopened.build_six_layer_routing_mode(),
+            crate::six_layer_runtime::SixLayerRoutingMode::BoardLayers { .. }
+        ));
+        assert_eq!(
+            sent_methods
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.as_str() == "kb.pl.set")
+                .count(),
+            kb_pl_set_while_manual + 1,
+            "unlocking after ManualPinned must restore BoardLayers and emit kb.pl.set"
         );
         link.push_wire(json!({"m": "kb.pl", "p": {"p": 3, "l": 3}}));
         poll_until(&mut reopened, |s| {

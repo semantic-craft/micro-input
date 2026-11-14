@@ -2009,8 +2009,6 @@ mod tests {
                 .find_canonical_profile_id(CanonicalAgent::Codex)
                 .unwrap();
             store.select_and_activate_profile(&native).unwrap();
-            store.auto_follow_enabled = false;
-            store.manual_override = true;
             store.set_host_execution_enabled(true).unwrap();
             if locked {
                 store
