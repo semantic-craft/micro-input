@@ -11,15 +11,11 @@ description: End-to-end acceptance and self-verification skill for Micro Input (
 
 ## 1. Launch
 
-1. **构建合成后端或生产后端应用包**：
-   - 驱动合成 HID 输入闭环（无需人工按压实体键盘）：
-     ```sh
-     scripts/build --synthetic
-     ```
-   - 验证生产二进制启动与离线工作台：
-     ```sh
-     scripts/build
-     ```
+1. 构建应用包：
+   ```sh
+   scripts/build
+   ```
+   合成场景由运行时 `MI_SYNTHETIC_SCENARIO` 选择，复用同一应用包。
 2. **启动受控隔离 QA 实例**：
    - 使用 `scripts/run --verify` 启动。脚本默认在 `<repo>/.scratch/qa-runs/<timestamp>-<pid>/`（严禁使用 `/tmp` 或 `/private/tmp`）下创建隔离的 `Micro Input QA.app`（固定 `CFBundleIdentifier` 为 `com.semanticcraft.microinput.qa` 并持有 `.scratch/qa-runs/qa.lock` 排他锁）。
    - 启动合成宿主执行自检场景：
@@ -80,7 +76,7 @@ description: End-to-end acceptance and self-verification skill for Micro Input (
    {
      "cleanup_confirmed": true,
      "git_sha": "<head-sha>",
-     "receipt_count": 16,
+     "receipt_count": 20,
      "run_id": "<run-id>",
      "scenario": "host-execution",
      "status": "PASS",

@@ -10,10 +10,10 @@
 MI_AUTO_HOST_READY=0 scripts/verify-offline
 ```
 
-总入口包括 `antigravity-status`。单独重跑时先构建合成应用，再运行：
+总入口包括 `antigravity-status`。单独重跑时先构建应用，再在运行时选择合成场景：
 
 ```sh
-scripts/build --synthetic
+scripts/build
 MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=antigravity-status scripts/run --verify --timeout=45
 ```
 

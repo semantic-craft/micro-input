@@ -270,7 +270,7 @@ def main():
     try:
         if not args.qa_only:
             subprocess.run(["scripts/check"], cwd=ROOT, env=env, check=True)
-        subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, env=env, check=True)
+        subprocess.run(["scripts/build"], cwd=ROOT, env=env, check=True)
         for scenario in ("host-execution", "dsh-navigation", "antigravity-status", "config-write", "lighting-control", "diagnostic-export"):
             started = int(time.time() * 1000)
             scenario_env = dict(env, MI_SYNTHETIC_SCENARIO=scenario)

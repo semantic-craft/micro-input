@@ -77,7 +77,7 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 
 文档模型与候选：`cargo test -p mi-model --test lighting`；合成端到端：`cargo test -p mi-session --features synthetic-backend --test config_write`。后者仅用自编夹具、私有临时备份和编译的合成transport，不枚举/打开真实设备。合成写入器仅由显式 `synthetic_config_writer` 构造的高层工作流调用；普通合成实例不开放写入；原生接线已由 E-108 补齐。默认统一门禁仍为 `scripts/check`，原生探针继续ignored。
 
-既有宿主回归使用 `scripts/build --synthetic` 后的 `MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=25`；该场景验证既有预设/宿主模拟未回退，不代表新增灯光UI或真实设备功能。生产离线启动必须设置 `MI_AUTO_HOST_READY=0`，本轮不启动生产应用。
+既有宿主回归使用 `scripts/build` 后的 `MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=25`；该场景验证既有预设/宿主模拟未回退，不代表新增灯光UI或真实设备功能。生产离线启动必须设置 `MI_AUTO_HOST_READY=0`，本轮不启动生产应用。
 
 
 持久记录回归：`cargo test -p mi-model --test operation_record`；合成恢复链路仍用 `cargo test -p mi-session --features synthetic-backend --test config_write`。覆盖首次发送前落盘、中断重开、损坏现状恢复、恢复链失败、新计划绑定、读回失败、核验结果未落盘、文档冲突和重复本地修复。`apply_observed` 是检查点观测接缝，不开放到 FFI；生产后端现经 E-108 的独立入口构造计划绑定 writer。完整检查使用 `MI_AUTO_HOST_READY=0 scripts/check`，真实硬件测试保持 ignored。

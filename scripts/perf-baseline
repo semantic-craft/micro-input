@@ -185,7 +185,7 @@ def main():
     if args.seconds <= 0 or args.interval <= 0 or args.seconds < args.interval:
         parser.error("--seconds and --interval must be positive, with seconds >= interval")
 
-    subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, check=True)
+    subprocess.run(["scripts/build"], cwd=ROOT, check=True)
     env = dict(os.environ, MI_AUTO_HOST_READY="0")
     env.pop("MI_SYNTHETIC_SCENARIO", None)
     started_ms = int(time.time() * 1000)
