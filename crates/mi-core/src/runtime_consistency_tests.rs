@@ -393,7 +393,7 @@ fn global_cleanup_without_a_core_ptt_owner_recovers_admission_after_confirmed_re
 }
 
 #[test]
-fn native_codex_lower_rows_keep_existing_actions_in_locked_and_manual_routes() {
+fn native_codex_all_controls_keep_existing_actions_in_locked_and_manual_routes() {
     for locked in [false, true] {
         let (_dir, mut store, now) = active_store();
         store.bottom_row_layout = BottomRowLayout::Split;
@@ -444,10 +444,22 @@ fn native_codex_lower_rows_keep_existing_actions_in_locked_and_manual_routes() {
                 assert_eq!(receipt.detail, format!("codex/{command}"));
             }
         }
-        assert!(plan.actions[..6]
-            .iter()
-            .chain(plan.actions[13..].iter())
-            .all(Option::is_none));
+        let local = store.local_codex_profile_id().unwrap();
+        let local_plan = store.compile_profile_twenty_slots(&local).unwrap();
+        assert_eq!(plan.actions, local_plan.actions);
+        for slot in 0..6 {
+            assert_eq!(
+                plan.actions[slot],
+                Some(ResolvedHostAction::AgentCommand {
+                    adapter: "four-app".into(),
+                    command: format!("slot-open:{slot}"),
+                })
+            );
+        }
+        assert_eq!(
+            store.desired_live_session_source(),
+            LiveSessionSource::Codex
+        );
         assert_eq!(
             serde_json::to_value(&store.document_store.draft.document).unwrap(),
             before
@@ -544,4 +556,68 @@ fn native_codex_lower_rows_preserve_custom_actions_unbound_slots_and_other_owner
     let mut event = input(9, InputEventKind::Pressed);
     event.binding_id = Some("ACT08".into());
     assert!(store.route_board_input(event, now).is_none());
+}
+
+#[test]
+fn native_codex_all_controls_dispatch_custom_local_actions_without_rewriting_mappings() {
+    for locked in [false, true] {
+        let (_dir, mut store, now) = active_store();
+        store.bottom_row_layout = BottomRowLayout::Split;
+        let native = store
+            .find_canonical_profile_id(CanonicalAgent::Codex)
+            .unwrap();
+        let local = store.local_codex_profile_id().unwrap();
+        let graph = &mut store.document_store.draft.document.editable.graph;
+        let layer_id = graph.profiles[&local].layer_order[0].clone();
+        let template = graph.actions.values().next().unwrap().clone();
+        for binding in graph
+            .layers
+            .get_mut(&layer_id)
+            .unwrap()
+            .controls
+            .values_mut()
+        {
+            let slot = binding.logical_control.strip_prefix("logical-").unwrap();
+            let id = format!("custom-control-{slot}");
+            let mut action = template.clone();
+            action.payload = serde_json::json!({
+                "type": "open_url", "url": format!("https://example.com/control/{slot}")
+            });
+            graph.actions.insert(id.clone(), action);
+            binding.action_id = Some(id);
+        }
+        store
+            .select_and_activate_profile_at(&native, now, false)
+            .unwrap();
+        store.auto_follow_enabled = false;
+        store.manual_override = true;
+        if locked {
+            store
+                .dispatch_sidebar_action(SidebarAction::SetProfileLocked(true))
+                .unwrap();
+        }
+        let before = serde_json::to_value(&store.document_store.draft.document).unwrap();
+        let plan = store.compile_profile_twenty_slots(&native).unwrap();
+        for (slot, binding) in mi_model::direct_controls::CONTROL_BINDINGS
+            .iter()
+            .enumerate()
+        {
+            let url = format!("https://example.com/control/{slot}");
+            assert_eq!(
+                plan.actions[slot],
+                Some(ResolvedHostAction::OpenUrl { url: url.clone() })
+            );
+            let mut event = input(9, InputEventKind::Pressed);
+            event.binding_id = Some((*binding).into());
+            let receipt = store
+                .route_board_input(event, now)
+                .expect("local custom action");
+            assert_eq!(receipt.profile_id, native);
+            assert_eq!(receipt.target, url);
+        }
+        assert_eq!(
+            serde_json::to_value(&store.document_store.draft.document).unwrap(),
+            before
+        );
+    }
 }

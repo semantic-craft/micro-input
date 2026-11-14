@@ -2081,14 +2081,16 @@ mod tests {
             .unwrap();
         assert_eq!(
             store.desired_live_session_source(),
-            super::LiveSessionSource::Antigravity
+            super::LiveSessionSource::Codex
         );
-        assert!(store
-            .slot_table
-            .slot_table()
-            .slots()
-            .iter()
-            .all(|s| s.place.is_none()));
+        assert_eq!(
+            store.slot_table.slot_table().slots()[0].place,
+            Some(NavigationPlace::codex(
+                "codex-1",
+                "local",
+                "/work/codex-repo"
+            ))
+        );
     }
 
     #[test]
