@@ -899,6 +899,41 @@ mod macos {
         Ok(Some(data))
     }
 
+    fn enable_application_accessibility_with(
+        settable: impl Fn(&str) -> Result<bool, String>,
+        read_bool: impl Fn(&str) -> Result<Option<bool>, String>,
+        mut set_true: impl FnMut(&str) -> i32,
+    ) -> Result<(), String> {
+        if !settable("AXManualAccessibility")? {
+            return Ok(());
+        }
+        let manual_code = set_true("AXManualAccessibility");
+        if manual_code != 0 {
+            return Err(format!("unconfirmed:ax_set_{manual_code}"));
+        }
+        if read_bool("AXManualAccessibility")?.unwrap_or(false) {
+            return Ok(());
+        }
+        if !read_bool("AXEnhancedUserInterface")?.unwrap_or(false) {
+            let enhanced_code = set_true("AXEnhancedUserInterface");
+            if enhanced_code != 0 && enhanced_code != -25208 {
+                return Err(format!("unconfirmed:ax_set_{enhanced_code}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn enable_application_accessibility(application: &Owned) -> Result<(), String> {
+        enable_application_accessibility_with(
+            |name| application.settable(name),
+            |name| application.bool_attr(name),
+            |name| {
+                let attr = Owned::text(name);
+                unsafe { AXUIElementSetAttributeValue(application.0, attr.0, kCFBooleanTrue) }
+            },
+        )
+    }
+
     pub fn frontmost_selected_antigravity_conversation(pid: i32, port: u16) -> Option<String> {
         if port == 0 || pid <= 0 {
             return None;
@@ -911,11 +946,7 @@ mod macos {
         if unsafe { AXUIElementSetMessagingTimeout(application.0, 0.2) } != 0 {
             return None;
         }
-        if application.settable("AXManualAccessibility").ok()? {
-            application
-                .set("AXManualAccessibility", unsafe { kCFBooleanTrue })
-                .ok()?;
-        }
+        enable_application_accessibility(&application).ok()?;
         let mut attrs = application
             .attributes(&["AXFrontmost", "AXFocusedWindow", "AXWindows"], deadline)
             .ok()?
@@ -979,9 +1010,7 @@ mod macos {
             if unsafe { AXUIElementSetMessagingTimeout(application.0, 0.2) } != 0 {
                 return Err(blocked("ax_timeout_unavailable"));
             }
-            if application.settable("AXManualAccessibility")? {
-                application.set("AXManualAccessibility", unsafe { kCFBooleanTrue })?;
-            }
+            enable_application_accessibility(&application)?;
             let mut attrs = application
                 .attributes(&["AXWindows", "AXFocusedWindow"], deadline)?
                 .into_iter();
@@ -1210,7 +1239,9 @@ mod macos {
     }
 
     fn is_row_boundary_button(node: &ObservedNode) -> bool {
-        node.data.expanded.is_some() || is_sidebar_boundary_label(node.data.label.trim())
+        let trimmed = node.data.label.trim();
+        !is_row_action_label(trimmed)
+            && (node.data.expanded.is_some() || is_sidebar_boundary_label(trimmed))
     }
 
     fn classify_sidebar_row(
@@ -1639,12 +1670,15 @@ mod macos {
             .iter()
             .enumerate()
             .filter_map(|(idx, node)| {
+                let trimmed = node.data.label.trim();
+                let is_collapsed_toggle = (trimmed == "Toggle sidebar"
+                    && node.data.expanded == Some(false))
+                    || (trimmed == "Open sidebar" && node.data.expanded != Some(true));
                 (node.data.role == "AXButton"
                     && node.data.enabled
                     && node.data.pressable
-                    && node.data.label.trim() == "Toggle sidebar"
-                    && node.data.expanded == Some(false))
-                .then_some(idx)
+                    && is_collapsed_toggle)
+                    .then_some(idx)
             });
         let first = matches.next()?;
         matches.next().is_none().then_some(first)
@@ -1758,7 +1792,31 @@ mod macos {
                     .then_some(idx)
             })
             .collect();
-        (matches.len() == 1).then(|| matches[0])
+        if matches.len() == 1 {
+            return Some(matches[0]);
+        }
+        let sidebar_matches: Vec<_> = matches
+            .into_iter()
+            .filter(|&idx| {
+                let Some(parent) = observation.nodes[idx].parent else {
+                    return false;
+                };
+                let end = subtree_end(&observation.nodes, parent);
+                observation.nodes[(idx + 1)..end]
+                    .iter()
+                    .take_while(|next| next.data.role != "AXButton")
+                    .any(|next| {
+                        next.parent == Some(parent)
+                            && next.data.role == "AXLink"
+                            && (next.data.label.contains("New Conversation")
+                                || next.data.url.as_deref().is_some_and(|u| {
+                                    crate::session_navigation::app_document_path(u, port)
+                                        .is_some_and(|p| p.contains("project="))
+                                }))
+                    })
+            })
+            .collect();
+        (sidebar_matches.len() == 1).then(|| sidebar_matches[0])
     }
 
     fn is_section_or_project_header_button(
@@ -2038,10 +2096,11 @@ mod macos {
         }
 
         if let Some(toggle_idx) = find_collapsed_toggle_sidebar_button(&observation) {
+            let expected_expanded = observation.nodes[toggle_idx].data.expanded;
             backend.verify_and_press_button(
                 &observation,
                 toggle_idx,
-                Some(false),
+                expected_expanded,
                 validate_lease,
                 is_current,
             )?;
@@ -4864,6 +4923,149 @@ mod macos {
                     false,
                 ),
                 Some(2)
+            );
+
+            let duplicate_basename_obs = WindowObservation {
+                nodes: vec![
+                    node("root", "AXGroup", "", None, None, None, false),
+                    node(
+                        "picker-btn",
+                        "AXButton",
+                        "agent-tasks",
+                        Some(0),
+                        None,
+                        Some(false),
+                        true,
+                    ),
+                    node(
+                        "picker-show-all",
+                        "AXButton",
+                        "Show All",
+                        Some(0),
+                        None,
+                        Some(false),
+                        true,
+                    ),
+                    node(
+                        "sidebar-project",
+                        "AXButton",
+                        "agent-tasks",
+                        Some(0),
+                        None,
+                        Some(false),
+                        true,
+                    ),
+                    node(
+                        "sidebar-new-conv",
+                        "AXLink",
+                        "New Conversation in Project",
+                        Some(0),
+                        None,
+                        None,
+                        true,
+                    ),
+                ],
+            };
+            assert_eq!(
+                locate_target_project_header(
+                    &duplicate_basename_obs,
+                    4321,
+                    "/work/agent-tasks",
+                    None,
+                    true,
+                ),
+                Some(3)
+            );
+        }
+
+        #[test]
+        fn collapsed_open_sidebar_button_reveals_target_link() {
+            let mut backend = MockSidebarBackend::new(vec![
+                WindowObservation {
+                    nodes: vec![
+                        node("root", "AXGroup", "", None, None, None, false),
+                        node(
+                            "open-sidebar",
+                            "AXButton",
+                            "Open sidebar",
+                            Some(0),
+                            None,
+                            None,
+                            true,
+                        ),
+                    ],
+                },
+                WindowObservation {
+                    nodes: vec![
+                        node("root", "AXGroup", "", None, None, None, false),
+                        node("row", "AXGroup", "", Some(0), None, None, false),
+                        node(
+                            "target-link",
+                            "AXLink",
+                            "Target",
+                            Some(1),
+                            Some("https://127.0.0.1:4321/c/target-1"),
+                            None,
+                            true,
+                        ),
+                        node(
+                            "archive",
+                            "AXButton",
+                            "Archive conversation",
+                            Some(1),
+                            None,
+                            Some(false),
+                            true,
+                        ),
+                    ],
+                },
+            ]);
+            let target = crate::session_navigation::SessionNavigationWindow {
+                pid: 1,
+                window: 1,
+                selected_urls: vec!["https://127.0.0.1:4321/c/current".into()],
+            };
+            drive_sidebar_selection(
+                &mut backend,
+                &target,
+                4321,
+                "/work/agent-tasks",
+                None,
+                "target-1",
+                &mut || Ok(()),
+                &|| true,
+                |_, _| Ok(()),
+            )
+            .unwrap();
+            assert_eq!(
+                backend.pressed_buttons,
+                vec![("open-sidebar".to_string(), None)]
+            );
+            assert_eq!(backend.pressed_links, vec!["target-link".to_string()]);
+        }
+
+        #[test]
+        fn accessibility_enablement_falls_back_to_enhanced_ui_when_manual_stays_false() {
+            let mut written = Vec::new();
+            enable_application_accessibility_with(
+                |name| Ok(name == "AXManualAccessibility"),
+                |_| Ok(Some(false)),
+                |name| {
+                    written.push(name.to_string());
+                    if name == "AXEnhancedUserInterface" {
+                        -25208
+                    } else {
+                        0
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                written,
+                vec![
+                    "AXManualAccessibility".to_string(),
+                    "AXEnhancedUserInterface".to_string()
+                ]
             );
         }
 
