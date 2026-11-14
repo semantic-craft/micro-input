@@ -12,6 +12,10 @@ use crate::firmware_update::{
     V070PmStateProjection, V070SaRgbProjection, V070SnapshotPayload,
 };
 use crate::store::{HardwareLoopEvent, SystemLifecycle, WorkbenchStore};
+use crate::v070_session_sa_rgb::{
+    resolve_desired_for_device_layer, resolve_desired_for_document_layer, DesiredTarget,
+    LayerLightingResolution, ManualSaRgbWrite, SaRgbLitStyle, UrgentClearReason,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct V070BridgeCommand {
@@ -29,6 +33,7 @@ pub(crate) struct V070HardwareController {
     pub last_snapshot_session_id: Option<u64>,
     pub expected_layer_echo: Option<(u8, std::time::Instant)>,
     pub pending_auto_layer_sync: Option<u8>,
+    pub device_layer_override: Option<u8>,
 }
 
 impl V070HardwareController {
@@ -69,6 +74,7 @@ impl V070HardwareController {
         self.last_snapshot_session_id = None;
         self.expected_layer_echo = None;
         self.pending_auto_layer_sync = None;
+        self.device_layer_override = None;
     }
 
     pub fn mark_supported(
@@ -214,7 +220,9 @@ pub(crate) fn validate_v070_action(
     max_name_length: usize,
 ) -> Result<(), String> {
     match action {
-        V070HardwareAction::Refresh | V070HardwareAction::SetAutoLayerSync { .. } => Ok(()),
+        V070HardwareAction::Refresh
+        | V070HardwareAction::SetAutoLayerSync { .. }
+        | V070HardwareAction::SetSessionSaRgbSync { .. } => Ok(()),
         V070HardwareAction::SelectLayer { layer } => {
             if *layer == 0 || *layer > 6 {
                 return Err(format!(
@@ -373,6 +381,9 @@ pub(crate) async fn execute_v070_command_on_session(
         V070HardwareAction::SetAutoLayerSync { .. } => {
             Err("自动切层联动仅在宿主侧配置，不直接发送到固件".into())
         }
+        V070HardwareAction::SetSessionSaRgbSync { .. } => {
+            Err("会话状态自动映灯开关仅在宿主侧配置，不直接经桥接队列发送".into())
+        }
         V070HardwareAction::SelectLayer { layer } => {
             session
                 .set_profile_layer_flashless(None, Some(*layer))
@@ -484,7 +495,192 @@ pub(crate) async fn execute_v070_command_on_session(
     }
 }
 
+fn map_layer_lighting_resolution(res: LayerLightingResolution) -> DesiredTarget {
+    match res {
+        LayerLightingResolution::Active(map) => DesiredTarget::Active(map),
+        LayerLightingResolution::ProtectedOai => {
+            DesiredTarget::UrgentClear(UrgentClearReason::ProtectedLayer)
+        }
+        LayerLightingResolution::MissingLayer => {
+            DesiredTarget::Active(std::collections::BTreeMap::new())
+        }
+    }
+}
+
 impl WorkbenchStore {
+    pub fn live_v070_session(&self) -> Option<std::sync::Arc<DeviceSession>> {
+        if let Some(running) = &self.six_layer_running {
+            let version_ok = running
+                .observed_firmware_version()
+                .as_deref()
+                .is_some_and(mi_model::supports_v070_hardware_capabilities);
+            if !version_ok {
+                return None;
+            }
+            return running.live_vendor_session();
+        }
+        self.device_session
+            .as_ref()
+            .filter(|session| {
+                !session.is_disconnected()
+                    && session.has_exclusive_vendor_link()
+                    && session
+                        .observed_firmware_version()
+                        .as_deref()
+                        .is_some_and(mi_model::supports_v070_hardware_capabilities)
+            })
+            .cloned()
+    }
+
+    pub(crate) fn teardown_v070_session_sa_rgb(&mut self) {
+        let session = self.live_v070_session();
+        self.sa_rgb_coordinator
+            .teardown_blocking(&self.tokio_runtime, session);
+    }
+
+    pub(crate) fn sync_v070_session_sa_rgb(&mut self) {
+        if self.system_lifecycle != SystemLifecycle::Awake || self.firmware_update.reserved() {
+            self.sa_rgb_coordinator
+                .sync(DesiredTarget::Inactive, None, &self.tokio_runtime);
+            return;
+        }
+        let Some(session) = self.live_v070_session() else {
+            self.sa_rgb_coordinator
+                .sync(DesiredTarget::Inactive, None, &self.tokio_runtime);
+            return;
+        };
+        if !self.document_store.v070_session_sa_rgb_sync_enabled() {
+            self.sa_rgb_coordinator.sync(
+                DesiredTarget::Inactive,
+                Some(session),
+                &self.tokio_runtime,
+            );
+            return;
+        }
+        let target = self.resolve_v070_session_sa_rgb_target();
+        self.sa_rgb_coordinator
+            .sync(target, Some(session), &self.tokio_runtime);
+    }
+
+    fn resolve_v070_session_sa_rgb_target(&self) -> DesiredTarget {
+        let slot_kinds = self
+            .slot_table
+            .slot_session_kinds(&self.lighting_arbiter.acknowledged_watermarks);
+        let fallback_sa = self
+            .v070_hardware
+            .projection
+            .sa_rgb
+            .sa
+            .and_then(mi_model::SaId::new);
+
+        if let Some(running) = &self.six_layer_running {
+            let Some(l) = self
+                .v070_hardware
+                .projection
+                .active_layer
+                .or_else(|| {
+                    Some(
+                        running
+                            .observed_layer
+                            .load(std::sync::atomic::Ordering::Acquire),
+                    )
+                })
+                .filter(|l| (1..=6).contains(l))
+            else {
+                return DesiredTarget::UrgentClear(UrgentClearReason::ProtectedLayer);
+            };
+            let Ok(board_layer) = mi_model::board_layers::BoardLayer::try_from(l) else {
+                return DesiredTarget::UrgentClear(UrgentClearReason::ProtectedLayer);
+            };
+            if matches!(
+                running.installation.plan.desired.route(board_layer),
+                mi_model::board_layers::BoardLayerRoute::Native { .. }
+            ) {
+                return DesiredTarget::UrgentClear(UrgentClearReason::ProtectedLayer);
+            }
+            let compiled_layer = running.installation.plan.compiled_board_layer(board_layer);
+            return map_layer_lighting_resolution(resolve_desired_for_device_layer(
+                &compiled_layer,
+                &slot_kinds,
+                None,
+            ));
+        }
+
+        let doc = &self.document_store.draft.document;
+        let is_device_snapshot = doc.origin["kind"] == "device-snapshot";
+        let resolve_snapshot_board_layer = |layer_1_based: u8| -> Option<DesiredTarget> {
+            if !is_device_snapshot || layer_1_based < 1 {
+                return None;
+            }
+            let p = self.v070_hardware.projection.active_profile?;
+            let dev_layer = self
+                .document_store
+                .draft
+                .config
+                .profiles
+                .get(usize::from(p))
+                .and_then(|prof| prof.layers.get(usize::from(layer_1_based - 1)))?;
+            Some(map_layer_lighting_resolution(
+                resolve_desired_for_device_layer(dev_layer, &slot_kinds, fallback_sa),
+            ))
+        };
+
+        if is_device_snapshot && doc.editable.graph.profiles.is_empty() {
+            let target_layer = self
+                .v070_hardware
+                .device_layer_override
+                .or(self.v070_hardware.projection.active_layer);
+            return target_layer
+                .and_then(resolve_snapshot_board_layer)
+                .unwrap_or_else(|| DesiredTarget::Active(std::collections::BTreeMap::new()));
+        }
+
+        let Some(active_pid) = self
+            .effective_resolved_active_profile_id()
+            .or_else(|| self.selected_profile_id.clone())
+        else {
+            return DesiredTarget::Active(std::collections::BTreeMap::new());
+        };
+        let Some(profile) = doc.editable.graph.profiles.get(&active_pid) else {
+            return DesiredTarget::Active(std::collections::BTreeMap::new());
+        };
+
+        if let Some(l) = self.v070_hardware.device_layer_override.filter(|&l| l >= 1) {
+            if let Some(lid) = profile.layer_order.get(usize::from(l - 1)) {
+                return map_layer_lighting_resolution(resolve_desired_for_document_layer(
+                    doc,
+                    lid,
+                    &slot_kinds,
+                    fallback_sa,
+                ));
+            }
+            return resolve_snapshot_board_layer(l)
+                .unwrap_or_else(|| DesiredTarget::Active(std::collections::BTreeMap::new()));
+        }
+
+        if self.is_active_lighting_protected() {
+            return DesiredTarget::UrgentClear(UrgentClearReason::ProtectedLayer);
+        }
+
+        let active_lid = if self.selected_profile_id.as_deref() == Some(active_pid.as_str()) {
+            self.selected_layer_id
+                .as_ref()
+                .filter(|lid| profile.layer_order.iter().any(|id| id == *lid))
+                .or_else(|| profile.layer_order.first())
+        } else {
+            profile.layer_order.first()
+        };
+        let Some(lid) = active_lid else {
+            return DesiredTarget::Active(std::collections::BTreeMap::new());
+        };
+        map_layer_lighting_resolution(resolve_desired_for_document_layer(
+            doc,
+            lid,
+            &slot_kinds,
+            fallback_sa,
+        ))
+    }
+
     pub(super) fn has_active_v070_device(&self) -> bool {
         if let Some(running) = &self.six_layer_running {
             return running.vendor_bridge_connected()
@@ -678,6 +874,25 @@ impl WorkbenchStore {
             }
             return Ok(());
         }
+        if let V070HardwareAction::SetSessionSaRgbSync { enabled } = action {
+            self.document_store
+                .set_v070_session_sa_rgb_sync_enabled(enabled)?;
+            self.v070_hardware.projection.session_sa_rgb_sync_enabled = enabled;
+            self.v070_hardware.projection.last_error = None;
+            if enabled {
+                self.v070_hardware.projection.status_message = "已开启 AI 会话状态自动映灯".into();
+                self.sync_v070_session_sa_rgb();
+            } else {
+                let session = self.live_v070_session();
+                self.sa_rgb_coordinator.sync(
+                    DesiredTarget::UrgentClear(UrgentClearReason::OptInDisabled),
+                    session,
+                    &self.tokio_runtime,
+                );
+                self.v070_hardware.projection.status_message = "已关闭 AI 会话状态自动映灯".into();
+            }
+            return Ok(());
+        }
         if self.v070_hardware.projection.busy {
             return Err("上一条 0.7.0 硬件指令尚未完成".into());
         }
@@ -770,6 +985,45 @@ impl WorkbenchStore {
         if !self.is_active_v070_session(session_id) {
             return;
         }
+        let mut is_manual_sa_rgb = false;
+        if let Ok(ref outcome) = result {
+            let sync_enabled = self.document_store.v070_session_sa_rgb_sync_enabled();
+            match outcome {
+                V070BridgeOutcome::SaRgbApplied {
+                    sa,
+                    color_hex,
+                    brightness,
+                    speed,
+                    effect,
+                } => {
+                    is_manual_sa_rgb = true;
+                    if let Some(sa_id) = mi_model::SaId::new(*sa) {
+                        let style = parse_hex_color(color_hex).ok().and_then(|rgb| {
+                            SaRgbLitStyle::from_manual_apply(rgb, *brightness, *speed, *effect)
+                        });
+                        self.sa_rgb_coordinator.note_manual_sa_rgb_write(
+                            session_id,
+                            ManualSaRgbWrite::Applied { sa: sa_id, style },
+                            sync_enabled,
+                        );
+                    }
+                }
+                V070BridgeOutcome::SaRgbReset { sa } => {
+                    is_manual_sa_rgb = true;
+                    if let Some(sa_id) = mi_model::SaId::new(*sa) {
+                        self.sa_rgb_coordinator.note_manual_sa_rgb_write(
+                            session_id,
+                            ManualSaRgbWrite::Reset { sa: sa_id },
+                            sync_enabled,
+                        );
+                    }
+                }
+                V070BridgeOutcome::ProfileLayer { layer_index, .. } => {
+                    self.v070_hardware.device_layer_override = Some(*layer_index);
+                }
+                _ => {}
+            }
+        }
         let succeeded = result.is_ok();
         self.v070_hardware.apply_outcome(seq, result);
         if succeeded {
@@ -778,6 +1032,9 @@ impl WorkbenchStore {
                 if pending.is_some() || seq == 0 {
                     let _ = self.maybe_sync_v070_foreground_layer();
                 }
+            }
+            if !is_manual_sa_rgb {
+                self.sync_v070_session_sa_rgb();
             }
         } else {
             self.v070_hardware.pending_auto_layer_sync = None;
@@ -795,6 +1052,7 @@ impl WorkbenchStore {
         if !self.is_active_v070_session(session_id) {
             return;
         }
+        self.v070_hardware.device_layer_override = Some(layer_index);
         let is_expected_echo = self
             .v070_hardware
             .consume_expected_layer_echo(layer_index, self.update_now);
@@ -804,6 +1062,7 @@ impl WorkbenchStore {
             self.v070_hardware.projection.status_message =
                 format!("前台联动已切至 P{profile_index} · 第 {layer_index} 层（RAM 零擦写）");
         }
+        self.sync_v070_session_sa_rgb();
         self.commit_runtime_update();
     }
 }
@@ -824,7 +1083,7 @@ mod tests {
     use crate::six_layer_runtime::RunningSixLayer;
     use crate::store::WorkbenchCommand;
 
-    struct TestFramer;
+    pub(super) struct TestFramer;
     impl Framer for TestFramer {
         fn encode(&self, payload: &[u8]) -> Result<Vec<Vec<u8>>, ProtoError> {
             Ok(vec![payload.to_vec()])
@@ -835,15 +1094,22 @@ mod tests {
         fn clear(&mut self) {}
     }
 
-    struct MockV070Link {
+    #[derive(Debug, Clone, PartialEq)]
+    pub(super) enum MockWireEvent {
+        SaRgb(Value),
+        LinkClosed,
+    }
+
+    pub(super) struct MockV070Link {
         in_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
         in_rx: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>,
         out_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
         closed: std::sync::atomic::AtomicBool,
+        pub(super) wire_events: Arc<Mutex<Vec<MockWireEvent>>>,
     }
 
     impl MockV070Link {
-        fn new() -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+        pub(super) fn new() -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
             let (in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel();
             let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
             (
@@ -852,15 +1118,32 @@ mod tests {
                     in_rx: tokio::sync::Mutex::new(in_rx),
                     out_tx,
                     closed: std::sync::atomic::AtomicBool::new(false),
+                    wire_events: Arc::new(Mutex::new(Vec::new())),
                 }),
                 out_rx,
             )
         }
 
-        fn push_wire(&self, value: Value) {
+        pub(super) fn push_wire(&self, value: Value) {
             if let Some(tx) = self.in_tx.lock().unwrap().as_ref() {
                 let _ = tx.send(serde_json::to_vec(&value).unwrap());
             }
+        }
+
+        pub(super) fn sa_rgb_params(&self) -> Vec<Value> {
+            self.wire_events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|ev| match ev {
+                    MockWireEvent::SaRgb(params) => Some(params.clone()),
+                    MockWireEvent::LinkClosed => None,
+                })
+                .collect()
+        }
+
+        pub(super) fn clear_wire_events(&self) {
+            self.wire_events.lock().unwrap().clear();
         }
     }
 
@@ -886,6 +1169,14 @@ mod tests {
                 if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
                     return Err(TransportError::Disconnected);
                 }
+                if let Ok(req) = serde_json::from_slice::<Value>(report) {
+                    if req.get("method").and_then(Value::as_str) == Some("kb.sa.rgb") {
+                        self.wire_events
+                            .lock()
+                            .unwrap()
+                            .push(MockWireEvent::SaRgb(req["params"].clone()));
+                    }
+                }
                 let _ = self.out_tx.send(report.to_vec());
                 Ok(())
             })
@@ -905,12 +1196,17 @@ mod tests {
             })
         }
         fn close(&self) {
-            self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+            if !self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                self.wire_events
+                    .lock()
+                    .unwrap()
+                    .push(MockWireEvent::LinkClosed);
+            }
             self.in_tx.lock().unwrap().take();
         }
     }
 
-    fn spawn_mock_v070_session(
+    pub(super) fn spawn_mock_v070_session(
         runtime: &tokio::runtime::Runtime,
         version: &str,
         sent_methods: Arc<Mutex<Vec<String>>>,
@@ -1016,7 +1312,7 @@ mod tests {
         (session, link, responder)
     }
 
-    fn poll_until(store: &mut WorkbenchStore, pred: impl Fn(&WorkbenchStore) -> bool) {
+    pub(super) fn poll_until(store: &mut WorkbenchStore, pred: impl Fn(&WorkbenchStore) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(3);
         while !pred(store) {
             assert!(
@@ -1754,3 +2050,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "v070_session_sa_rgb_store_tests.rs"]
+mod fw6_store_tests;

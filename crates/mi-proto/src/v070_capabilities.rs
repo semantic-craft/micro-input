@@ -503,7 +503,7 @@ pub fn decode_device_name_response(
         .map_err(|error| ProtoError::Invalid(format!("invalid device.name result: {error}")))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum SaRgbEffect {
     Off = 0,

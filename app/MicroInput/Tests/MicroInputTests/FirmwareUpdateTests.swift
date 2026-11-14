@@ -179,6 +179,7 @@ final class FirmwareUpdateTests: XCTestCase {
         ])
         XCTAssertFalse(partial.supported)
         XCTAssertFalse(partial.autoLayerSyncEnabled)
+        XCTAssertFalse(partial.sessionSaRgbSyncEnabled)
         XCTAssertNil(partial.preferredDeviceSerial)
         XCTAssertNil(partial.activeLayer)
         XCTAssertNil(partial.batteryPercent)
@@ -386,5 +387,33 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertGreaterThan(host.fittingSize.height, 140)
         XCTAssertLessThanOrEqual(host.fittingSize.width, 520.5)
         XCTAssertEqual(dispatched, 0)
+    }
+
+    @MainActor
+    func testSessionSaRgbSyncCommandToggleAndPrepareForTermination() throws {
+        let onCmd = (V070HardwareCommand.setSessionSaRgbSync(true)["V070Hardware"] as? [String: Any])?["SetSessionSaRgbSync"] as? [String: Any]
+        XCTAssertEqual(onCmd?["enabled"] as? Bool, true)
+        let offCmd = (V070HardwareCommand.setSessionSaRgbSync(false)["V070Hardware"] as? [String: Any])?["SetSessionSaRgbSync"] as? [String: Any]
+        XCTAssertEqual(offCmd?["enabled"] as? Bool, false)
+
+        let decodedOn = V070HardwareSliceModel(json: ["session_sa_rgb_sync_enabled": true])
+        XCTAssertTrue(decodedOn.sessionSaRgbSyncEnabled)
+        let decodedDefault = V070HardwareSliceModel(json: [:])
+        XCTAssertFalse(decodedDefault.sessionSaRgbSyncEnabled)
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mi-v070-sa-rgb-sync-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        XCTAssertFalse(store.firmware.v070.sessionSaRgbSyncEnabled)
+        store.setV070SessionSaRgbSync(true)
+        XCTAssertTrue(store.firmware.v070.sessionSaRgbSyncEnabled)
+        XCTAssertNil(store.firmware.v070.lastError)
+        store.setV070SessionSaRgbSync(false)
+        XCTAssertFalse(store.firmware.v070.sessionSaRgbSyncEnabled)
+        XCTAssertNil(store.firmware.v070.lastError)
+        store.prepareForTermination()
+        XCTAssertNil(store.firmware.v070.lastError)
     }
 }

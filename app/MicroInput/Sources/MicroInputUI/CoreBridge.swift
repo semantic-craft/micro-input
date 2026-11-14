@@ -139,6 +139,14 @@ public final class CoreStore {
         dispatch("firmware", V070HardwareCommand.setAutoLayerSync(enabled))
     }
 
+    public func setV070SessionSaRgbSync(_ enabled: Bool) {
+        dispatch("firmware", V070HardwareCommand.setSessionSaRgbSync(enabled))
+    }
+
+    public func prepareForTermination() {
+        dispatchRaw(["domain": "system_will_terminate"])
+    }
+
     public func dispatchRaw(_ payload: [String: Any]) {
         guard let h = handle else { return }
         guard JSONSerialization.isValidJSONObject(payload),

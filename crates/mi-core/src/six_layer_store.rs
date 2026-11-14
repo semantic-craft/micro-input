@@ -251,6 +251,7 @@ impl WorkbenchStore {
 
     pub(super) fn suspend_for_six_layer_operation(&mut self) -> Result<(), WorkbenchError> {
         self.cancel_session_navigation();
+        self.teardown_v070_session_sa_rgb();
         if let Some(running) = self.six_layer_running.take() {
             if let Err(error) = running.shutdown(&self.tokio_runtime) {
                 self.system_lifecycle = SystemLifecycle::CleanupFailed(error.clone());
@@ -429,12 +430,14 @@ impl WorkbenchStore {
                     self.status_message = "六层配置已读回，等待首次实体输入验证".into();
                     self.lighting_arbiter.invalidate_hardware_cache();
                     self.refresh_four_app_lighting();
+                    self.sync_v070_session_sa_rgb();
                     self.start_mac_usb_discovery_watcher();
                 }
                 Ok(None) => {
                     self.status_message = "原设备配置及 Karabiner 设置已恢复".into();
                     self.board_routing = BoardRouting::Legacy;
                     self.v070_hardware.on_disconnected();
+                    self.sa_rgb_coordinator.clear_on_disconnect();
                 }
                 Err(error) => self.status_message = error,
             }
@@ -506,12 +509,14 @@ impl WorkbenchStore {
                 .invalidate("宿主动作清理未确认，输入已暂停");
         }
         let observed = running.observed_layer.load(Ordering::Acquire);
+        let observed_changed =
+            self.projection.sidebar.board_layers.observed_layer != Some(observed);
         let first = running.first_event_verified.load(Ordering::Acquire);
         let failure = running.receiver.failure();
         let needs_cleanup = failure.is_some() && !running.is_retired();
         let changed = lighting_changed
             || v070_changed
-            || self.projection.sidebar.board_layers.observed_layer != Some(observed)
+            || observed_changed
             || self.projection.sidebar.board_layers.first_event_verified != first
             || failure
                 .as_ref()
@@ -540,6 +545,7 @@ impl WorkbenchStore {
             self.status_message = failure;
         }
         if needs_cleanup {
+            self.sa_rgb_coordinator.clear_on_disconnect();
             let stopped = self
                 .six_layer_running
                 .as_mut()
@@ -549,6 +555,8 @@ impl WorkbenchStore {
             if let Err(error) = self.finish_host_cleanup(stopped) {
                 self.status_message = format!("宿主动作清理未确认 · {error}");
             }
+        } else if observed_changed || v070_changed {
+            self.sync_v070_session_sa_rgb();
         }
         if changed {
             self.capture_runtime_view();

@@ -408,6 +408,22 @@ impl DocumentStore {
         }
         self.preferences.set_v070_auto_layer_sync_enabled(enabled)
     }
+    pub fn v070_session_sa_rgb_sync_enabled(&self) -> bool {
+        self.host_store()
+            .preferences
+            .value
+            .v070_session_sa_rgb_sync_enabled
+    }
+    pub fn set_v070_session_sa_rgb_sync_enabled(&mut self, enabled: bool) -> Result<bool, String> {
+        if let Some(host) = &mut self.host {
+            return host.set_v070_session_sa_rgb_sync_enabled(enabled);
+        }
+        if self.blocked {
+            return Err("本地文档未载入，0.7.0 会话状态映灯开关未保存".into());
+        }
+        self.preferences
+            .set_v070_session_sa_rgb_sync_enabled(enabled)
+    }
     pub fn initialize_board_plan_if_absent(&mut self, plan: BoardLayerPlan) {
         if let Some(host) = &mut self.host {
             host.initialize_board_plan_if_absent(plan);
@@ -805,6 +821,8 @@ struct HostPreferences {
     preferred_device_serial: Option<String>,
     #[serde(default)]
     v070_auto_layer_sync_enabled: bool,
+    #[serde(default)]
+    v070_session_sa_rgb_sync_enabled: bool,
 }
 impl Default for HostPreferences {
     fn default() -> Self {
@@ -826,6 +844,7 @@ impl Default for HostPreferences {
             legacy_three_bindings: None,
             preferred_device_serial: None,
             v070_auto_layer_sync_enabled: false,
+            v070_session_sa_rgb_sync_enabled: false,
         }
     }
 }
@@ -907,6 +926,7 @@ impl HostPreferencesStore {
                                 legacy_three_bindings: legacy,
                                 preferred_device_serial: None,
                                 v070_auto_layer_sync_enabled: false,
+                                v070_session_sa_rgb_sync_enabled: false,
                             }
                         }
                         Some(2) => serde_json::from_slice(bytes)
@@ -1047,6 +1067,15 @@ impl HostPreferencesStore {
         self.save_with_sync(next, true)?;
         Ok(true)
     }
+    fn set_v070_session_sa_rgb_sync_enabled(&mut self, enabled: bool) -> Result<bool, String> {
+        if self.value.v070_session_sa_rgb_sync_enabled == enabled {
+            return Ok(false);
+        }
+        let mut next = self.value.clone();
+        next.v070_session_sa_rgb_sync_enabled = enabled;
+        self.save_with_sync(next, true)?;
+        Ok(true)
+    }
 }
 pub(crate) struct Lock(PathBuf);
 impl Lock {
@@ -1130,6 +1159,34 @@ mod tests {
         store.open(doc_path).unwrap();
         assert_eq!(store.preferred_device_serial(), None);
         assert!(!store.v070_auto_layer_sync_enabled());
+        assert!(!store.v070_session_sa_rgb_sync_enabled());
+    }
+
+    #[test]
+    fn v070_session_sa_rgb_sync_persists_and_defaults_false_on_v1_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc_path = dir.path().join("workbench.json");
+        let prefs_path = dir.path().join("workbench.preferences.json");
+        fs::write(
+            &prefs_path,
+            r#"{"schema_version":1,"favorites":[],"hardware_profile_slots":[null,null,null,null],"active_hardware_slot":0}"#,
+        )
+        .unwrap();
+
+        let mut store = DocumentStore::default();
+        store.open(doc_path.clone()).unwrap();
+        assert!(!store.v070_session_sa_rgb_sync_enabled());
+        assert!(store.set_v070_session_sa_rgb_sync_enabled(true).unwrap());
+        assert!(store.v070_session_sa_rgb_sync_enabled());
+        assert!(!store.set_v070_session_sa_rgb_sync_enabled(true).unwrap());
+
+        let mut reopened = DocumentStore::default();
+        reopened.open(doc_path).unwrap();
+        assert!(reopened.v070_session_sa_rgb_sync_enabled());
+        assert!(reopened
+            .set_v070_session_sa_rgb_sync_enabled(false)
+            .unwrap());
+        assert!(!reopened.v070_session_sa_rgb_sync_enabled());
     }
 
     #[test]

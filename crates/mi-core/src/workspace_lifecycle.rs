@@ -32,6 +32,7 @@ impl WorkbenchStore {
         }
         self.cancel_session_navigation();
         self.session_navigation.catalog = None;
+        self.teardown_v070_session_sa_rgb();
         self.system_lifecycle = SystemLifecycle::Sleeping;
         self.v070_hardware.on_disconnected();
         self.v070_hardware.set_host_sleep_status("sleeping");

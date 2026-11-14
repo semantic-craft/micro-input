@@ -341,6 +341,7 @@ public struct V070HardwareSliceModel: Equatable {
     public var statusMessage = "需连接 0.7.0-rc.16+ 独占固件设备"
     public var lastError: String?
     public var autoLayerSyncEnabled = false
+    public var sessionSaRgbSyncEnabled = false
     public var preferredDeviceSerial: String?
     public var mouse = V070MouseConfigModel()
     public var pmConfig = V070PmConfigModel()
@@ -361,6 +362,7 @@ public struct V070HardwareSliceModel: Equatable {
         statusMessage = json["status_message"] as? String ?? statusMessage
         lastError = json["last_error"] as? String
         autoLayerSyncEnabled = json["auto_layer_sync_enabled"] as? Bool ?? false
+        sessionSaRgbSyncEnabled = json["session_sa_rgb_sync_enabled"] as? Bool ?? false
         preferredDeviceSerial = json["preferred_device_serial"] as? String
         mouse = V070MouseConfigModel(json: json["mouse"] as? [String: Any] ?? [:])
         pmConfig = V070PmConfigModel(json: json["pm_config"] as? [String: Any] ?? [:])
@@ -373,6 +375,7 @@ public struct V070HardwareSliceModel: Equatable {
 public enum V070HardwareCommand {
     public static func refresh() -> [String: Any] { ["V070Hardware": "Refresh"] }
     public static func setAutoLayerSync(_ enabled: Bool) -> [String: Any] { ["V070Hardware": ["SetAutoLayerSync": ["enabled": enabled]]] }
+    public static func setSessionSaRgbSync(_ enabled: Bool) -> [String: Any] { ["V070Hardware": ["SetSessionSaRgbSync": ["enabled": enabled]]] }
     public static func selectLayer(_ layer: Int) -> [String: Any] { ["V070Hardware": ["SelectLayer": ["layer": layer]]] }
     public static func applyMousePreset(_ preset: String) -> [String: Any] { ["V070Hardware": ["ApplyMousePreset": ["preset": preset]]] }
     public static func renameDevice(name: String) -> [String: Any] { ["V070Hardware": ["RenameDevice": ["name": name]]] }
@@ -583,7 +586,7 @@ public struct V070HardwareSettingsSection: View {
                 SettingsRow(
                     "前台切层实验联动 (kb.pl.set)",
                     subtitle: "随前台编程工具自动切换板载第 1–6 层（仅写 RAM 零擦写；OAI 原生层自动跳过）",
-                    showsDivider: false
+                    showsDivider: true
                 ) {
                     Toggle(
                         "",
@@ -596,6 +599,23 @@ public struct V070HardwareSettingsSection: View {
                     .toggleStyle(NeutralSwitchToggleStyle())
                     .disabled(model.busy)
                     .accessibilityIdentifier("v070-auto-layer-sync")
+                }
+                SettingsRow(
+                    "AI 会话状态自动映灯 (kb.sa.rgb)",
+                    subtitle: "按会话状态自动映射自定义 SA 键灯色（≥100ms 节流；退出或休眠自动恢复板载默认，OAI 原生层跳过）",
+                    showsDivider: false
+                ) {
+                    Toggle(
+                        "",
+                        isOn: Binding(
+                            get: { model.sessionSaRgbSyncEnabled },
+                            set: { dispatch(V070HardwareCommand.setSessionSaRgbSync($0)) }
+                        )
+                    )
+                    .labelsHidden()
+                    .toggleStyle(NeutralSwitchToggleStyle())
+                    .disabled(model.busy)
+                    .accessibilityIdentifier("v070-session-sa-rgb-sync")
                 }
             }
         }
