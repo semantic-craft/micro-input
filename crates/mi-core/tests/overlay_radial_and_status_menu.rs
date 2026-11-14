@@ -734,6 +734,22 @@ fn popover_cheat_sheet_preview_tracks_active_profile_merges_wide_key_and_isolate
         format_popover_cheat_label("内置浏览器 · 布局"),
         "浏览器/布局"
     );
+    assert_eq!(format_popover_cheat_label("Codex · 降低推理档位"), "降推理");
+    assert_eq!(format_popover_cheat_label("Codex · 提高推理档位"), "升推理");
+    assert_eq!(format_popover_cheat_label("Codex · 切换 Fast 模式"), "Fast");
+    assert_eq!(
+        format_popover_cheat_label("Codex · 向上滚动对话"),
+        "向上滚动"
+    );
+    assert_eq!(
+        format_popover_cheat_label("Codex · 向下滚动对话"),
+        "向下滚动"
+    );
+    assert_eq!(
+        format_popover_cheat_label("Codex · 跳到底部并聚焦输入"),
+        "跳到底部"
+    );
+    assert_eq!(format_popover_cheat_label("滚动到对话底部"), "跳到底部");
 
     let dir = tempdir().expect("tempdir");
     let mut cfg = WorkbenchStoreConfig::isolated(dir.path());

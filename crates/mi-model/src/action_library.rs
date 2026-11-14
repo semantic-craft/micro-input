@@ -264,6 +264,9 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                                     | "new-tab"
                                     | "cycle-workspace-layout"
                                     | "toggle-dictation"
+                                    | "effort-down"
+                                    | "effort-up"
+                                    | "toggle-fast-mode"
                             ))
                         || (adapter == "antigravity"
                             && matches!(

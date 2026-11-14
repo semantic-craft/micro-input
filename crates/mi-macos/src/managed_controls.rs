@@ -1,7 +1,7 @@
 use crate::ax_dictation::DictationAdapter;
 use crate::executor::DialScrollRequest;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,26 +88,286 @@ pub trait ManagedAxProvider: Send {
         text: &str,
     ) -> Result<(), String>;
     fn submit(&mut self, target: &ManagedWindowIdentity, control: u64) -> Result<(), String>;
+    fn send_window_key(
+        &mut self,
+        _target: &ManagedWindowIdentity,
+        _key_code: u16,
+        _modifiers: &[String],
+    ) -> Result<(), String> {
+        Err(blocked("window_key_unavailable"))
+    }
 }
 
-#[derive(Debug)]
-pub struct ManagedAxControls<P> {
-    provider: Mutex<P>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexReasoningAction {
+    DecreaseEffort,
+    IncreaseEffort,
+    ToggleFastMode,
+}
+
+fn is_codex_trigger_excluded(label: &str) -> bool {
+    let lower = label.trim().to_lowercase();
+    let excluded = [
+        "actions",
+        "options",
+        "menu",
+        "switch mode",
+        "rate response",
+        "more actions",
+        "regenerate response",
+        "change permissions",
+        "attach files",
+    ];
+    excluded.iter().any(|ex| lower.contains(ex))
+}
+
+pub(crate) fn is_codex_explicit_effort_trigger(label: &str) -> bool {
+    if is_codex_trigger_excluded(label) {
+        return false;
+    }
+    let trimmed = label.trim();
+    if trimmed.eq_ignore_ascii_case("select effort") {
+        return true;
+    }
+    let standalone = ["minimal", "low", "medium", "high", "extra high", "max"];
+    if standalone
+        .iter()
+        .any(|level| trimmed.eq_ignore_ascii_case(level))
+    {
+        return true;
+    }
+    let suffixes = [
+        " Minimal",
+        " Low",
+        " Medium",
+        " High",
+        " Extra High",
+        " Max",
+    ];
+    suffixes.iter().any(|suffix| trimmed.ends_with(suffix))
+}
+
+pub(crate) fn is_codex_fallback_reasoning_trigger(label: &str) -> bool {
+    if is_codex_trigger_excluded(label) {
+        return false;
+    }
+    let trimmed = label.trim();
+    if trimmed.eq_ignore_ascii_case("select model") {
+        return true;
+    }
+    let prefixes = ["GPT-", "o1", "o3", "o4", "codex-"];
+    if prefixes.iter().any(|prefix| trimmed.starts_with(prefix)) {
+        return true;
+    }
+    trimmed.ends_with(" Standard")
+}
+
+pub(crate) fn is_codex_reasoning_trigger(label: &str) -> bool {
+    is_codex_explicit_effort_trigger(label) || is_codex_fallback_reasoning_trigger(label)
+}
+
+pub(crate) fn is_codex_popover_menu_item(label: &str) -> bool {
+    let trimmed = label.trim();
+    let allowed = [
+        "select model",
+        "enable fast mode",
+        "enable standard mode",
+        "reset to default",
+        "power",
+    ];
+    allowed
+        .iter()
+        .any(|target| trimmed.eq_ignore_ascii_case(target))
+}
+
+struct DismissRequest {
+    target: Option<ManagedWindowIdentity>,
+    generation: u64,
+    deadline: Option<Instant>,
+    shutdown: bool,
+    owned_by_us: bool,
+}
+
+struct DismissState {
+    lock: Mutex<DismissRequest>,
+    cvar: Condvar,
+}
+
+pub struct ManagedAxControls<P: 'static> {
+    provider: Arc<Mutex<P>>,
     readback_timeout: Duration,
+    auto_dismiss_delay: Duration,
     uncleared_targets: Mutex<BTreeMap<String, ManagedWindowIdentity>>,
+    dismiss_state: Arc<DismissState>,
+    worker_handle: Option<std::thread::JoinHandle<()>>,
 }
 
-impl<P: ManagedAxProvider> ManagedAxControls<P> {
+impl<P> std::fmt::Debug for ManagedAxControls<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManagedAxControls")
+            .field("readback_timeout", &self.readback_timeout)
+            .field("auto_dismiss_delay", &self.auto_dismiss_delay)
+            .finish()
+    }
+}
+
+impl<P: 'static> Drop for ManagedAxControls<P> {
+    fn drop(&mut self) {
+        {
+            let mut state = self.dismiss_state.lock.lock().unwrap();
+            state.shutdown = true;
+            self.dismiss_state.cvar.notify_all();
+        }
+        if let Some(handle) = self.worker_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
     pub fn new(provider: P) -> Self {
-        Self::with_readback_timeout(provider, Duration::from_millis(900))
+        Self::with_timeouts(
+            provider,
+            Duration::from_millis(900),
+            Duration::from_millis(1500),
+        )
     }
 
     pub fn with_readback_timeout(provider: P, readback_timeout: Duration) -> Self {
+        Self::with_timeouts(provider, readback_timeout, Duration::from_millis(1500))
+    }
+
+    pub fn with_auto_dismiss_delay(provider: P, auto_dismiss_delay: Duration) -> Self {
+        Self::with_timeouts(provider, Duration::from_millis(900), auto_dismiss_delay)
+    }
+
+    pub fn with_timeouts(
+        provider: P,
+        readback_timeout: Duration,
+        auto_dismiss_delay: Duration,
+    ) -> Self {
+        let provider = Arc::new(Mutex::new(provider));
+        let dismiss_state = Arc::new(DismissState {
+            lock: Mutex::new(DismissRequest {
+                target: None,
+                generation: 0,
+                deadline: None,
+                shutdown: false,
+                owned_by_us: false,
+            }),
+            cvar: Condvar::new(),
+        });
+        let worker_provider = Arc::clone(&provider);
+        let worker_state = Arc::clone(&dismiss_state);
+        let worker_handle = std::thread::spawn(move || loop {
+            let mut state = worker_state.lock.lock().unwrap();
+            if state.shutdown {
+                break;
+            }
+            match state.deadline {
+                None => {
+                    state = worker_state.cvar.wait(state).unwrap();
+                }
+                Some(deadline) => {
+                    let now = Instant::now();
+                    if now < deadline {
+                        let wait_time = deadline - now;
+                        let (next_state, _) =
+                            worker_state.cvar.wait_timeout(state, wait_time).unwrap();
+                        state = next_state;
+                    } else {
+                        let gen = state.generation;
+                        let target = state.target.clone();
+                        state.deadline = None;
+                        drop(state);
+
+                        if let Some(target) = target {
+                            let mut p = worker_provider.lock().unwrap();
+                            let current = worker_state.lock.lock().unwrap();
+                            if current.generation == gen && !current.shutdown {
+                                drop(current);
+                                if p.process_has_exited(target.pid) {
+                                    let mut current = worker_state.lock.lock().unwrap();
+                                    if current.generation == gen && !current.shutdown {
+                                        current.owned_by_us = false;
+                                        current.target = None;
+                                    }
+                                } else if let Ok(window) = p.read(&target) {
+                                    let has_popover = window.controls.iter().any(|c| {
+                                        c.role == "AXMenuItem"
+                                            && is_codex_popover_menu_item(&c.label)
+                                    });
+                                    if has_popover {
+                                        let current = worker_state.lock.lock().unwrap();
+                                        if current.generation == gen && !current.shutdown {
+                                            drop(current);
+                                            let _ = p.send_window_key(&target, 0x35, &[]);
+                                            let mut current = worker_state.lock.lock().unwrap();
+                                            if current.generation == gen && !current.shutdown {
+                                                current.owned_by_us = false;
+                                                current.target = None;
+                                            }
+                                        }
+                                    } else {
+                                        let mut current = worker_state.lock.lock().unwrap();
+                                        if current.generation == gen && !current.shutdown {
+                                            current.owned_by_us = false;
+                                            current.target = None;
+                                        }
+                                    }
+                                } else {
+                                    let mut current = worker_state.lock.lock().unwrap();
+                                    if current.generation == gen && !current.shutdown {
+                                        current.owned_by_us = false;
+                                        current.target = None;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
         Self {
-            provider: Mutex::new(provider),
+            provider,
             readback_timeout,
+            auto_dismiss_delay,
             uncleared_targets: Mutex::new(BTreeMap::new()),
+            dismiss_state,
+            worker_handle: Some(worker_handle),
         }
+    }
+
+    pub fn auto_dismiss_delay(&self) -> Duration {
+        self.auto_dismiss_delay
+    }
+
+    fn begin_codex_reasoning_turn(&self) -> bool {
+        let mut state = self.dismiss_state.lock.lock().unwrap();
+        state.generation = state.generation.wrapping_add(1);
+        state.deadline = None;
+        self.dismiss_state.cvar.notify_all();
+        state.owned_by_us
+    }
+
+    fn set_codex_popover_owned(&self, owned: bool) {
+        let mut state = self.dismiss_state.lock.lock().unwrap();
+        state.generation = state.generation.wrapping_add(1);
+        state.deadline = None;
+        state.owned_by_us = owned;
+        if !owned {
+            state.target = None;
+        }
+        self.dismiss_state.cvar.notify_all();
+    }
+
+    fn schedule_auto_dismiss(&self, target: &ManagedWindowIdentity) {
+        let mut state = self.dismiss_state.lock.lock().unwrap();
+        state.generation = state.generation.wrapping_add(1);
+        state.target = Some(target.clone());
+        state.owned_by_us = true;
+        state.deadline = Some(Instant::now() + self.auto_dismiss_delay);
+        self.dismiss_state.cvar.notify_all();
     }
 
     pub fn inspect(&self, adapter: &str) -> Result<ManagedControlReadiness, String> {
@@ -391,9 +651,155 @@ impl<P: ManagedAxProvider> ManagedAxControls<P> {
         let control = focus_in_window(&mut *provider, &window.identity, self.readback_timeout)?;
         provider.insert_text(&window.identity, control, prompt)
     }
+
+    pub fn codex_reasoning(&self, action: CodexReasoningAction) -> Result<(), String> {
+        let prior_owned_by_us = self.begin_codex_reasoning_turn();
+        let adapter = DictationAdapter::Codex;
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let mut window = capture(&mut *provider, adapter)?;
+        validate_target(&window.identity, adapter_bundle(adapter))?;
+
+        let is_popover_visible = |w: &ManagedWindow| {
+            w.controls
+                .iter()
+                .any(|c| c.role == "AXMenuItem" && is_codex_popover_menu_item(&c.label))
+        };
+
+        let popover_owned = if !is_popover_visible(&window) {
+            let mut explicit = Vec::new();
+            let mut fallback = Vec::new();
+            for c in &window.controls {
+                if c.role == "AXPopUpButton" && c.enabled && c.pressable {
+                    if is_codex_explicit_effort_trigger(&c.label) {
+                        explicit.push(c);
+                    } else if is_codex_fallback_reasoning_trigger(&c.label) {
+                        fallback.push(c);
+                    }
+                }
+            }
+            let candidates = if !explicit.is_empty() {
+                explicit
+            } else {
+                fallback
+            };
+            let trigger = match candidates.as_slice() {
+                [t] => *t,
+                _ => return Err(blocked("reasoning_control_unavailable")),
+            };
+            provider.press(&window.identity, trigger.id)?;
+
+            let deadline = Instant::now() + Duration::from_millis(400);
+            let mut popover_appeared = false;
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(25));
+                window = read(&mut *provider, &window.identity)?;
+                if is_popover_visible(&window) {
+                    popover_appeared = true;
+                    break;
+                }
+            }
+            if !popover_appeared {
+                self.set_codex_popover_owned(false);
+                return Err(blocked("reasoning_popover_unavailable"));
+            }
+            self.set_codex_popover_owned(true);
+            true
+        } else {
+            prior_owned_by_us
+        };
+
+        match action {
+            CodexReasoningAction::DecreaseEffort | CodexReasoningAction::IncreaseEffort => {
+                let key_code = match action {
+                    CodexReasoningAction::DecreaseEffort => 0x7B,
+                    CodexReasoningAction::IncreaseEffort => 0x7C,
+                    _ => unreachable!(),
+                };
+                if let Err(e) = provider.send_window_key(&window.identity, key_code, &[]) {
+                    if popover_owned {
+                        let _ = provider.send_window_key(&window.identity, 0x35, &[]);
+                        self.set_codex_popover_owned(false);
+                    }
+                    return Err(e);
+                }
+                if popover_owned {
+                    self.schedule_auto_dismiss(&window.identity);
+                }
+                Ok(())
+            }
+            CodexReasoningAction::ToggleFastMode => {
+                let fast_items: Vec<&ManagedControl> = window
+                    .controls
+                    .iter()
+                    .filter(|c| {
+                        c.role == "AXMenuItem"
+                            && (c.label.trim().eq_ignore_ascii_case("enable fast mode")
+                                || c.label.trim().eq_ignore_ascii_case("enable standard mode"))
+                    })
+                    .collect();
+                let fast_item = match fast_items.as_slice() {
+                    [item] => *item,
+                    _ => {
+                        if popover_owned {
+                            let _ = provider.send_window_key(&window.identity, 0x35, &[]);
+                            self.set_codex_popover_owned(false);
+                        }
+                        return Err(blocked("fast_mode_unavailable"));
+                    }
+                };
+                let initial_label = fast_item.label.trim().to_lowercase();
+                let target_label = if initial_label == "enable fast mode" {
+                    "enable standard mode"
+                } else {
+                    "enable fast mode"
+                };
+
+                if let Err(e) = provider.press(&window.identity, fast_item.id) {
+                    if popover_owned {
+                        let _ = provider.send_window_key(&window.identity, 0x35, &[]);
+                        self.set_codex_popover_owned(false);
+                    }
+                    return Err(e);
+                }
+
+                let deadline = Instant::now() + Duration::from_millis(350);
+                let mut flipped = false;
+                while Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(25));
+                    let Ok(cur_window) = read(&mut *provider, &window.identity) else {
+                        break;
+                    };
+                    if !is_popover_visible(&cur_window) {
+                        self.set_codex_popover_owned(false);
+                        break;
+                    }
+                    if cur_window.controls.iter().any(|c| {
+                        c.role == "AXMenuItem" && c.label.trim().eq_ignore_ascii_case(target_label)
+                    }) {
+                        flipped = true;
+                        break;
+                    }
+                }
+                if !flipped {
+                    if popover_owned {
+                        let _ = provider.send_window_key(&window.identity, 0x35, &[]);
+                        self.set_codex_popover_owned(false);
+                    }
+                    return Err("unconfirmed:fast_mode_toggle_readback".into());
+                }
+                if popover_owned {
+                    self.schedule_auto_dismiss(&window.identity);
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
-impl<P: ManagedAxProvider + Default> Default for ManagedAxControls<P> {
+impl<P: ManagedAxProvider + Default + 'static> Default for ManagedAxControls<P> {
     fn default() -> Self {
         Self::new(P::default())
     }

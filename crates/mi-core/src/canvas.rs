@@ -218,19 +218,32 @@ impl JoystickDirection8 {
 pub enum KnobJoystickPreset {
     CycleWorkingAndBlueDot,
     DualScrollProjectsAndChat,
+    CodexScrollChatAndBottom,
+    CodexReasoningEffortAndSpeed,
 }
 
 impl KnobJoystickPreset {
-    pub const ALL: [Self; 2] = [
+    pub const ALL: [Self; 4] = [
         Self::CycleWorkingAndBlueDot,
         Self::DualScrollProjectsAndChat,
+        Self::CodexScrollChatAndBottom,
+        Self::CodexReasoningEffortAndSpeed,
     ];
 
     pub const fn title(self) -> &'static str {
         match self {
             Self::CycleWorkingAndBlueDot => "旋钮轮询 Working/蓝点",
             Self::DualScrollProjectsAndChat => "旋钮+摇杆双滚轮",
+            Self::CodexScrollChatAndBottom => "旋钮滚动对话",
+            Self::CodexReasoningEffortAndSpeed => "旋钮调整推理档位",
         }
+    }
+
+    pub const fn is_codex(self) -> bool {
+        matches!(
+            self,
+            Self::CodexScrollChatAndBottom | Self::CodexReasoningEffortAndSpeed
+        )
     }
 }
 
@@ -485,6 +498,21 @@ pub enum CanvasAction {
     UnlockBySwitchingOrCreatingCustomLayer,
 }
 
+pub(crate) fn concise_dial_caption_alias(label: &str) -> Option<&'static str> {
+    match label {
+        "向上滚动对话" => Some("向上滚动"),
+        "向下滚动对话" => Some("向下滚动"),
+        "滚动到对话底部" | "跳到底部并聚焦输入" => Some("跳到底部"),
+        "降低推理档位" => Some("降推理"),
+        "提高推理档位" => Some("升推理"),
+        "切换 Fast 模式" => Some("Fast"),
+        "在项目中新建会话" => Some("项目新建"),
+        "新建标签页" => Some("新标签页"),
+        "Gemini Live 实时语音" | "Live 实时语音" => Some("实时语音"),
+        _ => None,
+    }
+}
+
 pub fn format_concise_keycap_caption(raw_label: &str) -> String {
     let trimmed = raw_label.trim();
     if trimmed.is_empty() {
@@ -511,17 +539,11 @@ pub fn format_concise_keycap_caption(raw_label: &str) -> String {
         without_paren
     };
 
-    if segment == "在项目中新建会话" {
-        return "项目新建".to_string();
+    if let Some(alias) = concise_dial_caption_alias(segment) {
+        return alias.to_string();
     }
     if segment == "聚焦当前输入框" {
         return "聚焦输入".to_string();
-    }
-    if segment == "新建标签页" {
-        return "新标签页".to_string();
-    }
-    if segment == "Gemini Live 实时语音" || segment == "Live 实时语音" {
-        return "实时语音".to_string();
     }
 
     let compact: String = segment

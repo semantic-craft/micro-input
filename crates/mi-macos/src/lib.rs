@@ -29,6 +29,7 @@ pub use executor::{
     SimulatedHostActionExecutor,
 };
 pub use instance_lock::DocumentInstanceLock;
+pub use managed_controls::CodexReasoningAction;
 pub use native_ax::observe_codex_window_state;
 pub use passive_panel::{
     PassivePanelEvent, PassivePanelFrameSpec, PassivePanelHost, PassivePanelRole,
