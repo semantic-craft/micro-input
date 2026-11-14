@@ -933,11 +933,17 @@ impl HostOsDriver for MacOsSystemDriver {
         }
         let bundle = bundle_id_for_adapter(adapter)
             .ok_or_else(|| "blocked:unsupported_agent_adapter".to_string())?;
+        #[cfg(not(target_os = "macos"))]
         self.open_application(bundle)?;
         #[cfg(target_os = "macos")]
         unsafe {
-            let pid = find_pid_for_bundle_id(bundle)
-                .ok_or_else(|| "blocked:agent_process_not_found".to_string())?;
+            let pid = if bundle == "com.openai.codex" && find_pid_for_bundle_id(bundle).is_some() {
+                crate::native_ax::activate_focused_codex_window()?
+            } else {
+                self.open_application(bundle)?;
+                find_pid_for_bundle_id(bundle)
+                    .ok_or_else(|| "blocked:agent_process_not_found".to_string())?
+            };
             let down = CGEventCreateKeyboardEvent(std::ptr::null_mut(), key, true);
             if down.is_null() {
                 return Err("cg_keyboard_event_null".to_string());
