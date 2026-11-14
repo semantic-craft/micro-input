@@ -851,6 +851,7 @@ async fn readback_failure_keeps_unknown_until_independent_fresh_check() {
 struct NativeFixtureLink {
     inner: Arc<dyn HidLink>,
     firmware: &'static str,
+    profile_index: Option<u32>,
     incoming: tokio::sync::Mutex<(mi_proto::NativeFramer, std::collections::VecDeque<Vec<u8>>)>,
 }
 #[async_trait::async_trait]
@@ -873,6 +874,9 @@ impl HidLink for NativeFixtureLink {
                 let mut value: Value = serde_json::from_slice(&line).unwrap();
                 if value["result"]["version"] == "synthetic-0.6.3" {
                     value["result"]["version"] = json!(self.firmware);
+                    if let Some(profile_index) = self.profile_index {
+                        value["result"]["profile_index"] = json!(profile_index);
+                    }
                 }
                 state.1.extend(
                     mi_proto::NativeFramer::default()
@@ -894,6 +898,7 @@ async fn native_plan_bound_writer_applies_and_restores_but_rejects_another_conne
     let link = Arc::new(NativeFixtureLink {
         inner: device.open("synthetic-interface-0").unwrap(),
         firmware: "0.6.3",
+        profile_index: None,
         incoming: tokio::sync::Mutex::new(Default::default()),
     });
     let session = DeviceSession::new(
@@ -943,6 +948,7 @@ async fn native_v070_rc16_records_actual_firmware_and_applies_ms_token() {
     let link = Arc::new(NativeFixtureLink {
         inner: device.open("synthetic-interface-0").unwrap(),
         firmware: "0.7.0-rc.16",
+        profile_index: None,
         incoming: tokio::sync::Mutex::new(Default::default()),
     });
     let session = DeviceSession::new(
@@ -994,4 +1000,79 @@ async fn native_v070_rc16_records_actual_firmware_and_applies_ms_token() {
         mi_model::Binding::Basic(mi_model::Token("MS_BTN1".into()))
     );
     session.shutdown().await;
+}
+
+fn open_native_fixture_session(
+    keymap: Vec<u8>,
+    smart: Option<Vec<u8>>,
+    firmware: &'static str,
+    profile_index: u32,
+) -> Arc<DeviceSession> {
+    let device = Arc::new(SyntheticDiscovery::default());
+    device.set_synthetic_discovery(1).unwrap();
+    device.set_files(SyntheticFiles::new(keymap, smart));
+    let link = Arc::new(NativeFixtureLink {
+        inner: device.open("synthetic-interface-0").unwrap(),
+        firmware,
+        profile_index: Some(profile_index),
+        incoming: tokio::sync::Mutex::new(Default::default()),
+    });
+    DeviceSession::new(
+        link,
+        Box::<mi_proto::NativeFramer>::default(),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_millis(500),
+            interval: Duration::ZERO,
+        },
+    )
+}
+
+#[tokio::test]
+async fn verify_six_layer_files_and_snapshot_check_populate_observed_firmware_version() {
+    const SIX_SOURCE: &[u8] =
+        include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+    const SMART: &[u8] =
+        include_bytes!("../../mi-model/fixtures/device/synthetic-smart-actions-object.json");
+    let compiled = mi_model::apply::compile_six_layer_profile(SIX_SOURCE, Some(SMART)).unwrap();
+
+    for firmware in ["0.6.3", "0.7.0-rc.16"] {
+        let verify_session = open_native_fixture_session(
+            compiled.keymap.clone(),
+            Some(SMART.to_vec()),
+            firmware,
+            compiled.profile_index,
+        );
+        assert_eq!(verify_session.observed_firmware_version(), None);
+        let layer = verify_session
+            .verify_six_layer_files(&compiled.keymap, Some(SMART), compiled.profile_index)
+            .await
+            .unwrap();
+        assert_eq!(layer, 1);
+        assert_eq!(
+            verify_session.observed_firmware_version().as_deref(),
+            Some(firmware)
+        );
+        verify_session.shutdown().await;
+
+        let snapshot_session = open_native_fixture_session(
+            compiled.keymap.clone(),
+            Some(SMART.to_vec()),
+            firmware,
+            compiled.profile_index,
+        );
+        assert_eq!(snapshot_session.observed_firmware_version(), None);
+        assert_eq!(
+            snapshot_session
+                .matches_six_layer_snapshot(&compiled.keymap, Some(SMART), compiled.profile_index)
+                .await
+                .unwrap(),
+            mi_session::SixLayerSnapshotCheck::Matched
+        );
+        assert_eq!(
+            snapshot_session.observed_firmware_version().as_deref(),
+            Some(firmware)
+        );
+        snapshot_session.shutdown().await;
+    }
 }

@@ -740,6 +740,7 @@ pub struct RunningSixLayer {
     routing: Arc<Mutex<RoutingContext>>,
     pub(crate) navigation: Option<NavigationDispatch>,
     vendor_bridge: VendorBridge,
+    firmware_version: Option<String>,
     transport: Option<Arc<MacTransport>>,
     stop: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
@@ -1055,12 +1056,16 @@ impl RunningSixLayer {
     }
 
     pub fn observed_firmware_version(&self) -> Option<String> {
+        if self.is_retired() || self.receiver.failure().is_some() {
+            return None;
+        }
         self.vendor_bridge
             .active_session
             .lock()
             .unwrap()
             .as_ref()
             .and_then(|session| session.observed_firmware_version())
+            .or_else(|| self.firmware_version.clone())
     }
 
     pub fn vendor_bridge_connected(&self) -> bool {
@@ -1116,6 +1121,9 @@ impl RunningSixLayer {
         runtime: &tokio::runtime::Runtime,
         session: Arc<DeviceSession>,
     ) {
+        if self.firmware_version.is_none() {
+            self.firmware_version = session.observed_firmware_version();
+        }
         self.vendor_bridge.spawn(
             runtime,
             Some(session),
@@ -1695,6 +1703,9 @@ fn new_running(
     installation: Installation,
     layer: u8,
 ) -> RunningSixLayer {
+    let firmware_version = initial_session
+        .as_ref()
+        .and_then(|s| s.observed_firmware_version());
     RunningSixLayer {
         receiver,
         readiness,
@@ -1708,6 +1719,7 @@ fn new_running(
         routing: Arc::new(Mutex::new(RoutingContext::default())),
         navigation: None,
         vendor_bridge: VendorBridge::new(initial_session),
+        firmware_version,
         transport: None,
         stop: Arc::new(AtomicBool::new(false)),
         monitor: None,
@@ -3673,6 +3685,188 @@ mod tests {
             err,
             "原 Karabiner 方案身份已变化；请先恢复原键盘配置后再应用"
         );
+    }
+
+    fn make_firmware_rpc_session(
+        rt: &tokio::runtime::Runtime,
+        firmware: &'static str,
+    ) -> Arc<DeviceSession> {
+        use mi_proto::Framer;
+        let (link, mut writes) = mi_transport::MockLink::new();
+        let inject = link.inject.clone();
+        let session = {
+            let _entered = rt.enter();
+            DeviceSession::new(
+                link,
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig {
+                    timeout: Duration::from_secs(2),
+                    interval: Duration::ZERO,
+                },
+            )
+        };
+        rt.spawn(async move {
+            let mut in_framer = mi_proto::NativeFramer::default();
+            let out_framer = mi_proto::NativeFramer::default();
+            while let Some(report) = writes.recv().await {
+                let Ok(messages) = in_framer.feed(&report) else {
+                    break;
+                };
+                for msg in messages {
+                    let Ok(req) = serde_json::from_slice::<serde_json::Value>(&msg) else {
+                        continue;
+                    };
+                    let result_val = if req["method"].as_str() == Some("v.oai.thstatus") {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!({
+                            "version": firmware,
+                            "profile_index": 1,
+                            "layer_index": 1
+                        })
+                    };
+                    let reply = serde_json::json!({
+                        "id": req["id"],
+                        "result": result_val
+                    });
+                    let mut wire = reply.to_string();
+                    wire.push('\n');
+                    for frame in out_framer.encode(wire.as_bytes()).unwrap() {
+                        let _ = inject.send(frame);
+                    }
+                }
+            }
+        });
+        session
+    }
+
+    #[test]
+    fn observed_firmware_version_survives_vendor_bridge_clear_and_rotation() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let session1 = make_firmware_rpc_session(&runtime, "0.7.0-rc.16");
+        runtime.block_on(async {
+            let info = session1.read_identity_info().await.unwrap();
+            assert_eq!(info.version.as_deref(), Some("0.7.0-rc.16"));
+            for _ in 0..899 {
+                session1
+                    .request(mi_proto::Method::DeviceStatus, serde_json::Value::Null)
+                    .await
+                    .unwrap();
+            }
+        });
+        assert_eq!(session1.request_count(), 900);
+        assert_eq!(
+            session1.observed_firmware_version().as_deref(),
+            Some("0.7.0-rc.16")
+        );
+
+        let mut running = RunningSixLayer::isolated(session1.clone(), dir.path());
+        assert_eq!(
+            running.observed_firmware_version().as_deref(),
+            Some("0.7.0-rc.16")
+        );
+
+        let _cleared = running.vendor_bridge.active_session.lock().unwrap().take();
+        assert_eq!(
+            running.observed_firmware_version().as_deref(),
+            Some("0.7.0-rc.16")
+        );
+
+        let session2 = make_firmware_rpc_session(&runtime, "0.7.0-rc.16");
+        assert_eq!(session2.observed_firmware_version(), None);
+        let reopened = Arc::new(AtomicBool::new(false));
+        let reopened_flag = Arc::clone(&reopened);
+        let next_session = session2.clone();
+        running.vendor_bridge.spawn_with_reopen(
+            &runtime,
+            Some(session1.clone()),
+            Arc::clone(&running.receiver),
+            Arc::clone(&running.routing),
+            true,
+            move || {
+                reopened_flag.store(true, Ordering::Release);
+                let rotated = next_session.clone();
+                async move { Some(rotated) }
+            },
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while (!reopened.load(Ordering::Acquire)
+            || !running
+                .vendor_bridge
+                .active_session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|s| Arc::ptr_eq(s, &session2)))
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(reopened.load(Ordering::Acquire));
+        assert!(session1.is_disconnected());
+        assert_eq!(session2.observed_firmware_version(), None);
+        assert_eq!(
+            running.observed_firmware_version().as_deref(),
+            Some("0.7.0-rc.16")
+        );
+        running.shutdown(&runtime).unwrap();
+
+        let blank_session = make_firmware_rpc_session(&runtime, "0.6.3");
+        let observed_session = make_firmware_rpc_session(&runtime, "0.6.3");
+        runtime.block_on(async {
+            observed_session.read_identity_info().await.unwrap();
+        });
+        let mut attached = RunningSixLayer::isolated(blank_session, dir.path());
+        assert_eq!(attached.observed_firmware_version(), None);
+        attached.attach_test_vendor_session(&runtime, observed_session);
+        assert_eq!(
+            attached.observed_firmware_version().as_deref(),
+            Some("0.6.3")
+        );
+        let _ = attached.vendor_bridge.active_session.lock().unwrap().take();
+        assert_eq!(
+            attached.observed_firmware_version().as_deref(),
+            Some("0.6.3")
+        );
+        attached.shutdown(&runtime).unwrap();
+    }
+
+    #[test]
+    fn observed_firmware_version_clears_immediately_on_retire_or_invalidation() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let session_retire = make_firmware_rpc_session(&runtime, "0.7.0-rc.16");
+        runtime.block_on(async {
+            session_retire.read_identity_info().await.unwrap();
+        });
+        let running_retire = RunningSixLayer::isolated(session_retire, dir.path());
+        assert_eq!(
+            running_retire.observed_firmware_version().as_deref(),
+            Some("0.7.0-rc.16")
+        );
+        running_retire.retire();
+        assert!(running_retire.is_retired());
+        assert_eq!(running_retire.observed_firmware_version(), None);
+        running_retire.shutdown(&runtime).unwrap();
+
+        let session_invalidate = make_firmware_rpc_session(&runtime, "0.6.3");
+        runtime.block_on(async {
+            session_invalidate.read_identity_info().await.unwrap();
+        });
+        let running_invalidate = RunningSixLayer::isolated(session_invalidate, dir.path());
+        assert_eq!(
+            running_invalidate.observed_firmware_version().as_deref(),
+            Some("0.6.3")
+        );
+        running_invalidate.receiver.invalidate("USB removed");
+        assert!(!running_invalidate.is_retired());
+        assert_eq!(running_invalidate.observed_firmware_version(), None);
+        running_invalidate.shutdown(&runtime).unwrap();
     }
 }
 

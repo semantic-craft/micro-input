@@ -793,6 +793,12 @@ impl DeviceSession {
         }
     }
 
+    fn record_status_firmware<'a>(&self, response: &'a Value) -> Result<&'a Value, SessionError> {
+        let result = identity_result(response)?;
+        *self.firmware.lock().unwrap() = firmware(result);
+        Ok(result)
+    }
+
     pub async fn verify_six_layer_files(
         &self,
         candidate: &[u8],
@@ -814,7 +820,7 @@ impl DeviceSession {
             let response = self
                 .exchange(&mut queue, Method::DeviceStatus, Value::Null)
                 .await?;
-            let result = identity_result(&response)?;
+            let result = self.record_status_firmware(&response)?;
             let layer = result["layer_index"]
                 .as_u64()
                 .filter(|n| (1..=6).contains(n))
@@ -843,7 +849,7 @@ impl DeviceSession {
             let response = self
                 .exchange(&mut queue, Method::DeviceStatus, Value::Null)
                 .await?;
-            let result = identity_result(&response)?;
+            let result = self.record_status_firmware(&response)?;
             if !exact_files(&current, expected_keymap, expected_smart) {
                 return Ok(SixLayerSnapshotCheck::FilesDiverged);
             }
