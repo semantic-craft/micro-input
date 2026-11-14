@@ -618,18 +618,12 @@ public struct V070HardwareSettingsSection: View {
                         Text(String(format: "%.2f", mouseDraft.deadzone)).font(UITheme.monoBadge).foregroundStyle(UITheme.textSecondary).frame(width: 42, alignment: .trailing)
                     }
                 }
-                VStack(spacing: 0) {
-                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 10) {
-                        mouseField("指针初速", hint: "move_delta · 1–255", text: $mouseDraft.moveDelta)
-                        mouseField("指针上限", hint: "max_speed · 1–255", text: $mouseDraft.maxSpeed)
-                        mouseField("滚轮步进", hint: "wheel_delta · 1–255", text: $mouseDraft.wheelDelta)
-                        mouseField("滚轮上限", hint: "wheel_max_speed · 1–255", text: $mouseDraft.wheelMaxSpeed)
-                        mouseField("摇杆指针", hint: "stick_speed · 1–255", text: $mouseDraft.stickSpeed)
-                        mouseField("摇杆滚轮", hint: "stick_scroll · 1–2000", text: $mouseDraft.stickScroll)
-                    }
-                    .padding(.horizontal, 20).padding(.vertical, 14)
-                    Rectangle().fill(UITheme.rowDivider).frame(height: 1).padding(.horizontal, 20)
-                }
+                mouseSliderRow("指针初速", subtitle: "move_delta · 单步位移（1–255）", text: $mouseDraft.moveDelta, defaultRange: 1...255, unit: "px/tick", id: "v070-mouse-move-delta-slider")
+                mouseSliderRow("指针上限", subtitle: "max_speed · 加速上限（1–255）", text: $mouseDraft.maxSpeed, defaultRange: 1...255, unit: "px/tick", id: "v070-mouse-max-speed-slider")
+                mouseSliderRow("滚轮步进", subtitle: "wheel_delta · 单步滚动（1–255）", text: $mouseDraft.wheelDelta, defaultRange: 1...255, unit: "x/tick", id: "v070-mouse-wheel-delta-slider")
+                mouseSliderRow("滚轮上限", subtitle: "wheel_max_speed · 加速上限（1–255）", text: $mouseDraft.wheelMaxSpeed, defaultRange: 1...255, unit: "x/tick", id: "v070-mouse-wheel-max-speed-slider")
+                mouseSliderRow("摇杆指针", subtitle: "stick_speed · 硬件指针速率（1–255）", text: $mouseDraft.stickSpeed, defaultRange: 1...255, unit: "x/tick", id: "v070-mouse-stick-speed-slider")
+                mouseSliderRow("摇杆滚轮", subtitle: "stick_scroll · 硬件滚轮速率（1–2000）", text: $mouseDraft.stickScroll, defaultRange: 1...2000, unit: "x/tick", id: "v070-mouse-stick-scroll-slider")
                 SettingsRow("自定义参数", subtitle: mouseDraft.validationHint ?? "连同上方摇杆死区一起写入设备 NVS") {
                     Button("应用鼠标参数") {
                         if let v = mouseDraft.validated {
@@ -730,15 +724,38 @@ public struct V070HardwareSettingsSection: View {
         }
     }
 
-    private func mouseField(_ title: String, hint: String, text: Binding<String>) -> some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(UITheme.captionMedium).foregroundStyle(UITheme.textPrimary)
-                Text(hint).font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
+    private func intStringBinding(_ text: Binding<String>, fallback: Int) -> Binding<Double> {
+        Binding(
+            get: { Double(Int(text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? fallback) },
+            set: { text.wrappedValue = String(Int($0.rounded())) }
+        )
+    }
+
+    private func mouseSliderRow(
+        _ title: String,
+        subtitle: String,
+        text: Binding<String>,
+        defaultRange: ClosedRange<Int>,
+        unit: String,
+        id: String
+    ) -> some View {
+        let current = Int(text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? defaultRange.lowerBound
+        let bounds = Double(min(defaultRange.lowerBound, current))...Double(max(defaultRange.upperBound, current))
+        return SettingsRow(title, subtitle: subtitle, showsDivider: true) {
+            HStack(spacing: 10) {
+                NeutralTrackSlider(
+                    value: intStringBinding(text, fallback: defaultRange.lowerBound),
+                    in: bounds,
+                    trackWidth: 132,
+                    showsPercentage: false
+                )
+                .disabled(model.busy)
+                .accessibilityIdentifier(id)
+                Text("\(current) \(unit)")
+                    .font(UITheme.monoBadge)
+                    .foregroundStyle(UITheme.textSecondary)
+                    .frame(minWidth: 78, alignment: .trailing)
             }
-            Spacer(minLength: 4)
-            TextField("", text: text).textFieldStyle(.roundedBorder).controlSize(.small)
-                .frame(width: 68).multilineTextAlignment(.trailing).disabled(model.busy)
         }
     }
 

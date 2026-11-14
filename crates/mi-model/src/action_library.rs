@@ -18,6 +18,33 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
     let mut prerequisites = vec!["可分配到本地逻辑槽位；宿主执行基于 0.6.3 物理映射验证".into()];
     let (target, host_required, execution_available, reason, source, result_semantics) =
         match serde_json::from_value::<ActionKind>(action.payload.clone()) {
+            Ok(ActionKind::DeviceKey { token }) if token.starts_with("MS_") => {
+                prerequisites.push(
+                    "需固件 0.7.0-rc.16+ 并应用到 /fs/keymap.json；写入后跨 USB/蓝牙主机脱机直接生效"
+                        .into(),
+                );
+                (
+                    format!("硬件 HID 鼠标 · {token}"),
+                    false,
+                    false,
+                    "板载硬件鼠标键码需审阅并应用到设备后生效；宿主运行时推荐使用「鼠标控制」动作或摇杆切换",
+                    "Creator Micro 2 板载固件动作 (0.7.0-rc.16+)",
+                    "保存只改变本地草稿；应用到设备后跨主机脱机生效",
+                )
+            }
+            Ok(ActionKind::DeviceKey { token }) if token.starts_with("KI_CS_") => {
+                prerequisites.push(
+                    "需固件 0.6.3+ 应用到 /fs/keymap.json 且当前 Mac 保持 Vendor HID 连接".into(),
+                );
+                (
+                    format!("板载速查通知 · {token}"),
+                    false,
+                    false,
+                    "按键按下后由固件经 Vendor 通道发送 kb.cs.* 通知唤醒桌面速查浮窗",
+                    "Creator Micro 2 板载速查触发器 (0.6.3+)",
+                    "应用到设备后按下触发 Vendor 通知并控制桌面速查浮窗",
+                )
+            }
             Ok(ActionKind::DeviceKey { token }) => (
                 token,
                 false,

@@ -905,3 +905,100 @@ fn reconnect_comparison_and_apply_preparation_backup_gate() {
         assert!(modal.candidate_operation_id.is_some());
     }
 }
+
+#[test]
+fn joystick_dual_mode_inspector_projects_summary_and_preserves_dormant_slots() {
+    let ws = TempWorkspace::new("joystick-dual-mode");
+    let mut store = WorkbenchStore::open_isolated(&ws.dir).expect("open isolated store");
+    store
+        .dispatch_inspector_action(InspectorAction::CreateCustomLayer {
+            name: "摇杆模式测试层".into(),
+        })
+        .expect("create custom editable layer");
+    store
+        .dispatch_inspector_action(InspectorAction::SelectSlot(16))
+        .expect("select joystick north slot");
+
+    store
+        .dispatch_inspector_action(InspectorAction::SetJoystickMode(
+            mi_core::JoystickControlMode::LogicalSectors,
+        ))
+        .expect("switch to logical sectors");
+    store
+        .dispatch_inspector_action(InspectorAction::AssignCatalogAction("search".into()))
+        .expect("assign search action to joystick sector 16");
+    let before = store
+        .projection()
+        .inspector
+        .editable()
+        .expect("editable inspector")
+        .clone();
+    assert_eq!(
+        before.joystick_mode,
+        mi_core::JoystickControlMode::LogicalSectors
+    );
+    assert!(before.joystick_mode_summary.contains("宿主 CGEvent"));
+    assert!(before.v070_hardware_mouse_supported);
+    assert_eq!(store.projection().canvas.joystick.mode_label, "8向摇杆");
+    assert_eq!(before.bound_action_id.as_deref(), Some("search"));
+
+    store
+        .dispatch_inspector_action(InspectorAction::SetJoystickMode(
+            mi_core::JoystickControlMode::Mouse,
+        ))
+        .expect("switch to hardware mouse");
+    let mouse = store
+        .projection()
+        .inspector
+        .editable()
+        .expect("editable inspector");
+    assert_eq!(mouse.joystick_mode, mi_core::JoystickControlMode::Mouse);
+    assert!(mouse.joystick_mode_summary.contains("/fs/keymap.json"));
+    assert_eq!(store.projection().canvas.joystick.mode_label, "硬件指针");
+
+    store
+        .dispatch_inspector_action(InspectorAction::SetJoystickMode(
+            mi_core::JoystickControlMode::Scroll,
+        ))
+        .expect("switch to hardware scroll");
+    let scroll = store
+        .projection()
+        .inspector
+        .editable()
+        .expect("editable inspector");
+    assert_eq!(scroll.joystick_mode, mi_core::JoystickControlMode::Scroll);
+    assert_eq!(store.projection().canvas.joystick.mode_label, "硬件滚轮");
+
+    store
+        .dispatch_inspector_action(InspectorAction::SetJoystickMode(
+            mi_core::JoystickControlMode::Source,
+        ))
+        .expect("switch to source mode");
+    let source = store
+        .projection()
+        .inspector
+        .editable()
+        .expect("editable inspector");
+    assert_eq!(source.joystick_mode, mi_core::JoystickControlMode::Source);
+    assert_eq!(store.projection().canvas.joystick.mode_label, "8向摇杆");
+
+    store
+        .dispatch_inspector_action(InspectorAction::SetJoystickMode(
+            mi_core::JoystickControlMode::LogicalSectors,
+        ))
+        .expect("switch back to logical sectors");
+    let restored = store
+        .projection()
+        .inspector
+        .editable()
+        .expect("editable inspector");
+    assert_eq!(
+        restored.joystick_mode,
+        mi_core::JoystickControlMode::LogicalSectors
+    );
+    assert_eq!(
+        restored.bound_action_id.as_deref(),
+        Some("search"),
+        "dormant joystick sector assignment must survive mode roundtrip"
+    );
+}

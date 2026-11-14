@@ -209,6 +209,9 @@ public struct EditableInspectorModel: Equatable {
     public var selectedBindingId: String = "AG00"
     public var surfaceDisplayName: String = "按键 AG00"
     public var joystickDirection: String? = nil
+    public var joystickMode: String = "logical_sectors"
+    public var joystickModeSummary: String = ""
+    public var v070HardwareMouseSupported: Bool = true
     public var bottomRowLayout: String = "split"
     public var supportsTaskRole: Bool = true
     public var slotRole: String = "TaskKey"

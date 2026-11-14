@@ -400,3 +400,21 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Outcome**: 在 `0.7.0-rc.16+` 真机基础上接入 `mouse.config` 指针与滚轮速度档/摇杆死区调参、`kb.pl`/`kb.pl.set` 无写 Flash 实时切层、`pm.config`/`pm.state`/`usb.host` 休眠跟随与电量状态显示，以及 `device.name` 与 `kb.sa.rgb` 动态灯光支持。
 - **Done Predicate**: 完成相关 `.rodata` 与真机 RPC 只读/受控抓包确认（每项均写入 `docs/` 契约并过 `scripts/check`）；工作台新增控制项与 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 全量通过。
 - **Evidence**: verify-offline 6 QA PASS (.scratch/qa-runs/1794640685530-23470..1794640692201-20201); live 0.7.0-rc.16 probe (fw3-rpc-probe.json, keymap.json unchanged); release MicroInput.app (sha256 122229d4)
+
+### [x] Slice FW4: 物理速查 kb.cs.* 连线、全量 MS_*/KI_CS_* 动作与摇杆双模滑块化
+- **Playbook**: `Feature` + `Verify-Micro-Input`
+- **Outcome**: 打通 `DeviceSession` 与 `SharedVendorBridge` 双路径 `kb.cs.show/hide/toggle` 到 `OverlayController`（保序队列与会话序号去重），在 `mi-model` 动作库公开全部 19 个 `MS_*` 与 4 个 `KI_CS_*` 板载键码及能力说明，在右侧检视器提供摇杆「宿主四向 / 硬件指针 / 硬件滚轮 / 原层保留」分段切换与互斥提示，并将 `mouse.config` 6 项常用参数升级为单色 `NeutralTrackSlider` 滑块。
+- **Done Predicate**: `./scripts/check` 与 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 六场景全绿通过，所有 Swift 文件严格 `< 1000` 行且满足 `R-C06`..`R-C10`。
+- **Evidence**: PR #140; verify-offline 6 QA PASS (.scratch/qa-runs/1794644961407-93313..1794644968913-88524)
+
+### [ ] Slice FW5: 顶栏电量与电源模式常驻状态、多设备序列号优选及安全层同步
+- **Playbook**: `Feature` + `Verify-Micro-Input`
+- **Outcome**: 在工作台顶栏与菜单栏展示 `pm.state` 电量百分比/充电态与 `usb.host` 电源模式摘要，接入 `CandidateDevice.serial_number` 持久化记住上次连接设备并在多机并存时提供选择器，增加显式受用户开关门禁的 `kb.pl.set` 前台切层联动实验开关（默认关闭以保护原生 OAI 层）。
+- **Done Predicate**: 多设备优选与顶栏电源切片单元测试、`./scripts/check` 及 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 全绿通过。
+- **Evidence**: PENDING
+
+### [ ] Slice FW6: kb.sa.rgb AI 会话状态自动映灯、节流防抖与退出复原闭环
+- **Playbook**: `Feature` + `Verify-Micro-Input`
+- **Outcome**: 将 `FourAppSessionKind`（空闲/运行中/待确认/蓝点完成）可选联动到 `0.7.0-rc.16+` 非保护自定义层的 `kb.sa.rgb` 单键灯效，内置同色去重与 `>= 100ms` 节流防抖，在断开或应用退出时发送全零 `kb.sa.rgb` 恢复板载默认灯效。
+- **Done Predicate**: 灯效仲裁节流与退出清零测试、`./scripts/check` 及 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 全绿通过。
+- **Evidence**: PENDING

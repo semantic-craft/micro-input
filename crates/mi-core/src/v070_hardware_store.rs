@@ -1240,4 +1240,109 @@ mod tests {
         assert_eq!(controller.in_flight_seq, None);
         assert_eq!(controller.projection.active_layer, Some(5));
     }
+
+    #[test]
+    fn six_layer_vendor_bridge_forwards_kb_cs_notifications_on_v063_and_v070_with_dedup() {
+        for version in ["0.6.3", "0.7.0-rc.16"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+            let sent_methods = Arc::new(Mutex::new(Vec::new()));
+            let (session, link, responder) =
+                spawn_mock_v070_session(&store.tokio_runtime, version, sent_methods);
+
+            let mut running = RunningSixLayer::isolated(session.clone(), dir.path());
+            running.set_v070_inbox(store.hardware_event_tx.clone());
+            running.attach_test_vendor_session(&store.tokio_runtime, session.clone());
+            store.six_layer_running = Some(running);
+
+            store.overlay_controller.request_profile_switch_notice(
+                "Antigravity".to_string(),
+                "自动跟随".to_string(),
+                &crate::CheatSheetProjection::default(),
+                &store.screen_geometry,
+                store.last_cursor_position,
+                Instant::now(),
+            );
+            assert!(matches!(
+                store.overlay_controller.visibility(),
+                &crate::HudVisibilityState::PassiveToast { .. }
+            ));
+
+            link.push_wire(json!({ "method": "kb.cs.hide", "params": {} }));
+            std::thread::sleep(Duration::from_millis(60));
+            store.poll_at(Instant::now());
+            assert!(
+                matches!(
+                    store.overlay_controller.visibility(),
+                    &crate::HudVisibilityState::PassiveToast { .. }
+                ),
+                "kb.cs.hide must never clobber an active PassiveToast on firmware {version}"
+            );
+
+            let is_cs_visible = |s: &WorkbenchStore| {
+                matches!(
+                    s.projection().overlay.content,
+                    crate::ActiveHudContent::InteractiveCheatSheet(_)
+                )
+            };
+
+            link.push_wire(json!({ "method": "kb.cs.show", "params": {} }));
+            poll_until(&mut store, is_cs_visible);
+
+            link.push_wire(json!({ "method": "kb.cs.hide", "params": {} }));
+            poll_until(&mut store, |s| !is_cs_visible(s));
+
+            link.push_wire(json!({ "method": "kb.cs.toggle", "params": {} }));
+            poll_until(&mut store, is_cs_visible);
+
+            link.push_wire(json!({ "method": "kb.cs.toggle", "params": {} }));
+            poll_until(&mut store, |s| !is_cs_visible(s));
+
+            let dup_event = crate::store::HardwareLoopEvent::CheatSheetNotification {
+                session_id: session.id,
+                ingress_sequence: 9001,
+                kind: crate::CheatSheetNotificationKind::Show,
+            };
+            store.hardware_event_tx.send(dup_event).unwrap();
+            poll_until(&mut store, is_cs_visible);
+
+            let duplicate_toggle = crate::store::HardwareLoopEvent::CheatSheetNotification {
+                session_id: session.id,
+                ingress_sequence: 9001,
+                kind: crate::CheatSheetNotificationKind::Toggle,
+            };
+            store.hardware_event_tx.send(duplicate_toggle).unwrap();
+            store.poll_at(Instant::now());
+            assert!(
+                is_cs_visible(&store),
+                "duplicate (session_id, ingress_sequence) must be ignored on firmware {version}"
+            );
+
+            if version == "0.6.3" {
+                let edit = store
+                    .projection()
+                    .inspector
+                    .editable()
+                    .expect("editable inspector");
+                assert!(!edit.v070_hardware_mouse_supported);
+                store
+                    .dispatch_inspector_action(crate::InspectorAction::SetJoystickMode(
+                        crate::JoystickControlMode::Mouse,
+                    ))
+                    .unwrap();
+                let updated = store
+                    .projection()
+                    .inspector
+                    .editable()
+                    .expect("editable inspector after SetJoystickMode");
+                assert!(!updated.v070_hardware_mouse_supported);
+                assert!(updated.joystick_mode_summary.contains("0.7.0-rc.16+"));
+            }
+
+            if let Some(running) = store.six_layer_running.take() {
+                running.shutdown(&store.tokio_runtime).unwrap();
+            }
+            responder.abort();
+        }
+    }
 }

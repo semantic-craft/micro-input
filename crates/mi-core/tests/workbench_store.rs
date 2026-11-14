@@ -1974,3 +1974,146 @@ fn diagnostics_export_reports_failure_when_destination_cannot_be_written() {
     assert_eq!(report["connected"], false);
     assert!(store.status_message().contains("已导出诊断报告"));
 }
+
+#[test]
+fn standard_device_session_connect_forwards_kb_cs_notifications_with_dedup() {
+    use mi_proto::{Framer, NativeFramer};
+    use mi_transport::{
+        HidCandidate, HidLink, HidTransport, LinkBackend, TransportError, TransportHint, UsagePair,
+    };
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{Arc, Mutex},
+    };
+    use tokio::sync::{broadcast, mpsc};
+
+    struct ChannelHidLink {
+        rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Result<Vec<u8>, TransportError>>>,
+        closed_tx: mpsc::UnboundedSender<Result<Vec<u8>, TransportError>>,
+    }
+
+    impl HidLink for ChannelHidLink {
+        fn backend(&self) -> LinkBackend {
+            LinkBackend::MacHidapi267Numbered
+        }
+
+        fn write<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            _report: &'life1 [u8],
+        ) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn read<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                let mut guard = self.rx.lock().await;
+                guard
+                    .recv()
+                    .await
+                    .unwrap_or(Err(TransportError::Disconnected))
+            })
+        }
+
+        fn close(&self) {
+            let _ = self.closed_tx.send(Err(TransportError::Disconnected));
+        }
+    }
+
+    struct FakeUsbTransport {
+        candidate: HidCandidate,
+        link: Mutex<Option<Arc<dyn HidLink>>>,
+        events: broadcast::Sender<()>,
+    }
+
+    impl HidTransport for FakeUsbTransport {
+        fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
+            Ok(vec![self.candidate.clone()])
+        }
+
+        fn subscribe(&self) -> broadcast::Receiver<()> {
+            self.events.subscribe()
+        }
+
+        fn open(&self, id: &str) -> Result<Arc<dyn HidLink>, TransportError> {
+            assert_eq!(id, self.candidate.path);
+            self.link
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| TransportError::Unavailable("already opened".to_string()))
+        }
+    }
+
+    let temp = TempDir::new().unwrap();
+    let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    let (report_tx, report_rx) = mpsc::unbounded_channel();
+    let link: Arc<dyn HidLink> = Arc::new(ChannelHidLink {
+        rx: tokio::sync::Mutex::new(report_rx),
+        closed_tx: report_tx.clone(),
+    });
+    let (events, _) = broadcast::channel(8);
+    let transport = FakeUsbTransport {
+        candidate: HidCandidate {
+            vid: 0x303A,
+            pid: 0x8298,
+            usage_page: 0xFF00,
+            usage: 1,
+            usage_pairs: vec![UsagePair {
+                page: 0xFF00,
+                usage: 1,
+            }],
+            transport_hint: TransportHint::Usb,
+            product: "Creator Micro 2".to_string(),
+            path: "IOService:/Synthetic/CheatSheetSession".to_string(),
+        },
+        link: Mutex::new(Some(link)),
+        events,
+    };
+
+    assert!(store.connect_with_transport(&transport, true).unwrap());
+    let framer = NativeFramer::default();
+    let send_wire = |payload: &[u8]| {
+        for report in framer.encode(payload).unwrap() {
+            report_tx.send(Ok(report)).unwrap();
+        }
+    };
+    let wait_visible = |store: &mut WorkbenchStore, expected: bool| {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while matches!(
+            store.projection().overlay.content,
+            mi_core::ActiveHudContent::InteractiveCheatSheet(_)
+        ) != expected
+        {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for cheat_sheet_visible={expected}"
+            );
+            store.poll_at(Instant::now());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+
+    send_wire(br#"{"method":"kb.cs.show","params":{}}"#);
+    wait_visible(&mut store, true);
+
+    send_wire(br#"{"method":"kb.cs.hide","params":{}}"#);
+    wait_visible(&mut store, false);
+
+    send_wire(br#"{"method":"kb.cs.toggle","params":{}}"#);
+    wait_visible(&mut store, true);
+
+    send_wire(br#"{"method":"kb.cs.toggle","params":{}}"#);
+    wait_visible(&mut store, false);
+}

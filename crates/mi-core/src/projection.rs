@@ -80,6 +80,7 @@ pub(super) struct ProjectionInputs<'a> {
     pub slot_table: &'a FourAppSlotTable,
     pub status_menu_open: bool,
     pub status_message: &'a String,
+    pub v070_hardware_mouse_supported: bool,
 }
 
 impl ProjectionInputs<'_> {
@@ -351,10 +352,20 @@ impl ProjectionInputs<'_> {
             })
             .collect();
 
+        let joystick_mode = layer
+            .and_then(|l| l.control_settings.as_ref())
+            .map(|s| JoystickControlMode::from_model_str(&s.joystick_mode));
+        let joystick_mode_label = match joystick_mode {
+            Some(JoystickControlMode::Mouse) => "硬件指针",
+            Some(JoystickControlMode::Scroll) => "硬件滚轮",
+            Some(JoystickControlMode::LogicalSectors | JoystickControlMode::Source) | None => {
+                "8向摇杆"
+            }
+        };
         let joystick = JoystickPadProjection {
             bounds: joy_bounds,
             center_deadzone_radius: KEY_1U_SIZE * 0.20,
-            mode_label: "8向摇杆".to_string(),
+            mode_label: joystick_mode_label.to_string(),
             active_direction: self.selected_joystick_direction,
             sectors,
             is_selected: self.selected_surface == ControlSurfaceId::Joystick,
@@ -963,6 +974,40 @@ impl ProjectionInputs<'_> {
             other => format!("按键 {}", other.binding_id()),
         };
 
+        let joystick_mode = layer
+            .and_then(|l| l.control_settings.as_ref())
+            .map_or(JoystickControlMode::Source, |s| {
+                JoystickControlMode::from_model_str(&s.joystick_mode)
+            });
+        let joystick_mode_summary = match joystick_mode {
+            JoystickControlMode::LogicalSectors => {
+                "宿主 CGEvent（逻辑扇区）：即时生效、仅限当前 Mac、不写 Flash；支持为上下左右 4 个摇杆方向分别绑定动作。"
+                    .to_string()
+            }
+            JoystickControlMode::Mouse => {
+                if self.v070_hardware_mouse_supported {
+                    "硬件 MOUSE 指针：需经配置审阅并应用到 /fs/keymap.json 生效；写入后跨主机脱机生效，不占用宿主摇杆方向槽位。"
+                        .to_string()
+                } else {
+                    "硬件 MOUSE 指针：需固件 0.7.0-rc.16+ 并应用到 /fs/keymap.json 才能生效（当前设备固件暂不支持，建议改用「宿主逻辑扇区」或先升级固件）。"
+                        .to_string()
+                }
+            }
+            JoystickControlMode::Scroll => {
+                if self.v070_hardware_mouse_supported {
+                    "硬件 SCROLL 滚轮：需经配置审阅并应用到 /fs/keymap.json 生效；写入后跨主机脱机平滑滚动，不占用宿主摇杆方向槽位。"
+                        .to_string()
+                } else {
+                    "硬件 SCROLL 滚轮：需固件 0.7.0-rc.16+ 并应用到 /fs/keymap.json 才能生效（当前设备固件暂不支持，建议改用「宿主逻辑扇区」或先升级固件）。"
+                        .to_string()
+                }
+            }
+            JoystickControlMode::Source => {
+                "保留来源模式：保留固件原始摇杆定义，宿主不覆盖扇区动作（Mac 运行时不触发逻辑槽位）。"
+                    .to_string()
+            }
+        };
+
         let editable = EditableSlotInspectorProjection {
             selected_surface: self.selected_surface,
             selected_logical_slot: slot,
@@ -970,6 +1015,9 @@ impl ProjectionInputs<'_> {
             surface_display_name,
             joystick_direction: (self.selected_surface == ControlSurfaceId::Joystick)
                 .then_some(self.selected_joystick_direction),
+            joystick_mode,
+            joystick_mode_summary,
+            v070_hardware_mouse_supported: self.v070_hardware_mouse_supported,
             bottom_row_layout: self.current_bottom_row_layout(),
             supports_task_role,
             slot_role,

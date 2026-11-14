@@ -36,15 +36,15 @@ pub use firmware_update::{
 pub use header::{HeaderAction, HeaderProjection, HeaderReadyState};
 pub use inspector::{
     ActionLibraryRowProjection, CodexKeycapId, EditableSlotInspectorProjection, InspectorAction,
-    InspectorBodyProjection, InspectorDrawer, InspectorProjection, KeycapCatalogItemProjection,
-    KeycapDescriptor, KeycapRole, MacroLibraryRowProjection, ShortcutModifier,
-    ShortcutRecorderState, INSPECTOR_WIDTH,
+    InspectorBodyProjection, InspectorDrawer, InspectorProjection, JoystickControlMode,
+    KeycapCatalogItemProjection, KeycapDescriptor, KeycapRole, MacroLibraryRowProjection,
+    ShortcutModifier, ShortcutRecorderState, INSPECTOR_WIDTH,
 };
 pub use mi_model::host_router::BottomRowLayout;
 pub use overlay::{
-    ActiveHudContent, CheatSheetKeyCellProjection, CheatSheetProjection, HostOverlayAction,
-    HostOverlayProjection, HudVisibilityState, OverlayController, TargetAgentStatusCardProjection,
-    PASSIVE_NOTICE_DURATION,
+    ActiveHudContent, CheatSheetKeyCellProjection, CheatSheetNotificationKind,
+    CheatSheetProjection, HostOverlayAction, HostOverlayProjection, HudVisibilityState,
+    OverlayController, TargetAgentStatusCardProjection, PASSIVE_NOTICE_DURATION,
 };
 pub use qa_runner::{run_synthetic_scenario, QaLaunchEnv, SyntheticScenario9};
 pub use radial::{

@@ -15,12 +15,12 @@ use crate::{
     inspector::{
         ActionLibraryRowProjection, CodexKeycapId, EditableSlotInspectorProjection,
         InspectorAction, InspectorBodyProjection, InspectorDrawer, InspectorProjection,
-        KeycapCatalogItemProjection, KeycapRole, MacroLibraryRowProjection, ShortcutRecorderState,
-        INSPECTOR_WIDTH,
+        JoystickControlMode, KeycapCatalogItemProjection, KeycapRole, MacroLibraryRowProjection,
+        ShortcutRecorderState, INSPECTOR_WIDTH,
     },
     overlay::{
-        CheatSheetKeyCellProjection, CheatSheetProjection, HostOverlayAction,
-        HostOverlayProjection, HudVisibilityState, OverlayController,
+        CheatSheetKeyCellProjection, CheatSheetNotificationKind, CheatSheetProjection,
+        HostOverlayAction, HostOverlayProjection, HudVisibilityState, OverlayController,
         TargetAgentStatusCardProjection,
     },
     radial::{
@@ -185,6 +185,11 @@ pub enum HardwareLoopEvent {
         session_id: u64,
         profile_index: u8,
         layer_index: u8,
+    },
+    CheatSheetNotification {
+        session_id: u64,
+        ingress_sequence: u64,
+        kind: CheatSheetNotificationKind,
     },
 }
 
@@ -433,6 +438,7 @@ pub struct WorkbenchStore {
     pub radial_readiness: RadialInputReadiness,
     pub radial_slot_configs: [RadialSlotConfig; RADIAL_SECTOR_COUNT],
     pub overlay_controller: OverlayController,
+    last_cheat_sheet_notif: Option<(u64, u64)>,
     pub pinned_favorites: PinnedFavoritesGrid,
     pub screen_geometry: ScreenGeometry,
     pub last_cursor_position: ScreenPoint,
@@ -571,6 +577,7 @@ impl WorkbenchStore {
             radial_readiness: RadialInputReadiness::Ready,
             radial_slot_configs: RadialSlotConfig::default_app_launcher_slots(),
             overlay_controller: OverlayController::new(),
+            last_cheat_sheet_notif: None,
             pinned_favorites: PinnedFavoritesGrid::default(),
             screen_geometry: ScreenGeometry::default(),
             last_cursor_position: ScreenPoint::default(),
@@ -1392,6 +1399,73 @@ impl WorkbenchStore {
                     }
                     let _ = tx.send(HardwareLoopEvent::Disconnected { session_id });
                 });
+                let mut cs_notif_rx = session.notifications();
+                let cs_session = Arc::clone(&session);
+                let cs_tx = self.hardware_event_tx.clone();
+                self.tokio_runtime.spawn(async move {
+                    let map_kind = |notification: &mi_proto::HostNotification| match notification {
+                        mi_proto::HostNotification::CheatSheetShow(_) => {
+                            Some(CheatSheetNotificationKind::Show)
+                        }
+                        mi_proto::HostNotification::CheatSheetHide(_) => {
+                            Some(CheatSheetNotificationKind::Hide)
+                        }
+                        mi_proto::HostNotification::CheatSheetToggle(_) => {
+                            Some(CheatSheetNotificationKind::Toggle)
+                        }
+                        _ => None,
+                    };
+                    loop {
+                        tokio::select! {
+                            _ = cs_session.wait_disconnected() => {
+                                loop {
+                                    match cs_notif_rx.try_recv() {
+                                        Ok(received) => {
+                                            if let Some(kind) = map_kind(&received.notification) {
+                                                if cs_tx
+                                                    .send(HardwareLoopEvent::CheatSheetNotification {
+                                                        session_id,
+                                                        ingress_sequence: received.ingress_sequence,
+                                                        kind,
+                                                    })
+                                                    .is_err()
+                                                {
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                                        Err(
+                                            tokio::sync::broadcast::error::TryRecvError::Empty
+                                            | tokio::sync::broadcast::error::TryRecvError::Closed,
+                                        ) => break,
+                                    }
+                                }
+                                return;
+                            }
+                            notif = cs_notif_rx.recv() => {
+                                match notif {
+                                    Ok(received) => {
+                                        if let Some(kind) = map_kind(&received.notification) {
+                                            if cs_tx
+                                                .send(HardwareLoopEvent::CheatSheetNotification {
+                                                    session_id,
+                                                    ingress_sequence: received.ingress_sequence,
+                                                    kind,
+                                                })
+                                                .is_err()
+                                            {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                                }
+                            }
+                        }
+                    }
+                });
                 self.device_session = Some(Arc::clone(&session));
                 self.connected_candidate = Some(target.clone());
                 self.hardware_rpc_verified = false;
@@ -1645,6 +1719,49 @@ impl WorkbenchStore {
                 layer_index,
             } => {
                 self.handle_v070_profile_layer_changed(session_id, profile_index, layer_index);
+                None
+            }
+            HardwareLoopEvent::CheatSheetNotification {
+                session_id,
+                ingress_sequence,
+                kind,
+            } => {
+                let active_session = self
+                    .device_session
+                    .as_ref()
+                    .is_some_and(|s| s.id == session_id)
+                    || self.six_layer_running.is_some();
+                if !active_session
+                    || self.last_cheat_sheet_notif == Some((session_id, ingress_sequence))
+                {
+                    return None;
+                }
+                self.last_cheat_sheet_notif = Some((session_id, ingress_sequence));
+                match kind {
+                    CheatSheetNotificationKind::Show => {
+                        let sheet = self.build_cheat_sheet_projection();
+                        self.overlay_controller.show_cheat_sheet(
+                            sheet,
+                            &self.screen_geometry,
+                            self.last_cursor_position,
+                        );
+                        self.commit_runtime_update();
+                    }
+                    CheatSheetNotificationKind::Hide => {
+                        if self.overlay_controller.hide_cheat_sheet() {
+                            self.commit_runtime_update();
+                        }
+                    }
+                    CheatSheetNotificationKind::Toggle => {
+                        let sheet = self.build_cheat_sheet_projection();
+                        self.overlay_controller.toggle_cheat_sheet(
+                            sheet,
+                            &self.screen_geometry,
+                            self.last_cursor_position,
+                        );
+                        self.commit_runtime_update();
+                    }
+                }
                 None
             }
         }
@@ -3533,6 +3650,23 @@ impl WorkbenchStore {
         self.reconcile_presentation();
     }
 
+    fn observed_firmware_version(&self) -> Option<String> {
+        self.last_hardware_auto_acceptance
+            .as_ref()
+            .filter(|_| self.hardware_rpc_verified && self.device_session_connected())
+            .map(|receipt| receipt.firmware_version.clone())
+            .or_else(|| {
+                self.six_layer_running
+                    .as_ref()
+                    .and_then(|running| running.observed_firmware_version())
+            })
+            .or_else(|| {
+                self.device_session
+                    .as_ref()
+                    .and_then(|session| session.observed_firmware_version())
+            })
+    }
+
     fn commit_local_update(&mut self) {
         self.normalize_view_state();
         let mut reused_keycaps = false;
@@ -3575,21 +3709,7 @@ impl WorkbenchStore {
         let mut next = self.projection_inputs_with(reusable).project();
         next.firmware = self.firmware_update.projection.clone();
         next.firmware.v070 = self.v070_hardware.projection.clone();
-        next.firmware.current_version = self
-            .last_hardware_auto_acceptance
-            .as_ref()
-            .filter(|_| self.hardware_rpc_verified && self.device_session_connected())
-            .map(|receipt| receipt.firmware_version.clone())
-            .or_else(|| {
-                self.six_layer_running
-                    .as_ref()
-                    .and_then(|running| running.observed_firmware_version())
-            })
-            .or_else(|| {
-                self.device_session
-                    .as_ref()
-                    .and_then(|session| session.observed_firmware_version())
-            });
+        next.firmware.current_version = self.observed_firmware_version();
         next.firmware.version_status =
             match (&next.firmware.current_version, &next.firmware.release) {
                 (Some(current), Some(release)) => {
@@ -3719,6 +3839,10 @@ impl WorkbenchStore {
             slot_table: &self.slot_table,
             status_menu_open: self.status_menu_open,
             status_message: &self.status_message,
+            v070_hardware_mouse_supported: self
+                .observed_firmware_version()
+                .as_deref()
+                .is_none_or(mi_model::supports_v070_mouse_tokens),
         }
     }
 
@@ -4883,6 +5007,47 @@ impl WorkbenchStore {
             }
             InspectorAction::SelectJoystickDirection(dir) => {
                 self.dispatch_canvas_action(CanvasAction::SelectJoystickDirection(dir))
+            }
+            InspectorAction::SetJoystickMode(mode) => {
+                self.ensure_layer_editable()?;
+                let (pid, lid) = self.require_selected_profile_and_layer()?;
+                let active_sectors = self
+                    .document_store
+                    .draft
+                    .document
+                    .editable
+                    .graph
+                    .layers
+                    .get(&lid)
+                    .and_then(|l| l.control_settings.as_ref())
+                    .map(|s| s.active_sectors)
+                    .map(|n| {
+                        if matches!(mode, JoystickControlMode::LogicalSectors) && n == 0 {
+                            4
+                        } else {
+                            n
+                        }
+                    })
+                    .unwrap_or(match mode {
+                        JoystickControlMode::LogicalSectors => 4,
+                        JoystickControlMode::Source
+                        | JoystickControlMode::Mouse
+                        | JoystickControlMode::Scroll => 0,
+                    });
+                self.document_store
+                    .update(|draft| {
+                        draft.set_control_settings(
+                            &pid,
+                            &lid,
+                            mi_model::control_settings::ControlSettings {
+                                joystick_mode: mode.as_model_str().to_string(),
+                                active_sectors,
+                            },
+                        )
+                    })
+                    .map_err(WorkbenchError::Storage)?;
+                self.commit_runtime_update();
+                Ok(())
             }
             InspectorAction::SetKeycapSearchQuery(query) => {
                 self.keycap_search_query = query;
