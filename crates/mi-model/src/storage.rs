@@ -350,12 +350,6 @@ impl DocumentStore {
         }
         self.preferences.value.bottom_row_layout
     }
-    pub fn popover_preview_mode(&self) -> crate::host_router::PopoverPreviewMode {
-        if let Some(host) = &self.host {
-            return host.popover_preview_mode();
-        }
-        self.preferences.value.popover_preview_mode
-    }
     pub fn has_saved_host_preferences(&self) -> bool {
         self.host_store().preferences.expected.is_some()
     }
@@ -707,6 +701,12 @@ impl DocumentStore {
     }
 }
 
+fn discard_retired_popover_preview_mode<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<(), D::Error> {
+    <serde::de::IgnoredAny as serde::Deserialize>::deserialize(deserializer).map(|_| ())
+}
+
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HostPreferencesV1 {
@@ -724,8 +724,13 @@ struct HostPreferencesV1 {
     manual_override: bool,
     #[serde(default)]
     bottom_row_layout: crate::host_router::BottomRowLayout,
-    #[serde(default)]
-    popover_preview_mode: crate::host_router::PopoverPreviewMode,
+    #[serde(
+        default,
+        skip_serializing,
+        rename = "popover_preview_mode",
+        deserialize_with = "discard_retired_popover_preview_mode"
+    )]
+    retired_popover_preview_mode: (),
     #[serde(default)]
     app_profile_links: std::collections::BTreeMap<String, String>,
     #[serde(default)]
@@ -752,8 +757,13 @@ struct HostPreferences {
     manual_override: bool,
     #[serde(default)]
     bottom_row_layout: crate::host_router::BottomRowLayout,
-    #[serde(default)]
-    popover_preview_mode: crate::host_router::PopoverPreviewMode,
+    #[serde(
+        default,
+        skip_serializing,
+        rename = "popover_preview_mode",
+        deserialize_with = "discard_retired_popover_preview_mode"
+    )]
+    retired_popover_preview_mode: (),
     #[serde(default)]
     app_profile_links: std::collections::BTreeMap<String, String>,
     usb_startup_profile_id: Option<String>,
@@ -773,7 +783,7 @@ impl Default for HostPreferences {
             auto_follow_enabled: false,
             manual_override: false,
             bottom_row_layout: crate::host_router::BottomRowLayout::Split,
-            popover_preview_mode: crate::host_router::PopoverPreviewMode::SessionPreview,
+            retired_popover_preview_mode: (),
             app_profile_links: Default::default(),
             usb_startup_profile_id: None,
             board_layer_plan: None,
@@ -844,7 +854,7 @@ impl HostPreferencesStore {
                                 auto_follow_enabled: old.auto_follow_enabled,
                                 manual_override: old.manual_override,
                                 bottom_row_layout: old.bottom_row_layout,
-                                popover_preview_mode: old.popover_preview_mode,
+                                retired_popover_preview_mode: (),
                                 app_profile_links: old.app_profile_links,
                                 usb_startup_profile_id: old
                                     .hardware_profile_slots

@@ -1,10 +1,10 @@
 use mi_core::{
     format_popover_cheat_label, ActiveHudContent, BackupCommand, BottomRowLayout, CanonicalAgent,
     CanvasAction, FavoriteSlotIndex, FourAppLiveCandidate, FourAppSessionKind, HostOverlayAction,
-    HudVisibilityState, PopoverPreviewMode, PresetExportScope, RadialConfirmMode, RadialInputEvent,
-    RadialIntent, RadialPhase, RadialPositionSample, RadialPresetKind, RadialSlotConfig,
-    SectorIndex, SidebarAction, StatusMenuAction, WorkbenchCommand, WorkbenchStore,
-    WorkbenchStoreConfig, ESCAPE_KEY_CODE, PASSIVE_NOTICE_DURATION,
+    HudVisibilityState, PresetExportScope, RadialConfirmMode, RadialInputEvent, RadialIntent,
+    RadialPhase, RadialPositionSample, RadialPresetKind, RadialSlotConfig, SectorIndex,
+    SidebarAction, StatusMenuAction, WorkbenchCommand, WorkbenchStore, WorkbenchStoreConfig,
+    ESCAPE_KEY_CODE, PASSIVE_NOTICE_DURATION,
 };
 use mi_macos::{
     PassivePanelFrameSpec, PassivePanelHost, PassivePanelRole, PresetFileEnvelope,
@@ -768,22 +768,8 @@ fn popover_cheat_sheet_preview_tracks_active_profile_merges_wide_key_and_isolate
         .select_and_activate_profile(&antigravity_id)
         .expect("activate Antigravity");
 
-    assert_eq!(
-        store.projection().status_menu.popover_preview_mode,
-        PopoverPreviewMode::SessionPreview
-    );
-    assert!(store.projection().status_menu.cheat_sheet_preview.is_none());
+    assert!(store.projection().status_menu.cheat_sheet_preview.is_some());
     assert!(store.projection().status_menu.lighting_enabled);
-
-    store
-        .dispatch_status_menu_action(StatusMenuAction::SetPopoverPreviewMode(
-            PopoverPreviewMode::CheatSheet,
-        ))
-        .expect("set cheat sheet preview mode");
-    assert_eq!(
-        store.projection().status_menu.popover_preview_mode,
-        PopoverPreviewMode::CheatSheet
-    );
 
     let split_sheet = store
         .projection()
@@ -842,6 +828,18 @@ fn popover_cheat_sheet_preview_tracks_active_profile_merges_wide_key_and_isolate
         .expect("2U AG10 cell");
     assert_eq!(ag10_merged.short_label, "按住说话");
 
+    store
+        .dispatch_status_menu_action(StatusMenuAction::SelectProfile(herdr_id))
+        .expect("activate Herdr from status menu");
+    let herdr_sheet = store
+        .projection()
+        .status_menu
+        .cheat_sheet_preview
+        .as_ref()
+        .unwrap();
+    assert_eq!(herdr_sheet.profile_name, "Herdr");
+    assert_ne!(herdr_sheet.key_cells, merged_sheet.key_cells);
+
     let status_before_live = store.projection().status_menu.clone();
     store.ingest_four_app_candidates(vec![
         FourAppLiveCandidate {
@@ -866,15 +864,11 @@ fn popover_cheat_sheet_preview_tracks_active_profile_merges_wide_key_and_isolate
     assert_eq!(
         store.projection().status_menu,
         status_before_live,
-        "live session candidate updates must leave StatusMenuProjection strictly unchanged in CheatSheet mode"
+        "live session candidate updates must leave StatusMenuProjection strictly unchanged"
     );
 
     drop(store);
     let reopened = WorkbenchStore::open(cfg).expect("reopen persistent temp store");
-    assert_eq!(
-        reopened.projection().status_menu.popover_preview_mode,
-        PopoverPreviewMode::CheatSheet
-    );
     assert!(reopened
         .projection()
         .status_menu

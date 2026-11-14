@@ -217,14 +217,6 @@ impl BottomRowLayout {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum PopoverPreviewMode {
-    #[default]
-    SessionPreview,
-    CheatSheet,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalControlSpec {
     pub binding_id: &'static str,

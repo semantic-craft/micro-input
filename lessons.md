@@ -1,5 +1,17 @@
 # 项目教训
 
+## 时序门禁使用独立测试进程
+
+- 起因与后果：方案切换的 2 毫秒检查与合成硬件用例共用进程内的隔离运行时，整组执行时出现超限；未改动主线的同组对照也失败，单独执行则通过。
+- 修复：将现有测试原样移到 `crates/mi-core/tests/profile_switch_latency.rs`，由 Cargo 标准测试进程隔离；保留 35 次切换、两个 2 毫秒断言、零错误与零 banner 门禁，不为测试改生产运行时。
+- 验证点：核对移动前后的测试函数相同，分别运行 `profile_switch_latency` 和 `workbench_store`，再执行全量 `scripts/verify-offline`。独立进程不消除机器整体负载的影响，不据此宣称产品变快。Seen 1x（2026-11-14）。
+
+## 按键速查须复用执行器的动作来源
+
+- 起因与后果：静态速查直接读取当前方案的首层，遗漏原生 Codex 已有的本机动作来源路由，安装版菜单因此把全部控件显示为未绑定。
+- 修复：速查与运行期共用纯动作来源解析，仍保留生效方案的名称和身份。未知受保护方案与缺少本机来源继续关闭，不回退其他方案。
+- 验证点：`native_codex_cheat_sheets_show_local_labels_and_preserve_empty_controls` 核对二十个控件、自定义标签、空槽、宽键和浏览隔离；`status_menu_cheat_sheet_retains_host_profile_during_device_editing_and_clears_when_unselected` 核对设备编辑隔离。安装后还须打开当前生效方案的菜单读回用途。Seen 1x（2026-11-14）。
+
 ## 原生 Codex 的保护范围不能吞掉下排宿主动作
 
 - 起因与后果：锁定原生 Codex 后，界面仍显示本机下排动作，但运行期把受保护方案编成二十个空槽，旧输入入口也提前拒绝；七次下排触发没有动作回执。另有双窗口捕获忽略焦点，以及 `open -b` 把快捷键目标切到另一已有窗口。

@@ -441,6 +441,7 @@ public struct PopoverMiniCheatSheetView: View {
             .frame(width: cellWidth, height: unitHeight, alignment: .topLeading)
             .background(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).fill(UITheme.surface))
             .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
+            .help(cell?.label ?? "未绑定")
 
         case .statusCluster(let profileName, _):
             VStack(alignment: .leading, spacing: 3) {
@@ -485,6 +486,7 @@ public struct PopoverMiniCheatSheetView: View {
                 .minimumScaleFactor(0.75)
             Spacer(minLength: 0)
         }
+        .help(cell?.label ?? "未绑定")
     }
 
     private func miniJoystickQuadrant(arrow: String, cell: CheatSheetCellModel?) -> some View {
@@ -507,5 +509,6 @@ public struct PopoverMiniCheatSheetView: View {
         .padding(.vertical, 1.5)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(UITheme.subtleSurface.opacity(0.7)))
+        .help(cell?.label ?? "未绑定")
     }
 }

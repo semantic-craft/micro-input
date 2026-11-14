@@ -215,10 +215,8 @@ final class MicroInputTests: XCTestCase {
             "No-op dispatches and idle hardware polls must trigger 0 JSON decodes and 0 SwiftUI body evaluations, got \(ViewRenderTelemetry.counts)"
         )
 
-        store.dispatch("status_menu", ["SetPopoverPreviewMode": PopoverPreviewMode.cheatSheet.rawValue])
         mainHosting.layoutSubtreeIfNeeded()
         statusHosting.layoutSubtreeIfNeeded()
-        XCTAssertEqual(store.statusMenu.popoverPreviewMode, .cheatSheet)
         XCTAssertNotNil(store.statusMenu.cheatSheetPreview)
 
         ViewRenderTelemetry.reset()
@@ -239,7 +237,7 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(
             ViewRenderTelemetry.count("StatusMenuPopoverView"),
             0,
-            "CheatSheet popover mode must trigger 0 StatusMenuPopoverView renders during live session strip, canvas selection, inspector search, or main overlay cheat-sheet toggles, got \(ViewRenderTelemetry.counts)"
+            "Status menu must trigger 0 StatusMenuPopoverView renders during live session strip, canvas selection, inspector search, or main overlay cheat-sheet toggles, got \(ViewRenderTelemetry.counts)"
         )
         XCTAssertEqual(
             ViewRenderTelemetry.count("PopoverMiniCheatSheetView"),

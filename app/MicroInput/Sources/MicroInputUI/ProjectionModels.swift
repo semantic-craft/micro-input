@@ -406,29 +406,6 @@ public enum ActiveModalModel: Identifiable, Equatable {
     }
 }
 
-public enum PopoverPreviewMode: String, CaseIterable, Hashable, Equatable {
-    case sessionPreview = "session_preview"
-    case cheatSheet = "cheat_sheet"
-
-    public var title: String {
-        switch self {
-        case .sessionPreview: return "会话预览"
-        case .cheatSheet: return "按键速查"
-        }
-    }
-
-    public var subtitle: String {
-        switch self {
-        case .sessionPreview: return "显示 6 个活跃会话槽位（AG00–AG05）与未读完成提醒"
-        case .cheatSheet: return "显示当前生效方案的静态 4×4 物理坐标按键速查"
-        }
-    }
-
-    public static var dropdownOptions: [SelectOption<PopoverPreviewMode>] {
-        allCases.map { SelectOption(value: $0, title: $0.title, subtitle: $0.subtitle) }
-    }
-}
-
 public struct CheatSheetCellModel: Identifiable, Equatable {
     public var id: String { bindingId }
     public let bindingId: String
@@ -705,7 +682,6 @@ public struct StatusMenuSliceModel: Equatable {
     public var radialReadiness: String = "Ready"
     public var radialSlots: [RadialSlotConfigModel] = []
     public var lightingEnabled: Bool = true
-    public var popoverPreviewMode: PopoverPreviewMode = .sessionPreview
     public var cheatSheetPreview: CheatSheetModel? = nil
     public init() {}
 
@@ -725,7 +701,6 @@ public struct StatusMenuSliceModel: Equatable {
         self.radialReadiness = m.radialReadiness
         self.radialSlots = m.radialSlots
         self.lightingEnabled = m.lightingEnabled
-        self.popoverPreviewMode = m.popoverPreviewMode
         self.cheatSheetPreview = m.cheatSheetPreview
     }
 }
@@ -829,7 +804,6 @@ public struct ProjectionModel: Equatable {
     public var radialReadiness: String = "Ready"
     public var radialSlots: [RadialSlotConfigModel] = []
     public var lightingEnabled: Bool = true
-    public var popoverPreviewMode: PopoverPreviewMode = .sessionPreview
     public var cheatSheetPreview: CheatSheetModel? = nil
     public var cheatSheetVisible: Bool = false
     public var cheatSheet: CheatSheetModel? = nil

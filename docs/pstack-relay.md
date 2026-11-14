@@ -379,3 +379,10 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Outcome**: 用 Creator Micro 2 正面硬件造型替换角色插画，保留旋钮、摇杆、六颗发光键和底部宽键，改善 Dock 小尺寸辨识度。
 - **Done Predicate**: 检视 16/32/128 px 图标；系统轮廓检查与 `scripts/verify-offline` 全量通过；本机日常版更新图标并通过签名校验。不改设备映射，用户视觉偏好由后续反馈确认。
 - **Evidence**: .scratch/app-icon/result.json; scripts/verify-offline six scenarios PASS; installed icon and signature verified
+
+
+### [x] Slice R29: 菜单栏固定显示当前按键配置
+- **Outcome**: 菜单栏直接显示当前生效方案的静态 4×4 按键用途，包含旋钮、摇杆及底排布局，删除会话预览与切换选项。复用原生弹层与现有数据，不新增依赖、后台进程或刷新计时器。
+- **Done Predicate**: 旧偏好保全、生效方案与浏览选择隔离、分体与宽键布局、会话更新不重绘菜单的回归及 `scripts/verify-offline` 通过；原生弹层核验并更新本机日常版。不写设备配置，不将本轮展示验证当作 #44 完整产品验收。
+- **Evidence**: .scratch/qa-runs/1794625945887-73688/evidence/result.json; verify-offline six scenarios PASS; native install check pending main merge
+
