@@ -323,7 +323,7 @@ pub const ALL_AG_OAI_KEY_TOKENS: [&str; 13] = [
 pub const OFFICIAL_OAI_ENCODER_TOKENS: [&str; 3] =
     ["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"];
 
-pub(crate) fn binding_has_oai_prefix(binding: &Binding) -> bool {
+pub fn binding_has_oai_prefix(binding: &Binding) -> bool {
     match binding {
         Binding::Basic(Token(s)) => s.starts_with("KV_OAI_"),
         Binding::Unknown(Value::String(s)) => s.starts_with("KV_OAI_"),
@@ -332,6 +332,83 @@ pub(crate) fn binding_has_oai_prefix(binding: &Binding) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|s| s.starts_with("KV_OAI_")),
         _ => false,
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct SaId(std::num::NonZeroU32);
+
+impl SaId {
+    pub const MAX: u32 = 0x00FF_FFFF;
+
+    pub const fn new(raw: u32) -> Option<Self> {
+        if raw == 0 || raw > Self::MAX {
+            return None;
+        }
+        match std::num::NonZeroU32::new(raw) {
+            Some(nz) => Some(Self(nz)),
+            None => None,
+        }
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+impl From<SaId> for u32 {
+    fn from(value: SaId) -> Self {
+        value.get()
+    }
+}
+
+impl TryFrom<u32> for SaId {
+    type Error = &'static str;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::new(value).ok_or("SaId must be within 1..=0x00FF_FFFF")
+    }
+}
+
+fn parse_sa_token_str(raw: &str) -> Option<SaId> {
+    let digits = raw.strip_prefix("SA_")?;
+    let first = *digits.as_bytes().first()?;
+    if !first.is_ascii_digit() || first == b'0' {
+        return None;
+    }
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<u32>().ok().and_then(SaId::new)
+}
+
+fn extract_smart_ref_sa_id(value: &Value) -> Option<SaId> {
+    match value {
+        Value::Number(num) => num
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .and_then(SaId::new),
+        Value::String(s) => parse_sa_token_str(s),
+        _ => None,
+    }
+}
+
+pub fn extract_sa_id(binding: &Binding) -> Option<SaId> {
+    match binding {
+        Binding::Basic(Token(s)) => parse_sa_token_str(s),
+        Binding::Unknown(Value::String(s)) => parse_sa_token_str(s),
+        Binding::Unknown(Value::Object(map)) => {
+            if let Some(k) = map.get("k").and_then(Value::as_str) {
+                parse_sa_token_str(k)
+            } else if map.get("kind").and_then(Value::as_str) == Some("smart") {
+                map.get("ref").and_then(extract_smart_ref_sa_id)
+            } else {
+                None
+            }
+        }
+        Binding::Smart(value) => extract_smart_ref_sa_id(value),
+        _ => None,
     }
 }
 
@@ -683,5 +760,72 @@ mod firmware_and_mouse_tests {
         for bad in ["mouse-move:diagonal", "mouse-speed:3", "submit", ""] {
             assert!(!is_host_mouse_command(bad), "expected invalid: {bad}");
         }
+    }
+
+    #[test]
+    fn sa_id_and_extract_sa_id_enforce_24bit_non_zero_bounds_and_canonical_tokens() {
+        assert_eq!(SaId::new(0), None);
+        assert_eq!(SaId::new(1).map(SaId::get), Some(1));
+        assert_eq!(SaId::new(0x00FF_FFFF).map(SaId::get), Some(0x00FF_FFFF));
+        assert_eq!(SaId::new(0x0100_0000), None);
+        assert_eq!(SaId::new(u32::MAX), None);
+
+        assert_eq!(
+            extract_sa_id(&Binding::Basic(Token("SA_19".into()))),
+            SaId::new(19)
+        );
+        assert_eq!(
+            extract_sa_id(&Binding::Unknown(serde_json::json!("SA_7057"))),
+            SaId::new(7057)
+        );
+        assert_eq!(
+            extract_sa_id(&Binding::Unknown(serde_json::json!({"k": "SA_16777215"}))),
+            SaId::new(0x00FF_FFFF)
+        );
+        assert_eq!(
+            extract_sa_id(&Binding::Smart(serde_json::json!(7057))),
+            SaId::new(7057)
+        );
+        assert_eq!(
+            extract_sa_id(&Binding::Smart(serde_json::json!("SA_404"))),
+            SaId::new(404)
+        );
+        assert_eq!(
+            extract_sa_id(&Binding::Unknown(
+                serde_json::json!({"kind": "smart", "ref": 512})
+            )),
+            SaId::new(512)
+        );
+
+        for rejected in [
+            Binding::Empty,
+            Binding::Basic(Token("SA_0".into())),
+            Binding::Basic(Token("SA_01".into())),
+            Binding::Basic(Token("SA_16777216".into())),
+            Binding::Basic(Token("KA_A12".into())),
+            Binding::Basic(Token("KA_M37".into())),
+            Binding::Basic(Token("KV_OAI_AG00".into())),
+            Binding::Unknown(serde_json::json!("SA_")),
+            Binding::Unknown(serde_json::json!("SA_-1")),
+            Binding::Unknown(serde_json::json!("sa_19")),
+            Binding::Smart(serde_json::json!(0)),
+            Binding::Smart(serde_json::json!(-5)),
+            Binding::Smart(serde_json::json!(0x0100_0000_u64)),
+            Binding::Smart(serde_json::json!("SA_07")),
+            Binding::Smart(serde_json::json!("7057")),
+            Binding::Macro(serde_json::json!(19)),
+            Binding::Multi(serde_json::json!(19)),
+        ] {
+            assert_eq!(
+                extract_sa_id(&rejected),
+                None,
+                "expected rejection for {rejected:?}"
+            );
+        }
+
+        let official = official_chatgpt_layer(serde_json::json!("oai"), "ChatGPT");
+        assert!(is_protected_oai_layer(&official));
+        let demo_cfg = demo().unwrap();
+        assert!(!is_protected_oai_layer(&demo_cfg.profiles[0].layers[0]));
     }
 }

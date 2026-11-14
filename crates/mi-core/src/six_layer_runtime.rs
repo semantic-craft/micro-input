@@ -1277,6 +1277,19 @@ impl RunningSixLayer {
         self.vendor_bridge.connected.load(Ordering::Acquire)
     }
 
+    pub fn live_vendor_session(&self) -> Option<Arc<DeviceSession>> {
+        if self.is_retired() || !self.vendor_bridge_connected() {
+            return None;
+        }
+        self.vendor_bridge
+            .active_session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|session| !session.is_disconnected() && session.has_exclusive_vendor_link())
+            .cloned()
+    }
+
     pub(crate) fn set_v070_inbox(&self, inbox: crate::store::runtime_inbox::RuntimeInbox) {
         *self.vendor_bridge.v070_inbox.lock().unwrap() = Some(inbox);
     }

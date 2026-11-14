@@ -305,6 +305,7 @@ pub enum WorkbenchCommand {
     Firmware(crate::firmware_update::FirmwareAction),
     SystemWillSleep,
     SystemDidWake,
+    SystemWillTerminate,
     Header(HeaderAction),
     Sidebar(SidebarAction),
     Canvas(CanvasAction),
@@ -421,6 +422,7 @@ pub struct WorkbenchStore {
     six_layer_next_auto_resume_at: Option<Instant>,
     last_synced_six_layer_revs: (u64, u64),
     v070_hardware: v070_hardware_store::V070HardwareController,
+    sa_rgb_coordinator: crate::v070_session_sa_rgb::SaRgbRuntimeCoordinator,
     accessibility_trusted: bool,
     accessibility_trusted_override: Option<bool>,
     last_accessibility_check_at: Instant,
@@ -662,6 +664,7 @@ impl WorkbenchStore {
             six_layer_next_auto_resume_at: None,
             last_synced_six_layer_revs: (0, 0),
             v070_hardware: v070_hardware_store::V070HardwareController::default(),
+            sa_rgb_coordinator: crate::v070_session_sa_rgb::SaRgbRuntimeCoordinator::new(),
             accessibility_trusted: true,
             accessibility_trusted_override: None,
             last_accessibility_check_at: now,
@@ -720,6 +723,8 @@ impl WorkbenchStore {
         store.initialize_selection(preserve_saved_host_state)?;
         store.v070_hardware.projection.auto_layer_sync_enabled =
             store.document_store.v070_auto_layer_sync_enabled();
+        store.v070_hardware.projection.session_sa_rgb_sync_enabled =
+            store.document_store.v070_session_sa_rgb_sync_enabled();
         store.v070_hardware.projection.preferred_device_serial =
             store.document_store.preferred_device_serial();
         store.status_message = "已就绪".to_string();
@@ -938,6 +943,7 @@ impl WorkbenchStore {
                 WorkbenchCommand::Firmware(_)
                     | WorkbenchCommand::SystemWillSleep
                     | WorkbenchCommand::SystemDidWake
+                    | WorkbenchCommand::SystemWillTerminate
                     | WorkbenchCommand::ForegroundAppChanged { .. }
                     | WorkbenchCommand::MainWindowActiveChanged { .. }
             )
@@ -954,6 +960,10 @@ impl WorkbenchStore {
             }
             WorkbenchCommand::SystemDidWake => {
                 self.system_did_wake();
+                Ok(())
+            }
+            WorkbenchCommand::SystemWillTerminate => {
+                self.system_will_terminate();
                 Ok(())
             }
             WorkbenchCommand::Header(a) => self.dispatch_header_action(a),
@@ -1392,6 +1402,15 @@ impl WorkbenchStore {
             .as_ref()
             .is_some_and(|s| s.is_disconnected() || self.input_lost_session == Some(s.id))
         {
+            if self
+                .device_session
+                .as_ref()
+                .is_some_and(|s| !s.is_disconnected())
+            {
+                self.teardown_v070_session_sa_rgb();
+            } else {
+                self.sa_rgb_coordinator.clear_on_disconnect();
+            }
             self.release_board_inputs(self.update_now);
             if let Some(session) = self.device_session.take() {
                 self.tokio_runtime.block_on(session.shutdown());
@@ -1698,6 +1717,7 @@ impl WorkbenchStore {
             self.commit_runtime_update();
             return Ok(true);
         }
+        self.teardown_v070_session_sa_rgb();
         self.release_board_inputs(self.update_now);
         if let Some(session) = self.device_session.take() {
             self.tokio_runtime.block_on(session.shutdown());
@@ -1757,6 +1777,7 @@ impl WorkbenchStore {
                     if let Some(running) = &self.six_layer_running {
                         running.receiver.invalidate("USB 会话已断开");
                     }
+                    self.sa_rgb_coordinator.clear_on_disconnect();
                     self.release_board_inputs(now);
                     self.board_routing = BoardRouting::Checking;
                     self.device_session = None;
@@ -1853,6 +1874,7 @@ impl WorkbenchStore {
                     self.hardware_rpc_verified = false;
                     self.lighting_arbiter.invalidate_hardware_cache();
                     self.v070_hardware.on_disconnected();
+                    self.sa_rgb_coordinator.clear_on_disconnect();
                     needs_commit = true;
                 }
                 if !self.config.isolated && !self.device_session_connected() {
@@ -2564,6 +2586,7 @@ impl WorkbenchStore {
         self.manual_override = true;
         self.selected_profile_id = Some(profile_id.to_string());
         self.selected_layer_id = first_layer_id;
+        self.v070_hardware.device_layer_override = None;
         self.normalize_surface_for_current_layer();
         self.sync_six_layer_routing_context();
         self.sync_live_session_source();
@@ -2611,6 +2634,7 @@ impl WorkbenchStore {
             let changed = running.foreground_changed(bundle_id);
             if changed {
                 let _ = self.maybe_sync_v070_foreground_layer();
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
             }
             return changed;
@@ -2666,6 +2690,7 @@ impl WorkbenchStore {
             .profiles
             .get(&target_pid)
             .and_then(|p| p.layer_order.first().cloned());
+        self.v070_hardware.device_layer_override = None;
         self.normalize_surface_for_current_layer();
         self.refresh_four_app_lighting();
         if !self.overlay_controller.is_cheat_sheet_visible() {
@@ -2756,6 +2781,7 @@ impl WorkbenchStore {
         self.ensure_selected_profile_visible();
         self.normalize_surface_for_current_layer();
         self.sync_six_layer_routing_context();
+        self.sync_v070_session_sa_rgb();
         self.commit_runtime_update();
         Ok(())
     }
@@ -2870,6 +2896,7 @@ impl WorkbenchStore {
         }
         self.sync_six_layer_routing_context();
         self.sync_live_session_source();
+        self.sync_v070_session_sa_rgb();
         self.commit_runtime_update();
         Ok(())
     }
@@ -2908,7 +2935,9 @@ impl WorkbenchStore {
                 self.prepare_desktop_profiles()?;
                 self.ensure_default_agent_links()?;
                 self.show_other_profiles = true;
+                self.v070_hardware.device_layer_override = None;
                 self.ensure_selected_profile_visible();
+                self.sync_v070_session_sa_rgb();
                 self.status_message = "已导入方案预设".to_string();
                 self.commit_runtime_update();
                 Ok(None)
@@ -2916,7 +2945,9 @@ impl WorkbenchStore {
             BackupCommand::ReturnToHostDocument => {
                 self.document_store.return_to_host();
                 self.sync_routing_snapshot();
+                self.v070_hardware.device_layer_override = None;
                 self.ensure_selected_profile_visible();
+                self.sync_v070_session_sa_rgb();
                 self.status_message = "已返回常用软件方案".to_string();
                 self.commit_runtime_update();
                 Ok(None)
@@ -3148,6 +3179,7 @@ impl WorkbenchStore {
                     .contains_key(&layer_id)
                 {
                     self.selected_layer_id = Some(layer_id);
+                    self.v070_hardware.device_layer_override = None;
                     self.normalize_surface_for_current_layer();
                     self.refresh_four_app_lighting();
                     self.commit_runtime_update();
@@ -3288,6 +3320,7 @@ impl WorkbenchStore {
                         Ok(())
                     })
                     .map_err(WorkbenchError::Storage)?;
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -3298,6 +3331,7 @@ impl WorkbenchStore {
                 self.document_store
                     .update(|draft| draft.assign(&json!(pid), &json!(lid), slot, action))
                     .map_err(WorkbenchError::Storage)?;
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -3339,6 +3373,7 @@ impl WorkbenchStore {
                     created_lid
                 };
                 self.selected_layer_id = Some(target_lid);
+                self.v070_hardware.device_layer_override = None;
                 self.normalize_surface_for_current_layer();
                 self.refresh_four_app_lighting();
                 self.commit_runtime_update();
@@ -3429,6 +3464,7 @@ impl WorkbenchStore {
                         Ok(())
                     })
                     .map_err(WorkbenchError::Storage)?;
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -3499,6 +3535,7 @@ impl WorkbenchStore {
                 self.bottom_row_layout = BottomRowLayout::Split;
                 self.merge_wide_key.store(false, Ordering::SeqCst);
                 self.normalize_surface_for_current_layer();
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -3608,6 +3645,7 @@ impl WorkbenchStore {
                             .and_then(|r| r.queue_session_lighting(digest, entries)))
                     });
             }
+            self.sync_v070_session_sa_rgb();
             return;
         }
         let verified_session = self
@@ -3639,6 +3677,7 @@ impl WorkbenchStore {
                 Ok("{\"synced\":true}".to_string())
             },
         );
+        self.sync_v070_session_sa_rgb();
     }
 
     fn derive_live_lighting_phase(&self, acks: &BTreeMap<String, String>) -> FourAppAgentPhase {
@@ -3938,6 +3977,8 @@ impl WorkbenchStore {
         next.firmware.v070 = self.v070_hardware.projection.clone();
         next.firmware.v070.auto_layer_sync_enabled =
             self.document_store.v070_auto_layer_sync_enabled();
+        next.firmware.v070.session_sa_rgb_sync_enabled =
+            self.document_store.v070_session_sa_rgb_sync_enabled();
         next.firmware.v070.preferred_device_serial = self.document_store.preferred_device_serial();
         next.firmware.current_version = self.observed_firmware_version();
         next.firmware.version_status =
@@ -5363,6 +5404,7 @@ impl WorkbenchStore {
                     })
                     .map_err(WorkbenchError::Storage)?;
                 self.selected_layer_id = Some(created_lid);
+                self.v070_hardware.device_layer_override = None;
                 self.normalize_surface_for_current_layer();
                 self.refresh_four_app_lighting();
                 self.commit_runtime_update();
@@ -5432,6 +5474,7 @@ impl WorkbenchStore {
                         }
                     }
                 }
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -5444,6 +5487,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 self.slot_role_overrides
                     .insert((pid, slot), KeycapRole::ActionKey);
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -5467,6 +5511,7 @@ impl WorkbenchStore {
                             .update(|draft| draft.unassign(&json!(pid), &json!(lid), slot))
                             .map_err(WorkbenchError::Storage)?;
                     }
+                    self.sync_v070_session_sa_rgb();
                 }
                 self.commit_runtime_update();
                 Ok(())
@@ -5485,6 +5530,7 @@ impl WorkbenchStore {
                     .insert((pid, slot), KeycapRole::ActionKey);
                 self.shortcut_recorder.is_recording = false;
                 self.shortcut_recorder.validation_error = None;
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -5575,6 +5621,7 @@ impl WorkbenchStore {
                     .insert((pid, slot), KeycapRole::ActionKey);
                 self.shortcut_recorder.is_recording = false;
                 self.shortcut_recorder.validation_error = None;
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -5594,6 +5641,7 @@ impl WorkbenchStore {
                     self.slot_role_overrides
                         .insert((pid, slot), KeycapRole::ActionKey);
                 }
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -5636,6 +5684,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 self.slot_role_overrides
                     .insert((pid, slot), KeycapRole::ActionKey);
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -5659,6 +5708,8 @@ impl WorkbenchStore {
                     })
                     .map_err(WorkbenchError::Storage)?;
                 self.selected_layer_id = Some(created);
+                self.v070_hardware.device_layer_override = None;
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -5677,6 +5728,8 @@ impl WorkbenchStore {
                     .profiles
                     .get(&pid)
                     .and_then(|p| p.layer_order.first().cloned());
+                self.v070_hardware.device_layer_override = None;
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -5751,7 +5804,9 @@ impl WorkbenchStore {
                     .resolve_comparison(&token, choice, &current_snapshot)
                     .map_err(WorkbenchError::Storage)?;
                 self.active_modal = None;
+                self.v070_hardware.device_layer_override = None;
                 self.ensure_selected_profile_visible();
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -6023,6 +6078,7 @@ impl WorkbenchStore {
                         .map_err(WorkbenchError::Storage)?;
                 }
                 self.active_modal = None;
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -6036,6 +6092,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 self.slot_role_overrides
                     .insert((pid, slot), KeycapRole::ActionKey);
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -6049,6 +6106,7 @@ impl WorkbenchStore {
                 ) {
                     self.active_modal = None;
                 }
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -6372,6 +6430,7 @@ impl WorkbenchStore {
                         .map_err(WorkbenchError::Storage)?;
                 }
                 self.active_modal = None;
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -6385,6 +6444,7 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 self.slot_role_overrides
                     .insert((pid, slot), KeycapRole::ActionKey);
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -6398,6 +6458,7 @@ impl WorkbenchStore {
                 ) {
                     self.active_modal = None;
                 }
+                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -6661,10 +6722,27 @@ impl WorkbenchStore {
     pub fn selected_keycap(&self, slot: u32) -> CodexKeycapId {
         self.projection_inputs().selected_keycap(slot)
     }
+
+    pub fn system_will_terminate(&mut self) {
+        self.teardown_v070_session_sa_rgb();
+        self.hardware_event_tx.close();
+        if let Some(session) = &self.device_session {
+            session.disconnect();
+        }
+        if let Some(running) = self.six_layer_running.take() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                let rt = Arc::clone(&self.tokio_runtime);
+                let _ = std::thread::spawn(move || running.shutdown(&rt)).join();
+            } else {
+                let _ = running.shutdown(&self.tokio_runtime);
+            }
+        }
+    }
 }
 
 impl Drop for WorkbenchStore {
     fn drop(&mut self) {
+        self.teardown_v070_session_sa_rgb();
         self.hardware_event_tx.close();
         if let Some(session) = &self.device_session {
             session.disconnect();

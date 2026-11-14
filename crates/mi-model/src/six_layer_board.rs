@@ -56,6 +56,59 @@ impl AppliedSixLayerPlan {
         Ok(())
     }
 
+    pub fn compiled_board_layer(&self, board_layer: BoardLayer) -> crate::Layer {
+        let index = usize::from(board_layer.number().saturating_sub(1));
+        if index == 0
+            || matches!(
+                self.desired.route(board_layer),
+                BoardLayerRoute::Native { .. }
+            )
+        {
+            return crate::official_chatgpt_layer(json!(0), "Codex");
+        }
+        let tokens: Vec<&str> = match index {
+            1 => LAYER2_VENDOR_SLOTS
+                .into_iter()
+                .chain(DIRECT_CONTROLS[6..20].iter().map(|control| control.token))
+                .collect(),
+            2 => LAYER3_VENDOR_SLOTS
+                .into_iter()
+                .chain(DIRECT_CONTROLS[26..40].iter().map(|control| control.token))
+                .collect(),
+            _ => vec!["KC_NONE"; 20],
+        };
+        let name = [
+            "Codex",
+            "Antigravity",
+            "DeepSeek Harness",
+            "Unassigned 4",
+            "Unassigned 5",
+            "Unassigned 6",
+        ]
+        .get(index)
+        .copied()
+        .unwrap_or("Unassigned");
+        crate::Layer {
+            id: json!(index),
+            name: name.into(),
+            color: json!(0),
+            keys: std::array::from_fn(|i| crate::Binding::Basic(crate::Token(tokens[i].into()))),
+            encoders: std::array::from_fn(|i| {
+                crate::Binding::Basic(crate::Token(tokens[13 + i].into()))
+            }),
+            joystick: crate::Joystick {
+                kind: json!("RADIAL"),
+                sectors: (16..20)
+                    .map(|i| crate::Binding::Basic(crate::Token(tokens[i].into())))
+                    .collect(),
+            },
+            lights: crate::Lights {
+                backlight: Value::Null,
+                underglow: Value::Null,
+            },
+        }
+    }
+
     pub fn compile(
         plan: &BoardLayerPlan,
         doc: &LocalDocumentV2,

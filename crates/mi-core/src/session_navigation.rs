@@ -288,6 +288,12 @@ impl WorkbenchStore {
             } else {
                 self.refresh_navigation_revision();
             }
+        } else if ack_changed {
+            let acks = self.lighting_arbiter.acknowledged_watermarks.clone();
+            self.slot_table.refresh_with_watermarks(&acks);
+            self.refresh_navigation_revision();
+            self.refresh_four_app_lighting();
+            self.commit_runtime_update();
         } else {
             self.refresh_navigation_revision();
         }

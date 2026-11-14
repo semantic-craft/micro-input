@@ -264,6 +264,20 @@ impl FourAppSlotTable {
             }
         })
     }
+
+    pub fn slot_session_kinds(
+        &self,
+        acknowledged_watermarks: &BTreeMap<String, String>,
+    ) -> [FourAppSessionKind; SLOT_COUNT] {
+        std::array::from_fn(|idx| {
+            let slot = &self.inner.slots()[idx];
+            slot.place
+                .as_ref()
+                .and_then(|place| self.find_candidate(place))
+                .map(|cand| cand.effective_kind(acknowledged_watermarks))
+                .unwrap_or(FourAppSessionKind::Idle)
+        })
+    }
 }
 
 pub fn agent_for_place(place: &NavigationPlace) -> CanonicalAgent {

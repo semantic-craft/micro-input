@@ -14,6 +14,7 @@ pub mod sidebar;
 pub mod six_layer_runtime;
 pub mod status_menu;
 pub mod store;
+pub mod v070_session_sa_rgb;
 
 pub use canvas::{
     format_concise_keycap_caption, CanvasAction, CanvasLayerTab, CanvasProjection, CanvasRect,

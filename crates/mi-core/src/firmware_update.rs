@@ -217,6 +217,8 @@ pub struct V070HardwareProjection {
     #[serde(default)]
     pub auto_layer_sync_enabled: bool,
     #[serde(default)]
+    pub session_sa_rgb_sync_enabled: bool,
+    #[serde(default)]
     pub preferred_device_serial: Option<String>,
     pub mouse: V070MouseConfigProjection,
     pub pm_config: V070PmConfigProjection,
@@ -239,6 +241,7 @@ impl Default for V070HardwareProjection {
             status_message: "需连接 0.7.0-rc.16+ 独占固件设备".into(),
             last_error: None,
             auto_layer_sync_enabled: false,
+            session_sa_rgb_sync_enabled: false,
             preferred_device_serial: None,
             mouse: V070MouseConfigProjection::default(),
             pm_config: V070PmConfigProjection::default(),
@@ -297,6 +300,9 @@ pub enum V070BridgeOutcome {
 pub enum V070HardwareAction {
     Refresh,
     SetAutoLayerSync {
+        enabled: bool,
+    },
+    SetSessionSaRgbSync {
         enabled: bool,
     },
     SelectLayer {
