@@ -66,9 +66,8 @@ pub use session_strip::{
     SimpleLightingPopoverProjection,
 };
 pub use sidebar::{
-    AutoSwitchState, BackupCommand, BoardLayerProjection, BoardLayersProjection,
-    BoardProfileChoice, CanonicalAgent, OwnershipBannerState, ProfileCommand, SidebarAction,
-    SidebarProfileRow, SidebarProjection,
+    BackupCommand, BoardLayerProjection, BoardLayersProjection, BoardProfileChoice, CanonicalAgent,
+    OwnershipBannerState, ProfileCommand, SidebarAction, SidebarProfileRow, SidebarProjection,
 };
 pub use status_menu::{
     FavoriteSlotCardProjection, FavoriteSlotIndex, PendingPresetImportPreview, PinnedFavoritesGrid,

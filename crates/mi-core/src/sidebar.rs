@@ -88,53 +88,6 @@ impl CanonicalAgent {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AutoSwitchState {
-    Unloaded,
-    Disabled,
-    Active,
-    Paused,
-}
-
-impl AutoSwitchState {
-    pub const fn from_flags(
-        loaded: bool,
-        auto_follow_enabled: bool,
-        manual_override: bool,
-    ) -> Self {
-        if !loaded {
-            Self::Unloaded
-        } else if !auto_follow_enabled {
-            Self::Disabled
-        } else if manual_override {
-            Self::Paused
-        } else {
-            Self::Active
-        }
-    }
-
-    pub const fn is_enabled(self) -> bool {
-        matches!(self, Self::Active | Self::Paused)
-    }
-
-    pub const fn status_label(self) -> &'static str {
-        match self {
-            Self::Unloaded => "文档未载入",
-            Self::Disabled => "手动选择软件",
-            Self::Active => "前台切到已安装软件时自动切换",
-            Self::Paused => "已手动固定当前软件，点右侧恢复自动切换",
-        }
-    }
-
-    pub const fn action_button_title(self) -> Option<&'static str> {
-        match self {
-            Self::Paused => Some("恢复自动"),
-            Self::Active => Some("固定当前"),
-            Self::Unloaded | Self::Disabled => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OwnershipBannerState {
     Ready { summary: String },
@@ -257,7 +210,6 @@ pub struct SidebarProjection {
     pub locked_profile_id: Option<String>,
     #[serde(default = "default_true")]
     pub accessibility_trusted: bool,
-    pub auto_switch: AutoSwitchState,
     pub show_other_profiles: bool,
     pub can_edit_draft: bool,
     pub editing_device: bool,
@@ -282,7 +234,6 @@ impl Default for SidebarProjection {
             is_profile_locked: false,
             locked_profile_id: None,
             accessibility_trusted: true,
-            auto_switch: AutoSwitchState::Unloaded,
             show_other_profiles: false,
             can_edit_draft: false,
             editing_device: false,
@@ -338,8 +289,6 @@ pub enum SidebarAction {
     SetUsbStartupProfile(Option<String>),
     ResetBoardLayerPlan,
     SetProfileLocked(bool),
-    SetAutoFollow(bool),
-    ToggleAutoFollowPause,
     SetShowOtherProfiles(bool),
     Profile(ProfileCommand),
     Backup(BackupCommand),

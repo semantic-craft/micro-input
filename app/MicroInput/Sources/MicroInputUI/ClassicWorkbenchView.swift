@@ -347,17 +347,6 @@ private struct WorkbenchSidebarView: View {
             VStack(alignment: .leading, spacing: 10) {
                 SettingsSectionHeader("方案切换选项")
                 SettingsCard {
-                    SettingsRow("切换软件时自动切换方案", subtitle: "根据前台活跃窗口自动加载对应软件按键映射", showsDivider: true) {
-                        Toggle(
-                            "",
-                            isOn: Binding(
-                                get: { s.autoFollowEnabled },
-                                set: { store.dispatch("sidebar", ["SetAutoFollow": $0]) }
-                            )
-                        )
-                        .labelsHidden()
-                        .toggleStyle(NeutralSwitchToggleStyle())
-                    }
                     SettingsRow("显示其他自定义方案", subtitle: "在方案列表中一并展示原生保护方案与自定义草稿") {
                         Toggle(
                             "",
@@ -854,14 +843,6 @@ private struct WorkbenchSettingsPage: View {
                                 Toggle("", isOn: Binding(
                                     get: { store.header.hostExecutionEnabled },
                                     set: { store.dispatch("header", ["SetExecutionEnabled": $0]) }
-                                ))
-                                .labelsHidden()
-                                .toggleStyle(NeutralSwitchToggleStyle())
-                            }
-                            SettingsRow("跟随前台应用切换方案", subtitle: "切换活跃窗口时自动加载对应软件方案", showsDivider: true) {
-                                Toggle("", isOn: Binding(
-                                    get: { store.sidebar.autoFollowEnabled },
-                                    set: { store.dispatch("sidebar", ["SetAutoFollow": $0]) }
                                 ))
                                 .labelsHidden()
                                 .toggleStyle(NeutralSwitchToggleStyle())

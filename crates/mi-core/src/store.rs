@@ -39,9 +39,9 @@ use crate::{
         SessionStripProjection, SimpleLightingPopoverProjection,
     },
     sidebar::{
-        AutoSwitchState, BackupCommand, BoardLayerProjection, BoardLayersProjection,
-        BoardProfileChoice, CanonicalAgent, OwnershipBannerState, ProfileCommand, SidebarAction,
-        SidebarProfileRow, SidebarProjection,
+        BackupCommand, BoardLayerProjection, BoardLayersProjection, BoardProfileChoice,
+        CanonicalAgent, OwnershipBannerState, ProfileCommand, SidebarAction, SidebarProfileRow,
+        SidebarProjection,
     },
     status_menu::{
         FavoriteSlotCardProjection, FavoriteSlotIndex, PendingPresetImportPreview,
@@ -203,12 +203,6 @@ enum BoardRouting {
     Managed { layer: u8 },
     WaitingForFirstLayer,
     Unverified,
-}
-
-impl BoardRouting {
-    fn is_managed(self) -> bool {
-        matches!(self, Self::Managed { .. } | Self::WaitingForFirstLayer)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -420,6 +414,7 @@ pub struct WorkbenchStore {
     >,
     six_layer_auto_resume_attempts: u8,
     six_layer_next_auto_resume_at: Option<Instant>,
+    six_layer_user_pinned: bool,
     last_synced_six_layer_revs: (u64, u64),
     v070_hardware: v070_hardware_store::V070HardwareController,
     sa_rgb_coordinator: crate::v070_session_sa_rgb::SaRgbRuntimeCoordinator,
@@ -467,9 +462,6 @@ pub struct WorkbenchStore {
     show_keycap_labels: bool,
     lighting_popover: SimpleLightingPopoverProjection,
     show_other_profiles: bool,
-    auto_follow_enabled: bool,
-    manual_override: bool,
-    app_profile_links: BTreeMap<String, String>,
     busy: bool,
     status_message: String,
     last_exported_preset: Option<String>,
@@ -662,6 +654,7 @@ impl WorkbenchStore {
             six_layer_job: None,
             six_layer_auto_resume_attempts: 0,
             six_layer_next_auto_resume_at: None,
+            six_layer_user_pinned: false,
             last_synced_six_layer_revs: (0, 0),
             v070_hardware: v070_hardware_store::V070HardwareController::default(),
             sa_rgb_coordinator: crate::v070_session_sa_rgb::SaRgbRuntimeCoordinator::new(),
@@ -680,9 +673,6 @@ impl WorkbenchStore {
             show_keycap_labels: true,
             lighting_popover: SimpleLightingPopoverProjection::default(),
             show_other_profiles: false,
-            auto_follow_enabled: false,
-            manual_override: false,
-            app_profile_links: BTreeMap::new(),
             busy: false,
             status_message: "已就绪".to_string(),
             last_exported_preset: None,
@@ -717,7 +707,6 @@ impl WorkbenchStore {
 
         store.sync_routing_snapshot();
         store.prepare_desktop_profiles()?;
-        store.ensure_default_agent_links()?;
         store.ensure_default_pinned_favorites();
         store.initialize_board_plan()?;
         store.initialize_selection(preserve_saved_host_state)?;
@@ -866,7 +855,6 @@ impl WorkbenchStore {
             self.apply_routing_operation(RoutingOperation::LockProfile {
                 profile_id: Some(target_pid.clone()),
             })?;
-            self.manual_override = true;
             if prefer_selected || self.selected_profile_id.is_none() {
                 self.selected_profile_id = Some(target_pid);
                 self.selected_layer_id = first_layer_id;
@@ -876,7 +864,7 @@ impl WorkbenchStore {
             self.status_message = format!("已锁定方案「{name}」");
         } else {
             self.apply_routing_operation(RoutingOperation::LockProfile { profile_id: None })?;
-            self.manual_override = !self.auto_follow_enabled;
+            self.six_layer_user_pinned = false;
             self.status_message = "已解除方案锁定".to_string();
         }
         self.sync_six_layer_routing_context();
@@ -2116,43 +2104,7 @@ impl WorkbenchStore {
         self.document_store
             .update(|draft| mi_model::preset::install_agent_starter_profiles(draft).map(|_| ()))
             .map_err(WorkbenchError::Preset)?;
-        self.ensure_default_agent_links()?;
         self.commit_runtime_update();
-        Ok(())
-    }
-
-    pub fn ensure_default_agent_links(&mut self) -> Result<(), WorkbenchError> {
-        if self.document_store.has_saved_host_preferences() {
-            return Ok(());
-        }
-        let mut canonical_ids: Vec<(CanonicalAgent, String)> = Vec::new();
-        for agent in CanonicalAgent::ALL {
-            if agent.is_manual_fallback() {
-                continue;
-            }
-            if let Some(pid) = self.default_host_profile_id(agent) {
-                canonical_ids.push((agent, pid));
-            }
-        }
-
-        for (agent, pid) in canonical_ids {
-            let bundle = agent.bundle_id();
-            if self.app_profile_links.get(bundle) != Some(&pid) {
-                self.apply_routing_operation(RoutingOperation::Upsert {
-                    bundle_id: bundle.to_string(),
-                    profile_id: pid.clone(),
-                })?;
-                self.app_profile_links.insert(bundle.to_string(), pid);
-            }
-        }
-
-        if self.app_profile_links.contains_key("*") {
-            self.apply_routing_operation(RoutingOperation::Remove {
-                bundle_id: "*".to_string(),
-            })?;
-            self.app_profile_links.remove("*");
-        }
-
         Ok(())
     }
 
@@ -2583,10 +2535,11 @@ impl WorkbenchStore {
         self.apply_routing_operation(RoutingOperation::Select {
             profile_id: profile_id.to_string(),
         })?;
-        self.manual_override = true;
         self.selected_profile_id = Some(profile_id.to_string());
         self.selected_layer_id = first_layer_id;
         self.v070_hardware.device_layer_override = None;
+        self.v070_hardware.pending_auto_layer_sync = None;
+        self.six_layer_user_pinned = true;
         self.normalize_surface_for_current_layer();
         self.sync_six_layer_routing_context();
         self.sync_live_session_source();
@@ -2629,89 +2582,34 @@ impl WorkbenchStore {
             self.refresh_competing_input_app_running(false);
         }
         self.navigation_foreground_changed(bundle_id);
+        let bundle_changed = self.foreground_bundle_id.as_deref() != bundle_id;
         self.foreground_bundle_id = bundle_id.map(str::to_owned);
+        let unlocked = self.document_store.locked_profile_id().is_none();
+        let mut acted = false;
         if let Some(running) = &self.six_layer_running {
-            let changed = running.foreground_changed(bundle_id);
-            if changed {
-                let _ = self.maybe_sync_v070_foreground_layer();
+            let running_updated = running.foreground_changed(bundle_id);
+            if bundle_changed && unlocked {
+                acted |= self.maybe_sync_v070_foreground_layer();
                 self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
+                return running_updated || acted;
             }
-            return changed;
-        }
-        if self.document_store.locked_profile_id().is_some() {
             if bundle_id == Some("com.worklouder.input") {
                 self.commit_runtime_update();
             }
             return false;
         }
-        let Some(bundle) = bundle_id else {
-            return false;
-        };
-        if self.board_routing.is_managed() || !self.auto_follow_enabled || self.manual_override {
-            return false;
+        if unlocked && bundle_changed {
+            acted |= self.maybe_sync_v070_foreground_layer();
+            self.sync_v070_session_sa_rgb();
+            if acted {
+                self.commit_runtime_update();
+            }
         }
-        let Some(target_pid) = self.app_profile_links.get(bundle).cloned() else {
-            return false;
-        };
-        if !self
-            .document_store
-            .draft
-            .document
-            .editable
-            .graph
-            .profiles
-            .contains_key(&target_pid)
-        {
-            return false;
+        if bundle_id == Some("com.worklouder.input") {
+            self.commit_runtime_update();
         }
-        if self.document_store.host_active_profile_id().as_deref() == Some(target_pid.as_str())
-            && self.selected_profile_id.as_deref() == Some(target_pid.as_str())
-        {
-            return false;
-        }
-
-        let started = self.update_now;
-        if self
-            .apply_routing_operation(RoutingOperation::Follow {
-                bundle_id: bundle.to_string(),
-            })
-            .is_err()
-        {
-            return false;
-        }
-        self.selected_profile_id = Some(target_pid.clone());
-        self.selected_layer_id = self
-            .document_store
-            .draft
-            .document
-            .editable
-            .graph
-            .profiles
-            .get(&target_pid)
-            .and_then(|p| p.layer_order.first().cloned());
-        self.v070_hardware.device_layer_override = None;
-        self.normalize_surface_for_current_layer();
-        self.refresh_four_app_lighting();
-        if !self.overlay_controller.is_cheat_sheet_visible() {
-            let profile_name = self.active_profile_display_name();
-            let mode_summary = self.routing_mode_summary_label();
-            let empty_sheet = CheatSheetProjection::default();
-            self.overlay_controller.request_profile_switch_notice(
-                profile_name,
-                mode_summary,
-                &empty_sheet,
-                &self.screen_geometry,
-                self.last_cursor_position,
-                started,
-            );
-        }
-        let _ = self.maybe_sync_v070_foreground_layer();
-        self.commit_runtime_update();
-        if self.projection.header.banner.is_caution() {
-            self.banner_flash_count += 1;
-        }
-        true
+        acted
     }
 
     pub fn set_host_execution_enabled(&mut self, enabled: bool) -> Result<(), WorkbenchError> {
@@ -2725,45 +2623,6 @@ impl WorkbenchStore {
             self.v070_hardware.pending_auto_layer_sync = None;
             self.release_board_inputs(self.update_now);
         }
-        self.commit_runtime_update();
-        Ok(())
-    }
-
-    pub fn set_auto_follow(&mut self, enabled: bool) -> Result<(), WorkbenchError> {
-        self.apply_routing_operation(RoutingOperation::Enable { enabled })?;
-        self.auto_follow_enabled = enabled;
-        if enabled && self.manual_override && self.document_store.locked_profile_id().is_none() {
-            self.apply_routing_operation(RoutingOperation::Resume)?;
-            self.manual_override = false;
-        }
-        self.sync_six_layer_routing_context();
-        self.sync_live_session_source();
-        if enabled {
-            let _ = self.maybe_sync_v070_foreground_layer();
-        }
-        self.commit_runtime_update();
-        Ok(())
-    }
-
-    pub fn toggle_auto_follow_pause(&mut self) -> Result<(), WorkbenchError> {
-        if !self.auto_follow_enabled {
-            return self.set_auto_follow(true);
-        }
-        if self.manual_override || self.document_store.locked_profile_id().is_some() {
-            self.apply_routing_operation(RoutingOperation::Resume)?;
-            self.manual_override = false;
-            self.auto_follow_enabled = true;
-        } else if let Some(pid) = self
-            .selected_profile_id
-            .clone()
-            .or_else(|| self.document_store.host_active_profile_id())
-        {
-            self.apply_routing_operation(RoutingOperation::Select { profile_id: pid })?;
-            self.manual_override = true;
-        }
-        self.sync_six_layer_routing_context();
-        self.sync_live_session_source();
-        let _ = self.maybe_sync_v070_foreground_layer();
         self.commit_runtime_update();
         Ok(())
     }
@@ -2890,7 +2749,6 @@ impl WorkbenchStore {
                         mi_model::preset::install_agent_starter_profiles(draft).map(|_| ())
                     })
                     .map_err(WorkbenchError::Preset)?;
-                self.ensure_default_agent_links()?;
                 self.status_message = "已恢复默认软件方案".to_string();
             }
         }
@@ -2933,7 +2791,6 @@ impl WorkbenchStore {
                     .map_err(WorkbenchError::Storage)?;
                 self.sync_routing_snapshot();
                 self.prepare_desktop_profiles()?;
-                self.ensure_default_agent_links()?;
                 self.show_other_profiles = true;
                 self.v070_hardware.device_layer_override = None;
                 self.ensure_selected_profile_visible();
@@ -3017,9 +2874,7 @@ impl WorkbenchStore {
                 self.set_usb_startup_profile(profile_id)
             }
             SidebarAction::ResetBoardLayerPlan => self.reset_board_layer_plan(),
-            SidebarAction::SetAutoFollow(enabled) => self.set_auto_follow(enabled),
             SidebarAction::SetProfileLocked(locked) => self.set_profile_locked(locked, true),
-            SidebarAction::ToggleAutoFollowPause => self.toggle_auto_follow_pause(),
             SidebarAction::SetShowOtherProfiles(show) => {
                 self.set_show_other_profiles(show);
                 Ok(())
@@ -3758,15 +3613,6 @@ impl WorkbenchStore {
     }
 
     fn sync_routing_snapshot(&mut self) {
-        let state = self.document_store.routing_state();
-        self.auto_follow_enabled = state
-            .get("auto_follow_enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        self.manual_override = state
-            .get("manual_override")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
         self.bottom_row_layout = self.document_store.bottom_row_layout();
         self.merge_wide_key
             .store(self.bottom_row_layout.is_merged(), Ordering::SeqCst);
@@ -3777,14 +3623,6 @@ impl WorkbenchStore {
                 self.command_execution_enabled,
                 self.update_now,
             );
-        }
-        self.app_profile_links.clear();
-        if let Some(map) = state.get("app_profile_links").and_then(|v| v.as_object()) {
-            for (k, v) in map {
-                if let Some(pid) = v.as_str() {
-                    self.app_profile_links.insert(k.clone(), pid.to_string());
-                }
-            }
         }
         self.sync_six_layer_routing_context();
     }
@@ -3811,6 +3649,8 @@ impl WorkbenchStore {
         }
         if let Some(ag_pid) = self.find_canonical_profile_id(CanonicalAgent::Antigravity) {
             let _ = self.select_and_activate_profile_at(&ag_pid, self.update_now, false);
+            self.six_layer_user_pinned = false;
+            self.sync_six_layer_routing_context();
         }
         if !self.document_store.host_execution_enabled() {
             let _ = self.apply_routing_operation(RoutingOperation::Execution { enabled: true });
@@ -4052,7 +3892,6 @@ impl WorkbenchStore {
             action_search_query: &self.action_search_query,
             active_modal: &self.active_modal,
             applications: &self.applications,
-            auto_follow_enabled: self.auto_follow_enabled,
             available_usb_candidates: &self.available_usb_candidates,
             banner_flash_count: self.banner_flash_count,
             bind_keycap_default_action_on_select: self.bind_keycap_default_action_on_select,
@@ -4081,7 +3920,6 @@ impl WorkbenchStore {
             full_keypad_feedback: &self.lighting_arbiter.full_keypad_feedback,
             dual_zone_feedback: &self.lighting_arbiter.dual_zone_feedback,
             lighting_popover: &self.lighting_popover,
-            manual_override: self.manual_override,
             navigation_history: &self.navigation_history,
             open_drawers: &self.open_drawers,
             overlay_controller: &self.overlay_controller,
@@ -4107,6 +3945,7 @@ impl WorkbenchStore {
             six_layer_busy: self.six_layer_job.is_some(),
             six_layer_running_present: self.six_layer_running.is_some(),
             six_layer_state: &self.six_layer_state,
+            six_layer_user_pinned: self.six_layer_user_pinned,
             six_layer_view: &self.six_layer_view,
             slot_role_overrides: &self.slot_role_overrides,
             slot_table: &self.slot_table,
@@ -4160,7 +3999,6 @@ impl WorkbenchStore {
                 armed: running.armed,
                 failure: running.receiver.failure(),
                 effective_profile_id: running.effective_profile_id(),
-                foreground_priority_adapter: running.foreground_priority_adapter(),
             }
         });
     }
@@ -4193,8 +4031,6 @@ impl WorkbenchStore {
             active_profile_name: menu.active_profile_name.clone(),
             routing_mode_label: menu.routing_mode_summary.clone(),
             host_execution_enabled: menu.host_execution_enabled,
-            auto_follow_enabled: menu.auto_follow_enabled,
-            manual_override: menu.manual_override,
             radial_menu_enabled: menu.radial_menu_enabled,
             cheat_sheet_visible: menu.cheat_sheet_visible,
             pinned_favorite_ids: self.pinned_favorites.slots.clone(),
@@ -4737,23 +4573,6 @@ impl WorkbenchStore {
             StatusMenuAction::SetProfileLocked(locked) => self.set_profile_locked(locked, false),
             StatusMenuAction::OpenAccessibilitySettings => {
                 self.open_accessibility_settings();
-                Ok(())
-            }
-            StatusMenuAction::SetAutoFollowEnabled(enabled) => self.set_auto_follow(enabled),
-            StatusMenuAction::ResumeAutoFollow => {
-                if self.manual_override || self.document_store.locked_profile_id().is_some() {
-                    self.apply_routing_operation(RoutingOperation::Resume)?;
-                    self.manual_override = false;
-                    self.auto_follow_enabled = true;
-                }
-                if !self.auto_follow_enabled {
-                    self.apply_routing_operation(RoutingOperation::Enable { enabled: true })?;
-                    self.auto_follow_enabled = true;
-                }
-                self.sync_six_layer_routing_context();
-                self.sync_live_session_source();
-                let _ = self.maybe_sync_v070_foreground_layer();
-                self.commit_runtime_update();
                 Ok(())
             }
             StatusMenuAction::SetRadialMenuEnabled(enabled) => {
@@ -7230,8 +7049,7 @@ mod startup_tests {
             let original = serde_json::to_vec_pretty(&serde_json::json!({
                 "schema_version": 1, "favorites": [],
                 "host_active_profile_id": active_id,
-                "host_execution_enabled": false, "command_execution_enabled": false,
-                "manual_override": false, "auto_follow_enabled": true
+                "host_execution_enabled": false, "command_execution_enabled": false
             }))
             .unwrap();
             let path = temp.path().join("workbench.preferences.json");
@@ -7246,7 +7064,6 @@ mod startup_tests {
 
             assert_eq!(store.document_store.routing_state(), before);
             assert_eq!(store.active_host_profile_id(), active_id);
-            assert!(!store.manual_override);
             assert!(!store.document_store.host_execution_enabled());
             assert_eq!(fs::read(path).unwrap(), original);
             assert!(!temp

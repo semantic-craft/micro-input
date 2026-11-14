@@ -544,8 +544,6 @@ fn native_codex_all_controls_keep_existing_actions_in_locked_and_manual_routes()
         store
             .select_and_activate_profile_at(&native, now, false)
             .unwrap();
-        store.auto_follow_enabled = false;
-        store.manual_override = true;
         if locked {
             store
                 .dispatch_sidebar_action(SidebarAction::SetProfileLocked(true))
@@ -733,8 +731,6 @@ fn native_codex_all_controls_dispatch_custom_local_actions_without_rewriting_map
         store
             .select_and_activate_profile_at(&native, now, false)
             .unwrap();
-        store.auto_follow_enabled = false;
-        store.manual_override = true;
         if locked {
             store
                 .dispatch_sidebar_action(SidebarAction::SetProfileLocked(true))

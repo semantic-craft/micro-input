@@ -607,11 +607,21 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(store.sidebar.lockedProfileId, secondId)
         XCTAssertEqual(store.statusMenu.lockedProfileId, secondId)
 
-        store.dispatch("status_menu", "ResumeAutoFollow")
+        store.dispatch("status_menu", ["SetProfileLocked": false])
         XCTAssertFalse(store.sidebar.isProfileLocked)
         XCTAssertFalse(store.statusMenu.isProfileLocked)
         XCTAssertNil(store.statusMenu.lockedProfileId)
-        XCTAssertTrue(store.statusMenu.autoFollowEnabled)
+
+        let activeHostBefore = store.sidebar.activeHostProfileId
+        let activeNameBefore = store.statusMenu.activeProfileName
+        for bundleId in ["com.openai.codex", "com.deepseek.dsh"] {
+            store.dispatchRaw([
+                "domain": "foreground_app_changed",
+                "action": ["bundle_id": bundleId]
+            ])
+            XCTAssertEqual(store.sidebar.activeHostProfileId, activeHostBefore)
+            XCTAssertEqual(store.statusMenu.activeProfileName, activeNameBefore)
+        }
 
         store.dispatch("status_menu", ["SetProfileLocked": true])
         XCTAssertTrue(store.statusMenu.isProfileLocked)

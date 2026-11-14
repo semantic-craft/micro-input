@@ -1,6 +1,5 @@
 use mi_core::{
-    AutoSwitchState, BackupCommand, CanonicalAgent, HeaderAction, ProfileCommand, SidebarAction,
-    WorkbenchStore,
+    BackupCommand, CanonicalAgent, HeaderAction, ProfileCommand, SidebarAction, WorkbenchStore,
 };
 use mi_model::board_layers::{BoardLayer, BoardLayerRoute, BoardPreviewSelection};
 use std::time::{Duration, Instant};
@@ -423,7 +422,7 @@ fn opening_saved_customized_local_codex_preserves_document_and_ready_status() {
 }
 
 #[test]
-fn retiring_cindy_keeps_a_saved_custom_profile_and_application_link() {
+fn retiring_cindy_keeps_a_saved_custom_profile() {
     use mi_model::storage::DocumentStore;
     use serde_json::json;
 
@@ -455,20 +454,25 @@ fn retiring_cindy_keeps_a_saved_custom_profile_and_application_link() {
         .unwrap();
     let layer_id = saved.draft.document.editable.graph.profiles[&custom_id].layer_order[0].clone();
     let original_layer = saved.draft.document.editable.graph.layers[&layer_id].clone();
-    saved.update_routing(serde_json::from_value(json!({
-        "document_id": saved.draft.document_id,
-        "document_revision": saved.draft.revision,
-        "host_state_revision": saved.host_revision(),
-        "operation": { "kind": "upsert", "bundle_id": "com.xd.cindy", "profile_id": custom_id }
-    })).unwrap()).unwrap();
+    saved
+        .update_routing(
+            serde_json::from_value(json!({
+                "document_id": saved.draft.document_id,
+                "document_revision": saved.draft.revision,
+                "host_state_revision": saved.host_revision(),
+                "operation": { "kind": "select", "profile_id": custom_id }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
 
     let mut upgraded = WorkbenchStore::open_isolated(temp.path()).unwrap();
     assert!(
         upgraded.document_store.draft.document.editable.graph.layers[&layer_id] == original_layer
     );
     assert_eq!(
-        upgraded.document_store.routing_state()["app_profile_links"]["com.xd.cindy"],
-        json!(custom_id)
+        upgraded.document_store.host_active_profile_id().as_deref(),
+        Some(custom_id.as_str())
     );
     let revision = upgraded.document_store.draft.revision;
     upgraded.prepare_desktop_profiles().unwrap();
@@ -476,36 +480,9 @@ fn retiring_cindy_keeps_a_saved_custom_profile_and_application_link() {
 }
 
 #[test]
-fn foreground_auto_follow_switches_linked_agents_and_ignores_unbound_apps_without_disk_writes() {
+fn foreground_app_changes_never_switch_active_host_profile_or_write_disk() {
     let temp = TempDir::new().unwrap();
     let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
-
-    store.set_auto_follow(true).unwrap();
-    assert_eq!(
-        store.projection().sidebar.auto_switch,
-        AutoSwitchState::Active
-    );
-
-    let switched_dsh = store.foreground_changed(Some("com.deepseek.dsh"));
-    assert!(switched_dsh);
-    assert_eq!(
-        store.projection().sidebar.selected_display_name.as_deref(),
-        Some("Deepseek Harness")
-    );
-
-    let host_rev_before_safari = store.projection().host_revision;
-    let doc_rev_before_safari = store.projection().document_revision;
-    let switched_safari = store.foreground_changed(Some("com.apple.Safari"));
-    assert!(
-        !switched_safari,
-        "unbound apps must not switch away from the active coding agent profile"
-    );
-    assert_eq!(store.projection().host_revision, host_rev_before_safari);
-    assert_eq!(store.projection().document_revision, doc_rev_before_safari);
-    assert_eq!(
-        store.projection().sidebar.selected_display_name.as_deref(),
-        Some("Deepseek Harness")
-    );
 
     let herdr_id = store
         .sidebar_rows()
@@ -515,32 +492,33 @@ fn foreground_auto_follow_switches_linked_agents_and_ignores_unbound_apps_withou
         .profile_id
         .clone();
     store
-        .dispatch_sidebar_action(SidebarAction::SelectProfile(herdr_id))
+        .dispatch_sidebar_action(SidebarAction::SelectProfile(herdr_id.clone()))
         .unwrap();
-    assert_eq!(
-        store.projection().sidebar.auto_switch,
-        AutoSwitchState::Paused
-    );
-
-    let switched_while_paused = store.foreground_changed(Some("com.google.antigravity"));
-    assert!(!switched_while_paused);
     assert_eq!(
         store.projection().sidebar.selected_display_name.as_deref(),
         Some("Herdr")
     );
+    assert_eq!(store.active_host_profile_id(), Some(herdr_id.clone()));
 
-    store
-        .dispatch_sidebar_action(SidebarAction::ToggleAutoFollowPause)
-        .unwrap();
-    assert_eq!(
-        store.projection().sidebar.auto_switch,
-        AutoSwitchState::Active
-    );
-    assert!(store.foreground_changed(Some("com.google.antigravity")));
-    assert_eq!(
-        store.projection().sidebar.selected_display_name.as_deref(),
-        Some("Antigravity")
-    );
+    let host_rev_before = store.projection().host_revision;
+    let doc_rev_before = store.projection().document_revision;
+    for bundle in [
+        "com.deepseek.dsh",
+        "com.apple.Safari",
+        "com.google.antigravity",
+    ] {
+        assert!(
+            !store.foreground_changed(Some(bundle)),
+            "foreground switch to {bundle} must never auto-switch host profile"
+        );
+        assert_eq!(store.projection().host_revision, host_rev_before);
+        assert_eq!(store.projection().document_revision, doc_rev_before);
+        assert_eq!(
+            store.projection().sidebar.selected_display_name.as_deref(),
+            Some("Herdr")
+        );
+        assert_eq!(store.active_host_profile_id(), Some(herdr_id.clone()));
+    }
 }
 
 #[test]
@@ -1067,7 +1045,6 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32, case: UsbRoutingCas
             UsbRoutingCase::SavedHost(profile) => {
                 preferences["host_active_profile_id"] = json!(profile.map(profile_id));
                 preferences["host_execution_enabled"] = json!(false);
-                preferences["manual_override"] = json!(false);
             }
             UsbRoutingCase::Normal => unreachable!(),
         }
@@ -1639,9 +1616,17 @@ fn opening_missing_board_references_preserves_them_and_all_unrelated_preferences
     assert_eq!(board.usb_startup_profile_id.as_deref(), Some("missing-usb"));
     store.preview_board_layer(BoardLayer::ALL[5]).unwrap();
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(saved["app_profile_links"], value["app_profile_links"]);
-    assert_eq!(saved["auto_follow_enabled"], value["auto_follow_enabled"]);
-    assert_eq!(saved["manual_override"], value["manual_override"]);
+    assert!(saved.get("app_profile_links").is_none());
+    assert!(saved.get("auto_follow_enabled").is_none());
+    assert!(saved.get("manual_override").is_none());
+    assert_eq!(
+        saved["usb_startup_profile_id"],
+        serde_json::json!("missing-usb")
+    );
+    assert_eq!(
+        saved["legacy_three_bindings"],
+        serde_json::json!(["missing-first", null, "missing-third"])
+    );
     assert_eq!(
         saved["host_active_profile_id"],
         value["host_active_profile_id"]
@@ -1874,7 +1859,7 @@ fn browsing_profiles_changes_editor_without_activating_host() {
         .unwrap();
     let active = store.active_host_profile_id();
     let revision = store.document_store.host_revision();
-    let routing = store.projection().sidebar.auto_switch.clone();
+    let routing = store.projection().status_menu.routing_mode_summary.clone();
     let banner = store.projection().header.banner.clone();
     store
         .dispatch_sidebar_action(SidebarAction::BrowseProfile(codex.clone()))
@@ -1890,7 +1875,7 @@ fn browsing_profiles_changes_editor_without_activating_host() {
     );
     assert_eq!(store.active_host_profile_id(), active);
     assert_eq!(store.document_store.host_revision(), revision);
-    assert_eq!(store.projection().sidebar.auto_switch, routing);
+    assert_eq!(store.projection().status_menu.routing_mode_summary, routing);
     assert_eq!(store.projection().header.banner, banner);
     assert!(store.dispatched_receipts().is_empty());
 

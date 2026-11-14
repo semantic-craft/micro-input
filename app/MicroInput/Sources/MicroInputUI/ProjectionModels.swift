@@ -576,8 +576,6 @@ public struct SidebarSliceModel: Equatable {
     public var selectedProfileId: String? = nil
     public var selectedDisplayName: String = "未选择方案"
     public var activeHostProfileId: String? = nil
-    public var autoSwitchState: String = "Active"
-    public var autoFollowEnabled: Bool = true
     public var isProfileLocked: Bool = false
     public var lockedProfileId: String? = nil
     public var accessibilityTrusted: Bool = true
@@ -599,8 +597,6 @@ public struct SidebarSliceModel: Equatable {
         self.selectedProfileId = m.selectedProfileId
         self.selectedDisplayName = m.selectedDisplayName
         self.activeHostProfileId = m.activeHostProfileId
-        self.autoSwitchState = m.autoSwitchState
-        self.autoFollowEnabled = m.autoFollowEnabled
         self.isProfileLocked = m.isProfileLocked
         self.lockedProfileId = m.lockedProfileId
         self.accessibilityTrusted = m.accessibilityTrusted
@@ -741,11 +737,9 @@ public struct InspectorSliceModel: Equatable {
 
 public struct StatusMenuSliceModel: Equatable {
     public var activeProfileName: String = "Antigravity"
-    public var routingModeSummary: String = "自动跟随前台软件"
+    public var routingModeSummary: String = "手动选择方案"
     public var favorites2x2: [FavoriteSlotModel] = []
     public var hostExecutionEnabled: Bool = false
-    public var autoFollowEnabled: Bool = true
-    public var manualOverride: Bool = false
     public var isProfileLocked: Bool = false
     public var lockedProfileId: String? = nil
     public var accessibilityTrusted: Bool = true
@@ -766,8 +760,6 @@ public struct StatusMenuSliceModel: Equatable {
         self.routingModeSummary = m.routingModeSummary
         self.favorites2x2 = m.favorites2x2
         self.hostExecutionEnabled = m.hostExecutionEnabled
-        self.autoFollowEnabled = m.autoFollowEnabled
-        self.manualOverride = m.manualOverride
         self.isProfileLocked = m.isProfileLocked
         self.lockedProfileId = m.lockedProfileId
         self.accessibilityTrusted = m.accessibilityTrusted
@@ -825,7 +817,6 @@ public struct ProjectionModel: Equatable {
     public var selectedProfileId: String? = nil
     public var selectedDisplayName: String = "未选择方案"
     public var activeHostProfileId: String? = nil
-    public var autoSwitchState: String = "Active"
     public var isProfileLocked: Bool = false
     public var lockedProfileId: String? = nil
     public var competingHostNotice: String? = nil
@@ -875,10 +866,8 @@ public struct ProjectionModel: Equatable {
     public var editableInspector: EditableInspectorModel? = EditableInspectorModel()
 
     public var activeProfileName: String = "Antigravity"
-    public var routingModeSummary: String = "自动跟随前台软件"
+    public var routingModeSummary: String = "手动选择方案"
     public var favorites2x2: [FavoriteSlotModel] = []
-    public var autoFollowEnabled: Bool = true
-    public var manualOverride: Bool = false
     public var radialMenuEnabled: Bool = false
     public var radialConfirmMode: String = "encoder_press"
     public var radialReadiness: String = "Ready"

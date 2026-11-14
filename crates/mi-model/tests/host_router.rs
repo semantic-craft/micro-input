@@ -1120,7 +1120,7 @@ fn canonical_recorded_shortcut_keys_resolve_through_host_router() {
 }
 
 #[test]
-fn other_apps_general_profile_binds_only_ag11_apple_fn_and_serves_as_wildcard_follow_fallback() {
+fn other_apps_general_profile_binds_only_ag11_apple_fn_and_activates_manually() {
     use mi_model::{resolve_host_action_with_layout, BottomRowLayout};
 
     let mut store = DocumentStore::default();
@@ -1188,39 +1188,32 @@ fn other_apps_general_profile_binds_only_ag11_apple_fn_and_serves_as_wildcard_fo
         );
     }
 
-    // Wildcard "*" link routes any non-coding-agent app to "其他软件" while preserving explicit agent links.
-    for op in [
-        json!({"kind": "upsert", "bundle_id": "com.google.antigravity", "profile_id": ag_pid}),
-        json!({"kind": "upsert", "bundle_id": "*", "profile_id": other_pid}),
-        json!({"kind": "enable", "enabled": true}),
-        json!({"kind": "follow", "bundle_id": "com.google.antigravity"}),
-    ] {
-        let req = serde_json::from_value(json!({
-            "document_id": store.draft.document_id,
-            "document_revision": store.draft.revision,
-            "host_state_revision": store.host_revision(),
-            "operation": op
-        }))
-        .unwrap();
-        store.update_routing(req).unwrap();
-    }
+    // Manual selection switches cleanly between Antigravity and "其他软件".
+    let select_ag = serde_json::from_value(json!({
+        "document_id": store.draft.document_id,
+        "document_revision": store.draft.revision,
+        "host_state_revision": store.host_revision(),
+        "operation": {"kind": "select", "profile_id": ag_pid}
+    }))
+    .unwrap();
+    store.update_routing(select_ag).unwrap();
     assert_eq!(
         store.host_active_profile_id().as_deref(),
         Some(ag_pid.as_str())
     );
 
-    let follow_safari = serde_json::from_value(json!({
+    let select_other = serde_json::from_value(json!({
         "document_id": store.draft.document_id,
         "document_revision": store.draft.revision,
         "host_state_revision": store.host_revision(),
-        "operation": {"kind": "follow", "bundle_id": "com.apple.Safari"}
+        "operation": {"kind": "select", "profile_id": other_pid}
     }))
     .unwrap();
-    store.update_routing(follow_safari).unwrap();
+    store.update_routing(select_other).unwrap();
     assert_eq!(
         store.host_active_profile_id().as_deref(),
         Some(other_pid.as_str()),
-        "Switching to an app outside the coding agents must follow into 其他软件"
+        "Manually selecting 其他软件 must activate it cleanly"
     );
 }
 

@@ -748,7 +748,7 @@ impl DocumentStore {
     }
 }
 
-fn discard_retired_popover_preview_mode<'de, D: serde::Deserializer<'de>>(
+fn discard_retired_preference_field<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<(), D::Error> {
     <serde::de::IgnoredAny as serde::Deserialize>::deserialize(deserializer).map(|_| ())
@@ -765,21 +765,36 @@ struct HostPreferencesV1 {
     host_execution_enabled: bool,
     #[serde(default)]
     command_execution_enabled: bool,
-    #[serde(default)]
-    auto_follow_enabled: bool,
-    #[serde(default)]
-    manual_override: bool,
+    #[serde(
+        default,
+        skip_serializing,
+        rename = "auto_follow_enabled",
+        deserialize_with = "discard_retired_preference_field"
+    )]
+    retired_auto_follow_enabled: (),
+    #[serde(
+        default,
+        skip_serializing,
+        rename = "manual_override",
+        deserialize_with = "discard_retired_preference_field"
+    )]
+    retired_manual_override: (),
     #[serde(default)]
     bottom_row_layout: crate::host_router::BottomRowLayout,
     #[serde(
         default,
         skip_serializing,
         rename = "popover_preview_mode",
-        deserialize_with = "discard_retired_popover_preview_mode"
+        deserialize_with = "discard_retired_preference_field"
     )]
     retired_popover_preview_mode: (),
-    #[serde(default)]
-    app_profile_links: std::collections::BTreeMap<String, String>,
+    #[serde(
+        default,
+        skip_serializing,
+        rename = "app_profile_links",
+        deserialize_with = "discard_retired_preference_field"
+    )]
+    retired_app_profile_links: (),
     #[serde(default)]
     hardware_profile_slots: Option<[Option<String>; 4]>,
     #[serde(default)]
@@ -798,21 +813,36 @@ struct HostPreferences {
     host_execution_enabled: bool,
     #[serde(default)]
     command_execution_enabled: bool,
-    #[serde(default)]
-    auto_follow_enabled: bool,
-    #[serde(default)]
-    manual_override: bool,
+    #[serde(
+        default,
+        skip_serializing,
+        rename = "auto_follow_enabled",
+        deserialize_with = "discard_retired_preference_field"
+    )]
+    retired_auto_follow_enabled: (),
+    #[serde(
+        default,
+        skip_serializing,
+        rename = "manual_override",
+        deserialize_with = "discard_retired_preference_field"
+    )]
+    retired_manual_override: (),
     #[serde(default)]
     bottom_row_layout: crate::host_router::BottomRowLayout,
     #[serde(
         default,
         skip_serializing,
         rename = "popover_preview_mode",
-        deserialize_with = "discard_retired_popover_preview_mode"
+        deserialize_with = "discard_retired_preference_field"
     )]
     retired_popover_preview_mode: (),
-    #[serde(default)]
-    app_profile_links: std::collections::BTreeMap<String, String>,
+    #[serde(
+        default,
+        skip_serializing,
+        rename = "app_profile_links",
+        deserialize_with = "discard_retired_preference_field"
+    )]
+    retired_app_profile_links: (),
     usb_startup_profile_id: Option<String>,
     board_layer_plan: Option<BoardLayerPlan>,
     preview_selection: BoardPreviewSelection,
@@ -833,11 +863,11 @@ impl Default for HostPreferences {
             locked_profile_id: None,
             host_execution_enabled: false,
             command_execution_enabled: false,
-            auto_follow_enabled: false,
-            manual_override: false,
+            retired_auto_follow_enabled: (),
+            retired_manual_override: (),
             bottom_row_layout: crate::host_router::BottomRowLayout::Split,
             retired_popover_preview_mode: (),
-            app_profile_links: Default::default(),
+            retired_app_profile_links: (),
             usb_startup_profile_id: None,
             board_layer_plan: None,
             preview_selection: BoardPreviewSelection::UsbStartup,
@@ -907,11 +937,11 @@ impl HostPreferencesStore {
                                 locked_profile_id: None,
                                 host_execution_enabled: old.host_execution_enabled,
                                 command_execution_enabled: old.command_execution_enabled,
-                                auto_follow_enabled: old.auto_follow_enabled,
-                                manual_override: old.manual_override,
+                                retired_auto_follow_enabled: (),
+                                retired_manual_override: (),
                                 bottom_row_layout: old.bottom_row_layout,
                                 retired_popover_preview_mode: (),
-                                app_profile_links: old.app_profile_links,
+                                retired_app_profile_links: (),
                                 usb_startup_profile_id: old
                                     .hardware_profile_slots
                                     .and_then(|s| s[0].clone()),

@@ -10,7 +10,6 @@ pub(super) struct SixLayerView {
     pub observed_layer: u8,
     pub failure: Option<String>,
     pub effective_profile_id: Option<String>,
-    pub foreground_priority_adapter: Option<String>,
 }
 
 pub(super) struct ReusableInspectorCatalogs {
@@ -26,7 +25,6 @@ pub(super) struct ProjectionInputs<'a> {
     pub action_search_query: &'a String,
     pub active_modal: &'a Option<EditorModalProjection>,
     pub applications: &'a BTreeMap<String, bool>,
-    pub auto_follow_enabled: bool,
     pub available_usb_candidates: &'a [mi_transport::HidCandidate],
     pub banner_flash_count: usize,
     pub bind_keycap_default_action_on_select: bool,
@@ -51,7 +49,6 @@ pub(super) struct ProjectionInputs<'a> {
     pub full_keypad_feedback: &'a [mi_bridge::PerKeyLightingFeedback],
     pub dual_zone_feedback: &'a Option<mi_bridge::DualZoneLightingFeedback>,
     pub lighting_popover: &'a SimpleLightingPopoverProjection,
-    pub manual_override: bool,
     pub navigation_history: &'a NavigationHistory,
     pub open_drawers: &'a Vec<InspectorDrawer>,
     pub overlay_controller: &'a OverlayController,
@@ -77,6 +74,7 @@ pub(super) struct ProjectionInputs<'a> {
     pub six_layer_busy: bool,
     pub six_layer_running_present: bool,
     pub six_layer_state: &'a crate::six_layer_runtime::SavedSixLayerState,
+    pub six_layer_user_pinned: bool,
     pub six_layer_view: &'a Option<SixLayerView>,
     pub slot_role_overrides: &'a BTreeMap<(String, u32), KeycapRole>,
     pub slot_table: &'a FourAppSlotTable,
@@ -1322,8 +1320,6 @@ impl ProjectionInputs<'_> {
             routing_mode_summary: self.routing_mode_summary_label(),
             favorites_2x2,
             host_execution_enabled: self.document_store.host_execution_enabled(),
-            auto_follow_enabled: self.auto_follow_enabled,
-            manual_override: self.manual_override,
             is_profile_locked,
             locked_profile_id,
             accessibility_trusted: self.accessibility_trusted,
@@ -1638,9 +1634,6 @@ impl ProjectionInputs<'_> {
                 })
             });
 
-        let auto_switch =
-            AutoSwitchState::from_flags(true, self.auto_follow_enabled, self.manual_override);
-
         let power_status =
             PowerStatusBadgeProjection::from_v070(self.v070_projection, self.device_connected);
         let candidate_devices = self.build_candidate_devices_projection();
@@ -1672,7 +1665,6 @@ impl ProjectionInputs<'_> {
             is_profile_locked,
             locked_profile_id,
             accessibility_trusted: self.accessibility_trusted,
-            auto_switch,
             show_other_profiles: self.show_other_profiles,
             can_edit_draft,
             editing_device,
@@ -1823,14 +1815,10 @@ impl ProjectionInputs<'_> {
         if self.document_store.locked_profile_id().is_some() {
             return "已锁定 · 忽略前台切换与外部干扰".to_string();
         }
-        let mode = if self.six_layer_view.is_some() {
-            "托管层前台优先"
-        } else if !self.auto_follow_enabled {
-            "手动模式"
-        } else if self.manual_override {
-            "手动锁定（自动跟随已暂停）"
+        let mode = if self.six_layer_view.is_some() && !self.six_layer_user_pinned {
+            "六层板载路由"
         } else {
-            "自动跟随前台软件"
+            "手动选择方案"
         };
         let exec = if self.document_store.host_execution_enabled() {
             "按键控制已启用"
@@ -1890,15 +1878,9 @@ impl ProjectionInputs<'_> {
             result.observed_layer = Some(running.observed_layer);
             result.observed_profile_kind = Some("six_layer_direct".into());
             result.observed_status = running.failure.clone().unwrap_or_else(|| {
-                let priority = running
-                    .foreground_priority_adapter
-                    .as_ref()
-                    .map(|adapter| format!(" · 前台优先 {adapter}"))
-                    .unwrap_or_default();
                 format!(
-                    "六层配置已核验 · 最近确认第 {} 层{} · {}",
+                    "六层配置已核验 · 最近确认第 {} 层 · {}",
                     running.observed_layer,
-                    priority,
                     if running.first_event_verified {
                         "实体输入已验证"
                     } else {
