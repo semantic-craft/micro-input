@@ -80,7 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let directory = ProcessInfo.processInfo.environment["MI_DOCUMENT_DIR"], !directory.isEmpty else {
                 Darwin.exit(1)
             }
-            self.store = CoreStore(isolatedDirectory: directory)
+            self.store = CoreStore(isolatedDirectory: directory, pollInIsolation: true)
         } else {
             self.store = CoreStore()
         }
@@ -94,6 +94,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         setupStatusItem()
         updater.startIfPermitted()
         openMainWindow()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard store.firmware.preventsTermination else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "设备固件更新尚未结束"
+        alert.informativeText = "正在准备、备份或写入设备。请保持 USB 连接，等待当前操作完成后再退出。"
+        alert.addButton(withTitle: "继续等待")
+        alert.runModal()
+        return .terminateCancel
     }
 
     func applicationWillTerminate(_ notification: Notification) {

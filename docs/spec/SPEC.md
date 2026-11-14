@@ -165,7 +165,7 @@ Herdr、DeepSeek Harness（DSH）、ZCode、QwenWork 等是动作适配对象，
 ## Out of Scope
 
 - 当前任务实现已批准产品规格，不接自动任务触发/调度；任何设备写入/激活仍须满足协议、备份和恢复前提。阶段3及之后的设备操作须后续明确任务并满足证据与恢复前提。
-- 产品不做跨agent任务编排/聊天平台、IME、内核驱动、厂商遥测、媒体/壁纸/LVGL，不刷固件、不做bootloader/selftest。
+- 产品不做跨agent任务编排/聊天平台、IME、内核驱动、厂商遥测、媒体/壁纸/LVGL，不做设备 selftest。2026-11-14 用户将官方固件更新加入范围：提供版本检查、下载校验、显式 bootloader 与串口刷写，约束及实机缺口见[固件更新契约](../firmware-update.md)。
 - 首轮不做BLE、多设备并行、Windows/Linux、旧VIA/QMK设备或其他Work Louder型号；未来扩大范围需新证据与规格决定。
 - 不承诺全token/参数范围、全部工具API、厂商Preset互导、事务原子性或自动恢复；未知项继续占位。
 - 不复制、调用或移植原厂Input/wl-device-kit实现与资源；不读取原Input数据库/宏载荷补规格。历史调查存在静态分析，本项目不声称已经取得严格人员隔离的clean-room证明。

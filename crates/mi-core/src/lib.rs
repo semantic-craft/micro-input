@@ -1,5 +1,8 @@
 pub mod canvas;
 pub mod editors;
+pub mod firmware_catalog;
+pub mod firmware_flash;
+pub mod firmware_update;
 pub mod header;
 pub mod inspector;
 pub mod karabiner;

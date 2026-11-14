@@ -386,3 +386,7 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: 旧偏好保全、生效方案与浏览选择隔离、分体与宽键布局、会话更新不重绘菜单的回归及 `scripts/verify-offline` 通过；原生弹层核验并更新本机日常版。不写设备配置，不将本轮展示验证当作 #44 完整产品验收。
 - **Evidence**: .scratch/qa-runs/1794625945887-73688/evidence/result.json; verify-offline six scenarios PASS; native install check pending main merge
 
+### [ ] Slice FW1: Creator Micro 2 官方固件更新
+- **Outcome**: 通用设置中检查官方稳定/预发布固件，下载校验后显式进入引导模式、选择串口，完整备份后由 Rust 写入并验证。
+- **Done Predicate**: 发布选择、摘要与镜像布局、引导命令一次发送、失败状态与宿主互斥测试通过；`scripts/verify-offline` 通过并更新本机。真实刷写、运行版本、配置保留及恢复分别保留未验边界。
+- **Evidence**: docs/firmware-update.md

@@ -382,10 +382,12 @@ impl DeviceSession {
                 .and_then(|n| u32::try_from(n).ok())
                 .ok_or_else(|| SessionError::Config("设备未返回有效的 Profile 和层位".into()))
         };
-        Ok(ThreeLayerBoard {
+        let position = ThreeLayerBoard {
             profile_index: index("profile_index")?,
             layer_index: index("layer_index")?,
-        })
+        };
+        *self.firmware.lock().unwrap() = result["version"].as_str().map(str::to_owned);
+        Ok(position)
     }
 
     /// Read-only detection. Bind routing to a verified active profile on this lease.

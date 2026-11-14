@@ -24,10 +24,12 @@ public final class CoreStore {
     public private(set) var statusMenu: StatusMenuSliceModel = StatusMenuSliceModel()
     public private(set) var overlay: OverlaySliceModel = OverlaySliceModel()
     public private(set) var footer: FooterSliceModel = FooterSliceModel()
+    public private(set) var firmware: FirmwareSliceModel = FirmwareSliceModel()
     public private(set) var activeModal: ActiveModalModel? = nil
 
     public init(
         isolatedDirectory: String? = nil,
+        pollInIsolation: Bool = false,
         workspaceNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter
     ) {
         self.workspaceNotificationCenter = workspaceNotificationCenter
@@ -42,8 +44,8 @@ public final class CoreStore {
         workspaceLifecycle = WorkspaceLifecycle(center: workspaceNotificationCenter) { [weak self] event in
             self?.dispatchRaw(["domain": event.rawValue])
         }
-        if isolatedDirectory == nil {
-            startEventLoops()
+        if isolatedDirectory == nil || pollInIsolation {
+            startEventLoops(observeWorkspace: isolatedDirectory == nil)
         }
     }
 
@@ -68,7 +70,7 @@ public final class CoreStore {
         }
     }
 
-    private func startEventLoops() {
+    private func startEventLoops(observeWorkspace: Bool) {
         let timer = Timer(timeInterval: 0.12, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.pollTimer != nil else { return }
@@ -78,6 +80,8 @@ public final class CoreStore {
         timer.tolerance = 0.03
         RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer
+
+        guard observeWorkspace else { return }
 
         workspaceObserver = workspaceNotificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -177,11 +181,14 @@ public final class CoreStore {
         let nextFooter = FooterSliceModel(from: m)
         if self.footer != nextFooter { self.footer = nextFooter }
 
+        if self.firmware != m.firmware { self.firmware = m.firmware }
+
         if self.activeModal != m.activeModal { self.activeModal = m.activeModal }
     }
 
     private static func parseProjection(_ root: [String: Any]) -> ProjectionModel {
         var m = ProjectionModel()
+        m.firmware = FirmwareSliceModel(json: root["firmware"] as? [String: Any] ?? [:])
         m.statusMessage = root["status_message"] as? String ?? "已就绪"
         m.lastExportedPreset = root["last_exported_preset"] as? String
         m.deviceConnected = root["device_connected"] as? Bool ?? false

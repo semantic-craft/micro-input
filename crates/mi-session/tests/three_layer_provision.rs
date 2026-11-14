@@ -183,7 +183,14 @@ fn fixture(
 async fn provisioning_preserves_original_data_and_is_idempotent_after_confirmed_readback() {
     let dir = tempfile::tempdir().unwrap();
     let (session, worker) = fixture(dir.path(), Commit::ConfirmLayerOne);
+    assert_eq!(session.observed_firmware_version(), None);
     assert_eq!(session.inspect_three_layer_profile().await.unwrap(), None);
+    let requests_after_inspection = session.request_count();
+    assert_eq!(
+        session.observed_firmware_version().as_deref(),
+        Some("0.6.3")
+    );
+    assert_eq!(session.request_count(), requests_after_inspection);
     let expected = ThreeLayerBoard {
         profile_index: 2,
         layer_index: 1,
@@ -207,6 +214,7 @@ async fn provisioning_preserves_original_data_and_is_idempotent_after_confirmed_
         expected
     );
     session.shutdown().await;
+    assert_eq!(session.observed_firmware_version(), None);
     drop(session);
     let (keymap, writes) = worker.await.unwrap();
     assert!(writes > 1, "fixture should exercise more than one chunk");

@@ -301,6 +301,10 @@ def main(argv: list[str] | None = None) -> int:
         staged_bin = stage_app / 'Contents/MacOS/MicroInput'
         shutil.copy2(swift_bin_dir / 'MicroInput', staged_bin)
         shutil.copy2(root / 'app/MicroInput/Info.plist', stage_app / 'Contents/Info.plist')
+        shutil.copy2(
+            root / 'app/MicroInput/Resources/Firmware-Licenses.txt',
+            stage_app / 'Contents/Resources/Firmware-Licenses.txt',
+        )
 
         sparkle_candidates = [
             swift_bin_dir / 'Sparkle.framework',

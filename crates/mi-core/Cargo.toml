@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+espflash = { version = "=4.7.0", default-features = false, features = ["serialport"] }
+serialport = { version = "=4.10.1", default-features = false }
 mi-bridge = { path = "../mi-bridge" }
 mi-macos = { path = "../mi-macos" }
 mi-model = { path = "../mi-model" }
@@ -12,6 +14,7 @@ mi-session = { path = "../mi-session" }
 mi-transport = { path = "../mi-transport" }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "=0.10.9"
 thiserror.workspace = true
 tokio.workspace = true
 
