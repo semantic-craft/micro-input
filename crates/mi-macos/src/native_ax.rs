@@ -53,6 +53,8 @@ pub fn observe_codex_window_state() -> Result<crate::codex_sessions::CodexWindow
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) use macos::activate_focused_codex_window;
+#[cfg(target_os = "macos")]
 pub use macos::{
     frontmost_selected_antigravity_conversation, observe_antigravity_sidebar_conversations,
     observe_codex_window_state, NativeAxProvider, NativeSessionNavigation,
@@ -1092,6 +1094,30 @@ mod macos {
                 return Err(blocked("target_window_changed"));
             }
             Ok(())
+        }
+    }
+
+    pub(crate) fn activate_focused_codex_window() -> Result<i32, String> {
+        let window = CapturedWindow::capture("com.openai.codex", true)?;
+        window
+            .application
+            .set("AXFrontmost", unsafe { kCFBooleanTrue })?;
+        window.element.action("AXRaise")?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            window.validate(None)?;
+            let focused = window.application.attr("AXFocusedWindow")?;
+            if window.application.bool_attr("AXFrontmost")? == Some(true)
+                && focused
+                    .as_ref()
+                    .is_some_and(|focused| unsafe { CFEqual(focused.0, window.element.0) != 0 })
+            {
+                return Ok(window.pid);
+            }
+            if Instant::now() >= deadline {
+                return Err(blocked("target_window_not_focused"));
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -2651,7 +2677,7 @@ mod macos {
         }
 
         fn capture_window(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
-            let captured = CapturedWindow::capture(bundle_id, false)?;
+            let captured = CapturedWindow::capture(bundle_id, bundle_id == "com.openai.codex")?;
             let pid = captured.pid;
             let window = captured.element.clone();
             self.elements.clear();

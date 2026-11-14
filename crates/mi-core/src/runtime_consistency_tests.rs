@@ -391,3 +391,276 @@ fn global_cleanup_without_a_core_ptt_owner_recovers_admission_after_confirmed_re
         .consume_physical_input_event(input(7, InputEventKind::Pressed), now)
         .is_some());
 }
+
+#[test]
+fn native_codex_all_controls_keep_existing_actions_in_locked_and_manual_routes() {
+    for locked in [false, true] {
+        let (_dir, mut store, now) = active_store();
+        store.bottom_row_layout = BottomRowLayout::Split;
+        let native = store
+            .find_canonical_profile_id(CanonicalAgent::Codex)
+            .unwrap();
+        store
+            .select_and_activate_profile_at(&native, now, false)
+            .unwrap();
+        store.auto_follow_enabled = false;
+        store.manual_override = true;
+        if locked {
+            store
+                .dispatch_sidebar_action(SidebarAction::SetProfileLocked(true))
+                .unwrap();
+        }
+        let before = serde_json::to_value(&store.document_store.draft.document).unwrap();
+        let plan = match store.build_six_layer_routing_mode() {
+            crate::six_layer_runtime::SixLayerRoutingMode::Locked(plan) if locked => plan,
+            crate::six_layer_runtime::SixLayerRoutingMode::ManualPinned(plan) if !locked => plan,
+            _ => panic!("expected pinned route"),
+        };
+        assert_eq!(plan.profile_id, native);
+        for (slot, command) in [
+            (6, "live-voice"),
+            (7, "focus-input"),
+            (8, "new-tab"),
+            (9, "cycle-workspace-layout"),
+            (10, "new-chat"),
+            (11, "toggle-dictation"),
+            (12, "submit"),
+        ] {
+            assert_eq!(
+                plan.actions[slot],
+                Some(ResolvedHostAction::AgentCommand {
+                    adapter: "codex".into(),
+                    command: command.into(),
+                }),
+                "slot {slot}"
+            );
+            for prefix in ["AG", "ACT"] {
+                let mut event = input(9, InputEventKind::Pressed);
+                event.binding_id = Some(format!("{prefix}{slot:02}"));
+                let receipt = store
+                    .route_board_input(event, now)
+                    .expect("existing lower-row action");
+                assert_eq!(receipt.profile_id, native);
+                assert_eq!(receipt.detail, format!("codex/{command}"));
+            }
+        }
+        let local = store.local_codex_profile_id().unwrap();
+        let local_plan = store.compile_profile_twenty_slots(&local).unwrap();
+        assert_eq!(plan.actions, local_plan.actions);
+        for slot in 0..6 {
+            assert_eq!(
+                plan.actions[slot],
+                Some(ResolvedHostAction::AgentCommand {
+                    adapter: "four-app".into(),
+                    command: format!("slot-open:{slot}"),
+                })
+            );
+        }
+        assert_eq!(
+            store.desired_live_session_source(),
+            LiveSessionSource::Codex
+        );
+        assert_eq!(
+            serde_json::to_value(&store.document_store.draft.document).unwrap(),
+            before
+        );
+        store.set_host_execution_enabled(false).unwrap();
+        assert!(store
+            .route_board_input(input(9, InputEventKind::Pressed), now)
+            .is_none());
+    }
+}
+
+#[test]
+fn native_codex_preserves_custom_actions_unbound_slots_and_other_owners() {
+    let (_dir, mut store, now) = active_store();
+    let native = store
+        .find_canonical_profile_id(CanonicalAgent::Codex)
+        .unwrap();
+    let local = store
+        .document_store
+        .draft
+        .document
+        .editable
+        .graph
+        .profiles
+        .iter()
+        .find(|(_, p)| p.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
+        .map(|(id, p)| (id.clone(), p.layer_order[0].clone()))
+        .unwrap();
+    let graph = &mut store.document_store.draft.document.editable.graph;
+    let layer = graph.layers.get_mut(&local.1).unwrap();
+    let custom_id = layer
+        .controls
+        .values()
+        .find(|c| c.logical_control == "logical-8")
+        .unwrap()
+        .action_id
+        .clone()
+        .unwrap();
+    for slot in [0, 12] {
+        layer
+            .controls
+            .values_mut()
+            .find(|c| c.logical_control == format!("logical-{slot}"))
+            .unwrap()
+            .action_id = None;
+    }
+    graph.actions.get_mut(&custom_id).unwrap().payload = serde_json::json!({
+        "type": "open_url", "url": "https://example.com/custom-action"
+    });
+    store
+        .select_and_activate_profile_at(&native, now, false)
+        .unwrap();
+    let before = serde_json::to_value(&store.document_store.draft.document).unwrap();
+    let plan = store.compile_profile_twenty_slots(&native).unwrap();
+    assert_eq!(
+        plan.actions[8],
+        Some(ResolvedHostAction::OpenUrl {
+            url: "https://example.com/custom-action".into(),
+        })
+    );
+    assert!(plan.actions[0].is_none());
+    assert!(plan.actions[12].is_none());
+    for (binding, expected) in [
+        ("ACT08", true),
+        ("AG00", false),
+        ("AG12", false),
+        ("AG13", true),
+    ] {
+        let mut event = input(9, InputEventKind::Pressed);
+        event.binding_id = Some(binding.into());
+        assert_eq!(
+            store.route_board_input(event, now).is_some(),
+            expected,
+            "{binding}"
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(&store.document_store.draft.document).unwrap(),
+        before
+    );
+    store
+        .document_store
+        .draft
+        .document
+        .editable
+        .graph
+        .profiles
+        .get_mut(&native)
+        .unwrap()
+        .name = "Other protected owner".into();
+    assert!(store
+        .compile_profile_twenty_slots(&native)
+        .unwrap()
+        .actions
+        .iter()
+        .all(Option::is_none));
+    let mut event = input(9, InputEventKind::Pressed);
+    event.binding_id = Some("ACT08".into());
+    assert!(store.route_board_input(event, now).is_none());
+}
+
+#[test]
+fn native_codex_all_controls_dispatch_custom_local_actions_without_rewriting_mappings() {
+    for locked in [false, true] {
+        let (_dir, mut store, now) = active_store();
+        store.bottom_row_layout = BottomRowLayout::Split;
+        let native = store
+            .find_canonical_profile_id(CanonicalAgent::Codex)
+            .unwrap();
+        let local = store.local_codex_profile_id().unwrap();
+        let graph = &mut store.document_store.draft.document.editable.graph;
+        let layer_id = graph.profiles[&local].layer_order[0].clone();
+        let template = graph.actions.values().next().unwrap().clone();
+        for binding in graph
+            .layers
+            .get_mut(&layer_id)
+            .unwrap()
+            .controls
+            .values_mut()
+        {
+            let slot = binding.logical_control.strip_prefix("logical-").unwrap();
+            let id = format!("custom-control-{slot}");
+            let mut action = template.clone();
+            action.payload = serde_json::json!({
+                "type": "open_url", "url": format!("https://example.com/control/{slot}")
+            });
+            graph.actions.insert(id.clone(), action);
+            binding.action_id = Some(id);
+        }
+        store
+            .select_and_activate_profile_at(&native, now, false)
+            .unwrap();
+        store.auto_follow_enabled = false;
+        store.manual_override = true;
+        if locked {
+            store
+                .dispatch_sidebar_action(SidebarAction::SetProfileLocked(true))
+                .unwrap();
+        }
+        let before = serde_json::to_value(&store.document_store.draft.document).unwrap();
+        let plan = store.compile_profile_twenty_slots(&native).unwrap();
+        for (slot, binding) in mi_model::direct_controls::CONTROL_BINDINGS
+            .iter()
+            .enumerate()
+        {
+            let url = format!("https://example.com/control/{slot}");
+            assert_eq!(
+                plan.actions[slot],
+                Some(ResolvedHostAction::OpenUrl { url: url.clone() })
+            );
+            let mut event = input(9, InputEventKind::Pressed);
+            event.binding_id = Some((*binding).into());
+            let receipt = store
+                .route_board_input(event, now)
+                .expect("local custom action");
+            assert_eq!(receipt.profile_id, native);
+            assert_eq!(receipt.target, "default-browser");
+            assert_eq!(receipt.detail, "example.com");
+            assert_eq!(receipt.text_byte_len, Some(url.len()));
+        }
+        assert_eq!(
+            serde_json::to_value(&store.document_store.draft.document).unwrap(),
+            before
+        );
+    }
+}
+
+#[test]
+fn native_codex_accepts_radial_positions_without_a_binding_and_unknown_owners_stay_closed() {
+    let (_dir, mut store, now) = active_store();
+    let native = store
+        .find_canonical_profile_id(CanonicalAgent::Codex)
+        .unwrap();
+    store
+        .select_and_activate_profile_at(&native, now, false)
+        .unwrap();
+    for recognized in [true, false] {
+        if !recognized {
+            store
+                .document_store
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .get_mut(&native)
+                .unwrap()
+                .name = "Other protected owner".into();
+        }
+        store.set_radial_menu_enabled(false);
+        store.set_radial_menu_enabled(true);
+        for (sequence, distance) in [(1, 0.0), (2, 0.8)] {
+            let mut event = input(9, InputEventKind::UnknownNotification);
+            event.binding_id = None;
+            event.ingress_sequence = sequence;
+            event.radial_position = Some(mi_session::RadialPosition {
+                angle_turns: 0.0,
+                distance,
+            });
+            assert!(store.route_board_input(event, now).is_none());
+        }
+        assert_eq!(store.radial_state().session().is_some(), recognized);
+    }
+}

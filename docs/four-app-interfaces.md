@@ -17,8 +17,10 @@
 
 ## Codex 本机方案
 
+Micro Input 独占键盘的 USB 厂商接口，原生 Codex 键盘插件对同一接口的共享连接会被系统拒绝。全部二十个控制使用现有「Codex · Micro Input」分配，包括前六会话键、下排七键、旋钮和摇杆。选择或锁定原生设备方案也使用这些本机定义；设备原件保护仅限制改写，不保留插件控制权。
+
 「Codex · Micro Input」底部七键依次为实时语音、聚焦输入、新建标签页、内置浏览器 / 布局、新建聊天、点击听写和提交。实时语音、新建标签页（Cmd+T）、内置浏览器 / 布局（Cmd+Shift+B）与新建聊天（Cmd+N）采用[官方快捷键](https://learn.chatgpt.com/docs/reference/commands)。Cmd+N 在当前项目中直接新建对话，Cmd+T 与 Cmd+Shift+B 分别触发新建标签页与内置浏览器 / 工作区布局切换；语音是否可用取决于应用。
 
 聚焦、听写和提交复用宿主控件状态机。听写使用目标窗口内的控件和停止读回；转写尚未完成时不发送。控件文案依据本机桌面包静态资源，合成测试不代表实际 Codex 无障碍树已经验收。
 
-前六键按状态筛选仍缺少经过核验的桌面会话观察和选择确认。公开 Codex app-server 的线程状态属于连接的运行实例，不能代替桌面当前会话目录。Cindy 的[会话槽位实现](https://github.com/makecindy/cindy/blob/f58aada0e2c5202009e3ba5c3572c88baf3d5ead/apps/desktop/src/main/worklouder-codex/taskSlots.ts)可参考筛选和槽位共用身份的设计，但不是 Codex 桌面外部接口。
+前六键使用 Micro Input 自己的 Codex 会话元数据观察和原窗口选中确认路径，不依赖原生键盘插件的 USB 连接。公开 app-server 的线程状态属于连接的运行实例，不能代替桌面当前会话目录。逐颗实体按键的目标效果仍须单独验收。

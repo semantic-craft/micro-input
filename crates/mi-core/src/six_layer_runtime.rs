@@ -2027,6 +2027,120 @@ mod tests {
     }
 
     #[test]
+    fn native_codex_all_controls_dispatch_compiled_actions_and_pause_without_events() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = crate::WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let local = store
+            .document_store
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, profile)| profile.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
+            .unwrap()
+            .0
+            .clone();
+        let graph = &mut store.document_store.draft.document.editable.graph;
+        let layer_id = graph.profiles[&local].layer_order[0].clone();
+        let template = graph.actions.values().next().unwrap().clone();
+        for binding in graph
+            .layers
+            .get_mut(&layer_id)
+            .unwrap()
+            .controls
+            .values_mut()
+        {
+            let slot = binding.logical_control.strip_prefix("logical-").unwrap();
+            let id = format!("receiver-control-{slot}");
+            let mut action = template.clone();
+            action.payload = serde_json::json!({
+                "type": "open_url", "url": format!("https://example.com/control/{slot}")
+            });
+            graph.actions.insert(id.clone(), action);
+            binding.action_id = Some(id);
+        }
+        let native = store
+            .find_canonical_profile_id(crate::CanonicalAgent::Codex)
+            .unwrap();
+        let pinned = store.compile_profile_twenty_slots(&native).unwrap();
+        let plan = test_plan();
+        for mode in [
+            SixLayerRoutingMode::Locked(pinned.clone()),
+            SixLayerRoutingMode::ManualPinned(pinned.clone()),
+        ] {
+            for enabled in [true, false] {
+                let receiver = UserCommandReceiver::bind().unwrap();
+                receiver.arm().unwrap();
+                let routing = Mutex::new(RoutingContext::default());
+                routing
+                    .lock()
+                    .unwrap()
+                    .set_routing(mode.clone(), Some("com.openai.codex"));
+                for control in 0..20 {
+                    send(&receiver, control);
+                }
+                let stop = AtomicBool::new(false);
+                let policy = ExecutionPolicy::default();
+                policy.set(enabled, true, Instant::now() - Duration::from_secs(1));
+                let (tx, rx) = std::sync::mpsc::sync_channel(20);
+                let mut dispatched = Vec::new();
+                let mut received = 0;
+                let deadline = Instant::now() + Duration::from_secs(1);
+                execute_clicks(
+                    &receiver,
+                    &plan,
+                    &stop,
+                    &policy,
+                    &AtomicU8::new(1),
+                    &AtomicBool::new(false),
+                    &routing,
+                    &tx,
+                    None,
+                    || {
+                        let next = receiver.next();
+                        match &next {
+                            Ok(Some(_)) => received += 1,
+                            Ok(None) if received == 20 => stop.store(true, Ordering::Release),
+                            Ok(None) => {
+                                assert!(Instant::now() < deadline, "input delivery timed out")
+                            }
+                            Err(error) => panic!("input delivery failed: {error}"),
+                        }
+                        next
+                    },
+                    || Ok(()),
+                    |profile, binding, action, _| {
+                        dispatched.push((profile.to_owned(), binding.to_owned(), action.clone()));
+                        mi_macos::SimulatedHostActionExecutor.execute(profile, binding, action)
+                    },
+                );
+                let expected = if enabled {
+                    (0..20)
+                        .map(|slot| {
+                            (
+                                native.clone(),
+                                mi_model::direct_controls::CONTROL_BINDINGS[slot].into(),
+                                ResolvedHostAction::OpenUrl {
+                                    url: format!("https://example.com/control/{slot}"),
+                                },
+                            )
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(dispatched, expected);
+                let receipts: Vec<_> = rx.try_iter().collect();
+                assert_eq!(receipts.len(), if enabled { 20 } else { 0 });
+                assert!(receipts.iter().all(|r| r.outcome == "simulated"));
+                assert!(receiver.failure().is_none());
+            }
+        }
+    }
+
+    #[test]
     fn custom_codex_routes_layer_one_vendor_in_manual_and_auto_follow_modes() {
         let plan = test_plan();
         let custom = PinnedProfilePlan {

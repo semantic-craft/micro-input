@@ -2,7 +2,48 @@ use super::*;
 use crate::six_layer_runtime::{self, InstallationStatus};
 use mi_model::apply::AppliedSixLayerPlan;
 
+struct RuntimeProfileRoute<'a> {
+    selected_profile_id: &'a str,
+    action_profile_id: Option<&'a str>,
+}
+
 impl WorkbenchStore {
+    fn runtime_profile_route<'a>(&'a self, profile_id: &'a str) -> Option<RuntimeProfileRoute<'a>> {
+        let doc = &self.document_store.host_store().draft.document;
+        let profile = doc.editable.graph.profiles.get(profile_id)?;
+        let protected = |profile: &mi_model::document::ProfileNode| {
+            profile
+                .layer_order
+                .iter()
+                .any(|id| doc.is_protected_oai_layer(id))
+        };
+        let action_profile_id = if !protected(profile) {
+            Some(profile_id)
+        } else if mi_model::board_layers::native_owner(doc, profile_id)
+            == Some(mi_model::board_layers::NativeLayerOwner::Codex)
+        {
+            doc.editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, profile)| {
+                    profile.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME
+                        && !protected(profile)
+                })
+                .map(|(id, _)| id.as_str())
+        } else {
+            None
+        };
+        Some(RuntimeProfileRoute {
+            selected_profile_id: profile_id,
+            action_profile_id,
+        })
+    }
+
+    pub(super) fn runtime_action_profile_id<'a>(&'a self, profile_id: &'a str) -> Option<&'a str> {
+        self.runtime_profile_route(profile_id)?.action_profile_id
+    }
+
     fn compiled_six_layer_plan(&self) -> Result<AppliedSixLayerPlan, String> {
         self.projection_inputs().compiled_six_layer_plan()
     }
@@ -31,24 +72,16 @@ impl WorkbenchStore {
             Some(CanonicalAgent::Herdr) => Some("herdr"),
             _ => None,
         };
-        let is_protected_oai = profile
-            .layer_order
-            .iter()
-            .any(|lid| doc.is_protected_oai_layer(lid));
-        if is_protected_oai {
-            return Some(six_layer_runtime::PinnedProfilePlan {
-                profile_id: profile_id.to_string(),
-                bundle_id,
-                actions: std::array::from_fn(|_| None),
-            });
-        }
+        let route = self.runtime_profile_route(profile_id)?;
         let layout = self.current_bottom_row_layout();
         let command_execution = self.command_execution_enabled;
         let actions = std::array::from_fn(|slot| {
+            let binding_id = mi_model::direct_controls::CONTROL_BINDINGS[slot];
+            let source_id = route.action_profile_id?;
             let mut action = resolve_host_action_with_layout(
                 doc,
-                Some(profile_id),
-                mi_model::direct_controls::CONTROL_BINDINGS[slot],
+                Some(source_id),
+                binding_id,
                 true,
                 command_execution,
                 layout,
@@ -95,7 +128,7 @@ impl WorkbenchStore {
             Some(action)
         });
         Some(six_layer_runtime::PinnedProfilePlan {
-            profile_id: profile_id.to_string(),
+            profile_id: route.selected_profile_id.to_string(),
             bundle_id,
             actions,
         })
@@ -1141,14 +1174,22 @@ mod tests {
     }
 
     #[test]
-    fn selecting_codex_in_draft_sidebar_keeps_editor_locked_without_suspending_live_six_layer_lighting(
-    ) {
+    fn browsing_native_codex_keeps_editor_locked_without_suspending_active_antigravity_lighting() {
         let directory = tempfile::tempdir().unwrap();
         let mut store = WorkbenchStore::open_isolated(directory.path()).unwrap();
         let (_link, session, rpc_rx) = spawn_thstatus_mock_session(&store.tokio_runtime);
         let mut running =
             six_layer_runtime::RunningSixLayer::isolated(session.clone(), directory.path());
         running.installation.plan = store.compiled_six_layer_plan().unwrap();
+        let active = store
+            .find_canonical_profile_id(CanonicalAgent::Antigravity)
+            .unwrap();
+        running.set_routing_context(
+            six_layer_runtime::SixLayerRoutingMode::Locked(
+                store.compile_profile_twenty_slots(&active).unwrap(),
+            ),
+            Some("com.google.antigravity"),
+        );
         running.readiness.configuration_observed = true;
         running.readiness.keyboard_grabbed = true;
         running.attach_test_vendor_session(&store.tokio_runtime, session);
@@ -1190,7 +1231,7 @@ mod tests {
             .find_canonical_profile_id(CanonicalAgent::Codex)
             .unwrap();
         store
-            .dispatch_sidebar_action(SidebarAction::SelectProfile(codex_pid))
+            .dispatch_sidebar_action(SidebarAction::BrowseProfile(codex_pid))
             .unwrap();
 
         assert!(store.is_selected_layer_protected());

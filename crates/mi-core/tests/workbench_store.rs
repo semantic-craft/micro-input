@@ -1629,11 +1629,21 @@ fn desired_board_edits_leave_held_ptt_for_the_original_release() {
 }
 
 #[test]
-fn a_forged_host_route_does_not_grant_execution_to_native_profiles() {
+fn a_forged_host_route_does_not_grant_execution_to_unknown_protected_owners() {
     let temp = TempDir::new().unwrap();
     let mut store = legacy_store(&temp);
     for agent in [CanonicalAgent::Codex] {
         let id = store.find_canonical_profile_id(agent).unwrap();
+        store
+            .document_store
+            .draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .get_mut(&id)
+            .unwrap()
+            .name = "Unknown protected owner".into();
         let mut plan = store.document_store.board_layer_plan().unwrap().clone();
         plan.replace(
             BoardLayer::ALL[0],
@@ -1652,9 +1662,7 @@ fn a_forged_host_route_does_not_grant_execution_to_native_profiles() {
         store.preview_board_layer(BoardLayer::ALL[0]).unwrap();
         assert!(store.projection().sidebar.board_layers.layers[0]
             .assignment_issue
-            .as_ref()
-            .unwrap()
-            .contains("不一致"));
+            .is_some());
         assert!(store
             .consume_physical_input_event(
                 board_test_event("AG00", mi_session::InputEventKind::Pressed),

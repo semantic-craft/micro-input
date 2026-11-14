@@ -1114,11 +1114,13 @@ impl WorkbenchStore {
             .graph
             .profiles;
         let profile_name = |pid: &str| profiles.get(pid).map(|p| p.name.as_str());
-        let active_name = self
+        let active_id = self
             .effective_resolved_active_profile_id()
+            .or_else(|| self.selected_profile_id.clone());
+        let active_name = active_id
             .as_deref()
-            .and_then(profile_name)
-            .or_else(|| self.selected_profile_id.as_deref().and_then(profile_name));
+            .and_then(|id| self.runtime_action_profile_id(id))
+            .and_then(profile_name);
         if active_name == Some(mi_model::preset::LOCAL_CODEX_PROFILE_NAME) {
             LiveSessionSource::Codex
         } else {
@@ -4413,10 +4415,11 @@ impl WorkbenchStore {
         binding_id: &str,
         layout: BottomRowLayout,
     ) -> Option<ResolvedHostAction> {
-        let doc = &self.document_store.draft.document;
+        let source_id = self.runtime_action_profile_id(profile_id)?;
+        let doc = &self.document_store.host_store().draft.document;
         if let Some(resolved) = resolve_host_action_with_layout(
             doc,
-            Some(profile_id),
+            Some(source_id),
             binding_id,
             true,
             self.command_execution_enabled,
@@ -4424,7 +4427,10 @@ impl WorkbenchStore {
         ) {
             return Some(resolved);
         }
-        let profile = doc.editable.graph.profiles.get(profile_id)?;
+        if source_id != profile_id {
+            return None;
+        }
+        let profile = doc.editable.graph.profiles.get(source_id)?;
         fallback_unbridged_oai_action(&profile.name, binding_id, layout)
     }
 
@@ -4453,7 +4459,7 @@ impl WorkbenchStore {
         if event.kind != InputEventKind::Released
             && profile_id
                 .as_ref()
-                .is_none_or(|id| self.is_protected_oai_profile(id))
+                .is_none_or(|id| self.runtime_action_profile_id(id).is_none())
         {
             return None;
         }
