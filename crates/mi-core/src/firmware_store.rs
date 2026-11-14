@@ -81,6 +81,9 @@ impl WorkbenchStore {
 
         match source {
             TargetSource::ExistingBootloader(ports) => {
+                if let Some(transport) = self.mac_watcher_transport.take() {
+                    mi_transport::HidTransport::stop_discovery(transport.as_ref());
+                }
                 self.firmware_update.projection.ports = ports;
                 self.firmware_update.projection.selected_port = None;
                 self.firmware_update.projection.phase = "select_port".into();
@@ -88,6 +91,14 @@ impl WorkbenchStore {
                     "检测到设备已处于引导模式，请核对并选择对应串口".into();
             }
             TargetSource::Usb(target) => {
+                let transport = match self.mac_watcher_transport.take() {
+                    Some(existing) if existing.is_exclusive_vendor() => existing,
+                    Some(descriptor_only) => {
+                        mi_transport::HidTransport::stop_discovery(descriptor_only.as_ref());
+                        Arc::new(mi_transport::MacTransport::exclusive_vendor())
+                    }
+                    None => Arc::new(mi_transport::MacTransport::exclusive_vendor()),
+                };
                 let tx = self
                     .firmware_update
                     .start("bootloading", "设备控制已暂停，正在请求进入引导模式…");
@@ -95,7 +106,6 @@ impl WorkbenchStore {
                 std::thread::spawn(move || {
                     let boot_result = runtime.block_on(async {
                         use mi_transport::HidTransport;
-                        let transport = mi_transport::MacTransport::exclusive_vendor();
                         let current = transport.enumerate().map_err(|e| e.to_string())?;
                         if !current.iter().any(|c| c == &target) {
                             return Err("原设备连接已变化，未发送引导命令".to_string());
@@ -121,6 +131,8 @@ impl WorkbenchStore {
                         session.shutdown().await;
                         result
                     });
+                    mi_transport::HidTransport::stop_discovery(transport.as_ref());
+                    drop(transport);
                     let event = match boot_result {
                         Ok(()) => {
                             let mut detected = Ok(Vec::new());
@@ -307,7 +319,10 @@ mod tests {
             path: "usb-1".into(),
         };
         let multi_err = store
-            .prepare_device_with_discovery(|| Ok(vec![candidate.clone(), candidate]), || Ok(vec![]))
+            .prepare_device_with_discovery(
+                || Ok(vec![candidate.clone(), candidate.clone()]),
+                || Ok(vec![]),
+            )
             .unwrap_err();
         assert!(multi_err.contains("多台"));
         assert!(!store.firmware_update.reserved());
@@ -320,12 +335,24 @@ mod tests {
             manufacturer: Some("Espressif".into()),
             product: Some("USB JTAG".into()),
         };
+        store.mac_watcher_transport =
+            Some(Arc::new(mi_transport::MacTransport::exclusive_vendor()));
         store
             .prepare_device_with_discovery(|| Ok(vec![]), || Ok(vec![port.clone()]))
             .unwrap();
+        assert!(store.mac_watcher_transport.is_none());
         assert!(store.firmware_update.reserved());
         assert_eq!(store.firmware_update.projection.phase, "select_port");
         assert!(store.firmware_update.projection.selected_port.is_none());
         assert_eq!(store.firmware_update.projection.ports, vec![port]);
+
+        store.firmware_update.projection.device_reserved = false;
+        store.mac_watcher_transport =
+            Some(Arc::new(mi_transport::MacTransport::exclusive_vendor()));
+        store
+            .prepare_device_with_discovery(|| Ok(vec![candidate]), || Ok(vec![]))
+            .unwrap();
+        assert!(store.mac_watcher_transport.is_none());
+        assert!(store.firmware_update.reserved());
     }
 }
