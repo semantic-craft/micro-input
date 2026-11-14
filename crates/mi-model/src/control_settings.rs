@@ -15,7 +15,8 @@ pub struct ControlSettings {
 }
 impl ControlSettings {
     pub fn validate(&self) -> Result<(), String> {
-        if !["source", "logical_sectors"].contains(&self.joystick_mode.as_str()) {
+        if !["source", "logical_sectors", "mouse", "scroll"].contains(&self.joystick_mode.as_str())
+        {
             return Err("摇杆模式：未知本地意图；原值保留".into());
         }
         if self.active_sectors > LOCAL_SECTOR_LIMIT {

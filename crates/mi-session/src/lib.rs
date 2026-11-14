@@ -744,9 +744,15 @@ impl DeviceSession {
             old.stale = true;
         }
         let read_firmware = self.firmware.lock().unwrap().clone();
-        let supported = read_firmware.as_deref() == Some("0.6.3")
-            || (self.backend_name().starts_with("synthetic/")
-                && read_firmware.as_deref() == Some("synthetic-0.6.3"));
+        let is_synthetic_backend = match self.link.backend() {
+            #[cfg(feature = "synthetic-backend")]
+            mi_transport::LinkBackend::SyntheticNumbered => true,
+            _ => false,
+        };
+        let supported = read_firmware
+            .as_deref()
+            .is_some_and(mi_model::is_supported_native_firmware)
+            || (is_synthetic_backend && read_firmware.as_deref() == Some("synthetic-0.6.3"));
         if !supported {
             return Err(ProtoError::Unverified(
                 "UNKNOWN-04 configuration requires explicit supported identity read",

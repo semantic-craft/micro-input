@@ -180,8 +180,10 @@ pub(crate) fn same_device(a: &Value, b: &Value) -> Result<(), String> {
     let y = &b["device_identity"];
     // A live native connection may restore its own exact backup. Interface paths
     // never authorize restoration after reconnect/restart or to another session.
-    if a["firmware"] == "0.6.3"
-        && b["firmware"] == "0.6.3"
+    let a_fw = a["firmware"].as_str();
+    let b_fw = b["firmware"].as_str();
+    if a_fw.is_some_and(crate::is_supported_native_firmware)
+        && a_fw == b_fw
         && x["confidence"] == "observed-interface"
         && y == x
         && x["session_id"].as_u64().is_some()
@@ -193,8 +195,8 @@ pub(crate) fn same_device(a: &Value, b: &Value) -> Result<(), String> {
     {
         return Ok(());
     }
-    if a["firmware"] != b["firmware"]
-        || !matches!(b["firmware"].as_str(), Some("0.6.3" | "synthetic-0.6.3"))
+    if a_fw != b_fw
+        || !b_fw.is_some_and(crate::is_supported_config_firmware)
         || x["confidence"] != "verified-serial"
         || y["confidence"] != "verified-serial"
         || x["serial"].as_str().is_none_or(str::is_empty)

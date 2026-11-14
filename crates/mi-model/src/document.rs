@@ -813,6 +813,8 @@ impl LocalDocumentV2 {
                     let mode = match settings.joystick_mode.as_str() {
                         "source" => "保留来源模式",
                         "logical_sectors" => "逻辑扇区意图",
+                        "mouse" => "原生鼠标指针模式 (MOUSE)",
+                        "scroll" => "原生平滑滚轮模式 (SCROLL)",
                         other => other,
                     };
                     changes.push(format!(

@@ -194,11 +194,12 @@ impl Pending {
             return Err("内存文档与磁盘原字节不符；请重新打开".into());
         }
         comparison::ensure_apply_baseline(doc, current)?;
-        if !matches!(
-            current["firmware"].as_str(),
-            Some("0.6.3" | "synthetic-0.6.3")
-        ) || current["device_identity"]["session_id"].as_u64().is_none()
-        {
+        let firmware = current["firmware"]
+            .as_str()
+            .filter(|fw| crate::is_supported_config_firmware(fw))
+            .ok_or_else(|| "当前会话或固件未核验".to_string())?
+            .to_owned();
+        if current["device_identity"]["session_id"].as_u64().is_none() {
             return Err("当前会话或固件未核验".into());
         }
         let keymap = bytes(current, "keymap")?.ok_or("没有 keymap 文件")?;
@@ -223,6 +224,22 @@ impl Pending {
         let mut normalized = doc.editable.graph.clone();
         for layer in normalized.layers.values_mut() {
             layer.lighting = None;
+            if let Some(settings) = &layer.control_settings {
+                match settings.joystick_mode.as_str() {
+                    "mouse" | "scroll" => {
+                        if !crate::supports_v070_mouse_tokens(&firmware) {
+                            return Err(
+                                "原生摇杆 MOUSE/SCROLL 模式需要固件 0.7.0-rc.16 或更高版本".into(),
+                            );
+                        }
+                        layer.control_settings = None;
+                    }
+                    "source" => {
+                        layer.control_settings = None;
+                    }
+                    _ => {}
+                }
+            }
         }
         let mut targets = Vec::new();
         let mut used_actions = std::collections::BTreeSet::new();
@@ -257,6 +274,13 @@ impl Pending {
             else {
                 return Err("只有 DeviceKey 普通设备按键可准备；宿主快捷键不可转换".into());
             };
+            if crate::draft::FIRMWARE_V070_MOUSE_TOKENS
+                .binary_search(&token.as_str())
+                .is_ok()
+                && !crate::supports_v070_mouse_tokens(&firmware)
+            {
+                return Err("MS_* 鼠标硬件令牌需要固件 0.7.0-rc.16 或更高版本".into());
+            }
             let source = &doc.editable.source_refs[&bid];
             if source["kind"] != "source-binding"
                 || source["logical_control"] != binding.logical_control
@@ -307,11 +331,17 @@ impl Pending {
             changes.push(json!({"kind":change_kind,"profile":pid,"layer":lid,"control":binding.logical_control,"before":before,"after":token}));
         }
         let key_count = changes.len();
+        let (joystick_patches, joystick_changes) =
+            Self::joystick_type_patches(doc, &planned, &firmware)?;
+        for (start, end, bytes) in joystick_patches.into_iter().rev() {
+            planned.splice(start..end, bytes);
+        }
         let (lighting_patches, lighting_changes) = Self::lighting_patches(doc, &planned)?;
         for (start, end, bytes) in lighting_patches.into_iter().rev() {
             planned.splice(start..end, bytes);
         }
-        changes.extend(lighting_changes);
+        changes.extend(joystick_changes.iter().cloned());
+        changes.extend(lighting_changes.iter().cloned());
         if changes.is_empty() {
             return Err("没有键位或灯光变化".into());
         }
@@ -321,7 +351,8 @@ impl Pending {
         let preview = Preview {
             kind: if single_key {
                 "single_device_key"
-            } else if key_count == 0 {
+            } else if key_count == 0 && !lighting_changes.is_empty() && joystick_changes.is_empty()
+            {
                 "lighting"
             } else {
                 "configuration"
@@ -359,11 +390,18 @@ impl Pending {
             },
             after: if single_key {
                 first["after"].as_str().unwrap_or("").into()
-            } else {
+            } else if joystick_changes.is_empty() {
                 format!(
                     "{} 个键位、{} 个灯光字段",
                     key_count,
-                    changes.len() - key_count
+                    lighting_changes.len()
+                )
+            } else {
+                format!(
+                    "{} 个键位、{} 个摇杆模式、{} 个灯光字段",
+                    key_count,
+                    joystick_changes.len(),
+                    lighting_changes.len()
                 )
             },
             planned_keymap_sha256: digest(&planned),
@@ -615,6 +653,66 @@ impl Pending {
                     changes.push(json!({"kind":"lighting","profile":pid,"layer":lid,"zone":zone.name(),"field":key,"before":b[key],"after":value}));
                 }
             }
+        }
+        patches.sort_by_key(|p| p.0);
+        if patches.windows(2).any(|w| w[0].1 > w[1].0) {
+            return Err("目标范围重叠".into());
+        }
+        Ok((patches, changes))
+    }
+
+    fn joystick_type_patches(
+        doc: &LocalDocumentV2,
+        keymap: &[u8],
+        firmware: &str,
+    ) -> Result<(Vec<(usize, usize, Vec<u8>)>, Vec<Value>), String> {
+        let root: &RawValue = serde_json::from_slice(keymap).map_err(|e| e.to_string())?;
+        let mut patches = vec![];
+        let mut changes = vec![];
+        for (id, layer) in &doc.editable.graph.layers {
+            let Some(settings) = &layer.control_settings else {
+                continue;
+            };
+            let target_type = match settings.joystick_mode.as_str() {
+                "mouse" => "MOUSE",
+                "scroll" => "SCROLL",
+                _ => continue,
+            };
+            if !crate::supports_v070_mouse_tokens(firmware) {
+                return Err("原生摇杆 MOUSE/SCROLL 模式需要固件 0.7.0-rc.16 或更高版本".into());
+            }
+            let source = &doc.editable.source_refs[id];
+            if source["kind"] != "source-layer" {
+                return Err("摇杆模式层来源不明确".into());
+            }
+            let pid = &source["profile_source_id"];
+            let lid = &source["source_id"];
+            let profile = unique(array(field(&object(root)?, "profiles")?)?, pid)?;
+            let raw_layer = unique(array(field(&object(profile)?, "layers")?)?, lid)?;
+            let layout = object(field(&object(raw_layer)?, "layout")?)?;
+            let joystick = object(field(&layout, "joystick")?)?;
+            let raw_type = field(&joystick, "type")?;
+            let before: Value = serde_json::from_str(raw_type.get()).map_err(|e| e.to_string())?;
+            if before.as_str() == Some(target_type) {
+                continue;
+            }
+            let start = (raw_type.get().as_ptr() as usize)
+                .checked_sub(keymap.as_ptr() as usize)
+                .ok_or("字节范围无效")?;
+            let end = start
+                .checked_add(raw_type.get().len())
+                .filter(|end| *end <= keymap.len())
+                .ok_or("范围越界")?;
+            let replacement = serde_json::to_vec(&target_type).map_err(|e| e.to_string())?;
+            patches.push((start, end, replacement));
+            changes.push(json!({
+                "kind": "joystick_mode",
+                "profile": pid,
+                "layer": lid,
+                "field": "type",
+                "before": before,
+                "after": target_type
+            }));
         }
         patches.sort_by_key(|p| p.0);
         if patches.windows(2).any(|w| w[0].1 > w[1].0) {

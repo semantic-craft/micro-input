@@ -223,6 +223,22 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                     semantics,
                 )
             }
+            Ok(ActionKind::AgentCommand { adapter, command })
+                if adapter == "host" && crate::is_host_mouse_command(&command) =>
+            {
+                prerequisites.push(
+                    "需要 Mac 宿主常驻与辅助功能（CGEvent）权限；无焦点抢占移动指针、点击与四向滚轮"
+                        .into(),
+                );
+                (
+                    format!("host / {command}"),
+                    true,
+                    true,
+                    "",
+                    "Mac 宿主 CoreGraphics 指针、点击、四向滚轮与三档速度控制器",
+                    "按当前宿主速度档位（0/1/2）实时移动光标、发送左/右/中键点击或四向滚轮事件",
+                )
+            }
             Ok(ActionKind::AgentCommand { adapter, command }) => {
                 let desktop = matches!(adapter.as_str(), "codex" | "antigravity" | "dsh-desktop")
                     && (matches!(

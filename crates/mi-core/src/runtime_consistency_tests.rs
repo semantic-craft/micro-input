@@ -805,3 +805,42 @@ fn native_codex_accepts_radial_positions_without_a_binding_and_unknown_owners_st
         assert_eq!(store.radial_state().session().is_some(), recognized);
     }
 }
+
+#[test]
+fn host_mouse_commands_preserve_host_adapter_in_compile_profile_twenty_slots() {
+    for target_agent in [CanonicalAgent::Antigravity, CanonicalAgent::Codex] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+        let target_pid = store.find_canonical_profile_id(target_agent).unwrap();
+        let edit_pid = if target_agent == CanonicalAgent::Codex {
+            store.local_codex_profile_id().unwrap()
+        } else {
+            target_pid.clone()
+        };
+        store.select_and_activate_profile(&edit_pid).unwrap();
+        store
+            .dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
+                KnobJoystickPreset::MousePointerAndScroll,
+            ))
+            .unwrap();
+
+        let compiled = store.compile_profile_twenty_slots(&target_pid).unwrap();
+        for slot in 13..=19 {
+            match &compiled.actions[slot] {
+                Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+                    adapter,
+                    command,
+                }) => {
+                    assert_eq!(
+                        adapter, "host",
+                        "{target_agent:?} slot {slot} ({command}) must preserve adapter == host"
+                    );
+                    assert!(mi_model::is_host_mouse_command(command));
+                }
+                other => panic!(
+                    "{target_agent:?} slot {slot} expected host mouse AgentCommand, got {other:?}"
+                ),
+            }
+        }
+    }
+}

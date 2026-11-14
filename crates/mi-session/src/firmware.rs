@@ -7,10 +7,15 @@ impl DeviceSession {
         }
         if self.link.backend() != mi_transport::LinkBackend::MacHidapi267Numbered
             || !self.has_exclusive_vendor_link()
-            || self.firmware.lock().unwrap().as_deref() != Some("0.6.3")
+            || !self
+                .firmware
+                .lock()
+                .unwrap()
+                .as_deref()
+                .is_some_and(mi_model::is_supported_bootloader_firmware)
         {
             return Err(ProtoError::Unverified(
-                "firmware bootloader requires verified Creator Micro 2 USB 0.6.3 exclusive session",
+                "firmware bootloader requires verified Creator Micro 2 USB exclusive session",
             )
             .into());
         }
@@ -200,10 +205,32 @@ mod tests {
 
     #[tokio::test]
     async fn bootloader_unknown_identity_or_shared_link_never_sends() {
-        for (exclusive, version) in [(true, None), (true, Some("0.7.0")), (false, Some("0.6.3"))] {
+        for (exclusive, version) in [
+            (true, Some("0.7.0-rc.16")),
+            (true, Some("0.7.0")),
+            (true, Some("0.8.0")),
+        ] {
+            let (session, _link, _) = setup(exclusive);
+            *session.firmware.lock().unwrap() = version.map(str::to_owned);
+            assert!(
+                session.require_firmware_bootloader_device().is_ok(),
+                "bootloader should accept {version:?}"
+            );
+            session.shutdown().await;
+        }
+        for (exclusive, version) in [
+            (true, None),
+            (true, Some("0.6.3-rc.10")),
+            (true, Some("0.7")),
+            (true, Some("synthetic-0.6.3")),
+            (false, Some("0.6.3")),
+        ] {
             let (session, link, _) = setup(exclusive);
             *session.firmware.lock().unwrap() = version.map(str::to_owned);
-            assert!(session.enter_firmware_bootloader().await.is_err());
+            assert!(
+                session.enter_firmware_bootloader().await.is_err(),
+                "bootloader should reject exclusive={exclusive}, version={version:?}"
+            );
             assert!(link.writes.lock().unwrap().is_empty());
             session.shutdown().await;
         }

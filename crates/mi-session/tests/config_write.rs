@@ -850,6 +850,7 @@ async fn readback_failure_keeps_unknown_until_independent_fresh_check() {
 // Exercise the actual native writer branch and production byte barrier without HID.
 struct NativeFixtureLink {
     inner: Arc<dyn HidLink>,
+    firmware: &'static str,
     incoming: tokio::sync::Mutex<(mi_proto::NativeFramer, std::collections::VecDeque<Vec<u8>>)>,
 }
 #[async_trait::async_trait]
@@ -871,7 +872,7 @@ impl HidLink for NativeFixtureLink {
             for line in state.0.feed(&report).unwrap() {
                 let mut value: Value = serde_json::from_slice(&line).unwrap();
                 if value["result"]["version"] == "synthetic-0.6.3" {
-                    value["result"]["version"] = json!("0.6.3");
+                    value["result"]["version"] = json!(self.firmware);
                 }
                 state.1.extend(
                     mi_proto::NativeFramer::default()
@@ -892,6 +893,7 @@ async fn native_plan_bound_writer_applies_and_restores_but_rejects_another_conne
     device.set_files(SyntheticFiles::new(RAW.to_vec(), None));
     let link = Arc::new(NativeFixtureLink {
         inner: device.open("synthetic-interface-0").unwrap(),
+        firmware: "0.6.3",
         incoming: tokio::sync::Mutex::new(Default::default()),
     });
     let session = DeviceSession::new(
@@ -930,5 +932,66 @@ async fn native_plan_bound_writer_applies_and_restores_but_rejects_another_conne
     let restore = writer.prepare_restore(&record).await.unwrap();
     assert_eq!(writer.apply(&restore).await, Outcome::Verified);
     assert_eq!(device.files().unwrap().keymap, RAW);
+    session.shutdown().await;
+}
+
+#[tokio::test]
+async fn native_v070_rc16_records_actual_firmware_and_applies_ms_token() {
+    let device = Arc::new(SyntheticDiscovery::default());
+    device.set_synthetic_discovery(1).unwrap();
+    device.set_files(SyntheticFiles::new(RAW.to_vec(), None));
+    let link = Arc::new(NativeFixtureLink {
+        inner: device.open("synthetic-interface-0").unwrap(),
+        firmware: "0.7.0-rc.16",
+        incoming: tokio::sync::Mutex::new(Default::default()),
+    });
+    let session = DeviceSession::new(
+        link,
+        Box::<mi_proto::NativeFramer>::default(),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_millis(500),
+            interval: Duration::ZERO,
+        },
+    );
+    let writer = ConfigWriter::native(session.clone(), "fake-native-v070".into()).unwrap();
+    let base = writer.inspect().await.unwrap();
+    assert_eq!(base["firmware"], json!("0.7.0-rc.16"));
+    let config = mi_model::parse_device_files(RAW, None).unwrap();
+    let doc = LocalDocumentV2::from_config(&config, Some(base.clone()), "device-snapshot").unwrap();
+    let p = doc.editable.graph.profile_order[0].clone();
+    let l = doc.editable.graph.profiles[&p].layer_order[0].clone();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("draft-v070.json");
+    std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
+    let mut store = DocumentStore::default();
+    store.open(path).unwrap();
+    store
+        .update(|d| {
+            d.assign(
+                &json!(p),
+                &json!(l),
+                0,
+                mi_model::draft::Action {
+                    id: "ms-btn1".into(),
+                    name: "左键".into(),
+                    category: "设备按键".into(),
+                    detail: "MS_BTN1".into(),
+                    payload: json!({"type": "device_key", "token": "MS_BTN1"}),
+                },
+            )
+        })
+        .unwrap();
+    let preview = store.preview_apply(&base).unwrap();
+    store.prepare_apply_backup(&preview.token, &base).unwrap();
+    let plan = store
+        .take_prepared_candidate(&preview.token, &base)
+        .unwrap();
+    assert_eq!(writer.apply(&plan).await, Outcome::Verified);
+    let updated = mi_model::parse_device_files(&device.files().unwrap().keymap, None).unwrap();
+    assert_eq!(
+        updated.profiles[0].layers[0].keys[0],
+        mi_model::Binding::Basic(mi_model::Token("MS_BTN1".into()))
+    );
     session.shutdown().await;
 }

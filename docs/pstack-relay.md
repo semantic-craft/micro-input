@@ -390,3 +390,13 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Outcome**: 通用设置中检查官方稳定/预发布固件，下载校验后显式进入引导模式、选择串口，完整备份后由 Rust 写入并验证。
 - **Done Predicate**: 发布选择、摘要与镜像布局、引导命令一次发送、失败状态与宿主互斥测试通过；`scripts/verify-offline` 通过并更新本机。真实刷写、运行版本、配置保留及恢复分别保留未验边界。
 - **Evidence**: docs/firmware-update.md; .scratch/qa-runs/1794627050790-39928/evidence/result.json; live catalog+SHA256+partition check PASS; verify-offline six scenarios PASS; hardware bootloader/flash/restore NOT_RUN
+
+### [x] Slice FW2: 固件更新未来兼容解锁与 0.7.0-rc.16 鼠标能力同步
+- **Outcome**: 解锁 `0.6.3` 与 `0.7.x+` 固件后续进入引导模式的软件限制，让 `PrepareDevice` 在未连接时实时识别有线 USB 或既有 bootloader 串口并自动轮询端口；同步 `v0.7.0-rc.16` 的 19 个 `MS_*` 硬件鼠标令牌与摇杆 `MOUSE`/`SCROLL` 模式，并新增 Mac 宿主 CoreGraphics 光标移动、左/右/中点击、四向滚轮、三档速度切换与通用预设「摇杆鼠标 + 旋钮滚轮」，随后以安装版 App 完成 `0.6.3 -> 0.6.3` 与 `0.6.3 -> 0.7.0-rc.16` 两阶段真机刷写验证。
+- **Done Predicate**: semver/bootloader 门禁、USB 发现与端口轮询、`apply` `MS_*`/`MOUSE`/`SCROLL` 兼容性校验、三处运行时 `"host"` 鼠标直通测试、CoreGraphics 鼠标测试与 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 全部通过；随后真机两阶段刷写完成并确认 16 MB 备份、`operation.json` `verified` 及重连 `0.7.0-rc.16` 自检回执。
+- **Evidence**: docs/firmware-update.md; verify-offline PASS (pending Stage A 0.6.3->0.6.3 and Stage B 0.6.3->0.7.0-rc.16 live flash receipts)
+
+### [ ] Slice FW3: 0.7.0 进阶硬件能力（速度曲线、无刷切换层与休眠电量看板）
+- **Outcome**: 在 `0.7.0-rc.16+` 真机基础上接入 `mouse.config` 指针与滚轮速度档/摇杆死区调参、`kb.pl`/`kb.pl.set` 无写 Flash 实时切层、`pm.config`/`pm.state`/`usb.host` 休眠跟随与电量状态显示，以及 `device.name` 与 `kb.sa.rgb` 动态灯光支持。
+- **Done Predicate**: 完成相关 `.rodata` 与真机 RPC 只读/受控抓包确认（每项均写入 `docs/` 契约并过 `scripts/check`）；工作台新增控制项与 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 全量通过。
+- **Evidence**: PENDING

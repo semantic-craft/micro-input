@@ -116,7 +116,7 @@ impl AppliedSixLayerPlan {
                     layout,
                 )?;
                 if let ResolvedHostAction::AgentCommand { adapter, command } = &mut action {
-                    if adapter == "host" {
+                    if adapter == "host" && !crate::is_host_mouse_command(command) {
                         *adapter = adapters[index].into();
                     }
                     if matches!(command.as_str(), "push-to-talk" | "dictation") {

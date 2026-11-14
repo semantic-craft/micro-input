@@ -61,32 +61,39 @@ impl ConfigWriter {
             records: Mutex::new(std::collections::BTreeMap::new()),
         })
     }
-    fn firmware(&self) -> &str {
+    fn is_supported_firmware(&self, version: Option<&str>) -> bool {
+        let Some(version) = version else {
+            return false;
+        };
         if self.native_interface.is_some() {
-            "0.6.3"
+            mi_model::is_supported_native_firmware(version)
         } else {
-            "synthetic-0.6.3"
+            version == "synthetic-0.6.3"
         }
     }
-    fn baseline(&self, files: &DeviceFiles) -> Value {
+    fn baseline(&self, firmware: &str, files: &DeviceFiles) -> Value {
         let mut value = synthetic_baseline(self.session.id, files);
         if let Some(interface) = &self.native_interface {
             value["device_identity"] = serde_json::json!({"confidence":"observed-interface","connection_nonce":self.session.connection_nonce,"interface":interface,"session_id":self.session.id,"backend":self.session.backend_name()});
-            value["firmware"] = serde_json::json!("0.6.3");
+            value["firmware"] = serde_json::json!(firmware);
         }
         value
     }
     /// Revalidate the supported backend and independently read complete files.
     pub async fn inspect(&self) -> Result<serde_json::Value, SessionError> {
         let info = self.session.read_identity_info().await?;
-        if info.version.as_deref() != Some(self.firmware()) {
+        let Some(firmware) = info
+            .version
+            .clone()
+            .filter(|v| self.is_supported_firmware(Some(v)))
+        else {
             return Err(SessionError::Config("identity unverified".into()));
-        }
+        };
         self.session
             .guarded(async {
                 let mut q = self.session.queue.lock().await;
                 let files = self.session.read_files_locked(&mut q).await?;
-                let mut base = self.baseline(&files);
+                let mut base = self.baseline(&firmware, &files);
                 base["active_indices"] =
                     serde_json::json!({"profile":info.profile_index,"layer":info.layer_index});
                 Ok(base)
@@ -148,9 +155,13 @@ impl ConfigWriter {
                     .map_err(SessionError::Config)?;
                 failure = Failure::Identity;
                 let info = self.session.read_identity_info().await?;
-                if info.version.as_deref() != Some(self.firmware()) {
+                let Some(firmware) = info
+                    .version
+                    .as_deref()
+                    .filter(|v| self.is_supported_firmware(Some(v)))
+                else {
                     return Err(SessionError::Config("identity unverified".into()));
-                }
+                };
                 if self.native_interface.is_some() {
                     let active = plan.preview().map_err(SessionError::Config)?.active_indices;
                     if info.profile_index.is_none()
@@ -173,7 +184,7 @@ impl ConfigWriter {
                 }
                 failure = Failure::Identity;
                 record
-                    .classify(&self.baseline(&current))
+                    .classify(&self.baseline(firmware, &current))
                     .map_err(SessionError::Config)?;
                 let chunks = plan.candidate().len().div_ceil(3072);
                 let reads = chunks
@@ -349,13 +360,13 @@ fn require_budget(queue: &Queue, writes: &[&[u8]], calls: usize) -> Result<(), S
 }
 
 impl DeviceSession {
-    fn three_layer_firmware(&self) -> Result<&'static str, SessionError> {
+    fn validate_three_layer_link(&self) -> Result<bool, SessionError> {
         match self.link.backend() {
             mi_transport::LinkBackend::MacHidapi267Numbered if self.has_exclusive_vendor_link() => {
-                Ok("0.6.3")
+                Ok(true)
             }
             #[cfg(feature = "synthetic-backend")]
-            mi_transport::LinkBackend::SyntheticNumbered => Ok("synthetic-0.6.3"),
+            mi_transport::LinkBackend::SyntheticNumbered => Ok(false),
             _ => Err(SessionError::Config(
                 "三层板载 Profile 需要独占 USB 专用接口".into(),
             )),
@@ -366,12 +377,19 @@ impl DeviceSession {
         &self,
         queue: &mut Queue,
     ) -> Result<ThreeLayerBoard, SessionError> {
-        let expected_firmware = self.three_layer_firmware()?;
+        let is_native = self.validate_three_layer_link()?;
         let response = self
             .exchange(queue, Method::DeviceStatus, Value::Null)
             .await?;
         let result = identity_result(&response)?;
-        if result["version"].as_str() != Some(expected_firmware) {
+        let supported = result["version"].as_str().is_some_and(|v| {
+            if is_native {
+                mi_model::is_supported_native_firmware(v)
+            } else {
+                v == "synthetic-0.6.3"
+            }
+        });
+        if !supported {
             return Err(SessionError::Config(
                 "三层板载 Profile 不支持当前固件".into(),
             ));
@@ -801,7 +819,11 @@ impl DeviceSession {
                 .as_u64()
                 .filter(|n| (1..=6).contains(n))
                 .ok_or_else(|| SessionError::Config("未确认六层层位".into()))?;
-            if result["version"] != "0.6.3" || result["profile_index"] != profile_index {
+            if !result["version"]
+                .as_str()
+                .is_some_and(mi_model::is_supported_native_firmware)
+                || result["profile_index"] != profile_index
+            {
                 return Err(SessionError::Config("六层固件或方案身份不符".into()));
             }
             Ok(layer as u32)
@@ -828,7 +850,11 @@ impl DeviceSession {
             let layer_ok = result["layer_index"]
                 .as_u64()
                 .is_some_and(|layer| (1..=6).contains(&layer));
-            if result["version"] != "0.6.3" || result["profile_index"] != profile_index || !layer_ok
+            if !result["version"]
+                .as_str()
+                .is_some_and(mi_model::is_supported_native_firmware)
+                || result["profile_index"] != profile_index
+                || !layer_ok
             {
                 return Ok(SixLayerSnapshotCheck::StatusNotReady);
             }

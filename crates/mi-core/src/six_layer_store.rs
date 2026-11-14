@@ -86,7 +86,7 @@ impl WorkbenchStore {
                 return None;
             }
             if let ResolvedHostAction::AgentCommand { adapter, command } = &mut action {
-                if adapter == "host" {
+                if adapter == "host" && !mi_model::is_host_mouse_command(command) {
                     if let Some(target_adapter) = adapter_name {
                         *adapter = target_adapter.into();
                     }

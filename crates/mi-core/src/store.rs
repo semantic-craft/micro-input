@@ -1807,7 +1807,7 @@ impl WorkbenchStore {
             Ok(Some(index))
                 if receipt.exclusive_vendor
                     && self.document_store.legacy_three_bindings().is_some()
-                    && receipt.firmware_version == "0.6.3"
+                    && mi_model::is_supported_native_firmware(&receipt.firmware_version)
                     && receipt.profile_index == Some(index)
                     && receipt
                         .layer_index
@@ -2819,25 +2819,27 @@ impl WorkbenchStore {
             CanvasAction::ApplyKnobJoystickPreset(preset) => {
                 self.ensure_layer_editable()?;
                 let (pid, lid) = self.require_selected_profile_and_layer()?;
-                if let Some(profile) = self
-                    .document_store
-                    .draft
-                    .document
-                    .editable
-                    .graph
-                    .profiles
-                    .get(&pid)
-                {
-                    let agent = CanonicalAgent::from_profile_name(&profile.name);
-                    if agent == Some(CanonicalAgent::Codex) && !preset.is_codex() {
-                        return Err(WorkbenchError::Preset(
-                            "Codex 方案不支持 Antigravity 旋钮与摇杆预设".into(),
-                        ));
-                    }
-                    if agent == Some(CanonicalAgent::Antigravity) && preset.is_codex() {
-                        return Err(WorkbenchError::Preset(
-                            "Antigravity 方案不支持 Codex 旋钮预设".into(),
-                        ));
+                if !preset.is_universal() {
+                    if let Some(profile) = self
+                        .document_store
+                        .draft
+                        .document
+                        .editable
+                        .graph
+                        .profiles
+                        .get(&pid)
+                    {
+                        let agent = CanonicalAgent::from_profile_name(&profile.name);
+                        if agent == Some(CanonicalAgent::Codex) && !preset.is_codex() {
+                            return Err(WorkbenchError::Preset(
+                                "Codex 方案不支持 Antigravity 旋钮与摇杆预设".into(),
+                            ));
+                        }
+                        if agent == Some(CanonicalAgent::Antigravity) && preset.is_codex() {
+                            return Err(WorkbenchError::Preset(
+                                "Antigravity 方案不支持 Codex 旋钮预设".into(),
+                            ));
+                        }
                     }
                 }
                 let pairs: &[(u32, &str)] = match preset {
@@ -2869,10 +2871,29 @@ impl WorkbenchStore {
                         (14, "codex-effort-up"),
                         (15, "codex-toggle-fast-mode"),
                     ],
+                    KnobJoystickPreset::MousePointerAndScroll => &[
+                        (13, "host-mouse-scroll-up"),
+                        (14, "host-mouse-scroll-down"),
+                        (15, "host-mouse-speed-cycle"),
+                        (16, "host-mouse-move-up"),
+                        (17, "host-mouse-move-down"),
+                        (18, "host-mouse-move-left"),
+                        (19, "host-mouse-move-right"),
+                    ],
                 };
                 let catalog = mi_model::draft::actions();
                 self.document_store
                     .update(|draft| {
+                        if matches!(preset, KnobJoystickPreset::MousePointerAndScroll) {
+                            draft.set_control_settings(
+                                &pid,
+                                &lid,
+                                mi_model::control_settings::ControlSettings {
+                                    joystick_mode: "logical_sectors".into(),
+                                    active_sectors: 4,
+                                },
+                            )?;
+                        }
                         for &(slot, action_id) in pairs {
                             let action = catalog
                                 .iter()
@@ -4678,7 +4699,7 @@ impl WorkbenchStore {
                 }
 
                 if let ResolvedHostAction::AgentCommand { adapter, command } = &mut action {
-                    if adapter == "host" {
+                    if adapter == "host" && !mi_model::is_host_mouse_command(command) {
                         *adapter = self
                             .active_desktop_agent_adapter()
                             .unwrap_or_else(|| "antigravity".to_string());

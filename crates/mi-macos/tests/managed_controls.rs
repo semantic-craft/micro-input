@@ -1,5 +1,5 @@
 use mi_macos::executor::{
-    ClipboardSnapshot, DialScrollRequest, HostOsDriver, LiveHostActionExecutor,
+    ClipboardSnapshot, DialScrollRequest, HostOsDriver, LiveHostActionExecutor, MouseButtonKind,
 };
 use mi_macos::managed_controls::{
     blocked, ManagedAxControls, ManagedAxProvider, ManagedControl, ManagedWindow,
@@ -806,6 +806,15 @@ impl HostOsDriver for Driver {
     }
     fn scroll_window(&self, request: &DialScrollRequest) -> Result<(), String> {
         self.controls.scroll(request)
+    }
+    fn move_cursor_by(&self, _: f64, _: f64) -> Result<(), String> {
+        unreachable!()
+    }
+    fn click_mouse_button(&self, _: MouseButtonKind) -> Result<(), String> {
+        unreachable!()
+    }
+    fn scroll_cursor_wheel(&self, _: i32, _: i32) -> Result<(), String> {
+        unreachable!()
     }
     fn new_conversation_in_project(&self, _: &str) -> Result<(), String> {
         unreachable!()

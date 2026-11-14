@@ -145,10 +145,10 @@ pub fn check_passthrough_health(
     let Some(identity) = identity else {
         return PassThroughHealth::Disconnected;
     };
-    if !matches!(
-        identity.version.as_deref(),
-        Some("0.6.3" | "synthetic-0.6.3")
-    ) {
+    let Some(version) = identity.version.as_deref() else {
+        return PassThroughHealth::SnapshotMissing;
+    };
+    if !crate::is_supported_config_firmware(version) {
         return PassThroughHealth::SnapshotMissing;
     }
     let Some(config) = snapshot else {
@@ -163,9 +163,9 @@ pub fn check_passthrough_health(
             bound_ag_count: 0,
         };
     };
-    // Firmware 0.6.3 device.status reports 1-based layer_index (1 for layers[0], 2 for layers[1]),
+    // Native firmware device.status reports 1-based layer_index (1 for layers[0], 2 for layers[1]),
     // whereas synthetic-0.6.3 fixtures and 0-based unit tests use 0 for layers[0].
-    let layer_idx = if identity.version.as_deref() == Some("0.6.3") {
+    let layer_idx = if crate::is_supported_native_firmware(version) {
         active_layer.saturating_sub(1) as usize
     } else {
         active_layer as usize
@@ -563,7 +563,9 @@ fn convert_action(
                     return None;
                 }
             }
-            let resolved_adapter = if adapter == "host"
+            let resolved_adapter = if adapter == "host" && crate::is_host_mouse_command(&command) {
+                adapter
+            } else if adapter == "host"
                 && (command == "submit"
                     || command == "focus-input"
                     || command.starts_with("prompt:")
@@ -762,7 +764,7 @@ pub fn verified_bindings(config: &DeviceConfig, identity: &HostIdentityStatus) -
         return allowed;
     };
     let layer_index = match identity.version.as_deref() {
-        Some("0.6.3") if l > 0 => (l - 1) as usize,
+        Some(v) if crate::is_supported_native_firmware(v) && l > 0 => (l - 1) as usize,
         Some("synthetic-0.6.3") => l as usize,
         _ => return allowed,
     };

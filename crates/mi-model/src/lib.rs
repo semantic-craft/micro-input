@@ -438,3 +438,237 @@ pub mod slot_table;
 
 pub mod board_layers;
 pub mod direct_controls;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StrictSemver<'a> {
+    major: u32,
+    minor: u32,
+    patch: u32,
+    prerelease: Option<&'a str>,
+}
+
+fn parse_numeric_part(part: &str) -> Option<u32> {
+    if part.is_empty()
+        || !part.bytes().all(|b| b.is_ascii_digit())
+        || (part.len() > 1 && part.starts_with('0'))
+    {
+        return None;
+    }
+    part.parse::<u32>().ok()
+}
+
+fn parse_strict_semver(version: &str) -> Option<StrictSemver<'_>> {
+    let (core, prerelease) = match version.split_once('-') {
+        Some((core, pre)) => {
+            if pre.is_empty()
+                || pre.split('.').any(|id| {
+                    id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                })
+            {
+                return None;
+            }
+            (core, Some(pre))
+        }
+        None => (version, None),
+    };
+    let mut parts = core.split('.');
+    let major = parse_numeric_part(parts.next()?)?;
+    let minor = parse_numeric_part(parts.next()?)?;
+    let patch = parse_numeric_part(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(StrictSemver {
+        major,
+        minor,
+        patch,
+        prerelease,
+    })
+}
+
+fn parse_rc_number(prerelease: &str) -> Option<u32> {
+    let num = prerelease.strip_prefix("rc.")?;
+    parse_numeric_part(num)
+}
+
+/// Returns `true` when `version` is a natively supported Creator Micro 2 firmware release.
+pub fn is_supported_native_firmware(version: &str) -> bool {
+    let Some(v) = parse_strict_semver(version) else {
+        return false;
+    };
+    match (v.major, v.minor, v.patch, v.prerelease) {
+        (0, 6, 3, None) | (0, 7, 0, None) => true,
+        (0, 7, 0, Some(pre)) => parse_rc_number(pre).is_some(),
+        _ => false,
+    }
+}
+
+/// Returns `true` when `version` is valid for reading/planning device configs (native or synthetic).
+pub fn is_supported_config_firmware(version: &str) -> bool {
+    is_supported_native_firmware(version) || version == "synthetic-0.6.3"
+}
+
+/// Returns `true` when `version` is allowed to enter the USB bootloader (`0.6.3` or strict semver `>= 0.7.0-0`).
+pub fn is_supported_bootloader_firmware(version: &str) -> bool {
+    if version == "0.6.3" {
+        return true;
+    }
+    let Some(v) = parse_strict_semver(version) else {
+        return false;
+    };
+    (v.major == 0 && v.minor >= 7) || v.major >= 1
+}
+
+/// Returns `true` when `version` supports `0.7.0-rc.16` `MS_*` hardware tokens and `MOUSE`/`SCROLL` joystick modes.
+pub fn supports_v070_mouse_tokens(version: &str) -> bool {
+    let Some(v) = parse_strict_semver(version) else {
+        return false;
+    };
+    if v.major >= 1 || (v.major == 0 && v.minor >= 8) {
+        return true;
+    }
+    if v.major == 0 && v.minor == 7 {
+        match v.prerelease {
+            None => true,
+            Some(_) if v.patch > 0 => true,
+            Some(pre) => parse_rc_number(pre).is_some_and(|n| n >= 16),
+        }
+    } else {
+        false
+    }
+}
+
+/// Returns `true` when `command` is one of the 15 host CoreGraphics cursor/click/scroll/speed commands.
+pub fn is_host_mouse_command(command: &str) -> bool {
+    matches!(
+        command,
+        "mouse-move:up"
+            | "mouse-move:down"
+            | "mouse-move:left"
+            | "mouse-move:right"
+            | "mouse-click:left"
+            | "mouse-click:right"
+            | "mouse-click:middle"
+            | "mouse-scroll:up"
+            | "mouse-scroll:down"
+            | "mouse-scroll:left"
+            | "mouse-scroll:right"
+            | "mouse-speed:0"
+            | "mouse-speed:1"
+            | "mouse-speed:2"
+            | "mouse-speed:cycle"
+    )
+}
+
+#[cfg(test)]
+mod firmware_and_mouse_tests {
+    use super::*;
+
+    #[test]
+    fn firmware_version_helpers_accept_expected_versions_and_reject_invalid_ones() {
+        for v in ["0.6.3", "0.7.0", "0.7.0-rc.1", "0.7.0-rc.16", "0.7.0-rc.17"] {
+            assert!(is_supported_native_firmware(v), "native should accept {v}");
+            assert!(is_supported_config_firmware(v), "config should accept {v}");
+        }
+        assert!(!is_supported_native_firmware("synthetic-0.6.3"));
+        assert!(is_supported_config_firmware("synthetic-0.6.3"));
+
+        for v in [
+            "0.7",
+            "0.6.3-rc.10",
+            "0.5.0",
+            "",
+            "0.7.0-rc.",
+            "0.7.0-rc.a",
+            "0.7.0-rc.01",
+        ] {
+            assert!(!is_supported_native_firmware(v), "native should reject {v}");
+            assert!(!is_supported_config_firmware(v), "config should reject {v}");
+        }
+
+        for v in [
+            "0.6.3",
+            "0.7.0-rc.16",
+            "0.7.0-rc.17",
+            "0.7.0",
+            "0.8.0",
+            "1.0.0",
+        ] {
+            assert!(
+                is_supported_bootloader_firmware(v),
+                "bootloader should accept {v}"
+            );
+        }
+        for v in [
+            "0.7",
+            "0.6.2",
+            "0.6.3-rc.10",
+            "synthetic-0.6.3",
+            "",
+            "01.0.0",
+            "0.7.0+build1",
+            "0.7.0-",
+        ] {
+            assert!(
+                !is_supported_bootloader_firmware(v),
+                "bootloader should reject {v}"
+            );
+        }
+
+        for v in [
+            "0.7.0-rc.16",
+            "0.7.0-rc.17",
+            "0.7.0",
+            "0.7.1-rc.1",
+            "0.7.1",
+            "0.8.0",
+            "1.0.0",
+        ] {
+            assert!(
+                supports_v070_mouse_tokens(v),
+                "v070 mouse tokens should be supported on {v}"
+            );
+        }
+        for v in [
+            "0.6.3",
+            "0.7.0-rc.15",
+            "0.7.0-rc.1",
+            "0.7.0-rc.016",
+            "0.7",
+            "synthetic-0.6.3",
+            "0.7.0-alpha.1",
+        ] {
+            assert!(
+                !supports_v070_mouse_tokens(v),
+                "v070 mouse tokens should be rejected on {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn host_mouse_command_matches_exact_fifteen_commands() {
+        let valid = [
+            "mouse-move:up",
+            "mouse-move:down",
+            "mouse-move:left",
+            "mouse-move:right",
+            "mouse-click:left",
+            "mouse-click:right",
+            "mouse-click:middle",
+            "mouse-scroll:up",
+            "mouse-scroll:down",
+            "mouse-scroll:left",
+            "mouse-scroll:right",
+            "mouse-speed:0",
+            "mouse-speed:1",
+            "mouse-speed:2",
+            "mouse-speed:cycle",
+        ];
+        for cmd in valid {
+            assert!(is_host_mouse_command(cmd), "expected valid: {cmd}");
+        }
+        for bad in ["mouse-move:diagonal", "mouse-speed:3", "submit", ""] {
+            assert!(!is_host_mouse_command(bad), "expected invalid: {bad}");
+        }
+    }
+}

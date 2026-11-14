@@ -57,4 +57,22 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertEqual(actions, 0)
         XCTAssertFalse(model.canInstall)
     }
+
+    @MainActor
+    func testConnectKeyboardControlRendersWhenDisconnectedWithoutTriggeringSideEffects() {
+        var connectClicks = 0
+        let disconnected = FirmwareSliceModel(json: [
+            "current_version": NSNull(),
+            "device_reserved": false,
+            "phase": "idle"
+        ])
+        let view = FirmwareUpdateSettingsSection(
+            model: disconnected,
+            onConnectKeyboard: { connectClicks += 1 }
+        ) { _ in }
+        let host = NSHostingView(rootView: view.frame(width: 680))
+        host.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(host.fittingSize.height, 120)
+        XCTAssertEqual(connectClicks, 0)
+    }
 }
