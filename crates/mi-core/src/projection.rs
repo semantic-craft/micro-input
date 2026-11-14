@@ -549,6 +549,7 @@ impl ProjectionInputs<'_> {
         let pid_opt = self.resolved_active_profile_id();
         let layer = pid_opt
             .as_ref()
+            .and_then(|pid| super::six_layer_store::runtime_action_profile_id(doc, pid))
             .and_then(|pid| graph.profiles.get(pid))
             .and_then(|p| p.layer_order.first())
             .and_then(|lid| graph.layers.get(lid));

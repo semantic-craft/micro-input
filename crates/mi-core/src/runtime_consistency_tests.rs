@@ -403,8 +403,19 @@ fn native_codex_cheat_sheets_show_local_labels_and_preserve_empty_controls() {
     let graph = &mut store.document_store.draft.document.editable.graph;
     let layer_id = graph.profiles[&local].layer_order[0].clone();
     let mut expected = BTreeMap::new();
-    for binding in graph.layers.get_mut(&layer_id).unwrap().controls.values_mut() {
-        let slot: usize = binding.logical_control.strip_prefix("logical-").unwrap().parse().unwrap();
+    for binding in graph
+        .layers
+        .get_mut(&layer_id)
+        .unwrap()
+        .controls
+        .values_mut()
+    {
+        let slot: usize = binding
+            .logical_control
+            .strip_prefix("logical-")
+            .unwrap()
+            .parse()
+            .unwrap();
         if [0, 12].contains(&slot) {
             binding.action_id = None;
         }
@@ -417,39 +428,109 @@ fn native_codex_cheat_sheets_show_local_labels_and_preserve_empty_controls() {
         };
         expected.insert(slot, (label, binding.action_id.is_some()));
     }
-    store.select_and_activate_profile_at(&native, now, false).unwrap();
-    store.dispatch_sidebar_action(SidebarAction::SetProfileLocked(true)).unwrap();
+    store
+        .select_and_activate_profile_at(&native, now, false)
+        .unwrap();
+    store
+        .dispatch_sidebar_action(SidebarAction::SetProfileLocked(true))
+        .unwrap();
     let before = serde_json::to_value(&store.document_store.draft.document).unwrap();
     let menu = &store.projection().status_menu;
     assert_eq!(menu.active_profile_id.as_deref(), Some(native.as_str()));
     let sheet = menu.cheat_sheet_preview.clone().unwrap();
     assert_eq!(sheet.profile_name, "Codex");
     assert_eq!(sheet.key_cells.len(), 20);
-    for (slot, binding) in mi_model::direct_controls::CONTROL_BINDINGS.iter().enumerate() {
-        let cell = sheet.key_cells.iter().find(|cell| cell.binding_id == *binding).unwrap();
-        assert_eq!((&cell.label, cell.available), (&expected[&slot].0, expected[&slot].1), "{binding}");
+    for (slot, binding) in mi_model::direct_controls::CONTROL_BINDINGS
+        .iter()
+        .enumerate()
+    {
+        let cell = sheet
+            .key_cells
+            .iter()
+            .find(|cell| cell.binding_id == *binding)
+            .unwrap();
+        assert_eq!(
+            (&cell.label, cell.available),
+            (&expected[&slot].0, expected[&slot].1),
+            "{binding}"
+        );
     }
-    assert_eq!(store.projection_inputs().build_cheat_sheet_projection().key_cells, sheet.key_cells);
-    let other = store.find_canonical_profile_id(CanonicalAgent::Herdr).unwrap();
+    assert_eq!(
+        store
+            .projection_inputs()
+            .build_cheat_sheet_projection()
+            .key_cells,
+        sheet.key_cells
+    );
+    let other = store
+        .find_canonical_profile_id(CanonicalAgent::Herdr)
+        .unwrap();
     store.browse_profile(&other).unwrap();
-    assert_eq!(store.projection().status_menu.cheat_sheet_preview.as_ref(), Some(&sheet));
+    assert_eq!(
+        store.projection().status_menu.cheat_sheet_preview.as_ref(),
+        Some(&sheet)
+    );
     store.bottom_row_layout = BottomRowLayout::Merged;
     store.commit_runtime_update();
-    let merged = store.projection().status_menu.cheat_sheet_preview.as_ref().unwrap();
+    let merged = store
+        .projection()
+        .status_menu
+        .cheat_sheet_preview
+        .as_ref()
+        .unwrap();
     assert_eq!(merged.key_cells.len(), 19);
-    assert!(!merged.key_cells.iter().any(|cell| cell.binding_id == "AG11"));
-    assert_eq!(merged.key_cells.iter().find(|cell| cell.binding_id == "AG10").unwrap().label, "custom-native-control-10");
-    assert_eq!(serde_json::to_value(&store.document_store.draft.document).unwrap(), before);
+    assert!(!merged
+        .key_cells
+        .iter()
+        .any(|cell| cell.binding_id == "AG11"));
+    assert_eq!(
+        merged
+            .key_cells
+            .iter()
+            .find(|cell| cell.binding_id == "AG10")
+            .unwrap()
+            .label,
+        "custom-native-control-10"
+    );
+    assert_eq!(
+        serde_json::to_value(&store.document_store.draft.document).unwrap(),
+        before
+    );
 
-    store.document_store.draft.document.editable.graph.profiles.get_mut(&native).unwrap().name = "Other protected owner".into();
+    store
+        .document_store
+        .draft
+        .document
+        .editable
+        .graph
+        .profiles
+        .get_mut(&native)
+        .unwrap()
+        .name = "Other protected owner".into();
     store.commit_runtime_update();
-    assert!(store.projection().status_menu.cheat_sheet_preview.as_ref().unwrap().key_cells.iter().all(|cell| !cell.available));
+    assert!(store
+        .projection()
+        .status_menu
+        .cheat_sheet_preview
+        .as_ref()
+        .unwrap()
+        .key_cells
+        .iter()
+        .all(|cell| !cell.available));
     let graph = &mut store.document_store.draft.document.editable.graph;
     graph.profiles.get_mut(&native).unwrap().name = "Codex".into();
     graph.profiles.remove(&local);
     graph.profile_order.retain(|id| id != &local);
     store.commit_runtime_update();
-    assert!(store.projection().status_menu.cheat_sheet_preview.as_ref().unwrap().key_cells.iter().all(|cell| !cell.available));
+    assert!(store
+        .projection()
+        .status_menu
+        .cheat_sheet_preview
+        .as_ref()
+        .unwrap()
+        .key_cells
+        .iter()
+        .all(|cell| !cell.available));
 }
 
 #[test]

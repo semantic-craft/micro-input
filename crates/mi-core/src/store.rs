@@ -7389,10 +7389,7 @@ mod tests {
             .clone()
             .expect("host cheat sheet preview");
         let host_favorites = store.projection().status_menu.favorites_2x2.clone();
-        assert_eq!(
-            store.projection().status_menu.active_profile_name,
-            "Codex"
-        );
+        assert_eq!(store.projection().status_menu.active_profile_name, "Codex");
         assert_eq!(host_sheet.profile_name, "Codex");
         assert!(host_sheet
             .key_cells
