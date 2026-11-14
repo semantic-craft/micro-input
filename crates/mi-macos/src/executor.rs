@@ -2098,12 +2098,7 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                         Err(err) => make_receipt("failed", err),
                     }
                 } else {
-                    let reason = if adapter == "four-app" && command.starts_with("slot-open:") {
-                        "session_navigation_unavailable"
-                    } else {
-                        "unsupported_agent_command"
-                    };
-                    make_receipt("blocked", reason.into())
+                    make_receipt("blocked", "unsupported_agent_command".into())
                 }
             }
             ResolvedHostAction::FocusSession { .. } => {
