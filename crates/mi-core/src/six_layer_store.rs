@@ -2,7 +2,77 @@ use super::*;
 use crate::six_layer_runtime::{self, InstallationStatus};
 use mi_model::apply::AppliedSixLayerPlan;
 
+struct RuntimeProfileRoute<'a> {
+    selected_profile_id: &'a str,
+    source: RuntimeActionSource<'a>,
+}
+
+enum RuntimeActionSource<'a> {
+    Host(&'a str),
+    NativeCodexLowerRows(Option<&'a str>),
+    Protected,
+}
+
+impl<'a> RuntimeProfileRoute<'a> {
+    fn action_profile_id(&self, binding_id: &str) -> Option<&'a str> {
+        match self.source {
+            RuntimeActionSource::Host(id) => Some(id),
+            RuntimeActionSource::NativeCodexLowerRows(id) => {
+                let slot = mi_model::host_router::binding_to_logical_slot(binding_id)?
+                    .strip_prefix("logical-")?
+                    .parse::<usize>()
+                    .ok()?;
+                (6..=12).contains(&slot).then_some(id).flatten()
+            }
+            RuntimeActionSource::Protected => None,
+        }
+    }
+}
+
 impl WorkbenchStore {
+    fn runtime_profile_route<'a>(&'a self, profile_id: &'a str) -> Option<RuntimeProfileRoute<'a>> {
+        let doc = &self.document_store.host_store().draft.document;
+        let profile = doc.editable.graph.profiles.get(profile_id)?;
+        let protected = |profile: &mi_model::document::ProfileNode| {
+            profile
+                .layer_order
+                .iter()
+                .any(|id| doc.is_protected_oai_layer(id))
+        };
+        let source = if !protected(profile) {
+            RuntimeActionSource::Host(profile_id)
+        } else if mi_model::board_layers::native_owner(doc, profile_id)
+            == Some(mi_model::board_layers::NativeLayerOwner::Codex)
+        {
+            let local = doc
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, profile)| {
+                    profile.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME
+                        && !protected(profile)
+                })
+                .map(|(id, _)| id.as_str());
+            RuntimeActionSource::NativeCodexLowerRows(local)
+        } else {
+            RuntimeActionSource::Protected
+        };
+        Some(RuntimeProfileRoute {
+            selected_profile_id: profile_id,
+            source,
+        })
+    }
+
+    pub(super) fn runtime_action_profile_id<'a>(
+        &'a self,
+        profile_id: &'a str,
+        binding_id: &str,
+    ) -> Option<&'a str> {
+        self.runtime_profile_route(profile_id)?
+            .action_profile_id(binding_id)
+    }
+
     fn compiled_six_layer_plan(&self) -> Result<AppliedSixLayerPlan, String> {
         self.projection_inputs().compiled_six_layer_plan()
     }
@@ -31,24 +101,16 @@ impl WorkbenchStore {
             Some(CanonicalAgent::Herdr) => Some("herdr"),
             _ => None,
         };
-        let is_protected_oai = profile
-            .layer_order
-            .iter()
-            .any(|lid| doc.is_protected_oai_layer(lid));
-        if is_protected_oai {
-            return Some(six_layer_runtime::PinnedProfilePlan {
-                profile_id: profile_id.to_string(),
-                bundle_id,
-                actions: std::array::from_fn(|_| None),
-            });
-        }
+        let route = self.runtime_profile_route(profile_id)?;
         let layout = self.current_bottom_row_layout();
         let command_execution = self.command_execution_enabled;
         let actions = std::array::from_fn(|slot| {
+            let binding_id = mi_model::direct_controls::CONTROL_BINDINGS[slot];
+            let source_id = route.action_profile_id(binding_id)?;
             let mut action = resolve_host_action_with_layout(
                 doc,
-                Some(profile_id),
-                mi_model::direct_controls::CONTROL_BINDINGS[slot],
+                Some(source_id),
+                binding_id,
                 true,
                 command_execution,
                 layout,
@@ -95,7 +157,7 @@ impl WorkbenchStore {
             Some(action)
         });
         Some(six_layer_runtime::PinnedProfilePlan {
-            profile_id: profile_id.to_string(),
+            profile_id: route.selected_profile_id.to_string(),
             bundle_id,
             actions,
         })

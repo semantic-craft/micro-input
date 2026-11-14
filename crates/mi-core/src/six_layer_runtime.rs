@@ -2027,6 +2027,97 @@ mod tests {
     }
 
     #[test]
+    fn native_codex_lower_rows_dispatch_compiled_actions_and_pause_without_events() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::WorkbenchStore::open_isolated(directory.path()).unwrap();
+        let native = store
+            .find_canonical_profile_id(crate::CanonicalAgent::Codex)
+            .unwrap();
+        let pinned = store.compile_profile_twenty_slots(&native).unwrap();
+        let plan = test_plan();
+        for mode in [
+            SixLayerRoutingMode::Locked(pinned.clone()),
+            SixLayerRoutingMode::ManualPinned(pinned.clone()),
+        ] {
+            for enabled in [true, false] {
+                let receiver = UserCommandReceiver::bind().unwrap();
+                receiver.arm().unwrap();
+                let routing = Mutex::new(RoutingContext::default());
+                routing
+                    .lock()
+                    .unwrap()
+                    .set_routing(mode.clone(), Some("com.openai.codex"));
+                for control in 0..20 {
+                    send(&receiver, control);
+                }
+                let stop = AtomicBool::new(false);
+                let policy = ExecutionPolicy::default();
+                policy.set(enabled, true, Instant::now() - Duration::from_secs(1));
+                let (tx, rx) = std::sync::mpsc::sync_channel(20);
+                let mut dispatched = Vec::new();
+                let mut received = 0;
+                let deadline = Instant::now() + Duration::from_secs(1);
+                execute_clicks(
+                    &receiver,
+                    &plan,
+                    &stop,
+                    &policy,
+                    &AtomicU8::new(1),
+                    &AtomicBool::new(false),
+                    &routing,
+                    &tx,
+                    None,
+                    || {
+                        let next = receiver.next();
+                        match &next {
+                            Ok(Some(_)) => received += 1,
+                            Ok(None) if received == 20 => stop.store(true, Ordering::Release),
+                            Ok(None) => {
+                                assert!(Instant::now() < deadline, "input delivery timed out")
+                            }
+                            Err(error) => panic!("input delivery failed: {error}"),
+                        }
+                        next
+                    },
+                    || Ok(()),
+                    |profile, binding, action, _| {
+                        dispatched.push((profile.to_owned(), binding.to_owned()));
+                        mi_macos::SimulatedHostActionExecutor.execute(profile, binding, action)
+                    },
+                );
+                let expected = if enabled {
+                    (6..=12)
+                        .map(|slot| (native.clone(), format!("AG{slot:02}")))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(dispatched, expected);
+                let receipts: Vec<_> = rx.try_iter().map(|r| r.detail).collect();
+                assert_eq!(
+                    receipts,
+                    if enabled {
+                        [
+                            "live-voice",
+                            "focus-input",
+                            "new-tab",
+                            "cycle-workspace-layout",
+                            "new-chat",
+                            "toggle-dictation",
+                            "submit",
+                        ]
+                        .map(|command| format!("codex/{command}"))
+                        .to_vec()
+                    } else {
+                        Vec::new()
+                    }
+                );
+                assert!(receiver.failure().is_none());
+            }
+        }
+    }
+
+    #[test]
     fn custom_codex_routes_layer_one_vendor_in_manual_and_auto_follow_modes() {
         let plan = test_plan();
         let custom = PinnedProfilePlan {

@@ -4413,10 +4413,11 @@ impl WorkbenchStore {
         binding_id: &str,
         layout: BottomRowLayout,
     ) -> Option<ResolvedHostAction> {
-        let doc = &self.document_store.draft.document;
+        let source_id = self.runtime_action_profile_id(profile_id, binding_id)?;
+        let doc = &self.document_store.host_store().draft.document;
         if let Some(resolved) = resolve_host_action_with_layout(
             doc,
-            Some(profile_id),
+            Some(source_id),
             binding_id,
             true,
             self.command_execution_enabled,
@@ -4424,7 +4425,10 @@ impl WorkbenchStore {
         ) {
             return Some(resolved);
         }
-        let profile = doc.editable.graph.profiles.get(profile_id)?;
+        if source_id != profile_id {
+            return None;
+        }
+        let profile = doc.editable.graph.profiles.get(source_id)?;
         fallback_unbridged_oai_action(&profile.name, binding_id, layout)
     }
 
@@ -4451,9 +4455,13 @@ impl WorkbenchStore {
         }
         let profile_id = self.resolved_active_profile_id();
         if event.kind != InputEventKind::Released
-            && profile_id
-                .as_ref()
-                .is_none_or(|id| self.is_protected_oai_profile(id))
+            && profile_id.as_ref().is_none_or(|id| {
+                self.is_protected_oai_profile(id)
+                    && event
+                        .binding_id
+                        .as_deref()
+                        .is_none_or(|binding| self.runtime_action_profile_id(id, binding).is_none())
+            })
         {
             return None;
         }
