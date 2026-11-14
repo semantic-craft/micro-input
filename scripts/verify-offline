@@ -267,59 +267,55 @@ def main():
     args = parser.parse_args()
     env = dict(os.environ, MI_AUTO_HOST_READY="0")
     env.pop("MI_SYNTHETIC_SCENARIO", None)
-    try:
-        if not args.qa_only:
-            subprocess.run(["scripts/check"], cwd=ROOT, env=env, check=True)
-        subprocess.run(["scripts/build"], cwd=ROOT, env=env, check=True)
-        for scenario in ("host-execution", "dsh-navigation", "antigravity-status", "config-write", "lighting-control", "diagnostic-export"):
-            started = int(time.time() * 1000)
-            scenario_env = dict(env, MI_SYNTHETIC_SCENARIO=scenario)
-            if scenario == "diagnostic-export":
-                qa_runs = ROOT / ".scratch/qa-runs"
-                qa_runs.mkdir(mode=0o700, parents=True, exist_ok=True)
-                run_dir = qa_runs / f"{started}-{os.getpid()}"
-                run_dir_index = 0
-                while run_dir.exists():
-                    run_dir_index += 1
-                    run_dir = qa_runs / f"{started}-{os.getpid()}-{run_dir_index}"
-                run_dir.mkdir(mode=0o700)
-                scenario_env["MI_QA_RUN_DIR"] = str(run_dir)
-                scenario_env["MI_DIAGNOSTIC_EVIDENCE_PATH"] = str(run_dir / "evidence/diagnostic-report.json")
-            proc = subprocess.Popen(["scripts/run", "--verify", "--timeout=45"], cwd=ROOT,
-                                    env=scenario_env,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if not args.qa_only:
+        subprocess.run(["scripts/check"], cwd=ROOT, env=env, check=True)
+    subprocess.run(["scripts/build"], cwd=ROOT, env=env, check=True)
+    for scenario in ("host-execution", "dsh-navigation", "antigravity-status", "config-write", "lighting-control", "diagnostic-export"):
+        started = int(time.time() * 1000)
+        scenario_env = dict(env, MI_SYNTHETIC_SCENARIO=scenario)
+        if scenario == "diagnostic-export":
+            qa_runs = ROOT / ".scratch/qa-runs"
+            qa_runs.mkdir(mode=0o700, parents=True, exist_ok=True)
+            run_dir = qa_runs / f"{started}-{os.getpid()}"
+            run_dir_index = 0
+            while run_dir.exists():
+                run_dir_index += 1
+                run_dir = qa_runs / f"{started}-{os.getpid()}-{run_dir_index}"
+            run_dir.mkdir(mode=0o700)
+            scenario_env["MI_QA_RUN_DIR"] = str(run_dir)
+            scenario_env["MI_DIAGNOSTIC_EVIDENCE_PATH"] = str(run_dir / "evidence/diagnostic-report.json")
+        proc = subprocess.Popen(["scripts/run", "--verify", "--timeout=45"], cwd=ROOT,
+                                env=scenario_env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            output, _ = proc.communicate(timeout=90)
+        except BaseException:
+            proc.terminate()
             try:
-                output, _ = proc.communicate(timeout=90)
-            except BaseException:
-                proc.terminate()
-                try:
-                    proc.communicate(timeout=15)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                raise
-            print(output, end="", flush=True)
-            paths = [line.split("=", 1)[1] for line in output.splitlines() if line.startswith("QA_RUN_DIR=")]
-            if len(paths) != 1:
-                raise ValueError("launcher did not identify exactly one QA run")
-            run = Path(paths[0]).resolve()
-            if run.parent != (ROOT / ".scratch/qa-runs").resolve():
-                raise ValueError("QA path escaped isolated root")
-            try:
-                result = verify_evidence(run, scenario, started, alive)
-                if proc.returncode != 0:
-                    raise ValueError(f"launcher failed: {proc.returncode}")
-            except Exception as error:
-                (run / "evidence/result.json").write_text(json.dumps({"status": "FAIL", "scenario": scenario, "error": str(error)}, indent=2) + "\n")
-                raise
-            result.update(git_sha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-                          working_tree_changes=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
-                          timestamp_ms=int(time.time() * 1000))
-            (run / "evidence/result.json").write_text(json.dumps(result, indent=2) + "\n")
-            print(f"{scenario}: PASS ({run / 'evidence/result.json'})", flush=True)
-    finally:
-        # Restore matching production bindings/library/app; never launch that app.
-        subprocess.run(["scripts/build"], cwd=ROOT, env=env, check=True)
+                proc.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            raise
+        print(output, end="", flush=True)
+        paths = [line.split("=", 1)[1] for line in output.splitlines() if line.startswith("QA_RUN_DIR=")]
+        if len(paths) != 1:
+            raise ValueError("launcher did not identify exactly one QA run")
+        run = Path(paths[0]).resolve()
+        if run.parent != (ROOT / ".scratch/qa-runs").resolve():
+            raise ValueError("QA path escaped isolated root")
+        try:
+            result = verify_evidence(run, scenario, started, alive)
+            if proc.returncode != 0:
+                raise ValueError(f"launcher failed: {proc.returncode}")
+        except Exception as error:
+            (run / "evidence/result.json").write_text(json.dumps({"status": "FAIL", "scenario": scenario, "error": str(error)}, indent=2) + "\n")
+            raise
+        result.update(git_sha=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                      working_tree_changes=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
+                      timestamp_ms=int(time.time() * 1000))
+        (run / "evidence/result.json").write_text(json.dumps(result, indent=2) + "\n")
+        print(f"{scenario}: PASS ({run / 'evidence/result.json'})", flush=True)
 
 
 if __name__ == "__main__":

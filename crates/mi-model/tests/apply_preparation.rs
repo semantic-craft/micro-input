@@ -358,7 +358,6 @@ fn firmware_v063_304_tokens_2d_encoders_and_joystick_sector_splicing_work_end_to
     let p = store.draft.document.editable.graph.profile_order[0].clone();
     let l = store.draft.document.editable.graph.profiles[&p].layer_order[0].clone();
 
-    // Assign encoder click (slot 15) -> KC_MUTE and joystick sector 0 (slot 16) -> KC_ENT
     store
         .update(|d| {
             d.assign(
