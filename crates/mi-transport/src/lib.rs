@@ -46,10 +46,19 @@ pub struct TargetKeyboard {
 
 /// Descriptor-only selection of one physical keyboard and its vendor sibling.
 pub fn discover_target_keyboard() -> Result<TargetKeyboard, TransportError> {
+    discover_target_keyboard_preferred(None)
+}
+
+/// Descriptor-only selection of one physical keyboard and its vendor sibling,
+/// preferring the device matching `preferred_serial` when multiple units exist.
+pub fn discover_target_keyboard_preferred(
+    preferred_serial: Option<&str>,
+) -> Result<TargetKeyboard, TransportError> {
     #[cfg(target_os = "macos")]
     {
         unsafe extern "C" {
             fn mi_keyboard_identity(
+                preferred_serial: *const std::ffi::c_char,
                 callback: extern "C" fn(*mut std::ffi::c_void, u32, u64, u64),
                 context: *mut std::ffi::c_void,
             ) -> i32;
@@ -69,15 +78,29 @@ pub fn discover_target_keyboard() -> Result<TargetKeyboard, TransportError> {
                 vendor_path: format!("DevSrvsID:{vendor}"),
             });
         }
+        let preferred_cstr = preferred_serial
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| std::ffi::CString::new(s).ok());
+        let preferred_ptr = preferred_cstr
+            .as_ref()
+            .map_or(std::ptr::null(), |s| s.as_ptr());
         let mut result = None;
-        let status =
-            unsafe { mi_keyboard_identity(found, &mut result as *mut _ as *mut std::ffi::c_void) };
+        let status = unsafe {
+            mi_keyboard_identity(
+                preferred_ptr,
+                found,
+                &mut result as *mut _ as *mut std::ffi::c_void,
+            )
+        };
         if status == 0 {
             if let Some(result) = result {
                 return Ok(result);
             }
         }
     }
+    #[cfg(not(target_os = "macos"))]
+    let _ = preferred_serial;
     Err(TransportError::Unavailable(
         "未确认唯一 Creator Micro 2 的标准键盘描述符、USB 位置及专用接口".into(),
     ))
@@ -92,6 +115,8 @@ pub struct HidCandidate {
     pub transport_hint: TransportHint,
     pub product: String,
     pub path: String,
+    #[serde(default)]
+    pub serial_number: Option<String>,
 }
 pub fn is_candidate(d: &HidCandidate) -> bool {
     d.vid == 0x303a
@@ -192,6 +217,7 @@ extern "C" {
             u16,
             *const u16,
             usize,
+            *const std::ffi::c_char,
             *const std::ffi::c_char,
             *const std::ffi::c_char,
             *const std::ffi::c_char,
@@ -369,8 +395,7 @@ impl MacTransport {
                                     let result = {
                                         let mut lease = lease.lock().unwrap();
                                         enumerate_mac().and_then(|devices| {
-                                            let path =
-                                                unique_vendor(&devices).map(|d| d.path.as_str());
+                                            let path = retained_or_unique_vendor(&lease, &devices);
                                             lease.stage(path, open_vendor)
                                         })
                                     };
@@ -445,6 +470,22 @@ fn unique_vendor(devices: &[HidCandidate]) -> Option<&HidCandidate> {
 }
 
 #[cfg(target_os = "macos")]
+fn retained_or_unique_vendor<'a>(
+    lease: &VendorLease,
+    devices: &'a [HidCandidate],
+) -> Option<&'a str> {
+    if let Some((held_id, _)) = &lease.owner {
+        if let Some(retained) = devices
+            .iter()
+            .find(|d| d.path == *held_id && is_exclusive_vendor_candidate(d))
+        {
+            return Some(retained.path.as_str());
+        }
+    }
+    unique_vendor(devices).map(|d| d.path.as_str())
+}
+
+#[cfg(target_os = "macos")]
 fn open_vendor(path: &str) -> Result<Arc<MacDeviceOwner>, TransportError> {
     MacDeviceOwner::open(path, true).map(Arc::new)
 }
@@ -461,10 +502,18 @@ extern "C" fn discovered(
     transport: *const std::ffi::c_char,
     product: *const std::ffi::c_char,
     path: *const std::ffi::c_char,
+    serial: *const std::ffi::c_char,
 ) {
     // The native adapter owns these values for the duration of this synchronous callback.
     unsafe {
         let string = |p| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
+        let serial_raw = if serial.is_null() {
+            String::new()
+        } else {
+            string(serial)
+        };
+        let serial_trimmed = serial_raw.trim();
+        let serial_number = (!serial_trimmed.is_empty()).then(|| serial_trimmed.to_owned());
         let candidate = HidCandidate {
             vid,
             pid,
@@ -484,6 +533,7 @@ extern "C" fn discovered(
             },
             product: string(product),
             path: string(path),
+            serial_number,
         };
         if is_candidate(&candidate) {
             (*(context as *mut Vec<HidCandidate>)).push(candidate);
@@ -529,9 +579,13 @@ impl HidTransport for MacTransport {
         if let Some(lease) = &self.vendor_lease {
             let mut lease = lease.lock().unwrap();
             let devices = self.enumerate()?;
-            let path = unique_vendor(&devices).map(|d| d.path.as_str());
-            if path != Some(id) {
-                lease.retain_stage(path);
+            let requested = devices
+                .iter()
+                .find(|d| d.path == id && is_exclusive_vendor_candidate(d))
+                .map(|d| d.path.as_str());
+            if requested != Some(id) {
+                let retained = retained_or_unique_vendor(&lease, &devices);
+                lease.retain_stage(retained);
                 return Err(TransportError::ExclusiveVendorInterfaceRequired);
             }
             return Ok(lease.handoff(id, open_vendor)?);
@@ -1183,6 +1237,7 @@ mod tests {
             transport_hint: TransportHint::Usb,
             product: "Synthetic".into(),
             path: "interface-a".into(),
+            serial_number: None,
         };
         assert!(is_candidate(&d));
         assert!(!is_exclusive_vendor_candidate(&d));
@@ -1202,6 +1257,7 @@ mod tests {
             transport_hint: TransportHint::Usb,
             product: "Synthetic".into(),
             path: "interface-a".into(),
+            serial_number: None,
         };
         assert!(is_exclusive_vendor_candidate(&d));
         d.usage_pairs.push(UsagePair { page: 1, usage: 6 });
@@ -1228,6 +1284,7 @@ mod tests {
             transport_hint: TransportHint::Usb,
             product: "synthetic".into(),
             path: "mock".into(),
+            serial_number: None,
         };
         assert!(is_candidate(&d));
         // R-D01: a vendor page alone cannot identify the RPC interface.
@@ -1242,6 +1299,116 @@ mod tests {
         d.pid = 0x8298;
         d.usage_page = 1;
         assert!(!is_candidate(&d));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn vendor_candidate(path: &str, serial: Option<&str>) -> HidCandidate {
+        HidCandidate {
+            vid: 0x303a,
+            pid: 0x8298,
+            usage_page: 0xff00,
+            usage: 1,
+            usage_pairs: vec![UsagePair {
+                page: 0xff00,
+                usage: 1,
+            }],
+            transport_hint: TransportHint::Usb,
+            product: "Creator Micro 2".into(),
+            path: path.into(),
+            serial_number: serial.map(str::to_owned),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn vendor_lease_retains_active_device_and_allows_explicit_handoff_across_two_units() {
+        let dev_a = Arc::new(QueuedHidDevice::default());
+        let dev_b = Arc::new(QueuedHidDevice::default());
+        let cand_a = vendor_candidate("unit-a", Some("SER-A"));
+        let cand_b = vendor_candidate("unit-b", Some("SER-B"));
+
+        let mut lease = VendorLease::default();
+        assert_eq!(
+            retained_or_unique_vendor(&lease, &[cand_a.clone(), cand_b.clone()]),
+            None
+        );
+
+        let initial_path = retained_or_unique_vendor(&lease, std::slice::from_ref(&cand_a));
+        assert_eq!(initial_path, Some("unit-a"));
+        lease
+            .stage(initial_path, |_| Ok(test_vendor_owner(dev_a.clone())))
+            .unwrap();
+        let link_a = lease
+            .handoff("unit-a", |_| panic!("must reuse staged unit-a"))
+            .unwrap();
+
+        // Plugging in a second Creator Micro 2 retains unit-a's lease rather than tearing it down.
+        let both = vec![cand_a.clone(), cand_b.clone()];
+        let retained_path = retained_or_unique_vendor(&lease, &both);
+        assert_eq!(retained_path, Some("unit-a"));
+        lease
+            .stage(retained_path, |_| panic!("must keep existing unit-a owner"))
+            .unwrap();
+        assert_eq!(dev_a.drops.load(Ordering::Acquire), 0);
+        link_a.write(b"still-alive").await.unwrap();
+
+        // Requesting an unverified/absent path retains unit-a's lease as well.
+        lease.retain_stage(retained_or_unique_vendor(&lease, &both));
+        assert_eq!(dev_a.drops.load(Ordering::Acquire), 0);
+
+        // Explicit handoff to unit-b switches ownership cleanly and releases unit-a.
+        let requested_b = both
+            .iter()
+            .find(|d| d.path == "unit-b" && is_exclusive_vendor_candidate(d))
+            .map(|d| d.path.as_str());
+        assert_eq!(requested_b, Some("unit-b"));
+        let link_b = lease
+            .handoff(requested_b.unwrap(), |_| {
+                Ok(test_vendor_owner(dev_b.clone()))
+            })
+            .unwrap();
+        assert_eq!(dev_a.drops.load(Ordering::Acquire), 1);
+        assert_eq!(dev_b.drops.load(Ordering::Acquire), 0);
+        assert!(link_a.write(b"stale-a").await.is_err());
+        link_b.write(b"active-b").await.unwrap();
+
+        // Unplugging unit-b when unit-a remains moves unique stage to unit-a.
+        let remaining_path = retained_or_unique_vendor(&lease, std::slice::from_ref(&cand_a));
+        assert_eq!(remaining_path, Some("unit-a"));
+        lease
+            .stage(remaining_path, |_| Ok(test_vendor_owner(dev_a.clone())))
+            .unwrap();
+        assert_eq!(dev_b.drops.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn hid_candidate_deserializes_with_and_without_serial_number() {
+        let legacy_json = r#"{
+            "vid": 12346,
+            "pid": 33432,
+            "usage_page": 65280,
+            "usage": 1,
+            "usage_pairs": [{"page": 65280, "usage": 1}],
+            "transport_hint": "Usb",
+            "product": "Creator Micro 2",
+            "path": "DevSrvsID:10"
+        }"#;
+        let legacy: HidCandidate = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(legacy.serial_number, None);
+
+        let with_serial = r#"{
+            "vid": 12346,
+            "pid": 33432,
+            "usage_page": 65280,
+            "usage": 1,
+            "usage_pairs": [],
+            "transport_hint": "Usb",
+            "product": "Creator Micro 2",
+            "path": "DevSrvsID:11",
+            "serial_number": "SN-001"
+        }"#;
+        let modern: HidCandidate = serde_json::from_str(with_serial).unwrap();
+        assert_eq!(modern.serial_number.as_deref(), Some("SN-001"));
     }
 
     #[test]
@@ -1372,6 +1539,7 @@ impl HidTransport for SyntheticDiscovery {
                     } else {
                         format!("synthetic-interface-{i}")
                     },
+                    serial_number: None,
                 })
                 .collect()),
             _ => Err(TransportError::Unavailable("合成枚举失败".into())),

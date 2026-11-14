@@ -335,6 +335,7 @@ mod tests {
             transport_hint: mi_transport::TransportHint::Usb,
             product: "Creator Micro 2".into(),
             path: "usb-1".into(),
+            serial_number: None,
         };
         let multi_err = store
             .prepare_device_with_discovery(

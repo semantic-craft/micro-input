@@ -134,6 +134,12 @@ pub struct StatusMenuProjection {
     pub pending_import: Option<PendingPresetImportPreview>,
     pub pending_export_scope: Option<PresetExportScope>,
     pub preset_error: Option<String>,
+    #[serde(default)]
+    pub power_status: Option<crate::header::PowerStatusBadgeProjection>,
+    #[serde(default)]
+    pub candidate_devices: Vec<crate::header::CandidateDevice>,
+    #[serde(default)]
+    pub preferred_device_serial: Option<String>,
 }
 
 impl Default for StatusMenuProjection {
@@ -166,6 +172,9 @@ impl Default for StatusMenuProjection {
             pending_import: None,
             pending_export_scope: None,
             preset_error: None,
+            power_status: None,
+            candidate_devices: Vec::new(),
+            preferred_device_serial: None,
         }
     }
 }
@@ -178,6 +187,9 @@ pub enum StatusMenuAction {
         profile_id: String,
     },
     SelectProfile(String),
+    SelectCandidateDevice {
+        selector: String,
+    },
     SetProfileLocked(bool),
     SetHostExecutionEnabled(bool),
     OpenAccessibilitySettings,

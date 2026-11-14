@@ -11,7 +11,10 @@ use crate::{
         MacroEditorModalProjection, MacroStepDraft, MultiBranchKind, MultiBranchSlotProjection,
         MultiBranchTarget, MultiEditorModalProjection, ReconnectComparisonModalProjection,
     },
-    header::{HeaderAction, HeaderProjection, HeaderReadyState},
+    header::{
+        CandidateDevice, HeaderAction, HeaderProjection, HeaderReadyState,
+        PowerStatusBadgeProjection,
+    },
     inspector::{
         ActionLibraryRowProjection, CodexKeycapId, EditableSlotInspectorProjection,
         InspectorAction, InspectorBodyProjection, InspectorDrawer, InspectorProjection,
@@ -400,6 +403,7 @@ pub struct WorkbenchStore {
     pub status_item_host: Arc<dyn StatusItemHost>,
     pub device_session: Option<Arc<DeviceSession>>,
     pub connected_candidate: Option<mi_transport::HidCandidate>,
+    pub available_usb_candidates: Vec<mi_transport::HidCandidate>,
     pub hardware_rpc_verified: bool,
     pub last_hardware_auto_acceptance: Option<HardwareAutoAcceptanceReceipt>,
     pub merge_wide_key: Arc<AtomicBool>,
@@ -496,6 +500,63 @@ pub struct WorkbenchStore {
     projection: WorkbenchProjection,
 }
 
+fn sorted_verified_usb_candidates(
+    candidates: &[mi_transport::HidCandidate],
+) -> Vec<mi_transport::HidCandidate> {
+    let mut verified_usb = candidates
+        .iter()
+        .filter(|candidate| {
+            mi_transport::is_candidate(candidate)
+                && candidate.transport_hint == mi_transport::TransportHint::Usb
+                && candidate.pid == 0x8298
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    verified_usb.sort_by(|left, right| {
+        (
+            left.serial_number.is_none(),
+            left.serial_number.as_deref().unwrap_or(""),
+            left.path.as_str(),
+        )
+            .cmp(&(
+                right.serial_number.is_none(),
+                right.serial_number.as_deref().unwrap_or(""),
+                right.path.as_str(),
+            ))
+    });
+    verified_usb
+}
+
+fn choose_usb_candidate<'a>(
+    verified_usb: &'a [mi_transport::HidCandidate],
+    explicit_selector: Option<&str>,
+    preferred_serial: Option<&str>,
+) -> Option<&'a mi_transport::HidCandidate> {
+    if let Some(raw_selector) = explicit_selector {
+        let selector = raw_selector.trim();
+        if selector.is_empty() {
+            return None;
+        }
+        return verified_usb
+            .iter()
+            .find(|candidate| candidate.serial_number.as_deref() == Some(selector))
+            .or_else(|| {
+                verified_usb
+                    .iter()
+                    .find(|candidate| candidate.path == selector)
+            });
+    }
+    if let Some(preferred) = preferred_serial.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(found) = verified_usb
+            .iter()
+            .find(|candidate| candidate.serial_number.as_deref() == Some(preferred))
+        {
+            return Some(found);
+        }
+    }
+    verified_usb.first()
+}
+
 impl WorkbenchStore {
     pub fn open(config: WorkbenchStoreConfig) -> Result<Self, WorkbenchError> {
         let now = Instant::now();
@@ -552,6 +613,7 @@ impl WorkbenchStore {
             status_item_host,
             device_session: None,
             connected_candidate: None,
+            available_usb_candidates: Vec::new(),
             hardware_rpc_verified: false,
             last_hardware_auto_acceptance: None,
             merge_wide_key,
@@ -656,6 +718,10 @@ impl WorkbenchStore {
         store.ensure_default_pinned_favorites();
         store.initialize_board_plan()?;
         store.initialize_selection(preserve_saved_host_state)?;
+        store.v070_hardware.projection.auto_layer_sync_enabled =
+            store.document_store.v070_auto_layer_sync_enabled();
+        store.v070_hardware.projection.preferred_device_serial =
+            store.document_store.preferred_device_serial();
         store.status_message = "已就绪".to_string();
         if store.config.auto_connect_usb
             && env::var("MI_AUTO_HOST_READY").ok().as_deref() != Some("0")
@@ -811,6 +877,9 @@ impl WorkbenchStore {
         self.sync_six_layer_routing_context();
         self.sync_live_session_source();
         self.refresh_four_app_lighting();
+        if !locked {
+            let _ = self.maybe_sync_v070_foreground_layer();
+        }
         self.commit_runtime_update();
         Ok(())
     }
@@ -1300,6 +1369,15 @@ impl WorkbenchStore {
         transport: &dyn mi_transport::HidTransport,
         enable_execution_on_connect: bool,
     ) -> Result<bool, WorkbenchError> {
+        self.connect_with_transport_preferring(transport, enable_execution_on_connect, None)
+    }
+
+    pub fn connect_with_transport_preferring(
+        &mut self,
+        transport: &dyn mi_transport::HidTransport,
+        enable_execution_on_connect: bool,
+        explicit_selector: Option<&str>,
+    ) -> Result<bool, WorkbenchError> {
         self.require_awake()?;
         if self.six_layer_state.installation.is_some()
             || self.six_layer_running.is_some()
@@ -1328,180 +1406,12 @@ impl WorkbenchStore {
                 .map_err(WorkbenchError::Routing)?;
         }
         if let (Some(session), Some(cand)) = (&self.device_session, &self.connected_candidate) {
-            self.status_message = format!(
-                "已连接 {} ({:04X}:{:04X}) · {}",
-                cand.product,
-                cand.vid,
-                cand.pid,
-                if session.has_exclusive_vendor_link() {
-                    "USB 专用接口已独占"
-                } else {
-                    "已建立 HID 会话"
-                }
-            );
-            self.commit_runtime_update();
-            return Ok(true);
-        }
-
-        let candidates = transport
-            .enumerate()
-            .map_err(|e| WorkbenchError::Storage(format!("检测小键盘连接失败：{e}")))?;
-        let verified_usb: Vec<mi_transport::HidCandidate> = candidates
-            .iter()
-            .filter(|c| {
-                mi_transport::is_candidate(c)
-                    && c.transport_hint == mi_transport::TransportHint::Usb
-                    && c.pid == 0x8298
-            })
-            .cloned()
-            .collect();
-
-        match verified_usb.len() {
-            1 => {
-                let target = verified_usb.into_iter().next().unwrap();
-                let link = transport
-                    .open(&target.path)
-                    .map_err(|e| WorkbenchError::Storage(format!("打开 USB 小键盘失败：{e}")))?;
-                if !self.config.isolated && !link.is_exclusive_vendor() {
-                    link.close();
-                    return Err(WorkbenchError::Storage("未取得 USB 专用接口独占".into()));
-                }
-                let session = {
-                    let _guard = self.tokio_runtime.enter();
-                    DeviceSession::new(
-                        link,
-                        Box::new(mi_proto::NativeFramer::default()),
-                        Arc::new(mi_session::ReadOnlySchema),
-                        mi_session::SessionConfig::default(),
-                    )
-                };
-                self.merge_wide_key
-                    .store(self.bottom_row_layout.is_merged(), Ordering::SeqCst);
-                self.board_decoder = Arc::new(AtomicBool::new(false));
-                self.board_routing = if session.has_exclusive_vendor_link() {
-                    BoardRouting::Checking
-                } else {
-                    BoardRouting::Legacy
-                };
-                let mut monitor = session.subscribe_verified_input_with_board_mode(
-                    Arc::clone(&self.merge_wide_key),
-                    Arc::clone(&self.board_decoder),
-                );
-                let session_id = session.id;
-                self.hardware_event_tx.open_source(session_id);
-                self.input_lost_session = None;
-                let tx = self.hardware_event_tx.clone();
-                self.tokio_runtime.spawn(async move {
-                    while let Some(event) = monitor.next().await {
-                        if tx.send(HardwareLoopEvent::Input(event)).is_err() {
-                            return;
-                        }
-                    }
-                    let _ = tx.send(HardwareLoopEvent::Disconnected { session_id });
-                });
-                let mut cs_notif_rx = session.notifications();
-                let cs_session = Arc::clone(&session);
-                let cs_tx = self.hardware_event_tx.clone();
-                self.tokio_runtime.spawn(async move {
-                    let map_kind = |notification: &mi_proto::HostNotification| match notification {
-                        mi_proto::HostNotification::CheatSheetShow(_) => {
-                            Some(CheatSheetNotificationKind::Show)
-                        }
-                        mi_proto::HostNotification::CheatSheetHide(_) => {
-                            Some(CheatSheetNotificationKind::Hide)
-                        }
-                        mi_proto::HostNotification::CheatSheetToggle(_) => {
-                            Some(CheatSheetNotificationKind::Toggle)
-                        }
-                        _ => None,
-                    };
-                    loop {
-                        tokio::select! {
-                            _ = cs_session.wait_disconnected() => {
-                                loop {
-                                    match cs_notif_rx.try_recv() {
-                                        Ok(received) => {
-                                            if let Some(kind) = map_kind(&received.notification) {
-                                                if cs_tx
-                                                    .send(HardwareLoopEvent::CheatSheetNotification {
-                                                        session_id,
-                                                        ingress_sequence: received.ingress_sequence,
-                                                        kind,
-                                                    })
-                                                    .is_err()
-                                                {
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
-                                        Err(
-                                            tokio::sync::broadcast::error::TryRecvError::Empty
-                                            | tokio::sync::broadcast::error::TryRecvError::Closed,
-                                        ) => break,
-                                    }
-                                }
-                                return;
-                            }
-                            notif = cs_notif_rx.recv() => {
-                                match notif {
-                                    Ok(received) => {
-                                        if let Some(kind) = map_kind(&received.notification) {
-                                            if cs_tx
-                                                .send(HardwareLoopEvent::CheatSheetNotification {
-                                                    session_id,
-                                                    ingress_sequence: received.ingress_sequence,
-                                                    kind,
-                                                })
-                                                .is_err()
-                                            {
-                                                return;
-                                            }
-                                        }
-                                    }
-                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                                }
-                            }
-                        }
-                    }
-                });
-                self.device_session = Some(Arc::clone(&session));
-                self.connected_candidate = Some(target.clone());
-                self.hardware_rpc_verified = false;
-                if enable_execution_on_connect && !self.document_store.host_execution_enabled() {
-                    let _ =
-                        self.apply_routing_operation(RoutingOperation::Execution { enabled: true });
-                }
-                self.lighting_arbiter.invalidate_hardware_cache();
-                self.refresh_four_app_lighting();
-                let accept_session = Arc::clone(&session);
-                let accept_target = target.clone();
-                let accept_tx = self.hardware_event_tx.clone();
-                let initial_lighting_json = self
-                    .lighting_arbiter
-                    .last_hardware_sync_json
-                    .clone()
-                    .unwrap_or_default();
-                self.tokio_runtime.spawn(async move {
-                    if let Some(receipt) = run_automatic_hardware_acceptance(
-                        &accept_session,
-                        &accept_target,
-                        &initial_lighting_json,
-                    )
-                    .await
-                    {
-                        let _ = accept_tx.send(HardwareLoopEvent::HardwareAutoAccepted {
-                            session_id: accept_session.id,
-                            receipt,
-                        });
-                    }
-                });
+            if explicit_selector.is_none() {
                 self.status_message = format!(
                     "已连接 {} ({:04X}:{:04X}) · {}",
-                    target.product,
-                    target.vid,
-                    target.pid,
+                    cand.product,
+                    cand.vid,
+                    cand.pid,
                     if session.has_exclusive_vendor_link() {
                         "USB 专用接口已独占"
                     } else {
@@ -1509,28 +1419,314 @@ impl WorkbenchStore {
                     }
                 );
                 self.commit_runtime_update();
-                Ok(true)
-            }
-            0 => {
-                if let Some(first) = candidates.first() {
-                    self.status_message = format!(
-                        "已检测到 {} ({:04X}:{:04X})",
-                        first.product, first.vid, first.pid
-                    );
-                } else {
-                    self.status_message =
-                        "未检测到 Creator Micro 2 USB 连接（离线工作台就绪）".to_string();
-                }
-                self.commit_runtime_update();
-                Ok(false)
-            }
-            _ => {
-                self.status_message =
-                    "检测到多台 Creator Micro 2 USB 设备，请只保留一台连接".to_string();
-                self.commit_runtime_update();
-                Ok(false)
+                return Ok(true);
             }
         }
+
+        let candidates = transport
+            .enumerate()
+            .map_err(|e| WorkbenchError::Storage(format!("检测小键盘连接失败：{e}")))?;
+        let verified_usb = sorted_verified_usb_candidates(&candidates);
+        self.available_usb_candidates = verified_usb.clone();
+
+        if verified_usb.is_empty() {
+            if let Some(first) = candidates.first() {
+                self.status_message = format!(
+                    "已检测到 {} ({:04X}:{:04X})",
+                    first.product, first.vid, first.pid
+                );
+            } else {
+                self.status_message =
+                    "未检测到 Creator Micro 2 USB 连接（离线工作台就绪）".to_string();
+            }
+            self.commit_runtime_update();
+            return Ok(false);
+        }
+
+        let preferred_serial = self.document_store.preferred_device_serial();
+        let Some(target) = choose_usb_candidate(
+            &verified_usb,
+            explicit_selector,
+            preferred_serial.as_deref(),
+        )
+        .cloned() else {
+            let selector = explicit_selector.unwrap_or_default();
+            self.commit_runtime_update();
+            return Err(WorkbenchError::Storage(format!(
+                "未找到目标 Creator Micro 2 设备（{selector}）"
+            )));
+        };
+
+        let link = transport
+            .open(&target.path)
+            .map_err(|e| WorkbenchError::Storage(format!("打开 USB 小键盘失败：{e}")))?;
+        if !self.config.isolated && !link.is_exclusive_vendor() {
+            link.close();
+            return Err(WorkbenchError::Storage("未取得 USB 专用接口独占".into()));
+        }
+        let session = {
+            let _guard = self.tokio_runtime.enter();
+            DeviceSession::new(
+                link,
+                Box::new(mi_proto::NativeFramer::default()),
+                Arc::new(mi_session::ReadOnlySchema),
+                mi_session::SessionConfig::default(),
+            )
+        };
+        self.merge_wide_key
+            .store(self.bottom_row_layout.is_merged(), Ordering::SeqCst);
+        self.board_decoder = Arc::new(AtomicBool::new(false));
+        self.board_routing = if session.has_exclusive_vendor_link() {
+            BoardRouting::Checking
+        } else {
+            BoardRouting::Legacy
+        };
+        let mut monitor = session.subscribe_verified_input_with_board_mode(
+            Arc::clone(&self.merge_wide_key),
+            Arc::clone(&self.board_decoder),
+        );
+        let session_id = session.id;
+        self.hardware_event_tx.open_source(session_id);
+        self.input_lost_session = None;
+        let tx = self.hardware_event_tx.clone();
+        self.tokio_runtime.spawn(async move {
+            while let Some(event) = monitor.next().await {
+                if tx.send(HardwareLoopEvent::Input(event)).is_err() {
+                    return;
+                }
+            }
+            let _ = tx.send(HardwareLoopEvent::Disconnected { session_id });
+        });
+        let mut cs_notif_rx = session.notifications();
+        let cs_session = Arc::clone(&session);
+        let cs_tx = self.hardware_event_tx.clone();
+        self.tokio_runtime.spawn(async move {
+            let map_kind = |notification: &mi_proto::HostNotification| match notification {
+                mi_proto::HostNotification::CheatSheetShow(_) => {
+                    Some(CheatSheetNotificationKind::Show)
+                }
+                mi_proto::HostNotification::CheatSheetHide(_) => {
+                    Some(CheatSheetNotificationKind::Hide)
+                }
+                mi_proto::HostNotification::CheatSheetToggle(_) => {
+                    Some(CheatSheetNotificationKind::Toggle)
+                }
+                _ => None,
+            };
+            loop {
+                tokio::select! {
+                    _ = cs_session.wait_disconnected() => {
+                        loop {
+                            match cs_notif_rx.try_recv() {
+                                Ok(received) => {
+                                    if let Some(kind) = map_kind(&received.notification) {
+                                        if cs_tx
+                                            .send(HardwareLoopEvent::CheatSheetNotification {
+                                                session_id,
+                                                ingress_sequence: received.ingress_sequence,
+                                                kind,
+                                            })
+                                            .is_err()
+                                        {
+                                            return;
+                                        }
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                                Err(
+                                    tokio::sync::broadcast::error::TryRecvError::Empty
+                                    | tokio::sync::broadcast::error::TryRecvError::Closed,
+                                ) => break,
+                            }
+                        }
+                        return;
+                    }
+                    notif = cs_notif_rx.recv() => {
+                        match notif {
+                            Ok(received) => {
+                                if let Some(kind) = map_kind(&received.notification) {
+                                    if cs_tx
+                                        .send(HardwareLoopEvent::CheatSheetNotification {
+                                            session_id,
+                                            ingress_sequence: received.ingress_sequence,
+                                            kind,
+                                        })
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                        }
+                    }
+                }
+            }
+        });
+        self.device_session = Some(Arc::clone(&session));
+        self.connected_candidate = Some(target.clone());
+        if let Some(sn) = target
+            .serial_number
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let _ = self
+                .document_store
+                .set_preferred_device_serial(Some(sn.to_string()));
+            self.v070_hardware.projection.preferred_device_serial =
+                self.document_store.preferred_device_serial();
+        }
+        self.hardware_rpc_verified = false;
+        if enable_execution_on_connect && !self.document_store.host_execution_enabled() {
+            let _ = self.apply_routing_operation(RoutingOperation::Execution { enabled: true });
+        }
+        self.lighting_arbiter.invalidate_hardware_cache();
+        self.refresh_four_app_lighting();
+        let accept_session = Arc::clone(&session);
+        let accept_target = target.clone();
+        let accept_tx = self.hardware_event_tx.clone();
+        let initial_lighting_json = self
+            .lighting_arbiter
+            .last_hardware_sync_json
+            .clone()
+            .unwrap_or_default();
+        self.tokio_runtime.spawn(async move {
+            if let Some(receipt) = run_automatic_hardware_acceptance(
+                &accept_session,
+                &accept_target,
+                &initial_lighting_json,
+            )
+            .await
+            {
+                let _ = accept_tx.send(HardwareLoopEvent::HardwareAutoAccepted {
+                    session_id: accept_session.id,
+                    receipt,
+                });
+            }
+        });
+        let iface_label = if session.has_exclusive_vendor_link() {
+            "USB 专用接口已独占"
+        } else {
+            "已建立 HID 会话"
+        };
+        self.status_message = if let Some(sn) = target
+            .serial_number
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            format!(
+                "已连接 {} ({:04X}:{:04X} · #{sn}) · {iface_label}",
+                target.product, target.vid, target.pid
+            )
+        } else {
+            format!(
+                "已连接 {} ({:04X}:{:04X}) · {iface_label}",
+                target.product, target.vid, target.pid
+            )
+        };
+        self.commit_runtime_update();
+        Ok(true)
+    }
+
+    pub fn select_candidate_device_with_transport(
+        &mut self,
+        transport: &dyn mi_transport::HidTransport,
+        selector: &str,
+    ) -> Result<bool, WorkbenchError> {
+        let selector = selector.trim();
+        if selector.is_empty() {
+            return Err(WorkbenchError::Routing("未指定目标设备标识".into()));
+        }
+        self.require_awake()?;
+        if self.firmware_update.reserved() {
+            return Err(WorkbenchError::Routing(
+                "固件更新流程正在占用设备，请结束后再切换设备".into(),
+            ));
+        }
+        if self.six_layer_state.installation.is_some()
+            || self.six_layer_running.is_some()
+            || self.six_layer_job.is_some()
+        {
+            return Err(WorkbenchError::Routing(
+                "六层运行独占 USB，不能直接切换连接设备".into(),
+            ));
+        }
+        if self.live_executor.has_unconfirmed_apple_fn_release()
+            || !self.ptt_controller.cleanup_confirmed
+        {
+            let stopped = self.live_executor.stop_owned_actions();
+            self.finish_host_cleanup(stopped)
+                .map_err(WorkbenchError::Routing)?;
+        }
+        let candidates = transport
+            .enumerate()
+            .map_err(|e| WorkbenchError::Storage(format!("检测小键盘连接失败：{e}")))?;
+        let verified_usb = sorted_verified_usb_candidates(&candidates);
+        let Some(target) = choose_usb_candidate(&verified_usb, Some(selector), None).cloned()
+        else {
+            self.available_usb_candidates = verified_usb;
+            self.commit_runtime_update();
+            return Err(WorkbenchError::Storage(format!(
+                "未找到目标 Creator Micro 2 设备（{selector}）"
+            )));
+        };
+        self.available_usb_candidates = verified_usb;
+        if self
+            .device_session
+            .as_ref()
+            .is_some_and(|s| !s.is_disconnected())
+            && self
+                .connected_candidate
+                .as_ref()
+                .is_some_and(|cur| cur.path == target.path)
+        {
+            if let Some(sn) = target
+                .serial_number
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let _ = self
+                    .document_store
+                    .set_preferred_device_serial(Some(sn.to_string()));
+                self.v070_hardware.projection.preferred_device_serial =
+                    self.document_store.preferred_device_serial();
+            }
+            self.commit_runtime_update();
+            return Ok(true);
+        }
+        self.release_board_inputs(self.update_now);
+        if let Some(session) = self.device_session.take() {
+            self.tokio_runtime.block_on(session.shutdown());
+        }
+        self.connected_candidate = None;
+        self.hardware_rpc_verified = false;
+        self.lighting_arbiter.invalidate_hardware_cache();
+        self.v070_hardware.on_disconnected();
+        self.board_routing = BoardRouting::Checking;
+        self.connect_with_transport_preferring(transport, false, Some(&target.path))
+    }
+
+    fn select_candidate_device_from_ui(&mut self, selector: &str) -> Result<(), WorkbenchError> {
+        let result = (|| -> Result<(), WorkbenchError> {
+            self.require_awake()?;
+            if self.config.isolated {
+                return Err(WorkbenchError::Routing(
+                    "隔离工作台不支持切换实体 USB 设备".into(),
+                ));
+            }
+            let transport = self.exclusive_usb_transport();
+            self.select_candidate_device_with_transport(transport.as_ref(), selector)
+                .map(|_| ())
+        })();
+        if let Err(err) = &result {
+            self.status_message = err.to_string();
+            self.commit_runtime_update();
+        }
+        result
     }
 
     pub fn handle_hardware_loop_event(
@@ -1565,24 +1761,33 @@ impl WorkbenchStore {
                     self.board_routing = BoardRouting::Checking;
                     self.device_session = None;
                     let previous = self.connected_candidate.take();
+                    if let Some(prev) = &previous {
+                        self.available_usb_candidates
+                            .retain(|c| c.path != prev.path);
+                    }
                     self.hardware_rpc_verified = false;
                     self.lighting_arbiter.invalidate_hardware_cache();
                     self.v070_hardware.on_disconnected();
                     self.status_message = "小键盘已断开连接（等待重新插入）".to_string();
                     self.commit_runtime_update();
                     if self.config.auto_connect_usb && !self.config.isolated {
-                        let transport = mi_transport::MacTransport::exclusive_vendor();
+                        let transport = self.exclusive_usb_transport();
                         use mi_transport::HidTransport;
-                        let reenumerated = transport.enumerate().is_ok_and(|candidates| {
-                            candidates.iter().any(|candidate| {
+                        if let Ok(candidates) = transport.enumerate() {
+                            let next_candidates = sorted_verified_usb_candidates(&candidates);
+                            let reenumerated = next_candidates.iter().any(|candidate| {
                                 mi_transport::is_exclusive_vendor_candidate(candidate)
                                     && previous
                                         .as_ref()
                                         .is_none_or(|old| old.path != candidate.path)
-                            })
-                        });
-                        if reenumerated {
-                            let _ = self.connect_default_usb_with_execution(false);
+                            });
+                            if self.available_usb_candidates != next_candidates {
+                                self.available_usb_candidates = next_candidates;
+                                self.commit_runtime_update();
+                            }
+                            if reenumerated {
+                                let _ = self.connect_default_usb_with_execution(false);
+                            }
                         }
                     }
                 }
@@ -1613,18 +1818,24 @@ impl WorkbenchStore {
                 if self.resume_requires_explicit_connect {
                     return None;
                 }
-                let old_path_missing = self
-                    .mac_watcher_transport
-                    .as_ref()
-                    .zip(self.connected_candidate.as_ref())
-                    .is_some_and(|(transport, old)| {
-                        use mi_transport::HidTransport;
-                        transport.enumerate().is_ok_and(|candidates| {
+                let mut candidates_changed = false;
+                let mut old_path_missing = false;
+                if let Some(transport) = &self.mac_watcher_transport {
+                    use mi_transport::HidTransport;
+                    if let Ok(candidates) = transport.enumerate() {
+                        let next_candidates = sorted_verified_usb_candidates(&candidates);
+                        if self.available_usb_candidates != next_candidates {
+                            self.available_usb_candidates = next_candidates;
+                            candidates_changed = true;
+                        }
+                        old_path_missing = self.connected_candidate.as_ref().is_some_and(|old| {
                             !candidates
                                 .iter()
                                 .any(|candidate| candidate.path == old.path)
-                        })
-                    });
+                        });
+                    }
+                }
+                let mut needs_commit = candidates_changed;
                 if self
                     .device_session
                     .as_ref()
@@ -1641,9 +1852,13 @@ impl WorkbenchStore {
                     self.connected_candidate = None;
                     self.hardware_rpc_verified = false;
                     self.lighting_arbiter.invalidate_hardware_cache();
+                    self.v070_hardware.on_disconnected();
+                    needs_commit = true;
                 }
                 if !self.config.isolated && !self.device_session_connected() {
                     let _ = self.connect_default_usb_with_execution(false);
+                } else if needs_commit {
+                    self.commit_runtime_update();
                 }
                 None
             }
@@ -2395,6 +2610,7 @@ impl WorkbenchStore {
         if let Some(running) = &self.six_layer_running {
             let changed = running.foreground_changed(bundle_id);
             if changed {
+                let _ = self.maybe_sync_v070_foreground_layer();
                 self.commit_runtime_update();
             }
             return changed;
@@ -2465,6 +2681,7 @@ impl WorkbenchStore {
                 started,
             );
         }
+        let _ = self.maybe_sync_v070_foreground_layer();
         self.commit_runtime_update();
         if self.projection.header.banner.is_caution() {
             self.banner_flash_count += 1;
@@ -2477,7 +2694,10 @@ impl WorkbenchStore {
         if let Some(running) = &self.six_layer_running {
             running.set_execution_policy(enabled, self.command_execution_enabled, self.update_now);
         }
-        if !enabled {
+        if enabled {
+            let _ = self.maybe_sync_v070_foreground_layer();
+        } else {
+            self.v070_hardware.pending_auto_layer_sync = None;
             self.release_board_inputs(self.update_now);
         }
         self.commit_runtime_update();
@@ -2493,6 +2713,9 @@ impl WorkbenchStore {
         }
         self.sync_six_layer_routing_context();
         self.sync_live_session_source();
+        if enabled {
+            let _ = self.maybe_sync_v070_foreground_layer();
+        }
         self.commit_runtime_update();
         Ok(())
     }
@@ -2515,6 +2738,7 @@ impl WorkbenchStore {
         }
         self.sync_six_layer_routing_context();
         self.sync_live_session_source();
+        let _ = self.maybe_sync_v070_foreground_layer();
         self.commit_runtime_update();
         Ok(())
     }
@@ -2736,6 +2960,9 @@ impl WorkbenchStore {
                 };
                 self.commit_runtime_update();
                 Ok(())
+            }
+            HeaderAction::SelectCandidateDevice { selector } => {
+                self.select_candidate_device_from_ui(&selector)
             }
         }
     }
@@ -3709,6 +3936,9 @@ impl WorkbenchStore {
         let mut next = self.projection_inputs_with(reusable).project();
         next.firmware = self.firmware_update.projection.clone();
         next.firmware.v070 = self.v070_hardware.projection.clone();
+        next.firmware.v070.auto_layer_sync_enabled =
+            self.document_store.v070_auto_layer_sync_enabled();
+        next.firmware.v070.preferred_device_serial = self.document_store.preferred_device_serial();
         next.firmware.current_version = self.observed_firmware_version();
         next.firmware.version_status =
             match (&next.firmware.current_version, &next.firmware.release) {
@@ -3782,6 +4012,7 @@ impl WorkbenchStore {
             active_modal: &self.active_modal,
             applications: &self.applications,
             auto_follow_enabled: self.auto_follow_enabled,
+            available_usb_candidates: &self.available_usb_candidates,
             banner_flash_count: self.banner_flash_count,
             bind_keycap_default_action_on_select: self.bind_keycap_default_action_on_select,
             board_routing: self.board_routing,
@@ -3816,6 +4047,7 @@ impl WorkbenchStore {
             pending_preset_export_scope: self.pending_preset_export_scope,
             pending_preset_import: &self.pending_preset_import,
             pinned_favorites: &self.pinned_favorites,
+            preferred_device_serial: self.document_store.preferred_device_serial(),
             preset_transfer_error: &self.preset_transfer_error,
             ptt_active: self.ptt_controller.is_active,
             radial_readiness: &self.radial_readiness,
@@ -3843,6 +4075,7 @@ impl WorkbenchStore {
                 .observed_firmware_version()
                 .as_deref()
                 .is_none_or(mi_model::supports_v070_mouse_tokens),
+            v070_projection: &self.v070_hardware.projection,
         }
     }
 
@@ -4454,6 +4687,9 @@ impl WorkbenchStore {
             StatusMenuAction::SelectProfile(profile_id) => {
                 self.select_and_activate_profile_at(&profile_id, self.update_now, true)
             }
+            StatusMenuAction::SelectCandidateDevice { selector } => {
+                self.select_candidate_device_from_ui(&selector)
+            }
             StatusMenuAction::SetHostExecutionEnabled(enabled) => {
                 self.set_host_execution_enabled(enabled)
             }
@@ -4475,6 +4711,7 @@ impl WorkbenchStore {
                 }
                 self.sync_six_layer_routing_context();
                 self.sync_live_session_source();
+                let _ = self.maybe_sync_v070_foreground_layer();
                 self.commit_runtime_update();
                 Ok(())
             }

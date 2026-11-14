@@ -163,9 +163,10 @@ enum WireSyncState {
 async fn open_vendor_session(
     transport: Arc<MacTransport>,
     target: TargetKeyboard,
+    preferred_serial: Option<String>,
 ) -> Option<Arc<DeviceSession>> {
     let session = tokio::task::spawn_blocking(move || {
-        mi_transport::discover_target_keyboard()
+        mi_transport::discover_target_keyboard_preferred(preferred_serial.as_deref())
             .ok()
             .filter(|d| d.location_id == target.location_id)
             .and_then(|d| connect(transport.as_ref(), &d).ok())
@@ -468,6 +469,7 @@ impl VendorBridge {
         receiver: Arc<UserCommandReceiver>,
         routing: Arc<Mutex<RoutingContext>>,
         target: TargetKeyboard,
+        preferred_serial: Option<String>,
         transport: Option<Arc<MacTransport>>,
         allow_reconnect: bool,
     ) {
@@ -480,7 +482,8 @@ impl VendorBridge {
             move || {
                 let transport = transport.clone();
                 let target = target.clone();
-                async move { open_vendor_session(transport?, target).await }
+                let preferred_serial = preferred_serial.clone();
+                async move { open_vendor_session(transport?, target, preferred_serial).await }
             },
         );
     }
@@ -1212,6 +1215,7 @@ impl RunningSixLayer {
             usage: 0x61,
             usage_pairs: vec![],
             transport_hint: mi_transport::TransportHint::Usb,
+            serial_number: None,
         };
         new_running(
             Arc::new(UserCommandReceiver::bind().unwrap()),
@@ -1348,6 +1352,7 @@ impl RunningSixLayer {
             Arc::clone(&self.receiver),
             Arc::clone(&self.routing),
             self.installation.target.clone(),
+            self.candidate.serial_number.clone(),
             self.transport.clone(),
             true,
         );
@@ -1367,6 +1372,7 @@ impl RunningSixLayer {
             Arc::clone(&self.receiver),
             Arc::clone(&self.routing),
             self.installation.target.clone(),
+            self.candidate.serial_number.clone(),
             None,
             false,
         );
@@ -1463,6 +1469,7 @@ impl RunningSixLayer {
         let patch_path = self.installation.config.path.clone();
         let endpoint_marker = self.receiver.path().to_string_lossy().into_owned();
         let target = self.installation.target.clone();
+        let preferred_serial = self.candidate.serial_number.clone();
         self.monitor = Some(thread::spawn(move || {
             let mut wall = SystemTime::now();
             let mut monotonic = Instant::now();
@@ -1486,6 +1493,7 @@ impl RunningSixLayer {
                 if !check_input_connection(&receiver, slept, || {
                     steady_state_recheck(
                         &target,
+                        preferred_serial.as_deref(),
                         receiver.path(),
                         &patch_path,
                         &endpoint_marker,
@@ -1501,12 +1509,13 @@ impl RunningSixLayer {
 
 fn steady_state_recheck(
     target: &TargetKeyboard,
+    preferred_serial: Option<&str>,
     receiver_path: &Path,
     patch_path: &Path,
     endpoint_marker: &str,
     last_patch_stamp: &mut Option<(Option<SystemTime>, u64)>,
 ) -> Result<(), String> {
-    match mi_transport::discover_target_keyboard() {
+    match mi_transport::discover_target_keyboard_preferred(preferred_serial) {
         Ok(found) => {
             if found.location_id != target.location_id {
                 return Err("键盘 USB 端口位置已变更，等待自动重连".into());
@@ -1711,6 +1720,20 @@ fn prepare_apply_karabiner_patch(
     Ok(patch)
 }
 
+fn read_preferred_serial(document_dir: &Path) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct PreferredSerialHeader {
+        #[serde(default)]
+        preferred_device_serial: Option<String>,
+    }
+    let bytes = fs::read(document_dir.join("workbench.preferences.json")).ok()?;
+    let header: PreferredSerialHeader = serde_json::from_slice(&bytes).ok()?;
+    header
+        .preferred_device_serial
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
 pub async fn apply(
     document_dir: &Path,
     plan: AppliedSixLayerPlan,
@@ -1719,7 +1742,9 @@ pub async fn apply(
 ) -> Result<RunningSixLayer, String> {
     let state_path = document_dir.join("six-layer-runtime.json");
     plan.validate_current()?;
-    let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
+    let preferred_serial = read_preferred_serial(document_dir);
+    let target = mi_transport::discover_target_keyboard_preferred(preferred_serial.as_deref())
+        .map_err(|e| e.to_string())?;
     let receiver = Arc::new(UserCommandReceiver::bind_default().map_err(|e| e.to_string())?);
     let patch = prepare_apply_karabiner_patch(&saved, &target, &receiver, plan.bottom_row_layout)?;
     let (session, candidate) = connect(transport.as_ref(), &target)?;
@@ -1825,7 +1850,7 @@ pub async fn apply(
             .verify_six_layer_files(&candidate_bytes, smart.as_deref(), receipt.profile_index)
             .await
             .map_err(|e| format!("{e}；保留吞键规则，请恢复设备"))?;
-        readiness.recheck(&patch, &target)?;
+        readiness.recheck_preferred(&patch, &target, candidate.serial_number.as_deref())?;
         installation.status = InstallationStatus::Applied;
         saved.installation = Some(installation.clone());
         save(&state_path, &saved)?;
@@ -2028,7 +2053,9 @@ pub async fn resume(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.to_string()),
     };
-    let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
+    let preferred_serial = read_preferred_serial(document_dir);
+    let target = mi_transport::discover_target_keyboard_preferred(preferred_serial.as_deref())
+        .map_err(|e| e.to_string())?;
     let (session, candidate) = connect(transport.as_ref(), &target)?;
     let layer = match inspect_resume_snapshot(
         &session,
@@ -2117,7 +2144,9 @@ pub async fn restore(
     transport: Arc<MacTransport>,
 ) -> Result<(), String> {
     let installation = saved.installation.clone().ok_or("没有可恢复的六层记录")?;
-    let target = mi_transport::discover_target_keyboard().map_err(|e| e.to_string())?;
+    let preferred_serial = read_preferred_serial(document_dir);
+    let target = mi_transport::discover_target_keyboard_preferred(preferred_serial.as_deref())
+        .map_err(|e| e.to_string())?;
     if target.location_id != installation.target.location_id {
         return Err("键盘 USB 位置已变化，未自动恢复".into());
     }
@@ -2578,6 +2607,7 @@ mod tests {
             usage: 1,
             usage_pairs: vec![],
             transport_hint: mi_transport::TransportHint::Usb,
+            serial_number: None,
         }]);
         assert!(
             matches!(connect(&transport, &target), Err(error) if error.contains("未取得 USB 专用接口独占"))

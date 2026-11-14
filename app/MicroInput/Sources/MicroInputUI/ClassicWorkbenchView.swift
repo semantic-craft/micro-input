@@ -165,6 +165,15 @@ struct WorkbenchHeaderBarView: View {
                 .fixedSize()
             }
 
+            if let powerStatus = h.powerStatus {
+                HardwarePowerStatusCapsule(badge: powerStatus)
+            }
+            if h.candidateDevices.count > 1 {
+                CandidateDevicePickerPill(candidates: h.candidateDevices) {
+                    store.selectHeaderCandidateDevice($0)
+                }
+            }
+
             Spacer(minLength: 8)
 
             Toggle(

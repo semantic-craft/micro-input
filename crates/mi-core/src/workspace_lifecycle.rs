@@ -66,6 +66,7 @@ impl WorkbenchStore {
         self.lighting_preview_active = false;
         self.lighting_preview_remaining_secs = 0;
         self.connected_candidate = None;
+        self.available_usb_candidates.clear();
         self.hardware_rpc_verified = false;
         self.last_hardware_auto_acceptance = None;
         self.lighting_arbiter.invalidate_hardware_cache();

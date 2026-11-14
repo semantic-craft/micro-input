@@ -340,6 +340,8 @@ public struct V070HardwareSliceModel: Equatable {
     public var hostSleepStatus = "awake"
     public var statusMessage = "需连接 0.7.0-rc.16+ 独占固件设备"
     public var lastError: String?
+    public var autoLayerSyncEnabled = false
+    public var preferredDeviceSerial: String?
     public var mouse = V070MouseConfigModel()
     public var pmConfig = V070PmConfigModel()
     public var pmState = V070PmStateModel()
@@ -358,6 +360,8 @@ public struct V070HardwareSliceModel: Equatable {
         hostSleepStatus = json["host_sleep_status"] as? String ?? hostSleepStatus
         statusMessage = json["status_message"] as? String ?? statusMessage
         lastError = json["last_error"] as? String
+        autoLayerSyncEnabled = json["auto_layer_sync_enabled"] as? Bool ?? false
+        preferredDeviceSerial = json["preferred_device_serial"] as? String
         mouse = V070MouseConfigModel(json: json["mouse"] as? [String: Any] ?? [:])
         pmConfig = V070PmConfigModel(json: json["pm_config"] as? [String: Any] ?? [:])
         pmState = V070PmStateModel(json: json["pm_state"] as? [String: Any] ?? [:])
@@ -368,6 +372,7 @@ public struct V070HardwareSliceModel: Equatable {
 
 public enum V070HardwareCommand {
     public static func refresh() -> [String: Any] { ["V070Hardware": "Refresh"] }
+    public static func setAutoLayerSync(_ enabled: Bool) -> [String: Any] { ["V070Hardware": ["SetAutoLayerSync": ["enabled": enabled]]] }
     public static func selectLayer(_ layer: Int) -> [String: Any] { ["V070Hardware": ["SelectLayer": ["layer": layer]]] }
     public static func applyMousePreset(_ preset: String) -> [String: Any] { ["V070Hardware": ["ApplyMousePreset": ["preset": preset]]] }
     public static func renameDevice(name: String) -> [String: Any] { ["V070Hardware": ["RenameDevice": ["name": name]]] }
@@ -539,7 +544,7 @@ public struct V070HardwareSettingsSection: View {
             }
             SettingsCard {
                 if !model.supported {
-                    SettingsRow(unavailableTitle, subtitle: unavailableSubtitle) { V070Badge(text: hostSleepBadgeText) }
+                    SettingsRow(unavailableTitle, subtitle: unavailableSubtitle, showsDivider: true) { V070Badge(text: hostSleepBadgeText) }
                 } else {
                     SettingsRow("电量与当前层", subtitle: batterySummaryText, showsDivider: true) {
                         HStack(spacing: 6) {
@@ -562,13 +567,35 @@ public struct V070HardwareSettingsSection: View {
                                 .surfaceButton(.secondary).disabled(!canApplyDeviceName).accessibilityIdentifier("v070-device-rename")
                         }
                     }
-                    SettingsRow("同步回执", subtitle: model.lastError ?? model.statusMessage) {
+                    SettingsRow("同步回执", subtitle: model.lastError ?? model.statusMessage, showsDivider: true) {
                         if let err = model.lastError, !err.isEmpty {
                             Text("异常").font(UITheme.micro).foregroundStyle(.red)
                         } else {
                             V070Badge(text: model.synced ? "已同步" : "待同步", accentDot: model.synced)
                         }
                     }
+                }
+                if let serial = model.preferredDeviceSerial, !serial.isEmpty {
+                    SettingsRow("已记忆设备序列号", subtitle: "多台 Creator Micro 2 同时接入时将优先匹配此设备", showsDivider: true) {
+                        V070Badge(text: serial)
+                    }
+                }
+                SettingsRow(
+                    "前台切层实验联动 (kb.pl.set)",
+                    subtitle: "随前台编程工具自动切换板载第 1–6 层（仅写 RAM 零擦写；OAI 原生层自动跳过）",
+                    showsDivider: false
+                ) {
+                    Toggle(
+                        "",
+                        isOn: Binding(
+                            get: { model.autoLayerSyncEnabled },
+                            set: { dispatch(V070HardwareCommand.setAutoLayerSync($0)) }
+                        )
+                    )
+                    .labelsHidden()
+                    .toggleStyle(NeutralSwitchToggleStyle())
+                    .disabled(model.busy)
+                    .accessibilityIdentifier("v070-auto-layer-sync")
                 }
             }
         }

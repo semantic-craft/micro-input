@@ -27,6 +27,7 @@ pub(super) struct ProjectionInputs<'a> {
     pub active_modal: &'a Option<EditorModalProjection>,
     pub applications: &'a BTreeMap<String, bool>,
     pub auto_follow_enabled: bool,
+    pub available_usb_candidates: &'a [mi_transport::HidCandidate],
     pub banner_flash_count: usize,
     pub bind_keycap_default_action_on_select: bool,
     pub board_routing: BoardRouting,
@@ -57,6 +58,7 @@ pub(super) struct ProjectionInputs<'a> {
     pub pending_preset_export_scope: Option<PresetExportScope>,
     pub pending_preset_import: &'a Option<PendingPresetImportPreview>,
     pub pinned_favorites: &'a PinnedFavoritesGrid,
+    pub preferred_device_serial: Option<String>,
     pub preset_transfer_error: &'a Option<String>,
     pub ptt_active: bool,
     pub radial_readiness: &'a RadialInputReadiness,
@@ -81,9 +83,69 @@ pub(super) struct ProjectionInputs<'a> {
     pub status_menu_open: bool,
     pub status_message: &'a String,
     pub v070_hardware_mouse_supported: bool,
+    pub v070_projection: &'a crate::firmware_update::V070HardwareProjection,
 }
 
 impl ProjectionInputs<'_> {
+    fn build_candidate_devices_projection(&self) -> Vec<CandidateDevice> {
+        let mut list: Vec<mi_transport::HidCandidate> = self.available_usb_candidates.to_vec();
+        if let Some(connected) = self.connected_candidate {
+            if !list.iter().any(|c| c.path == connected.path) {
+                list.push(connected.clone());
+            }
+        }
+        list.sort_by(|a, b| {
+            (
+                a.serial_number.is_none(),
+                a.serial_number.as_deref().unwrap_or(""),
+                a.path.as_str(),
+            )
+                .cmp(&(
+                    b.serial_number.is_none(),
+                    b.serial_number.as_deref().unwrap_or(""),
+                    b.path.as_str(),
+                ))
+        });
+        let preferred = self
+            .preferred_device_serial
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        list.into_iter()
+            .map(|c| {
+                let serial = c
+                    .serial_number
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let is_connected = self.device_connected
+                    && self
+                        .connected_candidate
+                        .as_ref()
+                        .is_some_and(|cur| cur.path == c.path);
+                let is_preferred = preferred.is_some() && serial.as_deref() == preferred;
+                let suffix = serial
+                    .as_deref()
+                    .map(|s| format!("#{s}"))
+                    .unwrap_or_else(|| {
+                        c.path
+                            .strip_prefix("DevSrvsID:")
+                            .map(|id| format!("#{id}"))
+                            .unwrap_or_else(|| c.path.clone())
+                    });
+                let display_label = format!("{} ({})", c.product, suffix);
+                CandidateDevice {
+                    path: c.path,
+                    product: c.product,
+                    serial_number: serial,
+                    display_label,
+                    is_connected,
+                    is_preferred,
+                }
+            })
+            .collect()
+    }
     pub(super) fn active_canonical_agent(&self) -> Option<CanonicalAgent> {
         let pid = self.resolved_active_profile_id()?;
         let profile = self
@@ -1250,6 +1312,9 @@ impl ProjectionInputs<'_> {
                 "检测到原版 Input 正在后台抢占层切换，建议开启「锁定当前方案」".to_string()
             }
         });
+        let power_status =
+            PowerStatusBadgeProjection::from_v070(self.v070_projection, self.device_connected);
+        let candidate_devices = self.build_candidate_devices_projection();
         StatusMenuProjection {
             icon: StatusItemIconSpec::canonical(),
             active_profile_id: active_pid,
@@ -1273,6 +1338,9 @@ impl ProjectionInputs<'_> {
             pending_import: self.pending_preset_import.clone(),
             pending_export_scope: self.pending_preset_export_scope,
             preset_error: self.preset_transfer_error.clone(),
+            power_status,
+            candidate_devices,
+            preferred_device_serial: self.preferred_device_serial.clone(),
         }
     }
 
@@ -1573,6 +1641,10 @@ impl ProjectionInputs<'_> {
         let auto_switch =
             AutoSwitchState::from_flags(true, self.auto_follow_enabled, self.manual_override);
 
+        let power_status =
+            PowerStatusBadgeProjection::from_v070(self.v070_projection, self.device_connected);
+        let candidate_devices = self.build_candidate_devices_projection();
+
         let header = HeaderProjection {
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
             ready_state,
@@ -1585,6 +1657,9 @@ impl ProjectionInputs<'_> {
             can_undo: self.document_store.draft.can_undo,
             can_redo: self.document_store.draft.can_redo,
             busy: self.busy,
+            power_status,
+            candidate_devices,
+            preferred_device_serial: self.preferred_device_serial.clone(),
         };
 
         let sidebar = SidebarProjection {

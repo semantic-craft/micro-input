@@ -214,6 +214,10 @@ pub struct V070HardwareProjection {
     pub host_sleep_status: String,
     pub status_message: String,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub auto_layer_sync_enabled: bool,
+    #[serde(default)]
+    pub preferred_device_serial: Option<String>,
     pub mouse: V070MouseConfigProjection,
     pub pm_config: V070PmConfigProjection,
     pub pm_state: V070PmStateProjection,
@@ -234,6 +238,8 @@ impl Default for V070HardwareProjection {
             host_sleep_status: "awake".into(),
             status_message: "需连接 0.7.0-rc.16+ 独占固件设备".into(),
             last_error: None,
+            auto_layer_sync_enabled: false,
+            preferred_device_serial: None,
             mouse: V070MouseConfigProjection::default(),
             pm_config: V070PmConfigProjection::default(),
             pm_state: V070PmStateProjection::default(),
@@ -290,6 +296,9 @@ pub enum V070BridgeOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum V070HardwareAction {
     Refresh,
+    SetAutoLayerSync {
+        enabled: bool,
+    },
     SelectLayer {
         layer: u8,
     },

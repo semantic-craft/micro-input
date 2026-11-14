@@ -512,3 +512,90 @@ public struct PopoverMiniCheatSheetView: View {
         .help(cell?.label ?? "未绑定")
     }
 }
+
+struct HardwarePowerStatusCapsule: View {
+    let badge: PowerStatusBadgeModel
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if badge.isCharging == true || badge.usbHostHold {
+                Circle()
+                    .fill(UITheme.statusSuccess)
+                    .frame(width: 6, height: 6)
+            } else {
+                Image(systemName: badge.linePowered ? "cable.connector" : "battery.75")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(UITheme.textSecondary)
+            }
+            Text(badge.summaryLabel)
+                .font(UITheme.micro)
+                .foregroundStyle(UITheme.textPrimary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(UITheme.subtleSurface))
+        .overlay(Capsule().stroke(UITheme.hairlineBorder, lineWidth: 1))
+        .fixedSize()
+        .accessibilityIdentifier("hardware-power-status-capsule")
+    }
+}
+
+struct CandidateDevicePickerPill: View {
+    let candidates: [CandidateDeviceModel]
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        let options = candidates.map { dev in
+            let roleTag = dev.isConnected ? "已连接" : (dev.isPreferred ? "上次优先" : "可用")
+            let subtitle = dev.serialNumber.map { "SN \($0) · \(roleTag)" } ?? roleTag
+            return SelectOption(
+                value: dev.selectorKey,
+                title: dev.displayLabel.isEmpty ? dev.product : dev.displayLabel,
+                subtitle: subtitle
+            )
+        }
+        let current = candidates.first(where: { $0.isConnected })?.selectorKey
+            ?? candidates.first(where: { $0.isPreferred })?.selectorKey
+            ?? candidates.first?.selectorKey
+            ?? ""
+        SelectDropdown(
+            options: options,
+            selection: current,
+            minTriggerWidth: 112,
+            onSelect: onSelect
+        )
+        .accessibilityIdentifier("candidate-device-picker")
+    }
+}
+
+struct StatusMenuHardwareStrip: View {
+    let powerStatus: PowerStatusBadgeModel?
+    let candidates: [CandidateDeviceModel]
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        if powerStatus != nil || candidates.count > 1 {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) {
+                    stripItems
+                    Spacer(minLength: 0)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    stripItems
+                }
+            }
+            .accessibilityIdentifier("status-menu-hardware-strip")
+        }
+    }
+
+    @ViewBuilder
+    private var stripItems: some View {
+        if let powerStatus {
+            HardwarePowerStatusCapsule(badge: powerStatus)
+        }
+        if candidates.count > 1 {
+            CandidateDevicePickerPill(candidates: candidates, onSelect: onSelect)
+        }
+    }
+}

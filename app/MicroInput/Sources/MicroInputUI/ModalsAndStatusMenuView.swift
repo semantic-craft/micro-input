@@ -59,6 +59,13 @@ public struct StatusMenuPopoverView: View {
                 .toggleStyle(NeutralSwitchToggleStyle())
             }
 
+            StatusMenuHardwareStrip(
+                powerStatus: sm.powerStatus,
+                candidates: sm.candidateDevices
+            ) {
+                store.selectStatusMenuCandidateDevice($0)
+            }
+
             if !sm.accessibilityTrusted {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle")
