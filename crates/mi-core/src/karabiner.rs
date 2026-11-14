@@ -561,7 +561,19 @@ pub fn validate_grabbed(log: &str, id: u64) -> Result<(), String> {
 
 impl Readiness {
     pub fn recheck(&self, patch: &ConfigPatch, target: &TargetKeyboard) -> Result<(), String> {
-        if mi_transport::discover_target_keyboard().map_err(|e| e.to_string())? != *target {
+        self.recheck_preferred(patch, target, None)
+    }
+
+    pub fn recheck_preferred(
+        &self,
+        patch: &ConfigPatch,
+        target: &TargetKeyboard,
+        preferred_serial: Option<&str>,
+    ) -> Result<(), String> {
+        if mi_transport::discover_target_keyboard_preferred(preferred_serial)
+            .map_err(|e| e.to_string())?
+            != *target
+        {
             return Err("目标 USB 设备已变化".into());
         }
         self.baseline.check(patch, target).map(|_| ())

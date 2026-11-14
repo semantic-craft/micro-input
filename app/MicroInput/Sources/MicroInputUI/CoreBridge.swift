@@ -127,6 +127,18 @@ public final class CoreStore {
         dispatchRaw(["domain": domain, "action": action])
     }
 
+    public func selectHeaderCandidateDevice(_ selector: String) {
+        dispatch("header", ["SelectCandidateDevice": ["selector": selector]])
+    }
+
+    public func selectStatusMenuCandidateDevice(_ selector: String) {
+        dispatch("status_menu", ["SelectCandidateDevice": ["selector": selector]])
+    }
+
+    public func setV070AutoLayerSync(_ enabled: Bool) {
+        dispatch("firmware", V070HardwareCommand.setAutoLayerSync(enabled))
+    }
+
     public func dispatchRaw(_ payload: [String: Any]) {
         guard let h = handle else { return }
         guard JSONSerialization.isValidJSONObject(payload),
@@ -186,7 +198,7 @@ public final class CoreStore {
         if self.activeModal != m.activeModal { self.activeModal = m.activeModal }
     }
 
-    private static func parseProjection(_ root: [String: Any]) -> ProjectionModel {
+    static func parseProjection(_ root: [String: Any]) -> ProjectionModel {
         var m = ProjectionModel()
         m.firmware = FirmwareSliceModel(json: root["firmware"] as? [String: Any] ?? [:])
         m.statusMessage = root["status_message"] as? String ?? "已就绪"
@@ -230,6 +242,11 @@ public final class CoreStore {
             m.canUndo = header["can_undo"] as? Bool ?? false
             m.canRedo = header["can_redo"] as? Bool ?? false
             m.busy = header["busy"] as? Bool ?? false
+            m.powerStatus = (header["power_status"] as? [String: Any]).map(parsePowerStatus)
+            if let devs = header["candidate_devices"] as? [[String: Any]] {
+                m.candidateDevices = parseCandidateDevices(devs)
+            }
+            m.preferredDeviceSerial = header["preferred_device_serial"] as? String
         }
 
         if let sidebar = root["sidebar"] as? [String: Any] {
@@ -448,6 +465,15 @@ public final class CoreStore {
             m.lightingEnabled = sm["lighting_enabled"] as? Bool ?? true
             m.cheatSheetPreview = (sm["cheat_sheet_preview"] as? [String: Any]).map(parseCheatSheet)
             m.cheatSheetVisible = sm["cheat_sheet_visible"] as? Bool ?? false
+            if let ps = sm["power_status"] as? [String: Any] {
+                m.powerStatus = parsePowerStatus(ps)
+            }
+            if let devs = sm["candidate_devices"] as? [[String: Any]] {
+                m.candidateDevices = parseCandidateDevices(devs)
+            }
+            if let pref = sm["preferred_device_serial"] as? String {
+                m.preferredDeviceSerial = pref
+            }
             if let favs = sm["favorites_2x2"] as? [[String: Any]] {
                 m.favorites2x2 = favs.enumerated().map { idx, f in
                     FavoriteSlotModel(
@@ -767,6 +793,33 @@ public final class CoreStore {
             )
         }
         return nil
+    }
+
+    private static func parsePowerStatus(_ ps: [String: Any]) -> PowerStatusBadgeModel {
+        PowerStatusBadgeModel(
+            batteryPercent: (ps["battery_percent"] as? NSNumber)?.intValue,
+            isCharging: ps["is_charging"] as? Bool,
+            linePowered: ps["line_powered"] as? Bool ?? false,
+            usbHostHold: ps["usb_host_hold"] as? Bool ?? false,
+            usbMode: ps["usb_mode"] as? String ?? "",
+            pmMode: ps["pm_mode"] as? String ?? "",
+            hostSleepStatus: ps["host_sleep_status"] as? String ?? "awake",
+            summaryLabel: ps["summary_label"] as? String ?? ""
+        )
+    }
+
+    private static func parseCandidateDevices(_ devs: [[String: Any]]) -> [CandidateDeviceModel] {
+        devs.compactMap { d in
+            guard let path = d["path"] as? String else { return nil }
+            return CandidateDeviceModel(
+                path: path,
+                product: d["product"] as? String ?? "Creator Micro 2",
+                serialNumber: d["serial_number"] as? String,
+                displayLabel: d["display_label"] as? String ?? "",
+                isConnected: d["is_connected"] as? Bool ?? false,
+                isPreferred: d["is_preferred"] as? Bool ?? false
+            )
+        }
     }
 
     private static func parseLightingZone(_ z: [String: Any]) -> LightingZoneModel {

@@ -713,6 +713,108 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(store.canvas.joystickModeLabel, "8向摇杆")
         renderHost()
     }
+
+    @MainActor
+    func testPowerStatusAndCandidateDeviceSliceIsolationAndDecoding() throws {
+        let withSerial = CandidateDeviceModel(path: "/dev/hid1", product: "Creator Micro 2", serialNumber: "  SN-01 ", displayLabel: "CM2 · SN-01")
+        XCTAssertEqual(withSerial.selectorKey, "SN-01")
+        XCTAssertEqual(withSerial.id, "SN-01")
+
+        let noSerial = CandidateDeviceModel(path: "IOService:/USB/1", product: "Creator Micro 2", serialNumber: "  ")
+        XCTAssertEqual(noSerial.selectorKey, "IOService:/USB/1")
+
+        let badgeJson: [String: Any] = [
+            "battery_percent": 88,
+            "is_charging": true,
+            "line_powered": true,
+            "usb_host_hold": true,
+            "usb_mode": "usb.host 保持",
+            "pm_mode": "idle",
+            "host_sleep_status": "awake",
+            "summary_label": "88% 充电中 · usb.host 保持 · 待机",
+        ]
+        let candidatesJson: [[String: Any]] = [
+            [
+                "path": "IOService:/USB/Alpha",
+                "product": "Creator Micro 2",
+                "serial_number": "SN-ALPHA",
+                "display_label": "Creator Micro 2 (SN-ALPHA)",
+                "is_connected": true,
+                "is_preferred": true,
+            ],
+            [
+                "path": "IOService:/USB/Beta",
+                "product": "Creator Micro 2",
+                "serial_number": "SN-BETA",
+                "display_label": "Creator Micro 2 (SN-BETA)",
+                "is_connected": false,
+                "is_preferred": false,
+            ],
+        ]
+
+        let rootJson: [String: Any] = [
+            "header": [
+                "engine_version": "0.2.0",
+                "power_status": badgeJson,
+                "candidate_devices": candidatesJson,
+                "preferred_device_serial": "SN-ALPHA",
+            ],
+            "status_menu": [
+                "active_profile_name": "Antigravity",
+                "power_status": badgeJson,
+                "candidate_devices": candidatesJson,
+                "preferred_device_serial": "SN-ALPHA",
+            ],
+        ]
+        let parsed = CoreStore.parseProjection(rootJson)
+        let headerSlice = HeaderSliceModel(from: parsed)
+        let statusSlice = StatusMenuSliceModel(from: parsed)
+        XCTAssertEqual(headerSlice.powerStatus?.summaryLabel, "88% 充电中 · usb.host 保持 · 待机")
+        XCTAssertEqual(statusSlice.powerStatus, headerSlice.powerStatus)
+        XCTAssertEqual(headerSlice.candidateDevices.count, 2)
+        XCTAssertEqual(statusSlice.candidateDevices, headerSlice.candidateDevices)
+        XCTAssertEqual(headerSlice.preferredDeviceSerial, "SN-ALPHA")
+        XCTAssertEqual(statusSlice.preferredDeviceSerial, "SN-ALPHA")
+
+        let baseSidebar = SidebarSliceModel(from: parsed)
+        let baseCanvas = CanvasSliceModel(from: parsed)
+        let baseOverlay = OverlaySliceModel(from: parsed)
+        let baseFooter = FooterSliceModel(from: parsed)
+
+        var mutated = parsed
+        mutated.powerStatus?.summaryLabel = "92% · 跟随宿主"
+        mutated.preferredDeviceSerial = "SN-BETA"
+        XCTAssertNotEqual(HeaderSliceModel(from: mutated), headerSlice)
+        XCTAssertNotEqual(StatusMenuSliceModel(from: mutated), statusSlice)
+        XCTAssertEqual(SidebarSliceModel(from: mutated), baseSidebar)
+        XCTAssertEqual(CanvasSliceModel(from: mutated), baseCanvas)
+        XCTAssertEqual(OverlaySliceModel(from: mutated), baseOverlay)
+        XCTAssertEqual(FooterSliceModel(from: mutated), baseFooter)
+
+        let stripHost = NSHostingView(
+            rootView: StatusMenuHardwareStrip(
+                powerStatus: parsed.powerStatus,
+                candidates: parsed.candidateDevices,
+                onSelect: { _ in }
+            )
+            .frame(width: 320)
+        )
+        stripHost.layoutSubtreeIfNeeded()
+        XCTAssertLessThanOrEqual(stripHost.fittingSize.width, 320.5)
+        XCTAssertGreaterThan(stripHost.fittingSize.height, 20)
+
+        let narrowStripHost = NSHostingView(
+            rootView: StatusMenuHardwareStrip(
+                powerStatus: parsed.powerStatus,
+                candidates: parsed.candidateDevices,
+                onSelect: { _ in }
+            )
+            .frame(width: 240)
+        )
+        narrowStripHost.layoutSubtreeIfNeeded()
+        XCTAssertLessThanOrEqual(narrowStripHost.fittingSize.width, 240.5)
+        XCTAssertGreaterThan(narrowStripHost.fittingSize.height, 44)
+    }
 }
 
 @MainActor

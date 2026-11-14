@@ -239,7 +239,8 @@ impl WorkbenchStore {
         {
             return;
         }
-        if mi_transport::discover_target_keyboard().is_err() {
+        let preferred = self.document_store.preferred_device_serial();
+        if mi_transport::discover_target_keyboard_preferred(preferred.as_deref()).is_err() {
             return;
         }
         self.six_layer_auto_resume_attempts += 1;
@@ -266,6 +267,7 @@ impl WorkbenchStore {
             self.tokio_runtime.block_on(session.shutdown());
         }
         self.connected_candidate = None;
+        self.available_usb_candidates.clear();
         self.v070_hardware.on_disconnected();
         self.hardware_rpc_verified = false;
         self.board_decoder.store(false, Ordering::Release);
@@ -381,6 +383,22 @@ impl WorkbenchStore {
                     self.six_layer_next_auto_resume_at = None;
                     self.device_session = None;
                     self.connected_candidate = Some(running.candidate.clone());
+                    if let Some(serial) = running
+                        .candidate
+                        .serial_number
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        let _ = self
+                            .document_store
+                            .set_preferred_device_serial(Some(serial.to_string()));
+                        self.v070_hardware.projection.preferred_device_serial =
+                            self.document_store.preferred_device_serial();
+                    }
+                    if self.available_usb_candidates.is_empty() {
+                        self.available_usb_candidates = vec![running.candidate.clone()];
+                    }
                     self.hardware_rpc_verified = true;
                     running.armed = running.receiver.arm().is_ok();
                     running.set_execution_policy(

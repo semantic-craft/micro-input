@@ -11,7 +11,7 @@ use crate::firmware_update::{
     V070HardwareAction, V070HardwareProjection, V070MouseConfigProjection, V070PmConfigProjection,
     V070PmStateProjection, V070SaRgbProjection, V070SnapshotPayload,
 };
-use crate::store::{HardwareLoopEvent, WorkbenchStore};
+use crate::store::{HardwareLoopEvent, SystemLifecycle, WorkbenchStore};
 
 #[derive(Debug, Clone)]
 pub(crate) struct V070BridgeCommand {
@@ -27,6 +27,8 @@ pub(crate) struct V070HardwareController {
     pub next_seq: u64,
     pub in_flight_seq: Option<u64>,
     pub last_snapshot_session_id: Option<u64>,
+    pub expected_layer_echo: Option<(u8, std::time::Instant)>,
+    pub pending_auto_layer_sync: Option<u8>,
 }
 
 impl V070HardwareController {
@@ -37,6 +39,20 @@ impl V070HardwareController {
 
     pub fn set_host_sleep_status(&mut self, status: &str) {
         self.projection.host_sleep_status = status.to_string();
+    }
+
+    pub fn consume_expected_layer_echo(&mut self, layer: u8, now: std::time::Instant) -> bool {
+        if let Some((expected, deadline)) = self.expected_layer_echo {
+            if now > deadline {
+                self.expected_layer_echo = None;
+                return false;
+            }
+            if expected == layer {
+                self.expected_layer_echo = None;
+                return true;
+            }
+        }
+        false
     }
 
     pub fn on_disconnected(&mut self) {
@@ -51,6 +67,8 @@ impl V070HardwareController {
         self.projection.status_message = "需连接 0.7.0-rc.16+ 独占固件设备".into();
         self.in_flight_seq = None;
         self.last_snapshot_session_id = None;
+        self.expected_layer_echo = None;
+        self.pending_auto_layer_sync = None;
     }
 
     pub fn mark_supported(
@@ -196,7 +214,7 @@ pub(crate) fn validate_v070_action(
     max_name_length: usize,
 ) -> Result<(), String> {
     match action {
-        V070HardwareAction::Refresh => Ok(()),
+        V070HardwareAction::Refresh | V070HardwareAction::SetAutoLayerSync { .. } => Ok(()),
         V070HardwareAction::SelectLayer { layer } => {
             if *layer == 0 || *layer > 6 {
                 return Err(format!(
@@ -352,6 +370,9 @@ pub(crate) async fn execute_v070_command_on_session(
         V070HardwareAction::Refresh => fetch_v070_snapshot_on_session(session, true)
             .await
             .map(V070BridgeOutcome::Snapshot),
+        V070HardwareAction::SetAutoLayerSync { .. } => {
+            Err("自动切层联动仅在宿主侧配置，不直接发送到固件".into())
+        }
         V070HardwareAction::SelectLayer { layer } => {
             session
                 .set_profile_layer_flashless(None, Some(*layer))
@@ -552,12 +573,110 @@ impl WorkbenchStore {
         });
     }
 
+    pub(crate) fn resolve_safe_auto_sync_board_layer(&self) -> Option<u8> {
+        if !self.document_store.v070_auto_layer_sync_enabled() {
+            return None;
+        }
+        if self.system_lifecycle != SystemLifecycle::Awake
+            || self.firmware_update.reserved()
+            || self.six_layer_job.is_some()
+        {
+            return None;
+        }
+        if !self.has_active_v070_device()
+            || self.v070_hardware.projection.host_sleep_status != "awake"
+        {
+            return None;
+        }
+        if !self.document_store.host_execution_enabled()
+            || !self.auto_follow_enabled
+            || self.manual_override
+            || self.document_store.locked_profile_id().is_some()
+        {
+            return None;
+        }
+        let active_pid = self.effective_resolved_active_profile_id()?;
+        if self.is_protected_oai_profile(&active_pid) {
+            return None;
+        }
+        let plan = self.document_store.board_layer_plan()?;
+        let installed_plan = self
+            .six_layer_running
+            .as_ref()
+            .map(|running| &running.installation.plan.desired);
+        for layer in mi_model::board_layers::BoardLayer::ALL {
+            let plan_matches = matches!(
+                plan.route(layer),
+                mi_model::board_layers::BoardLayerRoute::HostProfile { profile_id }
+                    if profile_id == &active_pid
+            );
+            if !plan_matches {
+                continue;
+            }
+            if let Some(desired) = installed_plan {
+                let desired_matches = matches!(
+                    desired.route(layer),
+                    mi_model::board_layers::BoardLayerRoute::HostProfile { profile_id }
+                        if profile_id == &active_pid
+                );
+                if !desired_matches {
+                    continue;
+                }
+            }
+            return Some(layer.number());
+        }
+        None
+    }
+
+    pub(crate) fn maybe_sync_v070_foreground_layer(&mut self) -> bool {
+        let Some(layer) = self.resolve_safe_auto_sync_board_layer() else {
+            self.v070_hardware.pending_auto_layer_sync = None;
+            return false;
+        };
+        if self.v070_hardware.projection.active_layer == Some(layer)
+            && self.v070_hardware.pending_auto_layer_sync.is_none()
+        {
+            return false;
+        }
+        if self.v070_hardware.projection.busy {
+            self.v070_hardware.pending_auto_layer_sync = Some(layer);
+            return false;
+        }
+        self.v070_hardware.pending_auto_layer_sync = None;
+        self.v070_hardware.expected_layer_echo =
+            Some((layer, self.update_now + std::time::Duration::from_secs(2)));
+        if self
+            .dispatch_v070_hardware_action(V070HardwareAction::SelectLayer { layer })
+            .is_err()
+        {
+            self.v070_hardware.expected_layer_echo = None;
+            return false;
+        }
+        true
+    }
+
     pub(super) fn dispatch_v070_hardware_action(
         &mut self,
         action: V070HardwareAction,
     ) -> Result<(), String> {
         if self.firmware_update.reserved() {
             return Err("固件更新流程正在占用设备，请结束后再试".into());
+        }
+        if let V070HardwareAction::SetAutoLayerSync { enabled } = action {
+            self.document_store
+                .set_v070_auto_layer_sync_enabled(enabled)?;
+            self.v070_hardware.projection.auto_layer_sync_enabled = enabled;
+            self.v070_hardware.projection.last_error = None;
+            if enabled {
+                self.v070_hardware.projection.status_message =
+                    "已开启前台切层联动（仅 RAM 零擦写）".into();
+                let _ = self.maybe_sync_v070_foreground_layer();
+            } else {
+                self.v070_hardware.pending_auto_layer_sync = None;
+                self.v070_hardware.expected_layer_echo = None;
+                self.v070_hardware.projection.status_message = "已关闭前台切层联动".into();
+            }
+            return Ok(());
         }
         if self.v070_hardware.projection.busy {
             return Err("上一条 0.7.0 硬件指令尚未完成".into());
@@ -651,7 +770,19 @@ impl WorkbenchStore {
         if !self.is_active_v070_session(session_id) {
             return;
         }
+        let succeeded = result.is_ok();
         self.v070_hardware.apply_outcome(seq, result);
+        if succeeded {
+            if !self.v070_hardware.projection.busy {
+                let pending = self.v070_hardware.pending_auto_layer_sync.take();
+                if pending.is_some() || seq == 0 {
+                    let _ = self.maybe_sync_v070_foreground_layer();
+                }
+            }
+        } else {
+            self.v070_hardware.pending_auto_layer_sync = None;
+            self.v070_hardware.expected_layer_echo = None;
+        }
         self.commit_runtime_update();
     }
 
@@ -664,8 +795,15 @@ impl WorkbenchStore {
         if !self.is_active_v070_session(session_id) {
             return;
         }
+        let is_expected_echo = self
+            .v070_hardware
+            .consume_expected_layer_echo(layer_index, self.update_now);
         self.v070_hardware
             .apply_profile_layer_notification(profile_index, layer_index);
+        if is_expected_echo {
+            self.v070_hardware.projection.status_message =
+                format!("前台联动已切至 P{profile_index} · 第 {layer_index} 层（RAM 零擦写）");
+        }
         self.commit_runtime_update();
     }
 }
@@ -1343,6 +1481,276 @@ mod tests {
                 running.shutdown(&store.tokio_runtime).unwrap();
             }
             responder.abort();
+        }
+    }
+
+    #[test]
+    fn v070_power_status_badge_formats_and_gates_by_support_and_connection() {
+        let mut proj = V070HardwareProjection::default();
+        assert!(crate::PowerStatusBadgeProjection::from_v070(&proj, false).is_none());
+        assert!(crate::PowerStatusBadgeProjection::from_v070(&proj, true).is_none());
+
+        proj.supported = true;
+        let unsynced = crate::PowerStatusBadgeProjection::from_v070(&proj, true)
+            .expect("supported connected device produces badge");
+        assert_eq!(unsynced.summary_label, "电量读取中");
+        assert_eq!(unsynced.usb_mode, "");
+
+        proj.synced = true;
+        proj.battery_percent = Some(88);
+        proj.is_charging = Some(true);
+        proj.pm_state.usb_host_hold = true;
+        proj.pm_state.state = "idle".into();
+        let charging_hold = crate::PowerStatusBadgeProjection::from_v070(&proj, true).unwrap();
+        assert_eq!(charging_hold.usb_mode, "usb.host 保持");
+        assert_eq!(
+            charging_hold.summary_label,
+            "88% 充电中 · usb.host 保持 · 待机"
+        );
+
+        proj.battery_percent = None;
+        proj.is_charging = None;
+        proj.pm_state.line_powered = true;
+        proj.pm_state.usb_host_hold = false;
+        proj.pm_config.host_sleep = true;
+        proj.pm_state.state = "active".into();
+        let line_follow = crate::PowerStatusBadgeProjection::from_v070(&proj, true).unwrap();
+        assert_eq!(line_follow.usb_mode, "跟随宿主");
+        assert_eq!(line_follow.summary_label, "USB 供电 · 跟随宿主");
+
+        proj.battery_percent = Some(50);
+        proj.is_charging = Some(false);
+        proj.pm_config.host_sleep = false;
+        proj.pm_config.auto_sleep = false;
+        proj.pm_state.state = "sleep".into();
+        let awake_sleep = crate::PowerStatusBadgeProjection::from_v070(&proj, true).unwrap();
+        assert_eq!(awake_sleep.summary_label, "50% · 常醒 · 休眠");
+    }
+
+    #[test]
+    fn v070_auto_layer_sync_default_off_oai_exclusion_echo_suppression_and_busy_coalescing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = crate::store::WorkbenchStoreConfig::isolated(dir.path());
+        cfg.isolated = false;
+        let mut store = WorkbenchStore::open(cfg.clone()).unwrap();
+        assert!(!store.projection().firmware.v070.auto_layer_sync_enabled);
+        assert!(!store.document_store.v070_auto_layer_sync_enabled());
+
+        store
+            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+                V070HardwareAction::SetAutoLayerSync { enabled: true },
+            )))
+            .unwrap();
+        assert!(store.projection().firmware.v070.auto_layer_sync_enabled);
+        assert!(store.document_store.v070_auto_layer_sync_enabled());
+        drop(store);
+
+        let mut reopened = WorkbenchStore::open(cfg).unwrap();
+        assert!(reopened.projection().firmware.v070.auto_layer_sync_enabled);
+        reopened
+            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+                V070HardwareAction::SetAutoLayerSync { enabled: false },
+            )))
+            .unwrap();
+        assert!(!reopened.projection().firmware.v070.auto_layer_sync_enabled);
+
+        let sent_methods = Arc::new(Mutex::new(Vec::new()));
+        let (session, link, mut responder) =
+            spawn_mock_v070_session(&reopened.tokio_runtime, "0.7.0-rc.16", sent_methods.clone());
+        let profile_id = |name: &str| {
+            reopened
+                .document_store
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, p)| p.name == name)
+                .unwrap()
+                .0
+                .clone()
+        };
+        let desired = mi_model::board_layers::BoardLayerPlan::recommended(
+            profile_id("Codex"),
+            profile_id("Antigravity"),
+            profile_id("DeepSeek Coder (DSH)"),
+        );
+        let compiled = mi_model::apply::AppliedSixLayerPlan::compile(
+            &desired,
+            &reopened.document_store.draft.document,
+            mi_model::host_router::BottomRowLayout::Split,
+            true,
+        )
+        .unwrap();
+
+        let mut running = RunningSixLayer::isolated(session.clone(), dir.path());
+        running.installation.plan = compiled;
+        running.readiness.configuration_observed = true;
+        running.readiness.keyboard_grabbed = true;
+        running.set_v070_inbox(reopened.hardware_event_tx.clone());
+        running.attach_test_vendor_session(&reopened.tokio_runtime, session.clone());
+        reopened.six_layer_running = Some(running);
+
+        poll_until(&mut reopened, |s| s.projection().firmware.v070.synced);
+        let badge = reopened
+            .projection()
+            .header
+            .power_status
+            .clone()
+            .expect("0.7.0 power status badge must be shown in header");
+        assert_eq!(badge.battery_percent, Some(91));
+        assert_eq!(reopened.projection().status_menu.power_status, Some(badge));
+
+        reopened.set_host_execution_enabled(true).unwrap();
+        reopened.set_auto_follow(true).unwrap();
+        assert!(reopened.foreground_changed(Some("com.deepseek.dsh")));
+        assert!(
+            !sent_methods
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == "kb.pl.set"),
+            "auto_layer_sync disabled by default must never emit kb.pl.set"
+        );
+
+        reopened
+            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+                V070HardwareAction::SetAutoLayerSync { enabled: true },
+            )))
+            .unwrap();
+        poll_until(&mut reopened, |s| {
+            !s.projection().firmware.v070.busy
+                && s.projection().firmware.v070.active_layer == Some(3)
+        });
+        assert!(
+            reopened.v070_hardware.expected_layer_echo.is_some(),
+            "kb.pl.set completion should arm expected_layer_echo"
+        );
+
+        link.push_wire(json!({"m": "kb.pl", "p": {"p": 3, "l": 3}}));
+        poll_until(&mut reopened, |s| {
+            s.v070_hardware.expected_layer_echo.is_none()
+        });
+        assert!(!reopened.projection().status_menu.manual_override);
+
+        let kb_pl_set_before_codex = sent_methods
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.as_str() == "kb.pl.set")
+            .count();
+        assert!(reopened.foreground_changed(Some("com.openai.codex")));
+        assert!(!reopened.projection().firmware.v070.busy);
+        assert_eq!(
+            sent_methods
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.as_str() == "kb.pl.set")
+                .count(),
+            kb_pl_set_before_codex,
+            "OAI native board layer (Codex on L1) must never trigger kb.pl.set"
+        );
+
+        reopened
+            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+                V070HardwareAction::ApplyMousePreset {
+                    preset: "fast".into(),
+                },
+            )))
+            .unwrap();
+        assert!(reopened.projection().firmware.v070.busy);
+        assert!(reopened.foreground_changed(Some("com.google.antigravity")));
+        assert_eq!(
+            reopened.v070_hardware.pending_auto_layer_sync,
+            Some(2),
+            "layer sync while busy must coalesce to pending_auto_layer_sync"
+        );
+        poll_until(&mut reopened, |s| {
+            !s.projection().firmware.v070.busy
+                && s.projection().firmware.v070.active_layer == Some(2)
+        });
+        link.push_wire(json!({"m": "kb.pl", "p": {"p": 3, "l": 2}}));
+        poll_until(&mut reopened, |s| {
+            s.v070_hardware.expected_layer_echo.is_none()
+        });
+
+        reopened.set_host_execution_enabled(false).unwrap();
+        let kb_pl_set_while_disabled = sent_methods
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.as_str() == "kb.pl.set")
+            .count();
+        assert!(reopened.foreground_changed(Some("com.deepseek.dsh")));
+        assert!(!reopened.projection().firmware.v070.busy);
+        assert_eq!(
+            sent_methods
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.as_str() == "kb.pl.set")
+                .count(),
+            kb_pl_set_while_disabled,
+            "host_execution_enabled == false must block kb.pl.set on foreground switches"
+        );
+
+        reopened.set_host_execution_enabled(true).unwrap();
+        poll_until(&mut reopened, |s| {
+            !s.projection().firmware.v070.busy
+                && s.projection().firmware.v070.active_layer == Some(3)
+        });
+        assert_eq!(
+            sent_methods
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.as_str() == "kb.pl.set")
+                .count(),
+            kb_pl_set_while_disabled + 1,
+            "re-enabling host_execution_enabled must immediately sync to mapped foreground layer"
+        );
+        link.push_wire(json!({"m": "kb.pl", "p": {"p": 3, "l": 3}}));
+        poll_until(&mut reopened, |s| {
+            s.v070_hardware.expected_layer_echo.is_none()
+        });
+
+        responder.abort();
+        let _ = reopened.tokio_runtime.block_on(&mut responder);
+        assert!(reopened.foreground_changed(Some("com.google.antigravity")));
+        assert!(reopened.projection().firmware.v070.busy);
+        assert!(reopened.v070_hardware.expected_layer_echo.is_some());
+        let in_flight_seq = reopened
+            .v070_hardware
+            .in_flight_seq
+            .expect("in-flight SelectLayer seq");
+        reopened
+            .hardware_event_tx
+            .send(HardwareLoopEvent::V070CapabilityOutcome {
+                session_id: session.id,
+                seq: in_flight_seq,
+                result: Err("timeout".into()),
+            })
+            .unwrap();
+        poll_until(&mut reopened, |s| !s.projection().firmware.v070.busy);
+        assert!(
+            reopened.v070_hardware.expected_layer_echo.is_none(),
+            "failed V070CapabilityOutcome must clear expected_layer_echo"
+        );
+        assert!(reopened.v070_hardware.pending_auto_layer_sync.is_none());
+
+        assert!(
+            !sent_methods
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == "fs.writebin"),
+            "auto layer sync must stay completely flashless"
+        );
+
+        if let Some(running) = reopened.six_layer_running.take() {
+            running.shutdown(&reopened.tokio_runtime).unwrap();
         }
     }
 }

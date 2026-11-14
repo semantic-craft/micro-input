@@ -730,6 +730,7 @@ fn usb_connect_and_verified_input_pump_dispatches_host_actions_and_handles_disco
             transport_hint: TransportHint::Usb,
             product: "Creator Micro 2".to_string(),
             path: "IOService:/Synthetic/CreatorMicro2".to_string(),
+            serial_number: None,
         },
         link: Mutex::new(Some(link)),
         events,
@@ -1132,6 +1133,7 @@ fn check_usb_host_routing(managed: bool, initial_layer: u32, case: UsbRoutingCas
             transport_hint: TransportHint::Usb,
             product: "Creator Micro 2".to_string(),
             path: "IOService:/Synthetic/AutoAcceptCreatorMicro2".to_string(),
+            serial_number: None,
         },
         link: Mutex::new(Some(link)),
         events,
@@ -2077,6 +2079,7 @@ fn standard_device_session_connect_forwards_kb_cs_notifications_with_dedup() {
             transport_hint: TransportHint::Usb,
             product: "Creator Micro 2".to_string(),
             path: "IOService:/Synthetic/CheatSheetSession".to_string(),
+            serial_number: None,
         },
         link: Mutex::new(Some(link)),
         events,
@@ -2116,4 +2119,322 @@ fn standard_device_session_connect_forwards_kb_cs_notifications_with_dedup() {
 
     send_wire(br#"{"method":"kb.cs.toggle","params":{}}"#);
     wait_visible(&mut store, false);
+}
+
+#[test]
+fn multi_device_usb_selection_persistence_fallback_and_switch_isolation() {
+    use mi_proto::{Framer, NativeFramer};
+    use mi_transport::{
+        HidCandidate, HidLink, HidTransport, LinkBackend, TransportError, TransportHint, UsagePair,
+    };
+    use serde_json::{json, Value};
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{Arc, Mutex},
+    };
+    use tokio::sync::{broadcast, mpsc};
+
+    fn b64_encode(input: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+        for chunk in input.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+            let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+            let triple = (b0 << 16) | (b1 << 8) | b2;
+            out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+            out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+            out.push(if chunk.len() > 1 {
+                TABLE[((triple >> 6) & 0x3F) as usize] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                TABLE[(triple & 0x3F) as usize] as char
+            } else {
+                '='
+            });
+        }
+        out
+    }
+
+    struct ResponderLink {
+        rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Result<Vec<u8>, TransportError>>>,
+        tx: mpsc::UnboundedSender<Result<Vec<u8>, TransportError>>,
+        in_framer: Mutex<NativeFramer>,
+        keymap_bytes: Vec<u8>,
+        keymap_sha1: String,
+    }
+
+    impl HidLink for ResponderLink {
+        fn backend(&self) -> LinkBackend {
+            LinkBackend::MacHidapi267Numbered
+        }
+
+        fn is_exclusive_vendor(&self) -> bool {
+            true
+        }
+
+        fn write<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            report: &'life1 [u8],
+        ) -> Pin<Box<dyn Future<Output = Result<(), TransportError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            let lines = self
+                .in_framer
+                .lock()
+                .unwrap()
+                .feed(report)
+                .unwrap_or_default();
+            for line in lines {
+                let req: Value = serde_json::from_slice(&line).unwrap();
+                let id = req["id"].clone();
+                let method = req["method"].as_str().unwrap_or("").to_string();
+                let reply = match method.as_str() {
+                    "device.status" => json!({
+                        "id": id,
+                        "result": {
+                            "version": "0.6.3",
+                            "profile_index": 0,
+                            "layer_index": 1
+                        }
+                    }),
+                    "fs.list" => json!({
+                        "id": id,
+                        "result": [{
+                            "name": "keymap.json",
+                            "size": self.keymap_bytes.len(),
+                            "checksum": self.keymap_sha1
+                        }]
+                    }),
+                    "fs.readbin" => {
+                        let offset = req["params"]["offset"].as_u64().unwrap_or(0) as usize;
+                        let len = req["params"]["len"].as_u64().unwrap_or(3072) as usize;
+                        let end = (offset + len).min(self.keymap_bytes.len());
+                        json!({
+                            "id": id,
+                            "result": {
+                                "total_size": self.keymap_bytes.len(),
+                                "data": b64_encode(&self.keymap_bytes[offset..end])
+                            }
+                        })
+                    }
+                    "v.oai.rgbcfg" | "lights.preview" | "v.oai.thstatus" => json!({
+                        "id": id,
+                        "result": {}
+                    }),
+                    other => panic!("unexpected RPC method: {other}"),
+                };
+                for out_report in NativeFramer::default()
+                    .encode(reply.to_string().as_bytes())
+                    .unwrap()
+                {
+                    let _ = self.tx.send(Ok(out_report));
+                }
+            }
+            Box::pin(async { Ok(()) })
+        }
+
+        fn read<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                let mut guard = self.rx.lock().await;
+                guard
+                    .recv()
+                    .await
+                    .unwrap_or(Err(TransportError::Disconnected))
+            })
+        }
+
+        fn close(&self) {
+            let _ = self.tx.send(Err(TransportError::Disconnected));
+        }
+    }
+
+    struct MultiUsbTransport {
+        candidates: Mutex<Vec<HidCandidate>>,
+        opened_paths: Mutex<Vec<String>>,
+        events: broadcast::Sender<()>,
+        keymap_bytes: Vec<u8>,
+        keymap_sha1: String,
+    }
+
+    impl HidTransport for MultiUsbTransport {
+        fn enumerate(&self) -> Result<Vec<HidCandidate>, TransportError> {
+            Ok(self.candidates.lock().unwrap().clone())
+        }
+
+        fn subscribe(&self) -> broadcast::Receiver<()> {
+            self.events.subscribe()
+        }
+
+        fn open(&self, id: &str) -> Result<Arc<dyn HidLink>, TransportError> {
+            self.opened_paths.lock().unwrap().push(id.to_string());
+            let (tx, rx) = mpsc::unbounded_channel();
+            Ok(Arc::new(ResponderLink {
+                rx: tokio::sync::Mutex::new(rx),
+                tx,
+                in_framer: Mutex::new(NativeFramer::default()),
+                keymap_bytes: self.keymap_bytes.clone(),
+                keymap_sha1: self.keymap_sha1.clone(),
+            }))
+        }
+    }
+
+    let make_candidate = |path: &str, serial: &str| HidCandidate {
+        vid: 0x303A,
+        pid: 0x8298,
+        usage_page: 0xFF00,
+        usage: 1,
+        usage_pairs: vec![UsagePair {
+            page: 0xFF00,
+            usage: 1,
+        }],
+        transport_hint: TransportHint::Usb,
+        product: "Creator Micro 2".to_string(),
+        path: path.to_string(),
+        serial_number: Some(serial.to_string()),
+    };
+
+    let beta = make_candidate("IOService:/Synthetic/Beta", "SN-BETA");
+    let alpha = make_candidate("IOService:/Synthetic/Alpha", "SN-ALPHA");
+    let mut raw_demo = mi_model::demo().unwrap().raw;
+    raw_demo["version"] = json!(1);
+    raw_demo["activeProfileId"] = json!(0);
+    let keymap_bytes = serde_json::to_vec(&raw_demo).unwrap();
+    let keymap_sha1 = mi_model::operation_record::file_value(&keymap_bytes)["sha1"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (events, _) = broadcast::channel(8);
+    let transport = MultiUsbTransport {
+        candidates: Mutex::new(vec![beta.clone(), alpha.clone()]),
+        opened_paths: Mutex::new(Vec::new()),
+        events,
+        keymap_bytes,
+        keymap_sha1,
+    };
+
+    let temp = TempDir::new().unwrap();
+    let mut cfg = mi_core::WorkbenchStoreConfig::isolated(temp.path());
+    cfg.isolated = false;
+    let mut store = WorkbenchStore::open(cfg.clone()).unwrap();
+
+    assert!(store.connect_with_transport(&transport, true).unwrap());
+    assert_eq!(
+        transport.opened_paths.lock().unwrap().as_slice(),
+        &["IOService:/Synthetic/Alpha"]
+    );
+    assert_eq!(
+        store.projection().header.preferred_device_serial.as_deref(),
+        Some("SN-ALPHA")
+    );
+    assert!(
+        store.projection().header.power_status.is_none(),
+        "0.6.3 device must never display 0.7.0 power_status capsule"
+    );
+    assert_eq!(
+        store.projection().status_menu.power_status,
+        store.projection().header.power_status
+    );
+    assert_eq!(store.projection().header.candidate_devices.len(), 2);
+    assert_eq!(
+        store.projection().header.candidate_devices[0]
+            .serial_number
+            .as_deref(),
+        Some("SN-ALPHA")
+    );
+    assert!(store.projection().header.candidate_devices[0].is_connected);
+    assert!(store.projection().header.candidate_devices[0].is_preferred);
+    assert!(!store.projection().header.candidate_devices[1].is_connected);
+    assert_eq!(
+        store.projection().status_menu.candidate_devices,
+        store.projection().header.candidate_devices
+    );
+
+    assert!(store
+        .select_candidate_device_with_transport(&transport, "SN-ALPHA")
+        .unwrap());
+    assert_eq!(transport.opened_paths.lock().unwrap().len(), 1);
+
+    assert!(store
+        .select_candidate_device_with_transport(&transport, "MISSING-SERIAL")
+        .is_err());
+    assert!(store.device_session.is_some());
+    assert_eq!(transport.opened_paths.lock().unwrap().len(), 1);
+
+    assert!(store
+        .select_candidate_device_with_transport(&transport, "SN-BETA")
+        .unwrap());
+    assert_eq!(
+        transport.opened_paths.lock().unwrap().as_slice(),
+        &["IOService:/Synthetic/Alpha", "IOService:/Synthetic/Beta"]
+    );
+    assert_eq!(
+        store.projection().header.preferred_device_serial.as_deref(),
+        Some("SN-BETA")
+    );
+    assert_eq!(
+        store
+            .projection()
+            .status_menu
+            .preferred_device_serial
+            .as_deref(),
+        Some("SN-BETA")
+    );
+    assert!(store.projection().header.candidate_devices[1].is_connected);
+    assert!(store.projection().header.candidate_devices[1].is_preferred);
+    assert!(!store.projection().header.candidate_devices[0].is_connected);
+
+    store.system_will_sleep();
+    assert!(store
+        .select_candidate_device_with_transport(&transport, "SN-ALPHA")
+        .is_err());
+    store.system_did_wake();
+    drop(store);
+
+    transport.opened_paths.lock().unwrap().clear();
+    let mut reopened = WorkbenchStore::open(cfg.clone()).unwrap();
+    assert_eq!(
+        reopened
+            .projection()
+            .header
+            .preferred_device_serial
+            .as_deref(),
+        Some("SN-BETA")
+    );
+    assert!(reopened.connect_with_transport(&transport, true).unwrap());
+    assert_eq!(
+        transport.opened_paths.lock().unwrap().as_slice(),
+        &["IOService:/Synthetic/Beta"]
+    );
+    drop(reopened);
+
+    *transport.candidates.lock().unwrap() = vec![alpha];
+    transport.opened_paths.lock().unwrap().clear();
+    let mut fallback = WorkbenchStore::open(cfg).unwrap();
+    assert!(fallback.connect_with_transport(&transport, true).unwrap());
+    assert_eq!(
+        transport.opened_paths.lock().unwrap().as_slice(),
+        &["IOService:/Synthetic/Alpha"]
+    );
+    assert_eq!(
+        fallback
+            .projection()
+            .header
+            .preferred_device_serial
+            .as_deref(),
+        Some("SN-ALPHA")
+    );
 }

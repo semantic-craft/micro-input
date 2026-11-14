@@ -33,7 +33,9 @@ pub use firmware_update::{
     V070HardwareProjection, V070MouseConfigProjection, V070PmConfigProjection,
     V070PmStateHoldProjection, V070PmStateProjection, V070SaRgbProjection,
 };
-pub use header::{HeaderAction, HeaderProjection, HeaderReadyState};
+pub use header::{
+    CandidateDevice, HeaderAction, HeaderProjection, HeaderReadyState, PowerStatusBadgeProjection,
+};
 pub use inspector::{
     ActionLibraryRowProjection, CodexKeycapId, EditableSlotInspectorProjection, InspectorAction,
     InspectorBodyProjection, InspectorDrawer, InspectorProjection, JoystickControlMode,

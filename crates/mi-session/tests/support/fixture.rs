@@ -54,6 +54,7 @@ fn device() -> HidCandidate {
         transport_hint: TransportHint::Usb,
         product: "Independent synthetic USB".into(),
         path: "synthetic-no-native-open".into(),
+        serial_number: None,
     }
 }
 impl HidTransport for Fixture {

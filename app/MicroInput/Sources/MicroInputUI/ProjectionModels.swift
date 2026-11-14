@@ -457,6 +457,70 @@ public struct CheatSheetModel: Equatable {
     }
 }
 
+public struct PowerStatusBadgeModel: Equatable, Sendable {
+    public var batteryPercent: Int?
+    public var isCharging: Bool?
+    public var linePowered: Bool
+    public var usbHostHold: Bool
+    public var usbMode: String
+    public var pmMode: String
+    public var hostSleepStatus: String
+    public var summaryLabel: String
+
+    public init(
+        batteryPercent: Int? = nil,
+        isCharging: Bool? = nil,
+        linePowered: Bool = false,
+        usbHostHold: Bool = false,
+        usbMode: String = "",
+        pmMode: String = "",
+        hostSleepStatus: String = "awake",
+        summaryLabel: String = ""
+    ) {
+        self.batteryPercent = batteryPercent
+        self.isCharging = isCharging
+        self.linePowered = linePowered
+        self.usbHostHold = usbHostHold
+        self.usbMode = usbMode
+        self.pmMode = pmMode
+        self.hostSleepStatus = hostSleepStatus
+        self.summaryLabel = summaryLabel
+    }
+}
+
+public struct CandidateDeviceModel: Equatable, Sendable, Identifiable {
+    public var id: String { selectorKey }
+    public let path: String
+    public let product: String
+    public let serialNumber: String?
+    public let displayLabel: String
+    public let isConnected: Bool
+    public let isPreferred: Bool
+
+    public var selectorKey: String {
+        if let serial = serialNumber?.trimmingCharacters(in: .whitespacesAndNewlines), !serial.isEmpty {
+            return serial
+        }
+        return path
+    }
+
+    public init(
+        path: String,
+        product: String,
+        serialNumber: String? = nil,
+        displayLabel: String = "",
+        isConnected: Bool = false,
+        isPreferred: Bool = false
+    ) {
+        self.path = path
+        self.product = product
+        self.serialNumber = serialNumber
+        self.displayLabel = displayLabel
+        self.isConnected = isConnected
+        self.isPreferred = isPreferred
+    }
+}
+
 public struct HeaderSliceModel: Equatable {
     public var engineVersion: String = "0.2.0"
     public var readyKind: String = "Ready"
@@ -474,6 +538,9 @@ public struct HeaderSliceModel: Equatable {
     public var cheatSheetVisible: Bool = false
     public var deviceConnected: Bool = false
     public var deviceSummary: String = "Creator Micro 2 (303A:8298) · 离线草稿模式"
+    public var powerStatus: PowerStatusBadgeModel? = nil
+    public var candidateDevices: [CandidateDeviceModel] = []
+    public var preferredDeviceSerial: String? = nil
     public var documentRevision: Int = 0
     public var hostRevision: Int = 0
     public init() {}
@@ -495,6 +562,9 @@ public struct HeaderSliceModel: Equatable {
         self.cheatSheetVisible = m.cheatSheetVisible
         self.deviceConnected = m.deviceConnected
         self.deviceSummary = m.deviceSummary
+        self.powerStatus = m.powerStatus
+        self.candidateDevices = m.candidateDevices
+        self.preferredDeviceSerial = m.preferredDeviceSerial
         self.documentRevision = m.documentRevision
         self.hostRevision = m.hostRevision
     }
@@ -686,6 +756,9 @@ public struct StatusMenuSliceModel: Equatable {
     public var radialSlots: [RadialSlotConfigModel] = []
     public var lightingEnabled: Bool = true
     public var cheatSheetPreview: CheatSheetModel? = nil
+    public var powerStatus: PowerStatusBadgeModel? = nil
+    public var candidateDevices: [CandidateDeviceModel] = []
+    public var preferredDeviceSerial: String? = nil
     public init() {}
 
     public init(from m: ProjectionModel) {
@@ -705,6 +778,9 @@ public struct StatusMenuSliceModel: Equatable {
         self.radialSlots = m.radialSlots
         self.lightingEnabled = m.lightingEnabled
         self.cheatSheetPreview = m.cheatSheetPreview
+        self.powerStatus = m.powerStatus
+        self.candidateDevices = m.candidateDevices
+        self.preferredDeviceSerial = m.preferredDeviceSerial
     }
 }
 
@@ -817,6 +893,9 @@ public struct ProjectionModel: Equatable {
     public var lastExportedPreset: String? = nil
     public var deviceConnected: Bool = false
     public var deviceSummary: String = "Creator Micro 2 (303A:8298) · 离线草稿模式"
+    public var powerStatus: PowerStatusBadgeModel? = nil
+    public var candidateDevices: [CandidateDeviceModel] = []
+    public var preferredDeviceSerial: String? = nil
     public var documentRevision: Int = 0
     public var hostRevision: Int = 0
 

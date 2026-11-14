@@ -90,6 +90,8 @@ final class FirmwareUpdateTests: XCTestCase {
                 "host_sleep_status": "awake",
                 "status_message": "已从设备同步 0.7.0 状态",
                 "last_error": NSNull(),
+                "auto_layer_sync_enabled": true,
+                "preferred_device_serial": "CM2-SN-001",
                 "mouse": [
                     "preset": "fast",
                     "delay_ms": 80,
@@ -150,6 +152,8 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertEqual(v070.batteryPercent, 87)
         XCTAssertEqual(v070.isCharging, false)
         XCTAssertNil(v070.lastError)
+        XCTAssertTrue(v070.autoLayerSyncEnabled)
+        XCTAssertEqual(v070.preferredDeviceSerial, "CM2-SN-001")
         XCTAssertEqual(v070.mouse.preset, "fast")
         XCTAssertEqual(v070.mouse.moveDelta, 12)
         XCTAssertEqual(v070.mouse.stickScroll, 120)
@@ -174,6 +178,8 @@ final class FirmwareUpdateTests: XCTestCase {
             "sa_rgb": ["sa": NSNull()],
         ])
         XCTAssertFalse(partial.supported)
+        XCTAssertFalse(partial.autoLayerSyncEnabled)
+        XCTAssertNil(partial.preferredDeviceSerial)
         XCTAssertNil(partial.activeLayer)
         XCTAssertNil(partial.batteryPercent)
         XCTAssertEqual(partial.mouse.deadzone, 0.15, accuracy: 0.0001)
@@ -343,6 +349,42 @@ final class FirmwareUpdateTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
         XCTAssertGreaterThan(host.fittingSize.height, 400)
         XCTAssertLessThanOrEqual(host.fittingSize.width, 560.5)
+        XCTAssertEqual(dispatched, 0)
+    }
+
+    @MainActor
+    func testAutoLayerSyncCommandPayloadAndOfflineToggleWithSerialSummary() throws {
+        let onCmd = (V070HardwareCommand.setAutoLayerSync(true)["V070Hardware"] as? [String: Any])?["SetAutoLayerSync"] as? [String: Any]
+        XCTAssertEqual(onCmd?["enabled"] as? Bool, true)
+        let offCmd = (V070HardwareCommand.setAutoLayerSync(false)["V070Hardware"] as? [String: Any])?["SetAutoLayerSync"] as? [String: Any]
+        XCTAssertEqual(offCmd?["enabled"] as? Bool, false)
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mi-v070-sync-toggle-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        XCTAssertFalse(store.firmware.v070.autoLayerSyncEnabled)
+        store.setV070AutoLayerSync(true)
+        XCTAssertTrue(store.firmware.v070.autoLayerSyncEnabled)
+        XCTAssertNil(store.firmware.v070.lastError)
+        store.setV070AutoLayerSync(false)
+        XCTAssertFalse(store.firmware.v070.autoLayerSyncEnabled)
+        XCTAssertNil(store.firmware.v070.lastError)
+
+        var dispatched = 0
+        let withSerial = V070HardwareSliceModel(json: [
+            "supported": false,
+            "auto_layer_sync_enabled": true,
+            "preferred_device_serial": "CM2-ALPHA",
+        ])
+        let host = NSHostingView(
+            rootView: V070HardwareSettingsSection(model: withSerial) { _ in dispatched += 1 }
+                .frame(width: 520)
+        )
+        host.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(host.fittingSize.height, 140)
+        XCTAssertLessThanOrEqual(host.fittingSize.width, 520.5)
         XCTAssertEqual(dispatched, 0)
     }
 }

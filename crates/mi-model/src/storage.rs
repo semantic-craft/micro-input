@@ -377,6 +377,37 @@ impl DocumentStore {
             .legacy_three_bindings
             .as_ref()
     }
+    pub fn preferred_device_serial(&self) -> Option<String> {
+        self.host_store()
+            .preferences
+            .value
+            .preferred_device_serial
+            .clone()
+    }
+    pub fn set_preferred_device_serial(&mut self, serial: Option<String>) -> Result<bool, String> {
+        if let Some(host) = &mut self.host {
+            return host.set_preferred_device_serial(serial);
+        }
+        if self.blocked {
+            return Err("本地文档未载入，首选设备序列号未保存".into());
+        }
+        self.preferences.set_preferred_device_serial(serial)
+    }
+    pub fn v070_auto_layer_sync_enabled(&self) -> bool {
+        self.host_store()
+            .preferences
+            .value
+            .v070_auto_layer_sync_enabled
+    }
+    pub fn set_v070_auto_layer_sync_enabled(&mut self, enabled: bool) -> Result<bool, String> {
+        if let Some(host) = &mut self.host {
+            return host.set_v070_auto_layer_sync_enabled(enabled);
+        }
+        if self.blocked {
+            return Err("本地文档未载入，0.7.0 前台自动切层开关未保存".into());
+        }
+        self.preferences.set_v070_auto_layer_sync_enabled(enabled)
+    }
     pub fn initialize_board_plan_if_absent(&mut self, plan: BoardLayerPlan) {
         if let Some(host) = &mut self.host {
             host.initialize_board_plan_if_absent(plan);
@@ -770,6 +801,10 @@ struct HostPreferences {
     board_layer_plan: Option<BoardLayerPlan>,
     preview_selection: BoardPreviewSelection,
     legacy_three_bindings: Option<LegacyThreeBindings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preferred_device_serial: Option<String>,
+    #[serde(default)]
+    v070_auto_layer_sync_enabled: bool,
 }
 impl Default for HostPreferences {
     fn default() -> Self {
@@ -789,6 +824,8 @@ impl Default for HostPreferences {
             board_layer_plan: None,
             preview_selection: BoardPreviewSelection::UsbStartup,
             legacy_three_bindings: None,
+            preferred_device_serial: None,
+            v070_auto_layer_sync_enabled: false,
         }
     }
 }
@@ -868,6 +905,8 @@ impl HostPreferencesStore {
                                     )?)
                                 },
                                 legacy_three_bindings: legacy,
+                                preferred_device_serial: None,
+                                v070_auto_layer_sync_enabled: false,
                             }
                         }
                         Some(2) => serde_json::from_slice(bytes)
@@ -987,6 +1026,27 @@ impl HostPreferencesStore {
         next.command_execution_enabled = enabled;
         self.save(next)
     }
+    fn set_preferred_device_serial(&mut self, serial: Option<String>) -> Result<bool, String> {
+        let normalized = serial
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        if self.value.preferred_device_serial == normalized {
+            return Ok(false);
+        }
+        let mut next = self.value.clone();
+        next.preferred_device_serial = normalized;
+        self.save_with_sync(next, true)?;
+        Ok(true)
+    }
+    fn set_v070_auto_layer_sync_enabled(&mut self, enabled: bool) -> Result<bool, String> {
+        if self.value.v070_auto_layer_sync_enabled == enabled {
+            return Ok(false);
+        }
+        let mut next = self.value.clone();
+        next.v070_auto_layer_sync_enabled = enabled;
+        self.save_with_sync(next, true)?;
+        Ok(true)
+    }
 }
 pub(crate) struct Lock(PathBuf);
 impl Lock {
@@ -1048,5 +1108,75 @@ impl DocumentStore {
         self.apply_preview = None;
         self.comparison = None;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v2_preferences_without_fw5_fields_deserializes_with_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc_path = dir.path().join("workbench.json");
+        let prefs_path = dir.path().join("workbench.preferences.json");
+        fs::write(
+            &prefs_path,
+            r#"{"schema_version":2,"favorites":[],"usb_startup_profile_id":null,"board_layer_plan":null,"preview_selection":"UsbStartup","legacy_three_bindings":null}"#,
+        )
+        .unwrap();
+
+        let mut store = DocumentStore::default();
+        store.open(doc_path).unwrap();
+        assert_eq!(store.preferred_device_serial(), None);
+        assert!(!store.v070_auto_layer_sync_enabled());
+    }
+
+    #[test]
+    fn preferred_device_serial_and_auto_layer_sync_persist_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc_path = dir.path().join("workbench.json");
+        let prefs_path = dir.path().join("workbench.preferences.json");
+
+        let mut store = DocumentStore::default();
+        store.open(doc_path.clone()).unwrap();
+        assert_eq!(store.preferred_device_serial(), None);
+        assert!(!store.v070_auto_layer_sync_enabled());
+
+        assert!(!store
+            .set_preferred_device_serial(Some("   ".into()))
+            .unwrap());
+        assert!(store
+            .set_preferred_device_serial(Some("  CM2-SERIAL-01  ".into()))
+            .unwrap());
+        assert_eq!(
+            store.preferred_device_serial().as_deref(),
+            Some("CM2-SERIAL-01")
+        );
+        assert!(!store
+            .set_preferred_device_serial(Some("CM2-SERIAL-01".into()))
+            .unwrap());
+
+        assert!(store.set_v070_auto_layer_sync_enabled(true).unwrap());
+        assert!(store.v070_auto_layer_sync_enabled());
+        assert!(!store.set_v070_auto_layer_sync_enabled(true).unwrap());
+
+        let mut reopened = DocumentStore::default();
+        reopened.open(doc_path.clone()).unwrap();
+        assert_eq!(
+            reopened.preferred_device_serial().as_deref(),
+            Some("CM2-SERIAL-01")
+        );
+        assert!(reopened.v070_auto_layer_sync_enabled());
+
+        assert!(reopened
+            .set_preferred_device_serial(Some(" \t ".into()))
+            .unwrap());
+        assert_eq!(reopened.preferred_device_serial(), None);
+        assert!(reopened.set_v070_auto_layer_sync_enabled(false).unwrap());
+        assert!(!reopened.v070_auto_layer_sync_enabled());
+
+        let saved_json = fs::read_to_string(&prefs_path).unwrap();
+        assert!(!saved_json.contains("preferred_device_serial"));
     }
 }
