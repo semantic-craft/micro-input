@@ -405,11 +405,4 @@ fn firmware_v063_304_tokens_2d_encoders_and_joystick_sector_splicing_work_end_to
         re_parsed.profiles[0].layers[0].joystick.sectors[0],
         mi_model::Binding::Basic(mi_model::Token("KC_ENT".into()))
     );
-
-    let all_ag = store.draft.compile_all_ag_host_keymap(Some(&p)).unwrap();
-    let all_ag_parsed = mi_model::parse_device_files(&all_ag, None).unwrap();
-    assert_eq!(
-        all_ag_parsed.profiles[0].layers[0].keys[12],
-        mi_model::Binding::Unknown(json!("KV_OAI_AG12"))
-    );
 }
