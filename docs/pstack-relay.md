@@ -1,11 +1,6 @@
-# PStack 接力队列（四款桌面应用深度控制）
+# 切片与阶段历史队列（四款桌面应用深度控制）
 
-本文件是 PStack 跨对话自动接力的唯一全景队列（对应 `principle-sequence-verifiable-units` 与 `Session pickup` 剧本）。
-不在此写死内部函数实现，只维护每个对话切片（Slice）的**用户可感知效果（Outcome）**、**可证伪验收条件（Done Predicate）**与**状态（Status）**。
-
-- 决策账本（`show-me-your-work`）：`.scratch/pstack-relay/decisions.tsv`
-- 下一棒提示词快照：`.scratch/pstack-relay/NEXT_PROMPT.md`
-- 交接与推进命令：`scripts/pstack-relay status` / `scripts/pstack-relay advance <SLICE_ID> --evidence "<sha/path>"`
+本文件记录各阶段切片（Slice）的**用户可感知效果（Outcome）**、**可证伪验收条件（Done Predicate）**与**状态（Status）**。
 
 ---
 
