@@ -408,8 +408,8 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: 多设备优选与顶栏电源切片单元测试、`./scripts/check` 及 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 全绿通过。
 - **Evidence**: PR #141; verify-offline 6 QA PASS (.scratch/qa-runs/1794650304936-44098..1794650311899-42165)
 
-### [ ] Slice FW6: kb.sa.rgb AI 会话状态自动映灯、节流防抖与退出复原闭环
+### [x] Slice FW6: kb.sa.rgb AI 会话状态自动映灯、节流防抖与退出复原闭环
 - **Playbook**: `Feature` + `Verify-Micro-Input`
 - **Outcome**: 将 `FourAppSessionKind`（空闲/运行中/待确认/蓝点完成）可选联动到 `0.7.0-rc.16+` 非保护自定义层的 `kb.sa.rgb` 单键灯效，内置同色去重与 `>= 100ms` 节流防抖，在断开或应用退出时发送全零 `kb.sa.rgb` 恢复板载默认灯效。
 - **Done Predicate**: 灯效仲裁节流与退出清零测试、`./scripts/check` 及 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline` 全绿通过。
-- **Evidence**: PENDING
+- **Evidence**: PR #142; verify-offline 6 QA PASS (.scratch/qa-runs/1794660308722-80147..1794660313825-79104)
