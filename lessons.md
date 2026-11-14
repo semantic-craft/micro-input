@@ -31,6 +31,12 @@
 - 修复：原插画不变，轮廓采用 1024 画布中的 824 像素，圆角同比缩放；启动时使用 `NSWorkspace.icon(forFile:)` 返回的系统图标。
 - 验证点：`swift scripts/verify-app-icon.swift target/AppIcon.iconset` 对照系统 Mail 图标的四档轮廓，改前失败、改后通过；构建入口自动运行该检查。安装包 ICNS 实测为 (100,100)–(924,924)，应用正常重启；Dock 专属截图未取得。Seen 1x（2026-11-10）。
 
+## 应用图标的小尺寸辨识
+
+- 起因与后果：用户反馈角色插画在 Dock 中不清晰，要求改用 Creator Micro 本体外形。
+- 修复：以正面硬件轮廓、旋钮、摇杆、六颗发光键及底部宽键作为识别特征，删除文字、螺丝和细小丝印；保留既有系统轮廓与留白。
+- 验证点：查看 `target/AppIcon.iconset/icon_16x16.png`、`icon_16x16@2x.png` 与 `icon_128x128.png` 的实际尺寸，再运行 `swift scripts/verify-app-icon.swift target/AppIcon.iconset`。机器检查验证轮廓，用户观感另行反馈。Seen 1x（2026-11-14）。
+
 
 ## 固定应用层必须覆盖实际动作类型
 

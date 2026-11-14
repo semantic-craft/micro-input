@@ -374,3 +374,8 @@ Workspace 固定为以下单向依赖的四层 Rust Crates 与薄原生宿主壳
 - **Done Predicate**: 原始改动逐项核对，Fast 模式错误回读回归先失败后通过，独立核验与 `scripts/verify-offline` 六景通过；有效改动提交、推送并合入主线，工作区干净，移除无运行依赖的旧副本。不写设备配置；不把安装、实体按键或视觉效果记为本轮通过。
 - **Evidence**: PR #128 merged 718483d; PR #129; .scratch/integration-cleanup-20261114/result.json; .scratch/integration-cleanup-20261114/cleanup-result.json; 6 isolated scenarios PASS; 8 unused worktrees removed; native and physical NOT_RUN
 - **Verification scope**: 本轮只做软件交付与开发现场清理；最新发布仍为 v0.7.0。#44 的安装升级、实体输入、灯光视觉及完整产品验收继续保留原门槛。#71 的旧六层按住方案与当前点击开关契约不同，不据此恢复旧草稿。
+
+### [x] Slice R28: Creator Micro 本体应用图标
+- **Outcome**: 用 Creator Micro 2 正面硬件造型替换角色插画，保留旋钮、摇杆、六颗发光键和底部宽键，改善 Dock 小尺寸辨识度。
+- **Done Predicate**: 检视 16/32/128 px 图标；系统轮廓检查与 `scripts/verify-offline` 全量通过；本机日常版更新图标并通过签名校验。不改设备映射，用户视觉偏好由后续反馈确认。
+- **Evidence**: .scratch/app-icon/result.json; scripts/verify-offline six scenarios PASS; installed icon and signature verified
