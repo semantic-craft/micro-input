@@ -11,7 +11,7 @@
 ## 隔离原生界面
 
 ```sh
-scripts/build --synthetic
+scripts/build
 MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=radial-menu scripts/run --verify --timeout=40
 ```
 

@@ -9,8 +9,6 @@ for arg in "$@"; do
     --release)
       profile="release"
       ;;
-    --synthetic)
-      ;;
     *)
       echo "Unknown argument: $arg" >&2
       exit 2

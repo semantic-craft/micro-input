@@ -11,10 +11,7 @@ pub mod session_navigation;
 pub mod status_item;
 
 pub use app_cache::{AppBundleCache, AppBundleInfo, OTHER_APPS_WILDCARD_BUNDLE_ID};
-pub use ax_dictation::{
-    is_valid_ax_leaf_on_no_value, AXDictationController, AxElementNode, AxTreeProvider,
-    DictationAdapter, DictationOutcome, LockedDictationTarget,
-};
+pub use ax_dictation::DictationAdapter;
 pub use codex_sessions::{
     build_codex_thread_deeplink, observe_codex_threads, read_codex_thread_fingerprint,
     verify_codex_window_readback, CodexObservedStatus, CodexThreadFingerprint,

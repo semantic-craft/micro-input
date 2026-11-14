@@ -77,7 +77,7 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 
 文档模型与候选：`cargo test -p mi-model --test lighting`；合成端到端：`cargo test -p mi-session --features synthetic-backend --test config_write`。后者仅用自编夹具、私有临时备份和编译的合成transport，不枚举/打开真实设备。合成写入器仅由显式 `synthetic_config_writer` 构造的高层工作流调用；普通合成实例不开放写入；原生接线已由 E-108 补齐。默认统一门禁仍为 `scripts/check`，原生探针继续ignored。
 
-既有宿主回归使用 `scripts/build --synthetic` 后的 `MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=25`；该场景验证既有预设/宿主模拟未回退，不代表新增灯光UI或真实设备功能。生产离线启动必须设置 `MI_AUTO_HOST_READY=0`，本轮不启动生产应用。
+既有宿主回归使用 `scripts/build` 后的 `MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=host-execution scripts/run --verify --timeout=25`；该场景验证既有预设/宿主模拟未回退，不代表新增灯光UI或真实设备功能。生产离线启动必须设置 `MI_AUTO_HOST_READY=0`，本轮不启动生产应用。
 
 
 持久记录回归：`cargo test -p mi-model --test operation_record`；合成恢复链路仍用 `cargo test -p mi-session --features synthetic-backend --test config_write`。覆盖首次发送前落盘、中断重开、损坏现状恢复、恢复链失败、新计划绑定、读回失败、核验结果未落盘、文档冲突和重复本地修复。`apply_observed` 是检查点观测接缝，不开放到 FFI；生产后端现经 E-108 的独立入口构造计划绑定 writer。完整检查使用 `MI_AUTO_HOST_READY=0 scripts/check`，真实硬件测试保持 ignored。
@@ -88,9 +88,9 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 
 诊断导出：`MI_AUTO_HOST_READY=0 MI_SYNTHETIC_SCENARIO=diagnostic-export MI_DIAGNOSTIC_EVIDENCE_PATH=/absolute/report.json scripts/run --verify --timeout=45`。隔离应用打开报告，生成 0600 的 JSON 和 `evidence/diagnostics.json`；后者确认失败阶段存在，并把实体键和灯光视觉固定为 `NOT_RUN`。单元测试覆盖路径、serial 和 JSON 载荷脱敏，以及失败读取后的行动报告。
 
-RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和六个 QA 场景的总入口；`--qa-only` 用于已完成单元门禁后的应用复验。每个应用场景 TTL 45 秒，启动器负责退出/清理，验证器另核对进程消失、回执数量及隔离目录移除。失败写入 FAIL 结果并非零退出；finally 恢复匹配的生产绑定/库/应用但不启动它。环境强制 `MI_AUTO_HOST_READY=0`，不运行任何物理探针。
+RGB 与全自动离线验收：`scripts/verify-offline` 是包含统一检查和六个 QA 场景的总入口；`--qa-only` 用于已完成单元门禁后的应用复验。每个应用场景 TTL 45 秒，启动器负责退出/清理，验证器另核对进程消失、回执数量及隔离目录移除。失败写入 FAIL 结果并非零退出；场景通过运行时环境选择，QA 使用独立副本，完成后保留原构建包而不启动生产应用。环境强制 `MI_AUTO_HOST_READY=0`，不运行任何物理探针。
 
-性能基线准备：`scripts/perf-baseline` 构建合成应用后启动隔离 QA，记录从启动到 Workbench 首次 `onAppear` 的耗时，再采样默认 10 秒空闲 CPU time 增量与 RSS。`--seconds 120` 可延长观察；launcher 超时随观察预算增加，包含启动和停止余量。结果写入该轮 `evidence/result.json`，状态为 `MEASURED`；设备连接、实体键、灯光视觉、安装版和验收预算固定 `NOT_RUN` 或 `NOT_SET`。该命令只建立可复测基线，不签收 #42 的插拔、睡眠唤醒或轻量预算。
+性能基线准备：`scripts/perf-baseline` 构建当前应用后启动隔离 QA，记录从启动到 Workbench 首次 `onAppear` 的耗时，再采样默认 10 秒空闲 CPU time 增量与 RSS。`--seconds 120` 可延长观察；launcher 超时随观察预算增加，包含启动和停止余量。结果写入该轮 `evidence/result.json`，状态为 `MEASURED`；设备连接、实体键、灯光视觉、安装版和验收预算固定 `NOT_RUN` 或 `NOT_SET`。该命令只建立可复测基线，不签收 #42 的插拔、睡眠唤醒或轻量预算。
 
 `cargo test -p mi-session --features synthetic-backend lighting_preview` 覆盖合成运行态与文件分离、最新值合并、切层/断连、失败未知状态、编号保留、30 秒上限及所有者丢弃恢复。`mi-core` 的 `inspector_and_editors` 回归覆盖两区六效果、参数可用性、非法值、单次全层撤销、重开、RGB 应用/恢复及预览不修改本地文档。恢复设备保留本地目标意图；测试分别检查当前设备快照和本地草稿，不把两者相等当成要求。
 

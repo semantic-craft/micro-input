@@ -46,9 +46,7 @@ use crate::{
         FAVORITE_SLOT_COUNT,
     },
 };
-use mi_bridge::{
-    FourAppAgentPhase, FourAppLightingArbiter, FourAppVoiceManager, PushToTalkController,
-};
+use mi_bridge::{FourAppAgentPhase, FourAppLightingArbiter, PushToTalkController};
 use mi_macos::{
     executor::APPLE_FN_KEY_CODE, AppBundleCache, AppBundleInfo, HeldInputId, HostActionReceipt,
     LiveHostActionExecutor, MacOsSystemDriver, PassivePanelFrameSpec, PassivePanelHost,
@@ -371,7 +369,6 @@ struct HeldDictation {
 pub struct WorkbenchStore {
     pub config: WorkbenchStoreConfig,
     pub document_store: DocumentStore,
-    pub voice_manager: FourAppVoiceManager,
     pub ptt_controller: PushToTalkController,
     pub lighting_arbiter: FourAppLightingArbiter,
     pub slot_table: FourAppSlotTable,
@@ -521,7 +518,6 @@ impl WorkbenchStore {
         let mut store = Self {
             config,
             document_store,
-            voice_manager: FourAppVoiceManager::new(),
             ptt_controller: PushToTalkController::new_simulated(),
             lighting_arbiter: FourAppLightingArbiter::new(),
             slot_table: FourAppSlotTable::new(),
@@ -1925,9 +1921,8 @@ impl WorkbenchStore {
             self.ptt_controller.cancel();
             self.ptt_controller.cleanup_confirmed = stopped.is_ok();
         }
-        match &stopped {
-            Ok(()) => self.voice_manager.confirm_dictation_stopped(),
-            Err(error) => self.status_message = format!("原目标释放未确认 · {error}"),
+        if let Err(error) = &stopped {
+            self.status_message = format!("原目标释放未确认 · {error}");
         }
         stopped
     }

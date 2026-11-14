@@ -1,11 +1,7 @@
-use mi_macos::ax_dictation::{
-    is_valid_ax_leaf_on_no_value, AXDictationController, AxElementNode, AxTreeProvider,
-    AxWindowSnapshot, DictationAdapter, DictationOutcome,
-};
+use mi_macos::ax_dictation::DictationAdapter;
 use mi_macos::executor::{
-    ClipboardItemSnapshot, ClipboardSnapshot, HeldInputId, LiveHostActionExecutor, RecordedOsEvent,
-    RecordingOsDriver, APPLE_FN_KEY_CODE, CG_EVENT_FLAG_MASK_SECONDARY_FN,
-    CG_EVENT_TYPE_FLAGS_CHANGED,
+    ClipboardItemSnapshot, HeldInputId, LiveHostActionExecutor, RecordedOsEvent, RecordingOsDriver,
+    APPLE_FN_KEY_CODE, CG_EVENT_FLAG_MASK_SECONDARY_FN, CG_EVENT_TYPE_FLAGS_CHANGED,
 };
 use mi_macos::{
     run_config_write_scenario, run_diagnostic_export_scenario, run_host_execution_scenario,
@@ -18,7 +14,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tempfile::TempDir;
 
 #[test]
@@ -357,145 +353,6 @@ fn test_live_host_action_executor_apple_fn_paste_submit_and_macro_trust() {
     let macro_receipt = executor.execute("Antigravity", "AG12", &macro_action);
     assert_eq!(macro_receipt.outcome, "blocked");
     assert_eq!(macro_receipt.detail, "accessibility_untrusted");
-}
-
-struct MockAxProvider {
-    window: Mutex<AxWindowSnapshot>,
-    press_calls: Mutex<Vec<String>>,
-    replace_control_on_stop: Mutex<bool>,
-    clipboard: Mutex<ClipboardSnapshot>,
-}
-
-impl AxTreeProvider for MockAxProvider {
-    fn frontmost_window(&self, _adapter: DictationAdapter) -> Option<AxWindowSnapshot> {
-        Some(self.window.lock().unwrap().clone())
-    }
-
-    fn window_by_identity(
-        &self,
-        pid: i32,
-        window_id: u64,
-        window_title: &str,
-    ) -> Option<AxWindowSnapshot> {
-        let win = self.window.lock().unwrap().clone();
-        if win.pid == pid && win.window_id == window_id && win.window_title == window_title {
-            Some(win)
-        } else {
-            None
-        }
-    }
-
-    fn ax_press(&self, _pid: i32, _window_id: u64, control_id: &str) -> Result<(), String> {
-        self.press_calls
-            .lock()
-            .unwrap()
-            .push(control_id.to_string());
-        let replace = *self.replace_control_on_stop.lock().unwrap();
-        let mut win = self.window.lock().unwrap();
-        if let Some(ctrl) = win.controls.iter_mut().find(|c| c.control_id == control_id) {
-            if ctrl.label == "开始听写" {
-                ctrl.label = "停止听写".to_string();
-            } else if ctrl.label == "停止听写" {
-                if replace {
-                    ctrl.control_id = "btn-voice-rebuilt-2".to_string();
-                }
-                ctrl.label = "开始听写".to_string();
-            }
-        }
-        Ok(())
-    }
-
-    fn snapshot_clipboard(&self, _max_bytes: usize) -> ClipboardSnapshot {
-        self.clipboard.lock().unwrap().clone()
-    }
-
-    fn restore_clipboard(&self, snapshot: &ClipboardSnapshot, expected_change_count: u64) -> bool {
-        let mut current = self.clipboard.lock().unwrap();
-        if current.change_count == expected_change_count {
-            *current = snapshot.clone();
-            true
-        } else {
-            false
-        }
-    }
-}
-
-#[test]
-fn test_ax_dictation_leaf_validation_4tuple_lock_and_replacement_readback() {
-    assert!(DictationAdapter::Dsh.matches_start_label("开始听写"));
-    assert!(DictationAdapter::Dsh.matches_stop_label("停止听写"));
-    assert!(DictationAdapter::Dsh.matches_stop_label("停止并识别"));
-
-    let leaf_attrs = vec!["AXRole".to_string(), "AXTitle".to_string()];
-    let container_attrs = vec![
-        "AXRole".to_string(),
-        "AXTitle".to_string(),
-        "AXChildren".to_string(),
-    ];
-    assert!(is_valid_ax_leaf_on_no_value(
-        Some("AXButton"),
-        Some(&leaf_attrs)
-    ));
-    assert!(!is_valid_ax_leaf_on_no_value(
-        Some("AXGroup"),
-        Some(&container_attrs)
-    ));
-    assert!(!is_valid_ax_leaf_on_no_value(None, Some(&leaf_attrs)));
-    assert!(!is_valid_ax_leaf_on_no_value(Some(""), Some(&leaf_attrs)));
-    assert!(!is_valid_ax_leaf_on_no_value(Some("AXButton"), None));
-
-    let provider = Arc::new(MockAxProvider {
-        window: Mutex::new(AxWindowSnapshot {
-            pid: 5150,
-            window_id: 9001,
-            window_title: "DSH - 主窗口".to_string(),
-            controls: vec![AxElementNode {
-                control_id: "btn-voice-1".to_string(),
-                role: "AXButton".to_string(),
-                label: "开始听写".to_string(),
-                parent_chain_to_window: vec![
-                    "toolbar-1".to_string(),
-                    "root-split".to_string(),
-                    "9001".to_string(),
-                ],
-                attribute_names: leaf_attrs,
-            }],
-        }),
-        press_calls: Mutex::new(Vec::new()),
-        replace_control_on_stop: Mutex::new(true),
-        clipboard: Mutex::new(ClipboardSnapshot {
-            change_count: 7,
-            items: vec![ClipboardItemSnapshot {
-                types_and_bytes: vec![("public.utf8-plain-text".to_string(), b"keep-me".to_vec())],
-            }],
-        }),
-    });
-
-    let controller = AXDictationController::new(provider.clone());
-    let start = controller.start_dictation(DictationAdapter::Dsh);
-    let locked = match start {
-        DictationOutcome::Started(t) => t,
-        other => panic!("expected Started, got {:?}", other),
-    };
-    assert_eq!(locked.pid, 5150);
-    assert_eq!(locked.window_id, 9001);
-    assert_eq!(locked.window_title, "DSH - 主窗口");
-    assert_eq!(locked.control_id, "btn-voice-1");
-
-    let stop = controller.stop_dictation();
-    assert_eq!(
-        stop,
-        DictationOutcome::Stopped {
-            used_replacement_idle_readback: true,
-            clipboard_restored: true,
-        }
-    );
-    let presses = provider.press_calls.lock().unwrap().clone();
-    assert_eq!(
-        presses,
-        vec!["btn-voice-1".to_string(), "btn-voice-1".to_string()],
-        "replacement control btn-voice-rebuilt-2 must only be read-confirmed, never pressed"
-    );
 }
 
 #[test]

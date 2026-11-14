@@ -146,21 +146,6 @@ public struct SessionSlotModel: Identifiable, Equatable {
     }
 }
 
-public struct SessionPillModel: Identifiable, Equatable {
-    public let id: String
-    public let agentMonogram: String
-    public let title: String
-    public let kind: String
-    public let badgeText: String
-    public let colorHex: String
-    public let watermark: String
-    public let placeRaw: Any?
-
-    public static func == (lhs: SessionPillModel, rhs: SessionPillModel) -> Bool {
-        lhs.id == rhs.id && lhs.title == rhs.title && lhs.watermark == rhs.watermark
-    }
-}
-
 public struct SimpleLightingModel: Equatable {
     public var isOpen: Bool = false
     public var lightingEnabled: Bool = true
@@ -655,9 +640,6 @@ public struct CanvasSliceModel: Equatable {
 
 public struct SessionStripSliceModel: Equatable {
     public var sessionSlots: [SessionSlotModel] = []
-    public var completedPills: [SessionPillModel] = []
-    public var workingPills: [SessionPillModel] = []
-    public var attentionPills: [SessionPillModel] = []
     public var unreadCompletedCount: Int = 0
     public var workingCount: Int = 0
     public var topSixBoundAsSessionKeys: Bool = false
@@ -667,9 +649,6 @@ public struct SessionStripSliceModel: Equatable {
 
     public init(from m: ProjectionModel) {
         self.sessionSlots = m.sessionSlots
-        self.completedPills = m.completedPills
-        self.workingPills = m.workingPills
-        self.attentionPills = m.attentionPills
         self.unreadCompletedCount = m.unreadCompletedCount
         self.workingCount = m.workingCount
         self.topSixBoundAsSessionKeys = m.topSixBoundAsSessionKeys
@@ -711,7 +690,6 @@ public struct InspectorSliceModel: Equatable {
 }
 
 public struct StatusMenuSliceModel: Equatable {
-    public var statusMenuIconTitle: String = "MI"
     public var activeProfileName: String = "Antigravity"
     public var routingModeSummary: String = "自动跟随前台软件"
     public var favorites2x2: [FavoriteSlotModel] = []
@@ -729,14 +707,9 @@ public struct StatusMenuSliceModel: Equatable {
     public var lightingEnabled: Bool = true
     public var popoverPreviewMode: PopoverPreviewMode = .sessionPreview
     public var cheatSheetPreview: CheatSheetModel? = nil
-    public var pendingImportName: String? = nil
-    public var pendingImportSummary: String? = nil
-    public var pendingExportScope: String? = nil
-    public var presetError: String? = nil
     public init() {}
 
     public init(from m: ProjectionModel) {
-        self.statusMenuIconTitle = m.statusMenuIconTitle
         self.activeProfileName = m.activeProfileName
         self.routingModeSummary = m.routingModeSummary
         self.favorites2x2 = m.favorites2x2
@@ -754,38 +727,26 @@ public struct StatusMenuSliceModel: Equatable {
         self.lightingEnabled = m.lightingEnabled
         self.popoverPreviewMode = m.popoverPreviewMode
         self.cheatSheetPreview = m.cheatSheetPreview
-        self.pendingImportName = m.pendingImportName
-        self.pendingImportSummary = m.pendingImportSummary
-        self.pendingExportScope = m.pendingExportScope
-        self.presetError = m.presetError
     }
 }
 
 public struct OverlaySliceModel: Equatable {
     public var cheatSheetVisible: Bool = false
     public var cheatSheet: CheatSheetModel? = nil
-    public var passiveToastTitle: String? = nil
-    public var passiveToastSubtitle: String? = nil
     public init() {}
 
     public init(from m: ProjectionModel) {
         self.cheatSheetVisible = m.cheatSheetVisible
         self.cheatSheet = m.cheatSheet
-        self.passiveToastTitle = m.passiveToastTitle
-        self.passiveToastSubtitle = m.passiveToastSubtitle
     }
 }
 
 public struct FooterSliceModel: Equatable {
     public var statusMessage: String = "已就绪"
-    public var footerStatusText: String = "就绪"
-    public var footerLimitText: String = "长按说话上限 120 秒，响应超时 8 秒"
     public init() {}
 
     public init(from m: ProjectionModel) {
         self.statusMessage = m.statusMessage
-        self.footerStatusText = m.footerStatusText
-        self.footerLimitText = m.footerLimitText
     }
 }
 
@@ -818,8 +779,6 @@ public struct ProjectionModel: Equatable {
     public var canMoveUp: Bool = false
     public var canMoveDown: Bool = false
     public var canDelete: Bool = false
-    public var footerStatusText: String = "就绪"
-    public var footerLimitText: String = "长按说话上限 120 秒，响应超时 8 秒"
 
     public var selectedLayerId: String? = nil
     public var layerTabs: [LayerTabModel] = []
@@ -850,9 +809,6 @@ public struct ProjectionModel: Equatable {
     public var canExportOrCopyLayer: Bool = true
 
     public var sessionSlots: [SessionSlotModel] = []
-    public var completedPills: [SessionPillModel] = []
-    public var workingPills: [SessionPillModel] = []
-    public var attentionPills: [SessionPillModel] = []
     public var unreadCompletedCount: Int = 0
     public var workingCount: Int = 0
     public var topSixBoundAsSessionKeys: Bool = false
@@ -863,7 +819,6 @@ public struct ProjectionModel: Equatable {
     public var isProtectedLayer: Bool = false
     public var editableInspector: EditableInspectorModel? = EditableInspectorModel()
 
-    public var statusMenuIconTitle: String = "MI"
     public var activeProfileName: String = "Antigravity"
     public var routingModeSummary: String = "自动跟随前台软件"
     public var favorites2x2: [FavoriteSlotModel] = []
@@ -878,12 +833,6 @@ public struct ProjectionModel: Equatable {
     public var cheatSheetPreview: CheatSheetModel? = nil
     public var cheatSheetVisible: Bool = false
     public var cheatSheet: CheatSheetModel? = nil
-    public var passiveToastTitle: String? = nil
-    public var passiveToastSubtitle: String? = nil
-    public var pendingImportName: String? = nil
-    public var pendingImportSummary: String? = nil
-    public var pendingExportScope: String? = nil
-    public var presetError: String? = nil
 
     public var activeModal: ActiveModalModel? = nil
     public var statusMessage: String = "已就绪"

@@ -240,8 +240,6 @@ public final class CoreStore {
             m.canMoveUp = sidebar["can_move_up"] as? Bool ?? false
             m.canMoveDown = sidebar["can_move_down"] as? Bool ?? false
             m.canDelete = sidebar["can_delete"] as? Bool ?? false
-            m.footerStatusText = sidebar["footer_status_text"] as? String ?? ""
-            m.footerLimitText = sidebar["footer_limit_text"] as? String ?? ""
             if let rows = sidebar["rows"] as? [[String: Any]] {
                 m.sidebarRows = rows.map { r in
                     SidebarRowModel(
@@ -397,9 +395,6 @@ public final class CoreStore {
                     )
                 }
             }
-            m.completedPills = parsePills(strip["completed_blue_dot_pills"] as? [[String: Any]] ?? [])
-            m.workingPills = parsePills(strip["working_pills"] as? [[String: Any]] ?? [])
-            m.attentionPills = parsePills(strip["attention_pills"] as? [[String: Any]] ?? [])
             if let lp = strip["lighting_popover"] as? [String: Any] {
                 m.simpleLighting = SimpleLightingModel(
                     isOpen: lp["is_open"] as? Bool ?? false,
@@ -431,9 +426,6 @@ public final class CoreStore {
         }
 
         if let sm = root["status_menu"] as? [String: Any] {
-            if let icon = sm["icon"] as? [String: Any] {
-                m.statusMenuIconTitle = icon["monogram"] as? String ?? "MI"
-            }
             m.activeProfileName = sm["active_profile_name"] as? String ?? "未选择方案"
             m.routingModeSummary = sm["routing_mode_summary"] as? String ?? "手动模式"
             m.autoFollowEnabled = sm["auto_follow_enabled"] as? Bool ?? false
@@ -450,15 +442,6 @@ public final class CoreStore {
             m.popoverPreviewMode = (sm["popover_preview_mode"] as? String).flatMap(PopoverPreviewMode.init(rawValue:)) ?? .sessionPreview
             m.cheatSheetPreview = (sm["cheat_sheet_preview"] as? [String: Any]).map(parseCheatSheet)
             m.cheatSheetVisible = sm["cheat_sheet_visible"] as? Bool ?? false
-            m.presetError = sm["preset_error"] as? String
-            m.pendingExportScope = sm["pending_export_scope"] as? String
-            if let imp = sm["pending_import"] as? [String: Any] {
-                m.pendingImportName = imp["name"] as? String
-                let pc = imp["profile_count"] as? Int ?? 0
-                let lc = imp["layer_count"] as? Int ?? 0
-                let ac = imp["action_count"] as? Int ?? 0
-                m.pendingImportSummary = "包含 \(pc) 个方案、\(lc) 个按键层、\(ac) 个动作"
-            }
             if let favs = sm["favorites_2x2"] as? [[String: Any]] {
                 m.favorites2x2 = favs.enumerated().map { idx, f in
                     FavoriteSlotModel(
@@ -493,10 +476,7 @@ public final class CoreStore {
         if let ov = root["overlay"] as? [String: Any],
            let content = ov["content"] as? [String: Any]
         {
-            if let toast = content["PassiveToast"] as? [String: Any] {
-                m.passiveToastTitle = toast["profile_name"] as? String
-                m.passiveToastSubtitle = toast["mode_summary"] as? String
-            } else if let cs = content["InteractiveCheatSheet"] as? [String: Any] {
+            if let cs = content["InteractiveCheatSheet"] as? [String: Any] {
                 m.cheatSheet = parseCheatSheet(cs)
             }
         }
@@ -518,21 +498,6 @@ public final class CoreStore {
             explanationText: lock["explanation_text"] as? String ?? "",
             unlockButtonTitle: lock["unlock_button_title"] as? String ?? "切到自定义层解锁编辑"
         )
-    }
-
-    private static func parsePills(_ list: [[String: Any]]) -> [SessionPillModel] {
-        list.enumerated().map { idx, p in
-            SessionPillModel(
-                id: "\(p["watermark"] as? String ?? "pill")-\(idx)",
-                agentMonogram: p["agent_monogram"] as? String ?? "",
-                title: p["title"] as? String ?? "",
-                kind: p["kind"] as? String ?? "Idle",
-                badgeText: p["badge_text"] as? String ?? "",
-                colorHex: p["color_hex"] as? String ?? "#14C76B",
-                watermark: p["watermark"] as? String ?? "",
-                placeRaw: p["place"]
-            )
-        }
     }
 
     private static func parseEditableInspector(_ edit: [String: Any]) -> EditableInspectorModel {

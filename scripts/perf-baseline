@@ -145,7 +145,7 @@ def baseline(process, run_dir, seconds, interval):
     return {
         "status": "MEASURED",
         "scenario": "performance-baseline",
-        "build": "synthetic",
+        "build": "debug",
         "bundle_id": launcher["bundle_id"],
         "launcher_pid": process.pid,
         "app_pid": launcher["pid"],
@@ -185,7 +185,7 @@ def main():
     if args.seconds <= 0 or args.interval <= 0 or args.seconds < args.interval:
         parser.error("--seconds and --interval must be positive, with seconds >= interval")
 
-    subprocess.run(["scripts/build", "--synthetic"], cwd=ROOT, check=True)
+    subprocess.run(["scripts/build"], cwd=ROOT, check=True)
     env = dict(os.environ, MI_AUTO_HOST_READY="0")
     env.pop("MI_SYNTHETIC_SCENARIO", None)
     started_ms = int(time.time() * 1000)
@@ -218,8 +218,6 @@ def main():
             stop_launcher(process)
         print("".join(output), end="", flush=True)
         raise
-    finally:
-        subprocess.run(["scripts/build"], cwd=ROOT, env=env, check=True)
 
 
 if __name__ == "__main__":

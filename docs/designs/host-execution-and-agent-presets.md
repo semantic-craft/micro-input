@@ -393,7 +393,7 @@
     *   在 `Model.swift` 的 `DocumentView` 中新增 `let host_active_profile_id: String?` 与 `let host_execution_enabled: Bool?`；新增 `ResolvedHostActionPayload: Codable` 与 `PassThroughHealthView: Codable`。
     *   在 `Store.swift` 的 `protocol Backend` 及 `extension Backend` 中添加新 FFI 方法及默认实现；在 `Store` 中新增 `@Published var hostActiveProfileId: String?`、`@Published var hostExecutionEnabled = false`、`@Published var passThroughHealth = PassThroughHealthView.disconnected`、`@Published var lastHostActionReceipt: HostActionReceipt?` 及 `hostInputTask: Task<Void, Never>?`（在 `InputStreamGap` 时自动重订阅）。
     *   在 `InputMonitor.swift` 的 `eventSummary` 中增加对 `.pressed` 与 `.released` 的展示分支（显示已核实逻辑槽位、物理控件与键帽组）。
-*   **Phase 2 Checkpoint**: `scripts/build --synthetic && swift test --package-path app/MicroInput -Xswiftc -DMI_SYNTHETIC_BACKEND` 通过。
+*   **Phase 2 Checkpoint**: `scripts/build && swift test --package-path app/MicroInput -Xswiftc -DMI_SYNTHETIC_BACKEND` 通过。
 
 ---
 
@@ -434,7 +434,7 @@
 ### Verification Plan
 
 *   **Compilation & Bridge Generation**:
-    *   `scripts/build --synthetic` 与 `scripts/build`（生成匹配的 UniFFI Swift 绑定、静态库与 `target/MicroInput.app`）。
+    *   `scripts/build`（当前构建 C-ABI 静态库与 `target/MicroInput.app`；合成场景在运行时由 `MI_SYNTHETIC_SCENARIO` 选择）。
 *   **Unit & Synthetic Bridge Tests**:
     *   `cargo test --locked --workspace --all-features`（包含新增 `crates/mi-model/tests/host_router.rs` 与 `mi-session` 宽键合并测试）。
     *   `swift test --package-path app/MicroInput -Xswiftc -DMI_SYNTHETIC_BACKEND` 与 `swift test --package-path app/MicroInput`（包含新增 `HostExecutionTests.swift`）。

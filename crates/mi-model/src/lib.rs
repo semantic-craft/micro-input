@@ -367,118 +367,6 @@ pub fn official_chatgpt_layer(id: Value, name: &str) -> Layer {
     }
 }
 
-pub fn compile_compact_host_keymap(
-    doc: &document::LocalDocumentV2,
-    active_profile_id: Option<&str>,
-) -> Result<Vec<u8>, String> {
-    doc.validate()?;
-    let profile_name = active_profile_id
-        .and_then(|pid| doc.editable.graph.profiles.get(pid))
-        .map(|p| p.name.as_str())
-        .filter(|name| !name.trim().is_empty() && name.len() <= 32)
-        .unwrap_or("ChatGPT");
-    let keymap_rows = serde_json::json!([
-        ["KV_OAI_AG00", "KV_OAI_AG01"],
-        ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"],
-        [
-            "KV_OAI_ACT06",
-            "KV_OAI_ACT07",
-            "KV_OAI_ACT08",
-            "KV_OAI_ACT09"
-        ],
-        ["KV_OAI_ACT10", "KV_OAI_ACT11", "KV_OAI_ACT12"]
-    ]);
-    let encoders = serde_json::json!([["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"]]);
-    let payload = serde_json::json!({
-        "version": 1,
-        "activeProfileId": 0,
-        "profiles": [{
-            "id": "oai-host",
-            "name": profile_name,
-            "layers": [{
-                "id": "chatgpt",
-                "name": "ChatGPT",
-                "color": 0x00FFA6u64,
-                "lights": null,
-                "layout": {
-                    "base": keymap_rows,
-                    "keymap": keymap_rows,
-                    "encoders": encoders,
-                    "joystick": {
-                        "type": "VENDOR",
-                        "sectors": []
-                    }
-                }
-            }]
-        }],
-        "macros": [],
-        "multiActions": [],
-        "smartActions": []
-    });
-    let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
-    if bytes.len() >= 1024 {
-        return Err(format!(
-            "紧凑板载 keymap.json 超出 1024 字节上限：{}",
-            bytes.len()
-        ));
-    }
-    Ok(bytes)
-}
-
-/// Compiles an all-AG (`KV_OAI_AG00`..`KV_OAI_AG12`) compact host keymap so all 13
-/// physical keys accept per-key `v.oai.thstatus` RGB feedback on firmware v0.6.3.
-pub fn compile_all_ag_host_keymap(
-    doc: &document::LocalDocumentV2,
-    active_profile_id: Option<&str>,
-) -> Result<Vec<u8>, String> {
-    doc.validate()?;
-    let profile_name = active_profile_id
-        .and_then(|pid| doc.editable.graph.profiles.get(pid))
-        .map(|p| p.name.as_str())
-        .filter(|name| !name.trim().is_empty() && name.len() <= 32)
-        .unwrap_or("ChatGPT");
-    let keymap_rows = serde_json::json!([
-        ["KV_OAI_AG00", "KV_OAI_AG01"],
-        ["KV_OAI_AG02", "KV_OAI_AG03", "KV_OAI_AG04", "KV_OAI_AG05"],
-        ["KV_OAI_AG06", "KV_OAI_AG07", "KV_OAI_AG08", "KV_OAI_AG09"],
-        ["KV_OAI_AG10", "KV_OAI_AG11", "KV_OAI_AG12"]
-    ]);
-    let encoders = serde_json::json!([["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"]]);
-    let payload = serde_json::json!({
-        "version": 1,
-        "activeProfileId": 0,
-        "profiles": [{
-            "id": "oai-host",
-            "name": profile_name,
-            "layers": [{
-                "id": "chatgpt",
-                "name": "ChatGPT",
-                "color": 0x00FFA6u64,
-                "lights": null,
-                "layout": {
-                    "base": keymap_rows,
-                    "keymap": keymap_rows,
-                    "encoders": encoders,
-                    "joystick": {
-                        "type": "VENDOR",
-                        "sectors": []
-                    }
-                }
-            }]
-        }],
-        "macros": [],
-        "multiActions": [],
-        "smartActions": []
-    });
-    let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
-    if bytes.len() >= 1024 {
-        return Err(format!(
-            "紧凑全 AG 板载 keymap.json 超出 1024 字节上限：{}",
-            bytes.len()
-        ));
-    }
-    Ok(bytes)
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,12 +436,6 @@ pub mod navigation_history;
 pub mod operation_record;
 
 pub mod slot_table;
-
-pub mod workspace_nav;
-
-pub mod attention_round;
-
-pub mod voice_control;
 
 pub mod board_layers;
 pub mod direct_controls;

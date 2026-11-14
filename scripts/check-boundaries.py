@@ -97,20 +97,6 @@ assert not residual_patches, (
     + '\n  '.join(residual_patches)
 )
 
-rust_voice_src = (root / 'crates/mi-bridge/src/voice.rs').read_text(encoding='utf-8')
-held_start_pos = rust_voice_src.find('ptt.start_held_dictation(')
-wait_outcome_pos = rust_voice_src.find('ptt.wait_for_start_outcome().await')
-recording_after_ptt_pos = rust_voice_src.find('FourAppDictationState::Recording', held_start_pos if held_start_pos != -1 else 0)
-assert (
-    held_start_pos != -1
-    and wait_outcome_pos != -1
-    and recording_after_ptt_pos != -1
-    and held_start_pos < wait_outcome_pos < recording_after_ptt_pos
-), (
-    'R-C04 violation in crates/mi-bridge/src/voice.rs: '
-    'FourAppVoiceManager::start_dictation must await ptt.wait_for_start_outcome().await before entering FourAppDictationState::Recording'
-)
-
 run_src = (root / 'scripts/run').read_text(encoding='utf-8')
 assert (
     'argparse.ArgumentParser' in run_src

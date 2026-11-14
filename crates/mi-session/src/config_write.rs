@@ -16,7 +16,6 @@ pub enum Outcome {
 pub struct ConfigWriter {
     session: Arc<DeviceSession>,
     native_interface: Option<String>,
-    use_transactions: bool,
     consumed: AsyncMutex<BTreeSet<String>>,
     records: Mutex<std::collections::BTreeMap<String, OperationRecord>>,
 }
@@ -45,7 +44,6 @@ impl ConfigWriter {
         Ok(Self {
             session,
             native_interface: None,
-            use_transactions: false,
             consumed: AsyncMutex::new(BTreeSet::new()),
             records: Mutex::new(std::collections::BTreeMap::new()),
         })
@@ -59,15 +57,9 @@ impl ConfigWriter {
         Ok(Self {
             session,
             native_interface: Some(interface),
-            use_transactions: false,
             consumed: AsyncMutex::new(BTreeSet::new()),
             records: Mutex::new(std::collections::BTreeMap::new()),
         })
-    }
-    /// Enable firmware v0.6.3 staged transactions (`fs.txbegin` -> `fs.writebin(tx)` -> `fs.txcommit`).
-    pub fn with_transactions(mut self, enabled: bool) -> Self {
-        self.use_transactions = enabled;
-        self
     }
     fn firmware(&self) -> &str {
         if self.native_interface.is_some() {
@@ -184,24 +176,17 @@ impl ConfigWriter {
                     .classify(&self.baseline(&current))
                     .map_err(SessionError::Config)?;
                 let chunks = plan.candidate().len().div_ceil(3072);
-                let tx_calls = if self.use_transactions { 2 } else { 0 };
                 let reads = chunks
                     + plan.smart_actions().map_or(0, |b| b.len().div_ceil(3072))
                     + 2
                     + usize::from(self.native_interface.is_some());
                 failure = Failure::RequestBudget;
-                if chunks == 0 || usize::from(q.next_id) + chunks + tx_calls + reads > 999 {
+                if chunks == 0 || usize::from(q.next_id) + chunks + reads > 999 {
                     return Err(SessionError::Config("request budget insufficient".into()));
                 }
                 if let Some(snapshot) = self.session.snapshot.lock().unwrap().as_mut() {
                     snapshot.stale = true;
                 }
-                let active_tx = if self.use_transactions {
-                    failure = Failure::Transport;
-                    Some(self.session.exchange_tx_begin(&mut q).await?)
-                } else {
-                    None
-                };
                 for (n, offset) in (0..plan.candidate().len()).step_by(3072).enumerate() {
                     let expected_id = q.next_id;
 
@@ -214,7 +199,7 @@ impl ConfigWriter {
                     failure = Failure::Transport;
                     let reply = self
                         .session
-                        .exchange_keymap_with_tx(&mut q, plan.candidate(), offset, active_tx)
+                        .exchange_keymap_with_tx(&mut q, plan.candidate(), offset, None)
                         .await?;
                     mi_proto::mutation::validate_mutation_response_candidate(&reply, expected_id)?;
                     observe(Checkpoint::AfterAck(n + 1), record.path());
@@ -222,10 +207,6 @@ impl ConfigWriter {
                     record
                         .advance(Phase::Writing, n + 1)
                         .map_err(SessionError::Config)?;
-                }
-                if let Some(tx_id) = active_tx {
-                    failure = Failure::Transport;
-                    self.session.exchange_tx_commit(&mut q, tx_id).await?;
                 }
                 record
                     .advance(Phase::Verifying, chunks)

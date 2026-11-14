@@ -4,7 +4,9 @@
 
 ## 当前开发状态
 
-当前已发布版本为 [v0.7.0](https://github.com/semantic-craft/micro-input/releases/tag/v0.7.0)。后续源码已接入 Codex 本机控制、按状态筛选的前六个会话键，以及旋钮的对话滚动和推理档位预设。内置适配为 Antigravity、Herdr、Codex、DeepSeek Harness，另有通用快捷键方案。六层听写采用点击开关，不合入已停止的按住说话试验。
+当前已发布版本为 [v0.8.0](https://github.com/semantic-craft/micro-input/releases/tag/v0.8.0)。本版支持 Codex 本机控制、按状态筛选的前六个会话键，以及旋钮的对话滚动和推理档位预设。内置适配为 Antigravity、Herdr、Codex、DeepSeek Harness，另有通用快捷键方案。六层听写采用点击开关，不合入已停止的按住说话试验。
+
+灯光编辑器的预览入口当前只更新界面状态，尚未接入设备预览。
 
 源码实现、离线自动验收、日常安装和实体效果分别记录在[接力队列](docs/pstack-relay.md)。[完整产品验收 #44](https://github.com/semantic-craft/micro-input/issues/44) 仍未完成，不能由已合并 PR 或合成回执代替。Fast 模式只有读回反向菜单标签才确认成功；没有滚动位置读回的定向滚轮派发保留未确认结果。
 
@@ -54,15 +56,11 @@ USB 匹配线程先尝试独占再通知工作台，包括已有六层安装的�
 
 Rust 模型已支持 Layer 可选灯光目标、单区/当前Profile多层编辑、撤销/重开/复制及自有预设往返。准备器支持多个普通键（包含有限已知AG/ACT原绑定）与已有灯光字段的混合候选；未知字段、另一灯区和其他映射保持原字节。保存副本后冻结计划仍可取得一次，受支持原生连接与专用合成实例均可执行应用/同连接恢复流程。
 
-`cargo test -p mi-model --test lighting` 验证文档与候选；`cargo test -p mi-session --features synthetic-backend --test config_write` 用实际codec/framer/唯一reader和可变合成文件验证写回、恢复及失败路径。原生与合成后端共用计划绑定的 ConfigWriter、高层 FFI 和恢复界面；原生入口独立核验型号、固件和连接，普通 RPC 接口仍只读。
+`cargo test -p mi-model --test lighting` 验证文档与候选；`cargo test -p mi-session --features synthetic-backend --test config_write` 用实际 codec、framer、唯一 reader 和合成文件验证写回、恢复及失败路径。模型与会话层提供持久操作记录、独立读回和幂等本地修复。当前 C-ABI 只传递工作台命令和投影，旧高层 FFI 与恢复界面的历史验收不能替代当前工作台接线，见[模块契约](docs/module-contracts.md)。
 
-下一段离线恢复已实现：备份目录内持久操作记录绑定原副本、候选和冻结文档；首次可能发送前落盘，重开不续写。合成环境支持损坏 keymap 的显式新计划恢复、独立读回核对，以及只修本地保存的幂等重试。
+RGB 面板提供 Backlight / Underglow 的已知效果与参数编辑，未知字段保留原值，当前配置全层修改为一次可撤销操作。面板的预览入口尚未接入设备。会话层另有合成与原生预览能力；合成运行态读回不证明真实灯光效果，原生停止只取消后续发送，不自动恢复，也不声称运行态读回。历史设计与证据见[设备改键与 RGB 设计](docs/designs/device-write-and-rgb.md)。
 
-高层 FFI、宿主动作排空、逐绑定重验及恢复界面已接入专用合成后端（E-102）。这不是完整 S3 交付：两区 RGB 编辑与合成预览生命周期已接入；E-108 已接通真实配置应用并完成最小 RGB 字段变更及原字节恢复；即时原生预览已接通离线路径，实体效果未验收。默认自动验证仍不连接真实设备。方案见[设备改键与RGB设计](docs/designs/device-write-and-rgb.md)。
-
-RGB 面板提供 Backlight / Underglow 的六种已知效果、六位颜色值及可用的亮度/速度/Magic 参数，禁用或未知字段保留原值；当前配置全层修改为一次可撤销操作。预览是显式临时状态，既不修改草稿也不写 keymap，30 秒自动结束，关闭面板/退出时显式结束。合成状态机使用专用 `synthetic.lights.*` 测试消息证明顺序、目标绑定、独立运行态读回与失败行为，**不是官方 `lights.preview` 的已验证实现**。原生入口复用当前核验连接，发送所选草稿两区值；停止只取消后续发送，不自动恢复、不声称运行态读回。
-
-`scripts/verify-offline` 自动执行统一门禁、构建合成应用、依次跑宿主、DSH 导航、Antigravity 状态、配置、灯光和诊断导出六个隔离场景、核对回执与清理并生成每轮 `result.json`，最后恢复生产构建而不启动它；任何缺失回执或错误地宣称物理/视觉通过都会失败。诊断导出场景注入一条脱敏配置读取失败，自动生成报告和回执。`--qa-only` 只省略单元门禁，仍构建、验收和清理应用。
+`scripts/verify-offline` 自动执行统一门禁、构建当前应用、依次跑宿主、DSH 导航、Antigravity 状态、配置、灯光和诊断导出六个隔离场景、核对回执与清理并生成每轮 `result.json`，完成后保留原构建包，不启动生产应用；任何缺失回执或错误地宣称物理/视觉通过都会失败。诊断导出场景注入一条脱敏配置读取失败，自动生成报告和回执。`--qa-only` 只省略单元门禁，仍构建、验收和清理应用。
 
 ## 常用 Agent 与日常界面
 

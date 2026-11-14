@@ -1060,18 +1060,6 @@ impl Draft {
     ) -> Result<Vec<String>, String> {
         self.mutate(|d| d.merge_keys_across_layers(pid, primary_slot, secondary_slot, action))
     }
-    pub fn compile_compact_host_keymap(
-        &self,
-        active_profile_id: Option<&str>,
-    ) -> Result<Vec<u8>, String> {
-        crate::compile_compact_host_keymap(&self.document, active_profile_id)
-    }
-    pub fn compile_all_ag_host_keymap(
-        &self,
-        active_profile_id: Option<&str>,
-    ) -> Result<Vec<u8>, String> {
-        crate::compile_all_ag_host_keymap(&self.document, active_profile_id)
-    }
     pub fn duplicate_profile(&mut self, pid: &str, name: &str) -> Result<String, String> {
         self.mutate(|d| d.duplicate_profile(pid, name))
     }
