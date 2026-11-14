@@ -513,6 +513,9 @@ public final class CoreStore {
         e.selectedBindingId = edit["selected_binding_id"] as? String ?? "AG00"
         e.surfaceDisplayName = edit["surface_display_name"] as? String ?? "按键 AG00"
         e.joystickDirection = edit["joystick_direction"] as? String
+        e.joystickMode = edit["joystick_mode"] as? String ?? "logical_sectors"
+        e.joystickModeSummary = edit["joystick_mode_summary"] as? String ?? ""
+        e.v070HardwareMouseSupported = edit["v070_hardware_mouse_supported"] as? Bool ?? true
         e.bottomRowLayout = edit["bottom_row_layout"] as? String ?? "Split"
         e.supportsTaskRole = edit["supports_task_role"] as? Bool ?? true
         e.slotRole = edit["slot_role"] as? String ?? "TaskKey"

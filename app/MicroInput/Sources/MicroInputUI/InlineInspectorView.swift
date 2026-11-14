@@ -83,7 +83,8 @@ struct CreatorMicroInlineInspectorView: View {
 
             let edit = insp.editableInspector ?? EditableInspectorModel()
             let hasEditable = (insp.editableInspector != nil)
-            let showActionControls = hasEditable && !isTaskRole
+            let isJoystickSurface = (16...19).contains(slot) || insp.selectedSurface == "Joystick"
+            let showActionControls = hasEditable && !isTaskRole && (!isJoystickSurface || edit.joystickMode == "logical_sectors")
             let showGlyphGrid = showActionControls && slot < 13
             let showTaskControls = hasEditable && isTaskRole
 
@@ -300,36 +301,78 @@ struct CreatorMicroInlineInspectorView: View {
                 }
             }
         } else if (16...19).contains(slot) || insp.selectedSurface == "Joystick" {
+            let isEditable = insp.editableInspector != nil
+            let currentMode = insp.editableInspector?.joystickMode ?? "logical_sectors"
+            let modeSummary = insp.editableInspector?.joystickModeSummary ?? ""
+            let mouseSupported = insp.editableInspector?.v070HardwareMouseSupported ?? true
+            let isUnsupportedHardwareMode = !mouseSupported && (currentMode == "mouse" || currentMode == "scroll")
+
             VStack(alignment: .leading, spacing: 8) {
-                Text("四向摇杆方向")
+                Text("摇杆驱动模式")
                     .font(UITheme.captionMedium)
                     .foregroundStyle(UITheme.textSecondary)
                 Picker(
-                    "摇杆方向",
+                    "摇杆驱动模式",
                     selection: Binding(
-                        get: { insp.selectedJoystickDirection },
-                        set: { store.dispatch("canvas", ["SelectJoystickDirection": $0]) }
+                        get: { currentMode },
+                        set: { store.dispatch("inspector", ["SetJoystickMode": $0]) }
                     )
                 ) {
-                    Text("上").tag("North")
-                    Text("左").tag("West")
-                    Text("下").tag("South")
-                    Text("右").tag("East")
+                    Text("宿主逻辑扇区").tag("logical_sectors")
+                    Text("硬件 MOUSE").tag("mouse")
+                    Text("硬件 SCROLL").tag("scroll")
+                    Text("保留来源").tag("source")
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .disabled(!isEditable)
+                .accessibilityIdentifier("inspector-joystick-mode-picker")
 
-                HStack(spacing: 8) {
-                    if agentKind == .antigravity {
-                        Button("滚对话 + 左右切会话") {
-                            store.dispatch("canvas", ["ApplyKnobJoystickPreset": "DualScrollProjectsAndChat"])
+                if !modeSummary.isEmpty {
+                    Text(modeSummary)
+                        .font(UITheme.micro)
+                        .foregroundStyle(isUnsupportedHardwareMode ? UITheme.textPrimary : UITheme.textSecondary)
+                        .padding(isUnsupportedHardwareMode ? 8 : 0)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(isUnsupportedHardwareMode ? UITheme.cautionSoft : Color.clear)
+                        )
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("inspector-joystick-mode-summary")
+                }
+
+                if currentMode == "logical_sectors" {
+                    Text("四向摇杆方向")
+                        .font(UITheme.captionMedium)
+                        .foregroundStyle(UITheme.textSecondary)
+                    Picker(
+                        "摇杆方向",
+                        selection: Binding(
+                            get: { insp.selectedJoystickDirection },
+                            set: { store.dispatch("canvas", ["SelectJoystickDirection": $0]) }
+                        )
+                    ) {
+                        Text("上").tag("North")
+                        Text("左").tag("West")
+                        Text("下").tag("South")
+                        Text("右").tag("East")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+
+                    HStack(spacing: 8) {
+                        if agentKind == .antigravity {
+                            Button("滚对话 + 左右切会话") {
+                                store.dispatch("canvas", ["ApplyKnobJoystickPreset": "DualScrollProjectsAndChat"])
+                            }
+                            .surfaceButton(.secondary)
+                        }
+                        Button("摇杆鼠标 + 旋钮滚轮") {
+                            store.dispatch("canvas", ["ApplyKnobJoystickPreset": "MousePointerAndScroll"])
                         }
                         .surfaceButton(.secondary)
                     }
-                    Button("摇杆鼠标 + 旋钮滚轮") {
-                        store.dispatch("canvas", ["ApplyKnobJoystickPreset": "MousePointerAndScroll"])
-                    }
-                    .surfaceButton(.secondary)
                 }
             }
         }

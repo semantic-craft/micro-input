@@ -666,6 +666,53 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(store.canvas.encoderCwLabel, "鼠标滚轮向下")
         XCTAssertEqual(store.canvas.encoderPressLabel, "切换档位")
     }
+
+    @MainActor
+    func testInspectorJoystickDualModeSwitchAndViewLayout() throws {
+        let dir = try makeIsolatedTempDir("joystick-dual-mode")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        let agRow = try XCTUnwrap(store.model.sidebarRows.first(where: { $0.displayName == "Antigravity" }))
+        store.dispatch("sidebar", ["SelectProfile": agRow.profileId])
+        store.dispatch("canvas", ["SelectSurface": "Joystick"])
+
+        XCTAssertEqual(store.inspector.editableInspector?.joystickMode, "logical_sectors")
+        XCTAssertFalse(store.inspector.editableInspector?.joystickModeSummary.isEmpty ?? true)
+        XCTAssertEqual(store.canvas.joystickModeLabel, "8向摇杆")
+
+        let renderHost = {
+            let view = CreatorMicroInlineInspectorView(
+                store: store,
+                agentKind: .antigravity,
+                onOpenFullActionLibrary: {},
+                onOpenMacroLibrary: {}
+            )
+            let host = NSHostingView(rootView: view.frame(width: 340, height: 640))
+            host.layoutSubtreeIfNeeded()
+            XCTAssertGreaterThan(host.fittingSize.height, 200)
+            XCTAssertLessThanOrEqual(host.fittingSize.width, 340.5)
+        }
+        renderHost()
+
+        store.dispatch("inspector", ["SetJoystickMode": "mouse"])
+        XCTAssertEqual(store.inspector.editableInspector?.joystickMode, "mouse")
+        XCTAssertEqual(store.canvas.joystickModeLabel, "硬件指针")
+        renderHost()
+
+        store.dispatch("inspector", ["SetJoystickMode": "scroll"])
+        XCTAssertEqual(store.inspector.editableInspector?.joystickMode, "scroll")
+        XCTAssertEqual(store.canvas.joystickModeLabel, "硬件滚轮")
+
+        store.dispatch("inspector", ["SetJoystickMode": "source"])
+        XCTAssertEqual(store.inspector.editableInspector?.joystickMode, "source")
+        XCTAssertEqual(store.canvas.joystickModeLabel, "8向摇杆")
+
+        store.dispatch("inspector", ["SetJoystickMode": "logical_sectors"])
+        XCTAssertEqual(store.inspector.editableInspector?.joystickMode, "logical_sectors")
+        XCTAssertEqual(store.canvas.joystickModeLabel, "8向摇杆")
+        renderHost()
+    }
 }
 
 @MainActor

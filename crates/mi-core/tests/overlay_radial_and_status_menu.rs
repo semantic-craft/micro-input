@@ -875,3 +875,52 @@ fn popover_cheat_sheet_preview_tracks_active_profile_merges_wide_key_and_isolate
         .cheat_sheet_preview
         .is_some());
 }
+
+#[test]
+fn overlay_hide_cheat_sheet_only_closes_active_cheat_sheet_without_clobbering_toast_or_suppression()
+{
+    let (_dir, mut store, _panel_host, _status_item_host) = open_test_store();
+    let now = Instant::now();
+    let screen = ScreenGeometry::single(ScreenRect::new(0.0, 0.0, 1440.0, 900.0));
+    let cursor = ScreenPoint::new(500.0, 400.0);
+
+    let preview = store
+        .projection()
+        .status_menu
+        .cheat_sheet_preview
+        .clone()
+        .expect("cheat sheet preview");
+    store.overlay_controller.request_profile_switch_notice(
+        "Antigravity".to_string(),
+        "自动跟随".to_string(),
+        &preview,
+        &screen,
+        cursor,
+        now,
+    );
+    assert!(!store.overlay_controller.hide_cheat_sheet());
+    assert!(matches!(
+        store.overlay_controller.visibility(),
+        &HudVisibilityState::PassiveToast { .. }
+    ));
+
+    store
+        .overlay_controller
+        .set_main_workbench_window_active(true);
+    assert!(!store.overlay_controller.hide_cheat_sheet());
+    assert_eq!(
+        *store.overlay_controller.visibility(),
+        HudVisibilityState::SuppressedByActiveWorkbench
+    );
+
+    store
+        .overlay_controller
+        .show_cheat_sheet(preview, &screen, cursor);
+    assert!(store.overlay_controller.is_cheat_sheet_visible());
+    assert!(store.overlay_controller.hide_cheat_sheet());
+    assert_eq!(
+        *store.overlay_controller.visibility(),
+        HudVisibilityState::Hidden
+    );
+    assert!(!store.overlay_controller.hide_cheat_sheet());
+}

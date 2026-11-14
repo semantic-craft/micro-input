@@ -420,6 +420,25 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         )
         .unwrap();
     assert!(resolve_host_action(&draft.document, Some(ag_pid), "AG15", true).is_none());
+
+    for mode in ["mouse", "scroll"] {
+        draft
+            .set_control_settings(
+                ag_pid,
+                &lid,
+                mi_model::control_settings::ControlSettings {
+                    joystick_mode: mode.into(),
+                    active_sectors: 4,
+                },
+            )
+            .unwrap();
+        for binding in ["AG15", "AG16", "AG17", "AG18"] {
+            assert!(
+                resolve_host_action(&draft.document, Some(ag_pid), binding, true).is_none(),
+                "joystick mode {mode} must exclude host routing for {binding}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1252,4 +1271,57 @@ fn generic_profile_routes_user_shortcut_after_reopen() {
             target_bundle_id: Some(target.into()),
         })
     );
+}
+
+#[test]
+fn action_catalog_exposes_all_19_mouse_tokens_and_4_cheat_sheet_tokens_with_honest_capabilities() {
+    let catalog = mi_model::draft::actions();
+    for token in mi_model::draft::FIRMWARE_V070_MOUSE_TOKENS {
+        let action = catalog
+            .iter()
+            .find(|a| {
+                matches!(
+                    serde_json::from_value::<mi_model::draft::ActionKind>(a.payload.clone()),
+                    Ok(mi_model::draft::ActionKind::DeviceKey { token: ref t }) if t == token
+                )
+            })
+            .unwrap_or_else(|| panic!("missing MS_* device_key catalog entry for {token}"));
+        assert_eq!(action.category, "设备按键");
+        assert!(action.validate().is_ok(), "{token} must validate");
+
+        let cap = mi_model::action_library::capability(action, true);
+        assert_eq!(cap.target, format!("硬件 HID 鼠标 · {token}"));
+        assert!(!cap.host_required);
+        assert!(!cap.execution_available);
+        assert!(cap.unavailable_reason.contains("板载硬件鼠标键码"));
+        assert!(cap
+            .prerequisites
+            .iter()
+            .any(|p| p.contains("0.7.0-rc.16+") && p.contains("/fs/keymap.json")));
+    }
+
+    for (id, token) in [
+        ("device-cs-toggle", "KI_CS_TOGGLE"),
+        ("device-cs-show-tmp", "KI_CS_SHOW_TMP"),
+        ("device-cs-show", "KI_CS_SHOW"),
+        ("device-cs-hide", "KI_CS_HIDE"),
+    ] {
+        let action = catalog
+            .iter()
+            .find(|a| a.id == id)
+            .unwrap_or_else(|| panic!("missing cheat sheet action {id}"));
+        assert_eq!(action.category, "设备按键");
+        assert!(action.validate().is_ok());
+        assert_eq!(
+            action.payload,
+            json!({"type": "device_key", "token": token})
+        );
+
+        let cap = mi_model::action_library::capability(action, false);
+        assert_eq!(cap.target, format!("板载速查通知 · {token}"));
+        assert!(!cap.host_required);
+        assert!(!cap.execution_available);
+        assert!(cap.unavailable_reason.contains("kb.cs.*"));
+        assert!(cap.prerequisites.iter().any(|p| p.contains("0.6.3+")));
+    }
 }

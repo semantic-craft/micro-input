@@ -1707,4 +1707,73 @@ mod tests {
         assert!(store.projection.status_menu.locked_profile_id.is_none());
         assert!(store.projection.status_menu.auto_follow_enabled);
     }
+
+    #[test]
+    fn compile_profile_twenty_slots_excludes_joystick_slots_when_mode_is_mouse_scroll_or_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+        let mut custom_pid = String::new();
+        store
+            .document_store
+            .update(|draft| {
+                custom_pid = draft.create_profile("Joystick Routing Test")?;
+                Ok(())
+            })
+            .unwrap();
+        store.commit_runtime_update();
+        store.browse_profile(&custom_pid).unwrap();
+        let lid = store.selected_layer_id().unwrap().to_string();
+
+        let catalog = mi_model::draft::actions();
+        let search_action = catalog.iter().find(|a| a.id == "search").unwrap().clone();
+        store
+            .document_store
+            .update(|draft| {
+                draft.set_control_settings(
+                    &custom_pid,
+                    &lid,
+                    mi_model::control_settings::ControlSettings {
+                        joystick_mode: "logical_sectors".into(),
+                        active_sectors: 4,
+                    },
+                )?;
+                draft.assign(&json!(custom_pid), &json!(lid), 0, search_action.clone())?;
+                for slot in 16..=19 {
+                    draft.assign(&json!(custom_pid), &json!(lid), slot, search_action.clone())?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let logical_plan = store.compile_profile_twenty_slots(&custom_pid).unwrap();
+        assert!(logical_plan.actions[0].is_some());
+        assert!(logical_plan.actions[16..20].iter().all(|a| a.is_some()));
+
+        for mode in [
+            crate::JoystickControlMode::Mouse,
+            crate::JoystickControlMode::Scroll,
+            crate::JoystickControlMode::Source,
+        ] {
+            store
+                .dispatch_inspector_action(crate::InspectorAction::SetJoystickMode(mode))
+                .unwrap();
+            let plan = store.compile_profile_twenty_slots(&custom_pid).unwrap();
+            assert!(
+                plan.actions[0].is_some(),
+                "key slot 0 stays active in {mode:?}"
+            );
+            assert!(
+                plan.actions[16..20].iter().all(|a| a.is_none()),
+                "joystick slots 16..=19 must be excluded in {mode:?}"
+            );
+        }
+
+        store
+            .dispatch_inspector_action(crate::InspectorAction::SetJoystickMode(
+                crate::JoystickControlMode::LogicalSectors,
+            ))
+            .unwrap();
+        let restored = store.compile_profile_twenty_slots(&custom_pid).unwrap();
+        assert!(restored.actions[16..20].iter().all(|a| a.is_some()));
+    }
 }

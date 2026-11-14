@@ -24,6 +24,37 @@ impl KeycapRole {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum JoystickControlMode {
+    Source,
+    #[default]
+    LogicalSectors,
+    Mouse,
+    Scroll,
+}
+
+impl JoystickControlMode {
+    pub fn from_model_str(raw: &str) -> Self {
+        match raw {
+            "source" => Self::Source,
+            "logical_sectors" => Self::LogicalSectors,
+            "mouse" => Self::Mouse,
+            "scroll" => Self::Scroll,
+            _ => Self::LogicalSectors,
+        }
+    }
+
+    pub fn as_model_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::LogicalSectors => "logical_sectors",
+            Self::Mouse => "mouse",
+            Self::Scroll => "scroll",
+        }
+    }
+}
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum CodexKeycapId {
@@ -705,6 +736,9 @@ pub struct EditableSlotInspectorProjection {
     pub selected_binding_id: String,
     pub surface_display_name: String,
     pub joystick_direction: Option<JoystickDirection8>,
+    pub joystick_mode: JoystickControlMode,
+    pub joystick_mode_summary: String,
+    pub v070_hardware_mouse_supported: bool,
     pub bottom_row_layout: BottomRowLayout,
     pub supports_task_role: bool,
     pub slot_role: KeycapRole,
@@ -753,6 +787,9 @@ impl PartialEq for EditableSlotInspectorProjection {
             && self.selected_binding_id == other.selected_binding_id
             && self.surface_display_name == other.surface_display_name
             && self.joystick_direction == other.joystick_direction
+            && self.joystick_mode == other.joystick_mode
+            && self.joystick_mode_summary == other.joystick_mode_summary
+            && self.v070_hardware_mouse_supported == other.v070_hardware_mouse_supported
             && self.bottom_row_layout == other.bottom_row_layout
             && self.supports_task_role == other.supports_task_role
             && self.slot_role == other.slot_role
@@ -789,6 +826,9 @@ impl Default for EditableSlotInspectorProjection {
             selected_binding_id: "AG00".to_string(),
             surface_display_name: "按键 AG00".to_string(),
             joystick_direction: None,
+            joystick_mode: JoystickControlMode::default(),
+            joystick_mode_summary: String::new(),
+            v070_hardware_mouse_supported: true,
             bottom_row_layout: BottomRowLayout::Split,
             supports_task_role: true,
             slot_role: KeycapRole::TaskKey,
@@ -872,6 +912,7 @@ pub enum InspectorAction {
     UnlockProtectedLayer,
     SelectSlot(u32),
     SelectJoystickDirection(JoystickDirection8),
+    SetJoystickMode(JoystickControlMode),
     SetSlotRole(KeycapRole),
     ApplyKnobJoystickPreset(KnobJoystickPreset),
     SetBottomRowLayout(BottomRowLayout),

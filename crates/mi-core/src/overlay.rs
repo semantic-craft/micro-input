@@ -25,6 +25,13 @@ pub struct CheatSheetKeyCellProjection {
     pub available: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CheatSheetNotificationKind {
+    Show,
+    Hide,
+    Toggle,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CheatSheetProjection {
     pub profile_name: String,
@@ -190,6 +197,15 @@ impl OverlayController {
 
     pub fn hide(&mut self) {
         self.visibility = HudVisibilityState::Hidden;
+    }
+
+    pub fn hide_cheat_sheet(&mut self) -> bool {
+        if self.is_cheat_sheet_visible() {
+            self.visibility = HudVisibilityState::Hidden;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn expire_notice_if_due(&mut self, now: Instant) -> bool {

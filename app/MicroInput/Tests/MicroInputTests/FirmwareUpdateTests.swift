@@ -316,4 +316,33 @@ final class FirmwareUpdateTests: XCTestCase {
             XCTAssertFalse(store.firmware.v070.busy)
         }
     }
+
+    @MainActor
+    func testMouseSettingsSlidersRenderUnusualBoundsWithoutClipping() {
+        var dispatched = 0
+        let unusualMouse = V070HardwareSliceModel(json: [
+            "supported": true,
+            "synced": true,
+            "active_profile": 1,
+            "active_layer": 2,
+            "mouse": [
+                "preset": "custom",
+                "move_delta": 0,
+                "max_speed": 300,
+                "wheel_delta": 12,
+                "wheel_max_speed": 24,
+                "stick_speed": 10,
+                "stick_scroll": 2600,
+                "deadzone": 0.18,
+            ],
+        ])
+        let host = NSHostingView(
+            rootView: V070HardwareSettingsSection(model: unusualMouse) { _ in dispatched += 1 }
+                .frame(width: 560)
+        )
+        host.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(host.fittingSize.height, 400)
+        XCTAssertLessThanOrEqual(host.fittingSize.width, 560.5)
+        XCTAssertEqual(dispatched, 0)
+    }
 }

@@ -9,11 +9,13 @@ use tokio::sync::Notify;
 pub(super) const INPUT_CAPACITY: usize = 256;
 pub(super) const INPUT_BATCH: usize = 32;
 pub(super) const CONTROL_BATCH: usize = 7;
+pub(super) const CHEAT_SHEET_NOTIF_CAPACITY: usize = 16;
 
 #[derive(Default)]
 struct Pending {
     session: Option<u64>,
     input: VecDeque<HardwareLoopEvent>,
+    cheat_sheet_notifications: VecDeque<HardwareLoopEvent>,
     source_closed: bool,
     closed: bool,
     gap: Option<HardwareLoopEvent>,
@@ -36,6 +38,7 @@ impl RuntimeInbox {
         let mut pending = self.pending.lock().unwrap();
         pending.session = Some(session_id);
         pending.input.clear();
+        pending.cheat_sheet_notifications.clear();
         pending.gap = None;
         pending.disconnected = None;
         pending.acceptance = None;
@@ -122,6 +125,12 @@ impl RuntimeInbox {
             event @ HardwareLoopEvent::V070ProfileLayerChanged { .. } => {
                 pending.v070_profile_layer = Some(event);
             }
+            event @ HardwareLoopEvent::CheatSheetNotification { .. } => {
+                if pending.cheat_sheet_notifications.len() >= CHEAT_SHEET_NOTIF_CAPACITY {
+                    pending.cheat_sheet_notifications.pop_front();
+                }
+                pending.cheat_sheet_notifications.push_back(event);
+            }
         }
         drop(pending);
         self.ready.notify_one();
@@ -130,7 +139,9 @@ impl RuntimeInbox {
 
     pub(super) fn take_batch(&self) -> Vec<HardwareLoopEvent> {
         let mut pending = self.pending.lock().unwrap();
-        let mut batch = Vec::with_capacity(CONTROL_BATCH + INPUT_BATCH);
+        let mut batch = Vec::with_capacity(
+            CONTROL_BATCH + INPUT_BATCH + pending.cheat_sheet_notifications.len(),
+        );
         for event in [
             pending.gap.take(),
             pending.disconnected.take(),
@@ -151,6 +162,7 @@ impl RuntimeInbox {
             };
             batch.push(event);
         }
+        batch.extend(pending.cheat_sheet_notifications.drain(..));
         batch
     }
 
@@ -169,6 +181,7 @@ impl RuntimeInbox {
                     .or_else(|| pending.v070_capability.take())
                     .or_else(|| pending.v070_profile_layer.take())
                     .or_else(|| pending.input.pop_front())
+                    .or_else(|| pending.cheat_sheet_notifications.pop_front())
                 {
                     return event;
                 }
@@ -330,5 +343,78 @@ mod tests {
             batch[0],
             HardwareLoopEvent::V070CapabilityOutcome { seq: 1, .. }
         ));
+    }
+
+    #[test]
+    fn cheat_sheet_notifications_bypass_session_filter_preserve_fifo_and_bound_at_16() {
+        let inbox = RuntimeInbox::default();
+        inbox.open_source(1);
+
+        for (seq, kind) in [
+            (10, crate::CheatSheetNotificationKind::Show),
+            (11, crate::CheatSheetNotificationKind::Hide),
+            (12, crate::CheatSheetNotificationKind::Toggle),
+        ] {
+            inbox
+                .send(HardwareLoopEvent::CheatSheetNotification {
+                    session_id: 99,
+                    ingress_sequence: seq,
+                    kind,
+                })
+                .unwrap();
+        }
+        let batch = inbox.take_batch();
+        assert_eq!(batch.len(), 3);
+        let kinds: Vec<_> = batch
+            .iter()
+            .map(|e| match e {
+                HardwareLoopEvent::CheatSheetNotification {
+                    session_id,
+                    ingress_sequence,
+                    kind,
+                } => (*session_id, *ingress_sequence, *kind),
+                other => panic!("unexpected event: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (99, 10, crate::CheatSheetNotificationKind::Show),
+                (99, 11, crate::CheatSheetNotificationKind::Hide),
+                (99, 12, crate::CheatSheetNotificationKind::Toggle),
+            ]
+        );
+
+        for seq in 0..20_u64 {
+            inbox
+                .send(HardwareLoopEvent::CheatSheetNotification {
+                    session_id: 7,
+                    ingress_sequence: seq,
+                    kind: crate::CheatSheetNotificationKind::Show,
+                })
+                .unwrap();
+        }
+        let bounded = inbox.take_batch();
+        assert_eq!(bounded.len(), CHEAT_SHEET_NOTIF_CAPACITY);
+        let seqs: Vec<u64> = bounded
+            .iter()
+            .map(|e| match e {
+                HardwareLoopEvent::CheatSheetNotification {
+                    ingress_sequence, ..
+                } => *ingress_sequence,
+                other => panic!("unexpected event: {other:?}"),
+            })
+            .collect();
+        assert_eq!(seqs, (4..20).collect::<Vec<_>>());
+
+        inbox
+            .send(HardwareLoopEvent::CheatSheetNotification {
+                session_id: 7,
+                ingress_sequence: 100,
+                kind: crate::CheatSheetNotificationKind::Show,
+            })
+            .unwrap();
+        inbox.open_source(2);
+        assert!(inbox.take_batch().is_empty());
     }
 }

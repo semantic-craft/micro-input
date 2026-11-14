@@ -291,6 +291,28 @@ fn handle_vendor_slot_notification(
     }
 }
 
+fn forward_vendor_cheat_sheet_notification(
+    received: &mi_session::ReceivedNotification,
+    session_id: u64,
+    v070_inbox: &Mutex<Option<crate::store::runtime_inbox::RuntimeInbox>>,
+) {
+    let kind = match received.notification {
+        mi_proto::HostNotification::CheatSheetShow(_) => crate::CheatSheetNotificationKind::Show,
+        mi_proto::HostNotification::CheatSheetHide(_) => crate::CheatSheetNotificationKind::Hide,
+        mi_proto::HostNotification::CheatSheetToggle(_) => {
+            crate::CheatSheetNotificationKind::Toggle
+        }
+        _ => return,
+    };
+    if let Some(inbox) = v070_inbox.lock().unwrap().as_ref().cloned() {
+        let _ = inbox.send(crate::store::HardwareLoopEvent::CheatSheetNotification {
+            session_id,
+            ingress_sequence: received.ingress_sequence,
+            kind,
+        });
+    }
+}
+
 fn forward_v070_profile_layer_notification(
     received: &mi_session::ReceivedNotification,
     session_id: u64,
@@ -624,6 +646,11 @@ impl VendorBridge {
                                 &v070_observed_profile_layer,
                                 &v070_inbox,
                             );
+                            forward_vendor_cheat_sheet_notification(
+                                &received,
+                                session.id,
+                                &v070_inbox,
+                            );
                         }
                         pressed_mask = 0;
                         let _ = active_session.lock().unwrap().take();
@@ -665,6 +692,11 @@ impl VendorBridge {
                                         session.id,
                                         &observed_layer,
                                         &v070_observed_profile_layer,
+                                        &v070_inbox,
+                                    );
+                                    forward_vendor_cheat_sheet_notification(
+                                        &received,
+                                        session.id,
                                         &v070_inbox,
                                     );
                                 }
