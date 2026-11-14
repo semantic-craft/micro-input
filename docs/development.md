@@ -61,7 +61,7 @@ PR #12/#13 已交付离线原生工作台、稳定文档 ID、结构化动作与
 
 ## 应用与菜单栏图标
 
-应用使用已选定的薄荷绿短发角色原画 `app/MicroInput/Resources/AppIcon-artwork.png`。`scripts/build` 调用 `scripts/generate-app-icon.swift` 生成 16–1024 px 的图标表示并打包为 AppIcon.icns；圆角和 5% 透明外边距与 Koe 的 macOS 图标一致。原画不带截图外框。
+应用图标原画为 `app/MicroInput/Resources/AppIcon-artwork.png`，基于 [Creator Micro 2 官方实物](https://worklouder.cc/creator-micro-2)的正面外形生成：银色外框、深色机身、左上旋钮、右上摇杆、六颗薄荷绿发光键和底部宽键。去掉文字、螺丝与细小丝印，优先保证 Dock 小尺寸辨识度。原画由内置 imagegen 生成，提示词要点为「正面俯视、保持 4×4 物理拓扑、深浅对比、六颗薄荷绿键、无文字与额外留白」。`scripts/build` 调用 `scripts/generate-app-icon.swift` 生成 16–1024 px 的图标表示并打包为 AppIcon.icns；1024 px 画布内保持 824 px 图形轮廓、四边各 100 px 透明留白，构建时由 `scripts/verify-app-icon.swift` 对照系统 Mail 图标校验。运行时继续使用系统处理后的图标。
 
 菜单栏由 `StatusItemIcon.swift` 绘制 20 × 18 pt 的键盘与旋钮符号，设置 `isTemplate`，由系统处理深浅色及选中着色。尺寸是本项目选择，不是 Apple 强制尺寸。遵循 [Apple 菜单栏规范](https://developer.apple.com/design/human-interface-guidelines/the-menu-bar) 的黑色/透明符号建议及 [NSImage.isTemplate](https://developer.apple.com/documentation/appkit/nsimage/istemplate) 的模板语义。
 
