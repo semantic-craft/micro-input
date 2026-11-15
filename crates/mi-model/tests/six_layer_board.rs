@@ -239,3 +239,253 @@ fn host_mouse_commands_preserve_host_adapter_in_applied_six_layer_plan() {
         })
     );
 }
+
+#[test]
+fn six_layer_v070_mouse_and_scroll_joystick_modes_gate_by_firmware_and_keep_strict_key_invariants()
+{
+    use mi_model::apply::{
+        compile_six_layer_profile_for_firmware, extract_keymap_joystick_hardware_mode,
+        patch_keymap_joystick_hardware_mode, recognize_six_layer_profile_for_firmware,
+        recognize_six_layer_profile_in_config, verify_active_six_layer_profile_for_firmware,
+    };
+
+    assert!(
+        compile_six_layer_profile_for_firmware(ORIGINAL, None, Some("0.6.3"), Some("mouse"))
+            .unwrap_err()
+            .contains("0.7.0-rc.16")
+    );
+    assert!(
+        compile_six_layer_profile_for_firmware(ORIGINAL, None, Some("0.7.0-rc.15"), Some("scroll"))
+            .unwrap_err()
+            .contains("0.7.0-rc.16")
+    );
+
+    let compiled_mouse =
+        compile_six_layer_profile_for_firmware(ORIGINAL, None, Some("0.7.0-rc.16"), Some("mouse"))
+            .unwrap();
+    assert_eq!(compiled_mouse.profile_index, 1);
+    let text = std::str::from_utf8(&compiled_mouse.keymap).unwrap();
+    assert!(text.contains("\"unknownNativeField\": 1.00"));
+    assert!(text.contains("\"keep\": [true, 9.00]"));
+
+    for layer_1_based in 1..=6_u8 {
+        assert_eq!(
+            extract_keymap_joystick_hardware_mode(
+                &compiled_mouse.keymap,
+                Some(1),
+                Some(layer_1_based)
+            )
+            .as_deref(),
+            Some("mouse")
+        );
+    }
+
+    assert_eq!(
+        recognize_six_layer_profile_for_firmware(&compiled_mouse.keymap, None, Some("0.7.0-rc.16"))
+            .unwrap(),
+        Some(1)
+    );
+    verify_active_six_layer_profile_for_firmware(
+        &compiled_mouse.keymap,
+        None,
+        1,
+        Some("0.7.0-rc.16"),
+    )
+    .unwrap();
+
+    let mut cfg_v070 = mi_model::parse_device_files(&compiled_mouse.keymap, None).unwrap();
+    cfg_v070.firmware = Some("0.7.0".into());
+    assert_eq!(
+        recognize_six_layer_profile_in_config(&cfg_v070).unwrap(),
+        Some(1)
+    );
+
+    let mut cfg_v063 = cfg_v070.clone();
+    cfg_v063.firmware = Some("0.6.3".into());
+    assert!(recognize_six_layer_profile_in_config(&cfg_v063)
+        .unwrap_err()
+        .contains("0.7.0-rc.16"));
+    assert!(verify_active_six_layer_profile_for_firmware(
+        &compiled_mouse.keymap,
+        None,
+        1,
+        Some("0.6.3"),
+    )
+    .unwrap_err()
+    .contains("0.7.0-rc.16"));
+
+    // Strict key/encoder KV_OAI_* and DIRECT_CONTROLS invariants must still reject manual edits!
+    let mut tampered_key: Value = serde_json::from_slice(&compiled_mouse.keymap).unwrap();
+    tampered_key["profiles"][1]["layers"][1]["layout"]["keymap"][2][0] = json!("KC_A");
+    assert!(recognize_six_layer_profile_for_firmware(
+        &serde_json::to_vec(&tampered_key).unwrap(),
+        None,
+        Some("0.7.0-rc.16")
+    )
+    .is_err());
+
+    let mut tampered_enc: Value = serde_json::from_slice(&compiled_mouse.keymap).unwrap();
+    tampered_enc["profiles"][1]["layers"][2]["layout"]["encoders"][0][0] = json!("KV_OAI_ENC_CC");
+    let tampered_enc_bytes = serde_json::to_vec(&tampered_enc).unwrap();
+    assert!(recognize_six_layer_profile_for_firmware(
+        &tampered_enc_bytes,
+        None,
+        Some("0.7.0-rc.16")
+    )
+    .is_err());
+    assert!(compile_six_layer_profile_for_firmware(
+        &tampered_enc_bytes,
+        None,
+        Some("0.7.0-rc.16"),
+        None
+    )
+    .is_err());
+
+    let mut tampered_codex: Value = serde_json::from_slice(&compiled_mouse.keymap).unwrap();
+    tampered_codex["profiles"][1]["layers"][0]["layout"]["keymap"][0][0] = json!("KC_F13");
+    assert!(recognize_six_layer_profile_for_firmware(
+        &serde_json::to_vec(&tampered_codex).unwrap(),
+        None,
+        Some("0.7.0-rc.16")
+    )
+    .is_err());
+
+    // Patching six-layer profile between MOUSE -> SCROLL -> logical_sectors preserves exact outer bytes
+    let (_, unchanged) = patch_keymap_joystick_hardware_mode(
+        &compiled_mouse.keymap,
+        "0.7.0-rc.16",
+        Some(1),
+        None,
+        "mouse",
+    )
+    .unwrap();
+    assert!(!unchanged);
+
+    let (patched_scroll, changed_scroll) = patch_keymap_joystick_hardware_mode(
+        &compiled_mouse.keymap,
+        "0.7.0-rc.16",
+        Some(1),
+        None,
+        "scroll",
+    )
+    .unwrap();
+    assert!(changed_scroll);
+    assert_eq!(
+        extract_keymap_joystick_hardware_mode(&patched_scroll, Some(1), Some(2)).as_deref(),
+        Some("scroll")
+    );
+    assert_eq!(
+        recognize_six_layer_profile_for_firmware(&patched_scroll, None, Some("0.7.0-rc.16"))
+            .unwrap(),
+        Some(1)
+    );
+
+    let (restored_sectors, changed_sectors) = patch_keymap_joystick_hardware_mode(
+        &patched_scroll,
+        "0.7.0-rc.16",
+        Some(1),
+        None,
+        "logical_sectors",
+    )
+    .unwrap();
+    assert!(changed_sectors);
+    assert_eq!(
+        extract_keymap_joystick_hardware_mode(&restored_sectors, Some(1), Some(1)).as_deref(),
+        Some("vendor")
+    );
+    for layer_1_based in 2..=6_u8 {
+        assert_eq!(
+            extract_keymap_joystick_hardware_mode(
+                &restored_sectors,
+                Some(1),
+                Some(layer_1_based)
+            )
+            .as_deref(),
+            Some("radial")
+        );
+    }
+    assert_eq!(
+        recognize_six_layer_profile_for_firmware(&restored_sectors, None, Some("0.6.3")).unwrap(),
+        Some(1)
+    );
+    let restored_text = std::str::from_utf8(&restored_sectors).unwrap();
+    assert!(restored_text.contains("\"unknownNativeField\": 1.00"));
+    assert!(restored_text.contains("\"keep\": [true, 9.00]"));
+}
+
+#[test]
+fn applied_six_layer_plan_tracks_and_gates_v070_joystick_hardware_modes() {
+    let mut draft = mi_model::draft::Draft::default();
+    mi_model::preset::install_agent_starter_profiles(&mut draft).unwrap();
+    let id = |name: &str| {
+        draft
+            .document
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, p)| p.name == name)
+            .unwrap()
+            .0
+            .clone()
+    };
+    let ag_id = id("Antigravity");
+    let codex_id = id("Codex");
+    let dsh_id = id("DeepSeek Coder (DSH)");
+    let ag_layer = draft.document.editable.graph.profiles[&ag_id].layer_order[0].clone();
+    draft
+        .set_control_settings(
+            &ag_id,
+            &ag_layer,
+            mi_model::control_settings::ControlSettings {
+                joystick_mode: "mouse".into(),
+                active_sectors: 0,
+            },
+        )
+        .unwrap();
+
+    let (view_cfg, _) = draft.document.view().unwrap();
+    let ag_view = view_cfg
+        .profiles
+        .iter()
+        .find(|p| p.name == "Antigravity")
+        .unwrap();
+    assert_eq!(ag_view.layers[0].joystick.kind, json!({"type": "MOUSE"}));
+
+    let desired = BoardLayerPlan::recommended(codex_id, ag_id, dsh_id);
+
+    // Offline document (no firmware baseline yet) compiles and records joystick_mode, then gates on live firmware
+    let plan =
+        AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
+            .unwrap();
+    assert!(plan.uses_v070_joystick_hardware_mode());
+    assert_eq!(plan.hosts[0].joystick_mode.as_deref(), Some("MOUSE"));
+    assert_eq!(plan.hosts[1].joystick_mode, None);
+    assert!(plan.validate_current().is_ok());
+    assert!(plan.validate_for_firmware(Some("0.7.0-rc.16")).is_ok());
+    assert!(plan
+        .validate_for_firmware(Some("0.6.3"))
+        .unwrap_err()
+        .contains("0.7.0-rc.16"));
+    assert_eq!(
+        plan.compiled_board_layer(BoardLayer::ALL[1]).joystick.kind,
+        json!("MOUSE")
+    );
+    assert_eq!(
+        plan.compiled_board_layer(BoardLayer::ALL[2]).joystick.kind,
+        json!("RADIAL")
+    );
+
+    // Document with known 0.6.3 baseline rejects compile directly
+    draft.document.baseline = Some(json!({"firmware": "0.6.3"}));
+    assert!(
+        AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
+            .unwrap_err()
+            .contains("0.7.0-rc.16")
+    );
+    draft.document.baseline = Some(json!({"firmware": "0.7.0-rc.16"}));
+    assert!(
+        AppliedSixLayerPlan::compile(&desired, &draft.document, BottomRowLayout::Split, true)
+            .is_ok()
+    );
+}

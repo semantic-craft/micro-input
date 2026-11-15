@@ -113,6 +113,8 @@ pub struct V070HardwareProjection {
     pub synced: bool,
     pub active_profile: Option<u8>,
     pub active_layer: Option<u8>,
+    #[serde(default)]
+    pub active_joystick_mode: Option<String>,
     pub battery_percent: Option<u8>,
     pub is_charging: Option<bool>,
     pub host_sleep_status: String,
@@ -139,6 +141,7 @@ impl Default for V070HardwareProjection {
             synced: false,
             active_profile: None,
             active_layer: None,
+            active_joystick_mode: None,
             battery_percent: None,
             is_charging: None,
             host_sleep_status: "awake".into(),
@@ -162,6 +165,7 @@ pub struct V070SnapshotPayload {
     pub version: String,
     pub active_profile: Option<u8>,
     pub active_layer: Option<u8>,
+    pub active_joystick_mode: Option<String>,
     pub battery_percent: Option<u8>,
     pub is_charging: Option<bool>,
     pub mouse: MouseConfig,
@@ -177,6 +181,11 @@ pub enum V070BridgeOutcome {
     ProfileLayer {
         profile_index: Option<u8>,
         layer_index: u8,
+    },
+    JoystickHardwareModeUpdated {
+        mode: String,
+        active_profile: Option<u8>,
+        active_layer: Option<u8>,
     },
     MouseConfigUpdated {
         mouse: MouseConfig,
@@ -213,6 +222,9 @@ pub enum V070HardwareAction {
     },
     SelectLayer {
         layer: u8,
+    },
+    ApplyJoystickHardwareMode {
+        mode: String,
     },
     ApplyMousePreset {
         preset: String,
@@ -259,6 +271,9 @@ pub(crate) enum ValidatedV070DeviceCommand {
     Refresh,
     SelectLayer {
         layer: u8,
+    },
+    ApplyJoystickHardwareMode {
+        mode: String,
     },
     ApplyMousePreset {
         config: MouseConfig,
@@ -313,6 +328,19 @@ pub(crate) fn parse_v070_action(
             }
             Ok(ParsedV070Action::DeviceCommand(
                 ValidatedV070DeviceCommand::SelectLayer { layer },
+            ))
+        }
+        V070HardwareAction::ApplyJoystickHardwareMode { mode } => {
+            let normalized = match mode.trim().to_ascii_lowercase().as_str() {
+                "mouse" => "mouse",
+                "scroll" => "scroll",
+                "logical_sectors" | "sectors" => "logical_sectors",
+                other => return Err(format!("不支持的摇杆硬件模式：{other}")),
+            };
+            Ok(ParsedV070Action::DeviceCommand(
+                ValidatedV070DeviceCommand::ApplyJoystickHardwareMode {
+                    mode: normalized.to_string(),
+                },
             ))
         }
         V070HardwareAction::ApplyMousePreset { preset } => {
@@ -631,5 +659,39 @@ mod tests {
                 deadzone: JoystickDeadzone { v: 0.25 }
             })
         );
+
+        for (raw, expected) in [
+            ("mouse", "mouse"),
+            ("MOUSE", "mouse"),
+            ("scroll", "scroll"),
+            ("logical_sectors", "logical_sectors"),
+            ("sectors", "logical_sectors"),
+        ] {
+            assert_eq!(
+                parse_v070_action(
+                    V070HardwareAction::ApplyJoystickHardwareMode { mode: raw.into() },
+                    &base_mouse,
+                    MAX_DEVICE_NAME_LEN,
+                ),
+                Ok(ParsedV070Action::DeviceCommand(
+                    ValidatedV070DeviceCommand::ApplyJoystickHardwareMode {
+                        mode: expected.into(),
+                    }
+                ))
+            );
+        }
+        assert!(parse_v070_action(
+            V070HardwareAction::ApplyJoystickHardwareMode {
+                mode: "unsupported".into()
+            },
+            &base_mouse,
+            MAX_DEVICE_NAME_LEN,
+        )
+        .is_err());
+
+        let mut proj_json = serde_json::to_value(V070HardwareProjection::default()).unwrap();
+        proj_json.as_object_mut().unwrap().remove("active_joystick_mode");
+        let decoded: V070HardwareProjection = serde_json::from_value(proj_json).unwrap();
+        assert_eq!(decoded.active_joystick_mode, None);
     }
 }

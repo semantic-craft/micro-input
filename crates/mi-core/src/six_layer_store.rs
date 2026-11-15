@@ -36,8 +36,50 @@ impl WorkbenchStore {
         runtime_action_profile_id(&self.document_store.host_store().draft.document, profile_id)
     }
 
+    pub(crate) fn observed_connected_firmware(&self) -> Option<String> {
+        self.six_layer_running
+            .as_ref()
+            .and_then(|running| running.observed_firmware_version())
+            .or_else(|| {
+                self.device_session
+                    .as_ref()
+                    .filter(|session| !session.is_disconnected())
+                    .and_then(|session| session.observed_firmware_version())
+            })
+    }
+
+    pub(crate) fn validate_six_layer_installation_health(
+        inst: &six_layer_runtime::Installation,
+        firmware: Option<&str>,
+    ) -> Result<(), String> {
+        if inst.status != InstallationStatus::Applied {
+            return Err("六层恢复记录尚未处理，请先恢复原设备配置".into());
+        }
+        inst.plan.validate_for_firmware(firmware)?;
+        let planned_path = inst.backup.join("planned-keymap.json");
+        if planned_path.is_file() {
+            let planned = std::fs::read(&planned_path).map_err(|e| e.to_string())?;
+            let smart_path = inst.backup.join("smart_actions.json");
+            let smart = if smart_path.is_file() {
+                Some(std::fs::read(&smart_path).map_err(|e| e.to_string())?)
+            } else {
+                None
+            };
+            mi_model::apply::verify_active_six_layer_profile_for_firmware(
+                &planned,
+                smart.as_deref(),
+                inst.profile_index,
+                firmware,
+            )?;
+        }
+        Ok(())
+    }
+
     fn compiled_six_layer_plan(&self) -> Result<AppliedSixLayerPlan, String> {
-        self.projection_inputs().compiled_six_layer_plan()
+        let plan = self.projection_inputs().compiled_six_layer_plan()?;
+        let fw = self.observed_connected_firmware();
+        plan.validate_for_firmware(fw.as_deref())?;
+        Ok(plan)
     }
 
     pub(crate) fn compile_profile_twenty_slots(
@@ -176,12 +218,13 @@ impl WorkbenchStore {
         {
             return;
         }
+        let connected_fw = self.observed_connected_firmware();
         let Some(plan) = self
             .six_layer_state
             .installation
             .as_ref()
             .filter(|inst| {
-                inst.status == InstallationStatus::Applied && inst.plan.validate_current().is_ok()
+                Self::validate_six_layer_installation_health(inst, connected_fw.as_deref()).is_ok()
             })
             .map(|inst| inst.plan.clone())
         else {
@@ -254,20 +297,20 @@ impl WorkbenchStore {
                 "隔离工作台不能应用实体六层方案".into(),
             ));
         }
-        if self
-            .six_layer_state
-            .installation
-            .as_ref()
-            .is_some_and(|installation| {
-                installation.status != InstallationStatus::Applied
-                    || installation.plan.validate_current().is_err()
-            })
-        {
-            return Err(WorkbenchError::Routing(
-                "六层恢复记录尚未处理，请先恢复原设备配置".into(),
-            ));
+        let connected_fw = self.observed_connected_firmware();
+        if let Some(installation) = self.six_layer_state.installation.as_ref() {
+            if installation.status != InstallationStatus::Applied
+                || installation.plan.validate_current().is_err()
+            {
+                return Err(WorkbenchError::Routing(
+                    "六层恢复记录尚未处理，请先恢复原设备配置".into(),
+                ));
+            }
+            Self::validate_six_layer_installation_health(installation, connected_fw.as_deref())
+                .map_err(WorkbenchError::Routing)?;
         }
-        plan.validate_current().map_err(WorkbenchError::Routing)?;
+        plan.validate_for_firmware(connected_fw.as_deref())
+            .map_err(WorkbenchError::Routing)?;
         self.suspend_for_six_layer_operation()?;
         let transport = self.exclusive_usb_transport();
         let dir = self.config.document_dir.clone();
@@ -335,57 +378,87 @@ impl WorkbenchStore {
             }
             match result {
                 Ok(Some(mut running)) => {
-                    self.six_layer_auto_resume_attempts = 0;
-                    self.six_layer_next_auto_resume_at = None;
-                    self.device_session = None;
-                    self.connected_candidate = Some(running.candidate.clone());
-                    if let Some(serial) = running
-                        .candidate
-                        .serial_number
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                    {
-                        let _ = self
-                            .document_store
-                            .set_preferred_device_serial(Some(serial.to_string()));
-                    }
-                    if self.available_usb_candidates.is_empty() {
-                        self.available_usb_candidates = vec![running.candidate.clone()];
-                    }
-                    self.hardware_rpc_verified = true;
-                    running.armed = running.receiver.arm().is_ok();
-                    running.set_execution_policy(
-                        self.document_store.host_execution_enabled(),
-                        self.command_execution_enabled,
-                        self.update_now,
-                    );
-                    running.navigation = Some(self.session_navigation.dispatch.clone());
-                    running.start_executor(Arc::clone(&self.live_executor));
-                    running.start_monitor();
-                    running.set_v070_inbox(self.hardware_event_tx.clone());
-                    if let Some(version) = running
+                    let firmware_health = running
                         .observed_firmware_version()
-                        .filter(|v| mi_model::supports_v070_hardware_capabilities(v))
-                    {
-                        let pl = running.observed_v070_profile_layer();
-                        self.v070_hardware.mark_supported(
-                            &version,
-                            pl.map(|(p, _)| p),
-                            pl.map(|(_, l)| l),
-                            None,
-                            None,
+                        .map(|version| {
+                            Self::validate_six_layer_installation_health(
+                                &running.installation,
+                                Some(&version),
+                            )
+                        })
+                        .transpose();
+                    if let Err(err) = firmware_health {
+                        running.receiver.invalidate(&err);
+                        let _ = running.shutdown(&self.tokio_runtime);
+                        self.v070_hardware.on_disconnected();
+                        self.sa_rgb_coordinator.clear_on_disconnect();
+                        self.status_message = err;
+                    } else {
+                        self.six_layer_auto_resume_attempts = 0;
+                        self.six_layer_next_auto_resume_at = None;
+                        self.device_session = None;
+                        self.connected_candidate = Some(running.candidate.clone());
+                        if let Some(serial) = running
+                            .candidate
+                            .serial_number
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            let _ = self
+                                .document_store
+                                .set_preferred_device_serial(Some(serial.to_string()));
+                        }
+                        if self.available_usb_candidates.is_empty() {
+                            self.available_usb_candidates = vec![running.candidate.clone()];
+                        }
+                        self.hardware_rpc_verified = true;
+                        running.armed = running.receiver.arm().is_ok();
+                        running.set_execution_policy(
+                            self.document_store.host_execution_enabled(),
+                            self.command_execution_enabled,
+                            self.update_now,
                         );
+                        running.navigation = Some(self.session_navigation.dispatch.clone());
+                        running.start_executor(Arc::clone(&self.live_executor));
+                        running.start_monitor();
+                        running.set_v070_inbox(self.hardware_event_tx.clone());
+                        if let Some(version) = running.observed_firmware_version() {
+                            if mi_model::supports_v070_hardware_capabilities(&version) {
+                                let pl = running.observed_v070_profile_layer();
+                                self.v070_hardware.mark_supported(
+                                    &version,
+                                    pl.map(|(p, _)| p),
+                                    pl.map(|(_, l)| l),
+                                    None,
+                                    None,
+                                );
+                                let planned_path =
+                                    running.installation.backup.join("planned-keymap.json");
+                                if self.v070_hardware.projection.active_joystick_mode.is_none()
+                                    && planned_path.is_file()
+                                {
+                                    if let Ok(bytes) = std::fs::read(&planned_path) {
+                                        self.v070_hardware.projection.active_joystick_mode =
+                                            mi_model::apply::extract_keymap_joystick_hardware_mode(
+                                                &bytes,
+                                                pl.map(|(p, _)| p),
+                                                pl.map(|(_, l)| l),
+                                            );
+                                    }
+                                }
+                            }
+                        }
+                        running.start_vendor_bridge(&self.tokio_runtime);
+                        self.six_layer_running = Some(running);
+                        self.six_layer_user_pinned = false;
+                        self.sync_six_layer_routing_context();
+                        self.status_message = "六层配置已读回，等待首次实体输入验证".into();
+                        self.lighting_arbiter.invalidate_hardware_cache();
+                        self.refresh_four_app_lighting();
+                        self.sync_v070_session_sa_rgb();
+                        self.start_mac_usb_discovery_watcher();
                     }
-                    running.start_vendor_bridge(&self.tokio_runtime);
-                    self.six_layer_running = Some(running);
-                    self.six_layer_user_pinned = false;
-                    self.sync_six_layer_routing_context();
-                    self.status_message = "六层配置已读回，等待首次实体输入验证".into();
-                    self.lighting_arbiter.invalidate_hardware_cache();
-                    self.refresh_four_app_lighting();
-                    self.sync_v070_session_sa_rgb();
-                    self.start_mac_usb_discovery_watcher();
                 }
                 Ok(None) => {
                     self.status_message = "原设备配置及 Karabiner 设置已恢复".into();
@@ -415,9 +488,18 @@ impl WorkbenchStore {
             )
         };
         let mut v070_changed = false;
-        if let Some(version) = v070_ver.filter(|v| mi_model::supports_v070_hardware_capabilities(v))
-        {
-            if !self.v070_hardware.projection.supported {
+        if let Some(version) = v070_ver {
+            if let Some(running) = self.six_layer_running.as_ref() {
+                if let Err(err) = Self::validate_six_layer_installation_health(
+                    &running.installation,
+                    Some(&version),
+                ) {
+                    running.receiver.invalidate(&err);
+                }
+            }
+            if mi_model::supports_v070_hardware_capabilities(&version)
+                && !self.v070_hardware.projection.supported
+            {
                 self.v070_hardware.mark_supported(
                     &version,
                     v070_pl.map(|(p, _)| p),
@@ -1781,5 +1863,282 @@ mod tests {
             .unwrap();
         let restored = store.compile_profile_twenty_slots(&custom_pid).unwrap();
         assert!(restored.actions[16..20].iter().all(|a| a.is_some()));
+    }
+
+    #[test]
+    fn six_layer_store_health_startup_and_resume_accept_v070_mouse_and_scroll_and_reject_on_v063() {
+        const SIX_SOURCE: &[u8] =
+            include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+        const SMART: &[u8] =
+            include_bytes!("../../mi-model/fixtures/device/synthetic-smart-actions-object.json");
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+
+        let ag_id = store
+            .find_canonical_profile_id(crate::CanonicalAgent::Antigravity)
+            .unwrap();
+        store.browse_profile(&ag_id).unwrap();
+        store
+            .dispatch_inspector_action(crate::InspectorAction::SetJoystickMode(
+                crate::JoystickControlMode::Mouse,
+            ))
+            .unwrap();
+
+        let plan = store.compiled_six_layer_plan().unwrap();
+        assert!(plan
+            .hosts
+            .iter()
+            .any(|h| h.joystick_mode.as_deref() == Some("MOUSE")));
+        assert!(plan.validate_current().is_ok());
+        assert!(plan.validate_for_firmware(None).is_ok());
+        assert!(plan.validate_for_firmware(Some("0.7.0-rc.16")).is_ok());
+        assert!(plan.validate_for_firmware(Some("0.7.0")).is_ok());
+        assert!(plan.validate_for_firmware(Some("0.6.3")).is_err());
+
+        for (hw_mode, cli_mode) in [("MOUSE", "mouse"), ("SCROLL", "scroll")] {
+            let compiled = mi_model::apply::compile_six_layer_profile_for_firmware(
+                SIX_SOURCE,
+                Some(SMART),
+                Some("0.7.0-rc.16"),
+                Some(hw_mode),
+            )
+            .unwrap();
+
+            let backup = dir.path().join(format!("backup-{cli_mode}"));
+            fs::create_dir_all(&backup).unwrap();
+            fs::write(backup.join("keymap.json"), SIX_SOURCE).unwrap();
+            fs::write(backup.join("planned-keymap.json"), &compiled.keymap).unwrap();
+            fs::write(backup.join("smart_actions.json"), SMART).unwrap();
+
+            let base_session = mock_session(&store.tokio_runtime);
+            let mut template_running =
+                six_layer_runtime::RunningSixLayer::isolated(base_session.clone(), dir.path());
+            template_running.installation.profile_index = compiled.profile_index;
+            template_running.installation.backup = backup.clone();
+            template_running.installation.plan = plan.clone();
+            template_running.installation.plan.codex_joystick_mode = Some(hw_mode.to_string());
+            for host in &mut template_running.installation.plan.hosts {
+                host.joystick_mode = Some(hw_mode.to_string());
+            }
+            let inst = template_running.installation.clone();
+            drop(template_running);
+            store.tokio_runtime.block_on(base_session.shutdown());
+
+            assert!(
+                WorkbenchStore::validate_six_layer_installation_health(&inst, None).is_ok(),
+                "{hw_mode} installation must pass pre-connect startup health check"
+            );
+            assert!(WorkbenchStore::validate_six_layer_installation_health(
+                &inst,
+                Some("0.7.0-rc.16")
+            )
+            .is_ok());
+            let err_v063 =
+                WorkbenchStore::validate_six_layer_installation_health(&inst, Some("0.6.3"))
+                    .unwrap_err();
+            assert!(err_v063.contains("0.7.0-rc.16"));
+
+            let mut tampered_inst = inst.clone();
+            let tampered_backup = dir.path().join(format!("backup-tampered-{cli_mode}"));
+            fs::create_dir_all(&tampered_backup).unwrap();
+            let tampered_keymap = String::from_utf8(compiled.keymap.clone())
+                .unwrap()
+                .replacen("KV_OAI_AG06", "KC_A", 1)
+                .into_bytes();
+            fs::write(tampered_backup.join("planned-keymap.json"), tampered_keymap).unwrap();
+            fs::write(tampered_backup.join("smart_actions.json"), SMART).unwrap();
+            tampered_inst.backup = tampered_backup;
+            assert!(
+                WorkbenchStore::validate_six_layer_installation_health(
+                    &tampered_inst,
+                    Some("0.7.0-rc.16")
+                )
+                .is_err(),
+                "manual key edits must still be strictly rejected on 0.7.0-rc.16"
+            );
+
+            store.tokio_runtime.block_on(async {
+                use mi_proto::Framer;
+                let (link, mut requests) = mi_transport::MockLink::new();
+                let inject = link.inject.clone();
+                let session = DeviceSession::new(
+                    Arc::new(MacMockLink {
+                        inner: link,
+                        exclusive: true,
+                    }),
+                    Box::new(mi_proto::NativeFramer::default()),
+                    Arc::new(mi_session::ReadOnlySchema),
+                    mi_session::SessionConfig {
+                        timeout: Duration::from_secs(2),
+                        interval: Duration::ZERO,
+                    },
+                );
+                let expected_km = compiled.keymap.clone();
+                let worker = tokio::spawn(async move {
+                    let mut incoming = mi_proto::NativeFramer::default();
+                    let outbound = mi_proto::NativeFramer::default();
+                    while let Some(frame) = requests.recv().await {
+                        for bytes in incoming.feed(&frame).unwrap() {
+                            let req: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                            let params = &req["params"];
+                            let meta = |name: &str, data: &[u8]| {
+                                let sha1 = mi_model::operation_record::file_value(data)["sha1"]
+                                    .as_str()
+                                    .unwrap()
+                                    .to_owned();
+                                serde_json::json!({"name": name, "size": data.len(), "checksum": sha1})
+                            };
+                            let result = match req["method"].as_str().unwrap() {
+                                "device.status" => serde_json::json!({
+                                    "version": "0.7.0-rc.16",
+                                    "profile_index": 1,
+                                    "layer_index": 2
+                                }),
+                                "fs.list" => serde_json::json!([
+                                    meta("keymap.json", &expected_km),
+                                    meta("smart_actions.json", SMART)
+                                ]),
+                                "fs.readbin" => {
+                                    let file_bytes = match params["file"].as_str().unwrap() {
+                                        "keymap.json" => expected_km.as_slice(),
+                                        "smart_actions.json" => SMART,
+                                        other => panic!("unexpected file {other}"),
+                                    };
+                                    let offset = params["offset"].as_u64().unwrap() as usize;
+                                    let len = params["len"].as_u64().unwrap() as usize;
+                                    let end = (offset + len).min(file_bytes.len());
+                                    serde_json::json!({
+                                        "total_size": file_bytes.len(),
+                                        "data": test_b64_encode(&file_bytes[offset..end])
+                                    })
+                                }
+                                other => panic!("unexpected method {other}"),
+                            };
+                            let reply = serde_json::json!({"id": req["id"], "result": result});
+                            let mut wire = reply.to_string();
+                            wire.push('\n');
+                            for out in outbound.encode(wire.as_bytes()).unwrap() {
+                                let _ = inject.send(out);
+                            }
+                        }
+                    }
+                });
+
+                let resume_action = six_layer_runtime::inspect_resume_snapshot(
+                    &session,
+                    &compiled.keymap,
+                    Some(SMART),
+                    compiled.profile_index,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    resume_action,
+                    six_layer_runtime::ResumeSnapshotAction::VerifyReady { layer: 2 }
+                );
+                session.shutdown().await;
+                worker.abort();
+            });
+        }
+
+        let compiled_mouse = mi_model::apply::compile_six_layer_profile_for_firmware(
+            SIX_SOURCE,
+            Some(SMART),
+            Some("0.7.0-rc.16"),
+            Some("MOUSE"),
+        )
+        .unwrap();
+        let backup_poll = dir.path().join("backup-poll-mouse");
+        fs::create_dir_all(&backup_poll).unwrap();
+        fs::write(backup_poll.join("keymap.json"), SIX_SOURCE).unwrap();
+        fs::write(backup_poll.join("planned-keymap.json"), &compiled_mouse.keymap).unwrap();
+        fs::write(backup_poll.join("smart_actions.json"), SMART).unwrap();
+
+        let make_mock_firmware_session = |rt: &tokio::runtime::Runtime, version: &str| {
+            rt.block_on(async {
+                use mi_proto::Framer;
+                let (link, mut requests) = mi_transport::MockLink::new();
+                let inject = link.inject.clone();
+                let session = DeviceSession::new(
+                    Arc::new(MacMockLink {
+                        inner: link,
+                        exclusive: true,
+                    }),
+                    Box::new(mi_proto::NativeFramer::default()),
+                    Arc::new(mi_session::ReadOnlySchema),
+                    mi_session::SessionConfig {
+                        timeout: Duration::from_secs(1),
+                        interval: Duration::ZERO,
+                    },
+                );
+                let v = version.to_string();
+                let worker = tokio::spawn(async move {
+                    let mut incoming = mi_proto::NativeFramer::default();
+                    let outbound = mi_proto::NativeFramer::default();
+                    while let Some(frame) = requests.recv().await {
+                        for bytes in incoming.feed(&frame).unwrap() {
+                            let req: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                            let result = match req["method"].as_str().unwrap() {
+                                "device.status" => serde_json::json!({
+                                    "version": v,
+                                    "profile_index": 1,
+                                    "layer_index": 2
+                                }),
+                                _ => serde_json::json!({}),
+                            };
+                            let reply = serde_json::json!({"id": req["id"], "result": result});
+                            let mut wire = reply.to_string();
+                            wire.push('\n');
+                            for out in outbound.encode(wire.as_bytes()).unwrap() {
+                                let _ = inject.send(out);
+                            }
+                        }
+                    }
+                });
+                session.read_identity_info().await.unwrap();
+                worker.abort();
+                session
+            })
+        };
+
+        let s_v063 = make_mock_firmware_session(&store.tokio_runtime, "0.6.3");
+        let mut r_v063 = six_layer_runtime::RunningSixLayer::isolated(s_v063.clone(), dir.path());
+        r_v063.installation.profile_index = 1;
+        r_v063.installation.backup = backup_poll.clone();
+        r_v063.installation.plan = plan.clone();
+        store.tokio_runtime.block_on(s_v063.shutdown());
+        let (tx_bad, rx_bad) = std::sync::mpsc::channel();
+        tx_bad.send(Ok(Some(r_v063))).unwrap();
+        store.six_layer_job = Some(rx_bad);
+        store.poll_six_layer_runtime();
+        assert!(
+            store.six_layer_running.is_none(),
+            "poll_six_layer_runtime must reject MOUSE installation when connected firmware is 0.6.3"
+        );
+        assert!(store.status_message.contains("0.7.0-rc.16"));
+
+        let s_v070 = make_mock_firmware_session(&store.tokio_runtime, "0.7.0-rc.16");
+        let mut r_v070 = six_layer_runtime::RunningSixLayer::isolated(s_v070.clone(), dir.path());
+        r_v070.installation.profile_index = 1;
+        r_v070.installation.backup = backup_poll;
+        r_v070.installation.plan = plan;
+        store.tokio_runtime.block_on(s_v070.shutdown());
+        let (tx_ok, rx_ok) = std::sync::mpsc::channel();
+        tx_ok.send(Ok(Some(r_v070))).unwrap();
+        store.six_layer_job = Some(rx_ok);
+        store.poll_six_layer_runtime();
+        assert!(store.six_layer_running.is_some());
+        assert_eq!(
+            store
+                .projection()
+                .v070_hardware
+                .active_joystick_mode
+                .as_deref(),
+            Some("mouse")
+        );
+        if let Some(running) = store.six_layer_running.take() {
+            running.shutdown(&store.tokio_runtime).unwrap();
+        }
     }
 }

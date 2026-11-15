@@ -17,6 +17,8 @@ pub struct AppliedHostLayer {
     pub profile_id: String,
     pub adapter: String,
     pub actions: [Option<ResolvedHostAction>; 20],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joystick_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -25,9 +27,78 @@ pub struct AppliedSixLayerPlan {
     pub desired: BoardLayerPlan,
     pub bottom_row_layout: BottomRowLayout,
     pub hosts: Vec<AppliedHostLayer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_joystick_mode: Option<String>,
+}
+
+fn doc_firmware_version(doc: &LocalDocumentV2) -> Option<&str> {
+    doc.baseline
+        .as_ref()
+        .and_then(|b| b.get("firmware"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            doc.origin
+                .get("config")
+                .and_then(|c| c.get("firmware"))
+                .and_then(Value::as_str)
+        })
+}
+
+fn profile_hardware_joystick_mode(doc: &LocalDocumentV2, profile_id: &str) -> Option<String> {
+    let lid = doc
+        .editable
+        .graph
+        .profiles
+        .get(profile_id)?
+        .layer_order
+        .first()?;
+    let settings = doc
+        .editable
+        .graph
+        .layers
+        .get(lid)?
+        .control_settings
+        .as_ref()?;
+    match settings.joystick_mode.as_str() {
+        "mouse" => Some("MOUSE".into()),
+        "scroll" => Some("SCROLL".into()),
+        _ => None,
+    }
+}
+
+fn codex_profile_hardware_joystick_mode(
+    doc: &LocalDocumentV2,
+    codex_profile_id: &str,
+) -> Option<String> {
+    if let Some(mode) = profile_hardware_joystick_mode(doc, codex_profile_id) {
+        return Some(mode);
+    }
+    doc.editable
+        .graph
+        .profiles
+        .iter()
+        .find(|(_, profile)| {
+            profile.name == crate::preset::LOCAL_CODEX_PROFILE_NAME
+                && !profile
+                    .layer_order
+                    .iter()
+                    .any(|lid| doc.is_protected_oai_layer(lid))
+        })
+        .and_then(|(pid, _)| profile_hardware_joystick_mode(doc, pid))
 }
 
 impl AppliedSixLayerPlan {
+    pub fn uses_v070_joystick_hardware_mode(&self) -> bool {
+        self.codex_joystick_mode
+            .as_deref()
+            .is_some_and(|m| matches!(m, "MOUSE" | "SCROLL"))
+            || self.hosts.iter().any(|h| {
+                h.joystick_mode
+                    .as_deref()
+                    .is_some_and(|m| matches!(m, "MOUSE" | "SCROLL"))
+            })
+    }
+
     pub fn validate_current(&self) -> Result<(), String> {
         if !matches!(
             self.desired.route(BoardLayer::ALL[0]),
@@ -42,6 +113,11 @@ impl AppliedSixLayerPlan {
         {
             return Err("旧六层安装已暂停，请先恢复原设备配置".into());
         }
+        if let Some(mode) = self.codex_joystick_mode.as_deref() {
+            if !matches!(mode, "VENDOR" | "MOUSE" | "SCROLL") {
+                return Err("六层摇杆硬件模式不受支持，请先恢复原设备配置".into());
+            }
+        }
         for (index, adapter) in ["antigravity", "dsh-desktop"].iter().enumerate() {
             let host = &self.hosts[index];
             if host.adapter != *adapter
@@ -51,6 +127,21 @@ impl AppliedSixLayerPlan {
                     })
             {
                 return Err("六层托管目标不受支持，请先恢复原设备配置".into());
+            }
+            if let Some(mode) = host.joystick_mode.as_deref() {
+                if !matches!(mode, "RADIAL" | "MOUSE" | "SCROLL") {
+                    return Err("六层摇杆硬件模式不受支持，请先恢复原设备配置".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_firmware(&self, firmware: Option<&str>) -> Result<(), String> {
+        self.validate_current()?;
+        if let Some(fw) = firmware {
+            if self.uses_v070_joystick_hardware_mode() && !crate::supports_v070_mouse_tokens(fw) {
+                return Err("原生摇杆 MOUSE/SCROLL 模式需要固件 0.7.0-rc.16 或更高版本".into());
             }
         }
         Ok(())
@@ -64,7 +155,18 @@ impl AppliedSixLayerPlan {
                 BoardLayerRoute::Native { .. }
             )
         {
-            return crate::official_chatgpt_layer(json!(0), "Codex");
+            let mut layer = crate::official_chatgpt_layer(json!(0), "Codex");
+            if let Some(mode) = self
+                .codex_joystick_mode
+                .as_deref()
+                .filter(|m| matches!(*m, "MOUSE" | "SCROLL"))
+            {
+                layer.joystick = crate::Joystick {
+                    kind: json!(mode),
+                    sectors: vec![],
+                };
+            }
+            return layer;
         }
         let tokens: Vec<&str> = match index {
             1 => LAYER2_VENDOR_SLOTS
@@ -88,6 +190,28 @@ impl AppliedSixLayerPlan {
         .get(index)
         .copied()
         .unwrap_or("Unassigned");
+        let hardware_joystick_mode = (1..=2)
+            .contains(&index)
+            .then(|| {
+                self.hosts
+                    .get(index - 1)
+                    .and_then(|h| h.joystick_mode.as_deref())
+            })
+            .flatten()
+            .filter(|m| matches!(*m, "MOUSE" | "SCROLL"));
+        let joystick = if let Some(mode) = hardware_joystick_mode {
+            crate::Joystick {
+                kind: json!(mode),
+                sectors: vec![],
+            }
+        } else {
+            crate::Joystick {
+                kind: json!("RADIAL"),
+                sectors: (16..20)
+                    .map(|i| crate::Binding::Basic(crate::Token(tokens[i].into())))
+                    .collect(),
+            }
+        };
         crate::Layer {
             id: json!(index),
             name: name.into(),
@@ -96,12 +220,7 @@ impl AppliedSixLayerPlan {
             encoders: std::array::from_fn(|i| {
                 crate::Binding::Basic(crate::Token(tokens[13 + i].into()))
             }),
-            joystick: crate::Joystick {
-                kind: json!("RADIAL"),
-                sectors: (16..20)
-                    .map(|i| crate::Binding::Basic(crate::Token(tokens[i].into())))
-                    .collect(),
-            },
+            joystick,
             lights: crate::Lights {
                 backlight: Value::Null,
                 underglow: Value::Null,
@@ -117,12 +236,14 @@ impl AppliedSixLayerPlan {
     ) -> Result<Self, String> {
         let BoardLayerRoute::Native {
             owner: NativeLayerOwner::Codex,
-            profile_id,
+            profile_id: codex_profile_id,
         } = plan.route(BoardLayer::ALL[0])
         else {
             return Err("第 1 层必须为 Codex 原生方案".into());
         };
-        if crate::board_layers::native_owner(doc, profile_id) != Some(NativeLayerOwner::Codex) {
+        if crate::board_layers::native_owner(doc, codex_profile_id)
+            != Some(NativeLayerOwner::Codex)
+        {
             return Err("第 1 层未引用受保护的 Codex 原生方案".into());
         }
         if [3, 4, 5]
@@ -131,6 +252,7 @@ impl AppliedSixLayerPlan {
         {
             return Err("当前第 4、5、6 层必须留空，尚无额外输入编码".into());
         }
+        let codex_joystick_mode = codex_profile_hardware_joystick_mode(doc, codex_profile_id);
         let names = ["Antigravity", "DeepSeek Coder (DSH)"];
         let adapters = ["antigravity", "dsh-desktop"];
         let bundles = ["com.google.antigravity", "com.deepseek.dsh"];
@@ -159,6 +281,7 @@ impl AppliedSixLayerPlan {
                     names[index]
                 ));
             }
+            let joystick_mode = profile_hardware_joystick_mode(doc, profile_id);
             let actions = std::array::from_fn(|slot| {
                 let mut action = resolve_host_action_with_layout(
                     doc,
@@ -216,22 +339,27 @@ impl AppliedSixLayerPlan {
                 profile_id: profile_id.clone(),
                 adapter: adapters[index].into(),
                 actions,
+                joystick_mode,
             });
         }
-        Ok(Self {
+        let compiled = Self {
             desired: plan.clone(),
             bottom_row_layout: layout,
             hosts,
-        })
+            codex_joystick_mode,
+        };
+        compiled.validate_for_firmware(doc_firmware_version(doc))?;
+        Ok(compiled)
     }
 }
 
+#[derive(Debug)]
 pub struct CompiledSixLayerProfile {
     pub profile_index: u32,
     pub keymap: Vec<u8>,
 }
 
-fn native_layout(layout: &Value) -> bool {
+fn codex_native_keys_and_encoders(layout: &Value) -> bool {
     let keys: Vec<_> = layout["keymap"]
         .as_array()
         .into_iter()
@@ -244,7 +372,42 @@ fn native_layout(layout: &Value) -> bool {
         .collect();
     keys == expected
         && layout["encoders"] == json!([["KV_OAI_ENC_CC", "KV_OAI_ENC_CW", "KV_OAI_ENC_CLK"]])
-        && layout["joystick"]["type"] == "VENDOR"
+}
+
+fn joystick_is_v070_mouse_or_scroll(joystick: &Value, allowed_sectors: Option<&Value>) -> bool {
+    let Some(obj) = joystick.as_object() else {
+        return false;
+    };
+    let Some(kind) = obj.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    if !matches!(kind, "MOUSE" | "SCROLL") {
+        return false;
+    }
+    match obj.len() {
+        1 => true,
+        2 => match (obj.get("sectors"), allowed_sectors) {
+            (Some(sectors), Some(expected)) => sectors == expected || sectors == &json!([]),
+            (Some(sectors), None) => sectors == &json!([]),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn native_layout_with_gate(layout: &Value, allow_v070_joystick: bool) -> bool {
+    if !codex_native_keys_and_encoders(layout) {
+        return false;
+    }
+    if layout["joystick"]["type"] == "VENDOR" {
+        layout["joystick"]
+            .get("sectors")
+            .is_none_or(|sectors| sectors == &json!([]))
+    } else if allow_v070_joystick {
+        joystick_is_v070_mouse_or_scroll(&layout["joystick"], None)
+    } else {
+        false
+    }
 }
 
 const LAYER2_VENDOR_SLOTS: [&str; 6] = [
@@ -264,6 +427,25 @@ const LAYER3_VENDOR_SLOTS: [&str; 6] = [
     "KV_OAI_AG16",
     "KV_OAI_AG17",
 ];
+
+const SINGLE_LAYER_OAI_SECTORS: [&str; 4] = [
+    "KV_OAI_AG15",
+    "KV_OAI_AG16",
+    "KV_OAI_AG17",
+    "KV_OAI_AG18",
+];
+
+fn four_sector_radial_joystick(tokens: [&str; 4]) -> Value {
+    json!({
+        "type": "RADIAL",
+        "sectors": [
+            {"k": tokens[0], "a1": 0.625, "a2": 0.875},
+            {"k": tokens[1], "a1": 0.375, "a2": 0.625},
+            {"k": tokens[2], "a1": 0.125, "a2": 0.375},
+            {"k": tokens[3], "a1": 0.875, "a2": 0.125}
+        ]
+    })
+}
 
 fn managed_lights_off() -> Value {
     json!({
@@ -285,6 +467,10 @@ fn managed_lights_off() -> Value {
 }
 
 fn managed_layer(index: usize) -> Value {
+    managed_layer_with_joystick_mode(index, None)
+}
+
+fn managed_layer_with_joystick_mode(index: usize, joystick_mode: Option<&str>) -> Value {
     let tokens: Vec<&str> = match index {
         1 => LAYER2_VENDOR_SLOTS
             .into_iter()
@@ -310,6 +496,11 @@ fn managed_layer(index: usize) -> Value {
         "Unassigned 5",
         "Unassigned 6",
     ][index];
+    let joystick = match joystick_mode {
+        Some("MOUSE") => json!({"type": "MOUSE"}),
+        Some("SCROLL") => json!({"type": "SCROLL"}),
+        _ => four_sector_radial_joystick([tokens[16], tokens[17], tokens[18], tokens[19]]),
+    };
     json!({
         "id": index,
         "name": name,
@@ -319,17 +510,31 @@ fn managed_layer(index: usize) -> Value {
             "base": rows,
             "keymap": rows,
             "encoders": [&tokens[13..16]],
-            "joystick": {
-                "type": "RADIAL",
-                "sectors": [
-                    {"k": tokens[16], "a1": 0.625, "a2": 0.875},
-                    {"k": tokens[17], "a1": 0.375, "a2": 0.625},
-                    {"k": tokens[18], "a1": 0.125, "a2": 0.375},
-                    {"k": tokens[19], "a1": 0.875, "a2": 0.125}
-                ]
-            }
+            "joystick": joystick
         }
     })
+}
+
+fn matches_canonical_managed_layer(index: usize, layer: &Value, allow_v070_joystick: bool) -> bool {
+    let radial = managed_layer(index);
+    if layer == &radial {
+        return true;
+    }
+    if !allow_v070_joystick {
+        return false;
+    }
+    if layer == &managed_layer_with_joystick_mode(index, Some("MOUSE"))
+        || layer == &managed_layer_with_joystick_mode(index, Some("SCROLL"))
+    {
+        return true;
+    }
+    let allowed_sectors = &radial["layout"]["joystick"]["sectors"];
+    if !joystick_is_v070_mouse_or_scroll(&layer["layout"]["joystick"], Some(allowed_sectors)) {
+        return false;
+    }
+    let mut normalized = layer.clone();
+    normalized["layout"]["joystick"] = radial["layout"]["joystick"].clone();
+    normalized == radial
 }
 
 fn offset(input: &[u8], raw: &RawValue) -> Result<usize, String> {
@@ -426,7 +631,7 @@ fn recognize_six_layer_recovery_candidate_in_config(
             || profile["id"] != index
             || profiles.iter().filter(|p| p["id"] == index).count() != 1
             || layers.len() != 6
-            || !native_layout(&layers[0]["layout"])
+            || !native_layout_with_gate(&layers[0]["layout"], true)
         {
             return Err("六层专用方案同名、重复或已修改，原映射保留".into());
         }
@@ -435,17 +640,28 @@ fn recognize_six_layer_recovery_candidate_in_config(
     Ok(found)
 }
 
-fn recognize_six_layer_profile_in_config(
+pub fn recognize_six_layer_profile_in_config(
     config: &crate::DeviceConfig,
 ) -> Result<Option<u32>, String> {
+    let allow_v070_joystick = config
+        .firmware
+        .as_deref()
+        .is_none_or(crate::supports_v070_mouse_tokens);
     let Some(index) = recognize_six_layer_recovery_candidate_in_config(config)? else {
         return Ok(None);
     };
     let layers = config.raw["profiles"][index as usize]["layers"]
         .as_array()
         .ok_or("六层专用方案同名、重复或已修改，原映射保留")?;
-    if (1..6).all(|i| layers[i] == managed_layer(i)) {
+    let valid_for_gate = native_layout_with_gate(&layers[0]["layout"], allow_v070_joystick)
+        && (1..6).all(|i| matches_canonical_managed_layer(i, &layers[i], allow_v070_joystick));
+    if valid_for_gate {
         Ok(Some(index))
+    } else if !allow_v070_joystick
+        && native_layout_with_gate(&layers[0]["layout"], true)
+        && (1..6).all(|i| matches_canonical_managed_layer(i, &layers[i], true))
+    {
+        Err("原生摇杆 MOUSE/SCROLL 模式需要固件 0.7.0-rc.16 或更高版本".into())
     } else {
         Err("六层专用方案同名、重复或已修改，原映射保留".into())
     }
@@ -455,7 +671,16 @@ pub fn recognize_six_layer_profile(
     keymap: &[u8],
     smart: Option<&[u8]>,
 ) -> Result<Option<u32>, String> {
-    let config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
+    recognize_six_layer_profile_for_firmware(keymap, smart, None)
+}
+
+pub fn recognize_six_layer_profile_for_firmware(
+    keymap: &[u8],
+    smart: Option<&[u8]>,
+    firmware: Option<&str>,
+) -> Result<Option<u32>, String> {
+    let mut config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
+    config.firmware = firmware.map(str::to_owned);
     recognize_six_layer_profile_in_config(&config)
 }
 
@@ -464,7 +689,17 @@ pub fn verify_active_six_layer_profile(
     smart: Option<&[u8]>,
     profile_index: u32,
 ) -> Result<(), String> {
-    let config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
+    verify_active_six_layer_profile_for_firmware(keymap, smart, profile_index, None)
+}
+
+pub fn verify_active_six_layer_profile_for_firmware(
+    keymap: &[u8],
+    smart: Option<&[u8]>,
+    profile_index: u32,
+    firmware: Option<&str>,
+) -> Result<(), String> {
+    let mut config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
+    config.firmware = firmware.map(str::to_owned);
     let recognized_index = recognize_six_layer_profile_in_config(&config)?
         .ok_or_else(|| "六层专用方案缺失".to_string())?;
     if recognized_index != profile_index
@@ -483,11 +718,44 @@ pub fn recognize_six_layer_recovery_candidate(
     recognize_six_layer_recovery_candidate_in_config(&config)
 }
 
+fn normalize_requested_six_layer_joystick_mode(
+    mode: Option<&str>,
+    firmware: Option<&str>,
+) -> Result<Option<&'static str>, String> {
+    let Some(raw) = mode else {
+        return Ok(None);
+    };
+    let normalized = match raw.trim().to_ascii_lowercase().as_str() {
+        "mouse" => Some("MOUSE"),
+        "scroll" => Some("SCROLL"),
+        "radial" | "sectors" | "logical_sectors" => None,
+        other => return Err(format!("不支持的摇杆硬件模式：{other}")),
+    };
+    if normalized.is_some()
+        && firmware.is_some_and(|fw| !crate::supports_v070_mouse_tokens(fw))
+    {
+        return Err("原生摇杆 MOUSE/SCROLL 模式需要固件 0.7.0-rc.16 或更高版本".into());
+    }
+    Ok(normalized)
+}
+
 pub fn compile_six_layer_profile(
     keymap: &[u8],
     smart: Option<&[u8]>,
 ) -> Result<CompiledSixLayerProfile, String> {
-    let config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
+    compile_six_layer_profile_for_firmware(keymap, smart, None, None)
+}
+
+pub fn compile_six_layer_profile_for_firmware(
+    keymap: &[u8],
+    smart: Option<&[u8]>,
+    firmware: Option<&str>,
+    joystick_mode: Option<&str>,
+) -> Result<CompiledSixLayerProfile, String> {
+    let requested_hw_mode = normalize_requested_six_layer_joystick_mode(joystick_mode, firmware)?;
+    let allow_v070_joystick = firmware.is_none_or(crate::supports_v070_mouse_tokens);
+    let mut config = parse_device_files(keymap, smart).map_err(|e| e.to_string())?;
+    config.firmware = firmware.map(str::to_owned);
     let existing = recognize_six_layer_recovery_candidate_in_config(&config)?;
     let profiles = config.raw["profiles"]
         .as_array()
@@ -508,12 +776,43 @@ pub fn compile_six_layer_profile(
             let layers = profiles[index as usize]["layers"]
                 .as_array()
                 .ok_or("六层数组缺失")?;
+            if !native_layout_with_gate(&layers[0]["layout"], allow_v070_joystick) {
+                if !allow_v070_joystick && native_layout_with_gate(&layers[0]["layout"], true) {
+                    return Err(
+                        "原生摇杆 MOUSE/SCROLL 模式需要固件 0.7.0-rc.16 或更高版本".into(),
+                    );
+                }
+                return Err("六层专用方案同名、重复或已修改，原映射保留".into());
+            }
             let has_conflict = (1..6)
                 .any(|layer_index| managed_layer_has_conflict(layer_index, &layers[layer_index]));
             if has_conflict {
                 return Err("六层专用方案同名、重复或已修改，原映射保留".into());
             }
-            if !(1..6).all(|i| layers[i] == managed_layer(i)) {
+            if !allow_v070_joystick
+                && (1..6).any(|i| {
+                    matches!(
+                        layers[i]["layout"]["joystick"]["type"].as_str(),
+                        Some("MOUSE" | "SCROLL")
+                    )
+                })
+            {
+                return Err("原生摇杆 MOUSE/SCROLL 模式需要固件 0.7.0-rc.16 或更高版本".into());
+            }
+            let needs_managed_update = match joystick_mode {
+                Some(_) => {
+                    !(1..6).all(|i| {
+                        layers[i] == managed_layer_with_joystick_mode(i, requested_hw_mode)
+                    }) || (requested_hw_mode.is_some()
+                        && layers[0]["layout"]["joystick"]
+                            != json!({"type": requested_hw_mode.unwrap()}))
+                        || (requested_hw_mode.is_none()
+                            && layers[0]["layout"]["joystick"]["type"] != "VENDOR")
+                }
+                None => !(1..6)
+                    .all(|i| matches_canonical_managed_layer(i, &layers[i], allow_v070_joystick)),
+            };
+            if needs_managed_update {
                 let target_profile = originals
                     .get(index as usize)
                     .copied()
@@ -522,8 +821,29 @@ pub fn compile_six_layer_profile(
                 let layers_raw = field(&profile_fields, "layers")?;
                 let raw_layers = array(layers_raw)?;
                 let codex_raw = raw_layers.first().copied().ok_or("第 1 层原字节缺失")?;
-                let mut upgraded_layers = vec![codex_raw.get().to_owned()];
-                upgraded_layers.extend((1..6).map(|i| managed_layer(i).to_string()));
+                let codex_layer_str = if joystick_mode.is_some() {
+                    splice_raw_layer_joystick(
+                        codex_raw,
+                        &requested_hw_mode.map_or_else(
+                            || json!({"type": "VENDOR", "sectors": []}),
+                            |m| json!({"type": m}),
+                        ),
+                    )?
+                } else {
+                    codex_raw.get().to_owned()
+                };
+                let mut upgraded_layers = vec![codex_layer_str];
+                for i in 1..6 {
+                    let preserved_mode = if joystick_mode.is_some() {
+                        requested_hw_mode
+                    } else {
+                        layers[i]["layout"]["joystick"]["type"]
+                            .as_str()
+                            .filter(|m| allow_v070_joystick && matches!(*m, "MOUSE" | "SCROLL"))
+                    };
+                    upgraded_layers
+                        .push(managed_layer_with_joystick_mode(i, preserved_mode).to_string());
+                }
                 let start = offset(keymap, layers_raw)?;
                 edits.push((
                     start,
@@ -544,7 +864,7 @@ pub fn compile_six_layer_profile(
                     .iter()
                     .zip(raw_layers)
                 {
-                    if native_layout(&layer["layout"]) {
+                    if native_layout_with_gate(&layer["layout"], allow_v070_joystick) {
                         native.push(raw_layer);
                     }
                 }
@@ -556,8 +876,17 @@ pub fn compile_six_layer_profile(
             if profiles.iter().any(|profile| profile["id"] == index) {
                 return Err("新增 Profile ID 与原方案重复".into());
             }
-            let mut layers = vec![native[0].get().to_owned()];
-            layers.extend((1..6).map(|i| managed_layer(i).to_string()));
+            let codex_layer_str = if let Some(mode) = requested_hw_mode {
+                splice_raw_layer_joystick(native[0], &json!({"type": mode}))?
+            } else if joystick_mode.is_some() {
+                splice_raw_layer_joystick(native[0], &json!({"type": "VENDOR", "sectors": []}))?
+            } else {
+                native[0].get().to_owned()
+            };
+            let mut layers = vec![codex_layer_str];
+            layers.extend(
+                (1..6).map(|i| managed_layer_with_joystick_mode(i, requested_hw_mode).to_string()),
+            );
             let profile = format!(
                 "{{\"id\":{index},\"name\":\"{SIX_LAYER_PROFILE_NAME}\",\"layers\":[{}]}}",
                 layers.join(",")
@@ -583,13 +912,288 @@ pub fn compile_six_layer_profile(
         cursor = end;
     }
     next.extend_from_slice(&keymap[cursor..]);
-    if recognize_six_layer_profile(&next, smart)? != Some(index) {
+    if recognize_six_layer_profile_for_firmware(&next, smart, firmware)? != Some(index) {
         return Err("六层候选自检失败".into());
     }
     Ok(CompiledSixLayerProfile {
         profile_index: index,
         keymap: next,
     })
+}
+
+fn splice_raw_layer_joystick(raw_layer: &RawValue, replacement: &Value) -> Result<String, String> {
+    let bytes = raw_layer.get().as_bytes();
+    let layer_fields = object(raw_layer)?;
+    let layout_raw = field(&layer_fields, "layout")?;
+    let layout_fields = object(layout_raw)?;
+    let joystick_raw = field(&layout_fields, "joystick")?;
+    let start = offset(bytes, joystick_raw)?;
+    let end = start + joystick_raw.get().len();
+    let current: Value = serde_json::from_str(joystick_raw.get()).map_err(|e| e.to_string())?;
+    if &current == replacement {
+        return Ok(raw_layer.get().to_owned());
+    }
+    let encoded = serde_json::to_string(replacement).map_err(|e| e.to_string())?;
+    let mut out = String::with_capacity(bytes.len() - joystick_raw.get().len() + encoded.len());
+    out.push_str(&raw_layer.get()[..start]);
+    out.push_str(&encoded);
+    out.push_str(&raw_layer.get()[end..]);
+    Ok(out)
+}
+
+/// Inspects `(profile_index, layer_index)` in `/fs/keymap.json` (`layer_index` is 1-based when `>= 1`)
+/// and returns normalized `"mouse" | "scroll" | "radial" | "vendor"`, or `None` if absent/unrecognized.
+pub fn extract_keymap_joystick_hardware_mode(
+    keymap_bytes: &[u8],
+    active_profile: Option<u8>,
+    active_layer: Option<u8>,
+) -> Option<String> {
+    let config = parse_device_files(keymap_bytes, None).ok()?;
+    let profiles = config.raw.get("profiles")?.as_array()?;
+    let profile_idx = if let Some(p) = active_profile {
+        usize::from(p)
+    } else {
+        let active_id = config.raw.get("activeProfileId")?;
+        let matching: Vec<usize> = profiles
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| (&p["id"] == active_id).then_some(i))
+            .collect();
+        if matching.len() == 1 {
+            matching[0]
+        } else {
+            usize::try_from(active_id.as_u64()?).ok()?
+        }
+    };
+    let layers = profiles.get(profile_idx)?.get("layers")?.as_array()?;
+    let layer = match active_layer {
+        Some(l) if l >= 1 => layers.get(usize::from(l - 1))?,
+        _ => layers.first()?,
+    };
+    let raw_type = layer
+        .get("layout")?
+        .get("joystick")?
+        .get("type")?
+        .as_str()?;
+    match raw_type.trim().to_ascii_uppercase().as_str() {
+        "MOUSE" => Some("mouse".into()),
+        "SCROLL" => Some("scroll".into()),
+        "RADIAL" => Some("radial".into()),
+        "VENDOR" => Some("vendor".into()),
+        _ => None,
+    }
+}
+
+fn grid_contains_any_token(grid: &Value, needles: &[&str]) -> bool {
+    grid.as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|row| row.as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .any(|token| needles.contains(&token))
+}
+
+/// Patches `layout.joystick` in `keymap_bytes` for the selected `profile_index` (defaults to
+/// `activeProfileId`) and `layer_index` (0-based; `None` patches all layers in the target profile),
+/// preserving all unknown JSON fields and exact bytes outside patched `joystick` object(s).
+pub fn patch_keymap_joystick_hardware_mode(
+    keymap_bytes: &[u8],
+    firmware: &str,
+    profile_index: Option<usize>,
+    layer_index: Option<usize>,
+    mode: &str,
+) -> Result<(Vec<u8>, bool), String> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum TargetJoystickMode {
+        Mouse,
+        Scroll,
+        Sectors,
+    }
+
+    let target_mode = match mode.trim().to_ascii_lowercase().as_str() {
+        "mouse" => TargetJoystickMode::Mouse,
+        "scroll" => TargetJoystickMode::Scroll,
+        "sectors" | "logical_sectors" | "radial" => TargetJoystickMode::Sectors,
+        other => return Err(format!("不支持的摇杆硬件模式：{other}")),
+    };
+    if matches!(
+        target_mode,
+        TargetJoystickMode::Mouse | TargetJoystickMode::Scroll
+    ) && !crate::supports_v070_mouse_tokens(firmware)
+    {
+        return Err(format!(
+            "原生摇杆 MOUSE/SCROLL 模式需要固件 0.7.0-rc.16 或更高版本（当前：{firmware}）"
+        ));
+    }
+
+    let config = parse_device_files(keymap_bytes, None).map_err(|e| e.to_string())?;
+    let profiles = config.raw["profiles"]
+        .as_array()
+        .ok_or("Profile 列表缺失")?;
+    let target_pi = match profile_index {
+        Some(pi) => {
+            if pi >= profiles.len() {
+                return Err("目标 Profile 索引超界".into());
+            }
+            pi
+        }
+        None => {
+            let active_id = &config.raw["activeProfileId"];
+            let matching: Vec<usize> = profiles
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| (&p["id"] == active_id).then_some(i))
+                .collect();
+            if matching.len() == 1 {
+                matching[0]
+            } else if let Some(idx) = active_id
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .filter(|&n| n < profiles.len())
+            {
+                idx
+            } else {
+                return Err("无法确定目标活动 Profile".into());
+            }
+        }
+    };
+
+    let layers = profiles[target_pi]["layers"]
+        .as_array()
+        .ok_or("目标 Profile 缺少 layers 数组")?;
+    if layers.is_empty() {
+        return Err("目标 Profile 没有可修改的层".into());
+    }
+    let layer_indices: Vec<usize> = match layer_index {
+        Some(li) => {
+            if li >= layers.len() {
+                return Err("目标 Layer 索引超界".into());
+            }
+            vec![li]
+        }
+        None => (0..layers.len()).collect(),
+    };
+
+    let recognized_six_layer =
+        recognize_six_layer_profile_for_firmware(keymap_bytes, None, Some("0.7.0-rc.16"))
+            .ok()
+            .flatten();
+    let is_six_layer_target = recognized_six_layer == Some(target_pi as u32);
+    let is_three_layer_target =
+        profiles[target_pi]["name"].as_str() == Some(super::THREE_LAYER_PROFILE_NAME);
+
+    let root: &RawValue = serde_json::from_slice(keymap_bytes).map_err(|e| e.to_string())?;
+    let root_fields = object(root)?;
+    let profiles_raw = array(field(&root_fields, "profiles")?)?;
+    let profile_raw = profiles_raw
+        .get(target_pi)
+        .copied()
+        .ok_or("目标 Profile 原字节缺失")?;
+    let profile_fields = object(profile_raw)?;
+    let layers_raw = array(field(&profile_fields, "layers")?)?;
+
+    let mut edits: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+    for li in layer_indices {
+        let raw_layer = layers_raw
+            .get(li)
+            .copied()
+            .ok_or("目标 Layer 原字节缺失")?;
+        let layer_fields = object(raw_layer)?;
+        let layout_raw = field(&layer_fields, "layout")?;
+        let layout_fields = object(layout_raw)?;
+        let joystick_raw = field(&layout_fields, "joystick")?;
+        let current_joystick: Value =
+            serde_json::from_str(joystick_raw.get()).map_err(|e| e.to_string())?;
+
+        let desired_joystick: Option<Value> = match target_mode {
+            TargetJoystickMode::Mouse => {
+                let target = json!({"type": "MOUSE"});
+                (&current_joystick != &target).then_some(target)
+            }
+            TargetJoystickMode::Scroll => {
+                let target = json!({"type": "SCROLL"});
+                (&current_joystick != &target).then_some(target)
+            }
+            TargetJoystickMode::Sectors => {
+                if is_six_layer_target {
+                    if li == 0 {
+                        let already_vendor = current_joystick["type"] == "VENDOR"
+                            && current_joystick
+                                .get("sectors")
+                                .is_none_or(|s| s == &json!([]));
+                        (!already_vendor).then(|| json!({"type": "VENDOR", "sectors": []}))
+                    } else {
+                        let expected = managed_layer(li)["layout"]["joystick"].clone();
+                        (&current_joystick != &expected).then_some(expected)
+                    }
+                } else if is_three_layer_target {
+                    let expected = json!({"type": "VENDOR", "sectors": []});
+                    (&current_joystick != &expected).then_some(expected)
+                } else if current_joystick["type"] == "RADIAL"
+                    && current_joystick
+                        .get("sectors")
+                        .and_then(Value::as_array)
+                        .is_some_and(|a| !a.is_empty())
+                {
+                    None
+                } else if let Some(existing_sectors) = current_joystick
+                    .get("sectors")
+                    .and_then(Value::as_array)
+                    .filter(|a| !a.is_empty())
+                {
+                    Some(json!({
+                        "type": "RADIAL",
+                        "sectors": existing_sectors
+                    }))
+                } else if grid_contains_any_token(
+                    &layers[li]["layout"]["keymap"],
+                    &SINGLE_LAYER_OAI_SECTORS,
+                ) {
+                    Some(four_sector_radial_joystick([
+                        "KC_F16", "KC_F17", "KC_F18", "KC_F19",
+                    ]))
+                } else {
+                    Some(four_sector_radial_joystick(SINGLE_LAYER_OAI_SECTORS))
+                }
+            }
+        };
+
+        if let Some(replacement_val) = desired_joystick {
+            let start = offset(keymap_bytes, joystick_raw)?;
+            let end = start + joystick_raw.get().len();
+            let encoded = serde_json::to_vec(&replacement_val).map_err(|e| e.to_string())?;
+            edits.push((start, end, encoded));
+        }
+    }
+
+    if edits.is_empty() {
+        return Ok((keymap_bytes.to_vec(), false));
+    }
+
+    edits.sort_by_key(|edit| edit.0);
+    if edits.windows(2).any(|w| w[0].1 > w[1].0) {
+        return Err("摇杆修改字节范围重叠".into());
+    }
+
+    let mut next = Vec::with_capacity(keymap_bytes.len());
+    let mut cursor = 0;
+    for (start, end, replacement) in edits {
+        next.extend_from_slice(&keymap_bytes[cursor..start]);
+        next.extend_from_slice(&replacement);
+        cursor = end;
+    }
+    next.extend_from_slice(&keymap_bytes[cursor..]);
+
+    parse_device_files(&next, None).map_err(|e| e.to_string())?;
+    if is_six_layer_target {
+        let verify_fw = (!firmware.trim().is_empty()).then_some(firmware);
+        if recognize_six_layer_profile_for_firmware(&next, None, verify_fw)?
+            != Some(target_pi as u32)
+        {
+            return Err("六层摇杆硬件模式补丁自检失败".into());
+        }
+    }
+    Ok((next, true))
 }
 
 #[cfg(test)]
