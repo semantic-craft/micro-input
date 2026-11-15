@@ -925,3 +925,85 @@ fn codex_dial_reasoning_and_fast_mode_actions_route_through_live_host_action_exe
     assert_eq!(receipt.outcome, "blocked");
     assert_eq!(receipt.detail, "accessibility_untrusted");
 }
+
+#[test]
+fn open_url_sink_rejects_disallowed_schemes_and_leading_dashes() {
+    let driver = RecordingOsDriver::new(true);
+    let executor = LiveHostActionExecutor::new(driver.clone());
+    for bad in [
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "smb://files.local/share",
+        "-a",
+        "https://example.com/\r\n",
+    ] {
+        let receipt = executor.execute(
+            "Antigravity",
+            "AG00",
+            &ResolvedHostAction::OpenUrl {
+                url: bad.to_string(),
+            },
+        );
+        assert_eq!(receipt.outcome, "failed", "must reject {bad:?}");
+        assert!(
+            !driver
+                .events()
+                .iter()
+                .any(|e| matches!(e, RecordedOsEvent::OpenUrl(u) if u == bad)),
+            "disallowed URL {bad:?} must never reach driver.open_url"
+        );
+    }
+}
+
+#[test]
+fn shell_command_redacts_home_target_and_releases_execution_lock_during_wait() {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let driver = RecordingOsDriver::new(true);
+    let executor = Arc::new(LiveHostActionExecutor::new(driver.clone()));
+    if let Ok(home) = std::env::var("HOME") {
+        let normalized = home.trim_end_matches('/');
+        if !normalized.is_empty() && normalized != "/" {
+            let receipt = executor.execute(
+                "Antigravity",
+                "AG00",
+                &ResolvedHostAction::ShellCommand {
+                    command: String::new(),
+                    working_directory: format!("{normalized}/projects/demo"),
+                },
+            );
+            assert_eq!(receipt.target, "~/projects/demo");
+        }
+    }
+
+    let exec_bg = Arc::clone(&executor);
+    let handle = std::thread::spawn(move || {
+        exec_bg.execute(
+            "Antigravity",
+            "AG00",
+            &ResolvedHostAction::ShellCommand {
+                command: "sleep 0.35".to_string(),
+                working_directory: "/tmp".to_string(),
+            },
+        )
+    });
+
+    std::thread::sleep(Duration::from_millis(60));
+    let t0 = Instant::now();
+    let app_receipt = executor.execute(
+        "Antigravity",
+        "AG01",
+        &ResolvedHostAction::OpenApp {
+            bundle_id: "com.google.antigravity".to_string(),
+        },
+    );
+    let concurrent_elapsed = t0.elapsed();
+    assert_eq!(app_receipt.outcome, "executed");
+    assert!(
+        concurrent_elapsed < Duration::from_millis(120),
+        "ShellCommand must release execution_lock before waiting, concurrent OpenApp took {concurrent_elapsed:?}"
+    );
+    let shell_receipt = handle.join().unwrap();
+    assert_eq!(shell_receipt.outcome, "executed");
+}

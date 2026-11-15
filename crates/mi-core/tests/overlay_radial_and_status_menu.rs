@@ -683,7 +683,14 @@ fn status_menu_quick_switch_2x2_favorites_swap_and_icon_and_preset_bounds() {
             exported.into_bytes(),
         ))
         .expect("stage valid preset bytes");
-    assert!(store.projection().status_menu.pending_import.is_some());
+    let staged_preview = store
+        .projection()
+        .status_menu
+        .pending_import
+        .clone()
+        .expect("staged preset import preview");
+    assert_eq!(staged_preview.scope, "profile");
+    assert!(staged_preview.contains_complete_archive);
     store
         .dispatch_status_menu_action(StatusMenuAction::ConfirmStagedPresetImport)
         .expect("confirm staged preset import");

@@ -255,7 +255,17 @@ public struct EditableInspectorModel: Equatable {
     public var multis: [MacroRowModel] = []
     public var canAddLighting: Bool = false
     public var hasLayerLighting: Bool = false
-    public var commandExecutionEnabled: Bool = true
+    public var commandExecutionEnabled: Bool = false
+}
+
+public struct PendingPresetImportModel: Equatable, Identifiable {
+    public var id: String { "\(name)|\(scope)|\(profileCount)|\(layerCount)|\(actionCount)" }
+    public let name: String
+    public let scope: String
+    public let containsCompleteArchive: Bool
+    public let profileCount: Int
+    public let layerCount: Int
+    public let actionCount: Int
 }
 
 public struct FavoriteSlotModel: Identifiable, Equatable {
@@ -786,6 +796,8 @@ public struct StatusMenuSliceModel: Equatable {
     public var powerStatus: PowerStatusBadgeModel? = nil
     public var candidateDevices: [CandidateDeviceModel] = []
     public var preferredDeviceSerial: String? = nil
+    public var pendingImport: PendingPresetImportModel? = nil
+    public var presetError: String? = nil
     public init() {}
 
     public init(from m: ProjectionModel) {
@@ -806,6 +818,8 @@ public struct StatusMenuSliceModel: Equatable {
         self.powerStatus = m.powerStatus
         self.candidateDevices = m.candidateDevices
         self.preferredDeviceSerial = m.preferredDeviceSerial
+        self.pendingImport = m.pendingImport
+        self.presetError = m.presetError
     }
 }
 
@@ -914,6 +928,8 @@ public struct ProjectionModel: Equatable {
     public var cheatSheetPreview: CheatSheetModel? = nil
     public var cheatSheetVisible: Bool = false
     public var cheatSheet: CheatSheetModel? = nil
+    public var pendingImport: PendingPresetImportModel? = nil
+    public var presetError: String? = nil
 
     public var activeModal: ActiveModalModel? = nil
     public var statusMessage: String = "已就绪"

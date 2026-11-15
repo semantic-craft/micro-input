@@ -1141,6 +1141,83 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(store.inspector.editableInspector?.joystickMode, "mouse")
         XCTAssertEqual(store.canvas.encoderHoldLabel, "搜索会话")
     }
+
+    @MainActor
+    func testSecurityDefaultsFailClosedAndPresetImportStagesPreview() throws {
+        let fallbackParsed = CoreStore.parseProjection([
+            "inspector": [
+                "body": [
+                    "Editable": [:],
+                ]
+            ],
+            "status_menu": [
+                "pending_import": [
+                    "raw_text": "{}",
+                    "name": "Scoped Profile",
+                    "scope": "profile",
+                    "contains_complete_archive": true,
+                    "profile_count": 1,
+                    "layer_count": 2,
+                    "action_count": 5,
+                ],
+                "preset_error": "invalid preset",
+            ],
+        ])
+        XCTAssertEqual(
+            fallbackParsed.editableInspector?.commandExecutionEnabled,
+            false,
+            "missing command_execution_enabled must fail closed to false"
+        )
+        XCTAssertEqual(fallbackParsed.pendingImport?.name, "Scoped Profile")
+        XCTAssertEqual(fallbackParsed.pendingImport?.scope, "profile")
+        XCTAssertEqual(fallbackParsed.pendingImport?.containsCompleteArchive, true)
+        XCTAssertEqual(fallbackParsed.pendingImport?.profileCount, 1)
+        XCTAssertEqual(fallbackParsed.pendingImport?.layerCount, 2)
+        XCTAssertEqual(fallbackParsed.pendingImport?.actionCount, 5)
+        XCTAssertEqual(fallbackParsed.presetError, "invalid preset")
+
+        let statusSlice = StatusMenuSliceModel(from: fallbackParsed)
+        XCTAssertEqual(statusSlice.pendingImport?.scope, "profile")
+        XCTAssertEqual(statusSlice.presetError, "invalid preset")
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("micro-input-swift-unit2-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let store = CoreStore(isolatedDirectory: tempDir.path)
+        defer { store.stopEventLoops() }
+        XCTAssertEqual(store.inspector.editableInspector?.commandExecutionEnabled, false)
+
+        let selectedPid = store.sidebar.selectedProfileId
+        store.dispatch("sidebar", [
+            "Backup": [
+                "ExportPreset": [
+                    "profile_id": selectedPid as Any? ?? NSNull(),
+                    "layer_id": NSNull(),
+                ]
+            ]
+        ])
+        let exported = try XCTUnwrap(store.sidebar.lastExportedPreset)
+        store.stagePresetImport(data: Data(exported.utf8))
+        let staged = try XCTUnwrap(store.statusMenu.pendingImport)
+        XCTAssertEqual(staged.scope, "profile")
+        XCTAssertTrue(staged.containsCompleteArchive)
+        XCTAssertGreaterThan(staged.profileCount, 0)
+
+        store.dispatch("status_menu", "CancelStagedPresetImport")
+        XCTAssertNil(store.statusMenu.pendingImport)
+
+        store.stagePresetImport(data: Data("not-json".utf8))
+        XCTAssertNotNil(store.statusMenu.presetError)
+        XCTAssertNil(store.statusMenu.pendingImport)
+
+        store.stagePresetImport(data: Data(exported.utf8))
+        XCTAssertNil(store.statusMenu.presetError)
+        XCTAssertNotNil(store.statusMenu.pendingImport)
+        store.dispatch("status_menu", "ConfirmStagedPresetImport")
+        XCTAssertNil(store.statusMenu.pendingImport)
+    }
 }
 
 @MainActor

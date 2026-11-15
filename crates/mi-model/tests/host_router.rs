@@ -1334,3 +1334,76 @@ fn action_catalog_exposes_all_19_mouse_tokens_and_4_cheat_sheet_tokens_with_hone
         assert!(cap.prerequisites.iter().any(|p| p.contains("0.6.3+")));
     }
 }
+
+#[test]
+fn open_url_routing_enforces_http_or_https_scheme_and_rejects_flag_or_control_chars() {
+    let mut draft = Draft::default();
+    let pid = draft.document.editable.graph.profile_order[0].clone();
+    let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
+    let slot_key = draft.document.editable.graph.layers[&lid]
+        .controls
+        .iter()
+        .find(|(_, c)| c.logical_control == "logical-0")
+        .map(|(k, _)| k.clone())
+        .expect("logical-0 slot");
+
+    let mut resolve_raw_url = |raw: &str| {
+        let aid = "crafted-open-url".to_string();
+        draft.document.editable.graph.actions.insert(
+            aid.clone(),
+            Action {
+                id: aid.clone(),
+                name: "Crafted URL".into(),
+                category: "导航".into(),
+                detail: raw.into(),
+                payload: json!({
+                    "type": "open_url",
+                    "url": raw,
+                }),
+            },
+        );
+        draft
+            .document
+            .editable
+            .graph
+            .layers
+            .get_mut(&lid)
+            .unwrap()
+            .controls
+            .get_mut(&slot_key)
+            .unwrap()
+            .action_id = Some(aid);
+        resolve_host_action_with_command_consent(&draft.document, Some(&pid), "AG00", true, false)
+    };
+
+    for invalid in [
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "smb://server/share",
+        "-flag",
+        "https://example.com/path with spaces",
+        "https://example.com/\n",
+        "https://example.com/\x07",
+        "http:example.com",
+        "https://",
+        "",
+    ] {
+        assert!(
+            resolve_raw_url(invalid).is_none(),
+            "host_router must reject invalid OpenUrl {invalid:?}"
+        );
+    }
+
+    for valid in [
+        "http://localhost:8080/health",
+        "HTTPS://Example.COM/docs?q=1#frag",
+    ] {
+        assert_eq!(
+            resolve_raw_url(valid),
+            Some(ResolvedHostAction::OpenUrl {
+                url: valid.to_string(),
+            }),
+            "host_router must allow valid http/https OpenUrl {valid:?}"
+        );
+    }
+}

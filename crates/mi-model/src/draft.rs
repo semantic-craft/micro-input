@@ -696,13 +696,7 @@ impl Action {
                         .all(|m| ["command", "shift", "option", "control"].contains(&m.as_str()))
             }
             ActionKind::Text { text } => bounded(&text),
-            ActionKind::OpenUrl { url } => {
-                url.len() <= 16384
-                    && !url.chars().any(char::is_whitespace)
-                    && url::Url::parse(&url).is_ok_and(|u| {
-                        matches!(u.scheme(), "http" | "https") && u.host_str().is_some()
-                    })
-            }
+            ActionKind::OpenUrl { url } => crate::host_router::validate_open_url(&url).is_ok(),
             ActionKind::OpenApp { bundle_id } => {
                 bundle_id.len() <= 256
                     && bundle_id.split('.').count() >= 2

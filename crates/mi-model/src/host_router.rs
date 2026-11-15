@@ -497,6 +497,34 @@ fn profile_open_app_bundle_id(doc: &LocalDocumentV2, profile_id: &str) -> Option
     None
 }
 
+pub fn validate_open_url(url: &str) -> Result<(), String> {
+    if url.is_empty() || url.len() > 16384 {
+        return Err("网址不能为空且不能超过 16384 字节".into());
+    }
+    if url.starts_with('-') {
+        return Err("网址不能以连字符开头".into());
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("网址不能包含空白或控制字符".into());
+    }
+    let has_http_prefix = url
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        || url
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"));
+    if !has_http_prefix {
+        return Err("仅支持 http:// 或 https:// 网址".into());
+    }
+    let parsed = url::Url::parse(url).map_err(|_| "网址格式无效".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.host_str().is_some_and(|host| !host.is_empty())
+    {
+        return Err("仅支持包含有效主机的 http:// 或 https:// 网址".into());
+    }
+    Ok(())
+}
+
 fn convert_action(
     action: &Action,
     profile_name: Option<&str>,
@@ -542,7 +570,10 @@ fn convert_action(
             })
         }
         ActionKind::OpenApp { bundle_id } => Some(ResolvedHostAction::OpenApp { bundle_id }),
-        ActionKind::OpenUrl { url } => Some(ResolvedHostAction::OpenUrl { url }),
+        ActionKind::OpenUrl { url } => {
+            validate_open_url(&url).ok()?;
+            Some(ResolvedHostAction::OpenUrl { url })
+        }
         ActionKind::ShellCommand {
             command,
             working_directory,

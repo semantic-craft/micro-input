@@ -715,7 +715,7 @@ impl WorkbenchStore {
             favorites_only: false,
             favorite_action_ids: BTreeSet::new(),
             open_drawers: Vec::new(),
-            command_execution_enabled: true,
+            command_execution_enabled: false,
             lighting_apply_to_all_layers: false,
             lighting_preview_active: false,
             lighting_preview_remaining_secs: 0,
@@ -4917,6 +4917,7 @@ impl WorkbenchStore {
                 let envelope = match PresetFileEnvelope::from_bytes(&bytes) {
                     Ok(env) => env,
                     Err(msg) => {
+                        self.status_message = msg.clone();
                         self.preset_transfer_error = Some(msg.clone());
                         self.pending_preset_import = None;
                         self.commit_runtime_update();
@@ -4926,6 +4927,7 @@ impl WorkbenchStore {
                 let parsed = match mi_model::preset::import(&envelope.raw_utf8) {
                     Ok(draft) => draft,
                     Err(msg) => {
+                        self.status_message = msg.clone();
                         self.preset_transfer_error = Some(msg.clone());
                         self.pending_preset_import = None;
                         self.commit_runtime_update();
@@ -4939,9 +4941,25 @@ impl WorkbenchStore {
                     .and_then(|pid| graph.profiles.get(pid))
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| "预设方案".to_string());
+                let scope = parsed
+                    .document
+                    .origin
+                    .get("preset_scope")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("document")
+                    .to_string();
+                let contains_complete_archive = parsed
+                    .document
+                    .origin
+                    .get("preset_metadata")
+                    .and_then(|m| m.get("source_archive"))
+                    .and_then(|v| v.as_str())
+                    == Some("complete");
                 self.pending_preset_import = Some(PendingPresetImportPreview {
                     raw_text: envelope.raw_utf8,
                     name,
+                    scope,
+                    contains_complete_archive,
                     profile_count: graph.profiles.len(),
                     layer_count: graph.layers.len(),
                     action_count: graph.actions.len(),

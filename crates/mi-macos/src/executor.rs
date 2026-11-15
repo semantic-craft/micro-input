@@ -21,6 +21,7 @@ pub const KEY_CODE_N: u16 = 0x2D;
 pub const CG_EVENT_TYPE_FLAGS_CHANGED: u32 = 12;
 pub const CG_EVENT_FLAG_MASK_SECONDARY_FN: u64 = 0x0080_0000;
 pub const MAX_CLIPBOARD_STASH_BYTES: usize = 4 * 1024 * 1024;
+pub const DEFAULT_SHELL_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_ANTIGRAVITY_AX_DEPTH: usize = 36;
 pub const MAX_ANTIGRAVITY_AX_NODES: usize = 1800;
 
@@ -859,6 +860,9 @@ pub trait HostOsDriver: Send + Sync {
     fn post_apple_fn_flags(&self, key_down: bool) -> Result<(), String>;
     fn snapshot_clipboard(&self, max_bytes: usize) -> ClipboardSnapshot;
     fn write_clipboard_plain_text(&self, text: &str) -> u64;
+    fn write_clipboard_plain_text_checked(&self, text: &str) -> Result<u64, String> {
+        Ok(self.write_clipboard_plain_text(text))
+    }
     fn restore_clipboard(&self, snapshot: &ClipboardSnapshot, expected_change_count: u64) -> bool;
     fn open_url(&self, url: &str) -> Result<(), String>;
     fn focus_agent_input(&self, adapter: &str) -> Result<(), String>;
@@ -1159,8 +1163,555 @@ impl Drop for ModelPickerMouseTap {
 #[cfg(not(target_os = "macos"))]
 struct ModelPickerMouseTap;
 
+#[cfg(target_os = "macos")]
+mod macos_pasteboard {
+    use super::{ClipboardItemSnapshot, ClipboardSnapshot};
+    use std::ffi::{c_char, c_void, CStr};
+
+    pub type Id = *mut c_void;
+    type Sel = *mut c_void;
+
+    #[link(name = "AppKit", kind = "framework")]
+    #[link(name = "Foundation", kind = "framework")]
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> Id;
+        fn sel_registerName(name: *const c_char) -> Sel;
+        fn objc_msgSend();
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
+
+    struct AutoreleasePool(*mut c_void);
+
+    impl AutoreleasePool {
+        unsafe fn push() -> Self {
+            Self(unsafe { objc_autoreleasePoolPush() })
+        }
+    }
+
+    impl Drop for AutoreleasePool {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { objc_autoreleasePoolPop(self.0) };
+            }
+        }
+    }
+
+    unsafe fn cls(name: &[u8]) -> Id {
+        unsafe { objc_getClass(name.as_ptr().cast::<c_char>()) }
+    }
+
+    unsafe fn sel(name: &[u8]) -> Sel {
+        unsafe { sel_registerName(name.as_ptr().cast::<c_char>()) }
+    }
+
+    unsafe fn msg_0(obj: Id, s: Sel) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s) }
+    }
+
+    unsafe fn msg_0_void(obj: Id, s: Sel) {
+        let f: unsafe extern "C" fn(Id, Sel) =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s) }
+    }
+
+    unsafe fn msg_0_isize(obj: Id, s: Sel) -> isize {
+        let f: unsafe extern "C" fn(Id, Sel) -> isize =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s) }
+    }
+
+    unsafe fn msg_0_usize(obj: Id, s: Sel) -> usize {
+        let f: unsafe extern "C" fn(Id, Sel) -> usize =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s) }
+    }
+
+    unsafe fn msg_0_cstr(obj: Id, s: Sel) -> *const c_char {
+        let f: unsafe extern "C" fn(Id, Sel) -> *const c_char =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s) }
+    }
+
+    unsafe fn msg_0_bytes(obj: Id, s: Sel) -> *const u8 {
+        let f: unsafe extern "C" fn(Id, Sel) -> *const u8 =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s) }
+    }
+
+    unsafe fn msg_1_usize(obj: Id, s: Sel, arg: usize) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel, usize) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s, arg) }
+    }
+
+    unsafe fn msg_1_id(obj: Id, s: Sel, arg: Id) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel, Id) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s, arg) }
+    }
+
+    unsafe fn msg_1_id_void(obj: Id, s: Sel, arg: Id) {
+        let f: unsafe extern "C" fn(Id, Sel, Id) =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s, arg) }
+    }
+
+    unsafe fn msg_1_id_bool(obj: Id, s: Sel, arg: Id) -> i8 {
+        let f: unsafe extern "C" fn(Id, Sel, Id) -> i8 =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s, arg) }
+    }
+
+    unsafe fn msg_2_id_id_bool(obj: Id, s: Sel, a: Id, b: Id) -> i8 {
+        let f: unsafe extern "C" fn(Id, Sel, Id, Id) -> i8 =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s, a, b) }
+    }
+
+    unsafe fn msg_2_ptr_usize(obj: Id, s: Sel, p: *const u8, n: usize) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel, *const u8, usize) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s, p, n) }
+    }
+
+    unsafe fn msg_3_ptr_usize_usize(obj: Id, s: Sel, p: *const u8, n: usize, enc: usize) -> Id {
+        let f: unsafe extern "C" fn(Id, Sel, *const u8, usize, usize) -> Id =
+            unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+        unsafe { f(obj, s, p, n, enc) }
+    }
+
+    #[derive(Debug)]
+    pub struct PasteboardRef {
+        unique_pb: Option<Id>,
+    }
+
+    unsafe impl Send for PasteboardRef {}
+    unsafe impl Sync for PasteboardRef {}
+
+    impl Drop for PasteboardRef {
+        fn drop(&mut self) {
+            if let Some(pb) = self.unique_pb.take() {
+                unsafe {
+                    let _pool = AutoreleasePool::push();
+                    msg_0_void(pb, sel(b"releaseGlobally\0"));
+                }
+            }
+        }
+    }
+
+    impl PasteboardRef {
+        pub fn general() -> Self {
+            Self { unique_pb: None }
+        }
+
+        #[allow(dead_code)]
+        pub fn unique_for_test() -> Option<Self> {
+            unsafe {
+                let _pool = AutoreleasePool::push();
+                let pb = msg_0(cls(b"NSPasteboard\0"), sel(b"pasteboardWithUniqueName\0"));
+                if pb.is_null() {
+                    return None;
+                }
+                let retained = msg_0(pb, sel(b"retain\0"));
+                Some(Self {
+                    unique_pb: Some(retained),
+                })
+            }
+        }
+
+        pub fn is_general(&self) -> bool {
+            self.unique_pb.is_none()
+        }
+
+        unsafe fn target(&self) -> Id {
+            match self.unique_pb {
+                Some(pb) => pb,
+                None => unsafe { msg_0(cls(b"NSPasteboard\0"), sel(b"generalPasteboard\0")) },
+            }
+        }
+
+        pub fn change_count(&self) -> u64 {
+            unsafe {
+                let _pool = AutoreleasePool::push();
+                let pb = self.target();
+                if pb.is_null() {
+                    return 0;
+                }
+                msg_0_isize(pb, sel(b"changeCount\0")).max(0) as u64
+            }
+        }
+
+        pub fn snapshot(&self, max_bytes: usize) -> (ClipboardSnapshot, bool) {
+            unsafe {
+                let _pool = AutoreleasePool::push();
+                let pb = self.target();
+                if pb.is_null() {
+                    return (
+                        ClipboardSnapshot {
+                            change_count: 0,
+                            items: Vec::new(),
+                        },
+                        true,
+                    );
+                }
+                let cc = msg_0_isize(pb, sel(b"changeCount\0")).max(0) as u64;
+                let items_arr = msg_0(pb, sel(b"pasteboardItems\0"));
+                if items_arr.is_null() {
+                    return (
+                        ClipboardSnapshot {
+                            change_count: cc,
+                            items: Vec::new(),
+                        },
+                        true,
+                    );
+                }
+                let item_count = msg_0_usize(items_arr, sel(b"count\0"));
+                let was_empty = item_count == 0;
+                let mut total = 0usize;
+                let mut items = Vec::new();
+                let sel_obj_at = sel(b"objectAtIndex:\0");
+                let sel_types = sel(b"types\0");
+                let sel_count = sel(b"count\0");
+                let sel_utf8 = sel(b"UTF8String\0");
+                let sel_data_for_type = sel(b"dataForType:\0");
+                let sel_length = sel(b"length\0");
+                let sel_bytes = sel(b"bytes\0");
+
+                for i in 0..item_count {
+                    let item = msg_1_usize(items_arr, sel_obj_at, i);
+                    if item.is_null() {
+                        continue;
+                    }
+                    let types_arr = msg_0(item, sel_types);
+                    if types_arr.is_null() {
+                        continue;
+                    }
+                    let type_count = msg_0_usize(types_arr, sel_count);
+                    let mut item_bytes = 0usize;
+                    let mut types_and_bytes = Vec::new();
+                    let mut exceeded = false;
+                    for j in 0..type_count {
+                        let ns_type = msg_1_usize(types_arr, sel_obj_at, j);
+                        if ns_type.is_null() {
+                            continue;
+                        }
+                        let cstr = msg_0_cstr(ns_type, sel_utf8);
+                        if cstr.is_null() {
+                            continue;
+                        }
+                        let uti = CStr::from_ptr(cstr).to_string_lossy().into_owned();
+                        let ns_data = msg_1_id(item, sel_data_for_type, ns_type);
+                        if ns_data.is_null() {
+                            continue;
+                        }
+                        let len = msg_0_usize(ns_data, sel_length);
+                        if total.saturating_add(item_bytes).saturating_add(len) > max_bytes {
+                            exceeded = true;
+                            break;
+                        }
+                        let ptr = msg_0_bytes(ns_data, sel_bytes);
+                        let bytes = if len == 0 || ptr.is_null() {
+                            Vec::new()
+                        } else {
+                            std::slice::from_raw_parts(ptr, len).to_vec()
+                        };
+                        item_bytes += len;
+                        types_and_bytes.push((uti, bytes));
+                    }
+                    if exceeded {
+                        break;
+                    }
+                    if !types_and_bytes.is_empty() {
+                        total += item_bytes;
+                        items.push(ClipboardItemSnapshot { types_and_bytes });
+                    }
+                }
+                (
+                    ClipboardSnapshot {
+                        change_count: cc,
+                        items,
+                    },
+                    was_empty,
+                )
+            }
+        }
+
+        pub fn clear_contents(&self) -> Result<(), String> {
+            unsafe {
+                let _pool = AutoreleasePool::push();
+                let pb = self.target();
+                if pb.is_null() {
+                    return Err("NSPasteboard unavailable".into());
+                }
+                let _ = msg_0_isize(pb, sel(b"clearContents\0"));
+                Ok(())
+            }
+        }
+
+        pub fn write_items(&self, items: &[ClipboardItemSnapshot]) -> Result<u64, String> {
+            unsafe {
+                let _pool = AutoreleasePool::push();
+                let pb = self.target();
+                if pb.is_null() {
+                    return Err("NSPasteboard unavailable".into());
+                }
+                let _ = msg_0_isize(pb, sel(b"clearContents\0"));
+                if items.is_empty() {
+                    return Ok(msg_0_isize(pb, sel(b"changeCount\0")).max(0) as u64);
+                }
+                let arr = msg_1_usize(
+                    cls(b"NSMutableArray\0"),
+                    sel(b"arrayWithCapacity:\0"),
+                    items.len(),
+                );
+                let sel_alloc = sel(b"alloc\0");
+                let sel_new = sel(b"new\0");
+                let sel_autorelease = sel(b"autorelease\0");
+                let sel_init_utf8 = sel(b"initWithBytes:length:encoding:\0");
+                let sel_data_bytes = sel(b"dataWithBytes:length:\0");
+                let sel_set_data = sel(b"setData:forType:\0");
+                let sel_add_object = sel(b"addObject:\0");
+                let cls_pb_item = cls(b"NSPasteboardItem\0");
+                let cls_nsstring = cls(b"NSString\0");
+                let cls_nsdata = cls(b"NSData\0");
+
+                for snap_item in items {
+                    let pb_item = msg_0(cls_pb_item, sel_new);
+                    if pb_item.is_null() {
+                        return Err("NSPasteboardItem allocation failed".into());
+                    }
+                    let _ = msg_0(pb_item, sel_autorelease);
+                    for (uti, bytes) in &snap_item.types_and_bytes {
+                        let ns_type_alloc = msg_0(cls_nsstring, sel_alloc);
+                        let ns_type = msg_3_ptr_usize_usize(
+                            ns_type_alloc,
+                            sel_init_utf8,
+                            if uti.is_empty() {
+                                std::ptr::null()
+                            } else {
+                                uti.as_ptr()
+                            },
+                            uti.len(),
+                            4, // NSUTF8StringEncoding
+                        );
+                        if ns_type.is_null() {
+                            continue;
+                        }
+                        let _ = msg_0(ns_type, sel_autorelease);
+                        let ns_data = msg_2_ptr_usize(
+                            cls_nsdata,
+                            sel_data_bytes,
+                            if bytes.is_empty() {
+                                std::ptr::null()
+                            } else {
+                                bytes.as_ptr()
+                            },
+                            bytes.len(),
+                        );
+                        if ns_data.is_null() {
+                            continue;
+                        }
+                        let _ = msg_2_id_id_bool(pb_item, sel_set_data, ns_data, ns_type);
+                    }
+                    msg_1_id_void(arr, sel_add_object, pb_item);
+                }
+                let wrote = msg_1_id_bool(pb, sel(b"writeObjects:\0"), arr);
+                if wrote == 0 {
+                    return Err("NSPasteboard writeObjects failed".into());
+                }
+                Ok(msg_0_isize(pb, sel(b"changeCount\0")).max(0) as u64)
+            }
+        }
+    }
+}
+
+trait ClipboardBackend: Send + Sync + std::fmt::Debug {
+    fn change_count(&self) -> u64;
+    fn snapshot(&self, max_bytes: usize) -> (ClipboardSnapshot, bool);
+    fn write_plain_text(&self, text: &str) -> Result<u64, String>;
+    fn restore_items(&self, snapshot: &ClipboardSnapshot) -> Result<bool, String>;
+    fn clear_contents(&self) -> Result<(), String>;
+    fn restore_delay(&self) -> Duration;
+}
+
+fn pbcopy_plain_text_with_binary(program: &Path, text: &str) -> Result<(), String> {
+    let mut child = Command::new(program)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("clipboard write spawn failed: {e}"))?;
+    let write_res = if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "pbcopy stdin unavailable",
+        ))
+    };
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("clipboard write wait failed: {e}"))?;
+    if let Err(err) = write_res {
+        return Err(format!("clipboard write stdin failed: {err}"));
+    }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("clipboard write failed with status {}", output.status)
+        } else {
+            format!("clipboard write failed ({}): {stderr}", output.status)
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct LiveMacOsClipboardBackend {
+    pasteboard: macos_pasteboard::PasteboardRef,
+}
+
+#[cfg(target_os = "macos")]
+impl LiveMacOsClipboardBackend {
+    fn general() -> Self {
+        Self {
+            pasteboard: macos_pasteboard::PasteboardRef::general(),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn unique_for_test() -> Option<Self> {
+        macos_pasteboard::PasteboardRef::unique_for_test().map(|pasteboard| Self { pasteboard })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl ClipboardBackend for LiveMacOsClipboardBackend {
+    fn change_count(&self) -> u64 {
+        self.pasteboard.change_count()
+    }
+
+    fn snapshot(&self, max_bytes: usize) -> (ClipboardSnapshot, bool) {
+        self.pasteboard.snapshot(max_bytes)
+    }
+
+    fn write_plain_text(&self, text: &str) -> Result<u64, String> {
+        let before_cc = self.pasteboard.change_count();
+        if self.pasteboard.is_general() {
+            pbcopy_plain_text_with_binary(Path::new("/usr/bin/pbcopy"), text)?;
+            let after_cc = self.pasteboard.change_count();
+            if after_cc == before_cc {
+                return Err("clipboard changeCount did not advance after write".into());
+            }
+            Ok(after_cc)
+        } else {
+            let item = ClipboardItemSnapshot {
+                types_and_bytes: vec![(
+                    "public.utf8-plain-text".to_string(),
+                    text.as_bytes().to_vec(),
+                )],
+            };
+            self.pasteboard.write_items(&[item])
+        }
+    }
+
+    fn restore_items(&self, snapshot: &ClipboardSnapshot) -> Result<bool, String> {
+        self.pasteboard.write_items(&snapshot.items)?;
+        Ok(true)
+    }
+
+    fn clear_contents(&self) -> Result<(), String> {
+        self.pasteboard.clear_contents()
+    }
+
+    fn restore_delay(&self) -> Duration {
+        Duration::from_millis(80)
+    }
+}
+
+#[derive(Debug)]
+struct InMemoryClipboardBackend {
+    state: Mutex<ClipboardSnapshot>,
+}
+
+impl Default for InMemoryClipboardBackend {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(ClipboardSnapshot {
+                change_count: 1,
+                items: Vec::new(),
+            }),
+        }
+    }
+}
+
+impl ClipboardBackend for InMemoryClipboardBackend {
+    fn change_count(&self) -> u64 {
+        self.state.lock().unwrap().change_count
+    }
+
+    fn snapshot(&self, max_bytes: usize) -> (ClipboardSnapshot, bool) {
+        let st = self.state.lock().unwrap();
+        let was_empty = st.items.is_empty();
+        let mut total = 0usize;
+        let mut items = Vec::new();
+        for item in &st.items {
+            let item_bytes = item.total_bytes();
+            if total.saturating_add(item_bytes) <= max_bytes {
+                total += item_bytes;
+                items.push(item.clone());
+            } else {
+                break;
+            }
+        }
+        (
+            ClipboardSnapshot {
+                change_count: st.change_count,
+                items,
+            },
+            was_empty,
+        )
+    }
+
+    fn write_plain_text(&self, text: &str) -> Result<u64, String> {
+        let mut st = self.state.lock().unwrap();
+        st.change_count += 1;
+        st.items = vec![ClipboardItemSnapshot {
+            types_and_bytes: vec![(
+                "public.utf8-plain-text".to_string(),
+                text.as_bytes().to_vec(),
+            )],
+        }];
+        Ok(st.change_count)
+    }
+
+    fn restore_items(&self, snapshot: &ClipboardSnapshot) -> Result<bool, String> {
+        let mut st = self.state.lock().unwrap();
+        st.change_count += 1;
+        st.items = snapshot.items.clone();
+        Ok(true)
+    }
+
+    fn clear_contents(&self) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        st.change_count += 1;
+        st.items.clear();
+        Ok(())
+    }
+
+    fn restore_delay(&self) -> Duration {
+        Duration::ZERO
+    }
+}
+
 pub struct MacOsSystemDriver {
-    clipboard_seq: Mutex<u64>,
+    clipboard_backend: Arc<dyn ClipboardBackend>,
+    snapshot_empty_flags: Mutex<HashMap<u64, bool>>,
     managed_controls: ManagedAxControls<NativeAxProvider>,
     isolated: AtomicBool,
     model_picker_mouse_deltas: Arc<Mutex<Vec<(f64, f64)>>>,
@@ -1178,8 +1729,15 @@ impl std::fmt::Debug for MacOsSystemDriver {
 
 impl Default for MacOsSystemDriver {
     fn default() -> Self {
+        #[cfg(target_os = "macos")]
+        let clipboard_backend: Arc<dyn ClipboardBackend> =
+            Arc::new(LiveMacOsClipboardBackend::general());
+        #[cfg(not(target_os = "macos"))]
+        let clipboard_backend: Arc<dyn ClipboardBackend> =
+            Arc::new(InMemoryClipboardBackend::default());
         Self {
-            clipboard_seq: Mutex::new(0),
+            clipboard_backend,
+            snapshot_empty_flags: Mutex::new(HashMap::new()),
             managed_controls: ManagedAxControls::default(),
             isolated: AtomicBool::new(false),
             model_picker_mouse_deltas: Arc::new(Mutex::new(Vec::new())),
@@ -1198,9 +1756,26 @@ impl Drop for MacOsSystemDriver {
 
 impl MacOsSystemDriver {
     pub fn new_isolated() -> Self {
-        let driver = Self::default();
-        driver.isolated.store(true, Ordering::Release);
-        driver
+        Self {
+            clipboard_backend: Arc::new(InMemoryClipboardBackend::default()),
+            snapshot_empty_flags: Mutex::new(HashMap::new()),
+            managed_controls: ManagedAxControls::default(),
+            isolated: AtomicBool::new(true),
+            model_picker_mouse_deltas: Arc::new(Mutex::new(Vec::new())),
+            model_picker_mouse_tap: Mutex::new(None),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn with_clipboard_backend(clipboard_backend: Arc<dyn ClipboardBackend>) -> Self {
+        Self {
+            clipboard_backend,
+            snapshot_empty_flags: Mutex::new(HashMap::new()),
+            managed_controls: ManagedAxControls::default(),
+            isolated: AtomicBool::new(true),
+            model_picker_mouse_deltas: Arc::new(Mutex::new(Vec::new())),
+            model_picker_mouse_tap: Mutex::new(None),
+        }
     }
 
     fn is_isolated_environment(&self) -> bool {
@@ -1220,6 +1795,65 @@ impl MacOsSystemDriver {
     pub fn inject_model_picker_mouse_delta(&self, dx: f64, dy: f64) {
         if let Ok(mut queue) = self.model_picker_mouse_deltas.lock() {
             queue.push((dx, dy));
+        }
+    }
+}
+
+fn open_url_command_args(url: &str) -> Result<[&str; 2], String> {
+    mi_model::host_router::validate_open_url(url)?;
+    Ok(["--", url])
+}
+
+fn redact_home_path_with_home(raw: &str, home: Option<&str>) -> String {
+    if let Some(home_dir) = home
+        .map(|h| h.trim_end_matches('/'))
+        .filter(|h| !h.is_empty() && *h != "/")
+    {
+        if raw == home_dir {
+            return "~".to_string();
+        }
+        if let Some(rest) = raw.strip_prefix(home_dir).filter(|r| r.starts_with('/')) {
+            return format!("~{rest}");
+        }
+    }
+    if let Some(after_users) = raw.strip_prefix("/Users/") {
+        let (user, rest) = match after_users.split_once('/') {
+            Some((u, r)) => (u, Some(r)),
+            None => (after_users, None),
+        };
+        if !user.is_empty() && user != "Shared" {
+            return match rest {
+                Some(r) => format!("/Users/[redacted]/{r}"),
+                None => "/Users/[redacted]".to_string(),
+            };
+        }
+    }
+    raw.to_string()
+}
+
+fn redact_home_path(raw: &str) -> String {
+    redact_home_path_with_home(raw, std::env::var("HOME").ok().as_deref())
+}
+
+fn wait_child_with_timeout(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("shell_timeout_{}ms", timeout.as_millis()));
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                std::thread::sleep(Duration::from_millis(5).min(remaining));
+            }
+            Err(err) => return Err(err.to_string()),
         }
     }
 }
@@ -1325,68 +1959,57 @@ impl HostOsDriver for MacOsSystemDriver {
     }
 
     fn snapshot_clipboard(&self, max_bytes: usize) -> ClipboardSnapshot {
-        let cc = *self.clipboard_seq.lock().unwrap();
-        let output = Command::new("/usr/bin/pbpaste").output().ok();
-        let mut items = Vec::new();
-        if let Some(out) = output {
-            if out.status.success() && !out.stdout.is_empty() && out.stdout.len() <= max_bytes {
-                items.push(ClipboardItemSnapshot {
-                    types_and_bytes: vec![("public.utf8-plain-text".to_string(), out.stdout)],
-                });
-            }
+        let (snapshot, was_empty) = self.clipboard_backend.snapshot(max_bytes);
+        let mut flags = self.snapshot_empty_flags.lock().unwrap();
+        if flags.len() > 32 {
+            flags.clear();
         }
-        ClipboardSnapshot {
-            change_count: cc,
-            items,
-        }
+        flags.insert(snapshot.change_count, was_empty);
+        snapshot
     }
 
     fn write_clipboard_plain_text(&self, text: &str) -> u64 {
-        let mut seq = self.clipboard_seq.lock().unwrap();
-        *seq += 1;
-        let next_cc = *seq;
-        if let Ok(mut child) = Command::new("/usr/bin/pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
-        }
-        next_cc
+        self.write_clipboard_plain_text_checked(text).unwrap_or(0)
+    }
+
+    fn write_clipboard_plain_text_checked(&self, text: &str) -> Result<u64, String> {
+        self.clipboard_backend.write_plain_text(text)
     }
 
     fn restore_clipboard(&self, snapshot: &ClipboardSnapshot, expected_change_count: u64) -> bool {
-        std::thread::sleep(std::time::Duration::from_millis(80));
-        let mut seq = self.clipboard_seq.lock().unwrap();
-        if *seq != expected_change_count {
+        let delay = self.clipboard_backend.restore_delay();
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+        let was_empty = self
+            .snapshot_empty_flags
+            .lock()
+            .unwrap()
+            .remove(&snapshot.change_count)
+            .unwrap_or(snapshot.items.is_empty());
+        if self.clipboard_backend.change_count() != expected_change_count {
             return false;
         }
-        *seq += 1;
-        if let Some(first) = snapshot.items.first() {
-            if let Some((_, bytes)) = first
-                .types_and_bytes
-                .iter()
-                .find(|(t, _)| t == "public.utf8-plain-text")
-            {
-                if let Ok(mut child) = Command::new("/usr/bin/pbcopy")
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                {
-                    if let Some(mut stdin) = child.stdin.take() {
-                        let _ = stdin.write_all(bytes);
-                    }
-                    let _ = child.wait();
-                }
+        if snapshot.items.is_empty() {
+            if was_empty {
+                self.clipboard_backend.clear_contents().is_ok()
+            } else {
+                false
             }
+        } else {
+            self.clipboard_backend
+                .restore_items(snapshot)
+                .unwrap_or(false)
         }
-        true
     }
 
     fn open_url(&self, url: &str) -> Result<(), String> {
+        let args = open_url_command_args(url)?;
         let status = Command::new("/usr/bin/open")
-            .arg(url)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map_err(|e| e.to_string())?;
         if status.success() {
@@ -1941,6 +2564,7 @@ pub enum RecordedOsEvent {
 struct RecordingState {
     dictation_active: bool,
     clipboard: ClipboardSnapshot,
+    clipboard_write_error: Option<String>,
     events: Vec<RecordedOsEvent>,
     model_picker_mouse_capture: bool,
     model_picker_mouse_deltas: Vec<(f64, f64)>,
@@ -1968,11 +2592,16 @@ impl RecordingOsDriver {
                     change_count: 1,
                     items: Vec::new(),
                 },
+                clipboard_write_error: None,
                 events: Vec::new(),
                 model_picker_mouse_capture: false,
                 model_picker_mouse_deltas: Vec::new(),
             })),
         }
+    }
+
+    pub fn set_clipboard_write_error(&self, err: Option<String>) {
+        self.state.lock().unwrap().clipboard_write_error = err;
     }
 
     pub fn push_model_picker_mouse_delta(&self, dx: f64, dy: f64) {
@@ -2095,7 +2724,14 @@ impl HostOsDriver for RecordingOsDriver {
     }
 
     fn write_clipboard_plain_text(&self, text: &str) -> u64 {
+        self.write_clipboard_plain_text_checked(text).unwrap_or(0)
+    }
+
+    fn write_clipboard_plain_text_checked(&self, text: &str) -> Result<u64, String> {
         let mut st = self.state.lock().unwrap();
+        if let Some(err) = st.clipboard_write_error.clone() {
+            return Err(err);
+        }
         st.events
             .push(RecordedOsEvent::WriteClipboardPlainText(text.to_string()));
         st.clipboard.change_count += 1;
@@ -2105,7 +2741,7 @@ impl HostOsDriver for RecordingOsDriver {
                 text.as_bytes().to_vec(),
             )],
         }];
-        st.clipboard.change_count
+        Ok(st.clipboard.change_count)
     }
 
     fn restore_clipboard(&self, snapshot: &ClipboardSnapshot, expected_change_count: u64) -> bool {
@@ -2328,7 +2964,7 @@ pub(crate) fn describe_resolved_action(action: &ResolvedHostAction) -> ActionDes
             working_directory,
         } => ActionDescriptor {
             action_type: "shell_command".to_string(),
-            target: working_directory.clone(),
+            target: redact_home_path(working_directory),
             detail: format!("sh ({}B)", command.len()),
             text_byte_len: Some(command.len()),
         },
@@ -2430,6 +3066,7 @@ pub struct LiveHostActionExecutor<D: HostOsDriver = MacOsSystemDriver> {
     execution_lock: Mutex<()>,
     held_apple_fn_bindings: Mutex<HashMap<FnHoldKey, FnOwner>>,
     mouse_speed_tier: AtomicU8,
+    shell_command_timeout: Duration,
 }
 
 impl<D: HostOsDriver> Drop for LiveHostActionExecutor<D> {
@@ -2447,7 +3084,13 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
             execution_lock: Mutex::new(()),
             held_apple_fn_bindings: Mutex::new(HashMap::new()),
             mouse_speed_tier: AtomicU8::new(1),
+            shell_command_timeout: DEFAULT_SHELL_COMMAND_TIMEOUT,
         }
+    }
+
+    pub fn with_shell_command_timeout(mut self, timeout: Duration) -> Self {
+        self.shell_command_timeout = timeout;
+        self
     }
 
     fn mouse_step_and_scroll(tier: u8) -> (f64, i32) {
@@ -2744,7 +3387,7 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
         action: &ResolvedHostAction,
         admitted: impl FnOnce() -> bool,
     ) -> HostActionReceipt {
-        let _execution = self.execution_lock.lock().unwrap();
+        let execution = self.execution_lock.lock().unwrap();
         let desc = describe_resolved_action(action);
         let make_receipt = |outcome: &str, detail: String| HostActionReceipt {
             action_type: desc.action_type.clone(),
@@ -2858,7 +3501,10 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     let _ = self.driver.open_application(bundle_id);
                 }
                 let snapshot = self.driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
-                let written_cc = self.driver.write_clipboard_plain_text(sanitized);
+                let written_cc = match self.driver.write_clipboard_plain_text_checked(sanitized) {
+                    Ok(cc) => cc,
+                    Err(err) => return make_receipt("failed", err),
+                };
                 let cmd_mod = vec!["command".to_string()];
                 let paste_res = self
                     .driver
@@ -2887,10 +3533,15 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     Err(err) => make_receipt("failed", err),
                 }
             }
-            ResolvedHostAction::OpenUrl { url } => match self.driver.open_url(url) {
-                Ok(()) => make_receipt("executed", desc.detail),
-                Err(err) => make_receipt("failed", err),
-            },
+            ResolvedHostAction::OpenUrl { url } => {
+                if let Err(err) = mi_model::host_router::validate_open_url(url) {
+                    return make_receipt("failed", err);
+                }
+                match self.driver.open_url(url) {
+                    Ok(()) => make_receipt("executed", desc.detail),
+                    Err(err) => make_receipt("failed", err),
+                }
+            }
             ResolvedHostAction::ShellCommand {
                 command,
                 working_directory,
@@ -2899,15 +3550,22 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     && !working_directory.trim().is_empty()
                     && Path::new(working_directory).is_dir()
                 {
-                    let status = Command::new("/bin/sh")
+                    let spawn_res = Command::new("/bin/sh")
                         .args(["-c", command])
                         .current_dir(working_directory)
+                        .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
-                        .status();
-                    match status {
-                        Ok(s) if s.success() => make_receipt("executed", desc.detail),
-                        Ok(s) => make_receipt("failed", format!("shell_exit_{s}")),
+                        .spawn();
+                    drop(execution);
+                    match spawn_res {
+                        Ok(mut child) => {
+                            match wait_child_with_timeout(&mut child, self.shell_command_timeout) {
+                                Ok(s) if s.success() => make_receipt("executed", desc.detail),
+                                Ok(s) => make_receipt("failed", format!("shell_exit_{s}")),
+                                Err(err) => make_receipt("failed", err),
+                            }
+                        }
                         Err(err) => make_receipt("failed", err.to_string()),
                     }
                 } else {
@@ -3161,7 +3819,7 @@ fn legacy_submit_agent_input<D: HostOsDriver + ?Sized>(
     let submit_modifiers = submit_modifiers_for_adapter(adapter);
     if let Some(prompt) = prompt {
         let snapshot = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
-        let written = driver.write_clipboard_plain_text(prompt);
+        let written = driver.write_clipboard_plain_text_checked(prompt)?;
         let command = vec!["command".to_owned()];
         let result = driver
             .post_key_shortcut(KEY_CODE_V, &command, true)
@@ -3183,7 +3841,7 @@ fn legacy_insert_agent_prompt<D: HostOsDriver + ?Sized>(
 ) -> Result<(), String> {
     driver.focus_agent_input(adapter)?;
     let snapshot = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
-    let written = driver.write_clipboard_plain_text(prompt);
+    let written = driver.write_clipboard_plain_text_checked(prompt)?;
     let modifiers = vec!["command".to_owned()];
     let result = driver
         .post_key_shortcut(KEY_CODE_V, &modifiers, true)
@@ -3465,5 +4123,285 @@ mod serialized_effect_tests {
             });
             assert_eq!(result, Some((1, true)));
         }
+    }
+
+    #[test]
+    fn open_url_command_args_adds_double_dash_and_validates_scheme() {
+        assert_eq!(
+            open_url_command_args("https://example.com/a?b=1").unwrap(),
+            ["--", "https://example.com/a?b=1"]
+        );
+        assert!(open_url_command_args("-open").is_err());
+        assert!(open_url_command_args("file:///etc/passwd").is_err());
+        assert!(open_url_command_args("javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn redact_home_path_collapses_home_and_non_shared_users() {
+        assert_eq!(
+            redact_home_path_with_home("/Users/example", Some("/Users/example")),
+            "~"
+        );
+        assert_eq!(
+            redact_home_path_with_home("/Users/example/work/app", Some("/Users/example/")),
+            "~/work/app"
+        );
+        let sibling_home = ["/Users/example", "2/work"].concat();
+        assert_eq!(
+            redact_home_path_with_home(&sibling_home, Some("/Users/example")),
+            "/Users/[redacted]/work"
+        );
+        assert_eq!(
+            redact_home_path_with_home("/Users/test/work", Some("/Users/example")),
+            "/Users/[redacted]/work"
+        );
+        assert_eq!(
+            redact_home_path_with_home("/Users/Shared/repo", Some("/Users/example")),
+            "/Users/Shared/repo"
+        );
+        assert_eq!(
+            redact_home_path_with_home("/tmp/work", Some("/Users/example")),
+            "/tmp/work"
+        );
+    }
+
+    #[test]
+    fn shell_command_enforces_timeout_kills_child_and_nulls_stdin() {
+        let driver = RecordingOsDriver::new(true);
+        let executor = LiveHostActionExecutor::new(driver)
+            .with_shell_command_timeout(Duration::from_millis(80));
+        let t0 = std::time::Instant::now();
+        let receipt = executor.execute(
+            "Antigravity",
+            "AG00",
+            &ResolvedHostAction::ShellCommand {
+                command: "sleep 5".into(),
+                working_directory: "/tmp".into(),
+            },
+        );
+        let elapsed = t0.elapsed();
+        assert_eq!(receipt.outcome, "failed");
+        assert!(
+            receipt.detail.contains("shell_timeout_80ms"),
+            "unexpected timeout detail: {}",
+            receipt.detail
+        );
+        assert!(
+            elapsed < Duration::from_millis(600),
+            "timeout wait took too long: {elapsed:?}"
+        );
+
+        let stdin_receipt = executor.execute(
+            "Antigravity",
+            "AG00",
+            &ResolvedHostAction::ShellCommand {
+                command: "test ! -t 0 && [ \"$(head -c 1 | wc -c | tr -d ' ')\" = 0 ]".into(),
+                working_directory: "/tmp".into(),
+            },
+        );
+        assert_eq!(stdin_receipt.outcome, "executed");
+    }
+
+    #[test]
+    fn pbcopy_helper_propagates_non_zero_exit_and_spawn_errors() {
+        let missing = Path::new("/nonexistent/mi-pbcopy-missing");
+        assert!(pbcopy_plain_text_with_binary(missing, "hello").is_err());
+
+        let false_bin = Path::new("/usr/bin/false");
+        let err = pbcopy_plain_text_with_binary(false_bin, "hello").unwrap_err();
+        assert!(err.contains("clipboard write failed"), "err={err}");
+    }
+
+    #[test]
+    fn paste_text_aborts_before_paste_when_clipboard_write_fails() {
+        let driver = RecordingOsDriver::new(true);
+        driver.set_clipboard_write_error(Some("pbcopy exited 1".into()));
+        let executor = LiveHostActionExecutor::new(driver.clone());
+        let receipt = executor.execute(
+            "Notes",
+            "AG00",
+            &ResolvedHostAction::PasteText {
+                text: "secret-snippet".into(),
+                target_bundle_id: None,
+                adapter: None,
+                no_newline: false,
+                submit: false,
+            },
+        );
+        assert_eq!(receipt.outcome, "failed");
+        assert_eq!(receipt.detail, "pbcopy exited 1");
+        assert!(
+            !driver
+                .events()
+                .iter()
+                .any(|e| matches!(e, RecordedOsEvent::PostKeyShortcut { .. })),
+            "must never send Cmd+V after clipboard write failure"
+        );
+    }
+
+    #[derive(Debug)]
+    struct MockClipboardState {
+        change_count: u64,
+        items: Vec<ClipboardItemSnapshot>,
+        clear_calls: usize,
+        restore_calls: usize,
+        fail_next_write: Option<String>,
+    }
+
+    #[derive(Debug)]
+    struct MockClipboardBackend {
+        state: Mutex<MockClipboardState>,
+    }
+
+    impl MockClipboardBackend {
+        fn new(items: Vec<ClipboardItemSnapshot>, change_count: u64) -> Self {
+            Self {
+                state: Mutex::new(MockClipboardState {
+                    change_count,
+                    items,
+                    clear_calls: 0,
+                    restore_calls: 0,
+                    fail_next_write: None,
+                }),
+            }
+        }
+    }
+
+    impl ClipboardBackend for MockClipboardBackend {
+        fn change_count(&self) -> u64 {
+            self.state.lock().unwrap().change_count
+        }
+
+        fn snapshot(&self, max_bytes: usize) -> (ClipboardSnapshot, bool) {
+            let st = self.state.lock().unwrap();
+            let was_empty = st.items.is_empty();
+            let mut total = 0usize;
+            let mut items = Vec::new();
+            for item in &st.items {
+                if total + item.total_bytes() <= max_bytes {
+                    total += item.total_bytes();
+                    items.push(item.clone());
+                } else {
+                    break;
+                }
+            }
+            (
+                ClipboardSnapshot {
+                    change_count: st.change_count,
+                    items,
+                },
+                was_empty,
+            )
+        }
+
+        fn write_plain_text(&self, text: &str) -> Result<u64, String> {
+            let mut st = self.state.lock().unwrap();
+            if let Some(err) = st.fail_next_write.take() {
+                return Err(err);
+            }
+            st.change_count += 1;
+            st.items = vec![ClipboardItemSnapshot {
+                types_and_bytes: vec![("public.utf8-plain-text".into(), text.as_bytes().to_vec())],
+            }];
+            Ok(st.change_count)
+        }
+
+        fn restore_items(&self, snapshot: &ClipboardSnapshot) -> Result<bool, String> {
+            let mut st = self.state.lock().unwrap();
+            st.restore_calls += 1;
+            st.change_count += 1;
+            st.items = snapshot.items.clone();
+            Ok(true)
+        }
+
+        fn clear_contents(&self) -> Result<(), String> {
+            let mut st = self.state.lock().unwrap();
+            st.clear_calls += 1;
+            st.change_count += 1;
+            st.items.clear();
+            Ok(())
+        }
+
+        fn restore_delay(&self) -> Duration {
+            Duration::ZERO
+        }
+    }
+
+    #[test]
+    fn macos_driver_preserves_newer_clipboard_and_clears_when_originally_empty() {
+        let backend = Arc::new(MockClipboardBackend::new(Vec::new(), 5));
+        let driver = MacOsSystemDriver::with_clipboard_backend(Arc::clone(&backend) as _);
+
+        // Originally empty clipboard -> cleared on restore
+        let snap = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
+        let written_cc = driver.write_clipboard_plain_text_checked("temp").unwrap();
+        assert_eq!(written_cc, 6);
+        assert!(driver.restore_clipboard(&snap, written_cc));
+        assert_eq!(backend.state.lock().unwrap().clear_calls, 1);
+        assert!(backend.state.lock().unwrap().items.is_empty());
+
+        // External user copy bumps changeCount -> restore skips clobbering newer item
+        let snap2 = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
+        let written_cc2 = driver.write_clipboard_plain_text_checked("temp2").unwrap();
+        {
+            let mut st = backend.state.lock().unwrap();
+            st.change_count += 1;
+            st.items = vec![ClipboardItemSnapshot {
+                types_and_bytes: vec![("public.utf8-plain-text".into(), b"user-newer".to_vec())],
+            }];
+        }
+        assert!(!driver.restore_clipboard(&snap2, written_cc2));
+        assert_eq!(
+            backend.state.lock().unwrap().items[0].types_and_bytes[0].1,
+            b"user-newer"
+        );
+        assert_eq!(backend.state.lock().unwrap().restore_calls, 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_appkit_pasteboard_snapshots_and_restores_multiple_items_and_types() {
+        let Some(backend) = LiveMacOsClipboardBackend::unique_for_test() else {
+            panic!("pasteboardWithUniqueName should succeed on macOS");
+        };
+        let backend = Arc::new(backend);
+        let original = vec![
+            ClipboardItemSnapshot {
+                types_and_bytes: vec![
+                    ("public.utf8-plain-text".into(), b"alpha".to_vec()),
+                    ("public.html".into(), b"<b>alpha</b>".to_vec()),
+                ],
+            },
+            ClipboardItemSnapshot {
+                types_and_bytes: vec![("public.png".into(), vec![0x89, 0x50, 0x4E, 0x47])],
+            },
+        ];
+        backend.pasteboard.write_items(&original).unwrap();
+        let driver = MacOsSystemDriver::with_clipboard_backend(Arc::clone(&backend) as _);
+
+        let snap = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
+        assert_eq!(snap.items.len(), 2);
+        let cc_after_write = driver
+            .write_clipboard_plain_text_checked("ephemeral")
+            .unwrap();
+        assert!(cc_after_write > snap.change_count);
+        assert!(driver.restore_clipboard(&snap, cc_after_write));
+
+        let (restored, was_empty) = backend.snapshot(MAX_CLIPBOARD_STASH_BYTES);
+        assert!(!was_empty);
+        assert_eq!(restored.items.len(), 2);
+        assert!(restored.items[0]
+            .types_and_bytes
+            .iter()
+            .any(|(t, b)| t == "public.html" && b == b"<b>alpha</b>"));
+        assert!(restored.items[1]
+            .types_and_bytes
+            .iter()
+            .any(|(t, b)| t == "public.png" && b == &[0x89, 0x50, 0x4E, 0x47]));
+
+        backend.clear_contents().unwrap();
+        let (empty_snap, is_empty) = backend.snapshot(MAX_CLIPBOARD_STASH_BYTES);
+        assert!(is_empty);
+        assert!(empty_snap.items.is_empty());
     }
 }

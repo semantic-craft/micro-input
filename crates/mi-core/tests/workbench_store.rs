@@ -2581,3 +2581,22 @@ fn open_migrates_on_disk_six_layer_runtime_in_memory_and_persisted() {
         })
     );
 }
+
+#[test]
+fn command_execution_enabled_defaults_fail_closed_across_store_and_inspector() {
+    let temp = TempDir::new().unwrap();
+    let store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    match &store.projection().inspector.body {
+        mi_core::InspectorBodyProjection::Editable(edit) => {
+            assert!(
+                !edit.command_execution_enabled,
+                "command_execution_enabled must default to false"
+            );
+        }
+        other => panic!("expected Editable inspector, got {other:?}"),
+    }
+    assert!(
+        !mi_core::EditableSlotInspectorProjection::default().command_execution_enabled,
+        "EditableSlotInspectorProjection::default() must fail closed"
+    );
+}
