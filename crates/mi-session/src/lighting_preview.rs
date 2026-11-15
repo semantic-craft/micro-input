@@ -474,6 +474,9 @@ mod native_tests {
         fn backend(&self) -> LinkBackend {
             LinkBackend::MacHidapi267Numbered
         }
+        fn is_exclusive_vendor(&self) -> bool {
+            true
+        }
         async fn write(&self, report: &[u8]) -> Result<(), TransportError> {
             self.0.write(report).await
         }

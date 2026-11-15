@@ -209,3 +209,58 @@ fn future_multi_format_and_unknown_original_bindings_stay_read_only_and_preserve
     assert!(re.bind_multi(&p, &l, 1, Some(&id)).is_err());
     assert_eq!(serde_json::to_value(&re.document).unwrap(), raw);
 }
+
+#[test]
+fn validate_references_rejects_excessive_nesting_depth_cardinality_and_oversized_draft() {
+    use mi_model::document::{new_id, Graph};
+    use mi_model::multi::validate_references;
+
+    let leaf_id = "00000000-0000-4000-8000-0000000000ff".to_string();
+    let leaf_action = mi_model::draft::actions()
+        .into_iter()
+        .find(|a| a.id == "save")
+        .unwrap();
+
+    // Build an acyclic chain of 17 nested multi actions (reverse lexicographical order too).
+    let mut graph = Graph::default();
+    graph.actions.insert(leaf_id.clone(), leaf_action.clone());
+    let mut next_id = leaf_id;
+    let mut ref_type = "action";
+    for i in (0..17).rev() {
+        let id = format!("00000000-0000-4000-8000-{i:012}");
+        let mut m = multi(&next_id);
+        m.payload["multi"]["tap"]["type"] = json!(ref_type);
+        graph.actions.insert(id.clone(), m);
+        next_id = id;
+        ref_type = "action";
+    }
+    assert!(
+        validate_references(&graph).is_err(),
+        "multi chain exceeding max nesting depth must be rejected"
+    );
+
+    let mut huge_graph = Graph::default();
+    for i in 0..4097usize {
+        let id = format!("00000000-0000-4000-8000-{i:012}");
+        huge_graph.actions.insert(id, leaf_action.clone());
+    }
+    assert!(
+        validate_references(&huge_graph).is_err(),
+        "graph exceeding max action cardinality must be rejected"
+    );
+
+    let mut huge_bytes = vec![b' '; mi_model::preset::LIMIT + 1];
+    huge_bytes[0] = b'{';
+    assert!(
+        Draft::from_bytes(&huge_bytes).is_err(),
+        "oversized Draft::from_bytes payload must be rejected before parsing"
+    );
+
+    let mut v1 = mi_model::draft::LegacyDocumentV1::default();
+    v1.config.profiles[0].layers[0].joystick.sectors = vec![mi_model::Binding::Empty; 65];
+    assert!(
+        v1.validate().is_err(),
+        "LegacyDocumentV1 with excessive joystick sectors must be rejected"
+    );
+    let _ = new_id();
+}

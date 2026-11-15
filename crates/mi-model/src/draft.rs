@@ -691,6 +691,7 @@ impl Action {
             } => {
                 bounded(&key)
                     && bounded(&target)
+                    && modifiers.len() <= 8
                     && modifiers
                         .iter()
                         .all(|m| ["command", "shift", "option", "control"].contains(&m.as_str()))
@@ -894,13 +895,21 @@ impl LegacyDocumentV1 {
         Ok(d)
     }
     fn keys(&self) -> Result<BTreeSet<String>, String> {
+        if self.config.profiles.len() > crate::multi::MAX_GRAPH_PROFILES {
+            return Err("配置数量超过上限；原文件保留".into());
+        }
         let mut profiles = BTreeSet::new();
         let mut keys = BTreeSet::new();
+        let mut total_layers = 0usize;
         for p in &self.config.profiles {
             if !(p.id.is_string() || p.id.is_i64() || p.id.is_u64())
                 || !profiles.insert(p.id.to_string())
             {
                 return Err("配置 ID 缺失或重复".into());
+            }
+            total_layers += p.layers.len();
+            if total_layers > crate::multi::MAX_GRAPH_LAYERS {
+                return Err("层数量超过上限；原文件保留".into());
             }
             let mut layers = BTreeSet::new();
             for l in &p.layers {
@@ -908,6 +917,9 @@ impl LegacyDocumentV1 {
                     || !layers.insert(l.id.to_string())
                 {
                     return Err("层 ID 缺失或重复".into());
+                }
+                if l.joystick.sectors.len() > 64 {
+                    return Err("摇杆扇区数量超过上限；原文件保留".into());
                 }
                 for slot in 0..16 + l.joystick.sectors.len() {
                     keys.insert(binding_key(&p.id, &l.id, slot as u32));
@@ -920,6 +932,9 @@ impl LegacyDocumentV1 {
         if self.schema_version != 1 {
             return Err("本地文档版本不支持；原文件保留".into());
         }
+        if self.edits.len() > crate::multi::MAX_GRAPH_ACTIONS {
+            return Err("草稿动作数量超过上限；原文件保留".into());
+        }
         let keys = self.keys()?;
         if self.edits.keys().any(|k| !keys.contains(k)) {
             return Err("草稿包含不存在的控件引用；原文件保留".into());
@@ -927,6 +942,9 @@ impl LegacyDocumentV1 {
         Ok(())
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() > crate::preset::LIMIT {
+            return Err("本地文档超过大小上限；原文件保留".into());
+        }
         let raw: Value = serde_json::from_slice(bytes).map_err(|_| "本地文档损坏；原文件保留")?;
         if raw["schema_version"] != 1 {
             return Err("本地文档版本不支持；原文件保留".into());
@@ -1056,6 +1074,9 @@ impl Draft {
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         use sha2::{Digest, Sha256};
+        if bytes.len() > crate::preset::LIMIT {
+            return Err("本地文档超过大小上限；原文件保留".into());
+        }
         let raw: Value = serde_json::from_slice(bytes).map_err(|_| "本地文档损坏；原文件保留")?;
         match raw["schema_version"].as_u64() {
             Some(1) => {

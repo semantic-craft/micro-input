@@ -315,6 +315,10 @@ unsafe extern "C" {
         value: CFTypeRef,
     ) -> AXError;
     fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
+    fn AXUIElementGetTypeID() -> usize;
+    fn CFGetTypeID(cf: CFTypeRef) -> usize;
+    fn CFStringGetTypeID() -> usize;
+    fn CFArrayGetTypeID() -> usize;
     static kCFBooleanTrue: CFTypeRef;
     static kCFBooleanFalse: CFTypeRef;
     static kCFTypeDictionaryKeyCallBacks: u8;
@@ -452,7 +456,7 @@ unsafe fn cf_string_from_str(s: &str) -> CFStringRef {
 
 #[cfg(target_os = "macos")]
 unsafe fn cf_string_to_rust(cf: CFStringRef) -> Option<String> {
-    if cf.is_null() {
+    if cf.is_null() || CFGetTypeID(cf) != CFStringGetTypeID() {
         return None;
     }
     let len = CFStringGetLength(cf);
@@ -478,24 +482,7 @@ unsafe fn cf_string_to_rust(cf: CFStringRef) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn ax_copy_string_attr(elem: AXUIElementRef, attr: &str) -> Option<String> {
-    let attr_cf = cf_string_from_str(attr);
-    if attr_cf.is_null() {
-        return None;
-    }
-    let mut val: CFTypeRef = std::ptr::null();
-    let err = AXUIElementCopyAttributeValue(elem, attr_cf, &mut val);
-    CFRelease(attr_cf);
-    if err != K_AX_ERROR_SUCCESS || val.is_null() {
-        return None;
-    }
-    let out = cf_string_to_rust(val);
-    CFRelease(val);
-    out
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn ax_copy_element_attr(elem: AXUIElementRef, attr: &str) -> Option<AXUIElementRef> {
+unsafe fn ax_copy_raw_attr(elem: AXUIElementRef, attr: &str) -> Option<CFTypeRef> {
     let attr_cf = cf_string_from_str(attr);
     if attr_cf.is_null() {
         return None;
@@ -510,30 +497,54 @@ unsafe fn ax_copy_element_attr(elem: AXUIElementRef, attr: &str) -> Option<AXUIE
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn ax_copy_children(elem: AXUIElementRef) -> Vec<AXUIElementRef> {
-    let attr_cf = cf_string_from_str("AXChildren");
-    if attr_cf.is_null() {
+unsafe fn cf_array_copy_ax_elements(owned_val: CFTypeRef, limit: isize) -> Vec<AXUIElementRef> {
+    if owned_val.is_null() {
         return Vec::new();
     }
-    let mut val: CFTypeRef = std::ptr::null();
-    let err = AXUIElementCopyAttributeValue(elem, attr_cf, &mut val);
-    CFRelease(attr_cf);
-    if err != K_AX_ERROR_SUCCESS || val.is_null() {
+    if CFGetTypeID(owned_val) != CFArrayGetTypeID() {
+        CFRelease(owned_val);
         return Vec::new();
     }
-    let count = CFArrayGetCount(val);
+    let ax_elem_type = AXUIElementGetTypeID();
+    let count = CFArrayGetCount(owned_val);
     let mut out = Vec::new();
     if count > 0 {
-        for i in 0..count.min(256) {
-            let item = CFArrayGetValueAtIndex(val, i);
-            if !item.is_null() {
+        for i in 0..count.min(limit) {
+            let item = CFArrayGetValueAtIndex(owned_val, i);
+            if !item.is_null() && CFGetTypeID(item) == ax_elem_type {
                 CFRetain(item);
                 out.push(item);
             }
         }
     }
+    CFRelease(owned_val);
+    out
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ax_copy_string_attr(elem: AXUIElementRef, attr: &str) -> Option<String> {
+    let val = ax_copy_raw_attr(elem, attr)?;
+    let out = cf_string_to_rust(val);
     CFRelease(val);
     out
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ax_copy_element_attr(elem: AXUIElementRef, attr: &str) -> Option<AXUIElementRef> {
+    let val = ax_copy_raw_attr(elem, attr)?;
+    if CFGetTypeID(val) != AXUIElementGetTypeID() {
+        CFRelease(val);
+        return None;
+    }
+    Some(val)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ax_copy_children(elem: AXUIElementRef) -> Vec<AXUIElementRef> {
+    match ax_copy_raw_attr(elem, "AXChildren") {
+        Some(val) => cf_array_copy_ax_elements(val, 256),
+        None => Vec::new(),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -969,6 +980,7 @@ struct TapCallbackContext {
     active: AtomicBool,
     suppress_mouse_moved: AtomicBool,
     tap_port: AtomicUsize,
+    run_loop_addr: AtomicUsize,
     deltas: Arc<Mutex<Vec<(f64, f64)>>>,
 }
 
@@ -1016,10 +1028,95 @@ unsafe extern "C" fn model_picker_mouse_tap_callback(
 }
 
 #[cfg(target_os = "macos")]
+trait TapRuntime: Send + Sync + 'static {
+    unsafe fn create_tap(&self, options: u32, ctx: *mut std::ffi::c_void) -> CFMachPortRef;
+    unsafe fn create_source(&self, tap: CFMachPortRef) -> CFRunLoopSourceRef;
+    unsafe fn invalidate_port(&self, tap: CFMachPortRef);
+    unsafe fn current_run_loop(&self) -> CFRunLoopRef;
+    unsafe fn add_source(&self, rl: CFRunLoopRef, source: CFRunLoopSourceRef);
+    unsafe fn remove_source(&self, rl: CFRunLoopRef, source: CFRunLoopSourceRef);
+    unsafe fn enable_tap(&self, tap: CFMachPortRef, enable: bool);
+    unsafe fn run_loop_once(&self);
+    unsafe fn stop_run_loop(&self, rl: CFRunLoopRef);
+    unsafe fn retain_cf(&self, cf: CFTypeRef) -> CFTypeRef;
+    unsafe fn release_cf(&self, cf: CFTypeRef);
+}
+
+#[cfg(target_os = "macos")]
+struct LiveTapRuntime;
+
+#[cfg(target_os = "macos")]
+impl TapRuntime for LiveTapRuntime {
+    unsafe fn create_tap(&self, options: u32, ctx: *mut std::ffi::c_void) -> CFMachPortRef {
+        CGEventTapCreate(
+            CG_SESSION_EVENT_TAP,
+            CG_HEAD_INSERT_EVENT_TAP,
+            options,
+            1u64 << CG_EVENT_MOUSE_MOVED,
+            model_picker_mouse_tap_callback,
+            ctx,
+        )
+    }
+    unsafe fn create_source(&self, tap: CFMachPortRef) -> CFRunLoopSourceRef {
+        CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0)
+    }
+    unsafe fn invalidate_port(&self, tap: CFMachPortRef) {
+        CFMachPortInvalidate(tap);
+    }
+    unsafe fn current_run_loop(&self) -> CFRunLoopRef {
+        CFRunLoopGetCurrent()
+    }
+    unsafe fn add_source(&self, rl: CFRunLoopRef, source: CFRunLoopSourceRef) {
+        CFRunLoopAddSource(rl, source, kCFRunLoopCommonModes);
+    }
+    unsafe fn remove_source(&self, rl: CFRunLoopRef, source: CFRunLoopSourceRef) {
+        CFRunLoopRemoveSource(rl, source, kCFRunLoopCommonModes);
+    }
+    unsafe fn enable_tap(&self, tap: CFMachPortRef, enable: bool) {
+        CGEventTapEnable(tap, enable);
+    }
+    unsafe fn run_loop_once(&self) {
+        let _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, 0);
+    }
+    unsafe fn stop_run_loop(&self, rl: CFRunLoopRef) {
+        CFRunLoopStop(rl);
+    }
+    unsafe fn retain_cf(&self, cf: CFTypeRef) -> CFTypeRef {
+        CFRetain(cf)
+    }
+    unsafe fn release_cf(&self, cf: CFTypeRef) {
+        CFRelease(cf);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn cleanup_mouse_tap(
+    ctx_ptr: *mut TapCallbackContext,
+    join_handle: Option<std::thread::JoinHandle<()>>,
+    runtime: &dyn TapRuntime,
+) {
+    unsafe {
+        (*ctx_ptr).active.store(false, Ordering::SeqCst);
+        let rl_addr = (*ctx_ptr).run_loop_addr.load(Ordering::SeqCst);
+        if rl_addr != 0 {
+            runtime.stop_run_loop(rl_addr as CFRunLoopRef);
+        }
+        if let Some(handle) = join_handle {
+            let _ = handle.join();
+        }
+        let retained_rl = (*ctx_ptr).run_loop_addr.swap(0, Ordering::AcqRel);
+        if retained_rl != 0 {
+            runtime.release_cf(retained_rl as CFTypeRef);
+        }
+        drop(Box::from_raw(ctx_ptr));
+    }
+}
+
+#[cfg(target_os = "macos")]
 struct ModelPickerMouseTap {
     ctx_ptr: *mut TapCallbackContext,
-    run_loop_addr: usize,
     join_handle: Option<std::thread::JoinHandle<()>>,
+    runtime: Arc<dyn TapRuntime>,
 }
 
 #[cfg(target_os = "macos")]
@@ -1028,6 +1125,14 @@ unsafe impl Send for ModelPickerMouseTap {}
 #[cfg(target_os = "macos")]
 impl ModelPickerMouseTap {
     fn start(deltas: Arc<Mutex<Vec<(f64, f64)>>>) -> Option<Self> {
+        Self::start_with_runtime(deltas, Arc::new(LiveTapRuntime), Duration::from_millis(500))
+    }
+
+    fn start_with_runtime(
+        deltas: Arc<Mutex<Vec<(f64, f64)>>>,
+        runtime: Arc<dyn TapRuntime>,
+        timeout: Duration,
+    ) -> Option<Self> {
         if let Ok(mut queue) = deltas.lock() {
             queue.clear();
         }
@@ -1035,103 +1140,86 @@ impl ModelPickerMouseTap {
             active: AtomicBool::new(true),
             suppress_mouse_moved: AtomicBool::new(true),
             tap_port: AtomicUsize::new(0),
+            run_loop_addr: AtomicUsize::new(0),
             deltas,
         }));
         let ctx_addr = ctx_ptr as usize;
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Option<usize>>(1);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<bool>(1);
+        let worker_runtime = Arc::clone(&runtime);
         let handle = std::thread::Builder::new()
             .name("mi-model-picker-mouse-tap".into())
             .spawn(move || unsafe {
                 let ctx = &*(ctx_addr as *const TapCallbackContext);
-                let mask: CGEventMask = 1u64 << CG_EVENT_MOUSE_MOVED;
-                let mut tap = CGEventTapCreate(
-                    CG_SESSION_EVENT_TAP,
-                    CG_HEAD_INSERT_EVENT_TAP,
+                if !ctx.active.load(Ordering::SeqCst) {
+                    let _ = ready_tx.send(false);
+                    return;
+                }
+                let mut tap = worker_runtime.create_tap(
                     CG_EVENT_TAP_OPTION_DEFAULT,
-                    mask,
-                    model_picker_mouse_tap_callback,
                     ctx_addr as *mut std::ffi::c_void,
                 );
                 if tap.is_null() {
                     ctx.suppress_mouse_moved.store(false, Ordering::Release);
-                    tap = CGEventTapCreate(
-                        CG_SESSION_EVENT_TAP,
-                        CG_HEAD_INSERT_EVENT_TAP,
+                    tap = worker_runtime.create_tap(
                         CG_EVENT_TAP_OPTION_LISTEN_ONLY,
-                        mask,
-                        model_picker_mouse_tap_callback,
                         ctx_addr as *mut std::ffi::c_void,
                     );
                 }
                 if tap.is_null() {
-                    let _ = ready_tx.send(None);
+                    let _ = ready_tx.send(false);
                     return;
                 }
-                let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
+                let source = worker_runtime.create_source(tap);
                 if source.is_null() {
-                    CFMachPortInvalidate(tap);
-                    CFRelease(tap as CFTypeRef);
-                    let _ = ready_tx.send(None);
+                    worker_runtime.invalidate_port(tap);
+                    worker_runtime.release_cf(tap as CFTypeRef);
+                    let _ = ready_tx.send(false);
                     return;
                 }
                 ctx.tap_port.store(tap as usize, Ordering::Release);
-                let rl = CFRunLoopGetCurrent();
+                let rl = worker_runtime.current_run_loop();
                 if rl.is_null() {
-                    CFMachPortInvalidate(tap);
-                    CFRelease(source as CFTypeRef);
-                    CFRelease(tap as CFTypeRef);
-                    let _ = ready_tx.send(None);
+                    worker_runtime.invalidate_port(tap);
+                    worker_runtime.release_cf(source as CFTypeRef);
+                    worker_runtime.release_cf(tap as CFTypeRef);
+                    let _ = ready_tx.send(false);
                     return;
                 }
-                CFRetain(rl as CFTypeRef);
-                CFRunLoopAddSource(rl, source, kCFRunLoopCommonModes);
-                CGEventTapEnable(tap, true);
-                if ready_tx.send(Some(rl as usize)).is_err() {
-                    CGEventTapEnable(tap, false);
-                    CFRunLoopRemoveSource(rl, source, kCFRunLoopCommonModes);
-                    CFMachPortInvalidate(tap);
-                    CFRelease(source as CFTypeRef);
-                    CFRelease(tap as CFTypeRef);
-                    CFRelease(rl as CFTypeRef);
+                worker_runtime.retain_cf(rl as CFTypeRef);
+                ctx.run_loop_addr.store(rl as usize, Ordering::SeqCst);
+                if !ctx.active.load(Ordering::SeqCst) {
+                    worker_runtime.invalidate_port(tap);
+                    worker_runtime.release_cf(source as CFTypeRef);
+                    worker_runtime.release_cf(tap as CFTypeRef);
+                    let _ = ready_tx.send(false);
                     return;
                 }
-                while ctx.active.load(Ordering::Acquire) {
-                    let _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, 0);
+                worker_runtime.add_source(rl, source);
+                worker_runtime.enable_tap(tap, true);
+                if ready_tx.send(true).is_ok() {
+                    while ctx.active.load(Ordering::Acquire) {
+                        worker_runtime.run_loop_once();
+                    }
                 }
-                CGEventTapEnable(tap, false);
-                CFRunLoopRemoveSource(rl, source, kCFRunLoopCommonModes);
-                CFMachPortInvalidate(tap);
-                CFRelease(source as CFTypeRef);
-                CFRelease(tap as CFTypeRef);
+                worker_runtime.enable_tap(tap, false);
+                worker_runtime.remove_source(rl, source);
+                worker_runtime.invalidate_port(tap);
+                worker_runtime.release_cf(source as CFTypeRef);
+                worker_runtime.release_cf(tap as CFTypeRef);
             })
             .ok();
         let Some(handle) = handle else {
-            unsafe {
-                drop(Box::from_raw(ctx_ptr));
-            }
+            cleanup_mouse_tap(ctx_ptr, None, runtime.as_ref());
             return None;
         };
-        match ready_rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(Some(rl_addr)) => Some(Self {
+        match ready_rx.recv_timeout(timeout) {
+            Ok(true) => Some(Self {
                 ctx_ptr,
-                run_loop_addr: rl_addr,
                 join_handle: Some(handle),
+                runtime,
             }),
-            Ok(None) => {
-                let _ = handle.join();
-                unsafe {
-                    drop(Box::from_raw(ctx_ptr));
-                }
-                None
-            }
-            Err(_) => {
-                unsafe {
-                    (*ctx_ptr).active.store(false, Ordering::SeqCst);
-                }
-                let _ = handle.join();
-                unsafe {
-                    drop(Box::from_raw(ctx_ptr));
-                }
+            Ok(false) | Err(_) => {
+                cleanup_mouse_tap(ctx_ptr, Some(handle), runtime.as_ref());
                 None
             }
         }
@@ -1141,22 +1229,7 @@ impl ModelPickerMouseTap {
 #[cfg(target_os = "macos")]
 impl Drop for ModelPickerMouseTap {
     fn drop(&mut self) {
-        unsafe {
-            (*self.ctx_ptr).active.store(false, Ordering::SeqCst);
-            if self.run_loop_addr != 0 {
-                CFRunLoopStop(self.run_loop_addr as CFRunLoopRef);
-            }
-        }
-        if let Some(handle) = self.join_handle.take() {
-            let _ = handle.join();
-        }
-        unsafe {
-            if self.run_loop_addr != 0 {
-                CFRelease(self.run_loop_addr as CFTypeRef);
-                self.run_loop_addr = 0;
-            }
-            drop(Box::from_raw(self.ctx_ptr));
-        }
+        cleanup_mouse_tap(self.ctx_ptr, self.join_handle.take(), self.runtime.as_ref());
     }
 }
 
@@ -1440,6 +1513,17 @@ mod macos_pasteboard {
             }
         }
 
+        pub(crate) fn require_objc_object(
+            ptr: *mut std::ffi::c_void,
+            what: &str,
+        ) -> Result<*mut std::ffi::c_void, String> {
+            if ptr.is_null() {
+                Err(format!("{what} allocation failed"))
+            } else {
+                Ok(ptr)
+            }
+        }
+
         pub fn clear_contents(&self) -> Result<(), String> {
             unsafe {
                 let _pool = AutoreleasePool::push();
@@ -1463,11 +1547,14 @@ mod macos_pasteboard {
                 if items.is_empty() {
                     return Ok(msg_0_isize(pb, sel(b"changeCount\0")).max(0) as u64);
                 }
-                let arr = msg_1_usize(
-                    cls(b"NSMutableArray\0"),
-                    sel(b"arrayWithCapacity:\0"),
-                    items.len(),
-                );
+                let arr = Self::require_objc_object(
+                    msg_1_usize(
+                        cls(b"NSMutableArray\0"),
+                        sel(b"arrayWithCapacity:\0"),
+                        items.len(),
+                    ),
+                    "NSMutableArray",
+                )?;
                 let sel_alloc = sel(b"alloc\0");
                 let sel_new = sel(b"new\0");
                 let sel_autorelease = sel(b"autorelease\0");
@@ -1480,10 +1567,8 @@ mod macos_pasteboard {
                 let cls_nsdata = cls(b"NSData\0");
 
                 for snap_item in items {
-                    let pb_item = msg_0(cls_pb_item, sel_new);
-                    if pb_item.is_null() {
-                        return Err("NSPasteboardItem allocation failed".into());
-                    }
+                    let pb_item =
+                        Self::require_objc_object(msg_0(cls_pb_item, sel_new), "NSPasteboardItem")?;
                     let _ = msg_0(pb_item, sel_autorelease);
                     for (uti, bytes) in &snap_item.types_and_bytes {
                         let ns_type_alloc = msg_0(cls_nsstring, sel_alloc);
@@ -2337,29 +2422,9 @@ impl HostOsDriver for MacOsSystemDriver {
                     let win_elem = ax_copy_element_attr(app_elem, "AXFocusedWindow")
                         .or_else(|| ax_copy_element_attr(app_elem, "AXMainWindow"))
                         .or_else(|| {
-                            let attr_cf = cf_string_from_str("AXWindows");
-                            if attr_cf.is_null() {
-                                return None;
-                            }
-                            let mut val: CFTypeRef = std::ptr::null();
-                            let err = AXUIElementCopyAttributeValue(app_elem, attr_cf, &mut val);
-                            CFRelease(attr_cf);
-                            if err != K_AX_ERROR_SUCCESS || val.is_null() {
-                                return None;
-                            }
-                            let first = if CFArrayGetCount(val) > 0 {
-                                let item = CFArrayGetValueAtIndex(val, 0);
-                                if !item.is_null() {
-                                    CFRetain(item);
-                                    Some(item)
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            };
-                            CFRelease(val);
-                            first
+                            ax_copy_raw_attr(app_elem, "AXWindows").and_then(|val| {
+                                cf_array_copy_ax_elements(val, 1).into_iter().next()
+                            })
                         });
                     CFRelease(app_elem);
                     if let Some(win) = win_elem {
@@ -4403,5 +4468,192 @@ mod serialized_effect_tests {
         let (empty_snap, is_empty) = backend.snapshot(MAX_CLIPBOARD_STASH_BYTES);
         assert!(is_empty);
         assert!(empty_snap.items.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cf_string_to_rust_rejects_mismatched_cf_type() {
+        #[link(name = "CoreFoundation", kind = "framework")]
+        unsafe extern "C" {
+            fn CFArrayCreate(
+                allocator: CFTypeRef,
+                values: *const CFTypeRef,
+                num_values: CFIndex,
+                call_backs: CFTypeRef,
+            ) -> CFArrayRef;
+        }
+        if std::env::var_os("MI_MACOS_CF_PROBE").is_some() {
+            unsafe {
+                let empty = CFArrayCreate(std::ptr::null(), std::ptr::null(), 0, std::ptr::null());
+                assert!(!empty.is_null());
+                let decoded = cf_string_to_rust(empty);
+                CFRelease(empty);
+                assert!(decoded.is_none());
+            }
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "executor::serialized_effect_tests::cf_string_to_rust_rejects_mismatched_cf_type",
+            ])
+            .env("MI_MACOS_CF_PROBE", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "cf_string_to_rust on mismatched CFArray crashed or returned Some (status={:?}, stdout={stdout})",
+            output.status
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cf_array_copy_ax_elements_releases_mismatched_ref_and_skips_non_ax_items() {
+        #[link(name = "CoreFoundation", kind = "framework")]
+        unsafe extern "C" {
+            fn CFArrayCreate(
+                allocator: CFTypeRef,
+                values: *const CFTypeRef,
+                num_values: CFIndex,
+                call_backs: CFTypeRef,
+            ) -> CFArrayRef;
+            fn CFGetRetainCount(cf: CFTypeRef) -> CFIndex;
+        }
+        unsafe {
+            let cf_str = cf_string_from_str("not-an-array");
+            assert!(!cf_str.is_null());
+            CFRetain(cf_str);
+            let before = CFGetRetainCount(cf_str);
+            let elems = cf_array_copy_ax_elements(cf_str, 16);
+            assert!(elems.is_empty());
+            assert_eq!(CFGetRetainCount(cf_str), before - 1);
+
+            let values = [cf_str];
+            let arr = CFArrayCreate(std::ptr::null(), values.as_ptr(), 1, std::ptr::null());
+            assert!(!arr.is_null());
+            let items = cf_array_copy_ax_elements(arr, 16);
+            assert!(
+                items.is_empty(),
+                "non-AXUIElement CFString item inside CFArray must be skipped"
+            );
+            CFRelease(cf_str);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pasteboard_require_objc_object_rejects_null_mutable_array() {
+        let err = macos_pasteboard::PasteboardRef::require_objc_object(
+            std::ptr::null_mut(),
+            "NSMutableArray",
+        )
+        .unwrap_err();
+        assert!(err.contains("NSMutableArray"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn model_picker_mouse_tap_timeout_and_drop_balance_run_loop_retains() {
+        struct MockTapRuntime {
+            delay_before_run_loop: Duration,
+            retains: AtomicUsize,
+            releases: AtomicUsize,
+            stops: AtomicUsize,
+            tap_releases: AtomicUsize,
+            source_releases: AtomicUsize,
+        }
+
+        impl MockTapRuntime {
+            fn new(delay_before_run_loop: Duration) -> Self {
+                Self {
+                    delay_before_run_loop,
+                    retains: AtomicUsize::new(0),
+                    releases: AtomicUsize::new(0),
+                    stops: AtomicUsize::new(0),
+                    tap_releases: AtomicUsize::new(0),
+                    source_releases: AtomicUsize::new(0),
+                }
+            }
+        }
+
+        impl TapRuntime for MockTapRuntime {
+            unsafe fn create_tap(
+                &self,
+                _options: u32,
+                _ctx: *mut std::ffi::c_void,
+            ) -> CFMachPortRef {
+                0x1001 as CFMachPortRef
+            }
+            unsafe fn create_source(&self, _tap: CFMachPortRef) -> CFRunLoopSourceRef {
+                0x2002 as CFRunLoopSourceRef
+            }
+            unsafe fn invalidate_port(&self, _tap: CFMachPortRef) {}
+            unsafe fn current_run_loop(&self) -> CFRunLoopRef {
+                if !self.delay_before_run_loop.is_zero() {
+                    std::thread::sleep(self.delay_before_run_loop);
+                }
+                0x3003 as CFRunLoopRef
+            }
+            unsafe fn add_source(&self, _rl: CFRunLoopRef, _source: CFRunLoopSourceRef) {}
+            unsafe fn remove_source(&self, _rl: CFRunLoopRef, _source: CFRunLoopSourceRef) {}
+            unsafe fn enable_tap(&self, _tap: CFMachPortRef, _enable: bool) {}
+            unsafe fn run_loop_once(&self) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            unsafe fn stop_run_loop(&self, _rl: CFRunLoopRef) {
+                self.stops.fetch_add(1, Ordering::SeqCst);
+            }
+            unsafe fn retain_cf(&self, cf: CFTypeRef) -> CFTypeRef {
+                self.retains.fetch_add(1, Ordering::SeqCst);
+                cf
+            }
+            unsafe fn release_cf(&self, cf: CFTypeRef) {
+                match cf as usize {
+                    0x1001 => {
+                        self.tap_releases.fetch_add(1, Ordering::SeqCst);
+                    }
+                    0x2002 => {
+                        self.source_releases.fetch_add(1, Ordering::SeqCst);
+                    }
+                    0x3003 => {
+                        self.releases.fetch_add(1, Ordering::SeqCst);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let deltas = Arc::new(Mutex::new(Vec::new()));
+        let timeout_rt = Arc::new(MockTapRuntime::new(Duration::from_millis(30)));
+        assert!(ModelPickerMouseTap::start_with_runtime(
+            Arc::clone(&deltas),
+            Arc::clone(&timeout_rt) as Arc<dyn TapRuntime>,
+            Duration::from_millis(1),
+        )
+        .is_none());
+        assert_eq!(
+            timeout_rt.retains.load(Ordering::SeqCst),
+            timeout_rt.releases.load(Ordering::SeqCst),
+            "timed-out tap setup must balance CFRetain/CFRelease on CFRunLoopRef"
+        );
+        assert_eq!(timeout_rt.tap_releases.load(Ordering::SeqCst), 1);
+        assert_eq!(timeout_rt.source_releases.load(Ordering::SeqCst), 1);
+
+        let live_rt = Arc::new(MockTapRuntime::new(Duration::ZERO));
+        let tap = ModelPickerMouseTap::start_with_runtime(
+            Arc::clone(&deltas),
+            Arc::clone(&live_rt) as Arc<dyn TapRuntime>,
+            Duration::from_millis(200),
+        )
+        .expect("live mock tap should start");
+        assert_eq!(live_rt.retains.load(Ordering::SeqCst), 1);
+        drop(tap);
+        assert_eq!(live_rt.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(live_rt.releases.load(Ordering::SeqCst), 1);
+        assert_eq!(live_rt.tap_releases.load(Ordering::SeqCst), 1);
+        assert_eq!(live_rt.source_releases.load(Ordering::SeqCst), 1);
     }
 }

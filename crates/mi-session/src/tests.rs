@@ -1390,3 +1390,61 @@ async fn verified_input_split_mode_emits_ag10_and_ag11_independently_and_toggles
 
     session.shutdown().await;
 }
+
+#[tokio::test]
+async fn native_mutation_requires_exclusive_vendor_link() {
+    struct SharedNativeLink(Arc<MockLink>);
+    #[async_trait::async_trait]
+    impl HidLink for SharedNativeLink {
+        fn backend(&self) -> mi_transport::LinkBackend {
+            mi_transport::LinkBackend::MacHidapi267Numbered
+        }
+        fn is_exclusive_vendor(&self) -> bool {
+            false
+        }
+        async fn write(&self, report: &[u8]) -> Result<(), TransportError> {
+            self.0.write(report).await
+        }
+        async fn read(&self) -> Result<Vec<u8>, TransportError> {
+            self.0.read().await
+        }
+        fn close(&self) {
+            self.0.close();
+        }
+    }
+
+    let (raw, _rx) = MockLink::new();
+    let session = DeviceSession::new(
+        Arc::new(SharedNativeLink(raw.clone())),
+        Box::<mi_proto::NativeFramer>::default(),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_millis(50),
+            interval: Duration::ZERO,
+        },
+    );
+
+    assert!(session
+        .send_lights_preview(&mi_proto::lighting_candidate::LightingPreviewCandidate::default())
+        .await
+        .is_err());
+    assert!(session.send_oai_thstatus(&[]).await.is_err());
+    assert!(session
+        .send_oai_rgbcfg(&mi_proto::lighting_candidate::LightingPreviewCandidate::default())
+        .await
+        .is_err());
+    {
+        let mut queue = session.queue.lock().await;
+        let encoded =
+            mi_proto::mutation::tx_begin_candidate(queue.next_id).expect("valid txbegin candidate");
+        assert!(session
+            .exchange_authorized(&mut queue, "fs.txbegin", encoded, Some("fs.txbegin"))
+            .await
+            .is_err());
+    }
+    assert!(
+        raw.writes.lock().unwrap().is_empty(),
+        "non-exclusive vendor link must never write native mutation bytes"
+    );
+    session.shutdown().await;
+}

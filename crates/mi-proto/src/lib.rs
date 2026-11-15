@@ -170,6 +170,7 @@ impl RpcCodec for JsonCodec {
                 "pm.state",
                 "device.name",
                 "kb.sa.rgb",
+                "sys.bootloader",
             ]
             .contains(&method.as_str())
                 || v.get("params").is_some()
@@ -283,6 +284,12 @@ mod tests {
         assert!(JsonCodec
             .decode(br#"{"id":7,"method":"host.focused_app","result":{}}"#)
             .is_err());
+        assert!(matches!(
+            JsonCodec
+                .decode(br#"{"id":1,"method":"sys.bootloader","result":null}"#)
+                .unwrap(),
+            Incoming::Response(r) if r.id == 1
+        ));
     }
     #[test]
     fn native_frames_and_object_boundaries() {
