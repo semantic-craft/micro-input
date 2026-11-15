@@ -596,3 +596,96 @@ fn v070_mouse_tokens_and_joystick_modes_gate_on_firmware_and_apply_cleanly() {
         );
     }
 }
+
+#[test]
+fn patch_keymap_joystick_hardware_mode_preserves_unknown_bytes_and_restores_single_layer_sectors() {
+    use mi_model::apply::{
+        extract_keymap_joystick_hardware_mode, patch_keymap_joystick_hardware_mode,
+    };
+
+    let raw = br#"{
+  "version": 1,
+  "futureNum": 4.500e+02,
+  "activeProfileId": "custom-p",
+  "profiles": [
+    {
+      "id": "custom-p",
+      "name": "Custom Single",
+      "extraProfileMeta": {"keepExact": [1.00, 2.00]},
+      "layers": [
+        {
+          "id": 7,
+          "name": "Base",
+          "layout": {
+            "keymap": [["KC_A", "KC_B"], ["KC_C", "KC_D", "KC_E", "KC_F"], ["KC_G", "KC_H", "KC_I", "KC_J"], ["KC_K", "KC_L", "KC_M"]],
+            "encoders": [["KC_VOLU", "KC_VOLD", "KC_MPLY"]],
+            "joystick": {"type": "RADIAL", "sectors": [{"k": "KC_F16", "a1": 0.625, "a2": 0.875}, {"k": "KC_F17", "a1": 0.375, "a2": 0.625}, {"k": "KC_F18", "a1": 0.125, "a2": 0.375}, {"k": "KC_F19", "a1": 0.875, "a2": 0.125}]},
+            "extraLayoutFlag": true
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+
+    assert!(
+        patch_keymap_joystick_hardware_mode(raw, "0.6.3", None, Some(0), "mouse")
+            .unwrap_err()
+            .contains("0.7.0-rc.16")
+    );
+    assert!(
+        patch_keymap_joystick_hardware_mode(raw, "0.7.0-rc.15", None, Some(0), "scroll")
+            .unwrap_err()
+            .contains("0.7.0-rc.16")
+    );
+    assert!(
+        patch_keymap_joystick_hardware_mode(raw, "0.7.0-rc.16", None, Some(0), "bogus").is_err()
+    );
+
+    assert_eq!(
+        extract_keymap_joystick_hardware_mode(raw, None, Some(1)).as_deref(),
+        Some("radial")
+    );
+
+    let (mouse_bytes, changed) =
+        patch_keymap_joystick_hardware_mode(raw, "0.7.0-rc.16", None, Some(0), "mouse").unwrap();
+    assert!(changed);
+    let mouse_str = std::str::from_utf8(&mouse_bytes).unwrap();
+    assert!(mouse_str.contains("\"futureNum\": 4.500e+02"));
+    assert!(mouse_str.contains("\"extraProfileMeta\": {\"keepExact\": [1.00, 2.00]}"));
+    assert!(mouse_str.contains("\"extraLayoutFlag\": true"));
+    assert_eq!(
+        extract_keymap_joystick_hardware_mode(&mouse_bytes, None, Some(1)).as_deref(),
+        Some("mouse")
+    );
+
+    let (scroll_bytes, changed_scroll) =
+        patch_keymap_joystick_hardware_mode(&mouse_bytes, "0.7.0", None, Some(0), "scroll")
+            .unwrap();
+    assert!(changed_scroll);
+    assert_eq!(
+        extract_keymap_joystick_hardware_mode(&scroll_bytes, None, Some(1)).as_deref(),
+        Some("scroll")
+    );
+
+    let (sectors_bytes, changed_sectors) =
+        patch_keymap_joystick_hardware_mode(&scroll_bytes, "0.7.0", None, Some(0), "sectors")
+            .unwrap();
+    assert!(changed_sectors);
+    assert_eq!(
+        extract_keymap_joystick_hardware_mode(&sectors_bytes, None, Some(1)).as_deref(),
+        Some("radial")
+    );
+    let parsed: Value = serde_json::from_slice(&sectors_bytes).unwrap();
+    let sector_tokens: Vec<&str> = parsed["profiles"][0]["layers"][0]["layout"]["joystick"]
+        ["sectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["k"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        sector_tokens,
+        vec!["KV_OAI_AG15", "KV_OAI_AG16", "KV_OAI_AG17", "KV_OAI_AG18"]
+    );
+}

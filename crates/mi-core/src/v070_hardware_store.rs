@@ -18,6 +18,80 @@ use crate::v070_session_sa_rgb::{
 pub(crate) struct V070BridgeCommand {
     pub seq: u64,
     pub command: ValidatedV070DeviceCommand,
+    pub document_dir: std::path::PathBuf,
+    pub active_six_layer_backup: Option<std::path::PathBuf>,
+}
+
+fn write_private_backup_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| "备份目录路径缺失".to_string())?;
+    let tmp = path.with_extension("v070.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| e.to_string())?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|e| e.to_string())?;
+    }
+    if std::fs::read(&tmp).map_err(|e| e.to_string())? != bytes {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("备份写后读回不一致".into());
+    }
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| e.to_string())?;
+    std::fs::File::open(parent)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn sync_six_layer_backup_after_joystick_write(
+    backup_dir: &std::path::Path,
+    pre_write_keymap: &[u8],
+    post_write_keymap: &[u8],
+) -> Result<(), String> {
+    let planned_path = backup_dir.join("planned-keymap.json");
+    if !planned_path.is_file() {
+        return Ok(());
+    }
+    let current_planned = std::fs::read(&planned_path).map_err(|e| e.to_string())?;
+    if current_planned != pre_write_keymap {
+        return Ok(());
+    }
+    let prev_planned_path = backup_dir.join("previous-planned-keymap.json");
+    if !prev_planned_path.exists() {
+        write_private_backup_file(&prev_planned_path, pre_write_keymap)?;
+    }
+    write_private_backup_file(&planned_path, post_write_keymap)?;
+    let manifest_path = backup_dir.join("manifest.json");
+    if manifest_path.is_file() {
+        if let Ok(raw_manifest) = std::fs::read(&manifest_path) {
+            if let Ok(mut manifest) = serde_json::from_slice::<serde_json::Value>(&raw_manifest) {
+                if let Some(obj) = manifest.as_object_mut() {
+                    obj.insert(
+                        "planned_keymap_sha256".into(),
+                        serde_json::Value::String(mi_bridge::lighting_arbiter::sha256_hex(
+                            post_write_keymap,
+                        )),
+                    );
+                    if let Ok(encoded) = serde_json::to_vec_pretty(&manifest) {
+                        let _ = write_private_backup_file(&manifest_path, &encoded);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -61,6 +135,7 @@ impl V070HardwareController {
         self.projection.synced = false;
         self.projection.active_profile = None;
         self.projection.active_layer = None;
+        self.projection.active_joystick_mode = None;
         self.projection.battery_percent = None;
         self.projection.is_charging = None;
         self.projection.last_error = None;
@@ -133,6 +208,7 @@ impl V070HardwareController {
                 if snap.active_layer.is_some() {
                     self.projection.active_layer = snap.active_layer;
                 }
+                self.projection.active_joystick_mode = snap.active_joystick_mode;
                 if snap.battery_percent.is_some() {
                     self.projection.battery_percent = snap.battery_percent;
                 }
@@ -158,6 +234,28 @@ impl V070HardwareController {
                 self.projection.last_error = None;
                 self.projection.status_message =
                     format!("已切换当前板载层至第 {layer_index} 层（不写入闪存）");
+            }
+            Ok(V070BridgeOutcome::JoystickHardwareModeUpdated {
+                mode,
+                active_profile,
+                active_layer,
+            }) => {
+                if let Some(profile) = active_profile {
+                    self.projection.active_profile = Some(profile);
+                }
+                if let Some(layer) = active_layer {
+                    self.projection.active_layer = Some(layer);
+                }
+                let mode_label = match mode.as_str() {
+                    "mouse" => "硬件鼠标（MOUSE）",
+                    "scroll" => "硬件滚轮（SCROLL）",
+                    "vendor" => "原生通道（VENDOR）",
+                    "radial" => "四向扇区（RADIAL）",
+                    other => other,
+                };
+                self.projection.active_joystick_mode = Some(mode.clone());
+                self.projection.last_error = None;
+                self.projection.status_message = format!("已同步板载摇杆硬件模式为{mode_label}");
             }
             Ok(V070BridgeOutcome::MouseUpdated { mouse, deadzone }) => {
                 self.projection.mouse =
@@ -256,11 +354,16 @@ pub(crate) async fn fetch_v070_snapshot_on_session(
         .read_joystick_deadzone()
         .await
         .map_err(|e| e.to_string())?;
+    let active_joystick_mode = session
+        .read_active_joystick_hardware_mode(active_profile, active_layer)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(V070SnapshotPayload {
         session_id: session.id,
         version,
         active_profile,
         active_layer,
+        active_joystick_mode,
         battery_percent,
         is_charging,
         mouse,
@@ -299,6 +402,26 @@ pub(crate) async fn execute_v070_command_on_session(
             Ok(V070BridgeOutcome::ProfileLayer {
                 profile_index: observed.map(|(p, _)| p),
                 layer_index: observed.map(|(_, l)| l).unwrap_or(*layer),
+            })
+        }
+        ValidatedV070DeviceCommand::ApplyJoystickHardwareMode { mode } => {
+            let receipt = session
+                .apply_joystick_hardware_mode(&cmd.document_dir, mode)
+                .await
+                .map_err(|e| e.to_string())?;
+            if receipt.changed {
+                if let Some(ref backup_dir) = cmd.active_six_layer_backup {
+                    sync_six_layer_backup_after_joystick_write(
+                        backup_dir,
+                        &receipt.pre_write_keymap,
+                        &receipt.post_write_keymap,
+                    )?;
+                }
+            }
+            Ok(V070BridgeOutcome::JoystickHardwareModeUpdated {
+                mode: receipt.mode,
+                active_profile: receipt.active_profile,
+                active_layer: receipt.active_layer,
             })
         }
         ValidatedV070DeviceCommand::ApplyMousePreset {
@@ -828,10 +951,30 @@ impl WorkbenchStore {
                 if self.v070_hardware.projection.busy {
                     return Err("上一条 0.7.0 硬件指令尚未完成".into());
                 }
+                let document_dir = self.config.document_dir.clone();
+                let active_six_layer_backup = self
+                    .six_layer_running
+                    .as_ref()
+                    .map(|running| running.installation.backup.clone())
+                    .or_else(|| {
+                        self.six_layer_state
+                            .installation
+                            .as_ref()
+                            .filter(|inst| {
+                                inst.status
+                                    == crate::six_layer_runtime::InstallationStatus::Applied
+                            })
+                            .map(|inst| inst.backup.clone())
+                    });
                 match self.resolve_v070_command_target()? {
                     V070CommandTarget::SixLayerBridge(_) => {
                         let seq = self.v070_hardware.allocate_seq();
-                        let cmd = V070BridgeCommand { seq, command };
+                        let cmd = V070BridgeCommand {
+                            seq,
+                            command,
+                            document_dir,
+                            active_six_layer_backup,
+                        };
                         self.six_layer_running
                             .as_ref()
                             .ok_or_else(|| "USB 专用桥接当前未连接".to_string())?
@@ -843,7 +986,12 @@ impl WorkbenchStore {
                     }
                     V070CommandTarget::DirectSession(session) => {
                         let seq = self.v070_hardware.allocate_seq();
-                        let cmd = V070BridgeCommand { seq, command };
+                        let cmd = V070BridgeCommand {
+                            seq,
+                            command,
+                            document_dir,
+                            active_six_layer_backup,
+                        };
                         self.v070_hardware.projection.busy = true;
                         self.v070_hardware.in_flight_seq = Some(seq);
                         self.v070_hardware.projection.last_error = None;
@@ -915,11 +1063,51 @@ impl WorkbenchStore {
                 V070BridgeOutcome::ProfileLayer { layer_index, .. } => {
                     self.v070_hardware.device_layer_override = Some(*layer_index);
                 }
+                V070BridgeOutcome::JoystickHardwareModeUpdated { mode, .. } => {
+                    let plan_hw_mode = match mode.as_str() {
+                        "mouse" => Some("MOUSE".to_string()),
+                        "scroll" => Some("SCROLL".to_string()),
+                        _ => None,
+                    };
+                    if let Some(running) = self.six_layer_running.as_mut() {
+                        running.installation.plan.codex_joystick_mode = plan_hw_mode.clone();
+                        for host in &mut running.installation.plan.hosts {
+                            host.joystick_mode = plan_hw_mode.clone();
+                        }
+                    }
+                    if let Some(inst) = self.six_layer_state.installation.as_mut() {
+                        inst.plan.codex_joystick_mode = plan_hw_mode.clone();
+                        for host in &mut inst.plan.hosts {
+                            host.joystick_mode = plan_hw_mode.clone();
+                        }
+                        if !self.config.isolated {
+                            let state_path =
+                                self.config.document_dir.join("six-layer-runtime.json");
+                            if state_path.is_file() {
+                                let _ = crate::six_layer_runtime::save(
+                                    &state_path,
+                                    &self.six_layer_state,
+                                );
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
+        let is_profile_layer = matches!(result, Ok(V070BridgeOutcome::ProfileLayer { .. }));
         let succeeded = result.is_ok();
         self.v070_hardware.apply_outcome(seq, result);
+        if is_profile_layer {
+            if let Some(session) = self.live_v070_session() {
+                if let Some(cached_mode) = session.cached_joystick_hardware_mode(
+                    self.v070_hardware.projection.active_profile,
+                    self.v070_hardware.projection.active_layer,
+                ) {
+                    self.v070_hardware.projection.active_joystick_mode = Some(cached_mode);
+                }
+            }
+        }
         if succeeded {
             if !self.v070_hardware.projection.busy {
                 let pending = self.v070_hardware.pending_auto_layer_sync.take();
@@ -952,6 +1140,13 @@ impl WorkbenchStore {
             .consume_expected_layer_echo(layer_index, self.update_now);
         self.v070_hardware
             .apply_profile_layer_notification(profile_index, layer_index);
+        if let Some(session) = self.live_v070_session() {
+            if let Some(cached_mode) =
+                session.cached_joystick_hardware_mode(Some(profile_index), Some(layer_index))
+            {
+                self.v070_hardware.projection.active_joystick_mode = Some(cached_mode);
+            }
+        }
         if !is_expected_echo
             && self.document_store.locked_profile_id().is_none()
             && self.six_layer_user_pinned
@@ -1520,6 +1715,7 @@ mod tests {
                 version: "0.7.0-rc.16".into(),
                 active_profile: Some(3),
                 active_layer: Some(layer),
+                active_joystick_mode: None,
                 battery_percent: Some(80),
                 is_charging: Some(false),
                 mouse: MouseConfig::default(),
@@ -2108,6 +2304,483 @@ mod tests {
         store.handle_v070_capability_outcome(session.id, seq, Err("USB 会话已断开".into()));
         assert!(!store.projection().v070_hardware.busy);
         assert_eq!(store.v070_hardware.in_flight_seq, None);
+
+        drop(link);
+        if let Some(running) = store.six_layer_running.take() {
+            running.shutdown(&store.tokio_runtime).unwrap();
+        }
+        responder.abort();
+    }
+
+    #[test]
+    fn v070_minimal_mock_degrades_active_joystick_mode_to_none_and_v063_rejects_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+        let sent_methods = Arc::new(Mutex::new(Vec::new()));
+        let (session, _link, responder) =
+            spawn_mock_v070_session(&store.tokio_runtime, "0.7.0-rc.16", sent_methods.clone());
+        let mut running = RunningSixLayer::isolated(session.clone(), dir.path());
+        running.set_v070_inbox(store.hardware_event_tx.clone());
+        running.attach_test_vendor_session(&store.tokio_runtime, session);
+        store.six_layer_running = Some(running);
+
+        poll_until(&mut store, |s| s.projection().v070_hardware.synced);
+        assert_eq!(store.projection().v070_hardware.active_joystick_mode, None);
+
+        assert!(store
+            .dispatch_command(WorkbenchCommand::V070Hardware(
+                V070HardwareAction::ApplyJoystickHardwareMode {
+                    mode: "bogus".into(),
+                }
+            ))
+            .is_err());
+        assert!(!store.projection().v070_hardware.busy);
+
+        if let Some(running) = store.six_layer_running.take() {
+            running.shutdown(&store.tokio_runtime).unwrap();
+        }
+        responder.abort();
+
+        let dir_v063 = tempfile::tempdir().unwrap();
+        let mut store_v063 = WorkbenchStore::open_isolated(dir_v063.path()).unwrap();
+        let sent_v063 = Arc::new(Mutex::new(Vec::new()));
+        let (session_v063, _link_v063, responder_v063) =
+            spawn_mock_v070_session(&store_v063.tokio_runtime, "0.6.3", sent_v063.clone());
+        let mut running_v063 = RunningSixLayer::isolated(session_v063.clone(), dir_v063.path());
+        running_v063.set_v070_inbox(store_v063.hardware_event_tx.clone());
+        running_v063.attach_test_vendor_session(&store_v063.tokio_runtime, session_v063);
+        store_v063.six_layer_running = Some(running_v063);
+
+        let err = store_v063
+            .dispatch_command(WorkbenchCommand::V070Hardware(
+                V070HardwareAction::ApplyJoystickHardwareMode {
+                    mode: "mouse".into(),
+                },
+            ))
+            .unwrap_err();
+        assert!(err.to_string().contains("0.7.0-rc.16"));
+        assert!(!dir_v063.path().join("v070-keymap-backups").exists());
+        assert!(!sent_v063
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m == "fs.writebin"));
+
+        if let Some(running) = store_v063.six_layer_running.take() {
+            running.shutdown(&store_v063.tokio_runtime).unwrap();
+        }
+        responder_v063.abort();
+    }
+
+    #[test]
+    fn v070_joystick_hardware_mode_snapshot_apply_backup_six_layer_sync_and_reload() {
+        use crate::six_layer_runtime::{test_b64_decode, test_b64_encode};
+        use std::os::unix::fs::PermissionsExt;
+
+        const SIX_SOURCE: &[u8] =
+            include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+        const SMART: &[u8] =
+            include_bytes!("../../mi-model/fixtures/device/synthetic-smart-actions-object.json");
+
+        let compiled_six =
+            mi_model::apply::compile_six_layer_profile(SIX_SOURCE, Some(SMART)).unwrap();
+        assert_eq!(compiled_six.profile_index, 1);
+        let initial_planned_bytes = compiled_six.keymap.clone();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+
+        let six_backup_dir = dir.path().join("six-layer-backup");
+        std::fs::create_dir_all(&six_backup_dir).unwrap();
+        std::fs::write(six_backup_dir.join("keymap.json"), SIX_SOURCE).unwrap();
+        std::fs::write(
+            six_backup_dir.join("planned-keymap.json"),
+            &initial_planned_bytes,
+        )
+        .unwrap();
+        std::fs::write(six_backup_dir.join("smart_actions.json"), SMART).unwrap();
+        std::fs::write(
+            six_backup_dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&json!({
+                "format": "micro-input-three-layer-recovery-v1",
+                "previous_profile_index": 0,
+                "previous_layer_index": 1,
+                "planned_profile_index": 1,
+                "keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(SIX_SOURCE),
+                "planned_keymap_sha256": mi_bridge::lighting_arbiter::sha256_hex(&initial_planned_bytes),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let sent_methods = Arc::new(Mutex::new(Vec::<String>::new()));
+        let kb_pl_set_calls = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let board_keymap = Arc::new(Mutex::new(initial_planned_bytes.clone()));
+
+        let (link, mut out_rx) = MockV070Link::new();
+        let session = store.tokio_runtime.block_on(async {
+            DeviceSession::new(
+                link.clone(),
+                Box::new(TestFramer),
+                Arc::new(ReadOnlySchema),
+                SessionConfig {
+                    timeout: Duration::from_millis(800),
+                    interval: Duration::ZERO,
+                },
+            )
+        });
+        let sent_clone = sent_methods.clone();
+        let pl_clone = kb_pl_set_calls.clone();
+        let board_keymap_clone = board_keymap.clone();
+        let link_responder = link.clone();
+        let responder = store.tokio_runtime.spawn(async move {
+            let mouse = MouseConfig::default();
+            let deadzone = 0.15_f64;
+            let pm_cfg = PmConfig::default();
+            let mut active_profile = 1_u8;
+            let mut active_layer = 2_u8;
+            let mut staged = Vec::<u8>::new();
+            while let Some(raw) = out_rx.recv().await {
+                let req: Value = serde_json::from_slice(&raw).unwrap();
+                let id = req["id"].clone();
+                let method = req["method"].as_str().unwrap().to_string();
+                let params = &req["params"];
+                sent_clone.lock().unwrap().push(method.clone());
+                let meta = |name: &str, data: &[u8]| {
+                    let sha1 = mi_model::operation_record::file_value(data)["sha1"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned();
+                    json!({"name": name, "size": data.len(), "checksum": sha1})
+                };
+                let result = match method.as_str() {
+                    "device.status" => json!({
+                        "version": "0.7.0-rc.16",
+                        "profile_index": active_profile,
+                        "layer_index": active_layer,
+                        "battery": 88,
+                        "is_charging": false
+                    }),
+                    "device.name" => json!({
+                        "name": "Creator Micro 2",
+                        "factory_name": "Creator Micro 2",
+                        "max_length": 15
+                    }),
+                    "pm.config" => serde_json::to_value(pm_cfg).unwrap(),
+                    "pm.state" => json!({
+                        "state": "active",
+                        "floor": "usb",
+                        "base_floor": "host_sleep",
+                        "line_powered": true,
+                        "auto_sleep": true,
+                        "sleep_after_s": 900,
+                        "idle_s": 2,
+                        "standby_s": 100,
+                        "credit_s": 0,
+                        "holds": [{"owner": "usb.host", "floor": "usb", "age_ms": 100}]
+                    }),
+                    "mouse.config" => serde_json::to_value(mouse).unwrap(),
+                    "joystick.deadzone" => json!({"v": deadzone}),
+                    "fs.list" => {
+                        let km = board_keymap_clone.lock().unwrap();
+                        json!([
+                            meta("keymap.json", &km),
+                            meta("smart_actions.json", SMART)
+                        ])
+                    }
+                    "fs.readbin" => {
+                        let km = board_keymap_clone.lock().unwrap().clone();
+                        let file_bytes: &[u8] = match params["file"].as_str().unwrap() {
+                            "keymap.json" => km.as_slice(),
+                            "smart_actions.json" => SMART,
+                            other => panic!("unexpected file {other}"),
+                        };
+                        let offset = params["offset"].as_u64().unwrap() as usize;
+                        let len = params["len"].as_u64().unwrap() as usize;
+                        let end = (offset + len).min(file_bytes.len());
+                        json!({
+                            "total_size": file_bytes.len(),
+                            "data": test_b64_encode(&file_bytes[offset..end])
+                        })
+                    }
+                    "fs.txbegin" => {
+                        staged.clear();
+                        json!({"tx": 42})
+                    }
+                    "fs.writebin" => {
+                        assert_eq!(params["file"].as_str(), Some("keymap.json"));
+                        assert_eq!(params["tx"].as_u64(), Some(42));
+                        staged.extend(test_b64_decode(params["data"].as_str().unwrap()));
+                        Value::Null
+                    }
+                    "fs.txcommit" => {
+                        assert_eq!(params["tx"].as_u64(), Some(42));
+                        *board_keymap_clone.lock().unwrap() = std::mem::take(&mut staged);
+                        Value::Null
+                    }
+                    "kb.pl.set" => {
+                        pl_clone.lock().unwrap().push(params.clone());
+                        if let Some(p) = params.get("p").and_then(Value::as_u64) {
+                            active_profile = p as u8;
+                        }
+                        if let Some(l) = params.get("l").and_then(Value::as_u64) {
+                            active_layer = l as u8;
+                        }
+                        json!({})
+                    }
+                    "kb.sa.rgb" | "v.oai.thstatus" => json!({}),
+                    other => panic!("unexpected method {other}"),
+                };
+                link_responder.push_wire(json!({
+                    "id": id,
+                    "method": method,
+                    "result": result
+                }));
+            }
+        });
+        store.tokio_runtime.block_on(async {
+            session.read_identity_info().await.unwrap();
+        });
+
+        let profile_id = |store: &WorkbenchStore, name: &str| {
+            store
+                .document_store
+                .draft
+                .document
+                .editable
+                .graph
+                .profiles
+                .iter()
+                .find(|(_, p)| p.name == name)
+                .unwrap()
+                .0
+                .clone()
+        };
+        let desired = mi_model::board_layers::BoardLayerPlan::recommended(
+            profile_id(&store, "Codex"),
+            profile_id(&store, "Antigravity"),
+            profile_id(&store, "DeepSeek Coder (DSH)"),
+        );
+        let compiled_plan = mi_model::apply::AppliedSixLayerPlan::compile(
+            &desired,
+            &store.document_store.draft.document,
+            mi_model::host_router::BottomRowLayout::Split,
+            true,
+        )
+        .unwrap();
+
+        let mut running = RunningSixLayer::isolated(session.clone(), dir.path());
+        running.installation.profile_index = 1;
+        running.installation.backup = six_backup_dir.clone();
+        running.installation.plan = compiled_plan;
+        running.readiness.configuration_observed = true;
+        running.readiness.keyboard_grabbed = true;
+        running.set_v070_inbox(store.hardware_event_tx.clone());
+        running.attach_test_vendor_session(&store.tokio_runtime, session.clone());
+        store.six_layer_running = Some(running);
+
+        poll_until(&mut store, |s| s.projection().v070_hardware.synced);
+        assert_eq!(
+            store
+                .projection()
+                .v070_hardware
+                .active_joystick_mode
+                .as_deref(),
+            Some("radial"),
+            "initial snapshot on six-layer L2 must populate active_joystick_mode = radial"
+        );
+
+        store
+            .dispatch_command(WorkbenchCommand::V070Hardware(
+                V070HardwareAction::SelectLayer { layer: 1 },
+            ))
+            .unwrap();
+        poll_until(&mut store, |s| {
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.active_layer == Some(1)
+        });
+        assert_eq!(
+            store
+                .projection()
+                .v070_hardware
+                .active_joystick_mode
+                .as_deref(),
+            Some("vendor"),
+            "switching to six-layer L1 must reflect cached vendor joystick mode"
+        );
+
+        store
+            .dispatch_command(WorkbenchCommand::V070Hardware(
+                V070HardwareAction::SelectLayer { layer: 2 },
+            ))
+            .unwrap();
+        poll_until(&mut store, |s| {
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.active_layer == Some(2)
+        });
+        assert_eq!(
+            store
+                .projection()
+                .v070_hardware
+                .active_joystick_mode
+                .as_deref(),
+            Some("radial")
+        );
+        let pl_calls_before_apply = kb_pl_set_calls.lock().unwrap().len();
+
+        let cmd_json: WorkbenchCommand = serde_json::from_value(json!({
+            "domain": "v070_hardware",
+            "action": { "ApplyJoystickHardwareMode": { "mode": "mouse" } }
+        }))
+        .unwrap();
+        store.dispatch_command(cmd_json).unwrap();
+        poll_until(&mut store, |s| {
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.active_joystick_mode.as_deref() == Some("mouse")
+        });
+
+        let backup_root = dir.path().join("v070-keymap-backups");
+        let orig_backup = backup_root.join("original-keymap.json");
+        assert!(orig_backup.is_file());
+        assert_eq!(
+            std::fs::metadata(&orig_backup)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&backup_root)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(std::fs::read(&orig_backup).unwrap(), initial_planned_bytes);
+
+        let pl_calls = kb_pl_set_calls.lock().unwrap().clone();
+        assert_eq!(pl_calls.len(), pl_calls_before_apply + 1);
+        assert_eq!(pl_calls.last(), Some(&json!({"p": 1, "l": 2})));
+
+        let live_mouse_bytes = board_keymap.lock().unwrap().clone();
+        assert_eq!(
+            mi_model::apply::recognize_six_layer_profile_for_firmware(
+                &live_mouse_bytes,
+                Some(SMART),
+                Some("0.7.0-rc.16"),
+            ),
+            Ok(Some(1))
+        );
+        for l in 1..=6 {
+            assert_eq!(
+                mi_model::apply::extract_keymap_joystick_hardware_mode(
+                    &live_mouse_bytes,
+                    Some(1),
+                    Some(l),
+                )
+                .as_deref(),
+                Some("mouse"),
+                "six-layer profile must apply MOUSE across all 6 layers so layer-switching preserves hardware mouse"
+            );
+        }
+
+        assert_eq!(
+            std::fs::read(six_backup_dir.join("keymap.json")).unwrap(),
+            SIX_SOURCE,
+            "original pre-six-layer keymap.json backup must never be mutated"
+        );
+        assert_eq!(
+            std::fs::read(six_backup_dir.join("previous-planned-keymap.json")).unwrap(),
+            initial_planned_bytes
+        );
+        assert_eq!(
+            std::fs::read(six_backup_dir.join("planned-keymap.json")).unwrap(),
+            live_mouse_bytes
+        );
+        assert_eq!(
+            store
+                .six_layer_running
+                .as_ref()
+                .unwrap()
+                .installation
+                .plan
+                .codex_joystick_mode
+                .as_deref(),
+            Some("MOUSE")
+        );
+        assert!(store
+            .six_layer_running
+            .as_ref()
+            .unwrap()
+            .installation
+            .plan
+            .hosts
+            .iter()
+            .all(|h| h.joystick_mode.as_deref() == Some("MOUSE")));
+
+        store
+            .dispatch_command(WorkbenchCommand::V070Hardware(
+                V070HardwareAction::ApplyJoystickHardwareMode {
+                    mode: "scroll".into(),
+                },
+            ))
+            .unwrap();
+        poll_until(&mut store, |s| {
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.active_joystick_mode.as_deref() == Some("scroll")
+        });
+        assert_eq!(
+            std::fs::read(&orig_backup).unwrap(),
+            initial_planned_bytes,
+            "original-keymap.json in v070-keymap-backups must stay immutable across subsequent writes"
+        );
+        let mouse_sha1 = mi_model::operation_record::file_value(&live_mouse_bytes)["sha1"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            std::fs::read(backup_root.join(format!("keymap-{mouse_sha1}.json"))).unwrap(),
+            live_mouse_bytes
+        );
+
+        store
+            .dispatch_command(WorkbenchCommand::V070Hardware(
+                V070HardwareAction::ApplyJoystickHardwareMode {
+                    mode: "logical_sectors".into(),
+                },
+            ))
+            .unwrap();
+        poll_until(&mut store, |s| {
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.active_joystick_mode.as_deref() == Some("radial")
+        });
+        let restored_bytes = board_keymap.lock().unwrap().clone();
+        assert_eq!(
+            mi_model::apply::extract_keymap_joystick_hardware_mode(
+                &restored_bytes,
+                Some(1),
+                Some(1)
+            )
+            .as_deref(),
+            Some("vendor")
+        );
+        assert_eq!(
+            mi_model::apply::extract_keymap_joystick_hardware_mode(
+                &restored_bytes,
+                Some(1),
+                Some(2)
+            )
+            .as_deref(),
+            Some("radial")
+        );
+
+        link.push_wire(json!({"m": "kb.pl", "p": {"p": 1, "l": 1}}));
+        poll_until(&mut store, |s| {
+            s.projection().v070_hardware.active_layer == Some(1)
+                && s.projection().v070_hardware.active_joystick_mode.as_deref() == Some("vendor")
+        });
 
         drop(link);
         if let Some(running) = store.six_layer_running.take() {

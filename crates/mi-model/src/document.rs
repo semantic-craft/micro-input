@@ -734,6 +734,21 @@ impl LocalDocumentV2 {
                 if original.is_none() && crate::is_protected_oai_layer(&layer) {
                     layer.color = json!(0x00FFA6u64);
                     layer.joystick.kind = json!("VENDOR");
+                } else if let Some(settings) = &l.control_settings {
+                    match settings.joystick_mode.as_str() {
+                        "mouse" => layer.joystick.kind = json!({"type": "MOUSE"}),
+                        "scroll" => layer.joystick.kind = json!({"type": "SCROLL"}),
+                        "logical_sectors"
+                            if layer.joystick.kind.is_null()
+                                || matches!(
+                                    layer.joystick.kind.get("type").and_then(Value::as_str),
+                                    Some("MOUSE" | "SCROLL")
+                                ) =>
+                        {
+                            layer.joystick.kind = json!({"type": "RADIAL"});
+                        }
+                        _ => {}
+                    }
                 }
                 profile.layers.push(layer);
             }

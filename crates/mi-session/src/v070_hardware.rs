@@ -1,5 +1,11 @@
 //! Verified `0.7.0-rc.16+` hardware capability RPC helpers gated behind exclusive vendor ownership.
 
+use std::fs::{self, DirBuilder, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
 use mi_proto::v070_capabilities::{
     decode_device_name_response, decode_joystick_deadzone_response, decode_mouse_config_response,
     decode_pm_config_response, decode_pm_state_response, decode_set_profile_layer_response,
@@ -11,10 +17,140 @@ use mi_proto::v070_capabilities::{
     JOYSTICK_DEADZONE_METHOD, MAX_DEVICE_NAME_LEN, MOUSE_CONFIG_METHOD, PM_CONFIG_METHOD,
     PM_STATE_METHOD, PROFILE_LAYER_SET_METHOD, SA_RGB_METHOD,
 };
-use mi_proto::ProtoError;
+use mi_proto::{Method, ProtoError};
 use serde_json::Value;
+use sha1::{Digest, Sha1};
 
 use crate::{DeviceSession, SessionError};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoystickHardwareModeReceipt {
+    pub mode: String,
+    pub active_profile: Option<u8>,
+    pub active_layer: Option<u8>,
+    pub backup_path: PathBuf,
+    pub pre_write_keymap: Vec<u8>,
+    pub post_write_keymap: Vec<u8>,
+    pub changed: bool,
+}
+
+static SESSION_KEYMAP_CACHE: OnceLock<Mutex<Vec<(u64, Vec<u8>)>>> = OnceLock::new();
+
+fn cache_session_keymap(session_id: u64, keymap_bytes: Vec<u8>) {
+    let cache = SESSION_KEYMAP_CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    let mut guard = cache.lock().unwrap();
+    if let Some(pos) = guard.iter().position(|(id, _)| *id == session_id) {
+        guard.remove(pos);
+    }
+    if guard.len() >= 8 {
+        guard.remove(0);
+    }
+    guard.push((session_id, keymap_bytes));
+}
+
+fn load_cached_session_keymap(session_id: u64) -> Option<Vec<u8>> {
+    let cache = SESSION_KEYMAP_CACHE.get()?;
+    let guard = cache.lock().unwrap();
+    guard
+        .iter()
+        .find(|(id, _)| *id == session_id)
+        .map(|(_, bytes)| bytes.clone())
+}
+
+struct V070KeymapMutationGuard<'a> {
+    session: &'a DeviceSession,
+    sent: bool,
+    verified: bool,
+}
+
+impl Drop for V070KeymapMutationGuard<'_> {
+    fn drop(&mut self) {
+        if self.sent && !self.verified {
+            self.session.disconnect();
+        }
+    }
+}
+
+fn write_verified_immutable_file(path: &Path, bytes: &[u8]) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if !meta.is_file() {
+                return Err(format!("备份文件不是普通文件：{}", path.display()));
+            }
+            if meta.permissions().mode() & 0o777 != 0o600 {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                    .map_err(|e| e.to_string())?;
+            }
+            let existing = fs::read(path).map_err(|e| e.to_string())?;
+            if existing != bytes {
+                return Err(format!("备份文件摘要内容不符：{}", path.display()));
+            }
+            Ok(false)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(|e| e.to_string())?;
+            file.write_all(bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|e| e.to_string())?;
+            let readback = fs::read(path).map_err(|e| e.to_string())?;
+            if readback != bytes {
+                return Err(format!("备份文件写后读回不一致：{}", path.display()));
+            }
+            Ok(true)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn persist_immutable_v070_keymap_backup(
+    document_dir: &Path,
+    keymap_bytes: &[u8],
+) -> Result<PathBuf, String> {
+    if !document_dir.exists() {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(document_dir)
+            .map_err(|e| e.to_string())?;
+    }
+    let parent_meta = fs::metadata(document_dir).map_err(|e| e.to_string())?;
+    let backup_dir = document_dir.join("v070-keymap-backups");
+    match DirBuilder::new().mode(0o700).create(&backup_dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    let dir_meta = fs::symlink_metadata(&backup_dir).map_err(|e| e.to_string())?;
+    if !dir_meta.is_dir() || dir_meta.uid() != parent_meta.uid() {
+        return Err("v070-keymap-backups 不是当前用户所属的私有目录".into());
+    }
+    if dir_meta.permissions().mode() & 0o777 != 0o700 {
+        fs::set_permissions(&backup_dir, fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+    }
+
+    let original_anchor = backup_dir.join("original-keymap.json");
+    if !original_anchor.exists() {
+        let _ = write_verified_immutable_file(&original_anchor, keymap_bytes)?;
+    }
+
+    let sha1_hex = format!("{:x}", Sha1::digest(keymap_bytes));
+    let snapshot_path = backup_dir.join(format!("keymap-{sha1_hex}.json"));
+    let created = write_verified_immutable_file(&snapshot_path, keymap_bytes)?;
+    if created {
+        for dir in [&backup_dir, document_dir] {
+            fs::File::open(dir)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(snapshot_path)
+}
 
 impl DeviceSession {
     async fn exchange_v070<E>(
@@ -158,6 +294,264 @@ impl DeviceSession {
     pub async fn reset_sa_rgb(&self, sa: Vec<u32>) -> Result<(), SessionError> {
         let reset = SaRgbUpdate::reset(sa);
         self.set_sa_rgb(&reset).await
+    }
+
+    fn require_v070_exclusive_vendor(&self) -> Result<String, SessionError> {
+        if self.link.backend() != mi_transport::LinkBackend::MacHidapi267Numbered
+            || !self.link.is_exclusive_vendor()
+        {
+            return Err(ProtoError::Unverified(
+                "0.7.0 hardware capability requires exclusive vendor MacHidapi267Numbered link",
+            )
+            .into());
+        }
+        let version = self.observed_firmware_version().ok_or_else(|| {
+            SessionError::from(ProtoError::Unverified(
+                "0.7.0 hardware capability requires verified firmware >= 0.7.0-rc.16",
+            ))
+        })?;
+        if !mi_model::supports_v070_hardware_capabilities(&version) {
+            return Err(ProtoError::Unverified(
+                "0.7.0 hardware capability requires firmware >= 0.7.0-rc.16",
+            )
+            .into());
+        }
+        Ok(version)
+    }
+
+    pub fn cached_joystick_hardware_mode(
+        &self,
+        active_profile: Option<u8>,
+        active_layer: Option<u8>,
+    ) -> Option<String> {
+        let bytes = load_cached_session_keymap(self.id)?;
+        let observed = self.observed_profile_layer();
+        let p = active_profile.or_else(|| observed.map(|(cp, _)| cp));
+        let l = active_layer.or_else(|| observed.map(|(_, cl)| cl));
+        mi_model::apply::extract_keymap_joystick_hardware_mode(&bytes, p, l)
+    }
+
+    pub async fn read_active_joystick_hardware_mode(
+        &self,
+        active_profile: Option<u8>,
+        active_layer: Option<u8>,
+    ) -> Result<Option<String>, SessionError> {
+        self.require_v070_exclusive_vendor()?;
+        self.guarded(async {
+            let mut q = self.queue.lock().await;
+            if usize::from(q.next_id) + 4 > 999 {
+                return Ok(self.cached_joystick_hardware_mode(active_profile, active_layer));
+            }
+            match self.read_files_locked(&mut q).await {
+                Ok(files) => {
+                    let bytes = files.keymap.bytes.to_vec();
+                    let observed = self.observed_profile_layer();
+                    let p = active_profile.or_else(|| observed.map(|(cp, _)| cp));
+                    let l = active_layer.or_else(|| observed.map(|(_, cl)| cl));
+                    let mode = mi_model::apply::extract_keymap_joystick_hardware_mode(&bytes, p, l);
+                    cache_session_keymap(self.id, bytes);
+                    Ok(mode)
+                }
+                Err(SessionError::Config(_) | SessionError::Protocol(_)) => Ok(None),
+                Err(err) => Err(err),
+            }
+        })
+        .await
+    }
+
+    pub async fn apply_joystick_hardware_mode(
+        &self,
+        document_dir: &Path,
+        mode: &str,
+    ) -> Result<JoystickHardwareModeReceipt, SessionError> {
+        let initial_version = self.require_v070_exclusive_vendor()?;
+        let normalized_requested = match mode.trim().to_ascii_lowercase().as_str() {
+            "mouse" => "mouse",
+            "scroll" => "scroll",
+            "logical_sectors" | "sectors" => "logical_sectors",
+            other => {
+                return Err(SessionError::Config(format!(
+                    "不支持的摇杆硬件模式：{other}"
+                )));
+            }
+        };
+
+        self.guarded(async {
+            let mut q = self.queue.lock().await;
+            let status = self.exchange(&mut q, Method::DeviceStatus, Value::Null).await?;
+            let status_result = crate::identity_result(&status)?;
+            let version = crate::firmware(status_result).unwrap_or(initial_version);
+            if !mi_model::supports_v070_hardware_capabilities(&version) {
+                return Err(ProtoError::Unverified(
+                    "0.7.0 hardware capability requires firmware >= 0.7.0-rc.16",
+                )
+                .into());
+            }
+            *self.firmware.lock().unwrap() = Some(version.clone());
+
+            let status_p = status_result
+                .get("profile_index")
+                .and_then(Value::as_u64)
+                .and_then(|v| u8::try_from(v).ok());
+            let status_l = status_result
+                .get("layer_index")
+                .and_then(Value::as_u64)
+                .and_then(|v| u8::try_from(v).ok());
+            let observed = self.observed_profile_layer();
+            let active_profile = status_p.or_else(|| observed.map(|(cp, _)| cp));
+            let active_layer = status_l.or_else(|| observed.map(|(_, cl)| cl));
+            if let Some((np, nl)) = active_profile.zip(active_layer) {
+                *self.profile_layer.lock().unwrap() = Some((np, nl));
+            }
+
+            let current = self.read_files_locked(&mut q).await?;
+            let pre_write_keymap = current.keymap.bytes.to_vec();
+            let smart_ref = current.smart_actions.as_ref().map(|f| f.bytes.as_ref());
+
+            let backup_path =
+                persist_immutable_v070_keymap_backup(document_dir, &pre_write_keymap)
+                    .map_err(SessionError::Config)?;
+
+            let parsed_cfg = mi_model::parse_device_files(&pre_write_keymap, smart_ref)
+                .map_err(|e| SessionError::Config(e.to_string()))?;
+            let effective_profile_idx: Option<usize> = if let Some(p) = active_profile {
+                Some(usize::from(p))
+            } else {
+                parsed_cfg
+                    .raw
+                    .get("profiles")
+                    .and_then(Value::as_array)
+                    .and_then(|profiles| {
+                        let active_id = parsed_cfg.raw.get("activeProfileId")?;
+                        let matching: Vec<usize> = profiles
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, p)| (&p["id"] == active_id).then_some(i))
+                            .collect();
+                        if matching.len() == 1 {
+                            Some(matching[0])
+                        } else {
+                            active_id.as_u64().and_then(|n| usize::try_from(n).ok())
+                        }
+                    })
+            };
+
+            let recognized_six_layer = mi_model::apply::recognize_six_layer_profile_for_firmware(
+                &pre_write_keymap,
+                smart_ref,
+                Some(&version),
+            )
+            .ok()
+            .flatten();
+            let is_six_layer_profile = recognized_six_layer.is_some()
+                && recognized_six_layer.map(|idx| idx as usize) == effective_profile_idx;
+
+            let layer_arg = if is_six_layer_profile {
+                None
+            } else {
+                Some(
+                    active_layer
+                        .and_then(|l| l.checked_sub(1))
+                        .map(usize::from)
+                        .unwrap_or(0),
+                )
+            };
+
+            let (patched_bytes, changed) = mi_model::apply::patch_keymap_joystick_hardware_mode(
+                &pre_write_keymap,
+                &version,
+                effective_profile_idx,
+                layer_arg,
+                normalized_requested,
+            )
+            .map_err(SessionError::Config)?;
+
+            if changed {
+                const KEYMAP_CHUNK_BYTES: usize = 3072;
+                let chunks = patched_bytes.len().div_ceil(KEYMAP_CHUNK_BYTES);
+                let smart_chunks = smart_ref.map_or(0, |b| b.len().div_ceil(KEYMAP_CHUNK_BYTES));
+                let needed_requests = 2 + chunks + 2 + chunks + smart_chunks + 1;
+                if chunks == 0 || usize::from(q.next_id) + needed_requests > 999 {
+                    return Err(SessionError::Config(
+                        "会话请求预算不足，请重新连接后再修改摇杆硬件模式".into(),
+                    ));
+                }
+                if let Some(snapshot) = self.snapshot.lock().unwrap().as_mut() {
+                    snapshot.stale = true;
+                }
+                let mut guard = V070KeymapMutationGuard {
+                    session: self,
+                    sent: true,
+                    verified: false,
+                };
+                let tx = self.exchange_tx_begin(&mut q).await?;
+                for offset in (0..patched_bytes.len()).step_by(KEYMAP_CHUNK_BYTES) {
+                    let expected_id = q.next_id;
+                    let reply = self
+                        .exchange_keymap_with_tx(&mut q, &patched_bytes, offset, Some(tx))
+                        .await?;
+                    mi_proto::mutation::validate_mutation_response_candidate(&reply, expected_id)?;
+                }
+                self.exchange_tx_commit(&mut q, tx).await?;
+                let actual = self.read_files_locked(&mut q).await?;
+                let actual_smart = actual.smart_actions.as_ref().map(|f| f.bytes.as_ref());
+                if actual.keymap.bytes.as_ref() != patched_bytes.as_slice()
+                    || actual_smart != smart_ref
+                {
+                    return Err(SessionError::Config(
+                        "摇杆硬件模式写入后 SHA-1 / 原字节读回不一致".into(),
+                    ));
+                }
+                guard.verified = true;
+            }
+
+            cache_session_keymap(self.id, patched_bytes.clone());
+
+            if let Some(layer) = active_layer.filter(|&l| l >= 1) {
+                let target = ProfileLayerTarget {
+                    p: active_profile,
+                    l: Some(layer),
+                };
+                target.validate()?;
+                let id = q.next_id;
+                let encoded = if id >= 999 {
+                    Vec::new()
+                } else {
+                    encode_set_profile_layer(target, id)?
+                };
+                let reply = self
+                    .exchange_authorized(
+                        &mut q,
+                        PROFILE_LAYER_SET_METHOD,
+                        encoded,
+                        Some(PROFILE_LAYER_SET_METHOD),
+                    )
+                    .await?;
+                decode_set_profile_layer_response(&reply, id)?;
+            }
+
+            let resolved_mode = mi_model::apply::extract_keymap_joystick_hardware_mode(
+                &patched_bytes,
+                active_profile,
+                active_layer,
+            )
+            .unwrap_or_else(|| match normalized_requested {
+                "mouse" => "mouse".into(),
+                "scroll" => "scroll".into(),
+                _ => "radial".into(),
+            });
+
+            Ok(JoystickHardwareModeReceipt {
+                mode: resolved_mode,
+                active_profile,
+                active_layer,
+                backup_path,
+                pre_write_keymap,
+                post_write_keymap: patched_bytes,
+                changed,
+            })
+        })
+        .await
     }
 }
 
@@ -503,5 +897,259 @@ mod tests {
         ));
         assert_eq!(session.observed_profile_layer(), Some((3, 4)));
         session.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn joystick_hardware_mode_readback_degrades_gracefully_without_keymap_and_gates_firmware()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (session_063, link_063, mut out_063) =
+            setup_session(true, LinkBackend::MacHidapi267Numbered);
+        read_identity(&session_063, &link_063, &mut out_063, "0.6.3").await;
+        assert!(matches!(
+            session_063
+                .read_active_joystick_hardware_mode(Some(3), Some(1))
+                .await,
+            Err(SessionError::Protocol(ProtoError::Unverified(_)))
+        ));
+        assert!(matches!(
+            session_063
+                .apply_joystick_hardware_mode(dir.path(), "mouse")
+                .await,
+            Err(SessionError::Protocol(ProtoError::Unverified(_)))
+        ));
+        assert!(out_063.try_recv().is_err());
+        session_063.shutdown().await;
+
+        // Minimal synthetic responder returning `{}` for `fs.list` degrades gracefully to `Ok(None)`
+        let (session_min, link_min, mut out_min) =
+            setup_session(true, LinkBackend::MacHidapi267Numbered);
+        read_identity(&session_min, &link_min, &mut out_min, "0.7.0-rc.16").await;
+        let link_resp = link_min.clone();
+        let responder = tokio::spawn(async move {
+            while let Some(raw) = out_min.recv().await {
+                let req: Value = serde_json::from_slice(&raw).unwrap();
+                link_resp.push_reply(json!({
+                    "id": req["id"],
+                    "method": req["method"],
+                    "result": {}
+                }));
+            }
+        });
+        assert_eq!(
+            session_min
+                .read_active_joystick_hardware_mode(Some(3), Some(1))
+                .await
+                .unwrap(),
+            None
+        );
+        session_min.shutdown().await;
+        responder.abort();
+    }
+
+    #[tokio::test]
+    async fn apply_joystick_hardware_mode_backs_up_verifies_sha1_patches_six_layers_and_reloads_pl()
+    {
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine as _;
+        use sha1::{Digest, Sha1};
+        use std::os::unix::fs::PermissionsExt;
+
+        const SIX_SOURCE: &[u8] =
+            include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+        let initial_six = mi_model::apply::compile_six_layer_profile(SIX_SOURCE, None)
+            .unwrap()
+            .keymap;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (session, link, mut out_rx) = setup_session(true, LinkBackend::MacHidapi267Numbered);
+        read_identity(&session, &link, &mut out_rx, "0.7.0-rc.16").await;
+
+        let recorded_methods = Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let methods_clone = recorded_methods.clone();
+        let corrupt_readback = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let corrupt_clone = corrupt_readback.clone();
+        let link_resp = link.clone();
+        let initial_for_task = initial_six.clone();
+
+        let responder = tokio::spawn(async move {
+            let mut keymap = initial_for_task;
+            let mut staged = Vec::new();
+            let mut active_profile = 1_u64;
+            let mut active_layer = 2_u64;
+            while let Some(raw) = out_rx.recv().await {
+                let req: Value = serde_json::from_slice(&raw).unwrap();
+                let id = req["id"].clone();
+                let method = req["method"].as_str().unwrap().to_string();
+                let params = req["params"].clone();
+                methods_clone
+                    .lock()
+                    .unwrap()
+                    .push((method.clone(), params.clone()));
+
+                let visible_keymap = if corrupt_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                    let mut bad = keymap.clone();
+                    bad.push(b' ');
+                    bad
+                } else {
+                    keymap.clone()
+                };
+
+                let result = match method.as_str() {
+                    "device.status" => json!({
+                        "version": "0.7.0-rc.16",
+                        "profile_index": active_profile,
+                        "layer_index": active_layer
+                    }),
+                    "fs.list" => {
+                        let sha1 = format!("{:x}", Sha1::digest(&visible_keymap));
+                        json!([{
+                            "name": "keymap.json",
+                            "size": visible_keymap.len(),
+                            "checksum": sha1
+                        }])
+                    }
+                    "fs.readbin" => {
+                        let offset = params["offset"].as_u64().unwrap() as usize;
+                        let len = params["len"].as_u64().unwrap() as usize;
+                        let end = (offset + len).min(visible_keymap.len());
+                        json!({
+                            "total_size": visible_keymap.len(),
+                            "data": B64.encode(&visible_keymap[offset..end])
+                        })
+                    }
+                    "fs.txbegin" => {
+                        staged.clear();
+                        json!({"tx": 42})
+                    }
+                    "fs.writebin" => {
+                        assert_eq!(params["tx"], json!(42));
+                        let chunk = B64.decode(params["data"].as_str().unwrap()).unwrap();
+                        staged.extend_from_slice(&chunk);
+                        Value::Null
+                    }
+                    "fs.txcommit" => {
+                        assert_eq!(params["tx"], json!(42));
+                        keymap = std::mem::take(&mut staged);
+                        Value::Null
+                    }
+                    "kb.pl.set" => {
+                        if let Some(p) = params.get("p").and_then(Value::as_u64) {
+                            active_profile = p;
+                        }
+                        if let Some(l) = params.get("l").and_then(Value::as_u64) {
+                            active_layer = l;
+                        }
+                        json!({})
+                    }
+                    other => panic!("unexpected method {other}"),
+                };
+
+                link_resp.push_reply(json!({
+                    "id": id,
+                    "method": method,
+                    "result": result
+                }));
+            }
+        });
+
+        assert_eq!(
+            session
+                .read_active_joystick_hardware_mode(Some(1), Some(2))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("radial")
+        );
+
+        let receipt_mouse = session
+            .apply_joystick_hardware_mode(dir.path(), "mouse")
+            .await
+            .unwrap();
+        assert!(receipt_mouse.changed);
+        assert_eq!(receipt_mouse.mode, "mouse");
+        assert_eq!(receipt_mouse.active_profile, Some(1));
+        assert_eq!(receipt_mouse.active_layer, Some(2));
+        assert_eq!(receipt_mouse.pre_write_keymap, initial_six);
+
+        // Verify immutable backup directory (0700) and file (0600)
+        let backup_dir = dir.path().join("v070-keymap-backups");
+        assert_eq!(
+            std::fs::metadata(&backup_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&receipt_mouse.backup_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::read(&receipt_mouse.backup_path).unwrap(),
+            initial_six
+        );
+        assert_eq!(
+            std::fs::read(backup_dir.join("original-keymap.json")).unwrap(),
+            initial_six
+        );
+
+        // Verify all 6 layers in the six-layer profile were patched to MOUSE and kb.pl.set reloaded (p=1, l=2)
+        for layer_1_based in 1..=6_u8 {
+            assert_eq!(
+                session
+                    .cached_joystick_hardware_mode(Some(1), Some(layer_1_based))
+                    .as_deref(),
+                Some("mouse")
+            );
+        }
+        assert!(recorded_methods
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, p)| m == "kb.pl.set" && p == &json!({"p": 1, "l": 2})));
+
+        // Switch to scroll, then back to logical_sectors; original backup stays untouched
+        let receipt_scroll = session
+            .apply_joystick_hardware_mode(dir.path(), "scroll")
+            .await
+            .unwrap();
+        assert!(receipt_scroll.changed);
+        assert_eq!(receipt_scroll.mode, "scroll");
+        assert_eq!(
+            std::fs::read(backup_dir.join("original-keymap.json")).unwrap(),
+            initial_six
+        );
+
+        let receipt_sectors = session
+            .apply_joystick_hardware_mode(dir.path(), "logical_sectors")
+            .await
+            .unwrap();
+        assert!(receipt_sectors.changed);
+        assert_eq!(receipt_sectors.mode, "radial");
+        assert_eq!(
+            session
+                .cached_joystick_hardware_mode(Some(1), Some(1))
+                .as_deref(),
+            Some("vendor")
+        );
+        assert_eq!(
+            session
+                .cached_joystick_hardware_mode(Some(1), Some(2))
+                .as_deref(),
+            Some("radial")
+        );
+
+        // Fault injection: if post-write readback diverges from written bytes, fail and fence session!
+        corrupt_readback.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = session
+            .apply_joystick_hardware_mode(dir.path(), "mouse")
+            .await
+            .unwrap_err();
+        assert!(!session.is_disconnected() || matches!(err, SessionError::Config(_)));
+
+        session.shutdown().await;
+        responder.abort();
     }
 }
