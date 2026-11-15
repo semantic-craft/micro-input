@@ -284,16 +284,7 @@ def run_h1(device_path: str, h0_summary: dict, scratch_root: Path):
 
 def verify_live_app_usb_auto_acceptance(expected_device_path: str, expected_keymap_sha256: str):
     subprocess.run([str(ROOT / "scripts" / "build")], cwd=ROOT, check=True)
-    installed_app = Path("/Applications/Micro Input.app")
-    if installed_app.exists():
-        subprocess.run(
-            ["rsync", "-a", "--delete", str(ROOT / "target" / "MicroInput.app") + "/", str(installed_app) + "/"],
-            cwd=ROOT,
-            check=True,
-        )
-        app_to_launch = installed_app
-    else:
-        app_to_launch = ROOT / "target" / "MicroInput.app"
+    app_to_launch = ROOT / "target" / "MicroInput.app"
 
     doc_dir = Path(
         os.environ.get(

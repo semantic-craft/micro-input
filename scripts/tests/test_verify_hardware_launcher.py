@@ -97,6 +97,37 @@ class VerifyHardwareLauncherTests(unittest.TestCase):
         self.assertTrue(saved["h1"]["cleanup_confirmed"])
         self.assertEqual(saved["app_auto_acceptance"]["status"], "PASS")
 
+    def test_verify_live_app_launches_target_bundle_without_rsyncing_applications(self):
+        doc_dir = self.root / "doc"
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        launched_cmds = []
+
+        def fake_run(cmd, cwd=None, check=False, **kwargs):
+            launched_cmds.append(cmd)
+            if cmd[0] == "open":
+                receipt = {
+                    "status": "PASS",
+                    "firmware_version": "0.6.3",
+                    "exclusive_vendor": True,
+                    "device_path": "DevSrvsID:synthetic-test",
+                    "keymap_sha256": "b" * 64,
+                    "lighting_rgbcfg_synced": True,
+                    "lighting_preview_synced": True,
+                    "lighting_thstatus_synced": True,
+                    "timestamp_ms": 9_999_999_999_999,
+                }
+                (doc_dir / "hardware-auto-acceptance.json").write_text(json.dumps(receipt), encoding="utf-8")
+            return None
+
+        with patch.dict("os.environ", {"MI_DOCUMENT_DIR": str(doc_dir)}), \
+             patch.object(self.mod.subprocess, "run", side_effect=fake_run):
+            receipt = self.mod.verify_live_app_usb_auto_acceptance("DevSrvsID:synthetic-test", "b" * 64)
+
+        self.assertEqual(receipt["status"], "PASS")
+        self.assertFalse(any(cmd[0] == "rsync" for cmd in launched_cmds))
+        open_cmds = [cmd for cmd in launched_cmds if cmd[0] == "open"]
+        self.assertEqual(open_cmds, [["open", "-g", str(self.mod.ROOT / "target" / "MicroInput.app")]])
+
 
 if __name__ == "__main__":
     unittest.main()
