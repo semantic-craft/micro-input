@@ -519,14 +519,12 @@ fn antigravity_status_client_rejects_public_regular_file_and_symlink_socket_befo
     std::fs::write(&grant_path, serde_json::to_vec(&g_val).unwrap()).unwrap();
     std::fs::set_permissions(&grant_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-    // Regular file at socketPath
     std::fs::write(&sock_path, b"not-a-socket").unwrap();
     std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let client = AntigravityStatusClient::new(&grant_path);
     assert_eq!(client.connect(), Err(AntigravityFailure::Denied));
     std::fs::remove_file(&sock_path).unwrap();
 
-    // 0o666 socket must be rejected before connecting or sending token
     let listener = UnixListener::bind(&sock_path).unwrap();
     listener.set_nonblocking(true).unwrap();
     std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o666)).unwrap();
@@ -538,7 +536,6 @@ fn antigravity_status_client_rejects_public_regular_file_and_symlink_socket_befo
     drop(listener);
     std::fs::remove_file(&sock_path).unwrap();
 
-    // Symlinked socket pointing to a private 0o600 socket must also be rejected
     let real_sock = dir.path().join("real.sock");
     let real_listener = UnixListener::bind(&real_sock).unwrap();
     real_listener.set_nonblocking(true).unwrap();

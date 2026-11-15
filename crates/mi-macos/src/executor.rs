@@ -4397,7 +4397,6 @@ mod serialized_effect_tests {
         let backend = Arc::new(MockClipboardBackend::new(Vec::new(), 5));
         let driver = MacOsSystemDriver::with_clipboard_backend(Arc::clone(&backend) as _);
 
-        // Originally empty clipboard -> cleared on restore
         let snap = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
         let written_cc = driver.write_clipboard_plain_text_checked("temp").unwrap();
         assert_eq!(written_cc, 6);
@@ -4405,7 +4404,6 @@ mod serialized_effect_tests {
         assert_eq!(backend.state.lock().unwrap().clear_calls, 1);
         assert!(backend.state.lock().unwrap().items.is_empty());
 
-        // External user copy bumps changeCount -> restore skips clobbering newer item
         let snap2 = driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
         let written_cc2 = driver.write_clipboard_plain_text_checked("temp2").unwrap();
         {
