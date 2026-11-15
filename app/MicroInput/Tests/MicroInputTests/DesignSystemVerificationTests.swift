@@ -810,6 +810,105 @@ final class DesignSystemVerificationTests: XCTestCase {
     }
 
     @MainActor
+    func testEnglishWorkbenchAndStatusMenuCheatSheetGeometryFitWithoutTruncation() throws {
+        let dir = try makeIsolatedTempDir("english-geometry")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        store.setUiLanguage(.en)
+        XCTAssertEqual(store.locale, .en)
+
+        let headerHost = NSHostingView(rootView: WorkbenchHeaderBarView(store: store))
+        headerHost.layoutSubtreeIfNeeded()
+        XCTAssertLessThanOrEqual(
+            headerHost.fittingSize.width,
+            820,
+            "English WorkbenchHeaderBarView minimum intrinsic width must fit inside 820pt minimum window width"
+        )
+
+        let loginController = LaunchAtLoginController(
+            bundleIdentifier: LaunchAtLoginPolicy.productionBundleIdentifier,
+            bundlePath: "/Applications/Micro Input.app",
+            environment: [:],
+            arguments: [],
+            driver: IsolatedLaunchAtLoginDriver()
+        )
+        let updater = SoftwareUpdateController(
+            bundlePath: "/Applications/Micro Input.app",
+            environment: ["MI_DISABLE_UPDATER": "1"]
+        )
+
+        for destination in WorkbenchDestination.allCases {
+            for (width, height) in [(CGFloat(820), CGFloat(640)), (CGFloat(1180), CGFloat(740))] {
+                let (win, host) = makeHostedWindow(
+                    ClassicWorkbenchView(
+                        store: store,
+                        navigation: WorkbenchNavigationModel(destination: destination),
+                        updater: updater,
+                        launchAtLogin: loginController
+                    )
+                    .frame(width: width, height: height),
+                    width: width,
+                    fixedHeight: height
+                )
+                defer { win.orderOut(nil) }
+                XCTAssertLessThanOrEqual(
+                    host.fittingSize.width,
+                    width + 0.5,
+                    "English workbench destination \(destination) overflowed width \(width)"
+                )
+            }
+        }
+
+        store.dispatch("canvas", ["SetBottomRowLayout": "split"])
+        let splitPreview = try XCTUnwrap(store.statusMenu.cheatSheetPreview)
+        XCTAssertEqual(splitPreview.keyCells.count, 20)
+
+        let (splitWin, splitHost) = makeHostedWindow(
+            StatusMenuPopoverView(store: store, onOpenMainWindow: {}),
+            width: 348
+        )
+        defer { splitWin.orderOut(nil) }
+        XCTAssertEqual(splitHost.fittingSize.width, 348, accuracy: 1.0)
+        XCTAssertLessThan(splitHost.fittingSize.height, 760)
+        XCTAssertFalse(hasScrollView(in: splitHost))
+
+        for cell in splitPreview.keyCells {
+            XCTAssertFalse(cell.shortLabel.isEmpty)
+            XCTAssertFalse(cell.shortLabel.contains("…"), "English split shortLabel must not contain ellipsis: \(cell.shortLabel)")
+            if ["AG13", "AG14", "ENC_CLK"].contains(cell.bindingId) {
+                let w = (cell.shortLabel as NSString).size(
+                    withAttributes: [.font: NSFont.systemFont(ofSize: 9 * 0.75, weight: .medium)]
+                ).width
+                XCTAssertLessThanOrEqual(w, 52, "English rotary shortLabel '\(cell.shortLabel)' must fit 1U rotary row")
+            } else if ["AG15", "AG16", "AG17", "AG18"].contains(cell.bindingId) {
+                let h = (cell.shortLabel as NSString).boundingRect(
+                    with: NSSize(width: CGFloat(22), height: .greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: [.font: NSFont.systemFont(ofSize: 8 * 0.75, weight: .medium)]
+                ).height
+                XCTAssertLessThanOrEqual(h, 24, "English joystick shortLabel '\(cell.shortLabel)' must fit 2x2 quadrant height")
+            } else {
+                let h = (cell.shortLabel as NSString).boundingRect(
+                    with: NSSize(width: CGFloat(60), height: .greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: [.font: NSFont.systemFont(ofSize: 10.5 * 0.82, weight: .medium)]
+                ).height
+                XCTAssertLessThanOrEqual(h, 34, "English 1U key shortLabel '\(cell.shortLabel)' must fit 2-line budget")
+            }
+        }
+
+        store.dispatch("canvas", ["SetBottomRowLayout": "merged"])
+        let mergedPreview = try XCTUnwrap(store.statusMenu.cheatSheetPreview)
+        XCTAssertEqual(mergedPreview.keyCells.count, 19)
+        let mergedAg10 = try XCTUnwrap(mergedPreview.keyCells.first(where: { $0.bindingId == "AG10" }))
+        XCTAssertEqual(mergedAg10.shortLabel, "Hold Talk")
+        for cell in mergedPreview.keyCells {
+            XCTAssertFalse(cell.shortLabel.contains("…"), "English merged shortLabel must not contain ellipsis: \(cell.shortLabel)")
+        }
+    }
+
+    @MainActor
     private func saveSnapshot<V: View>(
         _ view: V,
         width: CGFloat,

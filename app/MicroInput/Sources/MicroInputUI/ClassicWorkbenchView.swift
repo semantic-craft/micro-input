@@ -6,6 +6,7 @@ public struct ClassicWorkbenchView: View {
     let store: CoreStore
     @Bindable var navigation: WorkbenchNavigationModel
     let updater: SoftwareUpdateController
+    let launchAtLogin: LaunchAtLoginController
     @State private var showFullActionLibrarySheet = false
     @State private var showMacroLibrarySheet = false
     @State private var showNewProfileDialog = false
@@ -21,11 +22,13 @@ public struct ClassicWorkbenchView: View {
     public init(
         store: CoreStore,
         navigation: WorkbenchNavigationModel? = nil,
-        updater: SoftwareUpdateController? = nil
+        updater: SoftwareUpdateController? = nil,
+        launchAtLogin: LaunchAtLoginController? = nil
     ) {
         self.store = store
         self.navigation = navigation ?? WorkbenchNavigationModel()
         self.updater = updater ?? SoftwareUpdateController()
+        self.launchAtLogin = launchAtLogin ?? LaunchAtLoginController()
     }
 
     public var body: some View {
@@ -33,7 +36,11 @@ public struct ClassicWorkbenchView: View {
         let destination = navigation.destination
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                WorkbenchNavigationView(selection: $navigation.destination, versionLabel: updater.identity.displayVersionLabel)
+                WorkbenchNavigationView(
+                    selection: $navigation.destination,
+                    versionLabel: updater.identity.displayVersionLabel,
+                    locale: store.locale
+                )
                     .frame(width: UITheme.Layout.sidebarWidth)
                 Rectangle().fill(UITheme.hairlineBorder).frame(width: 1)
                 VStack(spacing: 0) {
@@ -53,7 +60,7 @@ public struct ClassicWorkbenchView: View {
                     } else if destination == .profiles {
                         ScrollView {
                             VStack(alignment: .leading, spacing: 24) {
-                                Text("应用方案").font(UITheme.title).foregroundStyle(UITheme.textPrimary)
+                                Text(store.tr("应用方案")).font(UITheme.title).foregroundStyle(UITheme.textPrimary)
                                 WorkbenchSidebarView(
                                     store: store,
                                     onBrowseProfile: { navigation.destination = .keyboard },
@@ -72,6 +79,7 @@ public struct ClassicWorkbenchView: View {
                         WorkbenchSettingsPage(
                             store: store,
                             updater: updater,
+                            launchAtLogin: launchAtLogin,
                             destination: destination
                         )
                     }
@@ -94,36 +102,36 @@ public struct ClassicWorkbenchView: View {
         .sheet(isPresented: $showMacroLibrarySheet) {
             ClassicMacroAndMultiLibrarySheet(store: store)
         }
-        .alert("新建软件方案", isPresented: $showNewProfileDialog) {
-            TextField("方案名称", text: $newProfileDraftName)
-            Button("取消", role: .cancel) {}
-            Button("创建") {
+        .alert(store.tr("新建软件方案"), isPresented: $showNewProfileDialog) {
+            TextField(store.tr("方案名称"), text: $newProfileDraftName)
+            Button(store.tr("取消"), role: .cancel) {}
+            Button(store.tr("创建")) {
                 let name = newProfileDraftName.trimmingCharacters(in: .whitespacesAndNewlines)
-                store.dispatch("sidebar", ["Profile": ["Create": ["name": name.isEmpty ? "自定义方案" : name]]])
+                store.dispatch("sidebar", ["Profile": ["Create": ["name": name.isEmpty ? "新建方案" : name]]])
             }
         }
-        .alert("重命名当前方案", isPresented: $showRenameProfileDialog) {
-            TextField("新方案名称", text: $renameProfileDraftName)
-            Button("取消", role: .cancel) {}
-            Button("保存") {
+        .alert(store.tr("重命名当前方案"), isPresented: $showRenameProfileDialog) {
+            TextField(store.tr("新方案名称"), text: $renameProfileDraftName)
+            Button(store.tr("取消"), role: .cancel) {}
+            Button(store.tr("保存")) {
                 let name = renameProfileDraftName.trimmingCharacters(in: .whitespacesAndNewlines)
                 if let pid = store.sidebar.selectedProfileId, !name.isEmpty {
                     store.dispatch("sidebar", ["Profile": ["Rename": ["profile_id": pid, "name": name]]])
                 }
             }
         }
-        .alert("新建按键层", isPresented: $showNewLayerDialog) {
-            TextField("层名称", text: $newLayerDraftName)
-            Button("取消", role: .cancel) {}
-            Button("创建") {
+        .alert(store.tr("新建按键层"), isPresented: $showNewLayerDialog) {
+            TextField(store.tr("层名称"), text: $newLayerDraftName)
+            Button(store.tr("取消"), role: .cancel) {}
+            Button(store.tr("创建")) {
                 let name = newLayerDraftName.trimmingCharacters(in: .whitespacesAndNewlines)
                 store.dispatch("inspector", ["CreateCustomLayer": ["name": name.isEmpty ? "自定义层" : name]])
             }
         }
-        .alert("重命名当前按键层", isPresented: $showRenameLayerDialog) {
-            TextField("新层名称", text: $renameLayerDraftName)
-            Button("取消", role: .cancel) {}
-            Button("保存") {
+        .alert(store.tr("重命名当前按键层"), isPresented: $showRenameLayerDialog) {
+            TextField(store.tr("新层名称"), text: $renameLayerDraftName)
+            Button(store.tr("取消"), role: .cancel) {}
+            Button(store.tr("保存")) {
                 let name = renameLayerDraftName.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !name.isEmpty {
                     store.dispatch("inspector", ["RenameSelectedLayer": ["name": name]])
@@ -157,7 +165,7 @@ struct WorkbenchHeaderBarView: View {
             .overlay(Capsule().stroke(UITheme.hairlineBorder, lineWidth: 1))
 
             if h.showConnectButton {
-                Button("连接键盘") {
+                Button(store.tr("连接键盘")) {
                     store.dispatch("header", "ConnectKeyboard")
                 }
                 .surfaceButton(.primary)
@@ -168,7 +176,7 @@ struct WorkbenchHeaderBarView: View {
                 HardwarePowerStatusCapsule(badge: powerStatus)
             }
             if h.candidateDevices.count > 1 {
-                CandidateDevicePickerPill(candidates: h.candidateDevices) {
+                CandidateDevicePickerPill(candidates: h.candidateDevices, locale: store.locale) {
                     store.selectHeaderCandidateDevice($0)
                 }
             }
@@ -176,7 +184,7 @@ struct WorkbenchHeaderBarView: View {
             Spacer(minLength: 8)
 
             Toggle(
-                "按键映射",
+                store.tr("按键映射"),
                 isOn: Binding(
                     get: { h.hostExecutionEnabled },
                     set: { store.dispatch("header", ["SetExecutionEnabled": $0]) }
@@ -194,7 +202,7 @@ struct WorkbenchHeaderBarView: View {
                 .surfaceButton(.icon)
                 .disabled(!h.canUndo)
                 .keyboardShortcut("z", modifiers: [.command])
-                .help("撤销上一步修改 (⌘Z)")
+                .help(store.tr("撤销上一步修改 (⌘Z)"))
 
                 Button {
                     store.dispatch("header", "Redo")
@@ -204,7 +212,7 @@ struct WorkbenchHeaderBarView: View {
                 .surfaceButton(.icon)
                 .disabled(!h.canRedo)
                 .keyboardShortcut("z", modifiers: [.command, .shift])
-                .help("重做上一步修改 (⇧⌘Z)")
+                .help(store.tr("重做上一步修改 (⇧⌘Z)"))
 
                 Button {
                     store.dispatch("overlay", "ToggleCheatSheet")
@@ -212,7 +220,7 @@ struct WorkbenchHeaderBarView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "square.grid.2x2")
                             .font(.system(size: 12, weight: .medium))
-                        Text(h.cheatSheetVisible ? "隐藏速查" : "按键速查")
+                        Text(h.cheatSheetVisible ? store.tr("隐藏速查") : store.tr("按键速查"))
                     }
                 }
                 .surfaceButton(.secondary)
@@ -234,40 +242,41 @@ private struct WorkbenchSidebarView: View {
     var body: some View {
         let _ = ViewRenderTelemetry.record("Sidebar")
         let s = store.sidebar
+        let locale = store.locale
         VStack(alignment: .leading, spacing: 24) {
             VStack(alignment: .leading, spacing: 10) {
-                SettingsSectionHeader("软件方案") {
+                SettingsSectionHeader(store.tr("软件方案")) {
                     HStack(spacing: 8) {
                         Menu {
-                            Button("新建配置…") { onPromptNewProfile() }
+                            Button(store.tr("新建配置…")) { onPromptNewProfile() }
                             if let pid = s.selectedProfileId {
-                                Button("重命名配置…") { onPromptRenameProfile() }
-                                Button("复制配置") {
+                                Button(store.tr("重命名配置…")) { onPromptRenameProfile() }
+                                Button(store.tr("复制配置")) {
                                     store.dispatch("sidebar", [
-                                        "Profile": ["Duplicate": ["profile_id": pid, "name": "\(s.selectedDisplayName) 副本"]]
+                                        "Profile": ["Duplicate": ["profile_id": pid, "name": ""]]
                                     ])
                                 }
                                 Divider()
-                                Button("上移配置") {
+                                Button(store.tr("上移配置")) {
                                     store.dispatch("sidebar", ["Profile": ["MoveUp": ["profile_id": pid]]])
                                 }
                                 .disabled(!s.canMoveUp)
-                                Button("下移配置") {
+                                Button(store.tr("下移配置")) {
                                     store.dispatch("sidebar", ["Profile": ["MoveDown": ["profile_id": pid]]])
                                 }
                                 .disabled(!s.canMoveDown)
                                 Divider()
-                                Button("删除配置…", role: .destructive) {
+                                Button(store.tr("删除配置…"), role: .destructive) {
                                     store.dispatch("sidebar", ["Profile": ["Delete": ["profile_id": pid]]])
                                 }
                                 .disabled(!s.canDelete)
                             }
                             Divider()
-                            Button("补齐内置软件方案") {
+                            Button(store.tr("补齐内置软件方案")) {
                                 store.dispatch("sidebar", ["Profile": "InstallCodingAgentPresets"])
                             }
                         } label: {
-                            CapsuleMenuLabel("方案管理")
+                            CapsuleMenuLabel(store.tr("方案管理"))
                         }
                         .menuStyle(.borderlessButton)
                         .menuIndicator(.hidden)
@@ -275,7 +284,7 @@ private struct WorkbenchSidebarView: View {
                         .fixedSize()
 
                         Menu {
-                            Button("导入预设文件…") {
+                            Button(store.tr("导入预设文件…")) {
                                 let panel = NSOpenPanel()
                                 panel.canChooseFiles = true
                                 panel.canChooseDirectories = false
@@ -287,21 +296,21 @@ private struct WorkbenchSidebarView: View {
                                 }
                             }
                             Divider()
-                            Button("导出整个本地文档…") {
+                            Button(store.tr("导出整个本地文档…")) {
                                 exportPreset(profileId: nil, layerId: nil, defaultName: "micro-input-document.json")
                             }
                             if let pid = s.selectedProfileId {
-                                Button("导出当前配置…") {
+                                Button(store.tr("导出当前配置…")) {
                                     exportPreset(profileId: pid, layerId: nil, defaultName: "micro-input-profile.json")
                                 }
                                 if let lid = s.selectedLayerId {
-                                    Button("导出当前层…") {
+                                    Button(store.tr("导出当前层…")) {
                                         exportPreset(profileId: pid, layerId: lid, defaultName: "micro-input-layer.json")
                                     }
                                 }
                             }
                         } label: {
-                            CapsuleMenuLabel("导入与备份")
+                            CapsuleMenuLabel(store.tr("导入与备份"))
                         }
                         .menuStyle(.borderlessButton)
                         .menuIndicator(.hidden)
@@ -313,7 +322,7 @@ private struct WorkbenchSidebarView: View {
                 SettingsCard {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(s.sidebarRows) { row in
-                            SidebarProfileRowButton(store: store, row: row, onBrowse: onBrowseProfile)
+                            SidebarProfileRowButton(store: store, row: row, locale: locale, onBrowse: onBrowseProfile)
                                 .equatable()
                         }
                     }
@@ -327,11 +336,11 @@ private struct WorkbenchSidebarView: View {
 
             let showHardwareLayerSync = store.v070Hardware.supported || store.v070Hardware.autoLayerSyncEnabled
             VStack(alignment: .leading, spacing: 10) {
-                SettingsSectionHeader("方案与硬件层选项")
+                SettingsSectionHeader(store.tr("方案与硬件层选项"))
                 SettingsCard {
                     SettingsRow(
-                        "显示其他自定义方案",
-                        subtitle: "在方案列表中一并展示原生保护方案与自定义草稿",
+                        store.tr("显示其他自定义方案"),
+                        subtitle: store.tr("在方案列表中一并展示原生保护方案与自定义草稿"),
                         showsDivider: showHardwareLayerSync
                     ) {
                         Toggle(
@@ -346,8 +355,8 @@ private struct WorkbenchSidebarView: View {
                     }
                     if showHardwareLayerSync {
                         SettingsRow(
-                            "同步切换键盘硬件层",
-                            subtitle: "在桌面端切换或激活方案时，同步切换已连接键盘的硬件层",
+                            store.tr("同步切换键盘硬件层"),
+                            subtitle: store.tr("在桌面端切换或激活方案时，同步切换已连接键盘的硬件层"),
                             showsDivider: false
                         ) {
                             Toggle(
@@ -416,10 +425,11 @@ private struct WorkbenchFooterBarView: View {
 private struct SidebarProfileRowButton: View, Equatable {
     let store: CoreStore
     let row: SidebarRowModel
+    let locale: ResolvedLocale
     var onBrowse: () -> Void
 
     static func == (lhs: SidebarProfileRowButton, rhs: SidebarProfileRowButton) -> Bool {
-        lhs.row == rhs.row
+        lhs.row == rhs.row && lhs.locale == rhs.locale
     }
 
     var body: some View {
@@ -439,7 +449,7 @@ private struct SidebarProfileRowButton: View, Equatable {
                         Circle()
                             .fill(UITheme.statusSuccess)
                             .frame(width: 6, height: 6)
-                        Text("使用中")
+                        Text(L10n.tr("使用中", locale))
                             .font(UITheme.micro)
                             .foregroundStyle(UITheme.textPrimary)
                     }
@@ -476,21 +486,23 @@ struct BoardLayersPanel: View {
     }
 
     private var profileOptions: [SelectOption<String>] {
-        [.init(value: Self.unassignedValue, title: "未分配")]
+        let locale = store.locale
+        return [.init(value: Self.unassignedValue, title: store.tr("未分配"))]
             + board.profileChoices.map {
-                .init(value: $0.profileId, title: DesktopAgent.displayName($0.displayName))
+                .init(value: $0.profileId, title: DesktopAgent.displayName($0.displayName, locale: locale))
             }
     }
 
     var body: some View {
+        let locale = store.locale
         let options = profileOptions
         VStack(alignment: .leading, spacing: 10) {
-            SettingsSectionHeader("本地六层方案") {
-                Button("默认") {
+            SettingsSectionHeader(store.tr("本地六层方案")) {
+                Button(store.tr("默认")) {
                     store.dispatch("sidebar", "ResetBoardLayerPlan")
                 }
                 .surfaceButton(.ghost)
-                .help("第 1 层保留 OAI 映射，USB 独占后由 Micro Input 当前方案控制；第 2 / 3 层为 Antigravity / DeepSeek Harness，4 / 5 / 6 层留空")
+                .help(store.tr("第 1 层保留 OAI 映射，USB 独占后由 Micro Input 当前方案控制；第 2 / 3 层为 Antigravity / DeepSeek Harness，4 / 5 / 6 层留空"))
             }
 
             SettingsCard {
@@ -502,7 +514,7 @@ struct BoardLayersPanel: View {
                             } label: {
                                 VStack(alignment: .leading, spacing: 3) {
                                     HStack(spacing: 6) {
-                                        Text("第 \(row.layer) 层")
+                                        Text(L10n.layerNumber(row.layer, locale))
                                             .font(.system(size: 14, weight: row.isPreviewSelected ? .semibold : .medium))
                                             .foregroundStyle(UITheme.textPrimary)
                                         HStack(spacing: 4) {
@@ -519,7 +531,7 @@ struct BoardLayersPanel: View {
                                             .foregroundStyle(UITheme.textSecondary)
                                             .fixedSize(horizontal: false, vertical: true)
                                     } else if row.owner == "MicroInput" {
-                                        Text("由 Micro Input 控制")
+                                        Text(store.tr("由 Micro Input 控制"))
                                             .font(.system(size: 12.5))
                                             .foregroundStyle(UITheme.textSecondary)
                                     }
@@ -534,7 +546,7 @@ struct BoardLayersPanel: View {
                             SelectDropdown(
                                 options: options,
                                 selection: row.profileId ?? Self.unassignedValue,
-                                overrideLabel: DesktopAgent.displayName(row.displayName),
+                                overrideLabel: DesktopAgent.displayName(row.displayName, locale: locale),
                                 minTriggerWidth: 148
                             ) { chosen in
                                 assign(row.layer, chosen == Self.unassignedValue ? nil : chosen)
@@ -552,9 +564,9 @@ struct BoardLayersPanel: View {
                     }
                 }
 
-                SettingsRow("USB 启动方案", subtitle: board.observedStatus, showsDivider: true) {
+                SettingsRow(store.tr("USB 启动方案"), subtitle: board.observedStatus, showsDivider: true) {
                     HStack(spacing: 8) {
-                        Button("预览") {
+                        Button(store.tr("预览")) {
                             store.dispatch("sidebar", "PreviewUsbStartup")
                         }
                         .surfaceButton(.ghost)
@@ -562,7 +574,7 @@ struct BoardLayersPanel: View {
                         SelectDropdown(
                             options: options,
                             selection: board.usbStartupProfileId ?? Self.unassignedValue,
-                            overrideLabel: DesktopAgent.displayName(board.usbStartupDisplayName),
+                            overrideLabel: DesktopAgent.displayName(board.usbStartupDisplayName, locale: locale),
                             minTriggerWidth: 148
                         ) { chosen in
                             let payload: Any = chosen == Self.unassignedValue ? NSNull() : chosen
@@ -572,18 +584,18 @@ struct BoardLayersPanel: View {
                 }
 
                 SettingsRow(
-                    "同步六层到小键盘",
-                    subtitle: board.applyBlockReason.isEmpty ? "托管层需要 Karabiner 保持运行。" : board.applyBlockReason
+                    store.tr("同步六层到小键盘"),
+                    subtitle: board.applyBlockReason.isEmpty ? store.tr("托管层需要 Karabiner 保持运行。") : board.applyBlockReason
                 ) {
                     HStack(spacing: 8) {
                         if board.restoreAvailable {
-                            Button("恢复原键盘配置") {
+                            Button(store.tr("恢复原键盘配置")) {
                                 store.dispatch("sidebar", "RestoreBoardLayers")
                             }
                             .surfaceButton(.ghost)
                             .accessibilityIdentifier("board-restore")
                         }
-                        Button("应用到键盘") {
+                        Button(store.tr("应用到键盘")) {
                             store.dispatch("sidebar", "ProvisionBoardLayers")
                         }
                         .surfaceButton(.primary)
@@ -620,6 +632,7 @@ public enum WorkbenchDestination: String, CaseIterable, Identifiable {
 private struct WorkbenchNavigationView: View {
     @Binding var selection: WorkbenchDestination
     let versionLabel: String
+    let locale: ResolvedLocale
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -627,13 +640,13 @@ private struct WorkbenchNavigationView: View {
                 .font(UITheme.bodySemibold)
                 .foregroundStyle(UITheme.textPrimary)
                 .padding(.horizontal, 12)
-            navigationGroup("小键盘", [.keyboard, .lighting, .device])
-            navigationGroup("自定义", [.profiles, .radial])
+            navigationGroup(L10n.tr("小键盘", locale), [.keyboard, .lighting, .device])
+            navigationGroup(L10n.tr("自定义", locale), [.profiles, .radial])
             navigationGroup("Micro Input", [.general])
             Spacer(minLength: 0)
             Button { selection = .general } label: {
                 HStack(spacing: 6) {
-                    Text("版本").font(UITheme.micro).foregroundStyle(UITheme.textMuted)
+                    Text(L10n.tr("版本", locale)).font(UITheme.micro).foregroundStyle(UITheme.textMuted)
                     Spacer(minLength: 4)
                     Text(versionLabel).font(UITheme.monoBadge).foregroundStyle(UITheme.textSecondary)
                 }
@@ -669,7 +682,7 @@ private struct WorkbenchNavigationView: View {
                             .font(.system(size: 13.5, weight: isSelected ? .medium : .regular))
                             .foregroundStyle(isSelected ? UITheme.textPrimary : UITheme.textSecondary)
                             .frame(width: 18)
-                        Text(item.rawValue)
+                        Text(L10n.destinationTitle(item.rawValue, locale))
                             .fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 0)
                     }
@@ -699,12 +712,14 @@ private struct WorkbenchNavigationView: View {
 private struct WorkbenchSettingsPage: View {
     let store: CoreStore
     let updater: SoftwareUpdateController
+    let launchAtLogin: LaunchAtLoginController
     let destination: WorkbenchDestination
 
     var body: some View {
+        let locale = store.locale
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
-                Text(destination.rawValue)
+                Text(L10n.destinationTitle(destination.rawValue, locale))
                     .font(UITheme.title)
                     .foregroundStyle(UITheme.textPrimary)
 
@@ -712,17 +727,17 @@ private struct WorkbenchSettingsPage: View {
                 case .lighting:
                     SimpleLightingControlCard(store: store)
                     VStack(alignment: .leading, spacing: 10) {
-                        SettingsSectionHeader("按键层灯光")
+                        SettingsSectionHeader(store.tr("按键层灯光"))
                         SettingsCard {
                             SettingsRow(
-                                "按键层双区 RGB 灯效",
+                                store.tr("按键层双区 RGB 灯效"),
                                 subtitle: store.canvas.canAddLighting
-                                    ? "独立配置所选按键层的键帽背光与底盘光效参数。"
+                                    ? store.tr("独立配置所选按键层的键帽背光与底盘光效参数。")
                                     : (store.sidebar.selectedProfileId == nil
-                                        ? "先选择已分配的层或应用方案。"
-                                        : "当前层由原生应用控制灯光，请在键盘页面选择可编辑的层。")
+                                        ? store.tr("先选择已分配的层或应用方案。")
+                                        : store.tr("当前层由原生应用控制灯光，请在键盘页面选择可编辑的层。"))
                             ) {
-                                Button("编辑层灯光") {
+                                Button(store.tr("编辑层灯光")) {
                                     store.dispatch("editor", "OpenLightingEditor")
                                 }
                                 .surfaceButton(.secondary)
@@ -733,25 +748,25 @@ private struct WorkbenchSettingsPage: View {
 
                 case .device:
                     VStack(alignment: .leading, spacing: 10) {
-                        SettingsSectionHeader("连接")
+                        SettingsSectionHeader(store.tr("连接"))
                         SettingsCard {
-                            SettingsRow("当前设备状态", subtitle: store.header.deviceSummary, showsDivider: true) {
-                                Button("查找键盘") {
+                            SettingsRow(store.tr("当前设备状态"), subtitle: store.header.deviceSummary, showsDivider: true) {
+                                Button(store.tr("查找键盘")) {
                                     store.dispatch("header", "ConnectKeyboard")
                                 }
                                 .surfaceButton(.primary)
                             }
-                            SettingsRow("物理层观测", subtitle: store.sidebar.boardLayers.observedStatus)
+                            SettingsRow(store.tr("物理层观测"), subtitle: store.sidebar.boardLayers.observedStatus)
                         }
                     }
                     VStack(alignment: .leading, spacing: 10) {
-                        SettingsSectionHeader("硬件键帽布局")
+                        SettingsSectionHeader(store.tr("硬件键帽布局"))
                         SettingsCard {
-                            SettingsRow("底行按键形态", subtitle: "匹配物理拆分为两颗 1u 按键或合并为单颗 2u 宽键") {
+                            SettingsRow(store.tr("底行按键形态"), subtitle: store.tr("匹配物理拆分为两颗 1u 按键或合并为单颗 2u 宽键")) {
                                 SelectDropdown(
                                     options: [
-                                        .init(value: "split", title: "双 1u 分体"),
-                                        .init(value: "merged", title: "单 2u 合并"),
+                                        .init(value: "split", title: store.tr("双 1u 分体")),
+                                        .init(value: "merged", title: store.tr("单 2u 合并")),
                                     ],
                                     selection: Binding(
                                         get: { store.canvas.bottomRowLayout },
@@ -763,30 +778,30 @@ private struct WorkbenchSettingsPage: View {
                             }
                         }
                     }
-                    V070HardwareSettingsSection(model: store.v070Hardware) {
+                    V070HardwareSettingsSection(model: store.v070Hardware, locale: locale) {
                         store.dispatchV070Hardware($0)
                     }
                     FirmwareUpdateSettingsSection(
                         model: store.firmware,
+                        locale: locale,
                         onConnectKeyboard: { store.dispatch("header", "ConnectKeyboard") }
                     ) { store.dispatch("firmware", $0) }
                     VStack(alignment: .leading, spacing: 10) {
-                        SettingsSectionHeader("诊断与支持")
+                        SettingsSectionHeader(store.tr("诊断与支持"))
                         SettingsCard {
-                            SettingsRow("运行诊断归档", subtitle: "导出脱敏连接与状态诊断快照，并在 Finder 中显示") {
-                                Button("导出诊断") {
+                            SettingsRow(store.tr("运行诊断归档"), subtitle: store.tr("导出脱敏连接与状态诊断快照，并在 Finder 中显示")) {
+                                Button(store.tr("导出诊断")) {
                                     store.dispatch("device", "ExportDiagnostics")
-                                    let prefix = "已导出诊断报告："
-                                    let msg = store.footer.statusMessage
-                                    guard msg.hasPrefix(prefix) else { return }
-                                    let path = String(msg.dropFirst(prefix.count))
-                                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                                    let env = ProcessInfo.processInfo.environment
-                                    if !path.isEmpty,
-                                       env["XCTestConfigurationFilePath"] == nil,
-                                       env["MI_SYNTHETIC_SCENARIO"] == nil
+                                    if let path = store.footer.lastExportedDiagnosticsPath?
+                                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                                       !path.isEmpty
                                     {
-                                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                                        let env = ProcessInfo.processInfo.environment
+                                        if env["XCTestConfigurationFilePath"] == nil,
+                                           env["MI_SYNTHETIC_SCENARIO"] == nil
+                                        {
+                                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                                        }
                                     }
                                 }
                                 .surfaceButton(.secondary)
@@ -796,18 +811,18 @@ private struct WorkbenchSettingsPage: View {
 
                 case .radial:
                     let slots = store.statusMenu.radialSlots
-                    let directions = ["右", "右下", "下", "左下", "左", "左上", "上", "右上"]
+                    let directions = L10n.radialDirections(locale)
                     VStack(alignment: .leading, spacing: 10) {
-                        SettingsSectionHeader("八向轮盘")
-                        Text("当前展示内置的固定八向快捷动作")
+                        SettingsSectionHeader(store.tr("八向轮盘"))
+                        Text(store.tr("当前展示内置的固定八向快捷动作"))
                             .font(UITheme.caption)
                             .foregroundStyle(UITheme.textSecondary)
                         SettingsCard {
                             SettingsRow(
-                                "启用轮盘菜单",
+                                store.tr("启用轮盘菜单"),
                                 subtitle: store.statusMenu.radialConfirmMode == "spring_back"
-                                    ? "移动摇杆选择，回到中心确认。"
-                                    : "移动摇杆选择，按下旋钮确认；回到中心取消。",
+                                    ? store.tr("移动摇杆选择，回到中心确认。")
+                                    : store.tr("移动摇杆选择，按下旋钮确认；回到中心取消。"),
                                 showsDivider: !slots.isEmpty
                             ) {
                                 Toggle(
@@ -823,7 +838,7 @@ private struct WorkbenchSettingsPage: View {
                             ForEach(Array(slots.enumerated()), id: \.element.id) { idx, slot in
                                 let dirName = directions[max(0, min(7, slot.id))]
                                 SettingsRow(dirName, showsDivider: idx + 1 < slots.count) {
-                                    Text(slot.label.isEmpty ? "未分配" : slot.label)
+                                    Text(slot.label.isEmpty ? store.tr("未分配") : slot.label)
                                         .font(UITheme.captionMedium)
                                         .foregroundStyle(slot.label.isEmpty ? UITheme.textMuted : UITheme.textPrimary)
                                 }
@@ -832,22 +847,27 @@ private struct WorkbenchSettingsPage: View {
                     }
 
                 case .general:
-                    AboutAndUpdatesSettingsSection(updater: updater, engineVersion: store.header.engineVersion)
+                    StartupAndLanguageSettingsSection(store: store, launchAtLogin: launchAtLogin)
+                    AboutAndUpdatesSettingsSection(
+                        updater: updater,
+                        engineVersion: store.header.engineVersion,
+                        locale: locale
+                    )
                     VStack(alignment: .leading, spacing: 10) {
-                        SettingsSectionHeader("系统权限")
+                        SettingsSectionHeader(store.tr("系统权限"))
                         SettingsCard {
                             SettingsRow(
-                                "辅助功能权限",
+                                store.tr("辅助功能权限"),
                                 subtitle: store.header.accessibilityTrusted
-                                    ? "已授权，可正常向目标软件发送快捷键与指令"
-                                    : "缺少 macOS 辅助功能权限，软件按键映射将被系统拦截"
+                                    ? store.tr("已授权，可正常向目标软件发送快捷键与指令")
+                                    : store.tr("缺少 macOS 辅助功能权限，软件按键映射将被系统拦截")
                             ) {
                                 if store.header.accessibilityTrusted {
                                     HStack(spacing: 6) {
                                         Circle()
                                             .fill(UITheme.statusSuccess)
                                             .frame(width: 7, height: 7)
-                                        Text("已就绪")
+                                        Text(store.tr("已就绪"))
                                             .font(UITheme.captionMedium)
                                             .foregroundStyle(UITheme.textPrimary)
                                     }
@@ -856,7 +876,7 @@ private struct WorkbenchSettingsPage: View {
                                     .background(Capsule().fill(UITheme.subtleSurface))
                                     .overlay(Capsule().stroke(UITheme.hairlineBorder, lineWidth: 1))
                                 } else {
-                                    Button("打开辅助功能设置") {
+                                    Button(store.tr("打开辅助功能设置")) {
                                         store.dispatch("header", "OpenAccessibilitySettings")
                                     }
                                     .surfaceButton(.primary)
@@ -881,8 +901,9 @@ struct BoardLayerOverview: View {
     let board: BoardLayersModel
 
     var body: some View {
+        let locale = store.locale
         VStack(alignment: .leading, spacing: 12) {
-            SettingsSectionHeader("键盘层")
+            SettingsSectionHeader(store.tr("键盘层"))
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 8)], spacing: 10) {
                 ForEach(board.layers) { layer in
                     let isCurrent = layer.isPreviewSelected && layer.profileId == store.sidebar.selectedProfileId
@@ -898,10 +919,10 @@ struct BoardLayerOverview: View {
                                 }
                             }
                             .accessibilityHidden(true)
-                            Text("第 \(layer.layer) 层")
+                            Text(L10n.layerNumber(layer.layer, locale))
                                 .font(UITheme.caption)
                                 .foregroundStyle(UITheme.textSecondary)
-                            Text(DesktopAgent.displayName(layer.displayName))
+                            Text(DesktopAgent.displayName(layer.displayName, locale: locale))
                                 .font(UITheme.bodySemibold)
                                 .foregroundStyle(UITheme.textPrimary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -909,7 +930,7 @@ struct BoardLayerOverview: View {
                             if board.runtimeReady && board.observedLayer == layer.layer {
                                 HStack(spacing: 4) {
                                     Circle().fill(UITheme.statusSuccess).frame(width: 5, height: 5)
-                                    Text("使用中").font(UITheme.micro).foregroundStyle(UITheme.textPrimary)
+                                    Text(store.tr("使用中")).font(UITheme.micro).foregroundStyle(UITheme.textPrimary)
                                 }
                             }
                         }

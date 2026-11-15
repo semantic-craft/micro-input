@@ -453,6 +453,7 @@ public struct CheatSheetCellModel: Identifiable, Equatable {
 public struct CheatSheetModel: Equatable {
     public var profileName: String = ""
     public var routingSummary: String = ""
+    public var joystickMode: String = "logical_sectors"
     public var agentName: String? = nil
     public var agentPhaseLabel: String? = nil
     public var agentVoiceSummary: String? = nil
@@ -461,6 +462,7 @@ public struct CheatSheetModel: Equatable {
     public init(
         profileName: String = "",
         routingSummary: String = "",
+        joystickMode: String = "logical_sectors",
         agentName: String? = nil,
         agentPhaseLabel: String? = nil,
         agentVoiceSummary: String? = nil,
@@ -468,6 +470,7 @@ public struct CheatSheetModel: Equatable {
     ) {
         self.profileName = profileName
         self.routingSummary = routingSummary
+        self.joystickMode = joystickMode
         self.agentName = agentName
         self.agentPhaseLabel = agentPhaseLabel
         self.agentVoiceSummary = agentVoiceSummary
@@ -561,6 +564,9 @@ public struct HeaderSliceModel: Equatable {
     public var powerStatus: PowerStatusBadgeModel? = nil
     public var candidateDevices: [CandidateDeviceModel] = []
     public var preferredDeviceSerial: String? = nil
+    public var uiLanguage: UiLanguagePreference = .system
+    public var resolvedLocale: ResolvedLocale = .zhHans
+    public var silentAtLogin: Bool = true
     public var documentRevision: Int = 0
     public var hostRevision: Int = 0
     public init() {}
@@ -585,6 +591,9 @@ public struct HeaderSliceModel: Equatable {
         self.powerStatus = m.powerStatus
         self.candidateDevices = m.candidateDevices
         self.preferredDeviceSerial = m.preferredDeviceSerial
+        self.uiLanguage = m.uiLanguage
+        self.resolvedLocale = m.resolvedLocale
+        self.silentAtLogin = m.silentAtLogin
         self.documentRevision = m.documentRevision
         self.hostRevision = m.hostRevision
     }
@@ -653,6 +662,7 @@ public struct CanvasSliceModel: Equatable {
     public var encoderHoldLabel: String = ""
     public var encoderSelectedSlot: Int? = nil
     public var encoderRingGlowHex: String = "#14C76B"
+    public var joystickMode: String = "logical_sectors"
     public var joystickModeLabel: String = "八向摇杆"
     public var joystickActiveDirection: String = "North"
     public var joystickIsSelected: Bool = false
@@ -687,6 +697,7 @@ public struct CanvasSliceModel: Equatable {
         self.encoderHoldLabel = m.encoderHoldLabel
         self.encoderSelectedSlot = m.encoderSelectedSlot
         self.encoderRingGlowHex = m.encoderRingGlowHex
+        self.joystickMode = m.joystickMode
         self.joystickModeLabel = m.joystickModeLabel
         self.joystickActiveDirection = m.joystickActiveDirection
         self.joystickIsSelected = m.joystickIsSelected
@@ -811,10 +822,12 @@ public struct OverlaySliceModel: Equatable {
 
 public struct FooterSliceModel: Equatable {
     public var statusMessage: String = "已就绪"
+    public var lastExportedDiagnosticsPath: String? = nil
     public init() {}
 
     public init(from m: ProjectionModel) {
         self.statusMessage = m.statusMessage
+        self.lastExportedDiagnosticsPath = m.lastExportedDiagnosticsPath
     }
 }
 
@@ -863,6 +876,7 @@ public struct ProjectionModel: Equatable {
     public var encoderHoldLabel: String = ""
     public var encoderSelectedSlot: Int? = nil
     public var encoderRingGlowHex: String = "#14C76B"
+    public var joystickMode: String = "logical_sectors"
     public var joystickModeLabel: String = "八向摇杆"
     public var joystickActiveDirection: String = "North"
     public var joystickIsSelected: Bool = false
@@ -903,12 +917,16 @@ public struct ProjectionModel: Equatable {
 
     public var activeModal: ActiveModalModel? = nil
     public var statusMessage: String = "已就绪"
+    public var lastExportedDiagnosticsPath: String? = nil
     public var lastExportedPreset: String? = nil
     public var deviceConnected: Bool = false
     public var deviceSummary: String = "Creator Micro 2 (303A:8298) · 离线草稿模式"
     public var powerStatus: PowerStatusBadgeModel? = nil
     public var candidateDevices: [CandidateDeviceModel] = []
     public var preferredDeviceSerial: String? = nil
+    public var uiLanguage: UiLanguagePreference = .system
+    public var resolvedLocale: ResolvedLocale = .zhHans
+    public var silentAtLogin: Bool = true
     public var documentRevision: Int = 0
     public var hostRevision: Int = 0
 

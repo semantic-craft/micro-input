@@ -42,6 +42,7 @@ expected_swift_ui_files = [
     'FirmwareUpdate.swift',
     'InlineInspectorView.swift',
     'KeycapGlyphView.swift',
+    'Localization.swift',
     'ModalsAndStatusMenuView.swift',
     'ProjectionModels.swift',
     'SoftwareUpdate.swift',
@@ -55,6 +56,9 @@ for ui_file in (root / 'app/MicroInput/Sources/MicroInputUI').glob('*.swift'):
     ui_text = ui_file.read_text(encoding='utf-8')
     assert not re.search(r'^\s*import\s+Sparkle\b', ui_text, re.MULTILINE), (
         f'{ui_file.relative_to(root)} must not import Sparkle; keep Sparkle confined to host target MicroInput'
+    )
+    assert not re.search(r'^\s*import\s+ServiceManagement\b', ui_text, re.MULTILINE), (
+        f'{ui_file.relative_to(root)} must not import ServiceManagement; keep ServiceManagement confined to host target MicroInput'
     )
 for swift_file in (root / 'app/MicroInput/Sources').rglob('*.swift'):
     line_count = len(swift_file.read_text(encoding='utf-8').splitlines())

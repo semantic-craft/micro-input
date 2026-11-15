@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 import Foundation
 import Observation
 import SwiftUI
@@ -47,7 +48,7 @@ public struct AppReleaseIdentity: Equatable, Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let bundleId = bundle.bundleIdentifier
             ?? (info["CFBundleIdentifier"] as? String)
-            ?? "craft.semantic.micro-input.dev"
+            ?? LaunchAtLoginPolicy.productionBundleIdentifier
         let feedURL = (info["SUFeedURL"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let publicKey = (info["SUPublicEDKey"] as? String)?
@@ -69,17 +70,23 @@ public struct AppReleaseIdentity: Equatable, Sendable {
 }
 
 public enum UpdateServiceStatus: Equatable, Sendable {
-    case isolated(reason: String)
-    case unavailable(reason: String)
+    case isolated(reason: HostGateReason)
+    case unavailable(reason: HostGateReason)
     case ready
 
-    public var statusDescription: String {
+    public func statusDescription(_ locale: ResolvedLocale) -> String {
         switch self {
         case .isolated(let reason), .unavailable(let reason):
-            return reason
+            return reason.localizedDescription(locale)
         case .ready:
-            return "通过 GitHub Releases 签名更新源接收更新"
+            return locale == .en
+                ? "Receiving signed updates via GitHub Releases"
+                : "通过 GitHub Releases 签名更新源接收更新"
         }
+    }
+
+    public var statusDescription: String {
+        statusDescription(.zhHans)
     }
 }
 
@@ -91,34 +98,23 @@ public enum UpdateLaunchPolicy {
         arguments: [String] = []
     ) -> UpdateServiceStatus {
         if environment["MI_DISABLE_UPDATER"] == "1" {
-            return .isolated(reason: "当前会话已通过环境变量停用软件更新")
+            return .isolated(reason: .disabledByEnvironment(variable: "MI_DISABLE_UPDATER"))
         }
-        if environment["MI_SYNTHETIC_SCENARIO"] != nil {
-            return .isolated(reason: "合成验收场景下已停用软件更新")
+        if LaunchOriginDetector.isIsolatedOrVerifyEnvironment(
+            bundleIdentifier: identity.bundleIdentifier,
+            environment: environment,
+            arguments: arguments
+        ) {
+            return .isolated(reason: .qaVerifyMode)
         }
-        if environment["MI_DOCUMENT_DIR"] != nil {
-            return .isolated(reason: "隔离数据目录会话下已停用软件更新")
+        if bundlePath.contains("/target/") || bundlePath.contains("/.build/") || bundlePath.contains("/DerivedData/") {
+            return .isolated(reason: .ephemeralBuildBundle(bundlePath: bundlePath))
         }
-        if environment["XCTestConfigurationFilePath"] != nil {
-            return .isolated(reason: "单元测试环境下已停用软件更新")
-        }
-        if arguments.contains("--isolated") || arguments.contains("--verify") {
-            return .isolated(reason: "隔离或验收启动模式下已停用软件更新")
-        }
-        if identity.bundleIdentifier.hasPrefix("com.semanticcraft.microinput.qa") {
-            return .isolated(reason: "QA 隔离副本不连接外部更新源")
-        }
-        if bundlePath.contains("/target/") || bundlePath.contains("/.build/") {
-            return .isolated(reason: "本地构建目录副本不连接外部更新源")
-        }
-        if bundlePath.contains("/AppTranslocation/") {
-            return .unavailable(reason: "应用处于系统隔离运行路径，请移至「应用程序」文件夹后检查更新")
-        }
-        if bundlePath.hasPrefix("/Volumes/") {
-            return .unavailable(reason: "应用正在挂载卷中运行，请移至「应用程序」文件夹后检查更新")
+        if bundlePath.contains("/AppTranslocation/") || bundlePath.hasPrefix("/Volumes/") {
+            return .unavailable(reason: .translocatedOrMountedVolume(bundlePath: bundlePath))
         }
         if !bundlePath.hasSuffix(".app") {
-            return .unavailable(reason: "当前未以完整 .app 应用包运行，软件更新不可用")
+            return .unavailable(reason: .unbundledExecutable)
         }
         guard let feedRaw = identity.feedURLString,
               let feedURL = URL(string: feedRaw),
@@ -126,13 +122,13 @@ public enum UpdateLaunchPolicy {
               let host = feedURL.host,
               !host.isEmpty
         else {
-            return .unavailable(reason: "未配置有效的 HTTPS 更新源（SUFeedURL）")
+            return .unavailable(reason: .missingInfoPlistKey(key: "SUFeedURL"))
         }
         guard let keyRaw = identity.publicEDKey,
               let keyData = Data(base64Encoded: keyRaw),
               keyData.count == 32
         else {
-            return .unavailable(reason: "未配置有效的 Ed25519 更新签名公钥（SUPublicEDKey）")
+            return .unavailable(reason: .missingInfoPlistKey(key: "SUPublicEDKey"))
         }
         return .ready
     }
@@ -186,14 +182,19 @@ public final class SoftwareUpdateController {
         self.driverFactory = driverFactory
     }
 
-    public var lastCheckSummary: String {
+    public func lastCheckSummary(_ locale: ResolvedLocale) -> String {
         guard serviceStatus == .ready else {
-            return serviceStatus.statusDescription
+            return serviceStatus.statusDescription(locale)
         }
         if let lastUpdateCheckDate {
-            return "上次检查：\(Self.timestampFormatter.string(from: lastUpdateCheckDate))"
+            let formatted = Self.timestampFormatter.string(from: lastUpdateCheckDate)
+            return locale == .en ? "Last checked: \(formatted)" : "上次检查：\(formatted)"
         }
-        return serviceStatus.statusDescription
+        return serviceStatus.statusDescription(locale)
+    }
+
+    public var lastCheckSummary: String {
+        lastCheckSummary(.zhHans)
     }
 
     public func startIfPermitted() {
@@ -203,7 +204,7 @@ public final class SoftwareUpdateController {
             return
         }
         guard let driverFactory else {
-            serviceStatus = .unavailable(reason: "当前构建未挂载 Sparkle 更新驱动")
+            serviceStatus = .unavailable(reason: .missingDriver)
             canCheckForUpdates = false
             automaticallyChecksForUpdates = false
             return
@@ -254,6 +255,271 @@ public final class SoftwareUpdateController {
     }
 }
 
+public enum LaunchAtLoginPolicy {
+    public static let productionBundleIdentifier = "craft.semantic.micro-input.dev"
+
+    private static func resolvedBundlePath(for trimmedPath: String) -> String {
+        let resolved = URL(fileURLWithPath: trimmedPath).resolvingSymlinksInPath().path
+        if resolved != trimmedPath {
+            return resolved
+        }
+        if let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: trimmedPath) {
+            let expanded: String
+            if dest.hasPrefix("/") {
+                expanded = dest
+            } else {
+                let parent = URL(fileURLWithPath: trimmedPath).deletingLastPathComponent()
+                expanded = parent.appendingPathComponent(dest).standardized.path
+            }
+            var trimmedDest = expanded
+            while trimmedDest.count > 1 && trimmedDest.hasSuffix("/") {
+                trimmedDest.removeLast()
+            }
+            return URL(fileURLWithPath: trimmedDest).resolvingSymlinksInPath().path
+        }
+        return resolved
+    }
+
+    public static func evaluate(
+        bundleIdentifier: String?,
+        bundlePath: String,
+        environment: [String: String],
+        arguments: [String] = []
+    ) -> HostGateReason? {
+        if LaunchOriginDetector.isIsolatedOrVerifyEnvironment(
+            bundleIdentifier: bundleIdentifier,
+            environment: environment,
+            arguments: arguments
+        ) {
+            return .qaVerifyMode
+        }
+        if environment["MI_DISABLE_LOGIN_ITEM"] == "1" {
+            return .disabledByEnvironment(variable: "MI_DISABLE_LOGIN_ITEM")
+        }
+        var trimmedPath = bundlePath
+        while trimmedPath.count > 1 && trimmedPath.hasSuffix("/") {
+            trimmedPath.removeLast()
+        }
+        let resolvedPath = resolvedBundlePath(for: trimmedPath)
+        if !trimmedPath.hasSuffix(".app") || !resolvedPath.hasSuffix(".app") {
+            return .unbundledExecutable
+        }
+        if trimmedPath.contains("/AppTranslocation/") || trimmedPath.hasPrefix("/Volumes/")
+            || resolvedPath.contains("/AppTranslocation/") || resolvedPath.hasPrefix("/Volumes/")
+        {
+            return .translocatedOrMountedVolume(bundlePath: bundlePath)
+        }
+        let ephemeralMarkers = ["/target/", "/DerivedData/", "/.build/", "/tmp/", "/var/folders/", "/.scratch/"]
+        if ephemeralMarkers.contains(where: { trimmedPath.contains($0) || resolvedPath.contains($0) }) {
+            return .ephemeralBuildBundle(bundlePath: bundlePath)
+        }
+        guard bundleIdentifier == productionBundleIdentifier else {
+            return .wrongBundleIdentifier(actual: bundleIdentifier ?? "")
+        }
+        return nil
+    }
+}
+
+public enum LaunchAtLoginDriverStatus: Equatable, Sendable {
+    case enabled
+    case notRegistered
+    case requiresApproval
+    case notFound
+}
+
+public enum LaunchAtLoginState: Equatable, Sendable {
+    case enabled
+    case disabled
+    case requiresApproval
+    case unavailable(reason: HostGateReason)
+}
+
+@MainActor
+public protocol LaunchAtLoginDriver: AnyObject {
+    func currentStatus() -> LaunchAtLoginDriverStatus
+    func register() throws
+    func unregister() throws
+    func openSystemSettingsLoginItems()
+}
+
+@MainActor
+public final class IsolatedLaunchAtLoginDriver: LaunchAtLoginDriver {
+    public init() {}
+    public func currentStatus() -> LaunchAtLoginDriverStatus { .notRegistered }
+    public func register() throws {}
+    public func unregister() throws {}
+    public func openSystemSettingsLoginItems() {}
+}
+
+@MainActor
+@Observable
+public final class LaunchAtLoginController {
+    public private(set) var state: LaunchAtLoginState
+    public private(set) var lastError: String? = nil
+
+    @ObservationIgnored private let policyReason: HostGateReason?
+    @ObservationIgnored private let driver: LaunchAtLoginDriver?
+
+    public init(
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        bundlePath: String = Bundle.main.bundlePath,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        arguments: [String] = CommandLine.arguments,
+        driver: LaunchAtLoginDriver? = nil
+    ) {
+        let detectedReason = LaunchAtLoginPolicy.evaluate(
+            bundleIdentifier: bundleIdentifier,
+            bundlePath: bundlePath,
+            environment: environment,
+            arguments: arguments
+        )
+        let effectiveReason = detectedReason ?? (driver == nil ? .missingDriver : nil)
+        self.policyReason = effectiveReason
+        self.driver = driver
+        if let effectiveReason {
+            self.state = .unavailable(reason: effectiveReason)
+        } else if let driver {
+            self.state = Self.mapDriverStatus(driver.currentStatus())
+        } else {
+            self.state = .unavailable(reason: .missingDriver)
+        }
+    }
+
+    public var isUnavailable: Bool {
+        if case .unavailable = state { return true }
+        return false
+    }
+
+    public var isToggleOn: Bool {
+        switch state {
+        case .enabled, .requiresApproval:
+            return true
+        case .disabled, .unavailable:
+            return false
+        }
+    }
+
+    private static func mapDriverStatus(_ status: LaunchAtLoginDriverStatus) -> LaunchAtLoginState {
+        switch status {
+        case .enabled:
+            return .enabled
+        case .notRegistered, .notFound:
+            return .disabled
+        case .requiresApproval:
+            return .requiresApproval
+        }
+    }
+
+    public func reconcileWithSystem() {
+        let next: LaunchAtLoginState
+        if let policyReason {
+            next = .unavailable(reason: policyReason)
+        } else if let driver {
+            next = Self.mapDriverStatus(driver.currentStatus())
+        } else {
+            next = .unavailable(reason: .missingDriver)
+        }
+        if state != next {
+            state = next
+        }
+    }
+
+    public func setEnabled(_ wantEnabled: Bool) {
+        guard policyReason == nil, let driver else { return }
+        reconcileWithSystem()
+        if case .unavailable = state { return }
+
+        switch (state, wantEnabled) {
+        case (.enabled, true), (.disabled, false), (.requiresApproval, true):
+            if lastError != nil { lastError = nil }
+            return
+        case (.disabled, true):
+            do {
+                try driver.register()
+                if lastError != nil { lastError = nil }
+            } catch {
+                lastError = error.localizedDescription
+            }
+        case (.enabled, false), (.requiresApproval, false):
+            do {
+                try driver.unregister()
+                if lastError != nil { lastError = nil }
+            } catch {
+                lastError = error.localizedDescription
+            }
+        case (.unavailable, _):
+            return
+        }
+        reconcileWithSystem()
+    }
+
+    public func openLoginItemsSettings() {
+        guard policyReason == nil, let driver else { return }
+        driver.openSystemSettingsLoginItems()
+    }
+}
+
+public enum LaunchOriginDetector {
+    public static let openApplicationEventClass: AEEventClass = 0x6165_7674
+    public static let openApplicationEventID: AEEventID = 0x6f61_7070
+    public static let propDataKeyword: AEKeyword = 0x7072_6474
+    public static let launchedAsLogInItemCode: DescType = 0x6c67_6974
+
+    public static func isIsolatedOrVerifyEnvironment(
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        arguments: [String] = CommandLine.arguments
+    ) -> Bool {
+        if arguments.contains("--verify") || arguments.contains("--isolated") {
+            return true
+        }
+        for envKey in ["MI_QA_SCENARIO", "MI_SYNTHETIC_SCENARIO", "MI_DOCUMENT_DIR", "MI_HOST_AUDIT_LOG"] {
+            if let value = environment[envKey], !value.isEmpty {
+                return true
+            }
+        }
+        if environment["XCTestConfigurationFilePath"] != nil {
+            return true
+        }
+        if bundleIdentifier?.hasPrefix("com.semanticcraft.microinput.qa") == true {
+            return true
+        }
+        return false
+    }
+
+    public static func isLaunchedAtLoginAppleEvent(_ event: NSAppleEventDescriptor?) -> Bool {
+        guard let event,
+              event.eventClass == openApplicationEventClass,
+              event.eventID == openApplicationEventID
+        else {
+            return false
+        }
+        return event.paramDescriptor(forKeyword: propDataKeyword)?.enumCodeValue == launchedAsLogInItemCode
+    }
+
+    public static func wasLaunchedAtLogin(
+        arguments: [String] = CommandLine.arguments,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        currentAppleEvent: NSAppleEventDescriptor? = NSAppleEventManager.shared().currentAppleEvent
+    ) -> Bool {
+        if arguments.contains("--launched-at-login") {
+            return true
+        }
+        if environment["MI_LAUNCHED_AT_LOGIN"] == "1" {
+            return true
+        }
+        return isLaunchedAtLoginAppleEvent(currentAppleEvent)
+    }
+
+    public static func shouldStartSilently(
+        isVerifyMode: Bool,
+        launchedAtLogin: Bool,
+        silentAtLoginPref: Bool
+    ) -> Bool {
+        !isVerifyMode && launchedAtLogin && silentAtLoginPref
+    }
+}
+
 @MainActor
 @Observable
 public final class WorkbenchNavigationModel {
@@ -270,30 +536,149 @@ public final class WorkbenchNavigationModel {
     }
 }
 
+public struct StartupAndLanguageSettingsSection: View {
+    let store: CoreStore
+    let launchAtLogin: LaunchAtLoginController
+
+    public init(store: CoreStore, launchAtLogin: LaunchAtLoginController) {
+        self.store = store
+        self.launchAtLogin = launchAtLogin
+    }
+
+    public var body: some View {
+        let locale = store.locale
+        let h = store.header
+        let languageOptions = UiLanguagePreference.allCases.map { pref in
+            SelectOption(
+                value: pref,
+                title: pref.displayTitle(locale),
+                subtitle: pref.displaySubtitle(locale)
+            )
+        }
+        let loginSubtitle: String = {
+            switch launchAtLogin.state {
+            case .unavailable(let reason):
+                return reason.localizedDescription(locale)
+            case .requiresApproval:
+                return store.tr("需要在「系统设置 → 通用 → 登录项」中批准后台运行")
+            case .enabled, .disabled:
+                return store.tr("开机登录后自动在后台驻留菜单栏并就绪键盘控制")
+            }
+        }()
+
+        VStack(alignment: .leading, spacing: 10) {
+            SettingsSectionHeader(store.tr("启动与语言"))
+            SettingsCard {
+                SettingsRow(
+                    store.tr("界面语言"),
+                    subtitle: store.tr("实时切换工作台、菜单栏弹层与按键速查的显示语言"),
+                    showsDivider: true
+                ) {
+                    SelectDropdown(
+                        options: languageOptions,
+                        selection: Binding(
+                            get: { h.uiLanguage },
+                            set: { store.setUiLanguage($0) }
+                        ),
+                        minTriggerWidth: 132
+                    )
+                    .accessibilityIdentifier("settings-ui-language")
+                }
+
+                SettingsRow(
+                    store.tr("登录时打开 Micro Input"),
+                    subtitle: loginSubtitle,
+                    showsDivider: true
+                ) {
+                    HStack(spacing: 8) {
+                        if launchAtLogin.state == .requiresApproval {
+                            Button(store.tr("打开登录项设置…")) {
+                                launchAtLogin.openLoginItemsSettings()
+                            }
+                            .surfaceButton(.secondary)
+                            .accessibilityIdentifier("settings-open-login-items")
+                        }
+                        Toggle(
+                            "",
+                            isOn: Binding(
+                                get: { launchAtLogin.isToggleOn },
+                                set: { launchAtLogin.setEnabled($0) }
+                            )
+                        )
+                        .labelsHidden()
+                        .toggleStyle(NeutralSwitchToggleStyle())
+                        .disabled(launchAtLogin.isUnavailable)
+                        .accessibilityIdentifier("settings-launch-at-login")
+                    }
+                }
+
+                if let err = launchAtLogin.lastError {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(UITheme.textSecondary)
+                        Text(store.tr("登录项变更失败：") + err)
+                            .font(UITheme.micro)
+                            .foregroundStyle(UITheme.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    Rectangle().fill(UITheme.rowDivider).frame(height: 1).padding(.leading, 16)
+                }
+
+                SettingsRow(
+                    store.tr("登录时静默驻留菜单栏"),
+                    subtitle: store.tr("由系统登录项拉起时不弹出主窗口，仅驻留右上角菜单栏")
+                ) {
+                    Toggle(
+                        "",
+                        isOn: Binding(
+                            get: { h.silentAtLogin },
+                            set: { store.setSilentAtLogin($0) }
+                        )
+                    )
+                    .labelsHidden()
+                    .toggleStyle(NeutralSwitchToggleStyle())
+                    .accessibilityIdentifier("settings-silent-at-login")
+                }
+            }
+        }
+    }
+}
+
 public struct AboutAndUpdatesSettingsSection: View {
     let updater: SoftwareUpdateController
     let engineVersion: String
+    let locale: ResolvedLocale
     let openURLHandler: (URL) -> Void
 
     @MainActor
     public init(
         updater: SoftwareUpdateController,
         engineVersion: String,
+        locale: ResolvedLocale = .zhHans,
         openURLHandler: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }
     ) {
         self.updater = updater
         self.engineVersion = engineVersion
+        self.locale = locale
         self.openURLHandler = openURLHandler
     }
 
     public var body: some View {
+        let kernelSubtitle = locale == .en ? "Rust Core v\(engineVersion)" : "Rust 内核 v\(engineVersion)"
+        let licenseSubtitle = locale == .en
+            ? "Distributed as open source under the \(updater.identity.licenseName) License"
+            : "基于 \(updater.identity.licenseName) License 开放源代码分发"
+
         VStack(alignment: .leading, spacing: 28) {
             VStack(alignment: .leading, spacing: 10) {
-                SettingsSectionHeader("版本与软件更新")
+                SettingsSectionHeader(L10n.tr("版本与软件更新", locale))
                 SettingsCard {
                     SettingsRow(
-                        "当前应用版本",
-                        subtitle: "Rust 内核 v\(engineVersion)",
+                        L10n.tr("当前应用版本", locale),
+                        subtitle: kernelSubtitle,
                         showsDivider: true
                     ) {
                         HStack(spacing: 10) {
@@ -305,7 +690,7 @@ public struct AboutAndUpdatesSettingsSection: View {
                                 .background(Capsule().fill(UITheme.subtleSurface))
                                 .overlay(Capsule().stroke(UITheme.hairlineBorder, lineWidth: 1))
 
-                            Button("检查更新…") {
+                            Button(L10n.tr("检查更新…", locale)) {
                                 updater.checkForUpdates()
                             }
                             .surfaceButton(.primary)
@@ -314,7 +699,7 @@ public struct AboutAndUpdatesSettingsSection: View {
                         }
                     }
 
-                    SettingsRow("自动检查更新", subtitle: updater.lastCheckSummary) {
+                    SettingsRow(L10n.tr("自动检查更新", locale), subtitle: updater.lastCheckSummary(locale)) {
                         Toggle(
                             "",
                             isOn: Binding(
@@ -331,11 +716,11 @@ public struct AboutAndUpdatesSettingsSection: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                SettingsSectionHeader("关于与开源")
+                SettingsSectionHeader(L10n.tr("关于与开源", locale))
                 SettingsCard {
                     SettingsRow(
-                        "开源许可证",
-                        subtitle: "基于 \(updater.identity.licenseName) License 开放源代码分发",
+                        L10n.tr("开源许可证", locale),
+                        subtitle: licenseSubtitle,
                         showsDivider: true
                     ) {
                         Text("\(updater.identity.licenseName) License")
@@ -344,17 +729,17 @@ public struct AboutAndUpdatesSettingsSection: View {
                     }
 
                     SettingsRow(
-                        "源码仓库与更新日志",
-                        subtitle: "查看公开代码仓库、构建说明与历史发行记录"
+                        L10n.tr("源码仓库与更新日志", locale),
+                        subtitle: L10n.tr("查看公开代码仓库、构建说明与历史发行记录", locale)
                     ) {
                         HStack(spacing: 8) {
-                            Button("GitHub 仓库") {
+                            Button(L10n.tr("GitHub 仓库", locale)) {
                                 openURLHandler(updater.identity.repositoryURL)
                             }
                             .surfaceButton(.secondary)
                             .accessibilityIdentifier("settings-open-repository")
 
-                            Button("发行说明") {
+                            Button(L10n.tr("发行说明", locale)) {
                                 openURLHandler(updater.identity.releasesURL)
                             }
                             .surfaceButton(.secondary)

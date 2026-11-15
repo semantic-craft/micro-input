@@ -1,8 +1,39 @@
 import AppKit
 import MicroInputCoreFFI
 import MicroInputUI
+import ServiceManagement
 import Sparkle
 import SwiftUI
+
+@MainActor
+private final class SMAppServiceLaunchAtLoginDriver: LaunchAtLoginDriver {
+    func currentStatus() -> LaunchAtLoginDriverStatus {
+        switch SMAppService.mainApp.status {
+        case .enabled:
+            return .enabled
+        case .notRegistered:
+            return .notRegistered
+        case .requiresApproval:
+            return .requiresApproval
+        case .notFound:
+            return .notFound
+        @unknown default:
+            return .notRegistered
+        }
+    }
+
+    func register() throws {
+        try SMAppService.mainApp.register()
+    }
+
+    func unregister() throws {
+        try SMAppService.mainApp.unregister()
+    }
+
+    func openSystemSettingsLoginItems() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+}
 
 @MainActor
 private final class SparkleSoftwareUpdateDriver: SoftwareUpdateDriver {
@@ -58,8 +89,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var statusItem: NSStatusItem?
     private let popover = NSPopover()
     private var mainWindow: NSWindow?
+    private var notificationObservers: [NSObjectProtocol] = []
+    private var lastRenderedLocale: ResolvedLocale = .zhHans
     let store: CoreStore
     let navigation = WorkbenchNavigationModel()
+    let launchAtLogin: LaunchAtLoginController
     private(set) lazy var updater: SoftwareUpdateController = SoftwareUpdateController { [weak self] in
         SparkleSoftwareUpdateDriver { [weak self] in
             self?.updater.refreshFromDriver()
@@ -76,6 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             Darwin.exit(0)
         }
         self.instanceLock = lock
+        let isIsolated = LaunchOriginDetector.isIsolatedOrVerifyEnvironment()
         if Bundle.main.bundleIdentifier?.hasPrefix("com.semanticcraft.microinput.qa") == true {
             guard let directory = ProcessInfo.processInfo.environment["MI_DOCUMENT_DIR"], !directory.isEmpty else {
                 Darwin.exit(1)
@@ -84,29 +119,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         } else {
             self.store = CoreStore()
         }
+        self.launchAtLogin = LaunchAtLoginController(
+            driver: isIsolated ? IsolatedLaunchAtLoginDriver() : SMAppServiceLaunchAtLoginDriver()
+        )
         super.init()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
+        let isVerifyMode = LaunchOriginDetector.isIsolatedOrVerifyEnvironment()
+        if !isVerifyMode {
+            store.syncSystemLocale(Locale.preferredLanguages)
+        }
+        launchAtLogin.reconcileWithSystem()
+
+        let silentBoot = LaunchOriginDetector.shouldStartSilently(
+            isVerifyMode: isVerifyMode,
+            launchedAtLogin: LaunchOriginDetector.wasLaunchedAtLogin(),
+            silentAtLoginPref: store.header.silentAtLogin
+        )
+        NSApp.setActivationPolicy(silentBoot ? .accessory : .regular)
         NSApp.applicationIconImage = NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
+        lastRenderedLocale = store.locale
         setupMainMenu()
         setupStatusItem()
         updater.startIfPermitted()
-        openMainWindow()
+        installHostObservers(isVerifyMode: isVerifyMode)
+        observeStoreLocale()
+        if !silentBoot {
+            openMainWindow()
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard store.firmware.preventsTermination else { return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = "设备固件更新尚未结束"
-        alert.informativeText = "正在准备、备份或写入设备。请保持 USB 连接，等待当前操作完成后再退出。"
-        alert.addButton(withTitle: "继续等待")
+        alert.messageText = store.tr("设备固件更新尚未结束")
+        alert.informativeText = store.tr("正在准备、备份或写入设备。请保持 USB 连接，等待当前操作完成后再退出。")
+        alert.addButton(withTitle: store.tr("继续等待"))
         alert.runModal()
         return .terminateCancel
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        for observer in notificationObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        notificationObservers.removeAll()
         store.prepareForTermination()
         store.stopEventLoops()
         if let lock = instanceLock {
@@ -135,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu(title: "Micro Input")
         let openItem = NSMenuItem(
-            title: "打开主配置台",
+            title: store.tr("打开主配置台"),
             action: #selector(handleDockOpenMainWindow(_:)),
             keyEquivalent: ""
         )
@@ -143,7 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(openItem)
 
         let settingsItem = NSMenuItem(
-            title: "通用设置…",
+            title: store.tr("通用设置…"),
             action: #selector(handleOpenGeneralSettings(_:)),
             keyEquivalent: ""
         )
@@ -151,7 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(settingsItem)
 
         let updateItem = NSMenuItem(
-            title: "检查更新…",
+            title: store.tr("检查更新…"),
             action: #selector(handleCheckForUpdates(_:)),
             keyEquivalent: ""
         )
@@ -159,7 +217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(updateItem)
 
         let toggleExecItem = NSMenuItem(
-            title: store.statusMenu.hostExecutionEnabled ? "暂停按键映射" : "启用按键映射",
+            title: store.tr(store.statusMenu.hostExecutionEnabled ? "暂停按键映射" : "启用按键映射"),
             action: #selector(handleDockToggleExecution(_:)),
             keyEquivalent: ""
         )
@@ -168,9 +226,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         menu.addItem(.separator())
 
-        for fav in store.statusMenu.favorites2x2 {
+        for fav in store.statusMenu.favorites2x2 where fav.profileId != nil {
+            let display = DesktopAgent.displayName(fav.title, locale: store.locale)
             let item = NSMenuItem(
-                title: "切换到 \(DesktopAgent.displayName(fav.title))",
+                title: store.locale == .en ? "Switch to \(display)" : "切换到 \(display)",
                 action: #selector(handleDockSelectFavorite(_:)),
                 keyEquivalent: ""
             )
@@ -182,14 +241,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return menu
     }
 
+    private func installHostObservers(isVerifyMode: Bool) {
+        let activeObs = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.launchAtLogin.reconcileWithSystem()
+            }
+        }
+        let localeObs = NotificationCenter.default.addObserver(
+            forName: NSLocale.currentLocaleDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !isVerifyMode else { return }
+                self.store.syncSystemLocale(Locale.preferredLanguages)
+            }
+        }
+        notificationObservers = [activeObs, localeObs]
+    }
+
+    private func observeStoreLocale() {
+        withObservationTracking {
+            _ = store.locale
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.lastRenderedLocale != self.store.locale {
+                    self.lastRenderedLocale = self.store.locale
+                    self.refreshLocalizedAppKitChrome()
+                }
+                self.observeStoreLocale()
+            }
+        }
+    }
+
+    private func refreshLocalizedAppKitChrome() {
+        setupMainMenu()
+        if let button = statusItem?.button {
+            button.image = StatusItemIcon.make(locale: store.locale)
+            button.toolTip = store.tr("Micro Input 按键与会话控制")
+        }
+        if popover.isShown {
+            syncPopoverContentSize()
+        }
+    }
+
     private func setupMainMenu() {
+        lastRenderedLocale = store.locale
         let mainMenu = NSMenu()
 
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu(title: "Micro Input")
 
         let aboutItem = NSMenuItem(
-            title: "关于 Micro Input",
+            title: store.tr("关于 Micro Input"),
             action: #selector(handleOpenAboutSettings(_:)),
             keyEquivalent: ""
         )
@@ -198,7 +307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appMenu.addItem(.separator())
 
         let settingsItem = NSMenuItem(
-            title: "设置…",
+            title: store.tr("设置…"),
             action: #selector(handleOpenGeneralSettings(_:)),
             keyEquivalent: ","
         )
@@ -207,7 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appMenu.addItem(settingsItem)
 
         let checkUpdatesItem = NSMenuItem(
-            title: "检查更新…",
+            title: store.tr("检查更新…"),
             action: #selector(handleCheckForUpdates(_:)),
             keyEquivalent: ""
         )
@@ -216,14 +325,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appMenu.addItem(.separator())
 
         let hideItem = NSMenuItem(
-            title: "隐藏 Micro Input",
+            title: store.tr("隐藏 Micro Input"),
             action: #selector(NSApplication.hide(_:)),
             keyEquivalent: "h"
         )
         appMenu.addItem(hideItem)
 
         let hideOthersItem = NSMenuItem(
-            title: "隐藏其他",
+            title: store.tr("隐藏其他"),
             action: #selector(NSApplication.hideOtherApplications(_:)),
             keyEquivalent: "h"
         )
@@ -232,7 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         appMenu.addItem(
             NSMenuItem(
-                title: "全部显示",
+                title: store.tr("全部显示"),
                 action: #selector(NSApplication.unhideAllApplications(_:)),
                 keyEquivalent: ""
             )
@@ -240,7 +349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appMenu.addItem(.separator())
         appMenu.addItem(
             NSMenuItem(
-                title: "退出 Micro Input",
+                title: store.tr("退出 Micro Input"),
                 action: #selector(NSApplication.terminate(_:)),
                 keyEquivalent: "q"
             )
@@ -248,27 +357,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
-        let editMenuItem = NSMenuItem()
-        let editMenu = NSMenu(title: "编辑")
-        editMenu.addItem(NSMenuItem(title: "撤销", action: Selector(("undo:")), keyEquivalent: "z"))
-        let redoItem = NSMenuItem(title: "重做", action: Selector(("redo:")), keyEquivalent: "Z")
+        let editMenuItem = NSMenuItem(title: store.tr("编辑"), action: nil, keyEquivalent: "")
+        let editMenu = NSMenu(title: store.tr("编辑"))
+        editMenu.addItem(NSMenuItem(title: store.tr("撤销"), action: Selector(("undo:")), keyEquivalent: "z"))
+        let redoItem = NSMenuItem(title: store.tr("重做"), action: Selector(("redo:")), keyEquivalent: "Z")
         redoItem.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(redoItem)
         editMenu.addItem(.separator())
-        editMenu.addItem(NSMenuItem(title: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
-        editMenu.addItem(NSMenuItem(title: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
-        editMenu.addItem(NSMenuItem(title: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
-        editMenu.addItem(NSMenuItem(title: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        editMenu.addItem(NSMenuItem(title: store.tr("剪切"), action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: store.tr("拷贝"), action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: store.tr("粘贴"), action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: store.tr("全选"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
-        let windowMenuItem = NSMenuItem()
-        let windowMenu = NSMenu(title: "窗口")
-        windowMenu.addItem(NSMenuItem(title: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))
-        windowMenu.addItem(NSMenuItem(title: "缩放", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: ""))
-        windowMenu.addItem(NSMenuItem(title: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
+        let windowMenuItem = NSMenuItem(title: store.tr("窗口"), action: nil, keyEquivalent: "")
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(NSMenuItem(title: store.tr("最小化"), action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))
+        windowMenu.addItem(NSMenuItem(title: store.tr("缩放"), action: #selector(NSWindow.performZoom(_:)), keyEquivalent: ""))
+        windowMenu.addItem(NSMenuItem(title: store.tr("关闭窗口"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
         windowMenu.addItem(.separator())
-        windowMenu.addItem(NSMenuItem(title: "前置全部窗口", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""))
+        windowMenu.addItem(NSMenuItem(title: store.tr("前置全部窗口"), action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""))
         windowMenuItem.submenu = windowMenu
         mainMenu.addItem(windowMenuItem)
 
@@ -311,7 +420,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            button.image = StatusItemIcon.make()
+            button.image = StatusItemIcon.make(locale: store.locale)
+            button.toolTip = store.tr("Micro Input 按键与会话控制")
             button.imagePosition = .imageOnly
             button.target = self
             button.action = #selector(toggleStatusPopover(_:))
@@ -363,6 +473,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func openMainWindow() {
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.applicationIconImage = NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
+            refreshLocalizedAppKitChrome()
+        }
         if let win = mainWindow {
             if win.isMiniaturized {
                 win.deminiaturize(nil)
@@ -388,7 +503,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             rootView: WorkbenchRootView(
                 store: store,
                 navigation: navigation,
-                updater: updater
+                updater: updater,
+                launchAtLogin: launchAtLogin
             )
         )
         win.makeKeyAndOrderFront(nil)

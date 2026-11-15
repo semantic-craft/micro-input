@@ -5,28 +5,38 @@ public struct WorkbenchRootView: View {
     let store: CoreStore
     private let injectedNavigation: WorkbenchNavigationModel?
     private let injectedUpdater: SoftwareUpdateController?
+    private let injectedLaunchAtLogin: LaunchAtLoginController?
     @State private var fallbackNavigation = WorkbenchNavigationModel()
     @State private var fallbackUpdater = SoftwareUpdateController()
+    @State private var fallbackLaunchAtLogin = LaunchAtLoginController()
 
     @MainActor
     public init(
         store: CoreStore,
         navigation: WorkbenchNavigationModel? = nil,
-        updater: SoftwareUpdateController? = nil
+        updater: SoftwareUpdateController? = nil,
+        launchAtLogin: LaunchAtLoginController? = nil
     ) {
         self.store = store
         self.injectedNavigation = navigation
         self.injectedUpdater = updater
+        self.injectedLaunchAtLogin = launchAtLogin
     }
 
     public var body: some View {
         let _ = ViewRenderTelemetry.record("WorkbenchRootView")
         let navigation = injectedNavigation ?? fallbackNavigation
         let updater = injectedUpdater ?? fallbackUpdater
+        let launchAtLogin = injectedLaunchAtLogin ?? fallbackLaunchAtLogin
         let overlay = store.overlay
         let modal = store.activeModal
         ZStack {
-            ClassicWorkbenchView(store: store, navigation: navigation, updater: updater)
+            ClassicWorkbenchView(
+                store: store,
+                navigation: navigation,
+                updater: updater,
+                launchAtLogin: launchAtLogin
+            )
 
             if overlay.cheatSheetVisible, let cs = overlay.cheatSheet {
                 CheatSheetOverlayView(store: store, sheet: cs)
@@ -134,6 +144,7 @@ struct CheatSheetOverlayView: View {
     private let gridSpacing: CGFloat = 10
 
     var body: some View {
+        let locale = store.locale
         let layout = CheatSheetSpatialLayout(sheet: sheet)
         let chassisWidth = unitWidth * 4 + gridSpacing * 3 + 28
         ZStack {
@@ -147,7 +158,7 @@ struct CheatSheetOverlayView: View {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("\(sheet.profileName) · 按键速查")
+                        Text("\(DesktopAgent.displayName(sheet.profileName, locale: locale)) · \(store.tr("按键速查"))")
                             .font(.system(size: 18, weight: .semibold))
                             .foregroundStyle(UITheme.textPrimary)
                         Text(sheet.routingSummary)
@@ -217,7 +228,7 @@ struct CheatSheetOverlayView: View {
                     Image(systemName: "dial.low")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(UITheme.textSecondary)
-                    Text("无极旋钮")
+                    Text(store.tr("无极旋钮"))
                         .font(UITheme.micro)
                         .foregroundStyle(UITheme.textSecondary)
                     Spacer()
@@ -232,20 +243,20 @@ struct CheatSheetOverlayView: View {
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(UITheme.strongBorder, lineWidth: 1))
 
         case .joystick(let north, let west, let south, let east):
-            let isHwMode = north?.controlName.contains("硬件") == true
+            let isHwMode = sheet.joystickMode != "logical_sectors" && sheet.joystickMode != "source"
             VStack(alignment: .leading, spacing: isHwMode ? 5 : 3) {
                 HStack(spacing: 5) {
                     Image(systemName: isHwMode ? "cursorarrow.motionlines" : "dpad")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(UITheme.textSecondary)
-                    Text(isHwMode ? (north?.controlName ?? "硬件摇杆") : "四向摇杆")
+                    Text(isHwMode ? (north?.controlName ?? store.tr("硬件摇杆")) : store.tr("四向摇杆"))
                         .font(UITheme.micro)
                         .foregroundStyle(UITheme.textSecondary)
                         .lineLimit(1)
                     Spacer()
                 }
                 if isHwMode {
-                    Text(north?.shortLabel ?? "鼠标指针")
+                    Text(north?.shortLabel ?? store.tr("鼠标指针"))
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(UITheme.textPrimary)
                         .lineLimit(1)
@@ -265,7 +276,7 @@ struct CheatSheetOverlayView: View {
 
         case .key(let cell, let bindingId, let fallbackName, let spanCols):
             let cellWidth = spanCols == 2 ? (unitWidth * 2 + gridSpacing) : unitWidth
-            let title = (cell?.label.isEmpty == false) ? cell!.label : "未绑定"
+            let title = (cell?.label.isEmpty == false) ? cell!.label : store.tr("未绑定")
             let isAvailable = cell?.available ?? false
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 4) {
@@ -273,7 +284,7 @@ struct CheatSheetOverlayView: View {
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .foregroundStyle(UITheme.textMuted)
                     Spacer(minLength: 4)
-                    Text(cell?.controlName ?? fallbackName)
+                    Text(cell?.controlName ?? store.tr(fallbackName))
                         .font(.system(size: 11, weight: .regular))
                         .foregroundStyle(UITheme.textSecondary)
                         .lineLimit(1)
@@ -304,11 +315,11 @@ struct CheatSheetOverlayView: View {
                         .foregroundStyle(UITheme.textMuted)
                 }
                 Spacer(minLength: 0)
-                Text(profileName)
+                Text(DesktopAgent.displayName(profileName, locale: store.locale))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(UITheme.textPrimary)
                     .lineLimit(1)
-                Text("物理坐标对齐")
+                Text(store.tr("物理坐标对齐"))
                     .font(.system(size: 11.5))
                     .foregroundStyle(UITheme.textSecondary)
             }
@@ -336,13 +347,15 @@ struct CheatSheetOverlayView: View {
 
 public struct PopoverMiniCheatSheetView: View {
     public let sheet: CheatSheetModel
+    public let locale: ResolvedLocale
 
     private let unitWidth: CGFloat = 72
     private let unitHeight: CGFloat = 56
     private let gridSpacing: CGFloat = 5
 
-    public init(sheet: CheatSheetModel) {
+    public init(sheet: CheatSheetModel, locale: ResolvedLocale = .zhHans) {
         self.sheet = sheet
+        self.locale = locale
     }
 
     public var body: some View {
@@ -350,11 +363,11 @@ public struct PopoverMiniCheatSheetView: View {
         let layout = CheatSheetSpatialLayout(sheet: sheet)
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text("按键速查")
+                Text(L10n.tr("按键速查", locale))
                     .font(UITheme.micro)
                     .foregroundStyle(UITheme.textSecondary)
                 Spacer(minLength: 4)
-                Text("\(DesktopAgent.displayName(sheet.profileName)) · 4×4")
+                Text("\(DesktopAgent.displayName(sheet.profileName, locale: locale)) · 4×4")
                     .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                     .foregroundStyle(UITheme.textMuted)
                     .lineLimit(1)
@@ -390,7 +403,7 @@ public struct PopoverMiniCheatSheetView: View {
                     Image(systemName: "dial.low")
                         .font(.system(size: 8.5, weight: .semibold))
                         .foregroundStyle(UITheme.textMuted)
-                    Text("旋钮")
+                    Text(L10n.tr("旋钮", locale))
                         .font(.system(size: 8.5, weight: .medium))
                         .foregroundStyle(UITheme.textSecondary)
                     Spacer(minLength: 0)
@@ -406,11 +419,11 @@ public struct PopoverMiniCheatSheetView: View {
             .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).stroke(UITheme.strongBorder, lineWidth: 1))
 
         case .joystick(let north, let west, let south, let east):
-            let isHwMode = north?.controlName.contains("硬件") == true
+            let isHwMode = sheet.joystickMode != "logical_sectors" && sheet.joystickMode != "source"
             Group {
                 if isHwMode {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(north?.shortLabel ?? "鼠标指针")
+                        Text(north?.shortLabel ?? L10n.tr("鼠标指针", locale))
                             .font(.system(size: 9.5, weight: .semibold))
                             .foregroundStyle(UITheme.textPrimary)
                             .lineLimit(1)
@@ -441,7 +454,8 @@ public struct PopoverMiniCheatSheetView: View {
         case .key(let cell, let bindingId, _, let spanCols):
             let cellWidth = spanCols == 2 ? (unitWidth * 2 + gridSpacing) : unitWidth
             let isAvailable = cell?.available ?? false
-            let title = (cell?.shortLabel.isEmpty == false) ? cell!.shortLabel : "未绑定"
+            let unbound = L10n.tr("未绑定", locale)
+            let title = (cell?.shortLabel.isEmpty == false) ? cell!.shortLabel : unbound
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 3) {
                     Text(bindingId)
@@ -468,7 +482,7 @@ public struct PopoverMiniCheatSheetView: View {
             .frame(width: cellWidth, height: unitHeight, alignment: .topLeading)
             .background(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).fill(UITheme.surface))
             .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
-            .help(cell?.label ?? "未绑定")
+            .help(cell?.label ?? unbound)
 
         case .statusCluster(let profileName, _):
             VStack(alignment: .leading, spacing: 3) {
@@ -484,7 +498,7 @@ public struct PopoverMiniCheatSheetView: View {
                         .foregroundStyle(UITheme.textMuted)
                 }
                 Spacer(minLength: 0)
-                Text(DesktopAgent.displayName(profileName))
+                Text(DesktopAgent.displayName(profileName, locale: locale))
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(UITheme.textPrimary)
                     .lineLimit(2)
@@ -513,7 +527,7 @@ public struct PopoverMiniCheatSheetView: View {
                 .minimumScaleFactor(0.75)
             Spacer(minLength: 0)
         }
-        .help(cell?.label ?? "未绑定")
+        .help(cell?.label ?? L10n.tr("未绑定", locale))
     }
 
     private func miniJoystickQuadrant(arrow: String, cell: CheatSheetCellModel?) -> some View {
@@ -536,7 +550,7 @@ public struct PopoverMiniCheatSheetView: View {
         .padding(.vertical, 1.5)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(UITheme.subtleSurface.opacity(0.7)))
-        .help(cell?.label ?? "未绑定")
+        .help(cell?.label ?? L10n.tr("未绑定", locale))
     }
 }
 
@@ -570,11 +584,14 @@ struct HardwarePowerStatusCapsule: View {
 
 struct CandidateDevicePickerPill: View {
     let candidates: [CandidateDeviceModel]
+    var locale: ResolvedLocale = .zhHans
     let onSelect: (String) -> Void
 
     var body: some View {
         let options = candidates.map { dev in
-            let roleTag = dev.isConnected ? "已连接" : (dev.isPreferred ? "上次优先" : "可用")
+            let roleTag = dev.isConnected
+                ? L10n.tr("已连接", locale)
+                : (dev.isPreferred ? L10n.tr("上次优先", locale) : L10n.tr("可用", locale))
             let subtitle = dev.serialNumber.map { "SN \($0) · \(roleTag)" } ?? roleTag
             return SelectOption(
                 value: dev.selectorKey,
@@ -599,6 +616,7 @@ struct CandidateDevicePickerPill: View {
 struct StatusMenuHardwareStrip: View {
     let powerStatus: PowerStatusBadgeModel?
     let candidates: [CandidateDeviceModel]
+    var locale: ResolvedLocale = .zhHans
     let onSelect: (String) -> Void
 
     var body: some View {
@@ -622,7 +640,7 @@ struct StatusMenuHardwareStrip: View {
             HardwarePowerStatusCapsule(badge: powerStatus)
         }
         if candidates.count > 1 {
-            CandidateDevicePickerPill(candidates: candidates, onSelect: onSelect)
+            CandidateDevicePickerPill(candidates: candidates, locale: locale, onSelect: onSelect)
         }
     }
 }
