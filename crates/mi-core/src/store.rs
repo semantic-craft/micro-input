@@ -735,6 +735,13 @@ impl WorkbenchStore {
 
         store.sync_routing_snapshot();
         store.prepare_desktop_profiles()?;
+        let runtime_path = store.config.document_dir.join("six-layer-runtime.json");
+        if let Ok(mut saved) = crate::six_layer_runtime::load(&runtime_path) {
+            let doc = &store.document_store.draft.document;
+            if saved.migrate_saved_encoder_defaults(doc) {
+                let _ = crate::six_layer_runtime::save(&runtime_path, &saved);
+            }
+        }
         store.ensure_default_pinned_favorites();
         store.initialize_board_plan()?;
         store.initialize_selection(preserve_saved_host_state)?;
@@ -2734,6 +2741,9 @@ impl WorkbenchStore {
         }
         self.navigation_foreground_changed(bundle_id);
         let bundle_changed = self.foreground_bundle_id.as_deref() != bundle_id;
+        if bundle_changed {
+            self.cancel_encoder_model_picker();
+        }
         self.foreground_bundle_id = bundle_id.map(str::to_owned);
         let unlocked = self.document_store.locked_profile_id().is_none();
         if let Some(running) = &self.six_layer_running {
@@ -3337,7 +3347,7 @@ impl WorkbenchStore {
                     KnobJoystickPreset::ModelSelectionAndMouse => &[
                         (13, "agent-model-picker-prev"),
                         (14, "agent-model-picker-next"),
-                        (15, "agent-model-picker-confirm"),
+                        (15, "agent-model-picker-open"),
                         (16, "agent-model-picker-prev"),
                         (17, "agent-model-picker-next"),
                         (18, "agent-model-picker-effort-left"),
@@ -3387,14 +3397,6 @@ impl WorkbenchStore {
                     .update(|draft| {
                         match preset {
                             KnobJoystickPreset::ModelSelectionAndMouse => {
-                                let open_action = catalog
-                                    .iter()
-                                    .find(|a| a.id == "agent-model-picker-open")
-                                    .cloned()
-                                    .ok_or_else(|| {
-                                        "未找到内置动作 agent-model-picker-open".to_string()
-                                    })?;
-                                draft.assign_encoder_hold(&json!(pid), &json!(lid), open_action)?;
                                 let (joystick_mode, active_sectors) = if v070_supported {
                                     ("mouse", 0)
                                 } else {
@@ -3409,6 +3411,14 @@ impl WorkbenchStore {
                                         encoder_hold_action_id: None,
                                     },
                                 )?;
+                                let search_action = catalog
+                                    .iter()
+                                    .find(|a| a.id == "agent-search")
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        "未找到内置动作 agent-search".to_string()
+                                    })?;
+                                draft.assign_encoder_hold(&json!(pid), &json!(lid), search_action)?;
                             }
                             KnobJoystickPreset::MousePointerAndScroll => {
                                 draft.unassign_encoder_hold(&json!(pid), &json!(lid))?;
@@ -5103,7 +5113,7 @@ impl WorkbenchStore {
         {
             return Some(ResolvedHostAction::AgentCommand {
                 adapter: "codex".to_string(),
-                command: "model-picker-open".to_string(),
+                command: "search".to_string(),
             });
         }
         None
@@ -5198,21 +5208,37 @@ impl WorkbenchStore {
         let hold_action = self.resolve_encoder_hold_physical_action(&hold_profile);
         let target_adapter =
             self.resolve_model_picker_target_adapter(&hold_profile, hold_action.as_ref());
-        let opens_picker = hold_action.as_ref().is_some_and(
-            crate::encoder_model_picker::ModelPickerCommand::is_open_model_picker_action,
-        );
+        let target_kind = hold_action
+            .as_ref()
+            .and_then(crate::encoder_model_picker::EncoderOverlayKind::from_action);
         match self.encoder_model_picker.on_hold_timer_with_picker_mode(
             hold_generation,
             target_adapter.as_deref(),
             hold_action.is_some(),
-            opens_picker,
+            target_kind,
             now,
         ) {
             crate::encoder_model_picker::EncoderHoldTimerOutcome::Ignored => None,
             crate::encoder_model_picker::EncoderHoldTimerOutcome::FiredHold {
-                entered_model_picker,
+                overlay_kind,
                 ..
             } => {
+                let must_esc = self.encoder_model_picker.prepare_for_hold_action(overlay_kind);
+                if must_esc {
+                    if let Some(ref adapter) = target_adapter {
+                        let cancel_action = crate::encoder_model_picker::ModelPickerCommand::ModelPickerCancel
+                            .into_host_action(adapter.clone());
+                        let _ = self.execute_resolved_physical_action_with_session(
+                            &hold_profile,
+                            "ENC_CLK",
+                            session_id,
+                            cancel_action,
+                        );
+                    }
+                }
+                if overlay_kind != Some(crate::encoder_model_picker::EncoderOverlayKind::ModelPicker) {
+                    self.set_model_picker_mouse_capture(false);
+                }
                 let mut action = hold_action?;
                 if let ResolvedHostAction::AgentCommand { adapter, .. } = &mut action {
                     if matches!(adapter.as_str(), "host" | "active-agent") {
@@ -5227,18 +5253,43 @@ impl WorkbenchStore {
                     session_id,
                     action,
                 );
-                if receipt.as_ref().is_some_and(|r| r.succeeded()) && entered_model_picker {
-                    self.set_model_picker_mouse_capture(true);
-                    if let Some(r) = &receipt {
-                        self.status_message = format!(
-                            "已弹出模型选择页 · 左右旋转选模型，按右选模型力度 ({})",
-                            r.detail
-                        );
+                let succeeded = receipt.as_ref().is_some_and(|r| r.succeeded());
+                let adapter = target_adapter.unwrap_or_else(|| "antigravity".to_string());
+                let transition = self.encoder_model_picker.apply_hold_execution_outcome(
+                    adapter,
+                    overlay_kind,
+                    succeeded,
+                    now,
+                );
+                match transition {
+                    crate::encoder_model_picker::OverlayTransition::Entered(kind) => {
+                        self.set_model_picker_mouse_capture(kind.captures_mouse());
+                        if let Some(r) = &receipt {
+                            match kind {
+                                crate::encoder_model_picker::EncoderOverlayKind::ModelPicker => {
+                                    self.status_message = format!(
+                                        "已弹出模型选择页 · 左右旋转选模型，按右选模型力度 ({})",
+                                        r.detail
+                                    );
+                                }
+                                crate::encoder_model_picker::EncoderOverlayKind::SearchConversations => {
+                                    self.status_message = format!(
+                                        "已打开搜索会话 · 上下旋转选择会话，短按确认 ({})",
+                                        r.detail
+                                    );
+                                }
+                            }
+                        }
+                        self.commit_runtime_update();
                     }
-                    self.commit_runtime_update();
-                } else if !receipt.as_ref().is_some_and(|r| r.succeeded()) {
-                    self.cancel_encoder_model_picker();
-                    self.commit_runtime_update();
+                    crate::encoder_model_picker::OverlayTransition::Cancelled => {
+                        self.cancel_encoder_model_picker();
+                        self.commit_runtime_update();
+                    }
+                    crate::encoder_model_picker::OverlayTransition::None => {
+                        self.set_model_picker_mouse_capture(false);
+                        self.commit_runtime_update();
+                    }
                 }
                 receipt
             }
@@ -5333,23 +5384,39 @@ impl WorkbenchStore {
                             &hold_profile,
                             hold_action.as_ref(),
                         );
-                        let opens_picker = hold_action.as_ref().is_some_and(
-                            crate::encoder_model_picker::ModelPickerCommand::is_open_model_picker_action,
-                        );
+                        let target_kind = hold_action
+                            .as_ref()
+                            .and_then(crate::encoder_model_picker::EncoderOverlayKind::from_action);
                         match self.encoder_model_picker.on_encoder_release_with_picker_mode(
                             event.session_id,
                             target_adapter.as_deref(),
                             hold_action.is_some(),
-                            opens_picker,
+                            target_kind,
                             now,
                         ) {
                             crate::encoder_model_picker::EncoderReleaseOutcome::Consumed => {
                                 return None;
                             }
                             crate::encoder_model_picker::EncoderReleaseOutcome::FiredHold {
-                                entered_model_picker,
+                                overlay_kind,
                                 ..
                             } => {
+                                let must_esc = self.encoder_model_picker.prepare_for_hold_action(overlay_kind);
+                                if must_esc {
+                                    if let Some(ref adapter) = target_adapter {
+                                        let cancel_action = crate::encoder_model_picker::ModelPickerCommand::ModelPickerCancel
+                                            .into_host_action(adapter.clone());
+                                        let _ = self.execute_resolved_physical_action_with_session(
+                                            &hold_profile,
+                                            "ENC_CLK",
+                                            event.session_id,
+                                            cancel_action,
+                                        );
+                                    }
+                                }
+                                if overlay_kind != Some(crate::encoder_model_picker::EncoderOverlayKind::ModelPicker) {
+                                    self.set_model_picker_mouse_capture(false);
+                                }
                                 let Some(mut action) = hold_action else {
                                     return None;
                                 };
@@ -5368,20 +5435,43 @@ impl WorkbenchStore {
                                     event.session_id,
                                     action,
                                 );
-                                if receipt.as_ref().is_some_and(|r| r.succeeded())
-                                    && entered_model_picker
-                                {
-                                    self.set_model_picker_mouse_capture(true);
-                                    if let Some(r) = &receipt {
-                                        self.status_message = format!(
-                                            "已弹出模型选择页 · 左右旋转选模型，按右选模型力度 ({})",
-                                            r.detail
-                                        );
+                                let succeeded = receipt.as_ref().is_some_and(|r| r.succeeded());
+                                let adapter = target_adapter.unwrap_or_else(|| "antigravity".to_string());
+                                let transition = self.encoder_model_picker.apply_hold_execution_outcome(
+                                    adapter,
+                                    overlay_kind,
+                                    succeeded,
+                                    now,
+                                );
+                                match transition {
+                                    crate::encoder_model_picker::OverlayTransition::Entered(kind) => {
+                                        self.set_model_picker_mouse_capture(kind.captures_mouse());
+                                        if let Some(r) = &receipt {
+                                            match kind {
+                                                crate::encoder_model_picker::EncoderOverlayKind::ModelPicker => {
+                                                    self.status_message = format!(
+                                                        "已弹出模型选择页 · 左右旋转选模型，按右选模型力度 ({})",
+                                                        r.detail
+                                                    );
+                                                }
+                                                crate::encoder_model_picker::EncoderOverlayKind::SearchConversations => {
+                                                    self.status_message = format!(
+                                                        "已打开搜索会话 · 上下旋转选择会话，短按确认 ({})",
+                                                        r.detail
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        self.commit_runtime_update();
                                     }
-                                    self.commit_runtime_update();
-                                } else if !receipt.as_ref().is_some_and(|r| r.succeeded()) {
-                                    self.cancel_encoder_model_picker();
-                                    self.commit_runtime_update();
+                                    crate::encoder_model_picker::OverlayTransition::Cancelled => {
+                                        self.cancel_encoder_model_picker();
+                                        self.commit_runtime_update();
+                                    }
+                                    crate::encoder_model_picker::OverlayTransition::None => {
+                                        self.set_model_picker_mouse_capture(false);
+                                        self.commit_runtime_update();
+                                    }
                                 }
                                 return receipt;
                             }
@@ -5409,12 +5499,62 @@ impl WorkbenchStore {
                                     self.commit_runtime_update();
                                     return None;
                                 };
-                                return self.execute_resolved_physical_action_with_session(
+                                let target_adapter = self.resolve_model_picker_target_adapter(
+                                    &hold_profile,
+                                    Some(&short_action),
+                                );
+                                let mut action = short_action;
+                                if let ResolvedHostAction::AgentCommand { adapter, .. } =
+                                    &mut action
+                                {
+                                    if matches!(adapter.as_str(), "host" | "active-agent") {
+                                        if let Some(ref resolved) = target_adapter {
+                                            *adapter = resolved.clone();
+                                        }
+                                    }
+                                }
+                                let receipt = self.execute_resolved_physical_action_with_session(
                                     &hold_profile,
                                     "ENC_CLK",
                                     event.session_id,
-                                    short_action,
+                                    action.clone(),
                                 );
+                                if receipt.as_ref().is_some_and(|r| r.succeeded()) {
+                                    let eff_adapter = target_adapter.unwrap_or_else(|| "antigravity".to_string());
+                                    let transition = self.encoder_model_picker.activate_overlay_after_action(
+                                        eff_adapter,
+                                        &action,
+                                        now,
+                                    );
+                                    match transition {
+                                        crate::encoder_model_picker::OverlayTransition::Entered(kind) => {
+                                            self.set_model_picker_mouse_capture(kind.captures_mouse());
+                                            if let Some(r) = &receipt {
+                                                match kind {
+                                                    crate::encoder_model_picker::EncoderOverlayKind::ModelPicker => {
+                                                        self.status_message = format!(
+                                                            "已弹出模型选择页 · 左右旋转选模型，按右选模型力度 ({})",
+                                                            r.detail
+                                                        );
+                                                    }
+                                                    crate::encoder_model_picker::EncoderOverlayKind::SearchConversations => {
+                                                        self.status_message = format!(
+                                                            "已打开搜索会话 · 上下旋转选择会话，短按确认 ({})",
+                                                            r.detail
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            self.commit_runtime_update();
+                                        }
+                                        crate::encoder_model_picker::OverlayTransition::Cancelled => {
+                                            self.cancel_encoder_model_picker();
+                                            self.commit_runtime_update();
+                                        }
+                                        crate::encoder_model_picker::OverlayTransition::None => {}
+                                    }
+                                }
+                                return receipt;
                             }
                         }
                     }
@@ -7883,7 +8023,11 @@ fn fallback_unbridged_oai_action(
         }),
         "ENC_CLK" => Some(ResolvedHostAction::AgentCommand {
             adapter: adapter.to_string(),
-            command: "scroll-to-bottom".to_string(),
+            command: if adapter == "codex" {
+                "model-picker-open".to_string()
+            } else {
+                "scroll-to-bottom".to_string()
+            },
         }),
         _ => None,
     }

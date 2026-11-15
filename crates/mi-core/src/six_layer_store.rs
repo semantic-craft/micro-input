@@ -294,6 +294,7 @@ impl WorkbenchStore {
 
     pub(super) fn suspend_for_six_layer_operation(&mut self) -> Result<(), WorkbenchError> {
         self.cancel_session_navigation();
+        self.cancel_encoder_model_picker();
         self.teardown_v070_session_sa_rgb();
         if let Some(running) = self.six_layer_running.take() {
             if let Err(error) = running.shutdown(&self.tokio_runtime) {
@@ -718,7 +719,7 @@ mod tests {
             custom.encoder_hold_action,
             Some(ResolvedHostAction::AgentCommand {
                 adapter: "codex".into(),
-                command: "model-picker-open".into(),
+                command: "search".into(),
             })
         );
         let live_l2 = layer_two.expect("Antigravity populates live layer_two");
@@ -726,7 +727,7 @@ mod tests {
             live_l2.encoder_hold_action,
             Some(ResolvedHostAction::AgentCommand {
                 adapter: "antigravity".into(),
-                command: "model-picker-open".into(),
+                command: "search".into(),
             })
         );
         let live_l3 = layer_three.expect("DSH populates live layer_three");
@@ -734,7 +735,7 @@ mod tests {
             live_l3.encoder_hold_action,
             Some(ResolvedHostAction::AgentCommand {
                 adapter: "dsh-desktop".into(),
-                command: "model-picker-open".into(),
+                command: "search".into(),
             })
         );
 
@@ -749,7 +750,7 @@ mod tests {
             manual.encoder_hold_action,
             Some(ResolvedHostAction::AgentCommand {
                 adapter: "antigravity".into(),
-                command: "model-picker-open".into(),
+                command: "search".into(),
             })
         );
 

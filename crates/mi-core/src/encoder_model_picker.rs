@@ -1,5 +1,5 @@
 //! Pure state machine for encoder long-press (`ENC_CLK`) and active target-app
-//! model-picker / reasoning-effort navigation.
+//! model-picker / search overlay navigation.
 
 use mi_model::host_router::ResolvedHostAction;
 use std::time::{Duration, Instant};
@@ -10,6 +10,33 @@ pub const MOUSE_FLICK_DX_THRESHOLD: f64 = 28.0;
 pub const MOUSE_FLICK_COOLDOWN: Duration = Duration::from_millis(220);
 pub const MOUSE_FLICK_IDLE_RESET: Duration = Duration::from_millis(180);
 pub const MOUSE_FLICK_HORIZONTAL_DOMINANCE: f64 = 1.5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncoderOverlayKind {
+    ModelPicker,
+    SearchConversations,
+}
+
+impl EncoderOverlayKind {
+    pub const fn captures_mouse(self) -> bool {
+        matches!(self, Self::ModelPicker)
+    }
+
+    pub const fn captures_sectors(self) -> bool {
+        matches!(self, Self::ModelPicker)
+    }
+
+    pub fn from_action(action: &ResolvedHostAction) -> Option<Self> {
+        match action {
+            ResolvedHostAction::AgentCommand { command, .. } => match command.as_str() {
+                "model" | "model-picker-open" => Some(Self::ModelPicker),
+                "search" => Some(Self::SearchConversations),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EncoderHoldState {
@@ -23,6 +50,7 @@ pub struct EncoderHoldState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActiveModelPickerSession {
     pub adapter: String,
+    pub kind: EncoderOverlayKind,
     pub opened_at: Instant,
     pub last_activity_at: Instant,
 }
@@ -72,7 +100,7 @@ pub enum EncoderHoldTimerOutcome {
     Ignored,
     FiredHold {
         adapter: Option<String>,
-        entered_model_picker: bool,
+        overlay_kind: Option<EncoderOverlayKind>,
     },
 }
 
@@ -89,11 +117,18 @@ pub enum EncoderReleaseOutcome {
     ShortPress,
     FiredHold {
         adapter: Option<String>,
-        entered_model_picker: bool,
+        overlay_kind: Option<EncoderOverlayKind>,
     },
     ModelPickerConfirm {
         adapter: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayTransition {
+    None,
+    Entered(EncoderOverlayKind),
+    Cancelled,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -160,6 +195,12 @@ impl EncoderModelPicker {
             .flatten()
     }
 
+    pub fn active_kind(&self, now: Instant) -> Option<EncoderOverlayKind> {
+        self.is_active(now)
+            .then(|| self.active.as_ref().map(|s| s.kind))
+            .flatten()
+    }
+
     pub fn expire_if_idle(&mut self, now: Instant) -> Option<ActiveModelPickerSession> {
         if self.active.as_ref().is_some_and(|session| {
             now.saturating_duration_since(session.last_activity_at) > MODEL_PICKER_IDLE_TIMEOUT
@@ -184,6 +225,73 @@ impl EncoderModelPicker {
         generation
     }
 
+    pub fn prepare_for_hold_action(&mut self, next_kind: Option<EncoderOverlayKind>) -> bool {
+        let was_model_picker = self
+            .active
+            .as_ref()
+            .is_some_and(|s| s.kind == EncoderOverlayKind::ModelPicker);
+        let entering_search = next_kind == Some(EncoderOverlayKind::SearchConversations);
+        if self.active.is_some() {
+            self.active = None;
+            self.flick.clear();
+        }
+        was_model_picker && entering_search
+    }
+
+    pub fn apply_hold_execution_outcome(
+        &mut self,
+        adapter: impl Into<String>,
+        kind: Option<EncoderOverlayKind>,
+        succeeded: bool,
+        now: Instant,
+    ) -> OverlayTransition {
+        if succeeded {
+            if let Some(kind) = kind {
+                self.active = Some(ActiveModelPickerSession {
+                    adapter: adapter.into(),
+                    kind,
+                    opened_at: now,
+                    last_activity_at: now,
+                });
+                self.flick.clear();
+                return OverlayTransition::Entered(kind);
+            }
+            OverlayTransition::None
+        } else {
+            self.cancel();
+            OverlayTransition::Cancelled
+        }
+    }
+
+    pub fn activate_overlay_after_action(
+        &mut self,
+        adapter: impl Into<String>,
+        action: &ResolvedHostAction,
+        now: Instant,
+    ) -> OverlayTransition {
+        if matches!(action, ResolvedHostAction::Shortcut { key_code: 0x35, .. })
+            || matches!(
+                action,
+                ResolvedHostAction::AgentCommand { command, .. }
+                    if command == "model-picker-cancel"
+            )
+        {
+            self.cancel();
+            return OverlayTransition::Cancelled;
+        }
+        if let Some(kind) = EncoderOverlayKind::from_action(action) {
+            self.active = Some(ActiveModelPickerSession {
+                adapter: adapter.into(),
+                kind,
+                opened_at: now,
+                last_activity_at: now,
+            });
+            self.flick.clear();
+            return OverlayTransition::Entered(kind);
+        }
+        OverlayTransition::None
+    }
+
     pub fn on_hold_timer(
         &mut self,
         hold_generation: u64,
@@ -191,14 +299,12 @@ impl EncoderModelPicker {
         has_hold_action: bool,
         now: Instant,
     ) -> EncoderHoldTimerOutcome {
-        let opens_picker = adapter.is_some_and(|a| !a.trim().is_empty());
-        self.on_hold_timer_with_picker_mode(
-            hold_generation,
-            adapter,
-            has_hold_action,
-            opens_picker,
-            now,
-        )
+        let target_kind = if has_hold_action && adapter.is_some_and(|a| !a.trim().is_empty()) {
+            Some(EncoderOverlayKind::ModelPicker)
+        } else {
+            None
+        };
+        self.on_hold_timer_with_picker_mode(hold_generation, adapter, has_hold_action, target_kind, now)
     }
 
     pub fn on_hold_timer_with_picker_mode(
@@ -206,7 +312,7 @@ impl EncoderModelPicker {
         hold_generation: u64,
         adapter: Option<&str>,
         has_hold_action: bool,
-        opens_model_picker: bool,
+        target_kind: Option<EncoderOverlayKind>,
         now: Instant,
     ) -> EncoderHoldTimerOutcome {
         self.expire_if_idle(now);
@@ -226,42 +332,35 @@ impl EncoderModelPicker {
             .map(str::trim)
             .filter(|a| !a.is_empty())
             .map(str::to_owned);
-        let entered_model_picker = if opens_model_picker {
-            if let Some(ref target_adapter) = normalized_adapter {
-                self.active = Some(ActiveModelPickerSession {
-                    adapter: target_adapter.clone(),
-                    opened_at: now,
-                    last_activity_at: now,
-                });
-                self.flick.clear();
-                true
-            } else {
-                false
-            }
+        let overlay_kind = if target_kind.is_some() && normalized_adapter.is_some() {
+            target_kind
         } else {
-            false
+            None
         };
         EncoderHoldTimerOutcome::FiredHold {
             adapter: normalized_adapter,
-            entered_model_picker,
+            overlay_kind,
         }
     }
 
     pub fn on_encoder_turn(&mut self, clockwise: bool, now: Instant) -> EncoderTurnOutcome {
         self.expire_if_idle(now);
-        if let Some(hold) = self.hold.as_mut() {
-            if !hold.hold_fired {
-                hold.turned_while_pressed = true;
-                return EncoderTurnOutcome::FastScroll { clockwise };
-            }
-        }
         if let Some(active) = self.active.as_mut() {
+            if let Some(hold) = self.hold.as_mut() {
+                hold.turned_while_pressed = true;
+            }
             active.last_activity_at = now;
             return EncoderTurnOutcome::ModelPicker(if clockwise {
                 ModelPickerCommand::ModelPickerNext
             } else {
                 ModelPickerCommand::ModelPickerPrev
             });
+        }
+        if let Some(hold) = self.hold.as_mut() {
+            if !hold.hold_fired {
+                hold.turned_while_pressed = true;
+                return EncoderTurnOutcome::FastScroll { clockwise };
+            }
         }
         EncoderTurnOutcome::NormalSlot
     }
@@ -273,14 +372,12 @@ impl EncoderModelPicker {
         has_hold_action: bool,
         now: Instant,
     ) -> EncoderReleaseOutcome {
-        let opens_picker = adapter.is_some_and(|a| !a.trim().is_empty());
-        self.on_encoder_release_with_picker_mode(
-            session_id,
-            adapter,
-            has_hold_action,
-            opens_picker,
-            now,
-        )
+        let target_kind = if has_hold_action && adapter.is_some_and(|a| !a.trim().is_empty()) {
+            Some(EncoderOverlayKind::ModelPicker)
+        } else {
+            None
+        };
+        self.on_encoder_release_with_picker_mode(session_id, adapter, has_hold_action, target_kind, now)
     }
 
     pub fn on_encoder_release_with_picker_mode(
@@ -288,7 +385,7 @@ impl EncoderModelPicker {
         session_id: u64,
         adapter: Option<&str>,
         has_hold_action: bool,
-        opens_model_picker: bool,
+        target_kind: Option<EncoderOverlayKind>,
         now: Instant,
     ) -> EncoderReleaseOutcome {
         self.expire_if_idle(now);
@@ -308,24 +405,14 @@ impl EncoderModelPicker {
                 .map(str::trim)
                 .filter(|a| !a.is_empty())
                 .map(str::to_owned);
-            let entered_model_picker = if opens_model_picker {
-                if let Some(ref target_adapter) = normalized_adapter {
-                    self.active = Some(ActiveModelPickerSession {
-                        adapter: target_adapter.clone(),
-                        opened_at: now,
-                        last_activity_at: now,
-                    });
-                    self.flick.clear();
-                    true
-                } else {
-                    false
-                }
+            let overlay_kind = if target_kind.is_some() && normalized_adapter.is_some() {
+                target_kind
             } else {
-                false
+                None
             };
             return EncoderReleaseOutcome::FiredHold {
                 adapter: normalized_adapter,
-                entered_model_picker,
+                overlay_kind,
             };
         }
         if let Some(active) = self.active.take() {
@@ -340,6 +427,9 @@ impl EncoderModelPicker {
     pub fn on_mouse_delta(&mut self, dx: f64, dy: f64, now: Instant) -> Option<ModelPickerCommand> {
         self.expire_if_idle(now);
         let active = self.active.as_mut()?;
+        if !active.kind.captures_mouse() {
+            return None;
+        }
         if !dx.is_finite() || !dy.is_finite() || (dx == 0.0 && dy == 0.0) {
             return None;
         }
@@ -395,6 +485,9 @@ impl EncoderModelPicker {
     ) -> Option<ModelPickerCommand> {
         self.expire_if_idle(now);
         let active = self.active.as_mut()?;
+        if !active.kind.captures_sectors() {
+            return None;
+        }
         let cmd = match binding_id {
             "AG18" => ModelPickerCommand::EffortRight,
             "AG16" => ModelPickerCommand::EffortLeft,
@@ -406,9 +499,15 @@ impl EncoderModelPicker {
         Some(cmd)
     }
 
-    pub fn enter_active_session(&mut self, adapter: impl Into<String>, now: Instant) {
+    pub fn enter_active_session(
+        &mut self,
+        adapter: impl Into<String>,
+        kind: EncoderOverlayKind,
+        now: Instant,
+    ) {
         self.active = Some(ActiveModelPickerSession {
             adapter: adapter.into(),
+            kind,
             opened_at: now,
             last_activity_at: now,
         });
@@ -466,13 +565,23 @@ mod tests {
             ),
             EncoderHoldTimerOutcome::FiredHold {
                 adapter: Some("antigravity".into()),
-                entered_model_picker: true,
+                overlay_kind: Some(EncoderOverlayKind::ModelPicker),
             }
+        );
+        picker.apply_hold_execution_outcome(
+            "antigravity",
+            Some(EncoderOverlayKind::ModelPicker),
+            true,
+            t0 + Duration::from_millis(350),
         );
         assert!(picker.is_active(t0 + Duration::from_millis(350)));
         assert_eq!(
             picker.active_adapter(t0 + Duration::from_millis(350)),
             Some("antigravity")
+        );
+        assert_eq!(
+            picker.active_kind(t0 + Duration::from_millis(350)),
+            Some(EncoderOverlayKind::ModelPicker)
         );
 
         // Duplicate timer wakeup for same hold generation is ignored.
@@ -544,15 +653,21 @@ mod tests {
             EncoderReleaseOutcome::ShortPress
         );
 
-        // Synchronous >= 350ms release without async timer wakeup -> fires hold & enters Active.
+        // Synchronous >= 350ms release without async timer wakeup -> fires hold & enters Active upon outcome.
         let t1 = t0 + Duration::from_secs(1);
         picker.on_encoder_press(1, t1);
         assert_eq!(
             picker.on_encoder_release(1, Some("codex"), true, t1 + Duration::from_millis(360)),
             EncoderReleaseOutcome::FiredHold {
                 adapter: Some("codex".into()),
-                entered_model_picker: true,
+                overlay_kind: Some(EncoderOverlayKind::ModelPicker),
             }
+        );
+        picker.apply_hold_execution_outcome(
+            "codex",
+            Some(EncoderOverlayKind::ModelPicker),
+            true,
+            t1 + Duration::from_millis(360),
         );
         assert!(picker.is_active(t1 + Duration::from_millis(360)));
 
@@ -602,6 +717,12 @@ mod tests {
             true,
             t0 + Duration::from_millis(350),
         );
+        picker.apply_hold_execution_outcome(
+            "antigravity",
+            Some(EncoderOverlayKind::ModelPicker),
+            true,
+            t0 + Duration::from_millis(350),
+        );
 
         let mut now = t0 + Duration::from_millis(400);
         // Sub-threshold horizontal steps accumulate into EffortRight.
@@ -644,6 +765,12 @@ mod tests {
         picker.on_hold_timer(
             gen,
             Some("dsh-desktop"),
+            true,
+            t0 + Duration::from_millis(350),
+        );
+        picker.apply_hold_execution_outcome(
+            "dsh-desktop",
+            Some(EncoderOverlayKind::ModelPicker),
             true,
             t0 + Duration::from_millis(350),
         );
@@ -693,8 +820,92 @@ mod tests {
             true,
             t_expired + Duration::from_millis(350),
         );
+        picker.apply_hold_execution_outcome(
+            "dsh-desktop",
+            Some(EncoderOverlayKind::ModelPicker),
+            true,
+            t_expired + Duration::from_millis(350),
+        );
         assert!(picker.cancel().is_some());
         assert!(!picker.is_active(t_expired + Duration::from_millis(350)));
         assert!(!picker.is_encoder_pressed());
+    }
+
+    #[test]
+    fn search_conversations_overlay_disables_mouse_and_sectors_but_routes_turns_and_confirm() {
+        let mut picker = EncoderModelPicker::new();
+        let t0 = Instant::now();
+
+        picker.enter_active_session("antigravity", EncoderOverlayKind::SearchConversations, t0);
+        assert!(picker.is_active(t0));
+        assert_eq!(picker.active_kind(t0), Some(EncoderOverlayKind::SearchConversations));
+
+        // Mouse flicks are strictly disabled in SearchConversations
+        assert_eq!(picker.on_mouse_delta(50.0, 0.0, t0 + Duration::from_millis(10)), None);
+
+        // Sectors are strictly disabled in SearchConversations
+        assert_eq!(picker.on_sector_direction_while_active("AG15", t0 + Duration::from_millis(20)), None);
+        assert_eq!(picker.on_sector_direction_while_active("AG18", t0 + Duration::from_millis(30)), None);
+
+        // Dial turns navigate Up/Down in conversation search
+        assert_eq!(
+            picker.on_encoder_turn(false, t0 + Duration::from_millis(50)),
+            EncoderTurnOutcome::ModelPicker(ModelPickerCommand::ModelPickerPrev)
+        );
+        assert_eq!(
+            picker.on_encoder_turn(true, t0 + Duration::from_millis(60)),
+            EncoderTurnOutcome::ModelPicker(ModelPickerCommand::ModelPickerNext)
+        );
+
+        // Turning while momentarily held still routes to ModelPicker rather than FastScroll
+        picker.on_encoder_press(2, t0 + Duration::from_millis(100));
+        assert_eq!(
+            picker.on_encoder_turn(true, t0 + Duration::from_millis(120)),
+            EncoderTurnOutcome::ModelPicker(ModelPickerCommand::ModelPickerNext)
+        );
+        assert_eq!(
+            picker.on_encoder_release(2, Some("antigravity"), true, t0 + Duration::from_millis(130)),
+            EncoderReleaseOutcome::Consumed
+        );
+
+        // Next short press confirms and exits
+        picker.on_encoder_press(3, t0 + Duration::from_millis(140));
+        assert_eq!(
+            picker.on_encoder_release(3, Some("antigravity"), true, t0 + Duration::from_millis(150)),
+            EncoderReleaseOutcome::ModelPickerConfirm { adapter: "antigravity".into() }
+        );
+        assert!(!picker.is_active(t0 + Duration::from_millis(150)));
+    }
+
+    #[test]
+    fn model_picker_to_search_long_hold_transition_signals_escape_and_resets_capture() {
+        let mut picker = EncoderModelPicker::new();
+        let t0 = Instant::now();
+
+        picker.enter_active_session("antigravity", EncoderOverlayKind::ModelPicker, t0);
+        assert!(picker.is_active(t0));
+
+        let search_action = ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "search".into(),
+        };
+        let next_kind = EncoderOverlayKind::from_action(&search_action);
+        assert_eq!(next_kind, Some(EncoderOverlayKind::SearchConversations));
+
+        // Transition from ModelPicker to Search requires sending Esc first
+        let must_esc = picker.prepare_for_hold_action(next_kind);
+        assert!(must_esc);
+        assert!(!picker.is_active(t0));
+
+        // Successful execution enters SearchConversations
+        let transition = picker.apply_hold_execution_outcome(
+            "antigravity",
+            next_kind,
+            true,
+            t0 + Duration::from_millis(50),
+        );
+        assert_eq!(transition, OverlayTransition::Entered(EncoderOverlayKind::SearchConversations));
+        assert!(picker.is_active(t0 + Duration::from_millis(50)));
+        assert_eq!(picker.active_kind(t0 + Duration::from_millis(50)), Some(EncoderOverlayKind::SearchConversations));
     }
 }
