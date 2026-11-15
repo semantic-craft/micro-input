@@ -188,6 +188,8 @@ type AXUIElementRef = *const std::ffi::c_void;
 #[cfg(target_os = "macos")]
 type CFStringRef = *const std::ffi::c_void;
 #[cfg(target_os = "macos")]
+type CFDictionaryRef = *const std::ffi::c_void;
+#[cfg(target_os = "macos")]
 type CFArrayRef = *const std::ffi::c_void;
 #[cfg(target_os = "macos")]
 type CFMachPortRef = *mut std::ffi::c_void;
@@ -299,6 +301,7 @@ const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
+    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
     fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
     fn AXUIElementCopyAttributeValue(
         element: AXUIElementRef,
@@ -312,6 +315,9 @@ unsafe extern "C" {
     ) -> AXError;
     fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
     static kCFBooleanTrue: CFTypeRef;
+    static kCFBooleanFalse: CFTypeRef;
+    static kCFTypeDictionaryKeyCallBacks: u8;
+    static kCFTypeDictionaryValueCallBacks: u8;
     static kCFRunLoopCommonModes: CFStringRef;
     static kCFRunLoopDefaultMode: CFStringRef;
     fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
@@ -385,8 +391,55 @@ unsafe extern "C" {
     ) -> u8;
     fn CFArrayGetCount(the_array: CFArrayRef) -> CFIndex;
     fn CFArrayGetValueAtIndex(the_array: CFArrayRef, idx: CFIndex) -> CFTypeRef;
+    fn CFDictionaryCreate(
+        allocator: CFTypeRef,
+        keys: *const CFTypeRef,
+        values: *const CFTypeRef,
+        num_values: CFIndex,
+        key_call_backs: CFTypeRef,
+        value_call_backs: CFTypeRef,
+    ) -> CFDictionaryRef;
+    #[cfg(test)]
+    fn CFDictionaryGetCount(the_dict: CFDictionaryRef) -> CFIndex;
+    #[cfg(test)]
+    fn CFDictionaryGetValue(the_dict: CFDictionaryRef, key: CFTypeRef) -> CFTypeRef;
     fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
     fn CFRelease(cf: CFTypeRef);
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn with_accessibility_prompt_options<R>(
+    prompt: bool,
+    f: impl FnOnce(CFDictionaryRef) -> R,
+) -> Option<R> {
+    let key = cf_string_from_str("AXTrustedCheckOptionPrompt");
+    if key.is_null() {
+        return None;
+    }
+    let value = if prompt {
+        kCFBooleanTrue
+    } else {
+        kCFBooleanFalse
+    };
+    let keys = [key as CFTypeRef];
+    let values = [value];
+    let dict = CFDictionaryCreate(
+        std::ptr::null(),
+        keys.as_ptr(),
+        values.as_ptr(),
+        1,
+        (&raw const kCFTypeDictionaryKeyCallBacks).cast(),
+        (&raw const kCFTypeDictionaryValueCallBacks).cast(),
+    );
+    let out = if !dict.is_null() {
+        let res = f(dict);
+        CFRelease(dict);
+        Some(res)
+    } else {
+        None
+    };
+    CFRelease(key);
+    out
 }
 
 #[cfg(target_os = "macos")]
@@ -1188,6 +1241,12 @@ impl HostOsDriver for MacOsSystemDriver {
     }
 
     fn open_accessibility_settings(&self) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let _ = with_accessibility_prompt_options(true, |options| {
+                AXIsProcessTrustedWithOptions(options)
+            });
+        }
         let status = Command::new("/usr/bin/open")
             .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
             .status()
@@ -3390,5 +3449,20 @@ mod serialized_effect_tests {
 
         // Empty display list falls back to the input point unchanged.
         assert_eq!(clamp_point_to_rects((-30.0, 40.0), &[]), (-30.0, 40.0));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn accessibility_prompt_options_builds_single_entry_cf_dictionary() {
+        unsafe {
+            let result = with_accessibility_prompt_options(false, |dict| {
+                let count = CFDictionaryGetCount(dict);
+                let key = cf_string_from_str("AXTrustedCheckOptionPrompt");
+                let value = CFDictionaryGetValue(dict, key as CFTypeRef);
+                CFRelease(key);
+                (count, value == kCFBooleanFalse)
+            });
+            assert_eq!(result, Some((1, true)));
+        }
     }
 }
