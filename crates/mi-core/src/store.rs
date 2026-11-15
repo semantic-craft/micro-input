@@ -872,8 +872,10 @@ impl WorkbenchStore {
         self.sync_six_layer_routing_context();
         self.sync_live_session_source();
         self.refresh_four_app_lighting();
-        if !locked {
-            let _ = self.maybe_sync_v070_foreground_layer();
+        if locked {
+            let _ = self.maybe_sync_v070_active_profile_layer();
+        } else {
+            self.v070_hardware.pending_auto_layer_sync = None;
         }
         self.commit_runtime_update();
         Ok(())
@@ -2541,6 +2543,7 @@ impl WorkbenchStore {
         self.six_layer_user_pinned = true;
         self.normalize_surface_for_current_layer();
         self.sync_six_layer_routing_context();
+        let _ = self.maybe_sync_v070_active_profile_layer();
         self.sync_live_session_source();
         self.refresh_four_app_lighting();
         if emit_hud_notice && !self.overlay_controller.is_cheat_sheet_visible() {
@@ -2584,14 +2587,12 @@ impl WorkbenchStore {
         let bundle_changed = self.foreground_bundle_id.as_deref() != bundle_id;
         self.foreground_bundle_id = bundle_id.map(str::to_owned);
         let unlocked = self.document_store.locked_profile_id().is_none();
-        let mut acted = false;
         if let Some(running) = &self.six_layer_running {
             let running_updated = running.foreground_changed(bundle_id);
             if bundle_changed && unlocked {
-                acted |= self.maybe_sync_v070_foreground_layer();
                 self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
-                return running_updated || acted;
+                return running_updated;
             }
             if bundle_id == Some("com.worklouder.input") {
                 self.commit_runtime_update();
@@ -2599,16 +2600,12 @@ impl WorkbenchStore {
             return false;
         }
         if unlocked && bundle_changed {
-            acted |= self.maybe_sync_v070_foreground_layer();
             self.sync_v070_session_sa_rgb();
-            if acted {
-                self.commit_runtime_update();
-            }
         }
         if bundle_id == Some("com.worklouder.input") {
             self.commit_runtime_update();
         }
-        acted
+        false
     }
 
     pub fn set_host_execution_enabled(&mut self, enabled: bool) -> Result<(), WorkbenchError> {
@@ -2620,7 +2617,7 @@ impl WorkbenchStore {
             if self.status_message == "已暂停软件按键映射" {
                 self.status_message = "已启用软件按键映射".to_string();
             }
-            let _ = self.maybe_sync_v070_foreground_layer();
+            let _ = self.maybe_sync_v070_active_profile_layer();
         } else {
             self.status_message = "已暂停软件按键映射".to_string();
             self.v070_hardware.pending_auto_layer_sync = None;

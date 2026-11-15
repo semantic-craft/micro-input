@@ -192,19 +192,19 @@ impl Default for MouseConfig {
 impl MouseConfig {
     pub fn validate(&self) -> Result<(), ProtoError> {
         let checks = [
-            ("delay_ms", self.delay_ms, 1..=5000),
-            ("interval_ms", self.interval_ms, 1..=5000),
-            ("move_delta", self.move_delta, 1..=255),
-            ("max_speed", self.max_speed, 1..=255),
-            ("time_to_max", self.time_to_max, 1..=2000),
-            ("wheel_delay_ms", self.wheel_delay_ms, 1..=5000),
-            ("wheel_interval_ms", self.wheel_interval_ms, 1..=5000),
-            ("wheel_delta", self.wheel_delta, 1..=255),
-            ("wheel_max_speed", self.wheel_max_speed, 1..=255),
-            ("wheel_time_to_max", self.wheel_time_to_max, 1..=2000),
+            ("delay_ms", self.delay_ms, 1..=1000),
+            ("interval_ms", self.interval_ms, 1..=200),
+            ("move_delta", self.move_delta, 1..=127),
+            ("max_speed", self.max_speed, 1..=100),
+            ("time_to_max", self.time_to_max, 1..=255),
+            ("wheel_delay_ms", self.wheel_delay_ms, 1..=1000),
+            ("wheel_interval_ms", self.wheel_interval_ms, 1..=1000),
+            ("wheel_delta", self.wheel_delta, 1..=127),
+            ("wheel_max_speed", self.wheel_max_speed, 1..=100),
+            ("wheel_time_to_max", self.wheel_time_to_max, 1..=255),
             ("stick_speed", self.stick_speed, 1..=255),
-            ("stick_regulator", self.stick_regulator, 1..=2000),
-            ("stick_scroll", self.stick_scroll, 1..=2000),
+            ("stick_regulator", self.stick_regulator, 1..=100),
+            ("stick_scroll", self.stick_scroll, 1..=255),
         ];
         for (name, val, range) in checks {
             if !range.contains(&val) {
@@ -710,6 +710,48 @@ mod tests {
         bad.move_delta = 0;
         assert!(encode_write_mouse_config(&bad, 11).is_err());
         assert!(encode_write_mouse_config(&standard, 999).is_err());
+
+        let max_valid = MouseConfig {
+            delay_ms: 1000,
+            interval_ms: 200,
+            move_delta: 127,
+            max_speed: 100,
+            time_to_max: 255,
+            wheel_delay_ms: 1000,
+            wheel_interval_ms: 1000,
+            wheel_delta: 127,
+            wheel_max_speed: 100,
+            wheel_time_to_max: 255,
+            stick_speed: 255,
+            stick_regulator: 100,
+            stick_scroll: 255,
+        };
+        assert!(max_valid.validate().is_ok());
+
+        let out_of_bounds: [(&str, fn(&mut MouseConfig)); 13] = [
+            ("delay_ms", |c| c.delay_ms = 1001),
+            ("interval_ms", |c| c.interval_ms = 201),
+            ("move_delta", |c| c.move_delta = 128),
+            ("max_speed", |c| c.max_speed = 101),
+            ("time_to_max", |c| c.time_to_max = 256),
+            ("wheel_delay_ms", |c| c.wheel_delay_ms = 1001),
+            ("wheel_interval_ms", |c| c.wheel_interval_ms = 1001),
+            ("wheel_delta", |c| c.wheel_delta = 128),
+            ("wheel_max_speed", |c| c.wheel_max_speed = 101),
+            ("wheel_time_to_max", |c| c.wheel_time_to_max = 256),
+            ("stick_speed", |c| c.stick_speed = 256),
+            ("stick_regulator", |c| c.stick_regulator = 101),
+            ("stick_scroll", |c| c.stick_scroll = 256),
+        ];
+        for (field, mutate) in out_of_bounds {
+            let mut invalid = max_valid;
+            mutate(&mut invalid);
+            let err = invalid.validate().unwrap_err().to_string();
+            assert!(
+                err.contains(field),
+                "expected error for {field}, got: {err}"
+            );
+        }
     }
 
     #[test]

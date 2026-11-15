@@ -178,8 +178,10 @@ pub enum V070BridgeOutcome {
         profile_index: Option<u8>,
         layer_index: u8,
     },
-    MouseUpdated {
+    MouseConfigUpdated {
         mouse: MouseConfig,
+    },
+    DeadzoneUpdated {
         deadzone: f64,
     },
     PmConfigUpdated {
@@ -222,6 +224,8 @@ pub enum V070HardwareAction {
         wheel_max_speed: u16,
         stick_speed: u16,
         stick_scroll: u16,
+    },
+    ApplyJoystickDeadzone {
         deadzone: f64,
     },
     ApplyPmConfig {
@@ -258,10 +262,11 @@ pub(crate) enum ValidatedV070DeviceCommand {
     },
     ApplyMousePreset {
         config: MouseConfig,
-        fallback_deadzone: f64,
     },
     ApplyMouseConfig {
         config: MouseConfig,
+    },
+    ApplyJoystickDeadzone {
         deadzone: JoystickDeadzone,
     },
     ApplyPmConfig(PmConfig),
@@ -288,7 +293,6 @@ pub(crate) enum ParsedV070Action {
 pub(crate) fn parse_v070_action(
     action: V070HardwareAction,
     base_mouse: &MouseConfig,
-    base_deadzone: f64,
     max_name_length: usize,
 ) -> Result<ParsedV070Action, String> {
     match action {
@@ -316,7 +320,6 @@ pub(crate) fn parse_v070_action(
             Ok(ParsedV070Action::DeviceCommand(
                 ValidatedV070DeviceCommand::ApplyMousePreset {
                     config: parsed.to_mouse_config(),
-                    fallback_deadzone: base_deadzone,
                 },
             ))
         }
@@ -327,7 +330,6 @@ pub(crate) fn parse_v070_action(
             wheel_max_speed,
             stick_speed,
             stick_scroll,
-            deadzone,
         } => {
             let mut config = *base_mouse;
             config.move_delta = move_delta;
@@ -337,9 +339,14 @@ pub(crate) fn parse_v070_action(
             config.stick_speed = stick_speed;
             config.stick_scroll = stick_scroll;
             config.validate().map_err(|e| e.to_string())?;
+            Ok(ParsedV070Action::DeviceCommand(
+                ValidatedV070DeviceCommand::ApplyMouseConfig { config },
+            ))
+        }
+        V070HardwareAction::ApplyJoystickDeadzone { deadzone } => {
             let deadzone = JoystickDeadzone::new(deadzone).map_err(|e| e.to_string())?;
             Ok(ParsedV070Action::DeviceCommand(
-                ValidatedV070DeviceCommand::ApplyMouseConfig { config, deadzone },
+                ValidatedV070DeviceCommand::ApplyJoystickDeadzone { deadzone },
             ))
         }
         V070HardwareAction::ApplyPmConfig {
@@ -508,7 +515,6 @@ mod tests {
             parse_v070_action(
                 V070HardwareAction::SetAutoLayerSync { enabled: true },
                 &base_mouse,
-                0.15,
                 MAX_DEVICE_NAME_LEN,
             ),
             Ok(ParsedV070Action::HostPreference(
@@ -525,7 +531,6 @@ mod tests {
                 effect: 4,
             },
             &base_mouse,
-            0.15,
             MAX_DEVICE_NAME_LEN,
         )
         .unwrap();
@@ -552,7 +557,6 @@ mod tests {
                 effect: 1,
             },
             &base_mouse,
-            0.15,
             MAX_DEVICE_NAME_LEN,
         )
         .is_err());
@@ -565,12 +569,67 @@ mod tests {
                 wheel_max_speed: 10,
                 stick_speed: 4,
                 stick_scroll: 80,
-                deadzone: 0.2,
             },
             &base_mouse,
-            0.15,
             MAX_DEVICE_NAME_LEN,
         )
         .is_err());
+
+        assert!(parse_v070_action(
+            V070HardwareAction::ApplyMouseConfig {
+                move_delta: 128,
+                max_speed: 20,
+                wheel_delta: 2,
+                wheel_max_speed: 10,
+                stick_speed: 4,
+                stick_scroll: 80,
+            },
+            &base_mouse,
+            MAX_DEVICE_NAME_LEN,
+        )
+        .is_err());
+
+        let parsed_mouse = parse_v070_action(
+            V070HardwareAction::ApplyMouseConfig {
+                move_delta: 12,
+                max_speed: 100,
+                wheel_delta: 127,
+                wheel_max_speed: 10,
+                stick_speed: 4,
+                stick_scroll: 255,
+            },
+            &base_mouse,
+            MAX_DEVICE_NAME_LEN,
+        )
+        .unwrap();
+        assert!(matches!(
+            parsed_mouse,
+            ParsedV070Action::DeviceCommand(ValidatedV070DeviceCommand::ApplyMouseConfig { .. })
+        ));
+
+        assert!(parse_v070_action(
+            V070HardwareAction::ApplyJoystickDeadzone { deadzone: 0.0024 },
+            &base_mouse,
+            MAX_DEVICE_NAME_LEN,
+        )
+        .is_err());
+        assert!(parse_v070_action(
+            V070HardwareAction::ApplyJoystickDeadzone { deadzone: 0.96 },
+            &base_mouse,
+            MAX_DEVICE_NAME_LEN,
+        )
+        .is_err());
+        let parsed_dz = parse_v070_action(
+            V070HardwareAction::ApplyJoystickDeadzone { deadzone: 0.25 },
+            &base_mouse,
+            MAX_DEVICE_NAME_LEN,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed_dz,
+            ParsedV070Action::DeviceCommand(ValidatedV070DeviceCommand::ApplyJoystickDeadzone {
+                deadzone: JoystickDeadzone { v: 0.25 }
+            })
+        );
     }
 }

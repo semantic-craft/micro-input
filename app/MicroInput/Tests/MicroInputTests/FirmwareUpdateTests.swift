@@ -264,7 +264,7 @@ final class FirmwareUpdateTests: XCTestCase {
 
         let mouseCfg = V070HardwareCommand.applyMouseConfig(
             moveDelta: 10, maxSpeed: 20, wheelDelta: 2, wheelMaxSpeed: 10,
-            stickSpeed: 4, stickScroll: 80, deadzone: 0.2
+            stickSpeed: 4, stickScroll: 80
         )["ApplyMouseConfig"] as? [String: Any]
         XCTAssertEqual(mouseCfg?["move_delta"] as? Int, 10)
         XCTAssertEqual(mouseCfg?["max_speed"] as? Int, 20)
@@ -272,7 +272,10 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertEqual(mouseCfg?["wheel_max_speed"] as? Int, 10)
         XCTAssertEqual(mouseCfg?["stick_speed"] as? Int, 4)
         XCTAssertEqual(mouseCfg?["stick_scroll"] as? Int, 80)
-        XCTAssertEqual(mouseCfg?["deadzone"] as? Double ?? -1, 0.2, accuracy: 0.0001)
+        XCTAssertNil(mouseCfg?["deadzone"])
+
+        let deadzoneCmd = V070HardwareCommand.applyJoystickDeadzone(0.2)["ApplyJoystickDeadzone"] as? [String: Any]
+        XCTAssertEqual(deadzoneCmd?["deadzone"] as? Double ?? -1, 0.2, accuracy: 0.0001)
 
         let pmCfg = V070HardwareCommand.applyPmConfig(
             autoSleep: false, hostSleep: true, sleepAfterMin: 30
@@ -307,8 +310,9 @@ final class FirmwareUpdateTests: XCTestCase {
             V070HardwareCommand.applyMousePreset("fast"),
             V070HardwareCommand.applyMouseConfig(
                 moveDelta: 10, maxSpeed: 20, wheelDelta: 2, wheelMaxSpeed: 10,
-                stickSpeed: 4, stickScroll: 80, deadzone: 0.2
+                stickSpeed: 4, stickScroll: 80
             ),
+            V070HardwareCommand.applyJoystickDeadzone(0.2),
             V070HardwareCommand.applyPmConfig(autoSleep: false, hostSleep: true, sleepAfterMin: 30),
             V070HardwareCommand.renameDevice(name: "Pad07"),
             V070HardwareCommand.applySaRgb(sa: 7057, colorHex: "#33AAFF", brightness: 0.75, speed: 0.25, effect: 4),
@@ -348,6 +352,70 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertGreaterThan(host.fittingSize.height, 400)
         XCTAssertLessThanOrEqual(host.fittingSize.width, 560.5)
         XCTAssertEqual(dispatched, 0)
+    }
+
+    func testMouseDraftFirmwareBoundsDeadzoneValidationAndIndependence() {
+        var modelA = V070MouseConfigModel()
+        modelA.deadzone = 0.15
+        var modelB = modelA
+        modelB.deadzone = 0.35
+        XCTAssertEqual(V070MouseDraft(from: modelA), V070MouseDraft(from: modelB))
+
+        var draft = V070MouseDraft(from: modelA)
+        XCTAssertNotNil(draft.validated)
+        XCTAssertNil(draft.validationHint)
+
+        draft.moveDelta = "127"
+        draft.maxSpeed = "100"
+        draft.wheelDelta = "127"
+        draft.wheelMaxSpeed = "100"
+        draft.stickSpeed = "255"
+        draft.stickScroll = "255"
+        let maxTuple = draft.validated
+        XCTAssertNotNil(maxTuple)
+        XCTAssertEqual(maxTuple?.0, 127)
+        XCTAssertEqual(maxTuple?.1, 100)
+        XCTAssertEqual(maxTuple?.2, 127)
+        XCTAssertEqual(maxTuple?.3, 100)
+        XCTAssertEqual(maxTuple?.4, 255)
+        XCTAssertEqual(maxTuple?.5, 255)
+
+        var badMoveDelta = draft
+        badMoveDelta.moveDelta = "128"
+        XCTAssertNil(badMoveDelta.validated)
+        XCTAssertEqual(badMoveDelta.validationHint, "请确认步进在 1–127、加速上限在 1–100、摇杆参数在 1–255")
+
+        var badMaxSpeed = draft
+        badMaxSpeed.maxSpeed = "101"
+        XCTAssertNil(badMaxSpeed.validated)
+
+        var badWheelDelta = draft
+        badWheelDelta.wheelDelta = "128"
+        XCTAssertNil(badWheelDelta.validated)
+
+        var badWheelMax = draft
+        badWheelMax.wheelMaxSpeed = "101"
+        XCTAssertNil(badWheelMax.validated)
+
+        var badStickSpeed = draft
+        badStickSpeed.stickSpeed = "256"
+        XCTAssertNil(badStickSpeed.validated)
+
+        var badStickScroll = draft
+        badStickScroll.stickScroll = "256"
+        XCTAssertNil(badStickScroll.validated)
+
+        var zeroMoveDelta = draft
+        zeroMoveDelta.moveDelta = "0"
+        XCTAssertNil(zeroMoveDelta.validated)
+
+        XCTAssertTrue(V070MouseDraft.isValidDeadzone(0.0025))
+        XCTAssertTrue(V070MouseDraft.isValidDeadzone(0.15))
+        XCTAssertTrue(V070MouseDraft.isValidDeadzone(0.95))
+        XCTAssertFalse(V070MouseDraft.isValidDeadzone(0.0024))
+        XCTAssertFalse(V070MouseDraft.isValidDeadzone(0.9501))
+        XCTAssertFalse(V070MouseDraft.isValidDeadzone(.nan))
+        XCTAssertFalse(V070MouseDraft.isValidDeadzone(.infinity))
     }
 
     @MainActor
