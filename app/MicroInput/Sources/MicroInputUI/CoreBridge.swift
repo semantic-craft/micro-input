@@ -4,6 +4,23 @@ import MicroInputCoreFFI
 import Observation
 import SwiftUI
 
+private struct CoreTeardownResources: @unchecked Sendable {
+    let timer: Timer?
+    let observer: NSObjectProtocol?
+    let center: NotificationCenter
+    let handle: OpaquePointer?
+
+    func releaseAll() {
+        timer?.invalidate()
+        if let observer {
+            center.removeObserver(observer)
+        }
+        if let handle {
+            mi_core_free(handle)
+        }
+    }
+}
+
 @MainActor
 @Observable
 public final class CoreStore {
@@ -55,12 +72,18 @@ public final class CoreStore {
     }
 
     deinit {
-        pollTimer?.invalidate()
-        if let observer = workspaceObserver {
-            workspaceNotificationCenter.removeObserver(observer)
-        }
-        if let h = handle {
-            mi_core_free(h)
+        let resources = CoreTeardownResources(
+            timer: pollTimer,
+            observer: workspaceObserver,
+            center: workspaceNotificationCenter,
+            handle: handle
+        )
+        if Thread.isMainThread {
+            resources.releaseAll()
+        } else {
+            DispatchQueue.main.async {
+                resources.releaseAll()
+            }
         }
     }
 

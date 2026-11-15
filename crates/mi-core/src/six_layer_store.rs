@@ -1094,7 +1094,7 @@ mod tests {
             DeviceSession::new(
                 Arc::new(MacMockLink {
                     inner: link.clone(),
-                    exclusive: false,
+                    exclusive: true,
                 }),
                 Box::new(mi_proto::NativeFramer::default()),
                 Arc::new(mi_session::ReadOnlySchema),

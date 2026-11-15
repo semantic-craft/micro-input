@@ -319,8 +319,7 @@ def main() -> int:
                 prefs_dir = pathlib.Path.home() / 'Library/Preferences'
                 candidates = [prefs_dir / f'{bundle_id}.plist']
                 if prefs_dir.is_dir():
-                    candidates.extend(prefs_dir.glob(f'{bundle_id}*.plist'))
-                    candidates.extend(prefs_dir.glob('com.semanticcraft.microinput.qa*.plist'))
+                    candidates.extend(prefs_dir.glob(f'{bundle_id}.*.plist'))
                 for pref_plist in set(candidates):
                     if pref_plist.exists():
                         try:

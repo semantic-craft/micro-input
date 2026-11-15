@@ -3,13 +3,34 @@ use sha2::{Digest, Sha256};
 use std::{
     cmp::Ordering,
     fs::OpenOptions,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 pub const RELEASES_URL: &str = "https://github.com/worklouder/cm-v2-fw-releases/releases";
 const API: &str = "https://api.github.com/repos/worklouder/cm-v2-fw-releases/releases";
+const API_ALLOWED_PREFIX: &str = "https://api.github.com/repos/worklouder/cm-v2-fw-releases/";
+const MAX_API_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_FIRMWARE_ASSET_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_CURL_STDERR_BYTES: u64 = 16 * 1024;
+const MAX_PRERELEASE_PAGES: u64 = 10;
+
+#[cfg(unix)]
+const O_NOFOLLOW_FLAG: i32 = {
+    #[cfg(target_os = "macos")]
+    {
+        0x0100
+    }
+    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "x86")))]
+    {
+        0o400000
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        0o100000
+    }
+};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -213,7 +234,35 @@ pub fn parse_stable_release(bytes: &[u8]) -> Result<FirmwareRelease, String> {
     Ok(r)
 }
 
-fn request(url: &str, size: Option<u64>) -> Result<Vec<u8>, String> {
+fn validate_firmware_url(url: &str) -> Result<(), String> {
+    if url.is_empty()
+        || url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '#' | '\\' | '@'))
+        || url.contains("..")
+    {
+        return Err("不允许的固件请求地址".into());
+    }
+    let download_prefix = format!("{RELEASES_URL}/download/");
+    if !(url.starts_with(API_ALLOWED_PREFIX) || url.starts_with(&download_prefix)) {
+        return Err("不允许的固件请求地址".into());
+    }
+    Ok(())
+}
+
+fn response_byte_limit(size: Option<u64>) -> Result<u64, String> {
+    match size {
+        Some(n) if n > MAX_FIRMWARE_ASSET_BYTES => Err(format!(
+            "固件大小超出安全上限（{MAX_FIRMWARE_ASSET_BYTES} 字节）"
+        )),
+        Some(n) => Ok(n),
+        None => Ok(MAX_API_RESPONSE_BYTES),
+    }
+}
+
+fn build_curl_command(url: &str, size: Option<u64>) -> Result<(Command, u64), String> {
+    validate_firmware_url(url)?;
+    let limit = response_byte_limit(size)?;
     let mut command = Command::new("/usr/bin/curl");
     command.args([
         "--disable",
@@ -221,6 +270,8 @@ fn request(url: &str, size: Option<u64>) -> Result<Vec<u8>, String> {
         "--silent",
         "--show-error",
         "--location",
+        "--max-redirs",
+        "3",
         "--proto",
         "=https",
         "--proto-redir",
@@ -237,17 +288,82 @@ fn request(url: &str, size: Option<u64>) -> Result<Vec<u8>, String> {
     if let Some(size) = size {
         command.args(["--max-filesize", &size.to_string()]);
     }
-    let output = command
-        .arg(url)
-        .output()
+    command.args(["--", url]);
+    Ok((command, limit))
+}
+
+fn execute_bounded_command(command: &mut Command, max_bytes: u64) -> Result<Vec<u8>, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
         .map_err(|e| format!("无法检查固件发布：{e}"))?;
-    if !output.status.success() {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "无法读取固件响应输出".to_string())?;
+    let stderr = child.stderr.take();
+    let stderr_thread = std::thread::spawn(move || {
+        let mut err_buf = Vec::new();
+        if let Some(mut pipe) = stderr {
+            let _ = (&mut pipe)
+                .take(MAX_CURL_STDERR_BYTES)
+                .read_to_end(&mut err_buf);
+            let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+        }
+        err_buf
+    });
+
+    let mut out_buf = Vec::new();
+    let read_result = stdout
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut out_buf);
+    if read_result.as_ref().is_ok() && (out_buf.len() as u64) > max_bytes {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = stderr_thread.join();
+        return Err(format!("固件响应大小超出安全上限（{max_bytes} 字节）"));
+    }
+
+    let status = child.wait().map_err(|e| format!("无法检查固件发布：{e}"))?;
+    let stderr_bytes = stderr_thread.join().unwrap_or_default();
+    if let Err(err) = read_result {
+        return Err(format!("读取固件响应失败：{err}"));
+    }
+    if !status.success() {
         return Err(format!(
             "固件请求失败：{}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(&stderr_bytes).trim()
         ));
     }
-    Ok(output.stdout)
+    Ok(out_buf)
+}
+
+fn request(url: &str, size: Option<u64>) -> Result<Vec<u8>, String> {
+    let (mut command, limit) = build_curl_command(url, size)?;
+    execute_bounded_command(&mut command, limit)
+}
+
+fn fetch_prerelease_with<F>(mut fetch_page: F) -> Result<FirmwareRelease, String>
+where
+    F: FnMut(u64) -> Result<Vec<u8>, String>,
+{
+    let mut selected: Option<ReleaseResponse> = None;
+    for page in 1..=MAX_PRERELEASE_PAGES {
+        let raw = fetch_page(page)?;
+        let releases: Vec<ReleaseResponse> =
+            serde_json::from_slice(&raw).map_err(|e| format!("固件目录解析失败：{e}"))?;
+        let count = releases.len();
+        select_newest(&mut selected, releases)?;
+        if count < 100 {
+            return convert_release(selected.ok_or("官方仓库暂无可用固件")?);
+        }
+    }
+    Err(format!(
+        "官方固件发布分页超出安全上限（最多 {MAX_PRERELEASE_PAGES} 页）"
+    ))
 }
 
 /// Blocking network operation; invoke on a worker thread, never on the UI thread.
@@ -255,20 +371,7 @@ pub fn fetch_release(channel: FirmwareChannel) -> Result<FirmwareRelease, String
     if channel == FirmwareChannel::Stable {
         return parse_stable_release(&request(&format!("{API}/latest"), None)?);
     }
-    let mut selected: Option<ReleaseResponse> = None;
-    let mut page = 1u64;
-    loop {
-        let releases: Vec<ReleaseResponse> =
-            serde_json::from_slice(&request(&format!("{API}?per_page=100&page={page}"), None)?)
-                .map_err(|e| format!("固件目录解析失败：{e}"))?;
-        let count = releases.len();
-        select_newest(&mut selected, releases)?;
-        if count < 100 {
-            break;
-        }
-        page += 1;
-    }
-    convert_release(selected.ok_or("官方仓库暂无可用固件")?)
+    fetch_prerelease_with(|page| request(&format!("{API}?per_page=100&page={page}"), None))
 }
 
 fn select_newest(
@@ -311,6 +414,17 @@ pub fn download_release(
     release: &FirmwareRelease,
     destination: &Path,
 ) -> Result<DownloadedFirmware, String> {
+    download_release_with(release, destination, |url, size| request(url, Some(size)))
+}
+
+fn download_release_with<F>(
+    release: &FirmwareRelease,
+    destination: &Path,
+    mut fetch: F,
+) -> Result<DownloadedFirmware, String>
+where
+    F: FnMut(&str, u64) -> Result<Vec<u8>, String>,
+{
     Version::parse(&release.version)?;
     if release.tag.strip_prefix('v').unwrap_or(&release.tag) != release.version
         || release.asset.name != format!("firmware_{}_merged.bin", release.version)
@@ -322,11 +436,18 @@ pub fn download_release(
     {
         return Err("固件附件与所选发布不匹配".into());
     }
-    let bytes = request(&release.asset.url, Some(release.asset.size))?;
+    validate_firmware_url(&release.asset.url)?;
+    let _ = response_byte_limit(Some(release.asset.size))?;
+    let bytes = fetch(&release.asset.url, release.asset.size)?;
     let sha256 = verify_release_bytes(release, &bytes)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(O_NOFOLLOW_FLAG);
+    }
+    let mut file = options
         .open(destination)
         .map_err(|e| format!("无法保存固件：{e}"))?;
     if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
@@ -417,5 +538,120 @@ mod tests {
         r.asset.sha256 = None;
         assert!(verify_release_bytes(&r, b"abc").is_ok());
         assert!(r.asset.sha256.is_none());
+    }
+
+    #[test]
+    fn request_rejects_disallowed_urls_control_chars_and_oversized_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_secret = dir.path().join("local-secret.txt");
+        std::fs::write(&local_secret, b"LOCAL_FILE_LEAK").unwrap();
+
+        let file_url = format!("file://{}", local_secret.display());
+        assert!(
+            request(&file_url, None).is_err(),
+            "file:// URL must be rejected before invoking curl"
+        );
+
+        for bad in [
+            "http://api.github.com/repos/worklouder/cm-v2-fw-releases/releases/latest",
+            "https://evil.example/repos/worklouder/cm-v2-fw-releases/releases/latest",
+            "https://github.com/other/repo/releases/download/v1.0.0/fw.bin",
+            "https://api.github.com/repos/worklouder/cm-v2-fw-releases/releases/latest\n--output=/tmp/x",
+            "https://github.com/worklouder/cm-v2-fw-releases/releases/download/v1.0.0/fw .bin",
+            "-K/etc/passwd",
+        ] {
+            let err = request(bad, None).unwrap_err();
+            assert!(
+                err.contains("不允许") || err.contains("URL") || err.contains("地址"),
+                "expected URL validation rejection for {bad}, got: {err}"
+            );
+        }
+
+        let oversized_err = request(
+            &format!("{RELEASES_URL}/download/v0.6.3/firmware_0.6.3_merged.bin"),
+            Some(64 * 1024 * 1024),
+        )
+        .unwrap_err();
+        assert!(
+            oversized_err.contains("上限") || oversized_err.contains("大小"),
+            "expected size ceiling error, got: {oversized_err}"
+        );
+    }
+
+    #[test]
+    fn build_curl_command_sets_redirect_and_protocol_bounds() {
+        let (cmd, limit) = build_curl_command(
+            &format!("{RELEASES_URL}/download/v0.6.3/firmware_0.6.3_merged.bin"),
+            Some(128),
+        )
+        .unwrap();
+        assert_eq!(limit, 128);
+        assert_eq!(cmd.get_program(), "/usr/bin/curl");
+        let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert!(args.windows(2).any(|w| w == ["--max-redirs", "3"]));
+        assert!(args.windows(2).any(|w| w == ["--proto", "=https"]));
+        assert!(args.windows(2).any(|w| w == ["--proto-redir", "=https"]));
+        assert!(args.contains(&"--"));
+    }
+
+    #[test]
+    fn execute_bounded_command_enforces_stdout_cap_and_bounds_stderr() {
+        let mut ok_cmd = Command::new("/bin/sh");
+        ok_cmd.args(["-c", "printf 'hello'"]);
+        assert_eq!(execute_bounded_command(&mut ok_cmd, 5).unwrap(), b"hello");
+
+        let mut overflow_cmd = Command::new("/bin/sh");
+        overflow_cmd.args(["-c", "printf '123456'"]);
+        let err = execute_bounded_command(&mut overflow_cmd, 5).unwrap_err();
+        assert!(err.contains("上限"), "unexpected error: {err}");
+
+        let mut stderr_cmd = Command::new("/bin/sh");
+        stderr_cmd.args(["-c", "printf 'x%.0s' {1..25000} >&2; exit 22"]);
+        let err = execute_bounded_command(&mut stderr_cmd, 1024).unwrap_err();
+        assert!(err.len() <= (MAX_CURL_STDERR_BYTES as usize) + 64);
+        assert!(err.contains("固件请求失败"));
+    }
+
+    #[test]
+    fn fetch_prerelease_with_caps_pagination_at_max_pages() {
+        let full_page = vec![fixture("0.7.0-rc.1", true); 100];
+        let payload = serde_json::to_vec(&full_page).unwrap();
+        let mut calls = 0u64;
+        let err = fetch_prerelease_with(|page| {
+            calls += 1;
+            assert_eq!(page, calls);
+            Ok(payload.clone())
+        })
+        .unwrap_err();
+        assert_eq!(calls, MAX_PRERELEASE_PAGES);
+        assert!(err.contains("分页超出安全上限"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_release_enforces_0600_mode_and_refuses_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let release =
+            parse_stable_release(&serde_json::to_vec(&fixture("0.6.3", false)).unwrap()).unwrap();
+        let dest = dir.path().join("fw.bin");
+        let downloaded =
+            download_release_with(&release, &dest, |_, _| Ok(b"abc".to_vec())).unwrap();
+        assert_eq!(downloaded.size, 3);
+        assert_eq!(
+            std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let victim = dir.path().join("victim.bin");
+        std::fs::write(&victim, b"KEEP").unwrap();
+        let link_dest = dir.path().join("fw-link.bin");
+        symlink(&victim, &link_dest).unwrap();
+        assert!(
+            download_release_with(&release, &link_dest, |_, _| Ok(b"abc".to_vec())).is_err(),
+            "symlink destination must be refused"
+        );
+        assert_eq!(std::fs::read(&victim).unwrap(), b"KEEP");
     }
 }

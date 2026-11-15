@@ -397,6 +397,41 @@ class RunVerifyLauncherTests(unittest.TestCase):
         self.assertTrue((active_dir / 'Micro Input QA.app').exists())
         self.assertTrue((qa_root / 'qa.lock').exists())
 
+    def test_unique_bundle_id_cleanup_never_deletes_other_qa_session_plists(self):
+        root = self._prepare_checkout()
+        script = root / 'scripts/run'
+        child = FakeVerifyChild([0])
+        captured_plist = {}
+
+        def fake_spawn(command, **kwargs):
+            info_path = Path(command[0]).parent.parent / 'Info.plist'
+            with info_path.open('rb') as handle:
+                captured_plist.update(plistlib.load(handle))
+            return child
+
+        fake_home = root / 'fake_home'
+        prefs_dir = fake_home / 'Library/Preferences'
+        prefs_dir.mkdir(parents=True)
+        other_unique = prefs_dir / 'com.semanticcraft.microinput.qa.other999.plist'
+        fixed_qa = prefs_dir / 'com.semanticcraft.microinput.qa.plist'
+        prod_plist = prefs_dir / 'com.semanticcraft.microinput.plist'
+        for p in (other_unique, fixed_qa, prod_plist):
+            p.write_text('plist', encoding='utf-8')
+
+        with patch.object(sys, 'argv', [str(script), '--verify', '--unique-bundle-id']), \
+                patch('pathlib.Path.home', return_value=fake_home), \
+                patch('subprocess.Popen', side_effect=fake_spawn), \
+                patch('subprocess.run'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 0)
+
+        self.assertTrue(captured_plist['CFBundleIdentifier'].startswith('com.semanticcraft.microinput.qa.'))
+        self.assertTrue(other_unique.exists(), 'Concurrent --unique-bundle-id session plist must not be deleted')
+        self.assertTrue(fixed_qa.exists(), 'Fixed QA session plist must not be deleted by --unique-bundle-id run')
+        self.assertTrue(prod_plist.exists(), 'Production preferences plist must not be deleted')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -62,6 +62,44 @@ fn non_empty_path(raw: Option<&str>) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn is_inside_production_document_dir(path: &Path) -> bool {
+    let Some(home) = env::var_os("HOME") else {
+        return false;
+    };
+    let prod =
+        normalize_lexical(&PathBuf::from(home).join("Library/Application Support/MicroInput"));
+    let prod_canon = fs::canonicalize(&prod).ok();
+    let candidate_lex = normalize_lexical(path);
+    if candidate_lex.starts_with(&prod) {
+        return true;
+    }
+    if let Some(canon) = prod_canon.as_ref() {
+        if candidate_lex.starts_with(canon) {
+            return true;
+        }
+        if let Ok(path_canon) = fs::canonicalize(path) {
+            if path_canon.starts_with(canon) || path_canon.starts_with(&prod) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 impl QaLaunchEnv {
     pub fn from_env() -> Result<Self, String> {
         let doc_dir = env::var("MI_DOCUMENT_DIR").ok();
@@ -85,12 +123,31 @@ impl QaLaunchEnv {
         diagnostic_path: Option<&str>,
         scenario_raw: Option<&str>,
     ) -> Result<Self, String> {
-        let document_dir = non_empty_path(doc_dir)
-            .or_else(|| {
-                env::var_os("HOME")
-                    .map(|home| PathBuf::from(home).join("Library/Application Support/MicroInput"))
-            })
-            .unwrap_or_else(|| PathBuf::from(".micro-input"));
+        let scenario = match scenario_raw.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(raw) => Some(SyntheticScenario9::parse(raw)?),
+            None => None,
+        };
+        let document_dir = match scenario {
+            Some(_) => {
+                let explicit = non_empty_path(doc_dir).ok_or_else(|| {
+                    "synthetic QA scenario requires non-empty MI_DOCUMENT_DIR".to_string()
+                })?;
+                if is_inside_production_document_dir(&explicit) {
+                    return Err(
+                        "synthetic QA scenario cannot target production document directory"
+                            .to_string(),
+                    );
+                }
+                explicit
+            }
+            None => non_empty_path(doc_dir)
+                .or_else(|| {
+                    env::var_os("HOME").map(|home| {
+                        PathBuf::from(home).join("Library/Application Support/MicroInput")
+                    })
+                })
+                .unwrap_or_else(|| PathBuf::from(".micro-input")),
+        };
         let audit_log_path = non_empty_path(audit_log);
         let run_dir = non_empty_path(qa_run_dir)
             .or_else(|| {
@@ -106,10 +163,6 @@ impl QaLaunchEnv {
                 .as_ref()
                 .map(|d| d.join("evidence/diagnostic-report.json"))
         });
-        let scenario = match scenario_raw.map(str::trim).filter(|s| !s.is_empty()) {
-            Some(raw) => Some(SyntheticScenario9::parse(raw)?),
-            None => None,
-        };
         Ok(Self {
             document_dir,
             audit_log_path,
@@ -216,5 +269,52 @@ pub fn run_synthetic_scenario(
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qa_launch_env_requires_non_empty_isolated_document_dir_when_scenario_set() {
+        assert!(
+            QaLaunchEnv::from_pairs(None, None, None, None, Some("host-execution")).is_err(),
+            "synthetic scenario without MI_DOCUMENT_DIR must fail instead of falling back to production"
+        );
+        assert!(
+            QaLaunchEnv::from_pairs(Some("   "), None, None, None, Some("host-execution")).is_err(),
+            "synthetic scenario with whitespace MI_DOCUMENT_DIR must fail"
+        );
+        if let Some(home) = env::var_os("HOME") {
+            let prod_doc = PathBuf::from(home).join("Library/Application Support/MicroInput");
+            assert!(
+                QaLaunchEnv::from_pairs(
+                    prod_doc.to_str(),
+                    None,
+                    None,
+                    None,
+                    Some("host-execution")
+                )
+                .is_err(),
+                "synthetic scenario targeting production document dir must fail"
+            );
+            let prod_sub = prod_doc.join("nested");
+            assert!(
+                QaLaunchEnv::from_pairs(
+                    prod_sub.to_str(),
+                    None,
+                    None,
+                    None,
+                    Some("host-execution")
+                )
+                .is_err(),
+                "synthetic scenario inside production document dir must fail"
+            );
+        }
+        assert!(
+            QaLaunchEnv::from_pairs(None, None, None, None, None).is_ok(),
+            "non-QA launch without scenario must remain permitted"
+        );
     }
 }

@@ -177,6 +177,34 @@ class VerifyHardwareLauncherTests(unittest.TestCase):
         self.assertEqual(len(run_mock.call_args_list), 2)
         self.assertEqual(sleep_calls, [0.1, 0.1])
 
+    def test_quiesce_competing_hid_readers_uses_exact_prefix_and_os_kill_without_pkill(self):
+        import os
+        import signal
+        import subprocess
+
+        self_pid = os.getpid()
+        ps_stdout = (
+            f"  {self_pid} /Applications/Micro Input.app/Contents/MacOS/MicroInput\n"
+            '  42001 tail -f "/Applications/Micro Input.app/Contents/MacOS/MicroInput"\n'
+            "  42002 /Applications/Micro Input.app/Contents/MacOS/MicroInput --background\n"
+        )
+        invoked_cmds = []
+        killed = []
+
+        def fake_run(cmd, **kwargs):
+            invoked_cmds.append(cmd)
+            if cmd[:2] == ["ps", "-ax"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout=ps_stdout, stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with patch.object(self.mod.subprocess, "run", side_effect=fake_run), \
+             patch.object(self.mod.os, "kill", side_effect=lambda pid, sig: killed.append((pid, sig))), \
+             patch.object(self.mod, "_competing_hid_readers_running", return_value=False):
+            self.mod.quiesce_competing_hid_readers()
+
+        self.assertFalse(any(cmd[0] == "pkill" for cmd in invoked_cmds), f"Unexpected pkill call: {invoked_cmds}")
+        self.assertEqual(killed, [(42002, signal.SIGTERM)])
+
 
 if __name__ == "__main__":
     unittest.main()

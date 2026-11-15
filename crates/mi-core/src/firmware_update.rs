@@ -65,8 +65,29 @@ pub(crate) enum UpdateEvent {
 pub(crate) struct FirmwareUpdater {
     pub projection: FirmwareProjection,
     pub resume_auto_connect: Option<bool>,
+    pub expected_serial: Option<String>,
     downloaded: Option<DownloadedFirmware>,
     events: Option<mpsc::Receiver<UpdateEvent>>,
+}
+
+fn ensure_private_downloads_dir(root: &Path) -> Result<std::path::PathBuf, String> {
+    let directory = root.join("firmware-downloads");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if !directory.exists() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&directory)
+                .map_err(|e| e.to_string())?;
+        }
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    Ok(directory)
 }
 impl FirmwareUpdater {
     pub fn reserved(&self) -> bool {
@@ -96,8 +117,7 @@ impl FirmwareUpdater {
     }
     pub fn download(&mut self, root: &Path) -> Result<(), String> {
         let release = self.projection.release.clone().ok_or("请先检查固件更新")?;
-        let directory = root.join("firmware-downloads");
-        std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+        let directory = ensure_private_downloads_dir(root)?;
         let destination = directory.join(format!(
             "{}-{}.bin",
             release.version,
@@ -118,9 +138,13 @@ impl FirmwareUpdater {
     pub fn scan(&mut self) {
         self.projection.selected_port = None;
         self.projection.ports.clear();
+        let expected_serial = self.expected_serial.clone();
         let tx = self.start("scanning", "正在查找引导模式设备…");
         std::thread::spawn(move || {
-            let _ = tx.send(UpdateEvent::Ports(firmware_flash::enumerate_bootloaders()));
+            let ports = firmware_flash::enumerate_bootloaders().map(|ports| {
+                firmware_flash::filter_ports_for_expected_serial(ports, expected_serial.as_deref())
+            });
+            let _ = tx.send(UpdateEvent::Ports(ports));
         });
     }
     pub fn install(&mut self, root: &Path) -> Result<(), String> {
@@ -138,6 +162,9 @@ impl FirmwareUpdater {
             .find(|p| Some(&p.path) == self.projection.selected_port.as_ref())
             .cloned()
             .ok_or("请选择这把 Creator Micro 2 对应的引导模式串口")?;
+        if !port.matches_expected_serial(self.expected_serial.as_deref()) {
+            return Err("所选串口序列号与已准备设备不匹配，请重新选择".into());
+        }
         let backup_root = root.join("firmware-backups");
         self.projection.backup_path = None;
         let tx = self.start("connecting", "正在连接所选设备；完整备份后才会写入…");
@@ -201,6 +228,10 @@ impl FirmwareUpdater {
                 self.projection.busy = false;
             }
             UpdateEvent::Ports(Ok(ports)) => {
+                let ports = firmware_flash::filter_ports_for_expected_serial(
+                    ports,
+                    self.expected_serial.as_deref(),
+                );
                 self.projection.message = if ports.is_empty() {
                     "尚未发现引导模式串口，可稍后重新查找"
                 } else {
@@ -215,6 +246,10 @@ impl FirmwareUpdater {
                 self.projection.busy = false;
                 match result {
                     Ok(ports) => {
+                        let ports = firmware_flash::filter_ports_for_expected_serial(
+                            ports,
+                            self.expected_serial.as_deref(),
+                        );
                         self.projection.message = if ports.is_empty() {
                             "已请求进入引导模式，暂未自动发现串口，请点击「查找串口」确认".into()
                         } else {
@@ -313,5 +348,82 @@ mod tests {
         updater.accept(UpdateEvent::Bootloader(Err("timeout".into())));
         assert_eq!(updater.projection.phase, "bootloader_requested");
         assert!(updater.projection.message.contains("timeout"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_creates_firmware_downloads_dir_with_0700_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let existing_root = dir.path().join("existing");
+        let existing_dl = existing_root.join("firmware-downloads");
+        std::fs::create_dir_all(&existing_dl).unwrap();
+        std::fs::set_permissions(&existing_dl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let fresh_root = dir.path().join("fresh");
+        std::fs::create_dir_all(&fresh_root).unwrap();
+
+        for root in [&existing_root, &fresh_root] {
+            let mut updater = FirmwareUpdater::default();
+            updater.projection.release = Some(FirmwareRelease {
+                version: "0.6.3".into(),
+                tag: "v0.6.3".into(),
+                prerelease: false,
+                published_at: None,
+                notes: String::new(),
+                release_url: format!("{}/tag/v0.6.3", firmware_catalog::RELEASES_URL),
+                asset: firmware_catalog::FirmwareAsset {
+                    name: "firmware_0.6.3_merged.bin".into(),
+                    url: "file:///nonexistent-firmware.bin".into(),
+                    size: 3,
+                    sha256: None,
+                },
+            });
+            updater.download(root).unwrap();
+            let mode = std::fs::metadata(root.join("firmware-downloads"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "firmware-downloads in {} must have 0o700 permissions",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn updater_correlates_bootloader_and_scanned_ports_against_expected_hid_serial() {
+        let mut updater = FirmwareUpdater::default();
+        updater.projection.device_reserved = true;
+        updater.expected_serial = Some("aa:bb:cc:11:22:33".into());
+        let matching = BootloaderPort {
+            path: "/dev/cu.usbmodem1".into(),
+            vid: 0x303a,
+            pid: 0x1001,
+            serial_number: Some("AABBCC112233".into()),
+            manufacturer: Some("Espressif".into()),
+            product: Some("USB JTAG".into()),
+        };
+        let other = BootloaderPort {
+            path: "/dev/cu.usbmodem2".into(),
+            serial_number: Some("998877665544".into()),
+            ..matching.clone()
+        };
+        updater.accept(UpdateEvent::Bootloader(Ok(vec![
+            other.clone(),
+            matching.clone(),
+        ])));
+        assert_eq!(updater.projection.ports, vec![matching.clone()]);
+
+        updater.accept(UpdateEvent::Ports(Ok(vec![other])));
+        assert!(updater.projection.ports.is_empty());
+
+        updater.expected_serial = None;
+        updater.accept(UpdateEvent::Ports(Ok(vec![matching.clone()])));
+        assert_eq!(updater.projection.ports, vec![matching]);
     }
 }

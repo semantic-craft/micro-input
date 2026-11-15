@@ -32,8 +32,11 @@ impl BootloaderPort {
         let SerialPortType::UsbPort(usb) = info.port_type else {
             return None;
         };
-        // Input 1.1.0 identifies an Espressif loader, not a Work Louder model.
-        if usb.vid != 0x303a || usb.manufacturer.as_deref() != Some("Espressif") {
+        // Input 1.1.0 identifies an Espressif ESP32-S3 USB JTAG/serial loader, not a Work Louder model.
+        if usb.vid != 0x303a
+            || usb.pid != 0x1001
+            || usb.manufacturer.as_deref() != Some("Espressif")
+        {
             return None;
         }
         #[cfg(target_os = "macos")]
@@ -50,6 +53,20 @@ impl BootloaderPort {
         })
     }
 
+    pub fn matches_expected_serial(&self, expected_serial: Option<&str>) -> bool {
+        let Some(expected) = expected_serial.and_then(normalize_serial_identifier) else {
+            return true;
+        };
+        let Some(actual) = self
+            .serial_number
+            .as_deref()
+            .and_then(normalize_serial_identifier)
+        else {
+            return true;
+        };
+        expected == actual
+    }
+
     fn usb_info(&self) -> UsbPortInfo {
         UsbPortInfo {
             vid: self.vid,
@@ -59,6 +76,26 @@ impl BootloaderPort {
             product: self.product.clone(),
         }
     }
+}
+
+pub fn normalize_serial_identifier(raw: &str) -> Option<String> {
+    let normalized: String = raw
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && !matches!(ch, ':' | '-'))
+        .map(|ch| ch.to_ascii_uppercase())
+        .collect();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+pub fn filter_ports_for_expected_serial(
+    ports: Vec<BootloaderPort>,
+    expected_serial: Option<&str>,
+) -> Vec<BootloaderPort> {
+    ports
+        .into_iter()
+        .filter(|port| port.matches_expected_serial(expected_serial))
+        .collect()
 }
 
 pub fn enumerate_bootloaders() -> Result<Vec<BootloaderPort>, String> {
@@ -483,12 +520,64 @@ mod tests {
             port_type: SerialPortType::UsbPort(usb.clone())
         })
         .is_some());
+
+        let wrong_pid = UsbPortInfo {
+            pid: 0x1002,
+            ..usb.clone()
+        };
+        assert!(
+            BootloaderPort::from_info(SerialPortInfo {
+                port_name: "/dev/cu.example".into(),
+                port_type: SerialPortType::UsbPort(wrong_pid)
+            })
+            .is_none(),
+            "Espressif VID with non-0x1001 bootloader PID must be rejected"
+        );
+
         usb.manufacturer = Some("Other".into());
         assert!(BootloaderPort::from_info(SerialPortInfo {
             port_name: "/dev/cu.example".into(),
             port_type: SerialPortType::UsbPort(usb)
         })
         .is_none());
+    }
+
+    #[test]
+    fn serial_correlation_normalizes_colons_and_case_and_filters_mismatches() {
+        assert_eq!(
+            normalize_serial_identifier(" aa:bb:cc-11:22:33 "),
+            Some("AABBCC112233".into())
+        );
+        assert_eq!(normalize_serial_identifier(" :- "), None);
+
+        let matching = BootloaderPort {
+            path: "/dev/cu.usbmodem1".into(),
+            vid: 0x303a,
+            pid: 0x1001,
+            serial_number: Some("AABBCC112233".into()),
+            manufacturer: Some("Espressif".into()),
+            product: None,
+        };
+        let mismatched = BootloaderPort {
+            path: "/dev/cu.usbmodem2".into(),
+            serial_number: Some("DEADBEEF0000".into()),
+            ..matching.clone()
+        };
+        let omitted_serial = BootloaderPort {
+            path: "/dev/cu.usbmodem3".into(),
+            serial_number: None,
+            ..matching.clone()
+        };
+
+        let filtered = filter_ports_for_expected_serial(
+            vec![matching.clone(), mismatched.clone(), omitted_serial.clone()],
+            Some("aa:bb:cc:11:22:33"),
+        );
+        assert_eq!(filtered, vec![matching.clone(), omitted_serial.clone()]);
+
+        let unfiltered =
+            filter_ports_for_expected_serial(vec![matching, mismatched, omitted_serial], None);
+        assert_eq!(unfiltered.len(), 3);
     }
 
     #[test]

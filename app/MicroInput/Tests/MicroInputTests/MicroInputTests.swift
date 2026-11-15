@@ -578,6 +578,112 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(store.header.engineVersion, "0.2.0")
     }
 
+    func testUpdateLaunchPolicyResolvesSymlinksRejectsEphemeralBundlesAndWrongBundleId() throws {
+        let validFeed = "https://github.com/semantic-craft/micro-input/releases/latest/download/appcast.xml"
+        let validKey = Data(repeating: 7, count: 32).base64EncodedString()
+        let prodIdentity = AppReleaseIdentity(
+            marketingVersion: "0.5.0",
+            buildVersion: "5",
+            bundleIdentifier: LaunchAtLoginPolicy.productionBundleIdentifier,
+            feedURLString: validFeed,
+            publicEDKey: validKey
+        )
+
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".mi-update-symlink-\(UUID().uuidString)")
+        let ephemeralTarget = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mi-ephemeral-upd-\(UUID().uuidString)/Micro Input.app")
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: ephemeralTarget.deletingLastPathComponent())
+        }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: ephemeralTarget, withIntermediateDirectories: true)
+        let symlinkApp = root.appendingPathComponent("Micro Input.app")
+        try FileManager.default.createSymbolicLink(at: symlinkApp, withDestinationURL: ephemeralTarget)
+
+        if case .isolated(reason: .ephemeralBuildBundle) = UpdateLaunchPolicy.evaluate(
+            identity: prodIdentity,
+            bundlePath: symlinkApp.path,
+            environment: [:],
+            arguments: []
+        ) {} else {
+            XCTFail("Expected symlink to ephemeral /var/folders or /tmp .app bundle to isolate updater")
+        }
+
+        for ephemeralAppPath in [
+            "/tmp/Micro Input.app",
+            "/private/tmp/Micro Input.app",
+            "/var/folders/xx/yy/T/Micro Input.app",
+            "/Users/example/work/.scratch/qa-runs/1/Micro Input.app",
+        ] {
+            if case .isolated(reason: .ephemeralBuildBundle) = UpdateLaunchPolicy.evaluate(
+                identity: prodIdentity,
+                bundlePath: ephemeralAppPath,
+                environment: [:],
+                arguments: []
+            ) {} else {
+                XCTFail("Expected \(ephemeralAppPath) to isolate updater as ephemeralBuildBundle")
+            }
+        }
+
+        let foreignIdentity = AppReleaseIdentity(
+            marketingVersion: "0.5.0",
+            buildVersion: "5",
+            bundleIdentifier: "com.example.other",
+            feedURLString: validFeed,
+            publicEDKey: validKey
+        )
+        XCTAssertEqual(
+            UpdateLaunchPolicy.evaluate(
+                identity: foreignIdentity,
+                bundlePath: "/Applications/Micro Input.app",
+                environment: [:],
+                arguments: []
+            ),
+            .unavailable(reason: .wrongBundleIdentifier(actual: "com.example.other"))
+        )
+    }
+
+    @MainActor
+    func testCoreStoreDeinitFromBackgroundAndMainThreadCleansUpSafely() throws {
+        final class WeakStoreBox {
+            weak var store: CoreStore?
+            init(_ store: CoreStore?) { self.store = store }
+        }
+        final class SendableStoreTransfer: @unchecked Sendable {
+            var store: CoreStore?
+            init(_ store: CoreStore?) { self.store = store }
+        }
+
+        let dir = try makeIsolatedTempDir("corestore-deinit")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var mainStore: CoreStore? = CoreStore(isolatedDirectory: dir.path, pollInIsolation: true)
+        let mainBox = WeakStoreBox(mainStore)
+        XCTAssertNotNil(mainBox.store)
+        mainStore = nil
+        XCTAssertNil(mainBox.store)
+
+        let bgTransfer = SendableStoreTransfer(CoreStore(isolatedDirectory: dir.path, pollInIsolation: true))
+        let bgBox = WeakStoreBox(bgTransfer.store)
+        XCTAssertNotNil(bgBox.store)
+
+        let releasedOnBg = XCTestExpectation(description: "Released CoreStore off main thread")
+        DispatchQueue.global(qos: .utility).async {
+            bgTransfer.store = nil
+            releasedOnBg.fulfill()
+        }
+        wait(for: [releasedOnBg], timeout: 5.0)
+
+        let mainDrained = XCTestExpectation(description: "Main queue processed deferred teardown")
+        DispatchQueue.main.async {
+            mainDrained.fulfill()
+        }
+        wait(for: [mainDrained], timeout: 5.0)
+        XCTAssertNil(bgBox.store)
+    }
+
     @MainActor
     func testProfileLockAndAccessibilitySlicesRoundtrip() throws {
         let dir = try makeIsolatedTempDir("profile-lock-slices")

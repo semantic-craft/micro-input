@@ -44,35 +44,63 @@ impl ScenarioResultSummary {
     }
 }
 
-fn write_private_json(path: &Path, value: &Value) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+fn ensure_private_dir(dir: &Path) -> Result<(), String> {
+    if dir.as_os_str().is_empty() {
+        return Ok(());
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if !dir.exists() {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .map_err(|e| e.to_string())?;
+        }
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn open_private_file(path: &Path, truncate: bool) -> Result<fs::File, String> {
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent)?;
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).mode(0o600);
+    if truncate {
+        options.truncate(true).write(true);
+    } else {
+        options.append(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+        let file = options.open(path).map_err(|e| e.to_string())?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+        return Ok(file);
+    }
+    #[cfg(not(unix))]
+    options.open(path).map_err(|e| e.to_string())
+}
+
+fn write_private_json(path: &Path, value: &Value) -> Result<(), String> {
     let mut text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     text.push('\n');
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| e.to_string())?;
+    let mut file = open_private_file(path, true)?;
     file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())
 }
 
 fn append_private_jsonl(path: &Path, value: &Value) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
     let mut line = serde_json::to_string(value).map_err(|e| e.to_string())?;
     line.push('\n');
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| e.to_string())?;
+    let mut file = open_private_file(path, false)?;
     file.write_all(line.as_bytes()).map_err(|e| e.to_string())
 }
 
@@ -231,7 +259,7 @@ fn find_catalog_action(action_id: &str) -> Result<mi_model::draft::Action, Strin
 
 pub fn run_host_execution_scenario(run_dir: &Path) -> Result<ScenarioResultSummary, String> {
     let evidence_dir = run_dir.join("evidence");
-    fs::create_dir_all(&evidence_dir).map_err(|e| e.to_string())?;
+    ensure_private_dir(&evidence_dir)?;
     let audit_path = evidence_dir.join("audit.jsonl");
     let _ = fs::remove_file(&audit_path);
 
@@ -431,8 +459,8 @@ pub fn run_config_write_scenario(run_dir: &Path) -> Result<ScenarioResultSummary
 async fn run_config_write_async(run_dir: &Path) -> Result<ScenarioResultSummary, String> {
     let evidence_dir = run_dir.join("evidence");
     let work_dir = run_dir.join("workspace");
-    fs::create_dir_all(&evidence_dir).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&work_dir).map_err(|e| e.to_string())?;
+    ensure_private_dir(&evidence_dir)?;
+    ensure_private_dir(&work_dir)?;
     let ops_jsonl = evidence_dir.join("device-operations.jsonl");
     let _ = fs::remove_file(&ops_jsonl);
 
@@ -582,8 +610,8 @@ pub fn run_lighting_control_scenario(run_dir: &Path) -> Result<ScenarioResultSum
 async fn run_lighting_control_async(run_dir: &Path) -> Result<ScenarioResultSummary, String> {
     let evidence_dir = run_dir.join("evidence");
     let work_dir = run_dir.join("workspace");
-    fs::create_dir_all(&evidence_dir).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&work_dir).map_err(|e| e.to_string())?;
+    ensure_private_dir(&evidence_dir)?;
+    ensure_private_dir(&work_dir)?;
     let ops_jsonl = evidence_dir.join("device-operations.jsonl");
     let _ = fs::remove_file(&ops_jsonl);
 
@@ -691,7 +719,7 @@ pub fn run_diagnostic_export_scenario(
     diagnostic_report_path: &Path,
 ) -> Result<ScenarioResultSummary, String> {
     let evidence_dir = run_dir.join("evidence");
-    fs::create_dir_all(&evidence_dir).map_err(|e| e.to_string())?;
+    ensure_private_dir(&evidence_dir)?;
 
     let synthetic_user_root = format!("/{}s/demo-operator/Library/Application Support", "User");
     let raw_failure = format!(
@@ -729,4 +757,59 @@ pub fn run_diagnostic_export_scenario(
     };
     summary.write_to(&evidence_dir.join("result.json"))?;
     Ok(summary)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn private_evidence_writers_enforce_0700_dirs_and_reject_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let evidence = dir.path().join("evidence");
+        fs::create_dir_all(&evidence).unwrap();
+        fs::set_permissions(&evidence, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let json_path = evidence.join("report.json");
+        write_private_json(&json_path, &json!({"ok": true})).unwrap();
+        assert_eq!(
+            fs::metadata(&evidence).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&json_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let target_file = dir.path().join("victim.txt");
+        fs::write(&target_file, b"ORIGINAL").unwrap();
+        let symlink_json = evidence.join("link.json");
+        symlink(&target_file, &symlink_json).unwrap();
+        assert!(
+            write_private_json(&symlink_json, &json!({"pwned": true})).is_err(),
+            "write_private_json must refuse symlinks via O_NOFOLLOW"
+        );
+        assert_eq!(fs::read(&target_file).unwrap(), b"ORIGINAL");
+
+        let nested_evidence = dir.path().join("nested_evidence");
+        let jsonl_path = nested_evidence.join("audit.jsonl");
+        append_private_jsonl(&jsonl_path, &json!({"line": 1})).unwrap();
+        assert_eq!(
+            fs::metadata(&nested_evidence).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&jsonl_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let symlink_jsonl = nested_evidence.join("link.jsonl");
+        symlink(&target_file, &symlink_jsonl).unwrap();
+        assert!(
+            append_private_jsonl(&symlink_jsonl, &json!({"pwned": true})).is_err(),
+            "append_private_jsonl must refuse symlinks via O_NOFOLLOW"
+        );
+        assert_eq!(fs::read(&target_file).unwrap(), b"ORIGINAL");
+    }
 }
