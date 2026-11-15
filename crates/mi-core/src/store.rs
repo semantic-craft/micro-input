@@ -55,7 +55,8 @@ use mi_macos::{
     executor::APPLE_FN_KEY_CODE, AppBundleCache, AppBundleInfo, HeldInputId, HostActionReceipt,
     LiveHostActionExecutor, MacOsSystemDriver, PassivePanelFrameSpec, PassivePanelHost,
     PassivePanelRole, PresetFileEnvelope, RecordingPassivePanelHost, RecordingStatusItemHost,
-    ScreenGeometry, ScreenPoint, StatusItemHost, StatusItemIconSpec, StatusItemSnapshot,
+    ScreenGeometry, ScreenPoint, ScreenRect, StatusItemHost, StatusItemIconSpec,
+    StatusItemSnapshot,
 };
 use mi_model::{
     action_library,
@@ -401,6 +402,52 @@ struct HeldDictation {
     adapter: String,
 }
 
+fn fnv1a_str(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325 ^ (s.len() as u64);
+    for &byte in s.as_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct RuntimeCommitStamp {
+    draft_revision: u64,
+    host_revision: u64,
+    device_connected: bool,
+    has_connected_candidate: bool,
+    usb_candidates_len: usize,
+    hardware_rpc_verified: bool,
+    six_layer_busy: bool,
+    six_layer_present: bool,
+    six_layer_user_pinned: bool,
+    ptt_active: bool,
+    board_routing: BoardRouting,
+    radial_enabled: bool,
+    radial_session_active: bool,
+    radial_readiness: RadialInputReadiness,
+    overlay_window_active: bool,
+    overlay_cheat_sheet_visible: bool,
+    main_visible_frame: ScreenRect,
+    screens_len: usize,
+    last_cursor_position: ScreenPoint,
+    accessibility_trusted: bool,
+    busy: bool,
+    status_menu_open: bool,
+    selected_binding_slot: Option<u32>,
+    selected_surface: ControlSurfaceId,
+    selected_joystick_direction: JoystickDirection8,
+    bottom_row_layout: BottomRowLayout,
+    command_execution_enabled: bool,
+    firmware_busy: bool,
+    firmware_reserved: bool,
+    status_message_hash: u64,
+    firmware_phase_hash: u64,
+    firmware_message_hash: u64,
+    v070_status_hash: u64,
+}
+
 pub struct WorkbenchStore {
     pub(crate) firmware_update: crate::firmware_update::FirmwareUpdater,
     pub config: WorkbenchStoreConfig,
@@ -507,6 +554,8 @@ pub struct WorkbenchStore {
     last_radial_panel: Option<Option<PassivePanelFrameSpec>>,
     applications: BTreeMap<String, bool>,
     six_layer_view: Option<SixLayerView>,
+    captured_app_cache_stamp: (usize, u64),
+    last_committed_stamp: Option<RuntimeCommitStamp>,
     update_now: Instant,
     input_lost_session: Option<u64>,
     projection_generation: u64,
@@ -727,6 +776,8 @@ impl WorkbenchStore {
             last_radial_panel: None,
             applications: BTreeMap::new(),
             six_layer_view: None,
+            captured_app_cache_stamp: (0, 0),
+            last_committed_stamp: None,
             update_now: now,
             input_lost_session: None,
             projection_generation: 0,
@@ -766,8 +817,8 @@ impl WorkbenchStore {
             store.document_store.draft.revision,
             store.document_store.host_revision(),
         );
-        store.refresh_accessibility_trusted();
-        store.refresh_competing_input_app_running(true);
+        let _ = store.refresh_accessibility_trusted();
+        let _ = store.refresh_competing_input_app_running(true);
         store.refresh_four_app_lighting();
         let initial_locale = store.effective_locale();
         if initial_locale != mi_model::ResolvedLocale::ZhHans {
@@ -779,7 +830,7 @@ impl WorkbenchStore {
 
     pub fn set_accessibility_trusted_for_test(&mut self, trusted: Option<bool>) {
         self.accessibility_trusted_override = trusted;
-        self.refresh_accessibility_trusted();
+        let _ = self.refresh_accessibility_trusted();
         self.commit_runtime_update();
     }
 
@@ -789,20 +840,22 @@ impl WorkbenchStore {
         self.commit_runtime_update();
     }
 
-    fn refresh_accessibility_trusted(&mut self) {
-        self.accessibility_trusted = if let Some(override_val) = self.accessibility_trusted_override
-        {
+    fn refresh_accessibility_trusted(&mut self) -> bool {
+        let next = if let Some(override_val) = self.accessibility_trusted_override {
             override_val
         } else if !self.config.isolated && self.config.auto_connect_usb {
             self.live_executor.is_accessibility_trusted()
         } else {
             true
         };
+        let changed = self.accessibility_trusted != next;
+        self.accessibility_trusted = next;
+        changed
     }
 
-    fn refresh_competing_input_app_running(&mut self, force: bool) {
+    fn refresh_competing_input_app_running(&mut self, force: bool) -> bool {
         if self.config.isolated || !self.config.auto_connect_usb {
-            return;
+            return false;
         }
         if !force
             && self
@@ -810,16 +863,17 @@ impl WorkbenchStore {
                 .saturating_duration_since(self.last_competing_app_check_at)
                 < Duration::from_secs(5)
         {
-            return;
+            return false;
         }
         self.last_competing_app_check_at = self.update_now;
         let running = mi_macos::is_bundle_running("com.worklouder.input");
         self.applications
-            .insert("com.worklouder.input".to_string(), running);
+            .insert("com.worklouder.input".to_string(), running)
+            != Some(running)
     }
 
     pub fn open_accessibility_settings(&mut self) {
-        self.refresh_accessibility_trusted();
+        let _ = self.refresh_accessibility_trusted();
         let (outcome, detail) = if !self.config.isolated && self.config.auto_connect_usb {
             match self.live_executor.open_accessibility_settings() {
                 Ok(()) => ("executed", "已打开 macOS 辅助功能权限设置".to_string()),
@@ -924,14 +978,14 @@ impl WorkbenchStore {
     pub fn poll_at(&mut self, now: Instant) -> bool {
         self.update_now = now;
         let before_gen = self.projection_generation;
-        self.firmware_update.poll();
+        let mut dirty = self.firmware_update.poll();
         if now.saturating_duration_since(self.last_accessibility_check_at) >= Duration::from_secs(1)
         {
             self.last_accessibility_check_at = now;
-            self.refresh_accessibility_trusted();
+            dirty |= self.refresh_accessibility_trusted();
         }
-        self.refresh_competing_input_app_running(false);
-        self.poll_workspace_lifecycle();
+        dirty |= self.refresh_competing_input_app_running(false);
+        dirty |= self.poll_workspace_lifecycle();
         if self.system_lifecycle == SystemLifecycle::Awake && !self.firmware_update.reserved() {
             self.poll_six_layer_runtime();
         }
@@ -939,8 +993,10 @@ impl WorkbenchStore {
         self.drain_pending_hardware_events(now);
         self.poll_encoder_model_picker(now);
         self.poll_session_navigation();
-        self.overlay_controller.expire_notice_if_due(now);
-        self.commit_runtime_update();
+        dirty |= self.overlay_controller.expire_notice_if_due(now);
+        if dirty || self.external_runtime_dirty() {
+            self.commit_runtime_update();
+        }
         self.projection_generation != before_gen
     }
 
@@ -4187,6 +4243,111 @@ impl WorkbenchStore {
         if changed {
             self.projection_generation = self.projection_generation.wrapping_add(1);
         }
+        self.last_committed_stamp = Some(self.current_runtime_stamp());
+    }
+
+    fn current_runtime_stamp(&self) -> RuntimeCommitStamp {
+        RuntimeCommitStamp {
+            draft_revision: self.document_store.draft.revision,
+            host_revision: self.document_store.host_revision(),
+            device_connected: self.device_session_connected(),
+            has_connected_candidate: self.connected_candidate.is_some(),
+            usb_candidates_len: self.available_usb_candidates.len(),
+            hardware_rpc_verified: self.hardware_rpc_verified,
+            six_layer_busy: self.six_layer_job.is_some(),
+            six_layer_present: self.six_layer_running.is_some(),
+            six_layer_user_pinned: self.six_layer_user_pinned,
+            ptt_active: self.ptt_controller.is_active,
+            board_routing: self.board_routing,
+            radial_enabled: self.radial_state.enabled(),
+            radial_session_active: self.radial_state.session().is_some(),
+            radial_readiness: self.radial_readiness,
+            overlay_window_active: self.overlay_controller.main_workbench_window_active(),
+            overlay_cheat_sheet_visible: self.overlay_controller.is_cheat_sheet_visible(),
+            main_visible_frame: self.screen_geometry.main_visible_frame,
+            screens_len: self.screen_geometry.screens.len(),
+            last_cursor_position: self.last_cursor_position,
+            accessibility_trusted: self.accessibility_trusted,
+            busy: self.busy,
+            status_menu_open: self.status_menu_open,
+            selected_binding_slot: self.selected_binding_slot,
+            selected_surface: self.selected_surface,
+            selected_joystick_direction: self.selected_joystick_direction,
+            bottom_row_layout: self.bottom_row_layout,
+            command_execution_enabled: self.command_execution_enabled,
+            firmware_busy: self.firmware_update.projection.busy,
+            firmware_reserved: self.firmware_update.projection.device_reserved,
+            status_message_hash: fnv1a_str(&self.status_message),
+            firmware_phase_hash: fnv1a_str(&self.firmware_update.projection.phase),
+            firmware_message_hash: fnv1a_str(&self.firmware_update.projection.message),
+            v070_status_hash: fnv1a_str(&self.v070_hardware.projection.status_message),
+        }
+    }
+
+    fn observed_firmware_changed(&self) -> bool {
+        let prev = self.projection.firmware.current_version.as_deref();
+        if self.hardware_rpc_verified && self.device_session_connected() {
+            if let Some(receipt) = &self.last_hardware_auto_acceptance {
+                return Some(receipt.firmware_version.as_str()) != prev;
+            }
+        }
+        if let Some(running) = &self.six_layer_running {
+            return !running.observed_firmware_version_eq(prev);
+        }
+        if let Some(session) = &self.device_session {
+            return session.observed_firmware_version().as_deref() != prev;
+        }
+        prev.is_some()
+    }
+
+    fn external_runtime_dirty(&self) -> bool {
+        if self.projection_generation == 0 {
+            return true;
+        }
+        let current_cache_stamp = (
+            Arc::as_ptr(&self.app_cache) as usize,
+            self.app_cache.generation(),
+        );
+        if self.captured_app_cache_stamp != current_cache_stamp {
+            return true;
+        }
+        if self.six_layer_running.is_some() {
+            let current_revs = (
+                self.document_store.draft.revision,
+                self.document_store.host_revision(),
+            );
+            if self.last_synced_six_layer_revs != current_revs {
+                return true;
+            }
+        }
+        let Some(last_stamp) = self.last_committed_stamp else {
+            return true;
+        };
+        if last_stamp != self.current_runtime_stamp() {
+            return true;
+        }
+        if self.selected_profile_id.as_deref() != self.projection.selected_profile_id.as_deref()
+            || self.selected_layer_id.as_deref() != self.projection.selected_layer_id.as_deref()
+        {
+            return true;
+        }
+        if self.observed_firmware_changed() {
+            return true;
+        }
+        match (&self.six_layer_running, &self.six_layer_view) {
+            (None, None) => false,
+            (Some(_), None) | (None, Some(_)) => true,
+            (Some(running), Some(prev)) => {
+                prev.configuration_observed != running.readiness.configuration_observed
+                    || prev.keyboard_grabbed != running.readiness.keyboard_grabbed
+                    || prev.first_event_verified
+                        != running.first_event_verified.load(Ordering::Acquire)
+                    || prev.observed_layer != running.observed_layer.load(Ordering::Acquire)
+                    || prev.armed != running.armed
+                    || !running.effective_profile_id_eq(prev.effective_profile_id.as_deref())
+                    || running.receiver.failure().as_deref() != prev.failure.as_deref()
+            }
+        }
     }
 
     fn projection_inputs(&self) -> ProjectionInputs<'_> {
@@ -4303,6 +4464,10 @@ impl WorkbenchStore {
                 }
             }
         }
+        self.captured_app_cache_stamp = (
+            Arc::as_ptr(&self.app_cache) as usize,
+            self.app_cache.generation(),
+        );
         let current_revs = (
             self.document_store.draft.revision,
             self.document_store.host_revision(),
@@ -5544,65 +5709,105 @@ impl WorkbenchStore {
                 let inspector_search_active = !self.action_search_query.trim().is_empty()
                     || !self.keycap_search_query.trim().is_empty()
                     || self.shortcut_recorder.is_recording;
+                let mut selection_changed = false;
                 if !inspector_search_active {
                     if let Some(surface) = self.surface_for_binding(&binding_id) {
-                        self.selected_surface = surface;
                         let slot = self.effective_slot_for_surface(surface);
-                        self.selected_binding_slot = Some(slot);
-                    }
-                    match binding_id.as_str() {
-                        "AG15" => self.selected_joystick_direction = JoystickDirection8::North,
-                        "AG16" => self.selected_joystick_direction = JoystickDirection8::West,
-                        "AG17" => self.selected_joystick_direction = JoystickDirection8::South,
-                        "AG18" => self.selected_joystick_direction = JoystickDirection8::East,
-                        _ => {}
-                    }
-                }
-
-                if !self.document_store.host_execution_enabled() {
-                    self.status_message = format!("已按下 {binding_id}（已暂停软件按键映射）");
-                    self.commit_runtime_update();
-                    return None;
-                }
-
-                if self.encoder_model_picker.expire_if_idle(now).is_some() {
-                    self.set_model_picker_mouse_capture(false);
-                }
-
-                if binding_id == "ENC_CLK" {
-                    self.dial_pressed = true;
-                    self.dial_turned_while_pressed = false;
-                    let hold_action = self.resolve_encoder_hold_physical_action(&profile_id);
-                    let picker_active = self.encoder_model_picker.is_active(now);
-                    if hold_action.is_some() || picker_active {
-                        let hold_gen = self
-                            .encoder_model_picker
-                            .on_encoder_press(event.session_id, now);
-                        self.encoder_hold_profile_id = Some(profile_id);
-                        if hold_action.is_some() {
-                            let tx = self.hardware_event_tx.clone();
-                            let session_id = event.session_id;
-                            self.tokio_runtime.spawn(async move {
-                                tokio::time::sleep(
-                                    crate::encoder_model_picker::ENCODER_HOLD_THRESHOLD,
-                                )
-                                .await;
-                                let _ = tx.send(HardwareLoopEvent::EncoderHoldTimer {
-                                    session_id,
-                                    hold_generation: hold_gen,
-                                });
-                            });
+                        if self.selected_surface != surface
+                            || self.selected_binding_slot != Some(slot)
+                        {
+                            self.selected_surface = surface;
+                            self.selected_binding_slot = Some(slot);
+                            selection_changed = true;
                         }
+                    }
+                    let next_dir = match binding_id.as_str() {
+                        "AG15" => Some(JoystickDirection8::North),
+                        "AG16" => Some(JoystickDirection8::West),
+                        "AG17" => Some(JoystickDirection8::South),
+                        "AG18" => Some(JoystickDirection8::East),
+                        _ => None,
+                    };
+                    if let Some(dir) = next_dir {
+                        if self.selected_joystick_direction != dir {
+                            self.selected_joystick_direction = dir;
+                            selection_changed = true;
+                        }
+                    }
+                }
+                let before_gen = self.projection_generation;
+                let receipt = (|| -> Option<HostActionReceipt> {
+                    if !self.document_store.host_execution_enabled() {
+                        self.status_message = format!("已按下 {binding_id}（已暂停软件按键映射）");
                         self.commit_runtime_update();
                         return None;
                     }
-                } else if matches!(
-                    binding_id.as_str(),
-                    "AG13" | "ENC_CC" | "ENC_CCW" | "AG14" | "ENC_CW"
-                ) {
-                    let clockwise = matches!(binding_id.as_str(), "AG14" | "ENC_CW");
-                    match self.encoder_model_picker.on_encoder_turn(clockwise, now) {
-                        crate::encoder_model_picker::EncoderTurnOutcome::ModelPicker(cmd) => {
+
+                    if self.encoder_model_picker.expire_if_idle(now).is_some() {
+                        self.set_model_picker_mouse_capture(false);
+                    }
+
+                    if binding_id == "ENC_CLK" {
+                        self.dial_pressed = true;
+                        self.dial_turned_while_pressed = false;
+                        let hold_action = self.resolve_encoder_hold_physical_action(&profile_id);
+                        let picker_active = self.encoder_model_picker.is_active(now);
+                        if hold_action.is_some() || picker_active {
+                            let hold_gen = self
+                                .encoder_model_picker
+                                .on_encoder_press(event.session_id, now);
+                            self.encoder_hold_profile_id = Some(profile_id);
+                            if hold_action.is_some() {
+                                let tx = self.hardware_event_tx.clone();
+                                let session_id = event.session_id;
+                                self.tokio_runtime.spawn(async move {
+                                    tokio::time::sleep(
+                                        crate::encoder_model_picker::ENCODER_HOLD_THRESHOLD,
+                                    )
+                                    .await;
+                                    let _ = tx.send(HardwareLoopEvent::EncoderHoldTimer {
+                                        session_id,
+                                        hold_generation: hold_gen,
+                                    });
+                                });
+                            }
+                            self.commit_runtime_update();
+                            return None;
+                        }
+                    } else if matches!(
+                        binding_id.as_str(),
+                        "AG13" | "ENC_CC" | "ENC_CCW" | "AG14" | "ENC_CW"
+                    ) {
+                        let clockwise = matches!(binding_id.as_str(), "AG14" | "ENC_CW");
+                        match self.encoder_model_picker.on_encoder_turn(clockwise, now) {
+                            crate::encoder_model_picker::EncoderTurnOutcome::ModelPicker(cmd) => {
+                                if let Some(adapter) = self
+                                    .encoder_model_picker
+                                    .active_adapter(now)
+                                    .map(str::to_owned)
+                                {
+                                    let action = cmd.into_host_action(adapter);
+                                    return self.execute_resolved_physical_action_with_session(
+                                        &profile_id,
+                                        &binding_id,
+                                        event.session_id,
+                                        action,
+                                    );
+                                }
+                            }
+                            crate::encoder_model_picker::EncoderTurnOutcome::FastScroll {
+                                ..
+                            } => {
+                                self.dial_turned_while_pressed = true;
+                                self.encoder_hold_profile_id = None;
+                            }
+                            crate::encoder_model_picker::EncoderTurnOutcome::NormalSlot => {}
+                        }
+                    } else if matches!(binding_id.as_str(), "AG15" | "AG16" | "AG17" | "AG18") {
+                        if let Some(cmd) = self
+                            .encoder_model_picker
+                            .on_sector_direction_while_active(&binding_id, now)
+                        {
                             if let Some(adapter) = self
                                 .encoder_model_picker
                                 .active_adapter(now)
@@ -5617,52 +5822,33 @@ impl WorkbenchStore {
                                 );
                             }
                         }
-                        crate::encoder_model_picker::EncoderTurnOutcome::FastScroll { .. } => {
-                            self.dial_turned_while_pressed = true;
-                            self.encoder_hold_profile_id = None;
+                        if self.encoder_model_picker.is_active(now) {
+                            self.cancel_encoder_model_picker();
                         }
-                        crate::encoder_model_picker::EncoderTurnOutcome::NormalSlot => {}
-                    }
-                } else if matches!(binding_id.as_str(), "AG15" | "AG16" | "AG17" | "AG18") {
-                    if let Some(cmd) = self
-                        .encoder_model_picker
-                        .on_sector_direction_while_active(&binding_id, now)
-                    {
-                        if let Some(adapter) = self
-                            .encoder_model_picker
-                            .active_adapter(now)
-                            .map(str::to_owned)
-                        {
-                            let action = cmd.into_host_action(adapter);
-                            return self.execute_resolved_physical_action_with_session(
-                                &profile_id,
-                                &binding_id,
-                                event.session_id,
-                                action,
-                            );
-                        }
-                    }
-                    if self.encoder_model_picker.is_active(now) {
+                    } else if self.encoder_model_picker.is_active(now) {
                         self.cancel_encoder_model_picker();
                     }
-                } else if self.encoder_model_picker.is_active(now) {
-                    self.cancel_encoder_model_picker();
-                }
 
-                let layout = self.current_bottom_row_layout();
-                let Some(action) = self.resolve_physical_action(&profile_id, &binding_id, layout)
-                else {
-                    self.status_message = format!("已按下 {binding_id}（当前槽位未绑定动作）");
+                    let layout = self.current_bottom_row_layout();
+                    let Some(action) =
+                        self.resolve_physical_action(&profile_id, &binding_id, layout)
+                    else {
+                        self.status_message = format!("已按下 {binding_id}（当前槽位未绑定动作）");
+                        self.commit_runtime_update();
+                        return None;
+                    };
+
+                    self.execute_resolved_physical_action_with_session(
+                        &profile_id,
+                        &binding_id,
+                        event.session_id,
+                        action,
+                    )
+                })();
+                if selection_changed && self.projection_generation == before_gen {
                     self.commit_runtime_update();
-                    return None;
-                };
-
-                self.execute_resolved_physical_action_with_session(
-                    &profile_id,
-                    &binding_id,
-                    event.session_id,
-                    action,
-                )
+                }
+                receipt
             }
             _ => None,
         }

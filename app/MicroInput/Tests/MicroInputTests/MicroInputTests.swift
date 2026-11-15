@@ -1141,6 +1141,38 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(store.inspector.editableInspector?.joystickMode, "mouse")
         XCTAssertEqual(store.canvas.encoderHoldLabel, "搜索会话")
     }
+
+    @MainActor
+    func testRevisionGatedPollAndRefreshShortCircuit() throws {
+        let dir = try makeIsolatedTempDir("revision-gate")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        let initialRev = store.lastAppliedRevision
+        XCTAssertGreaterThan(initialRev, 0)
+
+        ViewRenderTelemetry.isEnabled = true
+        defer { ViewRenderTelemetry.isEnabled = false }
+        ViewRenderTelemetry.reset()
+
+        for _ in 0..<20 {
+            store.pollHardware()
+            store.refreshProjection()
+        }
+        XCTAssertEqual(ViewRenderTelemetry.count("CoreStore.decodeProjection"), 0)
+        XCTAssertEqual(store.lastAppliedRevision, initialRev)
+
+        store.dispatch("canvas", ["SelectLogicalSlot": 7])
+        let updatedRev = store.lastAppliedRevision
+        XCTAssertGreaterThan(updatedRev, initialRev)
+        XCTAssertEqual(ViewRenderTelemetry.count("CoreStore.decodeProjection"), 1)
+        XCTAssertEqual(store.canvas.selectedLogicalSlot, 7)
+
+        store.pollHardware()
+        store.refreshProjection()
+        XCTAssertEqual(ViewRenderTelemetry.count("CoreStore.decodeProjection"), 1)
+        XCTAssertEqual(store.lastAppliedRevision, updatedRev)
+    }
 }
 
 @MainActor

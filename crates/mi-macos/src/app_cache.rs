@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 pub const OTHER_APPS_WILDCARD_BUNDLE_ID: &str = "*";
@@ -24,6 +24,7 @@ pub struct AppBundleCache {
     resolver: AppBundleResolver,
     lookup_count: AtomicUsize,
     cache_hits: AtomicUsize,
+    generation: AtomicU64,
 }
 
 impl Default for AppBundleCache {
@@ -43,6 +44,7 @@ impl AppBundleCache {
             resolver,
             lookup_count: AtomicUsize::new(0),
             cache_hits: AtomicUsize::new(0),
+            generation: AtomicU64::new(1),
         }
     }
 
@@ -99,10 +101,16 @@ impl AppBundleCache {
             .write()
             .expect("app cache write lock")
             .remove(bundle_id.trim());
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn clear(&self) {
         self.entries.write().expect("app cache write lock").clear();
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     pub fn lookup_count(&self) -> usize {
@@ -255,5 +263,26 @@ mod tests {
         assert!(inspected.installed);
         assert_eq!(inspected.display_name.as_deref(), Some("Sample App"));
         assert!(inspected.icon_cached);
+    }
+
+    #[test]
+    fn generation_tracks_invalidate_and_clear_without_bumping_on_reads() {
+        let cache = AppBundleCache::with_resolver(Arc::new(|bundle_id| AppBundleInfo {
+            bundle_id: bundle_id.to_string(),
+            installed: true,
+            app_path: None,
+            display_name: None,
+            icon_cached: false,
+        }));
+        assert_eq!(cache.generation(), 1);
+        assert!(cache.is_installed("com.example.alpha"));
+        assert!(cache.is_installed("com.example.alpha"));
+        assert_eq!(cache.generation(), 1);
+
+        cache.invalidate("com.example.alpha");
+        assert_eq!(cache.generation(), 2);
+
+        cache.clear();
+        assert_eq!(cache.generation(), 3);
     }
 }

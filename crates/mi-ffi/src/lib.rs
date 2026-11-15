@@ -193,6 +193,26 @@ pub unsafe extern "C" fn mi_core_poll_json(ptr: *mut WorkbenchStore) -> *mut c_c
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn mi_core_projection_revision(ptr: *const WorkbenchStore) -> u64 {
+    if ptr.is_null() {
+        0
+    } else {
+        (&*ptr).projection_generation()
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mi_core_poll_revision(ptr: *mut WorkbenchStore) -> u64 {
+    if ptr.is_null() {
+        0
+    } else {
+        let store = &mut *ptr;
+        store.poll_hardware_events();
+        store.projection_generation()
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn mi_core_string_free(s: *mut c_char) {
     if !s.is_null() {
         drop(CString::from_raw(s));
@@ -265,6 +285,39 @@ mod tests {
             mi_core_release_instance_lock(lock);
         }
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn ffi_revision_queries_handle_null_idle_polls_and_mutations() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dir_cstr = CString::new(temporary.path().to_string_lossy().to_string()).unwrap();
+
+        unsafe {
+            assert_eq!(mi_core_projection_revision(ptr::null()), 0);
+            assert_eq!(mi_core_poll_revision(ptr::null_mut()), 0);
+
+            let store = mi_core_new(dir_cstr.as_ptr());
+            assert!(!store.is_null());
+
+            let initial_rev = mi_core_projection_revision(store);
+            assert!(initial_rev >= 1);
+
+            for _ in 0..10 {
+                assert_eq!(mi_core_poll_revision(store), initial_rev);
+            }
+
+            let cmd =
+                CString::new(r#"{"domain":"canvas","action":{"SelectLogicalSlot":9}}"#).unwrap();
+            let updated_ptr = mi_core_dispatch_json(store, cmd.as_ptr());
+            assert!(!updated_ptr.is_null());
+            mi_core_string_free(updated_ptr);
+
+            let next_rev = mi_core_projection_revision(store);
+            assert!(next_rev > initial_rev);
+            assert_eq!(mi_core_poll_revision(store), next_rev);
+
+            mi_core_free(store);
+        }
     }
     #[test]
     fn ffi_board_intent_never_activates_a_host() {

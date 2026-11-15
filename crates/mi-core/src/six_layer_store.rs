@@ -641,8 +641,7 @@ impl WorkbenchStore {
             self.sync_v070_session_sa_rgb();
         }
         if changed {
-            self.capture_runtime_view();
-            self.commit_local_update();
+            self.commit_runtime_update();
         }
         self.try_auto_resume_six_layer(self.update_now);
     }

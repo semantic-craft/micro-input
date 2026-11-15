@@ -15,6 +15,7 @@ public final class CoreStore {
     @ObservationIgnored private var lastObservedBundleId: String?
 
     @ObservationIgnored public private(set) var model: ProjectionModel = ProjectionModel()
+    @ObservationIgnored public private(set) var lastAppliedRevision: UInt64 = 0
 
     public private(set) var header: HeaderSliceModel = HeaderSliceModel()
     public private(set) var sidebar: SidebarSliceModel = SidebarSliceModel()
@@ -114,18 +115,26 @@ public final class CoreStore {
 
     public func refreshProjection() {
         guard let h = handle else { return }
-        guard let cStr = mi_core_project_json(h) else { return }
-        defer { mi_core_string_free(cStr) }
-        let jsonString = String(cString: cStr)
-        applyProjectionJSON(jsonString)
+        let rev = mi_core_projection_revision(h)
+        if rev != 0 && rev == lastAppliedRevision {
+            return
+        }
+        guard let rawPtr = mi_core_project_json(h) else { return }
+        if applyProjectionJSON(rawPtr) {
+            lastAppliedRevision = rev
+        }
     }
 
     public func pollHardware() {
         guard let h = handle else { return }
-        guard let cStr = mi_core_poll_json(h) else { return }
-        defer { mi_core_string_free(cStr) }
-        let jsonString = String(cString: cStr)
-        applyProjectionJSON(jsonString)
+        let rev = mi_core_poll_revision(h)
+        if rev == 0 || rev == lastAppliedRevision {
+            return
+        }
+        guard let rawPtr = mi_core_project_json(h) else { return }
+        if applyProjectionJSON(rawPtr) {
+            lastAppliedRevision = rev
+        }
     }
 
     public func dispatch(_ domain: String, _ action: Any) {
@@ -183,22 +192,25 @@ public final class CoreStore {
         let updatedPtr = cmdString.withCString { ptr in
             mi_core_dispatch_json(h, ptr)
         }
-        guard let cStr = updatedPtr else { return }
-        defer { mi_core_string_free(cStr) }
-        let jsonString = String(cString: cStr)
-        applyProjectionJSON(jsonString)
+        guard let rawPtr = updatedPtr else { return }
+        if applyProjectionJSON(rawPtr) {
+            lastAppliedRevision = mi_core_projection_revision(h)
+        }
     }
 
-    private func applyProjectionJSON(_ jsonString: String) {
+    private func applyProjectionJSON(_ rawPtr: UnsafeMutablePointer<CChar>) -> Bool {
+        defer { mi_core_string_free(rawPtr) }
         ViewRenderTelemetry.record("CoreStore.decodeProjection")
-        guard let data = jsonString.data(using: .utf8),
+        guard let jsonString = String(validatingUTF8: rawPtr),
+              let data = jsonString.data(using: .utf8),
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else {
-            return
+            return false
         }
         let next = Self.parseProjection(root)
         self.model = next
         commitDomainSlices(from: next)
+        return true
     }
 
     func commitDomainSlices(from m: ProjectionModel) {

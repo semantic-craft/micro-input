@@ -135,34 +135,39 @@ impl WorkbenchStore {
             self.status_message = "系统已唤醒 · 等待旧会话释放".into();
             self.commit_runtime_update();
         }
-        self.poll_workspace_lifecycle();
+        let _ = self.poll_workspace_lifecycle();
     }
 
-    pub(super) fn poll_workspace_lifecycle(&mut self) {
+    pub(super) fn poll_workspace_lifecycle(&mut self) -> bool {
+        let mut dirty = false;
         if let Some(rx) = &self.lifecycle_cleanup {
             match rx.try_recv() {
                 Ok(result) => {
                     self.lifecycle_cleanup = None;
+                    dirty = true;
                     if let Err(error) = self.finish_host_cleanup(result) {
                         self.status_message =
                             format!("旧会话清理未确认 · {error}；宿主输入保持暂停");
                         self.system_lifecycle = SystemLifecycle::CleanupFailed(error);
                         self.commit_runtime_update();
-                        return;
+                        return true;
                     }
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return false,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.lifecycle_cleanup = None;
                     self.system_lifecycle = SystemLifecycle::CleanupFailed("清理任务已中断".into());
                     self.status_message = "清理任务已中断 · 宿主输入保持暂停".into();
                     self.commit_runtime_update();
-                    return;
+                    return true;
                 }
             }
         }
         if self.system_lifecycle != SystemLifecycle::Waking {
-            return;
+            if dirty {
+                self.commit_runtime_update();
+            }
+            return dirty;
         }
         self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
         self.system_lifecycle = SystemLifecycle::Awake;
@@ -197,6 +202,7 @@ impl WorkbenchStore {
             self.try_auto_resume_six_layer(self.update_now);
         }
         self.commit_runtime_update();
+        true
     }
 }
 

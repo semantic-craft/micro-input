@@ -853,3 +853,83 @@ fn host_mouse_commands_preserve_host_adapter_in_compile_profile_twenty_slots() {
         }
     }
 }
+
+#[test]
+fn idle_poll_at_skips_projection_rebuild_and_commits_on_subpoll_or_external_dirty() {
+    let (_dir, mut store, now) = active_store();
+    let installed_flag = Arc::new(AtomicBool::new(true));
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let flag_ref = Arc::clone(&installed_flag);
+    let calls_ref = Arc::clone(&resolver_calls);
+    store.app_cache = Arc::new(AppBundleCache::with_resolver(Arc::new(move |id| {
+        calls_ref.fetch_add(1, Ordering::SeqCst);
+        AppBundleInfo {
+            bundle_id: id.into(),
+            installed: flag_ref.load(Ordering::Acquire),
+            app_path: None,
+            display_name: None,
+            icon_cached: false,
+        }
+    })));
+
+    let _ = store.poll_at(now);
+    let baseline_gen = store.projection_generation();
+    let baseline_calls = resolver_calls.load(Ordering::SeqCst);
+    assert!(baseline_calls > 0);
+
+    for step in 1..=50_u64 {
+        let tick = now + Duration::from_millis(step * 250);
+        assert!(!store.poll_at(tick));
+        assert_eq!(store.projection_generation(), baseline_gen);
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), baseline_calls);
+    }
+
+    store
+        .dispatch_header_action(HeaderAction::SetUiLanguage {
+            language: mi_model::UiLanguagePreference::En,
+        })
+        .unwrap();
+    let en_gen = store.projection_generation();
+    assert!(en_gen > baseline_gen);
+    let en_calls = resolver_calls.load(Ordering::SeqCst);
+    for step in 1..=20_u64 {
+        let tick = now + Duration::from_secs(20) + Duration::from_millis(step * 300);
+        assert!(!store.poll_at(tick));
+        assert_eq!(store.projection_generation(), en_gen);
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), en_calls);
+    }
+
+    installed_flag.store(false, Ordering::Release);
+    store.app_cache.invalidate("com.google.antigravity");
+    let t_cache = now + Duration::from_secs(30);
+    assert!(store.poll_at(t_cache));
+    let after_cache_gen = store.projection_generation();
+    assert!(after_cache_gen > en_gen);
+    let after_cache_calls = resolver_calls.load(Ordering::SeqCst);
+    assert!(!store.poll_at(t_cache + Duration::from_millis(120)));
+    assert_eq!(store.projection_generation(), after_cache_gen);
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), after_cache_calls);
+
+    let tx = store
+        .firmware_update
+        .start("checking", "正在读取官方固件发布…");
+    let t_fw_start = now + Duration::from_secs(31);
+    assert!(store.poll_at(t_fw_start));
+    let fw_busy_gen = store.projection_generation();
+    assert!(!store.poll_at(t_fw_start + Duration::from_millis(120)));
+    assert_eq!(store.projection_generation(), fw_busy_gen);
+    tx.send(crate::firmware_update::UpdateEvent::Release(Err(
+        "network offline".into(),
+    )))
+    .unwrap();
+    assert!(store.poll_at(t_fw_start + Duration::from_millis(240)));
+    let fw_done_gen = store.projection_generation();
+    assert!(fw_done_gen > fw_busy_gen);
+
+    store.status_message = "外部诊断更新".to_string();
+    assert!(store.poll_at(t_fw_start + Duration::from_millis(360)));
+    let ext_gen = store.projection_generation();
+    assert!(ext_gen > fw_done_gen);
+    assert!(!store.poll_at(t_fw_start + Duration::from_millis(480)));
+    assert_eq!(store.projection_generation(), ext_gen);
+}
