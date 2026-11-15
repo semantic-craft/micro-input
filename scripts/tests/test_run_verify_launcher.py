@@ -342,6 +342,61 @@ class RunVerifyLauncherTests(unittest.TestCase):
             f'Expected nested Updater.app unregistration in {unregistered_targets}',
         )
 
+    def test_verify_prunes_completed_default_qa_runs_beyond_retention_cap(self):
+        root = self._prepare_checkout()
+        script = root / 'scripts/run'
+        qa_root = root / '.scratch/qa-runs'
+        qa_root.mkdir(parents=True)
+        for index in range(25):
+            evidence_dir = qa_root / f'1700000000{index:03d}-100' / 'evidence'
+            evidence_dir.mkdir(parents=True)
+            (evidence_dir / 'launcher.json').write_text('{"ok":true}\n', encoding='utf-8')
+        active_dir = qa_root / '9999999999999-111'
+        (active_dir / 'Micro Input QA.app').mkdir(parents=True)
+
+        fake_home = root / 'fake_home'
+        (fake_home / 'Library/Preferences').mkdir(parents=True)
+
+        with patch.object(sys, 'argv', [str(script), '--verify', '--timeout=15']), \
+                patch('pathlib.Path.home', return_value=fake_home), \
+                patch('subprocess.Popen', side_effect=lambda *args, **kwargs: FakeVerifyChild([0])), \
+                patch('subprocess.run'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 0)
+
+        for index in range(6):
+            self.assertFalse((qa_root / f'1700000000{index:03d}-100').exists())
+        for index in range(6, 25):
+            self.assertTrue((qa_root / f'1700000000{index:03d}-100').exists())
+        completed_dirs = [
+            p for p in qa_root.iterdir()
+            if p.is_dir() and p.name != '9999999999999-111'
+        ]
+        self.assertEqual(len(completed_dirs), 20)
+        self.assertTrue((active_dir / 'Micro Input QA.app').exists())
+        self.assertTrue((qa_root / 'qa.lock').exists())
+
+        with patch.object(sys, 'argv', [str(script), '--verify', '--timeout=15']), \
+                patch.dict(os.environ, {'MI_QA_MAX_RETAINED_RUNS': '3'}, clear=False), \
+                patch('pathlib.Path.home', return_value=fake_home), \
+                patch('subprocess.Popen', side_effect=lambda *args, **kwargs: FakeVerifyChild([0])), \
+                patch('subprocess.run'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 0)
+
+        remaining_completed = sorted(
+            p.name for p in qa_root.iterdir()
+            if p.is_dir() and p.name != '9999999999999-111'
+        )
+        self.assertEqual(len(remaining_completed), 3)
+        self.assertIn('1700000000024-100', remaining_completed)
+        self.assertTrue((active_dir / 'Micro Input QA.app').exists())
+        self.assertTrue((qa_root / 'qa.lock').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

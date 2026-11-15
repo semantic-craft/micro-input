@@ -12,9 +12,9 @@ PR #12/#13 已交付离线工作台与核心草稿（见 BUILD_PROMPT S1a/S2a）
 
 ## Solution
 
-提供原生 macOS Creator Micro 管理软件：菜单栏负责设备状态和常用切换，主视图以设备实体布局为中心，动作库围绕用户意图组织。Rust 核心 + SwiftUI，进程内 UniFFI；面向 Creator Micro 2 的 USB 只读链路先行。
+提供原生 macOS Creator Micro 管理软件，菜单栏负责设备状态和常用切换，主视图以设备实体布局为中心，动作库围绕用户意图组织。早期五模块与进程内 UniFFI 选型已收敛为七模块纯 Rust 内核 + 7 函数极简 C-ABI（`crates/mi-ffi`）+ 原生 SwiftUI 薄壳（`app/MicroInput`），面向 Creator Micro 2 的 USB 只读链路先行。
 
-完整闭环：接入设备 → 选择要浏览/编辑的 Profile 和 Layer → 点选实体控件 → 搜索、配置动作 → 在草稿中撤销和检查差异 → 明确应用 → 核对结果 → 日常手动切换。离线可编辑，重连先比较。通用 Coding 配置与工具专用配置并存，先明确切换，再提供可选应用感知。
+完整闭环为接入设备 → 选择要浏览/编辑的 Profile 和 Layer → 点选实体控件 → 搜索、配置动作 → 在草稿中撤销和检查差异 → 明确应用 → 核对结果 → 日常切换。离线可编辑，重连先比较。日常使用以手动选择、锁定当前方案或六层板载路由为准（前台应用自动切换已由 `R-C11` 退役）。
 
 Herdr、DeepSeek Harness（DSH）、ZCode、QwenWork 等是动作适配对象，不是产品中心。产品不演变成跨 agent 任务调度平台。Agent Experience 指代理能通过结构化接口协助准备、解释和检查配置草稿；设备应用仍由用户审阅触发。
 
@@ -54,7 +54,7 @@ Herdr、DeepSeek Harness（DSH）、ZCode、QwenWork 等是动作适配对象，
 30. **US-30** As a developer, I want semantic actions where reliable tool interfaces exist, so that I can configure an intent instead of memorizing shortcuts.
 31. **US-31** As a developer, I want shortcut-based actions to disclose their focus assumptions, so that they are not mistaken for precise session control.
 32. **US-32** As a user, I want to switch configurations from the menu bar or device, so that routine changes do not require opening the full editor.
-33. **US-33** As a user, I want optional foreground-app switching with visible active state, so that automatic changes remain understandable and reversible.
+33. **US-33** As a user, I want optional foreground-app switching with visible active state, so that automatic changes remain understandable and reversible.（已由 `R-C11` 退役，现行宿主路由改为六层板载路由、手动选择方案与锁定当前方案。）
 34. **US-34** As a user, I want a radial menu and mapping reference overlay, so that I can discover available actions without losing my work context.
 35. **US-35** As a user, I want text, application and URL actions with clear execution conditions, so that device controls can perform useful host operations.
 36. **US-36** As a user, I want command execution disabled by default, so that importing or browsing a configuration never runs a shell command.
@@ -89,7 +89,7 @@ Herdr、DeepSeek Harness（DSH）、ZCode、QwenWork 等是动作适配对象，
 | R-K01 | 统一可搜索动作库，分类与收藏；条目有稳定标识、可读名称、参数、目标、前置条件、宿主依赖、可用性和结果语义。高级信息按需展开。 | E-051 |
 | R-K02 | 通用Coding与工具专用配置并存。适配Herdr/DSH/ZCode/QwenWork等前逐工具验证“启动/聚焦、具体会话定位、语义操作、结果确认”；未验证能力不可标已支持。快捷键回退标明焦点前提。 | E-051, E-065 |
 | R-K03 | 设备触发的coding操作必须有明确目标；去重按下/释放与宽键事件；多宿主执行/灯光所有权未解决前不启用重叠消费者。切换会话不是自动分派任务。 | E-051, E-060 |
-| R-K04 | 先手动菜单栏/设备切换配置，生效对象始终可见。自动随前台应用切换可选、可关闭；需确认设备活动配置语义及切换副作用后启用，草稿不因此自动应用。 | E-051, E-026 |
+| R-K04 | 先手动菜单栏或设备切换配置，生效对象始终可见。原前台应用自动切换已由 `R-C11` 退役，现行仅保留六层板载路由、手动选择方案与锁定当前方案，草稿不因此自动应用。 | E-051, E-026 |
 | R-X01 | AX指Agent Experience，另保留无障碍要求。代理只读结构化状态、准备/校验草稿和差异；与UI共用模型/校验，不暴露任意RPC或无审阅应用入口。 | E-049, E-051 |
 | R-X02 | 性能预算先测量再制定；验收记录版本、环境、提交和来源。模拟/探针/应用/合并/发布分开报告。诊断默认脱敏，无遥测要求。 | E-049, E-063, E-064 |
 | R-X03 | 最终产品范围不构成本轮执行许可：S1a/S2a 已交付，当前按依赖图实施 35 张工单；不接自动化，不写设备。每阶段独立任务和完成门槛。 | E-051 |
@@ -99,7 +99,7 @@ Herdr、DeepSeek Harness（DSH）、ZCode、QwenWork 等是动作适配对象，
 | 规则 | 决定 | 证据 |
 | --- | --- | --- |
 | R-A01 | Rust核心+SwiftUI原生macOS应用，非IME，不要求兼容Electron实现；macOS 14+为当前构建基线。 | E-003, E-049, E-063 |
-| R-A02 | mi-model拥有配置/raw/草稿校验；mi-proto拥有framing与RPC；mi-transport拥有OS设备与模拟传输；mi-session拥有串行会话与快照；mi-ffi暴露异步高层能力。UniFFI进程内静态库；UI不直接发HID/RPC。 | E-049, E-063 |
+| R-A02 | 七模块纯 Rust 内核（`mi-proto`、`mi-transport`、`mi-model`、`mi-session`、`mi-bridge`、`mi-macos`、`mi-core`）承担协议分帧、模型校验、跨进程桥接、macOS 宿主执行与工作台状态机；早期 UniFFI 选型已收敛为 `crates/mi-ffi` 暴露的 7 函数极简 C-ABI 静态库，UI 不直接发 HID 或 RPC。 | E-049, E-063 |
 | R-A03 | 菜单栏、主窗和浮层共享核心状态，各自只获得所需能力；主窗关闭与退出应用分开。 | E-005, E-051 |
 | R-A04 | 后续mi-host/HostKit承接宿主动作、工具适配与系统权限；Overlays承接径向菜单/映射提示。需要时才增加模块/进程；当前不引入守护进程、HTTP服务或XPC。 | E-021, E-049 |
 | R-A05 | 高层方法白名单；只读、草稿、未来设备应用分别建能力面。UI和agent均无通用RPC透传。 | E-022, E-051 |
@@ -191,7 +191,7 @@ Herdr、DeepSeek Harness（DSH）、ZCode、QwenWork 等是动作适配对象，
 
 ## 已批准的实施与交互契约
 
-2026-11-02 用户接受实施准备审查修订。以下是设计要求，非新增设备事实；详细接口和步骤见 [实施设计](../implementation-plan.md)。原有 48 条故事与 35 张工单保留，完整索引为 [#44](https://github.com/semantic-craft/micro-input/issues/44)。
+2026-11-02 用户接受实施准备审查修订。以下是设计要求，非新增设备事实；现行模块接口与边界见[模块契约](../module-contracts.md)。原有 48 条故事与 35 张工单保留，完整索引为 [#44](https://github.com/semantic-craft/micro-input/issues/44)。
 
 | 规则 | 契约 | 来源 |
 | --- | --- | --- |

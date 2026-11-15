@@ -60,7 +60,7 @@
 
 新通知的静态字段结构可以进入研究 contract；尚未确认来源与物理语义时，不进入 InputDecoder 的可执行输出。写入与宿主执行尚无本轮授权新增的产品接口，不能填造 API 签名来掩盖未决行为。
 
-既有 `HidLink/HidTransport`、`Framer/RpcCodec`、`DeviceSession/DeviceSchema`、`InputDecoder` 与 `WorkbenchStore` 提供上述接入边界。本轮没有足够的新设备证据支持开放写入或宿主动作，因此不另造一套模拟成功的骨架。后续实现应在这些接口上补证据支持的行为与回归，保持 [现有实施设计](implementation-plan.md) 的能力门和恢复约束。
+既有 `HidLink/HidTransport`、`Framer/RpcCodec`、`DeviceSession/DeviceSchema`、`InputDecoder` 与 `WorkbenchStore` 提供上述接入边界。本轮没有足够的新设备证据支持开放写入或宿主动作，因此不另造一套模拟成功的骨架。后续实现应在这些接口上补证据支持的行为与回归，继续保持单请求串行与有界载荷容量门禁（4 MiB 本地文档上限与帧队列上限），以及显式核验快照、原字节备份和读回不符停止等恢复约束。
 
 ## 下一轮可执行的补证
 
@@ -135,3 +135,33 @@ RGB 编辑由 [Draft](../crates/mi-model/src/draft.rs) 与 [mi-model::lighting](
 会话层 `Preview::begin_native` 接收两区值，并经当前连接重新核对 0.6.3。当前工作台尚未调用此入口，旧 FFI 的唯一 USB 型号检查不代表当前生产调用。每次持有现有队列后重新取最新watch值，停止/所有者取消/到期后不发送旧pending；已经发送的交换完成后再结束，失败断开旧会话、不重发。`exchange_lighting` 只编码固定两区DTO，通用字节出口仍拒绝灯光方法。
 
 历史预览采纳设计要求绑定进入时的文档身份与修订，通过 DocumentStore 原子保存并作为一次 undo；当前实时预览接线尚未证实。`add_lighting` 只对原始来源完全不存在 lights 成员开放，新增成员编译保持所有非目标原字节；未知字段和已有null不补默认值。
+
+## 本地文档 v2 与三方比较契约
+
+`LocalDocumentV2`（[document.rs](../crates/mi-model/src/document.rs)）将 `baseline`、`origin` 与 `editable`（含 `Graph` 及 `source_refs`）分离，工作台与模型全部按稳定 UUID 定位配置、层、控件和动作。`DocumentStore`（[storage.rs](../crates/mi-model/src/storage.rs)）负责 `v1` 到 `v2` 的原字节备份迁移、4 MiB 文档上限校验、`.lock` 与 `.pending` 并发冲突保护以及 `active.json` 独立草稿切换；损坏、未来版本或只读文档保留原字节并禁止编辑。
+
+`comparison::Comparison`（[comparison.rs](../crates/mi-model/src/comparison.rs)）通过 `source_refs` 对齐基线配置、本地草稿与当前设备核验快照。只有全部字段无冲突且设备身份可靠时才允许 `Choice::Merge`；存在冲突或仅凭临时接口确认时，需先调用 `DocumentStore::confirm_comparison_identity` 并由用户在 `Choice::KeepLocal`、`Choice::UseDevice` 与 `Choice::Cancel` 之间作整份选择。`WorkbenchStore`（[store.rs](../crates/mi-core/src/store.rs)）经 C-ABI（[lib.rs](../crates/mi-ffi/src/lib.rs)）向 SwiftUI（[CoreBridge.swift](../app/MicroInput/Sources/MicroInputUI/CoreBridge.swift)）同步比较行与修订结果，不写设备。
+
+## 本地控件编辑契约
+
+`ControlSettings`（[control_settings.rs](../crates/mi-model/src/control_settings.rs)）与 `Draft::set_control_settings` 负责本地层级的旋钮 3 逻辑槽位动作分配和摇杆模式管理，支持 `source`、`logical_sectors`、`mouse` 与 `scroll` 四种本地意图。`LOCAL_SECTOR_LIMIT` 固定为 32，该数值是本机编辑器策略上限，不代表设备固件容量。
+
+缩减活动扇区数或切换摇杆模式时，既有 `BindingNode` 与 `original` 原值保留，不自动删除槽位绑定；受保护的原生 OAI 宿主层禁止修改控件设置。所有编辑通过 `DocumentStore` 原子保存并纳入当前会话的整次撤销/重做历史。
+
+## 自有预设交换契约
+
+`preset::Preset`（[preset.rs](../crates/mi-model/src/preset.rs)）定义自有 JSON 交换格式，固定 `format = "micro-input-preset"`、`version = 1` 与 4 MiB 上限 `preset::LIMIT`，作用域支持 `document`、`profile` 与 `layer`。`preset::export` 拒绝受保护的原生 OAI 宿主层和只读未知文档，导出载荷保留完整不可变 `origin` 档案并在界面提示后再保存。
+
+`preset::parse` 与 `preset::inspect` 先做结构校验和只读预览；`preset::import` 重新映射全部本地对象 UUID，把原 `origin` 与 `baseline` 降级为历史 `imported_origin`（不作为当前已连接设备事实），并生成新的独立草稿。自有预设交换与厂商格式互导保持分离，不宣称兼容官方预设格式。
+
+## 配置准备与备份契约
+
+`apply::Preview`、`apply::Prepared`、`apply::Pending` 与 `apply::PreparedCandidate`（[apply.rs](../crates/mi-model/src/apply.rs)）承担离线与核验快照下的配置变更编译。`DocumentStore::preview_apply`、`prepare_apply_backup` 与 `take_prepared_candidate` 校验当前文档 `document_id`、`revision` 与 `document_sha256` 同磁盘原字节一致，并绑定当前会话核验快照的设备身份与文件摘要。
+
+候选编译器基于 `serde_json::value::RawValue` 只替换发生变化的已知普通键和已有 `lights` 字段字节区间，保持 `smart_actions`、未知字段及非目标配置原字节不变。保存前必须在 `0700` 私有目录落盘 `keymap.json`、`planned-keymap.json`、可选 `smart_actions.json` 与 `manifest.json`（状态为 `prepared-not-sent`），经 `fsync` 与原字节读回核验后才允许一次性取出 `PreparedCandidate` 交给会话层 `ConfigWriter` 执行。
+
+## Agent 本地提案契约
+
+独立二进制 `mi`（[mi.rs](../crates/mi-model/src/bin/mi.rs)）与 `agent::execute`（[agent.rs](../crates/mi-model/src/agent.rs)）提供 `mi draft read/validate/patch` 本地提案入口，采用 `api_version = 1` 的单行 JSON stdin/stdout 契约。请求通过 `Stamp`（`document_id`、`revision`、`sha256`）绑定已保存本地 `v2` 文档，只允许 `rename_profile`、`rename_layer` 与 `bind_action` 三种受限操作，不提供设备写入口或宿主执行权限。
+
+`patch` 使用 `0600` 权限与 `create_new` 写入独立 `format = "micro-input-proposal"` 文件，源工作台与 `active.json` 保持原字节不变。工作台经 `DocumentStore::inspect_agent_proposal`、`reject_agent_proposal` 与 `accept_agent_proposal` 在文档锁下复核 `Stamp` 与操作重放结果；用户拒绝则保持原修订，接受后创建独立草稿并由 `WorkbenchStore` 更新 C-ABI 投影。

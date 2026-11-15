@@ -6,12 +6,61 @@ import json
 import os
 import pathlib
 import plistlib
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import time
 import uuid
+
+MAX_RETAINED_QA_RUNS = 20
+_QA_RUN_ID_RE = re.compile(r'^(\d+)-\d+$')
+
+
+def _prune_stale_qa_runs(
+    qa_root: pathlib.Path,
+    current_run_dir: pathlib.Path | None = None,
+    max_retained: int = MAX_RETAINED_QA_RUNS,
+) -> int:
+    if not qa_root.is_dir():
+        return 0
+    limit = max(1, max_retained)
+    raw_limit = os.environ.get('MI_QA_MAX_RETAINED_RUNS')
+    if raw_limit is not None:
+        try:
+            limit = max(1, int(raw_limit))
+        except ValueError:
+            limit = max(1, max_retained)
+
+    current_resolved = current_run_dir.resolve() if current_run_dir is not None else None
+    eligible: list[tuple[int, str, pathlib.Path, pathlib.Path]] = []
+    for entry in qa_root.iterdir():
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        match = _QA_RUN_ID_RE.match(entry.name)
+        if match is None:
+            continue
+        if any((entry / marker).exists() or (entry / marker).is_symlink() for marker in ('Micro Input QA.app', 'documents')):
+            continue
+        eligible.append((int(match.group(1)), entry.name, entry, entry.resolve()))
+
+    eligible.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    retained_paths: set[pathlib.Path] = set()
+    if current_resolved is not None and any(item[3] == current_resolved for item in eligible):
+        retained_paths.add(current_resolved)
+    for _ts, _name, _entry, resolved in eligible:
+        if len(retained_paths) >= limit:
+            break
+        retained_paths.add(resolved)
+
+    removed = 0
+    for _ts, _name, entry, resolved in eligible:
+        if resolved not in retained_paths:
+            shutil.rmtree(entry, ignore_errors=True)
+            if not entry.exists():
+                removed += 1
+    return removed
 
 
 def _validate_qa_dir(path: pathlib.Path) -> pathlib.Path:
@@ -285,6 +334,8 @@ def main() -> int:
                 launcher_record['documents_removed'] = documents_dir is None or not documents_dir.exists()
                 launcher_record['preferences_removed'] = pref_removed
                 _write_json(evidence_dir / 'launcher.json', launcher_record)
+            if lock_handle is not None and not os.environ.get('MI_QA_RUN_DIR'):
+                _prune_stale_qa_runs(qa_root, current_run_dir=run_dir)
             if lock_handle is not None:
                 try:
                     fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)

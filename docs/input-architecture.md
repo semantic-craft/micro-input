@@ -2,7 +2,7 @@
 
 本轮结论：Input 是 Electron 界面、主进程设备服务、Work Louder SDK 和 macOS 能力的组合。配置下行以文件为单位；宿主功能上行以通知为单位。前台应用检测又形成一条宿主到设备的消息链。独立管理器必须分别处理配置、会话和宿主动作，不能把全部键盘功能视为一种宏执行器。
 
-范围：本机 Input 1.1.0，Creator Micro 2 相关代码。以下为当前安装包的静态事实或明确标记的推断，不是本轮实机协议验收。没有启动、重启、注入 Input，没有读取个人配置、发送设备请求或改变映射。正式方案见[分析设计](designs/input-protocol-reconstruction.md)，候选字段见[协议补充](protocol-candidates.md)，独立实现边界见[模块契约](module-contracts.md)。
+范围：本机 Input 1.1.0，Creator Micro 2 相关代码。以下为当前安装包的静态事实或明确标记的推断，不是本轮实机协议验收。没有启动、重启、注入 Input，没有读取个人配置、发送设备请求或改变映射。候选字段见[协议补充](protocol-candidates.md)，独立实现边界见[模块契约](module-contracts.md)。
 
 ## 证据身份与可复核位置
 

@@ -12,3 +12,5 @@ DerivedData/
 *.xcuserdatad/
 *.xcuserstate
 build/
+*.swp
+*.swo

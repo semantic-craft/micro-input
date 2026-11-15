@@ -3,7 +3,7 @@
 - 五项持续交付范围与接续入口见 [持续交付](docs/autonomous-delivery.md)。完成一个 PR 后核对 #44 与下一可执行切片；代码合并不代表安装或实体效果验收。
 - **机器自动验收与日常迭代策略**：功能实现默认以 `scripts/verify-offline`（含静态/单元门禁 + 六个合成隔离 QA 场景自动回执校验）全量通过作为交付准绳，通过后可直接更新本机日常版 `/Applications/Micro Input.app` 供实际使用，不因等待人工逐键验收阻塞交付；日常使用中发现的体验或边缘问题再按需迭代修复。
 
-- 开工读 README.md、docs/development.md 和 lessons.md；当前首轮为离线工作台；阶段范围见 docs/spec/BUILD_PROMPT.md 的 S1a。
+- 开工读 README.md、docs/development.md、lessons.md，以及 docs/spec/SPEC.md、docs/spec/BUILD_PROMPT.md、docs/spec/UNKNOWNS.md 与 #44，按当前 Rust 核心 + C-ABI + SwiftUI 架构推进交付。
 - 接手未完成工单、实现或评审产品改动前，必读 [研究成果接入规则](docs/agents/research-context.md)，按任务选读 Input 架构、候选协议和模块契约，并在交付中记录采用的证据与验证缺口。拆分任务或交接时传递该入口。
 - 技术架构借鉴 [`metasequoiaime/msime`](https://github.com/metasequoiaime/msime) 的「纯 Rust 跨平台内核 + 薄 C-ABI 边界 + 原生宿主薄壳」设计：全部协议、模型、跨进程桥接、macOS 宿主执行与工作台状态机收敛在纯 Rust 内核（`crates/mi-proto`、`crates/mi-transport`、`crates/mi-model`、`crates/mi-session`、`crates/mi-bridge`、`crates/mi-macos`、`crates/mi-core`），经 7 函数极简 C-ABI 静态库（`crates/mi-ffi`）暴露给 100% 原生 macOS SwiftUI/AppKit 薄壳（`app/MicroInput`），彻底退役 UniFFI、`crates/mi-gpui` 及肥 Swift 业务层。
 - 兼容功能或协议工作查 README 中对应调研原件，分别标明观察、官方说明、社区线索和未知；社区旧版参数不能充当当前固件规格。
@@ -43,3 +43,5 @@
 | `app/MicroInput/Sources/MicroInputUI/*.swift` 中所有 `.buttonStyle(.plain)` 与 `.onTapGesture` 必须声明 `.contentShape(Rectangle())`；`InlineInspectorView` 必须绑定 `.id(...)`、`ScrollViewReader` 滚动复位及搜索框 `.onSubmit`，且 `consume_physical_input_event` 在 `inspector_search_active` 时禁止抢占 `selected_surface`；`MicroInputApp.swift` 必须实现 `applicationDockMenu`、`win.deminiaturize`、`applicationShouldHandleReopen` 与 `AppIcon.icns` 挂载 | `scripts/check-boundaries.py`（`R-C07`）+ `app/MicroInput/Tests/MicroInputTests/MicroInputTests.swift`（`testSidebarProfileAndSurfaceSwitchDistinctnessAndSearchFocusIsolation`） |
 | 单色中性 UI 设计规范以 `docs/designs/DESIGN.md` 为唯一契约：`app/MicroInput/Sources/MicroInputUI/*.swift` 严禁 `.controlSize(.mini)`、`.buttonStyle(.bordered/.borderedProminent)` 及非 `.segmented` 的裸 `Picker(`，所有 `.buttonStyle(.plain)` 必须附加 `.focusEffectDisabled()`，且「按键速查」保持 4×4 空间拓扑 | `scripts/check-boundaries.py`（`R-C09`）+ `app/MicroInput/Tests/MicroInputTests/DesignSystemVerificationTests.swift` |
 | 工作台侧栏、菜单栏弹层与原生被动面板统一以「轮盘菜单」单源命名（Swift 侧共享 `WorkbenchDestination.radial`，Rust 侧共享 `PassivePanelFrameSpec::RADIAL_TITLE` / `for_radial_frame`），`app/MicroInput/Sources/MicroInputUI/*.swift`、`crates/mi-macos/src/*.rs` 与 `crates/mi-core/src/*.rs` 严禁残留 `径向菜单` / `摇杆菜单` / `摇杆径向菜单` | `scripts/check-boundaries.py`（`R-C10`）+ `app/MicroInput/Tests/MicroInputTests/DesignSystemVerificationTests.swift`（`testWheelMenuCopyUnificationAndToggleContract`） |
+| 退役前台应用自动跟随路由，只保留六层板载路由、手动选择方案与锁定当前方案，旧版偏好字段（`auto_follow_enabled`、`manual_override`、`app_profile_links`）加载时经 `discard_retired_preference_field` 静默丢弃且不写回 | `scripts/check-boundaries.py`（`R-C11`） |
+| 历史迁移与过时方案文档保持清理状态，仓库内所有已跟踪 Markdown 文件不得包含失效相对链接 | `scripts/check-boundaries.py`（`R-C12`） |

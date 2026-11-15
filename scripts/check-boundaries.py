@@ -368,4 +368,37 @@ for retired_field in ('auto_follow_enabled', 'manual_override', 'app_profile_lin
         'on both HostPreferencesV1 and HostPreferences so legacy workbench.preferences.json loads without failing #[serde(deny_unknown_fields)]'
     )
 
+forbidden_retired_docs = (
+    'docs/pstack-relay.md',
+    'docs/implementation-plan.md',
+    'docs/designs/app-following-and-hud.md',
+    'docs/verification/app-following-and-hud.md',
+    'docs/designs/input-protocol-reconstruction.md',
+    'docs/designs/host-execution-and-agent-presets.md',
+    'docs/designs/device-write-and-rgb.md',
+)
+for rel_doc in forbidden_retired_docs:
+    assert not (root / rel_doc).exists(), (
+        f'R-C12 violation: retired document {rel_doc} must not exist'
+    )
+
+for rel_md in subprocess.check_output(['git', 'ls-files', '*.md'], cwd=root, text=True).splitlines():
+    md_path = root / rel_md
+    if not md_path.is_file():
+        continue
+    md_text = md_path.read_text(encoding='utf-8')
+    md_stripped = re.sub(r'```.*?```', '', md_text, flags=re.DOTALL)
+    md_stripped = re.sub(r'`[^`\n]+`', '', md_stripped)
+    for match in re.finditer(r'!?\[[^\]]*\]\(([^)]+)\)', md_stripped):
+        raw = match.group(1)
+        if raw.startswith(('http://', 'https://', 'mailto:', '#', 'file://')):
+            continue
+        target_part = raw.strip().split()[0].split('#', 1)[0]
+        if not target_part:
+            continue
+        resolved = (md_path.parent / target_part).resolve()
+        assert resolved.exists() and (resolved == root or root in resolved.parents), (
+            f'R-C12 violation in {rel_md}: broken relative link {raw!r}'
+        )
+
 print('UNKNOWN inventory and read-only/no-send boundaries: PASS')
