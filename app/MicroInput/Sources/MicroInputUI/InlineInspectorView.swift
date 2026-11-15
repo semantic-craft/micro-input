@@ -9,6 +9,7 @@ struct CreatorMicroInlineInspectorView: View {
     var body: some View {
         let _ = ViewRenderTelemetry.record("CreatorMicroInlineInspectorView")
         let insp = store.inspector
+        let locale = store.locale
         let slot = insp.selectedLogicalSlot
         let isTaskRole = (slot < 6) && (insp.selectedSlotRole == "TaskKey") && agentKind.supportsLiveSessionSlots
         let layerIdentity = "\(insp.selectedProfileId ?? "")-\(insp.inspectorLayerName)"
@@ -31,7 +32,7 @@ struct CreatorMicroInlineInspectorView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    Text(titleForSlot(slot: slot, isSplit: insp.bottomRowLayout == "split", insp: insp))
+                    Text(titleForSlot(slot: slot, isSplit: insp.bottomRowLayout == "split", insp: insp, locale: locale))
                         .font(UITheme.heading)
                         .foregroundStyle(UITheme.textPrimary)
                     Spacer(minLength: 4)
@@ -42,14 +43,14 @@ struct CreatorMicroInlineInspectorView: View {
                         .background(Capsule().fill(UITheme.subtleSurface))
                         .overlay(Capsule().stroke(UITheme.hairlineBorder, lineWidth: 1))
                         .foregroundStyle(UITheme.textPrimary)
-                    Text(insp.isProtectedLayer ? "原生直通" : (isTaskRole ? "会话键" : "动作键"))
+                    Text(store.tr(insp.isProtectedLayer ? "原生直通" : (isTaskRole ? "会话键" : "动作键")))
                         .font(UITheme.micro)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
                         .background(Capsule().fill(UITheme.subtleSurface))
                         .foregroundStyle(UITheme.textSecondary)
                 }
-                Text(boundSummaryText(insp: insp, slot: slot))
+                Text(boundSummaryText(insp: insp, slot: slot, locale: locale))
                     .font(UITheme.bodyMedium)
                     .foregroundStyle(UITheme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -96,18 +97,19 @@ struct CreatorMicroInlineInspectorView: View {
                             .id("inspector-scroll-top")
 
                         if hasEditable || (13...19).contains(slot) || insp.selectedSurface.hasPrefix("Encoder") || insp.selectedSurface == "Joystick" {
-                            slotSpecificControls(slot: slot, isTaskRole: isTaskRole, insp: insp)
+                            slotSpecificControls(slot: slot, isTaskRole: isTaskRole, insp: insp, locale: locale)
                                 .id(controlGroupIdentity)
                         }
 
                         if showTaskControls {
-                            sessionSlotExplanationCard(slot: slot, ss: store.sessionStrip)
+                            sessionSlotExplanationCard(slot: slot, ss: store.sessionStrip, locale: locale)
                         }
 
                         VStack(alignment: .leading, spacing: 14) {
-                            customShortcutInspectorCard(edit: edit)
+                            customShortcutInspectorCard(edit: edit, locale: locale)
                             KeycapGlyphGridSectionView(
                                 store: store,
+                                locale: locale,
                                 isVisible: showGlyphGrid,
                                 keycapSearchQuery: edit.keycapSearchQuery,
                                 filteredKeycaps: edit.filteredKeycaps,
@@ -120,6 +122,7 @@ struct CreatorMicroInlineInspectorView: View {
 
                             AgentActionCatalogSectionView(
                                 store: store,
+                                locale: locale,
                                 isVisible: showActionControls,
                                 boundActionId: edit.boundActionId,
                                 actionSearchQuery: edit.actionSearchQuery,
@@ -144,12 +147,12 @@ struct CreatorMicroInlineInspectorView: View {
             Rectangle().fill(UITheme.hairlineBorder).frame(height: 1)
 
             HStack(spacing: 8) {
-                Button("更多动作…") {
+                Button(store.tr("更多动作…")) {
                     onOpenFullActionLibrary()
                 }
                 .surfaceButton(.secondary)
 
-                Button("绑定宏…") {
+                Button(store.tr("绑定宏…")) {
                     onOpenMacroLibrary()
                 }
                 .surfaceButton(.secondary)
@@ -162,44 +165,22 @@ struct CreatorMicroInlineInspectorView: View {
         }
     }
 
-    private func titleForSlot(slot: Int, isSplit: Bool, insp: InspectorSliceModel) -> String {
-        if insp.selectedSurface == "EncoderHold" {
-            return "旋钮长按"
-        }
-        if (16...19).contains(slot) || insp.selectedSurface == "Joystick" {
-            switch insp.editableInspector?.joystickMode {
-            case "mouse": return "右上角摇杆（硬件鼠标）"
-            case "scroll": return "右上角摇杆（硬件滚轮）"
-            default: break
-            }
-        }
-        switch slot {
-        case 0: return "左上键（按键 01）"
-        case 1: return "右上键（按键 02）"
-        case 2..<10: return String(format: "按键 %02d", slot + 1)
-        case 10: return isSplit ? "底行左键（开关 11）" : "底部宽键（2U，开关 11+12）"
-        case 11: return isSplit ? "底行中键（开关 12）" : "底部宽键右开关"
-        case 12: return "底行右键（开关 13）"
-        case 13: return "旋钮左旋"
-        case 14: return "旋钮右旋"
-        case 15: return "旋钮短按"
-        case 16: return "四向摇杆（上）"
-        case 17: return "四向摇杆（下）"
-        case 18: return "四向摇杆（左）"
-        case 19: return "四向摇杆（右）"
-        default: return "按键 \(slot + 1)"
-        }
+    private func titleForSlot(slot: Int, isSplit: Bool, insp: InspectorSliceModel, locale: ResolvedLocale) -> String {
+        L10n.inspectorSlotTitle(
+            slot: slot,
+            isSplit: isSplit,
+            selectedSurface: insp.selectedSurface,
+            joystickMode: insp.editableInspector?.joystickMode,
+            locale: locale
+        )
     }
 
-    private func boundSummaryText(insp: InspectorSliceModel, slot: Int) -> String {
+    private func boundSummaryText(insp: InspectorSliceModel, slot: Int, locale: ResolvedLocale) -> String {
         if let edit = insp.editableInspector {
             return edit.boundActionName
         }
         if insp.isProtectedLayer {
             let owner = insp.protectedLock?.ownerClientName ?? insp.selectedDisplayName
-            if insp.selectedSurface == "EncoderHold" {
-                return "\(owner) 旋钮长按（弹出模型选择页）"
-            }
             let code: String = {
                 switch slot {
                 case 0..<13: return String(format: "KV_OAI_%02d / AG%02d", slot, slot)
@@ -213,27 +194,32 @@ struct CreatorMicroInlineInspectorView: View {
                 default: return "KV_OAI"
                 }
             }()
-            return "\(owner) 原生直通 (\(code))"
+            return L10n.protectedBoundSummary(
+                owner: owner,
+                selectedSurface: insp.selectedSurface,
+                code: code,
+                locale: locale
+            )
         }
-        return "未绑定"
+        return L10n.tr("未绑定", locale)
     }
 
     @ViewBuilder
-    private func slotSpecificControls(slot: Int, isTaskRole: Bool, insp: InspectorSliceModel) -> some View {
+    private func slotSpecificControls(slot: Int, isTaskRole: Bool, insp: InspectorSliceModel, locale: ResolvedLocale) -> some View {
         if slot < 6 && agentKind.supportsLiveSessionSlots {
             VStack(alignment: .leading, spacing: 6) {
-                Text("按键用途")
+                Text(store.tr("按键用途"))
                     .font(UITheme.captionMedium)
                     .foregroundStyle(UITheme.textSecondary)
                 Picker(
-                    "按键用途",
+                    store.tr("按键用途"),
                     selection: Binding(
                         get: { isTaskRole ? "TaskKey" : "ActionKey" },
                         set: { store.dispatch("inspector", ["SetSlotRole": $0]) }
                     )
                 ) {
-                    Text("会话键（自动跟灯）").tag("TaskKey")
-                    Text("普通动作键").tag("ActionKey")
+                    Text(store.tr("会话键（自动跟灯）")).tag("TaskKey")
+                    Text(store.tr("普通动作键")).tag("ActionKey")
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -241,7 +227,7 @@ struct CreatorMicroInlineInspectorView: View {
         } else if slot == 10 || slot == 11 {
             VStack(alignment: .leading, spacing: 10) {
                 Toggle(
-                    "拆分为两个按键（1U + 1U）",
+                    store.tr("拆分为两个按键（1U + 1U）"),
                     isOn: Binding(
                         get: { insp.bottomRowLayout == "split" },
                         set: { store.dispatch("canvas", ["SetBottomRowLayout": $0 ? "split" : "merged"]) }
@@ -251,14 +237,14 @@ struct CreatorMicroInlineInspectorView: View {
 
                 if insp.bottomRowLayout == "split" {
                     Picker(
-                        "底行按键",
+                        store.tr("底行按键"),
                         selection: Binding(
                             get: { slot },
                             set: { store.dispatch("canvas", ["SelectLogicalSlot": $0]) }
                         )
                     ) {
-                        Text("左键（开关 11）").tag(10)
-                        Text("中键（开关 12）").tag(11)
+                        Text(store.tr("左键（开关 11）")).tag(10)
+                        Text(store.tr("中键（开关 12）")).tag(11)
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
@@ -272,27 +258,27 @@ struct CreatorMicroInlineInspectorView: View {
                 return slot == 13 ? "EncoderCcw" : (slot == 14 ? "EncoderCw" : "EncoderPress")
             }()
             VStack(alignment: .leading, spacing: 8) {
-                Text("无极旋钮动作方向")
+                Text(store.tr("无极旋钮动作方向"))
                     .font(UITheme.captionMedium)
                     .foregroundStyle(UITheme.textSecondary)
                 Picker(
-                    "旋钮方向",
+                    store.tr("旋钮方向"),
                     selection: Binding(
                         get: { encoderSurface },
                         set: { store.dispatch("canvas", ["SelectSurface": $0]) }
                     )
                 ) {
-                    Text("左旋").tag("EncoderCcw")
-                    Text("右旋").tag("EncoderCw")
-                    Text("短按").tag("EncoderPress")
-                    Text("长按").tag("EncoderHold")
+                    Text(store.tr("左旋")).tag("EncoderCcw")
+                    Text(store.tr("右旋")).tag("EncoderCw")
+                    Text(store.tr("短按")).tag("EncoderPress")
+                    Text(store.tr("长按")).tag("EncoderHold")
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .accessibilityIdentifier("inspector-encoder-surface-picker")
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Button("模型选择（长按弹出模型页）") {
+                    Button(store.tr("模型选择（长按弹出模型页）")) {
                         store.dispatch("canvas", ["ApplyKnobJoystickPreset": "ModelSelectionAndMouse"])
                     }
                     .surfaceButton(.primary)
@@ -300,28 +286,28 @@ struct CreatorMicroInlineInspectorView: View {
 
                     if agentKind == .codex {
                         HStack(spacing: 8) {
-                            Button("滚动对话预设") {
+                            Button(store.tr("滚动对话预设")) {
                                 store.dispatch("canvas", ["ApplyKnobJoystickPreset": "CodexScrollChatAndBottom"])
                             }
                             .surfaceButton(.secondary)
-                            Button("调整推理档位") {
+                            Button(store.tr("调整推理档位")) {
                                 store.dispatch("canvas", ["ApplyKnobJoystickPreset": "CodexReasoningEffortAndSpeed"])
                             }
                             .surfaceButton(.secondary)
                         }
                     } else if agentKind == .antigravity {
                         HStack(spacing: 8) {
-                            Button("切活跃/蓝点会话") {
+                            Button(store.tr("切活跃/蓝点会话")) {
                                 store.dispatch("canvas", ["ApplyKnobJoystickPreset": "CycleWorkingAndBlueDot"])
                             }
                             .surfaceButton(.secondary)
-                            Button("双滚轮预设") {
+                            Button(store.tr("双滚轮预设")) {
                                 store.dispatch("canvas", ["ApplyKnobJoystickPreset": "DualScrollProjectsAndChat"])
                             }
                             .surfaceButton(.secondary)
                         }
                     }
-                    Button("摇杆鼠标 + 旋钮滚轮") {
+                    Button(store.tr("摇杆鼠标 + 旋钮滚轮")) {
                         store.dispatch("canvas", ["ApplyKnobJoystickPreset": "MousePointerAndScroll"])
                     }
                     .surfaceButton(.secondary)
@@ -336,20 +322,20 @@ struct CreatorMicroInlineInspectorView: View {
             let hw = store.v070Hardware
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("摇杆驱动模式")
+                Text(store.tr("摇杆驱动模式"))
                     .font(UITheme.captionMedium)
                     .foregroundStyle(UITheme.textSecondary)
                 Picker(
-                    "摇杆驱动模式",
+                    store.tr("摇杆驱动模式"),
                     selection: Binding(
                         get: { currentMode },
                         set: { store.dispatch("inspector", ["SetJoystickMode": $0]) }
                     )
                 ) {
-                    Text("宿主逻辑扇区").tag("logical_sectors")
-                    Text("硬件 MOUSE").tag("mouse")
-                    Text("硬件 SCROLL").tag("scroll")
-                    Text("保留来源").tag("source")
+                    Text(store.tr("宿主逻辑扇区")).tag("logical_sectors")
+                    Text(store.tr("硬件 MOUSE")).tag("mouse")
+                    Text(store.tr("硬件 SCROLL")).tag("scroll")
+                    Text(store.tr("保留来源")).tag("source")
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -372,17 +358,17 @@ struct CreatorMicroInlineInspectorView: View {
 
                 if currentMode == "mouse" || currentMode == "scroll" {
                     let isSynced = hw.activeJoystickMode == currentMode
-                    let modeTitle = currentMode == "mouse" ? "0.7.0 硬件鼠标指针" : "0.7.0 硬件模拟滚轮"
+                    let modeTitle = store.tr(currentMode == "mouse" ? "0.7.0 硬件鼠标指针" : "0.7.0 硬件模拟滚轮")
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 8) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(modeTitle).font(UITheme.bodyMedium).foregroundStyle(UITheme.textPrimary)
-                                Text(hw.supported ? (isSynced ? "键盘当前层已同步此硬件模式" : "待写入当前键盘层固件") : "离线草稿已保存；接入 0.7.0+ 固件后可一键写入键盘")
+                                Text(store.tr(hw.supported ? (isSynced ? "键盘当前层已同步此硬件模式" : "待写入当前键盘层固件") : "离线草稿已保存；接入 0.7.0+ 固件后可一键写入键盘"))
                                     .font(UITheme.micro)
                                     .foregroundStyle(UITheme.textSecondary)
                             }
                             Spacer(minLength: 6)
-                            Button(isSynced ? "重新写入固件" : "写入键盘固件") {
+                            Button(store.tr(isSynced ? "重新写入固件" : "写入键盘固件")) {
                                 store.dispatchV070Hardware(V070HardwareCommand.applyJoystickHardwareMode(currentMode))
                             }
                             .surfaceButton(isSynced ? .secondary : .primary)
@@ -392,10 +378,10 @@ struct CreatorMicroInlineInspectorView: View {
 
                         if hw.supported {
                             HStack(spacing: 6) {
-                                Text("速度档位").font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
+                                Text(store.tr("速度档位")).font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
                                 Spacer(minLength: 4)
                                 ForEach([("slow", "慢速"), ("standard", "标准"), ("fast", "快速"), ("precise", "精准")], id: \.0) { presetId, title in
-                                    Button(title) {
+                                    Button(store.tr(title)) {
                                         store.dispatchV070Hardware(V070HardwareCommand.applyMousePreset(presetId))
                                     }
                                     .surfaceButton(hw.mouse.preset == presetId ? .primary : .secondary)
@@ -405,7 +391,7 @@ struct CreatorMicroInlineInspectorView: View {
                             }
                         }
 
-                        Text("长按左上角旋钮弹出模型选择页期间，向右轻推摇杆（按右）将临时拦截指针并展开 / 调高模型力度，短按确认后自动恢复硬件指针。")
+                        Text(store.tr("长按左上角旋钮弹出模型选择页期间，向右轻推摇杆（按右）将临时拦截指针并展开 / 调高模型力度，短按确认后自动恢复硬件指针。"))
                             .font(UITheme.micro)
                             .foregroundStyle(UITheme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -416,12 +402,13 @@ struct CreatorMicroInlineInspectorView: View {
                     .accessibilityIdentifier("inspector-joystick-v070-card")
                 } else if currentMode == "logical_sectors" {
                     if hw.activeJoystickMode == "mouse" || hw.activeJoystickMode == "scroll" {
+                        let hwTag = hw.activeJoystickMode == "mouse" ? "MOUSE" : "SCROLL"
                         HStack(spacing: 8) {
-                            Text("当前键盘固件仍处于硬件 \(hw.activeJoystickMode == "mouse" ? "MOUSE" : "SCROLL") 模式")
+                            Text(locale == .en ? "Keypad firmware is still in hardware \(hwTag) mode" : "当前键盘固件仍处于硬件 \(hwTag) 模式")
                                 .font(UITheme.micro)
                                 .foregroundStyle(UITheme.textSecondary)
                             Spacer(minLength: 4)
-                            Button("恢复键盘扇区模式") {
+                            Button(store.tr("恢复键盘扇区模式")) {
                                 store.dispatchV070Hardware(V070HardwareCommand.applyJoystickHardwareMode("logical_sectors"))
                             }
                             .surfaceButton(.secondary)
@@ -433,32 +420,32 @@ struct CreatorMicroInlineInspectorView: View {
                         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
                     }
 
-                    Text("四向摇杆方向")
+                    Text(store.tr("四向摇杆方向"))
                         .font(UITheme.captionMedium)
                         .foregroundStyle(UITheme.textSecondary)
                     Picker(
-                        "摇杆方向",
+                        store.tr("摇杆方向"),
                         selection: Binding(
                             get: { insp.selectedJoystickDirection },
                             set: { store.dispatch("canvas", ["SelectJoystickDirection": $0]) }
                         )
                     ) {
-                        Text("上").tag("North")
-                        Text("左").tag("West")
-                        Text("下").tag("South")
-                        Text("右").tag("East")
+                        Text(store.tr("上")).tag("North")
+                        Text(store.tr("左")).tag("West")
+                        Text(store.tr("下")).tag("South")
+                        Text(store.tr("右")).tag("East")
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
 
                     HStack(spacing: 8) {
                         if agentKind == .antigravity {
-                            Button("滚对话 + 左右切会话") {
+                            Button(store.tr("滚对话 + 左右切会话")) {
                                 store.dispatch("canvas", ["ApplyKnobJoystickPreset": "DualScrollProjectsAndChat"])
                             }
                             .surfaceButton(.secondary)
                         }
-                        Button("摇杆鼠标 + 旋钮滚轮") {
+                        Button(store.tr("摇杆鼠标 + 旋钮滚轮")) {
                             store.dispatch("canvas", ["ApplyKnobJoystickPreset": "MousePointerAndScroll"])
                         }
                         .surfaceButton(.secondary)
@@ -468,19 +455,19 @@ struct CreatorMicroInlineInspectorView: View {
         }
     }
 
-    private func customShortcutInspectorCard(edit: EditableInspectorModel) -> some View {
+    private func customShortcutInspectorCard(edit: EditableInspectorModel, locale: ResolvedLocale) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text("自定义快捷键映射")
+                Text(store.tr("自定义快捷键映射"))
                     .font(UITheme.captionMedium)
                     .foregroundStyle(UITheme.textSecondary)
                 Spacer()
-                Button("设为 Fn 听写键") {
+                Button(store.tr("设为 Fn 听写键")) {
                     store.dispatch("inspector", "BindAppleFnKey")
                 }
                 .surfaceButton(.secondary)
 
-                Button("设为空键") {
+                Button(store.tr("设为空键")) {
                     store.dispatch("inspector", "UnassignSelectedSlot")
                 }
                 .surfaceButton(.ghost)
@@ -488,7 +475,7 @@ struct CreatorMicroInlineInspectorView: View {
 
             if edit.shortcutRecorder.isRecording {
                 HStack(spacing: 8) {
-                    Text("录制：")
+                    Text(store.tr("录制："))
                         .font(UITheme.captionMedium)
                         .foregroundStyle(UITheme.textPrimary)
                     ForEach([("r", "⌘R"), ("k", "⌘K"), ("l", "⌘L")], id: \.0) { key, label in
@@ -501,7 +488,7 @@ struct CreatorMicroInlineInspectorView: View {
                         .surfaceButton(.secondary)
                     }
                     Spacer()
-                    Button("取消") {
+                    Button(store.tr("取消")) {
                         store.dispatch("inspector", "CancelShortcutRecording")
                     }
                     .surfaceButton(.ghost)
@@ -524,8 +511,8 @@ struct CreatorMicroInlineInspectorView: View {
                             .foregroundStyle(UITheme.textSecondary)
                         Text(
                             edit.shortcutRecorder.previewBadge.isEmpty
-                                ? "点击录制键盘快捷键…"
-                                : "已录制：\(edit.shortcutRecorder.previewBadge)"
+                                ? store.tr("点击录制键盘快捷键…")
+                                : (locale == .en ? "Recorded: \(edit.shortcutRecorder.previewBadge)" : "已录制：\(edit.shortcutRecorder.previewBadge)")
                         )
                         .font(UITheme.caption)
                         .foregroundStyle(UITheme.textPrimary)
@@ -549,23 +536,24 @@ struct CreatorMicroInlineInspectorView: View {
         }
     }
 
-    private func sessionSlotExplanationCard(slot: Int, ss: SessionStripSliceModel) -> some View {
+    private func sessionSlotExplanationCard(slot: Int, ss: SessionStripSliceModel, locale: ResolvedLocale) -> some View {
         let sessionSlot = ss.sessionSlots.first(where: { $0.slotIndex == slot })
+        let slotTitle = sessionSlot?.title.isEmpty == false ? sessionSlot!.title : store.tr("等待关联活跃会话")
         return VStack(alignment: .leading, spacing: 10) {
-            Text("实时会话槽位（自动跟灯）")
+            Text(store.tr("实时会话槽位（自动跟灯）"))
                 .font(UITheme.bodySemibold)
                 .foregroundStyle(UITheme.textPrimary)
-            Text("当前槽位：\(sessionSlot?.title.isEmpty == false ? sessionSlot!.title : "等待关联活跃会话")")
+            Text(locale == .en ? "Current slot: \(slotTitle)" : "当前槽位：\(slotTitle)")
                 .font(UITheme.caption)
                 .foregroundStyle(UITheme.textSecondary)
             HStack(spacing: 8) {
-                Button("立即跳转到此会话") {
+                Button(store.tr("立即跳转到此会话")) {
                     store.dispatch("session_strip", ["ActivateSlot": slot])
                 }
                 .surfaceButton(.primary)
 
                 if sessionSlot?.isUnreadBlueDot == true {
-                    Button("标为已读熄灯") {
+                    Button(store.tr("标为已读熄灯")) {
                         store.dispatch("session_strip", "AcknowledgeAllCompleted")
                     }
                     .surfaceButton(.secondary)
@@ -586,6 +574,7 @@ struct CreatorMicroInlineInspectorView: View {
 
 private struct KeycapGlyphGridSectionView: View, Equatable {
     let store: CoreStore
+    let locale: ResolvedLocale
     let isVisible: Bool
     let keycapSearchQuery: String
     let filteredKeycaps: [KeycapCatalogItemModel]
@@ -593,9 +582,10 @@ private struct KeycapGlyphGridSectionView: View, Equatable {
 
     static func == (lhs: KeycapGlyphGridSectionView, rhs: KeycapGlyphGridSectionView) -> Bool {
         if !lhs.isVisible && !rhs.isVisible {
-            return true
+            return lhs.locale == rhs.locale
         }
-        return lhs.isVisible == rhs.isVisible
+        return lhs.locale == rhs.locale
+            && lhs.isVisible == rhs.isVisible
             && lhs.keycapSearchQuery == rhs.keycapSearchQuery
             && lhs.filteredKeycaps == rhs.filteredKeycaps
             && lhs.bindDefaultAction == rhs.bindDefaultAction
@@ -604,12 +594,12 @@ private struct KeycapGlyphGridSectionView: View, Equatable {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("键帽丝印图标")
+                Text(L10n.tr("键帽丝印图标", locale))
                     .font(UITheme.captionMedium)
                     .foregroundStyle(UITheme.textSecondary)
                 Spacer()
                 TextField(
-                    "搜索图标…",
+                    L10n.tr("搜索图标…", locale),
                     text: Binding(
                         get: { keycapSearchQuery },
                         set: { store.dispatch("inspector", ["SetKeycapSearchQuery": $0]) }
@@ -687,6 +677,7 @@ private struct KeycapGlyphCellButton: View, Equatable {
 
 private struct AgentActionCatalogSectionView: View, Equatable {
     let store: CoreStore
+    let locale: ResolvedLocale
     let isVisible: Bool
     let boundActionId: String?
     let actionSearchQuery: String
@@ -694,9 +685,10 @@ private struct AgentActionCatalogSectionView: View, Equatable {
 
     static func == (lhs: AgentActionCatalogSectionView, rhs: AgentActionCatalogSectionView) -> Bool {
         if !lhs.isVisible && !rhs.isVisible {
-            return true
+            return lhs.locale == rhs.locale
         }
-        return lhs.isVisible == rhs.isVisible
+        return lhs.locale == rhs.locale
+            && lhs.isVisible == rhs.isVisible
             && lhs.boundActionId == rhs.boundActionId
             && lhs.actionSearchQuery == rhs.actionSearchQuery
             && lhs.filteredActions == rhs.filteredActions
@@ -704,12 +696,12 @@ private struct AgentActionCatalogSectionView: View, Equatable {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("常用功能动作")
+            Text(L10n.tr("常用功能动作", locale))
                 .font(UITheme.captionMedium)
                 .foregroundStyle(UITheme.textSecondary)
 
             TextField(
-                "搜索动作名称或快捷键…",
+                L10n.tr("搜索动作名称或快捷键…", locale),
                 text: Binding(
                     get: { actionSearchQuery },
                     set: { store.dispatch("inspector", ["SetActionSearchQuery": $0]) }
@@ -726,7 +718,7 @@ private struct AgentActionCatalogSectionView: View, Equatable {
             LazyVStack(spacing: 4) {
                 ForEach(filteredActions) { act in
                     let isBound = act.isCurrentlyBound || (act.actionId == boundActionId)
-                    ActionCatalogRowButton(store: store, act: act, isBound: isBound)
+                    ActionCatalogRowButton(store: store, locale: locale, act: act, isBound: isBound)
                         .equatable()
                 }
             }
@@ -736,11 +728,12 @@ private struct AgentActionCatalogSectionView: View, Equatable {
 
 private struct ActionCatalogRowButton: View, Equatable {
     let store: CoreStore
+    let locale: ResolvedLocale
     let act: ActionRowModel
     let isBound: Bool
 
     static func == (lhs: ActionCatalogRowButton, rhs: ActionCatalogRowButton) -> Bool {
-        lhs.act == rhs.act && lhs.isBound == rhs.isBound
+        lhs.locale == rhs.locale && lhs.act == rhs.act && lhs.isBound == rhs.isBound
     }
 
     var body: some View {
@@ -759,7 +752,7 @@ private struct ActionCatalogRowButton: View, Equatable {
                 }
                 Spacer()
                 if isBound {
-                    Text("已启用")
+                    Text(L10n.tr("已启用", locale))
                         .font(UITheme.micro)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 2)
@@ -796,7 +789,7 @@ struct ClassicActionLibrarySheet: View {
         let selectedDisplayName = store.sidebar.selectedDisplayName
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("全部可用动作库 · \(selectedDisplayName)")
+                Text("\(store.tr("全部可用动作库")) · \(selectedDisplayName)")
                     .font(UITheme.heading)
                     .foregroundStyle(UITheme.textPrimary)
                 Spacer()
@@ -809,10 +802,11 @@ struct ClassicActionLibrarySheet: View {
             }
 
             if let edit {
-                let categories = ["全部"] + edit.availableCategories.filter { $0 != "全部" }
+                let allCat = store.tr("全部")
+                let categories = [allCat] + edit.availableCategories.filter { $0 != "全部" && $0 != "All" }
                 HStack(spacing: 10) {
                     TextField(
-                        "搜索动作名称…",
+                        store.tr("搜索动作名称…"),
                         text: Binding(
                             get: { edit.actionSearchQuery },
                             set: { store.dispatch("inspector", ["SetActionSearchQuery": $0]) }
@@ -838,7 +832,7 @@ struct ClassicActionLibrarySheet: View {
                                 subtitle: "\(act.category) · \(act.detail)",
                                 showsDivider: idx + 1 < edit.filteredActions.count
                             ) {
-                                Button(act.isCurrentlyBound ? "已绑定" : "绑定") {
+                                Button(store.tr(act.isCurrentlyBound ? "已绑定" : "绑定")) {
                                     store.dispatch("inspector", ["AssignCatalogAction": act.actionId])
                                     dismiss()
                                 }
@@ -864,16 +858,16 @@ struct ClassicMacroAndMultiLibrarySheet: View {
         let edit = store.inspector.editableInspector
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
-                Text("键盘宏与四分支动作")
+                Text(store.tr("键盘宏与四分支动作"))
                     .font(UITheme.heading)
                     .foregroundStyle(UITheme.textPrimary)
                 Spacer()
-                Button("+ 新建宏…") {
+                Button(store.tr("+ 新建宏…")) {
                     dismiss()
                     store.dispatch("editor", ["OpenMacroEditor": ["macro_id": NSNull()]])
                 }
                 .surfaceButton(.secondary)
-                Button("+ 新建四分支…") {
+                Button(store.tr("+ 新建四分支…")) {
                     dismiss()
                     store.dispatch("editor", ["OpenMultiEditor": ["multi_id": NSNull()]])
                 }
@@ -890,10 +884,10 @@ struct ClassicMacroAndMultiLibrarySheet: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
                         VStack(alignment: .leading, spacing: 8) {
-                            SettingsSectionHeader("键盘宏序列")
+                            SettingsSectionHeader(store.tr("键盘宏序列"))
                             SettingsCard {
                                 if edit.macros.isEmpty {
-                                    SettingsRow("暂无已保存的键盘宏", subtitle: "点击右上角「新建宏」录制或编写按键序列")
+                                    SettingsRow(store.tr("暂无已保存的键盘宏"), subtitle: store.tr("点击右上角「新建宏」录制或编写按键序列"))
                                 } else {
                                     ForEach(Array(edit.macros.enumerated()), id: \.element.id) { idx, mac in
                                         SettingsRow(
@@ -902,12 +896,12 @@ struct ClassicMacroAndMultiLibrarySheet: View {
                                             showsDivider: idx + 1 < edit.macros.count
                                         ) {
                                             HStack(spacing: 6) {
-                                                Button("编辑") {
+                                                Button(store.tr("编辑")) {
                                                     dismiss()
                                                     store.dispatch("editor", ["OpenMacroEditor": ["macro_id": mac.id]])
                                                 }
                                                 .surfaceButton(.ghost)
-                                                Button("绑定") {
+                                                Button(store.tr("绑定")) {
                                                     store.dispatch("editor", ["MacroBindExisting": ["macro_id": mac.id]])
                                                     dismiss()
                                                 }
@@ -920,10 +914,10 @@ struct ClassicMacroAndMultiLibrarySheet: View {
                         }
 
                         VStack(alignment: .leading, spacing: 8) {
-                            SettingsSectionHeader("四分支复用动作 (Multi)")
+                            SettingsSectionHeader(store.tr("四分支复用动作 (Multi)"))
                             SettingsCard {
                                 if edit.multis.isEmpty {
-                                    SettingsRow("暂无四分支复用动作", subtitle: "支持同一按键区分单击、双击、长按与单击后按住")
+                                    SettingsRow(store.tr("暂无四分支复用动作"), subtitle: store.tr("支持同一按键区分单击、双击、长按与单击后按住"))
                                 } else {
                                     ForEach(Array(edit.multis.enumerated()), id: \.element.id) { idx, mul in
                                         SettingsRow(
@@ -932,12 +926,12 @@ struct ClassicMacroAndMultiLibrarySheet: View {
                                             showsDivider: idx + 1 < edit.multis.count
                                         ) {
                                             HStack(spacing: 6) {
-                                                Button("编辑") {
+                                                Button(store.tr("编辑")) {
                                                     dismiss()
                                                     store.dispatch("editor", ["OpenMultiEditor": ["multi_id": mul.id]])
                                                 }
                                                 .surfaceButton(.ghost)
-                                                Button("绑定") {
+                                                Button(store.tr("绑定")) {
                                                     store.dispatch("editor", ["MultiBindExisting": ["multi_id": mul.id]])
                                                     dismiss()
                                                 }

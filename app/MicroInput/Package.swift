@@ -31,6 +31,7 @@ let commonLinkerSettings: [LinkerSetting] = [
 ]
 
 let executableLinkerSettings: [LinkerSetting] = commonLinkerSettings + [
+    .linkedFramework("ServiceManagement"),
     .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
 ]
 

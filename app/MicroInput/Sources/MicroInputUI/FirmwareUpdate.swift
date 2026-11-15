@@ -4,7 +4,14 @@ import SwiftUI
 public struct FirmwarePortModel: Equatable, Identifiable {
     public var id: String { path }
     public let path: String
+    public let product: String
     public let label: String
+
+    public init(path: String, product: String = "USB 设备", label: String? = nil) {
+        self.path = path
+        self.product = product
+        self.label = label ?? "\(product) · \(path)"
+    }
 }
 
 public struct FirmwareSliceModel: Equatable {
@@ -48,7 +55,7 @@ public struct FirmwareSliceModel: Equatable {
         ports = (json["ports"] as? [[String: Any]] ?? []).compactMap {
             guard let path = $0["path"] as? String else { return nil }
             let product = $0["product"] as? String ?? $0["manufacturer"] as? String ?? "USB 设备"
-            return FirmwarePortModel(path: path, label: "\(product) · \(path)")
+            return FirmwarePortModel(path: path, product: product, label: "\(product) · \(path)")
         }
     }
 
@@ -60,11 +67,15 @@ public struct FirmwareSliceModel: Equatable {
             && ports.contains { $0.path == selectedPort }
     }
     public var preventsTermination: Bool { busy && deviceReserved }
-    public var currentVersionLabel: String { currentVersion ?? "未知（尚未从设备读取）" }
+    public var currentVersionLabel: String { currentVersionLabel(.zhHans) }
+    public func currentVersionLabel(_ locale: ResolvedLocale) -> String {
+        currentVersion ?? L10n.tr("未知（尚未从设备读取）", locale)
+    }
 }
 
 public struct FirmwareUpdateSettingsSection: View {
     let model: FirmwareSliceModel
+    let locale: ResolvedLocale
     let onConnectKeyboard: (() -> Void)?
     let dispatch: (Any) -> Void
     @State private var confirmation: Confirmation?
@@ -74,62 +85,80 @@ public struct FirmwareUpdateSettingsSection: View {
 
         var id: String { rawValue }
 
-        var title: String {
-            self == .prepare ? "准备更新设备固件？" : "确认安装到所选 Creator Micro 2？"
+        func title(_ locale: ResolvedLocale) -> String {
+            L10n.tr(self == .prepare ? "准备更新设备固件？" : "确认安装到所选 Creator Micro 2？", locale)
         }
 
-        var actionTitle: String {
-            self == .prepare ? "暂停控制并准备" : "确认设备并安装"
+        func actionTitle(_ locale: ResolvedLocale) -> String {
+            L10n.tr(self == .prepare ? "暂停控制并准备" : "确认设备并安装", locale)
         }
     }
 
     public init(
         model: FirmwareSliceModel,
+        locale: ResolvedLocale = .zhHans,
         onConnectKeyboard: (() -> Void)? = nil,
         dispatch: @escaping (Any) -> Void
     ) {
         self.model = model
+        self.locale = locale
         self.onConnectKeyboard = onConnectKeyboard
         self.dispatch = dispatch
     }
 
+    private func tr(_ zh: String) -> String { L10n.tr(zh, locale) }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SettingsSectionHeader("设备固件")
+            SettingsSectionHeader(tr("设备固件"))
             SettingsCard {
-                SettingsRow("Creator Micro 2", subtitle: "当前固件：\(model.currentVersionLabel)", showsDivider: true) {
+                SettingsRow(
+                    "Creator Micro 2",
+                    subtitle: locale == .en
+                        ? "Current firmware: \(model.currentVersionLabel(locale))"
+                        : "当前固件：\(model.currentVersionLabel(locale))",
+                    showsDivider: true
+                ) {
                     HStack(spacing: 8) {
                         if !model.deviceReserved && model.currentVersion == nil, let onConnectKeyboard {
-                            Button("连接有线键盘") { onConnectKeyboard() }
+                            Button(tr("连接有线键盘")) { onConnectKeyboard() }
                                 .surfaceButton(.secondary)
                                 .accessibilityIdentifier("firmware-connect")
                         }
-                        Button("检查固件更新") { dispatch(["Check": ["channel": model.channel]]) }
+                        Button(tr("检查固件更新")) { dispatch(["Check": ["channel": model.channel]]) }
                             .surfaceButton(.secondary)
                             .disabled(!model.canCheck)
                             .accessibilityIdentifier("firmware-check")
                     }
                 }
-                SettingsRow("更新通道", subtitle: model.channel == "prerelease" ? "预发布固件与现有键位和配置协议的兼容性尚未验证。" : "只检查官方稳定版。", showsDivider: true) {
+                SettingsRow(
+                    tr("更新通道"),
+                    subtitle: tr(model.channel == "prerelease" ? "预发布固件与现有键位和配置协议的兼容性尚未验证。" : "只检查官方稳定版。"),
+                    showsDivider: true
+                ) {
                     SelectDropdown(
-                        options: [SelectOption(value: "stable", title: "稳定版"), SelectOption(value: "prerelease", title: "预发布版")],
+                        options: [SelectOption(value: "stable", title: tr("稳定版")), SelectOption(value: "prerelease", title: tr("预发布版"))],
                         selection: model.channel
                     ) { dispatch(["Check": ["channel": $0]]) }
                     .disabled(!model.canCheck)
                     .accessibilityIdentifier("firmware-channel")
                 }
                 if !model.versionStatus.isEmpty {
-                    SettingsRow("版本比较", subtitle: model.versionStatus, showsDivider: true)
+                    SettingsRow(tr("版本比较"), subtitle: model.versionStatus, showsDivider: true)
                 }
                 if let tag = model.releaseTag {
-                    SettingsRow("可下载版本：\(tag)", subtitle: model.downloaded ? (model.digestVerified ? "下载完成，官方 SHA-256 摘要核对通过。" : "官方未提供摘要；可下载查看，不能自动安装。") : "从 Work Louder 官方 GitHub 发布下载。", showsDivider: true) {
-                        Button(model.downloaded ? "重新下载" : "下载并校验") { dispatch("Download") }
+                    SettingsRow(
+                        locale == .en ? "Available release: \(tag)" : "可下载版本：\(tag)",
+                        subtitle: tr(model.downloaded ? (model.digestVerified ? "下载完成，官方 SHA-256 摘要核对通过。" : "官方未提供摘要；可下载查看，不能自动安装。") : "从 Work Louder 官方 GitHub 发布下载。"),
+                        showsDivider: true
+                    ) {
+                        Button(tr(model.downloaded ? "重新下载" : "下载并校验")) { dispatch("Download") }
                             .surfaceButton(.secondary)
                             .disabled(!model.canDownload)
                             .accessibilityIdentifier("firmware-download")
                     }
                     if !model.releaseNotes.isEmpty {
-                        DisclosureGroup("发行说明") {
+                        DisclosureGroup(tr("发行说明")) {
                             Text(model.releaseNotes)
                                 .font(UITheme.caption)
                                 .foregroundStyle(UITheme.textSecondary)
@@ -141,36 +170,50 @@ public struct FirmwareUpdateSettingsSection: View {
                         .accessibilityIdentifier("firmware-release-notes")
                     }
                 }
-                SettingsRow("准备设备", subtitle: model.deviceReserved ? "按键映射已暂停。选择这把键盘对应的引导模式串口。" : "会暂停按键映射并请求进入引导模式，键盘暂时不可用。", showsDivider: true) {
-                    Button("准备更新") { confirmation = .prepare }
+                SettingsRow(
+                    tr("准备设备"),
+                    subtitle: tr(model.deviceReserved ? "按键映射已暂停。选择这把键盘对应的引导模式串口。" : "会暂停按键映射并请求进入引导模式，键盘暂时不可用。"),
+                    showsDivider: true
+                ) {
+                    Button(tr("准备更新")) { confirmation = .prepare }
                         .surfaceButton(.secondary)
                         .disabled(!model.canPrepare)
                         .accessibilityIdentifier("firmware-prepare")
                 }
                 if model.deviceReserved {
-                    SettingsRow("引导模式设备", subtitle: "Espressif 名称不能确认键盘型号。请确认所选串口属于这把 Creator Micro 2。", showsDivider: true) {
+                    SettingsRow(
+                        tr("引导模式设备"),
+                        subtitle: tr("Espressif 名称不能确认键盘型号。请确认所选串口属于这把 Creator Micro 2。"),
+                        showsDivider: true
+                    ) {
                         VStack(alignment: .trailing, spacing: 8) {
                             SelectDropdown(
-                                options: model.ports.map { SelectOption(value: $0.path, title: $0.label) },
+                                options: model.ports.map {
+                                    SelectOption(value: $0.path, title: "\(tr($0.product)) · \($0.path)")
+                                },
                                 selection: model.selectedPort ?? "",
-                                overrideLabel: model.selectedPort ?? "请选择设备串口"
+                                overrideLabel: model.selectedPort ?? tr("请选择设备串口")
                             ) { dispatch(["SelectPort": ["path": $0]]) }
                             .disabled(model.busy || model.ports.isEmpty)
                             .accessibilityIdentifier("firmware-port")
-                            Button("查找串口") { dispatch("ScanPorts") }
+                            Button(tr("查找串口")) { dispatch("ScanPorts") }
                                 .surfaceButton(.secondary)
                                 .disabled(model.busy)
                                 .accessibilityIdentifier("firmware-scan")
                         }
                     }
-                    SettingsRow("安装固件", subtitle: "先保存完整 Flash 备份，再写入并校验。期间请勿断开 USB 或退出应用。", showsDivider: true) {
-                        Button("安装固件…") { confirmation = .install }
+                    SettingsRow(
+                        tr("安装固件"),
+                        subtitle: tr("先保存完整 Flash 备份，再写入并校验。期间请勿断开 USB 或退出应用。"),
+                        showsDivider: true
+                    ) {
+                        Button(tr("安装固件…")) { confirmation = .install }
                             .surfaceButton(.secondary)
                             .disabled(!model.canInstall)
                             .accessibilityIdentifier("firmware-install")
                     }
                 }
-                SettingsRow(model.phase == "flash_verified" ? "写入校验通过" : "更新状态", subtitle: model.message) {
+                SettingsRow(tr(model.phase == "flash_verified" ? "写入校验通过" : "更新状态"), subtitle: tr(model.message)) {
                     if model.busy {
                         if let progress = model.progress {
                             ProgressView(value: progress).frame(width: 100)
@@ -180,17 +223,17 @@ public struct FirmwareUpdateSettingsSection: View {
                     }
                 }
                 if model.backupPath != nil || model.deviceReserved {
-                    SettingsRow("结束与备份", subtitle: "完成后需重新连接并核对运行版本与原键位；写入校验不代表运行验收。") {
+                    SettingsRow(tr("结束与备份"), subtitle: tr("完成后需重新连接并核对运行版本与原键位；写入校验不代表运行验收。")) {
                         HStack(spacing: 8) {
                             if let path = model.backupPath {
-                                Button("显示备份") {
+                                Button(tr("显示备份")) {
                                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
                                 }
                                 .surfaceButton(.secondary)
                                 .accessibilityIdentifier("firmware-reveal-backup")
                             }
                             if model.deviceReserved {
-                                Button("结束更新") { dispatch("Finish") }
+                                Button(tr("结束更新")) { dispatch("Finish") }
                                     .surfaceButton(.ghost)
                                     .disabled(model.busy)
                                     .accessibilityIdentifier("firmware-finish")
@@ -202,20 +245,29 @@ public struct FirmwareUpdateSettingsSection: View {
         }
         .accessibilityIdentifier("firmware-settings")
         .alert(
-            confirmation?.title ?? "",
+            confirmation?.title(locale) ?? "",
             isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }),
             presenting: confirmation
         ) { kind in
-            Button("取消", role: .cancel) { confirmation = nil }
-            Button(kind.actionTitle, role: kind == .install ? .destructive : nil) {
+            Button(tr("取消"), role: .cancel) { confirmation = nil }
+            Button(kind.actionTitle(locale), role: kind == .install ? .destructive : nil) {
                 if kind == .prepare, model.canPrepare { dispatch("PrepareDevice") }
                 if kind == .install, model.canInstall { dispatch("Install") }
                 confirmation = nil
             }
         } message: { kind in
-            Text(kind == .prepare
-                 ? "Micro Input 将暂停宿主按键映射并请求键盘进入引导模式，键盘会暂时停止工作。下载的固件不会在此步骤写入。"
-                 : "请确认串口 \(model.selectedPort ?? "未选择") 属于你的 Creator Micro 2。将先保存完整 Flash 备份，再安装 \(model.releaseTag ?? "固件")。写入中断可能需要恢复，备份不代表已验证恢复成功。\(model.prerelease ? "预发布固件与当前配置协议的兼容性尚未验证。" : "更新后仍需核对运行版本和原键位。")")
+            if kind == .prepare {
+                Text(tr("Micro Input 将暂停宿主按键映射并请求键盘进入引导模式，键盘会暂时停止工作。下载的固件不会在此步骤写入。"))
+            } else if locale == .en {
+                let port = model.selectedPort ?? "none"
+                let tag = model.releaseTag ?? "firmware"
+                let tail = model.prerelease
+                    ? "Prerelease compatibility with the current config protocol has not been verified."
+                    : "Verify the running firmware version and keymap after reboot."
+                Text("Confirm serial port \(port) belongs to your Creator Micro 2. A full Flash backup will be saved before installing \(tag). Interrupted writes may require recovery. \(tail)")
+            } else {
+                Text("请确认串口 \(model.selectedPort ?? "未选择") 属于你的 Creator Micro 2。将先保存完整 Flash 备份，再安装 \(model.releaseTag ?? "固件")。写入中断可能需要恢复，备份不代表已验证恢复成功。\(model.prerelease ? "预发布固件与当前配置协议的兼容性尚未验证。" : "更新后仍需核对运行版本和原键位。")")
+            }
         }
     }
 }
@@ -438,8 +490,10 @@ struct V070MouseDraft: Equatable {
         return (md, ms, wd, ws, ss, sc)
     }
 
-    var validationHint: String? {
-        validated == nil ? "请确认步进在 1–127、加速上限在 1–100、摇杆参数在 1–255" : nil
+    var validationHint: String? { validationHint(.zhHans) }
+
+    func validationHint(_ locale: ResolvedLocale) -> String? {
+        validated == nil ? L10n.tr("请确认步进在 1–127、加速上限在 1–100、摇杆参数在 1–255", locale) : nil
     }
 
     private static func parseInt(_ raw: String, in range: ClosedRange<Int>) -> Int? {
@@ -465,6 +519,7 @@ private struct V070Badge: View {
 
 public struct V070HardwareSettingsSection: View {
     let model: V070HardwareSliceModel
+    let locale: ResolvedLocale
     let dispatch: (Any) -> Void
 
     @State private var deviceNameDraft: String
@@ -483,8 +538,13 @@ public struct V070HardwareSettingsSection: View {
     ]
     private static let baseSleepMinutes = [1, 5, 10, 15, 30, 60, 120, 240, 480, 1440]
 
-    public init(model: V070HardwareSliceModel, dispatch: @escaping (Any) -> Void) {
+    public init(
+        model: V070HardwareSliceModel,
+        locale: ResolvedLocale = .zhHans,
+        dispatch: @escaping (Any) -> Void
+    ) {
         self.model = model
+        self.locale = locale
         self.dispatch = dispatch
         _deviceNameDraft = State(initialValue: model.deviceName.name)
         _deadzoneDraft = State(initialValue: model.mouse.deadzone)
@@ -494,6 +554,8 @@ public struct V070HardwareSettingsSection: View {
         _pmHostSleepDraft = State(initialValue: model.pmConfig.hostSleep)
         _pmSleepAfterMinDraft = State(initialValue: model.pmConfig.sleepAfterMin)
     }
+
+    private func tr(_ zh: String) -> String { L10n.tr(zh, locale) }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -526,10 +588,10 @@ public struct V070HardwareSettingsSection: View {
     private var overviewSection: some View {
         let hasSerial = !(model.preferredDeviceSerial?.isEmpty ?? true)
         return VStack(alignment: .leading, spacing: 10) {
-            SettingsSectionHeader("设备识别与状态同步") {
+            SettingsSectionHeader(tr("设备识别与状态同步")) {
                 HStack(spacing: 8) {
                     if model.busy { ProgressView().controlSize(.small) }
-                    Button("刷新状态") { dispatch(V070HardwareCommand.refresh()) }
+                    Button(tr("刷新状态")) { dispatch(V070HardwareCommand.refresh()) }
                         .surfaceButton(.secondary)
                         .disabled(!model.supported || model.busy)
                         .accessibilityIdentifier("v070-refresh")
@@ -539,25 +601,25 @@ public struct V070HardwareSettingsSection: View {
                 if !model.supported {
                     SettingsRow(unavailableTitle, subtitle: unavailableSubtitle, showsDivider: hasSerial) { V070Badge(text: hostSleepBadgeText) }
                 } else {
-                    SettingsRow("设备名称", subtitle: deviceNameSubtitle, showsDivider: true) {
+                    SettingsRow(tr("设备名称"), subtitle: deviceNameSubtitle, showsDivider: true) {
                         HStack(spacing: 8) {
-                            TextField("设备名称", text: $deviceNameDraft)
+                            TextField(tr("设备名称"), text: $deviceNameDraft)
                                 .textFieldStyle(.roundedBorder).controlSize(.small).frame(width: 136).disabled(model.busy)
                                 .accessibilityIdentifier("v070-device-name-field")
-                            Button("应用名称") { dispatch(V070HardwareCommand.renameDevice(name: trimmedDeviceName)) }
+                            Button(tr("应用名称")) { dispatch(V070HardwareCommand.renameDevice(name: trimmedDeviceName)) }
                                 .surfaceButton(.secondary).disabled(!canApplyDeviceName).accessibilityIdentifier("v070-device-rename")
                         }
                     }
-                    SettingsRow("状态同步", subtitle: model.lastError ?? model.statusMessage, showsDivider: hasSerial) {
+                    SettingsRow(tr("状态同步"), subtitle: tr(model.lastError ?? model.statusMessage), showsDivider: hasSerial) {
                         if let err = model.lastError, !err.isEmpty {
-                            Text("异常").font(UITheme.micro).foregroundStyle(.red)
+                            Text(tr("异常")).font(UITheme.micro).foregroundStyle(.red)
                         } else {
-                            V070Badge(text: model.synced ? "已同步" : "待同步", accentDot: model.synced)
+                            V070Badge(text: tr(model.synced ? "已同步" : "待同步"), accentDot: model.synced)
                         }
                     }
                 }
                 if let serial = model.preferredDeviceSerial, !serial.isEmpty {
-                    SettingsRow("已记忆设备序列号", subtitle: "多台 Creator Micro 2 同时接入时将优先匹配此设备", showsDivider: false) {
+                    SettingsRow(tr("已记忆设备序列号"), subtitle: tr("多台 Creator Micro 2 同时接入时将优先匹配此设备"), showsDivider: false) {
                         V070Badge(text: serial)
                     }
                 }
@@ -567,32 +629,44 @@ public struct V070HardwareSettingsSection: View {
 
     private var mouseSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SettingsSectionHeader("鼠标速度与摇杆死区")
-            Text("速度参数仅对绑定了硬件鼠标或滚轮的按键层生效；摇杆死区同时影响轮盘菜单离中阈值。")
+            SettingsSectionHeader(tr("鼠标速度与摇杆死区"))
+            Text(tr("速度参数仅对绑定了硬件鼠标或滚轮的按键层生效；摇杆死区同时影响轮盘菜单离中阈值。"))
                 .font(UITheme.caption)
                 .foregroundStyle(UITheme.textSecondary)
             SettingsCard {
-                SettingsRow("摇杆固件模式", subtitle: "当前键盘固件：\(joystickModeDisplayName(model.activeJoystickMode))", showsDivider: true) {
+                SettingsRow(
+                    tr("摇杆固件模式"),
+                    subtitle: locale == .en
+                        ? "Active firmware mode: \(joystickModeDisplayName(model.activeJoystickMode))"
+                        : "当前键盘固件：\(joystickModeDisplayName(model.activeJoystickMode))",
+                    showsDivider: true
+                ) {
                     HStack(spacing: 6) {
                         ForEach(Self.joystickModes, id: \.id) { item in
-                            Button(item.title) { dispatch(V070HardwareCommand.applyJoystickHardwareMode(item.id)) }
+                            Button(tr(item.title)) { dispatch(V070HardwareCommand.applyJoystickHardwareMode(item.id)) }
                                 .surfaceButton(model.activeJoystickMode == item.id ? .primary : .secondary)
                                 .disabled(model.busy)
                                 .accessibilityIdentifier("v070-joystick-mode-\(item.id)")
                         }
                     }
                 }
-                SettingsRow("速度预设", subtitle: "当前档位：\(presetDisplayName(model.mouse.preset))（立即生效）", showsDivider: true) {
+                SettingsRow(
+                    tr("速度预设"),
+                    subtitle: locale == .en
+                        ? "Current preset: \(presetDisplayName(model.mouse.preset)) (applies immediately)"
+                        : "当前档位：\(presetDisplayName(model.mouse.preset))（立即生效）",
+                    showsDivider: true
+                ) {
                     HStack(spacing: 6) {
                         ForEach(Self.mousePresets, id: \.id) { item in
-                            Button(item.title) { dispatch(V070HardwareCommand.applyMousePreset(item.id)) }
+                            Button(tr(item.title)) { dispatch(V070HardwareCommand.applyMousePreset(item.id)) }
                                 .surfaceButton(model.mouse.preset == item.id ? .primary : .secondary)
                                 .disabled(model.busy)
                                 .accessibilityIdentifier("v070-mouse-preset-\(item.id)")
                         }
                     }
                 }
-                SettingsRow("摇杆死区", subtitle: "防漂移盲区（出厂默认 0.15，UI 范围 0.02–0.45）", showsDivider: true) {
+                SettingsRow(tr("摇杆死区"), subtitle: tr("防漂移盲区（出厂默认 0.15，UI 范围 0.02–0.45）"), showsDivider: true) {
                     HStack(spacing: 10) {
                         NeutralTrackSlider(
                             value: Binding(get: { deadzoneDraft }, set: { deadzoneDraft = (($0 * 100.0).rounded() / 100.0) }),
@@ -600,24 +674,24 @@ public struct V070HardwareSettingsSection: View {
                         ).disabled(model.busy).accessibilityIdentifier("v070-deadzone-slider")
                         Text(String(format: "%.2f", deadzoneDraft)).font(UITheme.monoBadge).foregroundStyle(UITheme.textSecondary).frame(width: 42, alignment: .trailing)
                         if abs(deadzoneDraft - model.mouse.deadzone) > 0.001 {
-                            Button("保存死区") { dispatch(V070HardwareCommand.applyJoystickDeadzone(deadzoneDraft)) }
+                            Button(tr("保存死区")) { dispatch(V070HardwareCommand.applyJoystickDeadzone(deadzoneDraft)) }
                                 .surfaceButton(.secondary)
                                 .disabled(model.busy || !V070MouseDraft.isValidDeadzone(deadzoneDraft))
                                 .accessibilityIdentifier("v070-deadzone-save")
                         }
                     }
                 }
-                DisclosureGroup("高级曲线参数", isExpanded: $showAdvancedMouseParams) {
+                DisclosureGroup(tr("高级曲线参数"), isExpanded: $showAdvancedMouseParams) {
                     VStack(spacing: 0) {
                         Rectangle().fill(UITheme.rowDivider).frame(height: 1).padding(.top, 10)
-                        mouseSliderRow("指针初速", subtitle: "按键鼠标单步位移（推荐 4–32，固件上限 127）", text: $mouseCurveDraft.moveDelta, defaultRange: 1...32, unit: "px/tick", id: "v070-mouse-move-delta-slider")
-                        mouseSliderRow("指针上限", subtitle: "按键鼠标加速上限（推荐 4–40，固件上限 100）", text: $mouseCurveDraft.maxSpeed, defaultRange: 1...40, unit: "px/tick", id: "v070-mouse-max-speed-slider")
-                        mouseSliderRow("滚轮步进", subtitle: "旋钮或按键单步滚动（推荐 1–16，固件上限 127）", text: $mouseCurveDraft.wheelDelta, defaultRange: 1...16, unit: "x/tick", id: "v070-mouse-wheel-delta-slider")
-                        mouseSliderRow("滚轮上限", subtitle: "旋钮或按键滚轮上限（推荐 1–32，固件上限 100）", text: $mouseCurveDraft.wheelMaxSpeed, defaultRange: 1...32, unit: "x/tick", id: "v070-mouse-wheel-max-speed-slider")
-                        mouseSliderRow("摇杆指针", subtitle: "模拟摇杆满偏转步长（推荐 1–16，固件上限 255）", text: $mouseCurveDraft.stickSpeed, defaultRange: 1...16, unit: "px/tick", id: "v070-mouse-stick-speed-slider")
-                        mouseSliderRow("摇杆滚轮", subtitle: "模拟摇杆滚轮分频间隔（10–120，越小越快；上限 255）", text: $mouseCurveDraft.stickScroll, defaultRange: 10...120, unit: "ticks", id: "v070-mouse-stick-scroll-slider")
-                        SettingsRow("自定义参数", subtitle: mouseCurveDraft.validationHint ?? "仅将上方 6 项自定义曲线参数写入设备", showsDivider: false) {
-                            Button("应用鼠标参数") { applyMouseCurveDraft() }
+                        mouseSliderRow(tr("指针初速"), subtitle: tr("按键鼠标单步位移（推荐 4–32，固件上限 127）"), text: $mouseCurveDraft.moveDelta, defaultRange: 1...32, unit: "px/tick", id: "v070-mouse-move-delta-slider")
+                        mouseSliderRow(tr("指针上限"), subtitle: tr("按键鼠标加速上限（推荐 4–40，固件上限 100）"), text: $mouseCurveDraft.maxSpeed, defaultRange: 1...40, unit: "px/tick", id: "v070-mouse-max-speed-slider")
+                        mouseSliderRow(tr("滚轮步进"), subtitle: tr("旋钮或按键单步滚动（推荐 1–16，固件上限 127）"), text: $mouseCurveDraft.wheelDelta, defaultRange: 1...16, unit: "x/tick", id: "v070-mouse-wheel-delta-slider")
+                        mouseSliderRow(tr("滚轮上限"), subtitle: tr("旋钮或按键滚轮上限（推荐 1–32，固件上限 100）"), text: $mouseCurveDraft.wheelMaxSpeed, defaultRange: 1...32, unit: "x/tick", id: "v070-mouse-wheel-max-speed-slider")
+                        mouseSliderRow(tr("摇杆指针"), subtitle: tr("模拟摇杆满偏转步长（推荐 1–16，固件上限 255）"), text: $mouseCurveDraft.stickSpeed, defaultRange: 1...16, unit: "px/tick", id: "v070-mouse-stick-speed-slider")
+                        mouseSliderRow(tr("摇杆滚轮"), subtitle: tr("模拟摇杆滚轮分频间隔（10–120，越小越快；上限 255）"), text: $mouseCurveDraft.stickScroll, defaultRange: 10...120, unit: "ticks", id: "v070-mouse-stick-scroll-slider")
+                        SettingsRow(tr("自定义参数"), subtitle: mouseCurveDraft.validationHint(locale) ?? tr("仅将上方 6 项自定义曲线参数写入设备"), showsDivider: false) {
+                            Button(tr("应用鼠标参数")) { applyMouseCurveDraft() }
                                 .surfaceButton(.secondary).disabled(model.busy || mouseCurveDraft.validated == nil).accessibilityIdentifier("v070-mouse-apply")
                         }
                     }
@@ -633,11 +707,11 @@ public struct V070HardwareSettingsSection: View {
 
     private var pmSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SettingsSectionHeader("休眠跟随与电源策略")
+            SettingsSectionHeader(tr("休眠跟随与电源策略"))
             SettingsCard {
                 toggleRow(
-                    "自动休眠",
-                    subtitle: "空闲达到设定时长后自动进入低功耗待机",
+                    tr("自动休眠"),
+                    subtitle: tr("空闲达到设定时长后自动进入低功耗待机"),
                     isOn: Binding(
                         get: { pmAutoSleepDraft },
                         set: { next in
@@ -648,8 +722,8 @@ public struct V070HardwareSettingsSection: View {
                     id: "v070-pm-auto-sleep"
                 )
                 toggleRow(
-                    "跟随宿主休眠",
-                    subtitle: "随 Mac USB 挂起与唤醒动态调整设备电源地板",
+                    tr("跟随宿主休眠"),
+                    subtitle: tr("随 Mac USB 挂起与唤醒动态调整设备电源地板"),
                     isOn: Binding(
                         get: { pmHostSleepDraft },
                         set: { next in
@@ -659,7 +733,13 @@ public struct V070HardwareSettingsSection: View {
                     ),
                     id: "v070-pm-host-sleep"
                 )
-                SettingsRow("休眠等待时长", subtitle: "有效范围 1–1440 分钟（当前选中 \(pmSleepAfterMinDraft) 分钟）", showsDivider: false) {
+                SettingsRow(
+                    tr("休眠等待时长"),
+                    subtitle: locale == .en
+                        ? "Valid range 1–1440 min (currently \(pmSleepAfterMinDraft) min)"
+                        : "有效范围 1–1440 分钟（当前选中 \(pmSleepAfterMinDraft) 分钟）",
+                    showsDivider: false
+                ) {
                     SelectDropdown(
                         options: sleepDurationOptions,
                         selection: Binding(
@@ -734,21 +814,21 @@ public struct V070HardwareSettingsSection: View {
 
     private var unavailableTitle: String {
         switch model.hostSleepStatus {
-        case "sleeping": return "Mac 正在休眠，扩展硬件配置已暂停"
-        case "waking": return "Mac 已唤醒，正在重连设备"
-        default: return "扩展硬件配置暂不可用"
+        case "sleeping": return tr("Mac 正在休眠，扩展硬件配置已暂停")
+        case "waking": return tr("Mac 已唤醒，正在重连设备")
+        default: return tr("扩展硬件配置暂不可用")
         }
     }
 
     private var unavailableSubtitle: String {
-        var parts = ["需通过 USB 连接支持扩展控制的 Creator Micro 2 固件。"]
-        if !model.statusMessage.isEmpty { parts.append(model.statusMessage) }
-        if let err = model.lastError, !err.isEmpty, err != model.statusMessage { parts.append(err) }
+        var parts = [tr("需通过 USB 连接支持扩展控制的 Creator Micro 2 固件。")]
+        if !model.statusMessage.isEmpty { parts.append(tr(model.statusMessage)) }
+        if let err = model.lastError, !err.isEmpty, err != model.statusMessage { parts.append(tr(err)) }
         return parts.joined(separator: " ")
     }
 
     private var hostSleepBadgeText: String {
-        model.hostSleepStatus == "sleeping" ? "宿主休眠" : (model.hostSleepStatus == "waking" ? "唤醒同步中" : "宿主清醒")
+        tr(model.hostSleepStatus == "sleeping" ? "宿主休眠" : (model.hostSleepStatus == "waking" ? "唤醒同步中" : "宿主清醒"))
     }
 
     private var trimmedDeviceName: String { deviceNameDraft.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -762,35 +842,55 @@ public struct V070HardwareSettingsSection: View {
     }
 
     private var deviceNameSubtitle: String {
-        let factory = model.deviceName.factoryName.isEmpty ? "出厂名称未知" : "出厂：\(model.deviceName.factoryName)"
+        let factory: String
+        if model.deviceName.factoryName.isEmpty {
+            factory = tr("出厂名称未知")
+        } else {
+            factory = locale == .en ? "Factory: \(model.deviceName.factoryName)" : "出厂：\(model.deviceName.factoryName)"
+        }
         let bytes = trimmedDeviceName.utf8.count
-        let hint = bytes > maxDeviceNameBytes ? "超出上限（\(bytes)/\(maxDeviceNameBytes) 字节）" : "\(bytes)/\(maxDeviceNameBytes) 字节"
+        let hint: String
+        if locale == .en {
+            hint = bytes > maxDeviceNameBytes
+                ? "Exceeds limit (\(bytes)/\(maxDeviceNameBytes) bytes)"
+                : "\(bytes)/\(maxDeviceNameBytes) bytes"
+        } else {
+            hint = bytes > maxDeviceNameBytes
+                ? "超出上限（\(bytes)/\(maxDeviceNameBytes) 字节）"
+                : "\(bytes)/\(maxDeviceNameBytes) 字节"
+        }
         return "\(factory) · \(hint)"
     }
 
     private var sleepDurationOptions: [SelectOption<Int>] {
         let values = Set(Self.baseSleepMinutes + ((1...1440).contains(pmSleepAfterMinDraft) ? [pmSleepAfterMinDraft] : []))
         return values.sorted().map { mins in
-            SelectOption(value: mins, title: mins >= 60 && mins % 60 == 0 ? "\(mins / 60) 小时 (\(mins)m)" : "\(mins) 分钟")
+            let title: String
+            if locale == .en {
+                title = mins >= 60 && mins % 60 == 0 ? "\(mins / 60) hr (\(mins)m)" : "\(mins) min"
+            } else {
+                title = mins >= 60 && mins % 60 == 0 ? "\(mins / 60) 小时 (\(mins)m)" : "\(mins) 分钟"
+            }
+            return SelectOption(value: mins, title: title)
         }
     }
 
     private func presetDisplayName(_ raw: String) -> String {
         switch raw {
-        case "slow": return "慢速"
-        case "standard": return "标准"
-        case "fast": return "快速"
-        case "precise": return "精准"
-        default: return "自定义"
+        case "slow": return tr("慢速")
+        case "standard": return tr("标准")
+        case "fast": return tr("快速")
+        case "precise": return tr("精准")
+        default: return tr("自定义")
         }
     }
 
     private func joystickModeDisplayName(_ raw: String?) -> String {
         switch raw {
-        case "mouse": return "硬件指针 (MOUSE)"
-        case "scroll": return "硬件滚轮 (SCROLL)"
-        case "logical_sectors": return "宿主逻辑扇区"
-        default: return "待同步"
+        case "mouse": return tr("硬件指针 (MOUSE)")
+        case "scroll": return tr("硬件滚轮 (SCROLL)")
+        case "logical_sectors": return tr("宿主逻辑扇区")
+        default: return tr("待同步")
         }
     }
 }

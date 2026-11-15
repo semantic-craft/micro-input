@@ -27,6 +27,7 @@ public final class CoreStore {
     public private(set) var firmware: FirmwareSliceModel = FirmwareSliceModel()
     public private(set) var v070Hardware: V070HardwareSliceModel = V070HardwareSliceModel()
     public private(set) var activeModal: ActiveModalModel? = nil
+    public private(set) var locale: ResolvedLocale = .zhHans
 
     public init(
         isolatedDirectory: String? = nil,
@@ -42,6 +43,9 @@ public final class CoreStore {
             self.handle = mi_core_new(nil)
         }
         refreshProjection()
+        if isolatedDirectory == nil && !LaunchOriginDetector.isIsolatedOrVerifyEnvironment() {
+            syncSystemLocale(Locale.preferredLanguages)
+        }
         workspaceLifecycle = WorkspaceLifecycle(center: workspaceNotificationCenter) { [weak self] event in
             self?.dispatchRaw(["domain": event.rawValue])
         }
@@ -148,6 +152,22 @@ public final class CoreStore {
         dispatchV070Hardware(V070HardwareCommand.setSessionSaRgbSync(enabled))
     }
 
+    public func tr(_ zh: String) -> String {
+        L10n.tr(zh, locale)
+    }
+
+    public func setUiLanguage(_ language: UiLanguagePreference) {
+        dispatch("header", ["SetUiLanguage": ["language": language.rawValue]])
+    }
+
+    public func syncSystemLocale(_ preferredLanguages: [String]) {
+        dispatch("header", ["SyncSystemLocale": ["preferred_languages": preferredLanguages]])
+    }
+
+    public func setSilentAtLogin(_ silent: Bool) {
+        dispatch("header", ["SetSilentAtLogin": ["silent": silent]])
+    }
+
     public func prepareForTermination() {
         dispatchRaw(["domain": "system_will_terminate"])
     }
@@ -210,6 +230,7 @@ public final class CoreStore {
         if self.v070Hardware != m.v070Hardware { self.v070Hardware = m.v070Hardware }
 
         if self.activeModal != m.activeModal { self.activeModal = m.activeModal }
+        if self.locale != m.resolvedLocale { self.locale = m.resolvedLocale }
     }
 
     static func parseProjection(_ root: [String: Any]) -> ProjectionModel {
@@ -217,6 +238,7 @@ public final class CoreStore {
         m.firmware = FirmwareSliceModel(json: root["firmware"] as? [String: Any] ?? [:])
         m.v070Hardware = V070HardwareSliceModel(json: root["v070_hardware"] as? [String: Any] ?? [:])
         m.statusMessage = root["status_message"] as? String ?? "已就绪"
+        m.lastExportedDiagnosticsPath = root["last_exported_diagnostics_path"] as? String
         m.lastExportedPreset = root["last_exported_preset"] as? String
         m.deviceConnected = root["device_connected"] as? Bool ?? false
         m.deviceSummary = root["device_summary"] as? String ?? "Creator Micro 2 (303A:8298) · 离线草稿模式"
@@ -263,6 +285,9 @@ public final class CoreStore {
                 m.candidateDevices = parseCandidateDevices(devs)
             }
             m.preferredDeviceSerial = header["preferred_device_serial"] as? String
+            m.uiLanguage = (header["ui_language"] as? String).flatMap(UiLanguagePreference.init(rawValue:)) ?? .system
+            m.resolvedLocale = (header["resolved_locale"] as? String).flatMap(ResolvedLocale.init(rawValue:)) ?? .zhHans
+            m.silentAtLogin = header["silent_at_login"] as? Bool ?? true
         }
 
         if let sidebar = root["sidebar"] as? [String: Any] {
@@ -370,6 +395,7 @@ public final class CoreStore {
                 m.encoderRingGlowHex = enc["ring_glow_hex"] as? String ?? "#14C76B"
             }
             if let joy = canvas["joystick"] as? [String: Any] {
+                m.joystickMode = joy["mode"] as? String ?? "logical_sectors"
                 m.joystickModeLabel = joy["mode_label"] as? String ?? "八向摇杆"
                 m.joystickActiveDirection = joy["active_direction"] as? String ?? "North"
                 m.joystickIsSelected = joy["is_selected"] as? Bool ?? false
@@ -646,6 +672,7 @@ public final class CoreStore {
         var m = CheatSheetModel()
         m.profileName = cs["profile_name"] as? String ?? ""
         m.routingSummary = cs["routing_summary"] as? String ?? ""
+        m.joystickMode = cs["joystick_mode"] as? String ?? "logical_sectors"
         if let card = cs["target_agent_card"] as? [String: Any] {
             m.agentName = card["agent_name"] as? String
             m.agentPhaseLabel = card["phase_label"] as? String

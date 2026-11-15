@@ -784,7 +784,7 @@ public struct PopoverActionRow: View {
 }
 
 public enum StatusItemIcon {
-    public static func make() -> NSImage {
+    public static func make(locale: ResolvedLocale = .zhHans) -> NSImage {
         let image = NSImage(size: NSSize(width: 20, height: 18), flipped: false) { _ in
             NSColor.black.setStroke()
             NSColor.black.setFill()
@@ -804,7 +804,7 @@ public enum StatusItemIcon {
             return true
         }
         image.isTemplate = true
-        image.accessibilityDescription = "Micro Input 键盘"
+        image.accessibilityDescription = locale == .en ? "Micro Input Keypad" : "Micro Input 键盘"
         return image
     }
 }
@@ -841,17 +841,28 @@ public struct DesktopAgent: Identifiable {
         .init(name: "其他软件", bundleID: otherAppsWildcardBundleID, symbol: "keyboard"),
     ]
 
-    public static func displayName(_ name: String) -> String {
+    public static func displayName(_ name: String, locale: ResolvedLocale = .zhHans) -> String {
         switch name {
         case "DeepSeek Coder (DSH)", "DSH", "DeepSeek Harness":
             return "DeepSeek Harness"
+        case "其他软件", "Other Apps":
+            return locale == .en ? "Other Apps" : "其他软件"
+        case "自定义方案", "Custom Profile":
+            return locale == .en ? "Custom Profile" : "自定义方案"
+        case "新建方案", "New Profile":
+            return locale == .en ? "New Profile" : "新建方案"
+        case "未分配", "Unassigned":
+            return locale == .en ? "Unassigned" : "未分配"
         default:
             return name
         }
     }
 
     public static func named(_ name: String) -> DesktopAgent? {
-        all.first { $0.name == name || displayName($0.name) == displayName(name) }
+        if name == "Other Apps" || name == "其他软件" {
+            return all.first { $0.isGeneralFallback }
+        }
+        return all.first { $0.name == name || displayName($0.name) == displayName(name) }
     }
 }
 
@@ -900,7 +911,7 @@ public enum AgentProfileKind: String {
 
     public static func from(profileName: String?) -> AgentProfileKind {
         guard let name = profileName else { return .custom }
-        if name == "Codex · Micro Input" || name == "Codex · 原生" { return .codex }
+        if name == "Codex · Micro Input" || name == "Codex · 原生" || name == "Codex · Native" { return .codex }
         if name == "Deepseek Harness" || name == "DeepSeek Harness" || name == "DSH" { return .dsh }
         return AgentProfileKind(rawValue: name) ?? .custom
     }
@@ -912,15 +923,22 @@ public enum AgentProfileKind: String {
         }
     }
 
-    public var bridgeDescription: String {
-        switch self {
-        case .codex: return "支持 Codex 会话切换、模型选择与语音听写"
-        case .antigravity: return "支持跨工作区会话切换、审批与实时语音"
-        case .dsh: return "支持实时插话、停止生成与语音回复"
-        case .herdr: return "终端工作区全动作键模式，直控标签、分栏与面板焦点"
-        case .custom: return "其他软件与通用快捷键映射（默认底排麦克风键触发苹果 Fn 语音输入）"
+    public func bridgeDescription(_ locale: ResolvedLocale) -> String {
+        switch (self, locale) {
+        case (.codex, .zhHans): return "支持 Codex 会话切换、模型选择与语音听写"
+        case (.codex, .en): return "Supports Codex session switching, model picker, and dictation"
+        case (.antigravity, .zhHans): return "支持跨工作区会话切换、审批与实时语音"
+        case (.antigravity, .en): return "Supports cross-workspace sessions, approvals, and live voice"
+        case (.dsh, .zhHans): return "支持实时插话、停止生成与语音回复"
+        case (.dsh, .en): return "Supports live steering, stop generation, and voice replies"
+        case (.herdr, .zhHans): return "终端工作区全动作键模式，直控标签、分栏与面板焦点"
+        case (.herdr, .en): return "Terminal workspace action mode for tabs, splits, and pane focus"
+        case (.custom, .zhHans): return "其他软件与通用快捷键映射（默认底排麦克风键触发苹果 Fn 语音输入）"
+        case (.custom, .en): return "General shortcuts & media keys (bottom mic key triggers Apple Fn dictation)"
         }
     }
+
+    public var bridgeDescription: String { bridgeDescription(.zhHans) }
 }
 
 public extension Color {
