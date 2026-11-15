@@ -28,11 +28,11 @@ use crate::{
         TargetAgentStatusCardProjection,
     },
     radial::{
-        resolve_radial_slots, RadialConfirmMode, RadialConsumeOutcome, RadialInputEvent,
-        RadialInputReadiness, RadialIntent, RadialMenuSession, RadialMenuState,
-        RadialOverlayAction, RadialOverlayProjection, RadialPositionSample, RadialPresetKind,
-        RadialRouteStamp, RadialSlot, RadialSlotConfig, RadialSlotResolutionContext, SectorIndex,
-        ESCAPE_KEY_CODE, RADIAL_SECTOR_COUNT,
+        RadialConfirmMode, RadialConsumeOutcome, RadialInputEvent, RadialInputReadiness,
+        RadialIntent, RadialMenuSession, RadialMenuState, RadialOverlayAction,
+        RadialOverlayProjection, RadialPositionSample, RadialPresetKind, RadialRouteStamp,
+        RadialSlot, RadialSlotConfig, RadialSlotResolutionContext, SectorIndex, ESCAPE_KEY_CODE,
+        RADIAL_SECTOR_COUNT,
     },
     session_strip::{
         agent_for_place, FourAppLiveCandidate, FourAppSessionKind, FourAppSlotTable,
@@ -227,6 +227,7 @@ pub struct WorkbenchStoreConfig {
     pub document_dir: PathBuf,
     pub auto_connect_usb: bool,
     pub isolated: bool,
+    pub system_locale: mi_model::ResolvedLocale,
     pub app_cache: Arc<AppBundleCache>,
     pub panel_host: Arc<dyn PassivePanelHost>,
     pub status_item_host: Arc<dyn StatusItemHost>,
@@ -245,6 +246,7 @@ impl WorkbenchStoreConfig {
             document_dir,
             auto_connect_usb: true,
             isolated: false,
+            system_locale: mi_model::ResolvedLocale::ZhHans,
             app_cache: Arc::new(AppBundleCache::new()),
             panel_host: Arc::new(RecordingPassivePanelHost::new()),
             status_item_host: Arc::new(RecordingStatusItemHost::new()),
@@ -268,6 +270,7 @@ impl WorkbenchStoreConfig {
             document_dir,
             auto_connect_usb: false,
             isolated: true,
+            system_locale: mi_model::ResolvedLocale::ZhHans,
             app_cache,
             panel_host: Arc::new(RecordingPassivePanelHost::new()),
             status_item_host: Arc::new(RecordingStatusItemHost::new()),
@@ -349,6 +352,8 @@ pub struct WorkbenchProjection {
     pub selected_binding_slot: Option<u32>,
     pub status_message: String,
     pub last_exported_preset: Option<String>,
+    #[serde(default)]
+    pub last_exported_diagnostics_path: Option<String>,
     pub device_connected: bool,
     pub device_summary: String,
     pub document_revision: u64,
@@ -378,6 +383,7 @@ impl Default for WorkbenchProjection {
             selected_binding_slot: None,
             status_message: "已就绪".to_string(),
             last_exported_preset: None,
+            last_exported_diagnostics_path: None,
             device_connected: false,
             device_summary: "Creator Micro 2 (303A:8298) · 离线草稿模式".to_string(),
             document_revision: 0,
@@ -477,6 +483,7 @@ pub struct WorkbenchStore {
     busy: bool,
     status_message: String,
     last_exported_preset: Option<String>,
+    last_exported_diagnostics_path: Option<String>,
     banner_flash_count: usize,
     last_switch_duration: Duration,
     keycap_overrides: BTreeMap<(String, u32), CodexKeycapId>,
@@ -696,6 +703,7 @@ impl WorkbenchStore {
             busy: false,
             status_message: "已就绪".to_string(),
             last_exported_preset: None,
+            last_exported_diagnostics_path: None,
             banner_flash_count: 0,
             last_switch_duration: Duration::ZERO,
             keycap_overrides: BTreeMap::new(),
@@ -754,6 +762,10 @@ impl WorkbenchStore {
         store.refresh_accessibility_trusted();
         store.refresh_competing_input_app_running(true);
         store.refresh_four_app_lighting();
+        let initial_locale = store.effective_locale();
+        if initial_locale != mi_model::ResolvedLocale::ZhHans {
+            store.apply_locale_transition(initial_locale);
+        }
         store.commit_runtime_update();
         Ok(store)
     }
@@ -877,7 +889,9 @@ impl WorkbenchStore {
                 self.selected_layer_id = first_layer_id;
                 self.normalize_surface_for_current_layer();
             }
-            let name = self.active_profile_display_name();
+            let name = self
+                .projection_inputs()
+                .active_profile_canonical_display_name();
             self.status_message = format!("已锁定方案「{name}」");
         } else {
             self.apply_routing_operation(RoutingOperation::LockProfile { profile_id: None })?;
@@ -1082,7 +1096,11 @@ impl WorkbenchStore {
     pub fn current_or_synthetic_device_snapshot(&mut self) -> Value {
         let wb_path = self.config.workbench_json_path();
         if !wb_path.exists() {
+            let prev_lang = self.document_store.ui_language();
+            let prev_silent = self.document_store.silent_at_login();
             let _ = self.document_store.open(wb_path);
+            let _ = self.document_store.set_ui_language(prev_lang);
+            let _ = self.document_store.set_silent_at_login(prev_silent);
         }
         if let Some(snap) = &self.document_store.draft.document.baseline {
             return snap.clone();
@@ -1177,7 +1195,9 @@ impl WorkbenchStore {
                 fs::write(&diag_path, bytes).map_err(|error| {
                     WorkbenchError::Storage(format!("无法保存诊断报告：{error}"))
                 })?;
-                self.status_message = format!("已导出诊断报告：{}", diag_path.display());
+                let exported_path = diag_path.display().to_string();
+                self.last_exported_diagnostics_path = Some(exported_path.clone());
+                self.status_message = format!("已导出诊断报告：{exported_path}");
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -2159,6 +2179,10 @@ impl WorkbenchStore {
         self.last_exported_preset.as_deref()
     }
 
+    pub fn last_exported_diagnostics_path(&self) -> Option<&str> {
+        self.last_exported_diagnostics_path.as_deref()
+    }
+
     pub fn has_all_desktop_agent_presets(&self) -> bool {
         let doc = &self.document_store.draft.document;
         let profiles = &doc.editable.graph.profiles;
@@ -2802,14 +2826,29 @@ impl WorkbenchStore {
                 self.status_message = format!("已重命名为「{name}」");
             }
             ProfileCommand::Duplicate { profile_id, name } => {
+                let resolved_name = if name.trim().is_empty() {
+                    let src_name = self
+                        .document_store
+                        .draft
+                        .document
+                        .editable
+                        .graph
+                        .profiles
+                        .get(&profile_id)
+                        .map(|p| p.name.as_str())
+                        .unwrap_or("新建方案");
+                    format!("{src_name} 副本")
+                } else {
+                    name
+                };
                 let mut duplicated_id = String::new();
                 self.document_store
                     .update(|draft| {
-                        duplicated_id = draft.duplicate_profile(&profile_id, &name)?;
+                        duplicated_id = draft.duplicate_profile(&profile_id, &resolved_name)?;
                         Ok(())
                     })
                     .map_err(WorkbenchError::Storage)?;
-                if CanonicalAgent::from_profile_name(&name).is_none() {
+                if CanonicalAgent::from_profile_name(&resolved_name).is_none() {
                     self.show_other_profiles = true;
                 }
                 self.selected_profile_id = Some(duplicated_id.clone());
@@ -2822,7 +2861,7 @@ impl WorkbenchStore {
                     .profiles
                     .get(&duplicated_id)
                     .and_then(|p| p.layer_order.first().cloned());
-                self.status_message = format!("已复制方案「{name}」");
+                self.status_message = format!("已复制方案「{resolved_name}」");
             }
             ProfileCommand::MoveUp { profile_id } => {
                 let order = &self
@@ -2937,6 +2976,28 @@ impl WorkbenchStore {
         }
     }
 
+    pub fn effective_locale(&self) -> mi_model::ResolvedLocale {
+        mi_model::ResolvedLocale::resolve(
+            self.document_store.ui_language(),
+            self.config.system_locale,
+        )
+    }
+
+    fn apply_locale_transition(&mut self, next_locale: mi_model::ResolvedLocale) {
+        if let InspectorBodyProjection::Editable(prev) = &mut self.projection.inspector.body {
+            prev.filtered_keycaps.clear();
+            prev.available_categories.clear();
+            prev.filtered_actions.clear();
+        }
+        self.action_category_filter =
+            if mi_model::i18n::is_all_category_filter(&self.action_category_filter) {
+                mi_model::i18n::all_category_label(next_locale).to_string()
+            } else {
+                mi_model::i18n::localize_category(&self.action_category_filter, next_locale)
+            };
+        self.radial_state.cancel();
+    }
+
     pub fn dispatch_header_action(&mut self, action: HeaderAction) -> Result<(), WorkbenchError> {
         match action {
             HeaderAction::ConnectKeyboard => {
@@ -2976,6 +3037,38 @@ impl WorkbenchStore {
             }
             HeaderAction::SelectCandidateDevice { selector } => {
                 self.select_candidate_device_from_ui(&selector)
+            }
+            HeaderAction::SetUiLanguage { language } => {
+                let prev_locale = self.effective_locale();
+                self.document_store
+                    .set_ui_language(language)
+                    .map_err(WorkbenchError::Storage)?;
+                let next_locale = self.effective_locale();
+                if next_locale != prev_locale {
+                    self.apply_locale_transition(next_locale);
+                }
+                self.commit_runtime_update();
+                Ok(())
+            }
+            HeaderAction::SyncSystemLocale {
+                preferred_languages,
+            } => {
+                let prev_locale = self.effective_locale();
+                self.config.system_locale =
+                    mi_model::ResolvedLocale::from_bcp47_tags(&preferred_languages);
+                let next_locale = self.effective_locale();
+                if next_locale != prev_locale {
+                    self.apply_locale_transition(next_locale);
+                }
+                self.commit_runtime_update();
+                Ok(())
+            }
+            HeaderAction::SetSilentAtLogin { silent } => {
+                self.document_store
+                    .set_silent_at_login(silent)
+                    .map_err(WorkbenchError::Storage)?;
+                self.commit_runtime_update();
+                Ok(())
             }
         }
     }
@@ -3975,6 +4068,7 @@ impl WorkbenchStore {
 
     fn commit_local_update(&mut self) {
         self.normalize_view_state();
+        let current_locale = self.effective_locale();
         let mut reused_keycaps = false;
         let mut reused_categories = false;
         let mut reused_actions = false;
@@ -3983,7 +4077,9 @@ impl WorkbenchStore {
             categories: None,
             actions: None,
         };
-        if self.projection_generation > 0 {
+        if self.projection_generation > 0
+            && self.projection.header.resolved_locale == current_locale
+        {
             if let InspectorBodyProjection::Editable(prev) = &mut self.projection.inspector.body {
                 if self.keycap_search_query.trim().is_empty()
                     && prev.keycap_search_query.trim().is_empty()
@@ -3998,8 +4094,8 @@ impl WorkbenchStore {
                 }
                 if self.action_search_query.trim().is_empty()
                     && prev.action_search_query.trim().is_empty()
-                    && self.action_category_filter == "全部"
-                    && prev.action_category_filter == "全部"
+                    && mi_model::i18n::is_all_category_filter(&self.action_category_filter)
+                    && mi_model::i18n::is_all_category_filter(&prev.action_category_filter)
                     && !self.favorites_only
                     && !prev.favorites_only
                     && self.favorite_action_ids.is_empty()
@@ -4019,19 +4115,31 @@ impl WorkbenchStore {
             match (&next.firmware.current_version, &next.firmware.release) {
                 (Some(current), Some(release)) => {
                     match crate::firmware_catalog::compare_versions(current, &release.version) {
-                        Ok(std::cmp::Ordering::Less) => "有较新的固件可用".into(),
-                        Ok(std::cmp::Ordering::Equal) => {
-                            "当前已是此通道最新版本；再次安装将重刷相同版本".into()
+                        Ok(std::cmp::Ordering::Less) => {
+                            crate::i18n::tr("有较新的固件可用", current_locale).into()
                         }
-                        Ok(std::cmp::Ordering::Greater) => {
-                            "所选版本低于当前版本；安装将降级，配置兼容性未确认".into()
+                        Ok(std::cmp::Ordering::Equal) => crate::i18n::tr(
+                            "当前已是此通道最新版本；再次安装将重刷相同版本",
+                            current_locale,
+                        )
+                        .into(),
+                        Ok(std::cmp::Ordering::Greater) => crate::i18n::tr(
+                            "所选版本低于当前版本；安装将降级，配置兼容性未确认",
+                            current_locale,
+                        )
+                        .into(),
+                        Err(error) => {
+                            crate::i18n::localize_firmware_message(&error, current_locale)
                         }
-                        Err(error) => error,
                     }
                 }
-                (None, _) => "当前运行版本尚未读取".into(),
-                _ => "尚未检查官方固件".into(),
+                (None, _) => crate::i18n::tr("当前运行版本尚未读取", current_locale).into(),
+                _ => crate::i18n::tr("尚未检查官方固件", current_locale).into(),
             };
+        if current_locale == mi_model::ResolvedLocale::En {
+            next.firmware.message =
+                crate::i18n::localize_firmware_message(&next.firmware.message, current_locale);
+        }
         let changed = if self.projection_generation == 0 {
             true
         } else if (reused_keycaps || reused_categories || reused_actions)
@@ -4108,6 +4216,7 @@ impl WorkbenchStore {
             keycap_overrides: &self.keycap_overrides,
             keycap_search_query: &self.keycap_search_query,
             last_cursor_position: self.last_cursor_position,
+            last_exported_diagnostics_path: &self.last_exported_diagnostics_path,
             last_exported_preset: &self.last_exported_preset,
             last_switch_duration: self.last_switch_duration,
             acknowledged_watermarks: &self.lighting_arbiter.acknowledged_watermarks,
@@ -4126,6 +4235,7 @@ impl WorkbenchStore {
             radial_readiness: &self.radial_readiness,
             radial_slot_configs: &self.radial_slot_configs,
             radial_state: &self.radial_state,
+            resolved_locale: self.effective_locale(),
             screen_geometry: &self.screen_geometry,
             selected_binding_slot: self.selected_binding_slot,
             selected_joystick_direction: self.selected_joystick_direction,
@@ -4136,6 +4246,7 @@ impl WorkbenchStore {
             show_keycap_icons: self.show_keycap_icons,
             show_keycap_labels: self.show_keycap_labels,
             show_other_profiles: self.show_other_profiles,
+            silent_at_login: self.document_store.silent_at_login(),
             six_layer_busy: self.six_layer_job.is_some(),
             six_layer_running_present: self.six_layer_running.is_some(),
             six_layer_state: &self.six_layer_state,
@@ -4145,6 +4256,7 @@ impl WorkbenchStore {
             slot_table: &self.slot_table,
             status_menu_open: self.status_menu_open,
             status_message: &self.status_message,
+            ui_language: self.document_store.ui_language(),
             v070_auto_layer_sync_enabled: self.document_store.v070_auto_layer_sync_enabled(),
             v070_hardware_mouse_supported: self
                 .observed_firmware_version()
@@ -6173,10 +6285,25 @@ impl WorkbenchStore {
             InspectorAction::DuplicateSelectedLayer { name } => {
                 self.ensure_layer_editable()?;
                 let (pid, lid) = self.require_selected_profile_and_layer()?;
+                let resolved_name = if name.trim().is_empty() {
+                    let src_layer_name = self
+                        .document_store
+                        .draft
+                        .document
+                        .editable
+                        .graph
+                        .layers
+                        .get(&lid)
+                        .map(|l| l.name.as_str())
+                        .unwrap_or("默认层");
+                    format!("{src_layer_name} 副本")
+                } else {
+                    name
+                };
                 let mut created = String::new();
                 self.document_store
                     .update(|draft| {
-                        created = draft.duplicate_layer(&pid, &lid, &name)?;
+                        created = draft.duplicate_layer(&pid, &lid, &resolved_name)?;
                         Ok(())
                     })
                     .map_err(WorkbenchError::Storage)?;
@@ -6508,12 +6635,18 @@ impl WorkbenchStore {
                     self.commit_runtime_update();
                     return Err(WorkbenchError::Storage(err));
                 }
+                let trimmed_name = modal.name.trim();
+                let canonical_name = if modal.macro_id.is_none() && trimmed_name == "New Macro" {
+                    "新建宏".to_string()
+                } else {
+                    trimmed_name.to_string()
+                };
                 let action = Action {
                     id: modal
                         .macro_id
                         .clone()
                         .unwrap_or_else(|| "local-macro".to_string()),
-                    name: modal.name.trim().to_string(),
+                    name: canonical_name,
                     category: "普通宏".to_string(),
                     detail: "自有本地序列 · 已验证键名可宿主执行".to_string(),
                     payload: serde_json::to_value(ActionKind::LocalMacro {
@@ -6862,12 +6995,18 @@ impl WorkbenchStore {
                     self.commit_runtime_update();
                     return Err(WorkbenchError::Storage(err));
                 }
+                let trimmed_name = modal.name.trim();
+                let canonical_name = if modal.multi_id.is_none() && trimmed_name == "New Multi" {
+                    "新建 Multi".to_string()
+                } else {
+                    trimmed_name.to_string()
+                };
                 let action = Action {
                     id: modal
                         .multi_id
                         .clone()
                         .unwrap_or_else(|| "local-multi".to_string()),
-                    name: modal.name.trim().to_string(),
+                    name: canonical_name,
                     category: "Multi".to_string(),
                     detail: "本地四分支 · 不执行 · 固件范围未知".to_string(),
                     payload: serde_json::to_value(ActionKind::LocalMulti { multi: local_multi })
@@ -7302,19 +7441,25 @@ fn resolve_slot_graph_action_id(layer: Option<&LayerNode>, slot: u32) -> Option<
         .and_then(|b| b.action_id.clone())
 }
 
-fn format_macro_references(refs: &[mi_model::macro_library::MacroReference]) -> String {
+pub(crate) fn format_macro_references(
+    refs: &[mi_model::macro_library::MacroReference],
+    locale: mi_model::ResolvedLocale,
+) -> String {
     if refs.is_empty() {
-        return "未绑定".to_string();
+        return locale.select("未绑定", "Unbound").to_string();
     }
+    let sep = locale.select("、", ", ");
     refs.iter()
         .map(|r| {
             format!(
                 "{} / {} · {}",
-                r.profile_name, r.layer_name, r.logical_control
+                mi_model::i18n::localize_profile_name(&r.profile_name, locale),
+                mi_model::i18n::localize_layer_name(&r.layer_name, locale),
+                r.logical_control
             )
         })
         .collect::<Vec<_>>()
-        .join("、")
+        .join(sep)
 }
 
 fn is_supported_macro_key(key: &str) -> bool {

@@ -5,6 +5,7 @@ pub mod firmware_catalog;
 pub mod firmware_flash;
 pub mod firmware_update;
 pub mod header;
+pub mod i18n;
 pub mod inspector;
 pub mod karabiner;
 pub mod overlay;
@@ -19,11 +20,11 @@ pub mod v070_hardware;
 pub mod v070_session_sa_rgb;
 
 pub use canvas::{
-    format_concise_keycap_caption, CanvasAction, CanvasLayerTab, CanvasProjection, CanvasRect,
-    ControlCellProjection, ControlSurfaceId, EncoderDialProjection, JoystickDirection8,
-    JoystickDirectionBadge, JoystickPadProjection, KnobJoystickPreset,
-    ProtectedLayerLockProjection, CANVAS_HEIGHT, CANVAS_PADDING, CANVAS_WIDTH, KEY_1U_SIZE,
-    KEY_2U_WIDTH, KEY_GAP,
+    format_concise_keycap_caption, format_concise_keycap_caption_localized, CanvasAction,
+    CanvasLayerTab, CanvasProjection, CanvasRect, ControlCellProjection, ControlSurfaceId,
+    EncoderDialProjection, JoystickDirection8, JoystickDirectionBadge, JoystickPadProjection,
+    KnobJoystickPreset, ProtectedLayerLockProjection, CANVAS_HEIGHT, CANVAS_PADDING, CANVAS_WIDTH,
+    KEY_1U_SIZE, KEY_2U_WIDTH, KEY_GAP,
 };
 pub use editors::{
     ApplyChangeRowProjection, ApplyPreparationModalProjection, ComparisonRowProjection,
@@ -49,6 +50,7 @@ pub use inspector::{
     ShortcutModifier, ShortcutRecorderState, INSPECTOR_WIDTH,
 };
 pub use mi_model::host_router::BottomRowLayout;
+pub use mi_model::{ResolvedLocale, UiLanguagePreference};
 pub use overlay::{
     ActiveHudContent, CheatSheetKeyCellProjection, CheatSheetNotificationKind,
     CheatSheetProjection, HostOverlayAction, HostOverlayProjection, HudVisibilityState,

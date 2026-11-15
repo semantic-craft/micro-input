@@ -247,6 +247,10 @@ impl KnobJoystickPreset {
         }
     }
 
+    pub fn title_localized(self, locale: mi_model::ResolvedLocale) -> &'static str {
+        crate::i18n::tr(self.title(), locale)
+    }
+
     pub const fn is_codex(self) -> bool {
         matches!(
             self,
@@ -287,10 +291,16 @@ pub struct JoystickDirectionBadge {
     pub is_selected: bool,
 }
 
+fn default_joystick_mode() -> String {
+    "logical_sectors".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JoystickPadProjection {
     pub bounds: CanvasRect,
     pub center_deadzone_radius: f32,
+    #[serde(default = "default_joystick_mode")]
+    pub mode: String,
     pub mode_label: String,
     pub active_direction: JoystickDirection8,
     pub sectors: Vec<JoystickDirectionBadge>,
@@ -394,6 +404,7 @@ impl Default for CanvasProjection {
             joystick: JoystickPadProjection {
                 bounds: zero,
                 center_deadzone_radius: 0.0,
+                mode: default_joystick_mode(),
                 mode_label: String::new(),
                 active_direction: JoystickDirection8::North,
                 sectors: Vec::new(),
@@ -549,6 +560,16 @@ pub(crate) fn concise_dial_caption_alias(label: &str) -> Option<&'static str> {
         "返回模型列表 / 调低模型力度" | "降低模型力度" => Some("调低力度"),
         "取消模型选择" => Some("取消选模"),
         _ => None,
+    }
+}
+
+pub fn format_concise_keycap_caption_localized(
+    raw_label: &str,
+    locale: mi_model::ResolvedLocale,
+) -> String {
+    match locale {
+        mi_model::ResolvedLocale::ZhHans => format_concise_keycap_caption(raw_label),
+        mi_model::ResolvedLocale::En => crate::i18n::concise_keycap_caption_en(raw_label),
     }
 }
 

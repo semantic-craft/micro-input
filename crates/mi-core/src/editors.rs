@@ -97,6 +97,10 @@ impl MultiBranchKind {
             Self::TapHold => "点击后长按 (Tap + Hold)",
         }
     }
+
+    pub fn title_localized(self, locale: mi_model::ResolvedLocale) -> &'static str {
+        crate::i18n::tr(self.title(), locale)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

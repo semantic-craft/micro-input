@@ -59,11 +59,17 @@ pub struct StatusItemIconSpec {
 
 impl StatusItemIconSpec {
     pub fn canonical() -> Self {
+        Self::canonical_localized(mi_model::ResolvedLocale::ZhHans)
+    }
+
+    pub fn canonical_localized(locale: mi_model::ResolvedLocale) -> Self {
         Self {
             width_pt: 20.0,
             height_pt: 18.0,
             is_template: true,
-            accessibility_description: "Micro Input 键盘".to_string(),
+            accessibility_description: locale
+                .select("Micro Input 键盘", "Micro Input Keyboard")
+                .to_string(),
             primitives: [
                 StatusIconPrimitive::KeyboardBodyRoundedRect {
                     x: 1.0,

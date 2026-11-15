@@ -22,6 +22,10 @@ impl KeycapRole {
             Self::ActionKey => "动作键",
         }
     }
+
+    pub fn label_localized(self, locale: mi_model::ResolvedLocale) -> &'static str {
+        crate::i18n::tr(self.label(), locale)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -522,6 +526,52 @@ impl CodexKeycapId {
         self.descriptor().chinese_hint
     }
 
+    pub const fn english_hint(self) -> &'static str {
+        match self {
+            Self::Blank => "Blank unlabeled keycap",
+            Self::Fast => "Fast execution / Quick jump",
+            Self::Approve => "Approve / Accept",
+            Self::Decline => "Decline / Reject",
+            Self::Split => "Split pane / Side-by-side",
+            Self::Mic => "Voice dictation / Push-to-talk",
+            Self::Codex => "Focus Codex agent",
+            Self::Bug => "Diagnose error / Fix bug",
+            Self::OpenAi => "Switch or focus AI session",
+            Self::Term => "Toggle terminal panel",
+            Self::Download => "Pull updates / Save",
+            Self::Delete => "Stop generation / Clear",
+            Self::New => "New chat / New task",
+            Self::Nav => "Global search & navigation",
+            Self::Magic => "Auto polish / Refactor",
+            Self::Diff => "Inspect diff & review",
+            Self::Play => "Run / Submit",
+            Self::Git => "Version control status",
+            Self::BranchAlt => "Fork branch / Alternate route",
+            Self::Branch => "Switch branch",
+            Self::Merge => "Merge changes",
+            Self::Pr => "Create Pull Request",
+            Self::Paint => "UI & visual tuning",
+            Self::Lab => "Run tests & verification",
+            Self::Party => "Gemini Live voice chat",
+            Self::Time => "Recent session history",
+            Self::MindPlus => "Deeper reasoning / Next completed",
+            Self::MindMinus => "Concise output / Previous completed",
+            Self::Setup => "Settings & command palette",
+            Self::Folder => "Switch workspace project",
+            Self::Upload => "Push remote / Upload context",
+            Self::Apps => "4-app overview & switcher",
+            Self::Yolo => "Autonomous execution",
+            Self::Yeet => "Discard changes / Revert",
+        }
+    }
+
+    pub const fn hint_localized(self, locale: mi_model::ResolvedLocale) -> &'static str {
+        match locale {
+            mi_model::ResolvedLocale::ZhHans => self.chinese_hint(),
+            mi_model::ResolvedLocale::En => self.english_hint(),
+        }
+    }
+
     pub const fn glyph_symbol(self) -> &'static str {
         self.descriptor().glyph_symbol
     }
@@ -539,6 +589,7 @@ impl CodexKeycapId {
         d.silk_code.to_lowercase().contains(&q)
             || d.short_label.to_lowercase().contains(&q)
             || d.chinese_hint.to_lowercase().contains(&q)
+            || self.english_hint().to_lowercase().contains(&q)
             || d.glyph_symbol.to_lowercase().contains(&q)
             || d.search_keywords
                 .iter()

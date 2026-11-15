@@ -44,6 +44,13 @@ impl CanonicalAgent {
         }
     }
 
+    pub const fn display_name_localized(self, locale: mi_model::ResolvedLocale) -> &'static str {
+        match (self, locale) {
+            (Self::OtherApps, mi_model::ResolvedLocale::En) => "Other Apps",
+            _ => self.display_name(),
+        }
+    }
+
     pub const fn bundle_id(self) -> &'static str {
         match self {
             Self::Antigravity => "com.google.antigravity",
@@ -61,6 +68,13 @@ impl CanonicalAgent {
             Self::DeepseekHarness => "DS",
             Self::Herdr => "HD",
             Self::OtherApps => "通用",
+        }
+    }
+
+    pub const fn badge_monogram_localized(self, locale: mi_model::ResolvedLocale) -> &'static str {
+        match (self, locale) {
+            (Self::OtherApps, mi_model::ResolvedLocale::En) => "APP",
+            _ => self.badge_monogram(),
         }
     }
 

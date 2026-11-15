@@ -334,6 +334,10 @@ impl AmbientColorPreset {
             Self::AmberGold => "琥珀金",
         }
     }
+
+    pub fn label_localized(self, locale: mi_model::ResolvedLocale) -> &'static str {
+        crate::i18n::tr(self.label(), locale)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,6 +364,10 @@ impl LightingBrightnessPreset {
             Self::Standard => "标准 (65%)",
             Self::Bright => "明亮 (95%)",
         }
+    }
+
+    pub fn label_localized(self, locale: mi_model::ResolvedLocale) -> &'static str {
+        crate::i18n::tr(self.label(), locale)
     }
 }
 
@@ -395,6 +403,10 @@ impl LightingTimeoutPreset {
             Self::FiveMinutes => "5 分钟",
             Self::Never => "常亮",
         }
+    }
+
+    pub fn label_localized(self, locale: mi_model::ResolvedLocale) -> &'static str {
+        crate::i18n::tr(self.label(), locale)
     }
 }
 

@@ -88,6 +88,10 @@ impl RadialConfirmMode {
             Self::SpringBack => "摇杆回弹确认",
         }
     }
+
+    pub fn label_localized(self, locale: mi_model::ResolvedLocale) -> &'static str {
+        crate::i18n::tr(self.label(), locale)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -109,6 +113,10 @@ impl RadialInputReadiness {
             Self::UnverifiedMapping => "当前摇杆或旋钮映射不可用于菜单",
             Self::Paused => "设备操作期间或映射重验前暂停菜单",
         }
+    }
+
+    pub fn label_localized(self, locale: mi_model::ResolvedLocale) -> &'static str {
+        crate::i18n::tr(self.label(), locale)
     }
 }
 
@@ -476,10 +484,29 @@ pub struct RadialSlot {
 
 impl RadialSlot {
     pub fn accessibility_label(&self, selected: bool) -> String {
-        let prefix = if selected { "已选择，" } else { "" };
-        match &self.unavailable_reason {
-            Some(reason) => format!("{prefix}{}，不可用，{reason}", self.label),
-            None => format!("{prefix}{}", self.label),
+        self.accessibility_label_localized(selected, mi_model::ResolvedLocale::ZhHans)
+    }
+
+    pub fn accessibility_label_localized(
+        &self,
+        selected: bool,
+        locale: mi_model::ResolvedLocale,
+    ) -> String {
+        match locale {
+            mi_model::ResolvedLocale::ZhHans => {
+                let prefix = if selected { "已选择，" } else { "" };
+                match &self.unavailable_reason {
+                    Some(reason) => format!("{prefix}{}，不可用，{reason}", self.label),
+                    None => format!("{prefix}{}", self.label),
+                }
+            }
+            mi_model::ResolvedLocale::En => {
+                let prefix = if selected { "Selected, " } else { "" };
+                match &self.unavailable_reason {
+                    Some(reason) => format!("{prefix}{}, unavailable, {reason}", self.label),
+                    None => format!("{prefix}{}", self.label),
+                }
+            }
         }
     }
 }
@@ -504,6 +531,20 @@ pub fn resolve_radial_slots(
     ctx: &RadialSlotResolutionContext,
     is_app_installed: impl Fn(&str) -> bool,
 ) -> [RadialSlot; RADIAL_SECTOR_COUNT] {
+    resolve_radial_slots_localized(
+        configs,
+        ctx,
+        is_app_installed,
+        mi_model::ResolvedLocale::ZhHans,
+    )
+}
+
+pub fn resolve_radial_slots_localized(
+    configs: &[RadialSlotConfig; RADIAL_SECTOR_COUNT],
+    ctx: &RadialSlotResolutionContext,
+    is_app_installed: impl Fn(&str) -> bool,
+    locale: mi_model::ResolvedLocale,
+) -> [RadialSlot; RADIAL_SECTOR_COUNT] {
     std::array::from_fn(|idx| {
         let sector = SectorIndex::ALL[idx];
         let cfg = &configs[idx];
@@ -522,7 +563,11 @@ pub fn resolve_radial_slots(
                 if ctx.has_active_profile {
                     (Some(RadialIntent::CheatSheet), None, None)
                 } else {
-                    (None, Some("当前配置不可用".to_string()), None)
+                    (
+                        None,
+                        Some(crate::i18n::tr("当前配置不可用", locale).to_string()),
+                        None,
+                    )
                 }
             }
             RadialSlotKind::OpenApp => {
@@ -537,13 +582,21 @@ pub fn resolve_radial_slots(
                         None,
                     )
                 } else {
-                    (None, Some("应用未安装".to_string()), None)
+                    (
+                        None,
+                        Some(crate::i18n::tr("应用未安装", locale).to_string()),
+                        None,
+                    )
                 }
             }
             RadialSlotKind::Prompt => {
                 let sanitized = strip_trailing_newlines(cfg.text.as_deref().unwrap_or(""));
                 if sanitized.trim().is_empty() {
-                    (None, Some("未设置指令文本".to_string()), None)
+                    (
+                        None,
+                        Some(crate::i18n::tr("未设置指令文本", locale).to_string()),
+                        None,
+                    )
                 } else {
                     let adapter = cfg.adapter.clone().or_else(|| ctx.active_adapter.clone());
                     let available = adapter.is_some() || ctx.has_active_profile;
@@ -558,7 +611,11 @@ pub fn resolve_radial_slots(
                             default_target_preview,
                         )
                     } else {
-                        (None, Some("没有可用的目标配置".to_string()), None)
+                        (
+                            None,
+                            Some(crate::i18n::tr("没有可用的目标配置", locale).to_string()),
+                            None,
+                        )
                     }
                 }
             }
@@ -571,7 +628,11 @@ pub fn resolve_radial_slots(
                         default_target_preview,
                     )
                 } else {
-                    (None, Some("当前配置不是桌面 Agent".to_string()), None)
+                    (
+                        None,
+                        Some(crate::i18n::tr("当前配置不是桌面 Agent", locale).to_string()),
+                        None,
+                    )
                 }
             }
             RadialSlotKind::Stop => {
@@ -583,28 +644,40 @@ pub fn resolve_radial_slots(
                         default_target_preview,
                     )
                 } else {
-                    (None, Some("当前配置不是桌面 Agent".to_string()), None)
+                    (
+                        None,
+                        Some(crate::i18n::tr("当前配置不是桌面 Agent", locale).to_string()),
+                        None,
+                    )
                 }
             }
             RadialSlotKind::NavigateBack => {
                 if ctx.can_navigate_back {
                     (Some(RadialIntent::NavigateBack), None, None)
                 } else {
-                    (None, Some("没有可后退的打开历史".to_string()), None)
+                    (
+                        None,
+                        Some(crate::i18n::tr("没有可后退的打开历史", locale).to_string()),
+                        None,
+                    )
                 }
             }
             RadialSlotKind::NavigateForward => {
                 if ctx.can_navigate_forward {
                     (Some(RadialIntent::NavigateForward), None, None)
                 } else {
-                    (None, Some("没有可前进的打开历史".to_string()), None)
+                    (
+                        None,
+                        Some(crate::i18n::tr("没有可前进的打开历史", locale).to_string()),
+                        None,
+                    )
                 }
             }
         };
 
         RadialSlot {
             sector,
-            label: cfg.label.clone(),
+            label: crate::i18n::tr(&cfg.label, locale).to_string(),
             target_preview,
             intent,
             unavailable_reason,

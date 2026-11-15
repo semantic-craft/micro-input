@@ -189,38 +189,79 @@ impl PassivePanelFrameSpec {
     }
 
     pub fn for_radial_frame(frame: ScreenRect) -> Self {
+        Self::for_radial_frame_localized(frame, mi_model::ResolvedLocale::ZhHans)
+    }
+
+    pub fn for_radial_frame_localized(frame: ScreenRect, locale: mi_model::ResolvedLocale) -> Self {
         Self {
             role: PassivePanelRole::RadialMenu,
-            title: Self::RADIAL_TITLE.to_string(),
+            title: locale
+                .select(Self::RADIAL_TITLE, "Micro Input Radial Menu")
+                .to_string(),
             frame,
             style: PassivePanelStyleSpec::for_role(PassivePanelRole::RadialMenu),
         }
     }
 
     pub fn for_radial(cursor: ScreenPoint, screen: &ScreenGeometry) -> Self {
+        Self::for_radial_localized(cursor, screen, mi_model::ResolvedLocale::ZhHans)
+    }
+
+    pub fn for_radial_localized(
+        cursor: ScreenPoint,
+        screen: &ScreenGeometry,
+        locale: mi_model::ResolvedLocale,
+    ) -> Self {
         let visible = screen.visible_frame_for_cursor(cursor);
-        Self::for_radial_frame(Self::cursor_centered_radial_frame(
-            Self::RADIAL_SIZE,
-            cursor,
-            visible,
-        ))
+        Self::for_radial_frame_localized(
+            Self::cursor_centered_radial_frame(Self::RADIAL_SIZE, cursor, visible),
+            locale,
+        )
     }
 
     pub fn for_notice(cursor: ScreenPoint, screen: &ScreenGeometry) -> Self {
+        Self::for_notice_localized(cursor, screen, mi_model::ResolvedLocale::ZhHans)
+    }
+
+    pub fn for_hud_localized(
+        cursor: ScreenPoint,
+        screen: &ScreenGeometry,
+        locale: mi_model::ResolvedLocale,
+    ) -> Self {
+        Self::for_notice_localized(cursor, screen, locale)
+    }
+
+    pub fn for_notice_localized(
+        cursor: ScreenPoint,
+        screen: &ScreenGeometry,
+        locale: mi_model::ResolvedLocale,
+    ) -> Self {
         let visible = screen.visible_frame_for_cursor(cursor);
         Self {
             role: PassivePanelRole::PassiveNotice,
-            title: "Micro Input 方案切换提示".to_string(),
+            title: locale
+                .select("Micro Input 方案切换提示", "Micro Input Profile Switch")
+                .to_string(),
             frame: Self::top_right_hud_frame(Self::NOTICE_SIZE, visible),
             style: PassivePanelStyleSpec::for_role(PassivePanelRole::PassiveNotice),
         }
     }
 
     pub fn for_cheat_sheet(cursor: ScreenPoint, screen: &ScreenGeometry) -> Self {
+        Self::for_cheat_sheet_localized(cursor, screen, mi_model::ResolvedLocale::ZhHans)
+    }
+
+    pub fn for_cheat_sheet_localized(
+        cursor: ScreenPoint,
+        screen: &ScreenGeometry,
+        locale: mi_model::ResolvedLocale,
+    ) -> Self {
         let visible = screen.visible_frame_for_cursor(cursor);
         Self {
             role: PassivePanelRole::CheatSheet,
-            title: "Micro Input 按键速查".to_string(),
+            title: locale
+                .select("Micro Input 按键速查", "Micro Input Cheat Sheet")
+                .to_string(),
             frame: Self::top_right_hud_frame(Self::CHEAT_SHEET_SIZE, visible),
             style: PassivePanelStyleSpec::for_role(PassivePanelRole::CheatSheet),
         }

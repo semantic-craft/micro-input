@@ -32,12 +32,30 @@ pub enum CheatSheetNotificationKind {
     Toggle,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+fn default_joystick_mode() -> String {
+    "logical_sectors".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheatSheetProjection {
     pub profile_name: String,
     pub routing_summary: String,
+    #[serde(default = "default_joystick_mode")]
+    pub joystick_mode: String,
     pub target_agent_card: Option<TargetAgentStatusCardProjection>,
     pub key_cells: Vec<CheatSheetKeyCellProjection>,
+}
+
+impl Default for CheatSheetProjection {
+    fn default() -> Self {
+        Self {
+            profile_name: String::new(),
+            routing_summary: String::new(),
+            joystick_mode: default_joystick_mode(),
+            target_agent_card: None,
+            key_cells: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -219,6 +237,15 @@ impl OverlayController {
     }
 
     pub fn project(&self, screen: &ScreenGeometry, cursor: ScreenPoint) -> HostOverlayProjection {
+        self.project_localized(screen, cursor, mi_model::ResolvedLocale::ZhHans)
+    }
+
+    pub fn project_localized(
+        &self,
+        screen: &ScreenGeometry,
+        cursor: ScreenPoint,
+        locale: mi_model::ResolvedLocale,
+    ) -> HostOverlayProjection {
         match &self.visibility {
             HudVisibilityState::Hidden => HostOverlayProjection {
                 content: ActiveHudContent::Hidden,
@@ -244,13 +271,17 @@ impl OverlayController {
                             profile_name: profile_name.clone(),
                             mode_summary: mode_summary.clone(),
                         },
-                        panel_spec: Some(PassivePanelFrameSpec::for_notice(cursor, screen)),
+                        panel_spec: Some(PassivePanelFrameSpec::for_notice_localized(
+                            cursor, screen, locale,
+                        )),
                     }
                 }
             }
             HudVisibilityState::InteractiveCheatSheet { projection, .. } => HostOverlayProjection {
                 content: ActiveHudContent::InteractiveCheatSheet(projection.clone()),
-                panel_spec: Some(PassivePanelFrameSpec::for_cheat_sheet(cursor, screen)),
+                panel_spec: Some(PassivePanelFrameSpec::for_cheat_sheet_localized(
+                    cursor, screen, locale,
+                )),
             },
         }
     }

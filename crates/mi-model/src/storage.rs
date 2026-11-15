@@ -424,6 +424,41 @@ impl DocumentStore {
         self.preferences
             .set_v070_session_sa_rgb_sync_enabled(enabled)
     }
+    pub fn ui_language(&self) -> crate::i18n::UiLanguagePreference {
+        self.host_store().preferences.value.ui_language
+    }
+    pub fn set_ui_language(
+        &mut self,
+        language: crate::i18n::UiLanguagePreference,
+    ) -> Result<bool, String> {
+        if let Some(host) = &mut self.host {
+            return host.set_ui_language(language);
+        }
+        if self.blocked {
+            return Err("本地文档未载入，界面语言偏好未保存".into());
+        }
+        let changed = self.preferences.set_ui_language(language)?;
+        if changed {
+            self.host_state_revision += 1;
+        }
+        Ok(changed)
+    }
+    pub fn silent_at_login(&self) -> bool {
+        self.host_store().preferences.value.silent_at_login
+    }
+    pub fn set_silent_at_login(&mut self, silent: bool) -> Result<bool, String> {
+        if let Some(host) = &mut self.host {
+            return host.set_silent_at_login(silent);
+        }
+        if self.blocked {
+            return Err("本地文档未载入，开机静默启动偏好未保存".into());
+        }
+        let changed = self.preferences.set_silent_at_login(silent)?;
+        if changed {
+            self.host_state_revision += 1;
+        }
+        Ok(changed)
+    }
     pub fn initialize_board_plan_if_absent(&mut self, plan: BoardLayerPlan) {
         if let Some(host) = &mut self.host {
             host.initialize_board_plan_if_absent(plan);
@@ -800,6 +835,14 @@ struct HostPreferencesV1 {
     #[serde(default)]
     active_hardware_slot: u8,
 }
+const fn default_true() -> bool {
+    true
+}
+
+const fn is_true(v: &bool) -> bool {
+    *v
+}
+
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HostPreferences {
@@ -853,6 +896,13 @@ struct HostPreferences {
     v070_auto_layer_sync_enabled: bool,
     #[serde(default)]
     v070_session_sa_rgb_sync_enabled: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::i18n::UiLanguagePreference::is_default"
+    )]
+    pub ui_language: crate::i18n::UiLanguagePreference,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub silent_at_login: bool,
 }
 impl Default for HostPreferences {
     fn default() -> Self {
@@ -875,6 +925,8 @@ impl Default for HostPreferences {
             preferred_device_serial: None,
             v070_auto_layer_sync_enabled: false,
             v070_session_sa_rgb_sync_enabled: false,
+            ui_language: crate::i18n::UiLanguagePreference::System,
+            silent_at_login: true,
         }
     }
 }
@@ -957,6 +1009,8 @@ impl HostPreferencesStore {
                                 preferred_device_serial: None,
                                 v070_auto_layer_sync_enabled: false,
                                 v070_session_sa_rgb_sync_enabled: false,
+                                ui_language: crate::i18n::UiLanguagePreference::System,
+                                silent_at_login: true,
                             }
                         }
                         Some(2) => serde_json::from_slice(bytes)
@@ -1103,6 +1157,27 @@ impl HostPreferencesStore {
         }
         let mut next = self.value.clone();
         next.v070_session_sa_rgb_sync_enabled = enabled;
+        self.save_with_sync(next, true)?;
+        Ok(true)
+    }
+    fn set_ui_language(
+        &mut self,
+        language: crate::i18n::UiLanguagePreference,
+    ) -> Result<bool, String> {
+        if self.value.ui_language == language {
+            return Ok(false);
+        }
+        let mut next = self.value.clone();
+        next.ui_language = language;
+        self.save_with_sync(next, true)?;
+        Ok(true)
+    }
+    fn set_silent_at_login(&mut self, silent: bool) -> Result<bool, String> {
+        if self.value.silent_at_login == silent {
+            return Ok(false);
+        }
+        let mut next = self.value.clone();
+        next.silent_at_login = silent;
         self.save_with_sync(next, true)?;
         Ok(true)
     }

@@ -471,6 +471,8 @@ mod tests {
 }
 
 pub mod draft;
+pub mod i18n;
+pub use i18n::{ResolvedLocale, UiLanguagePreference};
 
 pub mod storage;
 
