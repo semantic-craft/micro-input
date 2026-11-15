@@ -979,9 +979,7 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
         .unwrap();
     assert_eq!(store.projection().canvas.encoder.hold_label, "未绑定");
     store
-        .dispatch_inspector_action(InspectorAction::AssignCatalogAction(
-            "agent-search".into(),
-        ))
+        .dispatch_inspector_action(InspectorAction::AssignCatalogAction("agent-search".into()))
         .unwrap();
     assert_eq!(store.projection().canvas.encoder.hold_label, "搜索会话");
 

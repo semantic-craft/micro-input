@@ -2999,7 +2999,10 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
-                    match self.driver.agent_shortcut(effective_adapter, key_code, &modifiers) {
+                    match self
+                        .driver
+                        .agent_shortcut(effective_adapter, key_code, &modifiers)
+                    {
                         Ok(()) => make_receipt("executed", desc.detail),
                         Err(err) => make_receipt(managed_error_outcome(&err), err),
                     }

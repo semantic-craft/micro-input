@@ -199,8 +199,8 @@ public enum L10n {
     ) -> String {
         if selectedSurface == "EncoderHold" {
             return locale == .en
-                ? "\(owner) Knob Hold (Open Model Menu)"
-                : "\(owner) 旋钮长按（弹出模型选择页）"
+                ? "\(owner) Knob Hold (Search Conversations)"
+                : "\(owner) 旋钮长按（搜索会话）"
         }
         return locale == .en
             ? "\(owner) Native Passthrough (\(code))"
@@ -462,6 +462,7 @@ public enum L10n {
         "点击发光键打开会话": "Tap Glowing Key to Open Session",
         "上方六键设为会话键": "Set Top 6 Keys as Session Keys",
         "恢复默认布局": "Restore Default Layout",
+        "模型选择（短按模型 · 长按搜会话）": "Model Picker & Search (Tap / Hold)",
         "模型选择（长按弹出模型页）": "Select Model (Hold Knob)",
         "旋钮切换会话，摇杆滚动对话": "Knob Switches Sessions, Stick Scrolls Chat",
         "旋钮滚动项目，摇杆滚动对话": "Knob Scrolls Projects, Stick Scrolls Chat",
@@ -561,6 +562,7 @@ public enum L10n {
         "标准": "Standard",
         "快速": "Fast",
         "精准": "Precise",
+        "短按左上角旋钮弹出模型选择页期间，向右轻推摇杆（按右）将临时拦截指针并展开 / 调高模型力度，短按确认后自动恢复硬件指针。": "While tapping the top-left knob for Model Picker, nudging the stick right temporarily adjusts reasoning effort; press to confirm and restore hardware pointer.",
         "长按左上角旋钮弹出模型选择页期间，向右轻推摇杆（按右）将临时拦截指针并展开 / 调高模型力度，短按确认后自动恢复硬件指针。": "While holding the top-left knob for Model Picker, nudging the stick right temporarily adjusts reasoning effort; press to confirm and restore hardware pointer.",
         "恢复键盘扇区模式": "Restore Sector Mode",
         "四向摇杆方向": "4-Way Stick Direction",

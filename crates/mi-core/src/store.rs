@@ -3415,10 +3415,12 @@ impl WorkbenchStore {
                                     .iter()
                                     .find(|a| a.id == "agent-search")
                                     .cloned()
-                                    .ok_or_else(|| {
-                                        "未找到内置动作 agent-search".to_string()
-                                    })?;
-                                draft.assign_encoder_hold(&json!(pid), &json!(lid), search_action)?;
+                                    .ok_or_else(|| "未找到内置动作 agent-search".to_string())?;
+                                draft.assign_encoder_hold(
+                                    &json!(pid),
+                                    &json!(lid),
+                                    search_action,
+                                )?;
                             }
                             KnobJoystickPreset::MousePointerAndScroll => {
                                 draft.unassign_encoder_hold(&json!(pid), &json!(lid))?;
@@ -5223,11 +5225,14 @@ impl WorkbenchStore {
                 overlay_kind,
                 ..
             } => {
-                let must_esc = self.encoder_model_picker.prepare_for_hold_action(overlay_kind);
+                let must_esc = self
+                    .encoder_model_picker
+                    .prepare_for_hold_action(overlay_kind);
                 if must_esc {
                     if let Some(ref adapter) = target_adapter {
-                        let cancel_action = crate::encoder_model_picker::ModelPickerCommand::ModelPickerCancel
-                            .into_host_action(adapter.clone());
+                        let cancel_action =
+                            crate::encoder_model_picker::ModelPickerCommand::ModelPickerCancel
+                                .into_host_action(adapter.clone());
                         let _ = self.execute_resolved_physical_action_with_session(
                             &hold_profile,
                             "ENC_CLK",
@@ -5236,7 +5241,9 @@ impl WorkbenchStore {
                         );
                     }
                 }
-                if overlay_kind != Some(crate::encoder_model_picker::EncoderOverlayKind::ModelPicker) {
+                if overlay_kind
+                    != Some(crate::encoder_model_picker::EncoderOverlayKind::ModelPicker)
+                {
                     self.set_model_picker_mouse_capture(false);
                 }
                 let mut action = hold_action?;

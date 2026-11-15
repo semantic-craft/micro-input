@@ -51,6 +51,7 @@ pub const CORE_EN_TABLE: &[(&str, &str)] = &[
     ("硬件滚轮", "HW Scroll"),
     ("8向摇杆", "8-Way Stick"),
     ("USB 启动方案预览", "USB Startup Preview"),
+    ("模型选择（短按模型 · 长按搜会话）", "Model Picker & Search (Tap / Hold)"),
     ("模型选择（长按弹出模型页）", "Model Picker (Hold to Open)"),
     ("旋钮轮询 Working/蓝点", "Dial Cycles Working / Unread"),
     ("旋钮+摇杆双滚轮", "Dial + Stick Dual Scroll"),
@@ -82,6 +83,7 @@ pub const CORE_EN_TABLE: &[(&str, &str)] = &[
     ("摇杆（硬件鼠标）", "Stick (HW Mouse)"),
     ("摇杆（硬件滚轮）", "Stick (HW Scroll)"),
     ("确认/模型页", "OK/Model"),
+    ("模型/搜索", "Model/Search"),
     ("模型选择中：展开 / 调高模型力度", "Model Picker: Expand / Raise Effort"),
     ("模型力度", "Effort"),
     ("硬件鼠标指针（选模型时按右调力度）", "Hardware Mouse Pointer (Right Adjusts Effort)"),
@@ -520,6 +522,14 @@ pub fn relocalize_status_message(msg: &str, next_locale: ResolvedLocale) -> Stri
                     "Model picker opened · Turn dial for model, tilt right for effort ({target})"
                 );
             }
+            if let Some(target) = msg
+                .strip_prefix("已打开搜索会话 · 上下旋转选择会话，短按确认 (")
+                .and_then(|s| s.strip_suffix(')'))
+            {
+                return format!(
+                    "Search conversations opened · Turn dial to select, tap to confirm ({target})"
+                );
+            }
             let fw = localize_firmware_message(msg, ResolvedLocale::En);
             if fw != msg {
                 return fw;
@@ -928,6 +938,7 @@ pub fn concise_keycap_caption_en(raw_label: &str) -> String {
         "Previous Unread Completed" => return "Prev Done".to_string(),
         "Cycle Working / Attention" => return "Cycle Work".to_string(),
         "Focus Active Input" => return "Focus In".to_string(),
+        "Search Conversations" => return "Search".to_string(),
         "Open Model Picker" => return "Models".to_string(),
         "Previous Model / Effort" => return "Prev Model".to_string(),
         "Next Model / Effort" => return "Next Model".to_string(),

@@ -304,7 +304,13 @@ impl EncoderModelPicker {
         } else {
             None
         };
-        self.on_hold_timer_with_picker_mode(hold_generation, adapter, has_hold_action, target_kind, now)
+        self.on_hold_timer_with_picker_mode(
+            hold_generation,
+            adapter,
+            has_hold_action,
+            target_kind,
+            now,
+        )
     }
 
     pub fn on_hold_timer_with_picker_mode(
@@ -377,7 +383,13 @@ impl EncoderModelPicker {
         } else {
             None
         };
-        self.on_encoder_release_with_picker_mode(session_id, adapter, has_hold_action, target_kind, now)
+        self.on_encoder_release_with_picker_mode(
+            session_id,
+            adapter,
+            has_hold_action,
+            target_kind,
+            now,
+        )
     }
 
     pub fn on_encoder_release_with_picker_mode(
@@ -838,14 +850,26 @@ mod tests {
 
         picker.enter_active_session("antigravity", EncoderOverlayKind::SearchConversations, t0);
         assert!(picker.is_active(t0));
-        assert_eq!(picker.active_kind(t0), Some(EncoderOverlayKind::SearchConversations));
+        assert_eq!(
+            picker.active_kind(t0),
+            Some(EncoderOverlayKind::SearchConversations)
+        );
 
         // Mouse flicks are strictly disabled in SearchConversations
-        assert_eq!(picker.on_mouse_delta(50.0, 0.0, t0 + Duration::from_millis(10)), None);
+        assert_eq!(
+            picker.on_mouse_delta(50.0, 0.0, t0 + Duration::from_millis(10)),
+            None
+        );
 
         // Sectors are strictly disabled in SearchConversations
-        assert_eq!(picker.on_sector_direction_while_active("AG15", t0 + Duration::from_millis(20)), None);
-        assert_eq!(picker.on_sector_direction_while_active("AG18", t0 + Duration::from_millis(30)), None);
+        assert_eq!(
+            picker.on_sector_direction_while_active("AG15", t0 + Duration::from_millis(20)),
+            None
+        );
+        assert_eq!(
+            picker.on_sector_direction_while_active("AG18", t0 + Duration::from_millis(30)),
+            None
+        );
 
         // Dial turns navigate Up/Down in conversation search
         assert_eq!(
@@ -864,15 +888,27 @@ mod tests {
             EncoderTurnOutcome::ModelPicker(ModelPickerCommand::ModelPickerNext)
         );
         assert_eq!(
-            picker.on_encoder_release(2, Some("antigravity"), true, t0 + Duration::from_millis(130)),
+            picker.on_encoder_release(
+                2,
+                Some("antigravity"),
+                true,
+                t0 + Duration::from_millis(130)
+            ),
             EncoderReleaseOutcome::Consumed
         );
 
         // Next short press confirms and exits
         picker.on_encoder_press(3, t0 + Duration::from_millis(140));
         assert_eq!(
-            picker.on_encoder_release(3, Some("antigravity"), true, t0 + Duration::from_millis(150)),
-            EncoderReleaseOutcome::ModelPickerConfirm { adapter: "antigravity".into() }
+            picker.on_encoder_release(
+                3,
+                Some("antigravity"),
+                true,
+                t0 + Duration::from_millis(150)
+            ),
+            EncoderReleaseOutcome::ModelPickerConfirm {
+                adapter: "antigravity".into()
+            }
         );
         assert!(!picker.is_active(t0 + Duration::from_millis(150)));
     }
@@ -904,8 +940,14 @@ mod tests {
             true,
             t0 + Duration::from_millis(50),
         );
-        assert_eq!(transition, OverlayTransition::Entered(EncoderOverlayKind::SearchConversations));
+        assert_eq!(
+            transition,
+            OverlayTransition::Entered(EncoderOverlayKind::SearchConversations)
+        );
         assert!(picker.is_active(t0 + Duration::from_millis(50)));
-        assert_eq!(picker.active_kind(t0 + Duration::from_millis(50)), Some(EncoderOverlayKind::SearchConversations));
+        assert_eq!(
+            picker.active_kind(t0 + Duration::from_millis(50)),
+            Some(EncoderOverlayKind::SearchConversations)
+        );
     }
 }

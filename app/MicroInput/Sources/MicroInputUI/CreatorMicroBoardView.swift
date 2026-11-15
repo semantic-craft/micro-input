@@ -324,8 +324,8 @@ struct CreatorMicroBoardView: View {
         .focusEffectDisabled()
         .help(isHwMode
             ? (locale == .en
-                ? "Analog stick · \(c.joystickModeLabel) (click to configure; nudge right during Knob Hold to adjust reasoning)"
-                : "模拟摇杆 · \(c.joystickModeLabel)（点击配置；长按旋钮选模型时按右调力度）")
+                ? "Analog stick · \(c.joystickModeLabel) (click to configure; nudge right during Model Picker to adjust reasoning)"
+                : "模拟摇杆 · \(c.joystickModeLabel)（点击配置；短按旋钮选模型时按右调力度）")
             : (locale == .en
                 ? "8-way stick (click to cycle Up / Left / Down / Right)"
                 : "8 向摇杆（点击切换上 / 左 / 下 / 右方向配置）"))
@@ -429,7 +429,7 @@ struct CreatorMicroBoardView: View {
                 }
                 Button(store.tr("恢复默认布局")) { store.dispatch("session_strip", "RestoreDefaultLayout") }
                 Divider()
-                Button(store.tr("模型选择（长按弹出模型页）")) {
+                Button(store.tr("模型选择（短按模型 · 长按搜会话）")) {
                     store.dispatch("canvas", ["ApplyKnobJoystickPreset": "ModelSelectionAndMouse"])
                 }
                 if agentKind == .antigravity {

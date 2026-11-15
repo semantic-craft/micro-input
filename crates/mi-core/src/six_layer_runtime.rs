@@ -65,7 +65,10 @@ impl SavedSixLayerState {
         };
         let mut changed = false;
         for host in &mut inst.plan.hosts {
-            if !matches!(host.adapter.as_str(), "antigravity" | "codex" | "dsh-desktop") {
+            if !matches!(
+                host.adapter.as_str(),
+                "antigravity" | "codex" | "dsh-desktop"
+            ) {
                 continue;
             }
             let Some(profile) = doc.editable.graph.profiles.get(&host.profile_id) else {
@@ -2061,16 +2064,15 @@ fn execute_clicks_with_encoder_picker(
             if due_hold {
                 let hold_ctx = pending_hold.take().unwrap();
                 if hold_ctx.input_generation == receiver.generation() {
-                    if let EncoderHoldTimerOutcome::FiredHold {
-                        overlay_kind,
-                        ..
-                    } = picker.on_hold_timer_with_picker_mode(
-                        hold_ctx.hold_generation,
-                        hold_ctx.adapter.as_deref(),
-                        true,
-                        hold_ctx.target_overlay_kind,
-                        loop_now,
-                    ) {
+                    if let EncoderHoldTimerOutcome::FiredHold { overlay_kind, .. } = picker
+                        .on_hold_timer_with_picker_mode(
+                            hold_ctx.hold_generation,
+                            hold_ctx.adapter.as_deref(),
+                            true,
+                            hold_ctx.target_overlay_kind,
+                            loop_now,
+                        )
+                    {
                         let hold_action = hold_ctx.hold_action;
                         if policy.admits(hold_ctx.admission, &hold_action) {
                             if let Err(error) = check_connection() {
@@ -2126,8 +2128,9 @@ fn execute_clicks_with_encoder_picker(
                                 receiver.invalidate("执行回执积压，输入已暂停");
                                 return;
                             }
-                            let adapter =
-                                hold_ctx.adapter.unwrap_or_else(|| "antigravity".to_string());
+                            let adapter = hold_ctx
+                                .adapter
+                                .unwrap_or_else(|| "antigravity".to_string());
                             let transition = picker.apply_hold_execution_outcome(
                                 adapter,
                                 overlay_kind,
@@ -2166,11 +2169,7 @@ fn execute_clicks_with_encoder_picker(
                 } else {
                     picker.cancel();
                     active_picker_context = None;
-                    set_capture_state(
-                        false,
-                        &mut mouse_capture_enabled,
-                        &mut set_mouse_capture,
-                    );
+                    set_capture_state(false, &mut mouse_capture_enabled, &mut set_mouse_capture);
                 }
             }
 
@@ -2270,8 +2269,7 @@ fn execute_clicks_with_encoder_picker(
                     if resolved_hold.is_some() || picker.is_active(event.received_at) {
                         let hold_gen = picker.on_encoder_press(0, event.received_at);
                         pending_hold = resolved_hold.map(|(prof_id, hold_action)| {
-                            let target_overlay_kind =
-                                EncoderOverlayKind::from_action(&hold_action);
+                            let target_overlay_kind = EncoderOverlayKind::from_action(&hold_action);
                             let action_adapter = match &hold_action {
                                 ResolvedHostAction::AgentCommand { adapter, .. }
                                     if matches!(
@@ -2304,11 +2302,17 @@ fn execute_clicks_with_encoder_picker(
                     }
                     let saved_hold = pending_hold.take();
                     let hold_entry = saved_hold
-                        .map(|h| (h.profile_id, h.hold_action, h.adapter, h.target_overlay_kind))
+                        .map(|h| {
+                            (
+                                h.profile_id,
+                                h.hold_action,
+                                h.adapter,
+                                h.target_overlay_kind,
+                            )
+                        })
                         .or_else(|| {
                             resolved_hold.map(|(prof_id, act)| {
-                                let target_kind =
-                                    EncoderOverlayKind::from_action(&act);
+                                let target_kind = EncoderOverlayKind::from_action(&act);
                                 let ad = match &act {
                                     ResolvedHostAction::AgentCommand { adapter, .. }
                                         if matches!(
@@ -2337,11 +2341,9 @@ fn execute_clicks_with_encoder_picker(
                         event.received_at,
                     ) {
                         EncoderReleaseOutcome::Consumed => continue,
-                        EncoderReleaseOutcome::FiredHold {
-                            overlay_kind,
-                            ..
-                        } => {
-                            let Some((profile_id, hold_action, action_adapter, _)) = hold_entry else {
+                        EncoderReleaseOutcome::FiredHold { overlay_kind, .. } => {
+                            let Some((profile_id, hold_action, action_adapter, _)) = hold_entry
+                            else {
                                 continue;
                             };
                             if !policy.admits(admission, &hold_action) {
@@ -2376,12 +2378,8 @@ fn execute_clicks_with_encoder_picker(
                                 if let Some(ref adapter) = action_adapter {
                                     let cancel_action = ModelPickerCommand::ModelPickerCancel
                                         .into_host_action(adapter.clone());
-                                    let _ = execute(
-                                        &profile_id,
-                                        "ENC_CLK",
-                                        &cancel_action,
-                                        admission,
-                                    );
+                                    let _ =
+                                        execute(&profile_id, "ENC_CLK", &cancel_action, admission);
                                 }
                             }
                             if overlay_kind != Some(EncoderOverlayKind::ModelPicker) {
@@ -2686,11 +2684,7 @@ fn execute_clicks_with_encoder_picker(
                 }
                 OverlayTransition::Cancelled => {
                     active_picker_context = None;
-                    set_capture_state(
-                        false,
-                        &mut mouse_capture_enabled,
-                        &mut set_mouse_capture,
-                    );
+                    set_capture_state(false, &mut mouse_capture_enabled, &mut set_mouse_capture);
                 }
                 OverlayTransition::None => {}
             }
@@ -6080,11 +6074,7 @@ mod tests {
                     "ENC_CLK".into(),
                     "antigravity:model-picker-cancel".into(),
                 ),
-                (
-                    ag_profile_id,
-                    "ENC_CLK".into(),
-                    "antigravity:search".into(),
-                ),
+                (ag_profile_id, "ENC_CLK".into(), "antigravity:search".into(),),
             ]
         );
         assert_eq!(capture_transitions, vec![true, false]);
