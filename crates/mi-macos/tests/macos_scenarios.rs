@@ -169,6 +169,43 @@ fn test_document_instance_lock_rejects_duplicate_owner_until_released() {
 }
 
 #[test]
+fn test_document_instance_lock_rejects_symlink_and_public_mode_and_reads_pid_when_locked() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let temp = TempDir::new().expect("temp dir");
+    let doc_dir = temp.path().join("micro-input-doc-sec");
+    std::fs::create_dir_all(&doc_dir).unwrap();
+    std::fs::set_permissions(&doc_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let outside = temp.path().join("outside.txt");
+    std::fs::write(&outside, "preserve-me\n").unwrap();
+    let lock_path = doc_dir.join("instance.lock");
+    symlink(&outside, &lock_path).unwrap();
+
+    assert!(
+        DocumentInstanceLock::acquire_with_pid(&doc_dir, 4242).is_err(),
+        "acquire must reject symlink at instance.lock"
+    );
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "preserve-me\n");
+    assert_eq!(DocumentInstanceLock::owner_pid(&doc_dir), None);
+    std::fs::remove_file(&lock_path).unwrap();
+
+    std::fs::write(&lock_path, "9999\n").unwrap();
+    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        DocumentInstanceLock::acquire_with_pid(&doc_dir, 4242).is_err(),
+        "acquire must reject 0o644 instance.lock"
+    );
+    assert_eq!(DocumentInstanceLock::owner_pid(&doc_dir), None);
+    std::fs::remove_file(&lock_path).unwrap();
+
+    let _held = DocumentInstanceLock::acquire_with_pid(&doc_dir, 5151)
+        .unwrap()
+        .unwrap();
+    assert_eq!(DocumentInstanceLock::owner_pid(&doc_dir), Some(5151));
+}
+
+#[test]
 fn test_app_bundle_cache_caches_lookups_and_handles_wildcard() {
     let cache = AppBundleCache::with_resolver(Arc::new(|bundle_id| AppBundleInfo {
         bundle_id: bundle_id.to_string(),

@@ -1,9 +1,58 @@
 use std::ffi::CString;
-use std::fs::{self, DirBuilder};
+use std::fs::DirBuilder;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+
+fn validate_lock_fd(fd: i32) -> io::Result<()> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let uid = unsafe { libc::getuid() };
+    if (st.st_mode & libc::S_IFMT) != libc::S_IFREG || st.st_uid != uid || (st.st_mode & 0o077) != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "instance.lock failed security check",
+        ));
+    }
+    Ok(())
+}
+
+fn read_pid_from_fd(fd: i32) -> Option<i32> {
+    if unsafe { libc::lseek(fd, 0, libc::SEEK_SET) } < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 64];
+    let mut total = 0usize;
+    while total < buf.len() {
+        let n = unsafe {
+            libc::read(
+                fd,
+                buf[total..].as_mut_ptr().cast::<libc::c_void>(),
+                buf.len() - total,
+            )
+        };
+        if n > 0 {
+            total += n as usize;
+        } else if n == 0 {
+            break;
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+    }
+    if total == buf.len() {
+        return Some(-1);
+    }
+    let raw = std::str::from_utf8(&buf[..total]).ok()?;
+    Some(raw.trim().parse::<i32>().unwrap_or(-1))
+}
 
 #[derive(Debug)]
 pub struct DocumentInstanceLock {
@@ -30,7 +79,11 @@ impl DocumentInstanceLock {
         let fd = unsafe {
             libc::open(
                 c_path.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC,
+                libc::O_RDWR
+                    | libc::O_CREAT
+                    | libc::O_NOFOLLOW
+                    | libc::O_NONBLOCK
+                    | libc::O_CLOEXEC,
                 0o600 as libc::c_uint,
             )
         };
@@ -38,12 +91,23 @@ impl DocumentInstanceLock {
             return Err(io::Error::last_os_error());
         }
 
-        let lock_rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-        if lock_rc != 0 {
+        if let Err(err) = validate_lock_fd(fd) {
             unsafe {
                 libc::close(fd);
             }
-            return Ok(None);
+            return Err(err);
+        }
+
+        let lock_rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if lock_rc != 0 {
+            let err = io::Error::last_os_error();
+            unsafe {
+                libc::close(fd);
+            }
+            if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                return Ok(None);
+            }
+            return Err(err);
         }
 
         let payload = format!("{pid}\n");
@@ -72,8 +136,20 @@ impl DocumentInstanceLock {
     pub fn owner_pid(document_dir: &Path) -> Option<i32> {
         let lock_path = document_dir.join("instance.lock");
         let c_path = CString::new(lock_path.as_os_str().as_bytes()).ok()?;
-        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
         if fd < 0 {
+            return None;
+        }
+
+        if validate_lock_fd(fd).is_err() {
+            unsafe {
+                libc::close(fd);
+            }
             return None;
         }
 
@@ -86,11 +162,16 @@ impl DocumentInstanceLock {
             return None;
         }
 
+        let err = io::Error::last_os_error();
+        let pid = if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            read_pid_from_fd(fd)
+        } else {
+            None
+        };
         unsafe {
             libc::close(fd);
         }
-        let raw = fs::read_to_string(&lock_path).ok()?;
-        Some(raw.trim().parse::<i32>().unwrap_or(-1))
+        pid
     }
 
     pub fn lock_path(&self) -> &Path {
@@ -131,11 +212,21 @@ mod tests {
         let lock = DocumentInstanceLock::acquire_with_pid(&doc_dir, 12345)
             .unwrap()
             .unwrap();
-        let dir_mode = fs::metadata(&doc_dir).unwrap().permissions().mode() & 0o777;
+        let dir_mode = std::fs::metadata(&doc_dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700);
+        let lock_mode = std::fs::metadata(lock.lock_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(lock_mode, 0o600);
         assert_eq!(lock.lock_path(), doc_dir.join("instance.lock"));
 
-        fs::write(lock.lock_path(), "not-a-pid\n").unwrap();
+        std::fs::write(lock.lock_path(), "not-a-pid\n").unwrap();
+        assert_eq!(DocumentInstanceLock::owner_pid(&doc_dir), Some(-1));
+
+        let oversized = format!("{}\n", "1".repeat(80));
+        std::fs::write(lock.lock_path(), oversized).unwrap();
         assert_eq!(DocumentInstanceLock::owner_pid(&doc_dir), Some(-1));
     }
 }

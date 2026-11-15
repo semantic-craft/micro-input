@@ -11,6 +11,34 @@ use std::{
     path::PathBuf,
 };
 const LIMIT: u64 = 4 * 1024 * 1024;
+
+#[cfg(unix)]
+const O_NONBLOCK_FLAG: i32 = {
+    #[cfg(target_os = "macos")]
+    {
+        0x0004
+    }
+    #[cfg(target_os = "linux")]
+    {
+        0o4000
+    }
+};
+
+#[cfg(unix)]
+const O_NOFOLLOW_FLAG: i32 = {
+    #[cfg(target_os = "macos")]
+    {
+        0x0100
+    }
+    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "x86")))]
+    {
+        0o400000
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        0o100000
+    }
+};
 #[derive(Default)]
 pub struct DocumentStore {
     pub draft: Draft,
@@ -27,11 +55,19 @@ pub struct DocumentStore {
     apply_preview: Option<crate::apply::Pending>,
 }
 pub(crate) fn read(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
-    let f = match fs::File::open(path) {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(O_NOFOLLOW_FLAG | O_NONBLOCK_FLAG);
+    let f = match options.open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.to_string()),
     };
+    let meta = f.metadata().map_err(|e| e.to_string())?;
+    if !meta.file_type().is_file() {
+        return Err("本地文档不是常规文件；原文件保留".into());
+    }
     let mut b = Vec::new();
     f.take(LIMIT + 1)
         .read_to_end(&mut b)
@@ -1185,9 +1221,11 @@ impl HostPreferencesStore {
 pub(crate) struct Lock(PathBuf);
 impl Lock {
     pub(crate) fn acquire(path: PathBuf) -> Result<Self, String> {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600).custom_flags(O_NOFOLLOW_FLAG);
+        options
             .open(&path)
             .map_err(|_| "文档正在保存或上次保存中断；请检查 .lock 文件")?;
         Ok(Self(path))
@@ -1340,5 +1378,66 @@ mod tests {
 
         let saved_json = fs::read_to_string(&prefs_path).unwrap();
         assert!(!saved_json.contains("preferred_device_serial"));
+    }
+
+    #[test]
+    fn read_rejects_symlink_dangling_symlink_and_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+        use std::time::Duration;
+
+        extern "C" {
+            #[cfg(target_os = "macos")]
+            fn mkfifo(path: *const std::ffi::c_char, mode: u16) -> std::ffi::c_int;
+            #[cfg(not(target_os = "macos"))]
+            fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> std::ffi::c_int;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.json");
+        fs::write(&target, b"{}").unwrap();
+        let link = dir.path().join("link.json");
+        symlink(&target, &link).unwrap();
+        assert!(read(&link).is_err(), "read must reject symlink");
+
+        let dangling = dir.path().join("dangling.json");
+        symlink(dir.path().join("missing.json"), &dangling).unwrap();
+        assert!(
+            read(&dangling).is_err(),
+            "read must reject dangling symlink instead of returning Ok(None)"
+        );
+
+        let fifo = dir.path().join("pipe.json");
+        let c_fifo = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+
+        let fifo_clone = fifo.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read(&fifo_clone));
+        });
+        let outcome = rx
+            .recv_timeout(Duration::from_millis(300))
+            .expect("storage::read blocked on FIFO");
+        assert!(outcome.is_err(), "read must reject FIFO");
+    }
+
+    #[test]
+    fn lock_acquire_uses_private_mode_and_rejects_symlink() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("workbench.lock");
+        let guard = Lock::acquire(lock_path.clone()).unwrap();
+        let mode = fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "Lock::acquire must create 0o600 lock file");
+        drop(guard);
+
+        let target = dir.path().join("target.txt");
+        fs::write(&target, b"keep").unwrap();
+        symlink(&target, &lock_path).unwrap();
+        assert!(Lock::acquire(lock_path).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"keep");
     }
 }

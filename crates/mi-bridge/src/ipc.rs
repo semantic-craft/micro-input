@@ -89,7 +89,7 @@ impl UnixJsonTransport {
         {
             return Err(UnixTransportError::InvalidPeer);
         }
-        if request_bytes.len() > self.request_limit {
+        if request_bytes.len() > self.request_limit || request_bytes.contains(&b'\n') {
             return Err(UnixTransportError::InvalidReply);
         }
         let mut stream =
@@ -167,7 +167,11 @@ mod tests {
         );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
-            transport(path).exchange_blocking(b"123456789"),
+            transport(path.clone()).exchange_blocking(b"123456789"),
+            Err(UnixTransportError::InvalidReply)
+        );
+        assert_eq!(
+            transport(path).exchange_blocking(b"{}\n{}"),
             Err(UnixTransportError::InvalidReply)
         );
         assert_eq!(

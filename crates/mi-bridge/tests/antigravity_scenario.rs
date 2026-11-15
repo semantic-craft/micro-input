@@ -495,3 +495,105 @@ fn antigravity_grant_and_unix_client_enforce_permissions_whitelists_and_zero_rea
     client.close();
     server.join().unwrap();
 }
+
+#[test]
+fn antigravity_status_client_rejects_public_regular_file_and_symlink_socket_before_sending_token() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::Builder::new()
+        .prefix("mi-ag-sec-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sock_path = dir.path().join("antigravity.sock");
+    let grant_path = dir.path().join("antigravity-grant.json");
+    let g_val = json!({
+        "version": 1,
+        "socketPath": sock_path.to_str().unwrap(),
+        "token": "0123456789abcdef0123456789abcdef",
+        "instanceId": "ag-inst-sec",
+        "generation": 1,
+        "allowedWorkspaces": ["/workspace/ag-alpha"],
+        "capabilities": AntigravityCapabilities::installed_2_29_0(),
+    });
+    std::fs::write(&grant_path, serde_json::to_vec(&g_val).unwrap()).unwrap();
+    std::fs::set_permissions(&grant_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    // Regular file at socketPath
+    std::fs::write(&sock_path, b"not-a-socket").unwrap();
+    std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let client = AntigravityStatusClient::new(&grant_path);
+    assert_eq!(client.connect(), Err(AntigravityFailure::Denied));
+    std::fs::remove_file(&sock_path).unwrap();
+
+    // 0o666 socket must be rejected before connecting or sending token
+    let listener = UnixListener::bind(&sock_path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o666)).unwrap();
+    assert_eq!(client.connect(), Err(AntigravityFailure::Denied));
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    drop(listener);
+    std::fs::remove_file(&sock_path).unwrap();
+
+    // Symlinked socket pointing to a private 0o600 socket must also be rejected
+    let real_sock = dir.path().join("real.sock");
+    let real_listener = UnixListener::bind(&real_sock).unwrap();
+    real_listener.set_nonblocking(true).unwrap();
+    std::fs::set_permissions(&real_sock, std::fs::Permissions::from_mode(0o600)).unwrap();
+    symlink(&real_sock, &sock_path).unwrap();
+    assert_eq!(client.connect(), Err(AntigravityFailure::Denied));
+    assert_eq!(
+        real_listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn antigravity_grant_load_rejects_oversized_and_symlink_files() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::Builder::new()
+        .prefix("mi-ag-grant-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let grant_path = dir.path().join("antigravity-grant.json");
+    let big_ws = format!("/workspace/{}", "x".repeat(70_000));
+    let oversized = json!({
+        "version": 1,
+        "socketPath": dir.path().join("ag.sock").to_str().unwrap(),
+        "token": "0123456789abcdef0123456789abcdef",
+        "instanceId": "ag-inst-big",
+        "generation": 1,
+        "allowedWorkspaces": [big_ws],
+        "capabilities": AntigravityCapabilities::installed_2_29_0(),
+    });
+    std::fs::write(&grant_path, serde_json::to_vec(&oversized).unwrap()).unwrap();
+    std::fs::set_permissions(&grant_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        AntigravityGrant::load(&grant_path),
+        Err(AntigravityFailure::Grant)
+    );
+
+    let real_grant = dir.path().join("real-grant.json");
+    let valid = json!({
+        "version": 1,
+        "socketPath": dir.path().join("ag.sock").to_str().unwrap(),
+        "token": "0123456789abcdef0123456789abcdef",
+        "instanceId": "ag-inst-link",
+        "generation": 1,
+        "allowedWorkspaces": ["/workspace/ag-alpha"],
+        "capabilities": AntigravityCapabilities::installed_2_29_0(),
+    });
+    std::fs::write(&real_grant, serde_json::to_vec(&valid).unwrap()).unwrap();
+    std::fs::set_permissions(&real_grant, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::remove_file(&grant_path).unwrap();
+    symlink(&real_grant, &grant_path).unwrap();
+    assert_eq!(
+        AntigravityGrant::load(&grant_path),
+        Err(AntigravityFailure::Grant)
+    );
+}
