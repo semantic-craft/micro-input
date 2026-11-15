@@ -233,7 +233,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         ("ENC_CC", "model-picker-prev"),
         ("AG14", "model-picker-next"),
         ("ENC_CW", "model-picker-next"),
-        ("ENC_CLK", "model-picker-confirm"),
+        ("ENC_CLK", "model-picker-open"),
         ("AG15", "scroll-up"),
         ("AG17", "scroll-down"),
     ] {
@@ -250,7 +250,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         mi_model::host_router::resolve_encoder_hold_action(&draft.document, Some(ag_pid), true),
         Some(ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
-            command: "model-picker-open".into(),
+            command: "search".into(),
         })
     );
     for binding in ["AG05", "AG16", "AG18"] {
@@ -271,7 +271,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         ("ENC_CC", "model-picker-prev"),
         ("AG14", "model-picker-next"),
         ("ENC_CW", "model-picker-next"),
-        ("ENC_CLK", "model-picker-confirm"),
+        ("ENC_CLK", "model-picker-open"),
     ] {
         assert_eq!(
             resolve_host_action(&draft.document, Some(dsh_pid), binding, true),
@@ -285,7 +285,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         mi_model::host_router::resolve_encoder_hold_action(&draft.document, Some(dsh_pid), true),
         Some(ResolvedHostAction::AgentCommand {
             adapter: "dsh-desktop".into(),
-            command: "model-picker-open".into(),
+            command: "search".into(),
         })
     );
     assert_eq!(
@@ -681,7 +681,7 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
             ("ENC_CC", "model-picker-prev"),
             ("AG14", "model-picker-next"),
             ("ENC_CW", "model-picker-next"),
-            ("ENC_CLK", "model-picker-confirm"),
+            ("ENC_CLK", "model-picker-open"),
         ];
         for (binding, expected_cmd) in dial_expectations {
             assert_eq!(
@@ -697,9 +697,9 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
             mi_model::host_router::resolve_encoder_hold_action(&draft.document, Some(&pid), true),
             Some(ResolvedHostAction::AgentCommand {
                 adapter: adapter.into(),
-                command: "model-picker-open".into(),
+                command: "search".into(),
             }),
-            "{name} encoder_hold_action_id must resolve to {adapter}/model-picker-open"
+            "{name} encoder_hold_action_id must resolve to {adapter}/search"
         );
         let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
         for slot in [13, 14, 15] {

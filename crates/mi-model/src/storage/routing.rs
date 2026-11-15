@@ -247,6 +247,11 @@ impl DocumentStore {
             {
                 crate::i18n::tr("弹出模型选择页", locale).to_owned()
             }
+            crate::host_router::ResolvedHostAction::AgentCommand { command, .. }
+                if command == "search" =>
+            {
+                crate::i18n::tr("搜索会话", locale).to_owned()
+            }
             _ => profile
                 .and_then(|prof| prof.layer_order.first())
                 .and_then(|lid| graph.layers.get(lid))
@@ -434,8 +439,8 @@ mod tests {
                 assert_eq!(by_id("AG12")["label"], "停止听写并提交");
                 assert_eq!(by_id("AG13")["label"], "选择上一模型 / 档位");
                 assert_eq!(by_id("AG14")["label"], "选择下一模型 / 档位");
-                assert_eq!(by_id("ENC_CLK")["label"], "确认所选模型");
-                assert_eq!(state["encoder_hold_label"], "弹出模型选择页");
+                assert_eq!(by_id("ENC_CLK")["label"], "弹出模型选择页");
+                assert_eq!(state["encoder_hold_label"], "搜索会话");
                 continue;
             }
 
@@ -470,8 +475,8 @@ mod tests {
                 assert_eq!(by_id("AG12")["label"], "停止听写并提交");
                 assert_eq!(by_id("AG13")["label"], "选择上一模型 / 档位");
                 assert_eq!(by_id("AG14")["label"], "选择下一模型 / 档位");
-                assert_eq!(by_id("ENC_CLK")["label"], "确认所选模型");
-                assert_eq!(state["encoder_hold_label"], "弹出模型选择页");
+                assert_eq!(by_id("ENC_CLK")["label"], "弹出模型选择页");
+                assert_eq!(state["encoder_hold_label"], "搜索会话");
                 assert_eq!(by_id("AG15")["label"], "向上滚动对话");
                 assert_eq!(by_id("AG16")["label"], "历史后退 (command [)");
                 assert_eq!(by_id("AG17")["label"], "向下滚动对话");
@@ -480,8 +485,8 @@ mod tests {
                 assert_eq!(by_id("AG01")["label"], "聚焦输入框");
                 assert_eq!(by_id("AG13")["label"], "选择上一模型 / 档位");
                 assert_eq!(by_id("AG14")["label"], "选择下一模型 / 档位");
-                assert_eq!(by_id("ENC_CLK")["label"], "确认所选模型");
-                assert_eq!(state["encoder_hold_label"], "弹出模型选择页");
+                assert_eq!(by_id("ENC_CLK")["label"], "弹出模型选择页");
+                assert_eq!(state["encoder_hold_label"], "搜索会话");
             }
         }
 
@@ -873,12 +878,12 @@ mod tests {
             .unwrap();
         let en = store.routing_state_localized(crate::ResolvedLocale::En);
         assert_eq!(en["profile_name"], "Antigravity");
-        assert_eq!(en["encoder_hold_label"], "Open Model Picker");
+        assert_eq!(en["encoder_hold_label"], "Search Conversations");
         let keys = en["keys"].as_array().unwrap();
         let by_id = |b: &str| keys.iter().find(|k| k["binding_id"] == b).unwrap();
         assert_eq!(by_id("AG13")["label"], "Previous Model / Effort");
         assert_eq!(by_id("AG14")["label"], "Next Model / Effort");
-        assert_eq!(by_id("ENC_CLK")["label"], "Confirm Selected Model");
+        assert_eq!(by_id("ENC_CLK")["label"], "Open Model Picker");
 
         store
             .update_routing(request(

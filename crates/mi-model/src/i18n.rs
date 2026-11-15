@@ -1482,6 +1482,10 @@ const ACTION_DETAIL_EN_TABLE: &[(&str, &str)] = &[
         "Opens model and thinking effort picker (Cmd+/ or native control)",
     ),
     (
+        "打开当前目标 Agent 的会话搜索面板（Cmd+K）并进入旋钮上下选择会话",
+        "Opens target Agent search panel (Cmd+K) for dial conversation selection",
+    ),
+    (
         "打开当前目标 Agent 的模型选择弹层并进入旋钮选模型与推理力度会话",
         "Opens target Agent model picker for dial selection and effort tuning",
     ),

@@ -691,7 +691,7 @@ fn six_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
             "ENC_CLK",
             mi_model::host_router::ResolvedHostAction::AgentCommand {
                 adapter: "antigravity".into(),
-                command: "model-picker-confirm".into(),
+                command: "model-picker-open".into(),
             },
         ),
         (
@@ -746,7 +746,7 @@ fn six_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
         ),
         Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
-            command: "model-picker-open".into(),
+            command: "search".into(),
         })
     );
 
@@ -772,7 +772,7 @@ fn six_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
             ),
             Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
                 adapter: "antigravity".into(),
-                command: "model-picker-open".into(),
+                command: "search".into(),
             })
         );
     }
@@ -967,7 +967,7 @@ fn coding_agent_legacy_encoder_upgrades_losslessly_and_preserves_custom_encoder_
         mi_model::host_router::resolve_encoder_hold_action(&d.document, Some(&ag_pid), true),
         Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
-            command: "model-picker-open".into(),
+            command: "search".into(),
         })
     );
     assert_eq!(
@@ -975,6 +975,13 @@ fn coding_agent_legacy_encoder_upgrades_losslessly_and_preserves_custom_encoder_
         Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
             command: "model-picker-prev".into(),
+        })
+    );
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "ENC_CLK", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-open".into(),
         })
     );
     // Customized Codex encoder slot 13 remains untouched.
@@ -987,5 +994,111 @@ fn coding_agent_legacy_encoder_upgrades_losslessly_and_preserves_custom_encoder_
     assert_eq!(
         d.document.editable.graph.actions[codex_slot13_aid].id,
         "user-custom-knob"
+    );
+}
+
+#[test]
+fn coding_agent_v080_encoder_defaults_upgrade_to_v090_and_preserve_custom_hold() {
+    let mut d = Draft::default();
+    let ids = preset::install_agent_starter_profiles(&mut d).unwrap();
+    let ag_pid = ids
+        .iter()
+        .find(|pid| d.document.editable.graph.profiles[*pid].name == "Antigravity")
+        .unwrap()
+        .clone();
+    let ag_lid = d.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
+
+    let dsh_pid = ids
+        .iter()
+        .find(|pid| d.document.editable.graph.profiles[*pid].name == "DeepSeek Coder (DSH)")
+        .unwrap()
+        .clone();
+    let dsh_lid = d.document.editable.graph.profiles[&dsh_pid].layer_order[0].clone();
+
+    // 1. Simulate exact unmodified v0.8.0 Antigravity profile:
+    // Slot 13: prev, Slot 14: next, Slot 15: confirm, Hold: model-picker-open.
+    d.assign(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        15,
+        mi_model::draft::Action {
+            id: "agent-model-picker-confirm".into(),
+            name: "确认所选模型".into(),
+            category: "Agent".into(),
+            detail: "在已打开的模型选择弹层中回车确认当前高亮项".into(),
+            payload: json!({"type":"agent_command","adapter":"host","command":"model-picker-confirm"}),
+        },
+    )
+    .unwrap();
+    d.assign_encoder_hold(
+        &json!(ag_pid),
+        &json!(ag_lid),
+        mi_model::draft::Action {
+            id: "agent-model-picker-open".into(),
+            name: "弹出模型选择页".into(),
+            category: "Agent".into(),
+            detail: "打开当前目标 Agent 的模型选择弹层".into(),
+            payload: json!({"type":"agent_command","adapter":"host","command":"model-picker-open"}),
+        },
+    )
+    .unwrap();
+
+    // 2. Simulate customized hold action on DSH (e.g. user assigned custom script).
+    d.assign_encoder_hold(
+        &json!(dsh_pid),
+        &json!(dsh_lid),
+        mi_model::draft::Action {
+            id: "custom-user-hold".into(),
+            name: "我的专属长按".into(),
+            category: "命令".into(),
+            detail: "不应被升级覆盖".into(),
+            payload: json!({"type":"shell_command","command":"echo hold","working_directory":"/tmp"}),
+        },
+    )
+    .unwrap();
+
+    assert!(preset::coding_agent_layer_needs_encoder_migration(
+        &d.document,
+        "Antigravity",
+        &ag_lid
+    ));
+    assert!(!preset::coding_agent_layer_needs_encoder_migration(
+        &d.document,
+        "DeepSeek Coder (DSH)",
+        &dsh_lid
+    ));
+
+    preset::install_agent_starter_profiles(&mut d).unwrap();
+
+    // Antigravity v0.8.0 upgraded to v0.9.0 defaults.
+    assert!(!preset::coding_agent_layer_needs_encoder_migration(
+        &d.document,
+        "Antigravity",
+        &ag_lid
+    ));
+    assert_eq!(
+        mi_model::host_router::resolve_encoder_hold_action(&d.document, Some(&ag_pid), true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "search".into(),
+        })
+    );
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "ENC_CLK", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-open".into(),
+        })
+    );
+
+    // Custom hold action on DSH preserved.
+    let dsh_hold_aid = d.document.editable.graph.layers[&dsh_lid]
+        .control_settings
+        .as_ref()
+        .and_then(|cs| cs.encoder_hold_action_id.as_ref())
+        .unwrap();
+    assert_eq!(
+        d.document.editable.graph.actions[dsh_hold_aid].id,
+        "custom-user-hold"
     );
 }

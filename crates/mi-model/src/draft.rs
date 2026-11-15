@@ -749,6 +749,7 @@ pub fn actions() -> Vec<Action> {
                 ("prompt-summary", "工程指令 · Summary", "文本", "默认仅粘贴不回车（no_newline） · 自动暂存恢复剪贴板", json!({"type":"text","text":"Summarize where things stand and what's left"})),
                 ("agent-submit", "停止听写并提交", "提交控制", "若听写激活则先停并确认停止，再聚焦目标输入区回车提交", json!({"type":"agent_command","adapter":"host","command":"submit"})),
                 ("agent-prompt-submit", "粘贴指令并提交（显式回车）", "提交控制", "显式配置下先停听写、聚焦目标输入区、暂存剪贴板粘贴后再回车", json!({"type":"agent_command","adapter":"host","command":"submit-prompt:Continue"})),
+                ("agent-search", "搜索会话", "Agent", "打开当前目标 Agent 的会话搜索面板（Cmd+K）并进入旋钮上下选择会话", json!({"type":"agent_command","adapter":"host","command":"search"})),
                 ("agent-model-picker-open", "弹出模型选择页", "Agent", "打开当前目标 Agent 的模型选择弹层并进入旋钮选模型与推理力度会话", json!({"type":"agent_command","adapter":"host","command":"model-picker-open"})),
                 ("agent-model-picker-prev", "选择上一模型 / 档位", "Agent", "在已打开的模型选择弹层中向上移动高亮项（直接向窗口投递按键，不重聚焦输入框）", json!({"type":"agent_command","adapter":"host","command":"model-picker-prev"})),
                 ("agent-model-picker-next", "选择下一模型 / 档位", "Agent", "在已打开的模型选择弹层中向下移动高亮项（直接向窗口投递按键，不重聚焦输入框）", json!({"type":"agent_command","adapter":"host","command":"model-picker-next"})),
