@@ -764,7 +764,14 @@ mod macos {
         );
         let button = matches!(
             role.as_str(),
-            "AXButton" | "AXCheckBox" | "AXRadioButton" | "AXSwitch" | "AXToggleButton" | "AXLink"
+            "AXButton"
+                | "AXCheckBox"
+                | "AXRadioButton"
+                | "AXSwitch"
+                | "AXToggleButton"
+                | "AXLink"
+                | "AXPopUpButton"
+                | "AXMenuItem"
         );
         let children =
             if input || (purpose == ObservationPurpose::Sessions && role == "AXStaticText") {
@@ -2416,13 +2423,25 @@ mod macos {
                 .target
                 .as_ref()
                 .is_some_and(|target| target.identity.bundle_id == "com.openai.codex");
+            let is_dsh = self
+                .target
+                .as_ref()
+                .is_some_and(|target| target.identity.bundle_id == "com.deepseek.dsh");
             let codex_reasoning_trigger = is_codex
                 && data.role == "AXPopUpButton"
                 && data.pressable
                 && crate::managed_controls::is_codex_reasoning_trigger(&data.label);
+            let codex_model_trigger = is_codex
+                && matches!(data.role.as_str(), "AXPopUpButton" | "AXButton")
+                && data.pressable
+                && crate::managed_controls::is_codex_model_picker_trigger(&data.label);
             let codex_popover_item = is_codex
                 && data.role == "AXMenuItem"
                 && crate::managed_controls::is_codex_popover_menu_item(&data.label);
+            let dsh_model_trigger = is_dsh
+                && matches!(data.role.as_str(), "AXPopUpButton" | "AXButton")
+                && data.pressable
+                && crate::managed_controls::is_dsh_model_picker_trigger(&data.label);
 
             let relevant_button = data.pressable
                 && ([
@@ -2465,13 +2484,15 @@ mod macos {
                 && !chat_heading
                 && data.role != "AXScrollArea"
                 && !codex_reasoning_trigger
+                && !codex_model_trigger
                 && !codex_popover_item
+                && !dsh_model_trigger
             {
                 return None;
             }
             let pressable = if codex_popover_item {
                 data.pressable
-            } else if codex_reasoning_trigger {
+            } else if codex_reasoning_trigger || codex_model_trigger || dsh_model_trigger {
                 true
             } else {
                 relevant_button
@@ -2677,6 +2698,14 @@ mod macos {
         }
 
         fn capture_window(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
+            self.capture_window_with_scope_policy(bundle_id, true)
+        }
+
+        fn capture_window_with_scope_policy(
+            &mut self,
+            bundle_id: &str,
+            require_focused_pane: bool,
+        ) -> Result<ManagedWindow, String> {
             let captured = CapturedWindow::capture(bundle_id, bundle_id == "com.openai.codex")?;
             let pid = captured.pid;
             let window = captured.element.clone();
@@ -2745,10 +2774,13 @@ mod macos {
                 }
                 focus_path.reverse();
             }
-            let Some(scope_element_id) =
-                crate::managed_controls::select_input_scope(&input_paths, &focus_path)?
-            else {
-                return Ok(snapshot);
+            let scope_selection =
+                crate::managed_controls::select_input_scope(&input_paths, &focus_path);
+            let scope_element_id = match scope_selection {
+                Ok(Some(id)) => id,
+                Ok(None) => return Ok(snapshot),
+                Err(err) if require_focused_pane => return Err(err),
+                Err(_) => return Ok(snapshot),
             };
             let scope = self.element(scope_element_id)?;
             let scope_id = self.scope_identity(pid, window_id, &scope, previous_target.as_ref())?;
@@ -2929,6 +2961,9 @@ mod macos {
         }
         fn capture_for_scroll(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
             self.capture_window(bundle_id)
+        }
+        fn capture_for_window_key(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
+            self.capture_window_with_scope_policy(bundle_id, false)
         }
         fn read(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String> {
             self.validate(target)?;
@@ -5195,6 +5230,37 @@ mod macos {
             ];
             let normal_snap = summarize_codex_window("Debug chat".into(), &normal_chat_nodes);
             assert!(!normal_snap.has_resume_error);
+        }
+
+        #[test]
+        fn read_observed_node_extracts_popup_button_and_menu_item_labels_and_pressability() {
+            for (role, label) in [
+                ("AXPopUpButton", "GPT-5.4 Standard"),
+                ("AXMenuItem", "Select model"),
+            ] {
+                let mut pass = 0usize;
+                let observed = read_observed_node(
+                    ObservationPurpose::Controls,
+                    |names| {
+                        pass += 1;
+                        if pass == 1 {
+                            assert_eq!(names, &["AXRole", "AXSubrole", "AXHidden", "AXChildren"]);
+                            Ok(vec![Some(Owned::text(role)), None, None, None])
+                        } else {
+                            assert_eq!(names, &["AXDescription", "AXTitle", "AXEnabled"]);
+                            Ok(vec![None, Some(Owned::text(label)), None])
+                        }
+                    },
+                    |_| Ok(false),
+                    || Ok(vec!["AXPress".to_string()]),
+                )
+                .unwrap()
+                .expect("popup/menu control must be observed");
+                assert_eq!(observed.role, role);
+                assert_eq!(observed.label, label);
+                assert!(observed.enabled);
+                assert!(observed.pressable);
+            }
         }
 
         #[test]

@@ -55,6 +55,9 @@ pub trait ManagedAxProvider: Send {
     fn capture_for_scroll(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
         self.capture(bundle_id)
     }
+    fn capture_for_window_key(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
+        self.capture(bundle_id)
+    }
     fn read(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String>;
     fn read_control(
         &mut self,
@@ -178,6 +181,85 @@ pub(crate) fn is_codex_popover_menu_item(label: &str) -> bool {
     allowed
         .iter()
         .any(|target| trimmed.eq_ignore_ascii_case(target))
+}
+
+pub(crate) fn is_codex_model_picker_trigger(label: &str) -> bool {
+    if is_codex_trigger_excluded(label) {
+        return false;
+    }
+    let trimmed = label.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto approve") {
+        return false;
+    }
+    if is_codex_fallback_reasoning_trigger(label) {
+        return true;
+    }
+    let exact = [
+        "model",
+        "select model",
+        "choose model",
+        "switch model",
+        "模型",
+        "选择模型",
+        "切换模型",
+    ];
+    if exact.iter().any(|item| trimmed.eq_ignore_ascii_case(item)) {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let prefixes = [
+        "gpt-",
+        "claude",
+        "gemini",
+        "deepseek",
+        "o1",
+        "o3",
+        "o4",
+        "codex-",
+        "auto ",
+    ];
+    prefixes.iter().any(|prefix| lower.starts_with(prefix))
+}
+
+pub(crate) fn is_dsh_model_picker_trigger(label: &str) -> bool {
+    if is_codex_trigger_excluded(label) {
+        return false;
+    }
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let exact = [
+        "model",
+        "select model",
+        "choose model",
+        "switch model",
+        "effort",
+        "select effort",
+        "模型",
+        "选择模型",
+        "切换模型",
+        "深度思考",
+        "思考力度",
+        "推理力度",
+    ];
+    if exact.iter().any(|item| trimmed.eq_ignore_ascii_case(item)) {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let prefixes = [
+        "deepseek",
+        "claude",
+        "gemini",
+        "gpt-",
+        "qwen",
+        "r1",
+        "v3",
+        "model:",
+        "模型:",
+        "模型：",
+    ];
+    prefixes.iter().any(|prefix| lower.starts_with(prefix))
 }
 
 struct DismissRequest {
@@ -650,6 +732,177 @@ impl<P: ManagedAxProvider + 'static> ManagedAxControls<P> {
         let window = capture(&mut *provider, adapter)?;
         let control = focus_in_window(&mut *provider, &window.identity, self.readback_timeout)?;
         provider.insert_text(&window.identity, control, prompt)
+    }
+
+    pub fn open_model_picker(&self, adapter: &str) -> Result<(), String> {
+        let adapter = managed_adapter(adapter)?;
+        if adapter == DictationAdapter::Codex {
+            let _ = self.begin_codex_reasoning_turn();
+        }
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        match adapter {
+            DictationAdapter::Antigravity => {
+                let window = capture(&mut *provider, adapter)?;
+                {
+                    let mut targets = self
+                        .uncleared_targets
+                        .lock()
+                        .map_err(|_| blocked("ax_lock_poisoned"))?;
+                    validate_uncleared_target(&mut *provider, &mut targets, &window.identity)?;
+                }
+                let control =
+                    focus_in_window(&mut *provider, &window.identity, self.readback_timeout)?;
+                let cmd = vec!["command".to_string()];
+                provider.shortcut(&window.identity, control, 0x2C, &cmd)
+            }
+            DictationAdapter::Codex => {
+                let bundle = adapter_bundle(adapter);
+                let window = provider.capture_for_window_key(bundle)?;
+                validate_target(&window.identity, bundle)?;
+                {
+                    let mut targets = self
+                        .uncleared_targets
+                        .lock()
+                        .map_err(|_| blocked("ax_lock_poisoned"))?;
+                    validate_uncleared_target(&mut *provider, &mut targets, &window.identity)?;
+                }
+                let ctrl_shift = vec!["control".to_string(), "shift".to_string()];
+                if provider
+                    .send_window_key(&window.identity, 0x2E, &ctrl_shift)
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+                let popup_candidates: Vec<&ManagedControl> = window
+                    .controls
+                    .iter()
+                    .filter(|c| {
+                        c.enabled
+                            && c.pressable
+                            && c.role == "AXPopUpButton"
+                            && is_codex_model_picker_trigger(&c.label)
+                    })
+                    .collect();
+                let button_candidates: Vec<&ManagedControl> = window
+                    .controls
+                    .iter()
+                    .filter(|c| {
+                        c.enabled
+                            && c.pressable
+                            && c.role == "AXButton"
+                            && is_codex_model_picker_trigger(&c.label)
+                    })
+                    .collect();
+                let fallback_reasoning: Vec<&ManagedControl> = window
+                    .controls
+                    .iter()
+                    .filter(|c| {
+                        c.enabled
+                            && c.pressable
+                            && c.role == "AXPopUpButton"
+                            && is_codex_reasoning_trigger(&c.label)
+                    })
+                    .collect();
+                let trigger = if let [only] = popup_candidates.as_slice() {
+                    *only
+                } else if let [only] = button_candidates.as_slice() {
+                    *only
+                } else if let [only] = fallback_reasoning.as_slice() {
+                    *only
+                } else {
+                    return Err(blocked("model_picker_control_unavailable"));
+                };
+                provider.press(&window.identity, trigger.id)?;
+                if let Ok(updated) = read(&mut *provider, &window.identity) {
+                    let select_model_items: Vec<&ManagedControl> = updated
+                        .controls
+                        .iter()
+                        .filter(|c| {
+                            c.enabled
+                                && c.pressable
+                                && c.role == "AXMenuItem"
+                                && c.label.trim().eq_ignore_ascii_case("select model")
+                        })
+                        .collect();
+                    if let [item] = select_model_items.as_slice() {
+                        let _ = provider.press(&window.identity, item.id);
+                    }
+                }
+                Ok(())
+            }
+            DictationAdapter::Dsh => {
+                let window = capture(&mut *provider, adapter)?;
+                {
+                    let mut targets = self
+                        .uncleared_targets
+                        .lock()
+                        .map_err(|_| blocked("ax_lock_poisoned"))?;
+                    validate_uncleared_target(&mut *provider, &mut targets, &window.identity)?;
+                }
+                let popup_candidates: Vec<&ManagedControl> = window
+                    .controls
+                    .iter()
+                    .filter(|c| {
+                        c.enabled
+                            && c.pressable
+                            && c.role == "AXPopUpButton"
+                            && is_dsh_model_picker_trigger(&c.label)
+                    })
+                    .collect();
+                let button_candidates: Vec<&ManagedControl> = window
+                    .controls
+                    .iter()
+                    .filter(|c| {
+                        c.enabled
+                            && c.pressable
+                            && c.role == "AXButton"
+                            && is_dsh_model_picker_trigger(&c.label)
+                    })
+                    .collect();
+                if let [trigger] = popup_candidates.as_slice() {
+                    return provider.press(&window.identity, trigger.id);
+                }
+                if popup_candidates.is_empty() {
+                    if let [trigger] = button_candidates.as_slice() {
+                        return provider.press(&window.identity, trigger.id);
+                    }
+                }
+                if popup_candidates.len() > 1 || button_candidates.len() > 1 {
+                    return Err(blocked("ambiguous_model_picker_control"));
+                }
+                let cmd = vec!["command".to_string()];
+                if let Ok(control) =
+                    focus_in_window(&mut *provider, &window.identity, self.readback_timeout)
+                {
+                    provider.shortcut(&window.identity, control, 0x2C, &cmd)
+                } else {
+                    provider.send_window_key(&window.identity, 0x2C, &cmd)
+                }
+            }
+        }
+    }
+
+    pub fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        let adapter = managed_adapter(adapter)?;
+        if adapter == DictationAdapter::Codex {
+            let _ = self.begin_codex_reasoning_turn();
+        }
+        let bundle = adapter_bundle(adapter);
+        let mut provider = self
+            .provider
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        let window = provider.capture_for_window_key(bundle)?;
+        validate_target(&window.identity, bundle)?;
+        let mut targets = self
+            .uncleared_targets
+            .lock()
+            .map_err(|_| blocked("ax_lock_poisoned"))?;
+        validate_uncleared_target(&mut *provider, &mut targets, &window.identity)?;
+        provider.send_window_key(&window.identity, key_code, &[])
     }
 
     pub fn codex_reasoning(&self, action: CodexReasoningAction) -> Result<(), String> {

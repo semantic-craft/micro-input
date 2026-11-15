@@ -1,5 +1,8 @@
 //! Persistent device-scoped swallowing rules and observable Karabiner readiness.
-use mi_model::{direct_controls::DIRECT_CONTROLS, host_router::BottomRowLayout};
+use mi_model::{
+    direct_controls::{CONTROL_BINDINGS, DIRECT_CONTROLS},
+    host_router::BottomRowLayout,
+};
 use mi_transport::{ActivationPayload, TargetKeyboard, UserCommandReceiver};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -50,7 +53,16 @@ pub fn rules(
                 {"set_variable":{"name":latch,"value":1,"key_up_expression":other},"repeat":false}
             ])
         } else { json!([send]) };
-        json!({"type":"basic", "from":{"key_code":control.key_code,"modifiers":{"optional":["any"]}}, "conditions":[condition.clone()], "to":to})
+        let mut manipulator = json!({"type":"basic", "from":{"key_code":control.key_code,"modifiers":{"optional":["any"]}}, "conditions":[condition.clone()], "to":to});
+        if CONTROL_BINDINGS[control.slot as usize] == "ENC_CLK" {
+            manipulator["to_after_key_up"] = json!([{
+                "send_user_command": {
+                    "endpoint": receiver.path(),
+                    "payload": ActivationPayload::new_release(receiver.generation(), id),
+                }
+            }]);
+        }
+        manipulator
     }).collect();
     Ok(json!({"description":RULE_MARKER,"manipulators":manipulators}))
 }
@@ -678,6 +690,18 @@ mod tests {
             rules(&target(), &next, BottomRowLayout::Merged).unwrap(),
             rule
         );
+
+        let mut release_controls = Vec::new();
+        for (idx, manipulator) in manipulators.iter().enumerate() {
+            if let Some(after_up) = manipulator.get("to_after_key_up") {
+                let events = after_up.as_array().unwrap();
+                assert_eq!(events.len(), 1);
+                let payload = &events[0]["send_user_command"]["payload"];
+                assert_eq!(payload["released"], json!(true));
+                release_controls.push((idx, payload["control"].as_u64().unwrap()));
+            }
+        }
+        assert_eq!(release_controls, vec![(15, 15), (35, 35), (55, 55)]);
     }
 
     #[test]
