@@ -13,8 +13,10 @@ Micro Input 采用「纯 Rust 内核 + 极简 C-ABI 边界 + 原生 macOS 14+ Sw
 ## 构建与离线验证
 
 - `scripts/verify-offline` 执行全部静态门禁、Rust/Swift 单元测试、开发包构建以及六个隔离合成 QA 场景（`host-execution`、`dsh-navigation`、`antigravity-status`、`config-write`、`lighting-control`、`diagnostic-export`），自动核对 `launcher.json` 与清理结果后保留原构建包，不连接真实硬件或启动生产应用。附加 `--qa-only` 跳过单元门禁，仍执行构建和场景复验。
-- `scripts/check` 运行 Python 启动器单测、`cargo fmt --all -- --check`、`cargo test --locked --workspace --all-features`、`scripts/build`、`swift test --package-path app/MicroInput` 与 `scripts/check-boundaries.py`（含 `UNKNOWN-*` 清单对齐、生产只读边界、`R-C01`–`R-C12` 静态门禁及全部已跟踪 Markdown 断链检查）。
+- `scripts/check` 运行 Python 启动器单测、`cargo fmt --all -- --check`、`cargo test --locked --workspace --all-features`、`scripts/build`、`swift test --package-path app/MicroInput` 与 `scripts/check-boundaries.py`（含 `UNKNOWN-*` 清单对齐、生产只读边界、`R-C01`–`R-C13` 静态门禁及全部已跟踪 Markdown 断链检查）。
 - `scripts/build` 编译 `mi-model`、`mi-ffi` 静态库与 SwiftUI 可执行文件，调用 `scripts/generate-app-icon.swift` 与 `scripts/verify-app-icon.swift` 生成并校验 `AppIcon.icns`，打包并签名 `target/MicroInput.app`，随后注销临时包的 LaunchServices 登记（支持 `--release`）。
+- `scripts/install-app` 作为安装 `/Applications/Micro Input.app` 的唯一入口，接收 `.app` 目录或 `--zip <release-archive.zip>`，默认强制校验 `CFBundleIdentifier`、`codesign --verify --deep --strict`、`Developer ID Application:` 签名与 `spctl --assess --type execute`（安装开发/ad-hoc 包须显式传 `--allow-dev`）；同时比对现有包与来包的 `codesign -d -r -`（Designated Requirement），仅当签名要求变化时执行 `tccutil reset Accessibility craft.semantic.micro-input.dev`（除非 `--skip-tcc-reset` / `--dry-run`），避免系统设置保留旧签名假开启开关。
+- `scripts/release-macos` 构建、Developer ID 签名、公证、staple 并生成 Sparkle `appcast.xml` 与 `SHA256SUMS`（传 `--install` 在打包后调用 `scripts/install-app` 安装到 `/Applications/Micro Input.app`，传 `--publish` 发布到 GitHub Releases）。
 - `scripts/run` 启动当前 checkout 的 `target/MicroInput.app`，并持有 `<documentDir>/instance.lock` 排他锁与剥离继承环境变量，避免与 `/Applications/Micro Input.app` 双开产生双菜单栏图标。附加 `--list` / `--kill` 查看或结束受管实例；附加 `--verify` 在 `.scratch/qa-runs/<run-id>/` 创建 `0700` 隔离副本，默认持有 `qa.lock` 并在结束后删除临时应用、文档与 QA 偏好 plist，同时保留最多 20 个已完成的默认 QA 运行目录（可通过 `MI_QA_MAX_RETAINED_RUNS` 覆盖，并发 `--unique-bundle-id` 活动目录不参与清理）。
 - `scripts/perf-baseline` 构建并启动隔离 QA 实例，测量冷启动至工作台首次 `onAppear` 的耗时及空闲 CPU time 与 RSS（支持 `--seconds` 调整采样窗口），输出 `MEASURED` 基线而不设定未批准预算。
 
@@ -23,7 +25,7 @@ Micro Input 采用「纯 Rust 内核 + 极简 C-ABI 边界 + 原生 macOS 14+ Sw
 - `scripts/observe-input` 默认只跑合成回归；附加 `--observe-once` 后才在 45 秒只读被动窗口采集一次操作者配合的物理输入，脱敏日志写入 `.scratch/input-study/input-observation-<ID>/`。
 - `scripts/prepare-hardware-acceptance` 仅在本地生成 `0700`/`0600` 私有实机验收准备包并校验范围与摘要，不包含设备 I/O。
 - `scripts/hardware-acceptance` 默认只跑假 USB 回归；只有显式授权、明确设备路径与新鲜 H0 备份才执行单临时文件 H1 实验。
-- `scripts/verify-hardware` 在真实 USB Creator Micro 2（`303A:8298`）接入时编排只读 H0 核验、可选 `--include-h1` 与隔离 QA 应用自动 USB 连通及灯光同步核对，结果写入 `.scratch/hardware-acceptance/latest-result.json`。
+- `scripts/verify-hardware` 在真实 USB Creator Micro 2（`303A:8298`）接入时编排只读 H0 核验、可选 `--include-h1` 与 `target/MicroInput.app` 自动 USB 连通及灯光同步核对（静默旧进程但不覆盖 `/Applications/Micro Input.app`），结果写入 `.scratch/hardware-acceptance/latest-result.json`。
 
 ## 图标、菜单栏与轮盘菜单
 

@@ -414,3 +414,11 @@
 - 修复与证据：引入 `HostPreferences.locked_profile_id` 与 `SixLayerRoutingMode::{Locked, ManualPinned, AutoFollow}`，锁定或手动固定时将第 2 至 4 层 60 个按键及第 1 层 OAI 厂商通知统一路由到目标方案实时 20 槽动作表，忽略前台切换与时间戳抖动；仅在按住态（`apple_fn` 或自有听写）清理未确认时熔断接收器；唤醒与设备重枚举自动执行最多 3 次只读重连；稳态监控改为 2 秒零子进程轻量检查并兼容大日志尾部读取；界面实时投影 `AXIsProcessTrusted()` 状态与原版 `input.app` 竞争提示。
 - 验证点：`locked_mode_routes_layers_two_through_four_and_ignores_foreground_switches`、`manual_pinned_mode_routes_selected_profile_when_other_app_is_frontmost`、`one_shot_unconfirmed_receipt_keeps_six_layer_alive_while_held_fn_fences`、`check_log_readiness_handles_logs_larger_than_one_megabyte_and_log_rotation` 与 `scripts/verify-offline`。Seen 2x（2026-11-12）。
 
+## 正式安装包连续性与 TCC 辅助功能权限防退化门禁
+
+- 标签：#macOS #签名 #验收 #自动化
+- 起因与后果：一是 `scripts/verify-hardware` 的 `verify_live_app_usb_auto_acceptance` 曾用 `rsync -a --delete` 将 `Apple Development` / ad-hoc 签名的 `target/MicroInput.app` 覆盖进 `/Applications/Micro Input.app`；二是跨签名家族（`Developer ID Application` ↔ `Apple Development` / ad-hoc）手工替换同一 `CFBundleIdentifier` 时，macOS `tccd` 仍保留旧 `csreq`，导致系统设置界面显示“辅助功能”已开启而 `AXIsProcessTrusted()` 返回 `false`；三是 `MacOsSystemDriver::open_accessibility_settings()` 仅打开系统设置 URL，未通过 `AXIsProcessTrustedWithOptions`（`AXTrustedCheckOptionPrompt` = `kCFBooleanTrue`）主动登记当前包签名。
+- 修复与证据：新增统一安装入口 `scripts/install-app`（默认要求 `Developer ID Application:` 与 `spctl` 通过、须显式 `--allow-dev` 才安装开发包，并在新旧 `codesign -d -r -` Designated Requirement 不一致时自动执行 `tccutil reset Accessibility craft.semantic.micro-input.dev`）；`scripts/release-macos` 新增 `--install` 串联该入口；移除 `scripts/verify-hardware` 对 `/Applications/Micro Input.app` 的 `rsync` 覆盖，始终直接启动 `target/MicroInput.app`；`MacOsSystemDriver::open_accessibility_settings()` 在打开设置前调用 `AXIsProcessTrustedWithOptions` 提示登记；`scripts/check-boundaries.py` 新增 `R-C13` 静态门禁。
+- 验证点：`scripts/tests/test_install_app_launcher.py`、`scripts/tests/test_verify_hardware_launcher.py`、`scripts/tests/test_release_macos_launcher.py`、`crates/mi-macos/src/executor.rs`（`accessibility_prompt_options_builds_single_entry_cf_dictionary`）与 `MI_AUTO_HOST_READY=0 ./scripts/verify-offline`。Seen 1x（2026-11-15）。
+
+

@@ -1,4 +1,5 @@
 import base64
+import os
 from pathlib import Path
 import plistlib
 import re
@@ -121,9 +122,10 @@ assert swift_lock_pos != -1 and swift_menu_pos != -1 and swift_lock_pos < swift_
     'AppDelegate.init() must acquire mi_core_acquire_instance_lock before setupStatusItem()'
 )
 rust_exec_src = (root / 'crates/mi-macos/src/executor.rs').read_text(encoding='utf-8')
-assert rust_exec_src.count('AXIsProcessTrustedWithOptions') == 0, (
+rust_exec_prod = rust_exec_src.split('#[cfg(test)]\nmod tests {', 1)[0]
+assert rust_exec_prod.count('AXIsProcessTrustedWithOptions') == 2, (
     'R-C05 violation in crates/mi-macos/src/executor.rs: '
-    'do not call AXIsProcessTrustedWithOptions inside host execution paths'
+    'AXIsProcessTrustedWithOptions must only appear in its extern declaration and open_accessibility_settings'
 )
 
 core_bridge_src = (root / 'app/MicroInput/Sources/MicroInputUI/CoreBridge.swift').read_text(encoding='utf-8')
@@ -404,5 +406,45 @@ for rel_md in subprocess.check_output(['git', 'ls-files', '*.md'], cwd=root, tex
         assert resolved.exists() and (resolved == root or root in resolved.parents), (
             f'R-C12 violation in {rel_md}: broken relative link {raw!r}'
         )
+
+verify_hw_src = (root / 'scripts/verify-hardware').read_text(encoding='utf-8')
+assert (
+    'app_to_launch = ROOT / "target" / "MicroInput.app"' in verify_hw_src
+    and '"rsync"' not in verify_hw_src
+    and 'installed_app' not in verify_hw_src
+), (
+    'R-C13 violation in scripts/verify-hardware: '
+    'hardware verification must launch ROOT / "target" / "MicroInput.app" without rsyncing into /Applications/Micro Input.app'
+)
+
+install_app_path = root / 'scripts/install-app'
+assert install_app_path.is_file() and os.access(install_app_path, os.X_OK), (
+    'R-C13 violation: scripts/install-app must exist and be executable'
+)
+install_app_src = install_app_path.read_text(encoding='utf-8')
+assert (
+    'Developer ID Application:' in install_app_src
+    and '--allow-dev' in install_app_src
+    and 'spctl' in install_app_src
+    and 'tccutil' in install_app_src
+    and 'codesign' in install_app_src
+), (
+    'R-C13 violation in scripts/install-app: '
+    'must enforce Developer ID Application unless --allow-dev and manage TCC continuity'
+)
+
+release_macos_src = (root / 'scripts/release-macos').read_text(encoding='utf-8')
+assert "'--install'" in release_macos_src and 'scripts/install-app' in release_macos_src, (
+    'R-C13 violation in scripts/release-macos: must wire --install to scripts/install-app'
+)
+
+open_ax_slice = rust_exec_prod.split('impl HostOsDriver for MacOsSystemDriver', 1)[1].split('fn open_application(', 1)[0]
+assert (
+    'fn open_accessibility_settings(&self)' in open_ax_slice
+    and 'AXIsProcessTrustedWithOptions' in open_ax_slice
+), (
+    'R-C13 violation in crates/mi-macos/src/executor.rs: '
+    'MacOsSystemDriver::open_accessibility_settings must call AXIsProcessTrustedWithOptions'
+)
 
 print('UNKNOWN inventory and read-only/no-send boundaries: PASS')
