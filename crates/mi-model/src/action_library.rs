@@ -434,6 +434,51 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
     }
 }
 
+pub fn capability_localized(
+    action: &Action,
+    command_execution_enabled: bool,
+    locale: crate::ResolvedLocale,
+) -> ActionCapability {
+    let base = capability(action, command_execution_enabled);
+    if locale == crate::ResolvedLocale::ZhHans {
+        return base;
+    }
+    let localize_target = |t: &str| -> String {
+        if let Some(tok) = t.strip_prefix("硬件 HID 鼠标 · ") {
+            format!("Hardware HID Mouse · {tok}")
+        } else if let Some(tok) = t.strip_prefix("板载速查通知 · ") {
+            format!("Onboard Cheat Sheet · {tok}")
+        } else if t == "跨 Agent 导航 / 后退" {
+            "Cross-Agent Navigation / Back".into()
+        } else if t == "跨 Agent 导航 / 前进" {
+            "Cross-Agent Navigation / Forward".into()
+        } else {
+            crate::i18n::tr(t, locale).to_string()
+        }
+    };
+    let localize_prereq = |p: &str| -> String {
+        if let Some(rest) = p.strip_prefix("需要本机已安装并配置 ") {
+            if let Some(adapter) = rest.strip_suffix(" CLI 适配器") {
+                return format!("Requires {adapter} CLI adapter installed and configured locally");
+            }
+        }
+        crate::i18n::tr(p, locale).to_string()
+    };
+    ActionCapability {
+        target: localize_target(&base.target),
+        prerequisites: base
+            .prerequisites
+            .iter()
+            .map(|p| localize_prereq(p))
+            .collect(),
+        host_required: base.host_required,
+        execution_available: base.execution_available,
+        unavailable_reason: crate::i18n::tr(&base.unavailable_reason, locale).to_string(),
+        source: crate::i18n::tr(&base.source, locale).to_string(),
+        result_semantics: crate::i18n::tr(&base.result_semantics, locale).to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LibraryEntry {
     pub action: Action,
@@ -443,8 +488,8 @@ pub struct LibraryEntry {
 
 struct CachedCatalogEntry {
     action: Action,
-    cap_enabled: ActionCapability,
-    cap_disabled: ActionCapability,
+    cap_enabled: [ActionCapability; 2],
+    cap_disabled: [ActionCapability; 2],
     search_text_enabled: String,
     search_text_disabled: String,
 }
@@ -455,26 +500,44 @@ fn cached_catalog() -> &'static [CachedCatalogEntry] {
         actions()
             .into_iter()
             .map(|action| {
-                let cap_enabled = capability(&action, true);
-                let cap_disabled = capability(&action, false);
+                let cap_enabled_zh =
+                    capability_localized(&action, true, crate::ResolvedLocale::ZhHans);
+                let cap_enabled_en = capability_localized(&action, true, crate::ResolvedLocale::En);
+                let cap_disabled_zh =
+                    capability_localized(&action, false, crate::ResolvedLocale::ZhHans);
+                let cap_disabled_en =
+                    capability_localized(&action, false, crate::ResolvedLocale::En);
+                let en_pres = crate::i18n::localize_action(&action, crate::ResolvedLocale::En);
                 let search_text_enabled = format!(
-                    "{} {} {} {} {}",
-                    action.name, action.category, action.detail, cap_enabled.target, action.payload
-                )
-                .to_lowercase();
-                let search_text_disabled = format!(
-                    "{} {} {} {} {}",
+                    "{} {} {} {} {} {} {} {} {}",
                     action.name,
                     action.category,
                     action.detail,
-                    cap_disabled.target,
+                    cap_enabled_zh.target,
+                    en_pres.name,
+                    en_pres.category,
+                    en_pres.summary,
+                    cap_enabled_en.target,
+                    action.payload
+                )
+                .to_lowercase();
+                let search_text_disabled = format!(
+                    "{} {} {} {} {} {} {} {} {}",
+                    action.name,
+                    action.category,
+                    action.detail,
+                    cap_disabled_zh.target,
+                    en_pres.name,
+                    en_pres.category,
+                    en_pres.summary,
+                    cap_disabled_en.target,
                     action.payload
                 )
                 .to_lowercase();
                 CachedCatalogEntry {
                     action,
-                    cap_enabled,
-                    cap_disabled,
+                    cap_enabled: [cap_enabled_zh, cap_enabled_en],
+                    cap_disabled: [cap_disabled_zh, cap_disabled_en],
                     search_text_enabled,
                     search_text_disabled,
                 }
@@ -490,22 +553,50 @@ pub fn search(
     favorites: &BTreeSet<String>,
     command_execution_enabled: bool,
 ) -> Vec<LibraryEntry> {
+    search_localized(
+        query,
+        category,
+        favorites_only,
+        favorites,
+        command_execution_enabled,
+        crate::ResolvedLocale::ZhHans,
+    )
+}
+
+pub fn search_localized(
+    query: &str,
+    category: &str,
+    favorites_only: bool,
+    favorites: &BTreeSet<String>,
+    command_execution_enabled: bool,
+    locale: crate::ResolvedLocale,
+) -> Vec<LibraryEntry> {
     let query = query.trim().to_lowercase();
+    let is_all = crate::i18n::is_all_category_filter(category);
+    let canonical_cat = crate::i18n::canonical_category_key(category);
+    let locale_idx = locale.index();
     cached_catalog()
         .iter()
         .filter_map(|entry| {
             let favorite = favorites.contains(&entry.action.id);
             let (info, text) = if command_execution_enabled {
-                (&entry.cap_enabled, &entry.search_text_enabled)
+                (&entry.cap_enabled[locale_idx], &entry.search_text_enabled)
             } else {
-                (&entry.cap_disabled, &entry.search_text_disabled)
+                (&entry.cap_disabled[locale_idx], &entry.search_text_disabled)
             };
-            if (category == "全部" || category == entry.action.category)
+            if (is_all || canonical_cat == entry.action.category)
                 && (!favorites_only || favorite)
                 && (query.is_empty() || text.contains(&query))
             {
+                let mut localized_action = entry.action.clone();
+                if locale == crate::ResolvedLocale::En {
+                    let pres = crate::i18n::localize_action(&localized_action, locale);
+                    localized_action.name = pres.name;
+                    localized_action.category = pres.category;
+                    localized_action.detail = pres.summary;
+                }
                 Some(LibraryEntry {
-                    action: entry.action.clone(),
+                    action: localized_action,
                     capability: info.clone(),
                     favorite,
                 })

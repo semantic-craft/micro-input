@@ -1,5 +1,6 @@
 use super::*;
 use crate::six_layer_runtime::InstallationStatus;
+use crate::{format_concise_keycap_caption_localized, ActiveHudContent};
 use mi_model::apply::AppliedSixLayerPlan;
 
 pub(super) struct SixLayerView {
@@ -43,6 +44,7 @@ pub(super) struct ProjectionInputs<'a> {
     pub keycap_overrides: &'a BTreeMap<(String, u32), CodexKeycapId>,
     pub keycap_search_query: &'a String,
     pub last_cursor_position: ScreenPoint,
+    pub last_exported_diagnostics_path: &'a Option<String>,
     pub last_exported_preset: &'a Option<String>,
     pub last_switch_duration: Duration,
     pub acknowledged_watermarks: &'a BTreeMap<String, String>,
@@ -61,6 +63,7 @@ pub(super) struct ProjectionInputs<'a> {
     pub radial_readiness: &'a RadialInputReadiness,
     pub radial_slot_configs: &'a [RadialSlotConfig; RADIAL_SECTOR_COUNT],
     pub radial_state: &'a RadialMenuState,
+    pub resolved_locale: mi_model::ResolvedLocale,
     pub screen_geometry: &'a ScreenGeometry,
     pub selected_binding_slot: Option<u32>,
     pub selected_joystick_direction: JoystickDirection8,
@@ -71,6 +74,7 @@ pub(super) struct ProjectionInputs<'a> {
     pub show_keycap_icons: bool,
     pub show_keycap_labels: bool,
     pub show_other_profiles: bool,
+    pub silent_at_login: bool,
     pub six_layer_busy: bool,
     pub six_layer_running_present: bool,
     pub six_layer_state: &'a crate::six_layer_runtime::SavedSixLayerState,
@@ -80,6 +84,7 @@ pub(super) struct ProjectionInputs<'a> {
     pub slot_table: &'a FourAppSlotTable,
     pub status_menu_open: bool,
     pub status_message: &'a String,
+    pub ui_language: mi_model::UiLanguagePreference,
     pub v070_auto_layer_sync_enabled: bool,
     pub v070_hardware_mouse_supported: bool,
     pub v070_projection: &'a crate::v070_hardware::V070HardwareProjection,
@@ -172,8 +177,16 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn active_profile_display_name(&self) -> String {
+        self.active_profile_display_name_for(self.resolved_locale)
+    }
+
+    pub(super) fn active_profile_canonical_display_name(&self) -> String {
+        self.active_profile_display_name_for(mi_model::ResolvedLocale::ZhHans)
+    }
+
+    fn active_profile_display_name_for(&self, locale: mi_model::ResolvedLocale) -> String {
         let Some(pid) = self.resolved_active_profile_id() else {
-            return "未选择方案".to_string();
+            return crate::i18n::tr("未选择方案", locale).to_string();
         };
         let Some(profile) = self
             .document_store
@@ -185,14 +198,15 @@ impl ProjectionInputs<'_> {
             .profiles
             .get(&pid)
         else {
-            return "未选择方案".to_string();
+            return crate::i18n::tr("未选择方案", locale).to_string();
         };
         CanonicalAgent::from_profile_name(&profile.name)
-            .map(|a| a.display_name().to_string())
-            .unwrap_or_else(|| profile.name.clone())
+            .map(|a| a.display_name_localized(locale).to_string())
+            .unwrap_or_else(|| mi_model::i18n::localize_profile_name(&profile.name, locale))
     }
 
     pub(super) fn build_board_layers_projection(&self) -> BoardLayersProjection {
+        let locale = self.resolved_locale;
         let doc = &self.document_store.host_store().draft.document;
         let plan = self
             .document_store
@@ -201,6 +215,11 @@ impl ProjectionInputs<'_> {
             .unwrap_or_default();
         let preview = self.document_store.board_preview_selection();
         let mut result = BoardLayersProjection::default();
+        if locale == mi_model::ResolvedLocale::En {
+            result.observed_status = crate::i18n::tr(&result.observed_status, locale).to_string();
+            result.apply_block_reason =
+                crate::i18n::tr(&result.apply_block_reason, locale).to_string();
+        }
         result.layers = std::array::from_fn(|i| {
             let layer = BoardLayer::ALL[i];
             let route = plan.route(layer);
@@ -208,26 +227,36 @@ impl ProjectionInputs<'_> {
             let profile = id.and_then(|id| doc.editable.graph.profiles.get(id));
             let issue = match route {
                 BoardLayerRoute::Unassigned => None,
-                _ if profile.is_none() => Some("方案不存在，原引用已保留".into()),
+                _ if profile.is_none() => {
+                    Some(crate::i18n::tr("方案不存在，原引用已保留", locale).to_string())
+                }
                 _ if id.and_then(|id| self.route_for_profile(id).ok()).as_ref() != Some(route) => {
-                    Some("方案归属与保存的意图不一致，不能执行".into())
+                    Some(
+                        crate::i18n::tr("方案归属与保存的意图不一致，不能执行", locale).to_string(),
+                    )
                 }
-                BoardLayerRoute::Native { .. } => {
-                    Some("保留 OAI 映射；USB 独占后由 Micro Input 当前方案控制".into())
-                }
+                BoardLayerRoute::Native { .. } => Some(
+                    crate::i18n::tr(
+                        "保留 OAI 映射；USB 独占后由 Micro Input 当前方案控制",
+                        locale,
+                    )
+                    .to_string(),
+                ),
                 _ => None,
             };
             BoardLayerProjection {
                 layer: layer.number(),
                 leds: layer.leds(),
                 profile_id: id.map(str::to_owned),
-                display_name: profile.map(|p| p.name.clone()).unwrap_or_else(|| {
-                    if id.is_some() {
-                        "缺失的方案".into()
-                    } else {
-                        "未分配".into()
-                    }
-                }),
+                display_name: profile
+                    .map(|p| mi_model::i18n::localize_profile_name(&p.name, locale))
+                    .unwrap_or_else(|| {
+                        if id.is_some() {
+                            crate::i18n::tr("缺失的方案", locale).to_string()
+                        } else {
+                            crate::i18n::tr("未分配", locale).to_string()
+                        }
+                    }),
                 owner: match route {
                     BoardLayerRoute::Unassigned => "Unassigned",
                     BoardLayerRoute::HostProfile { .. } => "MicroInput",
@@ -252,9 +281,10 @@ impl ProjectionInputs<'_> {
             .iter()
             .filter_map(|id| {
                 self.route_for_profile(id).ok()?;
+                let raw_name = &doc.editable.graph.profiles.get(id)?.name;
                 Some(BoardProfileChoice {
                     profile_id: id.clone(),
-                    display_name: doc.editable.graph.profiles.get(id)?.name.clone(),
+                    display_name: mi_model::i18n::localize_profile_name(raw_name, locale),
                 })
             })
             .collect();
@@ -270,20 +300,27 @@ impl ProjectionInputs<'_> {
                     .graph
                     .profiles
                     .get(id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| "缺失的方案（原引用保留）".into())
+                    .map(|p| mi_model::i18n::localize_profile_name(&p.name, locale))
+                    .unwrap_or_else(|| {
+                        crate::i18n::tr("缺失的方案（原引用保留）", locale).to_string()
+                    })
             })
-            .unwrap_or_else(|| "未分配".into());
+            .unwrap_or_else(|| crate::i18n::tr("未分配", locale).to_string());
         result.usb_preview_selected = preview == BoardPreviewSelection::UsbStartup;
         if let BoardRouting::Managed { layer } = self.board_routing {
             if self.device_connected && self.hardware_rpc_verified {
                 result.observed_layer = Some(layer);
                 result.observed_profile_kind = Some("legacy_three".into());
-                result.observed_status = format!("已确认旧三层，第 {layer} 层");
+                result.observed_status = if locale == mi_model::ResolvedLocale::En {
+                    format!("Verified legacy 3-layer, Layer {layer}")
+                } else {
+                    format!("已确认旧三层，第 {layer} 层")
+                };
                 if self.legacy_host_profile_id(layer).is_none() {
-                    result
-                        .observed_status
-                        .push_str(" · 绑定缺失或属于原生应用，按键已暂停");
+                    result.observed_status.push_str(crate::i18n::tr(
+                        " · 绑定缺失或属于原生应用，按键已暂停",
+                        locale,
+                    ));
                 }
             }
         }
@@ -292,6 +329,7 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn build_canvas_projection(&self, can_edit_draft: bool) -> CanvasProjection {
+        let locale = self.resolved_locale;
         let doc = &self.document_store.draft.document;
         let graph = &doc.editable.graph;
         let profile = self
@@ -301,8 +339,8 @@ impl ProjectionInputs<'_> {
         let profile_display_name = profile
             .map(|p| {
                 CanonicalAgent::from_profile_name(&p.name)
-                    .map(|a| a.display_name().to_string())
-                    .unwrap_or_else(|| p.name.clone())
+                    .map(|a| a.display_name_localized(locale).to_string())
+                    .unwrap_or_else(|| mi_model::i18n::localize_profile_name(&p.name, locale))
             })
             .unwrap_or_default();
 
@@ -314,7 +352,7 @@ impl ProjectionInputs<'_> {
                         let l = graph.layers.get(lid)?;
                         Some(CanvasLayerTab {
                             layer_id: lid.clone(),
-                            name: l.name.clone(),
+                            name: mi_model::i18n::localize_layer_name(&l.name, locale),
                             is_selected: self.selected_layer_id.as_deref() == Some(lid.as_str()),
                             is_protected_oai: doc.is_protected_oai_layer(lid),
                         })
@@ -338,21 +376,27 @@ impl ProjectionInputs<'_> {
         let protected_lock = if is_protected {
             let lid = self.selected_layer_id.clone().unwrap_or_default();
             let layer_name = layer
-                .map(|l| l.name.clone())
+                .map(|l| mi_model::i18n::localize_layer_name(&l.name, locale))
                 .unwrap_or_else(|| "ChatGPT".to_string());
             let owner_client_name = profile
-                .map(|p| p.name.clone())
+                .map(|p| mi_model::i18n::localize_profile_name(&p.name, locale))
                 .unwrap_or_else(|| "ChatGPT / Codex".to_string());
             Some(ProtectedLayerLockProjection {
                 is_locked: true,
                 layer_id: lid,
                 layer_name,
                 owner_client_name,
-                lock_badge_text: "只读保护层 · 保留原生映射 (KV_OAI_*)".to_string(),
-                explanation_text:
-                    "保留此层的 OAI 固件映射；USB 独占后由 Micro Input 当前方案处理输入。按键映射、预设覆盖与灯光编辑保持只读保护。"
-                        .to_string(),
-                unlock_button_title: "新建并切换到自定义层".to_string(),
+                lock_badge_text: crate::i18n::tr(
+                    "只读保护层 · 保留原生映射 (KV_OAI_*)",
+                    locale,
+                )
+                .to_string(),
+                explanation_text: crate::i18n::tr(
+                    "保留此层的 OAI 固件映射；USB 独占后由 Micro Input 当前方案处理输入。按键映射、预设覆盖与灯光编辑保持只读保护。",
+                    locale,
+                )
+                .to_string(),
+                unlock_button_title: crate::i18n::tr("新建并切换到自定义层", locale).to_string(),
             })
         } else {
             None
@@ -362,11 +406,12 @@ impl ProjectionInputs<'_> {
         let indexed_controls = index_layer_controls(layer);
         let encoder_bounds =
             CanvasRect::new(CANVAS_PADDING, CANVAS_PADDING, KEY_1U_SIZE, KEY_1U_SIZE);
-        let (hold_full_title, hold_act) = resolve_encoder_hold_action_info(doc, layer);
+        let (hold_full_title, hold_act) =
+            resolve_encoder_hold_action_info_localized(doc, layer, locale);
         let hold_label = if hold_act.is_some() {
-            format_concise_keycap_caption(&hold_full_title)
+            format_concise_keycap_caption_localized(&hold_full_title, locale)
         } else {
-            "未绑定".to_string()
+            crate::i18n::tr("未绑定", locale).to_string()
         };
         let encoder = EncoderDialProjection {
             bounds: encoder_bounds,
@@ -378,10 +423,11 @@ impl ProjectionInputs<'_> {
                 KEY_1U_SIZE,
             ),
             press_bounds: CanvasRect::new(CANVAS_PADDING + 22.0, CANVAS_PADDING + 22.0, 24.0, 24.0),
-            ccw_label: resolve_indexed_slot(doc, &indexed_controls, 13).0,
-            cw_label: resolve_indexed_slot(doc, &indexed_controls, 14).0,
-            press_label: format_concise_keycap_caption(
-                &resolve_indexed_slot(doc, &indexed_controls, 15).0,
+            ccw_label: resolve_indexed_slot_localized(doc, &indexed_controls, 13, locale).0,
+            cw_label: resolve_indexed_slot_localized(doc, &indexed_controls, 14, locale).0,
+            press_label: format_concise_keycap_caption_localized(
+                &resolve_indexed_slot_localized(doc, &indexed_controls, 15, locale).0,
+                locale,
             ),
             hold_label,
             selected_slot: match self.selected_surface {
@@ -408,12 +454,13 @@ impl ProjectionInputs<'_> {
                 let bx = jcx + ux * 24.0;
                 let by = jcy + uy * 24.0;
                 let logical_slot = dir.logical_sector_slot();
-                let full_title = resolve_indexed_slot(doc, &indexed_controls, logical_slot).0;
+                let full_title =
+                    resolve_indexed_slot_localized(doc, &indexed_controls, logical_slot, locale).0;
                 JoystickDirectionBadge {
                     direction: dir,
                     logical_slot,
                     bounds: CanvasRect::new(bx - 6.0, by - 6.0, 12.0, 12.0),
-                    concise_label: format_concise_keycap_caption(&full_title),
+                    concise_label: format_concise_keycap_caption_localized(&full_title, locale),
                     icon_token: Some(dir.label().to_string()),
                     is_selected: self.selected_surface == ControlSurfaceId::Joystick
                         && self.selected_joystick_direction == dir,
@@ -424,17 +471,18 @@ impl ProjectionInputs<'_> {
         let joystick_mode = layer
             .and_then(|l| l.control_settings.as_ref())
             .map(|s| JoystickControlMode::from_model_str(&s.joystick_mode));
-        let joystick_mode_label = match joystick_mode {
-            Some(JoystickControlMode::Mouse) => "硬件指针",
-            Some(JoystickControlMode::Scroll) => "硬件滚轮",
+        let (joystick_ui_mode, joystick_mode_label_zh) = match joystick_mode {
+            Some(JoystickControlMode::Mouse) => ("mouse", "硬件指针"),
+            Some(JoystickControlMode::Scroll) => ("scroll", "硬件滚轮"),
             Some(JoystickControlMode::LogicalSectors | JoystickControlMode::Source) | None => {
-                "8向摇杆"
+                ("logical_sectors", "8向摇杆")
             }
         };
         let joystick = JoystickPadProjection {
             bounds: joy_bounds,
             center_deadzone_radius: KEY_1U_SIZE * 0.20,
-            mode_label: joystick_mode_label.to_string(),
+            mode: joystick_ui_mode.to_string(),
+            mode_label: crate::i18n::tr(joystick_mode_label_zh, locale).to_string(),
             active_direction: self.selected_joystick_direction,
             sectors,
             is_selected: self.selected_surface == ControlSurfaceId::Joystick,
@@ -484,7 +532,7 @@ impl ProjectionInputs<'_> {
                 primary_slot
             };
             let (full_action_title, action_obj) =
-                resolve_indexed_slot(doc, &indexed_controls, effective_slot);
+                resolve_indexed_slot_localized(doc, &indexed_controls, effective_slot, locale);
             let override_keycap = if !self.keycap_overrides.is_empty() {
                 self.selected_profile_id
                     .as_ref()
@@ -498,7 +546,8 @@ impl ProjectionInputs<'_> {
                     .map(|k| k.glyph_symbol().to_string())
                     .unwrap_or_else(|| resolve_silkscreen_icon(effective_slot, action_obj)),
             );
-            let concise_caption = format_concise_keycap_caption(&full_action_title);
+            let concise_caption =
+                format_concise_keycap_caption_localized(&full_action_title, locale);
             let is_session_slot = (0..6u32)
                 .contains(&primary_slot)
                 .then_some(primary_slot as usize)
@@ -587,8 +636,14 @@ impl ProjectionInputs<'_> {
             .map(|layer| layer.leds())
             .unwrap_or([false; 3]);
         let board_preview_label = board_preview_layer
-            .map(|layer| format!("第 {} 层预览", layer.number()))
-            .unwrap_or_else(|| "USB 启动方案预览".into());
+            .map(|layer| {
+                if locale == mi_model::ResolvedLocale::En {
+                    format!("Layer {} Preview", layer.number())
+                } else {
+                    format!("第 {} 层预览", layer.number())
+                }
+            })
+            .unwrap_or_else(|| crate::i18n::tr("USB 启动方案预览", locale).to_string());
 
         CanvasProjection {
             profile_id: self.selected_profile_id.clone(),
@@ -624,6 +679,7 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn build_static_cheat_sheet_projection(&self) -> CheatSheetProjection {
+        let locale = self.resolved_locale;
         let doc = &self.document_store.host_store().draft.document;
         let graph = &doc.editable.graph;
         let pid_opt = self.resolved_active_profile_id();
@@ -669,6 +725,13 @@ impl ProjectionInputs<'_> {
         let joystick_mode = layer
             .and_then(|l| l.control_settings.as_ref())
             .map(|s| JoystickControlMode::from_model_str(&s.joystick_mode));
+        let joystick_ui_mode = match joystick_mode {
+            Some(JoystickControlMode::Mouse) => "mouse",
+            Some(JoystickControlMode::Scroll) => "scroll",
+            Some(JoystickControlMode::LogicalSectors | JoystickControlMode::Source) | None => {
+                "logical_sectors"
+            }
+        };
         let (_, hold_action_opt) = resolve_encoder_hold_action_info(doc, layer);
 
         let mut key_cells = Vec::with_capacity(20);
@@ -681,67 +744,112 @@ impl ProjectionInputs<'_> {
             } else {
                 slot
             };
-            let (mut label, act_opt) = resolve_slot_action_info(doc, layer, effective_slot);
-            let mut control_name_out = control_name.to_string();
-            let mut short_label = format_popover_cheat_label(&label);
+            let (raw_label, act_opt) = resolve_slot_action_info(doc, layer, effective_slot);
+            let mut label = if locale == mi_model::ResolvedLocale::En {
+                act_opt
+                    .map(|a| mi_model::i18n::localize_action(a, locale).name)
+                    .unwrap_or_else(|| crate::i18n::tr(&raw_label, locale).to_string())
+            } else {
+                raw_label.clone()
+            };
+            let mut control_name_out = crate::i18n::tr(control_name, locale).to_string();
+            let mut short_label = if locale == mi_model::ResolvedLocale::En {
+                if let Some(act) = act_opt {
+                    let pres = mi_model::i18n::localize_action(act, locale);
+                    mi_model::i18n::cheat_short_for_binding(&pres.cheat_short, binding_id, locale)
+                } else {
+                    let fallback = if raw_label == "未绑定" {
+                        "Empty"
+                    } else {
+                        crate::i18n::tr(&raw_label, locale)
+                    };
+                    mi_model::i18n::cheat_short_for_binding(fallback, binding_id, locale)
+                }
+            } else {
+                format_popover_cheat_label(&raw_label)
+            };
             let mut available = act_opt.is_some();
 
             if slot == 15 {
                 if let Some(hold_act) = hold_action_opt {
-                    control_name_out = "旋钮短按 / 长按".to_string();
-                    short_label = if hold_act.id == "agent-model-picker-open"
-                        && act_opt.is_some_and(|a| a.id == "agent-model-picker-confirm")
-                    {
-                        "确认/模型页".to_string()
-                    } else if act_opt.is_some() {
-                        format!(
-                            "{}/{}",
-                            short_label.chars().take(2).collect::<String>(),
-                            format_concise_keycap_caption(&hold_act.name)
-                                .chars()
-                                .take(2)
-                                .collect::<String>()
-                        )
+                    control_name_out = crate::i18n::tr("旋钮短按 / 长按", locale).to_string();
+                    if locale == mi_model::ResolvedLocale::En {
+                        let hold_en = mi_model::i18n::localize_action(hold_act, locale).name;
+                        short_label = if hold_act.id == "agent-model-picker-open"
+                            && act_opt.is_some_and(|a| a.id == "agent-model-picker-confirm")
+                        {
+                            "OK / Models".to_string()
+                        } else if act_opt.is_some() {
+                            "Tap / Hold".to_string()
+                        } else if hold_act.id == "agent-model-picker-open" {
+                            "Hold Models".to_string()
+                        } else {
+                            "Hold Action".to_string()
+                        };
+                        label = if act_opt.is_some() {
+                            format!("{label} · Hold: {hold_en}")
+                        } else {
+                            format!("Hold: {hold_en}")
+                        };
                     } else {
-                        format!("长按{}", format_concise_keycap_caption(&hold_act.name))
-                    };
-                    label = if act_opt.is_some() {
-                        format!("{label} · 长按{}", hold_act.name)
-                    } else {
-                        format!("长按{}", hold_act.name)
-                    };
+                        short_label = if hold_act.id == "agent-model-picker-open"
+                            && act_opt.is_some_and(|a| a.id == "agent-model-picker-confirm")
+                        {
+                            "确认/模型页".to_string()
+                        } else if act_opt.is_some() {
+                            format!(
+                                "{}/{}",
+                                short_label.chars().take(2).collect::<String>(),
+                                format_concise_keycap_caption(&hold_act.name)
+                                    .chars()
+                                    .take(2)
+                                    .collect::<String>()
+                            )
+                        } else {
+                            format!("长按{}", format_concise_keycap_caption(&hold_act.name))
+                        };
+                        label = if act_opt.is_some() {
+                            format!("{label} · 长按{}", hold_act.name)
+                        } else {
+                            format!("长按{}", hold_act.name)
+                        };
+                    }
                     available = true;
                 }
             } else if (16..=19).contains(&slot) {
                 match joystick_mode {
                     Some(JoystickControlMode::Mouse) => {
-                        control_name_out = "摇杆（硬件鼠标）".to_string();
+                        control_name_out = crate::i18n::tr("摇杆（硬件鼠标）", locale).to_string();
                         if slot == 19 {
-                            label = "模型选择中：展开 / 调高模型力度".to_string();
-                            short_label = "模型力度".to_string();
+                            label = crate::i18n::tr("模型选择中：展开 / 调高模型力度", locale)
+                                .to_string();
+                            short_label = crate::i18n::tr("模型力度", locale).to_string();
                             available = true;
                         } else if slot == 16 {
-                            label = "硬件鼠标指针（选模型时按右调力度）".to_string();
-                            short_label = "鼠标指针".to_string();
+                            label = crate::i18n::tr("硬件鼠标指针（选模型时按右调力度）", locale)
+                                .to_string();
+                            short_label = crate::i18n::tr("鼠标指针", locale).to_string();
                             available = true;
                         } else {
-                            label = "硬件鼠标指针".to_string();
+                            label = crate::i18n::tr("硬件鼠标指针", locale).to_string();
                             short_label = "—".to_string();
                             available = false;
                         }
                     }
                     Some(JoystickControlMode::Scroll) => {
-                        control_name_out = "摇杆（硬件滚轮）".to_string();
+                        control_name_out = crate::i18n::tr("摇杆（硬件滚轮）", locale).to_string();
                         if slot == 19 {
-                            label = "模型选择中：展开 / 调高模型力度".to_string();
-                            short_label = "模型力度".to_string();
+                            label = crate::i18n::tr("模型选择中：展开 / 调高模型力度", locale)
+                                .to_string();
+                            short_label = crate::i18n::tr("模型力度", locale).to_string();
                             available = true;
                         } else if slot == 16 {
-                            label = "硬件滚轮（选模型时按右调力度）".to_string();
-                            short_label = "硬件滚轮".to_string();
+                            label = crate::i18n::tr("硬件滚轮（选模型时按右调力度）", locale)
+                                .to_string();
+                            short_label = crate::i18n::tr("硬件滚轮", locale).to_string();
                             available = true;
                         } else {
-                            label = "硬件滚轮".to_string();
+                            label = crate::i18n::tr("硬件滚轮", locale).to_string();
                             short_label = "—".to_string();
                             available = false;
                         }
@@ -762,21 +870,23 @@ impl ProjectionInputs<'_> {
         CheatSheetProjection {
             profile_name: self.active_profile_display_name(),
             routing_summary: self.routing_mode_summary_label(),
+            joystick_mode: joystick_ui_mode.to_string(),
             target_agent_card: None,
             key_cells,
         }
     }
 
     pub(super) fn build_cheat_sheet_projection(&self) -> CheatSheetProjection {
+        let locale = self.resolved_locale;
         let mut sheet = self.build_static_cheat_sheet_projection();
         sheet.target_agent_card = self.active_desktop_agent_adapter().map(|adapter| {
             let agent_name = self
                 .active_canonical_agent()
-                .map(|a| a.display_name().to_string())
+                .map(|a| a.display_name_localized(locale).to_string())
                 .unwrap_or_else(|| adapter.clone());
             let acks = &self.acknowledged_watermarks;
             let phase = self.derive_live_lighting_phase(acks);
-            let (phase_label, phase_symbol) = match phase {
+            let (phase_label_zh, phase_symbol) = match phase {
                 FourAppAgentPhase::Idle => ("空闲就绪", "checkmark.circle"),
                 FourAppAgentPhase::Thinking => ("正在运行", "sparkles"),
                 FourAppAgentPhase::AwaitingInput => ("等待确认", "exclamationmark.Bubble"),
@@ -786,14 +896,14 @@ impl ProjectionInputs<'_> {
             };
             let is_recording = self.ptt_active;
             let voice_summary = if is_recording {
-                "语音输入中".to_string()
+                crate::i18n::tr("语音输入中", locale).to_string()
             } else {
-                "按住说话已就绪".to_string()
+                crate::i18n::tr("按住说话已就绪", locale).to_string()
             };
             TargetAgentStatusCardProjection {
                 agent_name,
                 adapter,
-                phase_label: phase_label.to_string(),
+                phase_label: crate::i18n::tr(phase_label_zh, locale).to_string(),
                 phase_symbol: phase_symbol.to_string(),
                 is_recording,
                 voice_summary,
@@ -808,6 +918,8 @@ impl ProjectionInputs<'_> {
         can_edit_draft: bool,
         canvas: &CanvasProjection,
     ) -> InspectorProjection {
+        let locale = self.resolved_locale;
+        let loc_idx = usize::from(locale == mi_model::ResolvedLocale::En);
         let doc = &self.document_store.draft.document;
         let graph = &doc.editable.graph;
         let layer = self
@@ -815,8 +927,8 @@ impl ProjectionInputs<'_> {
             .as_ref()
             .and_then(|lid| graph.layers.get(lid));
         let layer_name = layer
-            .map(|l| l.name.clone())
-            .unwrap_or_else(|| "默认层".to_string());
+            .map(|l| mi_model::i18n::localize_layer_name(&l.name, locale))
+            .unwrap_or_else(|| crate::i18n::tr("默认层", locale).to_string());
         let is_protected = self.is_selected_layer_protected();
 
         if let Some(lock) = &canvas.protected_lock {
@@ -836,23 +948,31 @@ impl ProjectionInputs<'_> {
         let is_encoder_hold = self.selected_surface == ControlSurfaceId::EncoderHold;
         let supports_task_role = !is_encoder_hold && (0..6u32).contains(&slot);
         let (bound_action_name, action_obj, bound_graph_action_id) = if is_encoder_hold {
-            let (title, act) = resolve_encoder_hold_action_info(doc, layer);
+            let (title, act) = resolve_encoder_hold_action_info_localized(doc, layer, locale);
             let graph_aid = layer
                 .and_then(|l| l.control_settings.as_ref())
                 .and_then(|s| s.encoder_hold_action_id.clone());
             (title, act, graph_aid)
         } else {
-            let (title, act) = resolve_slot_action_info(doc, layer, slot);
+            let (title, act) = resolve_slot_action_info_localized(doc, layer, slot, locale);
             let graph_aid = resolve_slot_graph_action_id(layer, slot);
             (title, act, graph_aid)
         };
         let bound_action_id = action_obj
             .map(|a| a.id.clone())
             .or_else(|| bound_graph_action_id.clone());
-        let bound_action_category = action_obj.map(|a| a.category.clone()).unwrap_or_default();
-        let bound_action_detail = action_obj.map(|a| a.detail.clone()).unwrap_or_default();
-        let bound_capability =
-            action_obj.map(|a| action_library::capability(a, self.command_execution_enabled));
+        let localized_bound_act = action_obj.map(|a| mi_model::i18n::localize_action(a, locale));
+        let bound_action_category = localized_bound_act
+            .as_ref()
+            .map(|a| a.category.clone())
+            .unwrap_or_default();
+        let bound_action_detail = localized_bound_act
+            .as_ref()
+            .map(|a| a.summary.clone())
+            .unwrap_or_default();
+        let bound_capability = action_obj.map(|a| {
+            action_library::capability_localized(a, self.command_execution_enabled, locale)
+        });
 
         let is_session_action = action_obj.is_some_and(|a| {
             a.id.starts_with("slot-open-")
@@ -894,7 +1014,7 @@ impl ProjectionInputs<'_> {
         });
 
         let selected_keycap = self.selected_keycap(slot);
-        static ALL_KEYCAP_ITEMS: std::sync::OnceLock<Vec<KeycapCatalogItemProjection>> =
+        static ALL_KEYCAP_ITEMS: std::sync::OnceLock<[Vec<KeycapCatalogItemProjection>; 2]> =
             std::sync::OnceLock::new();
         let filtered_keycaps: Vec<KeycapCatalogItemProjection> =
             if let Some(mut rows) = self.reusable_catalogs.keycaps.take() {
@@ -903,21 +1023,26 @@ impl ProjectionInputs<'_> {
                 }
                 rows
             } else if self.keycap_search_query.trim().is_empty() {
-                let mut rows = ALL_KEYCAP_ITEMS
-                    .get_or_init(|| {
-                        CodexKeycapId::ALL_34
-                            .into_iter()
-                            .map(|k| KeycapCatalogItemProjection {
-                                id: k,
-                                silk_code: k.silk_code().to_string(),
-                                short_label: k.short_label().to_string(),
-                                chinese_hint: k.chinese_hint().to_string(),
-                                glyph_symbol: k.glyph_symbol().to_string(),
-                                default_action_id: k.default_action_id().map(str::to_string),
-                                is_selected: false,
-                            })
-                            .collect()
-                    })
+                let build_for_loc = |loc: mi_model::ResolvedLocale| {
+                    CodexKeycapId::ALL_34
+                        .into_iter()
+                        .map(|k| KeycapCatalogItemProjection {
+                            id: k,
+                            silk_code: k.silk_code().to_string(),
+                            short_label: k.short_label().to_string(),
+                            chinese_hint: k.hint_localized(loc).to_string(),
+                            glyph_symbol: k.glyph_symbol().to_string(),
+                            default_action_id: k.default_action_id().map(str::to_string),
+                            is_selected: false,
+                        })
+                        .collect()
+                };
+                let mut rows = ALL_KEYCAP_ITEMS.get_or_init(|| {
+                    [
+                        build_for_loc(mi_model::ResolvedLocale::ZhHans),
+                        build_for_loc(mi_model::ResolvedLocale::En),
+                    ]
+                })[loc_idx]
                     .clone();
                 for row in &mut rows {
                     if row.id == selected_keycap {
@@ -934,7 +1059,7 @@ impl ProjectionInputs<'_> {
                         id: k,
                         silk_code: k.silk_code().to_string(),
                         short_label: k.short_label().to_string(),
-                        chinese_hint: k.chinese_hint().to_string(),
+                        chinese_hint: k.hint_localized(locale).to_string(),
                         glyph_symbol: k.glyph_symbol().to_string(),
                         default_action_id: k.default_action_id().map(str::to_string),
                         is_selected: k == selected_keycap,
@@ -942,26 +1067,35 @@ impl ProjectionInputs<'_> {
                     .collect()
             };
 
-        static AVAILABLE_CATEGORIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        static AVAILABLE_CATEGORIES: std::sync::OnceLock<[Vec<String>; 2]> =
+            std::sync::OnceLock::new();
         let available_categories = self.reusable_catalogs.categories.take().unwrap_or_else(|| {
-            AVAILABLE_CATEGORIES
-                .get_or_init(|| {
-                    let all_catalog = mi_model::draft::actions();
-                    let mut categories = vec!["全部".to_string()];
-                    for act in &all_catalog {
-                        if !categories.contains(&act.category) {
-                            categories.push(act.category.clone());
-                        }
+            let build_cats = |loc: mi_model::ResolvedLocale| {
+                let all_catalog = mi_model::draft::actions();
+                let mut categories = vec![mi_model::i18n::all_category_label(loc).to_string()];
+                for act in &all_catalog {
+                    let cat = mi_model::i18n::localize_category(&act.category, loc);
+                    if !categories.contains(&cat) {
+                        categories.push(cat);
                     }
-                    categories
-                })
+                }
+                categories
+            };
+            AVAILABLE_CATEGORIES.get_or_init(|| {
+                [
+                    build_cats(mi_model::ResolvedLocale::ZhHans),
+                    build_cats(mi_model::ResolvedLocale::En),
+                ]
+            })[loc_idx]
                 .clone()
         });
 
-        static DEFAULT_ACTION_ROWS: std::sync::OnceLock<(
-            Vec<ActionLibraryRowProjection>,
-            Vec<ActionLibraryRowProjection>,
-        )> = std::sync::OnceLock::new();
+        static DEFAULT_ACTION_ROWS: std::sync::OnceLock<
+            [(
+                Vec<ActionLibraryRowProjection>,
+                Vec<ActionLibraryRowProjection>,
+            ); 2],
+        > = std::sync::OnceLock::new();
         let filtered_actions: Vec<ActionLibraryRowProjection> = if let Some(mut rows) =
             self.reusable_catalogs.actions.take()
         {
@@ -970,30 +1104,44 @@ impl ProjectionInputs<'_> {
             }
             rows
         } else if self.action_search_query.trim().is_empty()
-            && self.action_category_filter == "全部"
+            && mi_model::i18n::is_all_category_filter(&self.action_category_filter)
             && !self.favorites_only
             && self.favorite_action_ids.is_empty()
         {
-            let (enabled_rows, disabled_rows) = DEFAULT_ACTION_ROWS.get_or_init(|| {
+            let build_pair = |loc: mi_model::ResolvedLocale| {
                 let empty_favs = BTreeSet::new();
+                let all_lbl = mi_model::i18n::all_category_label(loc);
                 let build_for = |exec_enabled: bool| {
-                    action_library::search("", "全部", false, &empty_favs, exec_enabled)
-                        .into_iter()
-                        .map(|entry| ActionLibraryRowProjection {
-                            action_id: entry.action.id,
-                            name: entry.action.name,
-                            category: entry.action.category,
-                            detail: entry.action.detail,
-                            target_summary: entry.capability.target,
-                            execution_available: entry.capability.execution_available,
-                            unavailable_reason: entry.capability.unavailable_reason,
-                            is_favorite: false,
-                            is_currently_bound: false,
-                        })
-                        .collect()
+                    action_library::search_localized(
+                        "",
+                        all_lbl,
+                        false,
+                        &empty_favs,
+                        exec_enabled,
+                        loc,
+                    )
+                    .into_iter()
+                    .map(|entry| ActionLibraryRowProjection {
+                        action_id: entry.action.id,
+                        name: entry.action.name,
+                        category: entry.action.category,
+                        detail: entry.action.detail,
+                        target_summary: entry.capability.target,
+                        execution_available: entry.capability.execution_available,
+                        unavailable_reason: entry.capability.unavailable_reason,
+                        is_favorite: false,
+                        is_currently_bound: false,
+                    })
+                    .collect()
                 };
                 (build_for(true), build_for(false))
-            });
+            };
+            let (enabled_rows, disabled_rows) = &DEFAULT_ACTION_ROWS.get_or_init(|| {
+                [
+                    build_pair(mi_model::ResolvedLocale::ZhHans),
+                    build_pair(mi_model::ResolvedLocale::En),
+                ]
+            })[loc_idx];
             let mut rows = if self.command_execution_enabled {
                 enabled_rows.clone()
             } else {
@@ -1009,12 +1157,13 @@ impl ProjectionInputs<'_> {
             }
             rows
         } else {
-            let entries = action_library::search(
+            let entries = action_library::search_localized(
                 &self.action_search_query,
                 &self.action_category_filter,
                 self.favorites_only,
                 &self.favorite_action_ids,
                 self.command_execution_enabled,
+                locale,
             );
             entries
                 .into_iter()
@@ -1069,12 +1218,21 @@ impl ProjectionInputs<'_> {
                         .map(Vec::len)
                         .unwrap_or(0);
                     let reference_count = m.references.len();
-                    let reference_summary = format_macro_references(&m.references);
+                    let reference_summary = format_macro_references(&m.references, locale);
+                    let step_or_branch_summary = if locale == mi_model::ResolvedLocale::En {
+                        if event_count == 1 {
+                            "1 step".to_string()
+                        } else {
+                            format!("{event_count} steps")
+                        }
+                    } else {
+                        format!("{event_count} 步")
+                    };
                     MacroLibraryRowProjection {
                         id: m.id,
-                        name: m.action.name,
+                        name: mi_model::i18n::localize_action(&m.action, locale).name,
                         is_multi: false,
-                        step_or_branch_summary: format!("{event_count} 步"),
+                        step_or_branch_summary,
                         reference_count,
                         reference_summary,
                         is_currently_bound,
@@ -1095,12 +1253,12 @@ impl ProjectionInputs<'_> {
                         == Some(m.id.as_str())
                         || bound_action_id.as_deref() == Some(m.id.as_str());
                     let reference_count = m.references.len();
-                    let reference_summary = format_macro_references(&m.references);
+                    let reference_summary = format_macro_references(&m.references, locale);
                     MacroLibraryRowProjection {
                         id: m.id,
-                        name: m.action.name,
+                        name: mi_model::i18n::localize_action(&m.action, locale).name,
                         is_multi: true,
-                        step_or_branch_summary: "四分支 Multi".to_string(),
+                        step_or_branch_summary: crate::i18n::tr("四分支 Multi", locale).to_string(),
                         reference_count,
                         reference_summary,
                         is_currently_bound,
@@ -1120,10 +1278,22 @@ impl ProjectionInputs<'_> {
 
         let surface_display_name = match self.selected_surface {
             ControlSurfaceId::Joystick => {
-                format!("摇杆 · {}", self.selected_joystick_direction.label())
+                if locale == mi_model::ResolvedLocale::En {
+                    format!("Joystick · {}", self.selected_joystick_direction.label())
+                } else {
+                    format!("摇杆 · {}", self.selected_joystick_direction.label())
+                }
             }
-            ControlSurfaceId::EncoderHold => "旋钮长按 (ENC_HOLD)".to_string(),
-            other => format!("按键 {}", other.binding_id()),
+            ControlSurfaceId::EncoderHold => {
+                crate::i18n::tr("旋钮长按 (ENC_HOLD)", locale).to_string()
+            }
+            other => {
+                if locale == mi_model::ResolvedLocale::En {
+                    format!("Key {}", other.binding_id())
+                } else {
+                    format!("按键 {}", other.binding_id())
+                }
+            }
         };
 
         let joystick_mode = layer
@@ -1131,34 +1301,38 @@ impl ProjectionInputs<'_> {
             .map_or(JoystickControlMode::Source, |s| {
                 JoystickControlMode::from_model_str(&s.joystick_mode)
             });
-        let joystick_mode_summary = match joystick_mode {
+        let joystick_mode_summary_zh = match joystick_mode {
             JoystickControlMode::LogicalSectors => {
                 "宿主 CGEvent（逻辑扇区）：即时生效、仅限当前 Mac、不写 Flash；支持为上下左右 4 个摇杆方向分别绑定动作。"
-                    .to_string()
             }
             JoystickControlMode::Mouse => {
                 if self.v070_hardware_mouse_supported {
                     "硬件 MOUSE 指针：需经配置审阅并应用到 /fs/keymap.json 生效；写入后跨主机脱机生效，不占用宿主摇杆方向槽位。"
-                        .to_string()
                 } else {
                     "硬件 MOUSE 指针：需固件 0.7.0-rc.16+ 并应用到 /fs/keymap.json 才能生效（当前设备固件暂不支持，建议改用「宿主逻辑扇区」或先升级固件）。"
-                        .to_string()
                 }
             }
             JoystickControlMode::Scroll => {
                 if self.v070_hardware_mouse_supported {
                     "硬件 SCROLL 滚轮：需经配置审阅并应用到 /fs/keymap.json 生效；写入后跨主机脱机平滑滚动，不占用宿主摇杆方向槽位。"
-                        .to_string()
                 } else {
                     "硬件 SCROLL 滚轮：需固件 0.7.0-rc.16+ 并应用到 /fs/keymap.json 才能生效（当前设备固件暂不支持，建议改用「宿主逻辑扇区」或先升级固件）。"
-                        .to_string()
                 }
             }
             JoystickControlMode::Source => {
                 "保留来源模式：保留固件原始摇杆定义，宿主不覆盖扇区动作（Mac 运行时不触发逻辑槽位）。"
-                    .to_string()
             }
         };
+        let joystick_mode_summary = crate::i18n::tr(joystick_mode_summary_zh, locale).to_string();
+
+        let mut shortcut_recorder = self.shortcut_recorder.clone();
+        if locale == mi_model::ResolvedLocale::En {
+            shortcut_recorder.preview_badge =
+                crate::i18n::tr(&shortcut_recorder.preview_badge, locale).to_string();
+            if let Some(err) = &mut shortcut_recorder.validation_error {
+                *err = crate::i18n::tr(err, locale).to_string();
+            }
+        }
 
         let editable = EditableSlotInspectorProjection {
             selected_surface: self.selected_surface,
@@ -1183,7 +1357,7 @@ impl ProjectionInputs<'_> {
             keycap_search_query: self.keycap_search_query.clone(),
             filtered_keycaps,
             bind_keycap_default_action_on_select: self.bind_keycap_default_action_on_select,
-            shortcut_recorder: self.shortcut_recorder.clone(),
+            shortcut_recorder,
             action_search_query: self.action_search_query.clone(),
             action_category_filter: self.action_category_filter.clone(),
             available_categories,
@@ -1210,10 +1384,23 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn build_radial_projection(&self) -> RadialOverlayProjection {
-        let visible_session = self.radial_state.session().cloned();
-        let panel_spec = visible_session
-            .as_ref()
-            .map(|session| PassivePanelFrameSpec::for_radial_frame(session.anchor_frame));
+        let locale = self.resolved_locale;
+        let mut visible_session = self.radial_state.session().cloned();
+        if locale == mi_model::ResolvedLocale::En {
+            if let Some(session) = &mut visible_session {
+                session.route.profile_name =
+                    mi_model::i18n::localize_profile_name(&session.route.profile_name, locale);
+                for slot in &mut session.slots {
+                    slot.label = crate::i18n::tr(&slot.label, locale).to_string();
+                    if let Some(reason) = &mut slot.unavailable_reason {
+                        *reason = crate::i18n::tr(reason, locale).to_string();
+                    }
+                }
+            }
+        }
+        let panel_spec = visible_session.as_ref().map(|session| {
+            PassivePanelFrameSpec::for_radial_frame_localized(session.anchor_frame, locale)
+        });
         RadialOverlayProjection {
             enabled: self.radial_state.enabled(),
             readiness: *self.radial_readiness,
@@ -1227,6 +1414,7 @@ impl ProjectionInputs<'_> {
         &self,
         can_edit_draft: bool,
     ) -> SessionStripProjection {
+        let locale = self.resolved_locale;
         let doc = &self.document_store.draft.document;
         let graph = &doc.editable.graph;
         let layer = self
@@ -1250,7 +1438,7 @@ impl ProjectionInputs<'_> {
             let pill = SessionCapsulePillProjection {
                 place: cand.place.clone(),
                 agent,
-                agent_monogram: agent.badge_monogram().to_string(),
+                agent_monogram: agent.badge_monogram_localized(locale).to_string(),
                 title: cand.title.clone(),
                 kind: eff_kind,
                 badge_text: eff_kind.badge_prefix().to_string(),
@@ -1294,7 +1482,7 @@ impl ProjectionInputs<'_> {
                 .unwrap_or(FourAppSessionKind::Idle);
             let agent = slot.place.as_ref().map(agent_for_place);
             let agent_monogram = agent
-                .map(|a| a.badge_monogram().to_string())
+                .map(|a| a.badge_monogram_localized(locale).to_string())
                 .unwrap_or_default();
             let is_unread_blue_dot = cand.is_some_and(|c| c.is_unread_blue_dot(acks));
             let is_working_animated = kind == FourAppSessionKind::Working;
@@ -1311,13 +1499,14 @@ impl ProjectionInputs<'_> {
                     .map(|item| item.color.clone())
                     .unwrap_or_else(|| "#222222".to_string())
             };
-            let subtitle = match kind {
-                FourAppSessionKind::NeedsAttention => "待处理审批/输入".to_string(),
-                FourAppSessionKind::BlueDotCompleted => "● 已完成待查看".to_string(),
-                FourAppSessionKind::Working => ":: 正在运行".to_string(),
-                FourAppSessionKind::Error => "执行异常".to_string(),
-                FourAppSessionKind::Idle => "空闲已读".to_string(),
+            let subtitle_zh = match kind {
+                FourAppSessionKind::NeedsAttention => "待处理审批/输入",
+                FourAppSessionKind::BlueDotCompleted => "● 已完成待查看",
+                FourAppSessionKind::Working => ":: 正在运行",
+                FourAppSessionKind::Error => "执行异常",
+                FourAppSessionKind::Idle => "空闲已读",
             };
+            let subtitle = crate::i18n::tr(subtitle_zh, locale).to_string();
 
             SessionSlotCardProjection {
                 slot_index: idx,
@@ -1360,6 +1549,7 @@ impl ProjectionInputs<'_> {
         power_status: Option<PowerStatusBadgeProjection>,
         candidate_devices: Vec<CandidateDevice>,
     ) -> StatusMenuProjection {
+        let locale = self.resolved_locale;
         let profiles = &self
             .document_store
             .host_store()
@@ -1378,10 +1568,12 @@ impl ProjectionInputs<'_> {
                     .and_then(|pid| profiles.get(pid))
                     .map(|p| {
                         CanonicalAgent::from_profile_name(&p.name)
-                            .map(|a| a.display_name().to_string())
-                            .unwrap_or_else(|| p.name.clone())
+                            .map(|a| a.display_name_localized(locale).to_string())
+                            .unwrap_or_else(|| {
+                                mi_model::i18n::localize_profile_name(&p.name, locale)
+                            })
                     })
-                    .unwrap_or_else(|| "未绑定".to_string());
+                    .unwrap_or_else(|| crate::i18n::tr("未绑定", locale).to_string());
                 let is_active = pid_opt.is_some() && pid_opt == active_pid;
                 FavoriteSlotCardProjection {
                     slot,
@@ -1398,14 +1590,15 @@ impl ProjectionInputs<'_> {
         let locked_profile_id = self.document_store.locked_profile_id();
         let is_profile_locked = locked_profile_id.is_some();
         let competing_host_notice = self.competing_input_app_running.then(|| {
-            if is_profile_locked {
-                "检测到原版 Input 正在后台运行，已由方案锁定隔离干扰".to_string()
+            let zh = if is_profile_locked {
+                "检测到原版 Input 正在后台运行，已由方案锁定隔离干扰"
             } else {
-                "检测到原版 Input 正在后台抢占层切换，建议开启「锁定当前方案」".to_string()
-            }
+                "检测到原版 Input 正在后台抢占层切换，建议开启「锁定当前方案」"
+            };
+            crate::i18n::tr(zh, locale).to_string()
         });
         StatusMenuProjection {
-            icon: StatusItemIconSpec::canonical(),
+            icon: StatusItemIconSpec::canonical_localized(locale),
             active_profile_id: active_pid,
             active_profile_name: self.active_profile_display_name(),
             routing_mode_summary: self.routing_mode_summary_label(),
@@ -1432,6 +1625,7 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn compute_sidebar_rows(&self) -> Vec<SidebarProfileRow> {
+        let locale = self.resolved_locale;
         let doc = &self.document_store.draft.document;
         let graph = &doc.editable.graph;
         let active_host_id = self.document_store.host_active_profile_id();
@@ -1453,11 +1647,11 @@ impl ProjectionInputs<'_> {
                 continue;
             }
             let display_name = canonical_agent
-                .map(|a| a.display_name().to_string())
-                .unwrap_or_else(|| profile.name.clone());
+                .map(|a| a.display_name_localized(locale).to_string())
+                .unwrap_or_else(|| mi_model::i18n::localize_profile_name(&profile.name, locale));
             let badge_monogram = canonical_agent
-                .map(|a| a.badge_monogram().to_string())
-                .unwrap_or_else(|| custom_monogram(&profile.name));
+                .map(|a| a.badge_monogram_localized(locale).to_string())
+                .unwrap_or_else(|| custom_monogram_localized(&profile.name, locale));
             let app_installed = canonical_agent
                 .map(|a| {
                     self.applications
@@ -1489,7 +1683,7 @@ impl ProjectionInputs<'_> {
                 {
                     if profile.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME {
                         let mut original = std::mem::replace(existing, row);
-                        original.display_name = "Codex · 原生".into();
+                        original.display_name = crate::i18n::tr("Codex · 原生", locale).to_string();
                         if self.show_other_profiles {
                             custom_rows.push(original);
                         }
@@ -1625,6 +1819,7 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn project(mut self) -> WorkbenchProjection {
+        let locale = self.resolved_locale;
         let rows = self.compute_sidebar_rows();
         let active_host_id = self.document_store.host_active_profile_id();
         let is_protected_active = active_host_id
@@ -1639,8 +1834,11 @@ impl ProjectionInputs<'_> {
 
         let ownership_banner = if untrusted_exec {
             OwnershipBannerState::Caution {
-                reason: "缺少 macOS 辅助功能权限，按键动作已被系统拦截，请打开辅助功能设置授权"
-                    .to_string(),
+                reason: crate::i18n::tr(
+                    "缺少 macOS 辅助功能权限，按键动作已被系统拦截，请打开辅助功能设置授权",
+                    locale,
+                )
+                .to_string(),
             }
         } else if self.six_layer_state.installation.is_some() || self.six_layer_view.is_some() {
             if let Some(reason) = self
@@ -1648,23 +1846,25 @@ impl ProjectionInputs<'_> {
                 .as_ref()
                 .and_then(|running| running.failure.clone())
             {
-                OwnershipBannerState::Caution { reason }
+                OwnershipBannerState::Caution {
+                    reason: crate::i18n::tr(&reason, locale).to_string(),
+                }
             } else if self.device_connected {
                 OwnershipBannerState::Ready {
-                    summary: "六层标准键输入已连接".into(),
+                    summary: crate::i18n::tr("六层标准键输入已连接", locale).to_string(),
                 }
             } else {
                 OwnershipBannerState::Caution {
-                    reason: "六层输入尚未连接".into(),
+                    reason: crate::i18n::tr("六层输入尚未连接", locale).to_string(),
                 }
             }
         } else if is_protected_active {
             OwnershipBannerState::NativeHeld {
-                summary: "原生受保护方案".into(),
+                summary: crate::i18n::tr("原生受保护方案", locale).to_string(),
             }
         } else {
             OwnershipBannerState::Ready {
-                summary: "就绪".into(),
+                summary: crate::i18n::tr("就绪", locale).to_string(),
             }
         };
         let editing_device = self.document_store.editing_device();
@@ -1673,11 +1873,12 @@ impl ProjectionInputs<'_> {
 
         let ready_state = if editing_device {
             HeaderReadyState::ModeNotice {
-                text: "硬件布局草稿模式 · 返回后继续管理软件方案".to_string(),
+                text: crate::i18n::tr("硬件布局草稿模式 · 返回后继续管理软件方案", locale)
+                    .to_string(),
             }
         } else if untrusted_exec {
             HeaderReadyState::Caution {
-                text: "待授权辅助功能".to_string(),
+                text: crate::i18n::tr("待授权辅助功能", locale).to_string(),
             }
         } else if ownership_banner.is_caution() {
             HeaderReadyState::Caution {
@@ -1685,11 +1886,11 @@ impl ProjectionInputs<'_> {
             }
         } else if self.device_connected {
             HeaderReadyState::Ready {
-                text: "小键盘已连接".to_string(),
+                text: crate::i18n::tr("小键盘已连接", locale).to_string(),
             }
         } else {
             HeaderReadyState::Ready {
-                text: "已就绪".to_string(),
+                text: crate::i18n::tr("已就绪", locale).to_string(),
             }
         };
 
@@ -1721,12 +1922,15 @@ impl ProjectionInputs<'_> {
                         .graph
                         .profiles
                         .get(id)
-                        .map(|profile| profile.name.clone())
+                        .map(|profile| mi_model::i18n::localize_profile_name(&profile.name, locale))
                 })
             });
 
-        let power_status =
-            PowerStatusBadgeProjection::from_v070(self.v070_projection, self.device_connected);
+        let power_status = PowerStatusBadgeProjection::from_v070_localized(
+            self.v070_projection,
+            self.device_connected,
+            locale,
+        );
         let candidate_devices = self.build_candidate_devices_projection();
 
         let header = HeaderProjection {
@@ -1744,10 +1948,13 @@ impl ProjectionInputs<'_> {
             power_status: power_status.clone(),
             candidate_devices: candidate_devices.clone(),
             preferred_device_serial: self.preferred_device_serial.clone(),
+            ui_language: self.ui_language,
+            resolved_locale: locale,
+            silent_at_login: self.silent_at_login,
         };
 
         let sidebar = SidebarProjection {
-            section_title: "常用软件方案".to_string(),
+            section_title: crate::i18n::tr("常用软件方案", locale).to_string(),
             rows,
             board_layers: self.build_board_layers_projection(),
             selected_profile_id: self.selected_profile_id.clone(),
@@ -1765,16 +1972,29 @@ impl ProjectionInputs<'_> {
             busy: self.busy,
             ownership_banner: ownership_banner.clone(),
             footer_status_text: ownership_banner.text().to_string(),
-            footer_limit_text: "长按说话上限 120 秒，响应超时 8 秒".to_string(),
+            footer_limit_text: crate::i18n::tr("长按说话上限 120 秒，响应超时 8 秒", locale)
+                .to_string(),
         };
 
         let canvas = self.build_canvas_projection(can_edit_draft);
         let session_strip = self.build_session_strip_projection(can_edit_draft);
         let inspector = self.build_inspector_projection(can_edit_draft, &canvas);
 
-        let overlay = self
-            .overlay_controller
-            .project(&self.screen_geometry, self.last_cursor_position);
+        let mut overlay = self.overlay_controller.project_localized(
+            &self.screen_geometry,
+            self.last_cursor_position,
+            locale,
+        );
+        if locale == mi_model::ResolvedLocale::En {
+            if let ActiveHudContent::PassiveToast {
+                profile_name,
+                mode_summary,
+            } = &mut overlay.content
+            {
+                *profile_name = mi_model::i18n::localize_profile_name(profile_name, locale);
+                *mode_summary = crate::i18n::tr(mode_summary, locale).to_string();
+            }
+        }
 
         let radial = self.build_radial_projection();
 
@@ -1783,15 +2003,22 @@ impl ProjectionInputs<'_> {
         let (device_connected, device_summary) = if let Some(cand) = &self.connected_candidate {
             (
                 self.device_connected,
-                format!(
-                    "{} ({:04X}:{:04X}) · USB HID 只读保护已启用",
-                    cand.product, cand.vid, cand.pid
-                ),
+                if locale == mi_model::ResolvedLocale::En {
+                    format!(
+                        "{} ({:04X}:{:04X}) · USB HID Read-Only Guard Active",
+                        cand.product, cand.vid, cand.pid
+                    )
+                } else {
+                    format!(
+                        "{} ({:04X}:{:04X}) · USB HID 只读保护已启用",
+                        cand.product, cand.vid, cand.pid
+                    )
+                },
             )
         } else {
             (
                 false,
-                "Creator Micro 2 (303A:8298) · 离线草稿模式".to_string(),
+                crate::i18n::tr("Creator Micro 2 (303A:8298) · 离线草稿模式", locale).to_string(),
             )
         };
 
@@ -1799,6 +2026,28 @@ impl ProjectionInputs<'_> {
         v070_hardware.auto_layer_sync_enabled = self.v070_auto_layer_sync_enabled;
         v070_hardware.session_sa_rgb_sync_enabled = self.v070_session_sa_rgb_sync_enabled;
         v070_hardware.preferred_device_serial = self.preferred_device_serial.clone();
+        v070_hardware.status_message =
+            crate::i18n::localize_v070_status_message(&v070_hardware.status_message, locale);
+        v070_hardware.last_error = v070_hardware
+            .last_error
+            .as_deref()
+            .map(|e| crate::i18n::localize_v070_status_message(e, locale));
+
+        let mut radial_slot_configs = self.radial_slot_configs.clone();
+        if locale == mi_model::ResolvedLocale::En {
+            for cfg in &mut radial_slot_configs {
+                cfg.label = crate::i18n::tr(&cfg.label, locale).to_string();
+            }
+        }
+
+        let status_message = crate::i18n::relocalize_status_message(self.status_message, locale);
+
+        let mut active_modal = self.active_modal.clone();
+        if locale == mi_model::ResolvedLocale::En {
+            if let Some(modal) = &mut active_modal {
+                localize_editor_modal_in_place(modal, locale);
+            }
+        }
 
         WorkbenchProjection {
             firmware: Default::default(),
@@ -1809,16 +2058,17 @@ impl ProjectionInputs<'_> {
             session_strip,
             inspector,
             radial,
-            radial_slot_configs: self.radial_slot_configs.clone(),
+            radial_slot_configs,
             overlay,
             status_menu,
             status_menu_open: self.status_menu_open,
-            active_modal: self.active_modal.clone(),
+            active_modal,
             selected_profile_id: self.selected_profile_id.clone(),
             selected_layer_id: self.selected_layer_id.clone(),
             selected_binding_slot: self.selected_binding_slot,
-            status_message: self.status_message.clone(),
+            status_message,
             last_exported_preset: self.last_exported_preset.clone(),
+            last_exported_diagnostics_path: self.last_exported_diagnostics_path.clone(),
             device_connected,
             device_summary,
             document_revision: self.document_store.draft.revision,
@@ -1829,6 +2079,7 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn resolve_current_radial_slots(&self) -> [RadialSlot; RADIAL_SECTOR_COUNT] {
+        let locale = self.resolved_locale;
         let active_agent = self.active_canonical_agent();
         let active_session_preview = active_agent.and_then(|agent| {
             self.slot_table
@@ -1840,14 +2091,18 @@ impl ProjectionInputs<'_> {
         let ctx = RadialSlotResolutionContext {
             has_active_profile: self.resolved_active_profile_id().is_some(),
             active_adapter: self.active_desktop_agent_adapter(),
-            active_agent_display_name: active_agent.map(|a| a.display_name().to_string()),
+            active_agent_display_name: active_agent
+                .map(|a| a.display_name_localized(locale).to_string()),
             active_session_preview,
             can_navigate_back: self.navigation_history.can_go_back(|_| true),
             can_navigate_forward: self.navigation_history.can_go_forward(|_| true),
         };
-        resolve_radial_slots(&self.radial_slot_configs, &ctx, |bundle_id| {
-            self.applications.get(bundle_id).copied().unwrap_or(false)
-        })
+        crate::radial::resolve_radial_slots_localized(
+            &self.radial_slot_configs,
+            &ctx,
+            |bundle_id| self.applications.get(bundle_id).copied().unwrap_or(false),
+            locale,
+        )
     }
 
     pub(super) fn resolved_active_profile_id(&self) -> Option<String> {
@@ -1910,18 +2165,24 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn routing_mode_summary_label(&self) -> String {
+        let locale = self.resolved_locale;
         if self.document_store.locked_profile_id().is_some() {
-            return "已锁定 · 忽略前台切换与外部干扰".to_string();
+            return crate::i18n::tr("已锁定 · 忽略前台切换与外部干扰", locale).to_string();
         }
         if !self.document_store.host_execution_enabled() {
-            return "已暂停软件按键映射".to_string();
+            return crate::i18n::tr("已暂停软件按键映射", locale).to_string();
         }
-        let mode = if self.six_layer_view.is_some() && !self.six_layer_user_pinned {
+        let mode_zh = if self.six_layer_view.is_some() && !self.six_layer_user_pinned {
             "六层板载路由"
         } else {
             "手动选择方案"
         };
-        format!("{mode} · 按键映射已启用")
+        let mode = crate::i18n::tr(mode_zh, locale);
+        if locale == mi_model::ResolvedLocale::En {
+            format!("{mode} · Key Mapping Active")
+        } else {
+            format!("{mode} · 按键映射已启用")
+        }
     }
 
     pub(super) fn selected_keycap(&self, slot: u32) -> CodexKeycapId {
@@ -1940,28 +2201,32 @@ impl ProjectionInputs<'_> {
     }
 
     pub(super) fn project_six_layer_runtime(&self, result: &mut BoardLayersProjection) {
+        let locale = self.resolved_locale;
         result.restore_available =
             self.six_layer_state.installation.is_some() && !self.six_layer_busy;
         result.apply_block_reason = if self.six_layer_busy {
-            "六层操作正在进行".into()
+            crate::i18n::tr("六层操作正在进行", locale).to_string()
         } else if self
             .six_layer_state
             .installation
             .as_ref()
             .is_some_and(|installation| installation.status != InstallationStatus::Applied)
         {
-            "六层恢复记录尚未处理，请先恢复原设备配置".into()
+            crate::i18n::tr("六层恢复记录尚未处理，请先恢复原设备配置", locale).to_string()
         } else if self
             .six_layer_state
             .installation
             .as_ref()
             .is_some_and(|installation| installation.plan.validate_current().is_err())
         {
-            "旧六层安装已暂停，请先恢复原设备配置".into()
+            crate::i18n::tr("旧六层安装已暂停，请先恢复原设备配置", locale).to_string()
         } else if self.isolated {
-            "隔离工作台不能应用实体六层方案".into()
+            crate::i18n::tr("隔离工作台不能应用实体六层方案", locale).to_string()
         } else {
-            self.compiled_six_layer_plan().err().unwrap_or_default()
+            self.compiled_six_layer_plan()
+                .err()
+                .map(|e| crate::i18n::tr(&e, locale).to_string())
+                .unwrap_or_default()
         };
         result.can_apply = result.apply_block_reason.is_empty();
         if let Some(running) = &self.six_layer_view {
@@ -1973,25 +2238,36 @@ impl ProjectionInputs<'_> {
                 && self.document_store.host_execution_enabled();
             result.observed_layer = Some(running.observed_layer);
             result.observed_profile_kind = Some("six_layer_direct".into());
-            result.observed_status = running.failure.clone().unwrap_or_else(|| {
-                format!(
-                    "六层配置已核验 · 最近确认第 {} 层 · {}",
-                    running.observed_layer,
-                    if running.first_event_verified {
-                        "实体输入已验证"
+            result.observed_status = running
+                .failure
+                .as_ref()
+                .map(|f| crate::i18n::tr(f, locale).to_string())
+                .unwrap_or_else(|| {
+                    let tail = if running.first_event_verified {
+                        crate::i18n::tr("实体输入已验证", locale)
                     } else {
-                        "等待首次实体输入"
+                        crate::i18n::tr("等待首次实体输入", locale)
+                    };
+                    if locale == mi_model::ResolvedLocale::En {
+                        format!(
+                            "6-layer config verified · Last confirmed Layer {} · {tail}",
+                            running.observed_layer
+                        )
+                    } else {
+                        format!(
+                            "六层配置已核验 · 最近确认第 {} 层 · {tail}",
+                            running.observed_layer
+                        )
                     }
-                )
-            });
+                });
         } else if let Some(installation) = &self.six_layer_state.installation {
             result.observed_layer = None;
-            result.observed_status = if installation.status == InstallationStatus::Applied {
+            let status_zh = if installation.status == InstallationStatus::Applied {
                 "六层已保存，当前输入连接尚未确认"
             } else {
                 "六层恢复待处理，吞键规则保留"
-            }
-            .into();
+            };
+            result.observed_status = crate::i18n::tr(status_zh, locale).to_string();
         }
     }
 
@@ -2243,6 +2519,140 @@ fn resolve_indexed_merged_bottom_slot(
         return 11;
     }
     10
+}
+
+fn resolve_indexed_slot_localized<'a>(
+    doc: &'a LocalDocumentV2,
+    indexed: &[Option<&'a mi_model::document::BindingNode>; 20],
+    slot: u32,
+    locale: mi_model::ResolvedLocale,
+) -> (String, Option<&'a Action>) {
+    let (raw_title, act) = resolve_indexed_slot(doc, indexed, slot);
+    if locale == mi_model::ResolvedLocale::En {
+        let localized = act
+            .map(|a| mi_model::i18n::localize_action(a, locale).name)
+            .unwrap_or_else(|| crate::i18n::tr(&raw_title, locale).to_string());
+        (localized, act)
+    } else {
+        (raw_title, act)
+    }
+}
+
+fn resolve_slot_action_info_localized<'a>(
+    doc: &'a LocalDocumentV2,
+    layer: Option<&'a LayerNode>,
+    slot: u32,
+    locale: mi_model::ResolvedLocale,
+) -> (String, Option<&'a Action>) {
+    let (raw_title, act) = resolve_slot_action_info(doc, layer, slot);
+    if locale == mi_model::ResolvedLocale::En {
+        let localized = act
+            .map(|a| mi_model::i18n::localize_action(a, locale).name)
+            .unwrap_or_else(|| crate::i18n::tr(&raw_title, locale).to_string());
+        (localized, act)
+    } else {
+        (raw_title, act)
+    }
+}
+
+fn resolve_encoder_hold_action_info_localized<'a>(
+    doc: &'a LocalDocumentV2,
+    layer: Option<&'a LayerNode>,
+    locale: mi_model::ResolvedLocale,
+) -> (String, Option<&'a Action>) {
+    let (raw_title, act) = resolve_encoder_hold_action_info(doc, layer);
+    if locale == mi_model::ResolvedLocale::En {
+        let localized = act
+            .map(|a| mi_model::i18n::localize_action(a, locale).name)
+            .unwrap_or_else(|| crate::i18n::tr(&raw_title, locale).to_string());
+        (localized, act)
+    } else {
+        (raw_title, act)
+    }
+}
+
+fn custom_monogram_localized(name: &str, locale: mi_model::ResolvedLocale) -> String {
+    let mono = custom_monogram(name);
+    if locale == mi_model::ResolvedLocale::En && mono == "方案" {
+        "PR".to_string()
+    } else {
+        mono
+    }
+}
+
+fn localize_editor_modal_in_place(
+    modal: &mut EditorModalProjection,
+    locale: mi_model::ResolvedLocale,
+) {
+    match modal {
+        EditorModalProjection::MacroEditor(m) => {
+            if m.name == "新建宏" {
+                m.name = crate::i18n::tr("新建宏", locale).to_string();
+            }
+            for step in &mut m.steps {
+                if let Some(key) = step.summary_label.strip_prefix("按下 ") {
+                    step.summary_label = format!("Press {key}");
+                } else if let Some(key) = step.summary_label.strip_prefix("释放 ") {
+                    step.summary_label = format!("Release {key}");
+                } else if let Some(ms) = step
+                    .summary_label
+                    .strip_prefix("等待 ")
+                    .and_then(|s| s.strip_suffix(" ms"))
+                {
+                    step.summary_label = format!("Wait {ms} ms");
+                }
+            }
+            for summary in &mut m.reference_summaries {
+                *summary = crate::i18n::localize_macro_reference_entry(summary, locale);
+            }
+            if let Some(err) = &mut m.validation_error {
+                *err = crate::i18n::tr(err, locale).to_string();
+            }
+        }
+        EditorModalProjection::LightingEditor(l) => {
+            l.layer_name = mi_model::i18n::localize_layer_name(&l.layer_name, locale);
+            if let Some(z) = &mut l.backlight {
+                z.zone_title = crate::i18n::tr(&z.zone_title, locale).to_string();
+            }
+            if let Some(z) = &mut l.underglow {
+                z.zone_title = crate::i18n::tr(&z.zone_title, locale).to_string();
+            }
+            if let Some(err) = &mut l.validation_error {
+                *err = crate::i18n::tr(err, locale).to_string();
+            }
+        }
+        EditorModalProjection::MultiEditor(m) => {
+            if m.name == "新建 Multi" {
+                m.name = crate::i18n::tr("新建 Multi", locale).to_string();
+            }
+            for branch in &mut m.branches {
+                branch.title = branch.branch.title_localized(locale).to_string();
+                branch.target_display_name = if branch.target_display_name == "未设置" {
+                    crate::i18n::tr("未设置", locale).to_string()
+                } else {
+                    mi_model::i18n::localize_action_label(&branch.target_display_name, locale)
+                };
+            }
+            for opt in &mut m.available_actions {
+                opt.label = mi_model::i18n::localize_action_label(&opt.label, locale);
+            }
+            for opt in &mut m.available_macros {
+                opt.label = mi_model::i18n::localize_action_label(&opt.label, locale);
+            }
+            for summary in &mut m.reference_summaries {
+                *summary = crate::i18n::localize_macro_reference_entry(summary, locale);
+            }
+            if let Some(err) = &mut m.validation_error {
+                *err = crate::i18n::tr(err, locale).to_string();
+            }
+        }
+        EditorModalProjection::ReconnectComparison(c) => {
+            crate::i18n::localize_comparison_modal(c, locale);
+        }
+        EditorModalProjection::ApplyPreparation(a) => {
+            crate::i18n::localize_apply_modal(a, locale);
+        }
+    }
 }
 
 fn is_session_slot_action(action: &Action, slot_idx: usize) -> bool {

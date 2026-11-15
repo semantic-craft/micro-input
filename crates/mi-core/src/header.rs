@@ -37,22 +37,34 @@ impl PowerStatusBadgeProjection {
         v070: &crate::v070_hardware::V070HardwareProjection,
         device_connected: bool,
     ) -> Option<Self> {
+        Self::from_v070_localized(v070, device_connected, mi_model::ResolvedLocale::ZhHans)
+    }
+
+    pub fn from_v070_localized(
+        v070: &crate::v070_hardware::V070HardwareProjection,
+        device_connected: bool,
+        locale: mi_model::ResolvedLocale,
+    ) -> Option<Self> {
         if !(device_connected && v070.supported) {
             return None;
         }
         let battery_segment = if let Some(pct) = v070.battery_percent {
             if v070.is_charging == Some(true) {
-                format!("{pct}% 充电中")
+                if locale == mi_model::ResolvedLocale::En {
+                    format!("{pct}% Charging")
+                } else {
+                    format!("{pct}% 充电中")
+                }
             } else {
                 format!("{pct}%")
             }
         } else if v070.synced && v070.pm_state.line_powered {
-            "USB 供电".to_string()
+            crate::i18n::tr("USB 供电", locale).to_string()
         } else {
-            "电量读取中".to_string()
+            crate::i18n::tr("电量读取中", locale).to_string()
         };
         let usb_mode = if v070.synced {
-            if v070.pm_state.usb_host_hold {
+            let mode_zh = if v070.pm_state.usb_host_hold {
                 "usb.host 保持"
             } else if v070.pm_config.host_sleep {
                 "跟随宿主"
@@ -60,8 +72,8 @@ impl PowerStatusBadgeProjection {
                 "常醒"
             } else {
                 "定时休眠"
-            }
-            .to_string()
+            };
+            crate::i18n::tr(mode_zh, locale).to_string()
         } else {
             String::new()
         };
@@ -76,8 +88,8 @@ impl PowerStatusBadgeProjection {
         }
         if v070.synced && !pm_mode.is_empty() && pm_mode != "active" {
             let mapped = match pm_mode.as_str() {
-                "idle" => "待机",
-                "sleep" => "休眠",
+                "idle" => crate::i18n::tr("待机", locale),
+                "sleep" => crate::i18n::tr("休眠", locale),
                 other => other,
             };
             segments.push(mapped.to_string());
@@ -161,6 +173,12 @@ pub struct HeaderProjection {
     pub candidate_devices: Vec<CandidateDevice>,
     #[serde(default)]
     pub preferred_device_serial: Option<String>,
+    #[serde(default)]
+    pub ui_language: mi_model::UiLanguagePreference,
+    #[serde(default)]
+    pub resolved_locale: mi_model::ResolvedLocale,
+    #[serde(default = "default_true")]
+    pub silent_at_login: bool,
 }
 
 impl Default for HeaderProjection {
@@ -184,6 +202,9 @@ impl Default for HeaderProjection {
             power_status: None,
             candidate_devices: Vec::new(),
             preferred_device_serial: None,
+            ui_language: mi_model::UiLanguagePreference::System,
+            resolved_locale: mi_model::ResolvedLocale::ZhHans,
+            silent_at_login: true,
         }
     }
 }
@@ -197,7 +218,18 @@ pub enum HeaderAction {
     Undo,
     Redo,
     OpenSettings,
-    SelectCandidateDevice { selector: String },
+    SelectCandidateDevice {
+        selector: String,
+    },
+    SetUiLanguage {
+        language: mi_model::UiLanguagePreference,
+    },
+    SyncSystemLocale {
+        preferred_languages: Vec<String>,
+    },
+    SetSilentAtLogin {
+        silent: bool,
+    },
 }
 
 #[cfg(test)]

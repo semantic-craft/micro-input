@@ -58,8 +58,12 @@ impl DocumentStore {
         )
     }
     pub fn routing_state(&self) -> Value {
+        self.routing_state_localized(crate::ResolvedLocale::ZhHans)
+    }
+
+    pub fn routing_state_localized(&self, locale: crate::ResolvedLocale) -> Value {
         if let Some(host) = &self.host {
-            return host.routing_state();
+            return host.routing_state_localized(locale);
         }
         let p = &self.preferences.value;
         let layout = p.bottom_row_layout;
@@ -126,92 +130,108 @@ impl DocumentStore {
                                 | "desktop-nav-forward"
                         )
                     }) {
-                        format!("{} ({combo})", a.name)
+                        let action_name = crate::i18n::localize_action(a, locale).name;
+                        format!("{action_name} ({combo})")
                     } else {
                         combo
                     }
                 }
-                Some(PasteText{..}) => match bound_action.map(|a| a.id.as_str()) {
-                    Some("prompt-continue") => "粘贴文本 · Continue".into(),
-                    Some("prompt-test") => "粘贴文本 · Test".into(),
-                    Some("prompt-review") => "粘贴文本 · Review".into(),
-                    Some("prompt-commit") => "粘贴文本 · Commit".into(),
-                    Some("prompt-summary") => "粘贴文本 · Summary".into(),
-                    _ => "粘贴文本".into(),
+                Some(PasteText{..}) => {
+                    let zh = match bound_action.map(|a| a.id.as_str()) {
+                        Some("prompt-continue") => "粘贴文本 · Continue",
+                        Some("prompt-test") => "粘贴文本 · Test",
+                        Some("prompt-review") => "粘贴文本 · Review",
+                        Some("prompt-commit") => "粘贴文本 · Commit",
+                        Some("prompt-summary") => "粘贴文本 · Summary",
+                        _ => "粘贴文本",
+                    };
+                    crate::i18n::tr(zh, locale).into()
+                }
+                Some(OpenApp{bundle_id}) => match locale {
+                    crate::ResolvedLocale::ZhHans => format!("打开 {bundle_id}"),
+                    crate::ResolvedLocale::En => format!("Open {bundle_id}"),
                 },
-                Some(OpenApp{bundle_id}) => format!("打开 {}", bundle_id),
-                Some(ShellCommand{working_directory,..}) => format!("命令 · {}", working_directory),
-                Some(OpenUrl{..}) => "打开网址".into(),
-                Some(AgentCommand{command,..}) => match command.as_str() {
-                    "focus-input" => "聚焦输入框", "search" => "搜索会话", "new-chat" => "新建会话",
-                    "new-conversation-in-project" => "在项目中新建会话",
-                    "model" => "选择模型", "effort" => "思考力度", "dictation" => "听写 / 语音输入",
-                    "push-to-talk" => "按住说话",
-                    "live-voice" => "Gemini Live 实时语音",
-                    "project" => "选项目 / 新建项目",
-                    "split-right" => "快速向右分栏",
-                    "prev-conversation" => "上一会话（侧栏轮转）",
-                    "next-conversation" => "下一会话（侧栏轮转）",
-                    "voice-reply" | "toggle-voice-reply" => "切换语音回复",
-                    "browser" => "打开内置浏览器", "terminal" => "打开终端面板",
-                    "scroll-up" => "向上滚动对话", "scroll-down" => "向下滚动对话",
-                    "scroll-up-fast" => "快速向上滚动", "scroll-down-fast" => "快速向下滚动",
-                    "scroll-to-bottom" => "跳到底部并聚焦输入",
-                    "sidebar-scroll-up" => "在项目中向上滚动",
-                    "sidebar-scroll-down" => "在项目中向下滚动",
-                    "prev-project" => "上一项目",
-                    "next-project" => "下一项目",
-                    "cycle-working-prev" => "上一个 Working 会话",
-                    "cycle-working-next" => "下一个 Working 会话",
-                    "cycle-completed-prev" => "上一个蓝点已完成会话",
-                    "cycle-completed-next" => "下一个蓝点已完成会话",
-                    "cycle-attention-prev" => "上一个 Working 或蓝点会话",
-                    "cycle-attention-next" => "下一个 Working 或蓝点会话",
-                    "back" | "navigate-back" => "后退到上一个打开目标",
-                    "forward" | "navigate-forward" => "前进到下一个打开目标",
-                    "next-attention" => "下一个需要我",
-                    "submit" => "停止听写并提交",
-                    "slot-open:0" => "会话 1",
-                    "slot-open:1" => "会话 2",
-                    "slot-open:2" => "会话 3",
-                    "slot-open:3" => "会话 4",
-                    "slot-open:4" => "会话 5",
-                    "slot-open:5" => "会话 6",
-                    "new-tab" => "新建标签页",
-                    "cycle-workspace-layout" => "内置浏览器 · 布局",
-                    "toggle-dictation" => "点击听写",
-                    "effort-down" => "降低推理档位",
-                    "effort-up" => "提高推理档位",
-                    "toggle-fast-mode" => "切换 Fast 模式",
-                    "mouse-move:up" => "指针上移",
-                    "mouse-move:down" => "指针下移",
-                    "mouse-move:left" => "指针左移",
-                    "mouse-move:right" => "指针右移",
-                    "mouse-click:left" => "左键点击",
-                    "mouse-click:right" => "右键点击",
-                    "mouse-click:middle" => "中键点击",
-                    "mouse-scroll:up" => "滚轮向上",
-                    "mouse-scroll:down" => "滚轮向下",
-                    "mouse-scroll:left" => "滚轮向左",
-                    "mouse-scroll:right" => "滚轮向右",
-                    "mouse-speed:0" => "指针精细档 (0)",
-                    "mouse-speed:1" => "指针标准档 (1)",
-                    "mouse-speed:2" => "指针快速档 (2)",
-                    "mouse-speed:cycle" => "循环指针速度档",
-                    "model-picker-open" => "弹出模型选择页",
-                    "model-picker-prev" => "选择上一模型 / 档位",
-                    "model-picker-next" => "选择下一模型 / 档位",
-                    "model-picker-confirm" => "确认所选模型",
-                    "model-picker-effort-left" => "降低模型力度（左）",
-                    "model-picker-effort-right" => "选择 / 提高模型力度（右）",
-                    "model-picker-cancel" => "取消模型选择",
-                    c if c.starts_with("submit-prompt:") => "粘贴指令并提交",
-                    c if c.starts_with("prompt:") => "粘贴工程指令",
-                    _ => "Agent 动作",
-                }.into(),
-                Some(FocusSession{..}) => "聚焦会话".into(),
-                Some(MacroSequence{events}) => format!("本地宏 · {} 步", events.len()),
-                None => "不可用 / 未配置".into(),
+                Some(ShellCommand{working_directory,..}) => match locale {
+                    crate::ResolvedLocale::ZhHans => format!("命令 · {working_directory}"),
+                    crate::ResolvedLocale::En => format!("Command · {working_directory}"),
+                },
+                Some(OpenUrl{..}) => crate::i18n::tr("打开网址", locale).into(),
+                Some(AgentCommand{command,..}) => {
+                    let zh = match command.as_str() {
+                        "focus-input" => "聚焦输入框", "search" => "搜索会话", "new-chat" => "新建会话",
+                        "new-conversation-in-project" => "在项目中新建会话",
+                        "model" => "选择模型", "effort" => "思考力度", "dictation" => "听写 / 语音输入",
+                        "push-to-talk" => "按住说话",
+                        "live-voice" => "Gemini Live 实时语音",
+                        "project" => "选项目 / 新建项目",
+                        "split-right" => "快速向右分栏",
+                        "prev-conversation" => "上一会话（侧栏轮转）",
+                        "next-conversation" => "下一会话（侧栏轮转）",
+                        "voice-reply" | "toggle-voice-reply" => "切换语音回复",
+                        "browser" => "打开内置浏览器", "terminal" => "打开终端面板",
+                        "scroll-up" => "向上滚动对话", "scroll-down" => "向下滚动对话",
+                        "scroll-up-fast" => "快速向上滚动", "scroll-down-fast" => "快速向下滚动",
+                        "scroll-to-bottom" => "跳到底部并聚焦输入",
+                        "sidebar-scroll-up" => "在项目中向上滚动",
+                        "sidebar-scroll-down" => "在项目中向下滚动",
+                        "prev-project" => "上一项目",
+                        "next-project" => "下一项目",
+                        "cycle-working-prev" => "上一个 Working 会话",
+                        "cycle-working-next" => "下一个 Working 会话",
+                        "cycle-completed-prev" => "上一个蓝点已完成会话",
+                        "cycle-completed-next" => "下一个蓝点已完成会话",
+                        "cycle-attention-prev" => "上一个 Working 或蓝点会话",
+                        "cycle-attention-next" => "下一个 Working 或蓝点会话",
+                        "back" | "navigate-back" => "后退到上一个打开目标",
+                        "forward" | "navigate-forward" => "前进到下一个打开目标",
+                        "next-attention" => "下一个需要我",
+                        "submit" => "停止听写并提交",
+                        "slot-open:0" => "会话 1",
+                        "slot-open:1" => "会话 2",
+                        "slot-open:2" => "会话 3",
+                        "slot-open:3" => "会话 4",
+                        "slot-open:4" => "会话 5",
+                        "slot-open:5" => "会话 6",
+                        "new-tab" => "新建标签页",
+                        "cycle-workspace-layout" => "内置浏览器 · 布局",
+                        "toggle-dictation" => "点击听写",
+                        "effort-down" => "降低推理档位",
+                        "effort-up" => "提高推理档位",
+                        "toggle-fast-mode" => "切换 Fast 模式",
+                        "mouse-move:up" => "指针上移",
+                        "mouse-move:down" => "指针下移",
+                        "mouse-move:left" => "指针左移",
+                        "mouse-move:right" => "指针右移",
+                        "mouse-click:left" => "左键点击",
+                        "mouse-click:right" => "右键点击",
+                        "mouse-click:middle" => "中键点击",
+                        "mouse-scroll:up" => "滚轮向上",
+                        "mouse-scroll:down" => "滚轮向下",
+                        "mouse-scroll:left" => "滚轮向左",
+                        "mouse-scroll:right" => "滚轮向右",
+                        "mouse-speed:0" => "指针精细档 (0)",
+                        "mouse-speed:1" => "指针标准档 (1)",
+                        "mouse-speed:2" => "指针快速档 (2)",
+                        "mouse-speed:cycle" => "循环指针速度档",
+                        "model-picker-open" => "弹出模型选择页",
+                        "model-picker-prev" => "选择上一模型 / 档位",
+                        "model-picker-next" => "选择下一模型 / 档位",
+                        "model-picker-confirm" => "确认所选模型",
+                        "model-picker-effort-left" => "降低模型力度（左）",
+                        "model-picker-effort-right" => "选择 / 提高模型力度（右）",
+                        "model-picker-cancel" => "取消模型选择",
+                        c if c.starts_with("submit-prompt:") => "粘贴指令并提交",
+                        c if c.starts_with("prompt:") => "粘贴工程指令",
+                        _ => "Agent 动作",
+                    };
+                    crate::i18n::tr(zh, locale).into()
+                }
+                Some(FocusSession{..}) => crate::i18n::tr("聚焦会话", locale).into(),
+                Some(MacroSequence{events}) => match locale {
+                    crate::ResolvedLocale::ZhHans => format!("本地宏 · {} 步", events.len()),
+                    crate::ResolvedLocale::En => format!("Local Macro · {} steps", events.len()),
+                },
+                None => crate::i18n::tr("不可用 / 未配置", locale).into(),
             };
             let spec = crate::host_router::verified_physical_mapping_for_layout(binding, layout).unwrap();
             json!({"binding_id":binding,"control":spec.physical_control,"label":label,"available":action.is_some()})
@@ -225,7 +245,7 @@ impl DocumentStore {
             crate::host_router::ResolvedHostAction::AgentCommand { command, .. }
                 if command == "model-picker-open" =>
             {
-                "弹出模型选择页".to_owned()
+                crate::i18n::tr("弹出模型选择页", locale).to_owned()
             }
             _ => profile
                 .and_then(|prof| prof.layer_order.first())
@@ -233,13 +253,15 @@ impl DocumentStore {
                 .and_then(|l| l.control_settings.as_ref())
                 .and_then(|cs| cs.encoder_hold_action_id.as_ref())
                 .and_then(|aid| graph.actions.get(aid))
-                .map(|act| act.name.clone())
-                .unwrap_or_else(|| "长按动作".to_owned()),
+                .map(|act| crate::i18n::localize_action(act, locale).name)
+                .unwrap_or_else(|| crate::i18n::tr("长按动作", locale).to_owned()),
         });
+        let localized_profile_name =
+            profile.map(|p| crate::i18n::localize_profile_name(&p.name, locale));
         json!({"document_id":self.draft.document_id,"document_revision":self.draft.revision,
             "host_state_revision":self.host_state_revision,"profile_id":p.host_active_profile_id,
             "locked_profile_id":locked,
-            "profile_name":profile.map(|p| &p.name),"execution_enabled":p.host_execution_enabled,
+            "profile_name":localized_profile_name,"execution_enabled":p.host_execution_enabled,
             "command_execution_enabled":p.command_execution_enabled,
             "bottom_row_layout":layout,
             "encoder_hold_label":encoder_hold_label,
@@ -755,5 +777,116 @@ mod tests {
         reopened.open(doc_path).unwrap();
         assert_eq!(reopened.locked_profile_id(), None);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ui_language_and_silent_at_login_omit_defaults_and_roundtrip_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc_path = dir.path().join("workbench.json");
+        let prefs_path = doc_path.with_extension("preferences.json");
+        let legacy_v2 = json!({
+            "schema_version": 2,
+            "favorites": [],
+            "host_active_profile_id": null,
+            "locked_profile_id": null,
+            "host_execution_enabled": false,
+            "command_execution_enabled": false,
+            "bottom_row_layout": "split",
+            "usb_startup_profile_id": null,
+            "board_layer_plan": null,
+            "preview_selection": "UsbStartup",
+            "legacy_three_bindings": null,
+            "v070_auto_layer_sync_enabled": false,
+            "v070_session_sa_rgb_sync_enabled": false
+        });
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy_v2).unwrap();
+        std::fs::write(&prefs_path, &legacy_bytes).unwrap();
+
+        let mut store = DocumentStore::default();
+        store.open(doc_path.clone()).unwrap();
+        assert_eq!(store.ui_language(), crate::UiLanguagePreference::System);
+        assert!(store.silent_at_login());
+        assert!(!store
+            .set_ui_language(crate::UiLanguagePreference::System)
+            .unwrap());
+        assert!(!store.set_silent_at_login(true).unwrap());
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), legacy_bytes);
+
+        let req = request(&store, json!({"kind":"execution","enabled":true}));
+        store.update_routing(req).unwrap();
+        let saved_default: Value =
+            serde_json::from_slice(&std::fs::read(&prefs_path).unwrap()).unwrap();
+        assert!(saved_default.get("ui_language").is_none());
+        assert!(saved_default.get("silent_at_login").is_none());
+
+        assert!(store
+            .set_ui_language(crate::UiLanguagePreference::En)
+            .unwrap());
+        assert!(store.set_silent_at_login(false).unwrap());
+
+        let saved_custom: Value =
+            serde_json::from_slice(&std::fs::read(&prefs_path).unwrap()).unwrap();
+        assert_eq!(saved_custom["ui_language"], "en");
+        assert_eq!(saved_custom["silent_at_login"], false);
+
+        let mut reopened = DocumentStore::default();
+        reopened.open(doc_path.clone()).unwrap();
+        assert_eq!(reopened.ui_language(), crate::UiLanguagePreference::En);
+        assert!(!reopened.silent_at_login());
+
+        assert!(reopened
+            .set_ui_language(crate::UiLanguagePreference::ZhHans)
+            .unwrap());
+        let mut reopened_zh = DocumentStore::default();
+        reopened_zh.open(doc_path.clone()).unwrap();
+        assert_eq!(
+            reopened_zh.ui_language(),
+            crate::UiLanguagePreference::ZhHans
+        );
+
+        assert!(reopened_zh
+            .set_ui_language(crate::UiLanguagePreference::System)
+            .unwrap());
+        assert!(reopened_zh.set_silent_at_login(true).unwrap());
+        let restored: Value = serde_json::from_slice(&std::fs::read(&prefs_path).unwrap()).unwrap();
+        assert!(restored.get("ui_language").is_none());
+        assert!(restored.get("silent_at_login").is_none());
+    }
+
+    #[test]
+    fn routing_state_localized_projects_english_labels_and_encoder_hold() {
+        let mut store = DocumentStore::default();
+        let ids = crate::preset::install_agent_starter_profiles(&mut store.draft).unwrap();
+        let ag_id = ids
+            .iter()
+            .find(|id| store.draft.document.editable.graph.profiles[*id].name == "Antigravity")
+            .unwrap()
+            .clone();
+        let other_id = ids
+            .iter()
+            .find(|id| store.draft.document.editable.graph.profiles[*id].name == "其他软件")
+            .unwrap()
+            .clone();
+
+        store
+            .update_routing(request(&store, json!({"kind":"select","profile_id":ag_id})))
+            .unwrap();
+        let en = store.routing_state_localized(crate::ResolvedLocale::En);
+        assert_eq!(en["profile_name"], "Antigravity");
+        assert_eq!(en["encoder_hold_label"], "Open Model Picker");
+        let keys = en["keys"].as_array().unwrap();
+        let by_id = |b: &str| keys.iter().find(|k| k["binding_id"] == b).unwrap();
+        assert_eq!(by_id("AG13")["label"], "Previous Model / Effort");
+        assert_eq!(by_id("AG14")["label"], "Next Model / Effort");
+        assert_eq!(by_id("ENC_CLK")["label"], "Confirm Selected Model");
+
+        store
+            .update_routing(request(
+                &store,
+                json!({"kind":"select","profile_id":other_id}),
+            ))
+            .unwrap();
+        let other_en = store.routing_state_localized(crate::ResolvedLocale::En);
+        assert_eq!(other_en["profile_name"], "Other Apps");
     }
 }
