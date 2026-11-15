@@ -96,6 +96,37 @@ def wait_for_single_usb_candidate(wait_for_plug: bool, timeout_secs: float):
         time.sleep(1.0)
 
 
+def _competing_hid_readers_running() -> bool:
+    ps_proc = subprocess.run(
+        ["ps", "-ax", "-o", "pid=,command="],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if ps_proc.returncode == 0:
+        self_pid = os.getpid()
+        installed_prefix = "/Applications/Micro Input.app/Contents/MacOS/"
+        for line in ps_proc.stdout.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            if pid != self_pid and parts[1].startswith(installed_prefix):
+                return True
+    list_proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "run"), "--list"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return list_proc.returncode == 0 and bool(list_proc.stdout.strip())
+
+
 def quiesce_competing_hid_readers():
     subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "run"), "--kill"],
@@ -111,7 +142,11 @@ def quiesce_competing_hid_readers():
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    time.sleep(0.4)
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if not _competing_hid_readers_running():
+            return
+        time.sleep(0.1)
 
 
 def prepare_kit(kit_dir: Path, keymap_path: Path | None = None, smart_actions_path: Path | None = None):
@@ -284,16 +319,8 @@ def run_h1(device_path: str, h0_summary: dict, scratch_root: Path):
 
 def verify_live_app_usb_auto_acceptance(expected_device_path: str, expected_keymap_sha256: str):
     subprocess.run([str(ROOT / "scripts" / "build")], cwd=ROOT, check=True)
-    installed_app = Path("/Applications/Micro Input.app")
-    if installed_app.exists():
-        subprocess.run(
-            ["rsync", "-a", "--delete", str(ROOT / "target" / "MicroInput.app") + "/", str(installed_app) + "/"],
-            cwd=ROOT,
-            check=True,
-        )
-        app_to_launch = installed_app
-    else:
-        app_to_launch = ROOT / "target" / "MicroInput.app"
+    app_to_launch = ROOT / "target" / "MicroInput.app"
+    binary_path = app_to_launch / "Contents" / "MacOS" / "MicroInput"
 
     doc_dir = Path(
         os.environ.get(
@@ -305,21 +332,41 @@ def verify_live_app_usb_auto_acceptance(expected_device_path: str, expected_keym
     if receipt_path.exists():
         receipt_path.unlink()
 
-    launch_Started_ms = int(time.time() * 1000)
-    subprocess.run(["open", "-g", str(app_to_launch)], cwd=ROOT, check=True)
+    launch_env = os.environ.copy()
+    launch_env.pop("__CFBundleIdentifier", None)
+    launch_env.pop("XPC_SERVICE_NAME", None)
 
-    deadline = time.monotonic() + 20.0
-    receipt = None
-    while time.monotonic() < deadline:
-        if receipt_path.is_file():
+    launch_Started_ms = int(time.time() * 1000)
+    proc = subprocess.Popen(
+        [str(binary_path)],
+        cwd=ROOT,
+        env=launch_env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 20.0
+        receipt = None
+        while time.monotonic() < deadline:
+            if receipt_path.is_file():
+                try:
+                    candidate = json.loads(receipt_path.read_text(encoding="utf-8"))
+                    if candidate.get("timestamp_ms", 0) >= launch_Started_ms - 2000:
+                        receipt = candidate
+                        break
+                except (OSError, ValueError):
+                    pass
+            if proc.poll() is not None and not receipt_path.is_file():
+                break
+            time.sleep(0.2)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
             try:
-                candidate = json.loads(receipt_path.read_text(encoding="utf-8"))
-                if candidate.get("timestamp_ms", 0) >= launch_Started_ms - 2000:
-                    receipt = candidate
-                    break
-            except (OSError, ValueError):
-                pass
-        time.sleep(0.2)
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5.0)
 
     if receipt is None:
         raise RuntimeError(

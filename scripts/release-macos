@@ -40,6 +40,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog='scripts/release-macos', description=__doc__, allow_abbrev=False)
     parser.add_argument('tag', help='Release tag in vX.Y.Z format')
     parser.add_argument('--publish', action='store_true', help='Create or update GitHub Release and upload assets')
+    parser.add_argument(
+        '--install',
+        action='store_true',
+        help='Install the notarized app into /Applications/Micro Input.app via scripts/install-app',
+    )
     args = parser.parse_args(argv)
     if not re.fullmatch(r'v\d+\.\d+\.\d+', args.tag):
         parser.error(f'Release tag must match vX.Y.Z, got: {args.tag}')
@@ -452,6 +457,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f'      Archive:  {archive_path.relative_to(root)}', flush=True)
         print(f'      Appcast:  {appcast_path.relative_to(root)}', flush=True)
         print(f'      Checksums:{sums_path.relative_to(root)}', flush=True)
+
+        if args.install:
+            print('Installing notarized Micro Input.app via scripts/install-app...', flush=True)
+            install_out = run_checked(
+                [
+                    sys.executable,
+                    str(root / 'scripts/install-app'),
+                    str(stage_app),
+                    '--unregister-source',
+                ],
+                cwd=root,
+                secrets=secrets,
+            )
+            if install_out.strip():
+                print(f'      {install_out.strip()}', flush=True)
 
         if args.publish:
             print(f'[6/6] Publishing {tag} to GitHub Releases ({REPO_SLUG})...', flush=True)

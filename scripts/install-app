@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+"""Canonical macOS installer for /Applications/Micro Input.app with Developer ID and TCC continuity gates."""
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict, dataclass
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Callable
+import uuid
+
+EXPECTED_BUNDLE_ID = 'craft.semantic.micro-input.dev'
+DEFAULT_DEST_APP = Path('/Applications/Micro Input.app')
+LSREGISTER = Path(
+    '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
+)
+ROOT = Path(__file__).resolve().parent.parent
+
+CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+KillFn = Callable[[int, int], None]
+SleepFn = Callable[[float], None]
+
+
+class InstallerError(RuntimeError):
+    """Raised when bundle validation, signature checks, or atomic install fail."""
+
+
+@dataclass
+class InstallReport:
+    status: str
+    source: str
+    dest: str
+    bundle_id: str
+    allow_dev: bool
+    dry_run: bool
+    dest_existed: bool
+    designated_requirement_matched: bool | None
+    tcc_reset_required: bool
+    tcc_reset_performed: bool
+    terminated_pids: list[int]
+    unregistered_source: bool
+    launched: bool
+    incoming_designated_requirement: str
+    existing_designated_requirement: str | None
+
+
+def default_runner(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+
+def _format_proc_error(proc: subprocess.CompletedProcess[str]) -> str:
+    combined = '\n'.join(part.strip() for part in (proc.stderr, proc.stdout) if part and part.strip())
+    return combined or f'exit status {proc.returncode}'
+
+
+def parse_designated_requirement(output: str) -> str | None:
+    match = re.search(r'^designated\s*=>\s*(.+)$', output, re.MULTILINE)
+    if match is None:
+        return None
+    req = match.group(1).strip()
+    return req or None
+
+
+def has_developer_id_authority(codesign_dvv_output: str) -> bool:
+    return any(
+        line.strip().startswith('Authority=Developer ID Application:')
+        for line in codesign_dvv_output.splitlines()
+    )
+
+
+def read_designated_requirement(bundle_path: Path, runner: CommandRunner) -> str | None:
+    proc = runner(['codesign', '-d', '-r', '-', str(bundle_path)])
+    if proc.returncode != 0:
+        return None
+    combined = '\n'.join(part for part in (proc.stdout, proc.stderr) if part)
+    return parse_designated_requirement(combined)
+
+
+def validate_source_bundle(
+    src_app: Path,
+    *,
+    allow_dev: bool,
+    runner: CommandRunner,
+) -> tuple[str, str]:
+    info_plist = src_app / 'Contents/Info.plist'
+    if not src_app.is_dir() or not info_plist.is_file():
+        raise InstallerError(f'Missing .app bundle or Contents/Info.plist at {src_app}')
+
+    try:
+        with info_plist.open('rb') as handle:
+            info = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError) as exc:
+        raise InstallerError(f'Failed to read Info.plist at {info_plist}: {exc}') from exc
+    if not isinstance(info, dict):
+        raise InstallerError(f'Malformed Info.plist at {info_plist}: expected dictionary')
+    bundle_id = str(info.get('CFBundleIdentifier', '')).strip()
+    if bundle_id != EXPECTED_BUNDLE_ID:
+        raise InstallerError(
+            f'Expected CFBundleIdentifier={EXPECTED_BUNDLE_ID}, got {bundle_id!r} in {src_app}'
+        )
+
+    verify_proc = runner(['codesign', '--verify', '--deep', '--strict', str(src_app)])
+    if verify_proc.returncode != 0:
+        raise InstallerError(
+            f'Source bundle failed codesign --verify --deep --strict: {_format_proc_error(verify_proc)}'
+        )
+
+    dvv_proc = runner(['codesign', '-dvv', str(src_app)])
+    if dvv_proc.returncode != 0:
+        raise InstallerError(
+            f'Source bundle failed codesign -dvv inspection: {_format_proc_error(dvv_proc)}'
+        )
+    dvv_output = '\n'.join(part for part in (dvv_proc.stdout, dvv_proc.stderr) if part)
+
+    if not allow_dev:
+        if not has_developer_id_authority(dvv_output):
+            raise InstallerError(
+                'Refusing non-Developer-ID bundle without --allow-dev '
+                '(missing Authority=Developer ID Application:)'
+            )
+        spctl_proc = runner(['spctl', '--assess', '--type', 'execute', str(src_app)])
+        if spctl_proc.returncode != 0:
+            raise InstallerError(
+                f'Source bundle failed spctl --assess --type execute: {_format_proc_error(spctl_proc)}'
+            )
+
+    incoming_dr = read_designated_requirement(src_app, runner)
+    if incoming_dr is None:
+        raise InstallerError(f'Unable to read Designated Requirement for {src_app}')
+    return bundle_id, incoming_dr
+
+
+def extract_app_from_zip(zip_path: Path, extract_dir: Path, runner: CommandRunner) -> Path:
+    if not zip_path.is_file():
+        raise InstallerError(f'Release archive not found: {zip_path}')
+    proc = runner(['/usr/bin/ditto', '-x', '-k', str(zip_path), str(extract_dir)])
+    if proc.returncode != 0:
+        raise InstallerError(f'Failed to extract {zip_path}: {_format_proc_error(proc)}')
+    apps = [p for p in sorted(extract_dir.iterdir()) if p.suffix == '.app' and p.is_dir()]
+    if len(apps) != 1:
+        raise InstallerError(f'Expected exactly 1 .app bundle inside {zip_path}, found {len(apps)}')
+    return apps[0]
+
+
+def find_running_dest_pids(dest_app: Path, runner: CommandRunner) -> list[int]:
+    proc = runner(['ps', '-ax', '-o', 'pid=,command='])
+    if proc.returncode != 0:
+        return []
+    prefixes = {
+        str(dest_app) + '/',
+        str(Path(os.path.abspath(dest_app))) + '/',
+        str(dest_app.resolve()) + '/',
+    }
+    pids: list[int] = []
+    self_pid = os.getpid()
+    for line in proc.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if pid == self_pid:
+            continue
+        cmd = parts[1]
+        if any(cmd.startswith(prefix) for prefix in prefixes):
+            pids.append(pid)
+    return pids
+
+
+def terminate_running_dest(
+    dest_app: Path,
+    runner: CommandRunner,
+    *,
+    kill_fn: KillFn = os.kill,
+    sleep_fn: SleepFn = time.sleep,
+) -> list[int]:
+    initial_pids = find_running_dest_pids(dest_app, runner)
+    if not initial_pids:
+        return []
+    for pid in initial_pids:
+        try:
+            kill_fn(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    for _ in range(30):
+        sleep_fn(0.1)
+        remaining = find_running_dest_pids(dest_app, runner)
+        if not remaining:
+            return initial_pids
+    remaining = find_running_dest_pids(dest_app, runner)
+    for pid in remaining:
+        try:
+            kill_fn(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    for _ in range(10):
+        sleep_fn(0.1)
+        if not find_running_dest_pids(dest_app, runner):
+            return initial_pids
+    raise InstallerError(f'Unable to terminate running processes for {dest_app}: {remaining}')
+
+
+def atomic_replace_bundle(src_app: Path, dest_app: Path, runner: CommandRunner) -> None:
+    dest_abs = Path(os.path.abspath(dest_app))
+    token = f'{os.getpid()}.{uuid.uuid4().hex[:8]}'
+    staging_app = dest_abs.parent / f'.{dest_abs.name}.staging.{token}'
+    backup_app = dest_abs.parent / f'.{dest_abs.name}.backup.{token}'
+
+    try:
+        dest_abs.parent.mkdir(parents=True, exist_ok=True)
+        proc = runner(['/usr/bin/ditto', str(src_app), str(staging_app)])
+        if proc.returncode != 0:
+            raise InstallerError(f'Failed to stage bundle via ditto: {_format_proc_error(proc)}')
+        if not staging_app.exists():
+            raise InstallerError(f'Staged bundle missing after ditto: {staging_app}')
+
+        had_existing = dest_abs.exists() or dest_abs.is_symlink()
+        if had_existing:
+            os.rename(dest_abs, backup_app)
+        try:
+            os.rename(staging_app, dest_abs)
+        except Exception:
+            if had_existing and backup_app.exists() and not (dest_abs.exists() or dest_abs.is_symlink()):
+                try:
+                    os.rename(backup_app, dest_abs)
+                except OSError:
+                    pass
+            raise
+
+        if backup_app.is_symlink():
+            try:
+                backup_app.unlink()
+            except OSError:
+                pass
+        elif backup_app.exists():
+            shutil.rmtree(backup_app, ignore_errors=True)
+    except OSError as exc:
+        raise InstallerError(f'Filesystem error replacing {dest_abs}: {exc}') from exc
+    finally:
+        if staging_app.is_symlink():
+            try:
+                staging_app.unlink()
+            except OSError:
+                pass
+        elif staging_app.exists():
+            shutil.rmtree(staging_app, ignore_errors=True)
+
+
+def install_app(
+    *,
+    source: Path | None = None,
+    zip_path: Path | None = None,
+    dest: Path = DEFAULT_DEST_APP,
+    allow_dev: bool = False,
+    skip_tcc_reset: bool = False,
+    unregister_source: bool = False,
+    dry_run: bool = False,
+    launch: bool = False,
+    runner: CommandRunner | None = None,
+    kill_fn: KillFn = os.kill,
+    sleep_fn: SleepFn = time.sleep,
+    lsregister_path: Path | None = None,
+) -> InstallReport:
+    if runner is None:
+        runner = default_runner
+    if lsregister_path is None:
+        lsregister_path = LSREGISTER
+    if (source is None) == (zip_path is None):
+        raise InstallerError('Specify exactly one of source .app path or --zip archive')
+
+    dest_abs = Path(os.path.abspath(dest))
+    temp_dir_ctx: tempfile.TemporaryDirectory[str] | None = None
+    try:
+        if zip_path is not None:
+            temp_dir_ctx = tempfile.TemporaryDirectory(prefix='mi-install-')
+            src_app = extract_app_from_zip(zip_path, Path(temp_dir_ctx.name), runner)
+        else:
+            assert source is not None
+            src_app = source
+
+        bundle_id, incoming_dr = validate_source_bundle(src_app, allow_dev=allow_dev, runner=runner)
+
+        dest_existed = dest_abs.exists() or dest_abs.is_symlink()
+        existing_dr: str | None = None
+        dr_matched: bool | None = None
+        tcc_reset_required = False
+        if dest_existed:
+            existing_dr = read_designated_requirement(dest_abs, runner)
+            dr_matched = existing_dr is not None and existing_dr == incoming_dr
+            tcc_reset_required = not dr_matched
+
+        if dry_run:
+            return InstallReport(
+                status='dry_run',
+                source=str(src_app),
+                dest=str(dest_abs),
+                bundle_id=bundle_id,
+                allow_dev=allow_dev,
+                dry_run=True,
+                dest_existed=dest_existed,
+                designated_requirement_matched=dr_matched,
+                tcc_reset_required=tcc_reset_required,
+                tcc_reset_performed=False,
+                terminated_pids=[],
+                unregistered_source=False,
+                launched=False,
+                incoming_designated_requirement=incoming_dr,
+                existing_designated_requirement=existing_dr,
+            )
+
+        terminated_pids = terminate_running_dest(
+            dest_abs,
+            runner,
+            kill_fn=kill_fn,
+            sleep_fn=sleep_fn,
+        )
+
+        tcc_reset_performed = False
+        if tcc_reset_required and not skip_tcc_reset:
+            tcc_proc = runner(['tccutil', 'reset', 'Accessibility', EXPECTED_BUNDLE_ID])
+            if tcc_proc.returncode != 0:
+                raise InstallerError(
+                    f'Failed to reset Accessibility TCC entry: {_format_proc_error(tcc_proc)}'
+                )
+            tcc_reset_performed = True
+
+        atomic_replace_bundle(src_app, dest_abs, runner)
+
+        if lsregister_path.is_file():
+            ls_proc = runner([str(lsregister_path), '-f', str(dest_abs)])
+            if ls_proc.returncode != 0:
+                raise InstallerError(
+                    f'LaunchServices registration failed for {dest_abs}: {_format_proc_error(ls_proc)}'
+                )
+
+        unregistered = False
+        if unregister_source:
+            unreg_proc = runner(
+                [sys.executable, str(ROOT / 'scripts/sign_bundle.py'), str(src_app), '--unregister-only']
+            )
+            if unreg_proc.returncode != 0:
+                raise InstallerError(
+                    f'Failed to unregister source bundle {src_app}: {_format_proc_error(unreg_proc)}'
+                )
+            unregistered = True
+
+        post_verify = runner(['codesign', '--verify', '--deep', '--strict', str(dest_abs)])
+        if post_verify.returncode != 0:
+            raise InstallerError(
+                f'Installed bundle failed codesign --verify --deep --strict: {_format_proc_error(post_verify)}'
+            )
+
+        launched = False
+        if launch:
+            open_proc = runner(['/usr/bin/open', str(dest_abs)])
+            if open_proc.returncode != 0:
+                raise InstallerError(f'Failed to launch {dest_abs}: {_format_proc_error(open_proc)}')
+            launched = True
+
+        return InstallReport(
+            status='installed',
+            source=str(src_app),
+            dest=str(dest_abs),
+            bundle_id=bundle_id,
+            allow_dev=allow_dev,
+            dry_run=False,
+            dest_existed=dest_existed,
+            designated_requirement_matched=dr_matched,
+            tcc_reset_required=tcc_reset_required,
+            tcc_reset_performed=tcc_reset_performed,
+            terminated_pids=terminated_pids,
+            unregistered_source=unregistered,
+            launched=launched,
+            incoming_designated_requirement=incoming_dr,
+            existing_designated_requirement=existing_dr,
+        )
+    except OSError as exc:
+        raise InstallerError(f'Filesystem error during installation: {exc}') from exc
+    finally:
+        if temp_dir_ctx is not None:
+            temp_dir_ctx.cleanup()
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog='scripts/install-app', description=__doc__, allow_abbrev=False)
+    parser.add_argument('source', nargs='?', type=Path, help='Path to source .app bundle')
+    parser.add_argument('--zip', dest='zip_path', type=Path, help='Path to notarized release .zip archive')
+    parser.add_argument('--dest', type=Path, default=DEFAULT_DEST_APP, help='Destination .app path')
+    parser.add_argument(
+        '--allow-dev',
+        action='store_true',
+        help='Allow installing Apple Development or ad-hoc bundles',
+    )
+    parser.add_argument(
+        '--skip-tcc-reset',
+        action='store_true',
+        help='Do not reset Accessibility TCC even when Designated Requirements mismatch',
+    )
+    parser.add_argument(
+        '--unregister-source',
+        action='store_true',
+        help='Unregister source .app from LaunchServices after install',
+    )
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Validate bundle and inspect Designated Requirement continuity without modifying disk or TCC',
+    )
+    parser.add_argument('--launch', action='store_true', help='Launch the installed app after verification')
+    parser.add_argument('--json', action='store_true', help='Emit machine-readable JSON report to stdout')
+    args = parser.parse_args(argv)
+    if (args.source is None) == (args.zip_path is None):
+        parser.error('Provide either a source .app path or --zip <archive.zip> (not both)')
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        report = install_app(
+            source=args.source,
+            zip_path=args.zip_path,
+            dest=args.dest,
+            allow_dev=args.allow_dev,
+            skip_tcc_reset=args.skip_tcc_reset,
+            unregister_source=args.unregister_source,
+            dry_run=args.dry_run,
+            launch=args.launch,
+        )
+    except InstallerError as exc:
+        if args.json:
+            print(json.dumps({'status': 'error', 'error': str(exc)}, ensure_ascii=False, indent=2))
+        else:
+            print(f'install-app error: {exc}', file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
+    else:
+        tcc_note = 'reset' if report.tcc_reset_performed else ('would_reset' if report.tcc_reset_required else 'preserved')
+        print(f'install-app {report.status}: {report.dest} (tcc={tcc_note})')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

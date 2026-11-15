@@ -37,9 +37,13 @@ class ReleaseMacOSTests(unittest.TestCase):
             )
 
     def test_parse_args_enforces_tag_format_and_rejects_unknown_flags(self):
-        args = release_mod.parse_args(['v0.5.0', '--publish'])
+        args = release_mod.parse_args(['v0.5.0', '--publish', '--install'])
         self.assertEqual(args.tag, 'v0.5.0')
         self.assertTrue(args.publish)
+        self.assertTrue(args.install)
+        default_args = release_mod.parse_args(['v0.5.0'])
+        self.assertFalse(default_args.publish)
+        self.assertFalse(default_args.install)
         for bad in (['0.5.0'], ['v0.5'], ['v0.5.0', '--bogus']):
             with self.assertRaises(SystemExit):
                 release_mod.parse_args(bad)
