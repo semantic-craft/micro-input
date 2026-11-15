@@ -1,6 +1,5 @@
 // R-D02: OS notifications only; no device open, report access, or vendor code.
 #include <IOKit/hid/IOHIDManager.h>
-#include <CoreGraphics/CoreGraphics.h>
 #include <stdatomic.h>
 #include <stdint.h>
 typedef void (*change_callback)(void *);
@@ -10,7 +9,6 @@ static void changed(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef dev
     watch_context *watch = ctx;
     watch->notify(watch->context);
 }
-int mi_permission(void) { return CGPreflightListenEventAccess(); }
 void mi_watch(const atomic_bool *stop, change_callback notify, void *context) {
     watch_context watch = {notify, context};
     IOHIDManagerRef manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);

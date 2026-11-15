@@ -224,22 +224,11 @@ extern "C" {
         ),
         context: *mut std::ffi::c_void,
     ) -> i32;
-    fn mi_permission() -> i32;
     fn mi_watch(
         stop: *const AtomicBool,
         changed: extern "C" fn(*mut std::ffi::c_void),
         context: *mut std::ffi::c_void,
     );
-}
-pub fn input_monitoring_allowed() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        unsafe { mi_permission() != 0 }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MacHidAccess {
