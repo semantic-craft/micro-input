@@ -159,12 +159,19 @@ impl V070HardwareController {
                 self.projection.status_message =
                     format!("已切换当前板载层至第 {layer_index} 层（不写入闪存）");
             }
-            Ok(V070BridgeOutcome::MouseUpdated { mouse, deadzone }) => {
-                self.projection.mouse =
-                    V070MouseConfigProjection::from_mouse_config(&mouse, deadzone);
+            Ok(V070BridgeOutcome::MouseConfigUpdated { mouse }) => {
+                self.projection.mouse = V070MouseConfigProjection::from_mouse_config(
+                    &mouse,
+                    self.projection.mouse.deadzone,
+                );
                 self.projection.last_error = None;
                 self.projection.status_message =
-                    format!("已更新摇杆鼠标参数（{}）", self.projection.mouse.preset);
+                    format!("已更新硬件鼠标参数（{}）", self.projection.mouse.preset);
+            }
+            Ok(V070BridgeOutcome::DeadzoneUpdated { deadzone }) => {
+                self.projection.mouse.deadzone = deadzone;
+                self.projection.last_error = None;
+                self.projection.status_message = format!("已更新摇杆防漂移死区（{deadzone:.2}）");
             }
             Ok(V070BridgeOutcome::PmConfigUpdated { pm_config }) => {
                 self.projection.pm_config = pm_config;
@@ -301,32 +308,20 @@ pub(crate) async fn execute_v070_command_on_session(
                 layer_index: observed.map(|(_, l)| l).unwrap_or(*layer),
             })
         }
-        ValidatedV070DeviceCommand::ApplyMousePreset {
-            config,
-            fallback_deadzone,
-        } => {
+        ValidatedV070DeviceCommand::ApplyMousePreset { config }
+        | ValidatedV070DeviceCommand::ApplyMouseConfig { config } => {
             let saved = session
                 .write_mouse_config(config)
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok(V070BridgeOutcome::MouseUpdated {
-                mouse: saved,
-                deadzone: *fallback_deadzone,
-            })
+            Ok(V070BridgeOutcome::MouseConfigUpdated { mouse: saved })
         }
-        ValidatedV070DeviceCommand::ApplyMouseConfig { config, deadzone } => {
-            let saved_mouse = session
-                .write_mouse_config(config)
-                .await
-                .map_err(|e| e.to_string())?;
-            let saved_deadzone = session
+        ValidatedV070DeviceCommand::ApplyJoystickDeadzone { deadzone } => {
+            let saved = session
                 .write_joystick_deadzone(deadzone.v)
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok(V070BridgeOutcome::MouseUpdated {
-                mouse: saved_mouse,
-                deadzone: saved_deadzone,
-            })
+            Ok(V070BridgeOutcome::DeadzoneUpdated { deadzone: saved })
         }
         ValidatedV070DeviceCommand::ApplyPmConfig(cfg) => {
             let saved = session
@@ -677,27 +672,25 @@ impl WorkbenchStore {
         {
             return None;
         }
-        if !self.document_store.host_execution_enabled()
-            || self.document_store.locked_profile_id().is_some()
-            || self.six_layer_user_pinned
+        if !self.document_store.host_execution_enabled() {
+            return None;
+        }
+        let target_pid = if let Some(locked_pid) = self.document_store.locked_profile_id() {
+            locked_pid
+        } else if self.six_layer_running.is_none() || self.six_layer_user_pinned {
+            self.document_store.host_active_profile_id()?
+        } else {
+            return None;
+        };
+        let doc = &self.document_store.host_store().draft.document;
+        let profile = doc.editable.graph.profiles.get(&target_pid)?;
+        if profile
+            .layer_order
+            .iter()
+            .any(|lid| doc.is_protected_oai_layer(lid))
         {
             return None;
         }
-        let fg = self.foreground_bundle_id.as_deref()?;
-        let doc = &self.document_store.host_store().draft.document;
-        let graph = &doc.editable.graph;
-        let target_pid = graph.profile_order.iter().find(|pid| {
-            let Some(profile) = graph.profiles.get(*pid) else {
-                return false;
-            };
-            let is_protected = profile
-                .layer_order
-                .iter()
-                .any(|lid| doc.is_protected_oai_layer(lid));
-            !is_protected
-                && mi_model::host_router::desktop_agent_for_profile_name(&profile.name)
-                    .is_some_and(|(_, b)| b == fg)
-        })?;
         let plan = self.document_store.board_layer_plan()?;
         let installed_plan = self
             .six_layer_running
@@ -707,7 +700,7 @@ impl WorkbenchStore {
             let plan_matches = matches!(
                 plan.route(layer),
                 mi_model::board_layers::BoardLayerRoute::HostProfile { profile_id }
-                    if profile_id == target_pid
+                    if profile_id == &target_pid
             );
             if !plan_matches {
                 continue;
@@ -716,7 +709,7 @@ impl WorkbenchStore {
                 let desired_matches = matches!(
                     desired.route(layer),
                     mi_model::board_layers::BoardLayerRoute::HostProfile { profile_id }
-                        if profile_id == target_pid
+                        if profile_id == &target_pid
                 );
                 if !desired_matches {
                     continue;
@@ -727,7 +720,7 @@ impl WorkbenchStore {
         None
     }
 
-    pub(crate) fn maybe_sync_v070_foreground_layer(&mut self) -> bool {
+    pub(crate) fn maybe_sync_v070_active_profile_layer(&mut self) -> bool {
         let Some(layer) = self.resolve_safe_auto_sync_board_layer() else {
             self.v070_hardware.pending_auto_layer_sync = None;
             return false;
@@ -785,7 +778,6 @@ impl WorkbenchStore {
         let parsed = parse_v070_action(
             action,
             &self.v070_hardware.projection.mouse,
-            self.v070_hardware.projection.mouse.deadzone,
             self.v070_hardware.projection.device_name.max_length,
         )?;
         match parsed {
@@ -795,12 +787,12 @@ impl WorkbenchStore {
                 self.v070_hardware.projection.last_error = None;
                 if enabled {
                     self.v070_hardware.projection.status_message =
-                        "已开启前台切层联动（仅 RAM 零擦写）".into();
-                    let _ = self.maybe_sync_v070_foreground_layer();
+                        "已开启方案切层联动（仅 RAM 零擦写）".into();
+                    let _ = self.maybe_sync_v070_active_profile_layer();
                 } else {
                     self.v070_hardware.pending_auto_layer_sync = None;
                     self.v070_hardware.expected_layer_echo = None;
-                    self.v070_hardware.projection.status_message = "已关闭前台切层联动".into();
+                    self.v070_hardware.projection.status_message = "已关闭方案切层联动".into();
                 }
                 Ok(())
             }
@@ -924,7 +916,7 @@ impl WorkbenchStore {
             if !self.v070_hardware.projection.busy {
                 let pending = self.v070_hardware.pending_auto_layer_sync.take();
                 if pending.is_some() || seq == 0 {
-                    let _ = self.maybe_sync_v070_foreground_layer();
+                    let _ = self.maybe_sync_v070_active_profile_layer();
                 }
             }
             if !is_manual_sa_rgb {
@@ -961,7 +953,7 @@ impl WorkbenchStore {
         }
         if is_expected_echo {
             self.v070_hardware.projection.status_message =
-                format!("前台联动已切至 P{profile_index} · 第 {layer_index} 层（RAM 零擦写）");
+                format!("方案切层联动已切至 P{profile_index} · 第 {layer_index} 层（RAM 零擦写）");
         }
         self.sync_v070_session_sa_rgb();
         self.commit_runtime_update();
@@ -1310,6 +1302,7 @@ mod tests {
         });
         assert_eq!(store.projection().v070_hardware.mouse.move_delta, 14);
 
+        let before_custom_mouse_idx = sent_methods.lock().unwrap().len();
         store
             .dispatch_command(WorkbenchCommand::V070Hardware(
                 V070HardwareAction::ApplyMouseConfig {
@@ -1319,15 +1312,40 @@ mod tests {
                     wheel_max_speed: 12,
                     stick_speed: 3,
                     stick_scroll: 30,
-                    deadzone: 0.25,
                 },
             ))
             .unwrap();
         poll_until(&mut store, |s| {
             !s.projection().v070_hardware.busy
                 && s.projection().v070_hardware.mouse.move_delta == 12
-                && s.projection().v070_hardware.mouse.deadzone == 0.25
         });
+        {
+            let guard = sent_methods.lock().unwrap();
+            let slice = &guard[before_custom_mouse_idx..];
+            assert!(slice.iter().any(|m| m == "mouse.config"));
+            assert!(!slice.iter().any(|m| m == "joystick.deadzone"));
+        }
+        assert_eq!(store.projection().v070_hardware.mouse.preset, "custom");
+        assert!((store.projection().v070_hardware.mouse.deadzone - 0.15).abs() < 1e-9);
+
+        let before_deadzone_idx = sent_methods.lock().unwrap().len();
+        store
+            .dispatch_command(WorkbenchCommand::V070Hardware(
+                V070HardwareAction::ApplyJoystickDeadzone { deadzone: 0.25 },
+            ))
+            .unwrap();
+        poll_until(&mut store, |s| {
+            !s.projection().v070_hardware.busy
+                && (s.projection().v070_hardware.mouse.deadzone - 0.25).abs() < 1e-9
+        });
+        {
+            let guard = sent_methods.lock().unwrap();
+            let slice = &guard[before_deadzone_idx..];
+            assert!(slice.iter().any(|m| m == "joystick.deadzone"));
+            assert!(!slice.iter().any(|m| m == "mouse.config"));
+        }
+        assert_eq!(store.projection().v070_hardware.mouse.preset, "custom");
+        assert_eq!(store.projection().v070_hardware.mouse.move_delta, 12);
 
         store
             .dispatch_command(WorkbenchCommand::V070Hardware(
@@ -1466,26 +1484,18 @@ mod tests {
     fn select_layer_validation_rejects_out_of_range_before_sending_wire_command() {
         let base_mouse = MouseConfig::default();
         for layer in [0, 7] {
-            let err = parse_v070_action(
-                V070HardwareAction::SelectLayer { layer },
-                &base_mouse,
-                0.15,
-                15,
-            )
-            .unwrap_err();
+            let err = parse_v070_action(V070HardwareAction::SelectLayer { layer }, &base_mouse, 15)
+                .unwrap_err();
             assert_eq!(
                 err,
                 format!("板载层索引 {layer} 超出有效范围（仅支持第 1–6 层）")
             );
         }
         for layer in 1..=6 {
-            assert!(parse_v070_action(
-                V070HardwareAction::SelectLayer { layer },
-                &base_mouse,
-                0.15,
-                15,
-            )
-            .is_ok());
+            assert!(
+                parse_v070_action(V070HardwareAction::SelectLayer { layer }, &base_mouse, 15)
+                    .is_ok()
+            );
         }
 
         let dir = tempfile::tempdir().unwrap();
@@ -1770,10 +1780,12 @@ mod tests {
                 .0
                 .clone()
         };
+        let codex_id = profile_id("Codex");
+        let ag_id = profile_id("Antigravity");
         let dsh_id = profile_id("DeepSeek Coder (DSH)");
         let desired = mi_model::board_layers::BoardLayerPlan::recommended(
-            profile_id("Codex"),
-            profile_id("Antigravity"),
+            codex_id.clone(),
+            ag_id.clone(),
             dsh_id.clone(),
         );
         let compiled = mi_model::apply::AppliedSixLayerPlan::compile(
@@ -1803,6 +1815,7 @@ mod tests {
         assert_eq!(reopened.projection().status_menu.power_status, Some(badge));
 
         reopened.set_host_execution_enabled(true).unwrap();
+        reopened.select_and_activate_profile(&dsh_id).unwrap();
         let _ = reopened.foreground_changed(Some("com.deepseek.dsh"));
         assert!(
             !sent_methods
@@ -1812,12 +1825,42 @@ mod tests {
                 .any(|m| m == "kb.pl.set"),
             "auto_layer_sync disabled by default must never emit kb.pl.set"
         );
+        reopened
+            .dispatch_command(WorkbenchCommand::Sidebar(
+                crate::sidebar::SidebarAction::SetProfileLocked(true),
+            ))
+            .unwrap();
+        reopened
+            .dispatch_command(WorkbenchCommand::Sidebar(
+                crate::sidebar::SidebarAction::SetProfileLocked(false),
+            ))
+            .unwrap();
+        assert!(matches!(
+            reopened.build_six_layer_routing_mode(),
+            crate::six_layer_runtime::SixLayerRoutingMode::BoardLayers { .. }
+        ));
 
         reopened
             .dispatch_command(WorkbenchCommand::V070Hardware(
                 V070HardwareAction::SetAutoLayerSync { enabled: true },
             ))
             .unwrap();
+        assert!(!reopened.projection().v070_hardware.busy);
+        let _ = reopened.foreground_changed(Some("com.deepseek.dsh"));
+        assert!(
+            !sent_methods
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == "kb.pl.set"),
+            "foreground_changed must never emit kb.pl.set even when auto_layer_sync is enabled"
+        );
+
+        reopened.select_and_activate_profile(&dsh_id).unwrap();
+        assert!(matches!(
+            reopened.build_six_layer_routing_mode(),
+            crate::six_layer_runtime::SixLayerRoutingMode::ManualPinned(_)
+        ));
         poll_until(&mut reopened, |s| {
             !s.projection().v070_hardware.busy
                 && s.projection().v070_hardware.active_layer == Some(3)
@@ -1831,6 +1874,15 @@ mod tests {
         poll_until(&mut reopened, |s| {
             s.v070_hardware.expected_layer_echo.is_none()
         });
+        assert!(matches!(
+            reopened.build_six_layer_routing_mode(),
+            crate::six_layer_runtime::SixLayerRoutingMode::ManualPinned(_)
+        ));
+        assert!(reopened
+            .projection()
+            .v070_hardware
+            .status_message
+            .contains("方案切层联动已切至 P3 · 第 3 层"));
 
         let kb_pl_set_before_codex = sent_methods
             .lock()
@@ -1838,7 +1890,7 @@ mod tests {
             .iter()
             .filter(|m| m.as_str() == "kb.pl.set")
             .count();
-        let _ = reopened.foreground_changed(Some("com.openai.codex"));
+        reopened.select_and_activate_profile(&codex_id).unwrap();
         assert!(!reopened.projection().v070_hardware.busy);
         assert_eq!(
             sent_methods
@@ -1848,7 +1900,7 @@ mod tests {
                 .filter(|m| m.as_str() == "kb.pl.set")
                 .count(),
             kb_pl_set_before_codex,
-            "OAI native board layer (Codex on L1) must never trigger kb.pl.set"
+            "OAI-protected profile (Codex on L1) must never emit kb.pl.set"
         );
 
         reopened
@@ -1859,7 +1911,7 @@ mod tests {
             ))
             .unwrap();
         assert!(reopened.projection().v070_hardware.busy);
-        let _ = reopened.foreground_changed(Some("com.google.antigravity"));
+        reopened.select_and_activate_profile(&ag_id).unwrap();
         assert_eq!(
             reopened.v070_hardware.pending_auto_layer_sync,
             Some(2),
@@ -1881,7 +1933,7 @@ mod tests {
             .iter()
             .filter(|m| m.as_str() == "kb.pl.set")
             .count();
-        let _ = reopened.foreground_changed(Some("com.deepseek.dsh"));
+        reopened.select_and_activate_profile(&dsh_id).unwrap();
         assert!(!reopened.projection().v070_hardware.busy);
         assert_eq!(
             sent_methods
@@ -1891,7 +1943,7 @@ mod tests {
                 .filter(|m| m.as_str() == "kb.pl.set")
                 .count(),
             kb_pl_set_while_disabled,
-            "host_execution_enabled == false must block kb.pl.set on foreground switches"
+            "host_execution_enabled == false must block kb.pl.set on profile activation"
         );
 
         reopened.set_host_execution_enabled(true).unwrap();
@@ -1907,25 +1959,27 @@ mod tests {
                 .filter(|m| m.as_str() == "kb.pl.set")
                 .count(),
             kb_pl_set_while_disabled + 1,
-            "re-enabling host_execution_enabled must immediately sync to mapped foreground layer"
+            "re-enabling host_execution_enabled must immediately sync to active profile layer"
         );
         link.push_wire(json!({"m": "kb.pl", "p": {"p": 3, "l": 3}}));
         poll_until(&mut reopened, |s| {
             s.v070_hardware.expected_layer_echo.is_none()
         });
 
-        reopened
-            .dispatch_command(WorkbenchCommand::Sidebar(
-                crate::sidebar::SidebarAction::SetProfileLocked(true),
-            ))
-            .unwrap();
-        let kb_pl_set_while_locked = sent_methods
+        let kb_pl_set_before_physical_unpin = sent_methods
             .lock()
             .unwrap()
             .iter()
             .filter(|m| m.as_str() == "kb.pl.set")
             .count();
-        assert!(!reopened.foreground_changed(Some("com.google.antigravity")));
+        link.push_wire(json!({"m": "kb.pl", "p": {"p": 3, "l": 1}}));
+        poll_until(&mut reopened, |s| {
+            s.projection().v070_hardware.active_layer == Some(1)
+                && matches!(
+                    s.build_six_layer_routing_mode(),
+                    crate::six_layer_runtime::SixLayerRoutingMode::BoardLayers { .. }
+                )
+        });
         assert!(!reopened.projection().v070_hardware.busy);
         assert_eq!(
             sent_methods
@@ -1934,46 +1988,44 @@ mod tests {
                 .iter()
                 .filter(|m| m.as_str() == "kb.pl.set")
                 .count(),
-            kb_pl_set_while_locked,
-            "SetProfileLocked(true) must suppress kb.pl.set"
+            kb_pl_set_before_physical_unpin,
+            "unexpected physical layer change must unpin to BoardLayers without emitting counter-kb.pl.set"
         );
 
+        reopened.browse_profile(&ag_id).unwrap();
         reopened
             .dispatch_command(WorkbenchCommand::Sidebar(
-                crate::sidebar::SidebarAction::SetProfileLocked(false),
+                crate::sidebar::SidebarAction::SetProfileLocked(true),
             ))
             .unwrap();
+        assert!(matches!(
+            reopened.build_six_layer_routing_mode(),
+            crate::six_layer_runtime::SixLayerRoutingMode::Locked(_)
+        ));
         poll_until(&mut reopened, |s| {
             !s.projection().v070_hardware.busy
                 && s.projection().v070_hardware.active_layer == Some(2)
         });
-        assert_eq!(
-            sent_methods
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|m| m.as_str() == "kb.pl.set")
-                .count(),
-            kb_pl_set_while_locked + 1,
-            "SetProfileLocked(false) must restore BoardLayers and emit kb.pl.set"
-        );
         link.push_wire(json!({"m": "kb.pl", "p": {"p": 3, "l": 2}}));
         poll_until(&mut reopened, |s| {
             s.v070_hardware.expected_layer_echo.is_none()
         });
 
-        reopened.select_and_activate_profile(&dsh_id).unwrap();
-        assert!(matches!(
-            reopened.build_six_layer_routing_mode(),
-            crate::six_layer_runtime::SixLayerRoutingMode::ManualPinned(_)
-        ));
-        let kb_pl_set_while_manual = sent_methods
+        let kb_pl_set_before_unlock = sent_methods
             .lock()
             .unwrap()
             .iter()
             .filter(|m| m.as_str() == "kb.pl.set")
             .count();
-        assert!(!reopened.foreground_changed(Some("com.deepseek.dsh")));
+        reopened
+            .dispatch_command(WorkbenchCommand::Sidebar(
+                crate::sidebar::SidebarAction::SetProfileLocked(false),
+            ))
+            .unwrap();
+        assert!(matches!(
+            reopened.build_six_layer_routing_mode(),
+            crate::six_layer_runtime::SixLayerRoutingMode::BoardLayers { .. }
+        ));
         assert!(!reopened.projection().v070_hardware.busy);
         assert_eq!(
             sent_methods
@@ -1982,48 +2034,21 @@ mod tests {
                 .iter()
                 .filter(|m| m.as_str() == "kb.pl.set")
                 .count(),
-            kb_pl_set_while_manual,
-            "select_and_activate_profile (ManualPinned) must suppress kb.pl.set"
+            kb_pl_set_before_unlock,
+            "SetProfileLocked(false) must restore BoardLayers without emitting kb.pl.set"
         );
 
-        reopened
-            .dispatch_command(WorkbenchCommand::Sidebar(
-                crate::sidebar::SidebarAction::SetProfileLocked(true),
-            ))
-            .unwrap();
-        reopened
-            .dispatch_command(WorkbenchCommand::Sidebar(
-                crate::sidebar::SidebarAction::SetProfileLocked(false),
-            ))
-            .unwrap();
+        link.push_wire(json!({"m": "kb.pl", "p": {"p": 3, "l": 1}}));
         poll_until(&mut reopened, |s| {
-            !s.projection().v070_hardware.busy
-                && s.projection().v070_hardware.active_layer == Some(3)
+            s.projection().v070_hardware.active_layer == Some(1)
         });
-        assert!(matches!(
-            reopened.build_six_layer_routing_mode(),
-            crate::six_layer_runtime::SixLayerRoutingMode::BoardLayers { .. }
-        ));
-        assert_eq!(
-            sent_methods
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|m| m.as_str() == "kb.pl.set")
-                .count(),
-            kb_pl_set_while_manual + 1,
-            "unlocking after ManualPinned must restore BoardLayers and emit kb.pl.set"
-        );
-        link.push_wire(json!({"m": "kb.pl", "p": {"p": 3, "l": 3}}));
-        poll_until(&mut reopened, |s| {
-            s.v070_hardware.expected_layer_echo.is_none()
-        });
-
         responder.abort();
         let _ = reopened.tokio_runtime.block_on(&mut responder);
-        assert!(reopened.foreground_changed(Some("com.google.antigravity")));
+        reopened.select_and_activate_profile(&ag_id).unwrap();
         assert!(reopened.projection().v070_hardware.busy);
         assert!(reopened.v070_hardware.expected_layer_echo.is_some());
+        reopened.select_and_activate_profile(&dsh_id).unwrap();
+        assert_eq!(reopened.v070_hardware.pending_auto_layer_sync, Some(3));
         let in_flight_seq = reopened
             .v070_hardware
             .in_flight_seq

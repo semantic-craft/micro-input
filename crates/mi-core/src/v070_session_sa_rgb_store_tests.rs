@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -812,13 +813,17 @@ fn manual_sa_rgb_apply_is_not_immediately_clobbered_and_opt_out_uses_nonblocking
             Box::new(TestFramer),
             Arc::new(ReadOnlySchema),
             SessionConfig {
-                timeout: Duration::from_millis(500),
+                timeout: Duration::from_secs(2),
                 interval: Duration::ZERO,
             },
         )
     });
+    let hold_sa_rgb_reply = Arc::new(AtomicBool::new(false));
+    let release_sa_rgb_reply = Arc::new(tokio::sync::Notify::new());
     let slow_responder = store.tokio_runtime.spawn({
         let slow_link = slow_link.clone();
+        let hold_sa_rgb_reply = hold_sa_rgb_reply.clone();
+        let release_sa_rgb_reply = release_sa_rgb_reply.clone();
         async move {
             while let Some(raw) = slow_out_rx.recv().await {
                 let req: Value = serde_json::from_slice(&raw).unwrap();
@@ -833,7 +838,12 @@ fn manual_sa_rgb_apply_is_not_immediately_clobbered_and_opt_out_uses_nonblocking
                         "is_charging": false
                     })
                 } else {
-                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    let notified = release_sa_rgb_reply.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if hold_sa_rgb_reply.load(Ordering::SeqCst) {
+                        notified.await;
+                    }
                     json!({})
                 };
                 slow_link.push_wire(json!({
@@ -855,21 +865,23 @@ fn manual_sa_rgb_apply_is_not_immediately_clobbered_and_opt_out_uses_nonblocking
     }
     slow_link.clear_wire_events();
 
-    let toggle_start = Instant::now();
+    hold_sa_rgb_reply.store(true, Ordering::SeqCst);
     store
         .dispatch_command(WorkbenchCommand::V070Hardware(
             V070HardwareAction::SetSessionSaRgbSync { enabled: false },
         ))
         .unwrap();
-    let ui_elapsed = toggle_start.elapsed();
     assert!(
-        ui_elapsed < Duration::from_millis(50),
-        "SetSessionSaRgbSync(false) must dispatch non-blocking UrgentClear instead of blocking 120ms: took {ui_elapsed:?}"
+        hold_sa_rgb_reply.load(Ordering::SeqCst),
+        "SetSessionSaRgbSync(false) must return while kb.sa.rgb reply is still held"
     );
     wait_for_sa_rgb_count(&slow_link, 1);
+    assert!(store.sa_rgb_coordinator.is_in_flight());
     let clear_frames = slow_link.sa_rgb_params();
     assert_eq!(clear_frames.len(), 1);
     assert_is_clean_reset_frame(&clear_frames[0], &[801]);
+    hold_sa_rgb_reply.store(false, Ordering::SeqCst);
+    release_sa_rgb_reply.notify_waiters();
     while store.sa_rgb_coordinator.is_in_flight() {
         std::thread::sleep(Duration::from_millis(5));
     }

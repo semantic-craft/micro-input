@@ -381,13 +381,16 @@ public enum V070HardwareCommand {
 
     public static func applyMouseConfig(
         moveDelta: Int, maxSpeed: Int, wheelDelta: Int, wheelMaxSpeed: Int,
-        stickSpeed: Int, stickScroll: Int, deadzone: Double
+        stickSpeed: Int, stickScroll: Int
     ) -> [String: Any] {
         ["ApplyMouseConfig": [
             "move_delta": moveDelta, "max_speed": maxSpeed, "wheel_delta": wheelDelta,
             "wheel_max_speed": wheelMaxSpeed, "stick_speed": stickSpeed, "stick_scroll": stickScroll,
-            "deadzone": deadzone,
         ]]
+    }
+
+    public static func applyJoystickDeadzone(_ deadzone: Double) -> [String: Any] {
+        ["ApplyJoystickDeadzone": ["deadzone": deadzone]]
     }
 
     public static func applyPmConfig(autoSleep: Bool, hostSleep: Bool, sleepAfterMin: Int) -> [String: Any] {
@@ -405,10 +408,9 @@ public enum V070HardwareCommand {
     }
 }
 
-private struct V070MouseDraft: Equatable {
+struct V070MouseDraft: Equatable {
     var moveDelta: String, maxSpeed: String, wheelDelta: String, wheelMaxSpeed: String
     var stickSpeed: String, stickScroll: String
-    var deadzone: Double
 
     init(from mouse: V070MouseConfigModel) {
         moveDelta = String(mouse.moveDelta)
@@ -417,23 +419,25 @@ private struct V070MouseDraft: Equatable {
         wheelMaxSpeed = String(mouse.wheelMaxSpeed)
         stickSpeed = String(mouse.stickSpeed)
         stickScroll = String(mouse.stickScroll)
-        deadzone = mouse.deadzone
     }
 
-    var validated: (Int, Int, Int, Int, Int, Int, Double)? {
-        guard let md = Self.parseInt(moveDelta, in: 1...255),
-              let ms = Self.parseInt(maxSpeed, in: 1...255),
-              let wd = Self.parseInt(wheelDelta, in: 1...255),
-              let ws = Self.parseInt(wheelMaxSpeed, in: 1...255),
+    static func isValidDeadzone(_ value: Double) -> Bool {
+        value.isFinite && (0.0025...0.95).contains(value)
+    }
+
+    var validated: (Int, Int, Int, Int, Int, Int)? {
+        guard let md = Self.parseInt(moveDelta, in: 1...127),
+              let ms = Self.parseInt(maxSpeed, in: 1...100),
+              let wd = Self.parseInt(wheelDelta, in: 1...127),
+              let ws = Self.parseInt(wheelMaxSpeed, in: 1...100),
               let ss = Self.parseInt(stickSpeed, in: 1...255),
-              let sc = Self.parseInt(stickScroll, in: 1...2000),
-              deadzone.isFinite, (0.0025...0.95).contains(deadzone)
+              let sc = Self.parseInt(stickScroll, in: 1...255)
         else { return nil }
-        return (md, ms, wd, ws, ss, sc, deadzone)
+        return (md, ms, wd, ws, ss, sc)
     }
 
     var validationHint: String? {
-        validated == nil ? "请确认步进/速度在 1–255、摇杆滚轮在 1–2000，死区在 0.0025–0.95" : nil
+        validated == nil ? "请确认步进在 1–127、加速上限在 1–100、摇杆参数在 1–255" : nil
     }
 
     private static func parseInt(_ raw: String, in range: ClosedRange<Int>) -> Int? {
@@ -462,7 +466,8 @@ public struct V070HardwareSettingsSection: View {
     let dispatch: (Any) -> Void
 
     @State private var deviceNameDraft: String
-    @State private var mouseDraft: V070MouseDraft
+    @State private var deadzoneDraft: Double
+    @State private var mouseCurveDraft: V070MouseDraft
     @State private var showAdvancedMouseParams: Bool
     @State private var pmAutoSleepDraft: Bool
     @State private var pmHostSleepDraft: Bool
@@ -475,7 +480,8 @@ public struct V070HardwareSettingsSection: View {
         self.model = model
         self.dispatch = dispatch
         _deviceNameDraft = State(initialValue: model.deviceName.name)
-        _mouseDraft = State(initialValue: V070MouseDraft(from: model.mouse))
+        _deadzoneDraft = State(initialValue: model.mouse.deadzone)
+        _mouseCurveDraft = State(initialValue: V070MouseDraft(from: model.mouse))
         _showAdvancedMouseParams = State(initialValue: model.mouse.preset == "custom")
         _pmAutoSleepDraft = State(initialValue: model.pmConfig.autoSleep)
         _pmHostSleepDraft = State(initialValue: model.pmConfig.hostSleep)
@@ -494,13 +500,15 @@ public struct V070HardwareSettingsSection: View {
         .onChange(of: model.synced) { _, synced in
             guard synced else { return }
             deviceNameDraft = model.deviceName.name
-            mouseDraft = V070MouseDraft(from: model.mouse)
+            deadzoneDraft = model.mouse.deadzone
+            mouseCurveDraft = V070MouseDraft(from: model.mouse)
             pmAutoSleepDraft = model.pmConfig.autoSleep
             pmHostSleepDraft = model.pmConfig.hostSleep
             pmSleepAfterMinDraft = model.pmConfig.sleepAfterMin
         }
         .onChange(of: model.deviceName.name) { _, next in deviceNameDraft = next }
-        .onChange(of: model.mouse) { _, next in mouseDraft = V070MouseDraft(from: next) }
+        .onChange(of: model.mouse.deadzone) { _, next in deadzoneDraft = next }
+        .onChange(of: V070MouseDraft(from: model.mouse)) { _, next in mouseCurveDraft = next }
         .onChange(of: model.pmConfig) { _, next in
             pmAutoSleepDraft = next.autoSleep
             pmHostSleepDraft = next.hostSleep
@@ -553,6 +561,9 @@ public struct V070HardwareSettingsSection: View {
     private var mouseSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             SettingsSectionHeader("鼠标速度与摇杆死区")
+            Text("速度参数仅对绑定了硬件鼠标或滚轮的按键层生效；摇杆死区同时影响轮盘菜单离中阈值。")
+                .font(UITheme.caption)
+                .foregroundStyle(UITheme.textSecondary)
             SettingsCard {
                 SettingsRow("速度预设", subtitle: "当前档位：\(presetDisplayName(model.mouse.preset))（立即生效）", showsDivider: true) {
                     HStack(spacing: 6) {
@@ -564,17 +575,17 @@ public struct V070HardwareSettingsSection: View {
                         }
                     }
                 }
-                SettingsRow("摇杆死区", subtitle: "防漂移盲区（UI 范围 0.02–0.45，固件允许 0.0025–0.95）", showsDivider: true) {
+                SettingsRow("摇杆死区", subtitle: "防漂移盲区（出厂默认 0.15，UI 范围 0.02–0.45）", showsDivider: true) {
                     HStack(spacing: 10) {
                         NeutralTrackSlider(
-                            value: Binding(get: { mouseDraft.deadzone }, set: { mouseDraft.deadzone = (($0 * 100.0).rounded() / 100.0) }),
+                            value: Binding(get: { deadzoneDraft }, set: { deadzoneDraft = (($0 * 100.0).rounded() / 100.0) }),
                             in: 0.02...0.45, trackWidth: 132, showsPercentage: false
                         ).disabled(model.busy).accessibilityIdentifier("v070-deadzone-slider")
-                        Text(String(format: "%.2f", mouseDraft.deadzone)).font(UITheme.monoBadge).foregroundStyle(UITheme.textSecondary).frame(width: 42, alignment: .trailing)
-                        if !showAdvancedMouseParams && abs(mouseDraft.deadzone - model.mouse.deadzone) > 0.001 {
-                            Button("保存死区") { applyMouseDraft() }
+                        Text(String(format: "%.2f", deadzoneDraft)).font(UITheme.monoBadge).foregroundStyle(UITheme.textSecondary).frame(width: 42, alignment: .trailing)
+                        if abs(deadzoneDraft - model.mouse.deadzone) > 0.001 {
+                            Button("保存死区") { dispatch(V070HardwareCommand.applyJoystickDeadzone(deadzoneDraft)) }
                                 .surfaceButton(.secondary)
-                                .disabled(model.busy || mouseDraft.validated == nil)
+                                .disabled(model.busy || !V070MouseDraft.isValidDeadzone(deadzoneDraft))
                                 .accessibilityIdentifier("v070-deadzone-save")
                         }
                     }
@@ -582,15 +593,15 @@ public struct V070HardwareSettingsSection: View {
                 DisclosureGroup("高级曲线参数", isExpanded: $showAdvancedMouseParams) {
                     VStack(spacing: 0) {
                         Rectangle().fill(UITheme.rowDivider).frame(height: 1).padding(.top, 10)
-                        mouseSliderRow("指针初速", subtitle: "单步位移（1–255）", text: $mouseDraft.moveDelta, defaultRange: 1...255, unit: "px/tick", id: "v070-mouse-move-delta-slider")
-                        mouseSliderRow("指针上限", subtitle: "加速上限（1–255）", text: $mouseDraft.maxSpeed, defaultRange: 1...255, unit: "px/tick", id: "v070-mouse-max-speed-slider")
-                        mouseSliderRow("滚轮步进", subtitle: "单步滚动（1–255）", text: $mouseDraft.wheelDelta, defaultRange: 1...255, unit: "x/tick", id: "v070-mouse-wheel-delta-slider")
-                        mouseSliderRow("滚轮上限", subtitle: "加速上限（1–255）", text: $mouseDraft.wheelMaxSpeed, defaultRange: 1...255, unit: "x/tick", id: "v070-mouse-wheel-max-speed-slider")
-                        mouseSliderRow("摇杆指针", subtitle: "硬件指针速率（1–255）", text: $mouseDraft.stickSpeed, defaultRange: 1...255, unit: "x/tick", id: "v070-mouse-stick-speed-slider")
-                        mouseSliderRow("摇杆滚轮", subtitle: "硬件滚轮速率（1–2000）", text: $mouseDraft.stickScroll, defaultRange: 1...2000, unit: "x/tick", id: "v070-mouse-stick-scroll-slider")
-                        SettingsRow("自定义参数", subtitle: mouseDraft.validationHint ?? "连同上方摇杆死区一起保存至设备", showsDivider: false) {
-                            Button("应用鼠标参数") { applyMouseDraft() }
-                                .surfaceButton(.secondary).disabled(model.busy || mouseDraft.validated == nil).accessibilityIdentifier("v070-mouse-apply")
+                        mouseSliderRow("指针初速", subtitle: "按键鼠标单步位移（推荐 4–32，固件上限 127）", text: $mouseCurveDraft.moveDelta, defaultRange: 1...32, unit: "px/tick", id: "v070-mouse-move-delta-slider")
+                        mouseSliderRow("指针上限", subtitle: "按键鼠标加速上限（推荐 4–40，固件上限 100）", text: $mouseCurveDraft.maxSpeed, defaultRange: 1...40, unit: "px/tick", id: "v070-mouse-max-speed-slider")
+                        mouseSliderRow("滚轮步进", subtitle: "旋钮或按键单步滚动（推荐 1–16，固件上限 127）", text: $mouseCurveDraft.wheelDelta, defaultRange: 1...16, unit: "x/tick", id: "v070-mouse-wheel-delta-slider")
+                        mouseSliderRow("滚轮上限", subtitle: "旋钮或按键滚轮上限（推荐 1–32，固件上限 100）", text: $mouseCurveDraft.wheelMaxSpeed, defaultRange: 1...32, unit: "x/tick", id: "v070-mouse-wheel-max-speed-slider")
+                        mouseSliderRow("摇杆指针", subtitle: "模拟摇杆满偏转步长（推荐 1–16，固件上限 255）", text: $mouseCurveDraft.stickSpeed, defaultRange: 1...16, unit: "px/tick", id: "v070-mouse-stick-speed-slider")
+                        mouseSliderRow("摇杆滚轮", subtitle: "模拟摇杆滚轮分频间隔（10–120，越小越快；上限 255）", text: $mouseCurveDraft.stickScroll, defaultRange: 10...120, unit: "ticks", id: "v070-mouse-stick-scroll-slider")
+                        SettingsRow("自定义参数", subtitle: mouseCurveDraft.validationHint ?? "仅将上方 6 项自定义曲线参数写入设备", showsDivider: false) {
+                            Button("应用鼠标参数") { applyMouseCurveDraft() }
+                                .surfaceButton(.secondary).disabled(model.busy || mouseCurveDraft.validated == nil).accessibilityIdentifier("v070-mouse-apply")
                         }
                     }
                 }
@@ -649,11 +660,11 @@ public struct V070HardwareSettingsSection: View {
         }
     }
 
-    private func applyMouseDraft() {
-        if let v = mouseDraft.validated {
+    private func applyMouseCurveDraft() {
+        if let v = mouseCurveDraft.validated {
             dispatch(V070HardwareCommand.applyMouseConfig(
                 moveDelta: v.0, maxSpeed: v.1, wheelDelta: v.2,
-                wheelMaxSpeed: v.3, stickSpeed: v.4, stickScroll: v.5, deadzone: v.6
+                wheelMaxSpeed: v.3, stickSpeed: v.4, stickScroll: v.5
             ))
         }
     }
