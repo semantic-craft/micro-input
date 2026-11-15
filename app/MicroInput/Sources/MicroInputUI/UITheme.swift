@@ -784,7 +784,14 @@ public struct PopoverActionRow: View {
 }
 
 public enum StatusItemIcon {
+    private static let zhHansIcon = build(locale: .zhHans)
+    private static let enIcon = build(locale: .en)
+
     public static func make(locale: ResolvedLocale = .zhHans) -> NSImage {
+        locale == .en ? enIcon : zhHansIcon
+    }
+
+    private static func build(locale: ResolvedLocale) -> NSImage {
         let image = NSImage(size: NSSize(width: 20, height: 18), flipped: false) { _ in
             NSColor.black.setStroke()
             NSColor.black.setFill()
@@ -941,21 +948,50 @@ public enum AgentProfileKind: String {
     public var bridgeDescription: String { bridgeDescription(.zhHans) }
 }
 
-public extension Color {
-    init(hex: String) {
-        let cleaned = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        var val: UInt64 = 0
-        Scanner(string: cleaned).scanHexInt64(&val)
-        let r, g, b: Double
-        if cleaned.count == 6 {
-            r = Double((val >> 16) & 0xFF) / 255.0
-            g = Double((val >> 8) & 0xFF) / 255.0
-            b = Double(val & 0xFF) / 255.0
-        } else {
-            r = 0.23
-            g = 0.51
-            b = 0.96
+private enum HexColorCache {
+    private static let fallback = Color(red: 0.23, green: 0.51, blue: 0.96)
+    private static let lock = NSLock()
+    private static var table: [String: Color] = [:]
+
+    static func resolve(_ hex: String) -> Color {
+        if let cached = lock.withLock({ table[hex] }) { return cached }
+        let parsed = parse(hex)
+        lock.withLock {
+            if table.count >= 128 { table.removeAll(keepingCapacity: true) }
+            table[hex] = parsed
         }
-        self.init(red: r, green: g, blue: b)
+        return parsed
     }
+
+    private static func isASCIIAlnum(_ b: UInt8) -> Bool {
+        (48...57).contains(b) || (65...90).contains(b) || (97...122).contains(b)
+    }
+
+    private static func hexNibble(_ b: UInt8) -> UInt8? {
+        switch b {
+        case 48...57: return b - 48
+        case 65...70: return b - 55
+        case 97...102: return b - 87
+        default: return nil
+        }
+    }
+
+    private static func parse(_ hex: String) -> Color {
+        let bytes = hex.utf8
+        var start = bytes.startIndex, end = bytes.endIndex
+        while start < end && !isASCIIAlnum(bytes[start]) { bytes.formIndex(after: &start) }
+        while end > start && !isASCIIAlnum(bytes[bytes.index(before: end)]) { bytes.formIndex(before: &end) }
+        var value: UInt32 = 0, count = 0
+        for byte in bytes[start..<end] {
+            guard count < 6, let nibble = hexNibble(byte) else { return fallback }
+            value = (value << 4) | UInt32(nibble)
+            count += 1
+        }
+        guard count == 6 else { return fallback }
+        return Color(red: Double((value >> 16) & 0xFF) / 255.0, green: Double((value >> 8) & 0xFF) / 255.0, blue: Double(value & 0xFF) / 255.0)
+    }
+}
+
+public extension Color {
+    init(hex: String) { self = HexColorCache.resolve(hex) }
 }

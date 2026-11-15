@@ -762,13 +762,14 @@ private struct BoardKeycapCellButton: View, Equatable {
         let hasActiveState = (sessionSlot?.isUnreadBlueDot == true)
             || (sessionSlot?.isWorkingAnimated == true)
             || (status == "NeedsAttention")
-        let ledColor = Color(hex: sessionSlot?.ledColorHex ?? "#36526D")
         let fillSurface = (sessionSlot?.isUnreadBlueDot == true || status == "NeedsAttention")
             ? UITheme.accentSoft
             : UITheme.subtleSurface
         let borderColor: Color = {
             if isSelected { return UITheme.accent }
-            if hasActiveState { return ledColor.opacity(0.85) }
+            if hasActiveState {
+                return Color(hex: sessionSlot?.ledColorHex ?? "#36526D").opacity(0.85)
+            }
             return UITheme.strongBorder
         }()
 

@@ -908,6 +908,73 @@ final class DesignSystemVerificationTests: XCTestCase {
         }
     }
 
+    func testStatusItemIconCachingAndLocaleMetadata() {
+        let zh1 = StatusItemIcon.make(locale: .zhHans)
+        let zh2 = StatusItemIcon.make(locale: .zhHans)
+        let zhDefault = StatusItemIcon.make()
+        let en1 = StatusItemIcon.make(locale: .en)
+        let en2 = StatusItemIcon.make(locale: .en)
+
+        XCTAssertTrue(zh1 === zh2)
+        XCTAssertTrue(zh1 === zhDefault)
+        XCTAssertTrue(en1 === en2)
+        XCTAssertTrue(zh1 !== en1)
+
+        for icon in [zh1, en1] {
+            XCTAssertTrue(icon.isTemplate)
+            XCTAssertEqual(icon.size, NSSize(width: 20, height: 18))
+        }
+        XCTAssertEqual(zh1.accessibilityDescription, "Micro Input 键盘")
+        XCTAssertEqual(en1.accessibilityDescription, "Micro Input Keypad")
+    }
+
+    func testHexColorCacheParsingFallbackAndBoundedEviction() throws {
+        func srgb(_ color: Color, file: StaticString = #filePath, line: UInt = #line) throws -> (CGFloat, CGFloat, CGFloat) {
+            let converted = try XCTUnwrap(NSColor(color).usingColorSpace(.sRGB), file: file, line: line)
+            return (converted.redComponent, converted.greenComponent, converted.blueComponent)
+        }
+
+        let c1 = try srgb(Color(hex: "#36526D"))
+        XCTAssertEqual(c1.0, 54.0 / 255.0, accuracy: 1e-3)
+        XCTAssertEqual(c1.1, 82.0 / 255.0, accuracy: 1e-3)
+        XCTAssertEqual(c1.2, 109.0 / 255.0, accuracy: 1e-3)
+
+        let c2 = try srgb(Color(hex: "3b82f6"))
+        XCTAssertEqual(c2.0, 59.0 / 255.0, accuracy: 1e-3)
+        XCTAssertEqual(c2.1, 130.0 / 255.0, accuracy: 1e-3)
+        XCTAssertEqual(c2.2, 246.0 / 255.0, accuracy: 1e-3)
+
+        let c3 = try srgb(Color(hex: "  #00FF66 \n"))
+        XCTAssertEqual(c3.0, 0.0, accuracy: 1e-3)
+        XCTAssertEqual(c3.1, 1.0, accuracy: 1e-3)
+        XCTAssertEqual(c3.2, 102.0 / 255.0, accuracy: 1e-3)
+
+        XCTAssertEqual(Color(hex: "#36526D"), Color(hex: "#36526D"))
+
+        for invalid in ["#FFF", "#GGGGGG", "", "#12345678", "#12 345"] {
+            let fb = try srgb(Color(hex: invalid))
+            XCTAssertEqual(fb.0, 0.23, accuracy: 1e-3, "Fallback red mismatch for \(invalid)")
+            XCTAssertEqual(fb.1, 0.51, accuracy: 1e-3, "Fallback green mismatch for \(invalid)")
+            XCTAssertEqual(fb.2, 0.96, accuracy: 1e-3, "Fallback blue mismatch for \(invalid)")
+        }
+
+        for i in 0..<180 {
+            let r = (i * 3) & 0xFF
+            let g = (i * 7) & 0xFF
+            let b = (i * 11) & 0xFF
+            let hex = String(format: "#%02X%02X%02X", r, g, b)
+            let rgb = try srgb(Color(hex: hex))
+            XCTAssertEqual(rgb.0, CGFloat(r) / 255.0, accuracy: 1e-3)
+            XCTAssertEqual(rgb.1, CGFloat(g) / 255.0, accuracy: 1e-3)
+            XCTAssertEqual(rgb.2, CGFloat(b) / 255.0, accuracy: 1e-3)
+        }
+
+        let afterEviction = try srgb(Color(hex: "#36526D"))
+        XCTAssertEqual(afterEviction.0, 54.0 / 255.0, accuracy: 1e-3)
+        XCTAssertEqual(afterEviction.1, 82.0 / 255.0, accuracy: 1e-3)
+        XCTAssertEqual(afterEviction.2, 109.0 / 255.0, accuracy: 1e-3)
+    }
+
     @MainActor
     private func saveSnapshot<V: View>(
         _ view: V,
