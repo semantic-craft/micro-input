@@ -34,7 +34,7 @@ pub struct PowerStatusBadgeProjection {
 
 impl PowerStatusBadgeProjection {
     pub fn from_v070(
-        v070: &crate::firmware_update::V070HardwareProjection,
+        v070: &crate::v070_hardware::V070HardwareProjection,
         device_connected: bool,
     ) -> Option<Self> {
         if !(device_connected && v070.supported) {
@@ -103,17 +103,41 @@ pub struct CandidateDevice {
     #[serde(default)]
     pub serial_number: Option<String>,
     #[serde(default)]
+    pub selector_key: String,
+    #[serde(default)]
     pub display_label: String,
     pub is_connected: bool,
     pub is_preferred: bool,
 }
 
 impl CandidateDevice {
-    pub fn selector_key(&self) -> &str {
-        self.serial_number
+    pub fn new(
+        path: String,
+        product: String,
+        serial_number: Option<String>,
+        display_label: String,
+        is_connected: bool,
+        is_preferred: bool,
+    ) -> Self {
+        let selector_key = serial_number
             .as_deref()
+            .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or(&self.path)
+            .unwrap_or(&path)
+            .to_string();
+        Self {
+            path,
+            product,
+            serial_number,
+            selector_key,
+            display_label,
+            is_connected,
+            is_preferred,
+        }
+    }
+
+    pub fn selector_key(&self) -> &str {
+        &self.selector_key
     }
 }
 
@@ -174,4 +198,34 @@ pub enum HeaderAction {
     Redo,
     OpenSettings,
     SelectCandidateDevice { selector: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CandidateDevice;
+
+    #[test]
+    fn candidate_device_computes_and_serializes_selector_key_once() {
+        let with_serial = CandidateDevice::new(
+            "/dev/hid1".to_string(),
+            "Creator Micro 2".to_string(),
+            Some("  SN-42  ".to_string()),
+            "Creator Micro 2 (#SN-42)".to_string(),
+            true,
+            true,
+        );
+        assert_eq!(with_serial.selector_key(), "SN-42");
+        let json = serde_json::to_value(&with_serial).unwrap();
+        assert_eq!(json["selector_key"], "SN-42");
+
+        let fallback = CandidateDevice::new(
+            "IOService:/USB/9".to_string(),
+            "Creator Micro 2".to_string(),
+            Some("   ".to_string()),
+            "Creator Micro 2 (#IOService:/USB/9)".to_string(),
+            false,
+            false,
+        );
+        assert_eq!(fallback.selector_key(), "IOService:/USB/9");
+    }
 }

@@ -7,7 +7,6 @@ use serde_json::{json, Value};
 use super::tests::{poll_until, spawn_mock_v070_session, MockV070Link, MockWireEvent, TestFramer};
 use super::*;
 use crate::canvas::CanvasAction;
-use crate::firmware_update::FirmwareAction;
 use crate::session_strip::FourAppSessionKind;
 use crate::six_layer_runtime::RunningSixLayer;
 use crate::store::WorkbenchCommand;
@@ -123,7 +122,7 @@ fn v070_session_sa_rgb_end_to_end_states_dedup_coalescing_and_rc06_isolation() {
     let mut cfg = crate::store::WorkbenchStoreConfig::isolated(dir.path());
     cfg.isolated = false;
     let mut store = WorkbenchStore::open(cfg.clone()).unwrap();
-    assert!(!store.projection().firmware.v070.session_sa_rgb_sync_enabled);
+    assert!(!store.projection().v070_hardware.session_sa_rgb_sync_enabled);
 
     let (active_pid, active_lid) = select_editable_antigravity_profile(&mut store);
     bind_sa_tokens_on_layer(
@@ -144,7 +143,7 @@ fn v070_session_sa_rgb_end_to_end_states_dedup_coalescing_and_rc06_isolation() {
         spawn_mock_v070_session(&store.tokio_runtime, "0.7.0-rc.16", sent_methods);
     store.device_session = Some(session.clone());
     store.trigger_v070_session_snapshot_if_supported(&session);
-    poll_until(&mut store, |s| s.projection().firmware.v070.synced);
+    poll_until(&mut store, |s| s.projection().v070_hardware.synced);
 
     let initial_candidates = vec![
         make_live_candidate(0, FourAppSessionKind::Working, 100),
@@ -162,11 +161,11 @@ fn v070_session_sa_rgb_end_to_end_states_dedup_coalescing_and_rc06_isolation() {
 
     let _ = active_pid;
     store
-        .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+        .dispatch_command(WorkbenchCommand::V070Hardware(
             V070HardwareAction::SetSessionSaRgbSync { enabled: true },
-        )))
+        ))
         .unwrap();
-    assert!(store.projection().firmware.v070.session_sa_rgb_sync_enabled);
+    assert!(store.projection().v070_hardware.session_sa_rgb_sync_enabled);
     assert!(store.document_store.v070_session_sa_rgb_sync_enabled());
     wait_for_sa_rgb_count(&link, 4);
 
@@ -235,7 +234,7 @@ fn v070_session_sa_rgb_end_to_end_states_dedup_coalescing_and_rc06_isolation() {
         220,
     )]);
     let gen_after_ingest = store.projection_generation();
-    assert!(!store.projection().firmware.v070.busy);
+    assert!(!store.projection().v070_hardware.busy);
     std::thread::sleep(Duration::from_millis(30));
     assert!(
         link.sa_rgb_params().is_empty(),
@@ -254,7 +253,7 @@ fn v070_session_sa_rgb_end_to_end_states_dedup_coalescing_and_rc06_isolation() {
         "background sa.rgb timer flush must never increment projection_generation (R-C06)"
     );
     assert!(
-        !store.projection().firmware.v070.busy,
+        !store.projection().v070_hardware.busy,
         "background sa.rgb timer flush must never set v070.busy"
     );
 
@@ -295,8 +294,7 @@ fn v070_session_sa_rgb_end_to_end_states_dedup_coalescing_and_rc06_isolation() {
     assert!(
         reopened
             .projection()
-            .firmware
-            .v070
+            .v070_hardware
             .session_sa_rgb_sync_enabled
     );
 }
@@ -335,24 +333,24 @@ fn v070_session_sa_rgb_resets_before_close_on_opt_out_protected_layer_sleep_term
         spawn_mock_v070_session(&store.tokio_runtime, "0.7.0-rc.16", sent_methods);
     store.device_session = Some(session.clone());
     store.trigger_v070_session_snapshot_if_supported(&session);
-    poll_until(&mut store, |s| s.projection().firmware.v070.synced);
+    poll_until(&mut store, |s| s.projection().v070_hardware.synced);
 
     store.ingest_four_app_candidates(vec![
         make_live_candidate(0, FourAppSessionKind::Working, 100),
         make_live_candidate(1, FourAppSessionKind::Error, 90),
     ]);
     store
-        .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+        .dispatch_command(WorkbenchCommand::V070Hardware(
             V070HardwareAction::SetSessionSaRgbSync { enabled: true },
-        )))
+        ))
         .unwrap();
     wait_for_sa_rgb_count(&link, 2);
 
     link.clear_wire_events();
     store
-        .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+        .dispatch_command(WorkbenchCommand::V070Hardware(
             V070HardwareAction::SetSessionSaRgbSync { enabled: false },
-        )))
+        ))
         .unwrap();
     wait_for_sa_rgb_count(&link, 1);
     let opt_out_frames = link.sa_rgb_params();
@@ -361,9 +359,9 @@ fn v070_session_sa_rgb_resets_before_close_on_opt_out_protected_layer_sleep_term
 
     link.clear_wire_events();
     store
-        .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+        .dispatch_command(WorkbenchCommand::V070Hardware(
             V070HardwareAction::SetSessionSaRgbSync { enabled: true },
-        )))
+        ))
         .unwrap();
     wait_for_sa_rgb_count(&link, 2);
 
@@ -439,16 +437,16 @@ fn v070_session_sa_rgb_resets_before_close_on_opt_out_protected_layer_sleep_term
     );
     store_term.device_session = Some(session_term.clone());
     store_term.trigger_v070_session_snapshot_if_supported(&session_term);
-    poll_until(&mut store_term, |s| s.projection().firmware.v070.synced);
+    poll_until(&mut store_term, |s| s.projection().v070_hardware.synced);
     store_term.ingest_four_app_candidates(vec![make_live_candidate(
         0,
         FourAppSessionKind::Working,
         100,
     )]);
     store_term
-        .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+        .dispatch_command(WorkbenchCommand::V070Hardware(
             V070HardwareAction::SetSessionSaRgbSync { enabled: true },
-        )))
+        ))
         .unwrap();
     wait_for_sa_rgb_count(&link_term, 1);
     link_term.clear_wire_events();
@@ -487,16 +485,16 @@ fn v070_session_sa_rgb_resets_before_close_on_opt_out_protected_layer_sleep_term
     );
     store_unplug.device_session = Some(session_unplug.clone());
     store_unplug.trigger_v070_session_snapshot_if_supported(&session_unplug);
-    poll_until(&mut store_unplug, |s| s.projection().firmware.v070.synced);
+    poll_until(&mut store_unplug, |s| s.projection().v070_hardware.synced);
     store_unplug.ingest_four_app_candidates(vec![make_live_candidate(
         0,
         FourAppSessionKind::Working,
         100,
     )]);
     store_unplug
-        .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+        .dispatch_command(WorkbenchCommand::V070Hardware(
             V070HardwareAction::SetSessionSaRgbSync { enabled: true },
-        )))
+        ))
         .unwrap();
     wait_for_sa_rgb_count(&link_unplug, 1);
     link_unplug.clear_wire_events();
@@ -533,9 +531,9 @@ fn v070_session_sa_rgb_drop_inside_tokio_runtime_resets_before_close_without_pan
         store_old.device_session = Some(session_old.clone());
         store_old.trigger_v070_session_snapshot_if_supported(&session_old);
         store_old
-            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+            .dispatch_command(WorkbenchCommand::V070Hardware(
                 V070HardwareAction::SetSessionSaRgbSync { enabled: true },
-            )))
+            ))
             .unwrap();
         store_old.ingest_four_app_candidates(vec![make_live_candidate(
             0,
@@ -564,15 +562,15 @@ fn v070_session_sa_rgb_drop_inside_tokio_runtime_resets_before_close_without_pan
     );
     store.device_session = Some(session.clone());
     store.trigger_v070_session_snapshot_if_supported(&session);
-    poll_until(&mut store, |s| s.projection().firmware.v070.synced);
+    poll_until(&mut store, |s| s.projection().v070_hardware.synced);
     store.ingest_four_app_candidates(vec![
         make_live_candidate(0, FourAppSessionKind::Working, 100),
         make_live_candidate(1, FourAppSessionKind::BlueDotCompleted, 90),
     ]);
     store
-        .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+        .dispatch_command(WorkbenchCommand::V070Hardware(
             V070HardwareAction::SetSessionSaRgbSync { enabled: true },
-        )))
+        ))
         .unwrap();
     wait_for_sa_rgb_count(&link, 2);
     link.clear_wire_events();
@@ -617,15 +615,15 @@ fn v070_session_sa_rgb_drop_inside_tokio_runtime_resets_before_close_without_pan
     );
     store_drop.device_session = Some(session_drop.clone());
     store_drop.trigger_v070_session_snapshot_if_supported(&session_drop);
-    poll_until(&mut store_drop, |s| s.projection().firmware.v070.synced);
+    poll_until(&mut store_drop, |s| s.projection().v070_hardware.synced);
     store_drop.ingest_four_app_candidates(vec![
         make_live_candidate(0, FourAppSessionKind::Working, 100),
         make_live_candidate(1, FourAppSessionKind::Error, 90),
     ]);
     store_drop
-        .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+        .dispatch_command(WorkbenchCommand::V070Hardware(
             V070HardwareAction::SetSessionSaRgbSync { enabled: true },
-        )))
+        ))
         .unwrap();
     wait_for_sa_rgb_count(&link_drop, 2);
     link_drop.clear_wire_events();
@@ -674,16 +672,16 @@ fn reassigned_slot_ignores_stale_original_sa_and_hardware_layer_2_does_not_alias
     );
     store.device_session = Some(session.clone());
     store.trigger_v070_session_snapshot_if_supported(&session);
-    poll_until(&mut store, |s| s.projection().firmware.v070.synced);
+    poll_until(&mut store, |s| s.projection().v070_hardware.synced);
 
     store.ingest_four_app_candidates(vec![
         make_live_candidate(0, FourAppSessionKind::Working, 100),
         make_live_candidate(1, FourAppSessionKind::Error, 90),
     ]);
     store
-        .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+        .dispatch_command(WorkbenchCommand::V070Hardware(
             V070HardwareAction::SetSessionSaRgbSync { enabled: true },
-        )))
+        ))
         .unwrap();
     wait_for_sa_rgb_count(&link, 2);
 
@@ -765,7 +763,7 @@ fn manual_sa_rgb_apply_is_not_immediately_clobbered_and_opt_out_uses_nonblocking
     );
     store.device_session = Some(session.clone());
     store.trigger_v070_session_snapshot_if_supported(&session);
-    poll_until(&mut store, |s| s.projection().firmware.v070.synced);
+    poll_until(&mut store, |s| s.projection().v070_hardware.synced);
 
     store.ingest_four_app_candidates(vec![make_live_candidate(
         0,
@@ -773,9 +771,9 @@ fn manual_sa_rgb_apply_is_not_immediately_clobbered_and_opt_out_uses_nonblocking
         100,
     )]);
     store
-        .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+        .dispatch_command(WorkbenchCommand::V070Hardware(
             V070HardwareAction::SetSessionSaRgbSync { enabled: true },
-        )))
+        ))
         .unwrap();
     wait_for_sa_rgb_count(&link, 1);
     assert_eq!(link.sa_rgb_params()[0]["c"].as_u64(), Some(0x00FF66));
@@ -783,7 +781,7 @@ fn manual_sa_rgb_apply_is_not_immediately_clobbered_and_opt_out_uses_nonblocking
     std::thread::sleep(Duration::from_millis(110));
     link.clear_wire_events();
     store
-        .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+        .dispatch_command(WorkbenchCommand::V070Hardware(
             V070HardwareAction::ApplySaRgb {
                 sa: 801,
                 color_hex: "#33AAFF".into(),
@@ -791,9 +789,9 @@ fn manual_sa_rgb_apply_is_not_immediately_clobbered_and_opt_out_uses_nonblocking
                 speed: 0.5,
                 effect: 4,
             },
-        )))
+        ))
         .unwrap();
-    poll_until(&mut store, |s| !s.projection().firmware.v070.busy);
+    poll_until(&mut store, |s| !s.projection().v070_hardware.busy);
     std::thread::sleep(Duration::from_millis(140));
     let manual_frames = link.sa_rgb_params();
     assert_eq!(
@@ -859,9 +857,9 @@ fn manual_sa_rgb_apply_is_not_immediately_clobbered_and_opt_out_uses_nonblocking
 
     let toggle_start = Instant::now();
     store
-        .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+        .dispatch_command(WorkbenchCommand::V070Hardware(
             V070HardwareAction::SetSessionSaRgbSync { enabled: false },
-        )))
+        ))
         .unwrap();
     let ui_elapsed = toggle_start.elapsed();
     assert!(

@@ -345,12 +345,12 @@ fn forward_v070_profile_layer_notification(
 }
 
 fn record_v070_bridge_observation(
-    outcome: &crate::firmware_update::V070BridgeOutcome,
+    outcome: &crate::v070_hardware::V070BridgeOutcome,
     observed_layer: &AtomicU8,
     v070_observed_profile_layer: &Mutex<Option<(u8, u8)>>,
 ) {
     match outcome {
-        crate::firmware_update::V070BridgeOutcome::Snapshot(snap) => {
+        crate::v070_hardware::V070BridgeOutcome::Snapshot(snap) => {
             if let Some(layer) = snap.active_layer.filter(|l| (1..=6).contains(l)) {
                 observed_layer.store(layer, Ordering::Release);
             }
@@ -358,7 +358,7 @@ fn record_v070_bridge_observation(
                 *v070_observed_profile_layer.lock().unwrap() = Some((p, l));
             }
         }
-        crate::firmware_update::V070BridgeOutcome::ProfileLayer {
+        crate::v070_hardware::V070BridgeOutcome::ProfileLayer {
             profile_index,
             layer_index,
         } => {
@@ -614,7 +614,7 @@ impl VendorBridge {
                                 false,
                             )
                             .await
-                            .map(crate::firmware_update::V070BridgeOutcome::Snapshot);
+                            .map(crate::v070_hardware::V070BridgeOutcome::Snapshot);
                         if let Ok(ref bridge_outcome) = outcome {
                             record_v070_bridge_observation(
                                 bridge_outcome,
@@ -1203,8 +1203,18 @@ impl RunningSixLayer {
     }
 
     pub(crate) fn vendor_session_id(&self) -> Option<u64> {
-        self.vendor_bridge
+        if let Some(id) = self
+            .vendor_bridge
             .active_session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|session| session.id)
+        {
+            return Some(id);
+        }
+        self.vendor_bridge
+            .retired_session
             .lock()
             .unwrap()
             .as_ref()
@@ -4031,7 +4041,7 @@ mod tests {
         let observed_pl = Mutex::new(Some((3_u8, 1_u8)));
 
         record_v070_bridge_observation(
-            &crate::firmware_update::V070BridgeOutcome::ProfileLayer {
+            &crate::v070_hardware::V070BridgeOutcome::ProfileLayer {
                 profile_index: None,
                 layer_index: 4,
             },
@@ -4042,7 +4052,7 @@ mod tests {
         assert_eq!(*observed_pl.lock().unwrap(), Some((3, 4)));
 
         record_v070_bridge_observation(
-            &crate::firmware_update::V070BridgeOutcome::ProfileLayer {
+            &crate::v070_hardware::V070BridgeOutcome::ProfileLayer {
                 profile_index: Some(2),
                 layer_index: 5,
             },

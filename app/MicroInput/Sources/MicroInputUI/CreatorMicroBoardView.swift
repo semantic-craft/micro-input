@@ -19,7 +19,7 @@ struct CreatorMicroStageView: View {
                     Text("当前控制")
                         .font(UITheme.caption)
                         .foregroundStyle(UITheme.textSecondary)
-                    Text(h.hostExecutionEnabled ? store.statusMenu.activeProfileName : "按键控制已暂停")
+                    Text(h.hostExecutionEnabled ? store.statusMenu.activeProfileName : "已暂停软件按键映射")
                         .font(UITheme.title)
                         .foregroundStyle(UITheme.textPrimary)
                     Text(s.boardLayers.observedStatus)
@@ -138,7 +138,7 @@ struct CreatorMicroStageView: View {
                 .surfaceButton(.primary)
             }
             if !h.hostExecutionEnabled {
-                Button("开启按键控制") {
+                Button("开启按键映射") {
                     store.dispatch("header", ["SetExecutionEnabled": true])
                 }
                 .surfaceButton(.secondary)
@@ -157,7 +157,7 @@ struct CreatorMicroStageView: View {
 struct CreatorMicroBoardView: View {
     let store: CoreStore
     let agentKind: AgentProfileKind
-    @State private var jumpDirectlyOnGlowingSlotTap = true
+    @AppStorage("mi.jumpDirectlyOnGlowingSlotTap") private var jumpDirectlyOnGlowingSlotTap = true
 
     private let cellSize: CGFloat = 68
     private let gridSpacing: CGFloat = 8
@@ -565,9 +565,12 @@ struct SimpleLightingControlCard: View {
                             .toggleStyle(NeutralSwitchToggleStyle())
                         }
 
+                        let showSessionSaRgbSync = !compact
+                            && (store.v070Hardware.supported || store.v070Hardware.sessionSaRgbSyncEnabled)
                         SettingsRow(
                             "仅在有新完成或进行中的会话时亮起",
-                            subtitle: compact ? nil : "无未读或运行中任务时保持安静熄灯"
+                            subtitle: compact ? nil : "无未读或运行中任务时保持安静熄灯",
+                            showsDivider: showSessionSaRgbSync
                         ) {
                             Toggle(
                                 "",
@@ -578,6 +581,26 @@ struct SimpleLightingControlCard: View {
                             )
                             .labelsHidden()
                             .toggleStyle(NeutralSwitchToggleStyle())
+                        }
+
+                        if showSessionSaRgbSync {
+                            SettingsRow(
+                                "单键状态灯同步",
+                                subtitle: "按会话状态自动映射自定义单键灯效，退出或休眠时自动恢复默认",
+                                showsDivider: false
+                            ) {
+                                Toggle(
+                                    "",
+                                    isOn: Binding(
+                                        get: { store.v070Hardware.sessionSaRgbSyncEnabled },
+                                        set: { store.setV070SessionSaRgbSync($0) }
+                                    )
+                                )
+                                .labelsHidden()
+                                .toggleStyle(NeutralSwitchToggleStyle())
+                                .disabled(store.v070Hardware.busy)
+                                .accessibilityIdentifier("v070-session-sa-rgb-sync")
+                            }
                         }
                     }
                 }
@@ -924,7 +947,7 @@ struct SessionKeyStatusView: View {
 
     static func label(for slot: SessionSlotModel?) -> String {
         guard let slot else { return "未分配" }
-        if slot.title.isEmpty && (slot.placeRaw == nil || slot.placeRaw is NSNull) { return "未分配" }
+        if slot.title.isEmpty && !slot.hasAssignedPlace { return "未分配" }
         switch slot.kind {
         case "Working": return "进行中"
         case "BlueDotCompleted": return "已完成"

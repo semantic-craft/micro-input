@@ -127,6 +127,12 @@ pub struct MultiBranchSlotProjection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiTargetOptionProjection {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultiEditorModalProjection {
     pub multi_id: Option<String>,
     pub name: String,
@@ -134,8 +140,8 @@ pub struct MultiEditorModalProjection {
     pub branches: [MultiBranchSlotProjection; 4],
     pub bind_to_selected_slot: bool,
     pub target_slot: Option<u32>,
-    pub available_actions: Vec<(String, String)>,
-    pub available_macros: Vec<(String, String)>,
+    pub available_actions: Vec<MultiTargetOptionProjection>,
+    pub available_macros: Vec<MultiTargetOptionProjection>,
     pub reference_summaries: Vec<String>,
     pub validation_error: Option<String>,
 }

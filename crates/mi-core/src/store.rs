@@ -9,7 +9,8 @@ use crate::{
         ApplyChangeRowProjection, ApplyPreparationModalProjection, ComparisonRowProjection,
         EditorAction, EditorModalProjection, LightingEditorModalProjection, LightingZoneProjection,
         MacroEditorModalProjection, MacroStepDraft, MultiBranchKind, MultiBranchSlotProjection,
-        MultiBranchTarget, MultiEditorModalProjection, ReconnectComparisonModalProjection,
+        MultiBranchTarget, MultiEditorModalProjection, MultiTargetOptionProjection,
+        ReconnectComparisonModalProjection,
     },
     header::{
         CandidateDevice, HeaderAction, HeaderProjection, HeaderReadyState,
@@ -182,7 +183,7 @@ pub enum HardwareLoopEvent {
     V070CapabilityOutcome {
         session_id: u64,
         seq: u64,
-        result: Result<crate::firmware_update::V070BridgeOutcome, String>,
+        result: Result<crate::v070_hardware::V070BridgeOutcome, String>,
     },
     V070ProfileLayerChanged {
         session_id: u64,
@@ -297,6 +298,8 @@ pub enum DeviceWorkflowAction {
 #[serde(tag = "domain", content = "action", rename_all = "snake_case")]
 pub enum WorkbenchCommand {
     Firmware(crate::firmware_update::FirmwareAction),
+    #[serde(rename = "v070_hardware")]
+    V070Hardware(crate::v070_hardware::V070HardwareAction),
     SystemWillSleep,
     SystemDidWake,
     SystemWillTerminate,
@@ -325,6 +328,7 @@ pub enum WorkbenchCommand {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkbenchProjection {
     pub firmware: crate::firmware_update::FirmwareProjection,
+    pub v070_hardware: crate::v070_hardware::V070HardwareProjection,
     pub header: HeaderProjection,
     pub sidebar: SidebarProjection,
     pub canvas: CanvasProjection,
@@ -353,6 +357,7 @@ impl Default for WorkbenchProjection {
     fn default() -> Self {
         Self {
             firmware: Default::default(),
+            v070_hardware: Default::default(),
             header: HeaderProjection::default(),
             sidebar: SidebarProjection::default(),
             canvas: CanvasProjection::default(),
@@ -710,12 +715,6 @@ impl WorkbenchStore {
         store.ensure_default_pinned_favorites();
         store.initialize_board_plan()?;
         store.initialize_selection(preserve_saved_host_state)?;
-        store.v070_hardware.projection.auto_layer_sync_enabled =
-            store.document_store.v070_auto_layer_sync_enabled();
-        store.v070_hardware.projection.session_sa_rgb_sync_enabled =
-            store.document_store.v070_session_sa_rgb_sync_enabled();
-        store.v070_hardware.projection.preferred_device_serial =
-            store.document_store.preferred_device_serial();
         store.status_message = "已就绪".to_string();
         if store.config.auto_connect_usb
             && env::var("MI_AUTO_HOST_READY").ok().as_deref() != Some("0")
@@ -729,6 +728,9 @@ impl WorkbenchStore {
             let _ = store.connect_default_usb_with_execution(false);
         } else {
             store.sync_live_session_source();
+        }
+        if !store.config.isolated && !store.document_store.host_execution_enabled() {
+            store.status_message = "已暂停软件按键映射".to_string();
         }
         store.last_synced_six_layer_revs = (
             store.document_store.draft.revision,
@@ -942,6 +944,7 @@ impl WorkbenchStore {
         }
         match command {
             WorkbenchCommand::Firmware(action) => self.dispatch_firmware(action),
+            WorkbenchCommand::V070Hardware(action) => self.dispatch_v070_hardware(action),
             WorkbenchCommand::SystemWillSleep => {
                 self.system_will_sleep();
                 Ok(())
@@ -1582,8 +1585,6 @@ impl WorkbenchStore {
             let _ = self
                 .document_store
                 .set_preferred_device_serial(Some(sn.to_string()));
-            self.v070_hardware.projection.preferred_device_serial =
-                self.document_store.preferred_device_serial();
         }
         self.hardware_rpc_verified = false;
         if enable_execution_on_connect && !self.document_store.host_execution_enabled() {
@@ -1699,8 +1700,6 @@ impl WorkbenchStore {
                 let _ = self
                     .document_store
                     .set_preferred_device_serial(Some(sn.to_string()));
-                self.v070_hardware.projection.preferred_device_serial =
-                    self.document_store.preferred_device_serial();
             }
             self.commit_runtime_update();
             return Ok(true);
@@ -2618,8 +2617,12 @@ impl WorkbenchStore {
             running.set_execution_policy(enabled, self.command_execution_enabled, self.update_now);
         }
         if enabled {
+            if self.status_message == "已暂停软件按键映射" {
+                self.status_message = "已启用软件按键映射".to_string();
+            }
             let _ = self.maybe_sync_v070_foreground_layer();
         } else {
+            self.status_message = "已暂停软件按键映射".to_string();
             self.v070_hardware.pending_auto_layer_sync = None;
             self.release_board_inputs(self.update_now);
         }
@@ -3814,12 +3817,6 @@ impl WorkbenchStore {
         }
         let mut next = self.projection_inputs_with(reusable).project();
         next.firmware = self.firmware_update.projection.clone();
-        next.firmware.v070 = self.v070_hardware.projection.clone();
-        next.firmware.v070.auto_layer_sync_enabled =
-            self.document_store.v070_auto_layer_sync_enabled();
-        next.firmware.v070.session_sa_rgb_sync_enabled =
-            self.document_store.v070_session_sa_rgb_sync_enabled();
-        next.firmware.v070.preferred_device_serial = self.document_store.preferred_device_serial();
         next.firmware.current_version = self.observed_firmware_version();
         next.firmware.version_status =
             match (&next.firmware.current_version, &next.firmware.release) {
@@ -3951,11 +3948,15 @@ impl WorkbenchStore {
             slot_table: &self.slot_table,
             status_menu_open: self.status_menu_open,
             status_message: &self.status_message,
+            v070_auto_layer_sync_enabled: self.document_store.v070_auto_layer_sync_enabled(),
             v070_hardware_mouse_supported: self
                 .observed_firmware_version()
                 .as_deref()
                 .is_none_or(mi_model::supports_v070_mouse_tokens),
             v070_projection: &self.v070_hardware.projection,
+            v070_session_sa_rgb_sync_enabled: self
+                .document_store
+                .v070_session_sa_rgb_sync_enabled(),
         }
     }
 
@@ -4907,7 +4908,7 @@ impl WorkbenchStore {
                 }
 
                 if !self.document_store.host_execution_enabled() {
-                    self.status_message = format!("已按下 {binding_id}（快捷键映射已暂停）");
+                    self.status_message = format!("已按下 {binding_id}（已暂停软件按键映射）");
                     self.commit_runtime_update();
                     return None;
                 }
@@ -6348,17 +6349,23 @@ impl WorkbenchStore {
         multi_id: Option<String>,
     ) -> Result<MultiEditorModalProjection, WorkbenchError> {
         let target_slot = Some(self.current_selected_slot());
-        let available_actions: Vec<(String, String)> = mi_model::draft::actions()
+        let available_actions: Vec<MultiTargetOptionProjection> = mi_model::draft::actions()
             .into_iter()
             .filter(|a| a.id != "local-macro" && a.id != "local-multi")
-            .map(|a| (a.id, a.name))
+            .map(|a| MultiTargetOptionProjection {
+                id: a.id,
+                label: a.name,
+            })
             .collect();
-        let available_macros: Vec<(String, String)> = self
+        let available_macros: Vec<MultiTargetOptionProjection> = self
             .document_store
             .draft
             .macros()
             .into_iter()
-            .map(|m| (m.id, m.action.name))
+            .map(|m| MultiTargetOptionProjection {
+                id: m.id,
+                label: m.action.name,
+            })
             .collect();
 
         if let Some(id) = multi_id {

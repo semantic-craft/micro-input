@@ -628,6 +628,13 @@ final class MicroInputTests: XCTestCase {
         store.dispatch("status_menu", ["SetProfileLocked": false])
         XCTAssertFalse(store.statusMenu.isProfileLocked)
 
+        store.dispatch("status_menu", ["SetHostExecutionEnabled": false])
+        XCTAssertFalse(store.statusMenu.hostExecutionEnabled)
+        XCTAssertEqual(store.statusMenu.routingModeSummary, "已暂停软件按键映射")
+        store.dispatch("status_menu", ["SetHostExecutionEnabled": true])
+        XCTAssertTrue(store.statusMenu.hostExecutionEnabled)
+        XCTAssertEqual(store.statusMenu.routingModeSummary, "手动选择方案 · 按键映射已启用")
+
         store.dispatch("status_menu", "OpenAccessibilitySettings")
         XCTAssertEqual(store.footer.statusMessage, "已打开 macOS 辅助功能权限设置")
         store.dispatch("header", "OpenAccessibilitySettings")
@@ -824,6 +831,282 @@ final class MicroInputTests: XCTestCase {
         narrowStripHost.layoutSubtreeIfNeeded()
         XCTAssertLessThanOrEqual(narrowStripHost.fittingSize.width, 240.5)
         XCTAssertGreaterThan(narrowStripHost.fittingSize.height, 44)
+    }
+
+    @MainActor
+    func testHonestEquatableMultiTargetDtoAndHeaderAuthority() throws {
+        let dir = try makeIsolatedTempDir("honest-equatable")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let baseMulti = MultiEditorModel(
+            multiId: "m-1",
+            name: "TapHold",
+            termMs: 200,
+            branches: [
+                MultiBranchModel(
+                    branch: "Tap",
+                    title: "短按",
+                    targetKind: "Action",
+                    targetId: "act-1",
+                    targetDisplayName: "复制"
+                )
+            ],
+            bindToSelectedSlot: true,
+            targetSlot: 0,
+            availableActions: [MultiTargetOptionModel(id: "act-1", label: "复制")],
+            availableMacros: [MultiTargetOptionModel(id: "mac-1", label: "宏一")],
+            referenceSummaries: ["AG00"],
+            validationError: nil
+        )
+        XCTAssertNotEqual(
+            baseMulti,
+            MultiEditorModel(
+                multiId: baseMulti.multiId,
+                name: baseMulti.name,
+                termMs: baseMulti.termMs,
+                branches: baseMulti.branches,
+                bindToSelectedSlot: baseMulti.bindToSelectedSlot,
+                targetSlot: baseMulti.targetSlot,
+                availableActions: [MultiTargetOptionModel(id: "act-2", label: "粘贴")],
+                availableMacros: baseMulti.availableMacros,
+                referenceSummaries: baseMulti.referenceSummaries,
+                validationError: baseMulti.validationError
+            )
+        )
+        XCTAssertNotEqual(
+            baseMulti,
+            MultiEditorModel(
+                multiId: baseMulti.multiId,
+                name: baseMulti.name,
+                termMs: baseMulti.termMs,
+                branches: baseMulti.branches,
+                bindToSelectedSlot: baseMulti.bindToSelectedSlot,
+                targetSlot: baseMulti.targetSlot,
+                availableActions: baseMulti.availableActions,
+                availableMacros: [MultiTargetOptionModel(id: "mac-2", label: "宏二")],
+                referenceSummaries: baseMulti.referenceSummaries,
+                validationError: baseMulti.validationError
+            )
+        )
+        XCTAssertNotEqual(
+            baseMulti,
+            MultiEditorModel(
+                multiId: baseMulti.multiId,
+                name: baseMulti.name,
+                termMs: baseMulti.termMs,
+                branches: baseMulti.branches,
+                bindToSelectedSlot: false,
+                targetSlot: baseMulti.targetSlot,
+                availableActions: baseMulti.availableActions,
+                availableMacros: baseMulti.availableMacros,
+                referenceSummaries: baseMulti.referenceSummaries,
+                validationError: baseMulti.validationError
+            )
+        )
+        XCTAssertNotEqual(
+            baseMulti,
+            MultiEditorModel(
+                multiId: baseMulti.multiId,
+                name: baseMulti.name,
+                termMs: baseMulti.termMs,
+                branches: baseMulti.branches,
+                bindToSelectedSlot: baseMulti.bindToSelectedSlot,
+                targetSlot: 2,
+                availableActions: baseMulti.availableActions,
+                availableMacros: baseMulti.availableMacros,
+                referenceSummaries: baseMulti.referenceSummaries,
+                validationError: baseMulti.validationError
+            )
+        )
+        XCTAssertNotEqual(
+            baseMulti,
+            MultiEditorModel(
+                multiId: baseMulti.multiId,
+                name: baseMulti.name,
+                termMs: baseMulti.termMs,
+                branches: baseMulti.branches,
+                bindToSelectedSlot: baseMulti.bindToSelectedSlot,
+                targetSlot: baseMulti.targetSlot,
+                availableActions: baseMulti.availableActions,
+                availableMacros: baseMulti.availableMacros,
+                referenceSummaries: ["AG00", "AG01"],
+                validationError: baseMulti.validationError
+            )
+        )
+
+        let baseSlot = SessionSlotModel(
+            slotIndex: 0,
+            keyBindingId: "AG00",
+            mode: "pinned",
+            status: "idle",
+            kind: "codex",
+            agentMonogram: "CX",
+            title: "Session 0",
+            subtitle: "Ready",
+            isUnreadBlueDot: false,
+            isWorkingAnimated: false,
+            isBoundToTopKey: true,
+            ledColorHex: "#14C76B",
+            hasAssignedPlace: false
+        )
+        XCTAssertNotEqual(
+            baseSlot,
+            SessionSlotModel(
+                slotIndex: baseSlot.slotIndex,
+                keyBindingId: baseSlot.keyBindingId,
+                mode: baseSlot.mode,
+                status: baseSlot.status,
+                kind: baseSlot.kind,
+                agentMonogram: "AG",
+                title: baseSlot.title,
+                subtitle: baseSlot.subtitle,
+                isUnreadBlueDot: baseSlot.isUnreadBlueDot,
+                isWorkingAnimated: baseSlot.isWorkingAnimated,
+                isBoundToTopKey: baseSlot.isBoundToTopKey,
+                ledColorHex: baseSlot.ledColorHex,
+                hasAssignedPlace: baseSlot.hasAssignedPlace
+            )
+        )
+        XCTAssertNotEqual(
+            baseSlot,
+            SessionSlotModel(
+                slotIndex: baseSlot.slotIndex,
+                keyBindingId: baseSlot.keyBindingId,
+                mode: baseSlot.mode,
+                status: baseSlot.status,
+                kind: baseSlot.kind,
+                agentMonogram: baseSlot.agentMonogram,
+                title: baseSlot.title,
+                subtitle: baseSlot.subtitle,
+                isUnreadBlueDot: baseSlot.isUnreadBlueDot,
+                isWorkingAnimated: baseSlot.isWorkingAnimated,
+                isBoundToTopKey: baseSlot.isBoundToTopKey,
+                ledColorHex: baseSlot.ledColorHex,
+                hasAssignedPlace: true
+            )
+        )
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        func makeMultiRoot(_ actions: [[String: String]]) -> [String: Any] {
+            [
+                "active_modal": [
+                    "MultiEditor": [
+                        "multi_id": "m-1",
+                        "name": "TapHold",
+                        "term_ms": 200,
+                        "branches": [],
+                        "bind_to_selected_slot": true,
+                        "target_slot": 0,
+                        "available_actions": actions,
+                        "available_macros": [["id": "mac-1", "label": "宏一"]],
+                        "reference_summaries": ["AG00"],
+                    ]
+                ]
+            ]
+        }
+
+        store.commitDomainSlices(from: CoreStore.parseProjection(makeMultiRoot([
+            ["id": "act-1", "label": "复制"]
+        ])))
+        guard case let .multiEditor(firstModal)? = store.activeModal else {
+            return XCTFail("Expected multiEditor activeModal after first commit")
+        }
+        XCTAssertEqual(firstModal.availableActions, [MultiTargetOptionModel(id: "act-1", label: "复制")])
+
+        store.commitDomainSlices(from: CoreStore.parseProjection(makeMultiRoot([
+            ["id": "act-1", "label": "复制"],
+            ["id": "act-2", "label": "粘贴"],
+        ])))
+        guard case let .multiEditor(updatedModal)? = store.activeModal else {
+            return XCTFail("Expected multiEditor activeModal after available_actions change")
+        }
+        XCTAssertEqual(
+            updatedModal.availableActions,
+            [
+                MultiTargetOptionModel(id: "act-1", label: "复制"),
+                MultiTargetOptionModel(id: "act-2", label: "粘贴"),
+            ]
+        )
+
+        let headerPower: [String: Any] = [
+            "battery_percent": 91,
+            "is_charging": false,
+            "line_powered": false,
+            "usb_host_hold": false,
+            "usb_mode": "跟随宿主",
+            "pm_mode": "awake",
+            "host_sleep_status": "awake",
+            "summary_label": "91% · header",
+        ]
+        let statusMenuPower: [String: Any] = [
+            "battery_percent": 12,
+            "is_charging": true,
+            "line_powered": true,
+            "usb_host_hold": true,
+            "usb_mode": "usb.host 保持",
+            "pm_mode": "sleep",
+            "host_sleep_status": "sleep",
+            "summary_label": "12% · status_menu",
+        ]
+        let parsed = CoreStore.parseProjection([
+            "header": [
+                "engine_version": "0.2.0",
+                "accessibility_trusted": true,
+                "power_status": headerPower,
+                "candidate_devices": [
+                    [
+                        "path": "/dev/hid-header",
+                        "product": "Creator Micro 2",
+                        "serial_number": "SN-1",
+                        "selector_key": "override-key",
+                        "display_label": "Header Device",
+                        "is_connected": true,
+                        "is_preferred": true,
+                    ]
+                ],
+                "preferred_device_serial": "override-key",
+            ],
+            "sidebar": [
+                "accessibility_trusted": false,
+            ],
+            "status_menu": [
+                "accessibility_trusted": false,
+                "power_status": statusMenuPower,
+                "candidate_devices": [
+                    [
+                        "path": "/dev/hid-stale",
+                        "product": "Creator Micro 2",
+                        "serial_number": "SN-STALE",
+                        "selector_key": "stale-key",
+                        "display_label": "Stale Device",
+                        "is_connected": false,
+                        "is_preferred": false,
+                    ]
+                ],
+                "preferred_device_serial": "stale-key",
+            ],
+            "inspector": [
+                "body": [
+                    "Editable": [:],
+                ]
+            ],
+        ])
+
+        XCTAssertEqual(parsed.editableInspector?.bottomRowLayout, "split")
+        XCTAssertEqual(parsed.candidateDevices.first?.selectorKey, "override-key")
+        XCTAssertEqual(parsed.accessibilityTrusted, true)
+        XCTAssertEqual(parsed.powerStatus?.summaryLabel, "91% · header")
+        XCTAssertEqual(parsed.preferredDeviceSerial, "override-key")
+
+        let headerSlice = HeaderSliceModel(from: parsed)
+        let statusSlice = StatusMenuSliceModel(from: parsed)
+        XCTAssertEqual(headerSlice.accessibilityTrusted, true)
+        XCTAssertEqual(headerSlice.powerStatus?.summaryLabel, "91% · header")
+        XCTAssertEqual(headerSlice.preferredDeviceSerial, "override-key")
+        XCTAssertEqual(headerSlice.candidateDevices.first?.selectorKey, "override-key")
+        XCTAssertEqual(statusSlice.powerStatus?.summaryLabel, "91% · header")
+        XCTAssertEqual(statusSlice.preferredDeviceSerial, "override-key")
+        XCTAssertEqual(statusSlice.candidateDevices.first?.selectorKey, "override-key")
     }
 }
 

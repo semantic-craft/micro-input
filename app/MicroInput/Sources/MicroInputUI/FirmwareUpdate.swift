@@ -24,7 +24,6 @@ public struct FirmwareSliceModel: Equatable {
     public var selectedPort: String?
     public var progress: Double?
     public var backupPath: String?
-    public var v070 = V070HardwareSliceModel()
 
     public init() {}
 
@@ -51,7 +50,6 @@ public struct FirmwareSliceModel: Equatable {
             let product = $0["product"] as? String ?? $0["manufacturer"] as? String ?? "USB 设备"
             return FirmwarePortModel(path: path, label: "\(product) · \(path)")
         }
-        v070 = V070HardwareSliceModel(json: json["v070"] as? [String: Any] ?? [:])
     }
 
     public var canCheck: Bool { !busy && !deviceReserved }
@@ -143,7 +141,7 @@ public struct FirmwareUpdateSettingsSection: View {
                         .accessibilityIdentifier("firmware-release-notes")
                     }
                 }
-                SettingsRow("准备设备", subtitle: model.deviceReserved ? "按键控制已暂停。选择这把键盘对应的引导模式串口。" : "会暂停按键控制并请求进入引导模式，键盘暂时不可用。", showsDivider: true) {
+                SettingsRow("准备设备", subtitle: model.deviceReserved ? "按键映射已暂停。选择这把键盘对应的引导模式串口。" : "会暂停按键映射并请求进入引导模式，键盘暂时不可用。", showsDivider: true) {
                     Button("准备更新") { confirmation = .prepare }
                         .surfaceButton(.secondary)
                         .disabled(!model.canPrepare)
@@ -216,7 +214,7 @@ public struct FirmwareUpdateSettingsSection: View {
             }
         } message: { kind in
             Text(kind == .prepare
-                 ? "Micro Input 将暂停宿主按键控制并请求键盘进入引导模式，键盘会暂时停止工作。下载的固件不会在此步骤写入。"
+                 ? "Micro Input 将暂停宿主按键映射并请求键盘进入引导模式，键盘会暂时停止工作。下载的固件不会在此步骤写入。"
                  : "请确认串口 \(model.selectedPort ?? "未选择") 属于你的 Creator Micro 2。将先保存完整 Flash 备份，再安装 \(model.releaseTag ?? "固件")。写入中断可能需要恢复，备份不代表已验证恢复成功。\(model.prerelease ? "预发布固件与当前配置协议的兼容性尚未验证。" : "更新后仍需核对运行版本和原键位。")")
         }
     }
@@ -373,37 +371,37 @@ public struct V070HardwareSliceModel: Equatable {
 }
 
 public enum V070HardwareCommand {
-    public static func refresh() -> [String: Any] { ["V070Hardware": "Refresh"] }
-    public static func setAutoLayerSync(_ enabled: Bool) -> [String: Any] { ["V070Hardware": ["SetAutoLayerSync": ["enabled": enabled]]] }
-    public static func setSessionSaRgbSync(_ enabled: Bool) -> [String: Any] { ["V070Hardware": ["SetSessionSaRgbSync": ["enabled": enabled]]] }
-    public static func selectLayer(_ layer: Int) -> [String: Any] { ["V070Hardware": ["SelectLayer": ["layer": layer]]] }
-    public static func applyMousePreset(_ preset: String) -> [String: Any] { ["V070Hardware": ["ApplyMousePreset": ["preset": preset]]] }
-    public static func renameDevice(name: String) -> [String: Any] { ["V070Hardware": ["RenameDevice": ["name": name]]] }
-    public static func resetSaRgb(sa: Int) -> [String: Any] { ["V070Hardware": ["ResetSaRgb": ["sa": sa]]] }
+    public static func refresh() -> String { "Refresh" }
+    public static func setAutoLayerSync(_ enabled: Bool) -> [String: Any] { ["SetAutoLayerSync": ["enabled": enabled]] }
+    public static func setSessionSaRgbSync(_ enabled: Bool) -> [String: Any] { ["SetSessionSaRgbSync": ["enabled": enabled]] }
+    public static func selectLayer(_ layer: Int) -> [String: Any] { ["SelectLayer": ["layer": layer]] }
+    public static func applyMousePreset(_ preset: String) -> [String: Any] { ["ApplyMousePreset": ["preset": preset]] }
+    public static func renameDevice(name: String) -> [String: Any] { ["RenameDevice": ["name": name]] }
+    public static func resetSaRgb(sa: Int) -> [String: Any] { ["ResetSaRgb": ["sa": sa]] }
 
     public static func applyMouseConfig(
         moveDelta: Int, maxSpeed: Int, wheelDelta: Int, wheelMaxSpeed: Int,
         stickSpeed: Int, stickScroll: Int, deadzone: Double
     ) -> [String: Any] {
-        ["V070Hardware": ["ApplyMouseConfig": [
+        ["ApplyMouseConfig": [
             "move_delta": moveDelta, "max_speed": maxSpeed, "wheel_delta": wheelDelta,
             "wheel_max_speed": wheelMaxSpeed, "stick_speed": stickSpeed, "stick_scroll": stickScroll,
             "deadzone": deadzone,
-        ]]]
+        ]]
     }
 
     public static func applyPmConfig(autoSleep: Bool, hostSleep: Bool, sleepAfterMin: Int) -> [String: Any] {
-        ["V070Hardware": ["ApplyPmConfig": [
+        ["ApplyPmConfig": [
             "auto_sleep": autoSleep, "host_sleep": hostSleep, "sleep_after_min": sleepAfterMin,
-        ]]]
+        ]]
     }
 
     public static func applySaRgb(
         sa: Int, colorHex: String, brightness: Double, speed: Double, effect: Int
     ) -> [String: Any] {
-        ["V070Hardware": ["ApplySaRgb": [
+        ["ApplySaRgb": [
             "sa": sa, "color_hex": colorHex, "brightness": brightness, "speed": speed, "effect": effect,
-        ]]]
+        ]]
     }
 }
 
@@ -465,48 +463,31 @@ public struct V070HardwareSettingsSection: View {
 
     @State private var deviceNameDraft: String
     @State private var mouseDraft: V070MouseDraft
+    @State private var showAdvancedMouseParams: Bool
     @State private var pmAutoSleepDraft: Bool
     @State private var pmHostSleepDraft: Bool
     @State private var pmSleepAfterMinDraft: Int
-    @State private var saIdText: String
-    @State private var saColorHexDraft: String
-    @State private var saBrightnessPercentDraft: Double
-    @State private var saSpeedPercentDraft: Double
-    @State private var saEffectDraft: Int
 
     private static let mousePresets: [(id: String, title: String)] = [("slow", "慢速"), ("standard", "标准"), ("fast", "快速")]
     private static let baseSleepMinutes = [1, 5, 10, 15, 30, 60, 120, 240, 480, 1440]
-    private static let saPresetColors = ["#FFFFFF", "#33AAFF", "#14C76B", "#FFB040", "#EF4444"]
-    private static let saEffectOptions: [SelectOption<Int>] = [
-        .init(value: 1, title: "常亮 (1)", subtitle: "稳定静态单色覆盖"),
-        .init(value: 3, title: "彩虹 (3)", subtitle: "连续色相循环过渡"),
-        .init(value: 4, title: "呼吸 (4)", subtitle: "标准节奏明暗起伏"),
-        .init(value: 6, title: "浅呼吸 (6)", subtitle: "低幅度柔和微光呼吸"),
-    ]
 
     public init(model: V070HardwareSliceModel, dispatch: @escaping (Any) -> Void) {
         self.model = model
         self.dispatch = dispatch
         _deviceNameDraft = State(initialValue: model.deviceName.name)
         _mouseDraft = State(initialValue: V070MouseDraft(from: model.mouse))
+        _showAdvancedMouseParams = State(initialValue: model.mouse.preset == "custom")
         _pmAutoSleepDraft = State(initialValue: model.pmConfig.autoSleep)
         _pmHostSleepDraft = State(initialValue: model.pmConfig.hostSleep)
         _pmSleepAfterMinDraft = State(initialValue: model.pmConfig.sleepAfterMin)
-        _saIdText = State(initialValue: model.saRgb.sa.map(String.init) ?? "")
-        _saColorHexDraft = State(initialValue: model.saRgb.colorHex)
-        _saBrightnessPercentDraft = State(initialValue: Self.unitToPercent(model.saRgb.brightness))
-        _saSpeedPercentDraft = State(initialValue: Self.unitToPercent(model.saRgb.speed))
-        _saEffectDraft = State(initialValue: Self.validApplyEffect(model.saRgb.effect))
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             overviewSection
             if model.supported {
-                layerSection
                 mouseSection
                 pmSection
-                saRgbSection
             }
         }
         .accessibilityIdentifier("v070-hardware-settings")
@@ -525,18 +506,12 @@ public struct V070HardwareSettingsSection: View {
             pmHostSleepDraft = next.hostSleep
             pmSleepAfterMinDraft = next.sleepAfterMin
         }
-        .onChange(of: model.saRgb) { _, next in
-            if let sa = next.sa { saIdText = String(sa) }
-            saColorHexDraft = next.colorHex
-            saBrightnessPercentDraft = Self.unitToPercent(next.brightness)
-            saSpeedPercentDraft = Self.unitToPercent(next.speed)
-            saEffectDraft = Self.validApplyEffect(next.effect)
-        }
     }
 
     private var overviewSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SettingsSectionHeader("0.7.0 硬件能力") {
+        let hasSerial = !(model.preferredDeviceSerial?.isEmpty ?? true)
+        return VStack(alignment: .leading, spacing: 10) {
+            SettingsSectionHeader("设备识别与状态同步") {
                 HStack(spacing: 8) {
                     if model.busy { ProgressView().controlSize(.small) }
                     Button("刷新状态") { dispatch(V070HardwareCommand.refresh()) }
@@ -547,20 +522,8 @@ public struct V070HardwareSettingsSection: View {
             }
             SettingsCard {
                 if !model.supported {
-                    SettingsRow(unavailableTitle, subtitle: unavailableSubtitle, showsDivider: true) { V070Badge(text: hostSleepBadgeText) }
+                    SettingsRow(unavailableTitle, subtitle: unavailableSubtitle, showsDivider: hasSerial) { V070Badge(text: hostSleepBadgeText) }
                 } else {
-                    SettingsRow("电量与当前层", subtitle: batterySummaryText, showsDivider: true) {
-                        HStack(spacing: 6) {
-                            if let pct = model.batteryPercent { V070Badge(text: "\(pct)%", accentDot: model.isCharging == true) }
-                            V070Badge(text: profileLayerBadgeText)
-                        }
-                    }
-                    SettingsRow("电源状态", subtitle: pmStateSummaryText, showsDivider: true) {
-                        HStack(spacing: 6) {
-                            V070Badge(text: hostSleepBadgeText)
-                            V070Badge(text: model.pmState.usbHostHold ? "usb.host 保持中" : "无 usb.host 锁", accentDot: model.pmState.usbHostHold)
-                        }
-                    }
                     SettingsRow("设备名称", subtitle: deviceNameSubtitle, showsDivider: true) {
                         HStack(spacing: 8) {
                             TextField("设备名称", text: $deviceNameDraft)
@@ -570,7 +533,7 @@ public struct V070HardwareSettingsSection: View {
                                 .surfaceButton(.secondary).disabled(!canApplyDeviceName).accessibilityIdentifier("v070-device-rename")
                         }
                     }
-                    SettingsRow("同步回执", subtitle: model.lastError ?? model.statusMessage, showsDivider: true) {
+                    SettingsRow("状态同步", subtitle: model.lastError ?? model.statusMessage, showsDivider: hasSerial) {
                         if let err = model.lastError, !err.isEmpty {
                             Text("异常").font(UITheme.micro).foregroundStyle(.red)
                         } else {
@@ -579,65 +542,10 @@ public struct V070HardwareSettingsSection: View {
                     }
                 }
                 if let serial = model.preferredDeviceSerial, !serial.isEmpty {
-                    SettingsRow("已记忆设备序列号", subtitle: "多台 Creator Micro 2 同时接入时将优先匹配此设备", showsDivider: true) {
+                    SettingsRow("已记忆设备序列号", subtitle: "多台 Creator Micro 2 同时接入时将优先匹配此设备", showsDivider: false) {
                         V070Badge(text: serial)
                     }
                 }
-                SettingsRow(
-                    "前台切层实验联动 (kb.pl.set)",
-                    subtitle: "随前台编程工具自动切换板载第 1–6 层（仅写 RAM 零擦写；OAI 原生层自动跳过）",
-                    showsDivider: true
-                ) {
-                    Toggle(
-                        "",
-                        isOn: Binding(
-                            get: { model.autoLayerSyncEnabled },
-                            set: { dispatch(V070HardwareCommand.setAutoLayerSync($0)) }
-                        )
-                    )
-                    .labelsHidden()
-                    .toggleStyle(NeutralSwitchToggleStyle())
-                    .disabled(model.busy)
-                    .accessibilityIdentifier("v070-auto-layer-sync")
-                }
-                SettingsRow(
-                    "AI 会话状态自动映灯 (kb.sa.rgb)",
-                    subtitle: "按会话状态自动映射自定义 SA 键灯色（≥100ms 节流；退出或休眠自动恢复板载默认，OAI 原生层跳过）",
-                    showsDivider: false
-                ) {
-                    Toggle(
-                        "",
-                        isOn: Binding(
-                            get: { model.sessionSaRgbSyncEnabled },
-                            set: { dispatch(V070HardwareCommand.setSessionSaRgbSync($0)) }
-                        )
-                    )
-                    .labelsHidden()
-                    .toggleStyle(NeutralSwitchToggleStyle())
-                    .disabled(model.busy)
-                    .accessibilityIdentifier("v070-session-sa-rgb-sync")
-                }
-            }
-        }
-    }
-
-    private var layerSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SettingsSectionHeader("无写 Flash 实时切层")
-            SettingsCard {
-                SettingsRow("当前板载层", subtitle: "第 0 层为系统基底层（不可直切）；切换第 1–6 层仅修改 RAM，不写 Flash。", showsDivider: true) {
-                    V070Badge(text: profileLayerBadgeText)
-                }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 68), spacing: 8)], spacing: 8) {
-                    ForEach(1...6, id: \.self) { layer in
-                        Button("第 \(layer) 层") { dispatch(V070HardwareCommand.selectLayer(layer)) }
-                            .surfaceButton(model.activeLayer == layer ? .primary : .secondary)
-                            .disabled(model.busy)
-                            .accessibilityIdentifier("v070-layer-\(layer)")
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 14)
             }
         }
     }
@@ -663,25 +571,34 @@ public struct V070HardwareSettingsSection: View {
                             in: 0.02...0.45, trackWidth: 132, showsPercentage: false
                         ).disabled(model.busy).accessibilityIdentifier("v070-deadzone-slider")
                         Text(String(format: "%.2f", mouseDraft.deadzone)).font(UITheme.monoBadge).foregroundStyle(UITheme.textSecondary).frame(width: 42, alignment: .trailing)
-                    }
-                }
-                mouseSliderRow("指针初速", subtitle: "move_delta · 单步位移（1–255）", text: $mouseDraft.moveDelta, defaultRange: 1...255, unit: "px/tick", id: "v070-mouse-move-delta-slider")
-                mouseSliderRow("指针上限", subtitle: "max_speed · 加速上限（1–255）", text: $mouseDraft.maxSpeed, defaultRange: 1...255, unit: "px/tick", id: "v070-mouse-max-speed-slider")
-                mouseSliderRow("滚轮步进", subtitle: "wheel_delta · 单步滚动（1–255）", text: $mouseDraft.wheelDelta, defaultRange: 1...255, unit: "x/tick", id: "v070-mouse-wheel-delta-slider")
-                mouseSliderRow("滚轮上限", subtitle: "wheel_max_speed · 加速上限（1–255）", text: $mouseDraft.wheelMaxSpeed, defaultRange: 1...255, unit: "x/tick", id: "v070-mouse-wheel-max-speed-slider")
-                mouseSliderRow("摇杆指针", subtitle: "stick_speed · 硬件指针速率（1–255）", text: $mouseDraft.stickSpeed, defaultRange: 1...255, unit: "x/tick", id: "v070-mouse-stick-speed-slider")
-                mouseSliderRow("摇杆滚轮", subtitle: "stick_scroll · 硬件滚轮速率（1–2000）", text: $mouseDraft.stickScroll, defaultRange: 1...2000, unit: "x/tick", id: "v070-mouse-stick-scroll-slider")
-                SettingsRow("自定义参数", subtitle: mouseDraft.validationHint ?? "连同上方摇杆死区一起写入设备 NVS") {
-                    Button("应用鼠标参数") {
-                        if let v = mouseDraft.validated {
-                            dispatch(V070HardwareCommand.applyMouseConfig(
-                                moveDelta: v.0, maxSpeed: v.1, wheelDelta: v.2,
-                                wheelMaxSpeed: v.3, stickSpeed: v.4, stickScroll: v.5, deadzone: v.6
-                            ))
+                        if !showAdvancedMouseParams && abs(mouseDraft.deadzone - model.mouse.deadzone) > 0.001 {
+                            Button("保存死区") { applyMouseDraft() }
+                                .surfaceButton(.secondary)
+                                .disabled(model.busy || mouseDraft.validated == nil)
+                                .accessibilityIdentifier("v070-deadzone-save")
                         }
                     }
-                    .surfaceButton(.secondary).disabled(model.busy || mouseDraft.validated == nil).accessibilityIdentifier("v070-mouse-apply")
                 }
+                DisclosureGroup("高级曲线参数", isExpanded: $showAdvancedMouseParams) {
+                    VStack(spacing: 0) {
+                        Rectangle().fill(UITheme.rowDivider).frame(height: 1).padding(.top, 10)
+                        mouseSliderRow("指针初速", subtitle: "单步位移（1–255）", text: $mouseDraft.moveDelta, defaultRange: 1...255, unit: "px/tick", id: "v070-mouse-move-delta-slider")
+                        mouseSliderRow("指针上限", subtitle: "加速上限（1–255）", text: $mouseDraft.maxSpeed, defaultRange: 1...255, unit: "px/tick", id: "v070-mouse-max-speed-slider")
+                        mouseSliderRow("滚轮步进", subtitle: "单步滚动（1–255）", text: $mouseDraft.wheelDelta, defaultRange: 1...255, unit: "x/tick", id: "v070-mouse-wheel-delta-slider")
+                        mouseSliderRow("滚轮上限", subtitle: "加速上限（1–255）", text: $mouseDraft.wheelMaxSpeed, defaultRange: 1...255, unit: "x/tick", id: "v070-mouse-wheel-max-speed-slider")
+                        mouseSliderRow("摇杆指针", subtitle: "硬件指针速率（1–255）", text: $mouseDraft.stickSpeed, defaultRange: 1...255, unit: "x/tick", id: "v070-mouse-stick-speed-slider")
+                        mouseSliderRow("摇杆滚轮", subtitle: "硬件滚轮速率（1–2000）", text: $mouseDraft.stickScroll, defaultRange: 1...2000, unit: "x/tick", id: "v070-mouse-stick-scroll-slider")
+                        SettingsRow("自定义参数", subtitle: mouseDraft.validationHint ?? "连同上方摇杆死区一起保存至设备", showsDivider: false) {
+                            Button("应用鼠标参数") { applyMouseDraft() }
+                                .surfaceButton(.secondary).disabled(model.busy || mouseDraft.validated == nil).accessibilityIdentifier("v070-mouse-apply")
+                        }
+                    }
+                }
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(UITheme.textPrimary)
+                .tint(UITheme.textPrimary)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
             }
         }
     }
@@ -690,84 +607,65 @@ public struct V070HardwareSettingsSection: View {
         VStack(alignment: .leading, spacing: 10) {
             SettingsSectionHeader("休眠跟随与电源策略")
             SettingsCard {
-                toggleRow("自动休眠", subtitle: "空闲达到设定时长后自动进入低功耗待机", isOn: $pmAutoSleepDraft, id: "v070-pm-auto-sleep")
-                toggleRow("跟随宿主休眠", subtitle: "随 Mac USB 挂起与唤醒动态调整设备电源地板", isOn: $pmHostSleepDraft, id: "v070-pm-host-sleep")
-                SettingsRow("休眠等待时长", subtitle: "有效范围 1–1440 分钟（当前选中 \(pmSleepAfterMinDraft) 分钟）", showsDivider: true) {
-                    SelectDropdown(options: sleepDurationOptions, selection: $pmSleepAfterMinDraft, minTriggerWidth: 120)
-                        .disabled(model.busy).accessibilityIdentifier("v070-pm-sleep-after")
-                }
-                SettingsRow("写入电源策略", subtitle: "保存自动休眠、宿主跟随与超时阈值至 NVS") {
-                    Button("应用休眠策略") {
-                        dispatch(V070HardwareCommand.applyPmConfig(autoSleep: pmAutoSleepDraft, hostSleep: pmHostSleepDraft, sleepAfterMin: pmSleepAfterMinDraft))
-                    }
-                    .surfaceButton(.secondary).disabled(model.busy || !(1...1440).contains(pmSleepAfterMinDraft)).accessibilityIdentifier("v070-pm-apply")
+                toggleRow(
+                    "自动休眠",
+                    subtitle: "空闲达到设定时长后自动进入低功耗待机",
+                    isOn: Binding(
+                        get: { pmAutoSleepDraft },
+                        set: { next in
+                            pmAutoSleepDraft = next
+                            dispatchPmConfig(autoSleep: next, hostSleep: pmHostSleepDraft, sleepAfterMin: pmSleepAfterMinDraft)
+                        }
+                    ),
+                    id: "v070-pm-auto-sleep"
+                )
+                toggleRow(
+                    "跟随宿主休眠",
+                    subtitle: "随 Mac USB 挂起与唤醒动态调整设备电源地板",
+                    isOn: Binding(
+                        get: { pmHostSleepDraft },
+                        set: { next in
+                            pmHostSleepDraft = next
+                            dispatchPmConfig(autoSleep: pmAutoSleepDraft, hostSleep: next, sleepAfterMin: pmSleepAfterMinDraft)
+                        }
+                    ),
+                    id: "v070-pm-host-sleep"
+                )
+                SettingsRow("休眠等待时长", subtitle: "有效范围 1–1440 分钟（当前选中 \(pmSleepAfterMinDraft) 分钟）", showsDivider: false) {
+                    SelectDropdown(
+                        options: sleepDurationOptions,
+                        selection: Binding(
+                            get: { pmSleepAfterMinDraft },
+                            set: { next in
+                                pmSleepAfterMinDraft = next
+                                dispatchPmConfig(autoSleep: pmAutoSleepDraft, hostSleep: pmHostSleepDraft, sleepAfterMin: next)
+                            }
+                        ),
+                        minTriggerWidth: 120
+                    )
+                    .disabled(model.busy).accessibilityIdentifier("v070-pm-sleep-after")
                 }
             }
         }
     }
 
-    private var saRgbSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SettingsSectionHeader("单键动态背光")
-            SettingsCard {
-                SettingsRow("Smart Action 编号", subtitle: "输入非零整数 SA ID（1–16777215）", showsDivider: true) {
-                    TextField("如 7057", text: $saIdText)
-                        .textFieldStyle(.roundedBorder).controlSize(.small).frame(width: 120).multilineTextAlignment(.trailing)
-                        .disabled(model.busy).accessibilityIdentifier("v070-sa-id-field")
-                }
-                SettingsRow("动态灯效", subtitle: model.saRgb.effect == 0 ? "最近状态：已恢复默认背景灯效" : "仅发送固件支持的 1/3/4/6 动态灯效", showsDivider: true) {
-                    SelectDropdown(options: Self.saEffectOptions, selection: $saEffectDraft, minTriggerWidth: 140)
-                        .disabled(model.busy).accessibilityIdentifier("v070-sa-effect")
-                }
-                SettingsRow("颜色", subtitle: "6 位十六进制 RGB（如 #FFFFFF）", showsDivider: true) {
-                    HStack(spacing: 8) {
-                        ForEach(Self.saPresetColors, id: \.self) { hex in
-                            let isSelected = normalizedSaHex == hex
-                            Button { saColorHexDraft = hex } label: {
-                                Circle().fill(Color(hex: hex)).frame(width: 18, height: 18)
-                                    .overlay(Circle().strokeBorder(isSelected ? UITheme.textPrimary : UITheme.hairlineBorder, lineWidth: isSelected ? 2 : 1))
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain).focusEffectDisabled().disabled(model.busy).accessibilityIdentifier("v070-sa-color-\(hex.dropFirst())")
-                        }
-                        TextField("#FFFFFF", text: $saColorHexDraft)
-                            .textFieldStyle(.roundedBorder).controlSize(.small).frame(width: 84).disabled(model.busy).accessibilityIdentifier("v070-sa-color-field")
-                    }
-                }
-                percentSliderRow("动态亮度", value: $saBrightnessPercentDraft, id: "v070-sa-brightness")
-                percentSliderRow("动态速率", value: $saSpeedPercentDraft, id: "v070-sa-speed")
-                SettingsRow("下发或重置", subtitle: saValidationHint ?? "运行时覆盖单键灯光；重置恢复默认背景灯效") {
-                    HStack(spacing: 8) {
-                        Button("重置默认") {
-                            if let sa = parsedSaId { dispatch(V070HardwareCommand.resetSaRgb(sa: sa)) }
-                        }
-                        .surfaceButton(.ghost).disabled(model.busy || parsedSaId == nil).accessibilityIdentifier("v070-sa-reset")
-                        Button("应用灯光") {
-                            if let sa = parsedSaId, let hex = normalizedSaHex {
-                                dispatch(V070HardwareCommand.applySaRgb(
-                                    sa: sa, colorHex: hex,
-                                    brightness: min(max(saBrightnessPercentDraft / 100.0, 0.0), 1.0),
-                                    speed: min(max(saSpeedPercentDraft / 100.0, 0.0), 1.0),
-                                    effect: saEffectDraft
-                                ))
-                            }
-                        }
-                        .surfaceButton(.secondary).disabled(model.busy || parsedSaId == nil || normalizedSaHex == nil).accessibilityIdentifier("v070-sa-apply")
-                    }
-                }
-            }
+    private func applyMouseDraft() {
+        if let v = mouseDraft.validated {
+            dispatch(V070HardwareCommand.applyMouseConfig(
+                moveDelta: v.0, maxSpeed: v.1, wheelDelta: v.2,
+                wheelMaxSpeed: v.3, stickSpeed: v.4, stickScroll: v.5, deadzone: v.6
+            ))
         }
+    }
+
+    private func dispatchPmConfig(autoSleep: Bool, hostSleep: Bool, sleepAfterMin: Int) {
+        guard (1...1440).contains(sleepAfterMin) else { return }
+        dispatch(V070HardwareCommand.applyPmConfig(autoSleep: autoSleep, hostSleep: hostSleep, sleepAfterMin: sleepAfterMin))
     }
 
     private func toggleRow(_ title: String, subtitle: String, isOn: Binding<Bool>, id: String) -> some View {
         SettingsRow(title, subtitle: subtitle, showsDivider: true) {
             Toggle("", isOn: isOn).labelsHidden().toggleStyle(NeutralSwitchToggleStyle()).disabled(model.busy).accessibilityIdentifier(id)
-        }
-    }
-
-    private func percentSliderRow(_ title: String, value: Binding<Double>, id: String) -> some View {
-        SettingsRow(title, subtitle: "映射为固件 0.0–1.0 单位浮点", showsDivider: true) {
-            NeutralTrackSlider(value: value, in: 0...100, trackWidth: 132).disabled(model.busy).accessibilityIdentifier(id)
         }
     }
 
@@ -808,14 +706,14 @@ public struct V070HardwareSettingsSection: View {
 
     private var unavailableTitle: String {
         switch model.hostSleepStatus {
-        case "sleeping": return "Mac 正在休眠，0.7.0 能力已暂停"
-        case "waking": return "Mac 已唤醒，正在重连 0.7.0 设备"
-        default: return "0.7.0 硬件能力仅在连接 0.7.0+ 固件时可用"
+        case "sleeping": return "Mac 正在休眠，扩展硬件配置已暂停"
+        case "waking": return "Mac 已唤醒，正在重连设备"
+        default: return "扩展硬件配置暂不可用"
         }
     }
 
     private var unavailableSubtitle: String {
-        var parts = ["需通过 USB 专用独占接口连接 0.7.0-rc.16 及以上版本固件。"]
+        var parts = ["需通过 USB 连接支持扩展控制的 Creator Micro 2 固件。"]
         if !model.statusMessage.isEmpty { parts.append(model.statusMessage) }
         if let err = model.lastError, !err.isEmpty, err != model.statusMessage { parts.append(err) }
         return parts.joined(separator: " ")
@@ -823,25 +721,6 @@ public struct V070HardwareSettingsSection: View {
 
     private var hostSleepBadgeText: String {
         model.hostSleepStatus == "sleeping" ? "宿主休眠" : (model.hostSleepStatus == "waking" ? "唤醒同步中" : "宿主清醒")
-    }
-
-    private var profileLayerBadgeText: String {
-        "\(model.activeProfile.map { "P\($0)" } ?? "P-") · \(model.activeLayer.map { "第 \($0) 层" } ?? "层未知")"
-    }
-
-    private var batterySummaryText: String {
-        let pct = model.batteryPercent.map { "\($0)%" } ?? "电量未知"
-        let chg = model.isCharging.map { $0 ? "充电中" : "未充电" } ?? "充电状态未知"
-        let power = model.synced ? (model.pmState.linePowered ? "USB 外接供电" : "电池供电") : "供电状态同步中"
-        return "\(pct) · \(chg) · \(power)"
-    }
-
-    private var pmStateSummaryText: String {
-        guard model.synced else { return "等待读取 pm.state 电源状态快照…" }
-        let st = model.pmState.state.isEmpty ? "-" : model.pmState.state
-        let fl = model.pmState.floor.isEmpty ? "-" : model.pmState.floor
-        let bfl = model.pmState.baseFloor.isEmpty ? "-" : model.pmState.baseFloor
-        return "state=\(st) · floor=\(fl)（base=\(bfl)）· idle \(model.pmState.idleS)s / sleep \(model.pmState.sleepAfterS)s"
     }
 
     private var trimmedDeviceName: String { deviceNameDraft.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -868,27 +747,6 @@ public struct V070HardwareSettingsSection: View {
         }
     }
 
-    private var parsedSaId: Int? {
-        guard let val = Int(saIdText.trimmingCharacters(in: .whitespacesAndNewlines)), (1...0xFF_FFFF).contains(val) else { return nil }
-        return val
-    }
-
-    private var normalizedSaHex: String? {
-        let trimmed = saColorHexDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let stripped = trimmed.hasPrefix("#") ? String(trimmed.dropFirst())
-            : (trimmed.hasPrefix("0x") || trimmed.hasPrefix("0X") ? String(trimmed.dropFirst(2)) : trimmed)
-        guard stripped.count == 6,
-              stripped.unicodeScalars.allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) || ("A"..."F").contains($0) })
-        else { return nil }
-        return "#" + stripped.uppercased()
-    }
-
-    private var saValidationHint: String? {
-        if parsedSaId == nil { return "请输入有效的非零 Smart Action 编号（1–16777215）" }
-        if normalizedSaHex == nil { return "请输入 6 位十六进制 RGB 颜色（例如 #FFFFFF）" }
-        return nil
-    }
-
     private func presetDisplayName(_ raw: String) -> String {
         switch raw {
         case "slow": return "慢速"
@@ -897,10 +755,4 @@ public struct V070HardwareSettingsSection: View {
         default: return "自定义"
         }
     }
-
-    private static func unitToPercent(_ unit: Double) -> Double {
-        unit.isFinite ? min(max((unit * 100.0).rounded(), 0.0), 100.0) : 100.0
-    }
-
-    private static func validApplyEffect(_ raw: Int) -> Int { [1, 3, 4, 6].contains(raw) ? raw : 1 }
 }

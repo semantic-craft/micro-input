@@ -293,7 +293,7 @@ public struct AboutAndUpdatesSettingsSection: View {
                 SettingsCard {
                     SettingsRow(
                         "当前应用版本",
-                        subtitle: "标识 \(updater.identity.bundleIdentifier) · Rust 内核 v\(engineVersion)",
+                        subtitle: "Rust 内核 v\(engineVersion)",
                         showsDivider: true
                     ) {
                         HStack(spacing: 10) {

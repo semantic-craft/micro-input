@@ -129,20 +129,36 @@ public struct SessionSlotModel: Identifiable, Equatable {
     public let isWorkingAnimated: Bool
     public let isBoundToTopKey: Bool
     public let ledColorHex: String
-    public let placeRaw: Any?
+    public let hasAssignedPlace: Bool
 
-    public static func == (lhs: SessionSlotModel, rhs: SessionSlotModel) -> Bool {
-        lhs.slotIndex == rhs.slotIndex
-            && lhs.keyBindingId == rhs.keyBindingId
-            && lhs.mode == rhs.mode
-            && lhs.status == rhs.status
-            && lhs.kind == rhs.kind
-            && lhs.title == rhs.title
-            && lhs.subtitle == rhs.subtitle
-            && lhs.isUnreadBlueDot == rhs.isUnreadBlueDot
-            && lhs.isWorkingAnimated == rhs.isWorkingAnimated
-            && lhs.isBoundToTopKey == rhs.isBoundToTopKey
-            && lhs.ledColorHex == rhs.ledColorHex
+    public init(
+        slotIndex: Int,
+        keyBindingId: String,
+        mode: String,
+        status: String,
+        kind: String,
+        agentMonogram: String,
+        title: String,
+        subtitle: String,
+        isUnreadBlueDot: Bool,
+        isWorkingAnimated: Bool,
+        isBoundToTopKey: Bool,
+        ledColorHex: String,
+        hasAssignedPlace: Bool = false
+    ) {
+        self.slotIndex = slotIndex
+        self.keyBindingId = keyBindingId
+        self.mode = mode
+        self.status = status
+        self.kind = kind
+        self.agentMonogram = agentMonogram
+        self.title = title
+        self.subtitle = subtitle
+        self.isUnreadBlueDot = isUnreadBlueDot
+        self.isWorkingAnimated = isWorkingAnimated
+        self.isBoundToTopKey = isBoundToTopKey
+        self.ledColorHex = ledColorHex
+        self.hasAssignedPlace = hasAssignedPlace
     }
 }
 
@@ -291,6 +307,16 @@ public struct MultiBranchModel: Identifiable, Equatable {
     public let targetDisplayName: String
 }
 
+public struct MultiTargetOptionModel: Equatable, Identifiable {
+    public let id: String
+    public let label: String
+
+    public init(id: String, label: String) {
+        self.id = id
+        self.label = label
+    }
+}
+
 public struct MultiEditorModel: Equatable {
     public let multiId: String?
     public let name: String
@@ -298,18 +324,10 @@ public struct MultiEditorModel: Equatable {
     public let branches: [MultiBranchModel]
     public let bindToSelectedSlot: Bool
     public let targetSlot: Int?
-    public let availableActions: [(String, String)]
-    public let availableMacros: [(String, String)]
+    public let availableActions: [MultiTargetOptionModel]
+    public let availableMacros: [MultiTargetOptionModel]
     public let referenceSummaries: [String]
     public let validationError: String?
-
-    public static func == (lhs: MultiEditorModel, rhs: MultiEditorModel) -> Bool {
-        lhs.multiId == rhs.multiId
-            && lhs.name == rhs.name
-            && lhs.termMs == rhs.termMs
-            && lhs.branches == rhs.branches
-            && lhs.validationError == rhs.validationError
-    }
 }
 
 public struct LightingZoneModel: Equatable {
@@ -493,21 +511,16 @@ public struct CandidateDeviceModel: Equatable, Sendable, Identifiable {
     public let path: String
     public let product: String
     public let serialNumber: String?
+    public let selectorKey: String
     public let displayLabel: String
     public let isConnected: Bool
     public let isPreferred: Bool
-
-    public var selectorKey: String {
-        if let serial = serialNumber?.trimmingCharacters(in: .whitespacesAndNewlines), !serial.isEmpty {
-            return serial
-        }
-        return path
-    }
 
     public init(
         path: String,
         product: String,
         serialNumber: String? = nil,
+        selectorKey: String? = nil,
         displayLabel: String = "",
         isConnected: Bool = false,
         isPreferred: Bool = false
@@ -515,6 +528,13 @@ public struct CandidateDeviceModel: Equatable, Sendable, Identifiable {
         self.path = path
         self.product = product
         self.serialNumber = serialNumber
+        if let explicit = selectorKey?.trimmingCharacters(in: .whitespacesAndNewlines), !explicit.isEmpty {
+            self.selectorKey = explicit
+        } else if let serial = serialNumber?.trimmingCharacters(in: .whitespacesAndNewlines), !serial.isEmpty {
+            self.selectorKey = serial
+        } else {
+            self.selectorKey = path
+        }
         self.displayLabel = displayLabel
         self.isConnected = isConnected
         self.isPreferred = isPreferred
@@ -737,7 +757,7 @@ public struct InspectorSliceModel: Equatable {
 
 public struct StatusMenuSliceModel: Equatable {
     public var activeProfileName: String = "Antigravity"
-    public var routingModeSummary: String = "手动选择方案"
+    public var routingModeSummary: String = "手动选择方案 · 按键映射已启用"
     public var favorites2x2: [FavoriteSlotModel] = []
     public var hostExecutionEnabled: Bool = false
     public var isProfileLocked: Bool = false
@@ -798,6 +818,7 @@ public struct FooterSliceModel: Equatable {
 
 public struct ProjectionModel: Equatable {
     public var firmware = FirmwareSliceModel()
+    public var v070Hardware = V070HardwareSliceModel()
     public var engineVersion: String = "0.2.0"
     public var readyKind: String = "Ready"
     public var readyText: String = "已就绪"
@@ -866,7 +887,7 @@ public struct ProjectionModel: Equatable {
     public var editableInspector: EditableInspectorModel? = EditableInspectorModel()
 
     public var activeProfileName: String = "Antigravity"
-    public var routingModeSummary: String = "手动选择方案"
+    public var routingModeSummary: String = "手动选择方案 · 按键映射已启用"
     public var favorites2x2: [FavoriteSlotModel] = []
     public var radialMenuEnabled: Bool = false
     public var radialConfirmMode: String = "encoder_press"
