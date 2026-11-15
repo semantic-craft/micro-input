@@ -220,6 +220,13 @@ pub struct PinnedProfilePlan {
     pub profile_id: String,
     pub bundle_id: Option<String>,
     pub actions: [Option<HostAction>; SLOTS_PER_LAYER],
+    pub encoder_hold_action: Option<HostAction>,
+}
+
+impl PinnedProfilePlan {
+    pub fn has_any_action(&self) -> bool {
+        self.actions.iter().any(Option::is_some) || self.encoder_hold_action.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,12 +235,18 @@ pub enum SixLayerRoutingMode {
     ManualPinned(PinnedProfilePlan),
     BoardLayers {
         layer_one: Option<PinnedProfilePlan>,
+        layer_two: Option<PinnedProfilePlan>,
+        layer_three: Option<PinnedProfilePlan>,
     },
 }
 
 impl Default for SixLayerRoutingMode {
     fn default() -> Self {
-        Self::BoardLayers { layer_one: None }
+        Self::BoardLayers {
+            layer_one: None,
+            layer_two: None,
+            layer_three: None,
+        }
     }
 }
 
@@ -1043,11 +1056,11 @@ impl RoutingContext {
     fn accepts_layer1_vendor_fallback(&self) -> bool {
         match &self.mode {
             SixLayerRoutingMode::Locked(pinned) | SixLayerRoutingMode::ManualPinned(pinned) => {
-                pinned.actions.iter().any(Option::is_some)
+                pinned.has_any_action()
             }
-            SixLayerRoutingMode::BoardLayers { layer_one } => layer_one
+            SixLayerRoutingMode::BoardLayers { layer_one, .. } => layer_one
                 .as_ref()
-                .is_some_and(|p| p.actions.iter().any(Option::is_some)),
+                .is_some_and(PinnedProfilePlan::has_any_action),
         }
     }
 
@@ -1060,24 +1073,29 @@ impl RoutingContext {
             SixLayerRoutingMode::Locked(pinned) => Some(pinned.profile_id.clone()),
             SixLayerRoutingMode::ManualPinned(pinned) => {
                 if pinned.bundle_id.as_deref() == Some("com.openai.codex")
-                    && pinned.actions.iter().all(Option::is_none)
+                    && !pinned.has_any_action()
                 {
                     None
                 } else {
                     Some(pinned.profile_id.clone())
                 }
             }
-            SixLayerRoutingMode::BoardLayers { layer_one } => {
-                if physical_layer == 1 {
-                    layer_one.as_ref().map(|p| p.profile_id.clone())
-                } else if (2..=3).contains(&physical_layer) {
-                    plan.hosts
-                        .get((physical_layer - 2) as usize)
-                        .map(|h| h.profile_id.clone())
-                } else {
-                    None
-                }
-            }
+            SixLayerRoutingMode::BoardLayers {
+                layer_one,
+                layer_two,
+                layer_three,
+            } => match physical_layer {
+                1 => layer_one.as_ref().map(|p| p.profile_id.clone()),
+                2 => layer_two
+                    .as_ref()
+                    .map(|p| p.profile_id.clone())
+                    .or_else(|| plan.hosts.first().map(|h| h.profile_id.clone())),
+                3 => layer_three
+                    .as_ref()
+                    .map(|p| p.profile_id.clone())
+                    .or_else(|| plan.hosts.get(1).map(|h| h.profile_id.clone())),
+                _ => None,
+            },
         }
     }
 
@@ -1095,19 +1113,109 @@ impl RoutingContext {
                 let action = pinned.actions.get(slot)?.as_ref()?;
                 Some((pinned.profile_id.as_str(), action))
             }
-            SixLayerRoutingMode::BoardLayers { layer_one } => {
-                if control_layer == 1 {
+            SixLayerRoutingMode::BoardLayers {
+                layer_one,
+                layer_two,
+                layer_three,
+            } => match control_layer {
+                1 => {
                     let layer1 = layer_one.as_ref()?;
                     let action = layer1.actions.get(slot)?.as_ref()?;
-                    return Some((layer1.profile_id.as_str(), action));
+                    Some((layer1.profile_id.as_str(), action))
                 }
-                if !(2..=3).contains(&control_layer) {
+                2 => {
+                    if let Some(layer2) = layer_two.as_ref() {
+                        let action = layer2.actions.get(slot)?.as_ref()?;
+                        return Some((layer2.profile_id.as_str(), action));
+                    }
+                    let host = plan.hosts.first()?;
+                    let action = host.actions.get(slot)?.as_ref()?;
+                    Some((host.profile_id.as_str(), action))
+                }
+                3 => {
+                    if let Some(layer3) = layer_three.as_ref() {
+                        let action = layer3.actions.get(slot)?.as_ref()?;
+                        return Some((layer3.profile_id.as_str(), action));
+                    }
+                    let host = plan.hosts.get(1)?;
+                    let action = host.actions.get(slot)?.as_ref()?;
+                    Some((host.profile_id.as_str(), action))
+                }
+                _ => None,
+            },
+        }
+    }
+
+    fn resolve_encoder_hold(
+        &self,
+        plan: &AppliedSixLayerPlan,
+        control_layer: u8,
+    ) -> Option<(String, ResolvedHostAction)> {
+        match &self.mode {
+            SixLayerRoutingMode::Locked(pinned) | SixLayerRoutingMode::ManualPinned(pinned) => {
+                if !(1..=4).contains(&control_layer) {
                     return None;
                 }
-                let host = plan.hosts.get((control_layer - 2) as usize)?;
-                let action = host.actions.get(slot)?.as_ref()?;
-                Some((host.profile_id.as_str(), action))
+                if matches!(self.mode, SixLayerRoutingMode::ManualPinned(_))
+                    && pinned.bundle_id.as_deref() == Some("com.openai.codex")
+                    && !pinned.has_any_action()
+                {
+                    return None;
+                }
+                pinned
+                    .encoder_hold_action
+                    .as_ref()
+                    .map(|a| (pinned.profile_id.clone(), a.clone()))
             }
+            SixLayerRoutingMode::BoardLayers {
+                layer_one,
+                layer_two,
+                layer_three,
+            } => match control_layer {
+                1 => {
+                    if let Some(layer1) = layer_one.as_ref() {
+                        layer1
+                            .encoder_hold_action
+                            .as_ref()
+                            .map(|a| (layer1.profile_id.clone(), a.clone()))
+                    } else {
+                        Some((
+                            "codex".to_string(),
+                            ResolvedHostAction::AgentCommand {
+                                adapter: "codex".into(),
+                                command: "model-picker-open".into(),
+                            },
+                        ))
+                    }
+                }
+                2 => {
+                    if let Some(layer2) = layer_two.as_ref() {
+                        return layer2
+                            .encoder_hold_action
+                            .as_ref()
+                            .map(|a| (layer2.profile_id.clone(), a.clone()));
+                    }
+                    plan.hosts.first().and_then(|h| {
+                        h.encoder_hold_action
+                            .as_ref()
+                            .map(|a| (h.profile_id.clone(), a.clone()))
+                    })
+                }
+                3 => {
+                    if let Some(layer3) = layer_three.as_ref() {
+                        return layer3
+                            .encoder_hold_action
+                            .as_ref()
+                            .map(|a| (layer3.profile_id.clone(), a.clone()));
+                    }
+                    plan.hosts.get(1).and_then(|h| {
+                        h.encoder_hold_action
+                            .as_ref()
+                            .map(|a| (h.profile_id.clone(), a.clone()))
+                    })
+                }
+                _ => None,
+            },
         }
     }
 
@@ -1139,34 +1247,70 @@ impl RoutingContext {
                 }
                 if matches!(self.mode, SixLayerRoutingMode::ManualPinned(_))
                     && pinned.bundle_id.as_deref() == Some("com.openai.codex")
-                    && pinned.actions.iter().all(Option::is_none)
+                    && !pinned.has_any_action()
                 {
                     return None;
                 }
                 let adapter = adapter_from_bundle_id(pinned.bundle_id.as_deref())
                     .or_else(|| {
-                        pinned.actions.iter().flatten().find_map(|action| match action {
-                            ResolvedHostAction::AgentCommand { adapter, .. } => {
-                                adapter_from_name(adapter)
-                            }
-                            _ => None,
-                        })
+                        pinned
+                            .encoder_hold_action
+                            .iter()
+                            .chain(pinned.actions.iter().flatten())
+                            .find_map(|action| match action {
+                                ResolvedHostAction::AgentCommand { adapter, .. } => {
+                                    adapter_from_name(adapter)
+                                }
+                                _ => None,
+                            })
                     })
                     .or_else(|| adapter_from_bundle_id(self.bundle_id.as_deref()))?;
                 Some((pinned.profile_id.as_str(), adapter))
             }
-            SixLayerRoutingMode::BoardLayers { layer_one } => {
-                if control_layer == 1 {
-                    let layer1 = layer_one.as_ref()?;
-                    return Some((layer1.profile_id.as_str(), "codex"));
+            SixLayerRoutingMode::BoardLayers {
+                layer_one,
+                layer_two,
+                layer_three,
+            } => match control_layer {
+                1 => {
+                    let pid = layer_one
+                        .as_ref()
+                        .map(|l| l.profile_id.as_str())
+                        .unwrap_or("codex");
+                    Some((pid, "codex"))
                 }
-                if !(2..=3).contains(&control_layer) {
-                    return None;
+                2 => {
+                    if let Some(layer2) = layer_two.as_ref() {
+                        let adapter = adapter_from_bundle_id(layer2.bundle_id.as_deref())
+                            .or_else(|| {
+                                plan.hosts
+                                    .first()
+                                    .and_then(|h| adapter_from_name(h.adapter.as_str()))
+                            })
+                            .unwrap_or("antigravity");
+                        return Some((layer2.profile_id.as_str(), adapter));
+                    }
+                    let host = plan.hosts.first()?;
+                    let adapter = adapter_from_name(host.adapter.as_str())?;
+                    Some((host.profile_id.as_str(), adapter))
                 }
-                let host = plan.hosts.get((control_layer - 2) as usize)?;
-                let adapter = adapter_from_name(host.adapter.as_str())?;
-                Some((host.profile_id.as_str(), adapter))
-            }
+                3 => {
+                    if let Some(layer3) = layer_three.as_ref() {
+                        let adapter = adapter_from_bundle_id(layer3.bundle_id.as_deref())
+                            .or_else(|| {
+                                plan.hosts
+                                    .get(1)
+                                    .and_then(|h| adapter_from_name(h.adapter.as_str()))
+                            })
+                            .unwrap_or("dsh-desktop");
+                        return Some((layer3.profile_id.as_str(), adapter));
+                    }
+                    let host = plan.hosts.get(1)?;
+                    let adapter = adapter_from_name(host.adapter.as_str())?;
+                    Some((host.profile_id.as_str(), adapter))
+                }
+                _ => None,
+            },
         }
     }
 }
@@ -1609,6 +1753,8 @@ fn check_input_connection(
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn execute_clicks(
     receiver: &UserCommandReceiver,
     plan: &AppliedSixLayerPlan,
@@ -1709,7 +1855,9 @@ struct PendingSixLayerEncoderHold {
     hold_generation: u64,
     control_layer: u8,
     profile_id: String,
+    hold_action: ResolvedHostAction,
     adapter: Option<String>,
+    opens_model_picker: bool,
     admission: ExecutionAdmission,
     input_generation: String,
 }
@@ -1785,17 +1933,17 @@ fn execute_clicks_with_encoder_picker(
                 let hold_ctx = pending_hold.take().unwrap();
                 if hold_ctx.input_generation == receiver.generation() {
                     if let EncoderHoldTimerOutcome::FiredHold {
-                        adapter: Some(adapter),
                         entered_model_picker,
-                    } = picker.on_hold_timer(
+                        ..
+                    } = picker.on_hold_timer_with_picker_mode(
                         hold_ctx.hold_generation,
                         hold_ctx.adapter.as_deref(),
-                        hold_ctx.adapter.is_some(),
+                        true,
+                        hold_ctx.opens_model_picker,
                         loop_now,
                     ) {
-                        let open_action =
-                            ModelPickerCommand::ModelPickerOpen.into_host_action(adapter);
-                        if policy.admits(hold_ctx.admission, &open_action) {
+                        let hold_action = hold_ctx.hold_action;
+                        if policy.admits(hold_ctx.admission, &hold_action) {
                             if let Err(error) = check_connection() {
                                 set_capture_state(
                                     false,
@@ -1816,7 +1964,7 @@ fn execute_clicks_with_encoder_picker(
                             let receipt = execute(
                                 &hold_ctx.profile_id,
                                 "ENC_CLK",
-                                &open_action,
+                                &hold_action,
                                 hold_ctx.admission,
                             );
                             let executed_ok = receipt.outcome == "executed";
@@ -1942,6 +2090,7 @@ fn execute_clicks_with_encoder_picker(
         }
 
         let layer_adapter = context.resolve_layer_adapter(plan, control_layer);
+        let resolved_hold = context.resolve_encoder_hold(plan, control_layer);
 
         if binding == "ENC_CLK" {
             match input_event.kind {
@@ -1949,39 +2098,83 @@ fn execute_clicks_with_encoder_picker(
                     if event.is_expired_at(Instant::now()) {
                         continue;
                     }
-                    let hold_gen = picker.on_encoder_press(0, event.received_at);
-                    pending_hold = layer_adapter.map(|(prof_id, adapter)| {
-                        PendingSixLayerEncoderHold {
-                            hold_generation: hold_gen,
-                            control_layer,
-                            profile_id: prof_id.to_owned(),
-                            adapter: Some(adapter.to_owned()),
-                            admission,
-                            input_generation: event.generation.clone(),
-                        }
-                    });
-                    continue;
+                    if resolved_hold.is_some() || picker.is_active(event.received_at) {
+                        let hold_gen = picker.on_encoder_press(0, event.received_at);
+                        pending_hold = resolved_hold.map(|(prof_id, hold_action)| {
+                            let opens_model_picker =
+                                ModelPickerCommand::is_open_model_picker_action(&hold_action);
+                            let action_adapter = match &hold_action {
+                                ResolvedHostAction::AgentCommand { adapter, .. }
+                                    if matches!(
+                                        adapter.as_str(),
+                                        "antigravity" | "codex" | "dsh-desktop"
+                                    ) =>
+                                {
+                                    Some(adapter.clone())
+                                }
+                                _ => layer_adapter.map(|(_, a)| a.to_owned()),
+                            };
+                            PendingSixLayerEncoderHold {
+                                hold_generation: hold_gen,
+                                control_layer,
+                                profile_id: prof_id,
+                                hold_action,
+                                adapter: action_adapter,
+                                opens_model_picker,
+                                admission,
+                                input_generation: event.generation.clone(),
+                            }
+                        });
+                        continue;
+                    }
                 }
                 mi_session::InputEventKind::Released => {
-                    pending_hold = None;
-                    let adapter_opt = layer_adapter.map(|(_, a)| a);
-                    match picker.on_encoder_release(
+                    if picker.hold_state().is_none() {
+                        pending_hold = None;
+                        continue;
+                    }
+                    let saved_hold = pending_hold.take();
+                    let hold_entry = saved_hold
+                        .map(|h| (h.profile_id, h.hold_action, h.adapter, h.opens_model_picker))
+                        .or_else(|| {
+                            resolved_hold.map(|(prof_id, act)| {
+                                let opens = ModelPickerCommand::is_open_model_picker_action(&act);
+                                let ad = match &act {
+                                    ResolvedHostAction::AgentCommand { adapter, .. }
+                                        if matches!(
+                                            adapter.as_str(),
+                                            "antigravity" | "codex" | "dsh-desktop"
+                                        ) =>
+                                    {
+                                        Some(adapter.clone())
+                                    }
+                                    _ => layer_adapter.map(|(_, a)| a.to_owned()),
+                                };
+                                (prof_id, act, ad, opens)
+                            })
+                        });
+                    let release_adapter = hold_entry
+                        .as_ref()
+                        .and_then(|(_, _, ad, _)| ad.as_deref())
+                        .or_else(|| layer_adapter.map(|(_, a)| a));
+                    let has_hold_action = hold_entry.is_some();
+                    let opens_picker = hold_entry.as_ref().is_some_and(|(_, _, _, opens)| *opens);
+                    match picker.on_encoder_release_with_picker_mode(
                         0,
-                        adapter_opt,
-                        adapter_opt.is_some(),
+                        release_adapter,
+                        has_hold_action,
+                        opens_picker,
                         event.received_at,
                     ) {
                         EncoderReleaseOutcome::Consumed => continue,
                         EncoderReleaseOutcome::FiredHold {
-                            adapter: Some(adapter),
                             entered_model_picker,
+                            ..
                         } => {
-                            let Some((profile_id, _)) = layer_adapter else {
+                            let Some((profile_id, hold_action, _, _)) = hold_entry else {
                                 continue;
                             };
-                            let open_action =
-                                ModelPickerCommand::ModelPickerOpen.into_host_action(adapter);
-                            if !policy.admits(admission, &open_action) {
+                            if !policy.admits(admission, &hold_action) {
                                 picker.cancel();
                                 active_picker_context = None;
                                 continue;
@@ -2003,7 +2196,7 @@ fn execute_clicks_with_encoder_picker(
                                 );
                                 return;
                             }
-                            let receipt = execute(profile_id, "ENC_CLK", &open_action, admission);
+                            let receipt = execute(&profile_id, "ENC_CLK", &hold_action, admission);
                             let executed_ok = receipt.outcome == "executed";
                             if receipts.try_send(receipt).is_err() {
                                 set_capture_state(
@@ -2015,8 +2208,7 @@ fn execute_clicks_with_encoder_picker(
                                 return;
                             }
                             if executed_ok && entered_model_picker {
-                                active_picker_context =
-                                    Some((control_layer, profile_id.to_owned()));
+                                active_picker_context = Some((control_layer, profile_id));
                                 set_capture_state(
                                     true,
                                     &mut mouse_capture_enabled,
@@ -2033,7 +2225,6 @@ fn execute_clicks_with_encoder_picker(
                             }
                             continue;
                         }
-                        EncoderReleaseOutcome::FiredHold { adapter: None, .. } => continue,
                         EncoderReleaseOutcome::ModelPickerConfirm { adapter } => {
                             let profile_id = active_picker_context
                                 .take()
@@ -3062,11 +3253,14 @@ mod tests {
             profile_id: "local-codex".into(),
             bundle_id: Some("com.openai.codex".into()),
             actions: plan.hosts[0].actions.clone(),
+            encoder_hold_action: plan.hosts[0].encoder_hold_action.clone(),
         };
         for mode in [
             SixLayerRoutingMode::ManualPinned(custom.clone()),
             SixLayerRoutingMode::BoardLayers {
                 layer_one: Some(custom.clone()),
+                layer_two: None,
+                layer_three: None,
             },
         ] {
             let mut context = RoutingContext::default();
@@ -3098,6 +3292,7 @@ mod tests {
                     command: "focus-input".into(),
                 })
             }),
+            encoder_hold_action: None,
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();
         for mode in [
@@ -3105,6 +3300,8 @@ mod tests {
             SixLayerRoutingMode::ManualPinned(custom.clone()),
             SixLayerRoutingMode::BoardLayers {
                 layer_one: Some(custom.clone()),
+                layer_two: None,
+                layer_three: None,
             },
         ] {
             let (link, _writes) = mi_transport::MockLink::new();
@@ -3200,6 +3397,7 @@ mod tests {
         let mut context = RoutingContext::default();
         let protected = PinnedProfilePlan {
             actions: std::array::from_fn(|_| None),
+            encoder_hold_action: None,
             ..custom
         };
         for mode in [
@@ -3248,11 +3446,14 @@ mod tests {
             profile_id: "local-codex".into(),
             bundle_id: Some("com.openai.codex".into()),
             actions: std::array::from_fn(|_| None),
+            encoder_hold_action: None,
         };
         let routing = Mutex::new(RoutingContext::default());
         routing.lock().unwrap().set_routing(
             SixLayerRoutingMode::BoardLayers {
                 layer_one: Some(layer_one),
+                layer_two: None,
+                layer_three: None,
             },
             Some("com.google.antigravity"),
         );
@@ -3838,6 +4039,7 @@ mod tests {
             profile_id: ag_id.clone(),
             bundle_id: Some("com.google.antigravity".into()),
             actions: pinned_actions,
+            encoder_hold_action: plan.hosts[0].encoder_hold_action.clone(),
         };
 
         let routing = Arc::new(Mutex::new(RoutingContext::default()));
@@ -4778,10 +4980,13 @@ mod tests {
                     bundle_id: "com.openai.codex".into(),
                 })
             }),
+            encoder_hold_action: None,
         };
         let routing = Mutex::new(RoutingContext {
             mode: SixLayerRoutingMode::BoardLayers {
                 layer_one: Some(custom_codex),
+                layer_two: None,
+                layer_three: None,
             },
             bundle_id: None,
         });
@@ -4958,9 +5163,18 @@ mod tests {
         };
 
         // Layer 1 Vendor: ENC_CLK press (act: 1) -> release (act: 0), duplicate release ignored.
-        send_vendor(r#"{"m":"v.oai.hid","p":{"k":"ENC_CLK","act":1}}"#, &mut mask);
-        send_vendor(r#"{"m":"v.oai.hid","p":{"k":"ENC_CLK","act":0}}"#, &mut mask);
-        send_vendor(r#"{"m":"v.oai.hid","p":{"k":"ENC_CLK","act":0}}"#, &mut mask);
+        send_vendor(
+            r#"{"m":"v.oai.hid","p":{"k":"ENC_CLK","act":1}}"#,
+            &mut mask,
+        );
+        send_vendor(
+            r#"{"m":"v.oai.hid","p":{"k":"ENC_CLK","act":0}}"#,
+            &mut mask,
+        );
+        send_vendor(
+            r#"{"m":"v.oai.hid","p":{"k":"ENC_CLK","act":0}}"#,
+            &mut mask,
+        );
 
         let l1_press = receiver.next().unwrap().expect("L1 ENC_CLK press");
         let l1_release = receiver.next().unwrap().expect("L1 ENC_CLK release");
@@ -5017,7 +5231,8 @@ mod tests {
     }
 
     #[test]
-    fn six_layer_encoder_hold_opens_model_picker_navigates_flicks_and_confirms_without_short_press_leak() {
+    fn six_layer_encoder_hold_opens_model_picker_navigates_flicks_and_confirms_without_short_press_leak(
+    ) {
         let receiver = UserCommandReceiver::bind().unwrap();
         let mut plan = test_plan();
         // Configure a normal short-press action on L2 ENC_CLK (slot 15) to prove hold never leaks short-press.
@@ -5150,14 +5365,201 @@ mod tests {
                     "ENC_CLK".into(),
                     "antigravity:model-picker-confirm".into(),
                 ),
-                (
-                    ag_profile_id,
-                    "ENC_CLK".into(),
-                    "antigravity:submit".into(),
-                ),
+                (ag_profile_id, "ENC_CLK".into(), "antigravity:submit".into(),),
             ]
         );
         assert_eq!(capture_transitions, vec![true, false]);
+    }
+
+    #[test]
+    fn six_layer_custom_and_unassigned_encoder_hold_and_live_board_layer_override() {
+        let receiver = UserCommandReceiver::bind().unwrap();
+        receiver.arm().unwrap();
+        let mut stale_plan = test_plan();
+        // Simulate a stale saved six-layer-runtime.json where L2 had no encoder_hold_action
+        // and slot 15 had an old action.
+        stale_plan.hosts[0].encoder_hold_action = None;
+        stale_plan.hosts[0].actions[15] = Some(ResolvedHostAction::OpenUrl {
+            url: "https://stale.example/slot15".into(),
+        });
+
+        let base = Instant::now() - Duration::from_millis(100);
+        let policy = ExecutionPolicy::default();
+        policy.set(true, true, base - Duration::from_secs(1));
+        let gen: String = receiver.generation().into();
+        let mk_ev = |seq: u64, control: u8, released: bool, at: Instant| mi_transport::Activation {
+            control,
+            layer_override: None,
+            released,
+            generation: gen.clone(),
+            received_sequence: seq,
+            received_at: at,
+        };
+
+        // Case 1: Unassigned EncoderHold on live L2 -> ENC_CLK fires slot 15 immediately on Pressed
+        // with zero release delay and zero ModelPickerOpen.
+        let mut l2_unassigned_actions: [Option<ResolvedHostAction>; SLOTS_PER_LAYER] =
+            std::array::from_fn(|_| None);
+        l2_unassigned_actions[15] = Some(ResolvedHostAction::OpenUrl {
+            url: "https://live.example/immediate-short".into(),
+        });
+        let l2_unassigned = PinnedProfilePlan {
+            profile_id: "live-ag".into(),
+            bundle_id: Some("com.google.antigravity".into()),
+            actions: l2_unassigned_actions,
+            encoder_hold_action: None,
+        };
+        let routing = Mutex::new(RoutingContext::default());
+        routing.lock().unwrap().set_routing(
+            SixLayerRoutingMode::BoardLayers {
+                layer_one: None,
+                layer_two: Some(l2_unassigned),
+                layer_three: None,
+            },
+            None,
+        );
+        let mut steps = std::collections::VecDeque::from([
+            // Only Pressed (no Released yet) -> must execute slot 15 immediately!
+            Some(mk_ev(1, 15, false, base)),
+            // Subsequent Released at +500ms -> must be ignored without firing ModelPickerOpen or double-firing slot 15!
+            Some(mk_ev(2, 15, true, base + Duration::from_millis(500))),
+        ]);
+        let stop = AtomicBool::new(false);
+        let (tx, _rx) = std::sync::mpsc::sync_channel(16);
+        let mut dispatched = Vec::new();
+        let mut capture_transitions = Vec::new();
+        execute_clicks_with_encoder_picker(
+            &receiver,
+            &stale_plan,
+            &stop,
+            &policy,
+            &AtomicU8::new(1),
+            &AtomicBool::new(false),
+            &routing,
+            &tx,
+            None,
+            || match steps.pop_front() {
+                Some(Some(ev)) => Ok(Some(ev)),
+                _ => {
+                    stop.store(true, Ordering::Release);
+                    Ok(None)
+                }
+            },
+            || Ok(()),
+            |enabled| capture_transitions.push(enabled),
+            Vec::new,
+            |profile, binding, action, _| {
+                dispatched.push((profile.to_owned(), binding.to_owned(), action.clone()));
+                mi_macos::HostActionReceipt {
+                    action_type: "url".into(),
+                    binding_id: binding.into(),
+                    detail: format!("{action:?}"),
+                    outcome: "executed".into(),
+                    profile_id: profile.into(),
+                    target: "host".into(),
+                    text_byte_len: None,
+                    timestamp_ms: 1,
+                }
+            },
+        );
+        assert_eq!(
+            dispatched,
+            vec![(
+                "live-ag".into(),
+                "ENC_CLK".into(),
+                ResolvedHostAction::OpenUrl {
+                    url: "https://live.example/immediate-short".into(),
+                },
+            )]
+        );
+        assert!(capture_transitions.is_empty());
+
+        // Case 2: Custom non-picker EncoderHold on a Locked non-Agent profile -> fires custom action
+        // at >= 350ms without entering model picker mode or capturing mouse, and consumes Released.
+        let mut custom_actions: [Option<ResolvedHostAction>; SLOTS_PER_LAYER] =
+            std::array::from_fn(|_| None);
+        custom_actions[14] = Some(ResolvedHostAction::OpenUrl {
+            url: "https://custom.example/cw".into(),
+        });
+        custom_actions[15] = Some(ResolvedHostAction::OpenUrl {
+            url: "https://custom.example/short".into(),
+        });
+        let locked_custom = PinnedProfilePlan {
+            profile_id: "custom-figma".into(),
+            bundle_id: None,
+            actions: custom_actions,
+            encoder_hold_action: Some(ResolvedHostAction::OpenUrl {
+                url: "https://custom.example/hold".into(),
+            }),
+        };
+        assert!(locked_custom.has_any_action());
+        routing.lock().unwrap().set_routing(
+            SixLayerRoutingMode::Locked(locked_custom),
+            Some("com.figma.Desktop"),
+        );
+        let mut steps2 = std::collections::VecDeque::from([
+            Some(mk_ev(10, 15, false, base)),
+            Some(mk_ev(11, 15, true, base + Duration::from_millis(400))),
+            // Subsequent CW turn must use normal slot 14 (NOT ModelPickerNext)!
+            Some(mk_ev(12, 14, false, base + Duration::from_millis(430))),
+        ]);
+        let stop2 = AtomicBool::new(false);
+        let mut dispatched2 = Vec::new();
+        let mut capture2 = Vec::new();
+        execute_clicks_with_encoder_picker(
+            &receiver,
+            &stale_plan,
+            &stop2,
+            &policy,
+            &AtomicU8::new(1),
+            &AtomicBool::new(false),
+            &routing,
+            &tx,
+            None,
+            || match steps2.pop_front() {
+                Some(Some(ev)) => Ok(Some(ev)),
+                _ => {
+                    stop2.store(true, Ordering::Release);
+                    Ok(None)
+                }
+            },
+            || Ok(()),
+            |enabled| capture2.push(enabled),
+            Vec::new,
+            |profile, binding, action, _| {
+                dispatched2.push((profile.to_owned(), binding.to_owned(), action.clone()));
+                mi_macos::HostActionReceipt {
+                    action_type: "url".into(),
+                    binding_id: binding.into(),
+                    detail: format!("{action:?}"),
+                    outcome: "executed".into(),
+                    profile_id: profile.into(),
+                    target: "host".into(),
+                    text_byte_len: None,
+                    timestamp_ms: 1,
+                }
+            },
+        );
+        assert_eq!(
+            dispatched2,
+            vec![
+                (
+                    "custom-figma".into(),
+                    "ENC_CLK".into(),
+                    ResolvedHostAction::OpenUrl {
+                        url: "https://custom.example/hold".into(),
+                    },
+                ),
+                (
+                    "custom-figma".into(),
+                    "AG14".into(),
+                    ResolvedHostAction::OpenUrl {
+                        url: "https://custom.example/cw".into(),
+                    },
+                ),
+            ]
+        );
+        assert!(capture2.is_empty());
     }
 }
 

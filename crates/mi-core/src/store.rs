@@ -195,6 +195,10 @@ pub enum HardwareLoopEvent {
         ingress_sequence: u64,
         kind: CheatSheetNotificationKind,
     },
+    EncoderHoldTimer {
+        session_id: u64,
+        hold_generation: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -454,6 +458,9 @@ pub struct WorkbenchStore {
     pub last_host_action_receipt: Option<HostActionReceipt>,
     pub dispatched_receipts: Vec<HostActionReceipt>,
     pub live_executor: Arc<LiveHostActionExecutor<MacOsSystemDriver>>,
+    pub encoder_model_picker: crate::encoder_model_picker::EncoderModelPicker,
+    encoder_hold_profile_id: Option<String>,
+    model_picker_mouse_capture_enabled: bool,
     dial_pressed: bool,
     dial_turned_while_pressed: bool,
     held_dictation: Option<HeldDictation>,
@@ -600,6 +607,7 @@ impl WorkbenchStore {
         let hardware_event_tx = RuntimeInbox::default();
         let merge_wide_key = Arc::new(AtomicBool::new(false));
 
+        let isolated = config.isolated;
         let mut store = Self {
             firmware_update: Default::default(),
             config,
@@ -647,7 +655,14 @@ impl WorkbenchStore {
             preset_transfer_error: None,
             last_host_action_receipt: None,
             dispatched_receipts: Vec::new(),
-            live_executor: Arc::new(LiveHostActionExecutor::new(MacOsSystemDriver::default())),
+            live_executor: Arc::new(LiveHostActionExecutor::new(if isolated {
+                MacOsSystemDriver::new_isolated()
+            } else {
+                MacOsSystemDriver::default()
+            })),
+            encoder_model_picker: crate::encoder_model_picker::EncoderModelPicker::new(),
+            encoder_hold_profile_id: None,
+            model_picker_mouse_capture_enabled: false,
             dial_pressed: false,
             dial_turned_while_pressed: false,
             held_dictation: None,
@@ -901,10 +916,88 @@ impl WorkbenchStore {
         }
         self.sync_live_session_source();
         self.drain_pending_hardware_events(now);
+        self.poll_encoder_model_picker(now);
         self.poll_session_navigation();
         self.overlay_controller.expire_notice_if_due(now);
         self.commit_runtime_update();
         self.projection_generation != before_gen
+    }
+
+    pub fn is_model_picker_mouse_capture_enabled(&self) -> bool {
+        self.model_picker_mouse_capture_enabled
+    }
+
+    pub fn inject_model_picker_mouse_delta_for_test(&self, dx: f64, dy: f64) {
+        self.live_executor.inject_model_picker_mouse_delta(dx, dy);
+    }
+
+    pub(crate) fn set_model_picker_mouse_capture(&mut self, enabled: bool) {
+        if self.model_picker_mouse_capture_enabled != enabled {
+            self.model_picker_mouse_capture_enabled = enabled;
+            self.live_executor.set_model_picker_mouse_capture(enabled);
+        } else if !enabled {
+            self.live_executor.set_model_picker_mouse_capture(false);
+        }
+    }
+
+    pub(crate) fn cancel_encoder_model_picker(&mut self) {
+        self.encoder_model_picker.cancel();
+        self.encoder_hold_profile_id = None;
+        if self.model_picker_mouse_capture_enabled {
+            self.model_picker_mouse_capture_enabled = false;
+            self.live_executor.set_model_picker_mouse_capture(false);
+        }
+    }
+
+    fn poll_encoder_model_picker(&mut self, now: Instant) {
+        if self.system_lifecycle != SystemLifecycle::Awake
+            || !self.document_store.host_execution_enabled()
+        {
+            if self.encoder_model_picker.hold_state().is_some()
+                || self.encoder_model_picker.active_session().is_some()
+                || self.model_picker_mouse_capture_enabled
+            {
+                self.cancel_encoder_model_picker();
+            }
+            return;
+        }
+
+        if self.encoder_model_picker.expire_if_idle(now).is_some() {
+            self.set_model_picker_mouse_capture(false);
+        }
+
+        if let Some(hold) = self.encoder_model_picker.hold_state().cloned() {
+            if !hold.hold_fired
+                && !hold.turned_while_pressed
+                && now.saturating_duration_since(hold.pressed_at)
+                    >= crate::encoder_model_picker::ENCODER_HOLD_THRESHOLD
+            {
+                let _ = self.fire_due_encoder_hold(hold.session_id, hold.hold_generation, now);
+            }
+        }
+
+        if self.encoder_model_picker.is_active(now) {
+            let deltas = self.live_executor.drain_model_picker_mouse_deltas();
+            for (dx, dy) in deltas {
+                if let Some(cmd) = self.encoder_model_picker.on_mouse_delta(dx, dy, now) {
+                    let Some(adapter) = self
+                        .encoder_model_picker
+                        .active_adapter(now)
+                        .map(str::to_owned)
+                    else {
+                        continue;
+                    };
+                    let profile_id = self.resolved_active_profile_id().unwrap_or_default();
+                    let action = cmd.into_host_action(adapter);
+                    let _ = self.execute_resolved_physical_action_with_session(
+                        &profile_id,
+                        "ENC_CLK",
+                        0,
+                        action,
+                    );
+                }
+            }
+        }
     }
 
     pub fn projection_generation(&self) -> u64 {
@@ -1990,6 +2083,10 @@ impl WorkbenchStore {
                 }
                 None
             }
+            HardwareLoopEvent::EncoderHoldTimer {
+                session_id,
+                hold_generation,
+            } => self.fire_due_encoder_hold(session_id, hold_generation, now),
         }
     }
 
@@ -2072,6 +2169,19 @@ impl WorkbenchStore {
         {
             return false;
         }
+        if profiles
+            .get(&local_codex_id)
+            .and_then(|p| p.layer_order.first())
+            .is_some_and(|lid| {
+                mi_model::preset::coding_agent_layer_needs_encoder_migration(
+                    doc,
+                    mi_model::preset::LOCAL_CODEX_PROFILE_NAME,
+                    lid,
+                )
+            })
+        {
+            return false;
+        }
         CANONICAL_DESKTOP_AGENT_PROFILES
             .iter()
             .all(|canonical_name| {
@@ -2090,6 +2200,19 @@ impl WorkbenchStore {
                         return p.layer_order.first().is_some_and(|lid| {
                             !mi_model::preset::antigravity_layer_needs_starter_slot_migration(
                                 doc, lid,
+                            ) && !mi_model::preset::coding_agent_layer_needs_encoder_migration(
+                                doc,
+                                canonical_name,
+                                lid,
+                            )
+                        });
+                    }
+                    if *canonical_name == "DeepSeek Coder (DSH)" {
+                        return p.layer_order.first().is_some_and(|lid| {
+                            !mi_model::preset::coding_agent_layer_needs_encoder_migration(
+                                doc,
+                                canonical_name,
+                                lid,
                             )
                         });
                     }
@@ -2285,6 +2408,7 @@ impl WorkbenchStore {
     fn release_board_inputs(&mut self, now: Instant) {
         self.update_now = now;
         self.cancel_physical_session_navigation();
+        self.cancel_encoder_model_picker();
         self.dial_pressed = false;
         self.dial_turned_while_pressed = false;
         self.radial_state.cancel();
@@ -2536,6 +2660,7 @@ impl WorkbenchStore {
         self.apply_routing_operation(RoutingOperation::Select {
             profile_id: profile_id.to_string(),
         })?;
+        self.cancel_encoder_model_picker();
         self.selected_profile_id = Some(profile_id.to_string());
         self.selected_layer_id = first_layer_id;
         self.v070_hardware.device_layer_override = None;
@@ -3033,6 +3158,9 @@ impl WorkbenchStore {
                     .layers
                     .contains_key(&layer_id)
                 {
+                    if self.selected_layer_id.as_deref() != Some(layer_id.as_str()) {
+                        self.cancel_encoder_model_picker();
+                    }
                     self.selected_layer_id = Some(layer_id);
                     self.v070_hardware.device_layer_override = None;
                     self.normalize_surface_for_current_layer();
@@ -3113,6 +3241,15 @@ impl WorkbenchStore {
                     }
                 }
                 let pairs: &[(u32, &str)] = match preset {
+                    KnobJoystickPreset::ModelSelectionAndMouse => &[
+                        (13, "agent-model-picker-prev"),
+                        (14, "agent-model-picker-next"),
+                        (15, "agent-model-picker-confirm"),
+                        (16, "agent-model-picker-prev"),
+                        (17, "agent-model-picker-next"),
+                        (18, "agent-model-picker-effort-left"),
+                        (19, "agent-model-picker-effort-right"),
+                    ],
                     KnobJoystickPreset::CycleWorkingAndBlueDot => &[
                         (13, "ag-cycle-attention-prev"),
                         (14, "ag-cycle-attention-next"),
@@ -3151,18 +3288,55 @@ impl WorkbenchStore {
                         (19, "host-mouse-move-right"),
                     ],
                 };
+                let v070_supported = self.v070_hardware.projection.supported;
                 let catalog = mi_model::draft::actions();
                 self.document_store
                     .update(|draft| {
-                        if matches!(preset, KnobJoystickPreset::MousePointerAndScroll) {
-                            draft.set_control_settings(
-                                &pid,
-                                &lid,
-                                mi_model::control_settings::ControlSettings {
-                                    joystick_mode: "logical_sectors".into(),
-                                    active_sectors: 4,
-                                },
-                            )?;
+                        match preset {
+                            KnobJoystickPreset::ModelSelectionAndMouse => {
+                                let open_action = catalog
+                                    .iter()
+                                    .find(|a| a.id == "agent-model-picker-open")
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        "未找到内置动作 agent-model-picker-open".to_string()
+                                    })?;
+                                draft.assign_encoder_hold(&json!(pid), &json!(lid), open_action)?;
+                                let (joystick_mode, active_sectors) = if v070_supported {
+                                    ("mouse", 0)
+                                } else {
+                                    ("logical_sectors", 4)
+                                };
+                                draft.set_control_settings(
+                                    &pid,
+                                    &lid,
+                                    mi_model::control_settings::ControlSettings {
+                                        joystick_mode: joystick_mode.into(),
+                                        active_sectors,
+                                        encoder_hold_action_id: None,
+                                    },
+                                )?;
+                            }
+                            KnobJoystickPreset::MousePointerAndScroll => {
+                                draft.unassign_encoder_hold(&json!(pid), &json!(lid))?;
+                                let (joystick_mode, active_sectors) = if v070_supported {
+                                    ("mouse", 0)
+                                } else {
+                                    ("logical_sectors", 4)
+                                };
+                                draft.set_control_settings(
+                                    &pid,
+                                    &lid,
+                                    mi_model::control_settings::ControlSettings {
+                                        joystick_mode: joystick_mode.into(),
+                                        active_sectors,
+                                        encoder_hold_action_id: None,
+                                    },
+                                )?;
+                            }
+                            _ => {
+                                draft.unassign_encoder_hold(&json!(pid), &json!(lid))?;
+                            }
                         }
                         for &(slot, action_id) in pairs {
                             let action = catalog
@@ -3377,6 +3551,32 @@ impl WorkbenchStore {
                                 } else {
                                     draft.unassign(&json!(pid), &json!(lid), slot)?;
                                 }
+                            }
+                            if let Some(cs) = &tlayer.control_settings {
+                                draft.set_control_settings(
+                                    &pid,
+                                    &lid,
+                                    mi_model::control_settings::ControlSettings {
+                                        joystick_mode: cs.joystick_mode.clone(),
+                                        active_sectors: cs.active_sectors,
+                                        encoder_hold_action_id: None,
+                                    },
+                                )?;
+                                if let Some(hold_aid) = cs.encoder_hold_action_id.as_ref() {
+                                    if let Some(hold_action) = tactions.get(hold_aid).cloned() {
+                                        draft.assign_encoder_hold(
+                                            &json!(pid),
+                                            &json!(lid),
+                                            hold_action,
+                                        )?;
+                                    } else {
+                                        draft.unassign_encoder_hold(&json!(pid), &json!(lid))?;
+                                    }
+                                } else {
+                                    draft.unassign_encoder_hold(&json!(pid), &json!(lid))?;
+                                }
+                            } else {
+                                draft.unassign_encoder_hold(&json!(pid), &json!(lid))?;
                             }
                         } else {
                             mi_model::preset::install_agent_starter_profiles(draft)?;
@@ -4769,6 +4969,170 @@ impl WorkbenchStore {
         fallback_unbridged_oai_action(&profile.name, binding_id, layout)
     }
 
+    fn resolve_encoder_hold_physical_action(&self, profile_id: &str) -> Option<ResolvedHostAction> {
+        let source_id = self.runtime_action_profile_id(profile_id)?;
+        let doc = &self.document_store.host_store().draft.document;
+        if let Some(resolved) = mi_model::resolve_encoder_hold_action(
+            doc,
+            Some(source_id),
+            self.command_execution_enabled,
+        ) {
+            return Some(resolved);
+        }
+        if source_id != profile_id {
+            return None;
+        }
+        let profile = doc.editable.graph.profiles.get(source_id)?;
+        if profile.name.eq_ignore_ascii_case("Codex")
+            && profile
+                .layer_order
+                .iter()
+                .any(|lid| doc.is_protected_oai_layer(lid))
+        {
+            return Some(ResolvedHostAction::AgentCommand {
+                adapter: "codex".to_string(),
+                command: "model-picker-open".to_string(),
+            });
+        }
+        None
+    }
+
+    fn resolve_model_picker_target_adapter(
+        &self,
+        profile_id: &str,
+        hold_action: Option<&ResolvedHostAction>,
+    ) -> Option<String> {
+        if let Some(ResolvedHostAction::AgentCommand { adapter, .. }) = hold_action {
+            if matches!(adapter.as_str(), "antigravity" | "codex" | "dsh-desktop") {
+                return Some(adapter.clone());
+            }
+        }
+        let doc = &self.document_store.host_store().draft.document;
+        if let Some(source_id) = self.runtime_action_profile_id(profile_id) {
+            if let Some(profile) = doc.editable.graph.profiles.get(source_id) {
+                if let Some(agent) = CanonicalAgent::from_profile_name(&profile.name) {
+                    let mapped = match agent {
+                        CanonicalAgent::Antigravity => Some("antigravity"),
+                        CanonicalAgent::Codex => Some("codex"),
+                        CanonicalAgent::DeepseekHarness => Some("dsh-desktop"),
+                        _ => None,
+                    };
+                    if let Some(a) = mapped {
+                        return Some(a.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(adapter) = self.active_desktop_agent_adapter() {
+            if matches!(adapter.as_str(), "antigravity" | "codex" | "dsh-desktop") {
+                return Some(adapter);
+            }
+        }
+        if let Some(bundle) = self.foreground_bundle_id.as_deref() {
+            if bundle == "com.google.antigravity" {
+                return Some("antigravity".to_string());
+            }
+            if bundle == "com.openai.codex" {
+                return Some("codex".to_string());
+            }
+            if bundle.starts_with("com.deepseek.dsh") {
+                return Some("dsh-desktop".to_string());
+            }
+        }
+        if hold_action.is_some_and(
+            crate::encoder_model_picker::ModelPickerCommand::is_open_model_picker_action,
+        ) {
+            return Some("antigravity".to_string());
+        }
+        None
+    }
+
+    fn fire_due_encoder_hold(
+        &mut self,
+        session_id: u64,
+        hold_generation: u64,
+        now: Instant,
+    ) -> Option<HostActionReceipt> {
+        if self.system_lifecycle != SystemLifecycle::Awake
+            || !self.document_store.host_execution_enabled()
+        {
+            return None;
+        }
+        let Some(current) = self.encoder_model_picker.hold_state() else {
+            return None;
+        };
+        if current.session_id != session_id || current.hold_generation != hold_generation {
+            return None;
+        }
+        if self
+            .device_session
+            .as_ref()
+            .is_some_and(|s| s.id != session_id || s.is_disconnected())
+        {
+            self.cancel_encoder_model_picker();
+            return None;
+        }
+        let hold_profile = self
+            .encoder_hold_profile_id
+            .clone()
+            .or_else(|| self.resolved_active_profile_id())
+            .unwrap_or_default();
+        if let Some(active_pid) = self.resolved_active_profile_id() {
+            if !hold_profile.is_empty() && active_pid != hold_profile {
+                self.cancel_encoder_model_picker();
+                return None;
+            }
+        }
+        let hold_action = self.resolve_encoder_hold_physical_action(&hold_profile);
+        let target_adapter =
+            self.resolve_model_picker_target_adapter(&hold_profile, hold_action.as_ref());
+        let opens_picker = hold_action.as_ref().is_some_and(
+            crate::encoder_model_picker::ModelPickerCommand::is_open_model_picker_action,
+        );
+        match self.encoder_model_picker.on_hold_timer_with_picker_mode(
+            hold_generation,
+            target_adapter.as_deref(),
+            hold_action.is_some(),
+            opens_picker,
+            now,
+        ) {
+            crate::encoder_model_picker::EncoderHoldTimerOutcome::Ignored => None,
+            crate::encoder_model_picker::EncoderHoldTimerOutcome::FiredHold {
+                entered_model_picker,
+                ..
+            } => {
+                let mut action = hold_action?;
+                if let ResolvedHostAction::AgentCommand { adapter, .. } = &mut action {
+                    if matches!(adapter.as_str(), "host" | "active-agent") {
+                        if let Some(ref resolved) = target_adapter {
+                            *adapter = resolved.clone();
+                        }
+                    }
+                }
+                let receipt = self.execute_resolved_physical_action_with_session(
+                    &hold_profile,
+                    "ENC_CLK",
+                    session_id,
+                    action,
+                );
+                if receipt.as_ref().is_some_and(|r| r.succeeded()) && entered_model_picker {
+                    self.set_model_picker_mouse_capture(true);
+                    if let Some(r) = &receipt {
+                        self.status_message = format!(
+                            "已弹出模型选择页 · 左右旋转选模型，按右选模型力度 ({})",
+                            r.detail
+                        );
+                    }
+                    self.commit_runtime_update();
+                } else if !receipt.as_ref().is_some_and(|r| r.succeeded()) {
+                    self.cancel_encoder_model_picker();
+                    self.commit_runtime_update();
+                }
+                receipt
+            }
+        }
+    }
+
     pub fn consume_physical_input_event(
         &mut self,
         event: InputEvent,
@@ -4840,6 +5204,108 @@ impl WorkbenchStore {
                 if binding_id == "ENC_CLK" {
                     self.dial_pressed = false;
                     self.dial_turned_while_pressed = false;
+                    if self.encoder_model_picker.hold_state().is_some() {
+                        let hold_profile = self
+                            .encoder_hold_profile_id
+                            .take()
+                            .unwrap_or_else(|| profile_id.clone());
+                        if !self.document_store.host_execution_enabled()
+                            || (!profile_id.is_empty() && hold_profile != profile_id)
+                        {
+                            self.cancel_encoder_model_picker();
+                            self.commit_runtime_update();
+                            return None;
+                        }
+                        let hold_action = self.resolve_encoder_hold_physical_action(&hold_profile);
+                        let target_adapter = self.resolve_model_picker_target_adapter(
+                            &hold_profile,
+                            hold_action.as_ref(),
+                        );
+                        let opens_picker = hold_action.as_ref().is_some_and(
+                            crate::encoder_model_picker::ModelPickerCommand::is_open_model_picker_action,
+                        );
+                        match self.encoder_model_picker.on_encoder_release_with_picker_mode(
+                            event.session_id,
+                            target_adapter.as_deref(),
+                            hold_action.is_some(),
+                            opens_picker,
+                            now,
+                        ) {
+                            crate::encoder_model_picker::EncoderReleaseOutcome::Consumed => {
+                                return None;
+                            }
+                            crate::encoder_model_picker::EncoderReleaseOutcome::FiredHold {
+                                entered_model_picker,
+                                ..
+                            } => {
+                                let Some(mut action) = hold_action else {
+                                    return None;
+                                };
+                                if let ResolvedHostAction::AgentCommand { adapter, .. } =
+                                    &mut action
+                                {
+                                    if matches!(adapter.as_str(), "host" | "active-agent") {
+                                        if let Some(ref resolved) = target_adapter {
+                                            *adapter = resolved.clone();
+                                        }
+                                    }
+                                }
+                                let receipt = self.execute_resolved_physical_action_with_session(
+                                    &hold_profile,
+                                    "ENC_CLK",
+                                    event.session_id,
+                                    action,
+                                );
+                                if receipt.as_ref().is_some_and(|r| r.succeeded())
+                                    && entered_model_picker
+                                {
+                                    self.set_model_picker_mouse_capture(true);
+                                    if let Some(r) = &receipt {
+                                        self.status_message = format!(
+                                            "已弹出模型选择页 · 左右旋转选模型，按右选模型力度 ({})",
+                                            r.detail
+                                        );
+                                    }
+                                    self.commit_runtime_update();
+                                } else if !receipt.as_ref().is_some_and(|r| r.succeeded()) {
+                                    self.cancel_encoder_model_picker();
+                                    self.commit_runtime_update();
+                                }
+                                return receipt;
+                            }
+                            crate::encoder_model_picker::EncoderReleaseOutcome::ModelPickerConfirm {
+                                adapter,
+                            } => {
+                                self.set_model_picker_mouse_capture(false);
+                                let confirm_action =
+                                    crate::encoder_model_picker::ModelPickerCommand::ModelPickerConfirm
+                                        .into_host_action(adapter);
+                                return self.execute_resolved_physical_action_with_session(
+                                    &hold_profile,
+                                    "ENC_CLK",
+                                    event.session_id,
+                                    confirm_action,
+                                );
+                            }
+                            crate::encoder_model_picker::EncoderReleaseOutcome::ShortPress => {
+                                let layout = self.current_bottom_row_layout();
+                                let Some(short_action) =
+                                    self.resolve_physical_action(&hold_profile, "ENC_CLK", layout)
+                                else {
+                                    self.status_message =
+                                        "已按下 ENC_CLK（当前槽位未绑定动作）".to_string();
+                                    self.commit_runtime_update();
+                                    return None;
+                                };
+                                return self.execute_resolved_physical_action_with_session(
+                                    &hold_profile,
+                                    "ENC_CLK",
+                                    event.session_id,
+                                    short_action,
+                                );
+                            }
+                        }
+                    }
                 }
                 let input = HeldInputId {
                     session_id: event.session_id,
@@ -4881,11 +5347,6 @@ impl WorkbenchStore {
                     }
                 }
 
-                if binding_id == "ENC_CLK" {
-                    self.dial_pressed = true;
-                    self.dial_turned_while_pressed = false;
-                }
-
                 let inspector_search_active = !self.action_search_query.trim().is_empty()
                     || !self.keycap_search_query.trim().is_empty()
                     || self.shortcut_recorder.is_recording;
@@ -4910,162 +5371,260 @@ impl WorkbenchStore {
                     return None;
                 }
 
+                if self.encoder_model_picker.expire_if_idle(now).is_some() {
+                    self.set_model_picker_mouse_capture(false);
+                }
+
+                if binding_id == "ENC_CLK" {
+                    self.dial_pressed = true;
+                    self.dial_turned_while_pressed = false;
+                    let hold_action = self.resolve_encoder_hold_physical_action(&profile_id);
+                    let picker_active = self.encoder_model_picker.is_active(now);
+                    if hold_action.is_some() || picker_active {
+                        let hold_gen = self
+                            .encoder_model_picker
+                            .on_encoder_press(event.session_id, now);
+                        self.encoder_hold_profile_id = Some(profile_id);
+                        if hold_action.is_some() {
+                            let tx = self.hardware_event_tx.clone();
+                            let session_id = event.session_id;
+                            self.tokio_runtime.spawn(async move {
+                                tokio::time::sleep(
+                                    crate::encoder_model_picker::ENCODER_HOLD_THRESHOLD,
+                                )
+                                .await;
+                                let _ = tx.send(HardwareLoopEvent::EncoderHoldTimer {
+                                    session_id,
+                                    hold_generation: hold_gen,
+                                });
+                            });
+                        }
+                        self.commit_runtime_update();
+                        return None;
+                    }
+                } else if matches!(
+                    binding_id.as_str(),
+                    "AG13" | "ENC_CC" | "ENC_CCW" | "AG14" | "ENC_CW"
+                ) {
+                    let clockwise = matches!(binding_id.as_str(), "AG14" | "ENC_CW");
+                    match self.encoder_model_picker.on_encoder_turn(clockwise, now) {
+                        crate::encoder_model_picker::EncoderTurnOutcome::ModelPicker(cmd) => {
+                            if let Some(adapter) = self
+                                .encoder_model_picker
+                                .active_adapter(now)
+                                .map(str::to_owned)
+                            {
+                                let action = cmd.into_host_action(adapter);
+                                return self.execute_resolved_physical_action_with_session(
+                                    &profile_id,
+                                    &binding_id,
+                                    event.session_id,
+                                    action,
+                                );
+                            }
+                        }
+                        crate::encoder_model_picker::EncoderTurnOutcome::FastScroll { .. } => {
+                            self.dial_turned_while_pressed = true;
+                            self.encoder_hold_profile_id = None;
+                        }
+                        crate::encoder_model_picker::EncoderTurnOutcome::NormalSlot => {}
+                    }
+                } else if matches!(binding_id.as_str(), "AG15" | "AG16" | "AG17" | "AG18") {
+                    if let Some(cmd) = self
+                        .encoder_model_picker
+                        .on_sector_direction_while_active(&binding_id, now)
+                    {
+                        if let Some(adapter) = self
+                            .encoder_model_picker
+                            .active_adapter(now)
+                            .map(str::to_owned)
+                        {
+                            let action = cmd.into_host_action(adapter);
+                            return self.execute_resolved_physical_action_with_session(
+                                &profile_id,
+                                &binding_id,
+                                event.session_id,
+                                action,
+                            );
+                        }
+                    }
+                } else if self.encoder_model_picker.is_active(now) {
+                    self.cancel_encoder_model_picker();
+                }
+
                 let layout = self.current_bottom_row_layout();
-                let Some(mut action) =
-                    self.resolve_physical_action(&profile_id, &binding_id, layout)
+                let Some(action) = self.resolve_physical_action(&profile_id, &binding_id, layout)
                 else {
                     self.status_message = format!("已按下 {binding_id}（当前槽位未绑定动作）");
                     self.commit_runtime_update();
                     return None;
                 };
 
-                if matches!(binding_id.as_str(), "AG13" | "AG14") && self.dial_pressed {
-                    self.dial_turned_while_pressed = true;
-                    if let ResolvedHostAction::AgentCommand { command, .. } = &mut action {
-                        if command == "scroll-up" {
-                            *command = "scroll-up-fast".to_string();
-                        } else if command == "scroll-down" {
-                            *command = "scroll-down-fast".to_string();
-                        }
-                    }
-                }
-
-                if let ResolvedHostAction::Shortcut {
-                    key_code,
-                    modifiers,
-                    target_bundle_id,
-                    ..
-                } = &action
-                {
-                    if *key_code == APPLE_FN_KEY_CODE && modifiers.is_empty() {
-                        let target = target_bundle_id.as_deref().unwrap_or("frontmost-editor");
-                        if let Some(receipt) = self.live_executor.handle_apple_fn_press(
-                            &HeldInputId {
-                                session_id: event.session_id,
-                                binding_id: binding_id.clone(),
-                            },
-                            &profile_id,
-                            target,
-                        ) {
-                            self.status_message =
-                                format!("已触发 {} · {}", binding_id, receipt.detail);
-                            self.record_host_action_receipt(receipt.clone());
-                            self.commit_runtime_update();
-                            return Some(receipt);
-                        }
-                        return None;
-                    }
-                }
-
-                if let ResolvedHostAction::AgentCommand { adapter, command } = &mut action {
-                    if adapter == "host" && !mi_model::is_host_mouse_command(command) {
-                        *adapter = self
-                            .active_desktop_agent_adapter()
-                            .unwrap_or_else(|| "antigravity".to_string());
-                    }
-                    if let Some(command) =
-                        NavigationCommand::from_action(&ResolvedHostAction::AgentCommand {
-                            adapter: adapter.clone(),
-                            command: command.clone(),
-                        })
-                    {
-                        self.request_navigation_command(
-                            command,
-                            None,
-                            Some(NavigationInputLease::Vendor(event.session_id)),
-                            profile_id,
-                            binding_id,
-                        );
-                        return None;
-                    }
-                    if command == "push-to-talk" {
-                        let resolved_adapter = adapter.clone();
-                        if self.held_dictation.is_some() {
-                            return None;
-                        }
-                        let started = if self.config.isolated {
-                            Ok(())
-                        } else {
-                            self.live_executor.start_owned_dictation(&resolved_adapter)
-                        };
-                        let uncertain = started
-                            .as_ref()
-                            .is_err_and(|error| error.starts_with("unconfirmed:"));
-                        self.ptt_controller.is_active = started.is_ok();
-                        self.ptt_controller.cleanup_confirmed = !uncertain;
-                        if started.is_ok() || uncertain {
-                            self.held_dictation = Some(HeldDictation {
-                                input: HeldInputId {
-                                    session_id: event.session_id,
-                                    binding_id: binding_id.clone(),
-                                },
-                                profile_id: profile_id.clone(),
-                                adapter: resolved_adapter.clone(),
-                            });
-                        }
-                        let (outcome, detail) = match started {
-                            Ok(()) => (
-                                if self.config.isolated {
-                                    "simulated"
-                                } else {
-                                    "executed"
-                                },
-                                format!("{resolved_adapter}/push-to-talk"),
-                            ),
-                            Err(error) => {
-                                (if uncertain { "unconfirmed" } else { "blocked" }, error)
-                            }
-                        };
-                        let receipt = HostActionReceipt {
-                            action_type: "agent_command".into(),
-                            binding_id: binding_id.clone(),
-                            detail: detail.clone(),
-                            outcome: outcome.into(),
-                            profile_id,
-                            target: resolved_adapter,
-                            text_byte_len: None,
-                            timestamp_ms: 0,
-                        };
-                        self.status_message = if self.ptt_controller.is_active {
-                            format!("正在按住语音 ({binding_id})…")
-                        } else {
-                            format!("听写未启动 · {detail}")
-                        };
-                        self.record_host_action_receipt(receipt.clone());
-                        self.commit_runtime_update();
-                        return Some(receipt);
-                    }
-                }
-
-                let receipt = if self.config.isolated {
-                    mi_macos::SimulatedHostActionExecutor::new().execute(
-                        &profile_id,
-                        &binding_id,
-                        &action,
-                    )
-                } else {
-                    self.live_executor
-                        .execute(&profile_id, &binding_id, &action)
-                };
-
-                if let ResolvedHostAction::OpenApp { bundle_id } = &action {
-                    if receipt.succeeded() {
-                        self.navigation_history
-                            .visit(NavigationPlace::app(bundle_id.clone()));
-                    }
-                }
-
-                self.status_message = if receipt.succeeded() {
-                    format!("已触发 {} · {}", binding_id, receipt.detail)
-                } else {
-                    format!("未执行 {} · {}", binding_id, receipt.detail)
-                };
-                self.record_host_action_receipt(receipt.clone());
-                self.commit_runtime_update();
-                Some(receipt)
+                self.execute_resolved_physical_action_with_session(
+                    &profile_id,
+                    &binding_id,
+                    event.session_id,
+                    action,
+                )
             }
             _ => None,
         }
+    }
+
+    fn execute_resolved_physical_action_with_session(
+        &mut self,
+        profile_id: &str,
+        binding_id: &str,
+        session_id: u64,
+        mut action: ResolvedHostAction,
+    ) -> Option<HostActionReceipt> {
+        if matches!(
+            binding_id,
+            "AG13" | "AG14" | "ENC_CC" | "ENC_CCW" | "ENC_CW"
+        ) && self.dial_pressed
+        {
+            self.dial_turned_while_pressed = true;
+            if let ResolvedHostAction::AgentCommand { command, .. } = &mut action {
+                if command == "scroll-up" {
+                    *command = "scroll-up-fast".to_string();
+                } else if command == "scroll-down" {
+                    *command = "scroll-down-fast".to_string();
+                }
+            }
+        }
+
+        if let ResolvedHostAction::Shortcut {
+            key_code,
+            modifiers,
+            target_bundle_id,
+            ..
+        } = &action
+        {
+            if *key_code == APPLE_FN_KEY_CODE && modifiers.is_empty() {
+                let target = target_bundle_id.as_deref().unwrap_or("frontmost-editor");
+                if let Some(receipt) = self.live_executor.handle_apple_fn_press(
+                    &HeldInputId {
+                        session_id,
+                        binding_id: binding_id.to_string(),
+                    },
+                    profile_id,
+                    target,
+                ) {
+                    self.status_message = format!("已触发 {} · {}", binding_id, receipt.detail);
+                    self.record_host_action_receipt(receipt.clone());
+                    self.commit_runtime_update();
+                    return Some(receipt);
+                }
+                return None;
+            }
+        }
+
+        if let ResolvedHostAction::AgentCommand { adapter, command } = &mut action {
+            if matches!(adapter.as_str(), "host" | "active-agent")
+                && !mi_model::is_host_mouse_command(command)
+            {
+                *adapter = if command.starts_with("model-picker") || command == "model" {
+                    self.resolve_model_picker_target_adapter(profile_id, None)
+                        .or_else(|| self.active_desktop_agent_adapter())
+                        .unwrap_or_else(|| "antigravity".to_string())
+                } else {
+                    self.active_desktop_agent_adapter()
+                        .unwrap_or_else(|| "antigravity".to_string())
+                };
+            }
+            if let Some(command) =
+                NavigationCommand::from_action(&ResolvedHostAction::AgentCommand {
+                    adapter: adapter.clone(),
+                    command: command.clone(),
+                })
+            {
+                self.request_navigation_command(
+                    command,
+                    None,
+                    Some(NavigationInputLease::Vendor(session_id)),
+                    profile_id.to_string(),
+                    binding_id.to_string(),
+                );
+                return None;
+            }
+            if command == "push-to-talk" {
+                let resolved_adapter = adapter.clone();
+                if self.held_dictation.is_some() {
+                    return None;
+                }
+                let started = if self.config.isolated {
+                    Ok(())
+                } else {
+                    self.live_executor.start_owned_dictation(&resolved_adapter)
+                };
+                let uncertain = started
+                    .as_ref()
+                    .is_err_and(|error| error.starts_with("unconfirmed:"));
+                self.ptt_controller.is_active = started.is_ok();
+                self.ptt_controller.cleanup_confirmed = !uncertain;
+                if started.is_ok() || uncertain {
+                    self.held_dictation = Some(HeldDictation {
+                        input: HeldInputId {
+                            session_id,
+                            binding_id: binding_id.to_string(),
+                        },
+                        profile_id: profile_id.to_string(),
+                        adapter: resolved_adapter.clone(),
+                    });
+                }
+                let (outcome, detail) = match started {
+                    Ok(()) => (
+                        if self.config.isolated {
+                            "simulated"
+                        } else {
+                            "executed"
+                        },
+                        format!("{resolved_adapter}/push-to-talk"),
+                    ),
+                    Err(error) => (if uncertain { "unconfirmed" } else { "blocked" }, error),
+                };
+                let receipt = HostActionReceipt {
+                    action_type: "agent_command".into(),
+                    binding_id: binding_id.to_string(),
+                    detail: detail.clone(),
+                    outcome: outcome.into(),
+                    profile_id: profile_id.to_string(),
+                    target: resolved_adapter,
+                    text_byte_len: None,
+                    timestamp_ms: 0,
+                };
+                self.status_message = if self.ptt_controller.is_active {
+                    format!("正在按住语音 ({binding_id})…")
+                } else {
+                    format!("听写未启动 · {detail}")
+                };
+                self.record_host_action_receipt(receipt.clone());
+                self.commit_runtime_update();
+                return Some(receipt);
+            }
+        }
+
+        let receipt = if self.config.isolated {
+            mi_macos::SimulatedHostActionExecutor::new().execute(profile_id, binding_id, &action)
+        } else {
+            self.live_executor.execute(profile_id, binding_id, &action)
+        };
+
+        if let ResolvedHostAction::OpenApp { bundle_id } = &action {
+            if receipt.succeeded() {
+                self.navigation_history
+                    .visit(NavigationPlace::app(bundle_id.clone()));
+            }
+        }
+
+        self.status_message = if receipt.succeeded() {
+            format!("已触发 {} · {}", binding_id, receipt.detail)
+        } else {
+            format!("未执行 {} · {}", binding_id, receipt.detail)
+        };
+        self.record_host_action_receipt(receipt.clone());
+        self.commit_runtime_update();
+        Some(receipt)
     }
 
     fn sync_modal_for_layer_protection(&mut self) {
@@ -5137,6 +5696,7 @@ impl WorkbenchStore {
                             mi_model::control_settings::ControlSettings {
                                 joystick_mode: mode.as_model_str().to_string(),
                                 active_sectors,
+                                encoder_hold_action_id: None,
                             },
                         )
                     })
@@ -5241,6 +5801,14 @@ impl WorkbenchStore {
             }
             InspectorAction::SetSlotRole(role) => {
                 self.ensure_layer_editable()?;
+                if self.selected_surface == ControlSurfaceId::EncoderHold {
+                    return match role {
+                        KeycapRole::TaskKey => Err(WorkbenchError::Storage(
+                            "仅顶部 6 键 (AG00..AG05) 支持设为会话键".to_string(),
+                        )),
+                        KeycapRole::ActionKey => Ok(()),
+                    };
+                }
                 let (pid, lid) = self.require_selected_profile_and_layer()?;
                 let slot = self.current_selected_slot();
                 match role {
@@ -5298,6 +5866,13 @@ impl WorkbenchStore {
             InspectorAction::UnassignSelectedSlot => {
                 self.ensure_layer_editable()?;
                 let (pid, lid) = self.require_selected_profile_and_layer()?;
+                if self.selected_surface == ControlSurfaceId::EncoderHold {
+                    self.document_store
+                        .update(|draft| draft.unassign_encoder_hold(&json!(pid), &json!(lid)))
+                        .map_err(WorkbenchError::Storage)?;
+                    self.commit_runtime_update();
+                    return Ok(());
+                }
                 let slot = self.current_selected_slot();
                 self.document_store
                     .update(|draft| draft.unassign(&json!(pid), &json!(lid), slot))
@@ -5314,6 +5889,25 @@ impl WorkbenchStore {
             } => {
                 self.ensure_layer_editable()?;
                 let (pid, lid) = self.require_selected_profile_and_layer()?;
+                if self.selected_surface == ControlSurfaceId::EncoderHold {
+                    if bind_default_action {
+                        if let Some(action) = keycap.default_action() {
+                            self.document_store
+                                .update(|draft| {
+                                    draft.assign_encoder_hold(&json!(pid), &json!(lid), action)
+                                })
+                                .map_err(WorkbenchError::Storage)?;
+                        } else if keycap == CodexKeycapId::Blank {
+                            self.document_store
+                                .update(|draft| {
+                                    draft.unassign_encoder_hold(&json!(pid), &json!(lid))
+                                })
+                                .map_err(WorkbenchError::Storage)?;
+                        }
+                    }
+                    self.commit_runtime_update();
+                    return Ok(());
+                }
                 let slot = self.current_selected_slot();
                 self.keycap_overrides.insert((pid.clone(), slot), keycap);
                 if bind_default_action {
@@ -5336,8 +5930,17 @@ impl WorkbenchStore {
             InspectorAction::BindAppleFnKey => {
                 self.ensure_layer_editable()?;
                 let (pid, lid) = self.require_selected_profile_and_layer()?;
-                let slot = self.current_selected_slot();
                 let action = self.resolve_action_by_id("apple-fn-key")?;
+                if self.selected_surface == ControlSurfaceId::EncoderHold {
+                    self.document_store
+                        .update(|draft| draft.assign_encoder_hold(&json!(pid), &json!(lid), action))
+                        .map_err(WorkbenchError::Storage)?;
+                    self.shortcut_recorder.is_recording = false;
+                    self.shortcut_recorder.validation_error = None;
+                    self.commit_runtime_update();
+                    return Ok(());
+                }
+                let slot = self.current_selected_slot();
                 self.document_store
                     .update(|draft| draft.assign(&json!(pid), &json!(lid), slot, action))
                     .map_err(WorkbenchError::Storage)?;
@@ -5418,8 +6021,13 @@ impl WorkbenchStore {
                 } else {
                     self.shortcut_recorder.preview_badge.clone()
                 };
+                let is_encoder_hold = self.selected_surface == ControlSurfaceId::EncoderHold;
                 let action = Action {
-                    id: format!("custom-shortcut-{slot}"),
+                    id: if is_encoder_hold {
+                        "custom-shortcut-encoder-hold".to_string()
+                    } else {
+                        format!("custom-shortcut-{slot}")
+                    },
                     name: format!("快捷键 {badge}"),
                     category: "快捷键".to_string(),
                     detail: format!("自定义录制快捷键 · 目标 {target}"),
@@ -5431,14 +6039,20 @@ impl WorkbenchStore {
                     }),
                 };
                 action.validate().map_err(WorkbenchError::Storage)?;
-                self.document_store
-                    .update(|draft| draft.assign(&json!(pid), &json!(lid), slot, action))
-                    .map_err(WorkbenchError::Storage)?;
-                self.slot_role_overrides
-                    .insert((pid, slot), KeycapRole::ActionKey);
+                if is_encoder_hold {
+                    self.document_store
+                        .update(|draft| draft.assign_encoder_hold(&json!(pid), &json!(lid), action))
+                        .map_err(WorkbenchError::Storage)?;
+                } else {
+                    self.document_store
+                        .update(|draft| draft.assign(&json!(pid), &json!(lid), slot, action))
+                        .map_err(WorkbenchError::Storage)?;
+                    self.slot_role_overrides
+                        .insert((pid, slot), KeycapRole::ActionKey);
+                    self.sync_v070_session_sa_rgb();
+                }
                 self.shortcut_recorder.is_recording = false;
                 self.shortcut_recorder.validation_error = None;
-                self.sync_v070_session_sa_rgb();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -5446,6 +6060,36 @@ impl WorkbenchStore {
             | InspectorAction::BindExistingAction(action_id) => {
                 self.ensure_layer_editable()?;
                 let (pid, lid) = self.require_selected_profile_and_layer()?;
+                if self.selected_surface == ControlSurfaceId::EncoderHold {
+                    let exists_in_graph = self
+                        .document_store
+                        .draft
+                        .document
+                        .editable
+                        .graph
+                        .actions
+                        .contains_key(&action_id);
+                    if exists_in_graph {
+                        self.document_store
+                            .update(|draft| {
+                                draft.bind_existing_encoder_hold_action(
+                                    &pid,
+                                    &lid,
+                                    Some(&action_id),
+                                )
+                            })
+                            .map_err(WorkbenchError::Storage)?;
+                    } else {
+                        let action = self.resolve_action_by_id(&action_id)?;
+                        self.document_store
+                            .update(|draft| {
+                                draft.assign_encoder_hold(&json!(pid), &json!(lid), action)
+                            })
+                            .map_err(WorkbenchError::Storage)?;
+                    }
+                    self.commit_runtime_update();
+                    return Ok(());
+                }
                 let slot = self.current_selected_slot();
                 let action = self.resolve_action_by_id(&action_id)?;
                 self.document_store
@@ -5469,10 +6113,16 @@ impl WorkbenchStore {
             } => {
                 self.ensure_layer_editable()?;
                 let (pid, lid) = self.require_selected_profile_and_layer()?;
+                let is_encoder_hold = self.selected_surface == ControlSurfaceId::EncoderHold;
                 let slot = self.current_selected_slot();
+                let suffix = if is_encoder_hold {
+                    "encoder-hold".to_string()
+                } else {
+                    slot.to_string()
+                };
                 let action = if submit_on_paste {
                     Action {
-                        id: format!("custom-prompt-submit-{slot}"),
+                        id: format!("custom-prompt-submit-{suffix}"),
                         name,
                         category: "提交控制".to_string(),
                         detail: "显式配置下先停听写、聚焦目标输入区、暂存剪贴板粘贴后再回车"
@@ -5485,7 +6135,7 @@ impl WorkbenchStore {
                     }
                 } else {
                     Action {
-                        id: format!("custom-text-{slot}"),
+                        id: format!("custom-text-{suffix}"),
                         name,
                         category: "文本".to_string(),
                         detail: "默认仅粘贴不回车（no_newline） · 自动暂存恢复剪贴板".to_string(),
@@ -5496,12 +6146,18 @@ impl WorkbenchStore {
                     }
                 };
                 action.validate().map_err(WorkbenchError::Storage)?;
-                self.document_store
-                    .update(|draft| draft.assign(&json!(pid), &json!(lid), slot, action))
-                    .map_err(WorkbenchError::Storage)?;
-                self.slot_role_overrides
-                    .insert((pid, slot), KeycapRole::ActionKey);
-                self.sync_v070_session_sa_rgb();
+                if is_encoder_hold {
+                    self.document_store
+                        .update(|draft| draft.assign_encoder_hold(&json!(pid), &json!(lid), action))
+                        .map_err(WorkbenchError::Storage)?;
+                } else {
+                    self.document_store
+                        .update(|draft| draft.assign(&json!(pid), &json!(lid), slot, action))
+                        .map_err(WorkbenchError::Storage)?;
+                    self.slot_role_overrides
+                        .insert((pid, slot), KeycapRole::ActionKey);
+                    self.sync_v070_session_sa_rgb();
+                }
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -5867,24 +6523,34 @@ impl WorkbenchStore {
                 };
                 if bind_to_selected_slot {
                     let (pid, lid) = self.require_selected_profile_and_layer()?;
-                    let slot = modal
-                        .target_slot
-                        .unwrap_or_else(|| self.current_selected_slot());
-                    self.document_store
-                        .update(|draft| {
-                            draft
-                                .save_macro_for_binding(
-                                    modal.macro_id.as_deref(),
-                                    action,
-                                    &json!(pid),
-                                    &json!(lid),
-                                    slot,
-                                )
-                                .map(|_| ())
-                        })
-                        .map_err(WorkbenchError::Storage)?;
-                    self.slot_role_overrides
-                        .insert((pid, slot), KeycapRole::ActionKey);
+                    if self.selected_surface == ControlSurfaceId::EncoderHold {
+                        self.document_store
+                            .update(|draft| {
+                                let saved_id =
+                                    draft.save_macro(modal.macro_id.as_deref(), action)?;
+                                draft.bind_existing_encoder_hold_action(&pid, &lid, Some(&saved_id))
+                            })
+                            .map_err(WorkbenchError::Storage)?;
+                    } else {
+                        let slot = modal
+                            .target_slot
+                            .unwrap_or_else(|| self.current_selected_slot());
+                        self.document_store
+                            .update(|draft| {
+                                draft
+                                    .save_macro_for_binding(
+                                        modal.macro_id.as_deref(),
+                                        action,
+                                        &json!(pid),
+                                        &json!(lid),
+                                        slot,
+                                    )
+                                    .map(|_| ())
+                            })
+                            .map_err(WorkbenchError::Storage)?;
+                        self.slot_role_overrides
+                            .insert((pid, slot), KeycapRole::ActionKey);
+                    }
                 } else {
                     self.document_store
                         .update(|draft| {
@@ -5901,15 +6567,23 @@ impl WorkbenchStore {
             }
             EditorAction::MacroBindExisting { macro_id } => {
                 let (pid, lid) = self.require_selected_profile_and_layer()?;
-                let slot = self.current_selected_slot();
-                self.document_store
-                    .update(|draft| {
-                        draft.bind_macro(&json!(pid), &json!(lid), slot, macro_id.as_deref())
-                    })
-                    .map_err(WorkbenchError::Storage)?;
-                self.slot_role_overrides
-                    .insert((pid, slot), KeycapRole::ActionKey);
-                self.sync_v070_session_sa_rgb();
+                if self.selected_surface == ControlSurfaceId::EncoderHold {
+                    self.document_store
+                        .update(|draft| {
+                            draft.bind_existing_encoder_hold_action(&pid, &lid, macro_id.as_deref())
+                        })
+                        .map_err(WorkbenchError::Storage)?;
+                } else {
+                    let slot = self.current_selected_slot();
+                    self.document_store
+                        .update(|draft| {
+                            draft.bind_macro(&json!(pid), &json!(lid), slot, macro_id.as_deref())
+                        })
+                        .map_err(WorkbenchError::Storage)?;
+                    self.slot_role_overrides
+                        .insert((pid, slot), KeycapRole::ActionKey);
+                    self.sync_v070_session_sa_rgb();
+                }
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -6201,25 +6875,41 @@ impl WorkbenchStore {
                 };
                 if bind_to_selected_slot {
                     let (pid, lid) = self.require_selected_profile_and_layer()?;
-                    let slot = modal
-                        .target_slot
-                        .unwrap_or_else(|| self.current_selected_slot());
-                    self.document_store
-                        .update(|draft| {
-                            draft
-                                .save_multi_for_binding(
-                                    modal.multi_id.as_deref(),
-                                    action,
-                                    additions,
-                                    &json!(pid),
-                                    &json!(lid),
-                                    slot,
-                                )
-                                .map(|_| ())
-                        })
-                        .map_err(WorkbenchError::Storage)?;
-                    self.slot_role_overrides
-                        .insert((pid, slot), KeycapRole::ActionKey);
+                    if self.selected_surface == ControlSurfaceId::EncoderHold {
+                        self.document_store
+                            .update(|draft| {
+                                draft
+                                    .save_multi_for_encoder_hold(
+                                        modal.multi_id.as_deref(),
+                                        action,
+                                        additions,
+                                        &pid,
+                                        &lid,
+                                    )
+                                    .map(|_| ())
+                            })
+                            .map_err(WorkbenchError::Storage)?;
+                    } else {
+                        let slot = modal
+                            .target_slot
+                            .unwrap_or_else(|| self.current_selected_slot());
+                        self.document_store
+                            .update(|draft| {
+                                draft
+                                    .save_multi_for_binding(
+                                        modal.multi_id.as_deref(),
+                                        action,
+                                        additions,
+                                        &json!(pid),
+                                        &json!(lid),
+                                        slot,
+                                    )
+                                    .map(|_| ())
+                            })
+                            .map_err(WorkbenchError::Storage)?;
+                        self.slot_role_overrides
+                            .insert((pid, slot), KeycapRole::ActionKey);
+                    }
                 } else if let Some(ref existing_id) = modal.multi_id {
                     self.document_store
                         .update(|draft| {
@@ -6228,23 +6918,35 @@ impl WorkbenchStore {
                         .map_err(WorkbenchError::Storage)?;
                 } else {
                     let (pid, lid) = self.require_selected_profile_and_layer()?;
-                    let slot = modal
-                        .target_slot
-                        .unwrap_or_else(|| self.current_selected_slot());
-                    self.document_store
-                        .update(|draft| {
-                            draft
-                                .save_multi_for_binding(
-                                    None,
-                                    action,
-                                    additions,
-                                    &json!(pid),
-                                    &json!(lid),
-                                    slot,
-                                )
-                                .map(|_| ())
-                        })
-                        .map_err(WorkbenchError::Storage)?;
+                    if self.selected_surface == ControlSurfaceId::EncoderHold {
+                        self.document_store
+                            .update(|draft| {
+                                draft
+                                    .save_multi_for_encoder_hold(
+                                        None, action, additions, &pid, &lid,
+                                    )
+                                    .map(|_| ())
+                            })
+                            .map_err(WorkbenchError::Storage)?;
+                    } else {
+                        let slot = modal
+                            .target_slot
+                            .unwrap_or_else(|| self.current_selected_slot());
+                        self.document_store
+                            .update(|draft| {
+                                draft
+                                    .save_multi_for_binding(
+                                        None,
+                                        action,
+                                        additions,
+                                        &json!(pid),
+                                        &json!(lid),
+                                        slot,
+                                    )
+                                    .map(|_| ())
+                            })
+                            .map_err(WorkbenchError::Storage)?;
+                    }
                 }
                 self.active_modal = None;
                 self.sync_v070_session_sa_rgb();
@@ -6253,15 +6955,23 @@ impl WorkbenchStore {
             }
             EditorAction::MultiBindExisting { multi_id } => {
                 let (pid, lid) = self.require_selected_profile_and_layer()?;
-                let slot = self.current_selected_slot();
-                self.document_store
-                    .update(|draft| {
-                        draft.bind_multi(&json!(pid), &json!(lid), slot, multi_id.as_deref())
-                    })
-                    .map_err(WorkbenchError::Storage)?;
-                self.slot_role_overrides
-                    .insert((pid, slot), KeycapRole::ActionKey);
-                self.sync_v070_session_sa_rgb();
+                if self.selected_surface == ControlSurfaceId::EncoderHold {
+                    self.document_store
+                        .update(|draft| {
+                            draft.bind_existing_encoder_hold_action(&pid, &lid, multi_id.as_deref())
+                        })
+                        .map_err(WorkbenchError::Storage)?;
+                } else {
+                    let slot = self.current_selected_slot();
+                    self.document_store
+                        .update(|draft| {
+                            draft.bind_multi(&json!(pid), &json!(lid), slot, multi_id.as_deref())
+                        })
+                        .map_err(WorkbenchError::Storage)?;
+                    self.slot_role_overrides
+                        .insert((pid, slot), KeycapRole::ActionKey);
+                    self.sync_v070_session_sa_rgb();
+                }
                 self.commit_runtime_update();
                 Ok(())
             }

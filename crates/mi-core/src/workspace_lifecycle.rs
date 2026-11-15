@@ -39,6 +39,7 @@ impl WorkbenchStore {
         self.lifecycle_epoch.fetch_add(1, Ordering::AcqRel);
         self.resume_requires_explicit_connect = true;
         self.ptt_controller.cancel();
+        self.cancel_encoder_model_picker();
         self.dial_pressed = false;
         self.dial_turned_while_pressed = false;
         self.board_decoder.store(false, Ordering::Release);

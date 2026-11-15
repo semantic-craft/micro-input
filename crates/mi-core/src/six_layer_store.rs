@@ -103,17 +103,7 @@ impl WorkbenchStore {
         let action_profile_id = self.runtime_action_profile_id(profile_id);
         let layout = self.current_bottom_row_layout();
         let command_execution = self.command_execution_enabled;
-        let actions = std::array::from_fn(|slot| {
-            let binding_id = mi_model::direct_controls::CONTROL_BINDINGS[slot];
-            let source_id = action_profile_id?;
-            let mut action = resolve_host_action_with_layout(
-                doc,
-                Some(source_id),
-                binding_id,
-                true,
-                command_execution,
-                layout,
-            )?;
+        let normalize_action = |mut action: ResolvedHostAction| -> Option<ResolvedHostAction> {
             if matches!(
                 action,
                 ResolvedHostAction::MacroSequence { .. }
@@ -122,7 +112,9 @@ impl WorkbenchStore {
                 return None;
             }
             if let ResolvedHostAction::AgentCommand { adapter, command } = &mut action {
-                if adapter == "host" && !mi_model::is_host_mouse_command(command) {
+                if matches!(adapter.as_str(), "host" | "active-agent")
+                    && !mi_model::is_host_mouse_command(command)
+                {
                     if let Some(target_adapter) = adapter_name {
                         *adapter = target_adapter.into();
                     }
@@ -154,11 +146,30 @@ impl WorkbenchStore {
                 _ => {}
             }
             Some(action)
+        };
+        let actions = std::array::from_fn(|slot| {
+            let binding_id = mi_model::direct_controls::CONTROL_BINDINGS[slot];
+            let source_id = action_profile_id?;
+            let action = resolve_host_action_with_layout(
+                doc,
+                Some(source_id),
+                binding_id,
+                true,
+                command_execution,
+                layout,
+            )?;
+            normalize_action(action)
         });
+        let encoder_hold_action = action_profile_id
+            .and_then(|source_id| {
+                mi_model::resolve_encoder_hold_action(doc, Some(source_id), command_execution)
+            })
+            .and_then(&normalize_action);
         Some(six_layer_runtime::PinnedProfilePlan {
             profile_id: profile_id.to_string(),
             bundle_id,
             actions,
+            encoder_hold_action,
         })
     }
 
@@ -175,19 +186,53 @@ impl WorkbenchStore {
                 }
             }
         }
-        let layer_one = self
-            .document_store
-            .host_store()
-            .draft
-            .document
+        let doc = &self.document_store.host_store().draft.document;
+        let layer_one = doc
             .editable
             .graph
             .profiles
             .iter()
             .find(|(_, profile)| profile.name == mi_model::preset::LOCAL_CODEX_PROFILE_NAME)
             .and_then(|(pid, _)| self.compile_profile_twenty_slots(pid))
-            .filter(|plan| plan.actions.iter().any(Option::is_some));
-        six_layer_runtime::SixLayerRoutingMode::BoardLayers { layer_one }
+            .filter(six_layer_runtime::PinnedProfilePlan::has_any_action);
+        let resolve_board_host_layer = |board_layer: mi_model::board_layers::BoardLayer,
+                                        host_idx: usize,
+                                        canonical: CanonicalAgent|
+         -> Option<six_layer_runtime::PinnedProfilePlan> {
+            let pid = self
+                .document_store
+                .board_layer_plan()
+                .and_then(|plan| match plan.route(board_layer) {
+                    mi_model::board_layers::BoardLayerRoute::HostProfile { profile_id } => {
+                        Some(profile_id.clone())
+                    }
+                    _ => None,
+                })
+                .or_else(|| {
+                    self.six_layer_state
+                        .installation
+                        .as_ref()
+                        .and_then(|inst| inst.plan.hosts.get(host_idx))
+                        .map(|h| h.profile_id.clone())
+                })
+                .or_else(|| self.find_canonical_profile_id(canonical))?;
+            self.compile_profile_twenty_slots(&pid)
+        };
+        let layer_two = resolve_board_host_layer(
+            mi_model::board_layers::BoardLayer::ALL[1],
+            0,
+            CanonicalAgent::Antigravity,
+        );
+        let layer_three = resolve_board_host_layer(
+            mi_model::board_layers::BoardLayer::ALL[2],
+            1,
+            CanonicalAgent::DeepseekHarness,
+        );
+        six_layer_runtime::SixLayerRoutingMode::BoardLayers {
+            layer_one,
+            layer_two,
+            layer_three,
+        }
     }
 
     pub(crate) fn sync_six_layer_routing_context(&mut self) {
@@ -658,14 +703,40 @@ mod tests {
             .document_store
             .host_active_profile_id()
             .expect("default active profile");
-        let six_layer_runtime::SixLayerRoutingMode::BoardLayers { layer_one } =
-            store.build_six_layer_routing_mode()
+        let six_layer_runtime::SixLayerRoutingMode::BoardLayers {
+            layer_one,
+            layer_two,
+            layer_three,
+        } = store.build_six_layer_routing_mode()
         else {
             panic!("expected fresh store to start in board-layers mode");
         };
         let custom = layer_one.expect("local Codex populates layer_one");
         assert_eq!(custom.bundle_id.as_deref(), Some("com.openai.codex"));
         assert!(custom.actions.iter().any(Option::is_some));
+        assert_eq!(
+            custom.encoder_hold_action,
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "codex".into(),
+                command: "model-picker-open".into(),
+            })
+        );
+        let live_l2 = layer_two.expect("Antigravity populates live layer_two");
+        assert_eq!(
+            live_l2.encoder_hold_action,
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "model-picker-open".into(),
+            })
+        );
+        let live_l3 = layer_three.expect("DSH populates live layer_three");
+        assert_eq!(
+            live_l3.encoder_hold_action,
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "dsh-desktop".into(),
+                command: "model-picker-open".into(),
+            })
+        );
 
         store.select_and_activate_profile(&selected_id).unwrap();
         let six_layer_runtime::SixLayerRoutingMode::ManualPinned(manual) =
@@ -674,6 +745,13 @@ mod tests {
             panic!("expected manual pinned after explicit profile selection");
         };
         assert_eq!(manual.profile_id, selected_id);
+        assert_eq!(
+            manual.encoder_hold_action,
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "model-picker-open".into(),
+            })
+        );
 
         store
             .dispatch_sidebar_action(crate::sidebar::SidebarAction::SetProfileLocked(true))
@@ -690,8 +768,31 @@ mod tests {
             .unwrap();
         assert!(matches!(
             store.build_six_layer_routing_mode(),
-            six_layer_runtime::SixLayerRoutingMode::BoardLayers { layer_one: Some(_) }
+            six_layer_runtime::SixLayerRoutingMode::BoardLayers {
+                layer_one: Some(_),
+                layer_two: Some(_),
+                layer_three: Some(_),
+            }
         ));
+
+        // Unassigning EncoderHold on Antigravity updates live BoardLayers layer_two immediately
+        store
+            .dispatch_canvas_action(crate::canvas::CanvasAction::SelectSurface(
+                crate::canvas::ControlSurfaceId::EncoderHold,
+            ))
+            .unwrap();
+        store
+            .dispatch_inspector_action(crate::inspector::InspectorAction::UnassignSelectedSlot)
+            .unwrap();
+        if let six_layer_runtime::SixLayerRoutingMode::BoardLayers {
+            layer_two: Some(updated_l2),
+            ..
+        } = store.build_six_layer_routing_mode()
+        {
+            assert_eq!(updated_l2.encoder_hold_action, None);
+        } else {
+            panic!("expected live layer_two after unassigning EncoderHold");
+        }
     }
 
     #[test]
@@ -1823,6 +1924,7 @@ mod tests {
                     mi_model::control_settings::ControlSettings {
                         joystick_mode: "logical_sectors".into(),
                         active_sectors: 4,
+                        encoder_hold_action_id: None,
                     },
                 )?;
                 draft.assign(&json!(custom_pid), &json!(lid), 0, search_action.clone())?;
@@ -2052,7 +2154,11 @@ mod tests {
         let backup_poll = dir.path().join("backup-poll-mouse");
         fs::create_dir_all(&backup_poll).unwrap();
         fs::write(backup_poll.join("keymap.json"), SIX_SOURCE).unwrap();
-        fs::write(backup_poll.join("planned-keymap.json"), &compiled_mouse.keymap).unwrap();
+        fs::write(
+            backup_poll.join("planned-keymap.json"),
+            &compiled_mouse.keymap,
+        )
+        .unwrap();
         fs::write(backup_poll.join("smart_actions.json"), SMART).unwrap();
 
         let make_mock_firmware_session = |rt: &tokio::runtime::Runtime, version: &str| {

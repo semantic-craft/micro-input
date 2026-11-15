@@ -58,6 +58,7 @@ pub enum ControlSurfaceId {
     Key10 = 14,
     Key11 = 15,
     Key12 = 16,
+    EncoderHold = 17,
 }
 
 impl ControlSurfaceId {
@@ -98,7 +99,7 @@ impl ControlSurfaceId {
             Self::Key12 => 12,
             Self::EncoderCcw => 13,
             Self::EncoderCw => 14,
-            Self::EncoderPress => 15,
+            Self::EncoderPress | Self::EncoderHold => 15,
             Self::Joystick => 16,
         }
     }
@@ -134,6 +135,7 @@ impl ControlSurfaceId {
             Self::EncoderCcw => "AG13",
             Self::EncoderCw => "AG14",
             Self::EncoderPress => "ENC_CLK",
+            Self::EncoderHold => "ENC_HOLD",
             Self::Joystick => "AG15",
             Self::Key0 => "AG00",
             Self::Key1 => "AG01",
@@ -216,6 +218,7 @@ impl JoystickDirection8 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KnobJoystickPreset {
+    ModelSelectionAndMouse,
     CycleWorkingAndBlueDot,
     DualScrollProjectsAndChat,
     CodexScrollChatAndBottom,
@@ -224,7 +227,8 @@ pub enum KnobJoystickPreset {
 }
 
 impl KnobJoystickPreset {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
+        Self::ModelSelectionAndMouse,
         Self::CycleWorkingAndBlueDot,
         Self::DualScrollProjectsAndChat,
         Self::CodexScrollChatAndBottom,
@@ -234,6 +238,7 @@ impl KnobJoystickPreset {
 
     pub const fn title(self) -> &'static str {
         match self {
+            Self::ModelSelectionAndMouse => "模型选择（长按弹出模型页）",
             Self::CycleWorkingAndBlueDot => "旋钮轮询 Working/蓝点",
             Self::DualScrollProjectsAndChat => "旋钮+摇杆双滚轮",
             Self::CodexScrollChatAndBottom => "旋钮滚动对话",
@@ -250,7 +255,10 @@ impl KnobJoystickPreset {
     }
 
     pub const fn is_universal(self) -> bool {
-        matches!(self, Self::MousePointerAndScroll)
+        matches!(
+            self,
+            Self::ModelSelectionAndMouse | Self::MousePointerAndScroll
+        )
     }
 }
 
@@ -263,6 +271,8 @@ pub struct EncoderDialProjection {
     pub ccw_label: String,
     pub cw_label: String,
     pub press_label: String,
+    #[serde(default)]
+    pub hold_label: String,
     pub selected_slot: Option<u32>,
     pub ring_glow_hex: String,
 }
@@ -377,6 +387,7 @@ impl Default for CanvasProjection {
                 ccw_label: String::new(),
                 cw_label: String::new(),
                 press_label: String::new(),
+                hold_label: String::new(),
                 selected_slot: None,
                 ring_glow_hex: String::new(),
             },
@@ -419,7 +430,9 @@ impl CanvasProjection {
         match surface {
             ControlSurfaceId::EncoderCcw => Some(self.encoder.ccw_bounds),
             ControlSurfaceId::EncoderCw => Some(self.encoder.cw_bounds),
-            ControlSurfaceId::EncoderPress => Some(self.encoder.press_bounds),
+            ControlSurfaceId::EncoderPress | ControlSurfaceId::EncoderHold => {
+                Some(self.encoder.press_bounds)
+            }
             ControlSurfaceId::Joystick => Some(self.joystick.bounds),
             _ => self.cell_for_surface(surface).map(|cell| cell.bounds),
         }
@@ -528,6 +541,13 @@ pub(crate) fn concise_dial_caption_alias(label: &str) -> Option<&'static str> {
         "鼠标滚轮向左" => Some("滚轮向左"),
         "鼠标滚轮向右" => Some("滚轮向右"),
         "循环切换鼠标速度档位" | "循环指针速度档" => Some("切换档位"),
+        "弹出模型选择页" => Some("弹出模型"),
+        "选择上一模型 / 档位" | "选择上一模型" => Some("上一模型"),
+        "选择下一模型 / 档位" | "选择下一模型" => Some("下一模型"),
+        "确认所选模型" => Some("确认模型"),
+        "展开 / 调高模型力度" | "选择 / 提高模型力度" => Some("调高力度"),
+        "返回模型列表 / 调低模型力度" | "降低模型力度" => Some("调低力度"),
+        "取消模型选择" => Some("取消选模"),
         _ => None,
     }
 }

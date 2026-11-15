@@ -559,12 +559,16 @@ mod tests {
     fn release_payload_roundtrips_and_press_payload_omits_released_field() {
         let receiver = UserCommandReceiver::bind().unwrap();
         receiver.arm().unwrap();
-        let press = serde_json::to_value(ActivationPayload::new(receiver.generation(), 15)).unwrap();
+        let press =
+            serde_json::to_value(ActivationPayload::new(receiver.generation(), 15)).unwrap();
         assert!(press.get("released").is_none());
         let release =
             serde_json::to_value(ActivationPayload::new_release(receiver.generation(), 15))
                 .unwrap();
-        assert_eq!(release.get("released"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            release.get("released"),
+            Some(&serde_json::Value::Bool(true))
+        );
 
         send(&receiver, press);
         send(&receiver, release);
@@ -580,11 +584,19 @@ mod tests {
         let l1_events = receiver.take().unwrap();
         assert_eq!(l1_events.len(), 2);
         assert_eq!(
-            (l1_events[0].control, l1_events[0].layer_override, l1_events[0].released),
+            (
+                l1_events[0].control,
+                l1_events[0].layer_override,
+                l1_events[0].released
+            ),
             (15, Some(1), false)
         );
         assert_eq!(
-            (l1_events[1].control, l1_events[1].layer_override, l1_events[1].released),
+            (
+                l1_events[1].control,
+                l1_events[1].layer_override,
+                l1_events[1].released
+            ),
             (15, Some(1), true)
         );
     }

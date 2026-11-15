@@ -14,6 +14,7 @@ fn logical_sector_mode_preserves_independent_slots_history_and_source() {
             ControlSettings {
                 joystick_mode: "logical_sectors".into(),
                 active_sectors: 5,
+                encoder_hold_action_id: None,
             },
         )
         .unwrap();
@@ -33,6 +34,7 @@ fn logical_sector_mode_preserves_independent_slots_history_and_source() {
             ControlSettings {
                 joystick_mode: "source".into(),
                 active_sectors: 1,
+                encoder_hold_action_id: None,
             },
         )
         .unwrap();
@@ -96,6 +98,7 @@ fn unknown_mode_stays_visible_and_invalid_field_edits_leave_document_unchanged()
             ControlSettings {
                 joystick_mode: "source".into(),
                 active_sectors: 2,
+                encoder_hold_action_id: None,
             },
         )
         .unwrap_err();
@@ -108,6 +111,7 @@ fn unknown_mode_stays_visible_and_invalid_field_edits_leave_document_unchanged()
             ControlSettings {
                 joystick_mode: "source".into(),
                 active_sectors: 33,
+                encoder_hold_action_id: None,
             },
         )
         .unwrap_err();
@@ -135,6 +139,7 @@ fn source_mode_does_not_materialize_inactive_sector_intent() {
             ControlSettings {
                 joystick_mode: "source".into(),
                 active_sectors: 32,
+                encoder_hold_action_id: None,
             },
         )
         .unwrap();
@@ -148,6 +153,7 @@ fn source_mode_does_not_materialize_inactive_sector_intent() {
             ControlSettings {
                 joystick_mode: "logical_sectors".into(),
                 active_sectors: 32,
+                encoder_hold_action_id: None,
             },
         )
         .unwrap();
@@ -188,6 +194,7 @@ fn unknown_control_fields_make_document_read_only() {
             ControlSettings {
                 joystick_mode: "source".into(),
                 active_sectors: 0,
+                encoder_hold_action_id: None,
             }
         )
         .is_err());
@@ -209,6 +216,7 @@ fn mouse_and_scroll_joystick_modes_preserve_dormant_slots_and_reject_unknown_mod
             ControlSettings {
                 joystick_mode: "logical_sectors".into(),
                 active_sectors: 4,
+                encoder_hold_action_id: None,
             },
         )
         .unwrap();
@@ -225,6 +233,7 @@ fn mouse_and_scroll_joystick_modes_preserve_dormant_slots_and_reject_unknown_mod
                 ControlSettings {
                     joystick_mode: mode.into(),
                     active_sectors: 0,
+                    encoder_hold_action_id: None,
                 },
             )
             .unwrap();
@@ -243,7 +252,86 @@ fn mouse_and_scroll_joystick_modes_preserve_dormant_slots_and_reject_unknown_mod
             ControlSettings {
                 joystick_mode: "future-mode".into(),
                 active_sectors: 0,
+                encoder_hold_action_id: None,
             },
         )
         .is_err());
+}
+
+#[test]
+fn set_control_settings_preserves_encoder_hold_and_orphan_gc_plus_copy_layer_respect_it() {
+    let mut draft = Draft::default();
+    let pid_val = draft.config.profiles[0].id.clone();
+    let lid_val = draft.config.profiles[0].layers[0].id.clone();
+    let pid = pid_val.as_str().unwrap().to_owned();
+    let lid = lid_val.as_str().unwrap().to_owned();
+    let open_action = mi_model::draft::actions()
+        .into_iter()
+        .find(|a| a.id == "agent-model-picker-open")
+        .unwrap();
+
+    draft
+        .assign_encoder_hold(&pid_val, &lid_val, open_action)
+        .unwrap();
+    let hold_uuid = draft.document.editable.graph.layers[&lid]
+        .control_settings
+        .as_ref()
+        .and_then(|cs| cs.encoder_hold_action_id.clone())
+        .expect("encoder_hold_action_id must be set");
+    assert!(draft
+        .document
+        .editable
+        .graph
+        .actions
+        .contains_key(&hold_uuid));
+
+    // Updating joystick_mode with encoder_hold_action_id: None must preserve existing encoder_hold_action_id.
+    draft
+        .set_control_settings(
+            &pid,
+            &lid,
+            ControlSettings {
+                joystick_mode: "mouse".into(),
+                active_sectors: 0,
+                encoder_hold_action_id: None,
+            },
+        )
+        .unwrap();
+    let cs_after = draft.document.editable.graph.layers[&lid]
+        .control_settings
+        .as_ref()
+        .unwrap();
+    assert_eq!(cs_after.joystick_mode, "mouse");
+    assert_eq!(
+        cs_after.encoder_hold_action_id.as_deref(),
+        Some(hold_uuid.as_str())
+    );
+
+    // duplicate_layer must clone encoder_hold_action_id to an independent action UUID.
+    let copied_lid = draft.duplicate_layer(&pid, &lid, "副本层").unwrap();
+    let copied_hold_uuid = draft.document.editable.graph.layers[&copied_lid]
+        .control_settings
+        .as_ref()
+        .and_then(|cs| cs.encoder_hold_action_id.clone())
+        .expect("copied layer must retain encoder_hold_action_id");
+    assert_ne!(copied_hold_uuid, hold_uuid);
+    assert_eq!(
+        draft.document.editable.graph.actions[&copied_hold_uuid].id,
+        "agent-model-picker-open"
+    );
+
+    // Unassigning encoder hold on original layer removes orphan hold_uuid while keeping copied_hold_uuid.
+    draft.unassign_encoder_hold(&pid_val, &lid_val).unwrap();
+    assert!(!draft
+        .document
+        .editable
+        .graph
+        .actions
+        .contains_key(&hold_uuid));
+    assert!(draft
+        .document
+        .editable
+        .graph
+        .actions
+        .contains_key(&copied_hold_uuid));
 }

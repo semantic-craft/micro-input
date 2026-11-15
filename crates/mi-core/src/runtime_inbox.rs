@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 
 pub(super) const INPUT_CAPACITY: usize = 256;
 pub(super) const INPUT_BATCH: usize = 32;
-pub(super) const CONTROL_BATCH: usize = 7;
+pub(super) const CONTROL_BATCH: usize = 8;
 pub(super) const CHEAT_SHEET_NOTIF_CAPACITY: usize = 16;
 
 #[derive(Default)]
@@ -25,6 +25,7 @@ struct Pending {
     candidates: Option<HardwareLoopEvent>,
     v070_capability: Option<HardwareLoopEvent>,
     v070_profile_layer: Option<HardwareLoopEvent>,
+    encoder_hold_timer: Option<HardwareLoopEvent>,
 }
 
 #[derive(Clone, Default)]
@@ -44,6 +45,7 @@ impl RuntimeInbox {
         pending.acceptance = None;
         pending.v070_capability = None;
         pending.v070_profile_layer = None;
+        pending.encoder_hold_timer = None;
         pending.source_closed = false;
     }
 
@@ -92,6 +94,7 @@ impl RuntimeInbox {
                 }
                 pending.source_closed = true;
                 pending.input.clear();
+                pending.encoder_hold_timer = None;
                 pending.disconnected = Some(HardwareLoopEvent::Disconnected { session_id });
             }
             event @ HardwareLoopEvent::HardwareAutoAccepted { session_id, .. } => {
@@ -131,6 +134,13 @@ impl RuntimeInbox {
                 }
                 pending.cheat_sheet_notifications.push_back(event);
             }
+            event @ HardwareLoopEvent::EncoderHoldTimer { session_id, .. } => {
+                if (pending.session.is_none() || pending.session == Some(session_id))
+                    && !pending.source_closed
+                {
+                    pending.encoder_hold_timer = Some(event);
+                }
+            }
         }
         drop(pending);
         self.ready.notify_one();
@@ -150,6 +160,7 @@ impl RuntimeInbox {
             pending.candidates.take(),
             pending.v070_capability.take(),
             pending.v070_profile_layer.take(),
+            pending.encoder_hold_timer.take(),
         ]
         .into_iter()
         .flatten()
@@ -180,6 +191,7 @@ impl RuntimeInbox {
                     .or_else(|| pending.candidates.take())
                     .or_else(|| pending.v070_capability.take())
                     .or_else(|| pending.v070_profile_layer.take())
+                    .or_else(|| pending.encoder_hold_timer.take())
                     .or_else(|| pending.input.pop_front())
                     .or_else(|| pending.cheat_sheet_notifications.pop_front())
                 {

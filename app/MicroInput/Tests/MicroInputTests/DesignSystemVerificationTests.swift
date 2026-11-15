@@ -490,6 +490,26 @@ final class DesignSystemVerificationTests: XCTestCase {
         store.dispatch("status_menu", ["SetRadialMenuEnabled": false])
         XCTAssertFalse(store.statusMenu.radialMenuEnabled)
 
+        // Render encoder hold & hardware mouse joystick inspector and 4x4 cheat-sheet without clipping
+        store.dispatch("canvas", ["SelectSurface": "EncoderHold"])
+        let (encWin, encHost) = makeHostedWindow(
+            ClassicWorkbenchView(store: store),
+            width: 960,
+            fixedHeight: 680
+        )
+        defer { encWin.orderOut(nil) }
+        XCTAssertEqual(encHost.bounds.width, 960, accuracy: 0.5)
+
+        store.dispatch("canvas", ["SelectSurface": "Joystick"])
+        store.dispatch("inspector", ["SetJoystickMode": "mouse"])
+        let hwSheet = try XCTUnwrap(store.statusMenu.cheatSheetPreview)
+        let hwLayout = CheatSheetSpatialLayout(sheet: hwSheet)
+        XCTAssertEqual(hwLayout.rows.count, 4)
+        let ag15 = try XCTUnwrap(hwSheet.keyCells.first(where: { $0.bindingId == "AG15" }))
+        XCTAssertEqual(ag15.shortLabel, "鼠标指针")
+        let ag18 = try XCTUnwrap(hwSheet.keyCells.first(where: { $0.bindingId == "AG18" }))
+        XCTAssertEqual(ag18.shortLabel, "模型力度")
+
         let (workbenchWindow, workbenchHost) = makeHostedWindow(
             ClassicWorkbenchView(store: store),
             width: 960,

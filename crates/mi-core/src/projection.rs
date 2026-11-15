@@ -362,6 +362,12 @@ impl ProjectionInputs<'_> {
         let indexed_controls = index_layer_controls(layer);
         let encoder_bounds =
             CanvasRect::new(CANVAS_PADDING, CANVAS_PADDING, KEY_1U_SIZE, KEY_1U_SIZE);
+        let (hold_full_title, hold_act) = resolve_encoder_hold_action_info(doc, layer);
+        let hold_label = if hold_act.is_some() {
+            format_concise_keycap_caption(&hold_full_title)
+        } else {
+            "未绑定".to_string()
+        };
         let encoder = EncoderDialProjection {
             bounds: encoder_bounds,
             ccw_bounds: CanvasRect::new(CANVAS_PADDING, CANVAS_PADDING, 22.0, KEY_1U_SIZE),
@@ -377,10 +383,11 @@ impl ProjectionInputs<'_> {
             press_label: format_concise_keycap_caption(
                 &resolve_indexed_slot(doc, &indexed_controls, 15).0,
             ),
+            hold_label,
             selected_slot: match self.selected_surface {
                 ControlSurfaceId::EncoderCcw => Some(13),
                 ControlSurfaceId::EncoderCw => Some(14),
-                ControlSurfaceId::EncoderPress => Some(15),
+                ControlSurfaceId::EncoderPress | ControlSurfaceId::EncoderHold => Some(15),
                 _ => None,
             },
             ring_glow_hex: if is_protected {
@@ -659,6 +666,11 @@ impl ProjectionInputs<'_> {
             (19, "AG18", "摇杆（右）"),
         ];
 
+        let joystick_mode = layer
+            .and_then(|l| l.control_settings.as_ref())
+            .map(|s| JoystickControlMode::from_model_str(&s.joystick_mode));
+        let (_, hold_action_opt) = resolve_encoder_hold_action_info(doc, layer);
+
         let mut key_cells = Vec::with_capacity(20);
         for (slot, binding_id, control_name) in slot_defs {
             if slot == 11 && !is_split {
@@ -669,14 +681,81 @@ impl ProjectionInputs<'_> {
             } else {
                 slot
             };
-            let (label, act_opt) = resolve_slot_action_info(doc, layer, effective_slot);
-            let short_label = format_popover_cheat_label(&label);
+            let (mut label, act_opt) = resolve_slot_action_info(doc, layer, effective_slot);
+            let mut control_name_out = control_name.to_string();
+            let mut short_label = format_popover_cheat_label(&label);
+            let mut available = act_opt.is_some();
+
+            if slot == 15 {
+                if let Some(hold_act) = hold_action_opt {
+                    control_name_out = "旋钮短按 / 长按".to_string();
+                    short_label = if hold_act.id == "agent-model-picker-open"
+                        && act_opt.is_some_and(|a| a.id == "agent-model-picker-confirm")
+                    {
+                        "确认/模型页".to_string()
+                    } else if act_opt.is_some() {
+                        format!(
+                            "{}/{}",
+                            short_label.chars().take(2).collect::<String>(),
+                            format_concise_keycap_caption(&hold_act.name)
+                                .chars()
+                                .take(2)
+                                .collect::<String>()
+                        )
+                    } else {
+                        format!("长按{}", format_concise_keycap_caption(&hold_act.name))
+                    };
+                    label = if act_opt.is_some() {
+                        format!("{label} · 长按{}", hold_act.name)
+                    } else {
+                        format!("长按{}", hold_act.name)
+                    };
+                    available = true;
+                }
+            } else if (16..=19).contains(&slot) {
+                match joystick_mode {
+                    Some(JoystickControlMode::Mouse) => {
+                        control_name_out = "摇杆（硬件鼠标）".to_string();
+                        if slot == 19 {
+                            label = "模型选择中：展开 / 调高模型力度".to_string();
+                            short_label = "模型力度".to_string();
+                            available = true;
+                        } else if slot == 16 {
+                            label = "硬件鼠标指针（选模型时按右调力度）".to_string();
+                            short_label = "鼠标指针".to_string();
+                            available = true;
+                        } else {
+                            label = "硬件鼠标指针".to_string();
+                            short_label = "—".to_string();
+                            available = false;
+                        }
+                    }
+                    Some(JoystickControlMode::Scroll) => {
+                        control_name_out = "摇杆（硬件滚轮）".to_string();
+                        if slot == 19 {
+                            label = "模型选择中：展开 / 调高模型力度".to_string();
+                            short_label = "模型力度".to_string();
+                            available = true;
+                        } else if slot == 16 {
+                            label = "硬件滚轮（选模型时按右调力度）".to_string();
+                            short_label = "硬件滚轮".to_string();
+                            available = true;
+                        } else {
+                            label = "硬件滚轮".to_string();
+                            short_label = "—".to_string();
+                            available = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
             key_cells.push(CheatSheetKeyCellProjection {
                 binding_id: binding_id.to_string(),
-                control_name: control_name.to_string(),
+                control_name: control_name_out,
                 label,
                 short_label,
-                available: act_opt.is_some(),
+                available,
             });
         }
 
@@ -754,9 +833,19 @@ impl ProjectionInputs<'_> {
         }
 
         let slot = self.current_selected_slot();
-        let supports_task_role = (0..6u32).contains(&slot);
-        let (bound_action_name, action_obj) = resolve_slot_action_info(doc, layer, slot);
-        let bound_graph_action_id = resolve_slot_graph_action_id(layer, slot);
+        let is_encoder_hold = self.selected_surface == ControlSurfaceId::EncoderHold;
+        let supports_task_role = !is_encoder_hold && (0..6u32).contains(&slot);
+        let (bound_action_name, action_obj, bound_graph_action_id) = if is_encoder_hold {
+            let (title, act) = resolve_encoder_hold_action_info(doc, layer);
+            let graph_aid = layer
+                .and_then(|l| l.control_settings.as_ref())
+                .and_then(|s| s.encoder_hold_action_id.clone());
+            (title, act, graph_aid)
+        } else {
+            let (title, act) = resolve_slot_action_info(doc, layer, slot);
+            let graph_aid = resolve_slot_graph_action_id(layer, slot);
+            (title, act, graph_aid)
+        };
         let bound_action_id = action_obj
             .map(|a| a.id.clone())
             .or_else(|| bound_graph_action_id.clone());
@@ -1033,6 +1122,7 @@ impl ProjectionInputs<'_> {
             ControlSurfaceId::Joystick => {
                 format!("摇杆 · {}", self.selected_joystick_direction.label())
             }
+            ControlSurfaceId::EncoderHold => "旋钮长按 (ENC_HOLD)".to_string(),
             other => format!("按键 {}", other.binding_id()),
         };
 
@@ -2108,6 +2198,27 @@ fn resolve_indexed_slot<'a>(
         if raw_token != "Empty" && !raw_token.is_empty() {
             return (raw_token.to_string(), None);
         }
+    }
+    ("未绑定".to_string(), None)
+}
+
+fn resolve_encoder_hold_action_info<'a>(
+    doc: &'a LocalDocumentV2,
+    layer: Option<&'a LayerNode>,
+) -> (String, Option<&'a Action>) {
+    let Some(aid) = layer
+        .and_then(|l| l.control_settings.as_ref())
+        .and_then(|s| s.encoder_hold_action_id.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return ("未绑定".to_string(), None);
+    };
+    if let Some(action) = doc.editable.graph.actions.get(aid) {
+        return (action.name.clone(), Some(action));
+    }
+    if let Some(action) = doc.editable.graph.actions.values().find(|a| a.id == aid) {
+        return (action.name.clone(), Some(action));
     }
     ("未绑定".to_string(), None)
 }

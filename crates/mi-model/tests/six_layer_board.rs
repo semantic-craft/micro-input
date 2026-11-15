@@ -254,11 +254,14 @@ fn six_layer_v070_mouse_and_scroll_joystick_modes_gate_by_firmware_and_keep_stri
             .unwrap_err()
             .contains("0.7.0-rc.16")
     );
-    assert!(
-        compile_six_layer_profile_for_firmware(ORIGINAL, None, Some("0.7.0-rc.15"), Some("scroll"))
-            .unwrap_err()
-            .contains("0.7.0-rc.16")
-    );
+    assert!(compile_six_layer_profile_for_firmware(
+        ORIGINAL,
+        None,
+        Some("0.7.0-rc.15"),
+        Some("scroll")
+    )
+    .unwrap_err()
+    .contains("0.7.0-rc.16"));
 
     let compiled_mouse =
         compile_six_layer_profile_for_firmware(ORIGINAL, None, Some("0.7.0-rc.16"), Some("mouse"))
@@ -395,12 +398,8 @@ fn six_layer_v070_mouse_and_scroll_joystick_modes_gate_by_firmware_and_keep_stri
     );
     for layer_1_based in 2..=6_u8 {
         assert_eq!(
-            extract_keymap_joystick_hardware_mode(
-                &restored_sectors,
-                Some(1),
-                Some(layer_1_based)
-            )
-            .as_deref(),
+            extract_keymap_joystick_hardware_mode(&restored_sectors, Some(1), Some(layer_1_based))
+                .as_deref(),
             Some("radial")
         );
     }
@@ -440,6 +439,7 @@ fn applied_six_layer_plan_tracks_and_gates_v070_joystick_hardware_modes() {
             mi_model::control_settings::ControlSettings {
                 joystick_mode: "mouse".into(),
                 active_sectors: 0,
+                encoder_hold_action_id: None,
             },
         )
         .unwrap();

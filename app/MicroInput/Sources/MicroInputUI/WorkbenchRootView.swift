@@ -232,20 +232,30 @@ struct CheatSheetOverlayView: View {
             .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(UITheme.strongBorder, lineWidth: 1))
 
         case .joystick(let north, let west, let south, let east):
-            VStack(alignment: .leading, spacing: 3) {
+            let isHwMode = north?.controlName.contains("硬件") == true
+            VStack(alignment: .leading, spacing: isHwMode ? 5 : 3) {
                 HStack(spacing: 5) {
-                    Image(systemName: "dpad")
+                    Image(systemName: isHwMode ? "cursorarrow.motionlines" : "dpad")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(UITheme.textSecondary)
-                    Text("四向摇杆")
+                    Text(isHwMode ? (north?.controlName ?? "硬件摇杆") : "四向摇杆")
                         .font(UITheme.micro)
                         .foregroundStyle(UITheme.textSecondary)
+                        .lineLimit(1)
                     Spacer()
                 }
-                compactSubBindingRow(prefix: "↑", label: north?.label)
-                compactSubBindingRow(prefix: "↓", label: south?.label)
-                compactSubBindingRow(prefix: "←", label: west?.label)
-                compactSubBindingRow(prefix: "→", label: east?.label)
+                if isHwMode {
+                    Text(north?.shortLabel ?? "鼠标指针")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(UITheme.textPrimary)
+                        .lineLimit(1)
+                    compactSubBindingRow(prefix: "→", label: east?.label)
+                } else {
+                    compactSubBindingRow(prefix: "↑", label: north?.label)
+                    compactSubBindingRow(prefix: "↓", label: south?.label)
+                    compactSubBindingRow(prefix: "←", label: west?.label)
+                    compactSubBindingRow(prefix: "→", label: east?.label)
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -396,18 +406,35 @@ public struct PopoverMiniCheatSheetView: View {
             .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).stroke(UITheme.strongBorder, lineWidth: 1))
 
         case .joystick(let north, let west, let south, let east):
-            VStack(spacing: 2) {
-                HStack(spacing: 2) {
-                    miniJoystickQuadrant(arrow: "↑", cell: north)
-                    miniJoystickQuadrant(arrow: "↓", cell: south)
-                }
-                HStack(spacing: 2) {
-                    miniJoystickQuadrant(arrow: "←", cell: west)
-                    miniJoystickQuadrant(arrow: "→", cell: east)
+            let isHwMode = north?.controlName.contains("硬件") == true
+            Group {
+                if isHwMode {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(north?.shortLabel ?? "鼠标指针")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(UITheme.textPrimary)
+                            .lineLimit(1)
+                        miniRotaryRow(prefix: "→", cell: east)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 4)
+                    .frame(width: unitWidth, height: unitHeight, alignment: .topLeading)
+                } else {
+                    VStack(spacing: 2) {
+                        HStack(spacing: 2) {
+                            miniJoystickQuadrant(arrow: "↑", cell: north)
+                            miniJoystickQuadrant(arrow: "↓", cell: south)
+                        }
+                        HStack(spacing: 2) {
+                            miniJoystickQuadrant(arrow: "←", cell: west)
+                            miniJoystickQuadrant(arrow: "→", cell: east)
+                        }
+                    }
+                    .padding(3)
+                    .frame(width: unitWidth, height: unitHeight)
                 }
             }
-            .padding(3)
-            .frame(width: unitWidth, height: unitHeight)
             .background(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).fill(UITheme.surface))
             .overlay(RoundedRectangle(cornerRadius: UITheme.Radius.keycapInner, style: .continuous).stroke(UITheme.strongBorder, lineWidth: 1))
 

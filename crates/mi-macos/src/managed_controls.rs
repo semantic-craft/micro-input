@@ -208,15 +208,7 @@ pub(crate) fn is_codex_model_picker_trigger(label: &str) -> bool {
     }
     let lower = trimmed.to_ascii_lowercase();
     let prefixes = [
-        "gpt-",
-        "claude",
-        "gemini",
-        "deepseek",
-        "o1",
-        "o3",
-        "o4",
-        "codex-",
-        "auto ",
+        "gpt-", "claude", "gemini", "deepseek", "o1", "o3", "o4", "codex-", "auto ",
     ];
     prefixes.iter().any(|prefix| lower.starts_with(prefix))
 }

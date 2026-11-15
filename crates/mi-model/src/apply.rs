@@ -222,9 +222,14 @@ impl Pending {
             return Err("来源引用或结构变化不在配置应用范围内".into());
         }
         let mut normalized = doc.editable.graph.clone();
+        let mut targets = Vec::new();
+        let mut used_actions = std::collections::BTreeSet::new();
         for layer in normalized.layers.values_mut() {
             layer.lighting = None;
-            if let Some(settings) = &layer.control_settings {
+            if let Some(settings) = &mut layer.control_settings {
+                if let Some(hold_aid) = settings.encoder_hold_action_id.take() {
+                    used_actions.insert(hold_aid);
+                }
                 match settings.joystick_mode.as_str() {
                     "mouse" | "scroll" => {
                         if !crate::supports_v070_mouse_tokens(&firmware) {
@@ -241,8 +246,6 @@ impl Pending {
                 }
             }
         }
-        let mut targets = Vec::new();
-        let mut used_actions = std::collections::BTreeSet::new();
         for (lid, layer) in &mut normalized.layers {
             for (bid, binding) in &mut layer.controls {
                 if let Some(aid) = binding.action_id.take() {

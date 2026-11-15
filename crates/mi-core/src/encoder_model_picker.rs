@@ -435,7 +435,12 @@ mod tests {
 
         // Before 350ms threshold: timer is a no-op.
         assert_eq!(
-            picker.on_hold_timer(gen, Some("antigravity"), true, t0 + Duration::from_millis(349)),
+            picker.on_hold_timer(
+                gen,
+                Some("antigravity"),
+                true,
+                t0 + Duration::from_millis(349)
+            ),
             EncoderHoldTimerOutcome::Ignored
         );
         assert!(!picker.is_active(t0 + Duration::from_millis(349)));
@@ -453,7 +458,12 @@ mod tests {
 
         // At 350ms while still held: fires hold immediately and enters Active.
         assert_eq!(
-            picker.on_hold_timer(gen, Some("antigravity"), true, t0 + Duration::from_millis(350)),
+            picker.on_hold_timer(
+                gen,
+                Some("antigravity"),
+                true,
+                t0 + Duration::from_millis(350)
+            ),
             EncoderHoldTimerOutcome::FiredHold {
                 adapter: Some("antigravity".into()),
                 entered_model_picker: true,
@@ -467,7 +477,12 @@ mod tests {
 
         // Duplicate timer wakeup for same hold generation is ignored.
         assert_eq!(
-            picker.on_hold_timer(gen, Some("antigravity"), true, t0 + Duration::from_millis(400)),
+            picker.on_hold_timer(
+                gen,
+                Some("antigravity"),
+                true,
+                t0 + Duration::from_millis(400)
+            ),
             EncoderHoldTimerOutcome::Ignored
         );
 
@@ -479,7 +494,12 @@ mod tests {
 
         // Releasing after hold_fired is consumed with zero short-press fallback, keeping Active open.
         assert_eq!(
-            picker.on_encoder_release(7, Some("antigravity"), true, t0 + Duration::from_millis(600)),
+            picker.on_encoder_release(
+                7,
+                Some("antigravity"),
+                true,
+                t0 + Duration::from_millis(600)
+            ),
             EncoderReleaseOutcome::Consumed
         );
         assert!(picker.is_active(t0 + Duration::from_millis(600)));
@@ -576,7 +596,12 @@ mod tests {
         assert_eq!(picker.on_mouse_delta(40.0, 0.0, t0), None);
 
         let gen = picker.on_encoder_press(9, t0);
-        picker.on_hold_timer(gen, Some("antigravity"), true, t0 + Duration::from_millis(350));
+        picker.on_hold_timer(
+            gen,
+            Some("antigravity"),
+            true,
+            t0 + Duration::from_millis(350),
+        );
 
         let mut now = t0 + Duration::from_millis(400);
         // Sub-threshold horizontal steps accumulate into EffortRight.
@@ -652,7 +677,8 @@ mod tests {
         );
 
         // Idle timeout (> 12s after last activity) expires Active automatically.
-        let t_expired = t1 + Duration::from_millis(150) + Duration::from_secs(12) + Duration::from_millis(1);
+        let t_expired =
+            t1 + Duration::from_millis(150) + Duration::from_secs(12) + Duration::from_millis(1);
         assert_eq!(
             picker.on_encoder_turn(true, t_expired),
             EncoderTurnOutcome::NormalSlot

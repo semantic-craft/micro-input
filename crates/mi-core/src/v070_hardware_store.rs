@@ -953,8 +953,7 @@ impl WorkbenchStore {
                             .installation
                             .as_ref()
                             .filter(|inst| {
-                                inst.status
-                                    == crate::six_layer_runtime::InstallationStatus::Applied
+                                inst.status == crate::six_layer_runtime::InstallationStatus::Applied
                             })
                             .map(|inst| inst.backup.clone())
                     });
@@ -2385,11 +2384,7 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("0.7.0-rc.16"));
         assert!(!dir_v063.path().join("v070-keymap-backups").exists());
-        assert!(!sent_v063
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|m| m == "fs.writebin"));
+        assert!(!sent_v063.lock().unwrap().iter().any(|m| m == "fs.writebin"));
 
         if let Some(running) = store_v063.six_layer_running.take() {
             running.shutdown(&store_v063.tokio_runtime).unwrap();
@@ -2508,10 +2503,7 @@ mod tests {
                     "joystick.deadzone" => json!({"v": deadzone}),
                     "fs.list" => {
                         let km = board_keymap_clone.lock().unwrap();
-                        json!([
-                            meta("keymap.json", &km),
-                            meta("smart_actions.json", SMART)
-                        ])
+                        json!([meta("keymap.json", &km), meta("smart_actions.json", SMART)])
                     }
                     "fs.readbin" => {
                         let km = board_keymap_clone.lock().unwrap().clone();

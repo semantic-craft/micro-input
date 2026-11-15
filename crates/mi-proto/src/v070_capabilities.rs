@@ -84,6 +84,7 @@ fn validate_v070_response<'a>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MouseSpeedPreset {
+    Precise,
     Slow,
     Standard,
     Fast,
@@ -98,6 +99,7 @@ impl Default for MouseSpeedPreset {
 impl MouseSpeedPreset {
     pub fn parse(raw: &str) -> Result<Self, ProtoError> {
         match raw.trim().to_ascii_lowercase().as_str() {
+            "precise" => Ok(Self::Precise),
             "slow" => Ok(Self::Slow),
             "standard" | "default" => Ok(Self::Standard),
             "fast" => Ok(Self::Fast),
@@ -109,6 +111,7 @@ impl MouseSpeedPreset {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Precise => "precise",
             Self::Slow => "slow",
             Self::Standard => "standard",
             Self::Fast => "fast",
@@ -117,6 +120,21 @@ impl MouseSpeedPreset {
 
     pub fn to_mouse_config(self) -> MouseConfig {
         match self {
+            Self::Precise => MouseConfig {
+                delay_ms: 130,
+                interval_ms: 28,
+                move_delta: 2,
+                max_speed: 4,
+                time_to_max: 40,
+                wheel_delay_ms: 130,
+                wheel_interval_ms: 100,
+                wheel_delta: 1,
+                wheel_max_speed: 3,
+                wheel_time_to_max: 50,
+                stick_speed: 1,
+                stick_regulator: 32,
+                stick_scroll: 80,
+            },
             Self::Slow => MouseConfig {
                 delay_ms: 120,
                 interval_ms: 24,
@@ -220,6 +238,7 @@ impl MouseConfig {
 
     pub fn matching_preset(&self) -> Option<MouseSpeedPreset> {
         [
+            MouseSpeedPreset::Precise,
             MouseSpeedPreset::Slow,
             MouseSpeedPreset::Standard,
             MouseSpeedPreset::Fast,

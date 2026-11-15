@@ -931,3 +931,213 @@ fn host_mouse_commands_preserve_host_adapter_and_execute_cleanly_in_physical_dis
         assert_eq!(receipt.detail, "mouse-speed:2", "{target_agent:?}");
     }
 }
+
+#[test]
+fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
+    use mi_core::{InspectorAction, JoystickControlMode};
+    use mi_session::{InputEvent, InputEventKind};
+    use std::time::{Duration, Instant};
+
+    let temp = TempDir::new().unwrap();
+    let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    store.set_host_execution_enabled(true).unwrap();
+
+    let ag_pid = store
+        .find_canonical_profile_id(CanonicalAgent::Antigravity)
+        .unwrap();
+    store.select_and_activate_profile(&ag_pid).unwrap();
+
+    let enc = &store.projection().canvas.encoder;
+    assert_eq!(enc.ccw_label, "选择上一模型 / 档位");
+    assert_eq!(enc.cw_label, "选择下一模型 / 档位");
+    assert_eq!(enc.press_label, "确认模型");
+    assert_eq!(enc.hold_label, "弹出模型");
+
+    // Select EncoderHold surface and verify SetJoystickMode preserves encoder_hold_action_id.
+    store
+        .dispatch_canvas_action(CanvasAction::SelectSurface(ControlSurfaceId::EncoderHold))
+        .unwrap();
+    assert_eq!(
+        store
+            .projection()
+            .inspector
+            .editable()
+            .unwrap()
+            .bound_action_id
+            .as_deref(),
+        Some("agent-model-picker-open")
+    );
+    store
+        .dispatch_inspector_action(InspectorAction::SetJoystickMode(JoystickControlMode::Mouse))
+        .unwrap();
+    assert_eq!(store.projection().canvas.encoder.hold_label, "弹出模型");
+    assert_eq!(store.projection().canvas.joystick.mode_label, "硬件指针");
+
+    // Unassign and reassign EncoderHold via InspectorAction.
+    store
+        .dispatch_inspector_action(InspectorAction::UnassignSelectedSlot)
+        .unwrap();
+    assert_eq!(store.projection().canvas.encoder.hold_label, "未绑定");
+    store
+        .dispatch_inspector_action(InspectorAction::AssignCatalogAction(
+            "agent-model-picker-open".into(),
+        ))
+        .unwrap();
+    assert_eq!(store.projection().canvas.encoder.hold_label, "弹出模型");
+
+    let mk_ev = |seq: u64, binding: &str, kind: InputEventKind| InputEvent {
+        session_id: 1,
+        board_layer: None,
+        sequence: seq,
+        ingress_sequence: seq,
+        radial_center: None,
+        radial_position: None,
+        timestamp_ms: seq,
+        kind,
+        logical_switch: None,
+        binding_id: Some(binding.into()),
+        physical_control: None,
+        keycap_group: None,
+        action_role: None,
+        lost_count: 0,
+        action_eligible: true,
+    };
+
+    let t0 = Instant::now();
+    // 1. Long-press ENC_CLK (>= 350ms via poll_at) opens model picker & enables mouse capture.
+    assert!(store
+        .consume_physical_input_event(mk_ev(1, "ENC_CLK", InputEventKind::Pressed), t0)
+        .is_none());
+    store.poll_at(t0 + Duration::from_millis(380));
+    assert!(store.is_model_picker_mouse_capture_enabled());
+    assert_eq!(
+        store
+            .dispatched_receipts()
+            .last()
+            .map(|r| r.detail.as_str()),
+        Some("antigravity/model-picker-open")
+    );
+    // Subsequent release of the held ENC_CLK emits zero short-press leak.
+    assert!(store
+        .consume_physical_input_event(
+            mk_ev(2, "ENC_CLK", InputEventKind::Released),
+            t0 + Duration::from_millis(410),
+        )
+        .is_none());
+
+    // 2. Rotate CW/CCW while active -> model-picker-next / prev.
+    let next_receipt = store
+        .consume_physical_input_event(
+            mk_ev(3, "AG14", InputEventKind::Pressed),
+            t0 + Duration::from_millis(430),
+        )
+        .expect("CW in active picker");
+    assert_eq!(next_receipt.detail, "antigravity/model-picker-next");
+    let prev_receipt = store
+        .consume_physical_input_event(
+            mk_ev(4, "AG13", InputEventKind::Pressed),
+            t0 + Duration::from_millis(450),
+        )
+        .expect("CCW in active picker");
+    assert_eq!(prev_receipt.detail, "antigravity/model-picker-prev");
+
+    // 3. Hardware mouse horizontal flick right/left -> effort-right / effort-left.
+    store.inject_model_picker_mouse_delta_for_test(34.0, 2.0);
+    store.poll_at(t0 + Duration::from_millis(470));
+    assert_eq!(
+        store
+            .dispatched_receipts()
+            .last()
+            .map(|r| r.detail.as_str()),
+        Some("antigravity/model-picker-effort-right")
+    );
+    store.inject_model_picker_mouse_delta_for_test(-34.0, -1.0);
+    store.poll_at(t0 + Duration::from_millis(720));
+    assert_eq!(
+        store
+            .dispatched_receipts()
+            .last()
+            .map(|r| r.detail.as_str()),
+        Some("antigravity/model-picker-effort-left")
+    );
+
+    // 4. Sector right (AG18) also selects effort while picker is active even in mouse mode.
+    let sector_right = store
+        .consume_physical_input_event(
+            mk_ev(5, "AG18", InputEventKind::Pressed),
+            t0 + Duration::from_millis(760),
+        )
+        .expect("sector right in active picker");
+    assert_eq!(sector_right.detail, "antigravity/model-picker-effort-right");
+
+    // 5. Short tap ENC_CLK (< 350ms) confirms selection and disables mouse capture.
+    assert!(store
+        .consume_physical_input_event(
+            mk_ev(6, "ENC_CLK", InputEventKind::Pressed),
+            t0 + Duration::from_millis(750),
+        )
+        .is_none());
+    let confirm_receipt = store
+        .consume_physical_input_event(
+            mk_ev(7, "ENC_CLK", InputEventKind::Released),
+            t0 + Duration::from_millis(810),
+        )
+        .expect("short tap confirms model picker");
+    assert_eq!(confirm_receipt.detail, "antigravity/model-picker-confirm");
+    assert!(!store.is_model_picker_mouse_capture_enabled());
+
+    // 6. Press + turn (< 350ms) cancels hold cleanly without opening model picker.
+    let before_count = store.dispatched_receipts().len();
+    assert!(store
+        .consume_physical_input_event(
+            mk_ev(8, "ENC_CLK", InputEventKind::Pressed),
+            t0 + Duration::from_millis(900),
+        )
+        .is_none());
+    let turn_while_held = store
+        .consume_physical_input_event(
+            mk_ev(9, "AG14", InputEventKind::Pressed),
+            t0 + Duration::from_millis(960),
+        )
+        .expect("press+turn emits turn action");
+    assert_eq!(turn_while_held.detail, "antigravity/model-picker-next");
+    store.poll_at(t0 + Duration::from_millis(1400));
+    assert!(!store.is_model_picker_mouse_capture_enabled());
+    assert!(store
+        .consume_physical_input_event(
+            mk_ev(10, "ENC_CLK", InputEventKind::Released),
+            t0 + Duration::from_millis(1420),
+        )
+        .is_none());
+    assert_eq!(store.dispatched_receipts().len(), before_count + 1);
+
+    // 7. System sleep cancels active model picker and disables mouse capture.
+    assert!(store
+        .consume_physical_input_event(
+            mk_ev(11, "ENC_CLK", InputEventKind::Pressed),
+            t0 + Duration::from_millis(1500),
+        )
+        .is_none());
+    store.poll_at(t0 + Duration::from_millis(1900));
+    assert!(store.is_model_picker_mouse_capture_enabled());
+    store.system_will_sleep();
+    assert!(!store.is_model_picker_mouse_capture_enabled());
+    store.system_did_wake();
+
+    // 8. ModelSelectionAndMouse preset restores model-selection encoder + fallback joystick mode offline.
+    store
+        .dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
+            KnobJoystickPreset::ModelSelectionAndMouse,
+        ))
+        .unwrap();
+    assert_eq!(store.projection().canvas.encoder.hold_label, "弹出模型");
+    assert_eq!(
+        store
+            .projection()
+            .inspector
+            .editable()
+            .unwrap()
+            .joystick_mode,
+        JoystickControlMode::LogicalSectors
+    );
+}

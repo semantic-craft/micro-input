@@ -12,6 +12,8 @@ pub const LOCAL_SECTOR_LIMIT: u32 = 32;
 pub struct ControlSettings {
     pub joystick_mode: String,
     pub active_sectors: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_hold_action_id: Option<String>,
 }
 impl ControlSettings {
     pub fn validate(&self) -> Result<(), String> {
@@ -30,7 +32,7 @@ impl Draft {
         &mut self,
         pid: &str,
         lid: &str,
-        settings: ControlSettings,
+        mut settings: ControlSettings,
     ) -> Result<(), String> {
         settings.validate()?;
         self.mutate(|d| {
@@ -49,9 +51,17 @@ impl Draft {
             if d.is_protected_oai_layer(lid) {
                 return Err("受保护宿主层（原生 OAI）不支持修改控件设置".into());
             }
+            if let Some(ref hold_id) = settings.encoder_hold_action_id {
+                if !d.editable.graph.actions.contains_key(hold_id) {
+                    return Err("旋钮长按动作引用不存在".into());
+                }
+            }
             let layer = d.editable.graph.layers.get_mut(lid).ok_or("层不存在")?;
             if let Some(old) = &layer.control_settings {
                 old.validate()?;
+                if settings.encoder_hold_action_id.is_none() {
+                    settings.encoder_hold_action_id = old.encoder_hold_action_id.clone();
+                }
             }
             // Never remove a slot when reducing the active count or switching modes.
             // Dormant originals and independent assignments remain addressable.

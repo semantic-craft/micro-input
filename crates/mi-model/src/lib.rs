@@ -502,6 +502,7 @@ pub mod apply;
 
 pub mod host_router;
 pub use host_router::{
+    resolve_encoder_hold_action, resolve_encoder_hold_action_for_layer,
     resolve_host_action_with_layout, verified_physical_mapping_for_layout, BottomRowLayout,
 };
 

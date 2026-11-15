@@ -31,7 +31,7 @@ struct CreatorMicroInlineInspectorView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    Text(titleForSlot(slot: slot, isSplit: insp.bottomRowLayout == "split"))
+                    Text(titleForSlot(slot: slot, isSplit: insp.bottomRowLayout == "split", insp: insp))
                         .font(UITheme.heading)
                         .foregroundStyle(UITheme.textPrimary)
                     Spacer(minLength: 4)
@@ -162,7 +162,17 @@ struct CreatorMicroInlineInspectorView: View {
         }
     }
 
-    private func titleForSlot(slot: Int, isSplit: Bool) -> String {
+    private func titleForSlot(slot: Int, isSplit: Bool, insp: InspectorSliceModel) -> String {
+        if insp.selectedSurface == "EncoderHold" {
+            return "旋钮长按"
+        }
+        if (16...19).contains(slot) || insp.selectedSurface == "Joystick" {
+            switch insp.editableInspector?.joystickMode {
+            case "mouse": return "右上角摇杆（硬件鼠标）"
+            case "scroll": return "右上角摇杆（硬件滚轮）"
+            default: break
+            }
+        }
         switch slot {
         case 0: return "左上键（按键 01）"
         case 1: return "右上键（按键 02）"
@@ -172,7 +182,7 @@ struct CreatorMicroInlineInspectorView: View {
         case 12: return "底行右键（开关 13）"
         case 13: return "旋钮左旋"
         case 14: return "旋钮右旋"
-        case 15: return "旋钮按下"
+        case 15: return "旋钮短按"
         case 16: return "四向摇杆（上）"
         case 17: return "四向摇杆（下）"
         case 18: return "四向摇杆（左）"
@@ -187,6 +197,9 @@ struct CreatorMicroInlineInspectorView: View {
         }
         if insp.isProtectedLayer {
             let owner = insp.protectedLock?.ownerClientName ?? insp.selectedDisplayName
+            if insp.selectedSurface == "EncoderHold" {
+                return "\(owner) 旋钮长按（弹出模型选择页）"
+            }
             let code: String = {
                 switch slot {
                 case 0..<13: return String(format: "KV_OAI_%02d / AG%02d", slot, slot)
@@ -252,6 +265,12 @@ struct CreatorMicroInlineInspectorView: View {
                 }
             }
         } else if (13...15).contains(slot) || insp.selectedSurface.hasPrefix("Encoder") {
+            let encoderSurface: String = {
+                if ["EncoderCcw", "EncoderCw", "EncoderPress", "EncoderHold"].contains(insp.selectedSurface) {
+                    return insp.selectedSurface
+                }
+                return slot == 13 ? "EncoderCcw" : (slot == 14 ? "EncoderCw" : "EncoderPress")
+            }()
             VStack(alignment: .leading, spacing: 8) {
                 Text("无极旋钮动作方向")
                     .font(UITheme.captionMedium)
@@ -259,18 +278,26 @@ struct CreatorMicroInlineInspectorView: View {
                 Picker(
                     "旋钮方向",
                     selection: Binding(
-                        get: { insp.selectedSurface },
+                        get: { encoderSurface },
                         set: { store.dispatch("canvas", ["SelectSurface": $0]) }
                     )
                 ) {
                     Text("左旋").tag("EncoderCcw")
                     Text("右旋").tag("EncoderCw")
-                    Text("按下").tag("EncoderPress")
+                    Text("短按").tag("EncoderPress")
+                    Text("长按").tag("EncoderHold")
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .accessibilityIdentifier("inspector-encoder-surface-picker")
 
                 VStack(alignment: .leading, spacing: 6) {
+                    Button("模型选择（长按弹出模型页）") {
+                        store.dispatch("canvas", ["ApplyKnobJoystickPreset": "ModelSelectionAndMouse"])
+                    }
+                    .surfaceButton(.primary)
+                    .accessibilityIdentifier("inspector-preset-model-selection")
+
                     if agentKind == .codex {
                         HStack(spacing: 8) {
                             Button("滚动对话预设") {
@@ -306,6 +333,7 @@ struct CreatorMicroInlineInspectorView: View {
             let modeSummary = insp.editableInspector?.joystickModeSummary ?? ""
             let mouseSupported = insp.editableInspector?.v070HardwareMouseSupported ?? true
             let isUnsupportedHardwareMode = !mouseSupported && (currentMode == "mouse" || currentMode == "scroll")
+            let hw = store.v070Hardware
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("摇杆驱动模式")
@@ -342,7 +370,69 @@ struct CreatorMicroInlineInspectorView: View {
                         .accessibilityIdentifier("inspector-joystick-mode-summary")
                 }
 
-                if currentMode == "logical_sectors" {
+                if currentMode == "mouse" || currentMode == "scroll" {
+                    let isSynced = hw.activeJoystickMode == currentMode
+                    let modeTitle = currentMode == "mouse" ? "0.7.0 硬件鼠标指针" : "0.7.0 硬件模拟滚轮"
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(modeTitle).font(UITheme.bodyMedium).foregroundStyle(UITheme.textPrimary)
+                                Text(hw.supported ? (isSynced ? "键盘当前层已同步此硬件模式" : "待写入当前键盘层固件") : "离线草稿已保存；接入 0.7.0+ 固件后可一键写入键盘")
+                                    .font(UITheme.micro)
+                                    .foregroundStyle(UITheme.textSecondary)
+                            }
+                            Spacer(minLength: 6)
+                            Button(isSynced ? "重新写入固件" : "写入键盘固件") {
+                                store.dispatchV070Hardware(V070HardwareCommand.applyJoystickHardwareMode(currentMode))
+                            }
+                            .surfaceButton(isSynced ? .secondary : .primary)
+                            .disabled(!hw.supported || hw.busy)
+                            .accessibilityIdentifier("inspector-joystick-sync-hardware")
+                        }
+
+                        if hw.supported {
+                            HStack(spacing: 6) {
+                                Text("速度档位").font(UITheme.micro).foregroundStyle(UITheme.textSecondary)
+                                Spacer(minLength: 4)
+                                ForEach([("slow", "慢速"), ("standard", "标准"), ("fast", "快速"), ("precise", "精准")], id: \.0) { presetId, title in
+                                    Button(title) {
+                                        store.dispatchV070Hardware(V070HardwareCommand.applyMousePreset(presetId))
+                                    }
+                                    .surfaceButton(hw.mouse.preset == presetId ? .primary : .secondary)
+                                    .disabled(hw.busy)
+                                    .accessibilityIdentifier("inspector-mouse-preset-\(presetId)")
+                                }
+                            }
+                        }
+
+                        Text("长按左上角旋钮弹出模型选择页期间，向右轻推摇杆（按右）将临时拦截指针并展开 / 调高模型力度，短按确认后自动恢复硬件指针。")
+                            .font(UITheme.micro)
+                            .foregroundStyle(UITheme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(UITheme.subtleSurface))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
+                    .accessibilityIdentifier("inspector-joystick-v070-card")
+                } else if currentMode == "logical_sectors" {
+                    if hw.activeJoystickMode == "mouse" || hw.activeJoystickMode == "scroll" {
+                        HStack(spacing: 8) {
+                            Text("当前键盘固件仍处于硬件 \(hw.activeJoystickMode == "mouse" ? "MOUSE" : "SCROLL") 模式")
+                                .font(UITheme.micro)
+                                .foregroundStyle(UITheme.textSecondary)
+                            Spacer(minLength: 4)
+                            Button("恢复键盘扇区模式") {
+                                store.dispatchV070Hardware(V070HardwareCommand.applyJoystickHardwareMode("logical_sectors"))
+                            }
+                            .surfaceButton(.secondary)
+                            .disabled(!hw.supported || hw.busy)
+                            .accessibilityIdentifier("inspector-joystick-restore-sectors")
+                        }
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(UITheme.subtleSurface))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(UITheme.hairlineBorder, lineWidth: 1))
+                    }
+
                     Text("四向摇杆方向")
                         .font(UITheme.captionMedium)
                         .foregroundStyle(UITheme.textSecondary)

@@ -269,6 +269,20 @@ pub fn run_host_execution_scenario(run_dir: &Path) -> Result<ScenarioResultSumma
         Ok(())
     };
 
+    let hold_action = mi_model::host_router::resolve_encoder_hold_action(
+        &draft.document,
+        Some(&antigravity_pid),
+        false,
+    )
+    .ok_or_else(|| "failed to resolve Antigravity encoder hold action".to_string())?;
+    if hold_action
+        != (ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".to_string(),
+            command: "model-picker-open".to_string(),
+        })
+    {
+        return Err(format!("unexpected encoder hold action: {hold_action:?}"));
+    }
     for binding in ["AG00", "AG01", "AG02", "AG03", "AG13", "AG14", "ENC_CLK"] {
         fire_binding(&mut receipts, &draft.document, &antigravity_pid, binding)?;
     }

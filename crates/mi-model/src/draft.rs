@@ -1200,11 +1200,7 @@ impl Draft {
                 if !d.editable.graph.actions.get(&old).is_some_and(|a| {
                     crate::macro_library::is_local_macro(a) || crate::multi::is_local_multi(a)
                 }) && crate::multi::parent_references(d, &old).is_empty()
-                    && !d.editable.graph.layers.values().any(|l| {
-                        l.controls
-                            .values()
-                            .any(|b| b.action_id.as_ref() == Some(&old))
-                    })
+                    && !d.layer_references_action(&old)
                 {
                     d.editable.graph.actions.remove(&old);
                     d.editable.source_refs.remove(&old);
@@ -1235,11 +1231,171 @@ impl Draft {
                 if !d.editable.graph.actions.get(&old).is_some_and(|a| {
                     crate::macro_library::is_local_macro(a) || crate::multi::is_local_multi(a)
                 }) && crate::multi::parent_references(d, &old).is_empty()
-                    && !d.editable.graph.layers.values().any(|l| {
-                        l.controls
-                            .values()
-                            .any(|b| b.action_id.as_ref() == Some(&old))
+                    && !d.layer_references_action(&old)
+                {
+                    d.editable.graph.actions.remove(&old);
+                    d.editable.source_refs.remove(&old);
+                }
+            }
+            Ok(())
+        })
+    }
+    pub fn assign_encoder_hold(
+        &mut self,
+        profile: &Value,
+        layer: &Value,
+        action: Action,
+    ) -> Result<(), String> {
+        action.validate()?;
+        let pid = profile.as_str().ok_or("配置必须是本地 UUID")?;
+        let lid = layer.as_str().ok_or("层必须是本地 UUID")?;
+        self.mutate(|d| {
+            let p = d.editable.graph.profiles.get(pid).ok_or("配置不存在")?;
+            if !p.layer_order.iter().any(|id| id == lid) {
+                return Err("层不属于所选配置".into());
+            }
+            if d.is_protected_oai_layer(lid) {
+                return Err("受保护宿主层（原生 OAI）不支持修改按键映射".into());
+            }
+            let current_hold_matches = d
+                .editable
+                .graph
+                .layers
+                .get(lid)
+                .ok_or("层不存在")?
+                .control_settings
+                .as_ref()
+                .and_then(|cs| cs.encoder_hold_action_id.as_ref())
+                .and_then(|id| d.editable.graph.actions.get(id))
+                == Some(&action);
+            if current_hold_matches {
+                return Ok(());
+            }
+            let new_aid = crate::document::new_id();
+            d.editable.graph.actions.insert(new_aid.clone(), action);
+            let l = d.editable.graph.layers.get_mut(lid).ok_or("层不存在")?;
+            let old = if let Some(cs) = &mut l.control_settings {
+                cs.encoder_hold_action_id.replace(new_aid)
+            } else {
+                let sector_count = l
+                    .controls
+                    .values()
+                    .filter(|b| {
+                        b.logical_control
+                            .strip_prefix("logical-")
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .is_some_and(|n| n >= 16)
                     })
+                    .count() as u32;
+                l.control_settings = Some(crate::control_settings::ControlSettings {
+                    joystick_mode: "source".into(),
+                    active_sectors: sector_count.min(crate::control_settings::LOCAL_SECTOR_LIMIT),
+                    encoder_hold_action_id: Some(new_aid),
+                });
+                None
+            };
+            if let Some(old) = old {
+                if !d.editable.graph.actions.get(&old).is_some_and(|a| {
+                    crate::macro_library::is_local_macro(a) || crate::multi::is_local_multi(a)
+                }) && crate::multi::parent_references(d, &old).is_empty()
+                    && !d.layer_references_action(&old)
+                {
+                    d.editable.graph.actions.remove(&old);
+                    d.editable.source_refs.remove(&old);
+                }
+            }
+            Ok(())
+        })
+    }
+    pub fn unassign_encoder_hold(&mut self, profile: &Value, layer: &Value) -> Result<(), String> {
+        let pid = profile.as_str().ok_or("配置必须是本地 UUID")?;
+        let lid = layer.as_str().ok_or("层必须是本地 UUID")?;
+        self.mutate(|d| {
+            let p = d.editable.graph.profiles.get(pid).ok_or("配置不存在")?;
+            if !p.layer_order.iter().any(|id| id == lid) {
+                return Err("层不属于所选配置".into());
+            }
+            if d.is_protected_oai_layer(lid) {
+                return Err("受保护宿主层（原生 OAI）不支持修改按键映射".into());
+            }
+            let l = d.editable.graph.layers.get_mut(lid).ok_or("层不存在")?;
+            let old = l
+                .control_settings
+                .as_mut()
+                .and_then(|cs| cs.encoder_hold_action_id.take());
+            if let Some(old) = old {
+                if !d.editable.graph.actions.get(&old).is_some_and(|a| {
+                    crate::macro_library::is_local_macro(a) || crate::multi::is_local_multi(a)
+                }) && crate::multi::parent_references(d, &old).is_empty()
+                    && !d.layer_references_action(&old)
+                {
+                    d.editable.graph.actions.remove(&old);
+                    d.editable.source_refs.remove(&old);
+                }
+            }
+            Ok(())
+        })
+    }
+    pub fn bind_existing_encoder_hold_action(
+        &mut self,
+        profile_id: &str,
+        layer_id: &str,
+        action_id: Option<&str>,
+    ) -> Result<(), String> {
+        self.mutate(|d| {
+            if !d
+                .editable
+                .graph
+                .profiles
+                .get(profile_id)
+                .is_some_and(|p| p.layer_order.iter().any(|id| id == layer_id))
+            {
+                return Err("层不属于配置".into());
+            }
+            if d.is_protected_oai_layer(layer_id) {
+                return Err("受保护宿主层（原生 OAI）不支持绑定动作".into());
+            }
+            if let Some(id) = action_id {
+                d.editable
+                    .graph
+                    .actions
+                    .get(id)
+                    .ok_or("动作引用不存在")?
+                    .validate()?;
+            }
+            let l = d
+                .editable
+                .graph
+                .layers
+                .get_mut(layer_id)
+                .ok_or("层不存在")?;
+            let old = if let Some(cs) = &mut l.control_settings {
+                std::mem::replace(&mut cs.encoder_hold_action_id, action_id.map(str::to_owned))
+            } else if let Some(id) = action_id {
+                let sector_count = l
+                    .controls
+                    .values()
+                    .filter(|b| {
+                        b.logical_control
+                            .strip_prefix("logical-")
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .is_some_and(|n| n >= 16)
+                    })
+                    .count() as u32;
+                l.control_settings = Some(crate::control_settings::ControlSettings {
+                    joystick_mode: "source".into(),
+                    active_sectors: sector_count.min(crate::control_settings::LOCAL_SECTOR_LIMIT),
+                    encoder_hold_action_id: Some(id.to_owned()),
+                });
+                None
+            } else {
+                None
+            };
+            if let Some(old) = old {
+                if !d.editable.graph.actions.get(&old).is_some_and(|a| {
+                    crate::macro_library::is_local_macro(a) || crate::multi::is_local_multi(a)
+                }) && crate::multi::parent_references(d, &old).is_empty()
+                    && !d.layer_references_action(&old)
                 {
                     d.editable.graph.actions.remove(&old);
                     d.editable.source_refs.remove(&old);

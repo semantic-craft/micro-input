@@ -315,10 +315,9 @@ impl ManagedAxProvider for Provider {
         } else if modifiers.is_empty() {
             state.events.push(format!("window_key:{key_code:x}"));
         } else {
-            state.events.push(format!(
-                "window_key:{}:{key_code:x}",
-                modifiers.join("+")
-            ));
+            state
+                .events
+                .push(format!("window_key:{}:{key_code:x}", modifiers.join("+")));
         }
         Ok(())
     }

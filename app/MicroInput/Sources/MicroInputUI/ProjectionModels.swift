@@ -650,6 +650,7 @@ public struct CanvasSliceModel: Equatable {
     public var encoderCcwLabel: String = "上滚"
     public var encoderCwLabel: String = "下滚"
     public var encoderPressLabel: String = "按压"
+    public var encoderHoldLabel: String = ""
     public var encoderSelectedSlot: Int? = nil
     public var encoderRingGlowHex: String = "#14C76B"
     public var joystickModeLabel: String = "八向摇杆"
@@ -683,6 +684,7 @@ public struct CanvasSliceModel: Equatable {
         self.encoderCcwLabel = m.encoderCcwLabel
         self.encoderCwLabel = m.encoderCwLabel
         self.encoderPressLabel = m.encoderPressLabel
+        self.encoderHoldLabel = m.encoderHoldLabel
         self.encoderSelectedSlot = m.encoderSelectedSlot
         self.encoderRingGlowHex = m.encoderRingGlowHex
         self.joystickModeLabel = m.joystickModeLabel
@@ -858,6 +860,7 @@ public struct ProjectionModel: Equatable {
     public var encoderCcwLabel: String = "上滚"
     public var encoderCwLabel: String = "下滚"
     public var encoderPressLabel: String = "按压"
+    public var encoderHoldLabel: String = ""
     public var encoderSelectedSlot: Int? = nil
     public var encoderRingGlowHex: String = "#14C76B"
     public var joystickModeLabel: String = "八向摇杆"

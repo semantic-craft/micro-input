@@ -34,18 +34,36 @@ pub(crate) fn references(doc: &LocalDocumentV2, action_id: &str) -> Vec<MacroRef
             let profile = &graph.profiles[pid];
             profile.layer_order.iter().flat_map(move |lid| {
                 let layer = &graph.layers[lid];
-                layer.control_order.iter().filter_map(move |bid| {
-                    let binding = &layer.controls[bid];
-                    (binding.action_id.as_deref() == Some(action_id)).then(|| MacroReference {
+                let hold_ref = layer
+                    .control_settings
+                    .as_ref()
+                    .and_then(|cs| cs.encoder_hold_action_id.as_deref())
+                    .filter(|id| *id == action_id)
+                    .map(|_| MacroReference {
                         parent_action_name: None,
                         branch: None,
                         profile_id: pid.clone(),
                         profile_name: profile.name.clone(),
                         layer_id: lid.clone(),
                         layer_name: layer.name.clone(),
-                        logical_control: binding.logical_control.clone(),
+                        logical_control: "encoder-hold".into(),
+                    });
+                layer
+                    .control_order
+                    .iter()
+                    .filter_map(move |bid| {
+                        let binding = &layer.controls[bid];
+                        (binding.action_id.as_deref() == Some(action_id)).then(|| MacroReference {
+                            parent_action_name: None,
+                            branch: None,
+                            profile_id: pid.clone(),
+                            profile_name: profile.name.clone(),
+                            layer_id: lid.clone(),
+                            layer_name: layer.name.clone(),
+                            logical_control: binding.logical_control.clone(),
+                        })
                     })
-                })
+                    .chain(hold_ref)
             })
         })
         .collect();

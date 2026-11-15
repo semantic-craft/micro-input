@@ -336,11 +336,7 @@ unsafe extern "C" {
     fn CFRunLoopGetCurrent() -> CFRunLoopRef;
     fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
     fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    fn CFRunLoopRunInMode(
-        mode: CFStringRef,
-        seconds: f64,
-        return_after_source_handled: u8,
-    ) -> i32;
+    fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, return_after_source_handled: u8) -> i32;
     fn CFRunLoopStop(rl: CFRunLoopRef);
     fn CGEventCreateMouseEvent(
         source: CGEventSourceRef,
@@ -1171,6 +1167,12 @@ impl MacOsSystemDriver {
     ) -> Result<ManagedControlReadiness, String> {
         self.managed_controls.inspect(adapter)
     }
+
+    pub fn inject_model_picker_mouse_delta(&self, dx: f64, dy: f64) {
+        if let Ok(mut queue) = self.model_picker_mouse_deltas.lock() {
+            queue.push((dx, dy));
+        }
+    }
 }
 
 impl HostOsDriver for MacOsSystemDriver {
@@ -1772,7 +1774,9 @@ impl HostOsDriver for MacOsSystemDriver {
             return Err("accessibility_untrusted".to_string());
         }
         if is_managed_adapter(adapter) {
-            return self.managed_controls.send_model_picker_key(adapter, key_code);
+            return self
+                .managed_controls
+                .send_model_picker_key(adapter, key_code);
         }
         self.agent_shortcut(adapter, key_code, &[])
     }
@@ -2481,7 +2485,15 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
     pub fn drain_model_picker_mouse_deltas(&self) -> Vec<(f64, f64)> {
         self.driver.drain_model_picker_mouse_deltas()
     }
+}
 
+impl LiveHostActionExecutor<MacOsSystemDriver> {
+    pub fn inject_model_picker_mouse_delta(&self, dx: f64, dy: f64) {
+        self.driver.inject_model_picker_mouse_delta(dx, dy);
+    }
+}
+
+impl<D: HostOsDriver> LiveHostActionExecutor<D> {
     pub fn stop_owned_actions(&self) -> Result<(), String> {
         let _execution = self.execution_lock.lock().unwrap();
         self.driver.set_model_picker_mouse_capture(false);
@@ -2869,7 +2881,10 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
-                    return match self.driver.send_model_picker_key(effective_adapter, key_code) {
+                    return match self
+                        .driver
+                        .send_model_picker_key(effective_adapter, key_code)
+                    {
                         Ok(()) => make_receipt("executed", desc.detail),
                         Err(error) => make_receipt(managed_error_outcome(&error), error),
                     };

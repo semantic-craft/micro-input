@@ -30,9 +30,9 @@ def verify_evidence(run, scenario, started, process_alive):
             raise ValueError("host simulation receipts incomplete")
         details = {r.get("detail") for r in rows}
         for required_detail in (
-            "antigravity/prev-conversation",
-            "antigravity/next-conversation",
-            "antigravity/search",
+            "antigravity/model-picker-prev",
+            "antigravity/model-picker-next",
+            "antigravity/model-picker-confirm",
             "no_newline=true (bytes=8)",
         ):
             if required_detail not in details:

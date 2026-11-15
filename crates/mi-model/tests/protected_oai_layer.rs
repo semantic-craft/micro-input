@@ -107,6 +107,7 @@ fn four_hard_locks_reject_edits_lighting_duplicate_export_and_skip_protected_on_
             ControlSettings {
                 joystick_mode: "logical_sectors".into(),
                 active_sectors: 4,
+                encoder_hold_action_id: None,
             },
         )
         .is_err());

@@ -422,7 +422,11 @@ fn native_codex_cheat_sheets_show_local_labels_and_preserve_empty_controls() {
         let label = if let Some(id) = binding.action_id.as_ref() {
             let action = graph.actions.get_mut(id).unwrap();
             action.name = format!("custom-native-control-{slot}");
-            action.name.clone()
+            if slot == 15 {
+                format!("{} · 长按弹出模型选择页", action.name)
+            } else {
+                action.name.clone()
+            }
         } else {
             "未绑定".to_string()
         };
@@ -749,9 +753,18 @@ fn native_codex_all_controls_dispatch_custom_local_actions_without_rewriting_map
             );
             let mut event = input(9, InputEventKind::Pressed);
             event.binding_id = Some((*binding).into());
-            let receipt = store
-                .route_board_input(event, now)
-                .expect("local custom action");
+            let receipt = if *binding == "ENC_CLK" {
+                assert!(store.route_board_input(event, now).is_none());
+                let mut release = input(9, InputEventKind::Released);
+                release.binding_id = Some("ENC_CLK".into());
+                store
+                    .route_board_input(release, now + Duration::from_millis(50))
+                    .expect("local custom action on ENC_CLK short tap")
+            } else {
+                store
+                    .route_board_input(event, now)
+                    .expect("local custom action")
+            };
             assert_eq!(receipt.profile_id, native);
             assert_eq!(receipt.target, "default-browser");
             assert_eq!(receipt.detail, "example.com");

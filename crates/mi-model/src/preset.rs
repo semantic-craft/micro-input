@@ -108,8 +108,16 @@ pub fn export(draft: &Draft, pid: Option<&str>, lid: Option<&str>) -> Result<Str
             .graph
             .layers
             .values()
-            .flat_map(|l| l.controls.values())
-            .filter_map(|b| b.action_id.clone())
+            .flat_map(|l| {
+                l.controls
+                    .values()
+                    .filter_map(|b| b.action_id.clone())
+                    .chain(
+                        l.control_settings
+                            .as_ref()
+                            .and_then(|cs| cs.encoder_hold_action_id.clone()),
+                    )
+            })
             .collect();
         while let Some(id) = pending.pop() {
             if !used.insert(id.clone()) {
@@ -179,6 +187,10 @@ pub fn import(text: &str) -> Result<Draft, String> {
     g.layers = std::mem::take(&mut g.layers)
         .into_iter()
         .map(|(id, mut v)| {
+            if let Some(cs) = &mut v.control_settings {
+                cs.encoder_hold_action_id =
+                    cs.encoder_hold_action_id.take().map(|a| map[&a].clone());
+            }
             v.control_order = v.control_order.iter().map(|id| map[id].clone()).collect();
             v.controls = v
                 .controls
@@ -1478,7 +1490,8 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
         .expect("Codex starter assignments")
         .1
         .clone();
-    legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments.clone()));
+    let codex_pre_slots = codex_assignments.clone();
+    legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, codex_pre_slots.clone()));
     codex_assignments.retain(|(slot, ..)| !(6..=12).contains(slot));
     for (slot, id, label, detail, command) in [
         (
@@ -1543,7 +1556,8 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
             },
         ));
     }
-    legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments.clone()));
+    let codex_r25 = codex_assignments.clone();
+    legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, codex_r25.clone()));
     codex_assignments.retain(|(slot, ..)| !(0..=5).contains(slot));
     for (slot, id, label, command) in [
         (0, "slot-open-0", "会话 1", "slot-open:0"),
@@ -1566,7 +1580,8 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
         ));
     }
     codex_assignments.sort_by_key(|(slot, ..)| *slot);
-    legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments.clone()));
+    let codex_r26 = codex_assignments.clone();
+    legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, codex_r26.clone()));
     for item in codex_assignments.iter_mut() {
         match item.0 {
             8 => {
@@ -1593,7 +1608,89 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
         }
     }
     specs.push((LOCAL_CODEX_PROFILE_NAME, codex_assignments));
+
+    legacy_specs.extend(
+        specs
+            .iter()
+            .filter(|(name, _)| is_coding_agent_model_picker_starter_profile(name))
+            .cloned(),
+    );
+    for (name, assignments) in &mut specs {
+        if is_coding_agent_model_picker_starter_profile(name) {
+            replace_encoder_slots_with_model_picker(assignments);
+        }
+    }
+    for mut hybrid in [codex_pre_slots, codex_r25, codex_r26] {
+        replace_encoder_slots_with_model_picker(&mut hybrid);
+        legacy_specs.push((LOCAL_CODEX_PROFILE_NAME, hybrid));
+    }
+
     (specs, legacy_specs)
+}
+
+fn is_coding_agent_model_picker_starter_profile(profile_name: &str) -> bool {
+    matches!(
+        profile_name.trim(),
+        "Antigravity" | "DeepSeek Coder (DSH)" | LOCAL_CODEX_PROFILE_NAME
+    )
+}
+
+fn canonical_encoder_model_picker_assignments() -> [AgentAssignment; 3] {
+    [
+        (
+            13,
+            "agent-model-picker-prev",
+            "选择上一模型 / 档位",
+            "Agent",
+            "在已打开的模型选择弹层中向上移动高亮项（直接向窗口投递按键，不重聚焦输入框）",
+            ActionKind::AgentCommand {
+                adapter: "host".into(),
+                command: "model-picker-prev".into(),
+            },
+        ),
+        (
+            14,
+            "agent-model-picker-next",
+            "选择下一模型 / 档位",
+            "Agent",
+            "在已打开的模型选择弹层中向下移动高亮项（直接向窗口投递按键，不重聚焦输入框）",
+            ActionKind::AgentCommand {
+                adapter: "host".into(),
+                command: "model-picker-next".into(),
+            },
+        ),
+        (
+            15,
+            "agent-model-picker-confirm",
+            "确认所选模型",
+            "Agent",
+            "在已打开的模型选择弹层中回车确认当前高亮项（直接向窗口投递按键，不重聚焦输入框）",
+            ActionKind::AgentCommand {
+                adapter: "host".into(),
+                command: "model-picker-confirm".into(),
+            },
+        ),
+    ]
+}
+
+fn replace_encoder_slots_with_model_picker(assignments: &mut Vec<AgentAssignment>) {
+    assignments.retain(|(slot, ..)| !matches!(*slot, 13..=15));
+    assignments.extend(canonical_encoder_model_picker_assignments());
+    assignments.sort_by_key(|(slot, ..)| *slot);
+}
+
+pub fn canonical_encoder_hold_action() -> crate::draft::Action {
+    crate::draft::Action {
+        id: "agent-model-picker-open".into(),
+        name: "弹出模型选择页".into(),
+        category: "Agent".into(),
+        detail: "打开当前目标 Agent 的模型选择弹层并进入旋钮选模型与推理力度会话".into(),
+        payload: json!({
+            "type": "agent_command",
+            "adapter": "host",
+            "command": "model-picker-open"
+        }),
+    }
 }
 
 pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, String> {
@@ -1726,134 +1823,169 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                                 )
                             }))
             };
+            let first_lid = p.layer_order.first().cloned();
             if !can_upgrade {
-                if profile_name == "Antigravity" && !p.layer_order.is_empty() {
-                    let lid = p.layer_order[0].clone();
-                    if antigravity_layer_needs_starter_slot_migration(&work.document, &lid) {
-                        let slot_aid = |doc: &LocalDocumentV2, slot: &str| -> Option<String> {
-                            doc.editable
-                                .graph
-                                .layers
-                                .get(&lid)?
-                                .controls
-                                .values()
-                                .find(|b| b.logical_control == slot)
-                                .and_then(|b| b.action_id.clone())
-                        };
-                        let aid7 = slot_aid(&work.document, "logical-7");
-                        let aid10 = slot_aid(&work.document, "logical-10");
-                        let aid11 = slot_aid(&work.document, "logical-11");
-                        let aid12 = slot_aid(&work.document, "logical-12");
-                        work.mutate(|doc| {
-                            if let Some(id7) = &aid7 {
-                                let should_update_7 = doc
-                                    .editable
+                if profile_name == "Antigravity" {
+                    if let Some(lid) = first_lid.clone() {
+                        if antigravity_layer_needs_starter_slot_migration(&work.document, &lid) {
+                            let slot_aid = |doc: &LocalDocumentV2, slot: &str| -> Option<String> {
+                                doc.editable
                                     .graph
-                                    .actions
-                                    .get(id7)
-                                    .is_some_and(|a| {
-                                        a.id == "desktop-browser"
-                                            && a.payload.get("command").and_then(Value::as_str)
-                                                == Some("browser")
-                                    });
-                                if should_update_7 {
-                                    if let Some(a7) = doc.editable.graph.actions.get_mut(id7) {
-                                        a7.id = "desktop-input".into();
-                                        a7.name = "聚焦当前输入框".into();
-                                        a7.category = "Agent".into();
-                                        a7.detail = "com.google.antigravity".into();
-                                        a7.payload = serde_json::to_value(ActionKind::AgentCommand {
-                                            adapter: "antigravity".into(),
-                                            command: "focus-input".into(),
-                                        })
-                                        .map_err(|e| e.to_string())?;
+                                    .layers
+                                    .get(&lid)?
+                                    .controls
+                                    .values()
+                                    .find(|b| b.logical_control == slot)
+                                    .and_then(|b| b.action_id.clone())
+                            };
+                            let aid7 = slot_aid(&work.document, "logical-7");
+                            let aid10 = slot_aid(&work.document, "logical-10");
+                            let aid11 = slot_aid(&work.document, "logical-11");
+                            let aid12 = slot_aid(&work.document, "logical-12");
+                            work.mutate(|doc| {
+                                if let Some(id7) = &aid7 {
+                                    let should_update_7 = doc
+                                        .editable
+                                        .graph
+                                        .actions
+                                        .get(id7)
+                                        .is_some_and(|a| {
+                                            a.id == "desktop-browser"
+                                                && a.payload.get("command").and_then(Value::as_str)
+                                                    == Some("browser")
+                                        });
+                                    if should_update_7 {
+                                        if let Some(a7) = doc.editable.graph.actions.get_mut(id7) {
+                                            a7.id = "desktop-input".into();
+                                            a7.name = "聚焦当前输入框".into();
+                                            a7.category = "Agent".into();
+                                            a7.detail = "com.google.antigravity".into();
+                                            a7.payload =
+                                                serde_json::to_value(ActionKind::AgentCommand {
+                                                    adapter: "antigravity".into(),
+                                                    command: "focus-input".into(),
+                                                })
+                                                .map_err(|e| e.to_string())?;
+                                        }
                                     }
                                 }
-                            }
-                            if let Some(id10) = &aid10 {
-                                let should_update_10 = doc
-                                    .editable
-                                    .graph
-                                    .actions
-                                    .get(id10)
-                                    .is_some_and(|a| {
-                                        (a.id == "desktop-input"
-                                            && a.payload.get("command").and_then(Value::as_str)
-                                                == Some("focus-input"))
-                                            || (a.id == "desktop-dictation"
+                                if let Some(id10) = &aid10 {
+                                    let should_update_10 = doc
+                                        .editable
+                                        .graph
+                                        .actions
+                                        .get(id10)
+                                        .is_some_and(|a| {
+                                            (a.id == "desktop-input"
+                                                && a.payload.get("command").and_then(Value::as_str)
+                                                    == Some("focus-input"))
+                                                || (a.id == "desktop-dictation"
+                                                    && matches!(
+                                                        a.payload
+                                                            .get("command")
+                                                            .and_then(Value::as_str),
+                                                        Some("push-to-talk" | "dictation")
+                                                    ))
+                                        });
+                                    if should_update_10 {
+                                        if let Some(a10) = doc.editable.graph.actions.get_mut(id10)
+                                        {
+                                            a10.id = "desktop-new-project-chat".into();
+                                            a10.name = "在项目中新建会话".into();
+                                            a10.category = "Agent".into();
+                                            a10.detail =
+                                                "在当前或最近项目中新建会话（New Conversation in Project）"
+                                                    .into();
+                                            a10.payload =
+                                                serde_json::to_value(ActionKind::AgentCommand {
+                                                    adapter: "antigravity".into(),
+                                                    command: "new-conversation-in-project".into(),
+                                                })
+                                                .map_err(|e| e.to_string())?;
+                                        }
+                                    }
+                                }
+                                if let Some(id11) = &aid11 {
+                                    let should_update_11 = doc
+                                        .editable
+                                        .graph
+                                        .actions
+                                        .get(id11)
+                                        .is_some_and(|a| {
+                                            a.id == "desktop-dictation-r"
                                                 && matches!(
                                                     a.payload
                                                         .get("command")
                                                         .and_then(Value::as_str),
                                                     Some("push-to-talk" | "dictation")
-                                                ))
-                                    });
-                                if should_update_10 {
-                                    if let Some(a10) = doc.editable.graph.actions.get_mut(id10) {
-                                        a10.id = "desktop-new-project-chat".into();
-                                        a10.name = "在项目中新建会话".into();
-                                        a10.category = "Agent".into();
-                                        a10.detail =
-                                            "在当前或最近项目中新建会话（New Conversation in Project）"
-                                                .into();
-                                        a10.payload = serde_json::to_value(ActionKind::AgentCommand {
-                                            adapter: "antigravity".into(),
-                                            command: "new-conversation-in-project".into(),
-                                        })
-                                        .map_err(|e| e.to_string())?;
+                                                )
+                                        });
+                                    if should_update_11 {
+                                        if let Some(a11) = doc.editable.graph.actions.get_mut(id11)
+                                        {
+                                            a11.id = "desktop-dictation".into();
+                                            a11.name = "按住说话 · 松开停止".into();
+                                            a11.category = "Agent".into();
+                                            a11.detail =
+                                                "按住启动听写（Record Audio / Ctrl+M），松开自动停止"
+                                                    .into();
+                                            a11.payload =
+                                                serde_json::to_value(ActionKind::AgentCommand {
+                                                    adapter: "antigravity".into(),
+                                                    command: "push-to-talk".into(),
+                                                })
+                                                .map_err(|e| e.to_string())?;
+                                        }
                                     }
                                 }
-                            }
-                            if let Some(id11) = &aid11 {
-                                let should_update_11 = doc
-                                    .editable
-                                    .graph
-                                    .actions
-                                    .get(id11)
-                                    .is_some_and(|a| {
-                                        a.id == "desktop-dictation-r"
-                                            && matches!(
-                                                a.payload.get("command").and_then(Value::as_str),
-                                                Some("push-to-talk" | "dictation")
-                                            )
-                                    });
-                                if should_update_11 {
-                                    if let Some(a11) = doc.editable.graph.actions.get_mut(id11) {
-                                        a11.id = "desktop-dictation".into();
-                                        a11.name = "按住说话 · 松开停止".into();
-                                        a11.category = "Agent".into();
-                                        a11.detail =
-                                            "按住启动听写（Record Audio / Ctrl+M），松开自动停止"
-                                                .into();
-                                        a11.payload = serde_json::to_value(ActionKind::AgentCommand {
-                                            adapter: "antigravity".into(),
-                                            command: "push-to-talk".into(),
-                                        })
-                                        .map_err(|e| e.to_string())?;
+                                if let Some(id12) = &aid12 {
+                                    let should_update_12 = doc
+                                        .editable
+                                        .graph
+                                        .actions
+                                        .get(id12)
+                                        .is_some_and(|a| {
+                                            a.id == "desktop-submit"
+                                                && a.payload.get("command").and_then(Value::as_str)
+                                                    == Some("submit")
+                                        });
+                                    if should_update_12 {
+                                        if let Some(a12) = doc.editable.graph.actions.get_mut(id12)
+                                        {
+                                            a12.detail =
+                                                "若听写激活则先停并确认停止，再聚焦输入区按 Cmd+Enter 提交"
+                                                    .into();
+                                        }
                                     }
                                 }
-                            }
-                            if let Some(id12) = &aid12 {
-                                let should_update_12 = doc
-                                    .editable
-                                    .graph
-                                    .actions
-                                    .get(id12)
-                                    .is_some_and(|a| {
-                                        a.id == "desktop-submit"
-                                            && a.payload.get("command").and_then(Value::as_str)
-                                                == Some("submit")
-                                    });
-                                if should_update_12 {
-                                    if let Some(a12) = doc.editable.graph.actions.get_mut(id12) {
-                                        a12.detail =
-                                            "若听写激活则先停并确认停止，再聚焦输入区按 Cmd+Enter 提交"
-                                                .into();
-                                    }
-                                }
-                            }
-                            Ok(())
-                        })?;
+                                Ok(())
+                            })?;
+                        }
+                    }
+                }
+                if let Some(lid) = first_lid {
+                    if coding_agent_layer_needs_encoder_migration(
+                        &work.document,
+                        profile_name,
+                        &lid,
+                    ) {
+                        for (slot, id, name, category, detail, kind) in
+                            canonical_encoder_model_picker_assignments()
+                        {
+                            let action = crate::draft::Action {
+                                id: id.into(),
+                                name: name.into(),
+                                category: category.into(),
+                                detail: detail.into(),
+                                payload: serde_json::to_value(kind).map_err(|e| e.to_string())?,
+                            };
+                            work.assign(&json!(pid), &json!(lid), slot, action)?;
+                        }
+                        work.assign_encoder_hold(
+                            &json!(pid),
+                            &json!(lid),
+                            canonical_encoder_hold_action(),
+                        )?;
                     }
                 }
                 created_ids.push(pid);
@@ -1862,28 +1994,21 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             let lid = p.layer_order[0].clone();
             work.mutate(|doc| {
                 let mut removed = std::collections::BTreeSet::new();
-                for binding in doc
-                    .editable
-                    .graph
-                    .layers
-                    .get_mut(&lid)
-                    .unwrap()
-                    .controls
-                    .values_mut()
-                {
+                let layer = doc.editable.graph.layers.get_mut(&lid).unwrap();
+                if let Some(cs) = &mut layer.control_settings {
+                    if let Some(hid) = cs.encoder_hold_action_id.take() {
+                        removed.insert(hid);
+                    }
+                }
+                for binding in layer.controls.values_mut() {
                     if let Some(id) = binding.action_id.take() {
                         removed.insert(id);
                     }
                 }
-                let used: std::collections::BTreeSet<_> = doc
-                    .editable
-                    .graph
-                    .layers
-                    .values()
-                    .flat_map(|l| l.controls.values().filter_map(|b| b.action_id.clone()))
-                    .collect();
                 for id in removed {
-                    if !used.contains(&id) && crate::multi::parent_references(doc, &id).is_empty() {
+                    if !doc.layer_references_action(&id)
+                        && crate::multi::parent_references(doc, &id).is_empty()
+                    {
                         doc.editable.graph.actions.remove(&id);
                         doc.editable.source_refs.remove(&id);
                     }
@@ -1941,6 +2066,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             crate::control_settings::ControlSettings {
                 joystick_mode: "logical_sectors".into(),
                 active_sectors: 4,
+                encoder_hold_action_id: None,
             },
         )?;
         work.mutate(|doc| {
@@ -1992,11 +2118,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                     if !doc.editable.graph.actions.get(&old).is_some_and(|a| {
                         crate::macro_library::is_local_macro(a) || crate::multi::is_local_multi(a)
                     }) && crate::multi::parent_references(doc, &old).is_empty()
-                        && !doc.editable.graph.layers.values().any(|l| {
-                            l.controls
-                                .values()
-                                .any(|b| b.action_id.as_ref() == Some(&old))
-                        })
+                        && !doc.layer_references_action(&old)
                     {
                         doc.editable.graph.actions.remove(&old);
                         doc.editable.source_refs.remove(&old);
@@ -2005,6 +2127,9 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
             }
             Ok(())
         })?;
+        if is_coding_agent_model_picker_starter_profile(profile_name) {
+            work.assign_encoder_hold(&json!(pid), &json!(lid), canonical_encoder_hold_action())?;
+        }
         created_ids.push(pid);
     }
     draft.mutate(|doc| {
@@ -2104,6 +2229,53 @@ pub fn antigravity_layer_needs_starter_slot_migration(
     legacy_2u_dictation || previous_starter_slots
 }
 
+pub fn coding_agent_layer_needs_encoder_migration(
+    doc: &LocalDocumentV2,
+    profile_name: &str,
+    layer_id: &str,
+) -> bool {
+    if !is_coding_agent_model_picker_starter_profile(profile_name)
+        || doc.is_protected_oai_layer(layer_id)
+    {
+        return false;
+    }
+    let Some(layer) = doc.editable.graph.layers.get(layer_id) else {
+        return false;
+    };
+    if layer
+        .control_settings
+        .as_ref()
+        .and_then(|cs| cs.encoder_hold_action_id.as_ref())
+        .is_some()
+    {
+        return false;
+    }
+    let slot_action = |slot: &str| {
+        layer
+            .controls
+            .values()
+            .find(|b| b.logical_control == slot)
+            .and_then(|b| b.action_id.as_ref())
+            .and_then(|id| doc.editable.graph.actions.get(id))
+    };
+    let is_cmd = |action: Option<&crate::draft::Action>, expected_id: &str, cmd: &str| -> bool {
+        action.is_some_and(|a| {
+            a.id == expected_id && a.payload.get("command").and_then(Value::as_str) == Some(cmd)
+        })
+    };
+    let a13 = slot_action("logical-13");
+    let a14 = slot_action("logical-14");
+    let a15 = slot_action("logical-15");
+    let legacy_scroll_trio = is_cmd(a13, "desktop-scroll-up", "scroll-up")
+        && is_cmd(a14, "desktop-scroll-down", "scroll-down")
+        && is_cmd(a15, "desktop-scroll-bottom", "scroll-to-bottom");
+    let legacy_ag_chat_trio = profile_name.trim() == "Antigravity"
+        && is_cmd(a13, "desktop-prev-chat", "prev-conversation")
+        && is_cmd(a14, "desktop-next-chat", "next-conversation")
+        && is_cmd(a15, "desktop-search", "search");
+    legacy_scroll_trio || legacy_ag_chat_trio
+}
+
 pub fn install_four_app_cockpit_preset(
     draft: &mut Draft,
     profile_id: &str,
@@ -2164,6 +2336,7 @@ pub fn install_four_app_cockpit_preset(
         crate::control_settings::ControlSettings {
             joystick_mode: "logical_sectors".into(),
             active_sectors: 4,
+            encoder_hold_action_id: None,
         },
     )?;
     let assignments = [
@@ -2378,6 +2551,7 @@ mod agent_migration_tests {
                         crate::control_settings::ControlSettings {
                             joystick_mode: "logical_sectors".into(),
                             active_sectors: 4,
+                            encoder_hold_action_id: None,
                         },
                     )
                     .unwrap();

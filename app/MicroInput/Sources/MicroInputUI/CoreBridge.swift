@@ -365,6 +365,7 @@ public final class CoreStore {
                 m.encoderCcwLabel = enc["ccw_label"] as? String ?? "上滚"
                 m.encoderCwLabel = enc["cw_label"] as? String ?? "下滚"
                 m.encoderPressLabel = enc["press_label"] as? String ?? "按压"
+                m.encoderHoldLabel = enc["hold_label"] as? String ?? ""
                 m.encoderSelectedSlot = enc["selected_slot"] as? Int
                 m.encoderRingGlowHex = enc["ring_glow_hex"] as? String ?? "#14C76B"
             }

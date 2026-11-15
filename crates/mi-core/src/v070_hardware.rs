@@ -690,7 +690,10 @@ mod tests {
         .is_err());
 
         let mut proj_json = serde_json::to_value(V070HardwareProjection::default()).unwrap();
-        proj_json.as_object_mut().unwrap().remove("active_joystick_mode");
+        proj_json
+            .as_object_mut()
+            .unwrap()
+            .remove("active_joystick_mode");
         let decoded: V070HardwareProjection = serde_json::from_value(proj_json).unwrap();
         assert_eq!(decoded.active_joystick_mode, None);
     }

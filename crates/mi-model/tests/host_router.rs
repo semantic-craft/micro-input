@@ -229,11 +229,11 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         ("AG10", "push-to-talk"),
         ("AG11", "push-to-talk"),
         ("AG12", "submit"),
-        ("AG13", "prev-conversation"),
-        ("ENC_CC", "prev-conversation"),
-        ("AG14", "next-conversation"),
-        ("ENC_CW", "next-conversation"),
-        ("ENC_CLK", "search"),
+        ("AG13", "model-picker-prev"),
+        ("ENC_CC", "model-picker-prev"),
+        ("AG14", "model-picker-next"),
+        ("ENC_CW", "model-picker-next"),
+        ("ENC_CLK", "model-picker-confirm"),
         ("AG15", "scroll-up"),
         ("AG17", "scroll-down"),
     ] {
@@ -246,6 +246,13 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
             "Antigravity {binding} must resolve to {command}"
         );
     }
+    assert_eq!(
+        mi_model::host_router::resolve_encoder_hold_action(&draft.document, Some(ag_pid), true),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-open".into(),
+        })
+    );
     for binding in ["AG05", "AG16", "AG18"] {
         assert!(
             matches!(
@@ -260,11 +267,11 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         assert!(resolve_host_action(&draft.document, Some(dsh_pid), binding, true).is_none());
     }
     for (binding, command) in [
-        ("AG13", "scroll-up"),
-        ("ENC_CC", "scroll-up"),
-        ("AG14", "scroll-down"),
-        ("ENC_CW", "scroll-down"),
-        ("ENC_CLK", "scroll-to-bottom"),
+        ("AG13", "model-picker-prev"),
+        ("ENC_CC", "model-picker-prev"),
+        ("AG14", "model-picker-next"),
+        ("ENC_CW", "model-picker-next"),
+        ("ENC_CLK", "model-picker-confirm"),
     ] {
         assert_eq!(
             resolve_host_action(&draft.document, Some(dsh_pid), binding, true),
@@ -274,6 +281,13 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
             })
         );
     }
+    assert_eq!(
+        mi_model::host_router::resolve_encoder_hold_action(&draft.document, Some(dsh_pid), true),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "dsh-desktop".into(),
+            command: "model-picker-open".into(),
+        })
+    );
     assert_eq!(
         resolve_host_action(&draft.document, Some(herdr_pid), "AG00", true).unwrap(),
         ResolvedHostAction::OpenApp {
@@ -399,6 +413,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
             mi_model::control_settings::ControlSettings {
                 joystick_mode: "logical_sectors".into(),
                 active_sectors: 2,
+                encoder_hold_action_id: None,
             },
         )
         .unwrap();
@@ -416,6 +431,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
             mi_model::control_settings::ControlSettings {
                 joystick_mode: "source".into(),
                 active_sectors: 4,
+                encoder_hold_action_id: None,
             },
         )
         .unwrap();
@@ -429,6 +445,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
                 mi_model::control_settings::ControlSettings {
                     joystick_mode: mode.into(),
                     active_sectors: 4,
+                    encoder_hold_action_id: None,
                 },
             )
             .unwrap();
@@ -646,6 +663,7 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
     }
     for (name, adapter) in [
         ("Antigravity", "antigravity"),
+        ("Codex · Micro Input", "codex"),
         ("DeepSeek Coder (DSH)", "dsh-desktop"),
     ] {
         let pid = draft
@@ -658,23 +676,13 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
             .unwrap()
             .0
             .clone();
-        let dial_expectations = if adapter == "antigravity" {
-            [
-                ("AG13", "prev-conversation"),
-                ("ENC_CC", "prev-conversation"),
-                ("AG14", "next-conversation"),
-                ("ENC_CW", "next-conversation"),
-                ("ENC_CLK", "search"),
-            ]
-        } else {
-            [
-                ("AG13", "scroll-up"),
-                ("ENC_CC", "scroll-up"),
-                ("AG14", "scroll-down"),
-                ("ENC_CW", "scroll-down"),
-                ("ENC_CLK", "scroll-to-bottom"),
-            ]
-        };
+        let dial_expectations = [
+            ("AG13", "model-picker-prev"),
+            ("ENC_CC", "model-picker-prev"),
+            ("AG14", "model-picker-next"),
+            ("ENC_CW", "model-picker-next"),
+            ("ENC_CLK", "model-picker-confirm"),
+        ];
         for (binding, expected_cmd) in dial_expectations {
             assert_eq!(
                 resolve_host_action(&draft.document, Some(&pid), binding, true),
@@ -685,6 +693,14 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
                 "{name} {binding} must resolve to {adapter}/{expected_cmd}"
             );
         }
+        assert_eq!(
+            mi_model::host_router::resolve_encoder_hold_action(&draft.document, Some(&pid), true),
+            Some(ResolvedHostAction::AgentCommand {
+                adapter: adapter.into(),
+                command: "model-picker-open".into(),
+            }),
+            "{name} encoder_hold_action_id must resolve to {adapter}/model-picker-open"
+        );
         let lid = draft.document.editable.graph.profiles[&pid].layer_order[0].clone();
         for slot in [13, 14, 15] {
             let key = mi_model::draft::binding_key(&json!(pid), &json!(lid), slot);

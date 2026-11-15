@@ -151,6 +151,18 @@ impl Draft {
     ) -> Result<String, String> {
         self.save_multi_target(id, action, additions, Some((profile, layer, slot)))
     }
+    pub fn save_multi_for_encoder_hold(
+        &mut self,
+        id: Option<&str>,
+        action: Action,
+        additions: BTreeMap<String, Action>,
+        profile: &str,
+        layer: &str,
+    ) -> Result<String, String> {
+        let saved_id = self.save_multi_target(id, action, additions, None)?;
+        self.bind_existing_encoder_hold_action(profile, layer, Some(&saved_id))?;
+        Ok(saved_id)
+    }
     pub fn save_multi(
         &mut self,
         id: &str,

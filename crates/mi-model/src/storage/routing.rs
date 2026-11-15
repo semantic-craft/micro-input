@@ -198,6 +198,13 @@ impl DocumentStore {
                     "mouse-speed:1" => "指针标准档 (1)",
                     "mouse-speed:2" => "指针快速档 (2)",
                     "mouse-speed:cycle" => "循环指针速度档",
+                    "model-picker-open" => "弹出模型选择页",
+                    "model-picker-prev" => "选择上一模型 / 档位",
+                    "model-picker-next" => "选择下一模型 / 档位",
+                    "model-picker-confirm" => "确认所选模型",
+                    "model-picker-effort-left" => "降低模型力度（左）",
+                    "model-picker-effort-right" => "选择 / 提高模型力度（右）",
+                    "model-picker-cancel" => "取消模型选择",
                     c if c.starts_with("submit-prompt:") => "粘贴指令并提交",
                     c if c.starts_with("prompt:") => "粘贴工程指令",
                     _ => "Agent 动作",
@@ -209,12 +216,33 @@ impl DocumentStore {
             let spec = crate::host_router::verified_physical_mapping_for_layout(binding, layout).unwrap();
             json!({"binding_id":binding,"control":spec.physical_control,"label":label,"available":action.is_some()})
         }).collect();
+        let encoder_hold_label = crate::host_router::resolve_encoder_hold_action(
+            &self.draft.document,
+            active_profile_id.map(String::as_str),
+            p.command_execution_enabled,
+        )
+        .map(|a| match a {
+            crate::host_router::ResolvedHostAction::AgentCommand { command, .. }
+                if command == "model-picker-open" =>
+            {
+                "弹出模型选择页".to_owned()
+            }
+            _ => profile
+                .and_then(|prof| prof.layer_order.first())
+                .and_then(|lid| graph.layers.get(lid))
+                .and_then(|l| l.control_settings.as_ref())
+                .and_then(|cs| cs.encoder_hold_action_id.as_ref())
+                .and_then(|aid| graph.actions.get(aid))
+                .map(|act| act.name.clone())
+                .unwrap_or_else(|| "长按动作".to_owned()),
+        });
         json!({"document_id":self.draft.document_id,"document_revision":self.draft.revision,
             "host_state_revision":self.host_state_revision,"profile_id":p.host_active_profile_id,
             "locked_profile_id":locked,
             "profile_name":profile.map(|p| &p.name),"execution_enabled":p.host_execution_enabled,
             "command_execution_enabled":p.command_execution_enabled,
             "bottom_row_layout":layout,
+            "encoder_hold_label":encoder_hold_label,
             "keys":keys})
     }
     pub fn update_routing(&mut self, request: RoutingRequest) -> Result<(), String> {
@@ -382,9 +410,10 @@ mod tests {
                 assert_eq!(by_id("AG10")["label"], "新建会话");
                 assert_eq!(by_id("AG11")["label"], "点击听写");
                 assert_eq!(by_id("AG12")["label"], "停止听写并提交");
-                assert_eq!(by_id("AG13")["label"], "向上滚动对话");
-                assert_eq!(by_id("AG14")["label"], "向下滚动对话");
-                assert_eq!(by_id("ENC_CLK")["label"], "跳到底部并聚焦输入");
+                assert_eq!(by_id("AG13")["label"], "选择上一模型 / 档位");
+                assert_eq!(by_id("AG14")["label"], "选择下一模型 / 档位");
+                assert_eq!(by_id("ENC_CLK")["label"], "确认所选模型");
+                assert_eq!(state["encoder_hold_label"], "弹出模型选择页");
                 continue;
             }
 
@@ -417,18 +446,20 @@ mod tests {
                 assert_eq!(by_id("AG10")["label"], "在项目中新建会话");
                 assert_eq!(by_id("AG11")["label"], "按住说话");
                 assert_eq!(by_id("AG12")["label"], "停止听写并提交");
-                assert_eq!(by_id("AG13")["label"], "上一会话（侧栏轮转）");
-                assert_eq!(by_id("AG14")["label"], "下一会话（侧栏轮转）");
-                assert_eq!(by_id("ENC_CLK")["label"], "搜索会话");
+                assert_eq!(by_id("AG13")["label"], "选择上一模型 / 档位");
+                assert_eq!(by_id("AG14")["label"], "选择下一模型 / 档位");
+                assert_eq!(by_id("ENC_CLK")["label"], "确认所选模型");
+                assert_eq!(state["encoder_hold_label"], "弹出模型选择页");
                 assert_eq!(by_id("AG15")["label"], "向上滚动对话");
                 assert_eq!(by_id("AG16")["label"], "历史后退 (command [)");
                 assert_eq!(by_id("AG17")["label"], "向下滚动对话");
                 assert_eq!(by_id("AG18")["label"], "历史前进 (command ])");
             } else {
                 assert_eq!(by_id("AG01")["label"], "聚焦输入框");
-                assert_eq!(by_id("AG13")["label"], "向上滚动对话");
-                assert_eq!(by_id("AG14")["label"], "向下滚动对话");
-                assert_eq!(by_id("ENC_CLK")["label"], "跳到底部并聚焦输入");
+                assert_eq!(by_id("AG13")["label"], "选择上一模型 / 档位");
+                assert_eq!(by_id("AG14")["label"], "选择下一模型 / 档位");
+                assert_eq!(by_id("ENC_CLK")["label"], "确认所选模型");
+                assert_eq!(state["encoder_hold_label"], "弹出模型选择页");
             }
         }
 

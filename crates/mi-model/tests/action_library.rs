@@ -195,7 +195,11 @@ fn codex_dial_actions_are_executable_and_reported_in_action_library() {
 fn agent_model_picker_and_effort_catalog_actions_are_executable_and_assignable() {
     let entries = action_library::search("", "Agent", false, &BTreeSet::new(), false);
     let expected = [
-        ("agent-model-picker-open", "弹出模型选择页", "model-picker-open"),
+        (
+            "agent-model-picker-open",
+            "弹出模型选择页",
+            "model-picker-open",
+        ),
         (
             "agent-model-picker-prev",
             "选择上一模型 / 档位",

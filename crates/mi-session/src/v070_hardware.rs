@@ -378,7 +378,9 @@ impl DeviceSession {
 
         self.guarded(async {
             let mut q = self.queue.lock().await;
-            let status = self.exchange(&mut q, Method::DeviceStatus, Value::Null).await?;
+            let status = self
+                .exchange(&mut q, Method::DeviceStatus, Value::Null)
+                .await?;
             let status_result = crate::identity_result(&status)?;
             let version = crate::firmware(status_result).unwrap_or(initial_version);
             if !mi_model::supports_v070_hardware_capabilities(&version) {
@@ -408,9 +410,8 @@ impl DeviceSession {
             let pre_write_keymap = current.keymap.bytes.to_vec();
             let smart_ref = current.smart_actions.as_ref().map(|f| f.bytes.as_ref());
 
-            let backup_path =
-                persist_immutable_v070_keymap_backup(document_dir, &pre_write_keymap)
-                    .map_err(SessionError::Config)?;
+            let backup_path = persist_immutable_v070_keymap_backup(document_dir, &pre_write_keymap)
+                .map_err(SessionError::Config)?;
 
             let parsed_cfg = mi_model::parse_device_files(&pre_write_keymap, smart_ref)
                 .map_err(|e| SessionError::Config(e.to_string()))?;

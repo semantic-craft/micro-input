@@ -212,16 +212,17 @@ struct CreatorMicroBoardView: View {
 
     private func rotaryEncoderCell(c: CanvasSliceModel) -> some View {
         let isSelected = c.selectedSurface.hasPrefix("Encoder") || (13...15).contains(c.selectedLogicalSlot)
+        let holdTip = (!c.encoderHoldLabel.isEmpty && c.encoderHoldLabel != "未绑定") ? " · 长按：\(c.encoderHoldLabel)" : ""
+        let badge = c.selectedSurface == "EncoderCcw" ? "左旋" : (c.selectedSurface == "EncoderCw" ? "右旋" : (c.selectedSurface == "EncoderHold" ? "长按" : "短按"))
         return Button {
-            if !c.selectedSurface.hasPrefix("Encoder") {
-                store.dispatch("canvas", ["SelectSurface": "EncoderCcw"])
-            } else if c.selectedSurface == "EncoderCcw" {
-                store.dispatch("canvas", ["SelectSurface": "EncoderCw"])
-            } else if c.selectedSurface == "EncoderCw" {
-                store.dispatch("canvas", ["SelectSurface": "EncoderPress"])
-            } else {
-                store.dispatch("canvas", ["SelectSurface": "EncoderCcw"])
+            let next: String
+            switch c.selectedSurface {
+            case "EncoderCcw": next = "EncoderCw"
+            case "EncoderCw": next = "EncoderPress"
+            case "EncoderPress": next = "EncoderHold"
+            default: next = "EncoderCcw"
             }
+            store.dispatch("canvas", ["SelectSurface": next])
         } label: {
             ZStack {
                 Circle()
@@ -233,10 +234,7 @@ struct CreatorMicroBoardView: View {
                         )
                     )
                     .frame(width: cellSize, height: cellSize)
-                    .overlay(
-                        Circle()
-                            .stroke(isSelected ? UITheme.accent : Color.black.opacity(0.35), lineWidth: isSelected ? 2.5 : 1)
-                    )
+                    .overlay(Circle().stroke(isSelected ? UITheme.accent : Color.black.opacity(0.35), lineWidth: isSelected ? 2.5 : 1))
                 VStack(spacing: 0) {
                     Capsule().fill(Color.white.opacity(0.92)).frame(width: 2.2, height: 12).padding(.top, 7)
                     Spacer()
@@ -245,24 +243,24 @@ struct CreatorMicroBoardView: View {
                 .rotationEffect(.degrees(c.selectedSurface == "EncoderCcw" ? -32 : (c.selectedSurface == "EncoderCw" ? 32 : 0)))
 
                 if isSelected {
-                    Text(c.selectedSurface == "EncoderCcw" ? "左旋" : (c.selectedSurface == "EncoderCw" ? "右旋" : "按下"))
-                        .font(UITheme.micro)
-                        .foregroundStyle(Color.white.opacity(0.92))
-                        .padding(.top, 14)
+                    Text(badge).font(UITheme.micro).foregroundStyle(Color.white.opacity(0.92)).padding(.top, 14)
                 }
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .focusEffectDisabled()
-        .help("无极金属旋钮（点击切换左旋 / 右旋 / 按下配置）")
+        .help("无极金属旋钮（点击切换左旋 / 右旋 / 短按 / 长按配置\(holdTip)）")
     }
 
     private func analogJoystickCell(c: CanvasSliceModel) -> some View {
         let isSelected = c.selectedSurface == "Joystick" || c.joystickIsSelected
+        let isHwMouse = c.joystickModeLabel == "硬件指针"
+        let isHwScroll = c.joystickModeLabel == "硬件滚轮"
+        let isHwMode = isHwMouse || isHwScroll
         let activeDir = c.selectedJoystickDirection
         let joyOffset: CGSize = {
-            guard isSelected else { return .zero }
+            guard isSelected, !isHwMode else { return .zero }
             switch activeDir {
             case "North": return CGSize(width: 0, height: -4)
             case "West": return CGSize(width: -4, height: 0)
@@ -271,9 +269,10 @@ struct CreatorMicroBoardView: View {
             default: return .zero
             }
         }()
-        let dirArrow: String = {
+        let capLabel: String = {
+            if isHwMouse { return "鼠标" }
+            if isHwScroll { return "滚轮" }
             switch activeDir {
-            case "North": return "↑"
             case "West": return "←"
             case "South": return "↓"
             case "East": return "→"
@@ -281,7 +280,9 @@ struct CreatorMicroBoardView: View {
             }
         }()
         return Button {
-            if !isSelected {
+            if isHwMode {
+                store.dispatch("canvas", ["SelectSurface": "Joystick"])
+            } else if !isSelected {
                 store.dispatch("canvas", ["SelectJoystickDirection": activeDir.isEmpty ? "North" : activeDir])
             } else {
                 let dirs = ["North", "West", "South", "East"]
@@ -293,10 +294,7 @@ struct CreatorMicroBoardView: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(UITheme.mutedSurface)
                     .frame(width: cellSize, height: cellSize)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(isSelected ? UITheme.accent : UITheme.hairlineBorder, lineWidth: isSelected ? 2.5 : 1)
-                    )
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(isSelected ? UITheme.accent : UITheme.hairlineBorder, lineWidth: isSelected ? 2.5 : 1))
                 ZStack {
                     Circle()
                         .fill(
@@ -308,8 +306,8 @@ struct CreatorMicroBoardView: View {
                         )
                         .frame(width: 42, height: 42)
                         .overlay(Circle().stroke(Color.black.opacity(0.35), lineWidth: 1))
-                    if isSelected {
-                        Text(dirArrow).font(UITheme.captionMedium).foregroundStyle(Color.white.opacity(0.92))
+                    if isSelected || isHwMode {
+                        Text(capLabel).font(isHwMode ? UITheme.micro : UITheme.captionMedium).foregroundStyle(Color.white.opacity(0.92))
                     }
                 }
                 .offset(joyOffset)
@@ -318,7 +316,7 @@ struct CreatorMicroBoardView: View {
         }
         .buttonStyle(.plain)
         .focusEffectDisabled()
-        .help("8 向摇杆（点击切换上 / 左 / 下 / 右方向配置）")
+        .help(isHwMode ? "模拟摇杆 · \(c.joystickModeLabel)（点击配置；长按旋钮选模型时按右调力度）" : "8 向摇杆（点击切换上 / 左 / 下 / 右方向配置）")
     }
 
     private func statusIndicatorClusterCell(c: CanvasSliceModel) -> some View {
@@ -416,6 +414,10 @@ struct CreatorMicroBoardView: View {
                     Button("上方六键设为会话键") { store.dispatch("session_strip", "BindTopSixAsSessionKeys") }
                 }
                 Button("恢复默认布局") { store.dispatch("session_strip", "RestoreDefaultLayout") }
+                Divider()
+                Button("模型选择（长按弹出模型页）") {
+                    store.dispatch("canvas", ["ApplyKnobJoystickPreset": "ModelSelectionAndMouse"])
+                }
                 if agentKind == .antigravity {
                     Divider()
                     Button("旋钮切换会话，摇杆滚动对话") {

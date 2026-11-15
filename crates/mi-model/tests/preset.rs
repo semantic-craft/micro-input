@@ -396,6 +396,7 @@ fn local_codex_migration_preserves_customized_profile_structure_and_action_metad
                         } else {
                             4
                         },
+                        encoder_hold_action_id: None,
                     },
                 )
                 .unwrap(),
@@ -676,14 +677,21 @@ fn six_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
             "AG13",
             mi_model::host_router::ResolvedHostAction::AgentCommand {
                 adapter: "antigravity".into(),
-                command: "prev-conversation".into(),
+                command: "model-picker-prev".into(),
+            },
+        ),
+        (
+            "AG14",
+            mi_model::host_router::ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "model-picker-next".into(),
             },
         ),
         (
             "ENC_CLK",
             mi_model::host_router::ResolvedHostAction::AgentCommand {
                 adapter: "antigravity".into(),
-                command: "search".into(),
+                command: "model-picker-confirm".into(),
             },
         ),
         (
@@ -730,6 +738,18 @@ fn six_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
         );
     }
 
+    assert_eq!(
+        mi_model::host_router::resolve_encoder_hold_action(
+            &doc_imported.document,
+            Some(&imported_ag_pid),
+            true,
+        ),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-open".into(),
+        })
+    );
+
     // 2. Profile-scoped and Layer-scoped export/import round-trip
     for scope_layer in [None, Some(ag_lid.as_str())] {
         let scoped_text = preset::export(&d, Some(&ag_pid), scope_layer).unwrap();
@@ -744,6 +764,17 @@ fn six_agent_presets_and_paseo_actions_round_trip_across_all_export_scopes() {
             true
         )
         .is_some());
+        assert_eq!(
+            mi_model::host_router::resolve_encoder_hold_action(
+                &scoped_imported.document,
+                Some(pid),
+                true,
+            ),
+            Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: "model-picker-open".into(),
+            })
+        );
     }
 }
 
@@ -855,4 +886,106 @@ fn antigravity_legacy_bottom_row_dictation_upgrades_to_focus_input_and_push_to_t
 
     let a9 = action_for("logical-9");
     assert_eq!(a9.id, "custom-user-key");
+}
+
+#[test]
+fn coding_agent_legacy_encoder_upgrades_losslessly_and_preserves_custom_encoder_bindings() {
+    let mut d = Draft::default();
+    let ids = preset::install_agent_starter_profiles(&mut d).unwrap();
+    let ag_pid = ids
+        .iter()
+        .find(|pid| d.document.editable.graph.profiles[*pid].name == "Antigravity")
+        .unwrap()
+        .clone();
+    let ag_lid = d.document.editable.graph.profiles[&ag_pid].layer_order[0].clone();
+    let codex_pid = ids
+        .iter()
+        .find(|pid| d.document.editable.graph.profiles[*pid].name == "Codex · Micro Input")
+        .unwrap()
+        .clone();
+    let codex_lid = d.document.editable.graph.profiles[&codex_pid].layer_order[0].clone();
+
+    // Simulate a pre-change Antigravity profile with legacy desktop-prev-chat / next-chat / search and no encoder_hold_action_id.
+    d.unassign_encoder_hold(&json!(ag_pid), &json!(ag_lid))
+        .unwrap();
+    for (slot, id, cmd) in [
+        (13, "desktop-prev-chat", "prev-conversation"),
+        (14, "desktop-next-chat", "next-conversation"),
+        (15, "desktop-search", "search"),
+    ] {
+        d.assign(
+            &json!(ag_pid),
+            &json!(ag_lid),
+            slot,
+            mi_model::draft::Action {
+                id: id.into(),
+                name: id.into(),
+                category: "Agent".into(),
+                detail: id.into(),
+                payload: json!({"type":"agent_command","adapter":"antigravity","command":cmd}),
+            },
+        )
+        .unwrap();
+    }
+
+    // Simulate user-customized encoder slot 13 on Codex · Micro Input (must NOT be overwritten).
+    d.unassign_encoder_hold(&json!(codex_pid), &json!(codex_lid))
+        .unwrap();
+    d.assign(
+        &json!(codex_pid),
+        &json!(codex_lid),
+        13,
+        mi_model::draft::Action {
+            id: "user-custom-knob".into(),
+            name: "自定义左旋".into(),
+            category: "文本".into(),
+            detail: "保留".into(),
+            payload: json!({"type":"text","text":"keep-knob"}),
+        },
+    )
+    .unwrap();
+
+    assert!(preset::coding_agent_layer_needs_encoder_migration(
+        &d.document,
+        "Antigravity",
+        &ag_lid
+    ));
+    assert!(!preset::coding_agent_layer_needs_encoder_migration(
+        &d.document,
+        "Codex · Micro Input",
+        &codex_lid
+    ));
+
+    preset::install_agent_starter_profiles(&mut d).unwrap();
+
+    assert!(!preset::coding_agent_layer_needs_encoder_migration(
+        &d.document,
+        "Antigravity",
+        &ag_lid
+    ));
+    assert_eq!(
+        mi_model::host_router::resolve_encoder_hold_action(&d.document, Some(&ag_pid), true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-open".into(),
+        })
+    );
+    assert_eq!(
+        mi_model::host_router::resolve_host_action(&d.document, Some(&ag_pid), "AG13", true),
+        Some(mi_model::host_router::ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-prev".into(),
+        })
+    );
+    // Customized Codex encoder slot 13 remains untouched.
+    let codex_slot13_aid = d.document.editable.graph.layers[&codex_lid]
+        .controls
+        .values()
+        .find(|b| b.logical_control == "logical-13")
+        .and_then(|b| b.action_id.as_ref())
+        .unwrap();
+    assert_eq!(
+        d.document.editable.graph.actions[codex_slot13_aid].id,
+        "user-custom-knob"
+    );
 }

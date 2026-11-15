@@ -465,6 +465,7 @@ fn v070_mouse_tokens_and_joystick_modes_gate_on_firmware_and_apply_cleanly() {
                         mi_model::control_settings::ControlSettings {
                             joystick_mode: joystick_mode.into(),
                             active_sectors: 0,
+                            encoder_hold_action_id: None,
                         },
                     )?;
                 }
@@ -543,6 +544,7 @@ fn v070_mouse_tokens_and_joystick_modes_gate_on_firmware_and_apply_cleanly() {
                     mi_model::control_settings::ControlSettings {
                         joystick_mode: "mouse".into(),
                         active_sectors: 0,
+                        encoder_hold_action_id: None,
                     },
                 )?;
                 d.set_control_settings(
@@ -551,6 +553,7 @@ fn v070_mouse_tokens_and_joystick_modes_gate_on_firmware_and_apply_cleanly() {
                     mi_model::control_settings::ControlSettings {
                         joystick_mode: "source".into(),
                         active_sectors: 0,
+                        encoder_hold_action_id: None,
                     },
                 )?;
                 d.assign(

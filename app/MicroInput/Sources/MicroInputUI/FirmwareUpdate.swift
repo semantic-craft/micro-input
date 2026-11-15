@@ -334,7 +334,7 @@ public struct V070SaRgbModel: Equatable {
 
 public struct V070HardwareSliceModel: Equatable {
     public var supported = false, busy = false, synced = false
-    public var activeProfile: Int?, activeLayer: Int?, batteryPercent: Int?, isCharging: Bool?
+    public var activeProfile: Int?, activeLayer: Int?, activeJoystickMode: String?, batteryPercent: Int?, isCharging: Bool?
     public var hostSleepStatus = "awake"
     public var statusMessage = "需连接 0.7.0-rc.16+ 独占固件设备"
     public var lastError: String?
@@ -354,6 +354,7 @@ public struct V070HardwareSliceModel: Equatable {
         synced = json["synced"] as? Bool ?? false
         activeProfile = v070Int(json["active_profile"])
         activeLayer = v070Int(json["active_layer"])
+        activeJoystickMode = json["active_joystick_mode"] as? String
         batteryPercent = v070Int(json["battery_percent"])
         isCharging = json["is_charging"] as? Bool
         hostSleepStatus = json["host_sleep_status"] as? String ?? hostSleepStatus
@@ -375,6 +376,7 @@ public enum V070HardwareCommand {
     public static func setAutoLayerSync(_ enabled: Bool) -> [String: Any] { ["SetAutoLayerSync": ["enabled": enabled]] }
     public static func setSessionSaRgbSync(_ enabled: Bool) -> [String: Any] { ["SetSessionSaRgbSync": ["enabled": enabled]] }
     public static func selectLayer(_ layer: Int) -> [String: Any] { ["SelectLayer": ["layer": layer]] }
+    public static func applyJoystickHardwareMode(_ mode: String) -> [String: Any] { ["ApplyJoystickHardwareMode": ["mode": mode]] }
     public static func applyMousePreset(_ preset: String) -> [String: Any] { ["ApplyMousePreset": ["preset": preset]] }
     public static func renameDevice(name: String) -> [String: Any] { ["RenameDevice": ["name": name]] }
     public static func resetSaRgb(sa: Int) -> [String: Any] { ["ResetSaRgb": ["sa": sa]] }
@@ -473,7 +475,12 @@ public struct V070HardwareSettingsSection: View {
     @State private var pmHostSleepDraft: Bool
     @State private var pmSleepAfterMinDraft: Int
 
-    private static let mousePresets: [(id: String, title: String)] = [("slow", "慢速"), ("standard", "标准"), ("fast", "快速")]
+    private static let mousePresets: [(id: String, title: String)] = [
+        ("slow", "慢速"), ("standard", "标准"), ("fast", "快速"), ("precise", "精准"),
+    ]
+    private static let joystickModes: [(id: String, title: String)] = [
+        ("mouse", "硬件 MOUSE"), ("scroll", "硬件 SCROLL"), ("logical_sectors", "宿主扇区"),
+    ]
     private static let baseSleepMinutes = [1, 5, 10, 15, 30, 60, 120, 240, 480, 1440]
 
     public init(model: V070HardwareSliceModel, dispatch: @escaping (Any) -> Void) {
@@ -565,6 +572,16 @@ public struct V070HardwareSettingsSection: View {
                 .font(UITheme.caption)
                 .foregroundStyle(UITheme.textSecondary)
             SettingsCard {
+                SettingsRow("摇杆固件模式", subtitle: "当前键盘固件：\(joystickModeDisplayName(model.activeJoystickMode))", showsDivider: true) {
+                    HStack(spacing: 6) {
+                        ForEach(Self.joystickModes, id: \.id) { item in
+                            Button(item.title) { dispatch(V070HardwareCommand.applyJoystickHardwareMode(item.id)) }
+                                .surfaceButton(model.activeJoystickMode == item.id ? .primary : .secondary)
+                                .disabled(model.busy)
+                                .accessibilityIdentifier("v070-joystick-mode-\(item.id)")
+                        }
+                    }
+                }
                 SettingsRow("速度预设", subtitle: "当前档位：\(presetDisplayName(model.mouse.preset))（立即生效）", showsDivider: true) {
                     HStack(spacing: 6) {
                         ForEach(Self.mousePresets, id: \.id) { item in
@@ -763,7 +780,17 @@ public struct V070HardwareSettingsSection: View {
         case "slow": return "慢速"
         case "standard": return "标准"
         case "fast": return "快速"
+        case "precise": return "精准"
         default: return "自定义"
+        }
+    }
+
+    private func joystickModeDisplayName(_ raw: String?) -> String {
+        switch raw {
+        case "mouse": return "硬件指针 (MOUSE)"
+        case "scroll": return "硬件滚轮 (SCROLL)"
+        case "logical_sectors": return "宿主逻辑扇区"
+        default: return "待同步"
         }
     }
 }

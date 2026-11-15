@@ -259,8 +259,11 @@ final class FirmwareUpdateTests: XCTestCase {
         let selectLayer = V070HardwareCommand.selectLayer(5)["SelectLayer"] as? [String: Any]
         XCTAssertEqual(selectLayer?["layer"] as? Int, 5)
 
-        let preset = V070HardwareCommand.applyMousePreset("fast")["ApplyMousePreset"] as? [String: Any]
-        XCTAssertEqual(preset?["preset"] as? String, "fast")
+        let joyHw = V070HardwareCommand.applyJoystickHardwareMode("mouse")["ApplyJoystickHardwareMode"] as? [String: Any]
+        XCTAssertEqual(joyHw?["mode"] as? String, "mouse")
+
+        let preset = V070HardwareCommand.applyMousePreset("precise")["ApplyMousePreset"] as? [String: Any]
+        XCTAssertEqual(preset?["preset"] as? String, "precise")
 
         let mouseCfg = V070HardwareCommand.applyMouseConfig(
             moveDelta: 10, maxSpeed: 20, wheelDelta: 2, wheelMaxSpeed: 10,
@@ -307,7 +310,8 @@ final class FirmwareUpdateTests: XCTestCase {
         let allCommands: [Any] = [
             V070HardwareCommand.refresh(),
             V070HardwareCommand.selectLayer(5),
-            V070HardwareCommand.applyMousePreset("fast"),
+            V070HardwareCommand.applyJoystickHardwareMode("mouse"),
+            V070HardwareCommand.applyMousePreset("precise"),
             V070HardwareCommand.applyMouseConfig(
                 moveDelta: 10, maxSpeed: 20, wheelDelta: 2, wheelMaxSpeed: 10,
                 stickSpeed: 4, stickScroll: 80
@@ -486,12 +490,13 @@ final class FirmwareUpdateTests: XCTestCase {
     func testV070HardwareAndFirmwareSlicesRemainIndependent() throws {
         let parsed = CoreStore.parseProjection([
             "firmware": ["channel": "prerelease", "current_version": "0.7.0-rc.16"],
-            "v070_hardware": ["supported": true, "active_layer": 3],
+            "v070_hardware": ["supported": true, "active_layer": 3, "active_joystick_mode": "mouse"],
         ])
         XCTAssertEqual(parsed.firmware.channel, "prerelease")
         XCTAssertEqual(parsed.firmware.currentVersion, "0.7.0-rc.16")
         XCTAssertTrue(parsed.v070Hardware.supported)
         XCTAssertEqual(parsed.v070Hardware.activeLayer, 3)
+        XCTAssertEqual(parsed.v070Hardware.activeJoystickMode, "mouse")
 
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mi-v070-slice-isolation-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

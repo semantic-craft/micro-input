@@ -197,6 +197,15 @@ impl LocalDocumentV2 {
             if !exact_order(&l.control_order, l.controls.keys().cloned()) {
                 return Err("控件顺序引用不完整或重复".into());
             }
+            if let Some(settings) = &l.control_settings {
+                if settings
+                    .encoder_hold_action_id
+                    .as_ref()
+                    .is_some_and(|a| !g.actions.contains_key(a))
+                {
+                    return Err(format!("层 {id} 引用了不存在的旋钮长按动作"));
+                }
+            }
             let mut logical = BTreeSet::new();
             for (id, b) in &l.controls {
                 add(id)?;
@@ -440,6 +449,28 @@ impl LocalDocumentV2 {
             control_order: vec![],
             controls: BTreeMap::new(),
         };
+        if let Some(settings) = &mut layer.control_settings {
+            if let Some(aid) = settings.encoder_hold_action_id.clone() {
+                let is_shared = self.editable.graph.actions.get(&aid).is_some_and(|a| {
+                    crate::macro_library::is_local_macro(a) || crate::multi::is_local_multi(a)
+                });
+                if !is_shared {
+                    let mapped = if let Some(id) = action_map.get(&aid) {
+                        id.clone()
+                    } else {
+                        let id = new_id();
+                        self.editable
+                            .graph
+                            .actions
+                            .insert(id.clone(), self.editable.graph.actions[&aid].clone());
+                        self.copy_source(&aid, &id);
+                        action_map.insert(aid, id.clone());
+                        id
+                    };
+                    settings.encoder_hold_action_id = Some(mapped);
+                }
+            }
+        }
         self.copy_source(lid, &id);
         for bid in old.control_order {
             let mut b = old.controls[&bid].clone();
@@ -604,14 +635,33 @@ impl LocalDocumentV2 {
         }
         Ok(())
     }
+    pub fn layer_references_action(&self, action_id: &str) -> bool {
+        self.editable.graph.layers.values().any(|l| {
+            l.controls
+                .values()
+                .any(|b| b.action_id.as_deref() == Some(action_id))
+                || l.control_settings
+                    .as_ref()
+                    .and_then(|cs| cs.encoder_hold_action_id.as_deref())
+                    == Some(action_id)
+        })
+    }
     fn remove_orphan_actions(&mut self) {
         let mut used: BTreeSet<_> = self
             .editable
             .graph
             .layers
             .values()
-            .flat_map(|l| l.controls.values())
-            .filter_map(|b| b.action_id.clone())
+            .flat_map(|l| {
+                l.controls
+                    .values()
+                    .filter_map(|b| b.action_id.clone())
+                    .chain(
+                        l.control_settings
+                            .as_ref()
+                            .and_then(|cs| cs.encoder_hold_action_id.clone()),
+                    )
+            })
             .collect();
         for a in self.editable.graph.actions.values() {
             if let Some(m) = crate::multi::local_multi(a) {

@@ -3,7 +3,10 @@ use crate::{
     board_layers::{BoardLayer, BoardLayerPlan, BoardLayerRoute, NativeLayerOwner},
     direct_controls::{CONTROL_BINDINGS, DIRECT_CONTROLS},
     document::LocalDocumentV2,
-    host_router::{resolve_host_action_with_layout, BottomRowLayout, ResolvedHostAction},
+    host_router::{
+        resolve_encoder_hold_action, resolve_host_action_with_layout, BottomRowLayout,
+        ResolvedHostAction,
+    },
     parse_device_files,
 };
 use serde::{Deserialize, Serialize};
@@ -17,6 +20,8 @@ pub struct AppliedHostLayer {
     pub profile_id: String,
     pub adapter: String,
     pub actions: [Option<ResolvedHostAction>; 20],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_hold_action: Option<ResolvedHostAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joystick_mode: Option<String>,
 }
@@ -241,8 +246,7 @@ impl AppliedSixLayerPlan {
         else {
             return Err("第 1 层必须为 Codex 原生方案".into());
         };
-        if crate::board_layers::native_owner(doc, codex_profile_id)
-            != Some(NativeLayerOwner::Codex)
+        if crate::board_layers::native_owner(doc, codex_profile_id) != Some(NativeLayerOwner::Codex)
         {
             return Err("第 1 层未引用受保护的 Codex 原生方案".into());
         }
@@ -282,17 +286,11 @@ impl AppliedSixLayerPlan {
                 ));
             }
             let joystick_mode = profile_hardware_joystick_mode(doc, profile_id);
-            let actions = std::array::from_fn(|slot| {
-                let mut action = resolve_host_action_with_layout(
-                    doc,
-                    Some(profile_id),
-                    CONTROL_BINDINGS[slot],
-                    true,
-                    command_execution,
-                    layout,
-                )?;
+            let normalize_action = |mut action: ResolvedHostAction| -> ResolvedHostAction {
                 if let ResolvedHostAction::AgentCommand { adapter, command } = &mut action {
-                    if adapter == "host" && !crate::is_host_mouse_command(command) {
+                    if matches!(adapter.as_str(), "host" | "active-agent")
+                        && !crate::is_host_mouse_command(command)
+                    {
                         *adapter = adapters[index].into();
                     }
                     if matches!(command.as_str(), "push-to-talk" | "dictation") {
@@ -321,15 +319,34 @@ impl AppliedSixLayerPlan {
                     }
                     _ => {}
                 }
-                Some(action)
-            });
-            if actions.iter().flatten().any(|action| {
-                matches!(
-                    action,
-                    ResolvedHostAction::MacroSequence { .. }
-                        | ResolvedHostAction::Shortcut { key_code: 0x3f, .. }
+                action
+            };
+            let actions = std::array::from_fn(|slot| {
+                resolve_host_action_with_layout(
+                    doc,
+                    Some(profile_id),
+                    CONTROL_BINDINGS[slot],
+                    true,
+                    command_execution,
+                    layout,
                 )
-            }) {
+                .map(&normalize_action)
+            });
+            let encoder_hold_action =
+                resolve_encoder_hold_action(doc, Some(profile_id), command_execution)
+                    .map(&normalize_action);
+            if actions
+                .iter()
+                .flatten()
+                .chain(encoder_hold_action.iter())
+                .any(|action| {
+                    matches!(
+                        action,
+                        ResolvedHostAction::MacroSequence { .. }
+                            | ResolvedHostAction::Shortcut { key_code: 0x3f, .. }
+                    )
+                })
+            {
                 return Err(format!(
                     "{} 含需要全局按住或宏的动作，六层点击模式不支持",
                     names[index]
@@ -339,6 +356,7 @@ impl AppliedSixLayerPlan {
                 profile_id: profile_id.clone(),
                 adapter: adapters[index].into(),
                 actions,
+                encoder_hold_action,
                 joystick_mode,
             });
         }
@@ -428,12 +446,8 @@ const LAYER3_VENDOR_SLOTS: [&str; 6] = [
     "KV_OAI_AG17",
 ];
 
-const SINGLE_LAYER_OAI_SECTORS: [&str; 4] = [
-    "KV_OAI_AG15",
-    "KV_OAI_AG16",
-    "KV_OAI_AG17",
-    "KV_OAI_AG18",
-];
+const SINGLE_LAYER_OAI_SECTORS: [&str; 4] =
+    ["KV_OAI_AG15", "KV_OAI_AG16", "KV_OAI_AG17", "KV_OAI_AG18"];
 
 fn four_sector_radial_joystick(tokens: [&str; 4]) -> Value {
     json!({
@@ -731,9 +745,7 @@ fn normalize_requested_six_layer_joystick_mode(
         "radial" | "sectors" | "logical_sectors" => None,
         other => return Err(format!("不支持的摇杆硬件模式：{other}")),
     };
-    if normalized.is_some()
-        && firmware.is_some_and(|fw| !crate::supports_v070_mouse_tokens(fw))
-    {
+    if normalized.is_some() && firmware.is_some_and(|fw| !crate::supports_v070_mouse_tokens(fw)) {
         return Err("原生摇杆 MOUSE/SCROLL 模式需要固件 0.7.0-rc.16 或更高版本".into());
     }
     Ok(normalized)
@@ -778,9 +790,7 @@ pub fn compile_six_layer_profile_for_firmware(
                 .ok_or("六层数组缺失")?;
             if !native_layout_with_gate(&layers[0]["layout"], allow_v070_joystick) {
                 if !allow_v070_joystick && native_layout_with_gate(&layers[0]["layout"], true) {
-                    return Err(
-                        "原生摇杆 MOUSE/SCROLL 模式需要固件 0.7.0-rc.16 或更高版本".into(),
-                    );
+                    return Err("原生摇杆 MOUSE/SCROLL 模式需要固件 0.7.0-rc.16 或更高版本".into());
                 }
                 return Err("六层专用方案同名、重复或已修改，原映射保留".into());
             }
@@ -1094,10 +1104,7 @@ pub fn patch_keymap_joystick_hardware_mode(
 
     let mut edits: Vec<(usize, usize, Vec<u8>)> = Vec::new();
     for li in layer_indices {
-        let raw_layer = layers_raw
-            .get(li)
-            .copied()
-            .ok_or("目标 Layer 原字节缺失")?;
+        let raw_layer = layers_raw.get(li).copied().ok_or("目标 Layer 原字节缺失")?;
         let layer_fields = object(raw_layer)?;
         let layout_raw = field(&layer_fields, "layout")?;
         let layout_fields = object(layout_raw)?;

@@ -54,7 +54,7 @@ pub fn canonical_desktop_agent_rank(name: &str) -> Option<usize> {
 pub fn desktop_agent_for_profile_name(name: &str) -> Option<(&'static str, &'static str)> {
     match name.trim() {
         "Antigravity" => Some(("antigravity", "com.google.antigravity")),
-        "Codex" => Some(("codex", "com.openai.codex")),
+        "Codex" | "Codex · Micro Input" => Some(("codex", "com.openai.codex")),
         "DeepSeek Coder (DSH)" | "DSH" | "DeepSeek Harness" | "Deepseek Harness" => {
             Some(("dsh-desktop", "com.deepseek.dsh"))
         }
@@ -565,9 +565,10 @@ fn convert_action(
             }
             let resolved_adapter = if adapter == "host" && crate::is_host_mouse_command(&command) {
                 adapter
-            } else if adapter == "host"
+            } else if matches!(adapter.as_str(), "host" | "active-agent")
                 && (command == "submit"
                     || command == "focus-input"
+                    || command.starts_with("model-picker-")
                     || command.starts_with("prompt:")
                     || command.starts_with("submit-prompt:"))
             {
@@ -723,6 +724,40 @@ pub fn resolve_host_action_with_layout(
         fallback_bundle.as_deref(),
         command_execution_enabled,
     )
+}
+
+pub fn resolve_encoder_hold_action_for_layer(
+    doc: &LocalDocumentV2,
+    profile_id: &str,
+    layer_id: &str,
+    command_execution_enabled: bool,
+) -> Option<ResolvedHostAction> {
+    let profile = doc.editable.graph.profiles.get(profile_id)?;
+    let layer = doc.editable.graph.layers.get(layer_id)?;
+    let hold_aid = layer
+        .control_settings
+        .as_ref()?
+        .encoder_hold_action_id
+        .as_ref()?;
+    let action = doc.editable.graph.actions.get(hold_aid)?;
+    let fallback_bundle = profile_open_app_bundle_id(doc, profile_id);
+    convert_action(
+        action,
+        Some(&profile.name),
+        fallback_bundle.as_deref(),
+        command_execution_enabled,
+    )
+}
+
+pub fn resolve_encoder_hold_action(
+    doc: &LocalDocumentV2,
+    host_active_profile_id: Option<&str>,
+    command_execution_enabled: bool,
+) -> Option<ResolvedHostAction> {
+    let pid = host_active_profile_id?;
+    let profile = doc.editable.graph.profiles.get(pid)?;
+    let lid = profile.layer_order.first()?;
+    resolve_encoder_hold_action_for_layer(doc, pid, lid, command_execution_enabled)
 }
 
 pub fn resolve_host_action_with_command_consent(

@@ -375,9 +375,9 @@ fn test_four_synthetic_scenarios_match_verify_offline_contracts() {
         .filter_map(|r| r["detail"].as_str().map(str::to_string))
         .collect();
     for expected in [
-        "antigravity/prev-conversation",
-        "antigravity/next-conversation",
-        "antigravity/search",
+        "antigravity/model-picker-prev",
+        "antigravity/model-picker-next",
+        "antigravity/model-picker-confirm",
         "no_newline=true (bytes=8)",
     ] {
         assert!(details.contains(expected), "missing detail {expected}");

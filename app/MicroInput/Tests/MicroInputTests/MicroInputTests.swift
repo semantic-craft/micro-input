@@ -1108,6 +1108,38 @@ final class MicroInputTests: XCTestCase {
         XCTAssertEqual(statusSlice.preferredDeviceSerial, "override-key")
         XCTAssertEqual(statusSlice.candidateDevices.first?.selectorKey, "override-key")
     }
+
+    @MainActor
+    func testEncoderHoldModelSelectionPresetAndJoystickMouseModeRoundtrip() throws {
+        let dir = try makeIsolatedTempDir("encoder-hold-joystick-mouse")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = CoreStore(isolatedDirectory: dir.path)
+
+        // Default canonical Antigravity preset defaults top-left encoder to Model Selection
+        XCTAssertEqual(store.canvas.encoderHoldLabel, "弹出模型")
+        XCTAssertEqual(store.canvas.encoderPressLabel, "确认模型")
+
+        // Select EncoderHold surface and inspect/edit its action independently of short press
+        store.dispatch("canvas", ["SelectSurface": "EncoderHold"])
+        XCTAssertEqual(store.canvas.selectedSurface, "EncoderHold")
+        XCTAssertEqual(store.inspector.selectedSurface, "EncoderHold")
+        XCTAssertEqual(store.inspector.editableInspector?.boundActionId, "agent-model-picker-open")
+
+        store.dispatch("inspector", "UnassignSelectedSlot")
+        XCTAssertEqual(store.canvas.encoderHoldLabel, "未绑定")
+        XCTAssertEqual(store.canvas.encoderPressLabel, "确认模型")
+
+        // Apply ModelSelectionAndMouse preset to restore encoder model selection
+        store.dispatch("canvas", ["ApplyKnobJoystickPreset": "ModelSelectionAndMouse"])
+        XCTAssertEqual(store.canvas.encoderHoldLabel, "弹出模型")
+
+        // Switch top-right joystick to 0.7.0 hardware MOUSE mode and verify encoderHoldLabel survives
+        store.dispatch("canvas", ["SelectSurface": "Joystick"])
+        store.dispatch("inspector", ["SetJoystickMode": "mouse"])
+        XCTAssertEqual(store.canvas.joystickModeLabel, "硬件指针")
+        XCTAssertEqual(store.inspector.editableInspector?.joystickMode, "mouse")
+        XCTAssertEqual(store.canvas.encoderHoldLabel, "弹出模型")
+    }
 }
 
 @MainActor
