@@ -34,6 +34,7 @@ struct Fixture {
     after_focus: Option<fn(&mut Fixture)>,
     finish_reads_remaining: Option<usize>,
     include_fast_mode: bool,
+    window_key_error: Option<String>,
 }
 #[derive(Clone)]
 struct Provider(Arc<Mutex<Fixture>>);
@@ -82,6 +83,7 @@ impl Provider {
             after_focus: None,
             finish_reads_remaining: None,
             include_fast_mode: true,
+            window_key_error: None,
         })))
     }
     fn dsh() -> Self {
@@ -290,10 +292,13 @@ impl ManagedAxProvider for Provider {
         &mut self,
         target: &ManagedWindowIdentity,
         key_code: u16,
-        _: &[String],
+        modifiers: &[String],
     ) -> Result<(), String> {
         let mut state = self.0.lock().unwrap();
         assert_eq!(*target, state.window.identity);
+        if let Some(error) = &state.window_key_error {
+            return Err(error.clone());
+        }
         if key_code == 0x35 {
             state.window.controls.retain(|c| c.role != "AXMenuItem");
             state.events.push("window_key:escape".into());
@@ -301,8 +306,19 @@ impl ManagedAxProvider for Provider {
             state.events.push("window_key:arrow_left".into());
         } else if key_code == 0x7C {
             state.events.push("window_key:arrow_right".into());
-        } else {
+        } else if key_code == 0x7E {
+            state.events.push("window_key:arrow_up".into());
+        } else if key_code == 0x7D {
+            state.events.push("window_key:arrow_down".into());
+        } else if key_code == 0x24 {
+            state.events.push("window_key:return".into());
+        } else if modifiers.is_empty() {
             state.events.push(format!("window_key:{key_code:x}"));
+        } else {
+            state.events.push(format!(
+                "window_key:{}:{key_code:x}",
+                modifiers.join("+")
+            ));
         }
         Ok(())
     }
@@ -821,6 +837,12 @@ impl HostOsDriver for Driver {
     }
     fn toggle_live_voice(&self, _: &str) -> Result<(), String> {
         unreachable!()
+    }
+    fn open_model_picker(&self, adapter: &str) -> Result<(), String> {
+        self.controls.open_model_picker(adapter)
+    }
+    fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        self.controls.send_model_picker_key(adapter, key_code)
     }
 }
 
@@ -1944,4 +1966,228 @@ fn codex_fast_mode_requires_positive_readback_after_press() {
             vec!["capture:com.openai.codex", "press:Enable fast mode"]
         );
     }
+}
+
+#[test]
+fn model_picker_navigation_keys_deliver_direct_window_keys_without_refocusing_composer() {
+    for (bundle, adapter) in [
+        ("com.google.antigravity", "antigravity"),
+        ("com.openai.codex", "codex"),
+        ("com.deepseek.dsh", "dsh-desktop"),
+    ] {
+        let provider = Provider::with_target(bundle, "Dictate");
+        let executor = LiveHostActionExecutor::new(Driver {
+            controls: provider.controls(),
+            trusted: true,
+        });
+        for (command, expected_event) in [
+            ("model-picker-prev", "window_key:arrow_up"),
+            ("model-picker-next", "window_key:arrow_down"),
+            ("model-picker-effort-right", "window_key:arrow_right"),
+            ("model-picker-effort-left", "window_key:arrow_left"),
+            ("model-picker-confirm", "window_key:return"),
+            ("model-picker-cancel", "window_key:escape"),
+        ] {
+            let receipt = executor.execute(
+                "Local Antigravity",
+                "ENC_CW",
+                &ResolvedHostAction::AgentCommand {
+                    adapter: adapter.into(),
+                    command: command.into(),
+                },
+            );
+            assert_eq!(
+                receipt.outcome, "executed",
+                "{adapter}/{command}: {}",
+                receipt.detail
+            );
+            assert!(
+                provider.events().iter().any(|ev| ev == expected_event),
+                "missing {expected_event} in {:?}",
+                provider.events()
+            );
+        }
+        assert!(
+            !provider.events().iter().any(|ev| ev.starts_with("focus:")),
+            "popup navigation must never refocus composer for {adapter}: {:?}",
+            provider.events()
+        );
+    }
+}
+
+#[test]
+fn model_picker_open_supports_antigravity_codex_and_dsh_with_ax_fallbacks() {
+    // 1. Antigravity: composer-focused Cmd+/ shortcut.
+    let ag_provider = Provider::with_target("com.google.antigravity", "Start dictation");
+    let ag_executor = LiveHostActionExecutor::new(Driver {
+        controls: ag_provider.controls(),
+        trusted: true,
+    });
+    for cmd in ["model", "model-picker-open"] {
+        let receipt = ag_executor.execute(
+            "Local Antigravity",
+            "ENC_CLK",
+            &ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: cmd.into(),
+            },
+        );
+        assert_eq!(receipt.outcome, "executed", "{cmd}: {}", receipt.detail);
+    }
+    assert_eq!(
+        ag_provider
+            .events()
+            .iter()
+            .filter(|ev| ev.as_str() == "targeted_shortcut")
+            .count(),
+        2
+    );
+
+    // 2a. Codex: Ctrl+Shift+M direct window key without refocusing composer.
+    let codex_provider = Provider::codex();
+    let codex_executor = LiveHostActionExecutor::new(Driver {
+        controls: codex_provider.controls(),
+        trusted: true,
+    });
+    let codex_receipt = codex_executor.execute(
+        "Local Codex",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "codex".into(),
+            command: "model-picker-open".into(),
+        },
+    );
+    assert_eq!(codex_receipt.outcome, "executed");
+    assert!(codex_provider
+        .events()
+        .contains(&"window_key:control+shift:2e".to_string()));
+    assert!(!codex_provider
+        .events()
+        .iter()
+        .any(|ev| ev.starts_with("focus:")));
+
+    // 2b. Codex: falls back to AXPopUpButton + "Select model" when send_window_key is unavailable.
+    let codex_ax_provider = Provider::codex();
+    {
+        let mut st = codex_ax_provider.0.lock().unwrap();
+        st.window_key_error = Some("blocked:window_key_unavailable".into());
+        st.window.controls.push(ManagedControl {
+            id: 20,
+            role: "AXPopUpButton".into(),
+            label: "GPT-5.4 Standard".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        });
+    }
+    let codex_ax_executor = LiveHostActionExecutor::new(Driver {
+        controls: codex_ax_provider.controls(),
+        trusted: true,
+    });
+    let codex_ax_receipt = codex_ax_executor.execute(
+        "Local Codex",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "model-picker-open".into(),
+        },
+    );
+    assert_eq!(codex_ax_receipt.outcome, "executed");
+    assert!(codex_ax_provider
+        .events()
+        .contains(&"press:GPT-5.4 Standard".to_string()));
+    assert!(codex_ax_provider
+        .events()
+        .contains(&"press:Select model".to_string()));
+
+    // 3a. DSH: presses AXPopUpButton model trigger directly without composer refocus.
+    let dsh_provider = Provider::dsh();
+    dsh_provider
+        .0
+        .lock()
+        .unwrap()
+        .window
+        .controls
+        .push(ManagedControl {
+            id: 30,
+            role: "AXPopUpButton".into(),
+            label: "DeepSeek-R1".into(),
+            enabled: true,
+            pressable: true,
+            editable: false,
+            focused: false,
+        });
+    let dsh_executor = LiveHostActionExecutor::new(Driver {
+        controls: dsh_provider.controls(),
+        trusted: true,
+    });
+    let dsh_receipt = dsh_executor.execute(
+        "Local DeepSeek",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "dsh-desktop".into(),
+            command: "model".into(),
+        },
+    );
+    assert_eq!(dsh_receipt.outcome, "executed");
+    assert!(dsh_provider
+        .events()
+        .contains(&"press:DeepSeek-R1".to_string()));
+    assert!(!dsh_provider
+        .events()
+        .iter()
+        .any(|ev| ev.starts_with("focus:")));
+
+    // 3b. DSH: falls back to Cmd+/ shortcut when no AX model trigger is present.
+    let dsh_fallback_provider = Provider::dsh();
+    let dsh_fallback_executor = LiveHostActionExecutor::new(Driver {
+        controls: dsh_fallback_provider.controls(),
+        trusted: true,
+    });
+    let dsh_fallback_receipt = dsh_fallback_executor.execute(
+        "Local DeepSeek",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "dsh-desktop".into(),
+            command: "model-picker-open".into(),
+        },
+    );
+    assert_eq!(dsh_fallback_receipt.outcome, "executed");
+    assert!(dsh_fallback_provider
+        .events()
+        .contains(&"targeted_shortcut".to_string()));
+}
+
+#[test]
+fn model_picker_mouse_capture_bridge_is_noop_in_isolated_mode_and_drains_cleanly() {
+    use mi_macos::executor::{MacHostExecutor, MacOsSystemDriver, RecordingOsDriver};
+
+    // Isolated MacHostExecutor must never install a live CGEventTap and drains empty.
+    let isolated_exec = MacHostExecutor::new(MacOsSystemDriver::new_isolated());
+    isolated_exec.set_model_picker_mouse_capture(true);
+    assert!(isolated_exec.drain_model_picker_mouse_deltas().is_empty());
+    isolated_exec.set_model_picker_mouse_capture(false);
+    assert!(isolated_exec.drain_model_picker_mouse_deltas().is_empty());
+
+    // RecordingOsDriver captures deltas while enabled and clears on disable / stop_owned_actions.
+    let rec_driver = RecordingOsDriver::new(true);
+    let rec_exec = LiveHostActionExecutor::new(rec_driver.clone());
+    rec_driver.push_model_picker_mouse_delta(16.0, 2.0);
+    assert!(rec_exec.drain_model_picker_mouse_deltas().is_empty());
+
+    rec_exec.set_model_picker_mouse_capture(true);
+    assert!(rec_driver.is_model_picker_mouse_capture_enabled());
+    rec_driver.push_model_picker_mouse_delta(18.0, 1.0);
+    rec_driver.push_model_picker_mouse_delta(14.0, -2.0);
+    assert_eq!(
+        rec_exec.drain_model_picker_mouse_deltas(),
+        vec![(18.0, 1.0), (14.0, -2.0)]
+    );
+    assert!(rec_exec.drain_model_picker_mouse_deltas().is_empty());
+
+    rec_driver.push_model_picker_mouse_delta(-30.0, 0.0);
+    rec_exec.stop_owned_actions().unwrap();
+    assert!(!rec_driver.is_model_picker_mouse_capture_enabled());
+    assert!(rec_exec.drain_model_picker_mouse_deltas().is_empty());
 }

@@ -29,6 +29,8 @@ pub struct ActivationPayload {
     pub generation: String,
     pub control: u8,
     pub action: ActivationKind,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub released: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -43,6 +45,17 @@ impl ActivationPayload {
             generation: generation.into(),
             control,
             action: ActivationKind::Activate,
+            released: false,
+        }
+    }
+
+    pub fn new_release(generation: &str, control: u8) -> Self {
+        Self {
+            version: 1,
+            generation: generation.into(),
+            control,
+            action: ActivationKind::Activate,
+            released: true,
         }
     }
 }
@@ -51,6 +64,7 @@ impl ActivationPayload {
 pub struct Activation {
     pub control: u8,
     pub layer_override: Option<u8>,
+    pub released: bool,
     pub generation: String,
     /// Receiver order, not a HID sequence number.
     pub received_sequence: u64,
@@ -180,6 +194,7 @@ impl UserCommandReceiver {
                     pending.events.push_back(Activation {
                         control: payload.control,
                         layer_override: None,
+                        released: payload.released,
                         generation: generation.clone(),
                         received_sequence,
                         received_at: Instant::now(),
@@ -227,17 +242,31 @@ impl UserCommandReceiver {
         if control >= 60 {
             return false;
         }
-        self.push_activation(control, None)
+        self.push_activation(control, None, false)
+    }
+
+    pub fn push_vendor_release(&self, control: u8) -> bool {
+        if control >= 60 {
+            return false;
+        }
+        self.push_activation(control, None, true)
     }
 
     pub fn push_layer1_vendor_activation(&self, slot: u8) -> bool {
         if slot >= 20 {
             return false;
         }
-        self.push_activation(slot, Some(1))
+        self.push_activation(slot, Some(1), false)
     }
 
-    fn push_activation(&self, control: u8, layer_override: Option<u8>) -> bool {
+    pub fn push_layer1_vendor_release(&self, slot: u8) -> bool {
+        if slot >= 20 {
+            return false;
+        }
+        self.push_activation(slot, Some(1), true)
+    }
+
+    fn push_activation(&self, control: u8, layer_override: Option<u8>, released: bool) -> bool {
         if self.stop.load(Ordering::Acquire) {
             return false;
         }
@@ -250,6 +279,7 @@ impl UserCommandReceiver {
         pending.events.push_back(Activation {
             control,
             layer_override,
+            released,
             generation: self.generation.clone(),
             received_sequence,
             received_at: Instant::now(),
@@ -523,5 +553,39 @@ mod tests {
         assert!(parent.exists());
         drop(receiver);
         assert!(!parent.exists());
+    }
+
+    #[test]
+    fn release_payload_roundtrips_and_press_payload_omits_released_field() {
+        let receiver = UserCommandReceiver::bind().unwrap();
+        receiver.arm().unwrap();
+        let press = serde_json::to_value(ActivationPayload::new(receiver.generation(), 15)).unwrap();
+        assert!(press.get("released").is_none());
+        let release =
+            serde_json::to_value(ActivationPayload::new_release(receiver.generation(), 15))
+                .unwrap();
+        assert_eq!(release.get("released"), Some(&serde_json::Value::Bool(true)));
+
+        send(&receiver, press);
+        send(&receiver, release);
+        settle();
+
+        let events = receiver.take().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!((events[0].control, events[0].released), (15, false));
+        assert_eq!((events[1].control, events[1].released), (15, true));
+
+        assert!(receiver.push_layer1_vendor_activation(15));
+        assert!(receiver.push_layer1_vendor_release(15));
+        let l1_events = receiver.take().unwrap();
+        assert_eq!(l1_events.len(), 2);
+        assert_eq!(
+            (l1_events[0].control, l1_events[0].layer_override, l1_events[0].released),
+            (15, Some(1), false)
+        );
+        assert_eq!(
+            (l1_events[1].control, l1_events[1].layer_override, l1_events[1].released),
+            (15, Some(1), true)
+        );
     }
 }

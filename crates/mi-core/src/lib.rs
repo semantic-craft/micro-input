@@ -1,5 +1,6 @@
 pub mod canvas;
 pub mod editors;
+pub mod encoder_model_picker;
 pub mod firmware_catalog;
 pub mod firmware_flash;
 pub mod firmware_update;
@@ -30,6 +31,12 @@ pub use editors::{
     MacroEditorModalProjection, MacroStepDraft, MultiBranchKind, MultiBranchSlotProjection,
     MultiBranchTarget, MultiEditorModalProjection, MultiTargetOptionProjection,
     ReconnectComparisonModalProjection,
+};
+pub use encoder_model_picker::{
+    ActiveModelPickerSession, EncoderHoldState, EncoderHoldTimerOutcome, EncoderModelPicker,
+    EncoderModelPickerState, EncoderReleaseOutcome, EncoderTurnOutcome, ModelPickerCommand,
+    ENCODER_HOLD_THRESHOLD, MODEL_PICKER_IDLE_TIMEOUT, MOUSE_FLICK_COOLDOWN,
+    MOUSE_FLICK_DX_THRESHOLD, MOUSE_FLICK_HORIZONTAL_DOMINANCE, MOUSE_FLICK_IDLE_RESET,
 };
 pub use firmware_update::{FirmwareAction, FirmwareProjection};
 pub use header::{

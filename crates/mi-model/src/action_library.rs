@@ -251,6 +251,34 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                 )
             }
             Ok(ActionKind::AgentCommand { adapter, command })
+                if matches!(
+                    adapter.as_str(),
+                    "host" | "codex" | "antigravity" | "dsh-desktop"
+                ) && matches!(
+                    command.as_str(),
+                    "model-picker-open"
+                        | "model-picker-prev"
+                        | "model-picker-next"
+                        | "model-picker-confirm"
+                        | "model-picker-effort-right"
+                        | "model-picker-effort-left"
+                        | "model-picker-cancel"
+                ) =>
+            {
+                prerequisites.push(
+                    "需要目标桌面 Agent（Antigravity / Codex / DSH）运行及辅助功能权限；弹层内按键直投目标窗口不重聚焦输入框"
+                        .into(),
+                );
+                (
+                    format!("{adapter} / {command}"),
+                    true,
+                    true,
+                    "",
+                    "Mac 宿主目标应用模型选择与推理力度控制器（AX / 窗口直投按键）",
+                    "打开目标 Agent 模型选择页，或在不关闭浮层的前提下切换模型、调整推理力度并确认",
+                )
+            }
+            Ok(ActionKind::AgentCommand { adapter, command })
                 if adapter == "host" && crate::is_host_mouse_command(&command) =>
             {
                 prerequisites.push(

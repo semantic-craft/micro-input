@@ -10,9 +10,9 @@ use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const APPLE_FN_KEY_CODE: u16 = 0x3F;
 pub const KEY_CODE_V: u16 = 0x09;
@@ -190,6 +190,23 @@ type CFStringRef = *const std::ffi::c_void;
 #[cfg(target_os = "macos")]
 type CFArrayRef = *const std::ffi::c_void;
 #[cfg(target_os = "macos")]
+type CFMachPortRef = *mut std::ffi::c_void;
+#[cfg(target_os = "macos")]
+type CFRunLoopRef = *mut std::ffi::c_void;
+#[cfg(target_os = "macos")]
+type CFRunLoopSourceRef = *mut std::ffi::c_void;
+#[cfg(target_os = "macos")]
+type CGEventTapProxy = *mut std::ffi::c_void;
+#[cfg(target_os = "macos")]
+type CGEventMask = u64;
+#[cfg(target_os = "macos")]
+type CGEventTapCallBack = unsafe extern "C" fn(
+    proxy: CGEventTapProxy,
+    event_type: u32,
+    event: CGEventRef,
+    user_info: *mut std::ffi::c_void,
+) -> CGEventRef;
+#[cfg(target_os = "macos")]
 type CFIndex = isize;
 #[cfg(target_os = "macos")]
 type AXError = i32;
@@ -253,6 +270,24 @@ const CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE: i32 = 1;
 #[cfg(target_os = "macos")]
 const CG_HID_EVENT_TAP: u32 = 0;
 #[cfg(target_os = "macos")]
+const CG_SESSION_EVENT_TAP: u32 = 1;
+#[cfg(target_os = "macos")]
+const CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
+#[cfg(target_os = "macos")]
+const CG_EVENT_TAP_OPTION_DEFAULT: u32 = 0;
+#[cfg(target_os = "macos")]
+const CG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1;
+#[cfg(target_os = "macos")]
+const CG_EVENT_TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE;
+#[cfg(target_os = "macos")]
+const CG_EVENT_TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFF_FFFF;
+#[cfg(target_os = "macos")]
+const K_CG_MOUSE_EVENT_DELTA_X: u32 = 4;
+#[cfg(target_os = "macos")]
+const K_CG_MOUSE_EVENT_DELTA_Y: u32 = 5;
+#[cfg(target_os = "macos")]
+const MAX_MODEL_PICKER_MOUSE_DELTAS: usize = 256;
+#[cfg(target_os = "macos")]
 const CG_SCROLL_EVENT_UNIT_LINE: u32 = 1;
 #[cfg(target_os = "macos")]
 const K_AX_ERROR_SUCCESS: AXError = 0;
@@ -277,9 +312,36 @@ unsafe extern "C" {
     ) -> AXError;
     fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
     static kCFBooleanTrue: CFTypeRef;
+    static kCFRunLoopCommonModes: CFStringRef;
+    static kCFRunLoopDefaultMode: CFStringRef;
     fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
     fn CGEventCreate(source: CGEventSourceRef) -> CGEventRef;
     fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
+    fn CGEventGetDoubleValueField(event: CGEventRef, field: u32) -> f64;
+    fn CGEventTapCreate(
+        tap: u32,
+        place: u32,
+        options: u32,
+        events_of_interest: CGEventMask,
+        callback: CGEventTapCallBack,
+        user_info: *mut std::ffi::c_void,
+    ) -> CFMachPortRef;
+    fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
+    fn CFMachPortCreateRunLoopSource(
+        allocator: CFTypeRef,
+        port: CFMachPortRef,
+        order: CFIndex,
+    ) -> CFRunLoopSourceRef;
+    fn CFMachPortInvalidate(port: CFMachPortRef);
+    fn CFRunLoopGetCurrent() -> CFRunLoopRef;
+    fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
+    fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
+    fn CFRunLoopRunInMode(
+        mode: CFStringRef,
+        seconds: f64,
+        return_after_source_handled: u8,
+    ) -> i32;
+    fn CFRunLoopStop(rl: CFRunLoopRef);
     fn CGEventCreateMouseEvent(
         source: CGEventSourceRef,
         mouse_type: u32,
@@ -522,6 +584,18 @@ pub fn bundle_id_for_adapter(adapter: &str) -> Option<&'static str> {
     }
 }
 
+pub fn model_picker_navigation_key_code(command: &str) -> Option<u16> {
+    match command.trim() {
+        "model-picker-prev" => Some(0x7E),
+        "model-picker-next" => Some(0x7D),
+        "model-picker-effort-right" => Some(0x7C),
+        "model-picker-effort-left" => Some(0x7B),
+        "model-picker-confirm" => Some(KEY_CODE_RETURN),
+        "model-picker-cancel" => Some(0x35),
+        _ => None,
+    }
+}
+
 pub fn native_shortcut_for_agent_command(
     adapter: &str,
     command: &str,
@@ -535,7 +609,9 @@ pub fn native_shortcut_for_agent_command(
         ("antigravity", "focus-input") => Some((0x25, mods(&["command"]))),
         ("antigravity", "search") => Some((0x28, mods(&["command"]))),
         ("antigravity", "new-chat" | "new-or-stop") => Some((0x2D, mods(&["command"]))),
-        ("antigravity", "model" | "effort") => Some((0x2C, mods(&["command"]))),
+        ("antigravity", "model" | "effort" | "model-picker-open") => {
+            Some((0x2C, mods(&["command"])))
+        }
         ("antigravity", "project" | "prev-project" | "next-project") => {
             Some((0x29, mods(&["command"])))
         }
@@ -553,6 +629,9 @@ pub fn native_shortcut_for_agent_command(
         ) => Some((0x7D, mods(&["option"]))),
         ("dsh-desktop", "new-chat" | "new-or-stop") => Some((0x2D, mods(&["command"]))),
         ("dsh-desktop", "search" | "focus-input") => Some((0x28, mods(&["command"]))),
+        ("dsh-desktop", "model" | "effort" | "model-picker-open") => {
+            Some((0x2C, mods(&["command"])))
+        }
         ("dsh-desktop", "project" | "prev-project" | "next-project") => {
             Some((0x1F, mods(&["command"])))
         }
@@ -560,6 +639,9 @@ pub fn native_shortcut_for_agent_command(
         ("dsh-desktop", "browser") => Some((0x11, mods(&["command"]))),
         ("codex", "new-chat" | "new-or-stop") => Some((0x2D, mods(&["command"]))),
         ("codex", "search") => Some((0x28, mods(&["command"]))),
+        ("codex", "model" | "effort" | "model-picker-open") => {
+            Some((0x2E, mods(&["control", "shift"])))
+        }
         ("codex", "live-voice") => Some((0x09, mods(&["control", "shift"]))),
         ("codex", "new-tab") => Some((0x11, mods(&["command"]))),
         ("codex", "terminal") => Some((0x32, mods(&["control"]))),
@@ -767,6 +849,41 @@ pub trait HostOsDriver: Send + Sync {
     fn codex_reasoning(&self, _action: CodexReasoningAction) -> Result<(), String> {
         Err("blocked:codex_reasoning_unavailable".into())
     }
+    fn open_model_picker(&self, adapter: &str) -> Result<(), String> {
+        let Some((key_code, modifiers)) =
+            native_shortcut_for_agent_command(adapter, "model-picker-open")
+                .or_else(|| native_shortcut_for_agent_command(adapter, "model"))
+        else {
+            return Err("blocked:unsupported_agent_command".into());
+        };
+        self.agent_shortcut(adapter, key_code, &modifiers)
+    }
+    fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        Err(format!(
+            "blocked:model_picker_key_unavailable:{adapter}:{key_code:x}"
+        ))
+    }
+    fn resolve_default_managed_adapter(&self, profile_id: &str) -> &'static str {
+        infer_managed_adapter_from_profile_id(profile_id).unwrap_or("antigravity")
+    }
+    fn set_isolated_mode(&self, _isolated: bool) {}
+    fn set_model_picker_mouse_capture(&self, _enabled: bool) {}
+    fn drain_model_picker_mouse_deltas(&self) -> Vec<(f64, f64)> {
+        Vec::new()
+    }
+}
+
+fn infer_managed_adapter_from_profile_id(profile_id: &str) -> Option<&'static str> {
+    let lower = profile_id.trim().to_ascii_lowercase();
+    if lower.contains("codex") {
+        Some("codex")
+    } else if lower.contains("dsh") || lower.contains("deepseek") {
+        Some("dsh-desktop")
+    } else if lower.contains("antigravity") {
+        Some("antigravity")
+    } else {
+        None
+    }
 }
 
 fn clamp_point_to_rects(point: (f64, f64), rects: &[(f64, f64, f64, f64)]) -> (f64, f64) {
@@ -798,13 +915,256 @@ fn clamp_point_to_rects(point: (f64, f64), rects: &[(f64, f64, f64, f64)]) -> (f
     best.map_or(point, |(clamped, _)| clamped)
 }
 
-#[derive(Debug, Default)]
+#[cfg(target_os = "macos")]
+struct TapCallbackContext {
+    active: AtomicBool,
+    suppress_mouse_moved: AtomicBool,
+    tap_port: AtomicUsize,
+    deltas: Arc<Mutex<Vec<(f64, f64)>>>,
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn model_picker_mouse_tap_callback(
+    _proxy: CGEventTapProxy,
+    event_type: u32,
+    event: CGEventRef,
+    user_info: *mut std::ffi::c_void,
+) -> CGEventRef {
+    if user_info.is_null() || event.is_null() {
+        return event;
+    }
+    let ctx = &*(user_info as *const TapCallbackContext);
+    if !ctx.active.load(Ordering::Acquire) {
+        return event;
+    }
+    if event_type == CG_EVENT_TAP_DISABLED_BY_TIMEOUT {
+        let port = ctx.tap_port.load(Ordering::Acquire) as CFMachPortRef;
+        if !port.is_null() {
+            CGEventTapEnable(port, true);
+        }
+        return event;
+    }
+    if event_type == CG_EVENT_TAP_DISABLED_BY_USER_INPUT {
+        return event;
+    }
+    if event_type == CG_EVENT_MOUSE_MOVED {
+        let dx = CGEventGetDoubleValueField(event, K_CG_MOUSE_EVENT_DELTA_X);
+        let dy = CGEventGetDoubleValueField(event, K_CG_MOUSE_EVENT_DELTA_Y);
+        if (dx != 0.0 || dy != 0.0) && dx.is_finite() && dy.is_finite() {
+            if let Ok(mut queue) = ctx.deltas.lock() {
+                if queue.len() >= MAX_MODEL_PICKER_MOUSE_DELTAS {
+                    let drop_count = queue.len() + 1 - MAX_MODEL_PICKER_MOUSE_DELTAS;
+                    queue.drain(0..drop_count);
+                }
+                queue.push((dx, dy));
+            }
+        }
+        if ctx.suppress_mouse_moved.load(Ordering::Acquire) {
+            return std::ptr::null_mut();
+        }
+    }
+    event
+}
+
+#[cfg(target_os = "macos")]
+struct ModelPickerMouseTap {
+    ctx_ptr: *mut TapCallbackContext,
+    run_loop_addr: usize,
+    join_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(target_os = "macos")]
+unsafe impl Send for ModelPickerMouseTap {}
+
+#[cfg(target_os = "macos")]
+impl ModelPickerMouseTap {
+    fn start(deltas: Arc<Mutex<Vec<(f64, f64)>>>) -> Option<Self> {
+        if let Ok(mut queue) = deltas.lock() {
+            queue.clear();
+        }
+        let ctx_ptr = Box::into_raw(Box::new(TapCallbackContext {
+            active: AtomicBool::new(true),
+            suppress_mouse_moved: AtomicBool::new(true),
+            tap_port: AtomicUsize::new(0),
+            deltas,
+        }));
+        let ctx_addr = ctx_ptr as usize;
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Option<usize>>(1);
+        let handle = std::thread::Builder::new()
+            .name("mi-model-picker-mouse-tap".into())
+            .spawn(move || unsafe {
+                let ctx = &*(ctx_addr as *const TapCallbackContext);
+                let mask: CGEventMask = 1u64 << CG_EVENT_MOUSE_MOVED;
+                let mut tap = CGEventTapCreate(
+                    CG_SESSION_EVENT_TAP,
+                    CG_HEAD_INSERT_EVENT_TAP,
+                    CG_EVENT_TAP_OPTION_DEFAULT,
+                    mask,
+                    model_picker_mouse_tap_callback,
+                    ctx_addr as *mut std::ffi::c_void,
+                );
+                if tap.is_null() {
+                    ctx.suppress_mouse_moved.store(false, Ordering::Release);
+                    tap = CGEventTapCreate(
+                        CG_SESSION_EVENT_TAP,
+                        CG_HEAD_INSERT_EVENT_TAP,
+                        CG_EVENT_TAP_OPTION_LISTEN_ONLY,
+                        mask,
+                        model_picker_mouse_tap_callback,
+                        ctx_addr as *mut std::ffi::c_void,
+                    );
+                }
+                if tap.is_null() {
+                    let _ = ready_tx.send(None);
+                    return;
+                }
+                let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
+                if source.is_null() {
+                    CFMachPortInvalidate(tap);
+                    CFRelease(tap as CFTypeRef);
+                    let _ = ready_tx.send(None);
+                    return;
+                }
+                ctx.tap_port.store(tap as usize, Ordering::Release);
+                let rl = CFRunLoopGetCurrent();
+                if rl.is_null() {
+                    CFMachPortInvalidate(tap);
+                    CFRelease(source as CFTypeRef);
+                    CFRelease(tap as CFTypeRef);
+                    let _ = ready_tx.send(None);
+                    return;
+                }
+                CFRetain(rl as CFTypeRef);
+                CFRunLoopAddSource(rl, source, kCFRunLoopCommonModes);
+                CGEventTapEnable(tap, true);
+                if ready_tx.send(Some(rl as usize)).is_err() {
+                    CGEventTapEnable(tap, false);
+                    CFRunLoopRemoveSource(rl, source, kCFRunLoopCommonModes);
+                    CFMachPortInvalidate(tap);
+                    CFRelease(source as CFTypeRef);
+                    CFRelease(tap as CFTypeRef);
+                    CFRelease(rl as CFTypeRef);
+                    return;
+                }
+                while ctx.active.load(Ordering::Acquire) {
+                    let _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, 0);
+                }
+                CGEventTapEnable(tap, false);
+                CFRunLoopRemoveSource(rl, source, kCFRunLoopCommonModes);
+                CFMachPortInvalidate(tap);
+                CFRelease(source as CFTypeRef);
+                CFRelease(tap as CFTypeRef);
+            })
+            .ok();
+        let Some(handle) = handle else {
+            unsafe {
+                drop(Box::from_raw(ctx_ptr));
+            }
+            return None;
+        };
+        match ready_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(Some(rl_addr)) => Some(Self {
+                ctx_ptr,
+                run_loop_addr: rl_addr,
+                join_handle: Some(handle),
+            }),
+            Ok(None) => {
+                let _ = handle.join();
+                unsafe {
+                    drop(Box::from_raw(ctx_ptr));
+                }
+                None
+            }
+            Err(_) => {
+                unsafe {
+                    (*ctx_ptr).active.store(false, Ordering::SeqCst);
+                }
+                let _ = handle.join();
+                unsafe {
+                    drop(Box::from_raw(ctx_ptr));
+                }
+                None
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for ModelPickerMouseTap {
+    fn drop(&mut self) {
+        unsafe {
+            (*self.ctx_ptr).active.store(false, Ordering::SeqCst);
+            if self.run_loop_addr != 0 {
+                CFRunLoopStop(self.run_loop_addr as CFRunLoopRef);
+            }
+        }
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.join();
+        }
+        unsafe {
+            if self.run_loop_addr != 0 {
+                CFRelease(self.run_loop_addr as CFTypeRef);
+                self.run_loop_addr = 0;
+            }
+            drop(Box::from_raw(self.ctx_ptr));
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+struct ModelPickerMouseTap;
+
 pub struct MacOsSystemDriver {
     clipboard_seq: Mutex<u64>,
     managed_controls: ManagedAxControls<NativeAxProvider>,
+    isolated: AtomicBool,
+    model_picker_mouse_deltas: Arc<Mutex<Vec<(f64, f64)>>>,
+    model_picker_mouse_tap: Mutex<Option<ModelPickerMouseTap>>,
+}
+
+impl std::fmt::Debug for MacOsSystemDriver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MacOsSystemDriver")
+            .field("isolated", &self.isolated.load(Ordering::Relaxed))
+            .field("managed_controls", &self.managed_controls)
+            .finish()
+    }
+}
+
+impl Default for MacOsSystemDriver {
+    fn default() -> Self {
+        Self {
+            clipboard_seq: Mutex::new(0),
+            managed_controls: ManagedAxControls::default(),
+            isolated: AtomicBool::new(false),
+            model_picker_mouse_deltas: Arc::new(Mutex::new(Vec::new())),
+            model_picker_mouse_tap: Mutex::new(None),
+        }
+    }
+}
+
+impl Drop for MacOsSystemDriver {
+    fn drop(&mut self) {
+        if let Ok(mut tap) = self.model_picker_mouse_tap.lock() {
+            let _ = tap.take();
+        }
+    }
 }
 
 impl MacOsSystemDriver {
+    pub fn new_isolated() -> Self {
+        let driver = Self::default();
+        driver.isolated.store(true, Ordering::Release);
+        driver
+    }
+
+    fn is_isolated_environment(&self) -> bool {
+        self.isolated.load(Ordering::Acquire)
+            || std::env::var_os("MI_VERIFY_ISOLATED").is_some()
+            || std::env::var_os("MI_HOST_AUDIT_LOG").is_some()
+            || std::env::var_os("MI_DISABLE_UPDATER").is_some()
+    }
+
     pub fn inspect_managed_controls(
         &self,
         adapter: &str,
@@ -1390,6 +1750,86 @@ impl HostOsDriver for MacOsSystemDriver {
     fn codex_reasoning(&self, action: CodexReasoningAction) -> Result<(), String> {
         self.managed_controls.codex_reasoning(action)
     }
+
+    fn open_model_picker(&self, adapter: &str) -> Result<(), String> {
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        if is_managed_adapter(adapter) {
+            return self.managed_controls.open_model_picker(adapter);
+        }
+        let Some((key_code, modifiers)) =
+            native_shortcut_for_agent_command(adapter, "model-picker-open")
+                .or_else(|| native_shortcut_for_agent_command(adapter, "model"))
+        else {
+            return Err("blocked:unsupported_agent_command".into());
+        };
+        self.agent_shortcut(adapter, key_code, &modifiers)
+    }
+
+    fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        if !self.is_accessibility_trusted() {
+            return Err("accessibility_untrusted".to_string());
+        }
+        if is_managed_adapter(adapter) {
+            return self.managed_controls.send_model_picker_key(adapter, key_code);
+        }
+        self.agent_shortcut(adapter, key_code, &[])
+    }
+
+    fn resolve_default_managed_adapter(&self, profile_id: &str) -> &'static str {
+        if let Some(inferred) = infer_managed_adapter_from_profile_id(profile_id) {
+            return inferred;
+        }
+        if self.is_isolated_environment() {
+            return "antigravity";
+        }
+        for (bundle, adapter) in [
+            ("com.google.antigravity", "antigravity"),
+            ("com.openai.codex", "codex"),
+            ("com.deepseek.dsh", "dsh-desktop"),
+        ] {
+            if is_bundle_running(bundle) {
+                return adapter;
+            }
+        }
+        "antigravity"
+    }
+
+    fn set_isolated_mode(&self, isolated: bool) {
+        self.isolated.store(isolated, Ordering::SeqCst);
+        if isolated {
+            self.set_model_picker_mouse_capture(false);
+        }
+    }
+
+    fn set_model_picker_mouse_capture(&self, enabled: bool) {
+        let Ok(mut slot) = self.model_picker_mouse_tap.lock() else {
+            return;
+        };
+        if !enabled {
+            let _ = slot.take();
+            if let Ok(mut queue) = self.model_picker_mouse_deltas.lock() {
+                queue.clear();
+            }
+            return;
+        }
+        if self.is_isolated_environment() || !self.is_accessibility_trusted() {
+            let _ = slot.take();
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if slot.is_none() {
+            *slot = ModelPickerMouseTap::start(Arc::clone(&self.model_picker_mouse_deltas));
+        }
+    }
+
+    fn drain_model_picker_mouse_deltas(&self) -> Vec<(f64, f64)> {
+        self.model_picker_mouse_deltas
+            .lock()
+            .map(|mut queue| std::mem::take(&mut *queue))
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1431,6 +1871,11 @@ pub enum RecordedOsEvent {
     NewConversationInProject(String),
     ToggleLiveVoice(String),
     CodexReasoning(CodexReasoningAction),
+    OpenModelPicker(String),
+    SendModelPickerKey {
+        adapter: String,
+        key_code: u16,
+    },
 }
 
 #[derive(Debug)]
@@ -1438,6 +1883,8 @@ struct RecordingState {
     dictation_active: bool,
     clipboard: ClipboardSnapshot,
     events: Vec<RecordedOsEvent>,
+    model_picker_mouse_capture: bool,
+    model_picker_mouse_deltas: Vec<(f64, f64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -1463,8 +1910,21 @@ impl RecordingOsDriver {
                     items: Vec::new(),
                 },
                 events: Vec::new(),
+                model_picker_mouse_capture: false,
+                model_picker_mouse_deltas: Vec::new(),
             })),
         }
+    }
+
+    pub fn push_model_picker_mouse_delta(&self, dx: f64, dy: f64) {
+        let mut st = self.state.lock().unwrap();
+        if st.model_picker_mouse_capture {
+            st.model_picker_mouse_deltas.push((dx, dy));
+        }
+    }
+
+    pub fn is_model_picker_mouse_capture_enabled(&self) -> bool {
+        self.state.lock().unwrap().model_picker_mouse_capture
     }
 
     pub fn set_accessibility_trusted(&self, trusted: bool) {
@@ -1703,6 +2163,41 @@ impl HostOsDriver for RecordingOsDriver {
         st.events.push(RecordedOsEvent::CodexReasoning(action));
         Ok(())
     }
+
+    fn open_model_picker(&self, adapter: &str) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
+            return Err("accessibility_untrusted".to_string());
+        }
+        st.events
+            .push(RecordedOsEvent::OpenModelPicker(adapter.to_string()));
+        Ok(())
+    }
+
+    fn send_model_picker_key(&self, adapter: &str, key_code: u16) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        if !self.accessibility_trusted.load(Ordering::SeqCst) {
+            return Err("accessibility_untrusted".to_string());
+        }
+        st.events.push(RecordedOsEvent::SendModelPickerKey {
+            adapter: adapter.to_string(),
+            key_code,
+        });
+        Ok(())
+    }
+
+    fn set_model_picker_mouse_capture(&self, enabled: bool) {
+        let mut st = self.state.lock().unwrap();
+        st.model_picker_mouse_capture = enabled;
+        if !enabled {
+            st.model_picker_mouse_deltas.clear();
+        }
+    }
+
+    fn drain_model_picker_mouse_deltas(&self) -> Vec<(f64, f64)> {
+        let mut st = self.state.lock().unwrap();
+        std::mem::take(&mut st.model_picker_mouse_deltas)
+    }
 }
 
 pub(crate) struct ActionDescriptor {
@@ -1869,6 +2364,8 @@ struct FnOwner {
     release_failed: bool,
 }
 
+pub type MacHostExecutor = LiveHostActionExecutor<MacOsSystemDriver>;
+
 pub struct LiveHostActionExecutor<D: HostOsDriver = MacOsSystemDriver> {
     driver: D,
     execution_lock: Mutex<()>,
@@ -1973,8 +2470,21 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
             .any(|owner| owner.release_failed)
     }
 
+    pub fn set_isolated_mode(&self, isolated: bool) {
+        self.driver.set_isolated_mode(isolated);
+    }
+
+    pub fn set_model_picker_mouse_capture(&self, enabled: bool) {
+        self.driver.set_model_picker_mouse_capture(enabled);
+    }
+
+    pub fn drain_model_picker_mouse_deltas(&self) -> Vec<(f64, f64)> {
+        self.driver.drain_model_picker_mouse_deltas()
+    }
+
     pub fn stop_owned_actions(&self) -> Result<(), String> {
         let _execution = self.execution_lock.lock().unwrap();
+        self.driver.set_model_picker_mouse_capture(false);
         let mut held = self.held_apple_fn_bindings.lock().unwrap();
         let released = if held.is_empty() {
             Ok(())
@@ -2344,8 +2854,36 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 if adapter == "four-app" && command.starts_with("slot-open:") {
                     return make_receipt("blocked", "session_navigation_unavailable".into());
                 }
-                if bundle_id_for_adapter(adapter).is_none() {
+                let effective_adapter = if adapter == "host"
+                    && (matches!(command.as_str(), "model" | "effort" | "model-picker-open")
+                        || model_picker_navigation_key_code(command).is_some())
+                {
+                    self.driver.resolve_default_managed_adapter(profile_id)
+                } else {
+                    adapter.as_str()
+                };
+                if bundle_id_for_adapter(effective_adapter).is_none() {
                     return make_receipt("blocked", "unsupported_agent_adapter".into());
+                }
+                if let Some(key_code) = model_picker_navigation_key_code(command) {
+                    if !self.driver.is_accessibility_trusted() {
+                        return make_receipt("blocked", "accessibility_untrusted".to_string());
+                    }
+                    return match self.driver.send_model_picker_key(effective_adapter, key_code) {
+                        Ok(()) => make_receipt("executed", desc.detail),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
+                    };
+                }
+                if matches!(command.as_str(), "model" | "model-picker-open")
+                    && is_managed_adapter(effective_adapter)
+                {
+                    if !self.driver.is_accessibility_trusted() {
+                        return make_receipt("blocked", "accessibility_untrusted".to_string());
+                    }
+                    return match self.driver.open_model_picker(effective_adapter) {
+                        Ok(()) => make_receipt("executed", desc.detail),
+                        Err(error) => make_receipt(managed_error_outcome(&error), error),
+                    };
                 }
                 if command == "toggle-dictation" {
                     if !self.driver.is_accessibility_trusted() {

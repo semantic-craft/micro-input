@@ -190,3 +190,62 @@ fn codex_dial_actions_are_executable_and_reported_in_action_library() {
         assert!(entry.capability.unavailable_reason.is_empty());
     }
 }
+
+#[test]
+fn agent_model_picker_and_effort_catalog_actions_are_executable_and_assignable() {
+    let entries = action_library::search("", "Agent", false, &BTreeSet::new(), false);
+    let expected = [
+        ("agent-model-picker-open", "弹出模型选择页", "model-picker-open"),
+        (
+            "agent-model-picker-prev",
+            "选择上一模型 / 档位",
+            "model-picker-prev",
+        ),
+        (
+            "agent-model-picker-next",
+            "选择下一模型 / 档位",
+            "model-picker-next",
+        ),
+        (
+            "agent-model-picker-confirm",
+            "确认所选模型",
+            "model-picker-confirm",
+        ),
+        (
+            "agent-model-picker-effort-right",
+            "展开 / 调高模型力度",
+            "model-picker-effort-right",
+        ),
+        (
+            "agent-model-picker-effort-left",
+            "返回模型列表 / 调低模型力度",
+            "model-picker-effort-left",
+        ),
+    ];
+
+    let mut draft = Draft::default();
+    let profile_id = draft.config.profiles[0].id.clone();
+    let layer_id = draft.config.profiles[0].layers[0].id.clone();
+
+    for (slot, (id, name, command)) in expected.into_iter().enumerate() {
+        let entry = entries
+            .iter()
+            .find(|e| e.action.id == id)
+            .unwrap_or_else(|| panic!("missing catalog action {id}"));
+        assert_eq!(entry.action.name, name);
+        assert_eq!(
+            entry.action.payload,
+            json!({
+                "type": "agent_command",
+                "adapter": "host",
+                "command": command,
+            })
+        );
+        assert!(entry.capability.host_required);
+        assert!(entry.capability.execution_available);
+        assert!(entry.capability.unavailable_reason.is_empty());
+        draft
+            .assign(&profile_id, &layer_id, slot as u32, entry.action.clone())
+            .unwrap();
+    }
+}
