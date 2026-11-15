@@ -625,6 +625,10 @@ fn status_menu_quick_switch_2x2_favorites_swap_and_icon_and_preset_bounds() {
         .dispatch_status_menu_action(StatusMenuAction::SetHostExecutionEnabled(false))
         .expect("disable host execution");
     assert!(!store.projection().status_menu.host_execution_enabled);
+    assert_eq!(
+        store.projection().status_menu.routing_mode_summary,
+        "已暂停软件按键映射"
+    );
 
     store
         .dispatch_status_menu_action(StatusMenuAction::SetProfileLocked(true))

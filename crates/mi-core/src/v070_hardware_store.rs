@@ -1,17 +1,14 @@
 //! WorkbenchStore orchestration and async session dispatch for `0.7.0-rc.16+` hardware capabilities.
 
-use mi_proto::v070_capabilities::{
-    validate_device_name, JoystickDeadzone, MouseConfig, MouseSpeedPreset, PmConfig, SaRgbEffect,
-    SaRgbUpdate,
-};
+use mi_proto::v070_capabilities::SaRgbEffect;
 use mi_session::DeviceSession;
 
-use crate::firmware_update::{
-    format_hex_color, parse_hex_color, V070BridgeOutcome, V070DeviceNameProjection,
-    V070HardwareAction, V070HardwareProjection, V070MouseConfigProjection, V070PmConfigProjection,
-    V070PmStateProjection, V070SaRgbProjection, V070SnapshotPayload,
+use crate::store::{HardwareLoopEvent, SystemLifecycle, WorkbenchError, WorkbenchStore};
+use crate::v070_hardware::{
+    format_hex_color, parse_v070_action, ParsedV070Action, V070BridgeOutcome, V070HardwareAction,
+    V070HardwareProjection, V070HostPreference, V070MouseConfigProjection, V070PmStateProjection,
+    V070SaRgbProjection, V070SnapshotPayload, ValidatedV070DeviceCommand,
 };
-use crate::store::{HardwareLoopEvent, SystemLifecycle, WorkbenchStore};
 use crate::v070_session_sa_rgb::{
     resolve_desired_for_device_layer, resolve_desired_for_document_layer, DesiredTarget,
     LayerLightingResolution, ManualSaRgbWrite, SaRgbLitStyle, UrgentClearReason,
@@ -20,9 +17,7 @@ use crate::v070_session_sa_rgb::{
 #[derive(Debug, Clone)]
 pub(crate) struct V070BridgeCommand {
     pub seq: u64,
-    pub action: V070HardwareAction,
-    pub base_mouse: MouseConfig,
-    pub base_deadzone: f64,
+    pub command: ValidatedV070DeviceCommand,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -146,10 +141,9 @@ impl V070HardwareController {
                 }
                 self.projection.mouse =
                     V070MouseConfigProjection::from_mouse_config(&snap.mouse, snap.deadzone);
-                self.projection.pm_config = V070PmConfigProjection::from_pm_config(&snap.pm_config);
+                self.projection.pm_config = snap.pm_config;
                 self.projection.pm_state = V070PmStateProjection::from_pm_state(&snap.pm_state);
-                self.projection.device_name =
-                    V070DeviceNameProjection::from_device_name_info(&snap.device_name);
+                self.projection.device_name = snap.device_name;
                 self.projection.status_message =
                     format!("0.7.0 硬件能力已同步（{}）", snap.version);
             }
@@ -173,126 +167,44 @@ impl V070HardwareController {
                     format!("已更新摇杆鼠标参数（{}）", self.projection.mouse.preset);
             }
             Ok(V070BridgeOutcome::PmConfigUpdated { pm_config }) => {
-                self.projection.pm_config = V070PmConfigProjection::from_pm_config(&pm_config);
+                self.projection.pm_config = pm_config;
                 self.projection.last_error = None;
                 self.projection.status_message = "已更新电源管理设置".into();
             }
             Ok(V070BridgeOutcome::DeviceRenamed { device_name }) => {
-                self.projection.device_name =
-                    V070DeviceNameProjection::from_device_name_info(&device_name);
+                let updated_name = device_name.name.clone();
+                self.projection.device_name = device_name;
                 self.projection.last_error = None;
-                self.projection.status_message = format!("设备名称已更新为 {}", device_name.name);
+                self.projection.status_message = format!("设备名称已更新为 {updated_name}");
             }
             Ok(V070BridgeOutcome::SaRgbApplied {
                 sa,
-                color_hex,
+                rgb,
                 brightness,
                 speed,
                 effect,
             }) => {
                 self.projection.sa_rgb = V070SaRgbProjection {
-                    sa: Some(sa),
-                    color_hex,
+                    sa: Some(sa.get()),
+                    color_hex: format_hex_color(rgb),
                     brightness,
                     speed,
-                    effect,
+                    effect: effect.as_u8(),
                 };
                 self.projection.last_error = None;
-                self.projection.status_message = format!("已更新 SA #{sa} 独立灯效");
+                self.projection.status_message = format!("已更新 SA #{} 独立灯效", sa.get());
             }
             Ok(V070BridgeOutcome::SaRgbReset { sa }) => {
-                self.projection.sa_rgb.sa = Some(sa);
+                self.projection.sa_rgb.sa = Some(sa.get());
                 self.projection.sa_rgb.effect = SaRgbEffect::Off.as_u8();
                 self.projection.last_error = None;
-                self.projection.status_message = format!("已恢复 SA #{sa} 默认背景灯效");
+                self.projection.status_message = format!("已恢复 SA #{} 默认背景灯效", sa.get());
             }
             Err(error) => {
                 self.projection.last_error = Some(error.clone());
                 self.projection.status_message = error;
             }
         }
-    }
-}
-
-pub(crate) fn validate_v070_action(
-    action: &V070HardwareAction,
-    base_mouse: &MouseConfig,
-    max_name_length: usize,
-) -> Result<(), String> {
-    match action {
-        V070HardwareAction::Refresh
-        | V070HardwareAction::SetAutoLayerSync { .. }
-        | V070HardwareAction::SetSessionSaRgbSync { .. } => Ok(()),
-        V070HardwareAction::SelectLayer { layer } => {
-            if *layer == 0 || *layer > 6 {
-                return Err(format!(
-                    "板载层索引 {layer} 超出有效范围（仅支持第 1–6 层）"
-                ));
-            }
-            Ok(())
-        }
-        V070HardwareAction::ApplyMousePreset { preset } => {
-            MouseSpeedPreset::parse(preset).map_err(|e| e.to_string())?;
-            Ok(())
-        }
-        V070HardwareAction::ApplyMouseConfig {
-            move_delta,
-            max_speed,
-            wheel_delta,
-            wheel_max_speed,
-            stick_speed,
-            stick_scroll,
-            deadzone,
-        } => {
-            let mut cfg = *base_mouse;
-            cfg.move_delta = *move_delta;
-            cfg.max_speed = *max_speed;
-            cfg.wheel_delta = *wheel_delta;
-            cfg.wheel_max_speed = *wheel_max_speed;
-            cfg.stick_speed = *stick_speed;
-            cfg.stick_scroll = *stick_scroll;
-            cfg.validate().map_err(|e| e.to_string())?;
-            JoystickDeadzone::new(*deadzone).map_err(|e| e.to_string())?;
-            Ok(())
-        }
-        V070HardwareAction::ApplyPmConfig {
-            auto_sleep,
-            host_sleep,
-            sleep_after_min,
-        } => PmConfig {
-            auto_sleep: *auto_sleep,
-            host_sleep: *host_sleep,
-            sleep_after_min: *sleep_after_min,
-        }
-        .validate()
-        .map_err(|e| e.to_string()),
-        V070HardwareAction::RenameDevice { name } => {
-            validate_device_name(name, max_name_length).map_err(|e| e.to_string())?;
-            Ok(())
-        }
-        V070HardwareAction::ApplySaRgb {
-            sa,
-            color_hex,
-            brightness,
-            speed,
-            effect,
-        } => {
-            let c = parse_hex_color(color_hex)?;
-            if !brightness.is_finite() || !speed.is_finite() {
-                return Err("亮度和速度必须为有限数值".into());
-            }
-            let update = SaRgbUpdate {
-                sa: vec![*sa],
-                c: Some(c),
-                b: Some(*brightness as f32),
-                s: Some(*speed as f32),
-                e: Some(*effect),
-            };
-            update.validate().map_err(|e| e.to_string())
-        }
-        V070HardwareAction::ResetSaRgb { sa } => SaRgbUpdate::reset(vec![*sa])
-            .validate()
-            .map_err(|e| e.to_string()),
     }
 }
 
@@ -374,17 +286,11 @@ pub(crate) async fn execute_v070_command_on_session(
             "当前固件 {version} 低于 0.7.0-rc.16，不支持硬件能力接口"
         ));
     }
-    match &cmd.action {
-        V070HardwareAction::Refresh => fetch_v070_snapshot_on_session(session, true)
+    match &cmd.command {
+        ValidatedV070DeviceCommand::Refresh => fetch_v070_snapshot_on_session(session, true)
             .await
             .map(V070BridgeOutcome::Snapshot),
-        V070HardwareAction::SetAutoLayerSync { .. } => {
-            Err("自动切层联动仅在宿主侧配置，不直接发送到固件".into())
-        }
-        V070HardwareAction::SetSessionSaRgbSync { .. } => {
-            Err("会话状态自动映灯开关仅在宿主侧配置，不直接经桥接队列发送".into())
-        }
-        V070HardwareAction::SelectLayer { layer } => {
+        ValidatedV070DeviceCommand::SelectLayer { layer } => {
             session
                 .set_profile_layer_flashless(None, Some(*layer))
                 .await
@@ -395,39 +301,26 @@ pub(crate) async fn execute_v070_command_on_session(
                 layer_index: observed.map(|(_, l)| l).unwrap_or(*layer),
             })
         }
-        V070HardwareAction::ApplyMousePreset { preset } => {
-            let parsed = MouseSpeedPreset::parse(preset).map_err(|e| e.to_string())?;
+        ValidatedV070DeviceCommand::ApplyMousePreset {
+            config,
+            fallback_deadzone,
+        } => {
             let saved = session
-                .write_mouse_config(&parsed.to_mouse_config())
+                .write_mouse_config(config)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(V070BridgeOutcome::MouseUpdated {
                 mouse: saved,
-                deadzone: cmd.base_deadzone,
+                deadzone: *fallback_deadzone,
             })
         }
-        V070HardwareAction::ApplyMouseConfig {
-            move_delta,
-            max_speed,
-            wheel_delta,
-            wheel_max_speed,
-            stick_speed,
-            stick_scroll,
-            deadzone,
-        } => {
-            let mut cfg = cmd.base_mouse;
-            cfg.move_delta = *move_delta;
-            cfg.max_speed = *max_speed;
-            cfg.wheel_delta = *wheel_delta;
-            cfg.wheel_max_speed = *wheel_max_speed;
-            cfg.stick_speed = *stick_speed;
-            cfg.stick_scroll = *stick_scroll;
+        ValidatedV070DeviceCommand::ApplyMouseConfig { config, deadzone } => {
             let saved_mouse = session
-                .write_mouse_config(&cfg)
+                .write_mouse_config(config)
                 .await
                 .map_err(|e| e.to_string())?;
             let saved_deadzone = session
-                .write_joystick_deadzone(*deadzone)
+                .write_joystick_deadzone(deadzone.v)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(V070BridgeOutcome::MouseUpdated {
@@ -435,59 +328,43 @@ pub(crate) async fn execute_v070_command_on_session(
                 deadzone: saved_deadzone,
             })
         }
-        V070HardwareAction::ApplyPmConfig {
-            auto_sleep,
-            host_sleep,
-            sleep_after_min,
-        } => {
-            let cfg = PmConfig {
-                auto_sleep: *auto_sleep,
-                host_sleep: *host_sleep,
-                sleep_after_min: *sleep_after_min,
-            };
+        ValidatedV070DeviceCommand::ApplyPmConfig(cfg) => {
             let saved = session
-                .write_pm_config(&cfg)
+                .write_pm_config(cfg)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(V070BridgeOutcome::PmConfigUpdated { pm_config: saved })
         }
-        V070HardwareAction::RenameDevice { name } => {
+        ValidatedV070DeviceCommand::RenameDevice(name) => {
             let info = session
                 .write_device_name(name)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(V070BridgeOutcome::DeviceRenamed { device_name: info })
         }
-        V070HardwareAction::ApplySaRgb {
+        ValidatedV070DeviceCommand::ApplySaRgb {
             sa,
-            color_hex,
+            rgb,
             brightness,
             speed,
             effect,
+            update,
         } => {
-            let c = parse_hex_color(color_hex)?;
-            let update = SaRgbUpdate {
-                sa: vec![*sa],
-                c: Some(c),
-                b: Some(*brightness as f32),
-                s: Some(*speed as f32),
-                e: Some(*effect),
-            };
             session
-                .set_sa_rgb(&update)
+                .set_sa_rgb(update)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(V070BridgeOutcome::SaRgbApplied {
                 sa: *sa,
-                color_hex: format_hex_color(c),
+                rgb: *rgb,
                 brightness: *brightness,
                 speed: *speed,
                 effect: *effect,
             })
         }
-        V070HardwareAction::ResetSaRgb { sa } => {
+        ValidatedV070DeviceCommand::ResetSaRgb { sa } => {
             session
-                .reset_sa_rgb(vec![*sa])
+                .reset_sa_rgb(vec![sa.get()])
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(V070BridgeOutcome::SaRgbReset { sa: *sa })
@@ -507,29 +384,59 @@ fn map_layer_lighting_resolution(res: LayerLightingResolution) -> DesiredTarget 
     }
 }
 
-impl WorkbenchStore {
-    pub fn live_v070_session(&self) -> Option<std::sync::Arc<DeviceSession>> {
-        if let Some(running) = &self.six_layer_running {
-            let version_ok = running
-                .observed_firmware_version()
-                .as_deref()
-                .is_some_and(mi_model::supports_v070_hardware_capabilities);
-            if !version_ok {
-                return None;
-            }
-            return running.live_vendor_session();
+enum V070CommandTarget {
+    SixLayerBridge(std::sync::Arc<DeviceSession>),
+    DirectSession(std::sync::Arc<DeviceSession>),
+}
+
+impl V070CommandTarget {
+    fn into_session(self) -> std::sync::Arc<DeviceSession> {
+        match self {
+            Self::SixLayerBridge(session) | Self::DirectSession(session) => session,
         }
-        self.device_session
+    }
+}
+
+impl WorkbenchStore {
+    fn resolve_v070_command_target(&self) -> Result<V070CommandTarget, String> {
+        if let Some(running) = &self.six_layer_running {
+            let version = running
+                .observed_firmware_version()
+                .ok_or_else(|| "当前设备固件版本尚未确认，不支持 0.7.0 硬件能力".to_string())?;
+            if !mi_model::supports_v070_hardware_capabilities(&version) {
+                return Err(format!(
+                    "当前固件 {version} 低于 0.7.0-rc.16，不支持硬件能力接口"
+                ));
+            }
+            let session = running
+                .live_vendor_session()
+                .ok_or_else(|| "USB 专用桥接当前未连接".to_string())?;
+            return Ok(V070CommandTarget::SixLayerBridge(session));
+        }
+        let session = self
+            .device_session
             .as_ref()
-            .filter(|session| {
-                !session.is_disconnected()
-                    && session.has_exclusive_vendor_link()
-                    && session
-                        .observed_firmware_version()
-                        .as_deref()
-                        .is_some_and(mi_model::supports_v070_hardware_capabilities)
-            })
-            .cloned()
+            .ok_or_else(|| "未连接支持 0.7.0 硬件能力的 USB 专用设备".to_string())?;
+        if session.is_disconnected() || !session.has_exclusive_vendor_link() {
+            return Err("需要已连接的 USB 专用独占会话".to_string());
+        }
+        let version = session
+            .observed_firmware_version()
+            .ok_or_else(|| "固件版本尚未确认，请等待连接验证完成".to_string())?;
+        if !mi_model::supports_v070_hardware_capabilities(&version) {
+            return Err(format!(
+                "当前固件 {version} 低于 0.7.0-rc.16，不支持硬件能力接口"
+            ));
+        }
+        Ok(V070CommandTarget::DirectSession(std::sync::Arc::clone(
+            session,
+        )))
+    }
+
+    pub fn live_v070_session(&self) -> Option<std::sync::Arc<DeviceSession>> {
+        self.resolve_v070_command_target()
+            .ok()
+            .map(V070CommandTarget::into_session)
     }
 
     pub(crate) fn teardown_v070_session_sa_rgb(&mut self) {
@@ -682,21 +589,7 @@ impl WorkbenchStore {
     }
 
     pub(super) fn has_active_v070_device(&self) -> bool {
-        if let Some(running) = &self.six_layer_running {
-            return running.vendor_bridge_connected()
-                && running
-                    .observed_firmware_version()
-                    .as_deref()
-                    .is_some_and(mi_model::supports_v070_hardware_capabilities);
-        }
-        self.device_session.as_ref().is_some_and(|session| {
-            !session.is_disconnected()
-                && session.has_exclusive_vendor_link()
-                && session
-                    .observed_firmware_version()
-                    .as_deref()
-                    .is_some_and(mi_model::supports_v070_hardware_capabilities)
-        })
+        self.resolve_v070_command_target().is_ok()
     }
 
     pub(super) fn schedule_v070_refresh(&mut self) -> Result<(), String> {
@@ -861,6 +754,27 @@ impl WorkbenchStore {
         true
     }
 
+    pub(super) fn dispatch_v070_hardware(
+        &mut self,
+        action: V070HardwareAction,
+    ) -> Result<(), WorkbenchError> {
+        let result = self
+            .require_awake()
+            .map_err(|e| e.to_string())
+            .and_then(|()| {
+                if self.firmware_update.projection.busy {
+                    return Err("固件操作正在进行，请等待完成".into());
+                }
+                self.dispatch_v070_hardware_action(action)
+            });
+        if let Err(error) = &result {
+            self.v070_hardware.projection.last_error = Some(error.clone());
+            self.v070_hardware.projection.status_message = error.clone();
+        }
+        self.commit_runtime_update();
+        result.map_err(WorkbenchError::Routing)
+    }
+
     pub(super) fn dispatch_v070_hardware_action(
         &mut self,
         action: V070HardwareAction,
@@ -868,122 +782,97 @@ impl WorkbenchStore {
         if self.firmware_update.reserved() {
             return Err("固件更新流程正在占用设备，请结束后再试".into());
         }
-        if let V070HardwareAction::SetAutoLayerSync { enabled } = action {
-            self.document_store
-                .set_v070_auto_layer_sync_enabled(enabled)?;
-            self.v070_hardware.projection.auto_layer_sync_enabled = enabled;
-            self.v070_hardware.projection.last_error = None;
-            if enabled {
-                self.v070_hardware.projection.status_message =
-                    "已开启前台切层联动（仅 RAM 零擦写）".into();
-                let _ = self.maybe_sync_v070_foreground_layer();
-            } else {
-                self.v070_hardware.pending_auto_layer_sync = None;
-                self.v070_hardware.expected_layer_echo = None;
-                self.v070_hardware.projection.status_message = "已关闭前台切层联动".into();
-            }
-            return Ok(());
-        }
-        if let V070HardwareAction::SetSessionSaRgbSync { enabled } = action {
-            self.document_store
-                .set_v070_session_sa_rgb_sync_enabled(enabled)?;
-            self.v070_hardware.projection.session_sa_rgb_sync_enabled = enabled;
-            self.v070_hardware.projection.last_error = None;
-            if enabled {
-                self.v070_hardware.projection.status_message = "已开启 AI 会话状态自动映灯".into();
-                self.sync_v070_session_sa_rgb();
-            } else {
-                let session = self.live_v070_session();
-                self.sa_rgb_coordinator.sync(
-                    DesiredTarget::UrgentClear(UrgentClearReason::OptInDisabled),
-                    session,
-                    &self.tokio_runtime,
-                );
-                self.v070_hardware.projection.status_message = "已关闭 AI 会话状态自动映灯".into();
-            }
-            return Ok(());
-        }
-        if self.v070_hardware.projection.busy {
-            return Err("上一条 0.7.0 硬件指令尚未完成".into());
-        }
-        let base_mouse = self.v070_hardware.projection.mouse.to_mouse_config();
-        let base_deadzone = self.v070_hardware.projection.mouse.deadzone;
-        let max_name_length = self.v070_hardware.projection.device_name.max_length;
-        validate_v070_action(&action, &base_mouse, max_name_length)?;
-
-        if let Some(running) = &self.six_layer_running {
-            let Some(version) = running.observed_firmware_version() else {
-                return Err("当前设备固件版本尚未确认，不支持 0.7.0 硬件能力".into());
-            };
-            if !mi_model::supports_v070_hardware_capabilities(&version) {
-                return Err(format!(
-                    "当前固件 {version} 低于 0.7.0-rc.16，不支持硬件能力接口"
-                ));
-            }
-            if !running.vendor_bridge_connected() {
-                return Err("USB 专用桥接当前未连接".into());
-            }
-            let seq = self.v070_hardware.allocate_seq();
-            let cmd = V070BridgeCommand {
-                seq,
-                action,
-                base_mouse,
-                base_deadzone,
-            };
-            running.send_v070_command(cmd)?;
-            self.v070_hardware.projection.busy = true;
-            self.v070_hardware.in_flight_seq = Some(seq);
-            self.v070_hardware.projection.last_error = None;
-            return Ok(());
-        }
-
-        let Some(session) = self.device_session.as_ref().map(std::sync::Arc::clone) else {
-            return Err("未连接支持 0.7.0 硬件能力的 USB 专用设备".into());
-        };
-        if session.is_disconnected() || !session.has_exclusive_vendor_link() {
-            return Err("需要已连接的 USB 专用独占会话".into());
-        }
-        let Some(version) = session.observed_firmware_version() else {
-            return Err("固件版本尚未确认，请等待连接验证完成".into());
-        };
-        if !mi_model::supports_v070_hardware_capabilities(&version) {
-            return Err(format!(
-                "当前固件 {version} 低于 0.7.0-rc.16，不支持硬件能力接口"
-            ));
-        }
-
-        let seq = self.v070_hardware.allocate_seq();
-        let cmd = V070BridgeCommand {
-            seq,
+        let parsed = parse_v070_action(
             action,
-            base_mouse,
-            base_deadzone,
-        };
-        self.v070_hardware.projection.busy = true;
-        self.v070_hardware.in_flight_seq = Some(seq);
-        self.v070_hardware.projection.last_error = None;
-        let inbox = self.hardware_event_tx.clone();
-        self.tokio_runtime.spawn(async move {
-            let result = execute_v070_command_on_session(&session, &cmd).await;
-            let _ = inbox.send(HardwareLoopEvent::V070CapabilityOutcome {
-                session_id: session.id,
-                seq,
-                result,
-            });
-        });
-        Ok(())
+            &self.v070_hardware.projection.mouse,
+            self.v070_hardware.projection.mouse.deadzone,
+            self.v070_hardware.projection.device_name.max_length,
+        )?;
+        match parsed {
+            ParsedV070Action::HostPreference(V070HostPreference::AutoLayerSync { enabled }) => {
+                self.document_store
+                    .set_v070_auto_layer_sync_enabled(enabled)?;
+                self.v070_hardware.projection.last_error = None;
+                if enabled {
+                    self.v070_hardware.projection.status_message =
+                        "已开启前台切层联动（仅 RAM 零擦写）".into();
+                    let _ = self.maybe_sync_v070_foreground_layer();
+                } else {
+                    self.v070_hardware.pending_auto_layer_sync = None;
+                    self.v070_hardware.expected_layer_echo = None;
+                    self.v070_hardware.projection.status_message = "已关闭前台切层联动".into();
+                }
+                Ok(())
+            }
+            ParsedV070Action::HostPreference(V070HostPreference::SessionSaRgbSync { enabled }) => {
+                self.document_store
+                    .set_v070_session_sa_rgb_sync_enabled(enabled)?;
+                self.v070_hardware.projection.last_error = None;
+                if enabled {
+                    self.v070_hardware.projection.status_message =
+                        "已开启 AI 会话状态自动映灯".into();
+                    self.sync_v070_session_sa_rgb();
+                } else {
+                    let session = self.live_v070_session();
+                    self.sa_rgb_coordinator.sync(
+                        DesiredTarget::UrgentClear(UrgentClearReason::OptInDisabled),
+                        session,
+                        &self.tokio_runtime,
+                    );
+                    self.v070_hardware.projection.status_message =
+                        "已关闭 AI 会话状态自动映灯".into();
+                }
+                Ok(())
+            }
+            ParsedV070Action::DeviceCommand(command) => {
+                if self.v070_hardware.projection.busy {
+                    return Err("上一条 0.7.0 硬件指令尚未完成".into());
+                }
+                match self.resolve_v070_command_target()? {
+                    V070CommandTarget::SixLayerBridge(_) => {
+                        let seq = self.v070_hardware.allocate_seq();
+                        let cmd = V070BridgeCommand { seq, command };
+                        self.six_layer_running
+                            .as_ref()
+                            .ok_or_else(|| "USB 专用桥接当前未连接".to_string())?
+                            .send_v070_command(cmd)?;
+                        self.v070_hardware.projection.busy = true;
+                        self.v070_hardware.in_flight_seq = Some(seq);
+                        self.v070_hardware.projection.last_error = None;
+                        Ok(())
+                    }
+                    V070CommandTarget::DirectSession(session) => {
+                        let seq = self.v070_hardware.allocate_seq();
+                        let cmd = V070BridgeCommand { seq, command };
+                        self.v070_hardware.projection.busy = true;
+                        self.v070_hardware.in_flight_seq = Some(seq);
+                        self.v070_hardware.projection.last_error = None;
+                        let inbox = self.hardware_event_tx.clone();
+                        self.tokio_runtime.spawn(async move {
+                            let result = execute_v070_command_on_session(&session, &cmd).await;
+                            let _ = inbox.send(HardwareLoopEvent::V070CapabilityOutcome {
+                                session_id: session.id,
+                                seq,
+                                result,
+                            });
+                        });
+                        Ok(())
+                    }
+                }
+            }
+        }
     }
 
-    fn is_active_v070_session(&self, session_id: u64) -> bool {
-        let valid_six_layer = self
+    fn owns_v070_session_id(&self, session_id: u64) -> bool {
+        let owns_six_layer = self
             .six_layer_running
             .as_ref()
             .is_some_and(|running| running.vendor_session_id() == Some(session_id));
-        let valid_direct = self
+        let owns_direct = self
             .device_session
             .as_ref()
             .is_some_and(|session| session.id == session_id);
-        valid_six_layer || valid_direct
+        owns_six_layer || owns_direct
     }
 
     pub(super) fn handle_v070_capability_outcome(
@@ -992,7 +881,7 @@ impl WorkbenchStore {
         seq: u64,
         result: Result<V070BridgeOutcome, String>,
     ) {
-        if !self.is_active_v070_session(session_id) {
+        if !self.owns_v070_session_id(session_id) {
             return;
         }
         let mut is_manual_sa_rgb = false;
@@ -1001,32 +890,27 @@ impl WorkbenchStore {
             match outcome {
                 V070BridgeOutcome::SaRgbApplied {
                     sa,
-                    color_hex,
+                    rgb,
                     brightness,
                     speed,
                     effect,
                 } => {
                     is_manual_sa_rgb = true;
-                    if let Some(sa_id) = mi_model::SaId::new(*sa) {
-                        let style = parse_hex_color(color_hex).ok().and_then(|rgb| {
-                            SaRgbLitStyle::from_manual_apply(rgb, *brightness, *speed, *effect)
-                        });
-                        self.sa_rgb_coordinator.note_manual_sa_rgb_write(
-                            session_id,
-                            ManualSaRgbWrite::Applied { sa: sa_id, style },
-                            sync_enabled,
-                        );
-                    }
+                    let style =
+                        SaRgbLitStyle::from_manual_apply(*rgb, *brightness, *speed, effect.as_u8());
+                    self.sa_rgb_coordinator.note_manual_sa_rgb_write(
+                        session_id,
+                        ManualSaRgbWrite::Applied { sa: *sa, style },
+                        sync_enabled,
+                    );
                 }
                 V070BridgeOutcome::SaRgbReset { sa } => {
                     is_manual_sa_rgb = true;
-                    if let Some(sa_id) = mi_model::SaId::new(*sa) {
-                        self.sa_rgb_coordinator.note_manual_sa_rgb_write(
-                            session_id,
-                            ManualSaRgbWrite::Reset { sa: sa_id },
-                            sync_enabled,
-                        );
-                    }
+                    self.sa_rgb_coordinator.note_manual_sa_rgb_write(
+                        session_id,
+                        ManualSaRgbWrite::Reset { sa: *sa },
+                        sync_enabled,
+                    );
                 }
                 V070BridgeOutcome::ProfileLayer { layer_index, .. } => {
                     self.v070_hardware.device_layer_override = Some(*layer_index);
@@ -1059,7 +943,7 @@ impl WorkbenchStore {
         profile_index: u8,
         layer_index: u8,
     ) {
-        if !self.is_active_v070_session(session_id) {
+        if !self.owns_v070_session_id(session_id) {
             return;
         }
         self.v070_hardware.device_layer_override = Some(layer_index);
@@ -1096,7 +980,6 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
-    use crate::firmware_update::FirmwareAction;
     use crate::six_layer_runtime::RunningSixLayer;
     use crate::store::WorkbenchCommand;
 
@@ -1335,7 +1218,7 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "timed out waiting for store condition; v070={:?}",
-                store.projection().firmware.v070
+                store.projection().v070_hardware
             );
             store.poll_at(Instant::now());
             std::thread::sleep(Duration::from_millis(10));
@@ -1357,42 +1240,42 @@ mod tests {
         running.attach_test_vendor_session(&store.tokio_runtime, session.clone());
         store.six_layer_running = Some(running);
 
-        poll_until(&mut store, |s| s.projection().firmware.v070.synced);
+        poll_until(&mut store, |s| s.projection().v070_hardware.synced);
         let p = store.projection();
-        assert!(p.firmware.v070.supported);
-        assert_eq!(p.firmware.v070.battery_percent, Some(91));
-        assert_eq!(p.firmware.v070.is_charging, Some(false));
-        assert_eq!(p.firmware.v070.active_profile, Some(3));
-        assert_eq!(p.firmware.v070.active_layer, Some(1));
-        assert_eq!(p.firmware.v070.device_name.max_length, 15);
-        assert!(p.firmware.v070.pm_state.usb_host_hold);
-        assert_eq!(p.firmware.v070.mouse.move_delta, 8);
-        assert_eq!(p.firmware.v070.mouse.deadzone, 0.15);
+        assert!(p.v070_hardware.supported);
+        assert_eq!(p.v070_hardware.battery_percent, Some(91));
+        assert_eq!(p.v070_hardware.is_charging, Some(false));
+        assert_eq!(p.v070_hardware.active_profile, Some(3));
+        assert_eq!(p.v070_hardware.active_layer, Some(1));
+        assert_eq!(p.v070_hardware.device_name.max_length, 15);
+        assert!(p.v070_hardware.pm_state.usb_host_hold);
+        assert_eq!(p.v070_hardware.mouse.move_delta, 8);
+        assert_eq!(p.v070_hardware.mouse.deadzone, 0.15);
 
-        let before_invalid = store.projection().firmware.v070.clone();
+        let before_invalid = store.projection().v070_hardware.clone();
         assert!(store
-            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+            .dispatch_command(WorkbenchCommand::V070Hardware(
                 V070HardwareAction::ApplyPmConfig {
                     auto_sleep: true,
                     host_sleep: true,
                     sleep_after_min: 0,
                 }
-            )))
+            ))
             .is_err());
-        assert!(!store.projection().firmware.v070.busy);
+        assert!(!store.projection().v070_hardware.busy);
         assert_eq!(
-            store.projection().firmware.v070.pm_config,
+            store.projection().v070_hardware.pm_config,
             before_invalid.pm_config
         );
 
         store
-            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+            .dispatch_command(WorkbenchCommand::V070Hardware(
                 V070HardwareAction::SelectLayer { layer: 2 },
-            )))
+            ))
             .unwrap();
         poll_until(&mut store, |s| {
-            !s.projection().firmware.v070.busy
-                && s.projection().firmware.v070.active_layer == Some(2)
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.active_layer == Some(2)
         });
         assert_eq!(
             store.projection().sidebar.board_layers.observed_layer,
@@ -1415,20 +1298,20 @@ mod tests {
         );
 
         store
-            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+            .dispatch_command(WorkbenchCommand::V070Hardware(
                 V070HardwareAction::ApplyMousePreset {
                     preset: "fast".into(),
                 },
-            )))
+            ))
             .unwrap();
         poll_until(&mut store, |s| {
-            !s.projection().firmware.v070.busy
-                && s.projection().firmware.v070.mouse.preset == "fast"
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.mouse.preset == "fast"
         });
-        assert_eq!(store.projection().firmware.v070.mouse.move_delta, 14);
+        assert_eq!(store.projection().v070_hardware.mouse.move_delta, 14);
 
         store
-            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+            .dispatch_command(WorkbenchCommand::V070Hardware(
                 V070HardwareAction::ApplyMouseConfig {
                     move_delta: 12,
                     max_speed: 20,
@@ -1438,28 +1321,28 @@ mod tests {
                     stick_scroll: 30,
                     deadzone: 0.25,
                 },
-            )))
+            ))
             .unwrap();
         poll_until(&mut store, |s| {
-            !s.projection().firmware.v070.busy
-                && s.projection().firmware.v070.mouse.move_delta == 12
-                && s.projection().firmware.v070.mouse.deadzone == 0.25
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.mouse.move_delta == 12
+                && s.projection().v070_hardware.mouse.deadzone == 0.25
         });
 
         store
-            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+            .dispatch_command(WorkbenchCommand::V070Hardware(
                 V070HardwareAction::RenameDevice {
                     name: "MicroStudio".into(),
                 },
-            )))
+            ))
             .unwrap();
         poll_until(&mut store, |s| {
-            !s.projection().firmware.v070.busy
-                && s.projection().firmware.v070.device_name.name == "MicroStudio"
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.device_name.name == "MicroStudio"
         });
 
         store
-            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+            .dispatch_command(WorkbenchCommand::V070Hardware(
                 V070HardwareAction::ApplySaRgb {
                     sa: 7057,
                     color_hex: "#33AAFF".into(),
@@ -1467,42 +1350,42 @@ mod tests {
                     speed: 0.5,
                     effect: 4,
                 },
-            )))
+            ))
             .unwrap();
         poll_until(&mut store, |s| {
-            !s.projection().firmware.v070.busy
-                && s.projection().firmware.v070.sa_rgb.sa == Some(7057)
-                && s.projection().firmware.v070.sa_rgb.effect == 4
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.sa_rgb.sa == Some(7057)
+                && s.projection().v070_hardware.sa_rgb.effect == 4
         });
 
         store
-            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+            .dispatch_command(WorkbenchCommand::V070Hardware(
                 V070HardwareAction::ResetSaRgb { sa: 7057 },
-            )))
+            ))
             .unwrap();
         poll_until(&mut store, |s| {
-            !s.projection().firmware.v070.busy && s.projection().firmware.v070.sa_rgb.effect == 0
+            !s.projection().v070_hardware.busy && s.projection().v070_hardware.sa_rgb.effect == 0
         });
 
         link.push_wire(json!({"m": "kb.pl", "p": {"p": 3, "l": 5}}));
         poll_until(&mut store, |s| {
-            s.projection().firmware.v070.active_layer == Some(5)
+            s.projection().v070_hardware.active_layer == Some(5)
                 && s.projection().sidebar.board_layers.observed_layer == Some(5)
         });
 
         store.system_will_sleep();
         assert_eq!(
-            store.projection().firmware.v070.host_sleep_status,
+            store.projection().v070_hardware.host_sleep_status,
             "sleeping"
         );
-        assert!(!store.projection().firmware.v070.supported);
+        assert!(!store.projection().v070_hardware.supported);
         store.system_did_wake();
         assert!(matches!(
-            store.projection().firmware.v070.host_sleep_status.as_str(),
+            store.projection().v070_hardware.host_sleep_status.as_str(),
             "waking" | "awake"
         ));
         poll_until(&mut store, |s| {
-            s.projection().firmware.v070.host_sleep_status == "awake"
+            s.projection().v070_hardware.host_sleep_status == "awake"
         });
 
         if let Some(running) = store.six_layer_running.take() {
@@ -1526,12 +1409,10 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(80));
         store.poll_at(Instant::now());
-        assert!(!store.projection().firmware.v070.supported);
-        assert!(!store.projection().firmware.v070.synced);
+        assert!(!store.projection().v070_hardware.supported);
+        assert!(!store.projection().v070_hardware.synced);
         assert!(store
-            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
-                V070HardwareAction::Refresh,
-            )))
+            .dispatch_command(WorkbenchCommand::V070Hardware(V070HardwareAction::Refresh,))
             .is_err());
         assert_eq!(
             *sent_methods.lock().unwrap(),
@@ -1557,14 +1438,14 @@ mod tests {
         store.v070_hardware.set_host_sleep_status("sleeping");
         store.system_did_wake();
         assert!(matches!(
-            store.projection().firmware.v070.host_sleep_status.as_str(),
+            store.projection().v070_hardware.host_sleep_status.as_str(),
             "waking" | "awake"
         ));
         poll_until(&mut store, |s| {
-            s.projection().firmware.v070.host_sleep_status == "awake"
+            s.projection().v070_hardware.host_sleep_status == "awake"
         });
 
-        poll_until(&mut store, |s| s.projection().firmware.v070.synced);
+        poll_until(&mut store, |s| s.projection().v070_hardware.synced);
         assert!(
             sent_methods
                 .lock()
@@ -1585,19 +1466,24 @@ mod tests {
     fn select_layer_validation_rejects_out_of_range_before_sending_wire_command() {
         let base_mouse = MouseConfig::default();
         for layer in [0, 7] {
-            let err =
-                validate_v070_action(&V070HardwareAction::SelectLayer { layer }, &base_mouse, 15)
-                    .unwrap_err();
+            let err = parse_v070_action(
+                V070HardwareAction::SelectLayer { layer },
+                &base_mouse,
+                0.15,
+                15,
+            )
+            .unwrap_err();
             assert_eq!(
                 err,
                 format!("板载层索引 {layer} 超出有效范围（仅支持第 1–6 层）")
             );
         }
         for layer in 1..=6 {
-            assert!(validate_v070_action(
-                &V070HardwareAction::SelectLayer { layer },
+            assert!(parse_v070_action(
+                V070HardwareAction::SelectLayer { layer },
                 &base_mouse,
-                15
+                0.15,
+                15,
             )
             .is_ok());
         }
@@ -1612,11 +1498,11 @@ mod tests {
         let before_wire_count = sent_methods.lock().unwrap().len();
         for layer in [0, 7] {
             assert!(store
-                .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+                .dispatch_command(WorkbenchCommand::V070Hardware(
                     V070HardwareAction::SelectLayer { layer },
-                )))
+                ))
                 .is_err());
-            assert!(!store.projection().firmware.v070.busy);
+            assert!(!store.projection().v070_hardware.busy);
             assert_eq!(sent_methods.lock().unwrap().len(), before_wire_count);
         }
 
@@ -1846,26 +1732,26 @@ mod tests {
         let mut cfg = crate::store::WorkbenchStoreConfig::isolated(dir.path());
         cfg.isolated = false;
         let mut store = WorkbenchStore::open(cfg.clone()).unwrap();
-        assert!(!store.projection().firmware.v070.auto_layer_sync_enabled);
+        assert!(!store.projection().v070_hardware.auto_layer_sync_enabled);
         assert!(!store.document_store.v070_auto_layer_sync_enabled());
 
         store
-            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+            .dispatch_command(WorkbenchCommand::V070Hardware(
                 V070HardwareAction::SetAutoLayerSync { enabled: true },
-            )))
+            ))
             .unwrap();
-        assert!(store.projection().firmware.v070.auto_layer_sync_enabled);
+        assert!(store.projection().v070_hardware.auto_layer_sync_enabled);
         assert!(store.document_store.v070_auto_layer_sync_enabled());
         drop(store);
 
         let mut reopened = WorkbenchStore::open(cfg).unwrap();
-        assert!(reopened.projection().firmware.v070.auto_layer_sync_enabled);
+        assert!(reopened.projection().v070_hardware.auto_layer_sync_enabled);
         reopened
-            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+            .dispatch_command(WorkbenchCommand::V070Hardware(
                 V070HardwareAction::SetAutoLayerSync { enabled: false },
-            )))
+            ))
             .unwrap();
-        assert!(!reopened.projection().firmware.v070.auto_layer_sync_enabled);
+        assert!(!reopened.projection().v070_hardware.auto_layer_sync_enabled);
 
         let sent_methods = Arc::new(Mutex::new(Vec::new()));
         let (session, link, mut responder) =
@@ -1906,7 +1792,7 @@ mod tests {
         running.attach_test_vendor_session(&reopened.tokio_runtime, session.clone());
         reopened.six_layer_running = Some(running);
 
-        poll_until(&mut reopened, |s| s.projection().firmware.v070.synced);
+        poll_until(&mut reopened, |s| s.projection().v070_hardware.synced);
         let badge = reopened
             .projection()
             .header
@@ -1917,7 +1803,7 @@ mod tests {
         assert_eq!(reopened.projection().status_menu.power_status, Some(badge));
 
         reopened.set_host_execution_enabled(true).unwrap();
-        assert!(reopened.foreground_changed(Some("com.deepseek.dsh")));
+        let _ = reopened.foreground_changed(Some("com.deepseek.dsh"));
         assert!(
             !sent_methods
                 .lock()
@@ -1928,13 +1814,13 @@ mod tests {
         );
 
         reopened
-            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+            .dispatch_command(WorkbenchCommand::V070Hardware(
                 V070HardwareAction::SetAutoLayerSync { enabled: true },
-            )))
+            ))
             .unwrap();
         poll_until(&mut reopened, |s| {
-            !s.projection().firmware.v070.busy
-                && s.projection().firmware.v070.active_layer == Some(3)
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.active_layer == Some(3)
         });
         assert!(
             reopened.v070_hardware.expected_layer_echo.is_some(),
@@ -1952,8 +1838,8 @@ mod tests {
             .iter()
             .filter(|m| m.as_str() == "kb.pl.set")
             .count();
-        assert!(reopened.foreground_changed(Some("com.openai.codex")));
-        assert!(!reopened.projection().firmware.v070.busy);
+        let _ = reopened.foreground_changed(Some("com.openai.codex"));
+        assert!(!reopened.projection().v070_hardware.busy);
         assert_eq!(
             sent_methods
                 .lock()
@@ -1966,22 +1852,22 @@ mod tests {
         );
 
         reopened
-            .dispatch_command(WorkbenchCommand::Firmware(FirmwareAction::V070Hardware(
+            .dispatch_command(WorkbenchCommand::V070Hardware(
                 V070HardwareAction::ApplyMousePreset {
                     preset: "fast".into(),
                 },
-            )))
+            ))
             .unwrap();
-        assert!(reopened.projection().firmware.v070.busy);
-        assert!(reopened.foreground_changed(Some("com.google.antigravity")));
+        assert!(reopened.projection().v070_hardware.busy);
+        let _ = reopened.foreground_changed(Some("com.google.antigravity"));
         assert_eq!(
             reopened.v070_hardware.pending_auto_layer_sync,
             Some(2),
             "layer sync while busy must coalesce to pending_auto_layer_sync"
         );
         poll_until(&mut reopened, |s| {
-            !s.projection().firmware.v070.busy
-                && s.projection().firmware.v070.active_layer == Some(2)
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.active_layer == Some(2)
         });
         link.push_wire(json!({"m": "kb.pl", "p": {"p": 3, "l": 2}}));
         poll_until(&mut reopened, |s| {
@@ -1995,8 +1881,8 @@ mod tests {
             .iter()
             .filter(|m| m.as_str() == "kb.pl.set")
             .count();
-        assert!(reopened.foreground_changed(Some("com.deepseek.dsh")));
-        assert!(!reopened.projection().firmware.v070.busy);
+        let _ = reopened.foreground_changed(Some("com.deepseek.dsh"));
+        assert!(!reopened.projection().v070_hardware.busy);
         assert_eq!(
             sent_methods
                 .lock()
@@ -2010,8 +1896,8 @@ mod tests {
 
         reopened.set_host_execution_enabled(true).unwrap();
         poll_until(&mut reopened, |s| {
-            !s.projection().firmware.v070.busy
-                && s.projection().firmware.v070.active_layer == Some(3)
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.active_layer == Some(3)
         });
         assert_eq!(
             sent_methods
@@ -2040,7 +1926,7 @@ mod tests {
             .filter(|m| m.as_str() == "kb.pl.set")
             .count();
         assert!(!reopened.foreground_changed(Some("com.google.antigravity")));
-        assert!(!reopened.projection().firmware.v070.busy);
+        assert!(!reopened.projection().v070_hardware.busy);
         assert_eq!(
             sent_methods
                 .lock()
@@ -2058,8 +1944,8 @@ mod tests {
             ))
             .unwrap();
         poll_until(&mut reopened, |s| {
-            !s.projection().firmware.v070.busy
-                && s.projection().firmware.v070.active_layer == Some(2)
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.active_layer == Some(2)
         });
         assert_eq!(
             sent_methods
@@ -2088,7 +1974,7 @@ mod tests {
             .filter(|m| m.as_str() == "kb.pl.set")
             .count();
         assert!(!reopened.foreground_changed(Some("com.deepseek.dsh")));
-        assert!(!reopened.projection().firmware.v070.busy);
+        assert!(!reopened.projection().v070_hardware.busy);
         assert_eq!(
             sent_methods
                 .lock()
@@ -2111,8 +1997,8 @@ mod tests {
             ))
             .unwrap();
         poll_until(&mut reopened, |s| {
-            !s.projection().firmware.v070.busy
-                && s.projection().firmware.v070.active_layer == Some(3)
+            !s.projection().v070_hardware.busy
+                && s.projection().v070_hardware.active_layer == Some(3)
         });
         assert!(matches!(
             reopened.build_six_layer_routing_mode(),
@@ -2136,7 +2022,7 @@ mod tests {
         responder.abort();
         let _ = reopened.tokio_runtime.block_on(&mut responder);
         assert!(reopened.foreground_changed(Some("com.google.antigravity")));
-        assert!(reopened.projection().firmware.v070.busy);
+        assert!(reopened.projection().v070_hardware.busy);
         assert!(reopened.v070_hardware.expected_layer_echo.is_some());
         let in_flight_seq = reopened
             .v070_hardware
@@ -2150,7 +2036,7 @@ mod tests {
                 result: Err("timeout".into()),
             })
             .unwrap();
-        poll_until(&mut reopened, |s| !s.projection().firmware.v070.busy);
+        poll_until(&mut reopened, |s| !s.projection().v070_hardware.busy);
         assert!(
             reopened.v070_hardware.expected_layer_echo.is_none(),
             "failed V070CapabilityOutcome must clear expected_layer_echo"
@@ -2169,6 +2055,65 @@ mod tests {
         if let Some(running) = reopened.six_layer_running.take() {
             running.shutdown(&reopened.tokio_runtime).unwrap();
         }
+    }
+
+    #[test]
+    fn command_domain_target_predicate_and_disconnect_cleanup_stay_unified() {
+        let cmd: WorkbenchCommand = serde_json::from_value(json!({
+            "domain": "v070_hardware",
+            "action": { "SetAutoLayerSync": { "enabled": true } }
+        }))
+        .unwrap();
+        assert!(matches!(
+            cmd,
+            WorkbenchCommand::V070Hardware(V070HardwareAction::SetAutoLayerSync { enabled: true })
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = WorkbenchStore::open_isolated(dir.path()).unwrap();
+        let sent_methods = Arc::new(Mutex::new(Vec::new()));
+        let (session, link, responder) =
+            spawn_mock_v070_session(&store.tokio_runtime, "0.7.0-rc.16", sent_methods);
+        let mut running = RunningSixLayer::isolated(session.clone(), dir.path());
+        running.attach_test_vendor_session(&store.tokio_runtime, session.clone());
+        store.six_layer_running = Some(running);
+
+        assert!(store.has_active_v070_device());
+        assert_eq!(store.live_v070_session().map(|s| s.id), Some(session.id));
+        assert!(store.resolve_v070_command_target().is_ok());
+
+        store.firmware_update.projection.busy = true;
+        assert!(store
+            .dispatch_command(WorkbenchCommand::V070Hardware(V070HardwareAction::Refresh,))
+            .is_err());
+        assert!(store
+            .projection()
+            .v070_hardware
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("固件操作正在进行")));
+        store.firmware_update.projection.busy = false;
+
+        let seq = store.v070_hardware.allocate_seq();
+        store.v070_hardware.projection.busy = true;
+        store.v070_hardware.in_flight_seq = Some(seq);
+        store.commit_runtime_update();
+        assert!(store.projection().v070_hardware.busy);
+        store.six_layer_running.as_ref().unwrap().retire();
+
+        assert!(!store.has_active_v070_device());
+        assert!(store.live_v070_session().is_none());
+        assert!(store.resolve_v070_command_target().is_err());
+
+        store.handle_v070_capability_outcome(session.id, seq, Err("USB 会话已断开".into()));
+        assert!(!store.projection().v070_hardware.busy);
+        assert_eq!(store.v070_hardware.in_flight_seq, None);
+
+        drop(link);
+        if let Some(running) = store.six_layer_running.take() {
+            running.shutdown(&store.tokio_runtime).unwrap();
+        }
+        responder.abort();
     }
 }
 

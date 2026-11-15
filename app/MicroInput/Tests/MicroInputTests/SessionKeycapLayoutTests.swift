@@ -14,7 +14,7 @@ final class SessionKeycapLayoutTests: XCTestCase {
             slotIndex: index, keyBindingId: "AG0\(index)", mode: "Recent", status: status,
             kind: kind ?? ["running": "Working", "unread": "BlueDotCompleted", "needs_interaction": "NeedsAttention", "error": "Error", "idle": "Idle"][status]!, agentMonogram: "AG", title: title, subtitle: "",
             isUnreadBlueDot: status == "unread", isWorkingAnimated: status == "running",
-            isBoundToTopKey: true, ledColorHex: "#655681", placeRaw: title.isEmpty ? nil : ["synthetic": true]
+            isBoundToTopKey: true, ledColorHex: "#655681", hasAssignedPlace: !title.isEmpty
         )
     }
 

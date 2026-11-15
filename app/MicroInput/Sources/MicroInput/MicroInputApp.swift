@@ -159,7 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(updateItem)
 
         let toggleExecItem = NSMenuItem(
-            title: store.statusMenu.hostExecutionEnabled ? "暂停按键控制" : "启用按键控制",
+            title: store.statusMenu.hostExecutionEnabled ? "暂停按键映射" : "启用按键映射",
             action: #selector(handleDockToggleExecution(_:)),
             keyEquivalent: ""
         )

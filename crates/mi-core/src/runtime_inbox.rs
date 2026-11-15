@@ -311,7 +311,7 @@ mod tests {
         let outcome = |seq| HardwareLoopEvent::V070CapabilityOutcome {
             session_id: 1,
             seq,
-            result: Ok(crate::firmware_update::V070BridgeOutcome::ProfileLayer {
+            result: Ok(crate::v070_hardware::V070BridgeOutcome::ProfileLayer {
                 profile_index: Some(1),
                 layer_index: 2,
             }),

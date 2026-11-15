@@ -80,8 +80,10 @@ pub(super) struct ProjectionInputs<'a> {
     pub slot_table: &'a FourAppSlotTable,
     pub status_menu_open: bool,
     pub status_message: &'a String,
+    pub v070_auto_layer_sync_enabled: bool,
     pub v070_hardware_mouse_supported: bool,
-    pub v070_projection: &'a crate::firmware_update::V070HardwareProjection,
+    pub v070_projection: &'a crate::v070_hardware::V070HardwareProjection,
+    pub v070_session_sa_rgb_sync_enabled: bool,
 }
 
 impl ProjectionInputs<'_> {
@@ -133,14 +135,14 @@ impl ProjectionInputs<'_> {
                             .unwrap_or_else(|| c.path.clone())
                     });
                 let display_label = format!("{} ({})", c.product, suffix);
-                CandidateDevice {
-                    path: c.path,
-                    product: c.product,
-                    serial_number: serial,
+                CandidateDevice::new(
+                    c.path,
+                    c.product,
+                    serial,
                     display_label,
                     is_connected,
                     is_preferred,
-                }
+                )
             })
             .collect()
     }
@@ -1265,6 +1267,8 @@ impl ProjectionInputs<'_> {
     pub(super) fn build_status_menu_projection(
         &self,
         can_edit_draft: bool,
+        power_status: Option<PowerStatusBadgeProjection>,
+        candidate_devices: Vec<CandidateDevice>,
     ) -> StatusMenuProjection {
         let profiles = &self
             .document_store
@@ -1310,9 +1314,6 @@ impl ProjectionInputs<'_> {
                 "检测到原版 Input 正在后台抢占层切换，建议开启「锁定当前方案」".to_string()
             }
         });
-        let power_status =
-            PowerStatusBadgeProjection::from_v070(self.v070_projection, self.device_connected);
-        let candidate_devices = self.build_candidate_devices_projection();
         StatusMenuProjection {
             icon: StatusItemIconSpec::canonical(),
             active_profile_id: active_pid,
@@ -1650,8 +1651,8 @@ impl ProjectionInputs<'_> {
             can_undo: self.document_store.draft.can_undo,
             can_redo: self.document_store.draft.can_redo,
             busy: self.busy,
-            power_status,
-            candidate_devices,
+            power_status: power_status.clone(),
+            candidate_devices: candidate_devices.clone(),
             preferred_device_serial: self.preferred_device_serial.clone(),
         };
 
@@ -1687,7 +1688,8 @@ impl ProjectionInputs<'_> {
 
         let radial = self.build_radial_projection();
 
-        let status_menu = self.build_status_menu_projection(can_edit_draft);
+        let status_menu =
+            self.build_status_menu_projection(can_edit_draft, power_status, candidate_devices);
         let (device_connected, device_summary) = if let Some(cand) = &self.connected_candidate {
             (
                 self.device_connected,
@@ -1703,8 +1705,14 @@ impl ProjectionInputs<'_> {
             )
         };
 
+        let mut v070_hardware = self.v070_projection.clone();
+        v070_hardware.auto_layer_sync_enabled = self.v070_auto_layer_sync_enabled;
+        v070_hardware.session_sa_rgb_sync_enabled = self.v070_session_sa_rgb_sync_enabled;
+        v070_hardware.preferred_device_serial = self.preferred_device_serial.clone();
+
         WorkbenchProjection {
             firmware: Default::default(),
+            v070_hardware,
             header,
             sidebar,
             canvas,
@@ -1815,17 +1823,15 @@ impl ProjectionInputs<'_> {
         if self.document_store.locked_profile_id().is_some() {
             return "已锁定 · 忽略前台切换与外部干扰".to_string();
         }
+        if !self.document_store.host_execution_enabled() {
+            return "已暂停软件按键映射".to_string();
+        }
         let mode = if self.six_layer_view.is_some() && !self.six_layer_user_pinned {
             "六层板载路由"
         } else {
             "手动选择方案"
         };
-        let exec = if self.document_store.host_execution_enabled() {
-            "按键控制已启用"
-        } else {
-            "按键控制已暂停"
-        };
-        format!("{mode}，{exec}")
+        format!("{mode} · 按键映射已启用")
     }
 
     pub(super) fn selected_keycap(&self, slot: u32) -> CodexKeycapId {

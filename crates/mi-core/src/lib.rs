@@ -14,6 +14,7 @@ pub mod sidebar;
 pub mod six_layer_runtime;
 pub mod status_menu;
 pub mod store;
+pub mod v070_hardware;
 pub mod v070_session_sa_rgb;
 
 pub use canvas::{
@@ -27,13 +28,10 @@ pub use editors::{
     ApplyChangeRowProjection, ApplyPreparationModalProjection, ComparisonRowProjection,
     EditorAction, EditorModalProjection, LightingEditorModalProjection, LightingZoneProjection,
     MacroEditorModalProjection, MacroStepDraft, MultiBranchKind, MultiBranchSlotProjection,
-    MultiBranchTarget, MultiEditorModalProjection, ReconnectComparisonModalProjection,
+    MultiBranchTarget, MultiEditorModalProjection, MultiTargetOptionProjection,
+    ReconnectComparisonModalProjection,
 };
-pub use firmware_update::{
-    FirmwareAction, FirmwareProjection, V070DeviceNameProjection, V070HardwareAction,
-    V070HardwareProjection, V070MouseConfigProjection, V070PmConfigProjection,
-    V070PmStateHoldProjection, V070PmStateProjection, V070SaRgbProjection,
-};
+pub use firmware_update::{FirmwareAction, FirmwareProjection};
 pub use header::{
     CandidateDevice, HeaderAction, HeaderProjection, HeaderReadyState, PowerStatusBadgeProjection,
 };
@@ -77,4 +75,8 @@ pub use store::{
     format_popover_cheat_label, DeviceWorkflowAction, HardwareAutoAcceptanceReceipt,
     HardwareLoopEvent, WorkbenchCommand, WorkbenchError, WorkbenchProjection, WorkbenchStore,
     WorkbenchStoreConfig,
+};
+pub use v070_hardware::{
+    V070HardwareAction, V070HardwareProjection, V070MouseConfigProjection, V070PmStateProjection,
+    V070SaRgbProjection,
 };

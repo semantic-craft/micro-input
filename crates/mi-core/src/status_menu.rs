@@ -146,7 +146,7 @@ impl Default for StatusMenuProjection {
             icon: StatusItemIconSpec::default(),
             active_profile_id: None,
             active_profile_name: "未选择方案".to_string(),
-            routing_mode_summary: "手动选择方案".to_string(),
+            routing_mode_summary: "手动选择方案 · 按键映射已启用".to_string(),
             is_profile_locked: false,
             locked_profile_id: None,
             accessibility_trusted: true,

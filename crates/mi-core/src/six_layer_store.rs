@@ -349,8 +349,6 @@ impl WorkbenchStore {
                         let _ = self
                             .document_store
                             .set_preferred_device_serial(Some(serial.to_string()));
-                        self.v070_hardware.projection.preferred_device_serial =
-                            self.document_store.preferred_device_serial();
                     }
                     if self.available_usb_candidates.is_empty() {
                         self.available_usb_candidates = vec![running.candidate.clone()];

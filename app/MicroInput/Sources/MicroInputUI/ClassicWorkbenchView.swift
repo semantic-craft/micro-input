@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 public struct ClassicWorkbenchView: View {
     let store: CoreStore
@@ -71,9 +72,7 @@ public struct ClassicWorkbenchView: View {
                         WorkbenchSettingsPage(
                             store: store,
                             updater: updater,
-                            destination: destination,
-                            onActions: { showFullActionLibrarySheet = true },
-                            onMacros: { showMacroLibrarySheet = true }
+                            destination: destination
                         )
                     }
                 }
@@ -177,7 +176,7 @@ struct WorkbenchHeaderBarView: View {
             Spacer(minLength: 8)
 
             Toggle(
-                "按键控制",
+                "按键映射",
                 isOn: Binding(
                     get: { h.hostExecutionEnabled },
                     set: { store.dispatch("header", ["SetExecutionEnabled": $0]) }
@@ -289,33 +288,15 @@ private struct WorkbenchSidebarView: View {
                             }
                             Divider()
                             Button("导出整个本地文档…") {
-                                store.dispatch("sidebar", [
-                                    "Backup": ["ExportPreset": ["profile_id": NSNull(), "layer_id": NSNull()]]
-                                ])
-                                if let text = store.sidebar.lastExportedPreset {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(text, forType: .string)
-                                }
+                                exportPreset(profileId: nil, layerId: nil, defaultName: "micro-input-document.json")
                             }
                             if let pid = s.selectedProfileId {
                                 Button("导出当前配置…") {
-                                    store.dispatch("sidebar", [
-                                        "Backup": ["ExportPreset": ["profile_id": pid, "layer_id": NSNull()]]
-                                    ])
-                                    if let text = store.sidebar.lastExportedPreset {
-                                        NSPasteboard.general.clearContents()
-                                        NSPasteboard.general.setString(text, forType: .string)
-                                    }
+                                    exportPreset(profileId: pid, layerId: nil, defaultName: "micro-input-profile.json")
                                 }
                                 if let lid = s.selectedLayerId {
                                     Button("导出当前层…") {
-                                        store.dispatch("sidebar", [
-                                            "Backup": ["ExportPreset": ["profile_id": pid, "layer_id": lid]]
-                                        ])
-                                        if let text = store.sidebar.lastExportedPreset {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString(text, forType: .string)
-                                        }
+                                        exportPreset(profileId: pid, layerId: lid, defaultName: "micro-input-layer.json")
                                     }
                                 }
                             }
@@ -344,10 +325,15 @@ private struct WorkbenchSidebarView: View {
                 BoardLayersPanel(store: store, board: s.boardLayers)
             }
 
+            let showHardwareLayerSync = store.v070Hardware.supported || store.v070Hardware.autoLayerSyncEnabled
             VStack(alignment: .leading, spacing: 10) {
-                SettingsSectionHeader("方案切换选项")
+                SettingsSectionHeader("方案与硬件层选项")
                 SettingsCard {
-                    SettingsRow("显示其他自定义方案", subtitle: "在方案列表中一并展示原生保护方案与自定义草稿") {
+                    SettingsRow(
+                        "显示其他自定义方案",
+                        subtitle: "在方案列表中一并展示原生保护方案与自定义草稿",
+                        showsDivider: showHardwareLayerSync
+                    ) {
                         Toggle(
                             "",
                             isOn: Binding(
@@ -358,8 +344,51 @@ private struct WorkbenchSidebarView: View {
                         .labelsHidden()
                         .toggleStyle(NeutralSwitchToggleStyle())
                     }
+                    if showHardwareLayerSync {
+                        SettingsRow(
+                            "同步切换键盘硬件层",
+                            subtitle: "在桌面端切换或激活方案时，同步切换已连接键盘的硬件层",
+                            showsDivider: false
+                        ) {
+                            Toggle(
+                                "",
+                                isOn: Binding(
+                                    get: { store.v070Hardware.autoLayerSyncEnabled },
+                                    set: { store.setV070AutoLayerSync($0) }
+                                )
+                            )
+                            .labelsHidden()
+                            .toggleStyle(NeutralSwitchToggleStyle())
+                            .disabled(store.v070Hardware.busy)
+                            .accessibilityIdentifier("v070-auto-layer-sync")
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    private func exportPreset(profileId: String?, layerId: String?, defaultName: String) {
+        store.dispatch("sidebar", [
+            "Backup": [
+                "ExportPreset": [
+                    "profile_id": profileId as Any? ?? NSNull(),
+                    "layer_id": layerId as Any? ?? NSNull()
+                ]
+            ]
+        ])
+        guard let text = store.sidebar.lastExportedPreset else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        let env = ProcessInfo.processInfo.environment
+        guard env["XCTestConfigurationFilePath"] == nil, env["MI_SYNTHETIC_SCENARIO"] == nil else {
+            return
+        }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = defaultName
+        if panel.runModal() == .OK, let url = panel.url {
+            try? text.write(to: url, atomically: true, encoding: .utf8)
         }
     }
 }
@@ -572,7 +601,6 @@ public enum WorkbenchDestination: String, CaseIterable, Identifiable {
     case lighting = "灯光"
     case device = "设备与连接"
     case profiles = "应用方案"
-    case library = "动作库"
     case radial = "轮盘菜单"
     case general = "通用"
 
@@ -583,7 +611,6 @@ public enum WorkbenchDestination: String, CaseIterable, Identifiable {
         case .lighting: return "lightbulb"
         case .device: return "cable.connector"
         case .profiles: return "square.stack"
-        case .library: return "list.bullet.rectangle"
         case .radial: return "arrow.up.left.and.arrow.down.right"
         case .general: return "gearshape"
         }
@@ -601,7 +628,7 @@ private struct WorkbenchNavigationView: View {
                 .foregroundStyle(UITheme.textPrimary)
                 .padding(.horizontal, 12)
             navigationGroup("小键盘", [.keyboard, .lighting, .device])
-            navigationGroup("自定义", [.profiles, .library, .radial])
+            navigationGroup("自定义", [.profiles, .radial])
             navigationGroup("Micro Input", [.general])
             Spacer(minLength: 0)
             Button { selection = .general } label: {
@@ -673,8 +700,6 @@ private struct WorkbenchSettingsPage: View {
     let store: CoreStore
     let updater: SoftwareUpdateController
     let destination: WorkbenchDestination
-    var onActions: () -> Void
-    var onMacros: () -> Void
 
     var body: some View {
         ScrollView {
@@ -720,75 +745,51 @@ private struct WorkbenchSettingsPage: View {
                         }
                     }
                     VStack(alignment: .leading, spacing: 10) {
-                        SettingsSectionHeader("六层方案")
+                        SettingsSectionHeader("硬件键帽布局")
                         SettingsCard {
-                            SettingsRow(
-                                "硬件六层同步",
-                                subtitle: store.sidebar.boardLayers.applyBlockReason.isEmpty
-                                    ? "在应用方案中分配六层，应用前自动备份原配置并读回核对。"
-                                    : store.sidebar.boardLayers.applyBlockReason
-                            ) {
-                                HStack(spacing: 8) {
-                                    if store.sidebar.boardLayers.restoreAvailable {
-                                        Button("恢复原键盘配置") {
-                                            store.dispatch("sidebar", "RestoreBoardLayers")
-                                        }
-                                        .surfaceButton(.ghost)
+                            SettingsRow("底行按键形态", subtitle: "匹配物理拆分为两颗 1u 按键或合并为单颗 2u 宽键") {
+                                SelectDropdown(
+                                    options: [
+                                        .init(value: "split", title: "双 1u 分体"),
+                                        .init(value: "merged", title: "单 2u 合并"),
+                                    ],
+                                    selection: Binding(
+                                        get: { store.canvas.bottomRowLayout },
+                                        set: { store.dispatch("canvas", ["SetBottomRowLayout": $0]) }
+                                    ),
+                                    minTriggerWidth: 128
+                                )
+                                .accessibilityIdentifier("device-bottom-row-layout")
+                            }
+                        }
+                    }
+                    V070HardwareSettingsSection(model: store.v070Hardware) {
+                        store.dispatchV070Hardware($0)
+                    }
+                    FirmwareUpdateSettingsSection(
+                        model: store.firmware,
+                        onConnectKeyboard: { store.dispatch("header", "ConnectKeyboard") }
+                    ) { store.dispatch("firmware", $0) }
+                    VStack(alignment: .leading, spacing: 10) {
+                        SettingsSectionHeader("诊断与支持")
+                        SettingsCard {
+                            SettingsRow("运行诊断归档", subtitle: "导出脱敏连接与状态诊断快照，并在 Finder 中显示") {
+                                Button("导出诊断") {
+                                    store.dispatch("device", "ExportDiagnostics")
+                                    let prefix = "已导出诊断报告："
+                                    let msg = store.footer.statusMessage
+                                    guard msg.hasPrefix(prefix) else { return }
+                                    let path = String(msg.dropFirst(prefix.count))
+                                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                                    let env = ProcessInfo.processInfo.environment
+                                    if !path.isEmpty,
+                                       env["XCTestConfigurationFilePath"] == nil,
+                                       env["MI_SYNTHETIC_SCENARIO"] == nil
+                                    {
+                                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
                                     }
-                                    Button("应用到键盘") {
-                                        store.dispatch("sidebar", "ProvisionBoardLayers")
-                                    }
-                                    .surfaceButton(.secondary)
-                                    .disabled(!store.sidebar.boardLayers.canApply)
                                 }
-                            }
-                        }
-                    }
-                    VStack(alignment: .leading, spacing: 10) {
-                        SettingsSectionHeader("配置工具")
-                        SettingsCard {
-                            SettingsRow("配置应用预检与备份", subtitle: "只读核验待写入变更并生成本地回滚备份", showsDivider: true) {
-                                Button("预览并备份配置") { store.dispatch("device", "OpenApplyPreparation") }
-                                    .surfaceButton(.secondary)
-                            }
-                            SettingsRow("设备重连三方比较", subtitle: "对比基线、本地草稿与设备端配置的差异", showsDivider: true) {
-                                Button("预览重连比较") { store.dispatch("device", "OpenReconnectComparison") }
-                                    .surfaceButton(.secondary)
-                            }
-                            SettingsRow("运行诊断归档", subtitle: "导出脱敏连接与状态诊断快照") {
-                                Button("导出诊断") { store.dispatch("device", "ExportDiagnostics") }
-                                    .surfaceButton(.secondary)
-                            }
-                        }
-                    }
-
-                case .library:
-                    let libraryDisabled = store.sidebar.selectedProfileId == nil || store.inspector.editableInspector == nil
-                    let lockHint = store.sidebar.selectedProfileId == nil
-                        ? "先选择已分配的层或应用方案。"
-                        : "当前层受原生应用保护，选择可编辑层后可绑定动作。"
-                    VStack(alignment: .leading, spacing: 10) {
-                        SettingsSectionHeader("动作与快捷键")
-                        SettingsCard {
-                            SettingsRow(
-                                "全部可用动作库",
-                                subtitle: libraryDisabled
-                                    ? lockHint
-                                    : "当前编辑：\(store.sidebar.selectedDisplayName)。先在键盘页面选择按键，再绑定动作。"
-                            ) {
-                                Button("浏览动作") { onActions() }
-                                    .surfaceButton(.primary)
-                                    .disabled(libraryDisabled)
-                            }
-                        }
-                    }
-                    VStack(alignment: .leading, spacing: 10) {
-                        SettingsSectionHeader("宏与多击键")
-                        SettingsCard {
-                            SettingsRow("键盘宏与四分支动作", subtitle: "组合按键、等待和文本，或为单击/双击/长按分配不同动作。") {
-                                Button("管理宏与多击键") { onMacros() }
-                                    .surfaceButton(.secondary)
-                                    .disabled(libraryDisabled)
+                                .surfaceButton(.secondary)
                             }
                         }
                     }
@@ -798,6 +799,9 @@ private struct WorkbenchSettingsPage: View {
                     let directions = ["右", "右下", "下", "左下", "左", "左上", "上", "右上"]
                     VStack(alignment: .leading, spacing: 10) {
                         SettingsSectionHeader("八向轮盘")
+                        Text("当前展示内置的固定八向快捷动作")
+                            .font(UITheme.caption)
+                            .foregroundStyle(UITheme.textSecondary)
                         SettingsCard {
                             SettingsRow(
                                 "启用轮盘菜单",
@@ -829,41 +833,33 @@ private struct WorkbenchSettingsPage: View {
 
                 case .general:
                     AboutAndUpdatesSettingsSection(updater: updater, engineVersion: store.header.engineVersion)
-                    FirmwareUpdateSettingsSection(
-                        model: store.firmware,
-                        onConnectKeyboard: { store.dispatch("header", "ConnectKeyboard") }
-                    ) { store.dispatch("firmware", $0) }
-                    V070HardwareSettingsSection(model: store.firmware.v070) {
-                        store.dispatch("firmware", $0)
-                    }
                     VStack(alignment: .leading, spacing: 10) {
-                        SettingsSectionHeader("按键控制")
+                        SettingsSectionHeader("系统权限")
                         SettingsCard {
-                            SettingsRow("允许键盘控制应用", subtitle: "开启后由 Micro Input 接管并路由物理按键动作", showsDivider: true) {
-                                Toggle("", isOn: Binding(
-                                    get: { store.header.hostExecutionEnabled },
-                                    set: { store.dispatch("header", ["SetExecutionEnabled": $0]) }
-                                ))
-                                .labelsHidden()
-                                .toggleStyle(NeutralSwitchToggleStyle())
-                            }
-                            SettingsRow("按键速查浮层", subtitle: "查看当前方案 4×4 物理坐标按键绑定") {
-                                Button("查看按键速查") { store.dispatch("overlay", "ToggleCheatSheet") }
-                                    .surfaceButton(.secondary)
-                            }
-                        }
-                    }
-                    VStack(alignment: .leading, spacing: 10) {
-                        SettingsSectionHeader("本地草稿")
-                        SettingsCard {
-                            SettingsRow("本地配置修订", subtitle: "文档修订 #\(store.header.documentRevision)") {
-                                HStack(spacing: 8) {
-                                    Button("撤销") { store.dispatch("header", "Undo") }
-                                        .surfaceButton(.secondary)
-                                        .disabled(!store.header.canUndo)
-                                    Button("重做") { store.dispatch("header", "Redo") }
-                                        .surfaceButton(.secondary)
-                                        .disabled(!store.header.canRedo)
+                            SettingsRow(
+                                "辅助功能权限",
+                                subtitle: store.header.accessibilityTrusted
+                                    ? "已授权，可正常向目标软件发送快捷键与指令"
+                                    : "缺少 macOS 辅助功能权限，软件按键映射将被系统拦截"
+                            ) {
+                                if store.header.accessibilityTrusted {
+                                    HStack(spacing: 6) {
+                                        Circle()
+                                            .fill(UITheme.statusSuccess)
+                                            .frame(width: 7, height: 7)
+                                        Text("已就绪")
+                                            .font(UITheme.captionMedium)
+                                            .foregroundStyle(UITheme.textPrimary)
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Capsule().fill(UITheme.subtleSurface))
+                                    .overlay(Capsule().stroke(UITheme.hairlineBorder, lineWidth: 1))
+                                } else {
+                                    Button("打开辅助功能设置") {
+                                        store.dispatch("header", "OpenAccessibilitySettings")
+                                    }
+                                    .surfaceButton(.primary)
                                 }
                             }
                         }

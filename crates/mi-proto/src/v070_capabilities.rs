@@ -419,7 +419,7 @@ pub struct PmHold {
     pub age_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmState {
     pub state: String,
     pub floor: String,
@@ -455,6 +455,16 @@ pub struct DeviceNameInfo {
     pub name: String,
     pub factory_name: String,
     pub max_length: usize,
+}
+
+impl Default for DeviceNameInfo {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            factory_name: String::new(),
+            max_length: MAX_DEVICE_NAME_LEN,
+        }
+    }
 }
 
 pub fn validate_device_name(name: &str, max_length: usize) -> Result<String, ProtoError> {
@@ -867,5 +877,17 @@ mod tests {
             "error": {"code": -32602, "message": "missing p and l"}
         });
         assert!(decode_set_profile_layer_response(&err_reply, 1).is_err());
+    }
+
+    #[test]
+    fn defaults_preserve_device_name_limit_and_empty_pm_state() {
+        let pm = PmState::default();
+        assert!(pm.state.is_empty());
+        assert!(pm.holds.is_empty());
+
+        let name = DeviceNameInfo::default();
+        assert!(name.name.is_empty());
+        assert!(name.factory_name.is_empty());
+        assert_eq!(name.max_length, MAX_DEVICE_NAME_LEN);
     }
 }

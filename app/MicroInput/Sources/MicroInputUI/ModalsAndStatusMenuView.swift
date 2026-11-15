@@ -43,20 +43,21 @@ public struct StatusMenuPopoverView: View {
                                 .foregroundStyle(UITheme.textPrimary)
                         }
                     }
-                    Text(sm.routingModeSummary)
+                    Text(sm.hostExecutionEnabled ? sm.routingModeSummary : (sm.isProfileLocked ? "已锁定 · 已暂停软件按键映射" : "已暂停软件按键映射"))
                         .font(.system(size: 12.5, weight: .regular))
                         .foregroundStyle(UITheme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)
                 Toggle(
-                    "",
+                    "按键映射",
                     isOn: Binding(
                         get: { sm.hostExecutionEnabled },
                         set: { store.dispatch("status_menu", ["SetHostExecutionEnabled": $0]) }
                     )
                 )
-                .labelsHidden()
-                .toggleStyle(NeutralSwitchToggleStyle())
+                .toggleStyle(NeutralSwitchToggleStyle(showsLabel: true))
+                .fixedSize()
             }
 
             StatusMenuHardwareStrip(
@@ -430,11 +431,11 @@ struct MultiEditorSheet: View {
         var opts: [SelectOption<String>] = [
             .init(value: "__none__", title: "不设置", subtitle: "清空此触发分支动作")
         ]
-        for (actId, actName) in model.availableActions.prefix(24) {
-            opts.append(.init(value: "action:\(actId)", title: actName))
+        for option in model.availableActions.prefix(24) {
+            opts.append(.init(value: "action:\(option.id)", title: option.label))
         }
-        for (macId, macName) in model.availableMacros {
-            opts.append(.init(value: "macro:\(macId)", title: "宏：\(macName)"))
+        for option in model.availableMacros {
+            opts.append(.init(value: "macro:\(option.id)", title: "宏：\(option.label)"))
         }
         return opts
     }
@@ -619,18 +620,6 @@ struct LightingEditorSheet: View {
                     store.dispatch("editor", "LightingResetLayer")
                 }
                 .surfaceButton(.ghost)
-
-                if model.previewActive {
-                    Button("结束 30s 硬件预览 (\(model.previewRemainingSecs)s)") {
-                        store.dispatch("editor", "LightingEndPreview")
-                    }
-                    .surfaceButton(.secondary)
-                } else {
-                    Button("开始 30s 硬件预览") {
-                        store.dispatch("editor", "LightingBeginPreview")
-                    }
-                    .surfaceButton(.secondary)
-                }
                 Spacer()
                 if model.hasLighting {
                     Button("完成") {
@@ -725,7 +714,7 @@ struct LightingEditorSheet: View {
                     ), in: 0...100).disabled(!zone.canEditSpeed)
                 }
 
-                SettingsRow("动态参数", subtitle: "调节渐变跨度与动态光效细节") {
+                SettingsRow("渐变跨度", subtitle: "调节渐变跨度与动态光效细节") {
                     NeutralTrackSlider(value: Binding(
                         get: { Double(zone.magicPercent) },
                         set: { val in

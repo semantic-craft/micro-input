@@ -77,74 +77,70 @@ final class FirmwareUpdateTests: XCTestCase {
     }
 
     func testV070HardwareSliceModelDecodesFullPartialAndLegacyJson() {
-        let fullFirmware = FirmwareSliceModel(json: [
-            "current_version": "0.7.0-rc.16",
-            "v070": [
-                "supported": true,
-                "busy": false,
-                "synced": true,
-                "active_profile": NSNumber(value: 2),
-                "active_layer": NSNumber(value: 4),
-                "battery_percent": NSNumber(value: 87),
-                "is_charging": false,
-                "host_sleep_status": "awake",
-                "status_message": "已从设备同步 0.7.0 状态",
-                "last_error": NSNull(),
-                "auto_layer_sync_enabled": true,
-                "preferred_device_serial": "CM2-SN-001",
-                "mouse": [
-                    "preset": "fast",
-                    "delay_ms": 80,
-                    "interval_ms": 15,
-                    "move_delta": 12,
-                    "max_speed": 20,
-                    "time_to_max": 25,
-                    "wheel_delay_ms": 90,
-                    "wheel_interval_ms": 60,
-                    "wheel_delta": 2,
-                    "wheel_max_speed": 12,
-                    "wheel_time_to_max": 35,
-                    "stick_speed": 4,
-                    "stick_regulator": 18,
-                    "stick_scroll": 120,
-                    "deadzone": NSNumber(value: 0.25),
+        let v070 = V070HardwareSliceModel(json: [
+            "supported": true,
+            "busy": false,
+            "synced": true,
+            "active_profile": NSNumber(value: 2),
+            "active_layer": NSNumber(value: 4),
+            "battery_percent": NSNumber(value: 87),
+            "is_charging": false,
+            "host_sleep_status": "awake",
+            "status_message": "已从设备同步 0.7.0 状态",
+            "last_error": NSNull(),
+            "auto_layer_sync_enabled": true,
+            "preferred_device_serial": "CM2-SN-001",
+            "mouse": [
+                "preset": "fast",
+                "delay_ms": 80,
+                "interval_ms": 15,
+                "move_delta": 12,
+                "max_speed": 20,
+                "time_to_max": 25,
+                "wheel_delay_ms": 90,
+                "wheel_interval_ms": 60,
+                "wheel_delta": 2,
+                "wheel_max_speed": 12,
+                "wheel_time_to_max": 35,
+                "stick_speed": 4,
+                "stick_regulator": 18,
+                "stick_scroll": 120,
+                "deadzone": NSNumber(value: 0.25),
+            ],
+            "pm_config": [
+                "auto_sleep": true,
+                "host_sleep": false,
+                "sleep_after_min": 45,
+            ],
+            "pm_state": [
+                "state": "active",
+                "floor": "usb",
+                "base_floor": "idle",
+                "line_powered": true,
+                "auto_sleep": true,
+                "sleep_after_s": 2700,
+                "idle_s": 12,
+                "standby_s": 0,
+                "credit_s": 180,
+                "usb_host_hold": true,
+                "holds": [
+                    ["owner": "usb.host", "floor": "usb", "age_ms": 3400]
                 ],
-                "pm_config": [
-                    "auto_sleep": true,
-                    "host_sleep": false,
-                    "sleep_after_min": 45,
-                ],
-                "pm_state": [
-                    "state": "active",
-                    "floor": "usb",
-                    "base_floor": "idle",
-                    "line_powered": true,
-                    "auto_sleep": true,
-                    "sleep_after_s": 2700,
-                    "idle_s": 12,
-                    "standby_s": 0,
-                    "credit_s": 180,
-                    "usb_host_hold": true,
-                    "holds": [
-                        ["owner": "usb.host", "floor": "usb", "age_ms": 3400]
-                    ],
-                ],
-                "device_name": [
-                    "name": "MyMicro",
-                    "factory_name": "MicroInput",
-                    "max_length": 15,
-                ],
-                "sa_rgb": [
-                    "sa": 7057,
-                    "color_hex": "#FFB040",
-                    "brightness": NSNumber(value: 0.8),
-                    "speed": 0.4,
-                    "effect": 4,
-                ],
+            ],
+            "device_name": [
+                "name": "MyMicro",
+                "factory_name": "MicroInput",
+                "max_length": 15,
+            ],
+            "sa_rgb": [
+                "sa": 7057,
+                "color_hex": "#FFB040",
+                "brightness": NSNumber(value: 0.8),
+                "speed": 0.4,
+                "effect": 4,
             ],
         ])
 
-        let v070 = fullFirmware.v070
         XCTAssertTrue(v070.supported)
         XCTAssertTrue(v070.synced)
         XCTAssertEqual(v070.activeProfile, 2)
@@ -186,9 +182,9 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertEqual(partial.mouse.deadzone, 0.15, accuracy: 0.0001)
         XCTAssertNil(partial.saRgb.sa)
 
-        let legacy063 = FirmwareSliceModel(json: ["current_version": "0.6.3"])
-        XCTAssertFalse(legacy063.v070.supported)
-        XCTAssertNotEqual(legacy063, fullFirmware)
+        let legacyDefault = V070HardwareSliceModel(json: [:])
+        XCTAssertFalse(legacyDefault.supported)
+        XCTAssertNotEqual(legacyDefault, v070)
     }
 
     @MainActor
@@ -241,34 +237,35 @@ final class FirmwareUpdateTests: XCTestCase {
             bundlePath: "/Applications/Micro Input.app",
             environment: ["MI_DISABLE_UPDATER": "1"]
         )
-        for (width, height) in [(820.0, 640.0), (1180.0, 740.0)] {
-            let root = ClassicWorkbenchView(
-                store: store,
-                navigation: WorkbenchNavigationModel(destination: .general),
-                updater: updater
-            )
-            let host = NSHostingView(rootView: root.frame(width: width, height: height))
-            host.layoutSubtreeIfNeeded()
-            XCTAssertGreaterThan(host.fittingSize.height, 200)
-            XCTAssertLessThanOrEqual(host.fittingSize.width, width + 0.5)
+        for destination in [WorkbenchDestination.general, .device] {
+            for (width, height) in [(820.0, 640.0), (1180.0, 740.0)] {
+                let root = ClassicWorkbenchView(
+                    store: store,
+                    navigation: WorkbenchNavigationModel(destination: destination),
+                    updater: updater
+                )
+                let host = NSHostingView(rootView: root.frame(width: width, height: height))
+                host.layoutSubtreeIfNeeded()
+                XCTAssertGreaterThan(host.fittingSize.height, 200)
+                XCTAssertLessThanOrEqual(host.fittingSize.width, width + 0.5)
+            }
         }
     }
 
     @MainActor
     func testV070HardwareCommandPayloadsMatchRustVariantsAndDispatch() throws {
-        let refresh = V070HardwareCommand.refresh()
-        XCTAssertEqual(refresh["V070Hardware"] as? String, "Refresh")
+        XCTAssertEqual(V070HardwareCommand.refresh(), "Refresh")
 
-        let selectLayer = V070HardwareCommand.selectLayer(5)["V070Hardware"] as? [String: Any]
-        XCTAssertEqual((selectLayer?["SelectLayer"] as? [String: Any])?["layer"] as? Int, 5)
+        let selectLayer = V070HardwareCommand.selectLayer(5)["SelectLayer"] as? [String: Any]
+        XCTAssertEqual(selectLayer?["layer"] as? Int, 5)
 
-        let preset = V070HardwareCommand.applyMousePreset("fast")["V070Hardware"] as? [String: Any]
-        XCTAssertEqual((preset?["ApplyMousePreset"] as? [String: Any])?["preset"] as? String, "fast")
+        let preset = V070HardwareCommand.applyMousePreset("fast")["ApplyMousePreset"] as? [String: Any]
+        XCTAssertEqual(preset?["preset"] as? String, "fast")
 
-        let mouseCfg = (V070HardwareCommand.applyMouseConfig(
+        let mouseCfg = V070HardwareCommand.applyMouseConfig(
             moveDelta: 10, maxSpeed: 20, wheelDelta: 2, wheelMaxSpeed: 10,
             stickSpeed: 4, stickScroll: 80, deadzone: 0.2
-        )["V070Hardware"] as? [String: Any])?["ApplyMouseConfig"] as? [String: Any]
+        )["ApplyMouseConfig"] as? [String: Any]
         XCTAssertEqual(mouseCfg?["move_delta"] as? Int, 10)
         XCTAssertEqual(mouseCfg?["max_speed"] as? Int, 20)
         XCTAssertEqual(mouseCfg?["wheel_delta"] as? Int, 2)
@@ -277,26 +274,26 @@ final class FirmwareUpdateTests: XCTestCase {
         XCTAssertEqual(mouseCfg?["stick_scroll"] as? Int, 80)
         XCTAssertEqual(mouseCfg?["deadzone"] as? Double ?? -1, 0.2, accuracy: 0.0001)
 
-        let pmCfg = (V070HardwareCommand.applyPmConfig(
+        let pmCfg = V070HardwareCommand.applyPmConfig(
             autoSleep: false, hostSleep: true, sleepAfterMin: 30
-        )["V070Hardware"] as? [String: Any])?["ApplyPmConfig"] as? [String: Any]
+        )["ApplyPmConfig"] as? [String: Any]
         XCTAssertEqual(pmCfg?["auto_sleep"] as? Bool, false)
         XCTAssertEqual(pmCfg?["host_sleep"] as? Bool, true)
         XCTAssertEqual(pmCfg?["sleep_after_min"] as? Int, 30)
 
-        let rename = (V070HardwareCommand.renameDevice(name: "Pad07")["V070Hardware"] as? [String: Any])?["RenameDevice"] as? [String: Any]
+        let rename = V070HardwareCommand.renameDevice(name: "Pad07")["RenameDevice"] as? [String: Any]
         XCTAssertEqual(rename?["name"] as? String, "Pad07")
 
-        let saApply = (V070HardwareCommand.applySaRgb(
+        let saApply = V070HardwareCommand.applySaRgb(
             sa: 7057, colorHex: "#33AAFF", brightness: 0.75, speed: 0.25, effect: 4
-        )["V070Hardware"] as? [String: Any])?["ApplySaRgb"] as? [String: Any]
+        )["ApplySaRgb"] as? [String: Any]
         XCTAssertEqual(saApply?["sa"] as? Int, 7057)
         XCTAssertEqual(saApply?["color_hex"] as? String, "#33AAFF")
         XCTAssertEqual(saApply?["brightness"] as? Double ?? -1, 0.75, accuracy: 0.0001)
         XCTAssertEqual(saApply?["speed"] as? Double ?? -1, 0.25, accuracy: 0.0001)
         XCTAssertEqual(saApply?["effect"] as? Int, 4)
 
-        let saReset = (V070HardwareCommand.resetSaRgb(sa: 7057)["V070Hardware"] as? [String: Any])?["ResetSaRgb"] as? [String: Any]
+        let saReset = V070HardwareCommand.resetSaRgb(sa: 7057)["ResetSaRgb"] as? [String: Any]
         XCTAssertEqual(saReset?["sa"] as? Int, 7057)
 
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mi-v070-dispatch-\(UUID().uuidString)")
@@ -304,7 +301,7 @@ final class FirmwareUpdateTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let store = CoreStore(isolatedDirectory: dir.path)
-        let allCommands: [[String: Any]] = [
+        let allCommands: [Any] = [
             V070HardwareCommand.refresh(),
             V070HardwareCommand.selectLayer(5),
             V070HardwareCommand.applyMousePreset("fast"),
@@ -318,9 +315,9 @@ final class FirmwareUpdateTests: XCTestCase {
             V070HardwareCommand.resetSaRgb(sa: 7057),
         ]
         for payload in allCommands {
-            store.dispatch("firmware", payload)
-            XCTAssertNotNil(store.firmware.v070.lastError)
-            XCTAssertFalse(store.firmware.v070.busy)
+            store.dispatchV070Hardware(payload)
+            XCTAssertNotNil(store.v070Hardware.lastError)
+            XCTAssertFalse(store.v070Hardware.busy)
         }
     }
 
@@ -355,9 +352,9 @@ final class FirmwareUpdateTests: XCTestCase {
 
     @MainActor
     func testAutoLayerSyncCommandPayloadAndOfflineToggleWithSerialSummary() throws {
-        let onCmd = (V070HardwareCommand.setAutoLayerSync(true)["V070Hardware"] as? [String: Any])?["SetAutoLayerSync"] as? [String: Any]
+        let onCmd = V070HardwareCommand.setAutoLayerSync(true)["SetAutoLayerSync"] as? [String: Any]
         XCTAssertEqual(onCmd?["enabled"] as? Bool, true)
-        let offCmd = (V070HardwareCommand.setAutoLayerSync(false)["V070Hardware"] as? [String: Any])?["SetAutoLayerSync"] as? [String: Any]
+        let offCmd = V070HardwareCommand.setAutoLayerSync(false)["SetAutoLayerSync"] as? [String: Any]
         XCTAssertEqual(offCmd?["enabled"] as? Bool, false)
 
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mi-v070-sync-toggle-\(UUID().uuidString)")
@@ -365,13 +362,13 @@ final class FirmwareUpdateTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let store = CoreStore(isolatedDirectory: dir.path)
-        XCTAssertFalse(store.firmware.v070.autoLayerSyncEnabled)
+        XCTAssertFalse(store.v070Hardware.autoLayerSyncEnabled)
         store.setV070AutoLayerSync(true)
-        XCTAssertTrue(store.firmware.v070.autoLayerSyncEnabled)
-        XCTAssertNil(store.firmware.v070.lastError)
+        XCTAssertTrue(store.v070Hardware.autoLayerSyncEnabled)
+        XCTAssertNil(store.v070Hardware.lastError)
         store.setV070AutoLayerSync(false)
-        XCTAssertFalse(store.firmware.v070.autoLayerSyncEnabled)
-        XCTAssertNil(store.firmware.v070.lastError)
+        XCTAssertFalse(store.v070Hardware.autoLayerSyncEnabled)
+        XCTAssertNil(store.v070Hardware.lastError)
 
         var dispatched = 0
         let withSerial = V070HardwareSliceModel(json: [
@@ -391,9 +388,9 @@ final class FirmwareUpdateTests: XCTestCase {
 
     @MainActor
     func testSessionSaRgbSyncCommandToggleAndPrepareForTermination() throws {
-        let onCmd = (V070HardwareCommand.setSessionSaRgbSync(true)["V070Hardware"] as? [String: Any])?["SetSessionSaRgbSync"] as? [String: Any]
+        let onCmd = V070HardwareCommand.setSessionSaRgbSync(true)["SetSessionSaRgbSync"] as? [String: Any]
         XCTAssertEqual(onCmd?["enabled"] as? Bool, true)
-        let offCmd = (V070HardwareCommand.setSessionSaRgbSync(false)["V070Hardware"] as? [String: Any])?["SetSessionSaRgbSync"] as? [String: Any]
+        let offCmd = V070HardwareCommand.setSessionSaRgbSync(false)["SetSessionSaRgbSync"] as? [String: Any]
         XCTAssertEqual(offCmd?["enabled"] as? Bool, false)
 
         let decodedOn = V070HardwareSliceModel(json: ["session_sa_rgb_sync_enabled": true])
@@ -406,14 +403,73 @@ final class FirmwareUpdateTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let store = CoreStore(isolatedDirectory: dir.path)
-        XCTAssertFalse(store.firmware.v070.sessionSaRgbSyncEnabled)
+        XCTAssertFalse(store.v070Hardware.sessionSaRgbSyncEnabled)
         store.setV070SessionSaRgbSync(true)
-        XCTAssertTrue(store.firmware.v070.sessionSaRgbSyncEnabled)
-        XCTAssertNil(store.firmware.v070.lastError)
+        XCTAssertTrue(store.v070Hardware.sessionSaRgbSyncEnabled)
+        XCTAssertNil(store.v070Hardware.lastError)
         store.setV070SessionSaRgbSync(false)
-        XCTAssertFalse(store.firmware.v070.sessionSaRgbSyncEnabled)
-        XCTAssertNil(store.firmware.v070.lastError)
+        XCTAssertFalse(store.v070Hardware.sessionSaRgbSyncEnabled)
+        XCTAssertNil(store.v070Hardware.lastError)
         store.prepareForTermination()
-        XCTAssertNil(store.firmware.v070.lastError)
+        XCTAssertNil(store.v070Hardware.lastError)
+    }
+
+    @MainActor
+    func testV070HardwareAndFirmwareSlicesRemainIndependent() throws {
+        let parsed = CoreStore.parseProjection([
+            "firmware": ["channel": "prerelease", "current_version": "0.7.0-rc.16"],
+            "v070_hardware": ["supported": true, "active_layer": 3],
+        ])
+        XCTAssertEqual(parsed.firmware.channel, "prerelease")
+        XCTAssertEqual(parsed.firmware.currentVersion, "0.7.0-rc.16")
+        XCTAssertTrue(parsed.v070Hardware.supported)
+        XCTAssertEqual(parsed.v070Hardware.activeLayer, 3)
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mi-v070-slice-isolation-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = CoreStore(isolatedDirectory: dir.path)
+        final class HitCounter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value = 0
+            func increment() {
+                lock.lock()
+                value += 1
+                lock.unlock()
+            }
+            var count: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return value
+            }
+        }
+
+        let initialFirmware = store.firmware
+        let firmwareHits = HitCounter()
+        withObservationTracking {
+            _ = store.firmware
+        } onChange: {
+            firmwareHits.increment()
+        }
+        store.setV070AutoLayerSync(true)
+        store.dispatchV070Hardware(V070HardwareCommand.refresh())
+        XCTAssertTrue(store.v070Hardware.autoLayerSyncEnabled)
+        XCTAssertNotNil(store.v070Hardware.lastError)
+        XCTAssertEqual(store.firmware, initialFirmware)
+        XCTAssertEqual(firmwareHits.count, 0)
+
+        let v070BeforeFirmwareDispatch = store.v070Hardware
+        let v070Hits = HitCounter()
+        withObservationTracking {
+            _ = store.v070Hardware
+        } onChange: {
+            v070Hits.increment()
+        }
+        store.dispatch("firmware", "PrepareDevice")
+        XCTAssertEqual(store.firmware.message, "隔离验收不会切换实体设备的引导模式")
+        XCTAssertNotEqual(store.firmware, initialFirmware)
+        XCTAssertEqual(store.v070Hardware, v070BeforeFirmwareDispatch)
+        XCTAssertEqual(v070Hits.count, 0)
     }
 }

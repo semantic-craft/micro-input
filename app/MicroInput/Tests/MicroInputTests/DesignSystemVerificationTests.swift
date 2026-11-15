@@ -476,6 +476,7 @@ final class DesignSystemVerificationTests: XCTestCase {
     @MainActor
     func testWheelMenuCopyUnificationAndToggleContract() throws {
         XCTAssertEqual(WorkbenchDestination.radial.rawValue, "轮盘菜单")
+        XCTAssertFalse(WorkbenchDestination.allCases.map(\.rawValue).contains("动作库"))
 
         let dir = try makeIsolatedTempDir("wheel-menu")
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -565,6 +566,44 @@ final class DesignSystemVerificationTests: XCTestCase {
         XCTAssertGreaterThan(popHost.bounds.height, 260)
         XCTAssertLessThanOrEqual(popHost.bounds.height, 760)
         XCTAssertFalse(settingsOpened)
+    }
+
+    @MainActor
+    func testReorganizedWorkbenchDestinationsAndStatusPopoverLayouts() throws {
+        let dir = try makeIsolatedTempDir("reorganized-layouts")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = CoreStore(isolatedDirectory: dir.path)
+        let updater = SoftwareUpdateController(
+            bundlePath: "/Applications/Micro Input.app",
+            environment: ["MI_DISABLE_UPDATER": "1"]
+        )
+
+        for destination in [WorkbenchDestination.device, .profiles, .lighting, .radial, .general] {
+            for (width, height) in [(CGFloat(820), CGFloat(640)), (CGFloat(1180), CGFloat(740))] {
+                let nav = WorkbenchNavigationModel(destination: destination)
+                let (win, host) = makeHostedWindow(
+                    ClassicWorkbenchView(store: store, navigation: nav, updater: updater)
+                        .frame(width: width, height: height),
+                    width: width,
+                    fixedHeight: height
+                )
+                defer { win.orderOut(nil) }
+                XCTAssertEqual(host.bounds.width, width, accuracy: 0.5)
+                XCTAssertEqual(host.bounds.height, height, accuracy: 0.5)
+                XCTAssertLessThanOrEqual(host.fittingSize.width, width + 0.5)
+            }
+        }
+
+        for enabled in [false, true] {
+            store.dispatch("status_menu", ["SetHostExecutionEnabled": enabled])
+            let (popWin, popHost) = makeHostedWindow(
+                StatusMenuPopoverView(store: store, updater: updater, onOpenMainWindow: {}),
+                width: 348
+            )
+            defer { popWin.orderOut(nil) }
+            XCTAssertGreaterThan(popHost.bounds.height, 240)
+            XCTAssertLessThanOrEqual(popHost.fittingSize.width, 348.5)
+        }
     }
 
     @MainActor

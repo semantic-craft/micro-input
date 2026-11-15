@@ -25,6 +25,7 @@ public final class CoreStore {
     public private(set) var overlay: OverlaySliceModel = OverlaySliceModel()
     public private(set) var footer: FooterSliceModel = FooterSliceModel()
     public private(set) var firmware: FirmwareSliceModel = FirmwareSliceModel()
+    public private(set) var v070Hardware: V070HardwareSliceModel = V070HardwareSliceModel()
     public private(set) var activeModal: ActiveModalModel? = nil
 
     public init(
@@ -135,12 +136,16 @@ public final class CoreStore {
         dispatch("status_menu", ["SelectCandidateDevice": ["selector": selector]])
     }
 
+    public func dispatchV070Hardware(_ action: Any) {
+        dispatch("v070_hardware", action)
+    }
+
     public func setV070AutoLayerSync(_ enabled: Bool) {
-        dispatch("firmware", V070HardwareCommand.setAutoLayerSync(enabled))
+        dispatchV070Hardware(V070HardwareCommand.setAutoLayerSync(enabled))
     }
 
     public func setV070SessionSaRgbSync(_ enabled: Bool) {
-        dispatch("firmware", V070HardwareCommand.setSessionSaRgbSync(enabled))
+        dispatchV070Hardware(V070HardwareCommand.setSessionSaRgbSync(enabled))
     }
 
     public func prepareForTermination() {
@@ -176,7 +181,7 @@ public final class CoreStore {
         commitDomainSlices(from: next)
     }
 
-    private func commitDomainSlices(from m: ProjectionModel) {
+    func commitDomainSlices(from m: ProjectionModel) {
         let nextHeader = HeaderSliceModel(from: m)
         if self.header != nextHeader { self.header = nextHeader }
 
@@ -202,6 +207,7 @@ public final class CoreStore {
         if self.footer != nextFooter { self.footer = nextFooter }
 
         if self.firmware != m.firmware { self.firmware = m.firmware }
+        if self.v070Hardware != m.v070Hardware { self.v070Hardware = m.v070Hardware }
 
         if self.activeModal != m.activeModal { self.activeModal = m.activeModal }
     }
@@ -209,6 +215,7 @@ public final class CoreStore {
     static func parseProjection(_ root: [String: Any]) -> ProjectionModel {
         var m = ProjectionModel()
         m.firmware = FirmwareSliceModel(json: root["firmware"] as? [String: Any] ?? [:])
+        m.v070Hardware = V070HardwareSliceModel(json: root["v070_hardware"] as? [String: Any] ?? [:])
         m.statusMessage = root["status_message"] as? String ?? "已就绪"
         m.lastExportedPreset = root["last_exported_preset"] as? String
         m.deviceConnected = root["device_connected"] as? Bool ?? false
@@ -216,6 +223,7 @@ public final class CoreStore {
         m.documentRevision = root["document_revision"] as? Int ?? 0
         m.hostRevision = root["host_revision"] as? Int ?? 0
 
+        let hasHeader = root["header"] != nil
         if let header = root["header"] as? [String: Any] {
             m.engineVersion = header["engine_version"] as? String ?? "0.2.0"
             if let rs = header["ready_state"] as? [String: [String: Any]] {
@@ -263,7 +271,7 @@ public final class CoreStore {
             m.activeHostProfileId = sidebar["active_host_profile_id"] as? String
             m.isProfileLocked = sidebar["is_profile_locked"] as? Bool ?? false
             m.lockedProfileId = sidebar["locked_profile_id"] as? String
-            if let trusted = sidebar["accessibility_trusted"] as? Bool {
+            if !hasHeader, let trusted = sidebar["accessibility_trusted"] as? Bool {
                 m.accessibilityTrusted = trusted
             }
             m.showOtherProfiles = sidebar["show_other_profiles"] as? Bool ?? false
@@ -422,7 +430,7 @@ public final class CoreStore {
                         isWorkingAnimated: s["is_working_animated"] as? Bool ?? false,
                         isBoundToTopKey: s["is_bound_to_top_key"] as? Bool ?? false,
                         ledColorHex: s["led_color_hex"] as? String ?? "#222222",
-                        placeRaw: s["place"]
+                        hasAssignedPlace: s["place"] != nil && !(s["place"] is NSNull)
                     )
                 }
             }
@@ -458,10 +466,10 @@ public final class CoreStore {
 
         if let sm = root["status_menu"] as? [String: Any] {
             m.activeProfileName = sm["active_profile_name"] as? String ?? "未选择方案"
-            m.routingModeSummary = sm["routing_mode_summary"] as? String ?? "手动选择方案"
+            m.routingModeSummary = sm["routing_mode_summary"] as? String ?? "手动选择方案 · 按键映射已启用"
             m.isProfileLocked = sm["is_profile_locked"] as? Bool ?? m.isProfileLocked
             m.lockedProfileId = (sm["locked_profile_id"] as? String) ?? m.lockedProfileId
-            if let trusted = sm["accessibility_trusted"] as? Bool {
+            if !hasHeader, let trusted = sm["accessibility_trusted"] as? Bool {
                 m.accessibilityTrusted = trusted
             }
             m.competingHostNotice = sm["competing_host_notice"] as? String
@@ -470,14 +478,16 @@ public final class CoreStore {
             m.lightingEnabled = sm["lighting_enabled"] as? Bool ?? true
             m.cheatSheetPreview = (sm["cheat_sheet_preview"] as? [String: Any]).map(parseCheatSheet)
             m.cheatSheetVisible = sm["cheat_sheet_visible"] as? Bool ?? false
-            if let ps = sm["power_status"] as? [String: Any] {
-                m.powerStatus = parsePowerStatus(ps)
-            }
-            if let devs = sm["candidate_devices"] as? [[String: Any]] {
-                m.candidateDevices = parseCandidateDevices(devs)
-            }
-            if let pref = sm["preferred_device_serial"] as? String {
-                m.preferredDeviceSerial = pref
+            if !hasHeader {
+                if let ps = sm["power_status"] as? [String: Any] {
+                    m.powerStatus = parsePowerStatus(ps)
+                }
+                if let devs = sm["candidate_devices"] as? [[String: Any]] {
+                    m.candidateDevices = parseCandidateDevices(devs)
+                }
+                if let pref = sm["preferred_device_serial"] as? String {
+                    m.preferredDeviceSerial = pref
+                }
             }
             if let favs = sm["favorites_2x2"] as? [[String: Any]] {
                 m.favorites2x2 = favs.enumerated().map { idx, f in
@@ -547,7 +557,7 @@ public final class CoreStore {
         e.joystickMode = edit["joystick_mode"] as? String ?? "logical_sectors"
         e.joystickModeSummary = edit["joystick_mode_summary"] as? String ?? ""
         e.v070HardwareMouseSupported = edit["v070_hardware_mouse_supported"] as? Bool ?? true
-        e.bottomRowLayout = edit["bottom_row_layout"] as? String ?? "Split"
+        e.bottomRowLayout = edit["bottom_row_layout"] as? String ?? "split"
         e.supportsTaskRole = edit["supports_task_role"] as? Bool ?? true
         e.slotRole = edit["slot_role"] as? String ?? "TaskKey"
         e.boundActionId = edit["bound_action_id"] as? String
@@ -699,13 +709,13 @@ public final class CoreStore {
                     targetDisplayName: b["target_display_name"] as? String ?? "未设置"
                 )
             }
-            let availActs = (mul["available_actions"] as? [[Any]] ?? []).compactMap { pair -> (String, String)? in
-                guard pair.count >= 2, let id = pair[0] as? String, let name = pair[1] as? String else { return nil }
-                return (id, name)
+            let availActs = (mul["available_actions"] as? [[String: Any]] ?? []).compactMap { opt -> MultiTargetOptionModel? in
+                guard let id = opt["id"] as? String, let label = opt["label"] as? String else { return nil }
+                return MultiTargetOptionModel(id: id, label: label)
             }
-            let availMacs = (mul["available_macros"] as? [[Any]] ?? []).compactMap { pair -> (String, String)? in
-                guard pair.count >= 2, let id = pair[0] as? String, let name = pair[1] as? String else { return nil }
-                return (id, name)
+            let availMacs = (mul["available_macros"] as? [[String: Any]] ?? []).compactMap { opt -> MultiTargetOptionModel? in
+                guard let id = opt["id"] as? String, let label = opt["label"] as? String else { return nil }
+                return MultiTargetOptionModel(id: id, label: label)
             }
             return .multiEditor(
                 MultiEditorModel(
@@ -820,6 +830,7 @@ public final class CoreStore {
                 path: path,
                 product: d["product"] as? String ?? "Creator Micro 2",
                 serialNumber: d["serial_number"] as? String,
+                selectorKey: d["selector_key"] as? String,
                 displayLabel: d["display_label"] as? String ?? "",
                 isConnected: d["is_connected"] as? Bool ?? false,
                 isPreferred: d["is_preferred"] as? Bool ?? false
