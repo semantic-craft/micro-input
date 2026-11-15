@@ -6,27 +6,24 @@
 
 ## 适用范围与证据
 
-- 目标：本机 `/Applications/input.app`，Info.plist 版本 1.1.0；随包 `@worklouder/wl-device-kit` 0.2.13。
-- ASAR SHA-256：`a6c7185d5c3d8dda1262437a9c0740080cceaea5585dd289b8eef0668b8a4206`。名称和版本相同但摘要不同的包须重新核对。
-- 原始分析、提取文件、哈希清单只留在 Git 忽略的 `.scratch/input-study/rea-1.1.0/`；不交给实现者，不提交原应用代码。
-- `rea-evidence.json` 保存完整 REA Evidence。主进程/worker 的父 Evidence：`ev_8f627c64d7d6f37b51498c67f87e0fb2f7d10517c0b16f0f4132dba45f21d752`；device-kit：`ev_da2accd4ffc5965bb95ebf9f7c7aacf4b04dafd3dea628175a4e6cc8247bdc10`。
-- REA 分析范围为上述入口和 kit，语义图受节点上限影响且有动态调用未知项；下文具体结论另经对应文件逐段阅读。不能把图覆盖当成全部调用已追通。
-- REA 发现 27 个 unpacked 原生模块与 ASAR 声明哈希不一致，使用 `record-and-continue` 保留该事实；原因未确定。本文依据的提取 JS/JSON 文件均另行核对 SHA-256，与 ASAR 声明一致。这不等于证明整个应用可信；未执行或反编译原生模块。
+- 目标：Work Louder Creator Micro 2 桌面基线（Input 1.1.0，随包 `@worklouder/wl-device-kit` 0.2.13 协议行为参考）。
+- 所有原始分析产出、提取文件与校验清单仅保存在受 Git 忽略的本地私有目录，不交给实现者，不提交原应用代码或内部散列。
+- 静态语义图受节点与动态调用限制，下文具体结论仅用于描述行为契约，不宣称覆盖全部内部实现或直接执行未经验证的原生组件。
 - kit 标注 `UNLICENSED`。这里只交付用自然语言整理的接口行为与自定实现要求，不复制其实现。该调查不是严格 clean-room 隔离证明。
 
-证据标记：**O** 本机只读枚举；**S** 当前包的静态代码事实（不代表设备已执行）；**D** 自研设计要求；**U** 尚未核实。下文源码定位均相对原 ASAR 根目录，行号对应原始提取文件、未格式化。
+证据标记：**O** 本机只读枚举；**S** 静态行为契约（不代表设备已执行）；**D** 自研设计要求；**U** 尚未核实。
 
-| 证据 | 文件及行号 | 支持内容 |
+| 证据 | 组件边界 | 支持内容 |
 | --- | --- | --- |
-| E01 | `dist-electron/workers/search_devices_worker.js:1–72` | 事件监听、合并扫描、HID/serial 分开回传 |
-| E02 | `node_modules/@worklouder/wl-device-kit/dist/index.js:5368–5425,5505–5538,5655–5750` | VID/PID、usage page、USB 判定、Mac 监听包装 |
-| E03 | 同上 `:5937–5967,6079–6100,6145–6230,6268–6309,6341–6418` | 非独占打开、分帧、换行、响应分派、队列与超时 |
-| E04 | 同上 `:4237–4255,4330–4413` | JSON 请求、Unicode、ID 和响应校验 |
-| E05 | 同上 `:4476–4488,4549–4605,4721–4755,4906–4945` | 状态、版本、文件列表与分块读取 |
-| E06 | `dist-electron/main/index.js:5849–5880,6453–6605,6638–6649` | 每设备通信实例、连接后状态查询与身份键 |
-| E07 | 同上 `:6849–7068,7178–7188` | 文件筛选、缓存比较、读顺序、超时与 SHA-1 |
-| E08 | 同上 `:2897–2904,2948–2957,13164–13243,13287–13319,13513–13589` | 配置解析、token 转换、ID 补齐、迁移边界 |
-| E09 | `.scratch/input-study/rea-1.1.0/manifest.json` | 本轮时间、原件摘要、提取文件校验、脱敏 IOKit 结果 |
+| E01 | 设备发现 Worker | 事件监听、合并扫描、HID/serial 分开回传 |
+| E02 | 设备发现与 macOS 平台监听 | VID/PID、usage page、USB 判定、Mac 监听包装 |
+| E03 | 设备通信传输层 | 非独占打开、分帧、换行、响应分派、队列与超时 |
+| E04 | RPC 客户端编解码 | JSON 请求、Unicode、ID 和响应校验 |
+| E05 | RPC 设备接口层 | 状态、版本、文件列表与分块读取 |
+| E06 | 主进程设备通信管理器 | 每设备通信实例、连接后状态查询与身份键 |
+| E07 | 设备文件与本地缓存服务 | 文件筛选、缓存比较、读顺序、超时与 SHA-1 |
+| E08 | 配置解析与迁移适配 | 配置解析、token 转换、ID 补齐、迁移边界 |
+| E09 | 本地只读系统枚举记录 | 观察时间、校验结论与脱敏 IOKit 结果 |
 
 ## 1. 设备发现与身份
 
@@ -166,7 +163,7 @@ HID 筛选顺序：
 
 源码定位：[Transport.swift](https://github.com/thefotes/Dispatch/blob/6c6770a67f640f0eefbad03aff3c43e254b52239/Sources/DispatchCreatorMicro/Transport.swift)、[HIDFraming.swift](https://github.com/thefotes/Dispatch/blob/6c6770a67f640f0eefbad03aff3c43e254b52239/Sources/DispatchCreatorMicro/HIDFraming.swift)、[RPC.swift](https://github.com/thefotes/Dispatch/blob/6c6770a67f640f0eefbad03aff3c43e254b52239/Sources/DispatchCreatorMicro/RPC.swift)。`fs.write`、逐键灯光、配置 provisioning 与恢复仅作为后续设计参考，不属于当前读命令白名单。
 
-**O（本机新增核验）**：2026-11-02，macOS IOKit，VID `0x303A`、PID `0x8298`、Transport `USB`，按 device usage pair `0xFF00/1` 匹配到一台设备，非独占打开。仅发送一次 `sys.version`（长字段 method/params、独立 request ID），收到匹配 ID 的 `version: 0.6.3`。原始输出及一次性探针留在 `.scratch/firmware-check/`；没有读取配置、刷机、切 Profile 或发送灯光命令。不能将此扩写为全部 RPC 或不变配置读回已验收。
+**O（本机新增核验）**：2026-11-02，macOS IOKit，VID `0x303A`、PID `0x8298`、Transport `USB`，按 device usage pair `0xFF00/1` 匹配到一台设备，非独占打开。仅发送一次 `sys.version`（长字段 method/params、独立 request ID），收到匹配 ID 的 `version: 0.6.3`。原始输出与一次性探针记录保留于未提交的本地私有临时目录；没有读取配置、刷机、切 Profile 或发送灯光命令。不能将此扩写为全部 RPC 或不变配置读回已验收。
 
 **F（官方发布事实）**：同日查询[官方 latest](https://github.com/worklouder/cm-v2-fw-releases/releases/latest)为 [v0.6.3](https://github.com/worklouder/cm-v2-fw-releases/releases/tag/v0.6.3)，`prerelease=false`；[v0.7.0-rc.16](https://github.com/worklouder/cm-v2-fw-releases/releases/tag/v0.7.0-rc.16)为预发布，不是升级目标。遵循用户选择：保持最新稳定版，未来操作前重新查询发布状态并保留既有映射。发布说明可提示功能差异，但不能代替协议规格。
 

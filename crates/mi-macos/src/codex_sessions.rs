@@ -232,14 +232,19 @@ impl Drop for SqliteStmt<'_> {
     }
 }
 
+fn checked_sqlite_text_len(len: usize) -> Result<c_int, String> {
+    c_int::try_from(len).map_err(|_| "sqlite3 text binding exceeds i32 length limit".to_string())
+}
+
 impl SqliteStmt<'_> {
     fn bind_text(&mut self, index: c_int, value: &str) -> Result<(), String> {
+        let len = checked_sqlite_text_len(value.len())?;
         let rc = unsafe {
             sqlite3_bind_text(
                 self.ptr,
                 index,
                 value.as_ptr().cast::<c_char>(),
-                value.len() as c_int,
+                len,
                 SQLITE_TRANSIENT,
             )
         };
@@ -848,10 +853,7 @@ pub fn verify_codex_window_readback(
     }
     let expected_title = fp.display_title.trim();
     if !expected_title.is_empty() && snap.window_title.trim() != expected_title {
-        return Err(format!(
-            "unconfirmed:codex_title_mismatch:expected={expected_title}:actual={}",
-            snap.window_title.trim()
-        ));
+        return Err("unconfirmed:codex_title_mismatch".into());
     }
     if let Some(expected_project) = fp
         .project_name
@@ -864,10 +866,7 @@ pub fn verify_codex_window_readback(
             .as_deref()
             .is_some_and(|actual| actual.trim().eq_ignore_ascii_case(expected_project))
         {
-            return Err(format!(
-                "unconfirmed:codex_project_mismatch:expected={expected_project}:actual={:?}",
-                snap.toolbar_project
-            ));
+            return Err("unconfirmed:codex_project_mismatch".into());
         }
     }
     let snap_ctx = SnapshotTextIndex::new(snap);

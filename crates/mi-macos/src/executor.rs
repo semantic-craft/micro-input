@@ -1916,7 +1916,7 @@ fn redact_home_path_with_home(raw: &str, home: Option<&str>) -> String {
     raw.to_string()
 }
 
-fn redact_home_path(raw: &str) -> String {
+pub fn redact_home_path(raw: &str) -> String {
     redact_home_path_with_home(raw, std::env::var("HOME").ok().as_deref())
 }
 

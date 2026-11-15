@@ -422,7 +422,7 @@ pub fn flash(
             .map_err(|e| e.to_string())?;
         receipt.status = "flash_verified_restart_pending".into();
         persist(port, &receipt, None)?;
-        // Input 1.1.0 clears this ESP32-S3 register before toggling RTS (K:13730–13743).
+        // Clear ESP32-S3 download-mode reset register before toggling RTS.
         let mut connection = flasher.into_connection();
         connection
             .write_reg(0x6000_812c, 0, None)
@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(normalize_serial_identifier(" :- "), None);
 
         let matching = BootloaderPort {
-            path: "/dev/cu.usbmodem1".into(),
+            path: "/dev/cu.usbmodem-test-1".into(),
             vid: 0x303a,
             pid: 0x1001,
             serial_number: Some("AABBCC112233".into()),
@@ -559,12 +559,12 @@ mod tests {
             product: None,
         };
         let mismatched = BootloaderPort {
-            path: "/dev/cu.usbmodem2".into(),
+            path: "/dev/cu.usbmodem-test-2".into(),
             serial_number: Some("DEADBEEF0000".into()),
             ..matching.clone()
         };
         let omitted_serial = BootloaderPort {
-            path: "/dev/cu.usbmodem3".into(),
+            path: "/dev/cu.usbmodem-test-3".into(),
             serial_number: None,
             ..matching.clone()
         };

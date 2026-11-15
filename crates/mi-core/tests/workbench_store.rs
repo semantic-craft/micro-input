@@ -1960,6 +1960,40 @@ fn diagnostics_export_reports_failure_when_destination_cannot_be_written() {
     assert_eq!(report["schema_version"], 1);
     assert_eq!(report["connected"], false);
     assert!(store.status_message().contains("已导出诊断报告"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let mode = std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "exported diagnostic-report.json must use 0600 permissions"
+        );
+        let dir_str = temp.path().display().to_string();
+        assert!(
+            !store.status_message().contains(&dir_str),
+            "status_message must redact host directory path: {}",
+            store.status_message()
+        );
+
+        let victim = temp.path().join("victim.txt");
+        std::fs::write(&victim, b"ORIGINAL").unwrap();
+        std::fs::remove_file(&destination).unwrap();
+        symlink(&victim, &destination).unwrap();
+        let sym_err = store
+            .dispatch_device_workflow_action(mi_core::DeviceWorkflowAction::ExportDiagnostics)
+            .unwrap_err();
+        assert!(matches!(sym_err, mi_core::WorkbenchError::Storage(_)));
+        assert_eq!(std::fs::read(&victim).unwrap(), b"ORIGINAL");
+        assert!(
+            !sym_err.to_string().contains(&dir_str),
+            "ExportDiagnostics error must redact host paths: {sym_err}"
+        );
+    }
 }
 
 #[test]

@@ -265,7 +265,7 @@ final class LaunchAtLoginTests: XCTestCase {
         XCTAssertTrue(missingDriverController.isUnavailable)
 
         let fwSlice = FirmwareSliceModel(json: [
-            "ports": [["path": "/dev/cu.usbmodem101"]]
+            "ports": [["path": "/dev/cu.usbmodem-test-101"]]
         ])
         XCTAssertEqual(fwSlice.ports.first?.product, "USB 设备")
         XCTAssertEqual(L10n.tr(fwSlice.ports.first?.product ?? "", .en), "USB Device")

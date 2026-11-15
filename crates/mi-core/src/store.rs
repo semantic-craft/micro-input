@@ -1197,15 +1197,18 @@ impl WorkbenchStore {
                     "host_revision": self.document_store.host_revision(),
                     "execution_enabled": self.document_store.host_execution_enabled(),
                 });
-                let bytes = serde_json::to_vec_pretty(&report).map_err(|error| {
-                    WorkbenchError::Storage(format!("无法生成诊断报告：{error}"))
-                })?;
-                fs::write(&diag_path, bytes).map_err(|error| {
-                    WorkbenchError::Storage(format!("无法保存诊断报告：{error}"))
+                mi_macos::write_private_json(&diag_path, &report).map_err(|error| {
+                    WorkbenchError::Storage(format!(
+                        "无法保存诊断报告：{}",
+                        mi_macos::DiagnosticRedactor::sanitize(&error)
+                    ))
                 })?;
                 let exported_path = diag_path.display().to_string();
-                self.last_exported_diagnostics_path = Some(exported_path.clone());
-                self.status_message = format!("已导出诊断报告：{exported_path}");
+                let safe_display_path = mi_macos::DiagnosticRedactor::sanitize(
+                    &mi_macos::redact_home_path(&exported_path),
+                );
+                self.last_exported_diagnostics_path = Some(exported_path);
+                self.status_message = format!("已导出诊断报告：{safe_display_path}");
                 self.commit_runtime_update();
                 Ok(())
             }

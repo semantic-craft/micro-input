@@ -352,15 +352,17 @@ fn fingerprint_extracts_disjoint_sibling_snippets_and_readback_verifies_strictly
 
     let mut wrong_title = good_snap.clone();
     wrong_title.window_title = "ChatGPT".into();
-    assert!(verify_codex_window_readback(&fp, &wrong_title)
-        .unwrap_err()
-        .contains("codex_title_mismatch"));
+    let title_err = verify_codex_window_readback(&fp, &wrong_title).unwrap_err();
+    assert_eq!(title_err, "unconfirmed:codex_title_mismatch");
+    assert!(!title_err.contains("Same Title"));
+    assert!(!title_err.contains("ChatGPT"));
 
     let mut wrong_project = good_snap.clone();
     wrong_project.toolbar_project = Some("other-repo".into());
-    assert!(verify_codex_window_readback(&fp, &wrong_project)
-        .unwrap_err()
-        .contains("codex_project_mismatch"));
+    let project_err = verify_codex_window_readback(&fp, &wrong_project).unwrap_err();
+    assert_eq!(project_err, "unconfirmed:codex_project_mismatch");
+    assert!(!project_err.contains("micro-input"));
+    assert!(!project_err.contains("other-repo"));
 
     let mut wrong_sibling = good_snap.clone();
     wrong_sibling.main_pane_texts = vec!["Beta conflicting sibling reply".into()];
@@ -539,4 +541,16 @@ fn deeplink_builder_validates_uuid_and_encodes_non_local_host() {
     );
     assert!(build_codex_thread_deeplink("not-a-uuid", "local").is_err());
     assert!(build_codex_thread_deeplink(UUID_A, "").is_err());
+}
+
+#[test]
+fn checked_sqlite_text_len_rejects_lengths_exceeding_c_int_max() {
+    assert_eq!(checked_sqlite_text_len(0).unwrap(), 0);
+    assert_eq!(checked_sqlite_text_len(128).unwrap(), 128);
+    assert_eq!(
+        checked_sqlite_text_len(c_int::MAX as usize).unwrap(),
+        c_int::MAX
+    );
+    let err = checked_sqlite_text_len((c_int::MAX as usize).saturating_add(1)).unwrap_err();
+    assert!(err.contains("i32 length limit"));
 }

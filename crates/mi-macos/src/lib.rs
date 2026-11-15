@@ -19,7 +19,7 @@ pub use codex_sessions::{
 };
 pub use executor::{
     is_antigravity_new_conversation_control, is_bundle_running, parse_pid_from_lsappinfo_output,
-    select_antigravity_new_conversation_target, submit_modifiers_for_adapter,
+    redact_home_path, select_antigravity_new_conversation_target, submit_modifiers_for_adapter,
     AntigravityNewConversationTarget, AntigravitySidebarAxNode, ClipboardItemSnapshot,
     ClipboardSnapshot, DialScrollRequest, HeldInputId, HostActionReceipt, HostOsDriver,
     LiveHostActionExecutor, MacOsSystemDriver, MouseButtonKind, RecordedOsEvent, RecordingOsDriver,
@@ -35,7 +35,7 @@ pub use passive_panel::{
 };
 pub use scenarios::{
     run_config_write_scenario, run_diagnostic_export_scenario, run_host_execution_scenario,
-    run_lighting_control_scenario, DiagnosticRedactor, ScenarioResultSummary,
+    run_lighting_control_scenario, write_private_json, DiagnosticRedactor, ScenarioResultSummary,
 };
 pub use session_navigation::{
     codex_process_id, default_codex_home, navigate_codex_session,

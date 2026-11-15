@@ -332,7 +332,7 @@ mod tests {
         updater.projection.busy = true;
         updater.projection.selected_port = Some("/dev/cu.stale".into());
         let port = BootloaderPort {
-            path: "/dev/cu.usbmodem101".into(),
+            path: "/dev/cu.usbmodem-test-101".into(),
             vid: 0x303a,
             pid: 0x1001,
             serial_number: Some("ABC123".into()),
@@ -401,7 +401,7 @@ mod tests {
         updater.projection.device_reserved = true;
         updater.expected_serial = Some("aa:bb:cc:11:22:33".into());
         let matching = BootloaderPort {
-            path: "/dev/cu.usbmodem1".into(),
+            path: "/dev/cu.usbmodem-test-1".into(),
             vid: 0x303a,
             pid: 0x1001,
             serial_number: Some("AABBCC112233".into()),
@@ -409,7 +409,7 @@ mod tests {
             product: Some("USB JTAG".into()),
         };
         let other = BootloaderPort {
-            path: "/dev/cu.usbmodem2".into(),
+            path: "/dev/cu.usbmodem-test-2".into(),
             serial_number: Some("998877665544".into()),
             ..matching.clone()
         };

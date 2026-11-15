@@ -347,7 +347,7 @@ mod tests {
         assert!(!store.firmware_update.reserved());
 
         let port = crate::firmware_flash::BootloaderPort {
-            path: "/dev/cu.usbmodem201".into(),
+            path: "/dev/cu.usbmodem-test-201".into(),
             vid: 0x303a,
             pid: 0x1001,
             serial_number: Some("BOOT201".into()),

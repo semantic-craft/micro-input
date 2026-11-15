@@ -12,23 +12,23 @@ Input 的观察链为：查询 release → 下载 `.bin` 到临时目录 → 请
 
 ## Input 1.1.0 的静态证据
 
-文件缩写与身份沿用 [Input 架构证据表](input-architecture.md#证据身份与可复核位置)。安装包 SHA-256 为 `a6c7185d5c3d8dda1262437a9c0740080cceaea5585dd289b8eef0668b8a4206`。
+术语与架构边界沿用 [Input 架构证据表](input-architecture.md#证据身份与可复核位置)。
 
-| 定位 | 观察 |
+| 流程环节 | 观察 |
 | --- | --- |
-| K:13905–13954、13992–14006 | 获取 releases，按 semver prerelease 筛选稳定/预发布，取首条及首个 `.bin` 资产 |
-| K:14152–14179 | 稳定 Input 先检查自身是否最新，再提示固件；这是厂商应用版本策略，不能套用 Micro Input 的版本号 |
-| K:14251–14265 | CreatorMicroV2 与 CodexMicro 映射 `cm-v2-fw-releases` |
-| M:3815–3816、4493–4505 | Electron 下载到系统 temp；这层未见独立 SHA-256 检查 |
-| K:4608–4637 | HID 使用 `sys.bootloader`，旧串口使用 legacy `bootloader` 请求 |
-| R UTF-8 字节169074–171100 | 进入 bootloader 后等待与重新扫描；异常分支可能重连，不可把计数变量理解为严格重试上限 |
-| K:5780–5815 | macOS 串口候选以 VID `0x303A` 和 manufacturer `Espressif` 识别；不是 Creator Micro 2 型号证明 |
-| U UTF-8 字节12283–14300 | 自动更新取 bootloader 列表首项，完成后删除下载文件并显示完成；本段没有重连版本读回 |
-| R UTF-8 字节6980400–6985500 | 高级页支持本地文件、手动重试，并提示多个 bootloader |
-| K:13608–13685 | 单个 merged 文件写入地址 `0`；baud `921600`；mode/freq/size=`keep`，eraseAll=`false`，compress=`true`；MD5 与进度回调 |
-| K:13730–13771 | 写后寄存器 `0x6000812c` 置零，配合 DTR/RTS 重置，最后断开；连接/写入/reset 失败返回失败 |
+| Release 筛选 | 获取 releases，按 semver prerelease 筛选稳定/预发布，取首条及首个 `.bin` 资产 |
+| 客户端版本策略 | 稳定 Input 先检查自身是否最新，再提示固件；这是厂商应用版本策略，不能套用 Micro Input 的版本号 |
+| 型号仓库映射 | CreatorMicroV2 与 CodexMicro 映射 `cm-v2-fw-releases` |
+| 临时下载边界 | Electron 下载到系统 temp；这层未见独立 SHA-256 检查 |
+| Bootloader 切换命令 | HID 使用 `sys.bootloader`，旧串口使用 legacy `bootloader` 请求 |
+| Bootloader 重扫描 | 进入 bootloader 后等待与重新扫描；异常分支可能重连，不可把计数变量理解为严格重试上限 |
+| macOS Bootloader 枚举 | macOS 串口候选以 VID `0x303A` 和 manufacturer `Espressif` 识别；不是 Creator Micro 2 型号证明 |
+| 自动更新回执边界 | 自动更新取 bootloader 列表首项，完成后删除下载文件并显示完成；本段没有重连版本读回 |
+| 高级本地刷写入口 | 高级页支持本地文件、手动重试，并提示多个 bootloader |
+| ESP32-S3 写入参数 | 单个 merged 文件写入地址 `0`；baud `921600`；mode/freq/size=`keep`，eraseAll=`false`，compress=`true`；MD5 与进度回调 |
+| 写后芯片复位与断连 | 写后清零 ESP32-S3 复位控制寄存器并配合 DTR/RTS 重置，最后断开；连接/写入/reset 失败返回失败 |
 
-REA 定向分析原始 Evidence：`ev_454c0751f8555478d99f149372ad4c2a2e0b26b680a81ed33488178cec5789f0`。完整记录在受忽略的 `.scratch/input-study/firmware-update/rea-evidence.json`。只分析主进程、SDK、preload；语义图仍有 partial/动态关系缺口。29 个 unpacked native 文件与包内 integrity 声明不一致，工具按 `record-and-continue` 保存为 observed-untrusted；这些原生文件没有执行。上述具体链路由逐段读取补证，不把工具图当作运行验证。
+完整研究原始记录与中间工具产物仅保存在未提交的本地私有工作目录，不纳入代码或公开文档。对伴随包的原生模块完整性告警均已记录且未执行；上述行为结论由人工对照接口与更新链确认，不将静态图覆盖视为运行验证。
 
 ## 固件镜像与配置保留边界
 
@@ -56,7 +56,7 @@ REA 定向分析原始 Evidence：`ev_454c0751f8555478d99f149372ad4c2a2e0b26b680
 
 [Espressif ESP32-S3 文档](https://docs.espressif.com/projects/esptool/en/latest/esp32s3/advanced-topics/boot-mode-selection.html) 说明 GPIO0 拉低时复位进入下载模式，开发板通常按住 Boot 再按 EN。该通用芯片说明不是 Creator Micro 2 电路和按键时序的实机核验。
 
-原 SDK 还有 eFuse 身份读取函数（K:13706 起），但本轮未发现前端调用，也未取得产品码对照。独立实现不能仅凭 VID、Espressif manufacturer 或芯片类型静默选首项刷写；应显示串口候选并要求明确选择设备，保持其他设备不受影响。
+原 SDK 另包含 eFuse 身份读取逻辑，但本轮未发现前端调用，也未取得产品码对照。独立实现不能仅凭 VID、Espressif manufacturer 或芯片类型静默选首项刷写；应显示串口候选并要求明确选择设备，保持其他设备不受影响。
 
 ## 验证边界
 
@@ -75,7 +75,7 @@ REA 定向分析原始 Evidence：`ev_454c0751f8555478d99f149372ad4c2a2e0b26b680
   - `crates/mi-core` 与 `crates/mi-macos`：`PrepareDevice` 在未连接状态下改为实时枚举有线 USB 独占接口或既有 bootloader 串口，进入 bootloader 后自动轮询串口最多 10×350ms 并保持手动确认选择；`FirmwareUpdate.swift` 新增未连线时的「连接有线键盘」按钮；`LiveHostActionExecutor` 新增 CoreGraphics 指针移动（含多屏活动边界钳位）、左/右/中点击（含 `kCGMouseEventClickState = 1`）、四向滚轮与三档步进倍率；物理输入直连与六层编译路径对 `is_host_mouse_command` 保留 `adapter = "host"`，配合通用预设 `KnobJoystickPreset::MousePointerAndScroll` 直接用于日常档与各 Agent 方案。
 - **验证与缺口**：
   - **离线门禁（PR `#135` `b336b42`、PR `#136` `816351e`、PR `#137` `1bed7c4`）**：`MI_AUTO_HOST_READY=0 ./scripts/verify-offline`（边界检查、`cargo test`、`swift test` 与 6 个合成隔离场景）全量通过，覆盖版本号门禁、`PrepareDevice` 端口发现与租约交接、`apply` 兼容性隔离、六层固件版本号回读、CoreGraphics 鼠标动作状态机与六层直通路由；随后以 `./scripts/build --release` 更新安装版 `/Applications/Micro Input.app`。
-  - **实机阶段 A（同版本基线重刷 `0.6.3 -> 0.6.3`）**：连接 `Creator Micro 2`（`0x303a:0x8298`，串口 `/dev/cu.usbmodem11401`，序列号 `30:ED:A0:1D:9E:30`），完整保存 16 MB Flash 备份 `firmware-1794634846067366000-95189/flash-before.bin`（`16,777,216` 字节，`sha256:2d4c9583c7e49194bfca939265739a4f12a17de60ece7debcb1617053a725904`），`firmware_sha256` 为 `1d8bd545b9047182d7112dd86b14f6c636bad3834725ee0a6eca7cacee0ec6a7`，`operation.json` 记录 `status = "flash_verified_runtime_unverified"` 且 `error = null`；结束后 `hidutil list` 确认 USB HID 恢复枚举，重连读回 `当前固件：0.6.3` 与 `六层配置已读回，等待首次实体输入验证`。
-  - **实机阶段 B（跨版本升级 `0.6.3 -> 0.7.0-rc.16`）**：切换「预发布版」通道下载校验 `v0.7.0-rc.16`，进入 `/dev/cu.usbmodem11401` 并保存升级前 16 MB 备份 `firmware-1794635113513353000-95189/flash-before.bin`（`16,777,216` 字节，`sha256:b833e97ea23ca0a0d8dd113b56221cedcf99327ddeb2497a4983306a598073c3`），`firmware_sha256` 为 `9f429866986b2be640b4668d527e84df7e517e0f30559f287ba911dc2a67dab7`，`operation.json` 记录 `status = "flash_verified_runtime_unverified"` 且 `error = null`；升级重启后 `hidutil list` 实测新增原生 USB HID Mouse 接口（`UsagePage = 1, Usage = 2`，与 Keyboard `1, 6`、Consumer `12, 1`、Vendor `65280, 1` 并存），应用内重连读回 `当前固件：0.7.0-rc.16` 并确认 `nvs`/`fs` 分区六层板载配置完整保留（`六层配置已读回，等待首次实体输入验证`）。
+  - **实机阶段 A（同版本基线重刷 `0.6.3 -> 0.6.3`）**：连接 `Creator Micro 2`（`0x303a:0x8298`，本地受控 Bootloader 串口，序列号已脱敏），完整保存 16 MB Flash 备份（`16,777,216` 字节，本地备份摘要已校验），`firmware_sha256` 为 `1d8bd545b9047182d7112dd86b14f6c636bad3834725ee0a6eca7cacee0ec6a7`，`operation.json` 记录 `status = "flash_verified_runtime_unverified"` 且 `error = null`；结束后 `hidutil list` 确认 USB HID 恢复枚举，重连读回 `当前固件：0.6.3` 与 `六层配置已读回，等待首次实体输入验证`。
+  - **实机阶段 B（跨版本升级 `0.6.3 -> 0.7.0-rc.16`）**：切换「预发布版」通道下载校验 `v0.7.0-rc.16`，进入本地受控 Bootloader 串口并保存升级前 16 MB Flash 备份（`16,777,216` 字节，本地备份摘要已校验），`firmware_sha256` 为 `9f429866986b2be640b4668d527e84df7e517e0f30559f287ba911dc2a67dab7`，`operation.json` 记录 `status = "flash_verified_runtime_unverified"` 且 `error = null`；升级重启后 `hidutil list` 实测新增原生 USB HID Mouse 接口（`UsagePage = 1, Usage = 2`，与 Keyboard `1, 6`、Consumer `12, 1`、Vendor `65280, 1` 并存），应用内重连读回 `当前固件：0.7.0-rc.16` 并确认 `nvs`/`fs` 分区六层板载配置完整保留（`六层配置已读回，等待首次实体输入验证`）。
   - **Slice FW3 扩展契约**：`0.7.0-rc.16+` 新增的 `mouse.config`、`joystick.deadzone`、`kb.pl.set` / 出站 `kb.pl`、`pm.config` / `pm.state`（含 `usb.host` 锁持有状态）、`device.name`、`device.status` 电量字段与 `kb.sa.rgb` 动态灯光契约及实机抓取记录见 [0.7.0-rc.16 进阶硬件能力契约](firmware-v070-capabilities.md)。
   - **已知实机未测边缘**：`MOUSE`/`SCROLL` 原生板载写入 S3，以及手持摇杆/旋钮触发 CoreGraphics 光标移动与滚轮的交互手感，留待后续日常使用中验证。

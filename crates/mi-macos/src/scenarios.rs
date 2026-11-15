@@ -89,7 +89,7 @@ fn open_private_file(path: &Path, truncate: bool) -> Result<fs::File, String> {
     options.open(path).map_err(|e| e.to_string())
 }
 
-fn write_private_json(path: &Path, value: &Value) -> Result<(), String> {
+pub fn write_private_json(path: &Path, value: &Value) -> Result<(), String> {
     let mut text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     text.push('\n');
     let mut file = open_private_file(path, true)?;
@@ -110,7 +110,8 @@ impl DiagnosticRedactor {
     pub fn sanitize(message: &str) -> String {
         let payloads_redacted = redact_bracketed_payloads(message);
         let paths_redacted = redact_system_paths(&payloads_redacted);
-        redact_serial_tokens(&paths_redacted)
+        let serials_redacted = redact_serial_tokens(&paths_redacted);
+        redact_mac_addresses(&serials_redacted)
     }
 }
 
@@ -218,7 +219,8 @@ fn redact_serial_tokens(input: &str) -> String {
                 }
                 let val_start = j;
                 while j < bytes.len()
-                    && (bytes[j].is_ascii_alphanumeric() || matches!(bytes[j], b'-' | b'_' | b'.'))
+                    && (bytes[j].is_ascii_alphanumeric()
+                        || matches!(bytes[j], b'-' | b'_' | b'.' | b':'))
                 {
                     j += 1;
                 }
@@ -230,6 +232,42 @@ fn redact_serial_tokens(input: &str) -> String {
                     continue;
                 }
             }
+        }
+        let ch = input[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn is_six_octet_mac(bytes: &[u8], start: usize) -> bool {
+    const MAC_LEN: usize = 17;
+    if start + MAC_LEN > bytes.len() {
+        return false;
+    }
+    if start > 0 && bytes[start - 1].is_ascii_hexdigit() {
+        return false;
+    }
+    if start + MAC_LEN < bytes.len() && bytes[start + MAC_LEN].is_ascii_hexdigit() {
+        return false;
+    }
+    (0..6).all(|group| {
+        let off = start + group * 3;
+        bytes[off].is_ascii_hexdigit()
+            && bytes[off + 1].is_ascii_hexdigit()
+            && (group == 5 || bytes[off + 2] == b':')
+    })
+}
+
+fn redact_mac_addresses(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if is_six_octet_mac(bytes, i) {
+            out.push_str("[redacted]");
+            i += 17;
+            continue;
         }
         let ch = input[i..].chars().next().unwrap();
         out.push(ch);
@@ -811,5 +849,26 @@ mod tests {
             "append_private_jsonl must refuse symlinks via O_NOFOLLOW"
         );
         assert_eq!(fs::read(&target_file).unwrap(), b"ORIGINAL");
+    }
+
+    #[test]
+    fn diagnostic_redactor_masks_colon_serials_and_bare_macs_without_touching_vid_pid_or_timestamps(
+    ) {
+        let kv_sanitized = DiagnosticRedactor::sanitize(
+            "usb serial_number: AA:BB:CC:DD:EE:FF serial=11:22:33:44:55:66",
+        );
+        assert!(kv_sanitized.contains("serial_number:[redacted]"));
+        assert!(kv_sanitized.contains("serial=[redacted]"));
+        assert!(!kv_sanitized.contains("AA:BB"));
+        assert!(!kv_sanitized.contains("CC:DD"));
+        assert!(!kv_sanitized.contains("11:22"));
+        assert!(!kv_sanitized.contains("33:44"));
+
+        let bare_sanitized = DiagnosticRedactor::sanitize(
+            "device 02:ed:a0:1d:9e:30 failed at 12:34:56 on 303A:8298",
+        );
+        assert!(!bare_sanitized.contains("02:ed:a0:1d:9e:30"));
+        assert!(bare_sanitized.contains("12:34:56"));
+        assert!(bare_sanitized.contains("303A:8298"));
     }
 }

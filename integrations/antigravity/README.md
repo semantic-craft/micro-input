@@ -15,12 +15,10 @@
 
 ## 历史安装版接口与协议核对（K3/L3）
 
-对安装版包体、ASAR 头部文件完整性哈希、`language_server --stamp`、只读 protobuf 符号契约、`agentapi --help` 与 `~/.gemini/antigravity/lib/node_modules/sidecar_sdk` 的只读核对结论如下：
+对已安装客户端接口契约、只读服务协议、`agentapi --help` 与 sidecar 模块行为的只读核对结论如下：
 
-1. **包体与核心二进制**：
+1. **包体标识与版本基线**：
    - Bundle ID：`com.google.antigravity`，版本 `2.29.0`
-   - `Contents/Resources/app.asar` SHA-256：`290e1b7a1caa430a0c5367c7b433e8d284e2ca5d0b305e91e5ce8ec926f43283`
-   - `Contents/Resources/bin/language_server` SHA-256：`fb6e0fc3a1e091e773a3e91ce3e5a4dc93a5f0d30bf305a1ddd70008a2a26a74`（`Built at CL: 1013060670`）
 2. **`agentapi` CLI 与创建/发送契约（Slice K3）**：
    - 仅暴露 3 个官方子命令：`get-conversation-metadata <conversation_id>`、`new-conversation [--model=...] [--title=...] [--profile=...] <prompt>`、`send-message [--title=...] <recipient_id> <content>`。
    - **创建绑定 `projectId`**：`sidecar_sdk/index.mjs` 的 `startConversation` 通过环境变量 `ANTIGRAVITY_PROJECT_ID` 将 `agentapi new-conversation` 绑定到工作区 `projectId`（记录 `NewConversationEvent`）；若请求 `projectId` 与工作区绑定不一致则返回 `unconfirmed`（`guard.projectIdMismatch`），零新建会话。
@@ -31,7 +29,7 @@
 3. **Official Sidecars (`sidecar_sdk` `1.0.0`) 与只读 REA 会话目录/聚焦契约**：
    - 官方 Sidecar 仅绑定 `127.0.0.1`，要求宿主注入 `ANTIGRAVITY_LS_ADDRESS`、`ANTIGRAVITY_CSRF_TOKEN`、`ANTIGRAVITY_SIDECAR_WEB_PORT` 及 `X-Sidecar-Token`（`ANTIGRAVITY_SIDECAR_UI_TOKEN`），暴露 `/_sidecar/get-conversation-metadata`、`/_sidecar/new-conversation`、`/_sidecar/send-message`。
    - `preload.js` 通过 `window.addEventListener('message', ...)` 接收宿主推送的 `workspace-change`（`payload.workspaceUris`），并通过 `window.sidecar.ui.toggleConversation(conversationId)` 向父窗口发送 `postMessage({ type: 'toggle-conversation', payload: { conversationId } }, '*')`。
-   - 对 `language_server`（`CL 1013060670`）的只读 REA 确认：`LanguageServerService/GetConversationMetadata`（`GetConversationMetadataRequest` / `GetConversationMetadataResponse`）与 `GetAllCascadeTrajectories`（`CascadeTrajectorySummary` + `CortexTrajectoryMetadata` + `CortexWorkspaceMetadata.workspace_folder_absolute_uri`）在 `x-codeium-csrf-token` 保护下将会话身份 `(conversation_id, workspace_folder_absolute_uri)` 与 `summary` / `title`、`project_id` 绑定。
+   - 对 Antigravity `language_server` 的只读服务契约确认：`LanguageServerService/GetConversationMetadata`（`GetConversationMetadataRequest` / `GetConversationMetadataResponse`）与 `GetAllCascadeTrajectories`（`CascadeTrajectorySummary` + `CortexTrajectoryMetadata` + `CortexWorkspaceMetadata.workspace_folder_absolute_uri`）在 `x-codeium-csrf-token` 保护下将会话身份 `(conversation_id, workspace_folder_absolute_uri)` 与 `summary` / `title`、`project_id` 绑定。
    - 经上述契约核对后，状态与导航桥支持既有会话目录与精确导航（`supportsSessionCatalog = true`、`supportsTargetFocus = true`、`schemaVerified = true`）。
 4. **Slice L3 只读 REA 停止、审批/问答与模型/思考档位契约（固定白名单，绝不开放任意 RPC）**：
    - **停止当前调用（`antigravity-stop-v1`）**：经只读 REA 核实 `/exa.language_server_pb.LanguageServerService/CancelCascadeInvocation`、`CancelCascadeInvocationRequest`（`cascade_id=1`, `kill_background_tasks=2`, `notify_parent=3`）与 `CancelCascadeStepsRequest`，受 `x-codeium-csrf-token` 保护（`stopSchemaVerified = true`、`supportsStopTurn = true`）。桥接层 `stop` 操作强制核验 `selected == target` 及可选 `expectedInvocationNum` / `expectedExecutionNum`：迟到或轮次不匹配的 `stop` 返回 `noop`（`guard.stopTargetChanged`），不误停新轮次或另一会话；运行中目标会话确认取消后转为 `completed`（`terminationReason == "USER_CANCELED"`，`fullyIdle == true`）。
