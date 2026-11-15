@@ -463,7 +463,6 @@ public enum L10n {
         "上方六键设为会话键": "Set Top 6 Keys as Session Keys",
         "恢复默认布局": "Restore Default Layout",
         "模型选择（短按模型 · 长按搜会话）": "Model Picker & Search (Tap / Hold)",
-        "模型选择（长按弹出模型页）": "Select Model (Hold Knob)",
         "旋钮切换会话，摇杆滚动对话": "Knob Switches Sessions, Stick Scrolls Chat",
         "旋钮滚动项目，摇杆滚动对话": "Knob Scrolls Projects, Stick Scrolls Chat",
         "旋钮滚动对话": "Knob Scrolls Chat",

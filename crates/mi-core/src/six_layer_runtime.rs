@@ -1995,6 +1995,77 @@ struct PendingSixLayerEncoderHold {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn dispatch_hold_action(
+    picker: &mut crate::encoder_model_picker::EncoderModelPicker,
+    overlay_kind: Option<crate::encoder_model_picker::EncoderOverlayKind>,
+    profile_id: &str,
+    hold_action: &ResolvedHostAction,
+    action_adapter: Option<String>,
+    admission: ExecutionAdmission,
+    control_layer: u8,
+    at: Instant,
+    routing: &Mutex<RoutingContext>,
+    receipts: &std::sync::mpsc::SyncSender<mi_macos::HostActionReceipt>,
+    receiver: &UserCommandReceiver,
+    active_picker_context: &mut Option<(u8, String, Option<String>)>,
+    mouse_capture_enabled: &mut bool,
+    set_mouse_capture: &mut dyn FnMut(bool),
+    execute: &mut dyn FnMut(
+        &str,
+        &str,
+        &ResolvedHostAction,
+        ExecutionAdmission,
+    ) -> mi_macos::HostActionReceipt,
+) -> bool {
+    let must_esc = picker.prepare_for_hold_action(overlay_kind);
+    if must_esc {
+        if let Some(ref adapter) = action_adapter {
+            let cancel_action = crate::encoder_model_picker::ModelPickerCommand::ModelPickerCancel
+                .into_host_action(adapter.clone());
+            let _ = execute(profile_id, "ENC_CLK", &cancel_action, admission);
+        }
+    }
+    if overlay_kind != Some(crate::encoder_model_picker::EncoderOverlayKind::ModelPicker) {
+        if *mouse_capture_enabled {
+            *mouse_capture_enabled = false;
+            set_mouse_capture(false);
+        }
+    }
+    let receipt = execute(profile_id, "ENC_CLK", hold_action, admission);
+    let executed_ok = receipt.outcome == "executed";
+    if receipts.try_send(receipt).is_err() {
+        if *mouse_capture_enabled {
+            *mouse_capture_enabled = false;
+            set_mouse_capture(false);
+        }
+        receiver.invalidate("执行回执积压，输入已暂停");
+        return false;
+    }
+    let adapter = action_adapter.unwrap_or_else(|| "antigravity".to_string());
+    let transition = picker.apply_hold_execution_outcome(adapter, overlay_kind, executed_ok, at);
+    match transition {
+        crate::encoder_model_picker::OverlayTransition::Entered(kind) => {
+            let current_bundle = routing.lock().unwrap().bundle_id.clone();
+            *active_picker_context = Some((control_layer, profile_id.to_string(), current_bundle));
+            let captures = kind.captures_mouse();
+            if *mouse_capture_enabled != captures {
+                *mouse_capture_enabled = captures;
+                set_mouse_capture(captures);
+            }
+        }
+        crate::encoder_model_picker::OverlayTransition::Cancelled
+        | crate::encoder_model_picker::OverlayTransition::None => {
+            *active_picker_context = None;
+            if *mouse_capture_enabled {
+                *mouse_capture_enabled = false;
+                set_mouse_capture(false);
+            }
+        }
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
 fn execute_clicks_with_encoder_picker(
     receiver: &UserCommandReceiver,
     plan: &AppliedSixLayerPlan,
@@ -2024,7 +2095,7 @@ fn execute_clicks_with_encoder_picker(
     let mut picker = EncoderModelPicker::new();
     let mut mouse_capture_enabled = false;
     let mut pending_hold: Option<PendingSixLayerEncoderHold> = None;
-    let mut active_picker_context: Option<(u8, String)> = None;
+    let mut active_picker_context: Option<(u8, String, Option<String>)> = None;
 
     let set_capture_state =
         |enabled: bool, flag: &mut bool, set_mouse_capture: &mut dyn FnMut(bool)| {
@@ -2048,6 +2119,25 @@ fn execute_clicks_with_encoder_picker(
                 set_capture_state(false, &mut mouse_capture_enabled, &mut set_mouse_capture);
             }
         } else {
+            if let Some((active_layer, ref active_profile, ref active_bundle)) =
+                active_picker_context
+            {
+                let (current_eff_profile, current_bundle) = {
+                    let ctx = routing.lock().unwrap();
+                    (
+                        ctx.effective_profile_id(plan, active_layer),
+                        ctx.bundle_id.clone(),
+                    )
+                };
+                if current_eff_profile.as_deref() != Some(active_profile.as_str())
+                    || &current_bundle != active_bundle
+                {
+                    picker.cancel();
+                    pending_hold = None;
+                    active_picker_context = None;
+                    set_capture_state(false, &mut mouse_capture_enabled, &mut set_mouse_capture);
+                }
+            }
             if picker.expire_if_idle(loop_now).is_some() {
                 active_picker_context = None;
                 set_capture_state(false, &mut mouse_capture_enabled, &mut set_mouse_capture);
@@ -2092,69 +2182,24 @@ fn execute_clicks_with_encoder_picker(
                                 );
                                 return;
                             }
-                            let must_esc = picker.prepare_for_hold_action(overlay_kind);
-                            if must_esc {
-                                if let Some(ref adapter) = hold_ctx.adapter {
-                                    let cancel_action = ModelPickerCommand::ModelPickerCancel
-                                        .into_host_action(adapter.clone());
-                                    let _ = execute(
-                                        &hold_ctx.profile_id,
-                                        "ENC_CLK",
-                                        &cancel_action,
-                                        hold_ctx.admission,
-                                    );
-                                }
-                            }
-                            if overlay_kind != Some(EncoderOverlayKind::ModelPicker) {
-                                set_capture_state(
-                                    false,
-                                    &mut mouse_capture_enabled,
-                                    &mut set_mouse_capture,
-                                );
-                            }
-                            let receipt = execute(
-                                &hold_ctx.profile_id,
-                                "ENC_CLK",
-                                &hold_action,
-                                hold_ctx.admission,
-                            );
-                            let executed_ok = receipt.outcome == "executed";
-                            if receipts.try_send(receipt).is_err() {
-                                set_capture_state(
-                                    false,
-                                    &mut mouse_capture_enabled,
-                                    &mut set_mouse_capture,
-                                );
-                                receiver.invalidate("执行回执积压，输入已暂停");
-                                return;
-                            }
-                            let adapter = hold_ctx
-                                .adapter
-                                .unwrap_or_else(|| "antigravity".to_string());
-                            let transition = picker.apply_hold_execution_outcome(
-                                adapter,
+                            if !dispatch_hold_action(
+                                &mut picker,
                                 overlay_kind,
-                                executed_ok,
+                                &hold_ctx.profile_id,
+                                &hold_action,
+                                hold_ctx.adapter,
+                                hold_ctx.admission,
+                                hold_ctx.control_layer,
                                 loop_now,
-                            );
-                            match transition {
-                                OverlayTransition::Entered(kind) => {
-                                    active_picker_context =
-                                        Some((hold_ctx.control_layer, hold_ctx.profile_id));
-                                    set_capture_state(
-                                        kind.captures_mouse(),
-                                        &mut mouse_capture_enabled,
-                                        &mut set_mouse_capture,
-                                    );
-                                }
-                                OverlayTransition::Cancelled | OverlayTransition::None => {
-                                    active_picker_context = None;
-                                    set_capture_state(
-                                        false,
-                                        &mut mouse_capture_enabled,
-                                        &mut set_mouse_capture,
-                                    );
-                                }
+                                routing,
+                                receipts,
+                                receiver,
+                                &mut active_picker_context,
+                                &mut mouse_capture_enabled,
+                                &mut set_mouse_capture,
+                                &mut execute,
+                            ) {
+                                return;
                             }
                         } else {
                             picker.cancel();
@@ -2180,7 +2225,7 @@ fn execute_clicks_with_encoder_picker(
                         else {
                             continue;
                         };
-                        let Some((_, ref profile_id)) = active_picker_context else {
+                        let Some((_, ref profile_id, _)) = active_picker_context else {
                             continue;
                         };
                         let flick_admission = policy.capture(loop_now);
@@ -2246,7 +2291,7 @@ fn execute_clicks_with_encoder_picker(
         first.store(true, Ordering::Release);
 
         let current_eff_profile = context.effective_profile_id(plan, control_layer);
-        if let Some((active_layer, ref active_profile)) = active_picker_context {
+        if let Some((active_layer, ref active_profile, _)) = active_picker_context {
             if active_layer != control_layer
                 || current_eff_profile.as_deref() != Some(active_profile.as_str())
             {
@@ -2373,65 +2418,31 @@ fn execute_clicks_with_encoder_picker(
                                 );
                                 return;
                             }
-                            let must_esc = picker.prepare_for_hold_action(overlay_kind);
-                            if must_esc {
-                                if let Some(ref adapter) = action_adapter {
-                                    let cancel_action = ModelPickerCommand::ModelPickerCancel
-                                        .into_host_action(adapter.clone());
-                                    let _ =
-                                        execute(&profile_id, "ENC_CLK", &cancel_action, admission);
-                                }
-                            }
-                            if overlay_kind != Some(EncoderOverlayKind::ModelPicker) {
-                                set_capture_state(
-                                    false,
-                                    &mut mouse_capture_enabled,
-                                    &mut set_mouse_capture,
-                                );
-                            }
-                            let receipt = execute(&profile_id, "ENC_CLK", &hold_action, admission);
-                            let executed_ok = receipt.outcome == "executed";
-                            if receipts.try_send(receipt).is_err() {
-                                set_capture_state(
-                                    false,
-                                    &mut mouse_capture_enabled,
-                                    &mut set_mouse_capture,
-                                );
-                                receiver.invalidate("执行回执积压，输入已暂停");
-                                return;
-                            }
-                            let adapter =
-                                action_adapter.unwrap_or_else(|| "antigravity".to_string());
-                            let transition = picker.apply_hold_execution_outcome(
-                                adapter,
+                            if !dispatch_hold_action(
+                                &mut picker,
                                 overlay_kind,
-                                executed_ok,
+                                &profile_id,
+                                &hold_action,
+                                action_adapter,
+                                admission,
+                                control_layer,
                                 event.received_at,
-                            );
-                            match transition {
-                                OverlayTransition::Entered(kind) => {
-                                    active_picker_context = Some((control_layer, profile_id));
-                                    set_capture_state(
-                                        kind.captures_mouse(),
-                                        &mut mouse_capture_enabled,
-                                        &mut set_mouse_capture,
-                                    );
-                                }
-                                OverlayTransition::Cancelled | OverlayTransition::None => {
-                                    active_picker_context = None;
-                                    set_capture_state(
-                                        false,
-                                        &mut mouse_capture_enabled,
-                                        &mut set_mouse_capture,
-                                    );
-                                }
+                                routing,
+                                receipts,
+                                receiver,
+                                &mut active_picker_context,
+                                &mut mouse_capture_enabled,
+                                &mut set_mouse_capture,
+                                &mut execute,
+                            ) {
+                                return;
                             }
                             continue;
                         }
                         EncoderReleaseOutcome::ModelPickerConfirm { adapter } => {
                             let profile_id = active_picker_context
                                 .take()
-                                .map(|(_, p)| p)
+                                .map(|(_, p, _)| p)
                                 .or_else(|| layer_adapter.map(|(p, _)| p.to_owned()))
                                 .or(current_eff_profile);
                             set_capture_state(
@@ -2533,7 +2544,7 @@ fn execute_clicks_with_encoder_picker(
                     };
                     let Some(profile_id) = active_picker_context
                         .as_ref()
-                        .map(|(_, p)| p.clone())
+                        .map(|(_, p, _)| p.clone())
                         .or_else(|| layer_adapter.map(|(p, _)| p.to_owned()))
                     else {
                         continue;
@@ -2580,7 +2591,7 @@ fn execute_clicks_with_encoder_picker(
                 };
                 let Some(profile_id) = active_picker_context
                     .as_ref()
-                    .map(|(_, p)| p.clone())
+                    .map(|(_, p, _)| p.clone())
                     .or_else(|| layer_adapter.map(|(p, _)| p.to_owned()))
                 else {
                     continue;
@@ -2675,7 +2686,9 @@ fn execute_clicks_with_encoder_picker(
                 picker.activate_overlay_after_action(resolved_adapter, action, event.received_at);
             match transition {
                 OverlayTransition::Entered(kind) => {
-                    active_picker_context = Some((control_layer, profile_id.to_owned()));
+                    let current_bundle = routing.lock().unwrap().bundle_id.clone();
+                    active_picker_context =
+                        Some((control_layer, profile_id.to_owned(), current_bundle));
                     set_capture_state(
                         kind.captures_mouse(),
                         &mut mouse_capture_enabled,
@@ -6078,6 +6091,306 @@ mod tests {
             ]
         );
         assert_eq!(capture_transitions, vec![true, false]);
+    }
+
+    #[test]
+    fn six_layer_foreground_app_switch_cancels_model_picker_on_idle_tick() {
+        let receiver = UserCommandReceiver::bind().unwrap();
+        receiver.arm().unwrap();
+        let plan = test_plan();
+
+        let base = Instant::now() - Duration::from_millis(100);
+        let policy = ExecutionPolicy::default();
+        policy.set(true, true, base - Duration::from_secs(1));
+        let routing = Mutex::new(RoutingContext::default());
+        let observed = AtomicU8::new(1);
+        let first = AtomicBool::new(false);
+        let stop = AtomicBool::new(false);
+        let (tx, _rx) = std::sync::mpsc::sync_channel(16);
+
+        let gen: String = receiver.generation().into();
+        let mk_ev = |seq: u64, control: u8, released: bool, at: Instant| mi_transport::Activation {
+            control,
+            layer_override: None,
+            released,
+            generation: gen.clone(),
+            received_sequence: seq,
+            received_at: at,
+        };
+
+        let mut step = 0;
+        let mut capture_transitions = Vec::new();
+        let mut dispatched = Vec::new();
+
+        execute_clicks_with_encoder_picker(
+            &receiver,
+            &plan,
+            &stop,
+            &policy,
+            &observed,
+            &first,
+            &routing,
+            &tx,
+            None,
+            || {
+                step += 1;
+                match step {
+                    1 => Ok(Some(mk_ev(1, 15, false, base))),
+                    2 => Ok(Some(mk_ev(2, 15, true, base + Duration::from_millis(40)))),
+                    3 => {
+                        routing.lock().unwrap().update(Some("com.apple.Safari"));
+                        Ok(None)
+                    }
+                    _ => {
+                        stop.store(true, Ordering::Release);
+                        Ok(None)
+                    }
+                }
+            },
+            || Ok(()),
+            |enabled| capture_transitions.push(enabled),
+            Vec::new,
+            |profile, binding, action, _admission| {
+                let cmd = match action {
+                    ResolvedHostAction::AgentCommand { adapter, command } => {
+                        format!("{adapter}:{command}")
+                    }
+                    other => format!("{other:?}"),
+                };
+                dispatched.push((profile.to_owned(), binding.to_owned(), cmd.clone()));
+                mi_macos::HostActionReceipt {
+                    action_type: "agent_command".into(),
+                    binding_id: binding.into(),
+                    detail: cmd,
+                    outcome: "executed".into(),
+                    profile_id: profile.into(),
+                    target: "antigravity".into(),
+                    text_byte_len: None,
+                    timestamp_ms: 1,
+                }
+            },
+        );
+
+        assert_eq!(capture_transitions, vec![true, false]);
+    }
+
+    #[test]
+    fn six_layer_due_hold_timer_fires_search_and_transitions_from_model_picker() {
+        let receiver = UserCommandReceiver::bind().unwrap();
+        receiver.arm().unwrap();
+        let plan = test_plan();
+        let ag_profile_id = plan.hosts[0].profile_id.clone();
+
+        let policy = ExecutionPolicy::default();
+        policy.set(true, true, Instant::now() - Duration::from_secs(1));
+        let routing = Mutex::new(RoutingContext::default());
+        let observed = AtomicU8::new(1);
+        let first = AtomicBool::new(false);
+        let stop = AtomicBool::new(false);
+        let (tx, _rx) = std::sync::mpsc::sync_channel(16);
+
+        let gen: String = receiver.generation().into();
+        let mk_ev = |seq: u64, control: u8, released: bool, at: Instant| mi_transport::Activation {
+            control,
+            layer_override: None,
+            released,
+            generation: gen.clone(),
+            received_sequence: seq,
+            received_at: at,
+        };
+
+        let now = Instant::now();
+        let mut steps = std::collections::VecDeque::from([
+            Some(mk_ev(1, 15, false, now)),
+            Some(mk_ev(2, 15, true, now)),
+            Some(mk_ev(3, 15, false, now)),
+            None,
+            Some(mk_ev(4, 15, true, now)),
+        ]);
+
+        let mut capture_transitions = Vec::new();
+        let mut dispatched = Vec::new();
+        let mut slept_for_hold = false;
+
+        execute_clicks_with_encoder_picker(
+            &receiver,
+            &plan,
+            &stop,
+            &policy,
+            &observed,
+            &first,
+            &routing,
+            &tx,
+            None,
+            || match steps.pop_front() {
+                Some(Some(ev)) => {
+                    let mut ev = ev;
+                    ev.received_at = Instant::now();
+                    Ok(Some(ev))
+                }
+                Some(None) => {
+                    if !slept_for_hold {
+                        slept_for_hold = true;
+                        thread::sleep(Duration::from_millis(360));
+                    }
+                    Ok(None)
+                }
+                None => {
+                    stop.store(true, Ordering::Release);
+                    Ok(None)
+                }
+            },
+            || Ok(()),
+            |enabled| capture_transitions.push(enabled),
+            Vec::new,
+            |profile, binding, action, _admission| {
+                let cmd = match action {
+                    ResolvedHostAction::AgentCommand { adapter, command } => {
+                        format!("{adapter}:{command}")
+                    }
+                    other => format!("{other:?}"),
+                };
+                dispatched.push((profile.to_owned(), binding.to_owned(), cmd.clone()));
+                mi_macos::HostActionReceipt {
+                    action_type: "agent_command".into(),
+                    binding_id: binding.into(),
+                    detail: cmd,
+                    outcome: "executed".into(),
+                    profile_id: profile.into(),
+                    target: "antigravity".into(),
+                    text_byte_len: None,
+                    timestamp_ms: 1,
+                }
+            },
+        );
+
+        assert_eq!(
+            dispatched,
+            vec![
+                (
+                    ag_profile_id.clone(),
+                    "ENC_CLK".into(),
+                    "antigravity:model-picker-open".into(),
+                ),
+                (
+                    ag_profile_id.clone(),
+                    "ENC_CLK".into(),
+                    "antigravity:model-picker-cancel".into(),
+                ),
+                (ag_profile_id, "ENC_CLK".into(), "antigravity:search".into()),
+            ]
+        );
+        assert_eq!(capture_transitions, vec![true, false]);
+    }
+
+    #[test]
+    fn six_layer_sector_press_during_search_overlay_cancels_overlay() {
+        let receiver = UserCommandReceiver::bind().unwrap();
+        receiver.arm().unwrap();
+        let plan = test_plan();
+        let ag_profile_id = plan.hosts[0].profile_id.clone();
+
+        let base = Instant::now() - Duration::from_millis(500);
+        let policy = ExecutionPolicy::default();
+        policy.set(true, true, base - Duration::from_secs(1));
+        let routing = Mutex::new(RoutingContext::default());
+        let observed = AtomicU8::new(1);
+        let first = AtomicBool::new(false);
+        let stop = AtomicBool::new(false);
+        let (tx, _rx) = std::sync::mpsc::sync_channel(16);
+
+        let gen: String = receiver.generation().into();
+        let mk_ev = |seq: u64, control: u8, released: bool, at: Instant| mi_transport::Activation {
+            control,
+            layer_override: None,
+            released,
+            generation: gen.clone(),
+            received_sequence: seq,
+            received_at: at,
+        };
+
+        let mut steps = std::collections::VecDeque::from([
+            Some(mk_ev(1, 15, false, base)),
+            Some(mk_ev(2, 15, true, base + Duration::from_millis(450))),
+            None, // inject mouse delta during active search
+            Some(mk_ev(3, 19, false, base + Duration::from_millis(500))),
+            Some(mk_ev(4, 14, false, base + Duration::from_millis(550))),
+        ]);
+
+        let mut capture_transitions = Vec::new();
+        let mut dispatched = Vec::new();
+        let mut injected_drag = false;
+
+        execute_clicks_with_encoder_picker(
+            &receiver,
+            &plan,
+            &stop,
+            &policy,
+            &observed,
+            &first,
+            &routing,
+            &tx,
+            None,
+            || match steps.pop_front() {
+                Some(Some(ev)) => Ok(Some(ev)),
+                Some(None) => Ok(None),
+                None => {
+                    stop.store(true, Ordering::Release);
+                    Ok(None)
+                }
+            },
+            || Ok(()),
+            |enabled| capture_transitions.push(enabled),
+            || {
+                if !injected_drag {
+                    injected_drag = true;
+                    vec![(-45.0, 0.0)]
+                } else {
+                    Vec::new()
+                }
+            },
+            |profile, binding, action, _admission| {
+                let cmd = match action {
+                    ResolvedHostAction::AgentCommand { adapter, command } => {
+                        format!("{adapter}:{command}")
+                    }
+                    other => format!("{other:?}"),
+                };
+                dispatched.push((profile.to_owned(), binding.to_owned(), cmd.clone()));
+                mi_macos::HostActionReceipt {
+                    action_type: "agent_command".into(),
+                    binding_id: binding.into(),
+                    detail: cmd,
+                    outcome: "executed".into(),
+                    profile_id: profile.into(),
+                    target: "antigravity".into(),
+                    text_byte_len: None,
+                    timestamp_ms: 1,
+                }
+            },
+        );
+
+        assert_eq!(
+            dispatched,
+            vec![
+                (
+                    ag_profile_id.clone(),
+                    "ENC_CLK".into(),
+                    "antigravity:search".into(),
+                ),
+                (
+                    ag_profile_id.clone(),
+                    "AG18".into(),
+                    "Shortcut { key: \"]\", key_code: 30, modifiers: [\"command\"], target_bundle_id: Some(\"com.google.antigravity\") }".into(),
+                ),
+                (
+                    ag_profile_id,
+                    "AG14".into(),
+                    "antigravity:model-picker-next".into(),
+                ),
+            ]
+        );
+        assert!(capture_transitions.is_empty() || capture_transitions.iter().all(|&c| !c));
     }
 }
 
