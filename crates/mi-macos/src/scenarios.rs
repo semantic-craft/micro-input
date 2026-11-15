@@ -278,7 +278,7 @@ pub fn run_host_execution_scenario(run_dir: &Path) -> Result<ScenarioResultSumma
     if hold_action
         != (ResolvedHostAction::AgentCommand {
             adapter: "antigravity".to_string(),
-            command: "model-picker-open".to_string(),
+            command: "search".to_string(),
         })
     {
         return Err(format!("unexpected encoder hold action: {hold_action:?}"));

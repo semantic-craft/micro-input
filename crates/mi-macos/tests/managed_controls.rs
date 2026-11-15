@@ -2190,3 +2190,57 @@ fn model_picker_mouse_capture_bridge_is_noop_in_isolated_mode_and_drains_cleanly
     assert!(!rec_driver.is_model_picker_mouse_capture_enabled());
     assert!(rec_exec.drain_model_picker_mouse_deltas().is_empty());
 }
+
+#[test]
+fn host_search_command_resolves_to_active_agent_and_posts_cmd_k() {
+    use mi_macos::executor::{RecordedOsEvent, RecordingOsDriver};
+
+    let rec_driver = RecordingOsDriver::new(true);
+    let executor = LiveHostActionExecutor::new(rec_driver.clone());
+
+    let receipt_ag = executor.execute(
+        "Local Antigravity",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "search".into(),
+        },
+    );
+    assert_eq!(receipt_ag.outcome, "executed");
+    let events = rec_driver.events();
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        RecordedOsEvent::OpenApplication(bundle) if bundle == "com.google.antigravity"
+    )));
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        RecordedOsEvent::PostKeyShortcut {
+            key_code: 0x28,
+            modifiers,
+            key_down: true,
+        } if modifiers == &["command".to_string()]
+    )));
+
+    let receipt_codex = executor.execute(
+        "Local Codex",
+        "ENC_CLK",
+        &ResolvedHostAction::AgentCommand {
+            adapter: "host".into(),
+            command: "search".into(),
+        },
+    );
+    assert_eq!(receipt_codex.outcome, "executed");
+    let events = rec_driver.events();
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        RecordedOsEvent::OpenApplication(bundle) if bundle == "com.openai.codex"
+    )));
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        RecordedOsEvent::PostKeyShortcut {
+            key_code: 0x28,
+            modifiers,
+            key_down: true,
+        } if modifiers == &["command".to_string()]
+    )));
+}

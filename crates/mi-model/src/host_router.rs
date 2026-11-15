@@ -568,6 +568,7 @@ fn convert_action(
             } else if matches!(adapter.as_str(), "host" | "active-agent")
                 && (command == "submit"
                     || command == "focus-input"
+                    || command == "search"
                     || command.starts_with("model-picker-")
                     || command.starts_with("prompt:")
                     || command.starts_with("submit-prompt:"))

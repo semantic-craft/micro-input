@@ -295,7 +295,7 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                 )
             }
             Ok(ActionKind::AgentCommand { adapter, command }) => {
-                let desktop = matches!(adapter.as_str(), "codex" | "antigravity" | "dsh-desktop")
+                let desktop = (matches!(adapter.as_str(), "codex" | "antigravity" | "dsh-desktop")
                     && (matches!(
                         command.as_str(),
                         "model"
@@ -348,7 +348,11 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                                     | "project"
                                     | "new-conversation-in-project"
                                     | "split-right"
-                            )));
+                            ))))
+                    || (matches!(
+                        adapter.as_str(),
+                        "host" | "codex" | "antigravity" | "dsh-desktop"
+                    ) && command == "search");
                 let verified = matches!(adapter.as_str(), "herdr") || desktop;
                 if verified {
                     prerequisites.push(if desktop {

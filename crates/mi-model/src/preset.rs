@@ -1615,6 +1615,49 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
             .filter(|(name, _)| is_coding_agent_model_picker_starter_profile(name))
             .cloned(),
     );
+    for (name, assignments) in &specs {
+        if is_coding_agent_model_picker_starter_profile(name) {
+            let mut v080_assignments = assignments.clone();
+            v080_assignments.retain(|(slot, ..)| !matches!(*slot, 13..=15));
+            v080_assignments.extend([
+                (
+                    13,
+                    "agent-model-picker-prev",
+                    "选择上一模型 / 档位",
+                    "Agent",
+                    "在已打开的模型选择弹层中向上移动高亮项（直接向窗口投递按键，不重聚焦输入框）",
+                    ActionKind::AgentCommand {
+                        adapter: "host".into(),
+                        command: "model-picker-prev".into(),
+                    },
+                ),
+                (
+                    14,
+                    "agent-model-picker-next",
+                    "选择下一模型 / 档位",
+                    "Agent",
+                    "在已打开的模型选择弹层中向下移动高亮项（直接向窗口投递按键，不重聚焦输入框）",
+                    ActionKind::AgentCommand {
+                        adapter: "host".into(),
+                        command: "model-picker-next".into(),
+                    },
+                ),
+                (
+                    15,
+                    "agent-model-picker-confirm",
+                    "确认所选模型",
+                    "Agent",
+                    "在已打开的模型选择弹层中回车确认当前高亮项（直接向窗口投递按键，不重聚焦输入框）",
+                    ActionKind::AgentCommand {
+                        adapter: "host".into(),
+                        command: "model-picker-confirm".into(),
+                    },
+                ),
+            ]);
+            v080_assignments.sort_by_key(|(slot, ..)| *slot);
+            legacy_specs.push((*name, v080_assignments));
+        }
+    }
     for (name, assignments) in &mut specs {
         if is_coding_agent_model_picker_starter_profile(name) {
             replace_encoder_slots_with_model_picker(assignments);
@@ -1661,13 +1704,13 @@ fn canonical_encoder_model_picker_assignments() -> [AgentAssignment; 3] {
         ),
         (
             15,
-            "agent-model-picker-confirm",
-            "确认所选模型",
+            "agent-model-picker-open",
+            "弹出模型选择页",
             "Agent",
-            "在已打开的模型选择弹层中回车确认当前高亮项（直接向窗口投递按键，不重聚焦输入框）",
+            "打开当前目标 Agent 的模型选择弹层并进入旋钮选模型与推理力度会话",
             ActionKind::AgentCommand {
                 adapter: "host".into(),
-                command: "model-picker-confirm".into(),
+                command: "model-picker-open".into(),
             },
         ),
     ]
@@ -1681,14 +1724,14 @@ fn replace_encoder_slots_with_model_picker(assignments: &mut Vec<AgentAssignment
 
 pub fn canonical_encoder_hold_action() -> crate::draft::Action {
     crate::draft::Action {
-        id: "agent-model-picker-open".into(),
-        name: "弹出模型选择页".into(),
+        id: "agent-search".into(),
+        name: "搜索会话".into(),
         category: "Agent".into(),
-        detail: "打开当前目标 Agent 的模型选择弹层并进入旋钮选模型与推理力度会话".into(),
+        detail: "打开当前目标 Agent 的会话搜索面板（Cmd+K）并进入旋钮上下选择会话".into(),
         payload: json!({
             "type": "agent_command",
             "adapter": "host",
-            "command": "model-picker-open"
+            "command": "search"
         }),
     }
 }
@@ -2143,7 +2186,20 @@ fn layer_matches_starter_assignments(
     layer: &crate::document::LayerNode,
     assignments: &[AgentAssignment],
 ) -> bool {
-    layer.lighting.is_none()
+    let hold_ok = layer.control_settings.as_ref().map_or(true, |settings| {
+        match &settings.encoder_hold_action_id {
+            None => true,
+            Some(aid) => doc.editable.graph.actions.get(aid).is_some_and(|a| {
+                (a.id == "agent-model-picker-open"
+                    && a.payload.get("command").and_then(Value::as_str)
+                        == Some("model-picker-open"))
+                    || (a.id == "agent-search"
+                        && a.payload.get("command").and_then(Value::as_str) == Some("search"))
+            }),
+        }
+    });
+    hold_ok
+        && layer.lighting.is_none()
         && layer.control_settings.as_ref().is_some_and(|settings| {
             settings.joystick_mode == "logical_sectors" && settings.active_sectors == 4
         })
@@ -2242,14 +2298,12 @@ pub fn coding_agent_layer_needs_encoder_migration(
     let Some(layer) = doc.editable.graph.layers.get(layer_id) else {
         return false;
     };
-    if layer
+    let hold_action = layer
         .control_settings
         .as_ref()
         .and_then(|cs| cs.encoder_hold_action_id.as_ref())
-        .is_some()
-    {
-        return false;
-    }
+        .and_then(|aid| doc.editable.graph.actions.get(aid));
+
     let slot_action = |slot: &str| {
         layer
             .controls
@@ -2273,7 +2327,14 @@ pub fn coding_agent_layer_needs_encoder_migration(
         && is_cmd(a13, "desktop-prev-chat", "prev-conversation")
         && is_cmd(a14, "desktop-next-chat", "next-conversation")
         && is_cmd(a15, "desktop-search", "search");
-    legacy_scroll_trio || legacy_ag_chat_trio
+
+    let pre_v080 = hold_action.is_none() && (legacy_scroll_trio || legacy_ag_chat_trio);
+    let unmodified_v080 = is_cmd(a13, "agent-model-picker-prev", "model-picker-prev")
+        && is_cmd(a14, "agent-model-picker-next", "model-picker-next")
+        && is_cmd(a15, "agent-model-picker-confirm", "model-picker-confirm")
+        && is_cmd(hold_action, "agent-model-picker-open", "model-picker-open");
+
+    pre_v080 || unmodified_v080
 }
 
 pub fn install_four_app_cockpit_preset(

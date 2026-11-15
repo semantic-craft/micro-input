@@ -775,7 +775,11 @@ impl ProjectionInputs<'_> {
                     control_name_out = crate::i18n::tr("旋钮短按 / 长按", locale).to_string();
                     if locale == mi_model::ResolvedLocale::En {
                         let hold_en = mi_model::i18n::localize_action(hold_act, locale).name;
-                        short_label = if hold_act.id == "agent-model-picker-open"
+                        short_label = if hold_act.id == "agent-search"
+                            && act_opt.is_some_and(|a| a.id == "agent-model-picker-open")
+                        {
+                            "Model/Search".to_string()
+                        } else if hold_act.id == "agent-model-picker-open"
                             && act_opt.is_some_and(|a| a.id == "agent-model-picker-confirm")
                         {
                             "OK / Models".to_string()
@@ -783,6 +787,8 @@ impl ProjectionInputs<'_> {
                             "Tap / Hold".to_string()
                         } else if hold_act.id == "agent-model-picker-open" {
                             "Hold Models".to_string()
+                        } else if hold_act.id == "agent-search" {
+                            "Search".to_string()
                         } else {
                             "Hold Action".to_string()
                         };
@@ -792,7 +798,11 @@ impl ProjectionInputs<'_> {
                             format!("Hold: {hold_en}")
                         };
                     } else {
-                        short_label = if hold_act.id == "agent-model-picker-open"
+                        short_label = if hold_act.id == "agent-search"
+                            && act_opt.is_some_and(|a| a.id == "agent-model-picker-open")
+                        {
+                            "模型/搜索".to_string()
+                        } else if hold_act.id == "agent-model-picker-open"
                             && act_opt.is_some_and(|a| a.id == "agent-model-picker-confirm")
                         {
                             "确认/模型页".to_string()

@@ -423,7 +423,7 @@ fn native_codex_cheat_sheets_show_local_labels_and_preserve_empty_controls() {
             let action = graph.actions.get_mut(id).unwrap();
             action.name = format!("custom-native-control-{slot}");
             if slot == 15 {
-                format!("{} · 长按弹出模型选择页", action.name)
+                format!("{} · 长按搜索会话", action.name)
             } else {
                 action.name.clone()
             }

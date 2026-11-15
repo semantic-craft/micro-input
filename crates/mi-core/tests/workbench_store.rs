@@ -2423,3 +2423,161 @@ fn multi_device_usb_selection_persistence_fallback_and_switch_isolation() {
         Some("SN-ALPHA")
     );
 }
+
+#[test]
+fn open_migrates_on_disk_six_layer_runtime_in_memory_and_persisted() {
+    use mi_model::host_router::ResolvedHostAction;
+
+    let temp = TempDir::new().unwrap();
+    let initial_store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    let doc = initial_store.document_store.draft.document.clone();
+    let ag_pid = initial_store
+        .find_canonical_profile_id(CanonicalAgent::Antigravity)
+        .unwrap();
+    std::fs::write(
+        temp.path().join("workbench.json"),
+        serde_json::to_vec(&doc).unwrap(),
+    )
+    .unwrap();
+    drop(initial_store);
+
+    let mk_cmd = |adapter: &str, command: &str| {
+        serde_json::to_value(ResolvedHostAction::AgentCommand {
+            adapter: adapter.into(),
+            command: command.into(),
+        })
+        .unwrap()
+    };
+    let desired_json =
+        serde_json::to_value(mi_model::board_layers::BoardLayerPlan::default()).unwrap();
+    let v080_json = serde_json::json!({
+        "version": 1,
+        "installation": {
+            "status": "Applied",
+            "plan": {
+                "desired": desired_json,
+                "bottom_row_layout": "split",
+                "hosts": [
+                    {
+                        "profile_id": ag_pid,
+                        "adapter": "antigravity",
+                        "actions": [
+                            null, null, null, null, null, null, null, null, null, null,
+                            null, null, null,
+                            mk_cmd("antigravity", "model-picker-prev"),
+                            mk_cmd("antigravity", "model-picker-next"),
+                            mk_cmd("antigravity", "model-picker-confirm"),
+                            null, null, null, null
+                        ],
+                        "encoder_hold_action": mk_cmd("antigravity", "model-picker-open")
+                    },
+                    {
+                        "profile_id": "custom-profile",
+                        "adapter": "custom-adapter",
+                        "actions": [
+                            null, null, null, null, null, null, null, null, null, null,
+                            null, null, null, null, null,
+                            mk_cmd("custom-adapter", "custom-command"),
+                            null, null, null, null
+                        ],
+                        "encoder_hold_action": mk_cmd("custom-adapter", "custom-hold")
+                    }
+                ]
+            },
+            "target": {
+                "vendor_id": 0x303A,
+                "product_id": 0x8298,
+                "location_id": 0,
+                "usb_parent": 0,
+                "vendor_path": ""
+            },
+            "profile_index": 0,
+            "backup": temp.path().join("backup.json"),
+            "config": {
+                "path": temp.path().join("karabiner.json"),
+                "original": [],
+                "installed": [],
+                "profile_name": "Default profile",
+                "installed_device": {}
+            }
+        }
+    });
+
+    let runtime_path = temp.path().join("six-layer-runtime.json");
+    std::fs::write(
+        &runtime_path,
+        serde_json::to_vec_pretty(&v080_json).unwrap(),
+    )
+    .unwrap();
+
+    let mut cfg = mi_core::WorkbenchStoreConfig::isolated(temp.path());
+    cfg.isolated = false;
+    cfg.auto_connect_usb = false;
+    let store = WorkbenchStore::open(cfg).unwrap();
+
+    let inst = store.six_layer_state().installation.as_ref().unwrap();
+    let migrated_ag = inst
+        .plan
+        .hosts
+        .iter()
+        .find(|h| h.profile_id == ag_pid)
+        .unwrap();
+    assert_eq!(
+        migrated_ag.actions[15],
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-open".into(),
+        })
+    );
+    assert_eq!(
+        migrated_ag.encoder_hold_action,
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "search".into(),
+        })
+    );
+
+    let preserved_custom = inst
+        .plan
+        .hosts
+        .iter()
+        .find(|h| h.profile_id == "custom-profile")
+        .unwrap();
+    assert_eq!(
+        preserved_custom.actions[15],
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "custom-adapter".into(),
+            command: "custom-command".into(),
+        })
+    );
+    assert_eq!(
+        preserved_custom.encoder_hold_action,
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "custom-adapter".into(),
+            command: "custom-hold".into(),
+        })
+    );
+
+    let on_disk = mi_core::six_layer_runtime::load(&runtime_path).unwrap();
+    let disk_inst = on_disk.installation.as_ref().unwrap();
+    let disk_ag = disk_inst
+        .plan
+        .hosts
+        .iter()
+        .find(|h| h.profile_id == ag_pid)
+        .unwrap();
+    assert_eq!(
+        disk_ag.actions[15],
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "model-picker-open".into(),
+        })
+    );
+    assert_eq!(
+        disk_ag.encoder_hold_action,
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "search".into(),
+        })
+    );
+}

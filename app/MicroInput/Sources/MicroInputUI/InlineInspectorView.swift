@@ -278,7 +278,7 @@ struct CreatorMicroInlineInspectorView: View {
                 .accessibilityIdentifier("inspector-encoder-surface-picker")
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Button(store.tr("模型选择（长按弹出模型页）")) {
+                    Button(store.tr("模型选择（短按模型 · 长按搜会话）")) {
                         store.dispatch("canvas", ["ApplyKnobJoystickPreset": "ModelSelectionAndMouse"])
                     }
                     .surfaceButton(.primary)
@@ -391,7 +391,7 @@ struct CreatorMicroInlineInspectorView: View {
                             }
                         }
 
-                        Text(store.tr("长按左上角旋钮弹出模型选择页期间，向右轻推摇杆（按右）将临时拦截指针并展开 / 调高模型力度，短按确认后自动恢复硬件指针。"))
+                        Text(store.tr("短按左上角旋钮弹出模型选择页期间，向右轻推摇杆（按右）将临时拦截指针并展开 / 调高模型力度，短按确认后自动恢复硬件指针。"))
                             .font(UITheme.micro)
                             .foregroundStyle(UITheme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)

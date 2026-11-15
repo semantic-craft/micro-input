@@ -2866,9 +2866,11 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                 if adapter == "four-app" && command.starts_with("slot-open:") {
                     return make_receipt("blocked", "session_navigation_unavailable".into());
                 }
-                let effective_adapter = if adapter == "host"
-                    && (matches!(command.as_str(), "model" | "effort" | "model-picker-open")
-                        || model_picker_navigation_key_code(command).is_some())
+                let effective_adapter = if matches!(adapter.as_str(), "host" | "active-agent")
+                    && (matches!(
+                        command.as_str(),
+                        "model" | "effort" | "model-picker-open" | "search"
+                    ) || model_picker_navigation_key_code(command).is_some())
                 {
                     self.driver.resolve_default_managed_adapter(profile_id)
                 } else {
@@ -2992,12 +2994,15 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                         Err(error) => make_receipt(managed_error_outcome(&error), error),
                     }
                 } else if let Some((key_code, modifiers)) =
-                    native_shortcut_for_agent_command(adapter, command)
+                    native_shortcut_for_agent_command(effective_adapter, command)
                 {
                     if !self.driver.is_accessibility_trusted() {
                         return make_receipt("blocked", "accessibility_untrusted".to_string());
                     }
-                    match self.driver.agent_shortcut(adapter, key_code, &modifiers) {
+                    match self
+                        .driver
+                        .agent_shortcut(effective_adapter, key_code, &modifiers)
+                    {
                         Ok(()) => make_receipt("executed", desc.detail),
                         Err(err) => make_receipt(managed_error_outcome(&err), err),
                     }
