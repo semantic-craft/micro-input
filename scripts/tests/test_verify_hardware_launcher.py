@@ -97,16 +97,19 @@ class VerifyHardwareLauncherTests(unittest.TestCase):
         self.assertTrue(saved["h1"]["cleanup_confirmed"])
         self.assertEqual(saved["app_auto_acceptance"]["status"], "PASS")
 
-    def test_verify_live_app_launches_target_bundle_without_rsyncing_applications(self):
+    def test_verify_live_app_launches_target_binary_directly_and_cleans_up_in_finally(self):
         doc_dir = self.root / "doc"
         doc_dir.mkdir(parents=True, exist_ok=True)
-        launched_cmds = []
+        run_cmds = []
+        popen_calls = []
 
-        def fake_run(cmd, cwd=None, check=False, **kwargs):
-            launched_cmds.append(cmd)
-            if cmd[0] == "open":
+        class FakeProc:
+            def __init__(self, write_status="PASS"):
+                self.terminated = False
+                self.waited = False
+                self._exited = False
                 receipt = {
-                    "status": "PASS",
+                    "status": write_status,
                     "firmware_version": "0.6.3",
                     "exclusive_vendor": True,
                     "device_path": "DevSrvsID:synthetic-test",
@@ -117,16 +120,62 @@ class VerifyHardwareLauncherTests(unittest.TestCase):
                     "timestamp_ms": 9_999_999_999_999,
                 }
                 (doc_dir / "hardware-auto-acceptance.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+            def poll(self):
+                return 0 if self._exited else None
+
+            def terminate(self):
+                self.terminated = True
+                self._exited = True
+
+            def wait(self, timeout=None):
+                self.waited = True
+                return 0
+
+        created_procs = []
+
+        def fake_run(cmd, cwd=None, check=False, **kwargs):
+            run_cmds.append(cmd)
             return None
 
-        with patch.dict("os.environ", {"MI_DOCUMENT_DIR": str(doc_dir)}), \
-             patch.object(self.mod.subprocess, "run", side_effect=fake_run):
+        def fake_popen(cmd, cwd=None, env=None, **kwargs):
+            popen_calls.append({"cmd": cmd, "env": dict(env or {})})
+            proc = FakeProc(write_status="PASS" if len(created_procs) == 0 else "FAIL")
+            created_procs.append(proc)
+            return proc
+
+        env_overrides = {
+            "MI_DOCUMENT_DIR": str(doc_dir),
+            "__CFBundleIdentifier": "com.google.antigravity",
+            "XPC_SERVICE_NAME": "polluted.service",
+        }
+        with patch.dict("os.environ", env_overrides), \
+             patch.object(self.mod.subprocess, "run", side_effect=fake_run), \
+             patch.object(self.mod.subprocess, "Popen", side_effect=fake_popen):
             receipt = self.mod.verify_live_app_usb_auto_acceptance("DevSrvsID:synthetic-test", "b" * 64)
+            with self.assertRaises(RuntimeError):
+                self.mod.verify_live_app_usb_auto_acceptance("DevSrvsID:synthetic-test", "b" * 64)
 
         self.assertEqual(receipt["status"], "PASS")
-        self.assertFalse(any(cmd[0] == "rsync" for cmd in launched_cmds))
-        open_cmds = [cmd for cmd in launched_cmds if cmd[0] == "open"]
-        self.assertEqual(open_cmds, [["open", "-g", str(self.mod.ROOT / "target" / "MicroInput.app")]])
+        self.assertFalse(any(cmd[0] in ("rsync", "open") for cmd in run_cmds))
+        expected_bin = str(self.mod.ROOT / "target" / "MicroInput.app" / "Contents" / "MacOS" / "MicroInput")
+        self.assertEqual(len(popen_calls), 2)
+        for call_info in popen_calls:
+            self.assertEqual(call_info["cmd"], [expected_bin])
+            self.assertEqual(call_info["env"].get("MI_DOCUMENT_DIR"), str(doc_dir))
+            self.assertNotIn("__CFBundleIdentifier", call_info["env"])
+            self.assertNotIn("XPC_SERVICE_NAME", call_info["env"])
+        self.assertTrue(all(p.terminated and p.waited for p in created_procs))
+
+    def test_quiesce_competing_hid_readers_polls_until_stopped_processes_exit(self):
+        states = iter([True, True, False])
+        sleep_calls = []
+        with patch.object(self.mod.subprocess, "run") as run_mock, \
+             patch.object(self.mod, "_competing_hid_readers_running", side_effect=lambda: next(states)), \
+             patch.object(self.mod.time, "sleep", side_effect=lambda s: sleep_calls.append(s)):
+            self.mod.quiesce_competing_hid_readers()
+        self.assertEqual(len(run_mock.call_args_list), 2)
+        self.assertEqual(sleep_calls, [0.1, 0.1])
 
 
 if __name__ == "__main__":

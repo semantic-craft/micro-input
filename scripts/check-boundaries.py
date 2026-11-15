@@ -122,7 +122,7 @@ assert swift_lock_pos != -1 and swift_menu_pos != -1 and swift_lock_pos < swift_
     'AppDelegate.init() must acquire mi_core_acquire_instance_lock before setupStatusItem()'
 )
 rust_exec_src = (root / 'crates/mi-macos/src/executor.rs').read_text(encoding='utf-8')
-rust_exec_prod = rust_exec_src.split('#[cfg(test)]\nmod tests {', 1)[0]
+rust_exec_prod = rust_exec_src.split('#[cfg(test)]', 1)[0]
 assert rust_exec_prod.count('AXIsProcessTrustedWithOptions') == 2, (
     'R-C05 violation in crates/mi-macos/src/executor.rs: '
     'AXIsProcessTrustedWithOptions must only appear in its extern declaration and open_accessibility_settings'
@@ -410,11 +410,13 @@ for rel_md in subprocess.check_output(['git', 'ls-files', '*.md'], cwd=root, tex
 verify_hw_src = (root / 'scripts/verify-hardware').read_text(encoding='utf-8')
 assert (
     'app_to_launch = ROOT / "target" / "MicroInput.app"' in verify_hw_src
+    and 'subprocess.Popen' in verify_hw_src
+    and '["open", "-g"' not in verify_hw_src
     and '"rsync"' not in verify_hw_src
     and 'installed_app' not in verify_hw_src
 ), (
     'R-C13 violation in scripts/verify-hardware: '
-    'hardware verification must launch ROOT / "target" / "MicroInput.app" without rsyncing into /Applications/Micro Input.app'
+    'hardware verification must launch ROOT / "target" / "MicroInput.app" directly via Popen without open -g or rsyncing into /Applications/Micro Input.app'
 )
 
 install_app_path = root / 'scripts/install-app'
@@ -422,15 +424,21 @@ assert install_app_path.is_file() and os.access(install_app_path, os.X_OK), (
     'R-C13 violation: scripts/install-app must exist and be executable'
 )
 install_app_src = install_app_path.read_text(encoding='utf-8')
+install_app_fn_src = install_app_src.split('def install_app(', 1)[1].split('def parse_args(', 1)[0]
+tcc_reset_pos = install_app_fn_src.find("'tccutil'")
+replace_pos = install_app_fn_src.find('atomic_replace_bundle(')
 assert (
     'Developer ID Application:' in install_app_src
     and '--allow-dev' in install_app_src
     and 'spctl' in install_app_src
     and 'tccutil' in install_app_src
     and 'codesign' in install_app_src
+    and tcc_reset_pos != -1
+    and replace_pos != -1
+    and tcc_reset_pos < replace_pos
 ), (
     'R-C13 violation in scripts/install-app: '
-    'must enforce Developer ID Application unless --allow-dev and manage TCC continuity'
+    'must enforce Developer ID Application unless --allow-dev and reset TCC before atomic_replace_bundle'
 )
 
 release_macos_src = (root / 'scripts/release-macos').read_text(encoding='utf-8')

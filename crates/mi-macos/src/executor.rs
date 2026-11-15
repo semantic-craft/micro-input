@@ -399,10 +399,6 @@ unsafe extern "C" {
         key_call_backs: CFTypeRef,
         value_call_backs: CFTypeRef,
     ) -> CFDictionaryRef;
-    #[cfg(test)]
-    fn CFDictionaryGetCount(the_dict: CFDictionaryRef) -> CFIndex;
-    #[cfg(test)]
-    fn CFDictionaryGetValue(the_dict: CFDictionaryRef, key: CFTypeRef) -> CFTypeRef;
     fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
     fn CFRelease(cf: CFTypeRef);
 }
@@ -3454,6 +3450,11 @@ mod serialized_effect_tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn accessibility_prompt_options_builds_single_entry_cf_dictionary() {
+        #[link(name = "CoreFoundation", kind = "framework")]
+        unsafe extern "C" {
+            fn CFDictionaryGetCount(the_dict: CFDictionaryRef) -> CFIndex;
+            fn CFDictionaryGetValue(the_dict: CFDictionaryRef, key: CFTypeRef) -> CFTypeRef;
+        }
         unsafe {
             let result = with_accessibility_prompt_options(false, |dict| {
                 let count = CFDictionaryGetCount(dict);

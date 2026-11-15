@@ -95,8 +95,13 @@ def validate_source_bundle(
     if not src_app.is_dir() or not info_plist.is_file():
         raise InstallerError(f'Missing .app bundle or Contents/Info.plist at {src_app}')
 
-    with info_plist.open('rb') as handle:
-        info = plistlib.load(handle)
+    try:
+        with info_plist.open('rb') as handle:
+            info = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError) as exc:
+        raise InstallerError(f'Failed to read Info.plist at {info_plist}: {exc}') from exc
+    if not isinstance(info, dict):
+        raise InstallerError(f'Malformed Info.plist at {info_plist}: expected dictionary')
     bundle_id = str(info.get('CFBundleIdentifier', '')).strip()
     if bundle_id != EXPECTED_BUNDLE_ID:
         raise InstallerError(
@@ -151,8 +156,9 @@ def find_running_dest_pids(dest_app: Path, runner: CommandRunner) -> list[int]:
     if proc.returncode != 0:
         return []
     prefixes = {
-        str(dest_app / 'Contents/MacOS') + '/',
-        str(dest_app.resolve() / 'Contents/MacOS') + '/',
+        str(dest_app) + '/',
+        str(Path(os.path.abspath(dest_app))) + '/',
+        str(dest_app.resolve()) + '/',
     }
     pids: list[int] = []
     self_pid = os.getpid()
@@ -210,12 +216,12 @@ def terminate_running_dest(
 
 def atomic_replace_bundle(src_app: Path, dest_app: Path, runner: CommandRunner) -> None:
     dest_abs = Path(os.path.abspath(dest_app))
-    dest_abs.parent.mkdir(parents=True, exist_ok=True)
     token = f'{os.getpid()}.{uuid.uuid4().hex[:8]}'
     staging_app = dest_abs.parent / f'.{dest_abs.name}.staging.{token}'
     backup_app = dest_abs.parent / f'.{dest_abs.name}.backup.{token}'
 
     try:
+        dest_abs.parent.mkdir(parents=True, exist_ok=True)
         proc = runner(['/usr/bin/ditto', str(src_app), str(staging_app)])
         if proc.returncode != 0:
             raise InstallerError(f'Failed to stage bundle via ditto: {_format_proc_error(proc)}')
@@ -229,16 +235,27 @@ def atomic_replace_bundle(src_app: Path, dest_app: Path, runner: CommandRunner) 
             os.rename(staging_app, dest_abs)
         except Exception:
             if had_existing and backup_app.exists() and not (dest_abs.exists() or dest_abs.is_symlink()):
-                os.rename(backup_app, dest_abs)
+                try:
+                    os.rename(backup_app, dest_abs)
+                except OSError:
+                    pass
             raise
 
         if backup_app.is_symlink():
-            backup_app.unlink()
+            try:
+                backup_app.unlink()
+            except OSError:
+                pass
         elif backup_app.exists():
-            shutil.rmtree(backup_app)
+            shutil.rmtree(backup_app, ignore_errors=True)
+    except OSError as exc:
+        raise InstallerError(f'Filesystem error replacing {dest_abs}: {exc}') from exc
     finally:
         if staging_app.is_symlink():
-            staging_app.unlink()
+            try:
+                staging_app.unlink()
+            except OSError:
+                pass
         elif staging_app.exists():
             shutil.rmtree(staging_app, ignore_errors=True)
 
@@ -311,7 +328,6 @@ def install_app(
             kill_fn=kill_fn,
             sleep_fn=sleep_fn,
         )
-        atomic_replace_bundle(src_app, dest_abs, runner)
 
         tcc_reset_performed = False
         if tcc_reset_required and not skip_tcc_reset:
@@ -321,6 +337,8 @@ def install_app(
                     f'Failed to reset Accessibility TCC entry: {_format_proc_error(tcc_proc)}'
                 )
             tcc_reset_performed = True
+
+        atomic_replace_bundle(src_app, dest_abs, runner)
 
         if lsregister_path.is_file():
             ls_proc = runner([str(lsregister_path), '-f', str(dest_abs)])
@@ -370,6 +388,8 @@ def install_app(
             incoming_designated_requirement=incoming_dr,
             existing_designated_requirement=existing_dr,
         )
+    except OSError as exc:
+        raise InstallerError(f'Filesystem error during installation: {exc}') from exc
     finally:
         if temp_dir_ctx is not None:
             temp_dir_ctx.cleanup()

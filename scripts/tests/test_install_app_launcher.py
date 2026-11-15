@@ -322,6 +322,124 @@ class InstallAppTests(unittest.TestCase):
         self.assertEqual(payload['status'], 'dry_run')
         self.assertFalse(payload['tcc_reset_required'])
 
+    def test_tccutil_failure_before_swap_leaves_dest_unchanged_and_retry_is_idempotent(self):
+        dest = _make_fake_bundle(
+            self.root / 'Applications/Micro Input.app',
+            version='1',
+            authority='Authority=Apple Development: dev@example.com (DEV111)',
+            designated_req=APPLE_DEV_DR,
+        )
+        src = _make_fake_bundle(self.root / 'stage/Micro Input.app', version='2', designated_req=DEV_ID_DR)
+
+        fail_tcc = {'fail': True}
+
+        class RetryRunner(FakeCommandRunner):
+            def __call__(self, cmd: list[str]) -> subprocess.CompletedProcess[str]:
+                if cmd[0] == 'tccutil' and fail_tcc['fail']:
+                    self.calls.append(cmd)
+                    return subprocess.CompletedProcess(cmd, 1, '', 'transient tccutil error')
+                return super().__call__(cmd)
+
+        runner1 = RetryRunner()
+        with self.assertRaises(install_mod.InstallerError):
+            install_mod.install_app(
+                source=src,
+                dest=dest,
+                runner=runner1,
+                kill_fn=runner1.kill,
+                sleep_fn=lambda _: None,
+                lsregister_path=self.fake_lsregister,
+            )
+        self.assertEqual(_read_bundle_version(dest), '1')
+        self.assertFalse(any(c[0] == '/usr/bin/ditto' for c in runner1.calls))
+
+        fail_tcc['fail'] = False
+        runner2 = RetryRunner()
+        report = install_mod.install_app(
+            source=src,
+            dest=dest,
+            runner=runner2,
+            kill_fn=runner2.kill,
+            sleep_fn=lambda _: None,
+            lsregister_path=self.fake_lsregister,
+        )
+        self.assertTrue(report.tcc_reset_performed)
+        self.assertEqual(_read_bundle_version(dest), '2')
+        tcc_idx = next(i for i, c in enumerate(runner2.calls) if c[0] == 'tccutil')
+        ditto_idx = next(i for i, c in enumerate(runner2.calls) if c[0] == '/usr/bin/ditto')
+        self.assertLess(tcc_idx, ditto_idx)
+
+    def test_backup_cleanup_resilience_and_json_errors_on_corrupt_plist_or_oserror(self):
+        dest = _make_fake_bundle(self.root / 'Applications/Micro Input.app', version='1', designated_req=DEV_ID_DR)
+        src = _make_fake_bundle(self.root / 'stage/Micro Input.app', version='2', designated_req=DEV_ID_DR)
+
+        rmtree_flags: list[bool] = []
+        real_rmtree = shutil.rmtree
+
+        def checked_rmtree(path, ignore_errors=False, *args, **kwargs):
+            if Path(path).name.startswith(f'.{dest.name}.backup.'):
+                rmtree_flags.append(bool(ignore_errors))
+            return real_rmtree(path, ignore_errors=ignore_errors, *args, **kwargs)
+
+        runner = FakeCommandRunner()
+        with patch.object(install_mod.shutil, 'rmtree', side_effect=checked_rmtree):
+            report = install_mod.install_app(
+                source=src,
+                dest=dest,
+                runner=runner,
+                kill_fn=runner.kill,
+                sleep_fn=lambda _: None,
+                lsregister_path=self.fake_lsregister,
+            )
+        self.assertEqual(report.status, 'installed')
+        self.assertEqual(rmtree_flags, [True])
+        self.assertIn([str(self.fake_lsregister), '-f', str(dest)], runner.calls)
+
+        corrupt_src = self.root / 'corrupt/MicroInput.app'
+        (corrupt_src / 'Contents').mkdir(parents=True)
+        (corrupt_src / 'Contents/Info.plist').write_bytes(b'not a valid plist')
+        out_corrupt = io.StringIO()
+        with patch.object(install_mod, 'default_runner', runner), \
+             patch.object(sys, 'stdout', out_corrupt):
+            rc_corrupt = install_mod.main([str(corrupt_src), '--dest', str(dest), '--json'])
+        self.assertEqual(rc_corrupt, 1)
+        corrupt_payload = json.loads(out_corrupt.getvalue())
+        self.assertEqual(corrupt_payload['status'], 'error')
+        self.assertIn('Info.plist', corrupt_payload['error'])
+
+        out_perm = io.StringIO()
+        with patch.object(install_mod, 'default_runner', runner), \
+             patch.object(install_mod, 'LSREGISTER', self.fake_lsregister), \
+             patch.object(install_mod.os, 'rename', side_effect=PermissionError('read-only /Applications')), \
+             patch.object(sys, 'stdout', out_perm):
+            rc_perm = install_mod.main([str(src), '--dest', str(dest), '--json'])
+        self.assertEqual(rc_perm, 1)
+        perm_payload = json.loads(out_perm.getvalue())
+        self.assertEqual(perm_payload['status'], 'error')
+        self.assertIn('read-only', perm_payload['error'])
+
+    def test_terminates_nested_helpers_inside_dest_without_touching_sibling_apps(self):
+        dest = _make_fake_bundle(self.root / 'Applications/Micro Input.app', version='1', designated_req=DEV_ID_DR)
+        src = _make_fake_bundle(self.root / 'stage/Micro Input.app', version='2', designated_req=DEV_ID_DR)
+        runner = FakeCommandRunner(
+            ps_lines=[
+                f'101 {dest}/Contents/MacOS/MicroInput',
+                f'102 {dest}/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater',
+                f'202 {self.root}/Applications/Micro Input Extra.app/Contents/MacOS/MicroInput',
+                f'303 {self.root}/target/MicroInput.app/Contents/MacOS/MicroInput',
+            ]
+        )
+        report = install_mod.install_app(
+            source=src,
+            dest=dest,
+            runner=runner,
+            kill_fn=runner.kill,
+            sleep_fn=lambda _: None,
+            lsregister_path=self.fake_lsregister,
+        )
+        self.assertEqual(report.terminated_pids, [101, 102])
+        self.assertEqual(runner.killed, [(101, signal.SIGTERM), (102, signal.SIGTERM)])
+
 
 if __name__ == '__main__':
     unittest.main()
