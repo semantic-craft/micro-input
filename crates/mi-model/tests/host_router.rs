@@ -233,7 +233,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         ("ENC_CC", "model-picker-prev"),
         ("AG14", "model-picker-next"),
         ("ENC_CW", "model-picker-next"),
-        ("ENC_CLK", "model-picker-open"),
+        ("ENC_CLK", "search"),
         ("AG15", "scroll-up"),
         ("AG17", "scroll-down"),
     ] {
@@ -271,7 +271,7 @@ fn resolve_host_action_routes_pressed_events_and_supports_wide_key_fallback() {
         ("ENC_CC", "model-picker-prev"),
         ("AG14", "model-picker-next"),
         ("ENC_CW", "model-picker-next"),
-        ("ENC_CLK", "model-picker-open"),
+        ("ENC_CLK", "search"),
     ] {
         assert_eq!(
             resolve_host_action(&draft.document, Some(dsh_pid), binding, true),
@@ -681,7 +681,7 @@ fn desktop_profiles_are_targeted_idempotent_and_preserve_edits() {
             ("ENC_CC", "model-picker-prev"),
             ("AG14", "model-picker-next"),
             ("ENC_CW", "model-picker-next"),
-            ("ENC_CLK", "model-picker-open"),
+            ("ENC_CLK", "search"),
         ];
         for (binding, expected_cmd) in dial_expectations {
             assert_eq!(

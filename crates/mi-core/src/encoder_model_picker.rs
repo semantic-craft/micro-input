@@ -1,5 +1,5 @@
-//! Pure state machine for encoder long-press (`ENC_CLK`) and active target-app
-//! model-picker / search overlay navigation.
+//! Pure state machine for direct-turn, short-press, and long-press (`ENC_CLK`)
+//! target-app model-picker and search overlay navigation.
 
 use mi_model::host_router::ResolvedHostAction;
 use std::time::{Duration, Instant};
@@ -29,7 +29,9 @@ impl EncoderOverlayKind {
     pub fn from_action(action: &ResolvedHostAction) -> Option<Self> {
         match action {
             ResolvedHostAction::AgentCommand { command, .. } => match command.as_str() {
-                "model" | "model-picker-open" => Some(Self::ModelPicker),
+                "model" | "model-picker-open" | "model-picker-prev" | "model-picker-next" => {
+                    Some(Self::ModelPicker)
+                }
                 "search" => Some(Self::SearchConversations),
                 _ => None,
             },
@@ -64,6 +66,9 @@ pub enum ModelPickerCommand {
     EffortRight,
     EffortLeft,
     ModelPickerCancel,
+    SearchPrev,
+    SearchNext,
+    SearchConfirm,
 }
 
 impl ModelPickerCommand {
@@ -76,6 +81,9 @@ impl ModelPickerCommand {
             Self::EffortRight => "model-picker-effort-right",
             Self::EffortLeft => "model-picker-effort-left",
             Self::ModelPickerCancel => "model-picker-cancel",
+            Self::SearchPrev => "search-prev",
+            Self::SearchNext => "search-next",
+            Self::SearchConfirm => "search-confirm",
         }
     }
 
@@ -121,6 +129,7 @@ pub enum EncoderReleaseOutcome {
     },
     ModelPickerConfirm {
         adapter: String,
+        command: ModelPickerCommand,
     },
 }
 
@@ -129,6 +138,12 @@ pub enum OverlayTransition {
     None,
     Entered(EncoderOverlayKind),
     Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmExecutionDisposition {
+    Completed,
+    FallbackToShortPress,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -263,6 +278,19 @@ impl EncoderModelPicker {
         }
     }
 
+    pub fn apply_confirm_execution_outcome(
+        &mut self,
+        succeeded: bool,
+        detail: &str,
+    ) -> ConfirmExecutionDisposition {
+        self.cancel();
+        if succeeded && detail.ends_with("/model-picker-already-closed") {
+            ConfirmExecutionDisposition::FallbackToShortPress
+        } else {
+            ConfirmExecutionDisposition::Completed
+        }
+    }
+
     pub fn activate_overlay_after_action(
         &mut self,
         adapter: impl Into<String>,
@@ -356,11 +384,13 @@ impl EncoderModelPicker {
                 hold.turned_while_pressed = true;
             }
             active.last_activity_at = now;
-            return EncoderTurnOutcome::ModelPicker(if clockwise {
-                ModelPickerCommand::ModelPickerNext
-            } else {
-                ModelPickerCommand::ModelPickerPrev
-            });
+            let cmd = match (active.kind, clockwise) {
+                (EncoderOverlayKind::SearchConversations, true) => ModelPickerCommand::SearchNext,
+                (EncoderOverlayKind::SearchConversations, false) => ModelPickerCommand::SearchPrev,
+                (EncoderOverlayKind::ModelPicker, true) => ModelPickerCommand::ModelPickerNext,
+                (EncoderOverlayKind::ModelPicker, false) => ModelPickerCommand::ModelPickerPrev,
+            };
+            return EncoderTurnOutcome::ModelPicker(cmd);
         }
         if let Some(hold) = self.hold.as_mut() {
             if !hold.hold_fired {
@@ -429,8 +459,13 @@ impl EncoderModelPicker {
         }
         if let Some(active) = self.active.take() {
             self.flick.clear();
+            let command = match active.kind {
+                EncoderOverlayKind::ModelPicker => ModelPickerCommand::ModelPickerConfirm,
+                EncoderOverlayKind::SearchConversations => ModelPickerCommand::SearchConfirm,
+            };
             return EncoderReleaseOutcome::ModelPickerConfirm {
                 adapter: active.adapter,
+                command,
             };
         }
         EncoderReleaseOutcome::ShortPress
@@ -701,6 +736,7 @@ mod tests {
             picker.on_encoder_release(1, Some("codex"), true, t_tap + Duration::from_millis(90)),
             EncoderReleaseOutcome::ModelPickerConfirm {
                 adapter: "codex".into(),
+                command: ModelPickerCommand::ModelPickerConfirm,
             }
         );
         assert!(!picker.is_active(t_tap + Duration::from_millis(90)));
@@ -871,21 +907,19 @@ mod tests {
             None
         );
 
-        // Dial turns navigate Up/Down in conversation search
         assert_eq!(
             picker.on_encoder_turn(false, t0 + Duration::from_millis(50)),
-            EncoderTurnOutcome::ModelPicker(ModelPickerCommand::ModelPickerPrev)
+            EncoderTurnOutcome::ModelPicker(ModelPickerCommand::SearchPrev)
         );
         assert_eq!(
             picker.on_encoder_turn(true, t0 + Duration::from_millis(60)),
-            EncoderTurnOutcome::ModelPicker(ModelPickerCommand::ModelPickerNext)
+            EncoderTurnOutcome::ModelPicker(ModelPickerCommand::SearchNext)
         );
 
-        // Turning while momentarily held still routes to ModelPicker rather than FastScroll
         picker.on_encoder_press(2, t0 + Duration::from_millis(100));
         assert_eq!(
             picker.on_encoder_turn(true, t0 + Duration::from_millis(120)),
-            EncoderTurnOutcome::ModelPicker(ModelPickerCommand::ModelPickerNext)
+            EncoderTurnOutcome::ModelPicker(ModelPickerCommand::SearchNext)
         );
         assert_eq!(
             picker.on_encoder_release(
@@ -897,7 +931,6 @@ mod tests {
             EncoderReleaseOutcome::Consumed
         );
 
-        // Next short press confirms and exits
         picker.on_encoder_press(3, t0 + Duration::from_millis(140));
         assert_eq!(
             picker.on_encoder_release(
@@ -907,7 +940,8 @@ mod tests {
                 t0 + Duration::from_millis(150)
             ),
             EncoderReleaseOutcome::ModelPickerConfirm {
-                adapter: "antigravity".into()
+                adapter: "antigravity".into(),
+                command: ModelPickerCommand::SearchConfirm,
             }
         );
         assert!(!picker.is_active(t0 + Duration::from_millis(150)));
@@ -949,5 +983,76 @@ mod tests {
             picker.active_kind(t0 + Duration::from_millis(50)),
             Some(EncoderOverlayKind::SearchConversations)
         );
+    }
+
+    #[test]
+    fn idle_turn_actions_activate_model_picker_and_reopened_confirm_restores_session() {
+        let mut picker = EncoderModelPicker::new();
+        let t0 = Instant::now();
+
+        for cmd in ["model-picker-prev", "model-picker-next"] {
+            picker.cancel();
+            let action = ResolvedHostAction::AgentCommand {
+                adapter: "antigravity".into(),
+                command: cmd.into(),
+            };
+            assert_eq!(
+                picker.on_encoder_turn(true, t0),
+                EncoderTurnOutcome::NormalSlot
+            );
+            let transition = picker.activate_overlay_after_action("antigravity", &action, t0);
+            assert_eq!(
+                transition,
+                OverlayTransition::Entered(EncoderOverlayKind::ModelPicker)
+            );
+            assert!(picker.is_active(t0));
+            assert_eq!(
+                picker.on_mouse_delta(32.0, 0.0, t0 + Duration::from_millis(20)),
+                Some(ModelPickerCommand::EffortRight)
+            );
+        }
+
+        picker.on_encoder_press(10, t0 + Duration::from_millis(60));
+        assert_eq!(
+            picker.on_encoder_release(
+                10,
+                Some("antigravity"),
+                true,
+                t0 + Duration::from_millis(100)
+            ),
+            EncoderReleaseOutcome::ModelPickerConfirm {
+                adapter: "antigravity".into(),
+                command: ModelPickerCommand::ModelPickerConfirm,
+            }
+        );
+        assert!(!picker.is_active(t0 + Duration::from_millis(100)));
+
+        let fallback =
+            picker.apply_confirm_execution_outcome(true, "antigravity/model-picker-already-closed");
+        assert_eq!(fallback, ConfirmExecutionDisposition::FallbackToShortPress);
+        assert!(!picker.is_active(t0 + Duration::from_millis(105)));
+
+        picker.enter_active_session(
+            "antigravity",
+            EncoderOverlayKind::ModelPicker,
+            t0 + Duration::from_millis(120),
+        );
+        picker.on_encoder_press(11, t0 + Duration::from_millis(150));
+        assert_eq!(
+            picker.on_encoder_release(
+                11,
+                Some("antigravity"),
+                true,
+                t0 + Duration::from_millis(190)
+            ),
+            EncoderReleaseOutcome::ModelPickerConfirm {
+                adapter: "antigravity".into(),
+                command: ModelPickerCommand::ModelPickerConfirm,
+            }
+        );
+        let closed =
+            picker.apply_confirm_execution_outcome(true, "antigravity/model-picker-confirm");
+        assert_eq!(closed, ConfirmExecutionDisposition::Completed);
+        assert!(!picker.is_active(t0 + Duration::from_millis(195)));
     }
 }

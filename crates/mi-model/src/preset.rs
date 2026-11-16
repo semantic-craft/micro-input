@@ -1655,7 +1655,22 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
                 ),
             ]);
             v080_assignments.sort_by_key(|(slot, ..)| *slot);
+            let mut v090_assignments = v080_assignments.clone();
+            v090_assignments.retain(|(slot, ..)| *slot != 15);
+            v090_assignments.push((
+                15,
+                "agent-model-picker-open",
+                "弹出模型选择页",
+                "Agent",
+                "打开当前目标 Agent 的模型选择弹层并进入旋钮选模型与推理力度会话",
+                ActionKind::AgentCommand {
+                    adapter: "host".into(),
+                    command: "model-picker-open".into(),
+                },
+            ));
+            v090_assignments.sort_by_key(|(slot, ..)| *slot);
             legacy_specs.push((*name, v080_assignments));
+            legacy_specs.push((*name, v090_assignments));
         }
     }
     for (name, assignments) in &mut specs {
@@ -1685,7 +1700,7 @@ fn canonical_encoder_model_picker_assignments() -> [AgentAssignment; 3] {
             "agent-model-picker-prev",
             "选择上一模型 / 档位",
             "Agent",
-            "在已打开的模型选择弹层中向上移动高亮项（直接向窗口投递按键，不重聚焦输入框）",
+            "若模型选择弹层未开则直接原位展开，并向上移动高亮项（不抢占输入框焦点）",
             ActionKind::AgentCommand {
                 adapter: "host".into(),
                 command: "model-picker-prev".into(),
@@ -1696,7 +1711,7 @@ fn canonical_encoder_model_picker_assignments() -> [AgentAssignment; 3] {
             "agent-model-picker-next",
             "选择下一模型 / 档位",
             "Agent",
-            "在已打开的模型选择弹层中向下移动高亮项（直接向窗口投递按键，不重聚焦输入框）",
+            "若模型选择弹层未开则直接原位展开，并向下移动高亮项（不抢占输入框焦点）",
             ActionKind::AgentCommand {
                 adapter: "host".into(),
                 command: "model-picker-next".into(),
@@ -1704,13 +1719,13 @@ fn canonical_encoder_model_picker_assignments() -> [AgentAssignment; 3] {
         ),
         (
             15,
-            "agent-model-picker-open",
-            "弹出模型选择页",
+            "agent-search",
+            "搜索会话",
             "Agent",
-            "打开当前目标 Agent 的模型选择弹层并进入旋钮选模型与推理力度会话",
+            "打开当前目标 Agent 的会话搜索面板（Cmd+K）并进入旋钮上下选择会话",
             ActionKind::AgentCommand {
                 adapter: "host".into(),
-                command: "model-picker-open".into(),
+                command: "search".into(),
             },
         ),
     ]
@@ -2333,8 +2348,12 @@ pub fn coding_agent_layer_needs_encoder_migration(
         && is_cmd(a14, "agent-model-picker-next", "model-picker-next")
         && is_cmd(a15, "agent-model-picker-confirm", "model-picker-confirm")
         && is_cmd(hold_action, "agent-model-picker-open", "model-picker-open");
+    let unmodified_v090 = is_cmd(a13, "agent-model-picker-prev", "model-picker-prev")
+        && is_cmd(a14, "agent-model-picker-next", "model-picker-next")
+        && is_cmd(a15, "agent-model-picker-open", "model-picker-open")
+        && is_cmd(hold_action, "agent-search", "search");
 
-    pre_v080 || unmodified_v080
+    pre_v080 || unmodified_v080 || unmodified_v090
 }
 
 pub fn install_four_app_cockpit_preset(

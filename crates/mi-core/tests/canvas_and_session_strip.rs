@@ -950,7 +950,7 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
     let enc = &store.projection().canvas.encoder;
     assert_eq!(enc.ccw_label, "选择上一模型 / 档位");
     assert_eq!(enc.cw_label, "选择下一模型 / 档位");
-    assert_eq!(enc.press_label, "弹出模型");
+    assert_eq!(enc.press_label, "搜索会话");
     assert_eq!(enc.hold_label, "搜索会话");
 
     // Select EncoderHold surface and verify SetJoystickMode preserves encoder_hold_action_id.
@@ -1002,17 +1002,10 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
     };
 
     let t0 = Instant::now();
-    // 1. Short-tap ENC_CLK (< 350ms) opens model picker & enables mouse capture.
-    assert!(store
-        .consume_physical_input_event(mk_ev(1, "ENC_CLK", InputEventKind::Pressed), t0)
-        .is_none());
     let open_receipt = store
-        .consume_physical_input_event(
-            mk_ev(2, "ENC_CLK", InputEventKind::Released),
-            t0 + Duration::from_millis(80),
-        )
-        .expect("short tap opens model picker");
-    assert_eq!(open_receipt.detail, "antigravity/model-picker-open");
+        .consume_physical_input_event(mk_ev(1, "AG14", InputEventKind::Pressed), t0)
+        .expect("idle turn opens model picker");
+    assert_eq!(open_receipt.detail, "antigravity/model-picker-next");
     assert!(store.is_model_picker_mouse_capture_enabled());
 
     // 2. Rotate CW/CCW while active -> model-picker-next / prev.
@@ -1089,8 +1082,8 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
             mk_ev(9, "AG14", InputEventKind::Pressed),
             t0 + Duration::from_millis(760),
         )
-        .expect("press+turn emits turn action");
-    assert_eq!(turn_while_held.detail, "antigravity/model-picker-next");
+        .expect("press+turn emits fast scroll action");
+    assert_eq!(turn_while_held.detail, "antigravity/scroll-down-fast");
     store.poll_at(t0 + Duration::from_millis(1200));
     assert!(!store.is_model_picker_mouse_capture_enabled());
     assert!(store
@@ -1101,17 +1094,10 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
         .is_none());
     assert_eq!(store.dispatched_receipts().len(), before_count + 1);
 
-    // 7. System sleep cancels active model picker and disables mouse capture.
     assert!(store
         .consume_physical_input_event(
-            mk_ev(11, "ENC_CLK", InputEventKind::Pressed),
+            mk_ev(11, "AG14", InputEventKind::Pressed),
             t0 + Duration::from_millis(1300),
-        )
-        .is_none());
-    assert!(store
-        .consume_physical_input_event(
-            mk_ev(12, "ENC_CLK", InputEventKind::Released),
-            t0 + Duration::from_millis(1360),
         )
         .is_some());
     assert!(store.is_model_picker_mouse_capture_enabled());
@@ -1119,7 +1105,6 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
     assert!(!store.is_model_picker_mouse_capture_enabled());
     store.system_did_wake();
 
-    // 8. Long hold ENC_CLK (>= 350ms) triggers agent-search, opens SearchConversations overlay (mouse capture OFF).
     assert!(store
         .consume_physical_input_event(
             mk_ev(13, "ENC_CLK", InputEventKind::Pressed),
@@ -1142,16 +1127,14 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
         )
         .is_none());
 
-    // Dial turns inside SearchConversations route to model-picker-next / prev.
     let search_next = store
         .consume_physical_input_event(
             mk_ev(15, "AG14", InputEventKind::Pressed),
             t0 + Duration::from_millis(1950),
         )
         .expect("CW in search overlay");
-    assert_eq!(search_next.detail, "antigravity/model-picker-next");
+    assert_eq!(search_next.detail, "antigravity/search-next");
 
-    // Second short tap confirms and exits SearchConversations overlay.
     assert!(store
         .consume_physical_input_event(
             mk_ev(16, "ENC_CLK", InputEventKind::Pressed),
@@ -1164,22 +1147,15 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
             t0 + Duration::from_millis(2050),
         )
         .expect("short tap confirms search overlay");
-    assert_eq!(search_confirm.detail, "antigravity/model-picker-confirm");
+    assert_eq!(search_confirm.detail, "antigravity/search-confirm");
 
-    // 10. ModelPicker -> Long Hold Search: Esc is dispatched before Cmd+K and mouse capture drops to false.
-    assert!(store
-        .consume_physical_input_event(
-            mk_ev(18, "ENC_CLK", InputEventKind::Pressed),
-            t0 + Duration::from_millis(2100),
-        )
-        .is_none());
     let picker_open = store
         .consume_physical_input_event(
-            mk_ev(19, "ENC_CLK", InputEventKind::Released),
-            t0 + Duration::from_millis(2180),
+            mk_ev(18, "AG14", InputEventKind::Pressed),
+            t0 + Duration::from_millis(2100),
         )
-        .expect("short tap opens model picker");
-    assert_eq!(picker_open.detail, "antigravity/model-picker-open");
+        .expect("idle turn opens model picker");
+    assert_eq!(picker_open.detail, "antigravity/model-picker-next");
     assert!(store.is_model_picker_mouse_capture_enabled());
 
     assert!(store
@@ -1208,7 +1184,6 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
         )
         .is_none());
 
-    // 11. AG18 sector key during active SearchConversations cancels overlay and executes slot action.
     store
         .dispatch_inspector_action(InspectorAction::SetJoystickMode(
             JoystickControlMode::LogicalSectors,
@@ -1234,34 +1209,60 @@ fn encoder_hold_model_picker_flick_effort_presets_and_inspector_roundtrip() {
         )
         .expect("CW after search cancelled");
     assert_eq!(normal_turn.detail, "antigravity/model-picker-next");
-    assert!(!store.is_model_picker_mouse_capture_enabled());
+    assert!(store.is_model_picker_mouse_capture_enabled());
 
-    // 12. Foreground bundle change cancels active ModelPicker and drops mouse capture.
     assert!(store
         .consume_physical_input_event(
             mk_ev(24, "ENC_CLK", InputEventKind::Pressed),
             t0 + Duration::from_millis(2900),
         )
         .is_none());
-    let open_again = store
+    let direct_turn_confirm = store
         .consume_physical_input_event(
             mk_ev(25, "ENC_CLK", InputEventKind::Released),
             t0 + Duration::from_millis(2960),
         )
-        .expect("short tap opens model picker again");
-    assert_eq!(open_again.detail, "antigravity/model-picker-open");
+        .expect("short tap confirms model picker opened by idle turn");
+    assert_eq!(
+        direct_turn_confirm.detail,
+        "antigravity/model-picker-confirm"
+    );
+    assert!(!store.is_model_picker_mouse_capture_enabled());
+
+    assert!(store
+        .consume_physical_input_event(
+            mk_ev(26, "ENC_CLK", InputEventKind::Pressed),
+            t0 + Duration::from_millis(2980),
+        )
+        .is_none());
+    let idle_short_search = store
+        .consume_physical_input_event(
+            mk_ev(27, "ENC_CLK", InputEventKind::Released),
+            t0 + Duration::from_millis(3010),
+        )
+        .expect("idle short tap opens search");
+    assert_eq!(idle_short_search.detail, "antigravity/search");
+    assert!(!store.is_model_picker_mouse_capture_enabled());
+    store.foreground_changed(Some("com.google.antigravity"));
+
+    let reopen_by_turn = store
+        .consume_physical_input_event(
+            mk_ev(28, "AG13", InputEventKind::Pressed),
+            t0 + Duration::from_millis(3050),
+        )
+        .expect("CCW from idle activates model picker");
+    assert_eq!(reopen_by_turn.detail, "antigravity/model-picker-prev");
     assert!(store.is_model_picker_mouse_capture_enabled());
 
     store.foreground_changed(Some("com.apple.Safari"));
     assert!(!store.is_model_picker_mouse_capture_enabled());
 
-    // 13. ModelSelectionAndMouse preset restores model-selection encoder + fallback joystick mode offline.
     store
         .dispatch_canvas_action(CanvasAction::ApplyKnobJoystickPreset(
             KnobJoystickPreset::ModelSelectionAndMouse,
         ))
         .unwrap();
-    assert_eq!(store.projection().canvas.encoder.press_label, "弹出模型");
+    assert_eq!(store.projection().canvas.encoder.press_label, "搜索会话");
     assert_eq!(store.projection().canvas.encoder.hold_label, "搜索会话");
     assert_eq!(
         store

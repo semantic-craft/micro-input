@@ -2468,9 +2468,32 @@ fn open_migrates_on_disk_six_layer_runtime_in_memory_and_persisted() {
     let ag_pid = initial_store
         .find_canonical_profile_id(CanonicalAgent::Antigravity)
         .unwrap();
+    let dsh_pid = initial_store
+        .find_canonical_profile_id(CanonicalAgent::DeepseekHarness)
+        .unwrap();
+    let dsh_lid = doc.editable.graph.profiles[&dsh_pid].layer_order[0].clone();
+    let mut v090_draft = initial_store.document_store.draft.clone();
+    v090_draft
+        .assign(
+            &serde_json::json!(dsh_pid),
+            &serde_json::json!(dsh_lid),
+            15,
+            mi_model::draft::Action {
+                id: "agent-model-picker-open".into(),
+                name: "弹出模型选择页".into(),
+                category: "Agent".into(),
+                detail: "打开当前目标 Agent 的模型选择弹层并进入旋钮选模型与推理力度会话".into(),
+                payload: serde_json::json!({
+                    "type": "agent_command",
+                    "adapter": "host",
+                    "command": "model-picker-open"
+                }),
+            },
+        )
+        .unwrap();
     std::fs::write(
         temp.path().join("workbench.json"),
-        serde_json::to_vec(&doc).unwrap(),
+        serde_json::to_vec(&v090_draft.document).unwrap(),
     )
     .unwrap();
     drop(initial_store);
@@ -2484,7 +2507,7 @@ fn open_migrates_on_disk_six_layer_runtime_in_memory_and_persisted() {
     };
     let desired_json =
         serde_json::to_value(mi_model::board_layers::BoardLayerPlan::default()).unwrap();
-    let v080_json = serde_json::json!({
+    let v080_and_v090_json = serde_json::json!({
         "version": 1,
         "installation": {
             "status": "Applied",
@@ -2504,6 +2527,19 @@ fn open_migrates_on_disk_six_layer_runtime_in_memory_and_persisted() {
                             null, null, null, null
                         ],
                         "encoder_hold_action": mk_cmd("antigravity", "model-picker-open")
+                    },
+                    {
+                        "profile_id": dsh_pid,
+                        "adapter": "dsh-desktop",
+                        "actions": [
+                            null, null, null, null, null, null, null, null, null, null,
+                            null, null, null,
+                            mk_cmd("dsh-desktop", "model-picker-prev"),
+                            mk_cmd("dsh-desktop", "model-picker-next"),
+                            mk_cmd("dsh-desktop", "model-picker-open"),
+                            null, null, null, null
+                        ],
+                        "encoder_hold_action": mk_cmd("dsh-desktop", "search")
                     },
                     {
                         "profile_id": "custom-profile",
@@ -2540,14 +2576,18 @@ fn open_migrates_on_disk_six_layer_runtime_in_memory_and_persisted() {
     let runtime_path = temp.path().join("six-layer-runtime.json");
     std::fs::write(
         &runtime_path,
-        serde_json::to_vec_pretty(&v080_json).unwrap(),
+        serde_json::to_vec_pretty(&v080_and_v090_json).unwrap(),
     )
     .unwrap();
 
     let mut cfg = mi_core::WorkbenchStoreConfig::isolated(temp.path());
     cfg.isolated = false;
     cfg.auto_connect_usb = false;
-    let store = WorkbenchStore::open(cfg).unwrap();
+    let mut store = WorkbenchStore::open(cfg).unwrap();
+    assert!(store.has_all_desktop_agent_presets());
+    let rev_before = store.document_store.draft.revision;
+    store.prepare_desktop_profiles().unwrap();
+    assert_eq!(store.document_store.draft.revision, rev_before);
 
     let inst = store.six_layer_state().installation.as_ref().unwrap();
     let migrated_ag = inst
@@ -2560,13 +2600,34 @@ fn open_migrates_on_disk_six_layer_runtime_in_memory_and_persisted() {
         migrated_ag.actions[15],
         Some(ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
-            command: "model-picker-open".into(),
+            command: "search".into(),
         })
     );
     assert_eq!(
         migrated_ag.encoder_hold_action,
         Some(ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
+            command: "search".into(),
+        })
+    );
+
+    let migrated_dsh = inst
+        .plan
+        .hosts
+        .iter()
+        .find(|h| h.profile_id == dsh_pid)
+        .unwrap();
+    assert_eq!(
+        migrated_dsh.actions[15],
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "dsh-desktop".into(),
+            command: "search".into(),
+        })
+    );
+    assert_eq!(
+        migrated_dsh.encoder_hold_action,
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "dsh-desktop".into(),
             command: "search".into(),
         })
     );
@@ -2604,13 +2665,26 @@ fn open_migrates_on_disk_six_layer_runtime_in_memory_and_persisted() {
         disk_ag.actions[15],
         Some(ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
-            command: "model-picker-open".into(),
+            command: "search".into(),
         })
     );
     assert_eq!(
         disk_ag.encoder_hold_action,
         Some(ResolvedHostAction::AgentCommand {
             adapter: "antigravity".into(),
+            command: "search".into(),
+        })
+    );
+    let disk_dsh = disk_inst
+        .plan
+        .hosts
+        .iter()
+        .find(|h| h.profile_id == dsh_pid)
+        .unwrap();
+    assert_eq!(
+        disk_dsh.actions[15],
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "dsh-desktop".into(),
             command: "search".into(),
         })
     );

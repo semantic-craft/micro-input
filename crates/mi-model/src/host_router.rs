@@ -636,6 +636,7 @@ fn convert_action(
                 && (command == "submit"
                     || command == "focus-input"
                     || command == "search"
+                    || command.starts_with("search-")
                     || command.starts_with("model-picker-")
                     || command.starts_with("prompt:")
                     || command.starts_with("submit-prompt:"))

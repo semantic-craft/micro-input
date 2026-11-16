@@ -429,7 +429,7 @@ struct CreatorMicroBoardView: View {
                 }
                 Button(store.tr("恢复默认布局")) { store.dispatch("session_strip", "RestoreDefaultLayout") }
                 Divider()
-                Button(store.tr("模型选择（短按模型 · 长按搜会话）")) {
+                Button(store.tr("模型选择（直旋模型 · 按下搜会话）")) {
                     store.dispatch("canvas", ["ApplyKnobJoystickPreset": "ModelSelectionAndMouse"])
                 }
                 if agentKind == .antigravity {

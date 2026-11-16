@@ -1498,6 +1498,14 @@ const ACTION_DETAIL_EN_TABLE: &[(&str, &str)] = &[
         "Moves selection down in open model picker without refocusing input",
     ),
     (
+        "若模型选择弹层未开则直接原位展开，并向上移动高亮项（不抢占输入框焦点）",
+        "Opens model picker in place if closed and moves selection up without stealing input focus",
+    ),
+    (
+        "若模型选择弹层未开则直接原位展开，并向下移动高亮项（不抢占输入框焦点）",
+        "Opens model picker in place if closed and moves selection down without stealing input focus",
+    ),
+    (
         "在已打开的模型选择弹层中向左返回模型列表或调低模型推理力度档位",
         "Returns to model list or lowers reasoning effort in model picker",
     ),
