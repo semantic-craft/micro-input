@@ -1282,4 +1282,25 @@ fn concise_keycap_caption_aliases_built_in_browser_to_browser() {
         format_concise_keycap_caption("Antigravity · 打开内置浏览器"),
         "浏览器"
     );
+    assert_eq!(
+        mi_core::format_concise_keycap_caption_localized(
+            "打开内置浏览器",
+            mi_model::ResolvedLocale::En
+        ),
+        "Browser"
+    );
+    assert_eq!(
+        mi_core::format_concise_keycap_caption_localized(
+            "Antigravity · 打开内置浏览器",
+            mi_model::ResolvedLocale::En
+        ),
+        "Browser"
+    );
+    assert_eq!(
+        mi_core::format_concise_keycap_caption_localized(
+            "Antigravity · Open Browser",
+            mi_model::ResolvedLocale::En
+        ),
+        "Browser"
+    );
 }

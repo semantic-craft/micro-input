@@ -391,6 +391,85 @@ fn opening_saved_r26_desktop_presets_migrates_unchanged_codex_and_preserves_cust
 }
 
 #[test]
+fn opening_saved_desktop_presets_migrates_unchanged_antigravity_slot8_to_browser() {
+    use mi_model::draft::Action;
+    use mi_model::host_router::{resolve_host_action, ResolvedHostAction};
+    use serde_json::json;
+
+    let temp = TempDir::new().unwrap();
+    let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    let (ag_pid, ag_lid) = {
+        let doc = &store.document_store.draft.document;
+        let (pid, profile) = doc
+            .editable
+            .graph
+            .profiles
+            .iter()
+            .find(|(_, profile)| profile.name == "Antigravity")
+            .unwrap();
+        (pid.clone(), profile.layer_order[0].clone())
+    };
+    store
+        .document_store
+        .update(|draft| {
+            draft.assign(
+                &json!(ag_pid),
+                &json!(ag_lid),
+                8,
+                Action {
+                    id: "desktop-terminal".into(),
+                    name: "打开终端面板".into(),
+                    category: "Agent".into(),
+                    detail: "切换底部终端面板（Cmd+J 或原生控件）".into(),
+                    payload: json!({
+                        "type": "agent_command",
+                        "adapter": "antigravity",
+                        "command": "terminal"
+                    }),
+                },
+            )
+        })
+        .unwrap();
+    let revision_before = store.document_store.draft.revision;
+    std::fs::write(
+        temp.path().join("workbench.json"),
+        serde_json::to_vec(&store.document_store.draft.document).unwrap(),
+    )
+    .unwrap();
+    drop(store);
+
+    let mut reopened = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert!(reopened.has_all_desktop_agent_presets());
+    assert_eq!(reopened.document_store.draft.revision, revision_before + 1);
+    assert_eq!(
+        resolve_host_action(
+            &reopened.document_store.draft.document,
+            Some(&ag_pid),
+            "AG08",
+            true
+        ),
+        Some(ResolvedHostAction::AgentCommand {
+            adapter: "antigravity".into(),
+            command: "browser".into(),
+        })
+    );
+    let migrated_bytes = std::fs::read(temp.path().join("workbench.json")).unwrap();
+    let migrated_revision = reopened.document_store.draft.revision;
+    reopened.set_status_message("已就绪");
+    reopened.prepare_desktop_profiles().unwrap();
+    assert_eq!(reopened.status_message(), "已就绪");
+    assert_eq!(reopened.document_store.draft.revision, migrated_revision);
+    drop(reopened);
+
+    let reopened = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert_eq!(reopened.document_store.draft.revision, migrated_revision);
+    assert_eq!(
+        std::fs::read(temp.path().join("workbench.json")).unwrap(),
+        migrated_bytes
+    );
+}
+
+#[test]
 fn opening_saved_customized_local_codex_preserves_document_and_ready_status() {
     use serde_json::json;
 
