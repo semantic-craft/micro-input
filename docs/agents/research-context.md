@@ -33,7 +33,7 @@ IA 编号均对应[业务架构的证据表](../input-architecture.md#证据身�
 - 静态分析不等于动态运行验证；没有实际运行的 Hook、符号执行、场景或自动验收不能报告为完成。
 - `node-hid` 的缓冲区布局不能直接当成 IOKit/Rust 后端的总线布局；候选写入方法、事务 API、范围默认值均需要各自证据。普通发送链没有事务调用，不代表存在固件级回滚。
 - 原 Input 的本地失败回退不等于硬件恢复；Profile 选择可能触发同步。设备写入、宿主执行及映射恢复遵守当前任务授权与项目设备操作规则。
-- 原始安装包提取物、个人配置与日志留在受忽略的 `.scratch/input-study/`，不进入代码、工单或提示词。独立实现使用整理后的协议说明及脱敏合成向量，不复制原应用或无许可 SDK 的实现。
+- 原始外部产物、个人配置与原始日志保留在受 Git 忽略的本地私有目录，不进入源码、文档、工单或提示词。独立实现使用整理后的脱敏协议说明及合成向量，不复制原应用或无许可 SDK 的实现。
 - 其他机器缺少原始材料时仍可阅读上述已跟踪文档；需要核验源文件的结论标记为“原始来源未在本环境复核”。不要伪造复核结果或把缺少原件理解为可以忽略研究。
 
 ## 每项交付的证据记录
@@ -49,7 +49,7 @@ IA 编号均对应[业务架构的证据表](../input-architecture.md#证据身�
 ## 可直接使用的接续提示词
 
 ```text
-请继续 Micro Input 当前尚未完成的产品开发工单。先读取仓库 AGENTS.md、README.md、docs/development.md、lessons.md，并执行 docs/agents/research-context.md。
+请继续 Micro Input 当前尚未完成的产品开发工单。先读取仓库 AGENTS.md、README.md、docs/status.md、docs/development.md、lessons.md，并执行 docs/agents/research-context.md。
 
 查询工单的当前状态和依赖，结合已有代码确定剩余工作，不重复实现已经完成的功能。先核对 docs/input-architecture.md 的证据表与局限，按本次功能选读 docs/protocol-candidates.md、docs/module-contracts.md 及既有规格。说明相关 IA 证据对本次实现和验证的影响，然后在现有 Rust 核心 + SwiftUI 架构内完成实现与适用验证。
 
