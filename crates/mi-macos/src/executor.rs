@@ -1366,6 +1366,8 @@ mod macos_pasteboard {
         unsafe { f(obj, s, p, n, enc) }
     }
 
+    static PASTEBOARD_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[derive(Debug)]
     pub struct PasteboardRef {
         unique_pb: Option<Id>,
@@ -1377,6 +1379,7 @@ mod macos_pasteboard {
     impl Drop for PasteboardRef {
         fn drop(&mut self) {
             if let Some(pb) = self.unique_pb.take() {
+                let _guard = PASTEBOARD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
                 unsafe {
                     let _pool = AutoreleasePool::push();
                     msg_0_void(pb, sel(b"releaseGlobally\0"));
@@ -1392,6 +1395,7 @@ mod macos_pasteboard {
 
         #[allow(dead_code)]
         pub fn unique_for_test() -> Option<Self> {
+            let _guard = PASTEBOARD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             unsafe {
                 let _pool = AutoreleasePool::push();
                 let pb = msg_0(cls(b"NSPasteboard\0"), sel(b"pasteboardWithUniqueName\0"));
@@ -1417,6 +1421,7 @@ mod macos_pasteboard {
         }
 
         pub fn change_count(&self) -> u64 {
+            let _guard = PASTEBOARD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             unsafe {
                 let _pool = AutoreleasePool::push();
                 let pb = self.target();
@@ -1428,6 +1433,7 @@ mod macos_pasteboard {
         }
 
         pub fn snapshot(&self, max_bytes: usize) -> (ClipboardSnapshot, bool) {
+            let _guard = PASTEBOARD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             unsafe {
                 let _pool = AutoreleasePool::push();
                 let pb = self.target();
@@ -1566,6 +1572,7 @@ mod macos_pasteboard {
         }
 
         pub fn clear_contents(&self) -> Result<(), String> {
+            let _guard = PASTEBOARD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             unsafe {
                 let _pool = AutoreleasePool::push();
                 let pb = self.target();
@@ -1578,6 +1585,7 @@ mod macos_pasteboard {
         }
 
         pub fn write_items(&self, items: &[ClipboardItemSnapshot]) -> Result<u64, String> {
+            let _guard = PASTEBOARD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             unsafe {
                 let _pool = AutoreleasePool::push();
                 let pb = self.target();
