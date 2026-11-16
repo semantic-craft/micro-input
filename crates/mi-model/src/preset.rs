@@ -1695,6 +1695,22 @@ fn agent_starter_specs() -> (Vec<AgentProfileSpec>, Vec<AgentProfileSpec>) {
                 );
             }
         }
+        legacy_specs.push(("Antigravity", ag_assignments.clone()));
+        for item in ag_assignments.iter_mut() {
+            if item.0 == 9 {
+                *item = (
+                    9,
+                    "desktop-side-question",
+                    "打开 Side Question",
+                    "Agent",
+                    "打开 Antigravity Side Question 侧栏提问并聚焦输入框",
+                    ActionKind::AgentCommand {
+                        adapter: "antigravity".into(),
+                        command: "side-question".into(),
+                    },
+                );
+            }
+        }
     }
     for mut hybrid in [codex_pre_slots, codex_r25, codex_r26] {
         replace_encoder_slots_with_model_picker(&mut hybrid);
@@ -1916,6 +1932,7 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                             };
                             let aid7 = slot_aid(&work.document, "logical-7");
                             let aid8 = slot_aid(&work.document, "logical-8");
+                            let aid9 = slot_aid(&work.document, "logical-9");
                             let aid10 = slot_aid(&work.document, "logical-10");
                             let aid11 = slot_aid(&work.document, "logical-11");
                             let aid12 = slot_aid(&work.document, "logical-12");
@@ -1965,6 +1982,34 @@ pub fn install_agent_starter_profiles(draft: &mut Draft) -> Result<Vec<String>, 
                                                 serde_json::to_value(ActionKind::AgentCommand {
                                                     adapter: "antigravity".into(),
                                                     command: "browser".into(),
+                                                })
+                                                .map_err(|e| e.to_string())?;
+                                        }
+                                    }
+                                }
+                                if let Some(id9) = &aid9 {
+                                    let should_update_9 = doc
+                                        .editable
+                                        .graph
+                                        .actions
+                                        .get(id9)
+                                        .is_some_and(|a| {
+                                            a.id == "desktop-split"
+                                                && a.payload.get("command").and_then(Value::as_str)
+                                                    == Some("split-right")
+                                        });
+                                    if should_update_9 {
+                                        if let Some(a9) = doc.editable.graph.actions.get_mut(id9) {
+                                            a9.id = "desktop-side-question".into();
+                                            a9.name = "打开 Side Question".into();
+                                            a9.category = "Agent".into();
+                                            a9.detail =
+                                                "打开 Antigravity Side Question 侧栏提问并聚焦输入框"
+                                                    .into();
+                                            a9.payload =
+                                                serde_json::to_value(ActionKind::AgentCommand {
+                                                    adapter: "antigravity".into(),
+                                                    command: "side-question".into(),
                                                 })
                                                 .map_err(|e| e.to_string())?;
                                         }
@@ -2330,6 +2375,7 @@ pub fn antigravity_layer_needs_starter_slot_migration(
     };
     let a7 = slot_action("logical-7");
     let a8 = slot_action("logical-8");
+    let a9 = slot_action("logical-9");
     let a10 = slot_action("logical-10");
     let a11 = slot_action("logical-11");
     let is_cmd =
@@ -2347,7 +2393,8 @@ pub fn antigravity_layer_needs_starter_slot_migration(
     let previous_starter_slots = is_cmd(a7, "desktop-browser", &["browser"])
         || a8.is_some_and(is_unmodified_antigravity_terminal_slot8)
         || (is_cmd(a10, "desktop-input", &["focus-input"])
-            && is_cmd(a11, "desktop-dictation", &["push-to-talk", "dictation"]));
+            && is_cmd(a11, "desktop-dictation", &["push-to-talk", "dictation"]))
+        || is_cmd(a9, "desktop-split", &["split-right"]);
     legacy_2u_dictation || previous_starter_slots
 }
 

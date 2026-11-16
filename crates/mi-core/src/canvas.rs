@@ -561,6 +561,7 @@ pub(crate) fn concise_dial_caption_alias(label: &str) -> Option<&'static str> {
         "返回模型列表 / 调低模型力度" | "降低模型力度" => Some("调低力度"),
         "取消模型选择" => Some("取消选模"),
         "搜索会话" => Some("搜索会话"),
+        "打开 Side Question" => Some("Side Q"),
         _ => None,
     }
 }

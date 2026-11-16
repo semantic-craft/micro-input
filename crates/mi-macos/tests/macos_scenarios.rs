@@ -374,6 +374,21 @@ fn test_live_host_action_executor_apple_fn_paste_submit_and_macro_trust() {
         "new-conversation-in-project must invoke driver new_conversation_in_project"
     );
 
+    let side_question_action = ResolvedHostAction::AgentCommand {
+        adapter: "antigravity".to_string(),
+        command: "side-question".to_string(),
+    };
+    let side_question_receipt = executor.execute("Antigravity", "AG09", &side_question_action);
+    assert_eq!(side_question_receipt.outcome, "executed");
+    assert_eq!(side_question_receipt.detail, "antigravity/side-question");
+    assert!(
+        driver
+            .events()
+            .iter()
+            .any(|e| matches!(e, RecordedOsEvent::OpenSideQuestion(a) if a == "antigravity")),
+        "side-question must invoke driver open_side_question"
+    );
+
     driver.set_accessibility_trusted(false);
     let macro_action = ResolvedHostAction::MacroSequence {
         events: vec![

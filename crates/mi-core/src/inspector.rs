@@ -152,8 +152,8 @@ const KEYCAP_DESCRIPTORS: [KeycapDescriptor; 34] = [
         short_label: "Split",
         chinese_hint: "分屏 / 对比视图",
         glyph_symbol: "◫",
-        search_keywords: &["split", "pane", "分屏", "并排"],
-        default_action_id: Some("ag-split-right"),
+        search_keywords: &["split", "pane", "side", "question", "分屏", "并排", "提问"],
+        default_action_id: Some("ag-side-question"),
     },
     KeycapDescriptor {
         id: CodexKeycapId::Mic,
@@ -639,7 +639,10 @@ impl CodexKeycapId {
             if a.id.contains("new") {
                 return Self::New;
             }
-            if a.id.contains("split") {
+            if a.id.contains("split")
+                || a.id.contains("side-question")
+                || cmd == Some("side-question")
+            {
                 return Self::Split;
             }
             if a.id.contains("project") {

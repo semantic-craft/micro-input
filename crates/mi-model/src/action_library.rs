@@ -351,6 +351,7 @@ pub fn capability(action: &Action, command_execution_enabled: bool) -> ActionCap
                                     | "project"
                                     | "new-conversation-in-project"
                                     | "split-right"
+                                    | "side-question"
                             ))))
                     || (matches!(
                         adapter.as_str(),

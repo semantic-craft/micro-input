@@ -2479,6 +2479,12 @@ mod macos {
                 && data.pressable
                 && crate::managed_controls::is_dsh_model_picker_trigger(&data.label);
 
+            let is_antigravity_side_question_btn = is_antigravity
+                && matches!(
+                    data.label.trim(),
+                    "Toggle Side Panel" | "New tab" | "Side Question" | "New Side Question"
+                );
+
             let relevant_button = data.pressable
                 && ([
                     crate::ax_dictation::DictationAdapter::Antigravity,
@@ -2491,6 +2497,7 @@ mod macos {
                         || adapter.matches_stop_label(&data.label)
                 }) || crate::executor::is_antigravity_live_voice_start_label(&data.label)
                     || crate::executor::is_antigravity_live_voice_end_label(&data.label)
+                    || is_antigravity_side_question_btn
                     || matches!(
                         data.label.trim(),
                         "Jump to bottom"
@@ -2513,6 +2520,7 @@ mod macos {
             if !data.editable
                 && !relevant_button
                 && !codex_dictation
+                && !is_antigravity_side_question_btn
                 && !chat_heading
                 && data.role != "AXScrollArea"
                 && !antigravity_model_trigger
@@ -2531,6 +2539,8 @@ mod macos {
                 || dsh_model_trigger
             {
                 true
+            } else if is_antigravity_side_question_btn {
+                data.pressable
             } else {
                 relevant_button
             };
@@ -2614,20 +2624,135 @@ mod macos {
         ) -> Result<Vec<ManagedControl>, String> {
             let mut controls = Vec::new();
             let mut paths: Vec<Vec<u64>> = Vec::new();
+            let mut node_by_id = std::collections::HashMap::new();
             self.control_paths.clear();
-            for node in observation.nodes {
+            for (node_idx, node) in observation.nodes.iter().enumerate() {
                 let id = self.register(&node.element)?;
+                node_by_id.insert(id, node_idx);
                 let mut path = node
                     .parent
                     .map(|index| paths[index].clone())
                     .unwrap_or_default();
                 path.push(id);
                 paths.push(path.clone());
-                let Some(control) = self.control_from_node_data(id, node.data) else {
+                let Some(control) = self.control_from_node_data(id, node.data.clone()) else {
                     continue;
                 };
                 self.control_paths.push((id, path));
                 controls.push(control);
+            }
+            let is_antigravity = self
+                .target
+                .as_ref()
+                .is_some_and(|target| target.identity.bundle_id == "com.google.antigravity");
+            if is_antigravity {
+                let multi_text_areas = controls
+                    .iter()
+                    .filter(|c| {
+                        c.enabled
+                            && c.editable
+                            && matches!(c.role.as_str(), "AXTextArea" | "AXTextField")
+                    })
+                    .count()
+                    > 1;
+                let toggle_expanded = if let Some(toggle_idx) = controls
+                    .iter()
+                    .position(|c| c.label.trim() == "Toggle Side Panel")
+                {
+                    let id = controls[toggle_idx].id;
+                    let expanded = node_by_id
+                        .get(&id)
+                        .and_then(|&idx| observation.nodes[idx].data.expanded)
+                        .or_else(|| {
+                            let elem = self.element(id).ok()?;
+                            let deadline = Instant::now() + Duration::from_millis(100);
+                            let val = elem
+                                .attributes(&["AXExpanded"], deadline)
+                                .ok()?
+                                .into_iter()
+                                .next()
+                                .flatten();
+                            bool_attribute(val).ok().flatten()
+                        });
+                    controls[toggle_idx].expanded = expanded;
+                    expanded
+                } else {
+                    None
+                };
+                let side_panel_expanded = multi_text_areas || toggle_expanded == Some(true);
+
+                if side_panel_expanded {
+                    let mut side_question_ancestors: std::collections::HashMap<u64, bool> =
+                        std::collections::HashMap::new();
+                    for control in &mut controls {
+                        if matches!(control.role.as_str(), "AXTextArea" | "AXTextField")
+                            && control.editable
+                        {
+                            if let Some((_, path)) = self
+                                .control_paths
+                                .iter()
+                                .find(|(cid, _)| *cid == control.id)
+                            {
+                                for &ancestor_id in path.iter().rev().skip(1).take(16) {
+                                    let is_sq_group = if let Some(&cached) =
+                                        side_question_ancestors.get(&ancestor_id)
+                                    {
+                                        cached
+                                    } else {
+                                        let node_opt = node_by_id
+                                            .get(&ancestor_id)
+                                            .map(|&idx| &observation.nodes[idx]);
+                                        let role_matches = if let Some(n) = node_opt {
+                                            n.data.role == "AXGroup"
+                                        } else if let Ok(elem) = self.element(ancestor_id) {
+                                            elem.attr("AXRole")
+                                                .ok()
+                                                .flatten()
+                                                .and_then(|v| v.string())
+                                                .as_deref()
+                                                == Some("AXGroup")
+                                        } else {
+                                            false
+                                        };
+                                        let matched = if !role_matches {
+                                            false
+                                        } else if let Some(n) =
+                                            node_opt.filter(|n| !n.data.label.trim().is_empty())
+                                        {
+                                            n.data.label.trim() == "Side Question"
+                                        } else if let Ok(elem) = self.element(ancestor_id) {
+                                            let deadline =
+                                                Instant::now() + Duration::from_millis(100);
+                                            if let Ok(attrs) = elem
+                                                .attributes(&["AXDescription", "AXTitle"], deadline)
+                                            {
+                                                let mut iter = attrs.into_iter();
+                                                let desc =
+                                                    iter.next().flatten().and_then(|v| v.string());
+                                                let title =
+                                                    iter.next().flatten().and_then(|v| v.string());
+                                                desc.as_deref().map(str::trim)
+                                                    == Some("Side Question")
+                                                    || title.as_deref().map(str::trim)
+                                                        == Some("Side Question")
+                                            } else {
+                                                false
+                                            }
+                                        } else {
+                                            false
+                                        };
+                                        side_question_ancestors.insert(ancestor_id, matched);
+                                        matched
+                                    };
+                                    if is_sq_group {
+                                        control.label = "Side Question Input".to_string();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Ok(controls)
         }
@@ -2719,6 +2844,13 @@ mod macos {
         }
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ScopePolicy {
+        RequireFocusedPane,
+        AllowFallback,
+        FullWindow,
+    }
+
     impl NativeAxProvider {
         fn scope_identity(
             &mut self,
@@ -2741,14 +2873,10 @@ mod macos {
             Ok(self.next_scope_id)
         }
 
-        fn capture_window(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
-            self.capture_window_with_scope_policy(bundle_id, true)
-        }
-
         fn capture_window_with_scope_policy(
             &mut self,
             bundle_id: &str,
-            require_focused_pane: bool,
+            policy: ScopePolicy,
         ) -> Result<ManagedWindow, String> {
             let captured = CapturedWindow::capture(bundle_id, bundle_id == "com.openai.codex")?;
             let pid = captured.pid;
@@ -2780,7 +2908,11 @@ mod macos {
                 scope: window.clone(),
             });
             let snapshot = self.read(&identity)?;
-            let input_paths: Vec<_> = snapshot
+            if policy == ScopePolicy::FullWindow {
+                return Ok(snapshot);
+            }
+            let require_focused_pane = policy == ScopePolicy::RequireFocusedPane;
+            let input_controls: Vec<_> = snapshot
                 .controls
                 .iter()
                 .filter(|control| {
@@ -2790,8 +2922,12 @@ mod macos {
                     self.control_paths
                         .iter()
                         .find(|(id, _)| *id == control.id)
-                        .map(|(_, path)| path.clone())
+                        .map(|(_, path)| (control, path.clone()))
                 })
+                .collect();
+            let input_paths: Vec<_> = input_controls
+                .iter()
+                .map(|(_, path)| path.clone())
                 .collect();
             let mut focus_path = Vec::new();
             if input_paths.len() > 1 {
@@ -2819,7 +2955,32 @@ mod macos {
                 focus_path.reverse();
             }
             let scope_selection =
-                crate::managed_controls::select_input_scope(&input_paths, &focus_path);
+                match crate::managed_controls::select_input_scope(&input_paths, &focus_path) {
+                    Ok(selection) => Ok(selection),
+                    Err(err) => {
+                        let primary_paths: Vec<_> = input_controls
+                            .iter()
+                            .filter(|(control, _)| {
+                                !crate::managed_controls::is_side_question_input(control)
+                            })
+                            .map(|(_, path)| path.clone())
+                            .collect();
+                        if primary_paths.len() < input_paths.len() {
+                            if primary_paths.len() == 1 {
+                                return Ok(snapshot);
+                            } else if primary_paths.len() > 1 {
+                                crate::managed_controls::select_input_scope(
+                                    &primary_paths,
+                                    &focus_path,
+                                )
+                            } else {
+                                Err(err)
+                            }
+                        } else {
+                            Err(err)
+                        }
+                    }
+                };
             let scope_element_id = match scope_selection {
                 Ok(Some(id)) => id,
                 Ok(None) => return Ok(snapshot),
@@ -3009,13 +3170,16 @@ mod macos {
                 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
         }
         fn capture(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
-            self.capture_window(bundle_id)
+            self.capture_window_with_scope_policy(bundle_id, ScopePolicy::RequireFocusedPane)
+        }
+        fn capture_full_window(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
+            self.capture_window_with_scope_policy(bundle_id, ScopePolicy::FullWindow)
         }
         fn capture_for_scroll(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
-            self.capture_window(bundle_id)
+            self.capture_window_with_scope_policy(bundle_id, ScopePolicy::RequireFocusedPane)
         }
         fn capture_for_window_key(&mut self, bundle_id: &str) -> Result<ManagedWindow, String> {
-            self.capture_window_with_scope_policy(bundle_id, false)
+            self.capture_window_with_scope_policy(bundle_id, ScopePolicy::AllowFallback)
         }
         fn read(&mut self, target: &ManagedWindowIdentity) -> Result<ManagedWindow, String> {
             self.validate(target)?;
@@ -3114,7 +3278,28 @@ mod macos {
                     control.role == "AXTextArea" && control.editable && control.enabled
                 })
                 .collect();
-            let [input] = inputs.as_slice() else {
+            let input = if let [input] = inputs.as_slice() {
+                *input
+            } else if inputs.len() > 1 {
+                let focused: Vec<_> = inputs
+                    .iter()
+                    .copied()
+                    .filter(|control| control.focused)
+                    .collect();
+                if let [input] = focused.as_slice() {
+                    *input
+                } else {
+                    let primary: Vec<_> = inputs
+                        .iter()
+                        .copied()
+                        .filter(|control| !crate::managed_controls::is_side_question_input(control))
+                        .collect();
+                    let [input] = primary.as_slice() else {
+                        return Err(blocked("ambiguous_or_missing_input"));
+                    };
+                    *input
+                }
+            } else {
                 return Err(blocked("ambiguous_or_missing_input"));
             };
             let input_rect = self
@@ -5417,6 +5602,82 @@ mod macos {
             }
             assert!(Owned::text_with("hello", null_cfstring).is_none());
             assert!(Owned::text("hello").is_some());
+        }
+
+        #[test]
+        fn antigravity_controls_from_observation_identifies_side_question_input() {
+            let mut provider = NativeAxProvider {
+                target: Some(Target {
+                    identity: ManagedWindowIdentity {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        window_id: 1,
+                        scope_id: 0,
+                        title: "Antigravity".into(),
+                    },
+                    window: CapturedWindow {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        application: Owned::text("app").unwrap(),
+                        element: Owned::text("win").unwrap(),
+                        title: "Antigravity".into(),
+                    },
+                    scope: Owned::text("win").unwrap(),
+                }),
+                ..Default::default()
+            };
+
+            let observation = WindowObservation {
+                nodes: vec![
+                    ObservedNode {
+                        element: Owned::text("win").unwrap(),
+                        parent: None,
+                        data: NodeData {
+                            role: "AXWindow".into(),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("toggle-btn").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXButton".into(),
+                            label: "Toggle Side Panel".into(),
+                            enabled: true,
+                            pressable: true,
+                            expanded: Some(true),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("side-panel-group").unwrap(),
+                        parent: Some(0),
+                        data: NodeData {
+                            role: "AXGroup".into(),
+                            label: "Side Question".into(),
+                            ..Default::default()
+                        },
+                    },
+                    ObservedNode {
+                        element: Owned::text("side-question-textarea").unwrap(),
+                        parent: Some(2),
+                        data: NodeData {
+                            role: "AXTextArea".into(),
+                            label: String::new(),
+                            enabled: true,
+                            editable: true,
+                            ..Default::default()
+                        },
+                    },
+                ],
+            };
+
+            let controls = provider.controls_from_observation(observation).unwrap();
+            let sq_input = controls
+                .iter()
+                .find(|c| c.role == "AXTextArea")
+                .expect("Side Question textarea must be observed");
+            assert_eq!(sq_input.label, "Side Question Input");
         }
     }
 }

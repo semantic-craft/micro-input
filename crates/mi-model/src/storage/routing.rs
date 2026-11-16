@@ -165,6 +165,7 @@ impl DocumentStore {
                         "live-voice" => "Gemini Live 实时语音",
                         "project" => "选项目 / 新建项目",
                         "split-right" => "快速向右分栏",
+                        "side-question" => "打开 Side Question",
                         "prev-conversation" => "上一会话（侧栏轮转）",
                         "next-conversation" => "下一会话（侧栏轮转）",
                         "voice-reply" | "toggle-voice-reply" => "切换语音回复",
@@ -469,7 +470,7 @@ mod tests {
                 assert_eq!(by_id("AG06")["label"], "Gemini Live 实时语音");
                 assert_eq!(by_id("AG07")["label"], "聚焦输入框");
                 assert_eq!(by_id("AG08")["label"], "打开内置浏览器");
-                assert_eq!(by_id("AG09")["label"], "快速向右分栏");
+                assert_eq!(by_id("AG09")["label"], "打开 Side Question");
                 assert_eq!(by_id("AG10")["label"], "在项目中新建会话");
                 assert_eq!(by_id("AG11")["label"], "按住说话");
                 assert_eq!(by_id("AG12")["label"], "停止听写并提交");
