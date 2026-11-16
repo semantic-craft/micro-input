@@ -7,6 +7,9 @@ pub struct NativeAxProvider;
 
 #[cfg(not(target_os = "macos"))]
 impl ManagedAxProvider for NativeAxProvider {
+    fn activate_window(&mut self, _: &ManagedWindowIdentity) -> Result<(), String> {
+        Err(blocked("macos_required"))
+    }
     fn capture(&mut self, _: &str) -> Result<ManagedWindow, String> {
         Err(blocked("macos_required"))
     }
@@ -804,6 +807,9 @@ mod macos {
             && matches!(role.as_str(), "AXGroup" | "AXScrollArea" | "AXList");
         let names: &[&str] = match purpose {
             ObservationPurpose::Controls if input => &["AXEnabled", "AXFocused"],
+            ObservationPurpose::Controls if role == "AXPopUpButton" => {
+                &["AXDescription", "AXTitle", "AXEnabled", "AXExpanded"]
+            }
             ObservationPurpose::Controls if button || role == "AXHeading" => {
                 &["AXDescription", "AXTitle", "AXEnabled"]
             }
@@ -850,6 +856,9 @@ mod macos {
                     .or(title)
                     .unwrap_or_default();
                 data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
+                if data.role == "AXPopUpButton" {
+                    data.expanded = bool_attribute(attrs.next().flatten())?;
+                }
                 data.pressable = button && actions()?.iter().any(|action| action == "AXPress");
             }
             ObservationPurpose::Sessions if data.role == "AXLink" => {
@@ -2438,6 +2447,10 @@ mod macos {
             false
         }
         fn control_from_node_data(&self, id: u64, data: NodeData) -> Option<ManagedControl> {
+            let is_antigravity = self
+                .target
+                .as_ref()
+                .is_some_and(|target| target.identity.bundle_id == "com.google.antigravity");
             let is_codex = self
                 .target
                 .as_ref()
@@ -2446,6 +2459,10 @@ mod macos {
                 .target
                 .as_ref()
                 .is_some_and(|target| target.identity.bundle_id == "com.deepseek.dsh");
+            let antigravity_model_trigger = is_antigravity
+                && matches!(data.role.as_str(), "AXPopUpButton" | "AXButton")
+                && data.pressable
+                && crate::managed_controls::is_antigravity_model_picker_trigger(&data.label);
             let codex_reasoning_trigger = is_codex
                 && data.role == "AXPopUpButton"
                 && data.pressable
@@ -2487,12 +2504,8 @@ mod macos {
                             | "发送消息"
                             | "提交"
                     ));
-            let chat_heading = data.role == "AXHeading"
-                && data.label == "Conversation Log"
-                && self
-                    .target
-                    .as_ref()
-                    .is_some_and(|target| target.identity.bundle_id == "com.google.antigravity");
+            let chat_heading =
+                data.role == "AXHeading" && data.label == "Conversation Log" && is_antigravity;
             let codex = crate::ax_dictation::DictationAdapter::Codex;
             let codex_dictation = codex.matches_start_label(&data.label)
                 || codex.matches_stop_label(&data.label)
@@ -2502,6 +2515,7 @@ mod macos {
                 && !codex_dictation
                 && !chat_heading
                 && data.role != "AXScrollArea"
+                && !antigravity_model_trigger
                 && !codex_reasoning_trigger
                 && !codex_model_trigger
                 && !codex_popover_item
@@ -2511,7 +2525,11 @@ mod macos {
             }
             let pressable = if codex_popover_item {
                 data.pressable
-            } else if codex_reasoning_trigger || codex_model_trigger || dsh_model_trigger {
+            } else if antigravity_model_trigger
+                || codex_reasoning_trigger
+                || codex_model_trigger
+                || dsh_model_trigger
+            {
                 true
             } else {
                 relevant_button
@@ -2524,6 +2542,7 @@ mod macos {
                 pressable,
                 editable: data.editable,
                 focused: data.focused,
+                expanded: data.expanded,
             })
         }
         fn read_single_control_node(
@@ -2570,14 +2589,20 @@ mod macos {
                     && subrole.as_deref() != Some("AXSecureTextField")
                     && element.settable("AXValue")?;
             } else if button || data.role == "AXHeading" {
-                let mut attrs = element
-                    .attributes(&["AXDescription", "AXTitle", "AXEnabled"], deadline)?
-                    .into_iter();
+                let names: &[&str] = if data.role == "AXPopUpButton" {
+                    &["AXDescription", "AXTitle", "AXEnabled", "AXExpanded"]
+                } else {
+                    &["AXDescription", "AXTitle", "AXEnabled"]
+                };
+                let mut attrs = element.attributes(names, deadline)?.into_iter();
                 data.label = text_attribute(attrs.next().flatten())?
                     .filter(|s| !s.trim().is_empty())
                     .or(text_attribute(attrs.next().flatten())?)
                     .unwrap_or_default();
                 data.enabled = bool_attribute(attrs.next().flatten())?.unwrap_or(true);
+                if data.role == "AXPopUpButton" {
+                    data.expanded = bool_attribute(attrs.next().flatten())?;
+                }
                 data.pressable =
                     button && element.actions()?.iter().any(|action| action == "AXPress");
             }
@@ -2968,6 +2993,14 @@ mod macos {
         fn release_target(&mut self, identity: &ManagedWindowIdentity) {
             self.retained_targets
                 .retain(|target| target.identity != *identity);
+        }
+        fn activate_window(&mut self, target: &ManagedWindowIdentity) -> Result<(), String> {
+            let (application, window) = self.validate(target)?;
+            if application.bool_attr("AXFrontmost")? != Some(true) {
+                application.set("AXFrontmost", unsafe { kCFBooleanTrue })?;
+            }
+            let _ = window.action("AXRaise");
+            Ok(())
         }
 
         fn process_has_exited(&self, pid: i32) -> bool {
@@ -3396,6 +3429,7 @@ mod macos {
                     pressable,
                     editable: false,
                     focused: false,
+                    expanded: None,
                 }];
                 assert_eq!(
                     crate::managed_controls::validate_codex_submit(&window).is_ok(),
@@ -5258,9 +5292,9 @@ mod macos {
 
         #[test]
         fn read_observed_node_extracts_popup_button_and_menu_item_labels_and_pressability() {
-            for (role, label) in [
-                ("AXPopUpButton", "GPT-5.4 Standard"),
-                ("AXMenuItem", "Select model"),
+            for (role, label, expected_expanded) in [
+                ("AXPopUpButton", "GPT-5.4 Standard", Some(false)),
+                ("AXMenuItem", "Select model", None),
             ] {
                 let mut pass = 0usize;
                 let observed = read_observed_node(
@@ -5270,6 +5304,14 @@ mod macos {
                         if pass == 1 {
                             assert_eq!(names, &["AXRole", "AXSubrole", "AXHidden", "AXChildren"]);
                             Ok(vec![Owned::text(role), None, None, None])
+                        } else if role == "AXPopUpButton" {
+                            assert_eq!(
+                                names,
+                                &["AXDescription", "AXTitle", "AXEnabled", "AXExpanded"]
+                            );
+                            Ok(vec![None, Owned::text(label), None, unsafe {
+                                Some(Owned(CFRetain(kCFBooleanFalse)))
+                            }])
                         } else {
                             assert_eq!(names, &["AXDescription", "AXTitle", "AXEnabled"]);
                             Ok(vec![None, Owned::text(label), None])
@@ -5284,6 +5326,66 @@ mod macos {
                 assert_eq!(observed.label, label);
                 assert!(observed.enabled);
                 assert!(observed.pressable);
+                assert_eq!(observed.expanded, expected_expanded);
+            }
+
+            let provider = NativeAxProvider {
+                target: Some(Target {
+                    identity: ManagedWindowIdentity {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        window_id: 1,
+                        scope_id: 0,
+                        title: "Antigravity".into(),
+                    },
+                    window: CapturedWindow {
+                        bundle_id: "com.google.antigravity".into(),
+                        pid: 42,
+                        application: Owned::text("app").unwrap(),
+                        element: Owned::text("win").unwrap(),
+                        title: "Antigravity".into(),
+                    },
+                    scope: Owned::text("win").unwrap(),
+                }),
+                ..Default::default()
+            };
+            let trigger = provider
+                .control_from_node_data(
+                    7,
+                    NodeData {
+                        role: "AXPopUpButton".into(),
+                        label: "Select model, current: Gemini 4 Carbon High".into(),
+                        enabled: true,
+                        pressable: true,
+                        expanded: Some(false),
+                        ..Default::default()
+                    },
+                )
+                .expect("Antigravity Select model popup button must be observed");
+            assert!(trigger.pressable);
+            assert_eq!(trigger.expanded, Some(false));
+            for excluded in [
+                "Agent permissions",
+                "Add context",
+                "Display options",
+                "Project options",
+                "Customize sections",
+                "Notifications",
+                "Extensions",
+            ] {
+                assert!(provider
+                    .control_from_node_data(
+                        8,
+                        NodeData {
+                            role: "AXPopUpButton".into(),
+                            label: excluded.into(),
+                            enabled: true,
+                            pressable: true,
+                            expanded: Some(false),
+                            ..Default::default()
+                        },
+                    )
+                    .is_none());
             }
         }
 
