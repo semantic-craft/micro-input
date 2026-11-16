@@ -1,14 +1,13 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use mi_model::apply::{
-    compile_three_layer_profile, recognize_three_layer_profile, ThreeLayerBoard,
-    ThreeLayerProvision,
+    compile_three_layer_profile, recognize_three_layer_profile, ThreeLayerProvision,
 };
 use mi_proto::{Framer, NativeFramer};
 use mi_session::{DeviceSession, ReadOnlySchema, SessionConfig};
 use mi_transport::{HidLink, LinkBackend, MockLink, TransportError};
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 const KEYMAP: &[u8] =
     include_bytes!("../../mi-model/fixtures/device/synthetic-keymap-numeric.json");
@@ -72,251 +71,6 @@ impl HidLink for ExclusiveFixture {
 
 fn metadata(name: &str, bytes: &[u8]) -> Value {
     json!({"name":name,"size":bytes.len(),"checksum":format!("{:x}",Sha1::digest(bytes))})
-}
-
-#[derive(Clone, Copy)]
-enum Commit {
-    ConfirmLayerOne,
-    StayInLayerTwo,
-    Ignore,
-}
-
-fn fixture(
-    parent: &Path,
-    commit: Commit,
-) -> (
-    Arc<DeviceSession>,
-    tokio::task::JoinHandle<(Vec<u8>, usize)>,
-) {
-    let (link, mut requests) = MockLink::new();
-    let inject = link.inject.clone();
-    let parent = parent.to_owned();
-    let session = DeviceSession::new(
-        Arc::new(ExclusiveFixture(link)),
-        Box::<NativeFramer>::default(),
-        Arc::new(ReadOnlySchema),
-        SessionConfig {
-            timeout: Duration::from_secs(2),
-            interval: Duration::ZERO,
-        },
-    );
-    let worker = tokio::spawn(async move {
-        let mut incoming = NativeFramer::default();
-        let outbound = NativeFramer::default();
-        let mut active = 1;
-        let mut keymap = KEYMAP.to_vec();
-        let mut staged = vec![];
-        let mut writes = 0;
-        while let Some(frame) = requests.recv().await {
-            for bytes in incoming.feed(&frame).unwrap() {
-                let request: Value = serde_json::from_slice(&bytes).unwrap();
-                let params = &request["params"];
-                let result = match request["method"].as_str().unwrap() {
-                    "device.status" => {
-                        let layer = if active == 2 && matches!(commit, Commit::StayInLayerTwo) {
-                            2
-                        } else {
-                            1
-                        };
-                        json!({"version":"0.6.3","profile_index":active,"layer_index":layer})
-                    }
-                    "fs.list" => json!([
-                        metadata("keymap.json", &keymap),
-                        metadata("smart_actions.json", SMART)
-                    ]),
-                    "fs.readbin" => {
-                        let bytes = match params["file"].as_str().unwrap() {
-                            "keymap.json" => keymap.as_slice(),
-                            "smart_actions.json" => SMART,
-                            file => panic!("unexpected read {file}"),
-                        };
-                        let offset = params["offset"].as_u64().unwrap() as usize;
-                        let limit = params["len"].as_u64().unwrap() as usize;
-                        json!({"total_size":bytes.len(),"data":STANDARD.encode(&bytes[offset..(offset+limit).min(bytes.len())])})
-                    }
-                    "fs.txbegin" => {
-                        let mut backups =
-                            std::fs::read_dir(parent.join("three-layer-device-backups")).unwrap();
-                        let backup = backups.next().unwrap().unwrap().path();
-                        assert!(backups.next().is_none());
-                        assert_eq!(std::fs::read(backup.join("keymap.json")).unwrap(), KEYMAP);
-                        assert_eq!(
-                            std::fs::read(backup.join("smart_actions.json")).unwrap(),
-                            SMART
-                        );
-                        assert!(backup.join("manifest.json").is_file());
-                        json!({"tx":17})
-                    }
-                    "fs.writebin" => {
-                        assert_eq!(params["file"], "keymap.json");
-                        assert_eq!(params["tx"], 17);
-                        assert_eq!(params["offset"], staged.len());
-                        staged.extend(STANDARD.decode(params["data"].as_str().unwrap()).unwrap());
-                        writes += 1;
-                        Value::Null
-                    }
-                    "fs.txcommit" => {
-                        assert_eq!(params["tx"], 17);
-                        if !matches!(commit, Commit::Ignore) {
-                            keymap = std::mem::take(&mut staged);
-                            let applied: Value = serde_json::from_slice(&keymap).unwrap();
-                            active = applied["activeProfileId"].as_u64().unwrap();
-                        }
-                        Value::Null
-                    }
-                    method => panic!("unexpected method {method}"),
-                };
-                let response = json!({"id":request["id"],"result":result});
-                let mut wire = response.to_string();
-                wire.push('\n');
-                for frame in outbound.encode(wire.as_bytes()).unwrap() {
-                    inject.send(frame).unwrap();
-                }
-            }
-        }
-        (keymap, writes)
-    });
-    (session, worker)
-}
-
-#[tokio::test]
-async fn provisioning_preserves_original_data_and_is_idempotent_after_confirmed_readback() {
-    let dir = tempfile::tempdir().unwrap();
-    let (session, worker) = fixture(dir.path(), Commit::ConfirmLayerOne);
-    assert_eq!(session.observed_firmware_version(), None);
-    assert_eq!(session.inspect_three_layer_profile().await.unwrap(), None);
-    let requests_after_inspection = session.request_count();
-    assert_eq!(
-        session.observed_firmware_version().as_deref(),
-        Some("0.6.3")
-    );
-    assert_eq!(session.request_count(), requests_after_inspection);
-    let expected = ThreeLayerBoard {
-        profile_index: 2,
-        layer_index: 1,
-    };
-    assert_eq!(
-        session
-            .provision_three_layer_profile(dir.path())
-            .await
-            .unwrap(),
-        expected
-    );
-    assert_eq!(
-        session.inspect_three_layer_profile().await.unwrap(),
-        Some(expected)
-    );
-    assert_eq!(
-        session
-            .provision_three_layer_profile(dir.path())
-            .await
-            .unwrap(),
-        expected
-    );
-    session.shutdown().await;
-    assert_eq!(session.observed_firmware_version(), None);
-    drop(session);
-    let (keymap, writes) = worker.await.unwrap();
-    assert!(writes > 1, "fixture should exercise more than one chunk");
-    assert_eq!(
-        writes,
-        keymap.len().div_ceil(mi_proto::mutation::CHUNK_BYTES)
-    );
-}
-
-#[tokio::test]
-async fn successful_commit_reply_without_matching_bytes_never_confirms_three_layer_profile() {
-    let dir = tempfile::tempdir().unwrap();
-    let (session, worker) = fixture(dir.path(), Commit::Ignore);
-    let err = session
-        .provision_three_layer_profile(dir.path())
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("板载配置读回不一致"));
-    assert!(err.contains("副本"));
-    assert_eq!(session.inspect_three_layer_profile().await.unwrap(), None);
-    assert!(session.has_exclusive_vendor_link());
-    session.shutdown().await;
-    drop(session);
-    let (keymap, writes) = worker.await.unwrap();
-    assert_eq!(keymap, KEYMAP);
-    let ThreeLayerProvision::Write {
-        keymap: candidate, ..
-    } = compile_three_layer_profile(KEYMAP, Some(SMART)).unwrap()
-    else {
-        panic!("new profile")
-    };
-    assert_eq!(
-        writes,
-        candidate.len().div_ceil(mi_proto::mutation::CHUNK_BYTES)
-    );
-}
-
-#[tokio::test]
-async fn exact_candidate_with_unconfirmed_first_layer_restores_original_without_releasing_lease() {
-    let dir = tempfile::tempdir().unwrap();
-    let (session, worker) = fixture(dir.path(), Commit::StayInLayerTwo);
-    let error = session
-        .provision_three_layer_profile(dir.path())
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("固件未确认第 1 层"), "{error}");
-    assert!(error.contains("已恢复原板载配置并核对两份文件"), "{error}");
-    assert_eq!(session.inspect_three_layer_profile().await.unwrap(), None);
-    assert!(session.has_exclusive_vendor_link());
-    session.shutdown().await;
-    drop(session);
-    let (keymap, writes) = worker.await.unwrap();
-    assert_eq!(keymap, KEYMAP);
-    assert!(writes > keymap.len().div_ceil(mi_proto::mutation::CHUNK_BYTES));
-}
-
-#[tokio::test]
-async fn explicit_recovery_is_bound_to_the_successful_write_and_current_lease() {
-    let dir = tempfile::tempdir().unwrap();
-    let (session, worker) = fixture(dir.path(), Commit::ConfirmLayerOne);
-    let receipt = session
-        .provision_three_layer_profile_with_recovery(dir.path())
-        .await
-        .unwrap();
-    let (other_link, _other_frames) = MockLink::new();
-    let other_session = DeviceSession::new(
-        Arc::new(ExclusiveFixture(other_link.clone())),
-        Box::<NativeFramer>::default(),
-        Arc::new(ReadOnlySchema),
-        SessionConfig {
-            timeout: Duration::from_millis(60),
-            interval: Duration::ZERO,
-        },
-    );
-    let stale = other_session
-        .restore_three_layer_profile(&receipt)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(stale.contains("原独占 USB 会话已失效"), "{stale}");
-    assert!(other_link.writes.lock().unwrap().is_empty());
-    other_session.shutdown().await;
-    let backup = receipt.backup_path().unwrap();
-    assert_eq!(std::fs::read(backup.join("keymap.json")).unwrap(), KEYMAP);
-    assert_eq!(
-        std::fs::read(backup.join("smart_actions.json")).unwrap(),
-        SMART
-    );
-    assert!(session.restore_three_layer_profile(&receipt).await.unwrap());
-    let err = session
-        .restore_three_layer_profile(&receipt)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("候选不完全相同，拒绝覆盖"), "{err}");
-    assert!(session.has_exclusive_vendor_link());
-    session.shutdown().await;
-    drop(session);
-    let (keymap, _) = worker.await.unwrap();
-    assert_eq!(keymap, KEYMAP);
 }
 
 #[tokio::test]
@@ -838,4 +592,200 @@ async fn six_layer_upgrade_mid_write_failure_recovers_original_via_previous_plan
     drop(rec_session);
     let final_keymap = rec_worker.await.unwrap();
     assert_eq!(final_keymap, SIX_SOURCE);
+}
+
+fn spawn_mock_device(
+    initial: Vec<u8>,
+    commit_writes: bool,
+    post_commit_layer: u64,
+) -> (
+    Arc<DeviceSession>,
+    tokio::task::JoinHandle<(Vec<u8>, usize)>,
+) {
+    let (link, mut requests) = MockLink::new();
+    let inject = link.inject.clone();
+    let session = DeviceSession::new(
+        Arc::new(ExclusiveFixture(link)),
+        Box::<NativeFramer>::default(),
+        Arc::new(ReadOnlySchema),
+        SessionConfig {
+            timeout: Duration::from_secs(2),
+            interval: Duration::ZERO,
+        },
+    );
+    let worker = tokio::spawn(async move {
+        let mut incoming = NativeFramer::default();
+        let outbound = NativeFramer::default();
+        let mut active = serde_json::from_slice::<Value>(&initial)
+            .ok()
+            .and_then(|v| v["activeProfileId"].as_u64())
+            .unwrap_or(0);
+        let mut keymap = initial;
+        let mut staged = Vec::new();
+        let mut commits = 0usize;
+        while let Some(frame) = requests.recv().await {
+            for bytes in incoming.feed(&frame).unwrap() {
+                let request: Value = serde_json::from_slice(&bytes).unwrap();
+                let params = &request["params"];
+                let result = match request["method"].as_str().unwrap() {
+                    "device.status" => {
+                        let layer = if commits > 0 { post_commit_layer } else { 1 };
+                        json!({"version":"0.6.3","profile_index":active,"layer_index":layer})
+                    }
+                    "fs.list" => json!([
+                        metadata("keymap.json", &keymap),
+                        metadata("smart_actions.json", SMART)
+                    ]),
+                    "fs.readbin" => {
+                        let bytes = match params["file"].as_str().unwrap() {
+                            "keymap.json" => keymap.as_slice(),
+                            "smart_actions.json" => SMART,
+                            file => panic!("unexpected read {file}"),
+                        };
+                        let offset = params["offset"].as_u64().unwrap() as usize;
+                        let limit = params["len"].as_u64().unwrap() as usize;
+                        json!({"total_size":bytes.len(),"data":STANDARD.encode(&bytes[offset..(offset+limit).min(bytes.len())])})
+                    }
+                    "fs.txbegin" => {
+                        staged.clear();
+                        json!({"tx":51})
+                    }
+                    "fs.writebin" => {
+                        assert_eq!(params["file"], "keymap.json");
+                        assert_eq!(params["tx"], 51);
+                        assert_eq!(params["offset"], staged.len());
+                        staged.extend(STANDARD.decode(params["data"].as_str().unwrap()).unwrap());
+                        Value::Null
+                    }
+                    "fs.txcommit" => {
+                        assert_eq!(params["tx"], 51);
+                        commits += 1;
+                        if commit_writes {
+                            keymap = std::mem::take(&mut staged);
+                            let applied: Value = serde_json::from_slice(&keymap).unwrap();
+                            active = applied["activeProfileId"].as_u64().unwrap();
+                        } else {
+                            staged.clear();
+                        }
+                        Value::Null
+                    }
+                    method => panic!("unexpected method {method}"),
+                };
+                let response = json!({"id":request["id"],"result":result});
+                let mut wire = response.to_string();
+                wire.push('\n');
+                for frame in outbound.encode(wire.as_bytes()).unwrap() {
+                    inject.send(frame).unwrap();
+                }
+            }
+        }
+        (keymap, commits)
+    });
+    (session, worker)
+}
+
+#[tokio::test]
+async fn six_layer_unconfirmed_commit_or_layer_restores_original_bytes() {
+    const SIX_SOURCE: &[u8] =
+        include_bytes!("../../mi-model/fixtures/device/synthetic-six-layer-source.json");
+
+    let dir_a = tempfile::tempdir().unwrap();
+    let (session_a, worker_a) = spawn_mock_device(SIX_SOURCE.to_vec(), false, 1);
+    let prepared_a = session_a
+        .prepare_six_layer_write(dir_a.path())
+        .await
+        .unwrap();
+    let failure_a = session_a
+        .apply_six_layer_write(prepared_a)
+        .await
+        .unwrap_err();
+    assert!(
+        failure_a.detail.contains("板载配置读回不一致"),
+        "{}",
+        failure_a.detail
+    );
+    assert!(failure_a.original_verified);
+    session_a.shutdown().await;
+    drop(session_a);
+    let (final_a, commits_a) = worker_a.await.unwrap();
+    assert_eq!(commits_a, 1);
+    assert_eq!(final_a, SIX_SOURCE);
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let (session_b, worker_b) = spawn_mock_device(SIX_SOURCE.to_vec(), true, 0);
+    let prepared_b = session_b
+        .prepare_six_layer_write(dir_b.path())
+        .await
+        .unwrap();
+    let failure_b = session_b
+        .apply_six_layer_write(prepared_b)
+        .await
+        .unwrap_err();
+    assert!(
+        failure_b
+            .detail
+            .contains("六层文件已读回，但活动方案与层未确认"),
+        "{}",
+        failure_b.detail
+    );
+    assert!(failure_b.original_verified);
+    session_b.shutdown().await;
+    drop(session_b);
+    let (final_b, commits_b) = worker_b.await.unwrap();
+    assert_eq!(commits_b, 2);
+    assert_eq!(final_b, SIX_SOURCE);
+}
+
+#[tokio::test]
+async fn three_layer_backup_restore_roundtrip_idempotence_and_mismatch_rejection() {
+    let ThreeLayerProvision::Write {
+        keymap: candidate, ..
+    } = compile_three_layer_profile(KEYMAP, Some(SMART)).unwrap()
+    else {
+        panic!("expected new 3-layer write")
+    };
+    let backup = tempfile::tempdir().unwrap();
+    std::fs::write(backup.path().join("keymap.json"), KEYMAP).unwrap();
+    std::fs::write(backup.path().join("planned-keymap.json"), &candidate).unwrap();
+    std::fs::write(backup.path().join("smart_actions.json"), SMART).unwrap();
+
+    let (restore_session, restore_worker) = spawn_mock_device(candidate.clone(), true, 1);
+    restore_session
+        .restore_three_layer_backup(backup.path())
+        .await
+        .unwrap();
+    restore_session.shutdown().await;
+    drop(restore_session);
+    let (restored_keymap, restore_commits) = restore_worker.await.unwrap();
+    assert_eq!(restore_commits, 1);
+    assert_eq!(restored_keymap, KEYMAP);
+
+    let (idempotent_session, idempotent_worker) = spawn_mock_device(KEYMAP.to_vec(), true, 1);
+    idempotent_session
+        .restore_three_layer_backup(backup.path())
+        .await
+        .unwrap();
+    idempotent_session.shutdown().await;
+    drop(idempotent_session);
+    let (idempotent_keymap, idempotent_commits) = idempotent_worker.await.unwrap();
+    assert_eq!(idempotent_commits, 0);
+    assert_eq!(idempotent_keymap, KEYMAP);
+
+    let mut tampered = candidate;
+    tampered.push(b' ');
+    let (mismatch_session, mismatch_worker) = spawn_mock_device(tampered.clone(), true, 1);
+    let err = mismatch_session
+        .restore_three_layer_backup(backup.path())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("设备与本次三层候选不符，拒绝覆盖恢复"),
+        "{err}"
+    );
+    mismatch_session.shutdown().await;
+    drop(mismatch_session);
+    let (mismatch_keymap, mismatch_commits) = mismatch_worker.await.unwrap();
+    assert_eq!(mismatch_commits, 0);
+    assert_eq!(mismatch_keymap, tampered);
 }

@@ -15,8 +15,8 @@ import sys
 import time
 import uuid
 
-MAX_RETAINED_QA_RUNS = 20
-_QA_RUN_ID_RE = re.compile(r'^(\d+)-\d+$')
+MAX_RETAINED_QA_RUNS = 6
+_QA_RUN_ID_RE = re.compile(r'^(\d+)-\d+(?:-\d+)?$')
 
 
 def _ensure_private_dir(target: pathlib.Path) -> None:
@@ -411,7 +411,7 @@ def main() -> int:
                 launcher_record['documents_removed'] = documents_dir is None or not documents_dir.exists()
                 launcher_record['preferences_removed'] = pref_removed
                 _write_json(evidence_dir / 'launcher.json', launcher_record)
-            if lock_handle is not None and not os.environ.get('MI_QA_RUN_DIR'):
+            if lock_handle is not None and run_dir.resolve().parent == qa_root.resolve():
                 _prune_stale_qa_runs(qa_root, current_run_dir=run_dir)
             if lock_handle is not None:
                 try:

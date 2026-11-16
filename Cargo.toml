@@ -12,4 +12,4 @@ description = "Native macOS workbench and host controller for Work Louder Creato
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "test-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }

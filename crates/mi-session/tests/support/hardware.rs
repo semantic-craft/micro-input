@@ -1,9 +1,145 @@
 //! Private H0/H1 executor. Never linked into the application or FFI.
-use super::*;
+use super::{temp_name, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use mi_session::DeviceSchema;
+use mi_proto::{Framer, Incoming, JsonCodec, NativeFramer, RpcCodec};
+use mi_session::{DeviceSchema, ReadOnlySchema};
+use mi_transport::{HidCandidate, HidLink, HidTransport};
+use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
+use std::{
+    collections::BTreeMap,
+    fs::{self, OpenOptions},
+    io::{Read, Write},
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
+
+const RPC_BUDGET: Duration = Duration::from_secs(4);
+type Listing = BTreeMap<String, Value>;
+
+pub struct Outcome {
+    pub passed: bool,
+    pub cleanup_confirmed: bool,
+    pub reason: &'static str,
+    pub directory: PathBuf,
+}
+
+struct Record {
+    directory: PathBuf,
+    target: String,
+    sequence: usize,
+    cleanup_confirmed: bool,
+    mutation_attempted: bool,
+}
+
+impl Record {
+    fn named(label: &str) -> Result<Self> {
+        let mut bytes = [0u8; 16];
+        fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut bytes))
+            .map_err(|_| "random_failed")?;
+        let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let target = format!("mi_{}.txt", &token[..12]);
+        temp_name(&target)?;
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.scratch/hardware-probes");
+        fs::create_dir_all(&root).map_err(|_| "private_parent_failed")?;
+        let directory = root.join(format!(
+            "probe-{}-{}-{}-{}-{}-{}",
+            label,
+            &token[..8],
+            &token[8..12],
+            &token[12..16],
+            &token[16..20],
+            &token[20..]
+        ));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .map_err(|_| "private_directory_failed")?;
+        Ok(Self {
+            directory,
+            target,
+            sequence: 0,
+            cleanup_confirmed: false,
+            mutation_attempted: false,
+        })
+    }
+
+    fn private(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(self.directory.join(name))
+            .map_err(|_| "private_file_failed")?;
+        f.write_all(bytes)
+            .and_then(|_| f.sync_all())
+            .map_err(|_| "private_file_failed")
+    }
+
+    fn stage(&mut self, stage: &'static str, detail: Value) -> Result<()> {
+        self.sequence += 1;
+        let value = json!({
+            "stage": stage,
+            "target": self.target,
+            "mutation_attempted": self.mutation_attempted,
+            "cleanup_confirmed": self.cleanup_confirmed,
+            "exclusive_ownership": false,
+            "detail": detail,
+        });
+        self.private(
+            &format!("stage-{:02}.json", self.sequence),
+            value.to_string().as_bytes(),
+        )
+    }
+}
+
+fn candidate(transport: &dyn HidTransport) -> Result<HidCandidate> {
+    let candidates: Vec<_> = transport
+        .enumerate()
+        .map_err(|_| "enumerate_failed")?
+        .into_iter()
+        .filter(mi_transport::is_candidate)
+        .collect();
+    if candidates.len() != 1 {
+        return Err("ambiguous_or_absent_candidate");
+    }
+    let selected = candidates.into_iter().next().unwrap();
+    if selected.vid != 0x303a
+        || selected.pid != 0x8298
+        || selected.transport_hint != mi_transport::TransportHint::Usb
+    {
+        return Err("unsupported_target");
+    }
+    Ok(selected)
+}
+
+fn diagnostic_response(line: &[u8], expected: &str) -> Result<Value> {
+    let mut value: Value = serde_json::from_slice(line).map_err(|_| "invalid_response")?;
+    for key in ["method", "m"] {
+        if value.get(key).is_some_and(|v| v.as_str() != Some(expected)) {
+            return Err("mismatched_method_echo");
+        }
+    }
+    if value.get("params").is_some() || value.get("p").is_some() {
+        return Err("unexpected_response_params");
+    }
+    value
+        .as_object_mut()
+        .ok_or("invalid_response")?
+        .remove("method");
+    value.as_object_mut().unwrap().remove("m");
+    match JsonCodec
+        .decode(&serde_json::to_vec(&value).map_err(|_| "invalid_response")?)
+        .map_err(|_| "invalid_response")?
+    {
+        Incoming::Response(r) if r.raw.get("error").is_none() => Ok(r.raw),
+        _ => Err("rpc_error_unknown"),
+    }
+}
 
 pub const H0: &str = "I_AUTHORIZE_H0_READONLY_BACKUP";
 pub const H1: &str = "I_AUTHORIZE_H1_EXACT_TEMPFILE";
@@ -353,7 +489,6 @@ pub async fn run(
         cleanup_confirmed: record.cleanup_confirmed,
         reason,
         directory: record.directory,
-        target: record.target,
     })
 }
 

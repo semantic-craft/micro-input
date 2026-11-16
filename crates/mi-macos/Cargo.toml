@@ -5,14 +5,12 @@ edition.workspace = true
 
 [dependencies]
 libc = "0.2"
-mi-bridge = { path = "../mi-bridge" }
 mi-model = { path = "../mi-model" }
 mi-proto = { path = "../mi-proto" }
 mi-session = { path = "../mi-session", features = ["synthetic-backend"] }
 mi-transport = { path = "../mi-transport", features = ["synthetic-backend"] }
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

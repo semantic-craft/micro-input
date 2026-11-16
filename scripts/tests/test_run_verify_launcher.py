@@ -368,15 +368,15 @@ class RunVerifyLauncherTests(unittest.TestCase):
                 runpy.run_path(str(script), run_name='__main__')
             self.assertEqual(result.exception.code, 0)
 
-        for index in range(6):
+        for index in range(20):
             self.assertFalse((qa_root / f'1700000000{index:03d}-100').exists())
-        for index in range(6, 25):
+        for index in range(20, 25):
             self.assertTrue((qa_root / f'1700000000{index:03d}-100').exists())
         completed_dirs = [
             p for p in qa_root.iterdir()
             if p.is_dir() and p.name != '9999999999999-111'
         ]
-        self.assertEqual(len(completed_dirs), 20)
+        self.assertEqual(len(completed_dirs), 6)
         self.assertTrue((active_dir / 'Micro Input QA.app').exists())
         self.assertTrue((qa_root / 'qa.lock').exists())
 
@@ -398,6 +398,66 @@ class RunVerifyLauncherTests(unittest.TestCase):
         self.assertIn('1700000000024-100', remaining_completed)
         self.assertTrue((active_dir / 'Micro Input QA.app').exists())
         self.assertTrue((qa_root / 'qa.lock').exists())
+
+    def test_verify_prunes_collision_suffixed_and_nested_qa_run_dir_only(self):
+        root = self._prepare_checkout()
+        script = root / 'scripts/run'
+        qa_root = root / '.scratch/qa-runs'
+        qa_root.mkdir(parents=True)
+        seeded = [
+            '1700000000001-100',
+            '1700000000001-100-1',
+            '1700000000002-100',
+            '1700000000003-100-2',
+            '1700000000004-100',
+            '1700000000005-100',
+            '1700000000006-100-1',
+            '1700000000007-100',
+        ]
+        for run_id in seeded:
+            evidence_dir = qa_root / run_id / 'evidence'
+            evidence_dir.mkdir(parents=True)
+            (evidence_dir / 'launcher.json').write_text('{"ok":true}\n', encoding='utf-8')
+
+        fake_home = root / 'fake_home'
+        (fake_home / 'Library/Preferences').mkdir(parents=True)
+
+        external_run_dir = root / 'external-qa-run'
+        with patch.object(sys, 'argv', [str(script), '--verify', '--timeout=15']), \
+                patch.dict(os.environ, {'MI_QA_RUN_DIR': str(external_run_dir)}, clear=False), \
+                patch('pathlib.Path.home', return_value=fake_home), \
+                patch('subprocess.Popen', side_effect=lambda *args, **kwargs: FakeVerifyChild([0])), \
+                patch('subprocess.run'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 0)
+
+        self.assertTrue((external_run_dir / 'evidence/launcher.json').exists())
+        self.assertEqual(sorted(p.name for p in qa_root.iterdir() if p.is_dir()), seeded)
+
+        nested_run_dir = qa_root / '1700000000008-200-1'
+        with patch.object(sys, 'argv', [str(script), '--verify', '--timeout=15']), \
+                patch.dict(os.environ, {'MI_QA_RUN_DIR': str(nested_run_dir)}, clear=False), \
+                patch('pathlib.Path.home', return_value=fake_home), \
+                patch('subprocess.Popen', side_effect=lambda *args, **kwargs: FakeVerifyChild([0])), \
+                patch('subprocess.run'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(script), run_name='__main__')
+            self.assertEqual(result.exception.code, 0)
+
+        self.assertEqual(
+            sorted(p.name for p in qa_root.iterdir() if p.is_dir()),
+            [
+                '1700000000003-100-2',
+                '1700000000004-100',
+                '1700000000005-100',
+                '1700000000006-100-1',
+                '1700000000007-100',
+                '1700000000008-200-1',
+            ],
+        )
 
     def test_unique_bundle_id_cleanup_never_deletes_other_qa_session_plists(self):
         root = self._prepare_checkout()
