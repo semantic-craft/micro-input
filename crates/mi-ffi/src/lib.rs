@@ -480,4 +480,62 @@ mod tests {
         let code_res = ffi_guard(-1i32, "test_code", || panic!("simulated panic"));
         assert_eq!(code_res, -1);
     }
+
+    #[test]
+    fn ffi_rejects_unstaged_import_preset_while_keeping_export_and_return_available() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir_cstr = CString::new(temp_dir.path().to_string_lossy().into_owned()).unwrap();
+
+        let export_json = r#"{"domain":"sidebar","action":{"Backup":{"ExportPreset":{"profile_id":null,"layer_id":null}}}}"#;
+        assert!(serde_json::from_str::<WorkbenchCommand>(export_json).is_ok());
+        let return_json = r#"{"domain":"sidebar","action":{"Backup":"ReturnToHostDocument"}}"#;
+        assert!(serde_json::from_str::<WorkbenchCommand>(return_json).is_ok());
+
+        unsafe {
+            let store = mi_core_new(dir_cstr.as_ptr());
+            assert!(!store.is_null());
+
+            let export_cstr = CString::new(export_json).unwrap();
+            let export_out = mi_core_dispatch_json(store, export_cstr.as_ptr());
+            assert!(!export_out.is_null());
+            mi_core_string_free(export_out);
+
+            let exported_text = (&*store)
+                .last_exported_preset()
+                .expect("exported preset")
+                .to_string();
+
+            let import_payload = serde_json::json!({
+                "domain": "sidebar",
+                "action": {
+                    "Backup": {
+                        "ImportPreset": { "text": exported_text }
+                    }
+                }
+            })
+            .to_string();
+            assert!(
+                serde_json::from_str::<WorkbenchCommand>(&import_payload).is_err(),
+                "ImportPreset must be rejected during FFI command deserialization"
+            );
+
+            let before_ptr = mi_core_project_json(store);
+            let before_json = CStr::from_ptr(before_ptr).to_string_lossy().into_owned();
+            mi_core_string_free(before_ptr);
+
+            let import_cstr = CString::new(import_payload).unwrap();
+            let import_out = mi_core_dispatch_json(store, import_cstr.as_ptr());
+            assert!(
+                import_out.is_null(),
+                "un-staged ImportPreset over FFI must return null without mutating store"
+            );
+
+            let after_ptr = mi_core_project_json(store);
+            let after_json = CStr::from_ptr(after_ptr).to_string_lossy().into_owned();
+            mi_core_string_free(after_ptr);
+            assert_eq!(before_json, after_json);
+
+            mi_core_free(store);
+        }
+    }
 }

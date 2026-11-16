@@ -1,8 +1,6 @@
 use std::ffi::CString;
-use std::fs::DirBuilder;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 fn validate_lock_fd(fd: i32) -> io::Result<()> {
@@ -66,12 +64,8 @@ impl DocumentInstanceLock {
     }
 
     pub fn acquire_with_pid(document_dir: &Path, pid: i32) -> io::Result<Option<Self>> {
-        if !document_dir.exists() {
-            DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(document_dir)?;
-        }
+        crate::private_fs::ensure_private_dir(document_dir)
+            .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))?;
         let lock_path = document_dir.join("instance.lock");
         let c_path = CString::new(lock_path.as_os_str().as_bytes())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid lock path"))?;
@@ -228,5 +222,28 @@ mod tests {
         let oversized = format!("{}\n", "1".repeat(80));
         std::fs::write(lock.lock_path(), oversized).unwrap();
         assert_eq!(DocumentInstanceLock::owner_pid(&doc_dir), Some(-1));
+    }
+
+    #[test]
+    fn instance_lock_rejects_symlink_dir_and_preserves_target_permissions() {
+        let temp = TempDir::new().unwrap();
+        let target_dir = temp.path().join("target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::set_permissions(&target_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let link_dir = temp.path().join("link-doc");
+        std::os::unix::fs::symlink(&target_dir, &link_dir).unwrap();
+        assert!(
+            DocumentInstanceLock::acquire_with_pid(&link_dir, 999).is_err(),
+            "instance lock must reject symlink document_dir"
+        );
+        assert_eq!(
+            std::fs::metadata(&target_dir).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(
+            DocumentInstanceLock::acquire_with_pid(&link_dir.join("nested"), 999).is_err(),
+            "instance lock must reject user-owned intermediate symlink"
+        );
     }
 }

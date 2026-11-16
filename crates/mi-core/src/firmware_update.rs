@@ -72,21 +72,7 @@ pub(crate) struct FirmwareUpdater {
 
 fn ensure_private_downloads_dir(root: &Path) -> Result<std::path::PathBuf, String> {
     let directory = root.join("firmware-downloads");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        if !directory.exists() {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&directory)
-                .map_err(|e| e.to_string())?;
-        }
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
-    }
-    #[cfg(not(unix))]
-    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    mi_macos::ensure_private_dir(&directory)?;
     Ok(directory)
 }
 impl FirmwareUpdater {

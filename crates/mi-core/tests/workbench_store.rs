@@ -2634,3 +2634,50 @@ fn command_execution_enabled_defaults_fail_closed_across_store_and_inspector() {
         "EditableSlotInspectorProjection::default() must fail closed"
     );
 }
+
+#[test]
+fn set_command_execution_enabled_persists_across_return_to_host_and_reopen() {
+    let temp = TempDir::new().unwrap();
+    let seed = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    std::fs::write(
+        temp.path().join("workbench.json"),
+        serde_json::to_vec(&seed.document_store.draft.document).unwrap(),
+    )
+    .unwrap();
+    drop(seed);
+
+    let mut store = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert!(!store.document_store.command_execution_enabled());
+
+    store
+        .dispatch_inspector_action(mi_core::InspectorAction::SetCommandExecutionEnabled(true))
+        .expect("enable command execution");
+    assert!(store.document_store.command_execution_enabled());
+
+    store
+        .apply_backup_command(BackupCommand::ReturnToHostDocument)
+        .expect("return to host document");
+    assert!(
+        store.document_store.command_execution_enabled(),
+        "command_execution_enabled must survive ReturnToHostDocument"
+    );
+    match &store.projection().inspector.body {
+        mi_core::InspectorBodyProjection::Editable(edit) => {
+            assert!(edit.command_execution_enabled);
+        }
+        other => panic!("expected Editable inspector, got {other:?}"),
+    }
+
+    drop(store);
+    let reopened = WorkbenchStore::open_isolated(temp.path()).unwrap();
+    assert!(
+        reopened.document_store.command_execution_enabled(),
+        "command_execution_enabled must survive store reopen"
+    );
+    match &reopened.projection().inspector.body {
+        mi_core::InspectorBodyProjection::Editable(edit) => {
+            assert!(edit.command_execution_enabled);
+        }
+        other => panic!("expected Editable inspector, got {other:?}"),
+    }
+}

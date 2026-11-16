@@ -5968,14 +5968,8 @@ impl WorkbenchStore {
                 Ok(())
             }
             InspectorAction::SetCommandExecutionEnabled(enabled) => {
-                self.command_execution_enabled = enabled;
-                if let Some(running) = &self.six_layer_running {
-                    running.set_execution_policy(
-                        self.document_store.host_execution_enabled(),
-                        enabled,
-                        self.update_now,
-                    );
-                }
+                self.apply_routing_operation(RoutingOperation::CommandExecution { enabled })?;
+                self.sync_routing_snapshot();
                 self.commit_runtime_update();
                 Ok(())
             }
@@ -8324,31 +8318,7 @@ fn antigravity_hub_open_flags() -> i32 {
 }
 
 fn ensure_private_document_dir(dir: &Path) -> Result<(), WorkbenchError> {
-    #[cfg(unix)]
-    if let Ok(meta) = fs::symlink_metadata(dir) {
-        use std::os::unix::fs::MetadataExt;
-        if !meta.file_type().is_dir() || meta.uid() != current_uid() {
-            return Err(WorkbenchError::Storage(
-                "document_dir must be a regular directory owned by current user".into(),
-            ));
-        }
-    }
-    fs::create_dir_all(dir).map_err(|e| WorkbenchError::Storage(e.to_string()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let meta = fs::symlink_metadata(dir).map_err(|e| WorkbenchError::Storage(e.to_string()))?;
-        if !meta.file_type().is_dir() || meta.uid() != current_uid() {
-            return Err(WorkbenchError::Storage(
-                "document_dir must be a regular directory owned by current user".into(),
-            ));
-        }
-        if (meta.mode() & 0o077) != 0 {
-            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-                .map_err(|e| WorkbenchError::Storage(e.to_string()))?;
-        }
-    }
-    Ok(())
+    mi_macos::ensure_private_dir(dir).map_err(WorkbenchError::Storage)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

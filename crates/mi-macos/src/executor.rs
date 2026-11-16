@@ -5,9 +5,7 @@ use crate::native_ax::NativeAxProvider;
 use mi_model::host_router::{ResolvedHostAction, ResolvedMacroEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
@@ -804,17 +802,12 @@ impl HostActionReceipt {
     }
 
     pub fn append_to_audit_log(&self, path: &Path) -> io::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let mut line = serde_json::to_string(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         line.push('\n');
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(path)?;
+        let mut file =
+            crate::private_fs::open_private_file(path, crate::private_fs::PrivateOpenMode::Append)
+                .map_err(io::Error::other)?;
         file.write_all(line.as_bytes())
     }
 }
@@ -1931,7 +1924,19 @@ fn wait_child_with_timeout(
             Ok(None) => {
                 let now = std::time::Instant::now();
                 if now >= deadline {
-                    let _ = child.kill();
+                    #[cfg(unix)]
+                    {
+                        let pid = child.id() as libc::pid_t;
+                        if pid > 0 {
+                            unsafe {
+                                libc::kill(-pid, libc::SIGKILL);
+                            }
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = child.kill();
+                    }
                     let _ = child.wait();
                     return Err(format!("shell_timeout_{}ms", timeout.as_millis()));
                 }
@@ -3615,13 +3620,18 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     && !working_directory.trim().is_empty()
                     && Path::new(working_directory).is_dir()
                 {
-                    let spawn_res = Command::new("/bin/sh")
-                        .args(["-c", command])
+                    let mut cmd = Command::new("/bin/sh");
+                    cmd.args(["-c", command])
                         .current_dir(working_directory)
                         .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn();
+                        .stderr(std::process::Stdio::null());
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::CommandExt;
+                        cmd.process_group(0);
+                    }
+                    let spawn_res = cmd.spawn();
                     drop(execution);
                     match spawn_res {
                         Ok(mut child) => {
@@ -3634,7 +3644,14 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                         Err(err) => make_receipt("failed", err.to_string()),
                     }
                 } else {
-                    make_receipt("executed", desc.detail)
+                    make_receipt(
+                        "failed",
+                        if command.trim().is_empty() {
+                            "empty_shell_command".into()
+                        } else {
+                            "invalid_working_directory".into()
+                        },
+                    )
                 }
             }
             ResolvedHostAction::AgentCommand { adapter, command } => {
@@ -3945,6 +3962,7 @@ fn managed_adapter_for_bundle(bundle: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod serialized_effect_tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn codex_managed_controls_do_not_redirect_official_shortcuts_through_the_composer() {
@@ -4265,6 +4283,137 @@ mod serialized_effect_tests {
             },
         );
         assert_eq!(stdin_receipt.outcome, "executed");
+    }
+
+    #[test]
+    fn shell_command_timeout_kills_process_group_orphans() {
+        struct PidCleanup(Option<libc::pid_t>);
+        impl Drop for PidCleanup {
+            fn drop(&mut self) {
+                if let Some(pid) = self.0 {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("grandchild.pid");
+        let driver = RecordingOsDriver::new(true);
+        let executor = LiveHostActionExecutor::new(driver)
+            .with_shell_command_timeout(Duration::from_millis(250));
+        let receipt = executor.execute(
+            "Antigravity",
+            "AG00",
+            &ResolvedHostAction::ShellCommand {
+                command: format!("sleep 10 & echo $! > {}; wait", pid_file.display()),
+                working_directory: "/tmp".into(),
+            },
+        );
+        assert_eq!(receipt.outcome, "failed");
+        assert!(receipt.detail.contains("shell_timeout_250ms"));
+
+        let grandchild_pid: libc::pid_t = fs::read_to_string(&pid_file)
+            .expect("grandchild pid written")
+            .trim()
+            .parse()
+            .expect("valid pid");
+        let mut guard = PidCleanup(Some(grandchild_pid));
+
+        let deadline = std::time::Instant::now() + Duration::from_millis(250);
+        let mut exited = false;
+        while std::time::Instant::now() < deadline {
+            let rc = unsafe { libc::kill(grandchild_pid, 0) };
+            if rc != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if exited {
+            guard.0 = None;
+        }
+        assert!(
+            exited,
+            "timed-out ShellCommand must kill entire process group including grandchild PID {grandchild_pid}"
+        );
+    }
+
+    #[test]
+    fn shell_command_empty_command_or_invalid_working_dir_reports_failed() {
+        let driver = RecordingOsDriver::new(true);
+        let executor = LiveHostActionExecutor::new(driver);
+
+        let empty_cmd = executor.execute(
+            "Antigravity",
+            "AG00",
+            &ResolvedHostAction::ShellCommand {
+                command: "   \t\n ".into(),
+                working_directory: "/tmp".into(),
+            },
+        );
+        assert_eq!(empty_cmd.outcome, "failed");
+        assert_eq!(empty_cmd.detail, "empty_shell_command");
+
+        let bad_dir = executor.execute(
+            "Antigravity",
+            "AG00",
+            &ResolvedHostAction::ShellCommand {
+                command: "echo ok".into(),
+                working_directory: "/nonexistent/mi-shell-working-dir-404".into(),
+            },
+        );
+        assert_eq!(bad_dir.outcome, "failed");
+        assert_eq!(bad_dir.detail, "invalid_working_directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_log_append_refuses_symlinks_and_fifo_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim.txt");
+        fs::write(&victim, b"SAFE").unwrap();
+        let link_log = dir.path().join("audit.jsonl");
+        std::os::unix::fs::symlink(&victim, &link_log).unwrap();
+
+        let receipt = HostActionReceipt {
+            action_type: "open_app".into(),
+            binding_id: "AG00".into(),
+            detail: "ok".into(),
+            outcome: "executed".into(),
+            profile_id: "p1".into(),
+            target: "t".into(),
+            text_byte_len: None,
+            timestamp_ms: 1,
+        };
+        assert!(
+            receipt.append_to_audit_log(&link_log).is_err(),
+            "append_to_audit_log must refuse symlink target"
+        );
+        assert_eq!(fs::read(&victim).unwrap(), b"SAFE");
+
+        let fifo = dir.path().join("audit.fifo");
+        let c_fifo = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fifo_clone = fifo.clone();
+        let receipt_clone = receipt.clone();
+        let handle = std::thread::spawn(move || {
+            let _ = tx.send(receipt_clone.append_to_audit_log(&fifo_clone));
+        });
+        let recv_res = rx.recv_timeout(Duration::from_millis(200));
+        if recv_res.is_err() {
+            let drain_fd =
+                unsafe { libc::open(c_fifo.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+            let _ = handle.join();
+            if drain_fd >= 0 {
+                unsafe { libc::close(drain_fd) };
+            }
+            panic!("append_to_audit_log blocked on FIFO");
+        }
+        let _ = handle.join();
+        assert!(recv_res.unwrap().is_err());
     }
 
     #[test]

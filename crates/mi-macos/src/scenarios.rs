@@ -1,4 +1,5 @@
 use crate::executor::SimulatedHostActionExecutor;
+use crate::private_fs::{ensure_private_dir, open_private_file, PrivateOpenMode};
 use mi_model::draft::Draft;
 use mi_model::host_router::{
     resolve_host_action_with_layout, verified_bindings, verified_physical_mapping_for_layout,
@@ -17,9 +18,8 @@ use mi_transport::{HidTransport, SyntheticDiscovery, SyntheticFiles};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,55 +44,10 @@ impl ScenarioResultSummary {
     }
 }
 
-fn ensure_private_dir(dir: &Path) -> Result<(), String> {
-    if dir.as_os_str().is_empty() {
-        return Ok(());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        if !dir.exists() {
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(dir)
-                .map_err(|e| e.to_string())?;
-        }
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
-    }
-    #[cfg(not(unix))]
-    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn open_private_file(path: &Path, truncate: bool) -> Result<fs::File, String> {
-    if let Some(parent) = path.parent() {
-        ensure_private_dir(parent)?;
-    }
-    let mut options = OpenOptions::new();
-    options.create(true).mode(0o600);
-    if truncate {
-        options.truncate(true).write(true);
-    } else {
-        options.append(true);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-        let file = options.open(path).map_err(|e| e.to_string())?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|e| e.to_string())?;
-        return Ok(file);
-    }
-    #[cfg(not(unix))]
-    options.open(path).map_err(|e| e.to_string())
-}
-
 pub fn write_private_json(path: &Path, value: &Value) -> Result<(), String> {
     let mut text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     text.push('\n');
-    let mut file = open_private_file(path, true)?;
+    let mut file = open_private_file(path, PrivateOpenMode::Truncate)?;
     file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())
 }
@@ -100,7 +55,7 @@ pub fn write_private_json(path: &Path, value: &Value) -> Result<(), String> {
 fn append_private_jsonl(path: &Path, value: &Value) -> Result<(), String> {
     let mut line = serde_json::to_string(value).map_err(|e| e.to_string())?;
     line.push('\n');
-    let mut file = open_private_file(path, false)?;
+    let mut file = open_private_file(path, PrivateOpenMode::Append)?;
     file.write_all(line.as_bytes()).map_err(|e| e.to_string())
 }
 
@@ -251,11 +206,15 @@ fn is_six_octet_mac(bytes: &[u8], start: usize) -> bool {
     if start + MAC_LEN < bytes.len() && bytes[start + MAC_LEN].is_ascii_hexdigit() {
         return false;
     }
+    let delim = bytes[start + 2];
+    if !matches!(delim, b':' | b'-') {
+        return false;
+    }
     (0..6).all(|group| {
         let off = start + group * 3;
         bytes[off].is_ascii_hexdigit()
             && bytes[off + 1].is_ascii_hexdigit()
-            && (group == 5 || bytes[off + 2] == b':')
+            && (group == 5 || bytes[off + 2] == delim)
     })
 }
 
@@ -870,5 +829,83 @@ mod tests {
         assert!(!bare_sanitized.contains("02:ed:a0:1d:9e:30"));
         assert!(bare_sanitized.contains("12:34:56"));
         assert!(bare_sanitized.contains("303A:8298"));
+
+        let hyphen_sanitized = DiagnosticRedactor::sanitize(
+            "device 02-ed-a0-1d-9e-30 failed on 2026-11-16 uuid 12345678-1234-1234-1234-123456789012 vid 303A:8298 mixed 02:ed-a0:1d-9e:30",
+        );
+        assert!(!hyphen_sanitized.contains("02-ed-a0-1d-9e-30"));
+        assert!(hyphen_sanitized.contains("2026-11-16"));
+        assert!(hyphen_sanitized.contains("12345678-1234-1234-1234-123456789012"));
+        assert!(hyphen_sanitized.contains("303A:8298"));
+        assert!(hyphen_sanitized.contains("02:ed-a0:1d-9e:30"));
+    }
+
+    #[test]
+    fn private_fs_rejects_symlink_dirs_preserves_target_perms_and_refuses_fifo_nonblocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim_dir = dir.path().join("victim_dir");
+        fs::create_dir_all(&victim_dir).unwrap();
+        fs::set_permissions(&victim_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let link_dir = dir.path().join("link_dir");
+        symlink(&victim_dir, &link_dir).unwrap();
+        assert!(
+            write_private_json(&link_dir.join("out.json"), &json!({"ok": true})).is_err(),
+            "target dir symlink must be rejected"
+        );
+        assert_eq!(
+            fs::metadata(&victim_dir).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "symlink target directory permissions must not be modified"
+        );
+        assert!(
+            write_private_json(&link_dir.join("nested/out.json"), &json!({"ok": true})).is_err(),
+            "intermediate user-owned symlink must be rejected"
+        );
+        assert_eq!(
+            fs::metadata(&victim_dir).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+
+        let fifo_dir = dir.path().join("fifo_dir");
+        fs::create_dir_all(&fifo_dir).unwrap();
+        fs::set_permissions(&fifo_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let fifo_path = fifo_dir.join("pipe.json");
+        let c_fifo = std::ffi::CString::new(fifo_path.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fifo_for_thread = fifo_path.clone();
+        let handle = std::thread::spawn(move || {
+            let res = write_private_json(&fifo_for_thread, &json!({"secret": 1}));
+            let _ = tx.send(res);
+        });
+        let recv_res = rx.recv_timeout(Duration::from_millis(200));
+        if recv_res.is_err() {
+            let drain_fd =
+                unsafe { libc::open(c_fifo.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+            let _ = handle.join();
+            if drain_fd >= 0 {
+                unsafe { libc::close(drain_fd) };
+            }
+            panic!("write_private_json blocked when opening FIFO without O_NONBLOCK");
+        }
+        let _ = handle.join();
+        assert!(
+            recv_res.unwrap().is_err(),
+            "FIFO path must be rejected immediately"
+        );
+
+        let reader_fd = unsafe { libc::open(c_fifo.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+        assert!(reader_fd >= 0);
+        let active_res = write_private_json(&fifo_path, &json!({"secret": 2}));
+        let mut buf = [0u8; 32];
+        let n = unsafe { libc::read(reader_fd, buf.as_mut_ptr().cast(), buf.len()) };
+        unsafe { libc::close(reader_fd) };
+        assert!(
+            active_res.is_err(),
+            "FIFO with active reader must still be rejected"
+        );
+        assert!(n <= 0, "must never write bytes to FIFO");
     }
 }

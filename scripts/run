@@ -9,6 +9,7 @@ import plistlib
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -16,6 +17,73 @@ import uuid
 
 MAX_RETAINED_QA_RUNS = 20
 _QA_RUN_ID_RE = re.compile(r'^(\d+)-\d+$')
+
+
+def _ensure_private_dir(target: pathlib.Path) -> None:
+    anchored = pathlib.Path(os.path.abspath(target))
+    parts = anchored.parts
+    if not parts:
+        return
+    cur = pathlib.Path(parts[0])
+    current_uid = os.getuid()
+    for idx, part in enumerate(parts[1:], start=1):
+        cur = cur / part
+        is_target = idx == len(parts) - 1
+        try:
+            st = os.lstat(cur)
+        except FileNotFoundError:
+            os.mkdir(cur, 0o700)
+            st = os.lstat(cur)
+        if stat.S_ISLNK(st.st_mode):
+            if not is_target and st.st_uid == 0 and current_uid != 0:
+                continue
+            raise RuntimeError(f'Refusing symlink path component: {cur}')
+        if not stat.S_ISDIR(st.st_mode):
+            raise RuntimeError(f'Expected directory at {cur}')
+        if not is_target:
+            if st.st_uid not in (current_uid, 0):
+                raise RuntimeError(f'Untrusted ancestor directory owner at {cur}')
+            continue
+        dir_flags = (
+            os.O_RDONLY
+            | getattr(os, 'O_DIRECTORY', 0)
+            | getattr(os, 'O_NOFOLLOW', 0)
+            | getattr(os, 'O_CLOEXEC', 0)
+        )
+        dfd = os.open(cur, dir_flags)
+        try:
+            fst = os.fstat(dfd)
+            if not stat.S_ISDIR(fst.st_mode) or fst.st_uid != current_uid:
+                raise RuntimeError(f'Untrusted private directory: {cur}')
+            if stat.S_IMODE(fst.st_mode) != 0o700:
+                os.fchmod(dfd, 0o700)
+        finally:
+            os.close(dfd)
+
+
+def _open_secure_lock_file(lock_path: pathlib.Path) -> int:
+    _ensure_private_dir(lock_path.parent)
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, 'O_NOFOLLOW', 0)
+        | getattr(os, 'O_NONBLOCK', 0)
+        | getattr(os, 'O_CLOEXEC', 0)
+    )
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise RuntimeError(f'Refusing non-regular lock file: {lock_path}')
+        if st.st_uid != os.getuid():
+            raise RuntimeError(f'Lock file owner mismatch: {lock_path}')
+        mode = stat.S_IMODE(st.st_mode)
+        if (mode & 0o077) != 0:
+            raise RuntimeError(f'Lock file permissions too permissive ({oct(mode)}): {lock_path}')
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def _prune_stale_qa_runs(
@@ -170,9 +238,12 @@ def main() -> int:
 
     if not verify:
         doc_dir = _default_document_dir()
-        doc_dir.mkdir(parents=True, exist_ok=True)
         instance_lock_path = doc_dir / 'instance.lock'
-        instance_fd = os.open(instance_lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            instance_fd = _open_secure_lock_file(instance_lock_path)
+        except (OSError, RuntimeError) as exc:
+            print(f'Unsafe instance lock {instance_lock_path}: {exc}', file=sys.stderr)
+            raise SystemExit(2)
         try:
             fcntl.flock(instance_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(instance_fd, fcntl.LOCK_UN)
@@ -188,12 +259,19 @@ def main() -> int:
 
     if verify:
         qa_root = root / '.scratch/qa-runs'
-        qa_root.mkdir(parents=True, exist_ok=True)
-        os.chmod(qa_root, 0o700)
+        try:
+            _ensure_private_dir(qa_root)
+        except (OSError, RuntimeError) as exc:
+            print(f'Unsafe QA root {qa_root}: {exc}', file=sys.stderr)
+            raise SystemExit(2)
 
         if not unique_bundle:
             lock_path = qa_root / 'qa.lock'
-            lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                lock_fd = _open_secure_lock_file(lock_path)
+            except (OSError, RuntimeError) as exc:
+                print(f'Unsafe QA lock {lock_path}: {exc}', file=sys.stderr)
+                raise SystemExit(2)
             lock_handle = os.fdopen(lock_fd, 'r+', encoding='utf-8')
             try:
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

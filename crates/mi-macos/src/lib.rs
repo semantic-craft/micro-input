@@ -4,8 +4,9 @@ pub mod codex_sessions;
 pub mod executor;
 pub mod instance_lock;
 pub mod managed_controls;
-mod native_ax;
+pub mod native_ax;
 pub mod passive_panel;
+pub mod private_fs;
 pub mod scenarios;
 pub mod session_navigation;
 pub mod status_item;
@@ -33,6 +34,7 @@ pub use passive_panel::{
     PassivePanelStyleSpec, RecordingPassivePanelHost, RecordingPassivePanelState, ScreenGeometry,
     ScreenPoint, ScreenRect, ScreenSize,
 };
+pub use private_fs::{ensure_private_dir, open_private_file, PrivateOpenMode};
 pub use scenarios::{
     run_config_write_scenario, run_diagnostic_export_scenario, run_host_execution_scenario,
     run_lighting_control_scenario, write_private_json, DiagnosticRedactor, ScenarioResultSummary,

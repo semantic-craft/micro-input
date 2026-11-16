@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     cmp::Ordering,
-    fs::OpenOptions,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -15,22 +14,6 @@ const MAX_API_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_FIRMWARE_ASSET_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_CURL_STDERR_BYTES: u64 = 16 * 1024;
 const MAX_PRERELEASE_PAGES: u64 = 10;
-
-#[cfg(unix)]
-const O_NOFOLLOW_FLAG: i32 = {
-    #[cfg(target_os = "macos")]
-    {
-        0x0100
-    }
-    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "x86")))]
-    {
-        0o400000
-    }
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    {
-        0o100000
-    }
-};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -440,15 +423,7 @@ where
     let _ = response_byte_limit(Some(release.asset.size))?;
     let bytes = fetch(&release.asset.url, release.asset.size)?;
     let sha256 = verify_release_bytes(release, &bytes)?;
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(O_NOFOLLOW_FLAG);
-    }
-    let mut file = options
-        .open(destination)
+    let mut file = mi_macos::open_private_file(destination, mi_macos::PrivateOpenMode::CreateNew)
         .map_err(|e| format!("无法保存固件：{e}"))?;
     if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
         drop(file);
@@ -653,5 +628,26 @@ mod tests {
             "symlink destination must be refused"
         );
         assert_eq!(std::fs::read(&victim).unwrap(), b"KEEP");
+
+        let real_parent = dir.path().join("real_parent");
+        std::fs::create_dir_all(&real_parent).unwrap();
+        std::fs::set_permissions(&real_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link_parent = dir.path().join("link_parent");
+        symlink(&real_parent, &link_parent).unwrap();
+        assert!(
+            download_release_with(&release, &link_parent.join("fw.bin"), |_, _| Ok(
+                b"abc".to_vec()
+            ))
+            .is_err(),
+            "symlink parent dir must be refused"
+        );
+        assert_eq!(
+            std::fs::metadata(&real_parent)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
     }
 }

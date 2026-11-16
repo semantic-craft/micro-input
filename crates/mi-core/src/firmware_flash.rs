@@ -139,11 +139,7 @@ fn persist(
     error: Option<&str>,
 ) -> Result<(), String> {
     let temp = receipt.backup_dir.join("operation.json.next");
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(&temp).map_err(|e| e.to_string())?;
+    let mut file = mi_macos::open_private_file(&temp, mi_macos::PrivateOpenMode::Truncate)?;
     let bytes = serde_json::to_vec_pretty(&Operation {
         schema_version: 1,
         port,
@@ -328,7 +324,7 @@ pub fn flash(
         return Err("所选引导端口已经断开或身份变化，请重新选择".into());
     }
     let _awake = Awake::acquire()?;
-    fs::create_dir_all(backup_root).map_err(|e| e.to_string())?;
+    mi_macos::ensure_private_dir(backup_root)?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -338,6 +334,7 @@ pub fn flash(
     #[cfg(unix)]
     builder.mode(0o700);
     builder.create(&backup_dir).map_err(|e| e.to_string())?;
+    mi_macos::ensure_private_dir(&backup_dir)?;
     let mut receipt = FlashReceipt {
         backup_dir,
         backup_sha256: String::new(),

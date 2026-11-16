@@ -281,6 +281,7 @@ pub enum BackupCommand {
         profile_id: Option<String>,
         layer_id: Option<String>,
     },
+    #[serde(skip_deserializing)]
     ImportPreset {
         text: String,
     },

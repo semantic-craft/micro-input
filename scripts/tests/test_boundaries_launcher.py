@@ -124,3 +124,72 @@ pub unsafe extern "C" fn mi_core_good(ptr: *mut c_char) -> i32 {
 """
         self.assertEqual(module.find_unguarded_ffi_entrypoints("crates/mi-ffi/src/lib.rs", bad_ffi), ["mi_core_bad"])
         self.assertEqual(module.find_unguarded_ffi_entrypoints("crates/mi-ffi/src/lib.rs", good_ffi), [])
+
+    def test_rust_lexical_and_cfg_test_scanners_handle_edge_cases(self):
+        cfg_variants = """
+#[cfg(all(test, unix))]
+mod unix_tests {
+    fn t() { let _ = UnixStream::connect("/tmp/t1.sock"); }
+}
+#[cfg(any(test, feature = "sim"))]
+fn sim_helper() {
+    let _ = UnixStream::connect("/tmp/t2.sock");
+}
+"""
+        self.assertEqual(module.find_forbidden_unix_connect("crates/mi-core/src/a.rs", cfg_variants), [])
+
+        not_test_prod = """
+#[cfg(not(test))]
+fn prod_only() {
+    let _ = UnixStream::connect("/tmp/prod.sock");
+}
+"""
+        self.assertTrue(module.find_forbidden_unix_connect("crates/mi-core/src/a.rs", not_test_prod))
+
+        literals_and_comments = r'''
+fn safe<'a>(x: &'a str) {
+    // UnixStream::connect("/tmp/comment.sock");
+    /* outer /* nested */ UnixStream::connect("/tmp/nested.sock"); */
+    let _ = "UnixStream::connect(\"/tmp/str.sock\")";
+    let _ = b"UnixStream::connect(\"/tmp/bstr.sock\")";
+    let _ = c"UnixStream::connect(\"/tmp/cstr.sock\")";
+    let _ = r##"UnixStream::connect("#")"##;
+    let _ = br#"UnixStream::connect("x")"#;
+    let _ = '\'';
+}
+'''
+        self.assertEqual(module.find_forbidden_unix_connect("crates/mi-core/src/a.rs", literals_and_comments), [])
+
+        lifetime_then_call = """
+fn prod<'a, 'b>(_x: &'a str, _y: &'b str) {
+    let _ = UnixStream :: connect ("/tmp/ws.sock");
+}
+"""
+        self.assertTrue(module.find_forbidden_unix_connect("crates/mi-core/src/a.rs", lifetime_then_call))
+
+        ffi_edge_cases = r'''
+// #[no_mangle] pub extern "C" fn commented_out() {}
+#[unsafe(no_mangle)]
+pub extern "C" fn spoofed_str<'a>(_: &'a u8) {
+    let _ = "ffi_guard(";
+    // ffi_guard(
+    let _brace = "{";
+}
+
+#[no_mangle]
+#[inline(never)]
+pub unsafe extern "C" fn multi_attr_unguarded() -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub unsafe extern "C" fn guarded_ok<'a>(_x: &'a u8) -> i32 {
+    let _c = '\'';
+    ffi_guard(-1, "guarded_ok", || 0)
+}
+'''
+        self.assertEqual(
+            module.find_unguarded_ffi_entrypoints("crates/mi-ffi/src/lib.rs", ffi_edge_cases),
+            ["spoofed_str", "multi_attr_unguarded"],
+        )

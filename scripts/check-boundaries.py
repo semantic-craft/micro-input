@@ -47,7 +47,42 @@ _CLEAN_ROOM_COMMON_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
 _MD_SCRATCH_INPUT_STUDY = re.compile(r'\.scratch/input-study(?:/|\b)', re.IGNORECASE)
 _CODE_SCRATCH_INPUT_STUDY = re.compile(r'\.scratch/input-study/', re.IGNORECASE)
 _MD_TIMESTAMPED_QA_RUN = re.compile(r'\.scratch/qa-runs/\d{10,}', re.IGNORECASE)
-_FFI_EXPORT_RE = re.compile(r'(?:pub\s+|#\[no_mangle\]\s+)+(?:unsafe\s+)?extern\s+"C"\s+fn\s+([A-Za-z0-9_]+)\s*\(')
+_CHAR_ESCAPE_RE = re.compile(r"\\(?:['\"\\nrt0]|x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{1,24}\})'")
+_UNIX_CONNECT_RE = re.compile(r'\bUnixStream\s*::\s*connect\s*\(')
+_EXTERN_FN_RE = re.compile(r'\bextern(?:\s+(?=[A-Za-z_])|\s+)fn\s+([A-Za-z0-9_]+)\s*(?:<|\()')
+_FFI_GUARD_CALL_RE = re.compile(r'\bffi_guard\s*\(')
+
+
+def _is_ident_char(ch: str) -> bool:
+    return ch.isalnum() or ch == '_'
+
+
+def _advance_quoted_string(src: str, quote_idx: int) -> int:
+    n = len(src)
+    j = quote_idx + 1
+    while j < n:
+        if src[j] == '\\':
+            j += 2
+        elif src[j] == '"':
+            return j + 1
+        else:
+            j += 1
+    return n
+
+
+def _advance_char_literal_from_quote(src: str, quote_idx: int) -> int | None:
+    n = len(src)
+    if quote_idx + 2 < n and src[quote_idx + 1] == '\\':
+        m = _CHAR_ESCAPE_RE.match(src, quote_idx + 1)
+        if m:
+            return m.end()
+    elif (
+        quote_idx + 2 < n
+        and src[quote_idx + 1] not in ('\\', "'", '\n', '\r')
+        and src[quote_idx + 2] == "'"
+    ):
+        return quote_idx + 3
+    return None
 
 
 def _advance_rust_trivia_or_literal(src: str, idx: int) -> int | None:
@@ -71,35 +106,49 @@ def _advance_rust_trivia_or_literal(src: str, idx: int) -> int | None:
             else:
                 j += 1
         return j
-    if src.startswith('r"', idx) or src.startswith('r#"', idx):
-        j = idx + 1
-        hashes = 0
-        while j < n and src[j] == '#':
-            hashes += 1
-            j += 1
-        if j < n and src[j] == '"':
-            j += 1
-            closing = '"' + '#' * hashes
-            end = src.find(closing, j)
-            return n if end == -1 else end + len(closing)
-    if ch == '"':
-        j = idx + 1
-        while j < n:
-            if src[j] == '\\':
-                j += 2
-            elif src[j] == '"':
-                return j + 1
-            else:
+    at_ident_boundary = idx == 0 or not _is_ident_char(src[idx - 1])
+    if at_ident_boundary:
+        raw_prefix_len = 0
+        if src[idx : idx + 2] in ('br', 'rb', 'cr', 'rc'):
+            raw_prefix_len = 2
+        elif ch == 'r':
+            raw_prefix_len = 1
+        if raw_prefix_len:
+            j = idx + raw_prefix_len
+            while j < n and src[j] == '#':
                 j += 1
-        return n
+            if j < n and src[j] == '"':
+                closing = '"' + '#' * (j - idx - raw_prefix_len)
+                end = src.find(closing, j + 1)
+                return n if end == -1 else end + len(closing)
+        if ch in ('b', 'c') and idx + 1 < n and src[idx + 1] == '"':
+            return _advance_quoted_string(src, idx + 1)
+        if ch == 'b' and idx + 1 < n and src[idx + 1] == "'":
+            return _advance_char_literal_from_quote(src, idx + 1)
+    if ch == '"':
+        return _advance_quoted_string(src, idx)
     if ch == "'":
-        if idx + 1 < n and src[idx + 1] == '\\':
-            end = src.find("'", idx + 2, min(n, idx + 8))
-            if end != -1:
-                return end + 1
-        elif idx + 2 < n and src[idx + 2] == "'":
-            return idx + 3
+        return _advance_char_literal_from_quote(src, idx)
     return None
+
+
+def _blank_rust_comments_and_literals(src: str) -> str:
+    n = len(src)
+    out: list[str] = []
+    i = 0
+    while i < n:
+        if src[i] in ' \t\r\n':
+            out.append(src[i])
+            i += 1
+            continue
+        skipped = _advance_rust_trivia_or_literal(src, i)
+        if skipped is not None:
+            out.append(re.sub(r'[^\n]', ' ', src[i:skipped]))
+            i = skipped
+            continue
+        out.append(src[i])
+        i += 1
+    return ''.join(out)
 
 
 def _find_matching_delimiter(src: str, open_idx: int, open_ch: str, close_ch: str) -> int:
@@ -121,6 +170,40 @@ def _find_matching_delimiter(src: str, open_idx: int, open_ch: str, close_ch: st
     return n - 1
 
 
+def _find_matching_delimiter_backward(src: str, close_idx: int, open_ch: str, close_ch: str) -> int:
+    depth = 1
+    i = close_idx - 1
+    while i >= 0 and depth > 0:
+        if src[i] == close_ch:
+            depth += 1
+        elif src[i] == open_ch:
+            depth -= 1
+            if depth == 0:
+                return i
+        i -= 1
+    return -1
+
+
+def _is_cfg_test_attribute(attr_src: str) -> bool:
+    clean = _blank_rust_comments_and_literals(attr_src).strip()
+    m = re.match(r'^cfg\s*\(', clean)
+    if not m:
+        return False
+    close_paren = _find_matching_delimiter(clean, m.end() - 1, '(', ')')
+    if clean[close_paren + 1 :].strip():
+        return False
+    inner = list(clean[m.end() : close_paren])
+    while True:
+        joined = ''.join(inner)
+        nm = re.search(r'\bnot\s*\(', joined)
+        if not nm:
+            break
+        end_not = _find_matching_delimiter(joined, nm.end() - 1, '(', ')')
+        for k in range(nm.start(), min(len(inner), end_not + 1)):
+            inner[k] = ' '
+    return bool(re.search(r'\btest\b', ''.join(inner)))
+
+
 def _strip_rust_cfg_test(src: str) -> str:
     n = len(src)
     out: list[str] = []
@@ -131,37 +214,39 @@ def _strip_rust_cfg_test(src: str) -> str:
             out.append(src[i:skipped])
             i = skipped
             continue
-        if src.startswith('#[cfg(test)]', i):
-            item_start = i
-            i += len('#[cfg(test)]')
-            while i < n:
-                skipped = _advance_rust_trivia_or_literal(src, i)
-                if skipped is not None:
-                    i = skipped
-                    continue
-                if src.startswith('#[', i):
-                    i = _find_matching_delimiter(src, i + 1, '[', ']') + 1
-                    continue
-                break
-            paren_depth = 0
-            while i < n:
-                skipped = _advance_rust_trivia_or_literal(src, i)
-                if skipped is not None:
-                    i = skipped
-                    continue
-                if src[i] == '(':
-                    paren_depth += 1
-                elif src[i] == ')':
-                    paren_depth = max(0, paren_depth - 1)
-                elif paren_depth == 0 and src[i] == ';':
+        if src.startswith('#[', i):
+            close_bracket = _find_matching_delimiter(src, i + 1, '[', ']')
+            if _is_cfg_test_attribute(src[i + 2 : close_bracket]):
+                item_start = i
+                i = close_bracket + 1
+                while i < n:
+                    skipped = _advance_rust_trivia_or_literal(src, i)
+                    if skipped is not None:
+                        i = skipped
+                        continue
+                    if src.startswith('#[', i):
+                        i = _find_matching_delimiter(src, i + 1, '[', ']') + 1
+                        continue
+                    break
+                paren_depth = 0
+                while i < n:
+                    skipped = _advance_rust_trivia_or_literal(src, i)
+                    if skipped is not None:
+                        i = skipped
+                        continue
+                    if src[i] == '(':
+                        paren_depth += 1
+                    elif src[i] == ')':
+                        paren_depth = max(0, paren_depth - 1)
+                    elif paren_depth == 0 and src[i] == ';':
+                        i += 1
+                        break
+                    elif paren_depth == 0 and src[i] == '{':
+                        i = _find_matching_delimiter(src, i, '{', '}') + 1
+                        break
                     i += 1
-                    break
-                elif paren_depth == 0 and src[i] == '{':
-                    i = _find_matching_delimiter(src, i, '{', '}') + 1
-                    break
-                i += 1
-            out.append(re.sub(r'[^\n]', ' ', src[item_start:i]))
-            continue
+                out.append(re.sub(r'[^\n]', ' ', src[item_start:i]))
+                continue
         out.append(src[i])
         i += 1
     return ''.join(out)
@@ -192,35 +277,113 @@ def find_forbidden_unix_connect(rel_path: str, text: str) -> list[str]:
         or '/tests/' in rel_path
     ):
         return []
-    prod_text = _strip_rust_cfg_test(text)
-    return [
-        f'{rel_path}:{lineno}: {line.strip()}'
-        for lineno, line in enumerate(prod_text.splitlines(), 1)
-        if 'UnixStream::connect(' in line
-    ]
+    prod_text = _blank_rust_comments_and_literals(_strip_rust_cfg_test(text))
+    lines = prod_text.splitlines()
+    findings: list[str] = []
+    seen_lines: set[int] = set()
+    for match in _UNIX_CONNECT_RE.finditer(prod_text):
+        lineno = prod_text.count('\n', 0, match.start()) + 1
+        if lineno not in seen_lines:
+            seen_lines.add(lineno)
+            findings.append(f'{rel_path}:{lineno}: {lines[lineno - 1].strip()}')
+    return findings
+
+
+def _is_c_abi_extern(prod_text: str, extern_start: int, fn_pos: int) -> bool:
+    idx = extern_start + len('extern')
+    abi: str | None = None
+    while idx < fn_pos:
+        ch = prod_text[idx]
+        if ch in ' \t\r\n' or prod_text.startswith('//', idx) or prod_text.startswith('/*', idx):
+            skipped = _advance_rust_trivia_or_literal(prod_text, idx)
+            if skipped is not None:
+                idx = skipped
+                continue
+        if ch == '"':
+            end = _advance_quoted_string(prod_text, idx)
+            abi = prod_text[idx + 1 : end - 1]
+            idx = end
+            continue
+        idx += 1
+    return abi is None or abi in ('C', 'C-unwind')
+
+
+def _has_ffi_export_prefix(code_text: str, extern_start: int) -> bool:
+    pos = extern_start
+    has_pub = False
+    has_export_attr = False
+    while pos > 0:
+        while pos > 0 and code_text[pos - 1].isspace():
+            pos -= 1
+        if pos == 0:
+            break
+        kw_match = re.search(r'(?:^|[^A-Za-z0-9_])(unsafe|pub)$', code_text[:pos])
+        if kw_match:
+            if kw_match.group(1) == 'pub':
+                has_pub = True
+            pos -= len(kw_match.group(1))
+            continue
+        if code_text[pos - 1] == ')':
+            open_paren = _find_matching_delimiter_backward(code_text, pos - 1, '(', ')')
+            if open_paren == -1:
+                break
+            pub_match = re.search(r'(?:^|[^A-Za-z0-9_])pub\s*$', code_text[:open_paren])
+            if not pub_match:
+                break
+            pos = open_paren - len(pub_match.group(0))
+            if pub_match.group(0)[0] not in 'p':
+                pos += 1
+            continue
+        if code_text[pos - 1] == ']':
+            open_bracket = _find_matching_delimiter_backward(code_text, pos - 1, '[', ']')
+            if open_bracket <= 0:
+                break
+            hash_pos = open_bracket - 1
+            while hash_pos >= 0 and code_text[hash_pos].isspace():
+                hash_pos -= 1
+            if hash_pos < 0 or code_text[hash_pos] != '#':
+                break
+            attr_body = code_text[open_bracket + 1 : pos - 1]
+            if re.search(r'\b(?:no_mangle|export_name)\b', attr_body):
+                has_export_attr = True
+            pos = hash_pos
+            continue
+        break
+    return has_pub or has_export_attr
 
 
 def find_unguarded_ffi_entrypoints(rel_path: str, text: str) -> list[str]:
     prod_text = _strip_rust_cfg_test(text)
+    code_text = _blank_rust_comments_and_literals(prod_text)
     unguarded: list[str] = []
-    for match in _FFI_EXPORT_RE.finditer(prod_text):
+    for match in _EXTERN_FN_RE.finditer(code_text):
         fn_name = match.group(1)
-        brace_idx = match.end()
-        while brace_idx < len(prod_text) and prod_text[brace_idx] != '{':
-            skipped = _advance_rust_trivia_or_literal(prod_text, brace_idx)
-            if skipped is not None:
-                brace_idx = skipped
-                continue
-            if prod_text[brace_idx] == '(':
-                brace_idx = _find_matching_delimiter(prod_text, brace_idx, '(', ')') + 1
-                continue
-            brace_idx += 1
-        if brace_idx >= len(prod_text):
-            unguarded.append(fn_name)
+        fn_pos = code_text.find('fn', match.start(), match.end())
+        if not _is_c_abi_extern(prod_text, match.start(), fn_pos):
             continue
-        close_idx = _find_matching_delimiter(prod_text, brace_idx, '{', '}')
-        body = prod_text[brace_idx : close_idx + 1]
-        if 'ffi_guard(' not in body:
+        if not _has_ffi_export_prefix(code_text, match.start()):
+            continue
+        idx = match.end() - 1
+        found_body = False
+        while idx < len(code_text):
+            ch = code_text[idx]
+            if ch == '(':
+                idx = _find_matching_delimiter(code_text, idx, '(', ')') + 1
+                continue
+            if ch == '[':
+                idx = _find_matching_delimiter(code_text, idx, '[', ']') + 1
+                continue
+            if ch == ';':
+                break
+            if ch == '{':
+                found_body = True
+                break
+            idx += 1
+        if not found_body:
+            continue
+        close_idx = _find_matching_delimiter(code_text, idx, '{', '}')
+        body = code_text[idx : close_idx + 1]
+        if not _FFI_GUARD_CALL_RE.search(body):
             unguarded.append(fn_name)
     return unguarded
 
