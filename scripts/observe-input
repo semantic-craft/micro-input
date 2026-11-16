@@ -25,7 +25,7 @@ if MODE != ['--observe-once']:
     sys.exit(2)
 
 experiment = str(uuid.uuid4())
-private = ROOT / '.scratch' / 'input-study' / ('input-observation-' + experiment)
+private = ROOT / '.scratch' / 'hardware-probes' / ('input-observation-' + experiment)
 private.mkdir(parents=True, mode=0o700)
 env.update(MI_INPUT_OBSERVATION_OPERATOR='I_AUTHORIZE_ONE_READONLY_INPUT_OBSERVATION',
            MI_INPUT_OBSERVATION_ID=experiment, MI_INPUT_OBSERVATION_SECONDS='45',

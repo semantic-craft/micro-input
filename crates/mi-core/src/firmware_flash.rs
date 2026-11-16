@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -156,11 +156,23 @@ fn persist(
         .map_err(|e| e.to_string())
 }
 
+const MAX_FIRMWARE_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+
 fn image_bytes(firmware: &DownloadedFirmware) -> Result<Vec<u8>, String> {
     if !firmware.digest_verified {
         return Err("此资产没有通过官方 SHA-256 校验，不能自动安装".into());
     }
-    let bytes = fs::read(&firmware.path).map_err(|e| e.to_string())?;
+    if firmware.size == 0 || firmware.size > MAX_FIRMWARE_IMAGE_BYTES {
+        return Err("下载后的固件文件大小超出允许范围".into());
+    }
+    let file = mi_macos::open_verified_readonly_file(&firmware.path)?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if meta.len() != firmware.size {
+        return Err("下载后的固件文件已变化，请重新下载".into());
+    }
+    let mut bytes = Vec::with_capacity(firmware.size as usize);
+    Read::read_to_end(&mut file.take(firmware.size.saturating_add(1)), &mut bytes)
+        .map_err(|e| e.to_string())?;
     if bytes.len() as u64 != firmware.size
         || format!("{:x}", Sha256::digest(&bytes)) != firmware.sha256
     {
@@ -607,6 +619,50 @@ mod tests {
             ..firmware
         };
         assert!(image_bytes(&wrong_chip).unwrap_err().contains("ESP32-S3"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_bytes_rejects_symlink_oversized_and_preserves_0644_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let real_path = dir.path().join("real-firmware.bin");
+        let mut bytes = vec![0u8; 24];
+        bytes[0] = 0xe9;
+        bytes[12] = 9;
+        fs::write(&real_path, &bytes).unwrap();
+        fs::set_permissions(&real_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let firmware_0644 = DownloadedFirmware {
+            path: real_path.clone(),
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            digest_verified: true,
+            size: bytes.len() as u64,
+        };
+        assert!(image_bytes(&firmware_0644).is_ok());
+        let mode = fs::metadata(&real_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+
+        let link_path = dir.path().join("symlink-firmware.bin");
+        symlink(&real_path, &link_path).unwrap();
+        let symlink_fw = DownloadedFirmware {
+            path: link_path,
+            ..firmware_0644.clone()
+        };
+        assert!(image_bytes(&symlink_fw).is_err());
+
+        let zero_fw = DownloadedFirmware {
+            size: 0,
+            ..firmware_0644.clone()
+        };
+        assert!(image_bytes(&zero_fw).is_err());
+
+        let huge_fw = DownloadedFirmware {
+            size: MAX_FIRMWARE_IMAGE_BYTES + 1,
+            ..firmware_0644
+        };
+        assert!(image_bytes(&huge_fw).is_err());
     }
 
     #[test]

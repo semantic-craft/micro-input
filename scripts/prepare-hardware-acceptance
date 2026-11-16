@@ -86,7 +86,7 @@ def selected_files(args):
 
 def prepare(args):
     baseline = selected_files(args)
-    output = args.output or ROOT / '.scratch' / 'input-study' / ('hardware-kit-' + uuid.uuid4().hex)
+    output = args.output or ROOT / '.scratch' / 'hardware-probes' / ('hardware-kit-' + uuid.uuid4().hex)
     output = output.absolute()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.mkdir(mode=0o700)  # Never reuse or overwrite an existing kit.

@@ -74,7 +74,7 @@ class HardwareExecutorTests(unittest.TestCase):
             self.assertTrue(kwargs['start_new_session'])
             self.assertEqual(kwargs['env']['MI_HARDWARE_PATH'], 'mock-only-path')
             self.assertEqual(kwargs['env']['MI_HARDWARE_OPERATOR'], 'I_AUTHORIZE_H0_READONLY_BACKUP' if scope=='h0' else 'I_AUTHORIZE_H1_EXACT_TEMPFILE')
-            journals=list(self.root.glob('.scratch/input-study/hardware-supervisor-*/prepared.json'))
+            journals=list(self.root.glob('.scratch/hardware-probes/hardware-supervisor-*/prepared.json'))
             self.assertTrue(journals)
             for p in journals:
                 self.assertEqual(p.stat().st_mode & 0o777, 0o600)
@@ -99,4 +99,4 @@ class HardwareExecutorTests(unittest.TestCase):
         self.assertEqual(kills.call_count,1)
         self.assertEqual(kills.call_args.args[0],999999)
         self.assertEqual(len(list(self.root.glob('*.h1-claimed.json'))),1)
-        self.assertEqual(len(list(self.root.glob('.scratch/input-study/*/stopped-unknown.json'))),1)
+        self.assertEqual(len(list(self.root.glob('.scratch/hardware-probes/*/stopped-unknown.json'))),1)

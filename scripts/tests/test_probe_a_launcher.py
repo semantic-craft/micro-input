@@ -56,7 +56,7 @@ class ProbeALauncherTests(unittest.TestCase):
         def fake_popen(command, **kwargs):
             # The real prepared journal must be private and durable enough to
             # reopen before the launcher is allowed to create its child.
-            prepared = list(root.glob(f'.scratch/input-study/probe-{self.probe}-supervisor-*/prepared.json'))
+            prepared = list(root.glob(f'.scratch/hardware-probes/probe-{self.probe}-supervisor-*/prepared.json'))
             self.assertEqual(len(prepared), 1)
             self.assertIsNone(json.loads(prepared[0].read_text())['pid'])
             self.assertEqual(stat.S_IMODE(prepared[0].stat().st_mode), 0o600)
@@ -75,7 +75,7 @@ class ProbeALauncherTests(unittest.TestCase):
                 contextlib.redirect_stderr(stderr):
             with self.assertRaises(SystemExit) as exit_result:
                 runpy.run_path(str(script), run_name='__main__')
-        directories = list(root.glob(f'.scratch/input-study/probe-{self.probe}-supervisor-*'))
+        directories = list(root.glob(f'.scratch/hardware-probes/probe-{self.probe}-supervisor-*'))
         self.assertEqual(len(directories), 1)
         self.assertEqual(stat.S_IMODE(directories[0].stat().st_mode), 0o700)
         journals = {}

@@ -131,7 +131,7 @@ stateDiagram-v2
   Unchanged --> Editing
 ```
 
-IA-06、07、13、14。前端 `lV=3`，tick 将倒计时递减到 0 后在下一次 tick 执行发送；不能把常量 3 直接作为“精确 3 秒端到端更新延迟”。主界面 effect 在配置完成/layout 阶段调用 `stageConfig`，首次 effect 被跳过。
+IA-06、07、13、14。前端倒计时初值设为 3，tick 将倒计时递减到 0 后在下一次 tick 执行发送；不能把常量 3 直接作为“精确 3 秒端到端更新延迟”。主界面 effect 在配置完成/layout 阶段调用 `stageConfig`，首次 effect 被跳过。
 
 Profile 下拉选择处理器同时调用所选和所用 Profile 的 setter，并把层选择设为 0。因此已有“切换 Profile 名称也会触发更新”的观察有代码线索支持；这不是一次新的设备行为验收。
 

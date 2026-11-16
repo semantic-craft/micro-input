@@ -8419,7 +8419,8 @@ fn find_freshest_antigravity_hub() -> Option<(u16, CsrfToken, AntigravityInstanc
 }
 
 fn find_freshest_antigravity_hub_in(daemon_dir: &Path) -> Option<ParsedAntigravityHub> {
-    let entries = fs::read_dir(daemon_dir).ok()?;
+    let verified_dir = mi_macos::verify_existing_private_dir(daemon_dir).ok()?;
+    let entries = fs::read_dir(&verified_dir).ok()?;
     let mut hubs: Vec<(std::time::SystemTime, PathBuf)> = entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {
@@ -8428,7 +8429,11 @@ fn find_freshest_antigravity_hub_in(daemon_dir: &Path) -> Option<ParsedAntigravi
             if !name.starts_with("hub_") || !name.ends_with(".json") {
                 return None;
             }
-            let modified = e.metadata().ok()?.modified().ok()?;
+            let entry_meta = fs::symlink_metadata(&path).ok()?;
+            if entry_meta.file_type().is_symlink() || !entry_meta.file_type().is_file() {
+                return None;
+            }
+            let modified = entry_meta.modified().ok()?;
             Some((modified, path))
         })
         .collect();
@@ -9072,6 +9077,73 @@ mod tests {
             parse_antigravity_http_200_body(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\n{}"),
             Some(b"{}".as_slice())
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_hub_discovery_rejects_symlinked_and_world_or_group_writable_daemon_dir() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let parent = tempfile::tempdir().unwrap();
+        let real_dir = parent.path().join("real_daemon");
+        fs::create_dir_all(&real_dir).unwrap();
+        fs::set_permissions(&real_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let hub_path = real_dir.join("hub_live.json");
+        fs::write(
+            &hub_path,
+            r#"{"httpPort":9001,"httpsPort":9443,"csrfToken":"valid-token-123"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&hub_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let symlink_dir = parent.path().join("linked_daemon");
+        symlink(&real_dir, &symlink_dir).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&symlink_dir).is_none());
+
+        fs::set_permissions(&real_dir, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&real_dir).is_none());
+
+        fs::set_permissions(&real_dir, fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&real_dir).is_none());
+
+        fs::set_permissions(&real_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&real_dir).is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_hub_discovery_rejects_symlinked_and_writable_ancestor_dir() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let ancestor = root.path().join("ancestor");
+        let daemon_dir = ancestor.join("daemon");
+        fs::create_dir_all(&daemon_dir).unwrap();
+        fs::set_permissions(&daemon_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let hub_path = daemon_dir.join("hub_live.json");
+        fs::write(
+            &hub_path,
+            r#"{"httpPort":9001,"httpsPort":9443,"csrfToken":"valid-token-123"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&hub_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let symlink_ancestor = root.path().join("linked_ancestor");
+        symlink(&ancestor, &symlink_ancestor).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&symlink_ancestor.join("daemon")).is_none());
+
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&daemon_dir).is_none());
+
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&daemon_dir).is_none());
+
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o1777)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&daemon_dir).is_some());
+
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(find_freshest_antigravity_hub_in(&daemon_dir).is_some());
     }
 
     #[test]

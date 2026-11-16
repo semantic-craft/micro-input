@@ -1229,6 +1229,11 @@ impl Drop for ModelPickerMouseTap {
 #[cfg(not(target_os = "macos"))]
 struct ModelPickerMouseTap;
 
+pub(crate) fn is_sensitive_pasteboard_type(uti: &str) -> bool {
+    uti.eq_ignore_ascii_case("org.nspasteboard.ConcealedType")
+        || uti.eq_ignore_ascii_case("org.nspasteboard.TransientType")
+}
+
 #[cfg(target_os = "macos")]
 mod macos_pasteboard {
     use super::{ClipboardItemSnapshot, ClipboardSnapshot};
@@ -1446,6 +1451,38 @@ mod macos_pasteboard {
                 let sel_data_for_type = sel(b"dataForType:\0");
                 let sel_length = sel(b"length\0");
                 let sel_bytes = sel(b"bytes\0");
+
+                for i in 0..item_count {
+                    let item = msg_1_usize(items_arr, sel_obj_at, i);
+                    if item.is_null() {
+                        continue;
+                    }
+                    let types_arr = msg_0(item, sel_types);
+                    if types_arr.is_null() {
+                        continue;
+                    }
+                    let type_count = msg_0_usize(types_arr, sel_count);
+                    for j in 0..type_count {
+                        let ns_type = msg_1_usize(types_arr, sel_obj_at, j);
+                        if ns_type.is_null() {
+                            continue;
+                        }
+                        let cstr = msg_0_cstr(ns_type, sel_utf8);
+                        if cstr.is_null() {
+                            continue;
+                        }
+                        let uti = CStr::from_ptr(cstr).to_string_lossy();
+                        if super::is_sensitive_pasteboard_type(&uti) {
+                            return (
+                                ClipboardSnapshot {
+                                    change_count: cc,
+                                    items: Vec::new(),
+                                },
+                                true,
+                            );
+                        }
+                    }
+                }
 
                 for i in 0..item_count {
                     let item = msg_1_usize(items_arr, sel_obj_at, i);
@@ -1735,6 +1772,19 @@ impl ClipboardBackend for InMemoryClipboardBackend {
 
     fn snapshot(&self, max_bytes: usize) -> (ClipboardSnapshot, bool) {
         let st = self.state.lock().unwrap();
+        if st.items.iter().any(|item| {
+            item.types_and_bytes
+                .iter()
+                .any(|(uti, _)| is_sensitive_pasteboard_type(uti))
+        }) {
+            return (
+                ClipboardSnapshot {
+                    change_count: st.change_count,
+                    items: Vec::new(),
+                },
+                true,
+            );
+        }
         let was_empty = st.items.is_empty();
         let mut total = 0usize;
         let mut items = Vec::new();
@@ -1979,8 +2029,12 @@ impl HostOsDriver for MacOsSystemDriver {
     }
 
     fn open_application(&self, bundle_id: &str) -> Result<(), String> {
+        if !mi_model::host_router::is_valid_bundle_id(bundle_id) {
+            return Err("invalid_bundle_id".to_string());
+        }
         let status = Command::new("/usr/bin/open")
             .args(["-b", bundle_id])
+            .stdin(std::process::Stdio::null())
             .status()
             .map_err(|e| e.to_string())?;
         if status.success() {
@@ -3568,7 +3622,9 @@ impl<D: HostOsDriver> LiveHostActionExecutor<D> {
                     };
                 }
                 if let Some(bundle_id) = target_bundle_id {
-                    let _ = self.driver.open_application(bundle_id);
+                    if let Err(err) = self.driver.open_application(bundle_id) {
+                        return make_receipt("failed", err);
+                    }
                 }
                 let snapshot = self.driver.snapshot_clipboard(MAX_CLIPBOARD_STASH_BYTES);
                 let written_cc = match self.driver.write_clipboard_plain_text_checked(sanitized) {
@@ -4619,6 +4675,107 @@ mod serialized_effect_tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn live_appkit_pasteboard_skips_concealed_and_transient_types_and_clears_injected_text() {
+        let Some(backend) = LiveMacOsClipboardBackend::unique_for_test() else {
+            panic!("pasteboardWithUniqueName should succeed on macOS");
+        };
+        let backend = Arc::new(backend);
+        backend
+            .pasteboard
+            .write_items(&[ClipboardItemSnapshot {
+                types_and_bytes: vec![
+                    ("public.utf8-plain-text".into(), b"s3cr3t-pass".to_vec()),
+                    ("org.nspasteboard.ConcealedType".into(), b"1".to_vec()),
+                ],
+            }])
+            .unwrap();
+        let driver = MacOsSystemDriver::with_clipboard_backend(Arc::clone(&backend) as _);
+
+        let snapshot = driver.snapshot_clipboard(65536);
+        assert!(snapshot.items.is_empty());
+        let new_cc = driver
+            .write_clipboard_plain_text_checked("injected")
+            .unwrap();
+        assert!(driver.restore_clipboard(&snapshot, new_cc));
+
+        let (after, was_empty) = backend.snapshot(65536);
+        assert!(was_empty);
+        assert!(after.items.is_empty());
+
+        backend
+            .pasteboard
+            .write_items(&[
+                ClipboardItemSnapshot {
+                    types_and_bytes: vec![(
+                        "public.utf8-plain-text".into(),
+                        b"first-item".to_vec(),
+                    )],
+                },
+                ClipboardItemSnapshot {
+                    types_and_bytes: vec![("ORG.NSPASTEBOARD.TRANSIENTTYPE".into(), b"1".to_vec())],
+                },
+            ])
+            .unwrap();
+        let (transient_snap, transient_empty) = backend.snapshot(65536);
+        assert!(transient_empty);
+        assert!(transient_snap.items.is_empty());
+
+        let snap2 = driver.snapshot_clipboard(65536);
+        let written_cc2 = driver
+            .write_clipboard_plain_text_checked("injected-2")
+            .unwrap();
+        backend
+            .pasteboard
+            .write_items(&[ClipboardItemSnapshot {
+                types_and_bytes: vec![("public.utf8-plain-text".into(), b"user-newer".to_vec())],
+            }])
+            .unwrap();
+        assert!(!driver.restore_clipboard(&snap2, written_cc2));
+        let (newer, newer_empty) = backend.snapshot(65536);
+        assert!(!newer_empty);
+        assert_eq!(newer.items[0].types_and_bytes[0].1, b"user-newer");
+    }
+
+    #[test]
+    fn in_memory_clipboard_skips_transient_and_concealed_types_case_insensitively() {
+        let backend = Arc::new(InMemoryClipboardBackend::default());
+        {
+            let mut st = backend.state.lock().unwrap();
+            st.change_count = 10;
+            st.items = vec![ClipboardItemSnapshot {
+                types_and_bytes: vec![
+                    ("public.utf8-plain-text".into(), b"secret".to_vec()),
+                    ("ORG.NSPASTEBOARD.TRANSIENTTYPE".into(), b"1".to_vec()),
+                ],
+            }];
+        }
+        let (snap, was_empty) = backend.snapshot(65536);
+        assert!(was_empty);
+        assert!(snap.items.is_empty());
+        assert_eq!(snap.change_count, 10);
+
+        let driver = MacOsSystemDriver::with_clipboard_backend(Arc::clone(&backend) as _);
+        let driver_snap = driver.snapshot_clipboard(65536);
+        assert!(driver_snap.items.is_empty());
+        let written_cc = driver
+            .write_clipboard_plain_text_checked("injected")
+            .unwrap();
+        {
+            let mut st = backend.state.lock().unwrap();
+            st.change_count += 1;
+            st.items = vec![ClipboardItemSnapshot {
+                types_and_bytes: vec![("public.utf8-plain-text".into(), b"newer-user".to_vec())],
+            }];
+        }
+        assert!(!driver.restore_clipboard(&driver_snap, written_cc));
+        assert_eq!(
+            backend.state.lock().unwrap().items[0].types_and_bytes[0].1,
+            b"newer-user"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn cf_string_to_rust_rejects_mismatched_cf_type() {
         #[link(name = "CoreFoundation", kind = "framework")]
         unsafe extern "C" {
@@ -4699,6 +4856,131 @@ mod serialized_effect_tests {
         )
         .unwrap_err();
         assert!(err.contains("NSMutableArray"));
+    }
+
+    #[test]
+    fn open_application_rejects_malformed_and_option_injection_bundle_ids() {
+        let driver = MacOsSystemDriver::new_isolated();
+        for bad in [
+            "",
+            "-a.evil",
+            "com.apple.Safari' || kMDItemFSName == '*'",
+            "singleword",
+            "com.example..app",
+        ] {
+            assert_eq!(
+                driver.open_application(bad).unwrap_err(),
+                "invalid_bundle_id"
+            );
+        }
+    }
+
+    #[test]
+    fn paste_text_with_invalid_target_bundle_id_fails_without_touching_clipboard_or_cmd_v() {
+        struct TrustedMacOpenDriver {
+            system: MacOsSystemDriver,
+            recording: RecordingOsDriver,
+        }
+
+        impl HostOsDriver for TrustedMacOpenDriver {
+            fn is_accessibility_trusted(&self) -> bool {
+                self.recording.is_accessibility_trusted()
+            }
+            fn open_application(&self, bundle_id: &str) -> Result<(), String> {
+                self.system.open_application(bundle_id)
+            }
+            fn post_key_shortcut(
+                &self,
+                key_code: u16,
+                modifiers: &[String],
+                key_down: bool,
+            ) -> Result<(), String> {
+                self.recording
+                    .post_key_shortcut(key_code, modifiers, key_down)
+            }
+            fn post_apple_fn_flags(&self, key_down: bool) -> Result<(), String> {
+                self.recording.post_apple_fn_flags(key_down)
+            }
+            fn snapshot_clipboard(&self, max_bytes: usize) -> ClipboardSnapshot {
+                self.recording.snapshot_clipboard(max_bytes)
+            }
+            fn write_clipboard_plain_text(&self, text: &str) -> u64 {
+                self.recording.write_clipboard_plain_text(text)
+            }
+            fn write_clipboard_plain_text_checked(&self, text: &str) -> Result<u64, String> {
+                self.recording.write_clipboard_plain_text_checked(text)
+            }
+            fn restore_clipboard(&self, snapshot: &ClipboardSnapshot, expected: u64) -> bool {
+                self.recording.restore_clipboard(snapshot, expected)
+            }
+            fn open_url(&self, url: &str) -> Result<(), String> {
+                self.recording.open_url(url)
+            }
+            fn focus_agent_input(&self, adapter: &str) -> Result<(), String> {
+                self.recording.focus_agent_input(adapter)
+            }
+            fn stop_active_dictation(&self, adapter: &str) -> Result<bool, String> {
+                self.recording.stop_active_dictation(adapter)
+            }
+            fn scroll_window(&self, req: &DialScrollRequest) -> Result<(), String> {
+                self.recording.scroll_window(req)
+            }
+            fn move_cursor_by(&self, dx: f64, dy: f64) -> Result<(), String> {
+                self.recording.move_cursor_by(dx, dy)
+            }
+            fn click_mouse_button(&self, button: MouseButtonKind) -> Result<(), String> {
+                self.recording.click_mouse_button(button)
+            }
+            fn scroll_cursor_wheel(&self, dx: i32, dy: i32) -> Result<(), String> {
+                self.recording.scroll_cursor_wheel(dx, dy)
+            }
+            fn new_conversation_in_project(&self, adapter: &str) -> Result<(), String> {
+                self.recording.new_conversation_in_project(adapter)
+            }
+            fn toggle_live_voice(&self, adapter: &str) -> Result<(), String> {
+                self.recording.toggle_live_voice(adapter)
+            }
+        }
+
+        let recording = RecordingOsDriver::new(true);
+        recording.seed_clipboard(
+            vec![ClipboardItemSnapshot {
+                types_and_bytes: vec![("public.utf8-plain-text".into(), b"keep-me".to_vec())],
+            }],
+            7,
+        );
+        let driver = TrustedMacOpenDriver {
+            system: MacOsSystemDriver::new_isolated(),
+            recording: recording.clone(),
+        };
+        let executor = LiveHostActionExecutor::new(driver);
+        let receipt = executor.execute(
+            "Notes",
+            "AG00",
+            &ResolvedHostAction::PasteText {
+                text: "secret-snippet".into(),
+                target_bundle_id: Some("-a.evil".into()),
+                adapter: None,
+                no_newline: false,
+                submit: false,
+            },
+        );
+        assert_eq!(receipt.outcome, "failed");
+        assert_eq!(receipt.detail, "invalid_bundle_id");
+        assert_eq!(recording.current_clipboard().change_count, 7);
+        assert_eq!(
+            recording.current_clipboard().items,
+            vec![ClipboardItemSnapshot {
+                types_and_bytes: vec![("public.utf8-plain-text".into(), b"keep-me".to_vec())],
+            }]
+        );
+        assert!(!recording.events().iter().any(|e| matches!(
+            e,
+            RecordedOsEvent::SnapshotClipboard { .. }
+                | RecordedOsEvent::WriteClipboardPlainText(_)
+                | RecordedOsEvent::RestoreClipboard { .. }
+                | RecordedOsEvent::PostKeyShortcut { .. }
+        )));
     }
 
     #[cfg(target_os = "macos")]

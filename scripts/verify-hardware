@@ -404,7 +404,7 @@ def verify_live_app_usb_auto_acceptance(expected_device_path: str, expected_keym
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    scratch_root = ROOT / ".scratch" / "input-study"
+    scratch_root = ROOT / ".scratch" / "hardware-probes"
     scratch_root.mkdir(parents=True, exist_ok=True)
 
     candidate = wait_for_single_usb_candidate(args.wait, args.timeout)

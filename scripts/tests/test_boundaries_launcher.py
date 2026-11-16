@@ -1,3 +1,4 @@
+import hashlib
 import importlib.machinery
 import importlib.util
 from pathlib import Path
@@ -18,6 +19,8 @@ class CheckBoundariesTests(unittest.TestCase):
         self.assertTrue(module.find_clean_room_leaks("docs/note.md", "see .scratch/input-study/foo"))
         self.assertTrue(module.find_clean_room_leaks("docs/note.md", "see .scratch/input-study"))
         self.assertTrue(module.find_clean_room_leaks("crates/mi-core/src/a.rs", ".scratch/input-study/foo"))
+        self.assertTrue(module.find_clean_room_leaks("crates/mi-core/src/a.rs", "see .scratch/input-study"))
+        self.assertTrue(module.find_clean_room_leaks("scripts/a.py", "ROOT / '.scratch/input-study'"))
         self.assertTrue(module.find_clean_room_leaks("docs/note.md", "/Applications/input.app"))
         self.assertTrue(module.find_clean_room_leaks("docs/note.md", "app." + "asar"))
         self.assertTrue(module.find_clean_room_leaks("docs/note.md", "dist-" + "electron/main/index.js"))
@@ -25,15 +28,57 @@ class CheckBoundariesTests(unittest.TestCase):
         self.assertTrue(module.find_clean_room_leaks("docs/note.md", "ev_" + "0" * 64))
         self.assertTrue(module.find_clean_room_leaks("docs/note.md", "0x420742ac"))
         self.assertTrue(module.find_clean_room_leaks("docs/note.md", "wl_host_follow." + "cpp"))
+        self.assertTrue(module.find_clean_room_leaks("docs/note.md", "wl_lights." + "cpp"))
+        self.assertTrue(module.find_clean_room_leaks("crates/mi-core/src/a.rs", "wl_lights." + "cpp"))
         self.assertTrue(module.find_clean_room_leaks("crates/mi-core/src/a.rs", "/dev/cu.usbmodem" + "11401"))
-        self.assertTrue(module.find_clean_room_leaks("docs/note.md", "30:" + "ED:A0:1D:9E:30"))
+        self.assertTrue(module.find_clean_room_leaks("docs/note.md", "de:ad:" + "be:ef:ca:fe"))
+        self.assertTrue(module.find_clean_room_leaks("crates/mi-core/src/a.rs", "de-ad-" + "be-ef-ca-fe"))
+        self.assertTrue(module.find_clean_room_leaks("docs/note.md", "mac:de:ad:" + "be:ef:ca:fe"))
+        self.assertTrue(module.find_clean_room_leaks("crates/mi-core/src/a.rs", "usb-de-ad-" + "be-ef-ca-fe"))
+        self.assertTrue(module.find_clean_room_leaks("docs/note.md", "de:ad-" + "be:ef-ca:fe"))
         self.assertTrue(module.find_clean_room_leaks("docs/note.md", "firmware-1794634846067366000-95189"))
-        self.assertTrue(module.find_clean_room_leaks("docs/note.md", "a6c7185d" + "5c3d8dda" + "0" * 48))
+        self.assertTrue(module.find_clean_room_leaks("docs/note.md", "xw-notary"))
+        self.assertTrue(module.find_clean_room_leaks("scripts/release.sh", "notarytool --keychain-profile xw-notary"))
+        self.assertTrue(module.find_clean_room_leaks("docs/note.md", "input-app-lean-triage"))
+        self.assertTrue(module.find_clean_room_leaks("crates/mi-core/src/a.rs", "input-app-lean-triage"))
+
+        synthetic_sha1 = "deadbeef" * 5
+        synthetic_sha1_digest = hashlib.sha256(b"mi-cleanroom-v1:" + synthetic_sha1.encode("ascii")).hexdigest()
+        synthetic_sha256 = "cafebabe12345678" + "0" * 48
+        synthetic_sha256_digest = hashlib.sha256(b"mi-cleanroom-v1:" + synthetic_sha256[:16].encode("ascii")).hexdigest()
+        self.assertTrue(
+            module.find_clean_room_leaks(
+                "docs/note.md",
+                synthetic_sha1.upper(),
+                extra_sha1_digests=[synthetic_sha1_digest],
+            )
+        )
+        self.assertTrue(
+            module.find_clean_room_leaks(
+                "crates/mi-core/src/a.rs",
+                synthetic_sha256.upper(),
+                extra_sha256_prefix_digests=[synthetic_sha256_digest],
+            )
+        )
+        self.assertTrue(
+            module.find_clean_room_leaks(
+                "crates/mi-core/src/a.rs",
+                "0x" + synthetic_sha256,
+                extra_sha256_prefix_digests=[synthetic_sha256_digest],
+            )
+        )
+        self.assertTrue(
+            module.find_clean_room_leaks(
+                "docs/note.md",
+                "0x" + synthetic_sha1,
+                extra_sha1_digests=[synthetic_sha1_digest],
+            )
+        )
 
         self.assertEqual(
             module.find_clean_room_leaks(
                 "crates/mi-session/tests/support/mod.rs",
-                'let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.scratch/input-study");',
+                'let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.scratch/hardware-probes");',
             ),
             [],
         )
@@ -41,6 +86,13 @@ class CheckBoundariesTests(unittest.TestCase):
             module.find_clean_room_leaks(
                 "README.md",
                 "Accurate main-session filtering; /dev/cu.usbmodem-test-101; sha256:1d8bd545b9047182d7112dd86b14f6c636bad3834725ee0a6eca7cacee0ec6a7",
+            ),
+            [],
+        )
+        self.assertEqual(
+            module.find_clean_room_leaks(
+                "crates/mi-macos/src/scenarios.rs",
+                "macs 02:00:5e:10:00:01 02:00-5e:10-00:01 aa:bb:cc:dd:ee:ff at 12:34:56 on 2026-11-16 uuid 12345678-1234-1234-1234-123456789012 oid 00:11:22:33:44:55:66",
             ),
             [],
         )

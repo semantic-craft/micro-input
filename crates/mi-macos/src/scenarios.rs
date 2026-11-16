@@ -824,20 +824,20 @@ mod tests {
         assert!(!kv_sanitized.contains("33:44"));
 
         let bare_sanitized = DiagnosticRedactor::sanitize(
-            "device 02:ed:a0:1d:9e:30 failed at 12:34:56 on 303A:8298",
+            "device 02:00:5e:10:00:01 failed at 12:34:56 on 303A:8298",
         );
-        assert!(!bare_sanitized.contains("02:ed:a0:1d:9e:30"));
+        assert!(!bare_sanitized.contains("02:00:5e:10:00:01"));
         assert!(bare_sanitized.contains("12:34:56"));
         assert!(bare_sanitized.contains("303A:8298"));
 
         let hyphen_sanitized = DiagnosticRedactor::sanitize(
-            "device 02-ed-a0-1d-9e-30 failed on 2026-11-16 uuid 12345678-1234-1234-1234-123456789012 vid 303A:8298 mixed 02:ed-a0:1d-9e:30",
+            "device 02-00-5e-10-00-01 failed on 2026-11-16 uuid 12345678-1234-1234-1234-123456789012 vid 303A:8298 mixed 02:00-5e:10-00:01",
         );
-        assert!(!hyphen_sanitized.contains("02-ed-a0-1d-9e-30"));
+        assert!(!hyphen_sanitized.contains("02-00-5e-10-00-01"));
         assert!(hyphen_sanitized.contains("2026-11-16"));
         assert!(hyphen_sanitized.contains("12345678-1234-1234-1234-123456789012"));
         assert!(hyphen_sanitized.contains("303A:8298"));
-        assert!(hyphen_sanitized.contains("02:ed-a0:1d-9e:30"));
+        assert!(hyphen_sanitized.contains("02:00-5e:10-00:01"));
     }
 
     #[test]

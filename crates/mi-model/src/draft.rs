@@ -690,7 +690,11 @@ impl Action {
                 target,
             } => {
                 bounded(&key)
-                    && bounded(&target)
+                    && (if target.contains('.') {
+                        crate::host_router::is_valid_bundle_id(&target)
+                    } else {
+                        crate::host_router::is_valid_symbolic_shortcut_target(&target)
+                    })
                     && modifiers.len() <= 8
                     && modifiers
                         .iter()
@@ -698,14 +702,7 @@ impl Action {
             }
             ActionKind::Text { text } => bounded(&text),
             ActionKind::OpenUrl { url } => crate::host_router::validate_open_url(&url).is_ok(),
-            ActionKind::OpenApp { bundle_id } => {
-                bundle_id.len() <= 256
-                    && bundle_id.split('.').count() >= 2
-                    && bundle_id.split('.').all(|part| {
-                        !part.is_empty()
-                            && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                    })
-            }
+            ActionKind::OpenApp { bundle_id } => crate::host_router::is_valid_bundle_id(&bundle_id),
             ActionKind::ShellCommand {
                 command,
                 working_directory,

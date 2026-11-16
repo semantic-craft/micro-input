@@ -34,7 +34,10 @@ pub use passive_panel::{
     PassivePanelStyleSpec, RecordingPassivePanelHost, RecordingPassivePanelState, ScreenGeometry,
     ScreenPoint, ScreenRect, ScreenSize,
 };
-pub use private_fs::{ensure_private_dir, open_private_file, PrivateOpenMode};
+pub use private_fs::{
+    ensure_private_dir, open_private_file, open_verified_readonly_file,
+    verify_existing_private_dir, PrivateDirError, PrivateOpenMode,
+};
 pub use scenarios::{
     run_config_write_scenario, run_diagnostic_export_scenario, run_host_execution_scenario,
     run_lighting_control_scenario, write_private_json, DiagnosticRedactor, ScenarioResultSummary,

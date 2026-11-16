@@ -275,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         run_checked(['gh', 'auth', 'status'], cwd=root)
 
     sign_identity = resolve_release_signing_identity()
-    notary_profile = os.environ.get('MI_NOTARY_PROFILE', 'xw-notary').strip() or 'xw-notary'
+    notary_profile = os.environ.get('MI_NOTARY_PROFILE', 'micro-input-notary').strip() or 'micro-input-notary'
     secrets = [sign_identity, notary_profile]
     print('Pre-flight metadata and signing credentials check: OK', flush=True)
 

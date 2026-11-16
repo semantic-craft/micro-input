@@ -1,4 +1,6 @@
 import base64
+from collections.abc import Iterable
+import hashlib
 import os
 from pathlib import Path
 import plistlib
@@ -11,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 _CLEAN_ROOM_COMMON_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ('.scratch/native-redesign', re.compile(r'\.scratch/native-redesign', re.IGNORECASE)),
     ('.scratch/firmware-check', re.compile(r'\.scratch/firmware-check', re.IGNORECASE)),
+    ('.scratch/input-study', re.compile(r'\.scratch/input-study(?:/|\b)', re.IGNORECASE)),
     ('~/agent-tasks', re.compile(r'~/agent-tasks', re.IGNORECASE)),
     ('/Applications/input.app', re.compile(r'/Applications/input\.app', re.IGNORECASE)),
     ('vendor bundle/asar path', re.compile(r'app\.asar|dist-electron', re.IGNORECASE)),
@@ -18,34 +21,43 @@ _CLEAN_ROOM_COMMON_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ('REA evidence ID', re.compile(r'\bev_[0-9a-f]{16,}\b', re.IGNORECASE)),
     ('vendor bundle offset', re.compile(r'\b[MKPRUW]:\d')),
     ('firmware disassembly address', re.compile(r'\b0x(?:420[0-9a-fA-F]{5}|3c1[0-9a-fA-F]{5}|012598|012f24)\b', re.IGNORECASE)),
-    ('firmware internal source file', re.compile(r'\b(?:wl_host_follow|api_lighting)\.cpp\b', re.IGNORECASE)),
+    ('firmware internal source file', re.compile(r'\b(?:wl_[A-Za-z0-9_]+|api_lighting)\.cpp\b', re.IGNORECASE)),
     ('host build CL number', re.compile(r'\bCL[: ]+\d{6,}\b')),
-    ('private keymap sha1', re.compile(r'c4a98a61' + r'c1a211bd37b6a3e6b00454b0cf6a2a20', re.IGNORECASE)),
     ('non-synthetic serial port', re.compile(r'/dev/cu\.usbmodem\d+', re.IGNORECASE)),
-    ('hardware serial MAC', re.compile(r'30:' + r'ED:A0:1D:9E:30', re.IGNORECASE)),
     ('device flash backup id', re.compile(r'firmware-\d{12,}', re.IGNORECASE)),
-    (
-        'extracted/private sha256',
-        re.compile(
-            r'\b(?:'
-            + '|'.join([
-                'a6c7185d' + '5c3d8dda',
-                'ab2eaf1f' + 'e6bb241f',
-                'a07dc5d9' + '0bade50f',
-                'b3ee40ec' + '883df9a7',
-                'ed18815d' + 'fd5b3585',
-                '290e1b7a' + '1caa430a',
-                'fb6e0fc3' + 'a1e091e7',
-                '2d4c9583' + 'c7e49194',
-                'b833e97e' + 'a23ca0a0',
-            ])
-            + r')[0-9a-f]{48}\b',
-            re.IGNORECASE,
-        ),
-    ),
+    ('internal triage path', re.compile(r'input-app-lean-triage', re.IGNORECASE)),
+    ('personal notary profile', re.compile(r'\bxw-notary\b', re.IGNORECASE)),
 )
-_MD_SCRATCH_INPUT_STUDY = re.compile(r'\.scratch/input-study(?:/|\b)', re.IGNORECASE)
-_CODE_SCRATCH_INPUT_STUDY = re.compile(r'\.scratch/input-study/', re.IGNORECASE)
+_MAC_RE = re.compile(
+    r'(?<![0-9A-Za-z])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?![0-9A-Za-z])'
+)
+_MAC_OCTET_BEFORE_RE = re.compile(r'(?:^|[^0-9A-Za-z])[0-9A-Fa-f]{2}[:-]$')
+_MAC_OCTET_AFTER_RE = re.compile(r'^[:-][0-9A-Fa-f]{2}(?:$|[^0-9A-Za-z])')
+_ALLOWED_SYNTHETIC_MACS = frozenset({
+    '000000000000',
+    'aabbccddeeff',
+    'aabbcc112233',
+    '112233445566',
+    '02005e100001',
+    'ffffffffffff',
+})
+_CLEAN_ROOM_HASH_SALT = b'mi-cleanroom-v1:'
+_HEX40_RE = re.compile(r'(?<![0-9a-fA-F])(?:0[xX])?([0-9a-fA-F]{40})(?![0-9a-fA-F])')
+_HEX64_RE = re.compile(r'(?<![0-9a-fA-F])(?:0[xX])?([0-9a-fA-F]{64})(?![0-9a-fA-F])')
+_BANNED_SHA1_TOKEN_DIGESTS = frozenset({
+    'fc58f7710e256fbdf9e20f619221de2cbb994de53a058c3ea96043f0b2f1db15',
+})
+_BANNED_SHA256_PREFIX16_DIGESTS = frozenset({
+    '19e5a8098322a291fcdd5c83c7ae400718f500ded4fcc808428eb512e4151005',
+    '81e4924894f8c342c58d363668162dfe70572133f91fc450249eec9016c4adc4',
+    '9da100e9e39093fca628833528d9c20982fcfee4dd0f0f5811bdf2b72ea20fc4',
+    '396b1fcad768472583ad4dc0524572899bae3d38bb0da0deb8ef50f0877998d7',
+    '56da296e6c83fbdccce3be9c5019c23c43190f812177157484532ef0d05b31ea',
+    '599637330c68e98a1552fbe0b67da97428374ffdd7c844ad3a9dbbe45561d121',
+    '35b6e3fee45a34959d5bb03a3384a27b9b9d403c40f751a57779e28aa85abb58',
+    '38b93dcbd6914198257013b674a03b8d7fa02376327acfe50ecf064187d287cb',
+    '8ab2139f428ae9ce69a79a6e1faab80843b715bf5442142386a9cabaffa2c712',
+})
 _MD_TIMESTAMPED_QA_RUN = re.compile(r'\.scratch/qa-runs/\d{10,}', re.IGNORECASE)
 _CHAR_ESCAPE_RE = re.compile(r"\\(?:['\"\\nrt0]|x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]{1,24}\})'")
 _UNIX_CONNECT_RE = re.compile(r'\bUnixStream\s*::\s*connect\s*\(')
@@ -252,19 +264,44 @@ def _strip_rust_cfg_test(src: str) -> str:
     return ''.join(out)
 
 
-def find_clean_room_leaks(rel_path: str, text: str) -> list[str]:
+def _salted_clean_room_digest(token: str) -> str:
+    return hashlib.sha256(_CLEAN_ROOM_HASH_SALT + token.lower().encode('ascii')).hexdigest()
+
+
+def _iter_hardware_macs(line: str) -> Iterable[str]:
+    for m in _MAC_RE.finditer(line):
+        if _MAC_OCTET_BEFORE_RE.search(line[:m.start()]) or _MAC_OCTET_AFTER_RE.search(line[m.end():]):
+            continue
+        yield m.group(0)
+
+
+def find_clean_room_leaks(
+    rel_path: str,
+    text: str,
+    *,
+    extra_sha1_digests: Iterable[str] = (),
+    extra_sha256_prefix_digests: Iterable[str] = (),
+) -> list[str]:
     is_md = rel_path.endswith('.md')
+    sha1_digests = _BANNED_SHA1_TOKEN_DIGESTS | frozenset(extra_sha1_digests)
+    sha256_prefix_digests = _BANNED_SHA256_PREFIX16_DIGESTS | frozenset(extra_sha256_prefix_digests)
     findings: list[str] = []
     for lineno, line in enumerate(text.splitlines(), 1):
         matched: list[str] = [label for label, pat in _CLEAN_ROOM_COMMON_RULES if pat.search(line)]
-        if is_md:
-            if _MD_SCRATCH_INPUT_STUDY.search(line):
-                matched.append('.scratch/input-study')
-            if _MD_TIMESTAMPED_QA_RUN.search(line):
-                matched.append('timestamped QA run dir')
-        else:
-            if _CODE_SCRATCH_INPUT_STUDY.search(line):
-                matched.append('.scratch/input-study/')
+        if any(
+            token.replace(':', '').replace('-', '').lower() not in _ALLOWED_SYNTHETIC_MACS
+            for token in _iter_hardware_macs(line)
+        ):
+            matched.append('hardware serial MAC')
+        if any(_salted_clean_room_digest(m.group(1)) in sha1_digests for m in _HEX40_RE.finditer(line)):
+            matched.append('private keymap sha1')
+        if any(
+            _salted_clean_room_digest(m.group(1)[:16]) in sha256_prefix_digests
+            for m in _HEX64_RE.finditer(line)
+        ):
+            matched.append('extracted/private sha256')
+        if is_md and _MD_TIMESTAMPED_QA_RUN.search(line):
+            matched.append('timestamped QA run dir')
         if matched:
             findings.append(f'{rel_path}:{lineno} [{", ".join(matched)}]: {line.strip()[:120]}')
     return findings
@@ -463,7 +500,7 @@ def run_boundary_checks(root: Path = ROOT) -> None:
     ).splitlines()
     home_violations = []
     for rel in tracked:
-        if rel == 'lessons.md' or rel.startswith('.audit/'):
+        if rel.startswith('.audit/'):
             continue
         path = root / rel
         if not path.is_file():
@@ -840,12 +877,16 @@ def run_boundary_checks(root: Path = ROOT) -> None:
 
     clean_room_leaks: list[str] = []
     for rel in tracked:
-        if not (rel.endswith('.md') or (rel.startswith(('crates/', 'app/')) and rel.endswith(('.rs', '.swift')))):
+        if rel in ('scripts/check-boundaries.py', 'scripts/tests/test_boundaries_launcher.py') or rel.startswith('.audit/'):
             continue
         path = root / rel
         if not path.is_file():
             continue
-        clean_room_leaks.extend(find_clean_room_leaks(rel, path.read_text(encoding='utf-8')))
+        try:
+            text = path.read_text(encoding='utf-8')
+        except UnicodeDecodeError:
+            continue
+        clean_room_leaks.extend(find_clean_room_leaks(rel, text))
     assert not clean_room_leaks, (
         'R-C14 violation: private/extracted material leak found in docs or source:\n  '
         + '\n  '.join(clean_room_leaks)
